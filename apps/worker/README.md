@@ -16,11 +16,15 @@ Implemented boundaries:
 - Lease generation fencing and local self-abort before lease expiry.
 - Server command handling for cancel, stale, drain, and upgrade requests.
 - Absolute execution deadlines and graceful service drain.
-- Injectable `JobExecutor` and versioned ProcessHost protocol types.
+- Injectable `JobExecutor` and a strict, versioned ProcessHost NDJSON client.
+- Negotiated ProcessHost concurrency, bounded frames and output, replacement environments,
+  timeout/cancellation race handling, and fail-closed control-channel behavior.
+- Native Go ProcessHost source with Windows Job Object process-tree supervision.
 
-The default build uses `PlaceholderJobExecutor` and advertises execution as disabled. This
-milestone rejects `WORKER_EXECUTION_ENABLED=true`; a later release must wire and verify the Codex
-executor and ProcessHost transport before removing that guard.
+The default build still uses `PlaceholderJobExecutor` and advertises execution as disabled. This
+milestone rejects `WORKER_EXECUTION_ENABLED=true`; a later release must add disposable workspace
+preparation, wire and verify the Codex executor, and complete Windows runtime validation before
+removing that guard.
 
 ## Worker API
 

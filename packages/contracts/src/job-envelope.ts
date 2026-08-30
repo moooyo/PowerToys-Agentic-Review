@@ -56,11 +56,14 @@ export type PullRequestTarget = Static<typeof PullRequestTargetSchema>;
 export const ResourceTargetSchema = Type.Union([IssueTargetSchema, PullRequestTargetSchema]);
 export type ResourceTarget = Static<typeof ResourceTargetSchema>;
 
+// Producers must additionally enforce this limit against the encoded UTF-8 byte length.
+export const maximumRenderedPromptUtf8Bytes = 512 * 1024;
+
 export const PromptEnvelopeSchema = Type.Object(
   {
     name: Type.String({ minLength: 1, maxLength: 128 }),
     version: Type.String({ minLength: 1, maxLength: 128 }),
-    renderedPrompt: Type.String({ minLength: 1, maxLength: 1_048_576 }),
+    renderedPrompt: Type.String({ minLength: 1, maxLength: maximumRenderedPromptUtf8Bytes }),
     promptSha256: Sha256Schema,
     outputSchema: Type.Unknown(),
     outputSchemaSha256: Sha256Schema,

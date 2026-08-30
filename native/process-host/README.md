@@ -1,0 +1,28 @@
+# AgenticReview ProcessHost
+
+`AgenticReview.ProcessHost.exe` is the Windows process-tree boundary used by the remote worker. It
+accepts the versioned NDJSON protocol on standard input and emits protocol events only on standard
+output. Diagnostics are written to standard error.
+
+Build the Windows binary from this module:
+
+```powershell
+go build -trimpath -o AgenticReview.ProcessHost.exe .
+```
+
+The worker starts the binary with an absolute path and the required `--stdio` flag. Every `start`
+request supplies a replacement environment and explicit timeout, process-count, memory, and
+combined-output limits. ProcessHost does not invoke a shell or inherit its own environment.
+
+On Windows, ProcessHost creates the target with `CREATE_SUSPENDED`, restricts inherited handles to
+the three standard-I/O pipes, and uses `PROC_THREAD_ATTRIBUTE_JOB_LIST` to place the process in its
+preconfigured Job Object atomically during `CreateProcessW`. It then resumes the primary thread.
+The Job Object applies both per-process and total-job memory limits, an active process limit, and
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. ProcessHost does not emit `exited` until the root process has
+stopped and the Job Object reports no active processes.
+
+A Job Object is a lifetime and resource-control mechanism, not a security boundary for malicious
+code running under the same Windows token. A same-token process may be able to open ProcessHost and
+duplicate handles despite the creation-time inheritance allowlist. Dynamic execution of untrusted
+code must remain disabled unless a separate restricted identity or stronger isolation boundary is
+enforced outside ProcessHost.

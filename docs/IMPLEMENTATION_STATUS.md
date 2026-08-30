@@ -2,9 +2,10 @@
 
 Status date: 2026-08-31
 
-The repository currently implements the Phase 0 control-plane foundation and the Phase 1
-read-only GitHub ingestion vertical slice described in `ARCHITECTURE.md`. It is intentionally
-fail-closed where a production security boundary is not yet complete.
+The repository currently implements the Phase 0 control-plane foundation, the Phase 1 read-only
+GitHub ingestion vertical slice, and the M1 ProcessHost execution foundation described in
+`ARCHITECTURE.md`. It is intentionally fail-closed where a production security boundary is not
+yet complete.
 
 ## Implemented
 
@@ -44,24 +45,35 @@ fail-closed where a production security boundary is not yet complete.
   system state.
 - Codex static-review launch specifications, bounded JSONL parsing, strict PR/Issue result
   schemas, and canonical result digests in `packages/codex`.
+- A strict TypeScript ProcessHost NDJSON client with bounded frames and output buffering,
+  negotiated concurrency, replacement environments, abort propagation, hard-timeout handling,
+  and fail-closed protocol validation.
+- A native Go ProcessHost with suspended Windows process creation, restricted inherited handles,
+  Job Object process and memory limits, `KILL_ON_JOB_CLOSE`, bounded output, and complete
+  process-tree termination.
+- A shared 512 KiB UTF-8 prompt budget enforced by scheduling, the execution envelope, Codex
+  launch construction, and the ProcessHost protocol.
 
 ## Deliberately Disabled
 
 - `WORKER_EXECUTION_ENABLED=true` and the installer `-EnableExecution` option are rejected. The
-  real Codex executor and native ProcessHost client are not implemented yet.
+  ProcessHost client exists, but disposable checkout preparation and the real Codex job executor
+  are not connected to the Worker entrypoint yet.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1 read-only surfaces only.
-- The native `AgenticReview.ProcessHost.exe` implementation is not part of this milestone.
+- The native ProcessHost source is present, but a signed release binary and Windows runtime
+  verification are not part of this milestone.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - The Worker real-execution switch remains disabled until ProcessHost and the reviewed Codex
   executor are connected end to end on Windows.
 
 ## Next Milestone
 
-The next vertical slice should connect the static-review Codex package to the signed Windows
-ProcessHost boundary, add bounded artifact upload, and persist immutable review results. Approval
-and GitHub publication should follow as a separate slice. Dynamic validation and GitHub writes
-remain gated until their approval and isolation controls are implemented.
+The next vertical slice should add disposable exact-revision workspaces, connect the static-review
+Codex package to the ProcessHost client, and enable the real Worker executor behind complete
+configuration checks. Bounded artifact upload and immutable review-result persistence should
+follow before approval and GitHub publication. Dynamic validation and GitHub writes remain gated
+until their approval and isolation controls are implemented.
 
 ## Verification Evidence
 
@@ -71,7 +83,7 @@ Node.js 24.20.0 Linux distribution. Its archive checksum was validated against t
 release `SHASUMS256.txt`, and pnpm 11.24.0 was provided through Corepack. No verification command
 was run on the local Windows development machine.
 
-The following commands completed successfully on 2026-08-31:
+The following TypeScript commands completed successfully for the M1 candidate on 2026-08-31:
 
 ```text
 pnpm install --frozen-lockfile
@@ -81,9 +93,9 @@ pnpm build
 pnpm lint
 ```
 
-Test results:
+TypeScript test results:
 
-- 228 tests passed: 176 Server tests, 25 Codex package tests, 21 domain tests, and 6 Worker tests.
+- 342 tests passed: 178 Server tests, 79 Codex package tests, 21 domain tests, and 64 Worker tests.
 - Database integration coverage includes atomic multi-worker claims, lease fencing, lease expiry,
   superseded worker instances, heartbeats, idempotent terminal replay, migration backups,
   single-owner locking, startup-failure cleanup, and canonical digest validation.
@@ -96,6 +108,18 @@ Test results:
   development bypass.
 - The Dashboard, Server, shared packages, and bundled Worker all built successfully. The Windows
   Worker artifact is `apps/worker/dist/worker.mjs` and includes its non-native runtime dependencies.
+
+The native ProcessHost completed the following checks with Go 1.26.7 on `test-env`:
+
+```text
+go test -count=1 ./...
+go test -count=1 -race ./...
+go vet ./...
+GOOS=windows GOARCH=amd64 go build -trimpath
+GOOS=windows GOARCH=arm64 go build -trimpath
+GOOS=windows GOARCH=amd64 go test -c ./internal/host
+GOOS=windows GOARCH=arm64 go test -c ./internal/host
+```
 
 Runtime smoke results:
 
@@ -116,8 +140,9 @@ Not yet verified:
 
 - The Worker service, WinSW template, and installer have not been exercised on a Windows test
   machine.
-- The native ProcessHost and real Codex executor are deliberately absent and therefore have no
-  runtime verification.
+- The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
+  Windows process creation, Job Object, descendant termination, and resource limits have not been
+  exercised on a Windows test machine. The real Codex executor is not connected yet.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has

@@ -1,6 +1,7 @@
 import {
   type JobExecutionTemplate,
   JobExecutionTemplateSchema,
+  maximumRenderedPromptUtf8Bytes,
   type NormalizedSchedulingEvent,
   NormalizedSchedulingEventSchema,
 } from "@agentic-review/contracts";
@@ -8,8 +9,6 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { canonicalJson, sha256 } from "./canonical-json.js";
 import { isLoadedTrustedSchedulingConfig, type TrustedSchedulingConfig } from "./trusted-config.js";
-
-const maximumRenderedPromptLength = 1_048_576;
 
 export interface ScheduleJobInput {
   readonly jobKind: "issue_triage" | "pull_request_review";
@@ -78,9 +77,9 @@ function buildSchedule(
   resource: JobExecutionTemplate["resource"],
 ): ScheduleJobInput {
   const renderedPrompt = renderPrompt(jobConfig.text, jobKind, event);
-  if (renderedPrompt.length > maximumRenderedPromptLength) {
+  if (utf8ByteLength(renderedPrompt) > maximumRenderedPromptUtf8Bytes) {
     throw new RangeError(
-      `The rendered prompt exceeds ${maximumRenderedPromptLength} UTF-16 code units.`,
+      `The rendered prompt exceeds ${maximumRenderedPromptUtf8Bytes} UTF-8 bytes.`,
     );
   }
 
@@ -139,7 +138,7 @@ function renderPrompt(
   };
 
   const completePrompt = renderWithEvent(event);
-  if (completePrompt.length <= maximumRenderedPromptLength) {
+  if (utf8ByteLength(completePrompt) <= maximumRenderedPromptUtf8Bytes) {
     return completePrompt;
   }
 
@@ -147,33 +146,51 @@ function renderPrompt(
   if (body === null) {
     throw new RangeError("The trusted prompt and event metadata exceed the prompt size limit.");
   }
-  const truncationMarker = `\n[UNTRUSTED_BODY_TRUNCATED originalUtf16Length=${body.length} sha256=${sha256(body)}]`;
-  const renderWithBodyPrefix = (prefixLength: number): string =>
+  const truncationMarker =
+    `\n[UNTRUSTED_BODY_TRUNCATED originalUtf16Length=${body.length}` +
+    ` originalUtf8Bytes=${utf8ByteLength(body)} sha256=${sha256(body)}]`;
+  const prefixBoundaries = unicodeCodePointBoundaries(body);
+  const renderWithBodyPrefix = (boundaryIndex: number): string =>
     renderWithEvent({
       ...event,
       workItem: {
         ...event.workItem,
-        body: `${body.slice(0, prefixLength)}${truncationMarker}`,
+        body: `${body.slice(0, prefixBoundaries[boundaryIndex])}${truncationMarker}`,
       },
     });
 
   let lowerBound = 0;
-  let upperBound = body.length;
+  let upperBound = prefixBoundaries.length - 1;
   let boundedPrompt = renderWithBodyPrefix(0);
-  if (boundedPrompt.length > maximumRenderedPromptLength) {
+  if (utf8ByteLength(boundedPrompt) > maximumRenderedPromptUtf8Bytes) {
     throw new RangeError("The trusted prompt and event metadata exceed the prompt size limit.");
   }
   while (lowerBound <= upperBound) {
-    const candidateLength = Math.floor((lowerBound + upperBound) / 2);
-    const candidatePrompt = renderWithBodyPrefix(candidateLength);
-    if (candidatePrompt.length <= maximumRenderedPromptLength) {
+    const candidateBoundary = Math.floor((lowerBound + upperBound) / 2);
+    const candidatePrompt = renderWithBodyPrefix(candidateBoundary);
+    if (utf8ByteLength(candidatePrompt) <= maximumRenderedPromptUtf8Bytes) {
       boundedPrompt = candidatePrompt;
-      lowerBound = candidateLength + 1;
+      lowerBound = candidateBoundary + 1;
     } else {
-      upperBound = candidateLength - 1;
+      upperBound = candidateBoundary - 1;
     }
   }
   return boundedPrompt;
+}
+
+function unicodeCodePointBoundaries(value: string): number[] {
+  const boundaries = [0];
+  let offset = 0;
+  while (offset < value.length) {
+    const codePoint = value.codePointAt(offset);
+    offset += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+    boundaries.push(offset);
+  }
+  return boundaries;
+}
+
+function utf8ByteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 function assertNormalizedEvent(event: unknown): asserts event is NormalizedSchedulingEvent {

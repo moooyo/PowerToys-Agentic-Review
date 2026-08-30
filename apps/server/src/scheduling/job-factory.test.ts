@@ -2,8 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { NormalizedSchedulingEvent } from "@agentic-review/contracts";
-import { JobExecutionTemplateSchema } from "@agentic-review/contracts";
+import {
+  JobExecutionTemplateSchema,
+  maximumRenderedPromptUtf8Bytes,
+  type NormalizedSchedulingEvent,
+  PromptEnvelopeSchema,
+} from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
@@ -143,6 +147,71 @@ describe("createScheduleJobInput", () => {
       assertDigests(first?.executionTemplate.prompt);
       expect(Value.Check(PrReviewPlanV1Schema, validPrResult)).toBe(true);
       expect(Value.Check(IssueTriageV1Schema, validPrResult)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("bounds an oversized ASCII body at the exact 512 KiB UTF-8 prompt limit", async () => {
+    const { config, cleanup } = await createConfig();
+    try {
+      const event = {
+        ...issueEvent,
+        workItem: {
+          ...issueEvent.workItem,
+          body: "x".repeat(maximumRenderedPromptUtf8Bytes * 2),
+        },
+      } satisfies NormalizedSchedulingEvent;
+
+      const schedule = createScheduleJobInput(event, config);
+      const renderedPrompt = schedule?.executionTemplate.prompt.renderedPrompt ?? "";
+
+      expect(Buffer.byteLength(renderedPrompt, "utf8")).toBe(maximumRenderedPromptUtf8Bytes);
+      expect(renderedPrompt).toContain("[UNTRUSTED_BODY_TRUNCATED");
+      expect(Value.Check(JobExecutionTemplateSchema, schedule?.executionTemplate)).toBe(true);
+      expect(PromptEnvelopeSchema.properties.renderedPrompt.maxLength).toBe(
+        maximumRenderedPromptUtf8Bytes,
+      );
+      expect(
+        Value.Check(PromptEnvelopeSchema, {
+          ...schedule?.executionTemplate.prompt,
+          renderedPrompt: "x".repeat(maximumRenderedPromptUtf8Bytes + 1),
+        }),
+      ).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("truncates a multibyte body by UTF-8 bytes without splitting a surrogate pair", async () => {
+    const { config, cleanup } = await createConfig();
+    try {
+      const body = "\u{1f642}".repeat(Math.floor(maximumRenderedPromptUtf8Bytes / 4) + 2_048);
+      expect(body.length).toBeLessThan(maximumRenderedPromptUtf8Bytes);
+      expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(maximumRenderedPromptUtf8Bytes);
+      const event = {
+        ...issueEvent,
+        workItem: { ...issueEvent.workItem, body },
+      } satisfies NormalizedSchedulingEvent;
+
+      const schedule = createScheduleJobInput(event, config);
+      const renderedPrompt = schedule?.executionTemplate.prompt.renderedPrompt ?? "";
+      const renderedBody = extractRenderedBody(renderedPrompt);
+      const markerOffset = renderedBody.indexOf("\n[UNTRUSTED_BODY_TRUNCATED");
+      const retainedPrefix = renderedBody.slice(0, markerOffset);
+
+      expect(Buffer.byteLength(renderedPrompt, "utf8")).toBeLessThanOrEqual(
+        maximumRenderedPromptUtf8Bytes,
+      );
+      expect(Buffer.byteLength(renderedPrompt, "utf8")).toBeGreaterThan(
+        maximumRenderedPromptUtf8Bytes - 4,
+      );
+      expect(markerOffset).toBeGreaterThan(0);
+      expect(retainedPrefix.isWellFormed()).toBe(true);
+      expect(Array.from(retainedPrefix).every((character) => character === "\u{1f642}")).toBe(true);
+      expect(renderedBody).toContain(`originalUtf8Bytes=${Buffer.byteLength(body, "utf8")}`);
+      expect(Value.Check(JobExecutionTemplateSchema, schedule?.executionTemplate)).toBe(true);
+      assertDigests(schedule?.executionTemplate.prompt);
     } finally {
       await cleanup();
     }
@@ -449,6 +518,21 @@ function assertDigests(
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function extractRenderedBody(renderedPrompt: string): string {
+  const prefix = "UNTRUSTED_GITHUB_EVENT_JSON=";
+  const eventLine = renderedPrompt.split("\n").find((line) => line.startsWith(prefix));
+  if (eventLine === undefined) {
+    throw new Error("Rendered prompt does not contain the normalized event payload.");
+  }
+  const event = JSON.parse(eventLine.slice(prefix.length)) as {
+    readonly workItem: { readonly body: string | null };
+  };
+  if (event.workItem.body === null) {
+    throw new Error("Rendered normalized event does not contain a work item body.");
+  }
+  return event.workItem.body;
 }
 
 function databaseCanonicalJson(value: unknown): string {

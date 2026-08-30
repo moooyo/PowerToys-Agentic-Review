@@ -11,8 +11,9 @@ reviewer, authorizes the scheduling actor, and dispatches durable review jobs to
 workers. Workers run Codex CLI and approved validation recipes, while a central server owns
 operational state, approvals, and GitHub publication.
 
-All application code is TypeScript. The server runs on Linux. Workers run on Windows. The
-dashboard uses React and Ant Design Pro.
+Control-plane, dashboard, and Worker orchestration code is TypeScript. The small Windows
+ProcessHost platform adapter is implemented in Go. The server runs on Linux, Workers run on
+Windows, and the dashboard uses React and Ant Design Pro.
 
 ## 2. Accepted Technology Decisions
 
@@ -25,6 +26,7 @@ dashboard uses React and Ant Design Pro.
 | Workers | Remote TypeScript processes on Windows |
 | Worker hosting | Windows Service through WinSW |
 | Process supervision | Native `AgenticReview.ProcessHost.exe` using Windows Job Objects |
+| Native helper | Go 1.24 module, cross-compiled for Windows x64/arm64 |
 | Worker transport | Outbound HTTPS with mutual TLS |
 | Queue semantics | Server-issued leases with heartbeats and fencing generations |
 | GitHub | Webhooks when available, reconciliation polling always enabled |
