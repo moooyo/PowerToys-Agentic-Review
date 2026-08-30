@@ -130,9 +130,13 @@ no scheduling, lease, repository, prompt, result, or publication policy.
 ServiceHost performs only these duties:
 
 - own or connect the ACL-restricted Named Pipe and verify its peer ServiceHost;
+- expose a role-local, typed native RPC endpoint to its own Node payload;
+- on Control, use the non-exportable CNG client-certificate key through a fixed-origin,
+  route-limited mTLS Worker API transport and sign dedicated local-authority prehashes requested by
+  the trusted Control payload;
 - start one pinned Node executable and one pinned TypeScript bundle with an explicit inherited
   handle list and a replacement environment;
-- relay bounded, framed bytes between the Node payload and the authenticated Named Pipe;
+- relay bounded, framed bytes between the Node payload and the verified local Named Pipe session;
 - apply process and token DACLs before resuming the Node payload; and
 - place the Node payload and all descendants in a non-breakaway service-root Job Object with
   `KILL_ON_JOB_CLOSE`.
@@ -145,8 +149,13 @@ impersonation, adjustment, or thread-control rights.
 The Control and Executor Node payloads communicate with their local ServiceHost through inherited
 anonymous pipe handles that are not inherited by Codex, Git, ProcessHost, recipes, or any other
 child. Executor's ProcessHost Job Objects are nested inside the Executor service-root Job Object.
-The root Job closes if ServiceHost, WinSW, or the service exits, which bounds even processes started
-directly by the Executor coordinator. All application contracts and decisions remain TypeScript.
+ServiceHost is the sole long-lived owner of the root Job handle and never leaks it to Node. Process
+exit closes that handle automatically. Parent-child lineage alone does not make WinSW exit close a
+child-owned handle, so ServiceHost also retains and continuously waits on a stable handle to its
+verified WinSW wrapper. A wrapper signal or service-stop path immediately terminates the root Job,
+waits for zero active processes, closes the Job handle, and exits. This bounds even processes
+started directly by the Executor coordinator. All application contracts and decisions remain
+TypeScript.
 
 ## Local Topology
 
@@ -184,12 +193,17 @@ It uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, message mode, and `PIPE_REJECT_REMOTE_C
 security descriptor is protected from inheritance and grants:
 
 - full object control to `SYSTEM` and local Administrators;
-- connect, read, and write to the exact Executor service SID;
+- the exact Executor service SID receives only the specific `FILE_READ_DATA`, `FILE_WRITE_DATA`,
+  required attribute, and `SYNCHRONIZE` rights;
 - no client access to the Control SID, authenticated users, interactive users, anonymous users,
   network users, or `Everyone`.
 
+Neither endpoint requests or grants `GENERIC_WRITE` or `FILE_APPEND_DATA`. For Named Pipes,
+`FILE_APPEND_DATA` has the same value as `FILE_CREATE_PIPE_INSTANCE`; granting it would let a peer
+create another server instance.
+
 The Control ServiceHost owns the pipe object, so an Executor child that shares the Executor SID
-cannot become the object owner or change its DACL. Only one authenticated Executor ServiceHost
+cannot become the object owner or change its DACL. Only one verified and accepted Executor peer
 connection is accepted. Another Executor process can pass the initial pipe ACL, so the PID and
 image checks below are mandatory, and additional or invalid clients are rejected and audited. After
 any disconnect, Executor terminates all attempt children before it is allowed to reconnect.
@@ -204,16 +218,30 @@ a client. Before exchanging job data:
    `GetNamedPipeServerProcessId`.
 2. Control ServiceHost obtains the Executor WinSW wrapper PID from the Service Control Manager,
    then obtains the pipe-client ServiceHost PID with `GetNamedPipeClientProcessId`.
-3. Each side opens stable handles to the peer ServiceHost and wrapper with query-limited access,
-   records their creation times to defeat PID reuse, and requires ServiceHost to be the wrapper's
-   direct child. It verifies the exact restricted service SID on the ServiceHost token plus the
-   manifest-pinned paths and SHA-256 hashes of the WinSW wrapper, ServiceHost, Node launcher, Worker
-   bundle, and protected configuration; PE files must also have the approved Authenticode signer.
-   Neither peer impersonates the other. This wrapper-to-ServiceHost check is required because SCM
-   reports the WinSW PID, while the Named Pipe APIs report the ServiceHost PID.
+3. For each SCM or Named Pipe PID, the verifier reads the source PID, opens
+   `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, reads the source PID again, requires
+   `GetProcessId(handle)` to match, verifies the process is active and records its creation time,
+   then retains the handle for the full session. SCM PIDs are accepted only in stable running or
+   paused states; startup and stop pending states fail closed. Each side requires ServiceHost to be
+   the wrapper's direct child. It verifies the exact restricted service SID on the ServiceHost token
+   plus the manifest-pinned paths and SHA-256 hashes of the WinSW wrapper, ServiceHost, Node
+   launcher, Worker bundle, and protected configuration; PE files must also have the approved
+   Authenticode signer. Neither peer impersonates the other. This wrapper-to-ServiceHost check is
+   required because SCM reports the WinSW PID, while the Named Pipe APIs report the ServiceHost PID.
 4. Both peers exchange random 256-bit nonces, boot IDs, supported protocol ranges, and package
    digests. Control signs the transcript with its non-exportable local capability key. Executor
    verifies the pinned public key installed by the administrator.
+
+The SCM PID, pipe PID, parent relationship, SID, image, and hash checks are mandatory
+defense-in-depth and fail closed, but they are not cryptographic peer authentication. Windows
+allows a process with `PROCESS_CREATE_PROCESS` access to select a parent through
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, and same-token processes are not a secret boundary. The
+transcript signature cryptographically authenticates Control to Executor only. Control's judgment
+that its peer is the intended Executor still relies on the OS, service, process, token, image, and
+lineage checks above. If a malicious Executor-side process defeats those checks, it has the already
+documented compromised-Executor capability: it can receive a valid attempt authorization, falsify
+that authorized attempt's result or artifacts, and consume its resource grant. It still cannot read
+Control credentials, mint a capability, authorize another attempt, or bypass Server fencing.
 
 Any PID, SID, signature, image, nonce, version, or manifest mismatch closes the pipe and disables
 claims. Peer process checks are repeated after every reconnect. The threat model does not attempt to
@@ -253,7 +281,7 @@ Drain, Drained, Ping, Pong
 ```
 
 All messages carry the negotiated protocol version, `workerNodeId`, Control `workerInstanceId`,
-Executor boot ID, and correlation ID either directly or through the authenticated session context.
+Executor boot ID, and correlation ID either directly or through the verified local session context.
 Logs must never include complete frame payloads, signatures, capabilities, prompts, credentials, or
 artifact bytes.
 
@@ -320,6 +348,55 @@ recovered independently through its own lease and retry policy.
 Control stops renewing local grants immediately when Server renewal is uncertain. It must never
 extend local execution based only on a healthy pipe. The local 45-second grant is deliberately
 shorter than the Server lease TTL and Worker self-abort threshold.
+
+## Native mTLS Transport
+
+Node.js standard TLS and HTTPS APIs do not accept an `NCRYPT_KEY_HANDLE`, a Windows certificate
+store locator, or an application-provided signing callback. The standard Control TypeScript data
+path therefore never loads a PEM or PFX copy of the Server mTLS private key. Its ServiceHost obtains
+the certificate and non-exportable key from the Local Machine store and CNG, then performs the
+Worker API request through Go TLS using a narrowly scoped CNG-backed signer.
+
+ServiceHost and Node run with the same trusted Control service identity. A key DACL that grants the
+Control service SID cannot create a per-process boundary between them; a compromised Control Node
+could call CNG through other native code. The security boundary is between Control and Executor.
+The supported path withholds private-key bytes and handles from Node and reduces accidental misuse,
+but it does not claim to contain a compromised Control process. Making the route limiter a boundary
+against Control would require another token and service SID, which is outside this two-service
+design.
+
+The role-local RPC accepts only typed Worker API operations. Each operation maps locally to one
+fixed method and path template; schema-validated identifiers are encoded as individual path
+segments. It pins the configured Server origin, SNI, TLS roots, client certificate,
+request and response byte limits, deadlines, and concurrency. Redirects are disabled. Go transport
+proxy discovery is disabled unless installation policy pins one authenticated enterprise proxy.
+The caller cannot provide a raw URL, `Host`, SNI, TLS roots, client certificate, redirect behavior,
+proxy, or hop-by-hop headers. Route checks never use string prefixes or caller-controlled
+percent-encoding. It is not an HTTP CONNECT endpoint, generic reverse proxy, socket broker, or
+arbitrary URL fetcher.
+
+Capability signing accepts the one installed local-authority key and an exactly 32-byte prehash;
+CNG signs that digest once without hashing it again. This is deliberately a raw prehash signing
+operation available to the trusted Control identity, not an interface that can prove how Control
+constructed the digest. Its safety comes from the dedicated key, verifier-side domain separation,
+and complete denial to Executor, not from the digest length. A stronger per-process signing boundary
+would likewise require a separate ServiceHost identity.
+
+Handshake transcript, execution capability, and renewal signing each use an unambiguous versioned
+domain tag before hashing. Every local-authority wire signature uses fixed-width P1363 `r || s` and
+low-S normalization. A future design that cannot preserve domain separation must provision
+different keys per purpose instead of reusing this key.
+
+The certificate is selected only by the pinned SHA-256 digest of its DER form; subject, display
+name, issuer name, and the conventional SHA-1 certificate thumbprint are not selectors. Acquisition
+requires
+`CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG`, `CRYPT_ACQUIRE_COMPARE_KEY_FLAG`,
+`CRYPT_ACQUIRE_NO_HEALING`, and `CRYPT_ACQUIRE_SILENT_FLAG`, with exact `pfCallerFree` ownership.
+Preflight reads back algorithm P-256, `ExportPolicy=0`, signing-only key usage, and the protected key
+DACL. `NCryptSignHash` returns fixed-width P1363 `r || s`: the Go TLS signer converts it to ASN.1 DER,
+while local capabilities retain P1363 and normalize to low-S. Executor cannot open the Control RPC
+endpoint or either CNG key. Losing the native transport makes Control advertise zero slots and
+stops local grant renewal.
 
 ## Crash, Restart, and Upgrade Semantics
 
@@ -478,7 +555,7 @@ Control requires:
 - a valid local signing key whose ACL excludes Executor;
 - a trusted complete package manifest and protected Control directories;
 - the expected firewall posture and Server TLS policy;
-- an authenticated pipe peer with a compatible protocol and fresh Executor boot ID; and
+- a verified and accepted pipe peer with a compatible protocol and fresh Executor boot ID; and
 - an Executor `Ready` attestation covering its manifest, policy, capacity, and preflight digest.
 
 Executor requires:

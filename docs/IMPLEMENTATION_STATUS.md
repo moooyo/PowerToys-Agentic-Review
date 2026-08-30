@@ -3,9 +3,10 @@
 Status date: 2026-08-31
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1 read-only
-GitHub ingestion and immutable-result vertical slices, and the static-review execution components
-described in `ARCHITECTURE.md`. It is intentionally fail-closed where the production Windows
-identity and native filesystem security boundaries are not yet complete.
+GitHub ingestion and immutable-result vertical slices, the static-review execution components, and
+the first split-service protocol and native-host foundations described in `ARCHITECTURE.md`. It is
+intentionally fail-closed where the production Windows identity and native filesystem security
+boundaries are not yet complete.
 
 ## Implemented
 
@@ -68,38 +69,48 @@ identity and native filesystem security boundaries are not yet complete.
 - A production identity-boundary decision that represents one logical Worker as separate Control
   and Executor Windows services connected by signed short-lived capabilities over a protected
   Named Pipe.
+- A strict Control-Executor local protocol package with bounded ARWX framing, canonical JSON,
+  lease-token-free Executor envelopes, P-256 low-S capabilities, exact renewal chains, boot-lifetime
+  replay tombstones, streamed artifacts, terminal disposition, and attempt-level resource limits.
+- A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
+  replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
+  shutdown, and explicit unavailable Windows/non-Windows platform adapters.
 
 ## Deliberately Disabled
 
 - `WORKER_EXECUTION_ENABLED=true` and the installer `-EnableExecution` option are rejected. The
   execution components are implemented, but production enablement requires the ADR 0007 split
-  Control/Executor services, `AgenticReview.ServiceHost.exe`, native installation/workspace
-  security adapters, and Windows preflight evidence.
+  Control/Executor services, the Windows portion of `AgenticReview.ServiceHost.exe`, native
+  installation/workspace security adapters, and Windows preflight evidence.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1 read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
-- The native ProcessHost source is present, but signed release binaries and Windows runtime
-  verification for ProcessHost and the planned ServiceHost are not part of this milestone.
+- The native ProcessHost and fail-closed ServiceHost foundation sources are present, but signed
+  release binaries and Windows runtime verification are not part of this milestone. ServiceHost
+  does not yet create a Named Pipe, launch Node, create the root Job Object, use CNG, or open its
+  protected configuration on Windows.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
 
 ## Next Milestone
 
-The next vertical slice should implement the native ServiceHost and filesystem-security adapters,
+The next vertical slice should implement the Windows ServiceHost and filesystem-security adapters,
 split the Windows Worker into Control and Executor services, and connect the reviewed static
-executor in shadow mode. It must pass native Windows token, ACL, Named Pipe, sandbox, Job Object,
-disk, cancellation, and tamper tests before claims are enabled. Bounded artifact upload should
-follow, then publication drafts, digest-bound approvals, GitHub outbox reconciliation, and
-Dashboard write actions. Dynamic validation remains a separate stronger-isolation milestone.
+executor in shadow mode. ServiceHost must provide the narrow CNG capability signer and fixed-origin
+mTLS transport because Node's standard TLS APIs cannot use a non-exportable CNG key directly. The
+slice must pass native Windows token, ACL, Named Pipe, sandbox, Job Object, disk, cancellation, and
+tamper tests before claims are enabled. Bounded artifact upload should follow, then publication
+drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write actions. Dynamic
+validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
-The Phase 1a plus M0 stabilization candidate was verified on the remote Debian `test-env` host
-with the official
-Node.js 24.20.0 Linux distribution. Its archive checksum was validated against the Node.js
-release `SHASUMS256.txt`, and pnpm 11.24.0 was provided through Corepack. No verification command
-was run on the local Windows development machine.
+The Phase 1a, local-protocol, and fail-closed ServiceHost-foundation candidate was verified on the
+remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive
+checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0 was provided
+through Corepack. No test, build, validation suite, or runtime probe was run on the local Windows
+development machine.
 
 The following TypeScript commands completed successfully for the combined candidate on 2026-08-31:
 
@@ -113,7 +124,8 @@ pnpm lint
 
 Combined TypeScript test results:
 
-- 658 tests passed: 199 Server tests, 86 Codex package tests, 21 domain tests, and 352 Worker tests.
+- 698 tests passed: 199 Server tests, 336 Worker tests, 86 Codex package tests, 56 local-protocol
+  tests, and 21 domain tests.
 - Database integration coverage includes atomic multi-worker claims, lease fencing, lease expiry,
   superseded worker instances, heartbeats, idempotent terminal replay, migration backups,
   single-owner locking, startup-failure cleanup, and canonical digest validation.
@@ -126,7 +138,7 @@ Combined TypeScript test results:
   development bypass.
 - The Dashboard, Server, shared packages, and bundled Worker all built successfully. The Windows
   Worker artifact is `apps/worker/dist/worker.mjs` and includes its non-native runtime dependencies.
-- The combined candidate used Node.js 24.20.0 and pnpm 11.24.0 on `test-env`; Biome checked 165
+- The combined candidate used Node.js 24.20.0 and pnpm 11.24.0 on `test-env`; Biome checked 178
   files without applying changes.
 
 The native ProcessHost completed the following checks with Go 1.26.7 on `test-env`:
@@ -139,6 +151,16 @@ GOOS=windows GOARCH=amd64 go build -trimpath
 GOOS=windows GOARCH=arm64 go build -trimpath
 GOOS=windows GOARCH=amd64 go test -c ./internal/host
 GOOS=windows GOARCH=arm64 go test -c ./internal/host
+```
+
+The fail-closed ServiceHost foundation completed these checks with Go 1.26.7 on `test-env`:
+
+```text
+go test -count=1 ./...
+go test -count=1 -race ./...
+go vet ./...
+GOOS=windows GOARCH=amd64 go build -trimpath
+GOOS=windows GOARCH=arm64 go build -trimpath
 ```
 
 Runtime smoke results:
@@ -162,8 +184,10 @@ Not yet verified:
   machine.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
-  exercised on a Windows test machine. ServiceHost and the native security adapters are not yet
-  implemented, so the real Codex executor remains disconnected from the production entrypoint.
+  exercised on a Windows test machine. The ServiceHost contract, framing, and relay foundation
+  cross-compile, but its Windows configuration reader, process/token security, root Job, Named Pipe,
+  CNG signer, and fixed-origin mTLS transport are not yet implemented. The real Codex executor
+  therefore remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has

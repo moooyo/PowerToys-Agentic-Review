@@ -83,8 +83,12 @@ ephemeral container layer. A SQLite deployment has exactly one active server rep
 Each logical worker node is implemented by two WinSW services with distinct restricted Windows
 identities, as specified by ADR 0007:
 
-- `AgenticReview.Worker.Control` owns mTLS, registration, claims, leases, and Server uploads. It has
-  no checkout, Codex, Git, ProcessHost, or validation-tool access.
+- `AgenticReview.Worker.Control` owns registration, claims, leases, Server uploads, and use authority
+  for its non-exportable CNG mTLS key. The standard data path uses a fixed-origin, route-limited
+  Worker API transport in ServiceHost and never gives Node private-key bytes or a key handle. Node
+  and ServiceHost share the trusted Control identity, so this is defense-in-depth inside Control,
+  not a per-process security boundary. Control has no checkout, Codex, Git, ProcessHost, or
+  validation-tool access.
 - `AgenticReview.Worker.Executor` owns Codex, Git, ProcessHost, validation tools, and disposable
   workspaces. It has no Server, GitHub, database, webhook, or publication credential.
 
@@ -95,11 +99,13 @@ Executor boundary. Each worker machine installs:
 - A pinned Node.js 24 LTS runtime.
 - The compiled Control and Executor TypeScript worker bundles.
 - WinSW for Windows Service integration.
-- `AgenticReview.ServiceHost.exe` for the local identity channel and service-root Job Object.
+- `AgenticReview.ServiceHost.exe` for the local identity channel, CNG operations, Control-only
+  fixed-origin mTLS transport, and service-root Job Object.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
 - A pinned Codex CLI version.
 - PowerToys build tools required by its advertised recipes.
-- An individual mTLS client certificate accessible only to the Control service.
+- An individual mTLS client certificate with a non-exportable CNG private key whose ACL denies the
+  Executor identity; the standard Control path uses it through ServiceHost.
 - An Executor-specific Codex credential, workload identity, or inference-broker capability.
 
 Workers open outbound connections only. They do not expose inbound HTTP ports and never receive a
@@ -375,6 +381,9 @@ lockfile is mandatory, and dependency upgrades require UI contract and end-to-en
 - The server owns GitHub credentials and never sends them to workers.
 - Every worker has an individual mTLS certificate and Codex identity, held by separate Control and
   Executor service identities respectively.
+- Node's standard TLS APIs never receive CNG private-key bytes or a key handle. The Control
+  ServiceHost provides the standard fixed-origin path, while the shared trusted Control SID remains
+  the key-use authority. The transport cannot reach arbitrary hosts or routes.
 - Worker identity comes from the certificate, not request JSON or source IP.
 - Lease tokens authorize one attempt and cannot authorize publication.
 - Workers cannot access SQLite, approval state, or the GitHub outbox.
