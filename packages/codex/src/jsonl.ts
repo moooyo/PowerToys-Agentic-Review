@@ -52,7 +52,7 @@ const defaultMaximumLineCharacters = 1_048_576;
 const maximumPreviewCharacters = 512;
 
 export class CodexJsonlParser {
-  readonly #decoder = new TextDecoder("utf-8");
+  readonly #decoder = new TextDecoder("utf-8", { fatal: true });
   readonly #maximumLineCharacters: number;
   #buffer = "";
   #discardingOversizedLine = false;

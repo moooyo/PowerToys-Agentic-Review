@@ -11,7 +11,9 @@ import {
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
+  PrReviewPlanV1ModelOutputSchema,
   PrReviewPlanV1Schema,
 } from "../../../../packages/codex/src/review-results.js";
 import { canonicalJson } from "../../dist/scheduling/canonical-json.js";
@@ -62,7 +64,7 @@ describe("createScheduleJobInput", () => {
           prompt: {
             name: "issue-triage",
             version: "1",
-            outputSchema: { $id: "IssueTriageV1" },
+            outputSchema: { type: "object" },
           },
           executionPolicy: policy.issueTriage.executionPolicy,
         },
@@ -76,6 +78,9 @@ describe("createScheduleJobInput", () => {
         "requiredCapabilities",
       ]);
       expect(Value.Check(JobExecutionTemplateSchema, schedule?.executionTemplate)).toBe(true);
+      expect(schedule?.executionTemplate.prompt.outputSchema).toEqual(
+        JSON.parse(JSON.stringify(IssueTriageV1ModelOutputSchema)),
+      );
       assertDigests(schedule?.executionTemplate.prompt);
       expect(Value.Check(IssueTriageV1Schema, validIssueResult)).toBe(true);
       expect(Value.Check(PrReviewPlanV1Schema, validIssueResult)).toBe(false);
@@ -126,7 +131,7 @@ describe("createScheduleJobInput", () => {
           prompt: {
             name: "pull-request-review",
             version: "1",
-            outputSchema: { $id: "PrReviewPlanV1" },
+            outputSchema: { type: "object" },
           },
           executionPolicy: policy.pullRequestReview.executionPolicy,
         },
@@ -144,6 +149,9 @@ describe("createScheduleJobInput", () => {
       );
       expect(renderedPrompt).not.toContain(promptDirectory);
       expect(Value.Check(JobExecutionTemplateSchema, first?.executionTemplate)).toBe(true);
+      expect(first?.executionTemplate.prompt.outputSchema).toEqual(
+        JSON.parse(JSON.stringify(PrReviewPlanV1ModelOutputSchema)),
+      );
       assertDigests(first?.executionTemplate.prompt);
       expect(Value.Check(PrReviewPlanV1Schema, validPrResult)).toBe(true);
       expect(Value.Check(IssueTriageV1Schema, validPrResult)).toBe(false);
@@ -275,7 +283,7 @@ describe("createScheduleJobInput", () => {
       };
       firstSnapshot.body = "mutated result";
       const firstSchema = first?.executionTemplate.prompt.outputSchema as Record<string, unknown>;
-      firstSchema.$id = "mutated";
+      firstSchema.type = "mutated";
 
       const second = createScheduleJobInput(issueEvent, config);
       expect(second).not.toBeNull();
@@ -285,8 +293,8 @@ describe("createScheduleJobInput", () => {
       expect(
         (second.executionTemplate.resource.canonicalSnapshot as { body: string | null }).body,
       ).toBe(issueEvent.workItem.body);
-      expect((second.executionTemplate.prompt.outputSchema as { $id: string }).$id).toBe(
-        "IssueTriageV1",
+      expect(second.executionTemplate.prompt.outputSchema).toEqual(
+        JSON.parse(JSON.stringify(IssueTriageV1ModelOutputSchema)),
       );
     } finally {
       await cleanup();
@@ -461,8 +469,8 @@ async function createConfig() {
     promptDirectory: fixture.promptDirectory,
     policy,
     outputSchemas: {
-      issueTriage: IssueTriageV1Schema,
-      pullRequestReview: PrReviewPlanV1Schema,
+      issueTriage: IssueTriageV1ModelOutputSchema,
+      pullRequestReview: PrReviewPlanV1ModelOutputSchema,
     },
   });
   return { config, promptDirectory: fixture.promptDirectory, cleanup: fixture.cleanup };

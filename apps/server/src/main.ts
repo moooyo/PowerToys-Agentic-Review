@@ -1,5 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { IssueTriageV1Schema, PrReviewPlanV1Schema } from "@agentic-review/codex";
+import {
+  IssueTriageV1ModelOutputSchema,
+  PrReviewPlanV1ModelOutputSchema,
+} from "@agentic-review/codex";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DatabaseClient } from "./database/database-client.js";
@@ -59,8 +62,8 @@ const start = async (): Promise<void> => {
             promptDirectory: config.github.promptDirectory,
             policy: defaultTrustedSchedulingPolicy,
             outputSchemas: {
-              issueTriage: IssueTriageV1Schema,
-              pullRequestReview: PrReviewPlanV1Schema,
+              issueTriage: IssueTriageV1ModelOutputSchema,
+              pullRequestReview: PrReviewPlanV1ModelOutputSchema,
             },
           });
     const githubIngestion =

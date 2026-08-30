@@ -53,6 +53,13 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   }
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      return reply.code(413).send({
+        code: "request_body_too_large",
+        message: "The request body exceeds the configured limit.",
+        retryable: false,
+      });
+    }
     if (error instanceof DatabaseRequestError && error.code === "LEASE_LOST") {
       return reply.code(409).send({
         code: "lease_lost",
@@ -63,6 +70,16 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     if (error instanceof DatabaseRequestError && error.code === "RESULT_DIGEST_MISMATCH") {
       return reply.code(400).send({
         code: "result_digest_mismatch",
+        message: error.message,
+        retryable: false,
+      });
+    }
+    if (
+      error instanceof DatabaseRequestError &&
+      (error.code === "REVIEW_RESULT_INVALID" || error.code === "STORED_EXECUTION_TEMPLATE_INVALID")
+    ) {
+      return reply.code(422).send({
+        code: error.code.toLowerCase(),
         message: error.message,
         retryable: false,
       });

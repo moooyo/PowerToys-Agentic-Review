@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
-  PrReviewPlanV1Schema,
+  PrReviewPlanV1ModelOutputSchema,
 } from "../../../../packages/codex/src/review-results.js";
 import {
   loadTrustedSchedulingConfig,
@@ -41,16 +42,24 @@ describe("loadTrustedSchedulingConfig", () => {
       name: "issue-triage",
       version: "1",
       text: fixture.issuePrompt,
-      outputSchema: { $id: "IssueTriageV1" },
+      outputSchema: { type: "object" },
       policy: createPolicy().issueTriage,
     });
     expect(config.pullRequestReview).toMatchObject({
       name: "pull-request-review",
       version: "1",
       text: fixture.pullRequestPrompt,
-      outputSchema: { $id: "PrReviewPlanV1" },
+      outputSchema: { type: "object" },
       policy: createPolicy().pullRequestReview,
     });
+    expect(config.issueTriage.outputSchema).toEqual(
+      JSON.parse(JSON.stringify(IssueTriageV1ModelOutputSchema)),
+    );
+    expect(config.pullRequestReview.outputSchema).toEqual(
+      JSON.parse(JSON.stringify(PrReviewPlanV1ModelOutputSchema)),
+    );
+    expect(config.issueTriage.outputSchema).not.toHaveProperty("$id");
+    expect(config.pullRequestReview.outputSchema).not.toHaveProperty("$id");
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.issueTriage.policy.executionPolicy)).toBe(true);
     expect(JSON.stringify(config)).not.toContain(fixture.promptDirectory);
@@ -113,8 +122,19 @@ describe("loadTrustedSchedulingConfig", () => {
         promptDirectory: fixture.promptDirectory,
         policy: createPolicy(),
         outputSchemas: {
-          issueTriage: PrReviewPlanV1Schema,
-          pullRequestReview: IssueTriageV1Schema,
+          issueTriage: PrReviewPlanV1ModelOutputSchema,
+          pullRequestReview: IssueTriageV1ModelOutputSchema,
+        },
+      }),
+    ).rejects.toThrow(/authoritative IssueTriageV1/u);
+
+    await expect(
+      loadTrustedSchedulingConfig({
+        promptDirectory: fixture.promptDirectory,
+        policy: createPolicy(),
+        outputSchemas: {
+          issueTriage: IssueTriageV1Schema,
+          pullRequestReview: PrReviewPlanV1ModelOutputSchema,
         },
       }),
     ).rejects.toThrow(/authoritative IssueTriageV1/u);
@@ -125,7 +145,7 @@ describe("loadTrustedSchedulingConfig", () => {
         policy: createPolicy(),
         outputSchemas: {
           issueTriage: Type.Unknown({ $id: "IssueTriageV1" }),
-          pullRequestReview: PrReviewPlanV1Schema,
+          pullRequestReview: PrReviewPlanV1ModelOutputSchema,
         },
       }),
     ).rejects.toThrow(/authoritative IssueTriageV1/u);
@@ -186,8 +206,8 @@ describe("loadTrustedSchedulingConfig", () => {
 });
 
 const schemas = {
-  issueTriage: IssueTriageV1Schema,
-  pullRequestReview: PrReviewPlanV1Schema,
+  issueTriage: IssueTriageV1ModelOutputSchema,
+  pullRequestReview: PrReviewPlanV1ModelOutputSchema,
 };
 
 function createPolicy(): TrustedSchedulingPolicy {

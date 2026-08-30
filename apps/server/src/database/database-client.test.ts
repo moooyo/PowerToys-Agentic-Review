@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import {
+  IssueTriageV1ModelOutputSchema,
+  PrReviewPlanV1ModelOutputSchema,
+} from "@agentic-review/codex";
 import type {
   JobExecutionTemplate,
   NormalizedSchedulingEvent,
@@ -158,7 +162,7 @@ const makeJobSchedule = (
     throw new Error("This test schedule factory only supports pull requests.");
   }
   const renderedPrompt = "Review the normalized pull request.";
-  const outputSchema = {};
+  const outputSchema = PrReviewPlanV1ModelOutputSchema;
   return {
     jobKind: "pull_request_review",
     priority: 100,
@@ -199,6 +203,125 @@ const makeJobSchedule = (
     },
   };
 };
+
+const makeIssueRequestOpenedInput = (deliveryId: string): IngestSchedulingEventInput => {
+  const observedAt = "2026-08-30T00:00:10.000Z";
+  const contentDigest = sha256(`issue:${deliveryId}`);
+  const workItem = {
+    kind: "issue",
+    githubWorkItemId: 601,
+    githubNodeId: "I_ingestion_test",
+    githubRepositoryId: repository.githubRepositoryId,
+    number: 601,
+    title: "Test issue triage",
+    body: "The launcher exits unexpectedly.",
+    state: "open",
+    author: pullRequestAuthor,
+    htmlUrl: "https://github.com/microsoft/PowerToys/issues/601",
+    createdAt: observedAt,
+    updatedAt: observedAt,
+    closedAt: null,
+  } as const;
+  const revision = {
+    kind: "issue",
+    githubRepositoryId: repository.githubRepositoryId,
+    githubWorkItemId: workItem.githubWorkItemId,
+    revisionKey: contentDigest,
+    contentDigest,
+    observedAt,
+    sourceUpdatedAt: observedAt,
+  } as const;
+  const event = {
+    contractVersion: 1,
+    eventId: `event:${deliveryId}`,
+    source: "webhook",
+    sourceEventId: deliveryId,
+    occurredAt: observedAt,
+    observedAt,
+    repository,
+    workItem,
+    revision,
+    author: workItem.author,
+    action: "request_opened",
+    requestKind: "assignment",
+    actor: reviewer,
+    target: reviewer,
+  } satisfies NormalizedSchedulingEvent;
+  const renderedPrompt = "Triage the immutable issue snapshot.";
+  return {
+    event,
+    policy: schedulingPolicy,
+    delivery: delivery(deliveryId),
+    schedule: {
+      jobKind: "issue_triage",
+      priority: 50,
+      intentVersion: 1,
+      maxAttempts: 2,
+      requiredCapabilities: [],
+      executionTemplate: {
+        repository: {
+          githubRepositoryId: repository.githubRepositoryId,
+          fullName: repository.fullName,
+        },
+        resource: {
+          kind: "issue",
+          githubNodeId: workItem.githubNodeId,
+          number: workItem.number,
+          title: workItem.title,
+          author: workItem.author,
+          canonicalSnapshot: workItem,
+          revisionDigest: revision.revisionKey,
+        },
+        prompt: {
+          name: "issue-triage",
+          version: "test",
+          renderedPrompt,
+          promptSha256: sha256(renderedPrompt),
+          outputSchema: IssueTriageV1ModelOutputSchema,
+          outputSchemaSha256: sha256(canonicalJson(IssueTriageV1ModelOutputSchema)),
+        },
+        executionPolicy: {
+          hardTimeoutMs: 600_000,
+          noProgressTimeoutMs: 600_000,
+          maxCodexTurns: 1,
+          allowedRecipeIds: ["issue-triage"],
+          requiredCapabilityLabels: {},
+        },
+      },
+    },
+  };
+};
+
+const validPrReviewFinding = () => ({
+  findingId: "finding-1",
+  priority: 1,
+  title: "Preserve the lease fence",
+  body: "The finding records a concrete review concern for the immutable revision.",
+  path: "apps/server/src/database/database-worker.ts",
+  line: 100,
+  endLine: 102,
+  confidence: 0.95,
+});
+
+const validPrReviewResult = (summary = "The reviewed revision is ready for operator review.") => ({
+  schemaVersion: "PrReviewPlanV1" as const,
+  summary,
+  assessment: "comment" as const,
+  findings: [validPrReviewFinding()],
+  requestedRecipeIds: ["pull-request-review"],
+});
+
+const validIssueTriageResult = () => ({
+  schemaVersion: "IssueTriageV1" as const,
+  summary: "The issue describes a reproducible launcher failure.",
+  category: "bug" as const,
+  priority: 1,
+  confidence: 0.9,
+  suggestedLabels: ["Issue-Bug", "Product-Launcher"],
+  missingInformation: ["Provide the Windows build number."],
+  duplicateCandidates: [{ number: 123, reason: "The reported call stack is similar." }],
+  requestedRecipeIds: ["issue-triage"],
+});
 
 const delivery = (deliveryId: string, payload = `payload:${deliveryId}`) => ({
   deliveryId,
@@ -482,6 +605,61 @@ const claimLease = async (
     protocolVersion,
     leaseTtlSeconds,
   });
+
+const scheduleAndClaimReview = async (
+  fixture: DatabaseFixture,
+  input: IngestSchedulingEventInput,
+  workerSuffix: string,
+) => {
+  const ingestion = await fixture.client.request("ingestSchedulingEvent", input);
+  if (!ingestion.authorized || ingestion.jobId === null) {
+    throw new Error("Expected an authorized GitHub event to schedule a review job.");
+  }
+  const workerNodeId = `worker-review-${workerSuffix}`;
+  const workerInstanceId = `instance-review-${workerSuffix}`;
+  const worker = await registerWorker(fixture.client, workerNodeId, workerInstanceId);
+  const claim = await claimLease(
+    fixture.client,
+    workerNodeId,
+    workerInstanceId,
+    worker.capabilitiesDigest,
+  );
+  if (claim.outcome !== "granted") {
+    throw new Error("Expected the scheduled GitHub review job to be leased.");
+  }
+  return claim;
+};
+
+const assertUncommittedReviewCompletion = (
+  fixture: DatabaseFixture,
+  runAttemptId: string,
+): void => {
+  withFixtureDatabase(fixture, (database) => {
+    const state = database
+      .prepare(`
+        SELECT
+          attempt.status AS attempt_status,
+          attempt.result_digest,
+          attempt.result_json,
+          job.status AS job_status,
+          job.current_run_attempt_id
+        FROM run_attempts AS attempt
+        JOIN jobs AS job ON job.id = attempt.job_id
+        WHERE attempt.id = ?
+      `)
+      .get(runAttemptId);
+    expect(state).toEqual({
+      attempt_status: "leased",
+      result_digest: null,
+      result_json: null,
+      job_status: "leased",
+      current_run_attempt_id: runAttemptId,
+    });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM review_results").get()).toEqual({
+      count: 0,
+    });
+  });
+};
 
 afterEach(async () => {
   const cleanupErrors: unknown[] = [];
@@ -780,6 +958,13 @@ describe("DatabaseClient lease integration", () => {
         result,
       }),
     ).rejects.toMatchObject({ code: "RESULT_DIGEST_MISMATCH" });
+    await expect(
+      client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: `${validDigest}\u0000ignored-suffix`,
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "RESULT_DIGEST_MISMATCH" });
   });
 
   it("replays an identical completion and rejects conflicting terminal submissions", async () => {
@@ -962,6 +1147,817 @@ describe("DatabaseClient lease integration", () => {
         retryDelaySeconds: 1,
       }),
     ).rejects.toMatchObject({ code: "LEASE_LOST" });
+  });
+
+  it("validates and atomically persists an immutable pull-request review projection", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-pr"),
+      "valid-pr",
+    );
+    const result = validPrReviewResult();
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).resolves.toMatchObject({ jobState: "succeeded", runState: "succeeded" });
+
+    withFixtureDatabase(fixture, (database) => {
+      const persisted = database
+        .prepare(`
+          SELECT
+            result.id,
+            result.run_attempt_id,
+            result.job_id,
+            result.work_item_id,
+            result.revision_id,
+            result.job_kind,
+            result.schema_id,
+            result.result_digest,
+            result.result_json,
+            result.summary,
+            result.requested_recipe_ids_json,
+            result.output_schema_sha256,
+            result.prompt_sha256,
+            result.allowed_recipe_ids_json,
+            result.execution_template_sha256,
+            result.execution_template_json,
+            projection.assessment
+          FROM review_results AS result
+          JOIN pr_review_results AS projection ON projection.review_result_id = result.id
+          WHERE result.run_attempt_id = ?
+        `)
+        .get(claim.envelope.lease.runAttemptId) as Record<string, unknown>;
+      expect(persisted).toMatchObject({
+        run_attempt_id: claim.envelope.lease.runAttemptId,
+        job_id: claim.envelope.job.jobId,
+        job_kind: "pull_request_review",
+        schema_id: "PrReviewPlanV1",
+        result_digest: sha256(canonicalJson(result)),
+        result_json: canonicalJson(result),
+        summary: result.summary,
+        requested_recipe_ids_json: canonicalJson(result.requestedRecipeIds),
+        output_schema_sha256: sha256(canonicalJson(PrReviewPlanV1ModelOutputSchema)),
+        prompt_sha256: claim.envelope.prompt.promptSha256,
+        allowed_recipe_ids_json: canonicalJson(claim.envelope.executionPolicy.allowedRecipeIds),
+        execution_template_sha256: sha256(
+          canonicalJson({
+            repository: claim.envelope.repository,
+            resource: claim.envelope.resource,
+            prompt: claim.envelope.prompt,
+            executionPolicy: claim.envelope.executionPolicy,
+          }),
+        ),
+        execution_template_json: canonicalJson({
+          repository: claim.envelope.repository,
+          resource: claim.envelope.resource,
+          prompt: claim.envelope.prompt,
+          executionPolicy: claim.envelope.executionPolicy,
+        }),
+        assessment: result.assessment,
+      });
+      expect(persisted.work_item_id).toEqual(expect.any(String));
+      expect(persisted.revision_id).toEqual(expect.any(String));
+
+      const findings = database
+        .prepare(`
+          SELECT ordinal, finding_id, priority, title, body, path, line, end_line, confidence
+          FROM pr_review_findings
+          WHERE review_result_id = ?
+          ORDER BY ordinal
+        `)
+        .all(persisted.id as string);
+      expect(findings).toEqual([
+        {
+          ordinal: 0,
+          finding_id: "finding-1",
+          priority: 1,
+          title: result.findings[0]?.title,
+          body: result.findings[0]?.body,
+          path: result.findings[0]?.path,
+          line: 100,
+          end_line: 102,
+          confidence: 0.95,
+        },
+      ]);
+      expect(() =>
+        database
+          .prepare("UPDATE review_results SET summary = ? WHERE id = ?")
+          .run("changed", persisted.id as string),
+      ).toThrow("review results are immutable");
+      expect(() =>
+        database
+          .prepare("DELETE FROM pr_review_findings WHERE review_result_id = ?")
+          .run(persisted.id as string),
+      ).toThrow("PR review findings are immutable");
+      expect(() =>
+        database
+          .prepare(`
+            INSERT INTO pr_review_findings (
+              review_result_id,
+              ordinal,
+              finding_id,
+              priority,
+              title,
+              body,
+              path,
+              line,
+              end_line,
+              confidence
+            ) VALUES (?, 1, 'late-finding', 1, 'Late', 'Late insert', 'src/late.ts', 1, NULL, 1.0)
+          `)
+          .run(persisted.id as string),
+      ).toThrow("PR finding/result mismatch");
+      expect(() =>
+        database
+          .prepare(`
+            INSERT OR REPLACE INTO pr_review_results (review_result_id, assessment)
+            VALUES (?, 'approve')
+          `)
+          .run(persisted.id as string),
+      ).toThrow("PR review projection/result mismatch");
+      expect(() =>
+        database
+          .prepare("UPDATE jobs SET execution_json = ? WHERE id = ?")
+          .run("{}", claim.envelope.job.jobId),
+      ).toThrow("GitHub review scheduling identity is immutable");
+      expect(() =>
+        database
+          .prepare("UPDATE jobs SET request_epoch_id = NULL WHERE id = ?")
+          .run(claim.envelope.job.jobId),
+      ).toThrow("GitHub review scheduling identity is immutable");
+      expect(() =>
+        database
+          .prepare("UPDATE run_attempts SET result_json = ? WHERE id = ?")
+          .run("{}", claim.envelope.lease.runAttemptId),
+      ).toThrow("completed review attempt result is immutable");
+      expect(() =>
+        database
+          .prepare("UPDATE work_item_revisions SET head_sha = ? WHERE id = ?")
+          .run("f".repeat(40), persisted.revision_id as string),
+      ).toThrow("completed review revision identity is immutable");
+      expect(() =>
+        database
+          .prepare(`
+            INSERT INTO legacy_review_result_replays (
+              run_attempt_id,
+              job_id,
+              result_digest,
+              result_json,
+              recorded_at
+            ) VALUES (?, ?, ?, ?, ?)
+          `)
+          .run(
+            claim.envelope.lease.runAttemptId,
+            claim.envelope.job.jobId,
+            sha256(canonicalJson(result)),
+            canonicalJson(result),
+            new Date().toISOString(),
+          ),
+      ).toThrow("legacy review-result replay markers are migration-only");
+    });
+  });
+
+  it("rejects an omitted PR finding end line and persists an explicit null", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-null-end-line"),
+      "null-end-line",
+    );
+    const findingWithoutEndLine: Record<string, unknown> = { ...validPrReviewFinding() };
+    delete findingWithoutEndLine.endLine;
+    const omittedResult = {
+      ...validPrReviewResult(),
+      findings: [findingWithoutEndLine],
+    };
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(omittedResult)),
+        result: omittedResult,
+      }),
+    ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+
+    const nullableResult = {
+      ...validPrReviewResult(),
+      findings: [{ ...validPrReviewFinding(), endLine: null }],
+    };
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(nullableResult)),
+        result: nullableResult,
+      }),
+    ).resolves.toMatchObject({ jobState: "succeeded", runState: "succeeded" });
+
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare(`
+            SELECT finding.end_line
+            FROM pr_review_findings AS finding
+            JOIN review_results AS result ON result.id = finding.review_result_id
+            WHERE result.run_attempt_id = ?
+          `)
+          .get(claim.envelope.lease.runAttemptId),
+      ).toEqual({ end_line: null });
+    });
+  });
+
+  it("validates and atomically persists an immutable issue-triage projection", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeIssueRequestOpenedInput("delivery-review-result-issue"),
+      "valid-issue",
+    );
+    const result = validIssueTriageResult();
+
+    await fixture.client.request("completeLease", {
+      ...claim.envelope.lease,
+      resultDigest: sha256(canonicalJson(result)),
+      result,
+    });
+
+    withFixtureDatabase(fixture, (database) => {
+      const persisted = database
+        .prepare(`
+          SELECT
+            result.id,
+            result.job_kind,
+            result.schema_id,
+            result.result_json,
+            projection.category,
+            projection.priority,
+            projection.confidence,
+            projection.suggested_labels_json,
+            projection.missing_information_json,
+            projection.duplicate_candidates_json
+          FROM review_results AS result
+          JOIN issue_triage_results AS projection ON projection.review_result_id = result.id
+          WHERE result.run_attempt_id = ?
+        `)
+        .get(claim.envelope.lease.runAttemptId) as Record<string, unknown>;
+      expect(persisted).toMatchObject({
+        job_kind: "issue_triage",
+        schema_id: "IssueTriageV1",
+        result_json: canonicalJson(result),
+        category: result.category,
+        priority: result.priority,
+        confidence: result.confidence,
+        suggested_labels_json: canonicalJson(result.suggestedLabels),
+        missing_information_json: canonicalJson(result.missingInformation),
+        duplicate_candidates_json: canonicalJson(result.duplicateCandidates),
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM pr_review_results").get()).toEqual({
+        count: 0,
+      });
+      expect(() =>
+        database
+          .prepare("DELETE FROM issue_triage_results WHERE review_result_id = ?")
+          .run(persisted.id as string),
+      ).toThrow("issue triage projections are immutable");
+    });
+  });
+
+  it("rejects a result schema that does not match the authoritative job kind", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-wrong-kind"),
+      "wrong-kind",
+    );
+    const result = validIssueTriageResult();
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+  });
+
+  it("rejects an otherwise schema-valid review result above the canonical byte limit", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-too-large"),
+      "too-large",
+    );
+    const result = {
+      ...validPrReviewResult(),
+      findings: Array.from({ length: 100 }, (_, index) => ({
+        ...validPrReviewFinding(),
+        findingId: `finding-${index}`,
+        body: "\u754c".repeat(8_192),
+        path: `src/${index}-${"\u754c".repeat(1_000)}`,
+      })),
+    };
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+  });
+
+  it("rejects a deeply nested result before unbounded canonicalization", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-too-deep"),
+      "too-deep",
+    );
+    let result: unknown = null;
+    for (let depth = 0; depth < 256; depth += 1) {
+      result = [result];
+    }
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: "0".repeat(64),
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+  });
+
+  it.each(["execution", "prompt", "schema"] as const)(
+    "rejects an altered %s digest in the stored execution template",
+    async (alteration) => {
+      const fixture = await createFixture(false);
+      const claim = await scheduleAndClaimReview(
+        fixture,
+        makeRequestOpenedInput(`delivery-review-result-altered-${alteration}`),
+        `altered-${alteration}`,
+      );
+      withFixtureDatabase(fixture, (database) => {
+        // Simulate a pre-migration corrupted record after separately verifying the SQL freeze.
+        expect(() =>
+          database
+            .prepare("UPDATE jobs SET execution_digest = ? WHERE id = ?")
+            .run("f".repeat(64), claim.envelope.job.jobId),
+        ).toThrow("GitHub review scheduling identity is immutable");
+        database.exec("DROP TRIGGER tr_github_review_job_scheduling_identity_immutable");
+        if (alteration === "execution") {
+          database
+            .prepare("UPDATE jobs SET execution_digest = ? WHERE id = ?")
+            .run("0".repeat(64), claim.envelope.job.jobId);
+          return;
+        }
+        const row = database
+          .prepare("SELECT execution_json FROM jobs WHERE id = ?")
+          .get(claim.envelope.job.jobId) as { readonly execution_json: string };
+        const template = JSON.parse(row.execution_json) as JobExecutionTemplate;
+        const alteredTemplate: JobExecutionTemplate = {
+          ...template,
+          prompt: {
+            ...template.prompt,
+            ...(alteration === "prompt"
+              ? { promptSha256: "0".repeat(64) }
+              : { outputSchemaSha256: "0".repeat(64) }),
+          },
+        };
+        const executionJson = canonicalJson(alteredTemplate);
+        database
+          .prepare("UPDATE jobs SET execution_json = ?, execution_digest = ? WHERE id = ?")
+          .run(executionJson, sha256(executionJson), claim.envelope.job.jobId);
+      });
+
+      const result = validPrReviewResult();
+      await expect(
+        fixture.client.request("completeLease", {
+          ...claim.envelope.lease,
+          resultDigest: sha256(canonicalJson(result)),
+          result,
+        }),
+      ).rejects.toMatchObject({ code: "STORED_EXECUTION_TEMPLATE_INVALID" });
+      assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+    },
+  );
+
+  it("rejects direct SQL inserts whose immutable result or execution snapshot does not match", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-sql-mismatch"),
+      "sql-mismatch",
+    );
+    const result = validPrReviewResult();
+    const resultJson = canonicalJson(result);
+    const resultDigest = sha256(resultJson);
+
+    withFixtureDatabase(fixture, (database) => {
+      const context = database
+        .prepare(`
+          SELECT
+            job.work_item_id,
+            job.resource_revision,
+            job.execution_json,
+            job.execution_digest,
+            revision.id AS revision_id
+          FROM jobs AS job
+          JOIN work_item_revisions AS revision
+            ON revision.work_item_id = job.work_item_id
+            AND revision.revision_key = job.resource_revision
+          WHERE job.id = ?
+        `)
+        .get(claim.envelope.job.jobId) as {
+        readonly work_item_id: string;
+        readonly resource_revision: string;
+        readonly execution_json: string;
+        readonly execution_digest: string;
+        readonly revision_id: string;
+      };
+      database
+        .prepare(`
+          UPDATE run_attempts
+          SET status = 'succeeded', result_digest = ?, result_json = ?
+          WHERE id = ?
+        `)
+        .run(resultDigest, resultJson, claim.envelope.lease.runAttemptId);
+      const insert = database.prepare(`
+        INSERT INTO review_results (
+          id,
+          run_attempt_id,
+          job_id,
+          work_item_id,
+          revision_id,
+          job_kind,
+          resource_revision,
+          schema_id,
+          result_digest,
+          result_json,
+          summary,
+          requested_recipe_ids_json,
+          output_schema_sha256,
+          prompt_sha256,
+          allowed_recipe_ids_json,
+          execution_template_sha256,
+          execution_template_json,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, 'pull_request_review', ?, 'PrReviewPlanV1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const commonArguments = [
+        claim.envelope.lease.runAttemptId,
+        claim.envelope.job.jobId,
+        context.work_item_id,
+        context.revision_id,
+        context.resource_revision,
+      ] as const;
+      const trailingArguments = (
+        allowedRecipeIdsJson = canonicalJson(claim.envelope.executionPolicy.allowedRecipeIds),
+      ) =>
+        [
+          resultJson,
+          result.summary,
+          canonicalJson(result.requestedRecipeIds),
+          claim.envelope.prompt.outputSchemaSha256,
+          claim.envelope.prompt.promptSha256,
+          allowedRecipeIdsJson,
+          context.execution_digest,
+        ] as const;
+      const differentDigest = `${resultDigest.startsWith("0") ? "1" : "0"}${resultDigest.slice(1)}`;
+      expect(() =>
+        insert.run(
+          "review-result-wrong-result",
+          ...commonArguments,
+          differentDigest,
+          ...trailingArguments(),
+          context.execution_json,
+          new Date().toISOString(),
+        ),
+      ).toThrow("review result dependency mismatch");
+      expect(() =>
+        insert.run(
+          "review-result-wrong-template",
+          ...commonArguments,
+          resultDigest,
+          ...trailingArguments(),
+          "{}",
+          new Date().toISOString(),
+        ),
+      ).toThrow("review result dependency mismatch");
+      expect(() =>
+        insert.run(
+          "review-result-wrong-allowlist",
+          ...commonArguments,
+          resultDigest,
+          ...trailingArguments('["different-recipe"]'),
+          context.execution_json,
+          new Date().toISOString(),
+        ),
+      ).toThrow("review result dependency mismatch");
+      database
+        .prepare(`
+          UPDATE run_attempts
+          SET status = 'leased', result_digest = NULL, result_json = NULL
+          WHERE id = ?
+        `)
+        .run(claim.envelope.lease.runAttemptId);
+    });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+  });
+
+  it.each([
+    {
+      name: "disallowed recipe",
+      result: () => ({ ...validPrReviewResult(), requestedRecipeIds: ["not-allowed"] }),
+    },
+    {
+      name: "non-normalized path",
+      result: () => ({
+        ...validPrReviewResult(),
+        findings: [{ ...validPrReviewFinding(), path: "apps//server.ts" }],
+      }),
+    },
+    {
+      name: "duplicate finding identifier",
+      result: () => {
+        return {
+          ...validPrReviewResult(),
+          findings: [
+            validPrReviewFinding(),
+            { ...validPrReviewFinding(), line: 110, endLine: 111 },
+          ],
+        };
+      },
+    },
+    {
+      name: "reversed line range",
+      result: () => ({
+        ...validPrReviewResult(),
+        findings: [{ ...validPrReviewFinding(), line: 200, endLine: 199 }],
+      }),
+    },
+  ])("rejects the PR review business violation: $name", async ({ name, result: createResult }) => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput(`delivery-review-result-${name.replaceAll(" ", "-")}`),
+      name.replaceAll(" ", "-"),
+    );
+    const result = createResult();
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+  });
+
+  it("replays an identical persisted review without duplicating its immutable projection", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-replay"),
+      "persisted-replay",
+    );
+    const result = validPrReviewResult("Persist this result exactly once.");
+    const submission = {
+      ...claim.envelope.lease,
+      resultDigest: sha256(canonicalJson(result)),
+      result,
+    };
+
+    const first = await fixture.client.request("completeLease", submission);
+    const replay = await fixture.client.request("completeLease", submission);
+    expect(replay).toEqual(first);
+    withFixtureDatabase(fixture, (database) => {
+      expect(database.prepare("SELECT COUNT(*) AS count FROM review_results").get()).toEqual({
+        count: 1,
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM pr_review_results").get()).toEqual({
+        count: 1,
+      });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM pr_review_findings").get()).toEqual({
+        count: 1,
+      });
+    });
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...submission,
+        resultDigest: sha256(canonicalJson(validPrReviewResult("A conflicting result."))),
+        result: validPrReviewResult("A conflicting result."),
+      }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+  });
+
+  it("preserves idempotent replay for a linked review completed before migration 0006", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentic-review-server-v5-replay-"));
+    const databasePath = join(directory, "server.sqlite");
+    const versionFiveMigrations = join(directory, "migrations-v5");
+    await mkdir(versionFiveMigrations);
+    await Promise.all(
+      [1, 2, 3, 4, 5].map((version) => {
+        const filename = `${version.toString().padStart(4, "0")}_${
+          [
+            "initial",
+            "github_ingestion",
+            "operator_auth",
+            "github_polling_state",
+            "operator_browser_flows",
+          ][version - 1]
+        }.sql`;
+        return copyFile(join(migrationsDirectory, filename), join(versionFiveMigrations, filename));
+      }),
+    );
+
+    const leaseToken = "legacy-review-result-replay-token".padEnd(32, "x");
+    let result: unknown = "Completed under schema version five.";
+    for (let depth = 0; depth < 256; depth += 1) {
+      result = [result];
+    }
+    const resultJson = canonicalJson(result);
+    const resultDigest = sha256(resultJson);
+    const workerNodeId = "worker-legacy-review";
+    const workerInstanceId = "instance-legacy-review";
+    const workerId = "worker-id-legacy-review";
+    const runAttemptId = "attempt-legacy-review";
+    const versionFiveClient = await DatabaseClient.create({
+      databasePath,
+      migrationsDirectory: versionFiveMigrations,
+    });
+    let jobId: string;
+    try {
+      const ingestion = await versionFiveClient.request(
+        "ingestSchedulingEvent",
+        makeRequestOpenedInput("delivery-legacy-review-result"),
+      );
+      if (ingestion.jobId === null) {
+        throw new Error("Expected the version-five fixture to schedule a linked review job.");
+      }
+      jobId = ingestion.jobId;
+    } finally {
+      await versionFiveClient.close();
+    }
+    const seedDatabase = new DatabaseSync(databasePath);
+    try {
+      const now = new Date().toISOString();
+      const capabilitiesJson = canonicalJson(workerCapabilities);
+      seedDatabase
+        .prepare(`
+          INSERT INTO workers (
+            id,
+            node_id,
+            instance_id,
+            display_name,
+            version,
+            protocol_version,
+            max_slots,
+            capabilities_json,
+            capabilities_digest,
+            status,
+            registered_at,
+            last_seen_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, 'test', ?, 1, ?, ?, 'online', ?, ?, ?)
+        `)
+        .run(
+          workerId,
+          workerNodeId,
+          workerInstanceId,
+          workerInstanceId,
+          protocolVersion,
+          capabilitiesJson,
+          sha256(capabilitiesJson),
+          now,
+          now,
+          now,
+        );
+      seedDatabase
+        .prepare(`
+          INSERT INTO run_attempts (
+            id,
+            job_id,
+            attempt_number,
+            worker_id,
+            worker_node_id,
+            worker_instance_id,
+            status,
+            lease_token_hash,
+            lease_generation,
+            lease_expires_at,
+            execution_deadline_at,
+            no_progress_timeout_ms,
+            no_progress_deadline_at,
+            last_heartbeat_at,
+            phase,
+            result_digest,
+            result_json,
+            started_at,
+            ended_at
+          ) VALUES (?, ?, 1, ?, ?, ?, 'succeeded', ?, 1, ?, ?, 600000, ?, ?, 'completed', ?, ?, ?, ?)
+        `)
+        .run(
+          runAttemptId,
+          jobId,
+          workerId,
+          workerNodeId,
+          workerInstanceId,
+          sha256(leaseToken),
+          now,
+          now,
+          now,
+          now,
+          resultDigest,
+          resultJson,
+          now,
+          now,
+        );
+      seedDatabase
+        .prepare(`
+          UPDATE jobs
+          SET
+            status = 'succeeded',
+            attempt_count = 1,
+            lease_generation = 1,
+            current_run_attempt_id = NULL,
+            started_at = ?,
+            completed_at = ?,
+            updated_at = ?
+          WHERE id = ?
+        `)
+        .run(now, now, now, jobId);
+    } finally {
+      seedDatabase.close();
+    }
+
+    const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
+    const fixture = { client, directory, databasePath };
+    fixtures.push(fixture);
+    await expect(
+      client.request("completeLease", {
+        jobId,
+        runAttemptId,
+        workerNodeId,
+        workerInstanceId,
+        leaseToken,
+        leaseGeneration: 1,
+        resultDigest,
+        result,
+      }),
+    ).resolves.toEqual({
+      jobId,
+      runAttemptId,
+      jobState: "succeeded",
+      runState: "succeeded",
+    });
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare("SELECT result_digest, result_json FROM legacy_review_result_replays")
+          .get(),
+      ).toEqual({ result_digest: resultDigest, result_json: resultJson });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM review_results").get()).toEqual({
+        count: 0,
+      });
+    });
+  });
+
+  it("rolls back the attempt and result when a projection insert fails", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-review-result-rollback"),
+      "rollback",
+    );
+    withFixtureDatabase(fixture, (database) => {
+      database.exec(`
+        CREATE TRIGGER test_abort_pr_finding_insert
+        BEFORE INSERT ON pr_review_findings
+        BEGIN
+          SELECT RAISE(ABORT, 'injected PR finding failure');
+        END;
+      `);
+    });
+    const result = validPrReviewResult();
+
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).rejects.toThrow("injected PR finding failure");
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
   });
 });
 

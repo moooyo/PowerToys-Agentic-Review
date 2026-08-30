@@ -10,6 +10,9 @@ export interface JobExecutionContext {
   readonly signal: AbortSignal;
   readonly processHost: ProcessHostClient;
   reportProgress(progress: ExecutionProgress): void;
+  reportNodeHealthFault(error: Error): void;
+  // The callback must be retained synchronously and invoked after terminal reporting finishes.
+  deferCleanup?(cleanup: () => Promise<void>): void;
 }
 
 export type JobExecutionResult =
@@ -47,3 +50,11 @@ export class PlaceholderJobExecutor implements JobExecutor {
     };
   }
 }
+
+export {
+  buildStaticReviewCodexConfig,
+  type StaticReviewFileHandle,
+  type StaticReviewFileIO,
+  StaticReviewJobExecutor,
+  type StaticReviewJobExecutorOptions,
+} from "./static-review-executor.js";

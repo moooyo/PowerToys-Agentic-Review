@@ -112,6 +112,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@agentic-review/codex':
+        specifier: workspace:*
+        version: link:../../packages/codex
       '@agentic-review/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

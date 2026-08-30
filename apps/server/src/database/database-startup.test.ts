@@ -37,8 +37,8 @@ describe("DatabaseClient startup", () => {
     const backupDirectory = join(directory, "backups");
     await mkdir(backupDirectory);
     await Promise.all([
-      writeFile(join(backupDirectory, "state.sqlite.v1-to-v5.stale.sqlite.partial"), "partial"),
-      writeFile(join(backupDirectory, "state.sqlite.v1-to-v5.stale.sqlite.partial-wal"), "partial"),
+      writeFile(join(backupDirectory, "state.sqlite.v1-to-v6.stale.sqlite.partial"), "partial"),
+      writeFile(join(backupDirectory, "state.sqlite.v1-to-v6.stale.sqlite.partial-wal"), "partial"),
     ]);
 
     const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
@@ -53,7 +53,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(5);
+      expect(readSchemaVersion(migratedDatabase)).toBe(6);
     } finally {
       backupDatabase.close();
       migratedDatabase.close();

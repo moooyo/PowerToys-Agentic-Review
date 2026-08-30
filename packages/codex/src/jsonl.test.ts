@@ -40,6 +40,20 @@ describe("CodexJsonlParser", () => {
     });
   });
 
+  it("rejects invalid UTF-8 split across byte chunks", () => {
+    const parser = new CodexJsonlParser();
+
+    expect(parser.push(Uint8Array.from([0xe2]))).toEqual([]);
+    expect(() => parser.push(Uint8Array.from([0x28]))).toThrow(TypeError);
+  });
+
+  it("rejects an incomplete UTF-8 sequence when the stream finishes", () => {
+    const parser = new CodexJsonlParser();
+
+    expect(parser.push(Uint8Array.from([0xf0, 0x9f, 0x92]))).toEqual([]);
+    expect(() => parser.finish()).toThrow(TypeError);
+  });
+
   it("preserves unknown event types without treating them as parse failures", () => {
     const parser = new CodexJsonlParser();
     const records = [

@@ -4,6 +4,8 @@ import {
   type ClaimLeaseRequest,
   ClaimLeaseRequestSchema,
   ExecutionPhaseSchema,
+  maximumRunCompletionRequestBytes,
+  maximumRunCompletionResultUtf8Bytes,
   type RunCompletionSubmission,
   RunCompletionSubmissionSchema,
   type RunFailureSubmission,
@@ -94,7 +96,29 @@ const handleTerminalDatabaseError = (error: unknown, reply: FastifyReply): Fasti
       retryable: false,
     });
   }
+  if (
+    error instanceof DatabaseRequestError &&
+    (error.code === "REVIEW_RESULT_INVALID" || error.code === "STORED_EXECUTION_TEMPLATE_INVALID")
+  ) {
+    return reply.code(422).send({
+      code: error.code.toLowerCase(),
+      message: error.message,
+      retryable: false,
+    });
+  }
   throw error;
+};
+
+const exceedsReviewResultLimit = (result: unknown): boolean => {
+  try {
+    const serialized = JSON.stringify(result);
+    return (
+      serialized === undefined ||
+      Buffer.byteLength(serialized, "utf8") > maximumRunCompletionResultUtf8Bytes
+    );
+  } catch {
+    return true;
+  }
 };
 
 const sendLeaseLost = (runAttemptId: string) => ({
@@ -312,6 +336,7 @@ export const registerWorkerRoutes = (
   app.post<{ Params: RunRouteParameters; Body: RunCompletionSubmission }>(
     "/api/v1/worker/runs/:runAttemptId/complete",
     {
+      bodyLimit: maximumRunCompletionRequestBytes,
       schema: {
         params: parametersSchema,
         body: runCompletionSubmissionSchema,
@@ -320,6 +345,13 @@ export const registerWorkerRoutes = (
       preHandler: authenticateWorker,
     },
     async (request, reply) => {
+      if (exceedsReviewResultLimit(request.body.result)) {
+        return reply.code(413).send({
+          code: "review_result_too_large",
+          message: "The review result exceeds the permitted UTF-8 byte size.",
+          retryable: false,
+        });
+      }
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
       try {
         return await database.request("completeLease", {

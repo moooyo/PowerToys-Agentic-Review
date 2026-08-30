@@ -12,8 +12,8 @@ workers. Workers run Codex CLI and approved validation recipes, while a central 
 operational state, approvals, and GitHub publication.
 
 Control-plane, dashboard, and Worker orchestration code is TypeScript. The small Windows
-ProcessHost platform adapter is implemented in Go. The server runs on Linux, Workers run on
-Windows, and the dashboard uses React and Ant Design Pro.
+ProcessHost and ServiceHost platform adapters are implemented in Go. The server runs on Linux,
+Workers run on Windows, and the dashboard uses React and Ant Design Pro.
 
 ## 2. Accepted Technology Decisions
 
@@ -24,9 +24,9 @@ Windows, and the dashboard uses React and Ant Design Pro.
 | Database | Node built-in `node:sqlite` in a dedicated Worker Thread |
 | Database topology | One server instance is the only SQLite owner |
 | Workers | Remote TypeScript processes on Windows |
-| Worker hosting | Windows Service through WinSW |
+| Worker hosting | Two WinSW-managed Windows Services per logical node |
 | Process supervision | Native `AgenticReview.ProcessHost.exe` using Windows Job Objects |
-| Native helper | Go 1.24 module, cross-compiled for Windows x64/arm64 |
+| Native adapters | Go 1.24 ProcessHost and ServiceHost, cross-compiled for Windows x64/arm64 |
 | Worker transport | Outbound HTTPS with mutual TLS |
 | Queue semantics | Server-issued leases with heartbeats and fencing generations |
 | GitHub | Webhooks when available, reconciliation polling always enabled |
@@ -80,16 +80,27 @@ ephemeral container layer. A SQLite deployment has exactly one active server rep
 
 ### 4.2 Remote Windows Workers
 
-Each worker machine installs:
+Each logical worker node is implemented by two WinSW services with distinct restricted Windows
+identities, as specified by ADR 0007:
+
+- `AgenticReview.Worker.Control` owns mTLS, registration, claims, leases, and Server uploads. It has
+  no checkout, Codex, Git, ProcessHost, or validation-tool access.
+- `AgenticReview.Worker.Executor` owns Codex, Git, ProcessHost, validation tools, and disposable
+  workspaces. It has no Server, GitHub, database, webhook, or publication credential.
+
+The services exchange typed, signed, short-lived local execution grants over an ACL-restricted
+Named Pipe. The Server still sees one `workerNodeId`; a raw Server lease token never enters the
+Executor boundary. Each worker machine installs:
 
 - A pinned Node.js 24 LTS runtime.
-- The compiled TypeScript worker bundle.
+- The compiled Control and Executor TypeScript worker bundles.
 - WinSW for Windows Service integration.
+- `AgenticReview.ServiceHost.exe` for the local identity channel and service-root Job Object.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
 - A pinned Codex CLI version.
 - PowerToys build tools required by its advertised recipes.
-- An individual mTLS client certificate.
-- A worker-specific Codex credential or workload identity.
+- An individual mTLS client certificate accessible only to the Control service.
+- An Executor-specific Codex credential, workload identity, or inference-broker capability.
 
 Workers open outbound connections only. They do not expose inbound HTTP ports and never receive a
 GitHub credential, database path, webhook secret, or publication credential.
@@ -153,9 +164,11 @@ backup verification before rollout.
 
 ## 7. Worker Registration and Capabilities
 
-A worker has a stable `workerNodeId`, a new `workerInstanceId` for every process start, and a client
-certificate mapped to the node record. Request bodies cannot override the identity established by
-the certificate.
+A worker has a stable `workerNodeId`, a new `workerInstanceId` for every Control payload start, and
+a new local Executor boot ID for every Executor payload start. WinSW recovery that restarts either
+Node payload changes the corresponding ID; a pipe reconnect without a process restart does not.
+The client certificate is mapped to the node record, and request bodies cannot override the
+identity established by the certificate.
 
 Registration reports:
 
@@ -360,7 +373,8 @@ lockfile is mandatory, and dependency upgrades require UI contract and end-to-en
 ## 16. Security Boundaries
 
 - The server owns GitHub credentials and never sends them to workers.
-- Every worker has an individual mTLS certificate and Codex identity.
+- Every worker has an individual mTLS certificate and Codex identity, held by separate Control and
+  Executor service identities respectively.
 - Worker identity comes from the certificate, not request JSON or source IP.
 - Lease tokens authorize one attempt and cannot authorize publication.
 - Workers cannot access SQLite, approval state, or the GitHub outbox.
@@ -444,9 +458,11 @@ The Linux server is deployed with systemd or as a single-replica container using
 volume for SQLite, artifacts, and backups. The dashboard build is copied into the server image and
 served by Fastify.
 
-Each Windows worker is installed as a WinSW-managed Windows Service under a dedicated
-non-administrator account. The service uses Automatic Delayed Start and bounded restart recovery.
-It enters drain mode before upgrade and stops claiming before its executable bundle is replaced.
+Each Windows worker is installed as two WinSW-managed Windows Services under distinct restricted,
+non-administrator identities. Executor starts first; Control begins claiming only after their local
+identity, protocol, package, ACL, sandbox, and credential preflight succeeds. Control enters drain
+mode before upgrade and stops claiming before either executable bundle is replaced. Production
+execution fails closed unless the split-service boundary in ADR 0007 is active.
 
 Server upgrades pause claims, create a database backup, apply checked SQL migrations, start the new
 server, run reconciliation, and then resume claims. Worker and protocol versions are advertised at

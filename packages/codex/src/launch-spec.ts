@@ -35,6 +35,7 @@ export interface CodexProcessLaunchSpec {
 export interface BuildReadOnlyCodexExecLaunchSpecOptions {
   readonly executable: string;
   readonly workingDirectory: string;
+  readonly processWorkingDirectory: string;
   readonly controlRootDirectory: string;
   readonly prompt: string;
   readonly outputSchemaPath: string;
@@ -100,9 +101,13 @@ export function buildReadOnlyCodexExecLaunchSpec(
   options: BuildReadOnlyCodexExecLaunchSpecOptions,
 ): CodexProcessLaunchSpec {
   const executable = normalizeLocalWindowsExecutable(options.executable, "executable");
-  const workingDirectory = normalizeLocalWindowsDirectory(
+  const repositoryWorkingDirectory = normalizeLocalWindowsDirectory(
     options.workingDirectory,
     "workingDirectory",
+  );
+  const processWorkingDirectory = normalizeLocalWindowsDirectory(
+    options.processWorkingDirectory,
+    "processWorkingDirectory",
   );
   const controlRootDirectory = normalizeLocalWindowsDirectory(
     options.controlRootDirectory,
@@ -117,21 +122,29 @@ export function buildReadOnlyCodexExecLaunchSpec(
     "outputLastMessagePath",
   );
 
-  assertDisjointDirectories(workingDirectory, controlRootDirectory);
+  assertDisjointDirectories(repositoryWorkingDirectory, controlRootDirectory);
+  assertContainedDirectory(
+    controlRootDirectory,
+    processWorkingDirectory,
+    "processWorkingDirectory",
+  );
+  assertDisjointDirectories(repositoryWorkingDirectory, processWorkingDirectory);
   assertDescendantPath(controlRootDirectory, outputSchemaPath, "outputSchemaPath");
   assertDescendantPath(controlRootDirectory, outputLastMessagePath, "outputLastMessagePath");
   if (windowsPathsEqual(outputSchemaPath, outputLastMessagePath)) {
     throw new TypeError("outputSchemaPath and outputLastMessagePath must be different files");
   }
-  if (isSameOrDescendant(workingDirectory, executable)) {
+  if (isSameOrDescendant(repositoryWorkingDirectory, executable)) {
     throw new TypeError("executable must not be inside the untrusted workingDirectory");
   }
 
   assertPrompt(options.prompt);
   assertLimits(options.limits);
-  const environment = copyMinimalEnvironment(options.environment, workingDirectory);
+  const environment = copyMinimalEnvironment(options.environment, repositoryWorkingDirectory);
   const argumentsList = Object.freeze([
     "exec",
+    "--cd",
+    repositoryWorkingDirectory,
     "--json",
     "--color",
     "never",
@@ -150,7 +163,7 @@ export function buildReadOnlyCodexExecLaunchSpec(
   const spec: CodexProcessLaunchSpec = Object.freeze({
     executable,
     arguments: argumentsList,
-    workingDirectory,
+    workingDirectory: processWorkingDirectory,
     environmentMode: "replace",
     environment,
     standardInput: options.prompt,
@@ -251,6 +264,12 @@ function assertSafeWindowsPathSegment(segment: string, name: string): void {
 
 function assertDescendantPath(root: string, candidate: string, name: string): void {
   if (windowsPathsEqual(root, candidate) || !isSameOrDescendant(root, candidate)) {
+    throw new TypeError(`${name} must be contained by controlRootDirectory`);
+  }
+}
+
+function assertContainedDirectory(root: string, candidate: string, name: string): void {
+  if (!isSameOrDescendant(root, candidate)) {
     throw new TypeError(`${name} must be contained by controlRootDirectory`);
   }
 }

@@ -174,6 +174,11 @@ export const RunCompletionSubmissionSchema = Type.Composite(
 );
 export type RunCompletionSubmission = Static<typeof RunCompletionSubmissionSchema>;
 
+// The Worker reads the final Codex result from a file with the same byte ceiling.
+// The HTTP request allowance includes bounded lease-envelope and JSON framing overhead.
+export const maximumRunCompletionResultUtf8Bytes = 2 * 1024 * 1024;
+export const maximumRunCompletionRequestBytes = maximumRunCompletionResultUtf8Bytes + 16 * 1024;
+
 export const RunFailureSubmissionSchema = Type.Composite(
   [
     LeaseIdentitySchema,

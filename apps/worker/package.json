@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@agentic-review/codex": "workspace:*",
     "@agentic-review/contracts": "workspace:*",
     "@sinclair/typebox": "0.34.52"
   },

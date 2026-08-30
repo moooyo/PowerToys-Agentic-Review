@@ -16,9 +16,8 @@ Review the immutable pull request revision described in the job envelope.
 Find concrete correctness, security, reliability, compatibility, and test-coverage defects
 introduced by this revision. Prefer a small number of high-confidence findings over speculative
 comments. Every finding must explain the observable impact and point to a changed file and line
-when possible.
+when possible. Set `endLine` to `null` for a single-line finding.
 
 Return only a result that conforms to the supplied `PrReviewPlanV1` output schema. Requested
 validation must reference only recipe IDs present in the job envelope. A recommendation is advice
 for an operator and never authorizes publication or repository mutation.
-

@@ -14,6 +14,11 @@ async function main(): Promise<void> {
   }
 
   const config = loadWorkerConfig();
+  if (config.executionEnabled) {
+    throw new Error(
+      "Worker execution remains disabled until the control/executor identity boundary and Windows runtime preflight are connected.",
+    );
+  }
   await mkdir(config.dataDirectory, { recursive: true });
   const logger = new ConsoleJsonLogger(config.logLevel, {
     component: "worker",

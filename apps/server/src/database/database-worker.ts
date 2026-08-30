@@ -73,6 +73,13 @@ import type {
   RegisteredWorker,
   RegisterWorkerInput,
 } from "./protocol.js";
+import {
+  canonicalizeLegacyReviewResultSubmission,
+  canonicalizeReviewResultSubmission,
+  persistValidatedReviewResult,
+  type ReviewCompletionJobContext,
+  validateReviewCompletion,
+} from "./review-results.js";
 
 interface WorkerRow {
   readonly id: string;
@@ -124,6 +131,23 @@ interface TerminalAttemptRow extends HeartbeatRow {
   readonly result_json: string | null;
   readonly failure_code: string | null;
   readonly failure_message: string | null;
+  readonly job_kind: "issue_triage" | "pull_request_review";
+  readonly work_item_id: string | null;
+  readonly request_epoch_id: string | null;
+  readonly work_item_resource_kind: "issue" | "pull_request" | null;
+  readonly resource_revision: string;
+  readonly revision_id: string | null;
+  readonly revision_resource_kind: "issue" | "pull_request" | null;
+  readonly revision_base_sha: string | null;
+  readonly revision_head_sha: string | null;
+  readonly execution_json: string;
+  readonly execution_digest: string | null;
+  readonly persisted_result_id: string | null;
+  readonly persisted_result_digest: string | null;
+  readonly persisted_result_json: string | null;
+  readonly legacy_replay_id: string | null;
+  readonly legacy_result_digest: string | null;
+  readonly legacy_result_json: string | null;
 }
 
 interface FailureTerminalPayload {
@@ -813,6 +837,9 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
   });
 
 const securelyMatchesHash = (actual: string, expected: string): boolean => {
+  if (!/^[a-f0-9]{64}$/u.test(actual) || !/^[a-f0-9]{64}$/u.test(expected)) {
+    return false;
+  }
   const actualBytes = Buffer.from(actual, "hex");
   const expectedBytes = Buffer.from(expected, "hex");
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
@@ -1057,6 +1084,23 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           attempt.result_json,
           attempt.failure_code,
           attempt.failure_message,
+          job.job_kind,
+          job.work_item_id,
+          job.request_epoch_id,
+          item.resource_kind AS work_item_resource_kind,
+          job.resource_revision,
+          revision.id AS revision_id,
+          revision.resource_kind AS revision_resource_kind,
+          revision.base_sha AS revision_base_sha,
+          revision.head_sha AS revision_head_sha,
+          job.execution_json,
+          job.execution_digest,
+          persisted_result.id AS persisted_result_id,
+          persisted_result.result_digest AS persisted_result_digest,
+          persisted_result.result_json AS persisted_result_json,
+          legacy_replay.run_attempt_id AS legacy_replay_id,
+          legacy_replay.result_digest AS legacy_result_digest,
+          legacy_replay.result_json AS legacy_result_json,
           job.status AS job_status,
           job.cancellation_requested_at,
           job.current_run_attempt_id,
@@ -1065,6 +1109,14 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
         FROM run_attempts AS attempt
         JOIN jobs AS job ON job.id = attempt.job_id
         JOIN workers AS worker ON worker.id = attempt.worker_id
+        LEFT JOIN work_items AS item ON item.id = job.work_item_id
+        LEFT JOIN work_item_revisions AS revision
+          ON revision.work_item_id = job.work_item_id
+          AND revision.revision_key = job.resource_revision
+        LEFT JOIN review_results AS persisted_result
+          ON persisted_result.run_attempt_id = attempt.id
+        LEFT JOIN legacy_review_result_replays AS legacy_replay
+          ON legacy_replay.run_attempt_id = attempt.id
         WHERE attempt.id = ?
       `)
       .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
@@ -1072,13 +1124,40 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       throw new LeaseLostError();
     }
 
-    const resultJson = canonicalJson(input.result);
-    const expectedResultDigest = hash(resultJson);
+    if (isTerminalAttemptState(fence.status) && fence.legacy_replay_id !== null) {
+      const legacyCanonicalResult = canonicalizeLegacyReviewResultSubmission(input.result);
+      if (
+        fence.status === "succeeded" &&
+        fence.result_digest !== null &&
+        fence.result_json === legacyCanonicalResult.canonicalResultJson &&
+        fence.legacy_result_digest === fence.result_digest &&
+        fence.legacy_result_json === fence.result_json &&
+        securelyMatchesHash(input.resultDigest, fence.result_digest) &&
+        securelyMatchesHash(legacyCanonicalResult.resultDigest, fence.result_digest)
+      ) {
+        return {
+          jobId: input.jobId,
+          runAttemptId: input.runAttemptId,
+          jobState: "succeeded",
+          runState: "succeeded",
+        };
+      }
+      throw new TerminalSubmissionConflictError();
+    }
+
+    const canonicalResult = canonicalizeReviewResultSubmission(input.result);
+    const resultJson = canonicalResult.canonicalResultJson;
+    const expectedResultDigest = canonicalResult.resultDigest;
     if (isTerminalAttemptState(fence.status)) {
+      const requiresPersistedResult = isPersistedReviewJob(fence);
       if (
         fence.status === "succeeded" &&
         fence.result_digest !== null &&
         fence.result_json === resultJson &&
+        (fence.persisted_result_id !== null) === requiresPersistedResult &&
+        (fence.persisted_result_id === null ||
+          (fence.persisted_result_digest === fence.result_digest &&
+            fence.persisted_result_json === fence.result_json)) &&
         securelyMatchesHash(input.resultDigest, fence.result_digest) &&
         securelyMatchesHash(expectedResultDigest, fence.result_digest)
       ) {
@@ -1106,6 +1185,12 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
     if (!securelyMatchesHash(input.resultDigest, expectedResultDigest)) {
       throw new ResultDigestMismatchError();
     }
+    const reviewContext = toReviewCompletionContext(fence, input.runAttemptId);
+    const validatedReview = isPersistedReviewJob(fence)
+      ? validateReviewCompletion(reviewContext, input.resultDigest, input.result, canonicalResult)
+      : null;
+    const committedResultDigest = validatedReview?.resultDigest ?? input.resultDigest;
+    const committedResultJson = validatedReview?.canonicalResultJson ?? resultJson;
     const attemptUpdate = database
       .prepare(`
         UPDATE run_attempts
@@ -1133,8 +1218,8 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           )
       `)
       .run(
-        input.resultDigest,
-        resultJson,
+        committedResultDigest,
+        committedResultJson,
         now,
         input.runAttemptId,
         input.jobId,
@@ -1148,6 +1233,10 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       );
     if (Number(attemptUpdate.changes) !== 1) {
       throw new LeaseLostError();
+    }
+
+    if (validatedReview !== null) {
+      persistValidatedReviewResult(database, reviewContext, validatedReview, now);
     }
 
     const jobUpdate = database
@@ -1188,6 +1277,28 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       runState: "succeeded",
     };
   });
+
+const isPersistedReviewJob = (
+  row: Pick<TerminalAttemptRow, "work_item_id" | "request_epoch_id">,
+): boolean => row.work_item_id !== null && row.request_epoch_id !== null;
+
+const toReviewCompletionContext = (
+  row: TerminalAttemptRow,
+  runAttemptId: string,
+): ReviewCompletionJobContext => ({
+  jobId: row.job_id,
+  runAttemptId,
+  jobKind: row.job_kind,
+  workItemId: row.work_item_id,
+  workItemResourceKind: row.work_item_resource_kind,
+  resourceRevision: row.resource_revision,
+  revisionId: row.revision_id,
+  revisionResourceKind: row.revision_resource_kind,
+  revisionBaseSha: row.revision_base_sha,
+  revisionHeadSha: row.revision_head_sha,
+  executionJson: row.execution_json,
+  executionDigest: row.execution_digest,
+});
 
 const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
   withImmediateTransaction(() => {

@@ -10,7 +10,7 @@ import type {
 } from "@agentic-review/contracts";
 import type { WorkerConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
-import { WorkerApiError } from "../server-client/errors.js";
+import { isFatalWorkerControlError, WorkerApiError } from "../server-client/errors.js";
 import type { WorkerApi } from "../server-client/worker-api.js";
 import { delay } from "../util/async.js";
 import { LeaseLostError } from "./errors.js";
@@ -47,6 +47,7 @@ export interface HeartbeatCoordinatorOptions {
   readonly availableSlotsProvider: () => number;
   readonly onDrainRequested: (reason: string) => void;
   readonly onRegistrationLost: (error: WorkerApiError) => void;
+  readonly onFatalError: (error: unknown) => void;
 }
 
 export class HeartbeatCoordinator {
@@ -58,6 +59,7 @@ export class HeartbeatCoordinator {
   readonly #availableSlotsProvider: () => number;
   readonly #onDrainRequested: (reason: string) => void;
   readonly #onRegistrationLost: (error: WorkerApiError) => void;
+  readonly #onFatalError: (error: unknown) => void;
   readonly #sessions = new Map<string, LeaseSession>();
   readonly #stopController = new AbortController();
   #heartbeatSequence = 0;
@@ -76,6 +78,7 @@ export class HeartbeatCoordinator {
     this.#availableSlotsProvider = options.availableSlotsProvider;
     this.#onDrainRequested = options.onDrainRequested;
     this.#onRegistrationLost = options.onRegistrationLost;
+    this.#onFatalError = options.onFatalError;
     this.#nextHeartbeatMilliseconds = clampHeartbeatDelay(
       Math.min(
         options.registration.heartbeatIntervalMs,
@@ -182,11 +185,16 @@ export class HeartbeatCoordinator {
     while (!signal.aborted) {
       await this.#sendHeartbeat(signal).catch((error: unknown) => {
         if (!signal.aborted) {
-          this.#logger.warn("Worker heartbeat failed.", { error });
           if (error instanceof WorkerApiError && error.isWorkerRegistrationLost) {
             this.#onRegistrationLost(error);
+            this.#abortLeasesNearExpiry();
+          } else if (isFatalWorkerControlError(error)) {
+            this.#stopController.abort(error);
+            this.#onFatalError(error);
+          } else {
+            this.#logger.warn("Worker heartbeat failed.", { error });
+            this.#abortLeasesNearExpiry();
           }
-          this.#abortLeasesNearExpiry();
         }
       });
 

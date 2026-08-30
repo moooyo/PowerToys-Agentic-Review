@@ -1,5 +1,6 @@
 import { type ClientRequest, request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest, type RequestOptions } from "node:https";
+import { createSecureContext, type SecureContext, type SecureContextOptions } from "node:tls";
 import {
   type ClaimLeaseRequest,
   type ClaimLeaseResponse,
@@ -22,15 +23,49 @@ import type { WorkerApi } from "./worker-api.js";
 
 const maximumResponseBytes = 2 * 1024 * 1024;
 
+type RequestFactory = (
+  url: URL,
+  options: RequestOptions,
+  callback: (response: IncomingMessage) => void,
+) => ClientRequest;
+
+export interface HttpWorkerApiDependencies {
+  readonly createSecureContext?: (options: SecureContextOptions) => SecureContext;
+  readonly httpRequest?: RequestFactory;
+  readonly httpsRequest?: RequestFactory;
+}
+
 if (!FormatRegistry.Has("date-time")) {
   FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
 }
 
 export class HttpWorkerApi implements WorkerApi {
+  readonly #secureContext: SecureContext | undefined;
+  readonly #httpRequest: RequestFactory;
+  readonly #httpsRequest: RequestFactory;
+
   public constructor(
     private readonly config: WorkerConfig,
     private readonly logger: Logger,
-  ) {}
+    dependencies: HttpWorkerApiDependencies = {},
+  ) {
+    this.#httpRequest = dependencies.httpRequest ?? httpRequest;
+    this.#httpsRequest = dependencies.httpsRequest ?? httpsRequest;
+    if (config.serverUrl.protocol === "https:") {
+      const tls = config.tls;
+      if (tls === undefined) {
+        throw new TypeError("HTTPS Worker API access requires TLS client configuration.");
+      }
+      const createContext = dependencies.createSecureContext ?? createSecureContext;
+      this.#secureContext = createContext({
+        ...(tls.ca === undefined ? {} : { ca: tls.ca }),
+        ...(tls.cert === undefined ? {} : { cert: tls.cert }),
+        ...(tls.key === undefined ? {} : { key: tls.key }),
+        ...(tls.pfx === undefined ? {} : { pfx: tls.pfx }),
+        ...(tls.passphrase === undefined ? {} : { passphrase: tls.passphrase }),
+      });
+    }
+  }
 
   public async register(
     request: WorkerRegistrationRequest,
@@ -118,13 +153,7 @@ export class HttpWorkerApi implements WorkerApi {
       },
       ...(url.protocol === "https:"
         ? {
-            ...(this.config.tls?.ca === undefined ? {} : { ca: this.config.tls.ca }),
-            ...(this.config.tls?.cert === undefined ? {} : { cert: this.config.tls.cert }),
-            ...(this.config.tls?.key === undefined ? {} : { key: this.config.tls.key }),
-            ...(this.config.tls?.pfx === undefined ? {} : { pfx: this.config.tls.pfx }),
-            ...(this.config.tls?.passphrase === undefined
-              ? {}
-              : { passphrase: this.config.tls.passphrase }),
+            secureContext: this.#secureContext,
             ...(this.config.tls?.serverName === undefined
               ? {}
               : { servername: this.config.tls.serverName }),
@@ -176,8 +205,8 @@ export class HttpWorkerApi implements WorkerApi {
       };
       request =
         url.protocol === "https:"
-          ? httpsRequest(url, options, handleResponse)
-          : httpRequest(url, options, handleResponse);
+          ? this.#httpsRequest(url, options, handleResponse)
+          : this.#httpRequest(url, options, handleResponse);
 
       const onAbort = (): void => {
         request.destroy(abortError(signal));

@@ -26,6 +26,24 @@ export class ResultDigestMismatchError extends Error {
   }
 }
 
+export class ReviewResultInvalidError extends Error {
+  public readonly code = "REVIEW_RESULT_INVALID";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "ReviewResultInvalidError";
+  }
+}
+
+export class StoredExecutionTemplateInvalidError extends Error {
+  public readonly code = "STORED_EXECUTION_TEMPLATE_INVALID";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "StoredExecutionTemplateInvalidError";
+  }
+}
+
 export class TerminalSubmissionConflictError extends Error {
   public readonly code = "TERMINAL_SUBMISSION_CONFLICT";
 

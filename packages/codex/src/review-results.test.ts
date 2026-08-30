@@ -1,7 +1,35 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
-import { IssueTriageV1Schema, PrReviewPlanV1Schema } from "./review-results.js";
+import {
+  IssueTriageV1ModelOutputSchema,
+  IssueTriageV1Schema,
+  PrReviewPlanV1ModelOutputSchema,
+  PrReviewPlanV1Schema,
+} from "./review-results.js";
+
+const supportedStructuredOutputKeywords = new Set([
+  "type",
+  "properties",
+  "required",
+  "additionalProperties",
+  "items",
+  "anyOf",
+  "const",
+  "enum",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minItems",
+  "maxItems",
+  "description",
+  "$defs",
+  "$ref",
+]);
 
 const validPrReviewPlan = {
   schemaVersion: "PrReviewPlanV1",
@@ -37,6 +65,26 @@ const validIssueTriage = {
 describe("PrReviewPlanV1Schema", () => {
   it("accepts a bounded review plan with repository-relative locations", () => {
     expect(Value.Check(PrReviewPlanV1Schema, validPrReviewPlan)).toBe(true);
+  });
+
+  it("requires an explicit nullable end line for every finding", () => {
+    const findingWithoutEndLine: Record<string, unknown> = {
+      ...validPrReviewPlan.findings[0],
+    };
+    delete findingWithoutEndLine.endLine;
+
+    expect(
+      Value.Check(PrReviewPlanV1Schema, {
+        ...validPrReviewPlan,
+        findings: [findingWithoutEndLine],
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(PrReviewPlanV1Schema, {
+        ...validPrReviewPlan,
+        findings: [{ ...validPrReviewPlan.findings[0], endLine: null }],
+      }),
+    ).toBe(true);
   });
 
   it("rejects additional fields at the root and finding levels", () => {
@@ -102,3 +150,51 @@ describe("IssueTriageV1Schema", () => {
     ).toBe(false);
   });
 });
+
+describe("model output schemas", () => {
+  it.each([
+    ["PR review", PrReviewPlanV1ModelOutputSchema],
+    ["issue triage", IssueTriageV1ModelOutputSchema],
+  ] as const)("keeps the %s schema within the Structured Outputs subset", (_name, schema) => {
+    expect(schema.type).toBe("object");
+    expect(schema).not.toHaveProperty("anyOf");
+    assertStructuredOutputSchema(schema, "$");
+  });
+});
+
+function assertStructuredOutputSchema(schema: unknown, path: string): void {
+  expect(schema, `${path} must be a schema object`).toBeTypeOf("object");
+  expect(schema, `${path} must not be null`).not.toBeNull();
+  expect(Array.isArray(schema), `${path} must not be an array`).toBe(false);
+  const record = schema as Record<string, unknown>;
+  for (const keyword of Object.keys(record)) {
+    expect(
+      supportedStructuredOutputKeywords.has(keyword),
+      `${path} uses unsupported keyword ${keyword}`,
+    ).toBe(true);
+  }
+
+  if (record.type === "object") {
+    expect(record.additionalProperties, `${path}.additionalProperties`).toBe(false);
+    const properties = record.properties as Record<string, unknown>;
+    expect(properties, `${path}.properties`).toBeTypeOf("object");
+    expect(record.required, `${path}.required`).toEqual(Object.keys(properties));
+    for (const [name, propertySchema] of Object.entries(properties)) {
+      assertStructuredOutputSchema(propertySchema, `${path}.properties.${name}`);
+    }
+  }
+  if (record.items !== undefined) {
+    assertStructuredOutputSchema(record.items, `${path}.items`);
+  }
+  if (record.anyOf !== undefined) {
+    expect(Array.isArray(record.anyOf), `${path}.anyOf`).toBe(true);
+    for (const [index, memberSchema] of (record.anyOf as unknown[]).entries()) {
+      assertStructuredOutputSchema(memberSchema, `${path}.anyOf[${index}]`);
+    }
+  }
+  if (record.$defs !== undefined) {
+    for (const [name, definition] of Object.entries(record.$defs as Record<string, unknown>)) {
+      assertStructuredOutputSchema(definition, `${path}.$defs.${name}`);
+    }
+  }
+}

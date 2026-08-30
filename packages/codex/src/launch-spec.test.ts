@@ -27,6 +27,7 @@ const validLimits = (): CodexProcessResourceLimits => ({
 const validOptions = (): BuildReadOnlyCodexExecLaunchSpecOptions => ({
   executable: "C:\\Tools\\Codex\\codex.exe",
   workingDirectory: "C:\\Work\\Checkout",
+  processWorkingDirectory: "C:\\Service\\Runs\\attempt-1\\control",
   controlRootDirectory: "C:\\Service\\Runs\\attempt-1\\control",
   prompt: "Review this revision; & echo must remain ordinary prompt text.",
   outputSchemaPath: "C:\\Service\\Runs\\attempt-1\\control\\schema.json",
@@ -55,6 +56,8 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
       executable: "C:\\Tools\\Codex\\codex.exe",
       arguments: [
         "exec",
+        "--cd",
+        "C:\\Work\\Checkout",
         "--json",
         "--color",
         "never",
@@ -69,7 +72,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
         "C:\\Service\\Runs\\attempt-1\\control\\output\\result.json",
         "-",
       ],
-      workingDirectory: "C:\\Work\\Checkout",
+      workingDirectory: "C:\\Service\\Runs\\attempt-1\\control",
       environmentMode: "replace",
       environment: {
         CODEX_HOME: "C:\\Service\\Codex",
@@ -126,6 +129,8 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
 
   it.each([
     { field: "workingDirectory", value: "relative\\checkout" },
+    { field: "processWorkingDirectory", value: "C:\\Other\\process" },
+    { field: "processWorkingDirectory", value: "C:\\Work\\Checkout\\process" },
     { field: "workingDirectory", value: "C:\\Work\0outside" },
     { field: "controlRootDirectory", value: "\\\\server\\share\\control" },
     { field: "outputSchemaPath", value: "C:\\Service\\Runs\\escape\\schema.json" },

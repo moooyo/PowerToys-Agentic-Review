@@ -14,13 +14,34 @@ import { ExecutionTimeoutError, LeaseLostError } from "./leases/errors.js";
 import { HeartbeatCoordinator } from "./leases/heartbeat-coordinator.js";
 import type { Logger } from "./logging/logger.js";
 import { digestCapabilities } from "./server-client/capabilities.js";
-import { ProtocolError, WorkerApiError } from "./server-client/errors.js";
+import {
+  isFatalWorkerControlError,
+  isPermanentWorkerClientError,
+  ProtocolError,
+  WorkerApiError,
+} from "./server-client/errors.js";
 import type { WorkerApi } from "./server-client/worker-api.js";
 import { delay, waitForPromisesWithTimeout } from "./util/async.js";
 
 interface ActiveRun {
   readonly controller: AbortController;
+  readonly terminalSubmissionController: AbortController;
   readonly promise: Promise<void>;
+}
+
+interface DeferredCleanupScope {
+  readonly callbacks: Array<() => Promise<void>>;
+  accepting: boolean;
+  started: boolean;
+}
+
+const forcedRunSettleTimeoutMilliseconds = 5_000;
+
+class WorkerShutdownError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "WorkerShutdownError";
+  }
 }
 
 export class WorkerService {
@@ -64,6 +85,7 @@ export class WorkerService {
       availableSlotsProvider: () => this.#availableSlots(),
       onDrainRequested: (reason) => this.requestDrain(reason),
       onRegistrationLost: (error) => this.#requestRegistrationRecovery(error),
+      onFatalError: (error) => this.#signalFatal(error),
     });
     this.#heartbeat.start();
 
@@ -77,6 +99,7 @@ export class WorkerService {
 
     await this.#claimLoop();
     if (this.#fatalError !== undefined) {
+      await this.#heartbeat?.stop();
       throw this.#fatalError;
     }
     await this.#shutdownPromise;
@@ -163,7 +186,8 @@ export class WorkerService {
         }
         if (
           error instanceof ProtocolError ||
-          (error instanceof WorkerApiError && !error.isRetryable)
+          (error instanceof WorkerApiError && !error.isRetryable) ||
+          isPermanentWorkerClientError(error)
         ) {
           throw error;
         }
@@ -189,10 +213,24 @@ export class WorkerService {
         if (this.#stopping || this.#stopController.signal.aborted) {
           return;
         }
-        this.#fatalError = registrationError;
-        this.#stopController.abort(registrationError);
+        this.#signalFatal(registrationError);
       },
     );
+  }
+
+  #signalFatal(error: unknown): void {
+    if (this.#fatalError !== undefined || this.#stopping) {
+      return;
+    }
+    this.#fatalError = error;
+    this.#draining = true;
+    this.#currentClaimController?.abort(error);
+    this.#stopController.abort(error);
+    void this.#heartbeat?.stop();
+    for (const { controller, terminalSubmissionController } of this.#activeRuns.values()) {
+      terminalSubmissionController.abort(error);
+      controller.abort(error);
+    }
   }
 
   async #claimLoop(): Promise<void> {
@@ -231,8 +269,12 @@ export class WorkerService {
         responseReceivedAt = performance.now();
       } catch (error) {
         if (!claimController.signal.aborted && !stopSignal.aborted) {
-          this.logger.warn("Lease claim failed.", { error });
-          await delay(this.config.idleDelayMilliseconds, stopSignal).catch(() => undefined);
+          if (isFatalWorkerControlError(error)) {
+            this.#signalFatal(error);
+          } else {
+            this.logger.warn("Lease claim failed.", { error });
+            await delay(this.config.idleDelayMilliseconds, stopSignal).catch(() => undefined);
+          }
         }
       } finally {
         stopSignal.removeEventListener("abort", stopClaim);
@@ -252,12 +294,16 @@ export class WorkerService {
     if (response.outcome === "granted") {
       if (this.#draining || this.#stopping || stopSignal.aborted) {
         await this.api
-          .failRun(response.envelope.lease.runAttemptId, {
-            ...response.envelope.lease,
-            code: "WORKER_DRAINING",
-            message: "The worker entered drain mode before the granted lease could start.",
-            retryable: true,
-          })
+          .failRun(
+            response.envelope.lease.runAttemptId,
+            {
+              ...response.envelope.lease,
+              code: "WORKER_DRAINING",
+              message: "The worker entered drain mode before the granted lease could start.",
+              retryable: true,
+            },
+            stopSignal,
+          )
           .catch((error: unknown) => {
             this.logger.warn("Unable to release a lease granted during worker drain.", {
               runAttemptId: response.envelope.lease.runAttemptId,
@@ -303,14 +349,15 @@ export class WorkerService {
     }
 
     const controller = new AbortController();
-    const promise = this.#executeRun(envelope, controller)
+    const terminalSubmissionController = new AbortController();
+    const promise = this.#executeRun(envelope, controller, terminalSubmissionController)
       .catch((error: unknown) => {
         this.logger.error("Run attempt terminated unexpectedly.", { runAttemptId, error });
       })
       .finally(() => {
         this.#activeRuns.delete(runAttemptId);
       });
-    this.#activeRuns.set(runAttemptId, { controller, promise });
+    this.#activeRuns.set(runAttemptId, { controller, terminalSubmissionController, promise });
     this.logger.info("Lease claimed.", {
       jobId: envelope.job.jobId,
       runAttemptId,
@@ -318,10 +365,20 @@ export class WorkerService {
     });
   }
 
-  async #executeRun(envelope: JobExecutionEnvelope, controller: AbortController): Promise<void> {
+  async #executeRun(
+    envelope: JobExecutionEnvelope,
+    controller: AbortController,
+    terminalSubmissionController: AbortController,
+  ): Promise<void> {
     if (this.#heartbeat === undefined) {
       throw new Error("Heartbeat coordinator is not initialized.");
     }
+    const deferredCleanup: DeferredCleanupScope = {
+      callbacks: [],
+      accepting: true,
+      started: false,
+    };
+    let nodeHealthFaultReported = false;
     const lease = this.#heartbeat.attach(envelope, controller);
     const remainingMilliseconds = calculateExecutionTimeout(
       envelope,
@@ -347,7 +404,25 @@ export class WorkerService {
         signal: controller.signal,
         processHost: this.processHost,
         reportProgress: ({ phase, processCount }) => lease.reportProgress(phase, processCount),
+        reportNodeHealthFault: (error) => {
+          if (nodeHealthFaultReported) return;
+          nodeHealthFaultReported = true;
+          const reason = nodeHealthFaultReason(error);
+          this.logger.error("Worker node health fault requested drain mode.", {
+            runAttemptId: envelope.lease.runAttemptId,
+            reason,
+            error,
+          });
+          this.requestDrain(reason);
+        },
+        deferCleanup: (cleanup) => {
+          if (!deferredCleanup.accepting) {
+            throw new Error("Deferred cleanup registration closed after job execution returned.");
+          }
+          deferredCleanup.callbacks.push(cleanup);
+        },
       });
+      deferredCleanup.accepting = false;
       if (controller.signal.aborted) {
         throw controller.signal.reason ?? new Error("Run execution was aborted.");
       }
@@ -376,9 +451,10 @@ export class WorkerService {
         };
         const submitted = await this.#submitTerminalWithRetry(
           "completion",
-          () => this.api.completeRun(envelope.lease.runAttemptId, submission),
+          (signal) => this.api.completeRun(envelope.lease.runAttemptId, submission, signal),
           () => lease.isAuthoritative(),
           envelope.lease.runAttemptId,
+          terminalSubmissionController.signal,
         );
         const cancellationReason = lease.cancellationReason();
         if (!submitted && cancellationReason !== undefined) {
@@ -396,15 +472,17 @@ export class WorkerService {
         );
         const submitted = await this.#submitTerminalWithRetry(
           "failure",
-          () => this.api.failRun(envelope.lease.runAttemptId, submission),
+          (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),
           () => lease.isAuthoritative(),
           envelope.lease.runAttemptId,
+          terminalSubmissionController.signal,
         );
         if (!submitted && controller.signal.aborted) {
           throw controller.signal.reason ?? new Error("Run execution was aborted.");
         }
       }
     } catch (error) {
+      deferredCleanup.accepting = false;
       const cancellationReason = lease.cancellationReason();
       const reason = cancellationReason ?? controller.signal.reason ?? error;
       const leaseLoss =
@@ -435,15 +513,43 @@ export class WorkerService {
       );
       await this.#submitTerminalWithRetry(
         "termination",
-        () => this.api.failRun(envelope.lease.runAttemptId, submission),
+        (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),
         () => lease.canRetryTerminalSubmission(),
         envelope.lease.runAttemptId,
+        terminalSubmissionController.signal,
       );
     } finally {
+      deferredCleanup.accepting = false;
       if (deadlineTimer !== undefined) {
         clearTimeout(deadlineTimer);
       }
-      lease.detach();
+      try {
+        lease.detach();
+      } finally {
+        await this.#runDeferredCleanups(deferredCleanup, envelope.lease.runAttemptId);
+      }
+    }
+  }
+
+  async #runDeferredCleanups(scope: DeferredCleanupScope, runAttemptId: string): Promise<void> {
+    if (scope.started) {
+      return;
+    }
+    scope.started = true;
+    scope.accepting = false;
+
+    const callbacks = scope.callbacks.splice(0).reverse();
+    for (const [cleanupIndex, cleanup] of callbacks.entries()) {
+      try {
+        await cleanup();
+      } catch (error) {
+        this.logger.warn("Deferred run cleanup failed.", {
+          runAttemptId,
+          cleanupIndex,
+          error,
+        });
+        this.requestDrain("deferred_cleanup_failed");
+      }
     }
   }
 
@@ -468,16 +574,25 @@ export class WorkerService {
 
   async #submitTerminalWithRetry(
     operation: string,
-    submit: () => Promise<void>,
+    submit: (signal: AbortSignal) => Promise<void>,
     canRetry: () => boolean,
     runAttemptId: string,
+    signal: AbortSignal,
   ): Promise<boolean> {
     let retryDelayMilliseconds = 250;
-    while (canRetry()) {
+    while (!signal.aborted && canRetry()) {
       try {
-        await submit();
+        await submit(signal);
         return true;
       } catch (error) {
+        if (signal.aborted) {
+          this.logger.warn("Terminal run submission stopped during forced Worker shutdown.", {
+            operation,
+            runAttemptId,
+            error: signal.reason ?? error,
+          });
+          return false;
+        }
         const retryable =
           !(error instanceof ProtocolError) &&
           (!(error instanceof WorkerApiError) || error.isRetryable);
@@ -497,9 +612,26 @@ export class WorkerService {
           retryDelayMilliseconds,
           error,
         });
-        await delay(retryDelayMilliseconds);
+        try {
+          await delayWithoutKeepingProcessAlive(retryDelayMilliseconds, signal);
+        } catch (delayError) {
+          this.logger.warn("Terminal run submission stopped during forced Worker shutdown.", {
+            operation,
+            runAttemptId,
+            error: signal.reason ?? delayError,
+          });
+          return false;
+        }
         retryDelayMilliseconds = Math.min(2_000, retryDelayMilliseconds * 2);
       }
+    }
+    if (signal.aborted) {
+      this.logger.warn("Terminal run submission skipped during forced Worker shutdown.", {
+        operation,
+        runAttemptId,
+        error: signal.reason,
+      });
+      return false;
     }
     this.logger.warn("Terminal run submission stopped after lease authority expired.", {
       operation,
@@ -509,6 +641,7 @@ export class WorkerService {
   }
 
   async #drainAndStop(reason: string): Promise<void> {
+    let shutdownError: WorkerShutdownError | undefined;
     this.logger.info("Worker shutdown started.", {
       reason,
       activeRunCount: this.#activeRuns.size,
@@ -521,20 +654,40 @@ export class WorkerService {
       this.logger.warn("Shutdown grace period expired; cancelling active runs.", {
         activeRunCount: this.#activeRuns.size,
       });
-      for (const { controller } of this.#activeRuns.values()) {
-        controller.abort(new Error("Worker shutdown grace period expired."));
+      const forcedShutdownReason = new Error("Worker shutdown grace period expired.");
+      for (const { controller, terminalSubmissionController } of this.#activeRuns.values()) {
+        terminalSubmissionController.abort(forcedShutdownReason);
+        controller.abort(forcedShutdownReason);
       }
       await this.processHost.terminateAll("worker_shutdown").catch((error: unknown) => {
         this.logger.error("ProcessHost failed to terminate active processes.", { error });
       });
-      await waitForPromisesWithTimeout(
+      const settled = await waitForPromisesWithTimeout(
         [...this.#activeRuns.values()].map(({ promise }) => promise),
-        5_000,
+        forcedRunSettleTimeoutMilliseconds,
       );
+      if (!settled) {
+        this.logger.error(
+          "Active runs or deferred cleanup did not settle during forced shutdown.",
+          {
+            activeRunCount: this.#activeRuns.size,
+            timeoutMilliseconds: forcedRunSettleTimeoutMilliseconds,
+          },
+        );
+        shutdownError = new WorkerShutdownError(
+          `Worker shutdown failed because active runs or deferred cleanup did not settle within ${forcedRunSettleTimeoutMilliseconds} ms.`,
+        );
+      }
     }
 
-    await this.#heartbeat?.stop();
-    await this.processHost.close();
+    try {
+      await this.#heartbeat?.stop();
+    } finally {
+      await this.processHost.close();
+    }
+    if (shutdownError !== undefined) {
+      throw shutdownError;
+    }
     this.logger.info("Worker shutdown completed.");
   }
 
@@ -548,6 +701,11 @@ export class WorkerService {
     }
     return Math.max(0, this.config.maxSlots - this.#activeRuns.size);
   }
+}
+
+function nodeHealthFaultReason(error: Error): string {
+  const candidate = "code" in error && typeof error.code === "string" ? error.code : error.name;
+  return `node_health_fault:${/^[A-Z][A-Z0-9_]{0,63}$/u.test(candidate) ? candidate : "UNCLASSIFIED"}`;
 }
 
 function validateEnvelopeOwnership(
@@ -571,4 +729,23 @@ function calculateExecutionTimeout(
   const serverBudget = Math.max(0, remainingAbsoluteBudgetMilliseconds);
   const margin = Math.min(Math.max(0, safetyMarginMilliseconds), serverBudget);
   return Math.max(0, Math.min(envelope.executionPolicy.hardTimeoutMs, serverBudget) - margin);
+}
+
+function delayWithoutKeepingProcessAlive(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new Error("Operation aborted."));
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("Operation aborted."));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }

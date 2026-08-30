@@ -4,7 +4,7 @@ The Worker is a headless, outbound-only Windows service. It registers with the c
 
 The Worker never receives GitHub credentials and never opens the Server SQLite database.
 
-## Current skeleton
+## Current state
 
 Implemented boundaries:
 
@@ -20,11 +20,13 @@ Implemented boundaries:
 - Negotiated ProcessHost concurrency, bounded frames and output, replacement environments,
   timeout/cancellation race handling, and fail-closed control-channel behavior.
 - Native Go ProcessHost source with Windows Job Object process-tree supervision.
+- Disposable exact-revision workspaces, static Codex execution, strict structured results,
+  disk-budget enforcement, deferred cleanup, and immutable installation-manifest contracts.
 
 The default build still uses `PlaceholderJobExecutor` and advertises execution as disabled. This
-milestone rejects `WORKER_EXECUTION_ENABLED=true`; a later release must add disposable workspace
-preparation, wire and verify the Codex executor, and complete Windows runtime validation before
-removing that guard.
+milestone rejects `WORKER_EXECUTION_ENABLED=true`; the reviewed executor is intentionally dormant
+until the split Control/Executor services, ServiceHost, native NTFS/DACL adapters, installer, and
+Windows runtime preflight described by ADR 0007 are complete.
 
 ## Worker API
 

@@ -1,3 +1,7 @@
+import {
+  maximumRunCompletionRequestBytes,
+  maximumRunCompletionResultUtf8Bytes,
+} from "@agentic-review/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../../dist/config.js";
@@ -36,16 +40,18 @@ const leaseIdentity = {
   leaseGeneration: 1,
 };
 
-const createApp = (): {
+const createApp = (
+  terminalError = new DatabaseRequestError(
+    "The run attempt already has a different terminal submission.",
+    "TERMINAL_SUBMISSION_CONFLICT",
+  ),
+): {
   readonly app: FastifyInstance;
   readonly request: ReturnType<typeof vi.fn>;
 } => {
   const request = vi.fn(async (operation: string) => {
     if (operation === "completeLease" || operation === "failLease") {
-      throw new DatabaseRequestError(
-        "The run attempt already has a different terminal submission.",
-        "TERMINAL_SUBMISSION_CONFLICT",
-      );
+      throw terminalError;
     }
     throw new Error(`Unexpected database operation: ${operation}`);
   });
@@ -98,4 +104,108 @@ describe("Worker terminal routes", () => {
       }
     },
   );
+
+  it("returns 422 when authoritative review-result validation fails", async () => {
+    const { app, request } = createApp(
+      new DatabaseRequestError(
+        "The review result does not match PrReviewPlanV1Schema.",
+        "REVIEW_RESULT_INVALID",
+      ),
+    );
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: {
+          ...leaseIdentity,
+          resultDigest: "0".repeat(64),
+          result: { schemaVersion: "IssueTriageV1" },
+        },
+      });
+
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toEqual({
+        code: "review_result_invalid",
+        message: "The review result does not match PrReviewPlanV1Schema.",
+        retryable: false,
+      });
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects an oversized result within the bounded completion request", async () => {
+    const { app, request } = createApp();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: {
+          ...leaseIdentity,
+          resultDigest: "0".repeat(64),
+          result: { value: "x".repeat(maximumRunCompletionResultUtf8Bytes) },
+        },
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(response.json()).toEqual({
+        code: "review_result_too_large",
+        message: "The review result exceeds the permitted UTF-8 byte size.",
+        retryable: false,
+      });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects an oversized completion request before calling the database", async () => {
+    const { app, request } = createApp();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: {
+          ...leaseIdentity,
+          resultDigest: "0".repeat(64),
+          result: { summary: "x".repeat(maximumRunCompletionRequestBytes) },
+        },
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects deeply nested JSON when result-size serialization cannot complete", async () => {
+    const { app, request } = createApp();
+    const depth = 20_000;
+    const nestedResult = `${"[".repeat(depth)}null${"]".repeat(depth)}`;
+    const payload = `{
+      "jobId":"${leaseIdentity.jobId}",
+      "runAttemptId":"${leaseIdentity.runAttemptId}",
+      "workerNodeId":"${leaseIdentity.workerNodeId}",
+      "workerInstanceId":"${leaseIdentity.workerInstanceId}",
+      "leaseToken":"${leaseIdentity.leaseToken}",
+      "leaseGeneration":${leaseIdentity.leaseGeneration},
+      "resultDigest":"${"0".repeat(64)}",
+      "result":${nestedResult}
+    }`;
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        headers: { "content-type": "application/json" },
+        payload,
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
 });

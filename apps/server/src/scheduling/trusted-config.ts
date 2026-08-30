@@ -103,7 +103,7 @@ const promptSpecifications = [
     name: "issue-triage",
     version: "1",
     outputSchemaId: "IssueTriageV1",
-    outputSchemaSha256: "9746425cc67cf34b27dc267e13bace2cb241e6bbd3f28e6b005817f32cb4177f",
+    outputSchemaSha256: "60c37a09ddf4361bc063b1ca8479fa714ec6b12efe86418a2d6bb9896c29a554",
   },
   {
     key: "pullRequestReview",
@@ -111,7 +111,7 @@ const promptSpecifications = [
     name: "pull-request-review",
     version: "1",
     outputSchemaId: "PrReviewPlanV1",
-    outputSchemaSha256: "d549361518f49950e19869b6a486cf58cc8a75d49dc2b2e7366a850f9d59abeb",
+    outputSchemaSha256: "fd201092072879b125cdd8aa202b1309c8852f3d19b9f46dc279e318e78715be",
   },
 ] as const satisfies readonly PromptSpecification[];
 
@@ -375,8 +375,8 @@ function snapshotOutputSchema(
     );
   }
   const schemaJson = canonicalJson(schema);
-  const snapshot = JSON.parse(schemaJson) as Record<string, unknown>;
-  if (snapshot.$id !== expectedId || sha256(schemaJson) !== expectedSha256) {
+  const snapshot = JSON.parse(schemaJson) as unknown;
+  if (sha256(schemaJson) !== expectedSha256) {
     throw new TrustedSchedulingConfigError(
       `outputSchemas.${name} must be the authoritative ${expectedId} TypeBox schema.`,
     );
