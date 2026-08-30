@@ -4,18 +4,26 @@
 Control and Executor services. It is a small Go adapter. Scheduling, leases, repository policy,
 prompt construction, result validation, and publication remain in TypeScript.
 
-This directory currently contains only the first fail-closed foundation:
+This directory contains the fail-closed foundation and reviewed, unconnected Windows building
+blocks:
 
 - a strict canonical JSON configuration contract;
 - the structural 48-byte ARWX frame boundary;
 - a byte-bounded bidirectional relay core;
-- platform interfaces and explicit unsupported-platform implementations; and
+- a first-instance, remote-rejecting message-mode Named Pipe endpoint;
+- persisted CNG P-256 signing with non-exportability and signing-only policy checks;
+- handle-bound NTFS object, volume, and protected-DACL evidence;
+- a fixed-origin TLS 1.3 Worker API client that accepts a non-exportable signer;
+- suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
+  pre-resume process and primary-token DACLs, and stable WinSW wrapper observation;
+- platform interfaces and an explicit unavailable production platform factory; and
 - pure Go tests for those contracts.
 
-The Windows identity, process and token DACL, Job Object, Named Pipe, CNG, pinned-file, and Node
-launch adapters are not implemented yet. Both the Windows and non-Windows platform factories return
-an error. This binary therefore cannot launch a Worker payload and must not be used to enable
-production execution.
+Secure configuration loading, complete ancestor validation, caller-token and service-SID
+verification, peer lineage/image/Authenticode verification, certificate-store composition,
+role-local RPC, and final platform orchestration are not implemented yet. Both the Windows and
+non-Windows production platform factories therefore return an error. This binary cannot launch a
+Worker payload and must not be used to enable production execution.
 
 ## Command line
 
@@ -53,9 +61,10 @@ bind `PATH` to manifest or trusted system directories, bind profile and temporar
 selected role's protected data root, and verify every directory by handle, volume identity, and
 DACL before launching Node.
 
-The Windows build currently rejects every configuration before opening it because the native
-handle-bound NTFS, file-ID, reparse-point, hard-link, owner, and DACL reader is not implemented.
-The ordinary `os.Open` reader exists only for non-Windows contract tests.
+The Windows build currently rejects every configuration before opening it because the handle-bound
+reader has not yet been composed with complete ancestor traversal, expected ACL policy, manifest
+verification, and the production platform factory. The ordinary `os.Open` reader exists only for
+non-Windows contract tests.
 
 ## Framing and relay
 
