@@ -72,9 +72,22 @@ boundaries are not yet complete.
 - A strict Control-Executor local protocol package with bounded ARWX framing, canonical JSON,
   lease-token-free Executor envelopes, P-256 low-S capabilities, exact renewal chains, boot-lifetime
   replay tombstones, streamed artifacts, terminal disposition, and attempt-level resource limits.
+- A Control-side local execution boundary that projects Server envelopes into deeply frozen,
+  lease-token-free Executor envelopes; snapshots the lease authority basis; binds artifact streams
+  to the complete session and attempt context; and maps identity-checked Server terminal responses
+  to local terminal dispositions.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
   shutdown, and explicit unavailable Windows/non-Windows platform adapters.
+- Reviewed but not yet platform-wired Windows ServiceHost building blocks for first-instance,
+  remote-rejecting message-mode Named Pipes; persisted non-exportable CNG P-256 signing; handle-bound
+  NTFS file and directory evidence; fixed-origin TLS 1.3 Worker API transport using a caller-supplied
+  signer; stable WinSW wrapper observation; and suspended Node launch into a non-breakaway root Job.
+- Pre-resume Node process and primary-token protected DACL application with exact readback, plus
+  root-Job drain semantics that retain the lifetime handle whenever zero active processes cannot be
+  confirmed.
+- A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
+  before a lease is committed; oversized stored jobs are dead-lettered without creating an attempt.
 
 ## Deliberately Disabled
 
@@ -85,24 +98,27 @@ boundaries are not yet complete.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1 read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
-- The native ProcessHost and fail-closed ServiceHost foundation sources are present, but signed
-  release binaries and Windows runtime verification are not part of this milestone. ServiceHost
-  does not yet create a Named Pipe, launch Node, create the root Job Object, use CNG, or open its
-  protected configuration on Windows.
+- The native ProcessHost and ServiceHost sources are present, but signed release binaries and
+  native Windows runtime verification are not part of this milestone. The new ServiceHost Windows
+  primitives remain unreachable from the production platform factory. Secure configuration and
+  complete ancestor validation, service-token verification, peer lineage/image/signature checks,
+  certificate-store integration, role-local RPC, and the final orchestration layer are not yet
+  implemented.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
 
 ## Next Milestone
 
-The next vertical slice should implement the Windows ServiceHost and filesystem-security adapters,
-split the Windows Worker into Control and Executor services, and connect the reviewed static
-executor in shadow mode. ServiceHost must provide the narrow CNG capability signer and fixed-origin
-mTLS transport because Node's standard TLS APIs cannot use a non-exportable CNG key directly. The
-slice must pass native Windows token, ACL, Named Pipe, sandbox, Job Object, disk, cancellation, and
-tamper tests before claims are enabled. Bounded artifact upload should follow, then publication
-drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write actions. Dynamic
-validation remains a separate stronger-isolation milestone.
+The next vertical slice should wire the reviewed ServiceHost primitives behind the Windows platform
+factory, add the secure configuration and peer-verification adapters, build separate Control and
+Executor TypeScript bundles, and connect the static executor in zero-slot shadow mode. The Control
+bundle must exclusively own Server lease tokens and fixed-origin mTLS; the Executor bundle must
+exclusively own Codex, Git, workspaces, and execution credentials. The slice must pass native
+Windows token, ACL, Named Pipe, sandbox, Job Object, disk, cancellation, and tamper tests before
+claims are enabled. Bounded artifact upload and immutable diff manifests should follow, then
+publication drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write
+actions. Dynamic validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
@@ -124,7 +140,7 @@ pnpm lint
 
 Combined TypeScript test results:
 
-- 698 tests passed: 199 Server tests, 336 Worker tests, 86 Codex package tests, 56 local-protocol
+- 741 tests passed: 201 Server tests, 375 Worker tests, 86 Codex package tests, 58 local-protocol
   tests, and 21 domain tests.
 - Database integration coverage includes atomic multi-worker claims, lease fencing, lease expiry,
   superseded worker instances, heartbeats, idempotent terminal replay, migration backups,
@@ -138,7 +154,7 @@ Combined TypeScript test results:
   development bypass.
 - The Dashboard, Server, shared packages, and bundled Worker all built successfully. The Windows
   Worker artifact is `apps/worker/dist/worker.mjs` and includes its non-native runtime dependencies.
-- The combined candidate used Node.js 24.20.0 and pnpm 11.24.0 on `test-env`; Biome checked 178
+- The combined candidate used Node.js 24.20.0 and pnpm 11.24.0 on `test-env`; Biome checked 184
   files without applying changes.
 
 The native ProcessHost completed the following checks with Go 1.26.7 on `test-env`:
@@ -161,6 +177,14 @@ go test -count=1 -race ./...
 go vet ./...
 GOOS=windows GOARCH=amd64 go build -trimpath
 GOOS=windows GOARCH=arm64 go build -trimpath
+GOOS=windows GOARCH=amd64 go test -c ./internal/cng
+GOOS=windows GOARCH=arm64 go test -c ./internal/cng
+GOOS=windows GOARCH=amd64 go test -c ./internal/winfile
+GOOS=windows GOARCH=arm64 go test -c ./internal/winfile
+GOOS=windows GOARCH=amd64 go test -c ./internal/winpipe
+GOOS=windows GOARCH=arm64 go test -c ./internal/winpipe
+GOOS=windows GOARCH=amd64 go test -c ./internal/winprocess
+GOOS=windows GOARCH=arm64 go test -c ./internal/winprocess
 ```
 
 Runtime smoke results:
@@ -184,10 +208,11 @@ Not yet verified:
   machine.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
-  exercised on a Windows test machine. The ServiceHost contract, framing, and relay foundation
-  cross-compile, but its Windows configuration reader, process/token security, root Job, Named Pipe,
-  CNG signer, and fixed-origin mTLS transport are not yet implemented. The real Codex executor
-  therefore remains disconnected from the production entrypoint.
+  exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
+  x64 and arm64, but their Named Pipe, CNG, filesystem, process/token DACL, root Job, wrapper-watch,
+  and fixed-origin mTLS behavior has not been exercised on a native Windows test machine. The
+  secure configuration reader, peer verifier, role-local RPC, and production platform composition
+  are still missing, so the real Codex executor remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has
