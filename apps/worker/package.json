@@ -7,14 +7,18 @@
     "node": ">=24.20.0 <25"
   },
   "scripts": {
+    "prebuild": "pnpm --filter @agentic-review/local-protocol build",
     "build": "tsc -b && esbuild dist/main.js --bundle --platform=node --format=esm --target=node24 --outfile=dist/worker.mjs --sourcemap",
     "start": "node --enable-source-maps dist/worker.mjs",
+    "pretest": "pnpm --filter @agentic-review/local-protocol build",
     "test": "vitest run src",
+    "pretypecheck": "pnpm --filter @agentic-review/local-protocol build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentic-review/codex": "workspace:*",
     "@agentic-review/contracts": "workspace:*",
+    "@agentic-review/local-protocol": "workspace:*",
     "@sinclair/typebox": "0.34.52"
   },
   "devDependencies": {

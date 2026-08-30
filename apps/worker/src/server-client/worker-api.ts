@@ -3,6 +3,7 @@ import type {
   ClaimLeaseResponse,
   RunCompletionSubmission,
   RunFailureSubmission,
+  RunTerminalResponse,
   WorkerHeartbeatRequest,
   WorkerHeartbeatResponse,
   WorkerRegistrationRequest,
@@ -26,10 +27,10 @@ export interface WorkerApi {
     runAttemptId: string,
     submission: RunCompletionSubmission,
     signal?: AbortSignal,
-  ): Promise<void>;
+  ): Promise<RunTerminalResponse>;
   failRun(
     runAttemptId: string,
     submission: RunFailureSubmission,
     signal?: AbortSignal,
-  ): Promise<void>;
+  ): Promise<RunTerminalResponse>;
 }

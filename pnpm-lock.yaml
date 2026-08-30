@@ -118,6 +118,9 @@ importers:
       '@agentic-review/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agentic-review/local-protocol':
+        specifier: workspace:*
+        version: link:../../packages/local-protocol
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52

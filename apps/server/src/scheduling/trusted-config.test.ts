@@ -203,6 +203,47 @@ describe("loadTrustedSchedulingConfig", () => {
       }),
     ).rejects.toThrow(/policy is invalid/u);
   });
+
+  it("rejects policies that cannot cross the Control-Executor boundary", async () => {
+    const fixture = await createPromptFixture();
+    const mutations: Array<(policy: TrustedSchedulingPolicy) => void> = [
+      (policy) => {
+        policy.issueTriage.priority = 1_000_001;
+      },
+      (policy) => {
+        policy.issueTriage.executionPolicy.hardTimeoutMs = 999;
+      },
+      (policy) => {
+        policy.issueTriage.executionPolicy.hardTimeoutMs = 86_400_001;
+      },
+      (policy) => {
+        policy.issueTriage.executionPolicy.noProgressTimeoutMs = 300_001;
+      },
+      (policy) => {
+        policy.issueTriage.executionPolicy.maxCodexTurns = 129;
+      },
+      (policy) => {
+        policy.pullRequestReview.executionPolicy.allowedRecipeIds = ["invalid recipe id"];
+      },
+      (policy) => {
+        policy.issueTriage.executionPolicy.requiredCapabilityLabels = {
+          "invalid label": "value",
+        };
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const policy = createPolicy();
+      mutate(policy);
+      await expect(
+        loadTrustedSchedulingConfig({
+          promptDirectory: fixture.promptDirectory,
+          policy,
+          outputSchemas: schemas,
+        }),
+      ).rejects.toThrow(/policy is invalid|must not exceed/u);
+    }
+  });
 });
 
 const schemas = {

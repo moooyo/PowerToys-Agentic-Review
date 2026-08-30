@@ -4,6 +4,7 @@ import type {
   JobExecutionEnvelope,
   RunCompletionSubmission,
   RunFailureSubmission,
+  RunTerminalResponse,
   WorkerRegistrationResponse,
   WorkerState,
 } from "@agentic-review/contracts";
@@ -12,6 +13,7 @@ import type { JobExecutor } from "./execution/job-executor.js";
 import type { ProcessHostClient } from "./execution/process-host-protocol.js";
 import { ExecutionTimeoutError, LeaseLostError } from "./leases/errors.js";
 import { HeartbeatCoordinator } from "./leases/heartbeat-coordinator.js";
+import { mapRunTerminalResponseOutcome } from "./local/local-execution-run.js";
 import type { Logger } from "./logging/logger.js";
 import { digestCapabilities } from "./server-client/capabilities.js";
 import {
@@ -449,18 +451,19 @@ export class WorkerService {
           resultDigest: result.resultDigest,
           result: result.result,
         };
-        const submitted = await this.#submitTerminalWithRetry(
+        const terminalResponse = await this.#submitTerminalWithRetry(
           "completion",
           (signal) => this.api.completeRun(envelope.lease.runAttemptId, submission, signal),
           () => lease.isAuthoritative(),
+          envelope.lease.jobId,
           envelope.lease.runAttemptId,
           terminalSubmissionController.signal,
         );
         const cancellationReason = lease.cancellationReason();
-        if (!submitted && cancellationReason !== undefined) {
+        if (terminalResponse === undefined && cancellationReason !== undefined) {
           throw cancellationReason;
         }
-        if (!submitted && controller.signal.aborted) {
+        if (terminalResponse === undefined && controller.signal.aborted) {
           throw controller.signal.reason ?? new Error("Run execution was aborted.");
         }
       } else {
@@ -470,14 +473,15 @@ export class WorkerService {
           result.message,
           result.retryable,
         );
-        const submitted = await this.#submitTerminalWithRetry(
+        const terminalResponse = await this.#submitTerminalWithRetry(
           "failure",
           (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),
           () => lease.isAuthoritative(),
+          envelope.lease.jobId,
           envelope.lease.runAttemptId,
           terminalSubmissionController.signal,
         );
-        if (!submitted && controller.signal.aborted) {
+        if (terminalResponse === undefined && controller.signal.aborted) {
           throw controller.signal.reason ?? new Error("Run execution was aborted.");
         }
       }
@@ -515,6 +519,7 @@ export class WorkerService {
         "termination",
         (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),
         () => lease.canRetryTerminalSubmission(),
+        envelope.lease.jobId,
         envelope.lease.runAttemptId,
         terminalSubmissionController.signal,
       );
@@ -574,16 +579,36 @@ export class WorkerService {
 
   async #submitTerminalWithRetry(
     operation: string,
-    submit: (signal: AbortSignal) => Promise<void>,
+    submit: (signal: AbortSignal) => Promise<RunTerminalResponse>,
     canRetry: () => boolean,
+    jobId: string,
     runAttemptId: string,
     signal: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<RunTerminalResponse | undefined> {
     let retryDelayMilliseconds = 250;
     while (!signal.aborted && canRetry()) {
       try {
-        await submit(signal);
-        return true;
+        const response = await submit(signal);
+        if (response.jobId !== jobId || response.runAttemptId !== runAttemptId) {
+          throw new ProtocolError("Terminal response belongs to another job or run attempt.");
+        }
+        let localDispositionOutcome: ReturnType<typeof mapRunTerminalResponseOutcome>;
+        try {
+          localDispositionOutcome = mapRunTerminalResponseOutcome(response);
+        } catch (error) {
+          throw new ProtocolError("Server returned inconsistent terminal job and run states.", {
+            cause: error,
+          });
+        }
+        this.logger.debug("Server terminal decision received.", {
+          operation,
+          jobId,
+          runAttemptId,
+          jobState: response.jobState,
+          runState: response.runState,
+          localDispositionOutcome,
+        });
+        return response;
       } catch (error) {
         if (signal.aborted) {
           this.logger.warn("Terminal run submission stopped during forced Worker shutdown.", {
@@ -591,7 +616,7 @@ export class WorkerService {
             runAttemptId,
             error: signal.reason ?? error,
           });
-          return false;
+          return undefined;
         }
         const retryable =
           !(error instanceof ProtocolError) &&
@@ -603,7 +628,7 @@ export class WorkerService {
             retryable,
             error,
           });
-          return false;
+          return undefined;
         }
 
         this.logger.warn("Terminal run submission failed; retrying.", {
@@ -620,7 +645,7 @@ export class WorkerService {
             runAttemptId,
             error: signal.reason ?? delayError,
           });
-          return false;
+          return undefined;
         }
         retryDelayMilliseconds = Math.min(2_000, retryDelayMilliseconds * 2);
       }
@@ -631,13 +656,13 @@ export class WorkerService {
         runAttemptId,
         error: signal.reason,
       });
-      return false;
+      return undefined;
     }
     this.logger.warn("Terminal run submission stopped after lease authority expired.", {
       operation,
       runAttemptId,
     });
-    return false;
+    return undefined;
   }
 
   async #drainAndStop(reason: string): Promise<void> {

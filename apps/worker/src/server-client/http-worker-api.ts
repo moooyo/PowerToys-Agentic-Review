@@ -5,8 +5,11 @@ import {
   type ClaimLeaseRequest,
   type ClaimLeaseResponse,
   ClaimLeaseResponseSchema,
+  maximumClaimLeaseResponseUtf8Bytes,
   type RunCompletionSubmission,
   type RunFailureSubmission,
+  type RunTerminalResponse,
+  RunTerminalResponseSchema,
   type WorkerHeartbeatRequest,
   type WorkerHeartbeatResponse,
   WorkerHeartbeatResponseSchema,
@@ -21,7 +24,9 @@ import type { Logger } from "../logging/logger.js";
 import { ProtocolError, WorkerApiError } from "./errors.js";
 import type { WorkerApi } from "./worker-api.js";
 
-const maximumResponseBytes = 2 * 1024 * 1024;
+// A claim can contain both a bounded 1 MiB GitHub snapshot and a rendered prompt whose JSON
+// representation contains escaped untrusted data. Keep this aligned with ServiceHost transport.
+const maximumResponseBytes = maximumClaimLeaseResponseUtf8Bytes;
 
 type RequestFactory = (
   url: URL,
@@ -109,26 +114,30 @@ export class HttpWorkerApi implements WorkerApi {
     runAttemptId: string,
     submission: RunCompletionSubmission,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.#requestJson(
+  ): Promise<RunTerminalResponse> {
+    assertTerminalRouteIdentity(runAttemptId, submission.runAttemptId);
+    const response = await this.#requestJson(
       "POST",
       `/api/v1/worker/runs/${encodeURIComponent(runAttemptId)}/complete`,
       submission,
       signal,
     );
+    return parseRunTerminalResponse(response, submission.jobId, runAttemptId);
   }
 
   public async failRun(
     runAttemptId: string,
     submission: RunFailureSubmission,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.#requestJson(
+  ): Promise<RunTerminalResponse> {
+    assertTerminalRouteIdentity(runAttemptId, submission.runAttemptId);
+    const response = await this.#requestJson(
       "POST",
       `/api/v1/worker/runs/${encodeURIComponent(runAttemptId)}/fail`,
       submission,
       signal,
     );
+    return parseRunTerminalResponse(response, submission.jobId, runAttemptId);
   }
 
   async #requestJson(
@@ -163,35 +172,90 @@ export class HttpWorkerApi implements WorkerApi {
     };
 
     return await new Promise<unknown>((resolve, reject) => {
-      let request: ClientRequest;
+      let request: ClientRequest | undefined;
+      let absoluteTimeout: NodeJS.Timeout | undefined;
+      let onAbort: (() => void) | undefined;
+      let settled = false;
+      const cleanup = (): void => {
+        if (absoluteTimeout !== undefined) {
+          clearTimeout(absoluteTimeout);
+        }
+        if (onAbort !== undefined) {
+          signal?.removeEventListener("abort", onAbort);
+        }
+      };
+      const resolveOnce = (value: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const rejectOnce = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const destroyRequest = (error: Error): void => {
+        rejectOnce(error);
+        request?.destroy();
+      };
+      onAbort = (): void => {
+        destroyRequest(abortError(signal));
+      };
       const handleResponse = (response: IncomingMessage): void => {
         const chunks: Buffer[] = [];
         let receivedBytes = 0;
+        let ended = false;
+        const rejectPrematureResponse = (event: string, cause?: Error): void => {
+          rejectOnce(
+            new WorkerApiError(
+              `Worker API response ${event} before completion.`,
+              undefined,
+              undefined,
+              cause === undefined ? undefined : { cause },
+            ),
+          );
+          response.destroy();
+          request?.destroy();
+        };
         response.on("data", (chunk: Buffer | string) => {
+          if (settled) return;
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           receivedBytes += buffer.byteLength;
           if (receivedBytes > maximumResponseBytes) {
-            request.destroy(
+            rejectOnce(
               new ProtocolError(`Worker API response exceeded ${maximumResponseBytes} bytes.`),
             );
+            response.destroy();
+            request?.destroy();
             return;
           }
           chunks.push(buffer);
         });
+        response.once("aborted", () => rejectPrematureResponse("was aborted"));
+        response.once("error", (error: Error) => rejectPrematureResponse("failed", error));
+        response.once("close", () => {
+          if (!ended && !settled) {
+            rejectPrematureResponse("closed");
+          }
+        });
         response.once("end", () => {
+          ended = true;
+          if (settled) return;
           const text = Buffer.concat(chunks).toString("utf8");
           const statusCode = response.statusCode ?? 0;
           let payload: unknown;
           try {
             payload = text === "" ? undefined : JSON.parse(text);
           } catch (error) {
-            reject(new ProtocolError("Worker API returned invalid JSON.", { cause: error }));
+            rejectOnce(new ProtocolError("Worker API returned invalid JSON.", { cause: error }));
             return;
           }
 
           if (statusCode < 200 || statusCode >= 300) {
             const details = readApiError(payload);
-            reject(
+            rejectOnce(
               new WorkerApiError(
                 details.message ?? `Worker API returned HTTP ${statusCode}.`,
                 statusCode,
@@ -200,20 +264,25 @@ export class HttpWorkerApi implements WorkerApi {
             );
             return;
           }
-          resolve(payload);
+          resolveOnce(payload);
         });
       };
-      request =
-        url.protocol === "https:"
-          ? this.#httpsRequest(url, options, handleResponse)
-          : this.#httpRequest(url, options, handleResponse);
-
-      const onAbort = (): void => {
-        request.destroy(abortError(signal));
-      };
+      try {
+        request =
+          url.protocol === "https:"
+            ? this.#httpsRequest(url, options, handleResponse)
+            : this.#httpRequest(url, options, handleResponse);
+      } catch (error) {
+        rejectOnce(error);
+        return;
+      }
+      if (settled) {
+        request.destroy();
+        return;
+      }
       signal?.addEventListener("abort", onAbort, { once: true });
-      const absoluteTimeout = setTimeout(() => {
-        request.destroy(
+      absoluteTimeout = setTimeout(() => {
+        destroyRequest(
           new WorkerApiError(
             `Worker API request exceeded its absolute ${timeoutMilliseconds} ms deadline.`,
             408,
@@ -222,14 +291,15 @@ export class HttpWorkerApi implements WorkerApi {
       }, timeoutMilliseconds);
       absoluteTimeout.unref();
       request.setTimeout(timeoutMilliseconds, () => {
-        request.destroy(
+        destroyRequest(
           new WorkerApiError(`Worker API request timed out after ${timeoutMilliseconds} ms.`, 408),
         );
       });
-      request.once("error", (error) => reject(error));
+      request.once("error", (error) => rejectOnce(error));
       request.once("close", () => {
-        clearTimeout(absoluteTimeout);
-        signal?.removeEventListener("abort", onAbort);
+        if (!settled) {
+          rejectOnce(new WorkerApiError("Worker API request closed before receiving a response."));
+        }
       });
       request.write(serializedBody);
       request.end();
@@ -256,6 +326,26 @@ function parseClaimResponse(value: unknown): ClaimLeaseResponse {
 function parseHeartbeatResponse(value: unknown): WorkerHeartbeatResponse {
   if (!Value.Check(WorkerHeartbeatResponseSchema, value)) {
     throw new ProtocolError("Worker API returned an invalid heartbeat response.");
+  }
+  return value;
+}
+
+function assertTerminalRouteIdentity(routeRunAttemptId: string, bodyRunAttemptId: string): void {
+  if (routeRunAttemptId !== bodyRunAttemptId) {
+    throw new ProtocolError("Terminal route and body attempt identities do not match.");
+  }
+}
+
+function parseRunTerminalResponse(
+  value: unknown,
+  expectedJobId: string,
+  expectedRunAttemptId: string,
+): RunTerminalResponse {
+  if (!Value.Check(RunTerminalResponseSchema, value)) {
+    throw new ProtocolError("Worker API returned an invalid terminal response.");
+  }
+  if (value.jobId !== expectedJobId || value.runAttemptId !== expectedRunAttemptId) {
+    throw new ProtocolError("Worker API returned a terminal response for another run.");
   }
   return value;
 }

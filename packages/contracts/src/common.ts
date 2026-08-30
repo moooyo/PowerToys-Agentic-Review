@@ -34,8 +34,14 @@ export const GitHubRepositoryNameSchema = Type.String({
 });
 export type GitHubRepositoryName = Static<typeof GitHubRepositoryNameSchema>;
 
-export const NonNegativeIntegerSchema = Type.Integer({ minimum: 0 });
-export const PositiveIntegerSchema = Type.Integer({ minimum: 1 });
+export const NonNegativeIntegerSchema = Type.Integer({
+  minimum: 0,
+  maximum: Number.MAX_SAFE_INTEGER,
+});
+export const PositiveIntegerSchema = Type.Integer({
+  minimum: 1,
+  maximum: Number.MAX_SAFE_INTEGER,
+});
 
 export const GitHubNumericIdSchema = Type.Integer({
   minimum: 1,

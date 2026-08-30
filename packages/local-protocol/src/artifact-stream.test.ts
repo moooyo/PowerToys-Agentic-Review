@@ -5,6 +5,7 @@ import { ArtifactStreamProtocolError, ArtifactStreamVerifier } from "./artifact-
 import { encodeArtifactChunkData } from "./messages.js";
 
 const runAttemptId = "30000000-0000-4000-8000-000000000003";
+const attemptCorrelationId = "40000000-0000-4000-8000-000000000004";
 const session = {
   protocolMajor: 1 as const,
   protocolMinor: 0 as const,
@@ -12,7 +13,7 @@ const session = {
   workerInstanceId: "10000000-0000-4000-8000-000000000001",
   executorBootId: "20000000-0000-4000-8000-000000000002",
   sessionId: "50000000-0000-4000-8000-000000000005",
-  attemptCorrelationId: runAttemptId,
+  attemptCorrelationId,
   runAttemptId,
 };
 const artifactId = "60000000-0000-4000-8000-000000000006";
@@ -49,8 +50,7 @@ describe("ArtifactStreamVerifier", () => {
     const second = Buffer.from('"ok"}', "utf8");
     const content = Buffer.concat([first, second]);
     const verifier = new ArtifactStreamVerifier({
-      runAttemptId,
-      attemptCorrelationId: runAttemptId,
+      ...session,
       maximumArtifactBytes: 2n * 1024n * 1024n,
     });
 
@@ -80,8 +80,7 @@ describe("ArtifactStreamVerifier", () => {
   it("rejects duplicates, out-of-order chunks, overflow, and bad terminal metadata", () => {
     const content = Buffer.from("content", "utf8");
     const verifier = new ArtifactStreamVerifier({
-      runAttemptId,
-      attemptCorrelationId: runAttemptId,
+      ...session,
       maximumArtifactBytes: 64n,
     });
     verifier.start(startMessage(content));
@@ -101,12 +100,20 @@ describe("ArtifactStreamVerifier", () => {
         sha256: "f".repeat(64),
       }),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_DIGEST_MISMATCH" }));
+    expect(
+      verifier.end({
+        ...session,
+        artifactId,
+        chunkCount: 1,
+        totalBytes: content.byteLength.toString(),
+        sha256: sha256(content),
+      }),
+    ).toMatchObject({ artifactId, sha256: sha256(content) });
   });
 
   it("fails closed at count, concurrency, signed byte, and incomplete-stream limits", () => {
     const verifier = new ArtifactStreamVerifier({
-      runAttemptId,
-      attemptCorrelationId: runAttemptId,
+      ...session,
       maximumArtifactBytes: 4n,
       maximumArtifactCount: 1,
       maximumConcurrentArtifacts: 1,
@@ -122,8 +129,7 @@ describe("ArtifactStreamVerifier", () => {
 
   it("enforces the signed byte ceiling across every artifact in the attempt", () => {
     const verifier = new ArtifactStreamVerifier({
-      runAttemptId,
-      attemptCorrelationId: runAttemptId,
+      ...session,
       maximumArtifactBytes: 8n,
       maximumConcurrentArtifacts: 2,
     });
@@ -136,5 +142,41 @@ describe("ArtifactStreamVerifier", () => {
     expect(() =>
       verifier.start(startMessage(Buffer.from("56789"), "80000000-0000-4000-8000-000000000008")),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_LIMIT_EXCEEDED" }));
+  });
+
+  it("snapshots the full session and attempt context at construction", () => {
+    const options = {
+      ...session,
+      maximumArtifactBytes: 64n,
+    };
+    const verifier = new ArtifactStreamVerifier(options);
+    const content = Buffer.from("content", "utf8");
+    verifier.start(startMessage(content));
+
+    options.workerNodeId = "mutated-node";
+    options.sessionId = "90000000-0000-4000-8000-000000000009";
+    options.attemptCorrelationId = "a0000000-0000-4000-8000-00000000000a";
+    options.runAttemptId = "mutated-attempt";
+
+    expect(verifier.acceptChunk(chunkMessage(content, 0, 0))).toEqual(content);
+    expect(() =>
+      verifier.end({
+        ...session,
+        workerNodeId: "other-node",
+        artifactId,
+        chunkCount: 1,
+        totalBytes: content.byteLength.toString(),
+        sha256: sha256(content),
+      }),
+    ).toThrowError(expect.objectContaining({ code: "ARTIFACT_CONTEXT_MISMATCH" }));
+    expect(
+      verifier.end({
+        ...session,
+        artifactId,
+        chunkCount: 1,
+        totalBytes: content.byteLength.toString(),
+        sha256: sha256(content),
+      }),
+    ).toMatchObject({ artifactId });
   });
 });

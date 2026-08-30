@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import type { RequestOptions } from "node:https";
 import type { SecureContext, SecureContextOptions } from "node:tls";
-import type { WorkerRegistrationRequest } from "@agentic-review/contracts";
+import type { RunCompletionSubmission, WorkerRegistrationRequest } from "@agentic-review/contracts";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
@@ -89,12 +89,119 @@ describe("HttpWorkerApi TLS preflight", () => {
     expect(httpsRequest).not.toHaveBeenCalled();
     expect(logs).toEqual([]);
   });
+
+  it("accepts a bounded claim envelope larger than the completion-result limit", async () => {
+    const secureContext = {} as SecureContext;
+    const config = createHttpsConfig();
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => secureContext,
+      httpsRequest: (
+        _url: URL,
+        _options: RequestOptions,
+        callback: (response: IncomingMessage) => void,
+      ) => new StubClientRequest(callback, largeClaimResponse(config)) as unknown as ClientRequest,
+    });
+
+    const response = await api.claimLease({
+      protocolVersion: "1.0",
+      workerNodeId: config.workerNodeId,
+      workerInstanceId: "worker-instance",
+      availableSlots: 1,
+      waitSeconds: 0,
+      capabilitiesDigest: "f".repeat(64),
+    });
+
+    expect(response.outcome).toBe("granted");
+    if (response.outcome === "granted") {
+      expect(JSON.stringify(response).length).toBeGreaterThan(2 * 1024 * 1024);
+    }
+  });
+
+  it.each(["aborted", "error", "closed"] as const)(
+    "rejects when a response is %s before end",
+    async (responseOutcome) => {
+      const secureContext = {} as SecureContext;
+      const config = createHttpsConfig();
+      const api = new HttpWorkerApi(config, silentLogger(), {
+        createSecureContext: () => secureContext,
+        httpsRequest: (
+          _url: URL,
+          _options: RequestOptions,
+          callback: (response: IncomingMessage) => void,
+        ) =>
+          new StubClientRequest(
+            callback,
+            registrationResponse(),
+            responseOutcome,
+          ) as unknown as ClientRequest,
+      });
+
+      await expect(api.register(registrationRequest(config))).rejects.toThrow(
+        /response (?:was aborted|failed|closed) before completion/u,
+      );
+    },
+  );
+
+  it("returns an identity-bound terminal response", async () => {
+    const secureContext = {} as SecureContext;
+    const config = createHttpsConfig();
+    const submission = completionSubmission(config);
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => secureContext,
+      httpsRequest: (
+        _url: URL,
+        _options: RequestOptions,
+        callback: (response: IncomingMessage) => void,
+      ) =>
+        new StubClientRequest(callback, {
+          jobId: submission.jobId,
+          runAttemptId: submission.runAttemptId,
+          jobState: "succeeded",
+          runState: "succeeded",
+        }) as unknown as ClientRequest,
+    });
+
+    await expect(api.completeRun(submission.runAttemptId, submission)).resolves.toEqual({
+      jobId: submission.jobId,
+      runAttemptId: submission.runAttemptId,
+      jobState: "succeeded",
+      runState: "succeeded",
+    });
+    await expect(api.completeRun("another-run", submission)).rejects.toThrow(
+      /route and body attempt identities/u,
+    );
+  });
+
+  it("rejects a terminal response for another run", async () => {
+    const secureContext = {} as SecureContext;
+    const config = createHttpsConfig();
+    const submission = completionSubmission(config);
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => secureContext,
+      httpsRequest: (
+        _url: URL,
+        _options: RequestOptions,
+        callback: (response: IncomingMessage) => void,
+      ) =>
+        new StubClientRequest(callback, {
+          jobId: submission.jobId,
+          runAttemptId: "another-run",
+          jobState: "succeeded",
+          runState: "succeeded",
+        }) as unknown as ClientRequest,
+    });
+
+    await expect(api.completeRun(submission.runAttemptId, submission)).rejects.toThrow(
+      /terminal response for another run/u,
+    );
+  });
 });
 
 class StubClientRequest extends EventEmitter {
   public constructor(
     private readonly callback: (response: IncomingMessage) => void,
     private readonly responseBody: unknown,
+    private readonly responseOutcome: "complete" | "aborted" | "error" | "closed" = "complete",
   ) {
     super();
   }
@@ -117,10 +224,19 @@ class StubClientRequest extends EventEmitter {
 
   public end(): this {
     const response = Object.assign(new EventEmitter(), { statusCode: 200 }) as IncomingMessage;
+    response.destroy = () => response;
     this.callback(response);
     queueMicrotask(() => {
       response.emit("data", Buffer.from(JSON.stringify(this.responseBody), "utf8"));
-      response.emit("end");
+      if (this.responseOutcome === "complete") {
+        response.emit("end");
+      } else if (this.responseOutcome === "aborted") {
+        response.emit("aborted");
+      } else if (this.responseOutcome === "error") {
+        response.emit("error", new Error("response reset"));
+      } else {
+        response.emit("close");
+      }
       this.emit("close");
     });
     return this;
@@ -177,6 +293,19 @@ function registrationRequest(config: WorkerConfig): WorkerRegistrationRequest {
   };
 }
 
+function completionSubmission(config: WorkerConfig): RunCompletionSubmission {
+  return {
+    jobId: "job-terminal",
+    runAttemptId: "run-terminal",
+    workerNodeId: config.workerNodeId,
+    workerInstanceId: "worker-instance",
+    leaseToken: "t".repeat(32),
+    leaseGeneration: 1,
+    resultDigest: "a".repeat(64),
+    result: { summary: "ok" },
+  };
+}
+
 function registrationResponse() {
   return {
     protocolVersion: "1.0" as const,
@@ -185,6 +314,65 @@ function registrationResponse() {
     heartbeatIntervalMs: 5_000,
     leaseTtlMs: 30_000,
     serverTime,
+  };
+}
+
+function largeClaimResponse(config: WorkerConfig) {
+  const jobId = "job-large-envelope";
+  const runAttemptId = "run-large-envelope";
+  return {
+    outcome: "granted" as const,
+    serverTime,
+    envelope: {
+      protocolVersion: "1.0" as const,
+      envelopeVersion: 1 as const,
+      assignedAt: serverTime,
+      leaseExpiresAt: "2026-08-31T00:01:00.000Z",
+      executionDeadlineAt: "2026-08-31T00:05:00.000Z",
+      lease: {
+        jobId,
+        runAttemptId,
+        workerNodeId: config.workerNodeId,
+        workerInstanceId: "worker-instance",
+        leaseToken: "t".repeat(32),
+        leaseGeneration: 1,
+      },
+      job: {
+        jobId,
+        kind: "issue_triage" as const,
+        priority: 1,
+        attempt: 1,
+        maxAttempts: 3,
+        generation: 1,
+        intentVersion: 1,
+        semanticKey: "large-envelope",
+      },
+      repository: { githubRepositoryId: 1, fullName: "microsoft/PowerToys" },
+      resource: {
+        kind: "issue" as const,
+        githubNodeId: "issue-node",
+        number: 1,
+        title: "Large issue",
+        author: { githubUserId: 1, login: "author", accountType: "user" as const },
+        canonicalSnapshot: { body: "x".repeat(2 * 1024 * 1024 + 64 * 1024) },
+        revisionDigest: "a".repeat(64),
+      },
+      prompt: {
+        name: "issue-triage",
+        version: "1",
+        renderedPrompt: "Review the issue.",
+        promptSha256: "b".repeat(64),
+        outputSchema: { additionalProperties: false, type: "object" },
+        outputSchemaSha256: "c".repeat(64),
+      },
+      executionPolicy: {
+        hardTimeoutMs: 300_000,
+        noProgressTimeoutMs: 60_000,
+        maxCodexTurns: 4,
+        allowedRecipeIds: [],
+        requiredCapabilityLabels: {},
+      },
+    },
   };
 }
 

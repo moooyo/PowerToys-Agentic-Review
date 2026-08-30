@@ -29,13 +29,25 @@ interface ActiveArtifact {
   nextChunkIndex: number;
 }
 
-export interface ArtifactStreamVerifierOptions {
-  readonly runAttemptId: string;
-  readonly attemptCorrelationId: string;
+export type ArtifactStreamContext = Readonly<
+  Pick<
+    ArtifactStartMessage,
+    | "protocolMajor"
+    | "protocolMinor"
+    | "workerNodeId"
+    | "workerInstanceId"
+    | "executorBootId"
+    | "sessionId"
+    | "attemptCorrelationId"
+    | "runAttemptId"
+  >
+>;
+
+export type ArtifactStreamVerifierOptions = ArtifactStreamContext & {
   readonly maximumArtifactBytes: bigint;
   readonly maximumArtifactCount?: number;
   readonly maximumConcurrentArtifacts?: number;
-}
+};
 
 export class ArtifactStreamProtocolError extends Error {
   public constructor(
@@ -56,6 +68,7 @@ export class ArtifactStreamProtocolError extends Error {
 }
 
 export class ArtifactStreamVerifier {
+  readonly #context: ArtifactStreamContext;
   readonly #maximumArtifactBytes: bigint;
   readonly #maximumArtifactCount: number;
   readonly #maximumConcurrentArtifacts: number;
@@ -63,7 +76,7 @@ export class ArtifactStreamVerifier {
   readonly #active = new Map<string, ActiveArtifact>();
   #reservedArtifactBytes = 0n;
 
-  public constructor(private readonly options: ArtifactStreamVerifierOptions) {
+  public constructor(options: ArtifactStreamVerifierOptions) {
     if (
       options.maximumArtifactBytes < 1n ||
       options.maximumArtifactBytes > LOCAL_ARTIFACT_MAXIMUM_BYTES
@@ -86,6 +99,16 @@ export class ArtifactStreamVerifier {
     if (this.#maximumConcurrentArtifacts > this.#maximumArtifactCount) {
       throw new RangeError("maximumConcurrentArtifacts cannot exceed maximumArtifactCount");
     }
+    this.#context = Object.freeze({
+      protocolMajor: options.protocolMajor,
+      protocolMinor: options.protocolMinor,
+      workerNodeId: options.workerNodeId,
+      workerInstanceId: options.workerInstanceId,
+      executorBootId: options.executorBootId,
+      sessionId: options.sessionId,
+      attemptCorrelationId: options.attemptCorrelationId,
+      runAttemptId: options.runAttemptId,
+    });
   }
 
   public start(value: unknown): Readonly<ArtifactStartMessage> {
@@ -158,7 +181,9 @@ export class ArtifactStreamVerifier {
         "Artifact end metadata does not match the streamed bytes.",
       );
     }
-    const digest = active.digest.digest("hex");
+    // Digest a copy so malformed terminal metadata cannot corrupt verifier state or expose a
+    // runtime ERR_CRYPTO_HASH_FINALIZED error if the caller reports another protocol frame.
+    const digest = active.digest.copy().digest("hex");
     if (message.sha256 !== active.start.sha256 || digest !== active.start.sha256) {
       throw artifactError(
         "ARTIFACT_DIGEST_MISMATCH",
@@ -193,12 +218,22 @@ export class ArtifactStreamVerifier {
   #validate(messageType: LocalMessageType, value: unknown): Readonly<LocalMessagePayload> {
     let message: Readonly<LocalMessagePayload>;
     try {
-      message = validateLocalMessagePayload(messageType, value, this.options.attemptCorrelationId);
+      message = validateLocalMessagePayload(messageType, value, this.#context.attemptCorrelationId);
     } catch (error) {
       if (error instanceof LocalMessageValidationError) throw error;
       throw artifactError("ARTIFACT_CONTEXT_MISMATCH", "Artifact message is invalid.");
     }
-    if ((message as { readonly runAttemptId: string }).runAttemptId !== this.options.runAttemptId) {
+    const attempt = message as ArtifactStreamContext;
+    if (
+      attempt.protocolMajor !== this.#context.protocolMajor ||
+      attempt.protocolMinor !== this.#context.protocolMinor ||
+      attempt.workerNodeId !== this.#context.workerNodeId ||
+      attempt.workerInstanceId !== this.#context.workerInstanceId ||
+      attempt.executorBootId !== this.#context.executorBootId ||
+      attempt.sessionId !== this.#context.sessionId ||
+      attempt.attemptCorrelationId !== this.#context.attemptCorrelationId ||
+      attempt.runAttemptId !== this.#context.runAttemptId
+    ) {
       throw artifactError("ARTIFACT_CONTEXT_MISMATCH", "Artifact belongs to another attempt.");
     }
     return message;

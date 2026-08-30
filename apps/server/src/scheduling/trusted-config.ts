@@ -36,8 +36,8 @@ const CapabilityRequirementSchema = Type.Union([
 export const TrustedJobPolicySchema = Type.Object(
   {
     priority: Type.Integer({
-      minimum: Number.MIN_SAFE_INTEGER,
-      maximum: Number.MAX_SAFE_INTEGER,
+      minimum: -1_000_000,
+      maximum: 1_000_000,
     }),
     intentVersion: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     maxAttempts: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -418,6 +418,11 @@ function assertJobPolicyNumbers(policy: TrustedJobPolicy, path: string): void {
   ) {
     throw new TrustedSchedulingConfigError(
       `${path} execution timeouts exceed the supported date range.`,
+    );
+  }
+  if (policy.executionPolicy.noProgressTimeoutMs > policy.executionPolicy.hardTimeoutMs) {
+    throw new TrustedSchedulingConfigError(
+      `${path}.noProgressTimeoutMs must not exceed hardTimeoutMs.`,
     );
   }
 }

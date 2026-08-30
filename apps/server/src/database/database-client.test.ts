@@ -8,11 +8,12 @@ import {
   IssueTriageV1ModelOutputSchema,
   PrReviewPlanV1ModelOutputSchema,
 } from "@agentic-review/codex";
-import type {
-  JobExecutionTemplate,
-  NormalizedSchedulingEvent,
-  SelfOrAllowlistPolicy,
-  WorkerCapabilities,
+import {
+  type JobExecutionTemplate,
+  maximumClaimLeaseResponseUtf8Bytes,
+  type NormalizedSchedulingEvent,
+  type SelfOrAllowlistPolicy,
+  type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseClient } from "../../dist/database/database-client.js";
@@ -698,6 +699,51 @@ describe("DatabaseClient lease integration", () => {
     if (granted?.outcome === "granted") {
       expect(["worker-a", "worker-b"]).toContain(granted.envelope.lease.workerNodeId);
     }
+  });
+
+  it("dead-letters an oversized claim response before committing a lease", async () => {
+    const fixture = await createFixture();
+    const oversizedTemplate: JobExecutionTemplate = {
+      ...executionTemplate,
+      resource: {
+        ...executionTemplate.resource,
+        canonicalSnapshot: { body: "x".repeat(maximumClaimLeaseResponseUtf8Bytes) },
+      },
+    };
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE jobs SET execution_json = ? WHERE id = 'job-1'")
+        .run(JSON.stringify(oversizedTemplate));
+    });
+
+    const worker = await registerWorker(fixture.client, "worker-large", "instance-large");
+    await expect(
+      claimLease(fixture.client, "worker-large", "instance-large", worker.capabilitiesDigest),
+    ).resolves.toMatchObject({ outcome: "no_work" });
+
+    withFixtureDatabase(fixture, (database) => {
+      const state = database
+        .prepare(`
+          SELECT
+            jobs.status,
+            jobs.failure_code,
+            jobs.current_run_attempt_id,
+            jobs.attempt_count,
+            COUNT(run_attempts.id) AS run_attempt_count
+          FROM jobs
+          LEFT JOIN run_attempts ON run_attempts.job_id = jobs.id
+          WHERE jobs.id = 'job-1'
+          GROUP BY jobs.id
+        `)
+        .get();
+      expect(state).toEqual({
+        status: "dead_letter",
+        failure_code: "claim_response_too_large",
+        current_run_attempt_id: null,
+        attempt_count: 0,
+        run_attempt_count: 0,
+      });
+    });
   });
 
   it("reaches a compatible claim candidate after a full incompatible page", async () => {

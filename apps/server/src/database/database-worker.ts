@@ -11,6 +11,7 @@ import {
   JobExecutionEnvelopeSchema,
   type JobExecutionTemplate,
   JobExecutionTemplateSchema,
+  maximumClaimLeaseResponseUtf8Bytes,
   type RunTerminalResponse,
   RunTerminalResponseSchema,
 } from "@agentic-review/contracts";
@@ -367,7 +368,10 @@ const parseExecutionTemplate = (serializedTemplate: string): ExecutionTemplatePa
 const deadLetterClaimCandidate = (
   jobId: string,
   now: string,
-  failureCode: "invalid_execution_template" | "invalid_execution_envelope",
+  failureCode:
+    | "invalid_execution_template"
+    | "invalid_execution_envelope"
+    | "claim_response_too_large",
   failureMessage: string,
 ): void => {
   const update = database
@@ -759,6 +763,19 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
           continue;
         }
         const envelope: JobExecutionEnvelope = envelopeCandidate;
+        const claimResponseBytes = Buffer.byteLength(
+          JSON.stringify({ outcome: "granted", envelope, serverTime: nowText }),
+          "utf8",
+        );
+        if (claimResponseBytes > maximumClaimLeaseResponseUtf8Bytes) {
+          deadLetterClaimCandidate(
+            candidate.id,
+            nowText,
+            "claim_response_too_large",
+            `Server-generated claim response is ${claimResponseBytes} bytes; maximum is ${maximumClaimLeaseResponseUtf8Bytes}.`,
+          );
+          continue;
+        }
 
         const update = database
           .prepare(`

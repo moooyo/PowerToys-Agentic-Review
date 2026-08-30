@@ -58,6 +58,8 @@ export type ResourceTarget = Static<typeof ResourceTargetSchema>;
 
 // Producers must additionally enforce this limit against the encoded UTF-8 byte length.
 export const maximumRenderedPromptUtf8Bytes = 512 * 1024;
+// The Server must enforce this against the complete granted response before committing a lease.
+export const maximumClaimLeaseResponseUtf8Bytes = 16 * 1024 * 1024;
 
 export const PromptEnvelopeSchema = Type.Object(
   {
@@ -74,17 +76,24 @@ export type PromptEnvelope = Static<typeof PromptEnvelopeSchema>;
 
 export const ExecutionPolicySchema = Type.Object(
   {
-    hardTimeoutMs: PositiveIntegerSchema,
-    noProgressTimeoutMs: PositiveIntegerSchema,
-    maxCodexTurns: PositiveIntegerSchema,
-    allowedRecipeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
-      maxItems: 256,
-      uniqueItems: true,
-    }),
+    hardTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 86_400_000 }),
+    noProgressTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 86_400_000 }),
+    maxCodexTurns: Type.Integer({ minimum: 1, maximum: 128 }),
+    allowedRecipeIds: Type.Array(
+      Type.String({
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+      }),
+      {
+        maxItems: 256,
+        uniqueItems: true,
+      },
+    ),
     requiredCapabilityLabels: Type.Record(
-      Type.String({ minLength: 1, maxLength: 64 }),
+      Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }),
       Type.String({ maxLength: 256 }),
-      { maxProperties: 64 },
+      { additionalProperties: false, maxProperties: 64 },
     ),
   },
   { additionalProperties: false },

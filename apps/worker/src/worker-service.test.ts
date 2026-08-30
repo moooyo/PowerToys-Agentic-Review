@@ -3,6 +3,7 @@ import type {
   JobExecutionEnvelope,
   RunCompletionSubmission,
   RunFailureSubmission,
+  RunTerminalResponse,
   WorkerHeartbeatResponse,
   WorkerRegistrationResponse,
 } from "@agentic-review/contracts";
@@ -26,8 +27,10 @@ class FakeWorkerApi implements WorkerApi {
   public registerHandler: WorkerApi["register"] = async () => createRegistration();
   public claimHandler: WorkerApi["claimLease"] = async () => createNoWorkResponse();
   public heartbeatHandler: WorkerApi["heartbeat"] = async () => createHeartbeatResponse();
-  public completeHandler: WorkerApi["completeRun"] = async () => undefined;
-  public failHandler: WorkerApi["failRun"] = async () => undefined;
+  public completeHandler: WorkerApi["completeRun"] = async (runAttemptId, submission) =>
+    createTerminalResponse(submission.jobId, runAttemptId, "succeeded", "succeeded");
+  public failHandler: WorkerApi["failRun"] = async (runAttemptId, submission) =>
+    createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
 
   public register: WorkerApi["register"] = (request, signal) =>
     this.registerHandler(request, signal);
@@ -341,10 +344,11 @@ describe("WorkerService terminal reporting", () => {
         ? createGrantedResponse(createEnvelope(workerInstanceId))
         : createNoWorkResponse();
     };
-    api.completeHandler = async () => {
+    api.completeHandler = async (runAttemptId, submission) => {
       events.push("completion-started");
       await completionGate;
       events.push("completion-finished");
+      return createTerminalResponse(submission.jobId, runAttemptId, "succeeded", "succeeded");
     };
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
@@ -405,9 +409,10 @@ describe("WorkerService terminal reporting", () => {
         ? createGrantedResponse(createEnvelope(workerInstanceId))
         : createNoWorkResponse();
     };
-    api.failHandler = async (_runAttemptId, submission) => {
+    api.failHandler = async (runAttemptId, submission) => {
       failureSubmissions.push(submission);
       events.push("failure-reported");
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
     };
     api.heartbeatHandler = async (_instanceId, request) => {
       heartbeatStates.push(request.health.state);
@@ -487,11 +492,12 @@ describe("WorkerService terminal reporting", () => {
         reasonCode: "requested_by_user",
       })),
     });
-    api.failHandler = async (_runAttemptId, submission) => {
+    api.failHandler = async (runAttemptId, submission) => {
       failSubmissions.push(submission);
       if (failSubmissions.length === 1) {
         throw new Error("temporary terminal network error");
       }
+      return createTerminalResponse(submission.jobId, runAttemptId, "cancelled", "cancelled");
     };
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
@@ -617,6 +623,48 @@ describe("WorkerService terminal reporting", () => {
     await service.stop("test_complete");
     await runPromise;
   });
+
+  it("does not retry a semantically inconsistent terminal response", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    let workerInstanceId = "";
+    let claimCalls = 0;
+    let completionCalls = 0;
+    let cleanupCalls = 0;
+
+    api.registerHandler = async (request) => {
+      workerInstanceId = request.workerInstanceId;
+      return createRegistration();
+    };
+    api.claimHandler = async () => {
+      claimCalls += 1;
+      return claimCalls === 1
+        ? createGrantedResponse(createEnvelope(workerInstanceId))
+        : createNoWorkResponse();
+    };
+    api.completeHandler = async (runAttemptId, submission) => {
+      completionCalls += 1;
+      return createTerminalResponse(submission.jobId, runAttemptId, "cancelled", "failed");
+    };
+    const executor: JobExecutor = {
+      execute: async (_envelope, context) => {
+        context.deferCleanup?.(async () => {
+          cleanupCalls += 1;
+        });
+        return { outcome: "succeeded", resultDigest: digest, result: { ok: true } };
+      },
+    };
+
+    const service = new WorkerService(createConfig(), api, executor, processHost, logger);
+    const runPromise = service.run();
+    await waitFor(() => cleanupCalls === 1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushAsyncWork();
+
+    expect(completionCalls).toBe(1);
+    await service.stop("test_complete");
+    await runPromise;
+  });
 });
 
 describe("WorkerService shutdown convergence", () => {
@@ -651,6 +699,7 @@ describe("WorkerService shutdown convergence", () => {
           { once: true },
         );
       });
+      throw new Error("Aborted terminal request unexpectedly resumed.");
     };
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
@@ -708,8 +757,9 @@ describe("WorkerService shutdown convergence", () => {
       completionCalls += 1;
       throw new Error("temporary terminal network error");
     };
-    api.failHandler = async () => {
+    api.failHandler = async (runAttemptId, submission) => {
       failureCalls += 1;
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
     };
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
@@ -849,8 +899,9 @@ describe("WorkerService execution deadline", () => {
           )
         : createNoWorkResponse();
     };
-    api.failHandler = async (_runAttemptId, submission) => {
+    api.failHandler = async (runAttemptId, submission) => {
       failures.push(submission);
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
     };
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
@@ -1009,6 +1060,15 @@ function createGrantedResponse(
   serverTime = nowIso(),
 ): ClaimLeaseResponse {
   return { outcome: "granted", serverTime, envelope };
+}
+
+function createTerminalResponse(
+  jobId: string,
+  runAttemptId: string,
+  jobState: RunTerminalResponse["jobState"],
+  runState: RunTerminalResponse["runState"],
+): RunTerminalResponse {
+  return { jobId, runAttemptId, jobState, runState };
 }
 
 function createEnvelope(

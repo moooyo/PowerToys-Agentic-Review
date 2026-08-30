@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  createExecutionCapabilitySigningDigest,
   deriveCapabilityKeyId,
   digestExecutionCapability,
   digestRenewalGrant,
@@ -86,6 +87,35 @@ function context(expectedKeyId = hex("a")) {
 }
 
 describe("execution capabilities", () => {
+  it("pins the cross-language capability signing digest", () => {
+    const vector: ExecutionCapabilityV1 = {
+      ...capability(),
+      workerInstanceId: "worker-instance:restart-7",
+      runAttemptId: "attempt:pr:7",
+      jobId: "job:pr:42",
+      targetRevision: {
+        kind: "pull_request",
+        baseSha: "b".repeat(40),
+        headSha: "c".repeat(64),
+      },
+      resources: {
+        maximumProcesses: 8,
+        memoryBytes: "1073741824",
+        outputBytes: 1_048_576,
+        artifactBytes: "2097152",
+        diskBytes: "1073741824",
+        hardTimeoutMs: 60_000,
+      },
+      serverLeaseExpiresAtUnixMs: now + 90_000,
+      grantExpiresAtUnixMs: now + 30_000,
+      hardDeadlineUnixMs: now + 60_000,
+    };
+
+    expect(createExecutionCapabilitySigningDigest(vector).toString("hex")).toBe(
+      "8015fc8eed1746d31de5c250d13be33d732131da4c7a02899c6d9f697b32b139",
+    );
+  });
+
   it("supports issue revisions, future Git object widths, and non-UUID Server entity IDs", () => {
     const base = capability();
     expect(
