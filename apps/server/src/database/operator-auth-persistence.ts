@@ -1,11 +1,14 @@
 import type {
-  ConsumeOperatorLoginTransactionInput,
-  CreateOperatorLoginTransactionInput,
+  BeginOperatorLoginInput,
+  BeginOperatorLoginResult,
   CreateOperatorSessionInput,
+  DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
+  FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
   OperatorAuthPersistence,
   OperatorSession,
+  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import type { DatabaseClient } from "./database-client.js";
 
@@ -16,15 +19,20 @@ export class DatabaseOperatorAuthPersistence implements OperatorAuthPersistence 
     this.#database = database;
   }
 
-  public async createLoginTransaction(input: CreateOperatorLoginTransactionInput): Promise<void> {
-    await this.#database.request("createOperatorLoginTransaction", input);
+  public async beginLogin(input: BeginOperatorLoginInput): Promise<BeginOperatorLoginResult> {
+    return this.#database.request("beginOperatorLogin", input);
   }
 
-  public async consumeLoginTransaction(
-    input: ConsumeOperatorLoginTransactionInput,
-  ): Promise<boolean> {
-    const result = await this.#database.request("consumeOperatorLoginTransaction", input);
-    return result.consumed;
+  public async validateLoginTransaction(
+    input: ValidateOperatorLoginTransactionInput,
+  ): Promise<number | null> {
+    const result = await this.#database.request("validateOperatorLoginTransaction", input);
+    return result.browserGeneration;
+  }
+
+  public async finalizeLogin(input: FinalizeOperatorLoginInput): Promise<boolean> {
+    const result = await this.#database.request("finalizeOperatorLogin", input);
+    return result.finalized;
   }
 
   public async createSession(input: CreateOperatorSessionInput): Promise<void> {
@@ -38,5 +46,9 @@ export class DatabaseOperatorAuthPersistence implements OperatorAuthPersistence 
 
   public async deleteSession(input: DeleteOperatorSessionInput): Promise<void> {
     await this.#database.request("deleteOperatorSession", input);
+  }
+
+  public async deleteBrowserFlow(input: DeleteOperatorBrowserFlowInput): Promise<void> {
+    await this.#database.request("deleteOperatorBrowserFlow", input);
   }
 }

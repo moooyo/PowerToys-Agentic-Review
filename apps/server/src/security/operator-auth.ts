@@ -15,36 +15,57 @@ export interface OperatorSession extends OperatorIdentity {
   readonly expiresAt: string;
 }
 
-export interface CreateOperatorLoginTransactionInput {
-  readonly tokenSha256: string;
-  readonly createdAt: string;
-  readonly expiresAt: string;
+export interface BeginOperatorLoginInput {
+  readonly transactionTokenSha256: string;
+  readonly browserSha256: string;
+  readonly transactionExpiresAt: string;
+  readonly browserExpiresAt: string;
 }
 
-export interface ConsumeOperatorLoginTransactionInput {
-  readonly tokenSha256: string;
-  readonly consumedAt: string;
+export interface BeginOperatorLoginResult {
+  readonly browserGeneration: number;
+  readonly browserExpiresAt: string;
+}
+
+export interface ValidateOperatorLoginTransactionInput {
+  readonly transactionTokenSha256: string;
+  readonly browserSha256: string;
+}
+
+export interface FinalizeOperatorLoginInput extends OperatorSession {
+  readonly transactionTokenSha256: string;
+  readonly sessionTokenSha256: string;
+  readonly browserSha256: string;
+  readonly browserGeneration: number;
 }
 
 export interface CreateOperatorSessionInput extends OperatorSession {
   readonly tokenSha256: string;
+  readonly browserSha256: string | null;
+  readonly browserGeneration: number | null;
 }
 
 export interface FindOperatorSessionInput {
   readonly tokenSha256: string;
-  readonly accessedAt: string;
+  readonly browserSha256: string | null;
 }
 
 export interface DeleteOperatorSessionInput {
   readonly tokenSha256: string;
 }
 
+export interface DeleteOperatorBrowserFlowInput {
+  readonly browserSha256: string;
+}
+
 export interface OperatorAuthPersistence {
-  createLoginTransaction(input: CreateOperatorLoginTransactionInput): Promise<void>;
-  consumeLoginTransaction(input: ConsumeOperatorLoginTransactionInput): Promise<boolean>;
+  beginLogin(input: BeginOperatorLoginInput): Promise<BeginOperatorLoginResult>;
+  validateLoginTransaction(input: ValidateOperatorLoginTransactionInput): Promise<number | null>;
+  finalizeLogin(input: FinalizeOperatorLoginInput): Promise<boolean>;
   createSession(input: CreateOperatorSessionInput): Promise<void>;
   findSession(input: FindOperatorSessionInput): Promise<OperatorSession | null>;
   deleteSession(input: DeleteOperatorSessionInput): Promise<void>;
+  deleteBrowserFlow(input: DeleteOperatorBrowserFlowInput): Promise<void>;
 }
 
 export interface OperatorOidcAuthorizationInput {
@@ -94,12 +115,19 @@ export interface OperatorAuthServiceDependencies {
   readonly generateOpaqueToken?: () => string;
 }
 
+export interface OperatorBrowserBinding {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
 export type OperatorLoginStart =
   | {
       readonly kind: "authorization_redirect";
       readonly authorizationUrl: URL;
       readonly transactionToken: string;
       readonly transactionExpiresAt: string;
+      readonly browserBindingToken: string;
+      readonly browserBindingExpiresAt: string;
     }
   | {
       readonly kind: "session";
@@ -110,9 +138,11 @@ export type OperatorLoginStart =
 export interface CompletedOperatorLogin {
   readonly sessionToken: string;
   readonly session: OperatorSession;
+  readonly browserBindingExpiresAt?: string;
 }
 
 export type OperatorAuthErrorCode =
+  | "browser_binding_required"
   | "invalid_auth_callback"
   | "login_transaction_expired"
   | "oidc_authentication_failed"
@@ -122,7 +152,7 @@ export type OperatorAuthErrorCode =
 export class OperatorAuthError extends Error {
   public constructor(
     public readonly code: OperatorAuthErrorCode,
-    public readonly statusCode: 400 | 401 | 403,
+    public readonly statusCode: 400 | 401 | 403 | 409,
     message: string,
   ) {
     super(message);
@@ -267,6 +297,7 @@ export class OperatorAuthService {
   public readonly postLoginRedirectPath: string;
   public readonly requiresLoopbackRequest: boolean;
   public readonly secureCookies: boolean;
+  public readonly usesBrowserBinding: boolean;
 
   public constructor(dependencies: OperatorAuthServiceDependencies) {
     const publicOrigin = validateConfig(dependencies.config, dependencies.oidc);
@@ -282,19 +313,47 @@ export class OperatorAuthService {
     this.publicOrigin = publicOrigin.origin;
     this.postLoginRedirectPath = dependencies.config.postLoginRedirectPath;
     this.secureCookies = publicOrigin.protocol === "https:";
+    this.usesBrowserBinding = dependencies.config.mode === "oidc";
     this.requiresLoopbackRequest =
       dependencies.config.mode === "loopback-development-bypass" || !this.secureCookies;
   }
 
-  public async startLogin(): Promise<OperatorLoginStart> {
+  public ensureBrowserBinding(browserBindingToken?: string): OperatorBrowserBinding | undefined {
+    if (
+      this.#config.mode !== "oidc" ||
+      (browserBindingToken !== undefined && opaqueTokenPattern.test(browserBindingToken))
+    ) {
+      return undefined;
+    }
+
+    const issuedAt = this.#currentTime();
+    return {
+      token: this.#newOpaqueToken(),
+      expiresAt: addSeconds(issuedAt, this.#config.sessionTtlSeconds),
+    };
+  }
+
+  public async startLogin(browserBindingToken?: string): Promise<OperatorLoginStart> {
     if (this.#config.mode === "loopback-development-bypass") {
       const completed = await this.#createSession(this.#config.developmentIdentity);
       return { kind: "session", ...completed };
     }
 
+    if (browserBindingToken === undefined || !opaqueTokenPattern.test(browserBindingToken)) {
+      throw new OperatorAuthError(
+        "browser_binding_required",
+        409,
+        "A browser binding must be established before operator login begins.",
+      );
+    }
+    const effectiveBrowserBindingToken = browserBindingToken;
     const transactionToken = this.#newOpaqueToken();
     const createdAt = this.#currentTime();
     const transactionExpiresAt = addSeconds(createdAt, this.#config.loginTransactionTtlSeconds);
+    const browserBindingExpiresAt = addSeconds(
+      createdAt,
+      Math.max(this.#config.loginTransactionTtlSeconds, this.#config.sessionTtlSeconds),
+    );
     const state = deriveTransactionValue(transactionToken, "state");
     const authorizationUrl = await this.#requiredOidc().buildAuthorizationUrl({
       state,
@@ -302,10 +361,11 @@ export class OperatorAuthService {
       pkceCodeVerifier: deriveTransactionValue(transactionToken, "pkce"),
     });
 
-    await this.#persistence.createLoginTransaction({
-      tokenSha256: sha256Hex(transactionToken),
-      createdAt: createdAt.toISOString(),
-      expiresAt: transactionExpiresAt,
+    const begun = await this.#persistence.beginLogin({
+      transactionTokenSha256: sha256Hex(transactionToken),
+      browserSha256: sha256Hex(effectiveBrowserBindingToken),
+      transactionExpiresAt,
+      browserExpiresAt: browserBindingExpiresAt,
     });
 
     return {
@@ -313,12 +373,15 @@ export class OperatorAuthService {
       authorizationUrl,
       transactionToken,
       transactionExpiresAt,
+      browserBindingToken: effectiveBrowserBindingToken,
+      browserBindingExpiresAt: begun.browserExpiresAt,
     };
   }
 
   public async completeLogin(
     callbackParameters: URLSearchParams,
     transactionToken: string | undefined,
+    browserBindingToken: string | undefined,
   ): Promise<CompletedOperatorLogin> {
     if (this.#config.mode !== "oidc") {
       throw new OperatorAuthError(
@@ -327,7 +390,12 @@ export class OperatorAuthService {
         "The OIDC callback is unavailable while development bypass is enabled.",
       );
     }
-    if (transactionToken === undefined || !opaqueTokenPattern.test(transactionToken)) {
+    if (
+      transactionToken === undefined ||
+      !opaqueTokenPattern.test(transactionToken) ||
+      browserBindingToken === undefined ||
+      !opaqueTokenPattern.test(browserBindingToken)
+    ) {
       throw new OperatorAuthError(
         "login_transaction_expired",
         401,
@@ -345,12 +413,13 @@ export class OperatorAuthService {
       );
     }
 
-    const consumedAt = this.#currentTime();
-    const consumed = await this.#persistence.consumeLoginTransaction({
-      tokenSha256: sha256Hex(transactionToken),
-      consumedAt: consumedAt.toISOString(),
+    const transactionTokenSha256 = sha256Hex(transactionToken);
+    const browserSha256 = sha256Hex(browserBindingToken);
+    const browserGeneration = await this.#persistence.validateLoginTransaction({
+      transactionTokenSha256,
+      browserSha256,
     });
-    if (!consumed) {
+    if (browserGeneration === null) {
       throw new OperatorAuthError(
         "login_transaction_expired",
         401,
@@ -389,26 +458,72 @@ export class OperatorAuthService {
       );
     }
 
-    return this.#createSession(identity);
+    const sessionToken = this.#newOpaqueToken();
+    const createdAt = this.#currentTime();
+    const session: OperatorSession = {
+      ...identity,
+      createdAt: createdAt.toISOString(),
+      expiresAt: addSeconds(createdAt, this.#config.sessionTtlSeconds),
+    };
+    const finalized = await this.#persistence.finalizeLogin({
+      transactionTokenSha256,
+      sessionTokenSha256: sha256Hex(sessionToken),
+      browserSha256,
+      browserGeneration,
+      ...session,
+    });
+    if (!finalized) {
+      throw new OperatorAuthError(
+        "login_transaction_expired",
+        401,
+        "The operator login transaction is missing, expired, already used, or superseded.",
+      );
+    }
+    if (Date.parse(session.expiresAt) <= this.#currentTime().getTime()) {
+      await this.#persistence.deleteSession({ tokenSha256: sha256Hex(sessionToken) });
+      throw new OperatorAuthError(
+        "login_transaction_expired",
+        401,
+        "The operator login completed after its session lifetime expired.",
+      );
+    }
+    return {
+      sessionToken,
+      session,
+      browserBindingExpiresAt: session.expiresAt,
+    };
   }
 
-  public async getSession(sessionToken: string | undefined): Promise<OperatorSession | null> {
+  public async getSession(
+    sessionToken: string | undefined,
+    browserBindingToken?: string,
+  ): Promise<OperatorSession | null> {
     if (sessionToken === undefined || !opaqueTokenPattern.test(sessionToken)) {
       return null;
     }
 
-    const accessedAt = this.#currentTime();
+    const browserSha256 =
+      this.#config.mode === "oidc"
+        ? browserBindingToken !== undefined && opaqueTokenPattern.test(browserBindingToken)
+          ? sha256Hex(browserBindingToken)
+          : undefined
+        : null;
+    if (browserSha256 === undefined) {
+      return null;
+    }
+
     const tokenSha256 = sha256Hex(sessionToken);
     const session = await this.#persistence.findSession({
       tokenSha256,
-      accessedAt: accessedAt.toISOString(),
+      browserSha256,
     });
+    const verifiedAt = this.#currentTime();
     if (
       session === null ||
       !isValidIdentity(session) ||
       !Number.isFinite(Date.parse(session.createdAt)) ||
       !Number.isFinite(Date.parse(session.expiresAt)) ||
-      Date.parse(session.expiresAt) <= accessedAt.getTime() ||
+      Date.parse(session.expiresAt) <= verifiedAt.getTime() ||
       !this.#isCurrentlyAuthorized(session)
     ) {
       if (session !== null) {
@@ -419,11 +534,22 @@ export class OperatorAuthService {
     return session;
   }
 
-  public async logout(sessionToken: string | undefined): Promise<void> {
-    if (sessionToken === undefined || !opaqueTokenPattern.test(sessionToken)) {
-      return;
+  public async logout(
+    sessionToken: string | undefined,
+    browserBindingToken?: string,
+  ): Promise<void> {
+    if (
+      this.#config.mode === "oidc" &&
+      browserBindingToken !== undefined &&
+      opaqueTokenPattern.test(browserBindingToken)
+    ) {
+      await this.#persistence.deleteBrowserFlow({
+        browserSha256: sha256Hex(browserBindingToken),
+      });
     }
-    await this.#persistence.deleteSession({ tokenSha256: sha256Hex(sessionToken) });
+    if (sessionToken !== undefined && opaqueTokenPattern.test(sessionToken)) {
+      await this.#persistence.deleteSession({ tokenSha256: sha256Hex(sessionToken) });
+    }
   }
 
   async #createSession(identity: OperatorIdentity): Promise<CompletedOperatorLogin> {
@@ -436,6 +562,8 @@ export class OperatorAuthService {
     };
     await this.#persistence.createSession({
       tokenSha256: sha256Hex(sessionToken),
+      browserSha256: null,
+      browserGeneration: null,
       ...session,
     });
     return { sessionToken, session };

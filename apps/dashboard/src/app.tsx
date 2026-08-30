@@ -57,7 +57,7 @@ export async function getInitialState(): Promise<InitialState> {
     const session = value as Record<string, unknown>;
     if (session.authenticated !== true) {
       if (globalThis.location?.pathname !== "/signed-out") {
-        globalThis.location?.assign("/api/v1/auth/login");
+        globalThis.location?.assign("/signed-out");
       }
       return {
         apiConnected: true,

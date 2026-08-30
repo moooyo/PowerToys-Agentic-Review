@@ -1,11 +1,14 @@
 import type { DatabaseSync } from "node:sqlite";
 import type {
-  ConsumeOperatorLoginTransactionInput,
-  CreateOperatorLoginTransactionInput,
+  BeginOperatorLoginInput,
+  BeginOperatorLoginResult,
   CreateOperatorSessionInput,
+  DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
+  FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
   OperatorSession,
+  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 
 const sha256Pattern = /^[0-9a-f]{64}$/u;
@@ -22,39 +25,241 @@ const assertDateTime = (value: string, name: string): void => {
   }
 };
 
-export const createOperatorLoginTransaction = (
-  database: DatabaseSync,
-  input: CreateOperatorLoginTransactionInput,
-): { readonly created: true } => {
-  assertSha256(input.tokenSha256);
-  assertDateTime(input.createdAt, "createdAt");
-  assertDateTime(input.expiresAt, "expiresAt");
-  database
-    .prepare("DELETE FROM operator_login_transactions WHERE expires_at <= ?")
-    .run(input.createdAt);
-  database.prepare("DELETE FROM operator_sessions WHERE expires_at <= ?").run(input.createdAt);
-  database
-    .prepare(`
-      INSERT INTO operator_login_transactions (token_sha256, created_at, expires_at)
-      VALUES (?, ?, ?)
-    `)
-    .run(input.tokenSha256, input.createdAt, input.expiresAt);
-  return { created: true };
+const advanceOperatorAuthClock = (database: DatabaseSync): string => {
+  database.exec(`
+    UPDATE operator_auth_clock
+    SET last_observed_at = MAX(
+      last_observed_at,
+      strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    )
+    WHERE singleton = 1
+  `);
+  const row = database
+    .prepare("SELECT last_observed_at AS now FROM operator_auth_clock WHERE singleton = 1")
+    .get() as { readonly now: string } | undefined;
+  if (row === undefined || !Number.isFinite(Date.parse(row.now))) {
+    throw new Error("Operator authentication clock state is unavailable.");
+  }
+  return row.now;
 };
 
-export const consumeOperatorLoginTransaction = (
+const assertFuture = (value: string, now: string, name: string): void => {
+  if (value <= now) {
+    throw new TypeError(`${name} must be later than the authoritative database time.`);
+  }
+};
+
+export interface CleanupExpiredOperatorAuthInput {
+  readonly batchSize: number;
+}
+
+export interface CleanupExpiredOperatorAuthResult {
+  readonly deletedBrowserFlows: number;
+  readonly deletedLoginTransactions: number;
+  readonly deletedSessions: number;
+  readonly hasMore: boolean;
+}
+
+const assertGeneration = (value: number): void => {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("Operator authentication browser generation must be a positive integer.");
+  }
+};
+
+export const beginOperatorLogin = (
   database: DatabaseSync,
-  input: ConsumeOperatorLoginTransactionInput,
-): { readonly consumed: boolean } => {
-  assertSha256(input.tokenSha256);
-  assertDateTime(input.consumedAt, "consumedAt");
-  const result = database
+  input: BeginOperatorLoginInput,
+): BeginOperatorLoginResult => {
+  assertSha256(input.transactionTokenSha256);
+  assertSha256(input.browserSha256);
+  assertDateTime(input.transactionExpiresAt, "transactionExpiresAt");
+  assertDateTime(input.browserExpiresAt, "browserExpiresAt");
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const authoritativeNow = advanceOperatorAuthClock(database);
+    assertFuture(input.transactionExpiresAt, authoritativeNow, "transactionExpiresAt");
+    assertFuture(input.browserExpiresAt, authoritativeNow, "browserExpiresAt");
+    const existing = database
+      .prepare("SELECT generation FROM operator_browser_flows WHERE browser_sha256 = ?")
+      .get(input.browserSha256) as { readonly generation: number } | undefined;
+    const generation = existing === undefined ? 1 : existing.generation + 1;
+    assertGeneration(generation);
+
+    if (existing === undefined) {
+      database
+        .prepare(`
+          INSERT INTO operator_browser_flows (
+            browser_sha256, generation, created_at, updated_at, expires_at
+          ) VALUES (?, ?, ?, ?, ?)
+        `)
+        .run(
+          input.browserSha256,
+          generation,
+          authoritativeNow,
+          authoritativeNow,
+          input.browserExpiresAt,
+        );
+    } else {
+      database
+        .prepare(`
+          UPDATE operator_browser_flows
+          SET generation = ?,
+              updated_at = ?,
+              expires_at = ?
+          WHERE browser_sha256 = ?
+        `)
+        .run(generation, authoritativeNow, input.browserExpiresAt, input.browserSha256);
+    }
+
+    database
+      .prepare("DELETE FROM operator_login_transactions WHERE browser_sha256 = ?")
+      .run(input.browserSha256);
+    database
+      .prepare("DELETE FROM operator_sessions WHERE browser_sha256 = ?")
+      .run(input.browserSha256);
+    database
+      .prepare(`
+        INSERT INTO operator_login_transactions (
+          token_sha256, created_at, expires_at, browser_sha256, browser_generation
+        ) VALUES (?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.transactionTokenSha256,
+        authoritativeNow,
+        input.transactionExpiresAt,
+        input.browserSha256,
+        generation,
+      );
+
+    database.exec("COMMIT");
+    return { browserGeneration: generation, browserExpiresAt: input.browserExpiresAt };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+};
+
+export const validateOperatorLoginTransaction = (
+  database: DatabaseSync,
+  input: ValidateOperatorLoginTransactionInput,
+): { readonly browserGeneration: number | null } => {
+  assertSha256(input.transactionTokenSha256);
+  assertSha256(input.browserSha256);
+  const authoritativeNow = advanceOperatorAuthClock(database);
+  const row = database
     .prepare(`
-      DELETE FROM operator_login_transactions
-      WHERE token_sha256 = ? AND expires_at > ?
+      SELECT login_transaction.browser_generation AS "browserGeneration"
+      FROM operator_login_transactions AS login_transaction
+      JOIN operator_browser_flows AS browser
+        ON browser.browser_sha256 = login_transaction.browser_sha256
+      WHERE login_transaction.token_sha256 = ?
+        AND login_transaction.browser_sha256 = ?
+        AND login_transaction.expires_at > ?
+        AND browser.expires_at > ?
+        AND browser.generation = login_transaction.browser_generation
     `)
-    .run(input.tokenSha256, input.consumedAt);
-  return { consumed: Number(result.changes) === 1 };
+    .get(input.transactionTokenSha256, input.browserSha256, authoritativeNow, authoritativeNow) as
+    | { readonly browserGeneration: number }
+    | undefined;
+  if (row === undefined) {
+    return { browserGeneration: null };
+  }
+  assertGeneration(row.browserGeneration);
+  return { browserGeneration: row.browserGeneration };
+};
+
+export const finalizeOperatorLogin = (
+  database: DatabaseSync,
+  input: FinalizeOperatorLoginInput,
+): { readonly finalized: boolean } => {
+  assertSha256(input.transactionTokenSha256);
+  assertSha256(input.sessionTokenSha256);
+  assertSha256(input.browserSha256);
+  assertGeneration(input.browserGeneration);
+  assertDateTime(input.createdAt, "createdAt");
+  assertDateTime(input.expiresAt, "expiresAt");
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const authoritativeNow = advanceOperatorAuthClock(database);
+    assertFuture(input.expiresAt, authoritativeNow, "expiresAt");
+    const transaction = database
+      .prepare(`
+        SELECT 1 AS present
+        FROM operator_login_transactions AS login_transaction
+        JOIN operator_browser_flows AS browser
+          ON browser.browser_sha256 = login_transaction.browser_sha256
+        WHERE login_transaction.token_sha256 = ?
+          AND login_transaction.browser_sha256 = ?
+          AND login_transaction.browser_generation = ?
+          AND login_transaction.expires_at > ?
+          AND browser.expires_at > ?
+          AND browser.generation = login_transaction.browser_generation
+      `)
+      .get(
+        input.transactionTokenSha256,
+        input.browserSha256,
+        input.browserGeneration,
+        authoritativeNow,
+        authoritativeNow,
+      );
+    if (transaction === undefined) {
+      database.exec("ROLLBACK");
+      return { finalized: false };
+    }
+
+    const consumed = database
+      .prepare(`
+        DELETE FROM operator_login_transactions
+        WHERE token_sha256 = ?
+          AND browser_sha256 = ?
+          AND browser_generation = ?
+      `)
+      .run(input.transactionTokenSha256, input.browserSha256, input.browserGeneration);
+    if (Number(consumed.changes) !== 1) {
+      database.exec("ROLLBACK");
+      return { finalized: false };
+    }
+
+    database
+      .prepare(`
+        UPDATE operator_browser_flows
+        SET expires_at = CASE WHEN expires_at < ? THEN ? ELSE expires_at END
+        WHERE browser_sha256 = ? AND generation = ?
+      `)
+      .run(input.expiresAt, input.expiresAt, input.browserSha256, input.browserGeneration);
+    database
+      .prepare(`
+        INSERT INTO operator_sessions (
+          token_sha256,
+          issuer,
+          subject,
+          display_name,
+          email,
+          created_at,
+          expires_at,
+          browser_sha256,
+          browser_generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.sessionTokenSha256,
+        input.issuer,
+        input.subject,
+        input.displayName,
+        input.email,
+        authoritativeNow,
+        input.expiresAt,
+        input.browserSha256,
+        input.browserGeneration,
+      );
+    database.exec("COMMIT");
+    return { finalized: true };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
 };
 
 export const createOperatorSession = (
@@ -64,7 +269,8 @@ export const createOperatorSession = (
   assertSha256(input.tokenSha256);
   assertDateTime(input.createdAt, "createdAt");
   assertDateTime(input.expiresAt, "expiresAt");
-  database.prepare("DELETE FROM operator_sessions WHERE expires_at <= ?").run(input.createdAt);
+  const authoritativeNow = advanceOperatorAuthClock(database);
+  assertFuture(input.expiresAt, authoritativeNow, "expiresAt");
   database
     .prepare(`
       INSERT INTO operator_sessions (
@@ -74,8 +280,10 @@ export const createOperatorSession = (
         display_name,
         email,
         created_at,
-        expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        expires_at,
+        browser_sha256,
+        browser_generation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       input.tokenSha256,
@@ -83,8 +291,10 @@ export const createOperatorSession = (
       input.subject,
       input.displayName,
       input.email,
-      input.createdAt,
+      authoritativeNow,
       input.expiresAt,
+      input.browserSha256,
+      input.browserGeneration,
     );
   return { created: true };
 };
@@ -94,20 +304,48 @@ export const findOperatorSession = (
   input: FindOperatorSessionInput,
 ): { readonly session: OperatorSession | null } => {
   assertSha256(input.tokenSha256);
-  assertDateTime(input.accessedAt, "accessedAt");
-  const session = database
-    .prepare(`
-      SELECT
-        issuer,
-        subject,
-        display_name AS "displayName",
-        email,
-        created_at AS "createdAt",
-        expires_at AS "expiresAt"
-      FROM operator_sessions
-      WHERE token_sha256 = ? AND expires_at > ?
-    `)
-    .get(input.tokenSha256, input.accessedAt) as unknown as OperatorSession | undefined;
+  const authoritativeNow = advanceOperatorAuthClock(database);
+  const session = (input.browserSha256 === null
+    ? database
+        .prepare(`
+            SELECT
+              issuer,
+              subject,
+              display_name AS "displayName",
+              email,
+              created_at AS "createdAt",
+              expires_at AS "expiresAt"
+            FROM operator_sessions
+            WHERE token_sha256 = ?
+              AND browser_sha256 IS NULL
+              AND browser_generation IS NULL
+              AND expires_at > ?
+          `)
+        .get(input.tokenSha256, authoritativeNow)
+    : database
+        .prepare(`
+            SELECT
+              session.issuer,
+              session.subject,
+              session.display_name AS "displayName",
+              session.email,
+              session.created_at AS "createdAt",
+              session.expires_at AS "expiresAt"
+            FROM operator_sessions AS session
+            JOIN operator_browser_flows AS browser
+              ON browser.browser_sha256 = session.browser_sha256
+            WHERE session.token_sha256 = ?
+              AND session.browser_sha256 = ?
+              AND session.expires_at > ?
+              AND browser.expires_at > ?
+              AND browser.generation = session.browser_generation
+          `)
+        .get(
+          input.tokenSha256,
+          input.browserSha256,
+          authoritativeNow,
+          authoritativeNow,
+        )) as unknown as OperatorSession | undefined;
   return { session: session ?? null };
 };
 
@@ -120,4 +358,87 @@ export const deleteOperatorSession = (
     .prepare("DELETE FROM operator_sessions WHERE token_sha256 = ?")
     .run(input.tokenSha256);
   return { deleted: Number(result.changes) === 1 };
+};
+
+export const deleteOperatorBrowserFlow = (
+  database: DatabaseSync,
+  input: DeleteOperatorBrowserFlowInput,
+): { readonly deleted: boolean } => {
+  assertSha256(input.browserSha256);
+  const result = database
+    .prepare("DELETE FROM operator_browser_flows WHERE browser_sha256 = ?")
+    .run(input.browserSha256);
+  return { deleted: Number(result.changes) === 1 };
+};
+
+export const cleanupExpiredOperatorAuth = (
+  database: DatabaseSync,
+  input: CleanupExpiredOperatorAuthInput,
+): CleanupExpiredOperatorAuthResult => {
+  if (!Number.isSafeInteger(input.batchSize) || input.batchSize <= 0 || input.batchSize > 10_000) {
+    throw new TypeError("Operator authentication cleanup batchSize must be between 1 and 10000.");
+  }
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const authoritativeNow = advanceOperatorAuthClock(database);
+    const loginResult = database
+      .prepare(`
+        DELETE FROM operator_login_transactions
+        WHERE rowid IN (
+          SELECT rowid
+          FROM operator_login_transactions
+          WHERE expires_at <= ?
+          ORDER BY expires_at, rowid
+          LIMIT ?
+        )
+      `)
+      .run(authoritativeNow, input.batchSize);
+    const sessionResult = database
+      .prepare(`
+        DELETE FROM operator_sessions
+        WHERE rowid IN (
+          SELECT rowid
+          FROM operator_sessions
+          WHERE expires_at <= ?
+          ORDER BY expires_at, rowid
+          LIMIT ?
+        )
+      `)
+      .run(authoritativeNow, input.batchSize);
+    const browserResult = database
+      .prepare(`
+        DELETE FROM operator_browser_flows
+        WHERE rowid IN (
+          SELECT rowid
+          FROM operator_browser_flows
+          WHERE expires_at <= ?
+          ORDER BY expires_at, rowid
+          LIMIT ?
+        )
+      `)
+      .run(authoritativeNow, input.batchSize);
+    const remainingLogin = database
+      .prepare("SELECT 1 AS present FROM operator_login_transactions WHERE expires_at <= ? LIMIT 1")
+      .get(authoritativeNow);
+    const remainingSession = database
+      .prepare("SELECT 1 AS present FROM operator_sessions WHERE expires_at <= ? LIMIT 1")
+      .get(authoritativeNow);
+    const remainingBrowser = database
+      .prepare("SELECT 1 AS present FROM operator_browser_flows WHERE expires_at <= ? LIMIT 1")
+      .get(authoritativeNow);
+    database.exec("COMMIT");
+    return {
+      deletedBrowserFlows: Number(browserResult.changes),
+      deletedLoginTransactions: Number(loginResult.changes),
+      deletedSessions: Number(sessionResult.changes),
+      hasMore:
+        remainingLogin !== undefined ||
+        remainingSession !== undefined ||
+        remainingBrowser !== undefined,
+    };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
 };

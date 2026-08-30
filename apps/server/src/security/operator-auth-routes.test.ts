@@ -1,7 +1,10 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEVELOPMENT_OPERATOR_BROWSER_BINDING_COOKIE,
+  DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE,
   DEVELOPMENT_OPERATOR_SESSION_COOKIE,
+  OPERATOR_BROWSER_BINDING_COOKIE,
   OPERATOR_CALLBACK_PATH,
   OPERATOR_LOGIN_PATH,
   OPERATOR_LOGIN_TRANSACTION_COOKIE,
@@ -16,6 +19,7 @@ import { OperatorAuthError, type OperatorSession } from "../../dist/security/ope
 
 const transactionToken = "T".repeat(43);
 const sessionToken = "S".repeat(43);
+const browserBindingToken = "B".repeat(43);
 const session: OperatorSession = {
   issuer: "https://identity.example.com",
   subject: "operator-123",
@@ -30,6 +34,12 @@ const createService = (): OperatorAuthRouteService => ({
   postLoginRedirectPath: "/work-items",
   requiresLoopbackRequest: false,
   secureCookies: true,
+  usesBrowserBinding: true,
+  ensureBrowserBinding: vi.fn((existingToken?: string) =>
+    existingToken === undefined
+      ? { token: browserBindingToken, expiresAt: "2026-08-30T06:00:00.000Z" }
+      : undefined,
+  ),
   startLogin: vi.fn(async () => ({
     kind: "authorization_redirect" as const,
     authorizationUrl: new URL(
@@ -37,8 +47,14 @@ const createService = (): OperatorAuthRouteService => ({
     ),
     transactionToken,
     transactionExpiresAt: "2026-08-30T05:05:00.000Z",
+    browserBindingToken,
+    browserBindingExpiresAt: "2026-08-30T06:00:00.000Z",
   })),
-  completeLogin: vi.fn(async () => ({ sessionToken, session })),
+  completeLogin: vi.fn(async () => ({
+    sessionToken,
+    session,
+    browserBindingExpiresAt: session.expiresAt,
+  })),
   getSession: vi.fn(async () => null),
   logout: vi.fn(async () => undefined),
 });
@@ -67,9 +83,15 @@ describe("operator authentication routes", () => {
 
     try {
       const response = await app.inject({
-        method: "GET",
+        method: "POST",
         url: OPERATOR_LOGIN_PATH,
-        headers: { host: "127.0.0.1:8080" },
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+          host: "127.0.0.1:8080",
+          origin: auth.publicOrigin,
+        },
+        payload: "",
       });
 
       expect(response.statusCode).toBe(302);
@@ -79,9 +101,16 @@ describe("operator authentication routes", () => {
       expect(response.headers["cache-control"]).toBe("no-store");
       expect(response.headers["referrer-policy"]).toBe("no-referrer");
       const cookies = setCookies(response.headers["set-cookie"]);
-      expect(cookies).toHaveLength(1);
-      expectHardenedCookie(cookies[0] ?? "", OPERATOR_LOGIN_TRANSACTION_COOKIE);
-      expect(cookies[0]).toContain(transactionToken);
+      expect(cookies).toHaveLength(2);
+      const transactionCookie =
+        cookies.find((value) => value.startsWith(`${OPERATOR_LOGIN_TRANSACTION_COOKIE}=`)) ?? "";
+      const browserCookie =
+        cookies.find((value) => value.startsWith(`${OPERATOR_BROWSER_BINDING_COOKIE}=`)) ?? "";
+      expectHardenedCookie(transactionCookie, OPERATOR_LOGIN_TRANSACTION_COOKIE);
+      expectHardenedCookie(browserCookie, OPERATOR_BROWSER_BINDING_COOKIE);
+      expect(transactionCookie).toContain(transactionToken);
+      expect(browserCookie).toContain(browserBindingToken);
+      expect(auth.startLogin).toHaveBeenCalledWith(browserBindingToken);
     } finally {
       await app.close();
     }
@@ -93,10 +122,24 @@ describe("operator authentication routes", () => {
 
     try {
       for (let attempt = 0; attempt < 10; attempt += 1) {
-        const response = await app.inject({ method: "GET", url: OPERATOR_LOGIN_PATH });
+        const response = await app.inject({
+          method: "POST",
+          url: OPERATOR_LOGIN_PATH,
+          headers: {
+            cookie: `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+            origin: auth.publicOrigin,
+          },
+        });
         expect(response.statusCode).toBe(302);
       }
-      const limited = await app.inject({ method: "GET", url: OPERATOR_LOGIN_PATH });
+      const limited = await app.inject({
+        method: "POST",
+        url: OPERATOR_LOGIN_PATH,
+        headers: {
+          cookie: `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+          origin: auth.publicOrigin,
+        },
+      });
       expect(limited.statusCode).toBe(429);
       expect(auth.startLogin).toHaveBeenCalledTimes(10);
     } finally {
@@ -124,17 +167,19 @@ describe("operator authentication routes", () => {
       const response = await app.inject({
         method: "GET",
         url: "/protected",
-        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+        headers: {
+          cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+        },
       });
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true });
-      expect(auth.getSession).toHaveBeenCalledWith(sessionToken);
+      expect(auth.getSession).toHaveBeenCalledWith(sessionToken, browserBindingToken);
     } finally {
       await app.close();
     }
   });
 
-  it("completes the callback, clears the transaction, and sets the session cookie", async () => {
+  it("completes the callback without clearing a potentially newer login transaction", async () => {
     const auth = createService();
     const app = createApp(auth);
 
@@ -143,7 +188,7 @@ describe("operator authentication routes", () => {
         method: "GET",
         url: `${OPERATOR_CALLBACK_PATH}?code=authorization-code&state=state-value`,
         headers: {
-          cookie: `${OPERATOR_LOGIN_TRANSACTION_COOKIE}=${transactionToken}`,
+          cookie: `${OPERATOR_LOGIN_TRANSACTION_COOKIE}=${transactionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
         },
       });
 
@@ -153,15 +198,18 @@ describe("operator authentication routes", () => {
       const callbackParameters = vi.mocked(auth.completeLogin).mock.calls[0]?.[0];
       expect(callbackParameters?.get("code")).toBe("authorization-code");
       expect(vi.mocked(auth.completeLogin).mock.calls[0]?.[1]).toBe(transactionToken);
+      expect(vi.mocked(auth.completeLogin).mock.calls[0]?.[2]).toBe(browserBindingToken);
       const cookies = setCookies(response.headers["set-cookie"]);
       expect(cookies).toHaveLength(2);
-      expect(
-        cookies.some((value) => value.startsWith(`${OPERATOR_LOGIN_TRANSACTION_COOKIE}=`)),
-      ).toBe(true);
       const serializedSession =
         cookies.find((value) => value.startsWith(`${OPERATOR_SESSION_COOKIE}=`)) ?? "";
       expectHardenedCookie(serializedSession, OPERATOR_SESSION_COOKIE);
       expect(serializedSession).toContain(sessionToken);
+      expect(serializedSession).not.toContain(`${OPERATOR_LOGIN_TRANSACTION_COOKIE}=`);
+      const serializedBrowser =
+        cookies.find((value) => value.startsWith(`${OPERATOR_BROWSER_BINDING_COOKIE}=`)) ?? "";
+      expectHardenedCookie(serializedBrowser, OPERATOR_BROWSER_BINDING_COOKIE);
+      expect(serializedBrowser).toContain(browserBindingToken);
     } finally {
       await app.close();
     }
@@ -176,7 +224,9 @@ describe("operator authentication routes", () => {
       const response = await app.inject({
         method: "GET",
         url: OPERATOR_SESSION_PATH,
-        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+        headers: {
+          cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
@@ -190,13 +240,13 @@ describe("operator authentication routes", () => {
         },
         expiresAt: session.expiresAt,
       });
-      expect(auth.getSession).toHaveBeenCalledWith(sessionToken);
+      expect(auth.getSession).toHaveBeenCalledWith(sessionToken, browserBindingToken);
     } finally {
       await app.close();
     }
   });
 
-  it("reports an anonymous session and expires an unrecognized cookie", async () => {
+  it("reports an anonymous session without clearing a potentially newer session cookie", async () => {
     const auth = createService();
     const app = createApp(auth);
 
@@ -204,14 +254,69 @@ describe("operator authentication routes", () => {
       const response = await app.inject({
         method: "GET",
         url: OPERATOR_SESSION_PATH,
-        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+        headers: {
+          cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+        },
       });
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ authenticated: false });
-      const cookies = setCookies(response.headers["set-cookie"]);
-      expect(cookies[0]).toContain(`${OPERATOR_SESSION_COOKIE}=`);
-      expect(cookies[0]).toContain("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+      expect(response.headers["set-cookie"]).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("bootstraps an HttpOnly browser binding before login begins", async () => {
+    const auth = createService();
+    const app = createApp(auth);
+
+    try {
+      const response = await app.inject({ method: "GET", url: OPERATOR_SESSION_PATH });
+      const browserCookie =
+        setCookies(response.headers["set-cookie"]).find((value) =>
+          value.startsWith(`${OPERATOR_BROWSER_BINDING_COOKIE}=`),
+        ) ?? "";
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ authenticated: false });
+      expectHardenedCookie(browserCookie, OPERATOR_BROWSER_BINDING_COOKIE);
+      expect(browserCookie).toContain(browserBindingToken);
+      expect(auth.getSession).toHaveBeenCalledWith(undefined, browserBindingToken);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("requires same-origin POST and a bootstrapped browser binding for login", async () => {
+    const auth = createService();
+    const app = createApp(auth);
+
+    try {
+      const getResponse = await app.inject({ method: "GET", url: OPERATOR_LOGIN_PATH });
+      expect(getResponse.statusCode).toBe(404);
+
+      const crossOrigin = await app.inject({
+        method: "POST",
+        url: OPERATOR_LOGIN_PATH,
+        headers: {
+          cookie: `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+          origin: "https://attacker.example.com",
+        },
+      });
+      expect(crossOrigin.statusCode).toBe(403);
+
+      const missingBinding = await app.inject({
+        method: "POST",
+        url: OPERATOR_LOGIN_PATH,
+        headers: { origin: auth.publicOrigin },
+      });
+      expect(missingBinding.statusCode).toBe(409);
+      expect(missingBinding.json()).toMatchObject({ code: "browser_binding_required" });
+      expect(setCookies(missingBinding.headers["set-cookie"])[0]).toContain(
+        `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+      );
+      expect(auth.startLogin).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
@@ -226,15 +331,15 @@ describe("operator authentication routes", () => {
         method: "POST",
         url: OPERATOR_LOGOUT_PATH,
         headers: {
-          cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}`,
+          cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
           origin: auth.publicOrigin,
         },
       });
 
       expect(response.statusCode).toBe(204);
-      expect(auth.logout).toHaveBeenCalledWith(sessionToken);
+      expect(auth.logout).toHaveBeenCalledWith(sessionToken, browserBindingToken);
       const cookies = setCookies(response.headers["set-cookie"]);
-      expect(cookies).toHaveLength(2);
+      expect(cookies).toHaveLength(3);
       expect(
         cookies.every((value) => value.includes("Expires=Thu, 01 Jan 1970 00:00:00 GMT")),
       ).toBe(true);
@@ -265,21 +370,65 @@ describe("operator authentication routes", () => {
     }
   });
 
+  it("uses non-Secure browser binding for loopback OIDC development", async () => {
+    const auth: OperatorAuthRouteService = {
+      ...createService(),
+      publicOrigin: "http://127.0.0.1:8080",
+      requiresLoopbackRequest: true,
+      secureCookies: false,
+      usesBrowserBinding: true,
+    };
+    const app = createApp(auth);
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: OPERATOR_LOGIN_PATH,
+        headers: {
+          cookie: `${DEVELOPMENT_OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+          host: "127.0.0.1:8080",
+          origin: auth.publicOrigin,
+        },
+      });
+      const cookies = setCookies(response.headers["set-cookie"]);
+      const transactionCookie =
+        cookies.find((value) =>
+          value.startsWith(`${DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE}=`),
+        ) ?? "";
+      const browserCookie =
+        cookies.find((value) =>
+          value.startsWith(`${DEVELOPMENT_OPERATOR_BROWSER_BINDING_COOKIE}=`),
+        ) ?? "";
+
+      expect(response.statusCode).toBe(302);
+      expect(cookies).toHaveLength(2);
+      expect(transactionCookie).toContain(transactionToken);
+      expect(browserCookie).toContain(browserBindingToken);
+      expect(transactionCookie).not.toContain("Secure");
+      expect(browserCookie).not.toContain("Secure");
+      expect(transactionCookie).not.toContain("__Host-");
+      expect(browserCookie).not.toContain("__Host-");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("uses non-prefixed non-Secure cookies only for HTTP loopback development", async () => {
     const auth: OperatorAuthRouteService = {
       ...createService(),
       publicOrigin: "http://127.0.0.1:8080",
       requiresLoopbackRequest: true,
       secureCookies: false,
+      usesBrowserBinding: false,
       startLogin: vi.fn(async () => ({ kind: "session" as const, sessionToken, session })),
     };
     const app = createApp(auth);
 
     try {
       const response = await app.inject({
-        method: "GET",
+        method: "POST",
         url: OPERATOR_LOGIN_PATH,
-        headers: { host: "127.0.0.1:8080" },
+        headers: { host: "127.0.0.1:8080", origin: auth.publicOrigin },
       });
 
       expect(response.statusCode).toBe(303);
@@ -289,6 +438,8 @@ describe("operator authentication routes", () => {
       expect(serialized).toContain("SameSite=Lax");
       expect(serialized).not.toContain("__Host-");
       expect(serialized).not.toContain("Secure");
+      expect(setCookies(response.headers["set-cookie"])).toHaveLength(1);
+      expect(auth.startLogin).toHaveBeenCalledWith(undefined);
 
       const forwarded = await app.inject({
         method: "GET",
@@ -304,7 +455,7 @@ describe("operator authentication routes", () => {
     }
   });
 
-  it("returns a sanitized callback error and clears the one-time cookie", async () => {
+  it("returns a sanitized callback error without clearing a newer login transaction", async () => {
     const auth = createService();
     auth.completeLogin = vi.fn(async () => {
       throw new OperatorAuthError(
@@ -319,7 +470,9 @@ describe("operator authentication routes", () => {
       const response = await app.inject({
         method: "GET",
         url: `${OPERATOR_CALLBACK_PATH}?error=access_denied&state=state-value`,
-        headers: { cookie: `${OPERATOR_LOGIN_TRANSACTION_COOKIE}=${transactionToken}` },
+        headers: {
+          cookie: `${OPERATOR_LOGIN_TRANSACTION_COOKIE}=${transactionToken}; ${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
+        },
       });
 
       expect(response.statusCode).toBe(401);
@@ -329,9 +482,7 @@ describe("operator authentication routes", () => {
         retryable: false,
       });
       expect(response.body).not.toContain("access_denied");
-      expect(setCookies(response.headers["set-cookie"])[0]).toContain(
-        `${OPERATOR_LOGIN_TRANSACTION_COOKIE}=`,
-      );
+      expect(response.headers["set-cookie"]).toBeUndefined();
     } finally {
       await app.close();
     }

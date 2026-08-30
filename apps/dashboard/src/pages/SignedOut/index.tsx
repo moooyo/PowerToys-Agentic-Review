@@ -8,9 +8,11 @@ export default function SignedOutPage() {
       title="Signed out"
       subTitle="Your local Agentic Review session has ended."
       extra={
-        <Button href="/api/v1/auth/login" icon={<LoginOutlined />} key="sign-in" type="primary">
-          Sign in
-        </Button>
+        <form action="/api/v1/auth/login" method="post">
+          <Button htmlType="submit" icon={<LoginOutlined />} key="sign-in" type="primary">
+            Sign in
+          </Button>
+        </form>
       }
     />
   );

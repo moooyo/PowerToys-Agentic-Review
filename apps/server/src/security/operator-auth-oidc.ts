@@ -16,6 +16,14 @@ export interface OperatorOidcClientConfig {
   readonly requestTimeoutSeconds: number;
 }
 
+const entraAuthorityHosts = new Set([
+  "login.microsoftonline.com",
+  "login.microsoftonline.de",
+  "login.microsoftonline.us",
+  "login.partner.microsoftonline.cn",
+]);
+const entraMultiTenantAliases = new Set(["common", "consumers", "organizations"]);
+
 const isLoopbackHostname = (hostname: string): boolean => {
   const normalized = hostname.toLowerCase();
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]";
@@ -42,10 +50,60 @@ const readHttpsUrl = (value: string, name: string, allowLoopbackHttp: boolean): 
   return url;
 };
 
+const containsIssuerTemplate = (value: string): boolean =>
+  value.includes("{") || value.includes("}") || /%7b|%7d/iu.test(value);
+
+const assertConcreteIssuer = (value: string, name: string): void => {
+  if (containsIssuerTemplate(value)) {
+    throw new Error(`${name} must identify one exact issuer and must not contain a template.`);
+  }
+};
+
+const assertTenantSpecificEntraIssuer = (issuerUrl: URL): void => {
+  const hostname = issuerUrl.hostname.toLowerCase().replace(/\.$/u, "");
+  if (!entraAuthorityHosts.has(hostname)) {
+    return;
+  }
+
+  const encodedTenant = issuerUrl.pathname.split("/").find((segment) => segment.length > 0);
+  let tenant: string | undefined;
+  try {
+    tenant = encodedTenant === undefined ? undefined : decodeURIComponent(encodedTenant);
+  } catch {
+    tenant = encodedTenant;
+  }
+  if (tenant === undefined || entraMultiTenantAliases.has(tenant.toLowerCase())) {
+    throw new Error(
+      "issuerUrl must use a tenant-specific Microsoft Entra issuer; common, organizations, and consumers are not allowed.",
+    );
+  }
+};
+
+export const validateExactOidcIssuer = (
+  configuredIssuer: string,
+  discoveredIssuer: unknown,
+): string => {
+  if (typeof discoveredIssuer !== "string" || discoveredIssuer.length === 0) {
+    throw new Error("OIDC discovery did not return an issuer identifier.");
+  }
+  assertConcreteIssuer(discoveredIssuer, "OIDC discovery issuer");
+  if (discoveredIssuer !== configuredIssuer) {
+    throw new Error("OIDC discovery issuer must exactly match the configured issuerUrl.");
+  }
+  return discoveredIssuer;
+};
+
 const validateConfig = (
   config: OperatorOidcClientConfig,
-): { readonly issuerUrl: URL; readonly redirectUri: URL; readonly scope: string } => {
+): {
+  readonly issuerIdentifier: string;
+  readonly issuerUrl: URL;
+  readonly redirectUri: URL;
+  readonly scope: string;
+} => {
   const issuerUrl = readHttpsUrl(config.issuerUrl, "issuerUrl", false);
+  assertConcreteIssuer(config.issuerUrl, "issuerUrl");
+  assertTenantSpecificEntraIssuer(issuerUrl);
   if (issuerUrl.pathname.includes("/.well-known/")) {
     throw new Error("issuerUrl must identify the issuer, not a discovery document URL.");
   }
@@ -73,7 +131,12 @@ const validateConfig = (
     }
     seenScopes.add(scope);
   }
-  return { issuerUrl, redirectUri, scope: config.scopes.join(" ") };
+  return {
+    issuerIdentifier: config.issuerUrl,
+    issuerUrl,
+    redirectUri,
+    scope: config.scopes.join(" "),
+  };
 };
 
 const readOptionalClaim = (
@@ -94,15 +157,16 @@ class OpenIdClientOperatorAdapter implements OperatorOidcClient {
 
   public readonly issuer: string;
 
-  public constructor(configuration: oidc.Configuration, redirectUri: URL, scope: string) {
+  public constructor(
+    configuration: oidc.Configuration,
+    configuredIssuer: string,
+    redirectUri: URL,
+    scope: string,
+  ) {
     this.#configuration = configuration;
     this.#redirectUri = redirectUri;
     this.#scope = scope;
-    const issuer = configuration.serverMetadata().issuer;
-    if (typeof issuer !== "string" || issuer.length === 0) {
-      throw new Error("OIDC discovery did not return an issuer identifier.");
-    }
-    this.issuer = issuer;
+    this.issuer = validateExactOidcIssuer(configuredIssuer, configuration.serverMetadata().issuer);
   }
 
   public async buildAuthorizationUrl(input: OperatorOidcAuthorizationInput): Promise<URL> {
@@ -171,5 +235,10 @@ export const createOperatorOidcClient = async (
     { timeout: config.requestTimeoutSeconds },
   );
 
-  return new OpenIdClientOperatorAdapter(configuration, validated.redirectUri, validated.scope);
+  return new OpenIdClientOperatorAdapter(
+    configuration,
+    validated.issuerIdentifier,
+    validated.redirectUri,
+    validated.scope,
+  );
 };

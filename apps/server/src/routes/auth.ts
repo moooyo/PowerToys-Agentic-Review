@@ -2,15 +2,19 @@ import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  type CompletedOperatorLogin,
   OperatorAuthError,
+  type OperatorBrowserBinding,
   type OperatorLoginStart,
   type OperatorSession,
 } from "../security/operator-auth.js";
 
 export const OPERATOR_SESSION_COOKIE = "__Host-agentic_review_session";
 export const OPERATOR_LOGIN_TRANSACTION_COOKIE = "__Host-agentic_review_login";
+export const OPERATOR_BROWSER_BINDING_COOKIE = "__Host-agentic_review_browser";
 export const DEVELOPMENT_OPERATOR_SESSION_COOKIE = "agentic_review_dev_session";
 export const DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE = "agentic_review_dev_login";
+export const DEVELOPMENT_OPERATOR_BROWSER_BINDING_COOKIE = "agentic_review_dev_browser";
 export const OPERATOR_SESSION_PATH = "/api/v1/auth/session";
 export const OPERATOR_LOGIN_PATH = "/api/v1/auth/login";
 export const OPERATOR_CALLBACK_PATH = "/api/v1/auth/callback";
@@ -21,13 +25,19 @@ export interface OperatorAuthRouteService {
   readonly postLoginRedirectPath: string;
   readonly requiresLoopbackRequest: boolean;
   readonly secureCookies: boolean;
-  startLogin(): Promise<OperatorLoginStart>;
+  readonly usesBrowserBinding: boolean;
+  ensureBrowserBinding(browserBindingToken?: string): OperatorBrowserBinding | undefined;
+  startLogin(browserBindingToken?: string): Promise<OperatorLoginStart>;
   completeLogin(
     callbackParameters: URLSearchParams,
     transactionToken: string | undefined,
-  ): Promise<{ readonly sessionToken: string; readonly session: OperatorSession }>;
-  getSession(sessionToken: string | undefined): Promise<OperatorSession | null>;
-  logout(sessionToken: string | undefined): Promise<void>;
+    browserBindingToken: string | undefined,
+  ): Promise<CompletedOperatorLogin>;
+  getSession(
+    sessionToken: string | undefined,
+    browserBindingToken?: string,
+  ): Promise<OperatorSession | null>;
+  logout(sessionToken: string | undefined, browserBindingToken?: string): Promise<void>;
 }
 
 const baseCookieOptions = {
@@ -40,6 +50,7 @@ const baseCookieOptions = {
 interface OperatorCookiePolicy {
   readonly sessionCookie: string;
   readonly loginTransactionCookie: string;
+  readonly browserBindingCookie: string | undefined;
   readonly secure: boolean;
 }
 
@@ -48,11 +59,15 @@ const cookiePolicyFor = (auth: OperatorAuthRouteService): OperatorCookiePolicy =
     ? {
         sessionCookie: OPERATOR_SESSION_COOKIE,
         loginTransactionCookie: OPERATOR_LOGIN_TRANSACTION_COOKIE,
+        browserBindingCookie: auth.usesBrowserBinding ? OPERATOR_BROWSER_BINDING_COOKIE : undefined,
         secure: true,
       }
     : {
         sessionCookie: DEVELOPMENT_OPERATOR_SESSION_COOKIE,
         loginTransactionCookie: DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE,
+        browserBindingCookie: auth.usesBrowserBinding
+          ? DEVELOPMENT_OPERATOR_BROWSER_BINDING_COOKIE
+          : undefined,
         secure: false,
       };
 
@@ -131,7 +146,7 @@ const sendAuthError = (reply: FastifyReply, error: OperatorAuthError): FastifyRe
 const sendInvalidOrigin = (reply: FastifyReply): FastifyReply =>
   noStore(reply).code(403).send({
     code: "invalid_operator_auth_origin",
-    message: "The request origin is not authorized for operator logout.",
+    message: "The request origin is not authorized for this operator authentication action.",
     retryable: false,
   });
 
@@ -163,6 +178,23 @@ const setLoginTransactionCookie = (
   });
 };
 
+const setBrowserBindingCookie = (
+  reply: FastifyReply,
+  auth: OperatorAuthRouteService,
+  browserBindingToken: string,
+  expiresAt: string,
+): void => {
+  const policy = cookiePolicyFor(auth);
+  if (policy.browserBindingCookie === undefined) {
+    return;
+  }
+  reply.setCookie(policy.browserBindingCookie, browserBindingToken, {
+    ...baseCookieOptions,
+    secure: policy.secure,
+    expires: new Date(expiresAt),
+  });
+};
+
 const clearSessionCookie = (reply: FastifyReply, auth: OperatorAuthRouteService): void => {
   const policy = cookiePolicyFor(auth);
   reply.clearCookie(policy.sessionCookie, { ...baseCookieOptions, secure: policy.secure });
@@ -174,6 +206,24 @@ const clearLoginTransactionCookie = (reply: FastifyReply, auth: OperatorAuthRout
     ...baseCookieOptions,
     secure: policy.secure,
   });
+};
+
+const clearBrowserBindingCookie = (reply: FastifyReply, auth: OperatorAuthRouteService): void => {
+  const policy = cookiePolicyFor(auth);
+  if (policy.browserBindingCookie !== undefined) {
+    reply.clearCookie(policy.browserBindingCookie, {
+      ...baseCookieOptions,
+      secure: policy.secure,
+    });
+  }
+};
+
+const browserBindingTokenFrom = (
+  request: FastifyRequest,
+  auth: OperatorAuthRouteService,
+): string | undefined => {
+  const cookieName = cookiePolicyFor(auth).browserBindingCookie;
+  return cookieName === undefined ? undefined : request.cookies[cookieName];
 };
 
 const callbackParametersFrom = (request: FastifyRequest): URLSearchParams => {
@@ -188,7 +238,10 @@ export const readOperatorSession = async (
   if (!isAllowedRequest(request, auth)) {
     return null;
   }
-  return auth.getSession(request.cookies[cookiePolicyFor(auth).sessionCookie]);
+  return auth.getSession(
+    request.cookies[cookiePolicyFor(auth).sessionCookie],
+    browserBindingTokenFrom(request, auth),
+  );
 };
 
 export const registerOperatorAuthRoutes = (
@@ -198,6 +251,11 @@ export const registerOperatorAuthRoutes = (
   validateRouteSecurityPolicy(auth);
   app.register(cookie, { hook: "onRequest" });
   app.register(async (scope) => {
+    scope.addContentTypeParser(
+      "application/x-www-form-urlencoded",
+      { parseAs: "string" },
+      (_request, body, done) => done(null, body),
+    );
     await scope.register(rateLimit, { global: false });
 
     scope.get(OPERATOR_SESSION_PATH, async (request, reply) => {
@@ -206,11 +264,21 @@ export const registerOperatorAuthRoutes = (
       }
       noStore(reply);
       const sessionToken = request.cookies[cookiePolicyFor(auth).sessionCookie];
-      const session = await auth.getSession(sessionToken);
+      const existingBrowserBinding = browserBindingTokenFrom(request, auth);
+      const issuedBrowserBinding = auth.ensureBrowserBinding(existingBrowserBinding);
+      if (issuedBrowserBinding !== undefined) {
+        setBrowserBindingCookie(
+          reply,
+          auth,
+          issuedBrowserBinding.token,
+          issuedBrowserBinding.expiresAt,
+        );
+      }
+      const session = await auth.getSession(
+        sessionToken,
+        existingBrowserBinding ?? issuedBrowserBinding?.token,
+      );
       if (session === null) {
-        if (sessionToken !== undefined) {
-          clearSessionCookie(reply, auth);
-        }
         return { authenticated: false };
       }
       return {
@@ -225,7 +293,7 @@ export const registerOperatorAuthRoutes = (
       };
     });
 
-    scope.get(
+    scope.post(
       OPERATOR_LOGIN_PATH,
       {
         config: {
@@ -240,13 +308,34 @@ export const registerOperatorAuthRoutes = (
           return sendLoopbackDenied(reply);
         }
         noStore(reply);
-        const start = await auth.startLogin();
+        if (request.headers.origin !== auth.publicOrigin) {
+          return sendInvalidOrigin(reply);
+        }
+        const browserBindingToken = browserBindingTokenFrom(request, auth);
+        if (auth.usesBrowserBinding && browserBindingToken === undefined) {
+          const issued = auth.ensureBrowserBinding();
+          if (issued !== undefined) {
+            setBrowserBindingCookie(reply, auth, issued.token, issued.expiresAt);
+          }
+          return noStore(reply).code(409).send({
+            code: "browser_binding_required",
+            message: "Reload the sign-in page before starting operator login.",
+            retryable: true,
+          });
+        }
+        const start = await auth.startLogin(browserBindingToken);
         if (start.kind === "authorization_redirect") {
           setLoginTransactionCookie(
             reply,
             auth,
             start.transactionToken,
             start.transactionExpiresAt,
+          );
+          setBrowserBindingCookie(
+            reply,
+            auth,
+            start.browserBindingToken,
+            start.browserBindingExpiresAt,
           );
           return reply.redirect(start.authorizationUrl.href, 302);
         }
@@ -262,16 +351,24 @@ export const registerOperatorAuthRoutes = (
       }
       noStore(reply);
       const transactionToken = request.cookies[cookiePolicyFor(auth).loginTransactionCookie];
+      const browserBindingToken = browserBindingTokenFrom(request, auth);
       try {
         const completed = await auth.completeLogin(
           callbackParametersFrom(request),
           transactionToken,
+          browserBindingToken,
         );
-        clearLoginTransactionCookie(reply, auth);
         setSessionCookie(reply, auth, completed.sessionToken, completed.session.expiresAt);
+        if (completed.browserBindingExpiresAt !== undefined && browserBindingToken !== undefined) {
+          setBrowserBindingCookie(
+            reply,
+            auth,
+            browserBindingToken,
+            completed.browserBindingExpiresAt,
+          );
+        }
         return reply.redirect(auth.postLoginRedirectPath, 303);
       } catch (error) {
-        clearLoginTransactionCookie(reply, auth);
         if (error instanceof OperatorAuthError) {
           return sendAuthError(reply, error);
         }
@@ -287,9 +384,13 @@ export const registerOperatorAuthRoutes = (
       if (request.headers.origin !== auth.publicOrigin) {
         return sendInvalidOrigin(reply);
       }
-      await auth.logout(request.cookies[cookiePolicyFor(auth).sessionCookie]);
+      await auth.logout(
+        request.cookies[cookiePolicyFor(auth).sessionCookie],
+        browserBindingTokenFrom(request, auth),
+      );
       clearSessionCookie(reply, auth);
       clearLoginTransactionCookie(reply, auth);
+      clearBrowserBindingCookie(reply, auth);
       return reply.code(204).send();
     });
   });

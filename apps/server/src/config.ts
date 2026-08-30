@@ -47,6 +47,8 @@ export interface ServerConfig {
   readonly heartbeatIntervalSeconds: number;
   readonly leaseTtlSeconds: number;
   readonly leaseReaperIntervalSeconds: number;
+  readonly operatorAuthCleanupIntervalSeconds: number;
+  readonly operatorAuthCleanupBatchSize: number;
   readonly retryDelaySeconds: number;
   readonly workerOfflineAfterSeconds: number;
   readonly maxLongPollSeconds: number;
@@ -554,6 +556,18 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
       "AGENTIC_REVIEW_LEASE_REAPER_INTERVAL_SECONDS",
       15,
       3_600,
+    ),
+    operatorAuthCleanupIntervalSeconds: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_OPERATOR_AUTH_CLEANUP_INTERVAL_SECONDS",
+      900,
+      86_400,
+    ),
+    operatorAuthCleanupBatchSize: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_OPERATOR_AUTH_CLEANUP_BATCH_SIZE",
+      500,
+      10_000,
     ),
     retryDelaySeconds: readPositiveInteger(
       environment,

@@ -8,6 +8,7 @@ import {
   RunCompletionSubmissionSchema,
   type RunFailureSubmission,
   RunFailureSubmissionSchema,
+  RunTerminalResponseSchema,
   type WorkerHeartbeatRequest,
   WorkerHeartbeatRequestSchema,
   type WorkerHeartbeatResponse,
@@ -83,6 +84,18 @@ const workerHeartbeatSchema = inlineSchema(WorkerHeartbeatRequestSchema);
 const executionPhaseSchema = inlineSchema(ExecutionPhaseSchema);
 const runCompletionSubmissionSchema = inlineSchema(RunCompletionSubmissionSchema);
 const runFailureSubmissionSchema = inlineSchema(RunFailureSubmissionSchema);
+const runTerminalResponseSchema = inlineSchema(RunTerminalResponseSchema);
+
+const handleTerminalDatabaseError = (error: unknown, reply: FastifyReply): FastifyReply => {
+  if (error instanceof DatabaseRequestError && error.code === "TERMINAL_SUBMISSION_CONFLICT") {
+    return reply.code(409).send({
+      code: "terminal_submission_conflict",
+      message: error.message,
+      retryable: false,
+    });
+  }
+  throw error;
+};
 
 const sendLeaseLost = (runAttemptId: string) => ({
   runAttemptId,
@@ -302,16 +315,21 @@ export const registerWorkerRoutes = (
       schema: {
         params: parametersSchema,
         body: runCompletionSubmissionSchema,
+        response: { 200: runTerminalResponseSchema },
       },
       preHandler: authenticateWorker,
     },
-    async (request) => {
+    async (request, reply) => {
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
-      return database.request("completeLease", {
-        ...request.body,
-        runAttemptId: request.params.runAttemptId,
-        workerNodeId,
-      });
+      try {
+        return await database.request("completeLease", {
+          ...request.body,
+          runAttemptId: request.params.runAttemptId,
+          workerNodeId,
+        });
+      } catch (error) {
+        return handleTerminalDatabaseError(error, reply);
+      }
     },
   );
 
@@ -321,23 +339,28 @@ export const registerWorkerRoutes = (
       schema: {
         params: parametersSchema,
         body: runFailureSubmissionSchema,
+        response: { 200: runTerminalResponseSchema },
       },
       preHandler: authenticateWorker,
     },
-    async (request) => {
+    async (request, reply) => {
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
-      return database.request("failLease", {
-        runAttemptId: request.params.runAttemptId,
-        jobId: request.body.jobId,
-        workerNodeId,
-        workerInstanceId: request.body.workerInstanceId,
-        leaseToken: request.body.leaseToken,
-        leaseGeneration: request.body.leaseGeneration,
-        failureCode: request.body.code,
-        failureMessage: request.body.message,
-        retryable: request.body.retryable,
-        retryDelaySeconds: config.retryDelaySeconds,
-      });
+      try {
+        return await database.request("failLease", {
+          runAttemptId: request.params.runAttemptId,
+          jobId: request.body.jobId,
+          workerNodeId,
+          workerInstanceId: request.body.workerInstanceId,
+          leaseToken: request.body.leaseToken,
+          leaseGeneration: request.body.leaseGeneration,
+          failureCode: request.body.code,
+          failureMessage: request.body.message,
+          retryable: request.body.retryable,
+          retryDelaySeconds: config.retryDelaySeconds,
+        });
+      } catch (error) {
+        return handleTerminalDatabaseError(error, reply);
+      }
     },
   );
 };

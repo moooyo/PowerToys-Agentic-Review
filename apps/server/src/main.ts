@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { DatabaseClient } from "./database/database-client.js";
 import { DatabaseGitHubPollingState } from "./database/github-polling-state.js";
 import { DatabaseOperatorAuthPersistence } from "./database/operator-auth-persistence.js";
+import { DatabaseOwnerLock } from "./database/owner-lock.js";
 import { GitHubEventIngestionService } from "./github/ingestion-service.js";
 import { GitHubPollingCoordinator } from "./github/polling-coordinator.js";
 import { GitHubRestApiError, GitHubRestClient } from "./github/rest-client.js";
@@ -20,10 +21,20 @@ const start = async (): Promise<void> => {
   const config = loadConfig();
   const shutdownController = new AbortController();
   let database: DatabaseClient | undefined;
+  let databaseOwnerLock: DatabaseOwnerLock | undefined;
   let pollingPromise: Promise<void> | undefined;
   let application: { close(): Promise<void> } | undefined;
 
+  const closeStorage = async (): Promise<void> => {
+    try {
+      await database?.close();
+    } finally {
+      await databaseOwnerLock?.close();
+    }
+  };
+
   try {
+    databaseOwnerLock = await DatabaseOwnerLock.acquire(config.databasePath);
     database = await DatabaseClient.create({
       databasePath: config.databasePath,
       migrationsDirectory: config.migrationsDirectory,
@@ -78,7 +89,7 @@ const start = async (): Promise<void> => {
         try {
           await Promise.all([app.close(), pollingPromise ?? Promise.resolve()]);
         } finally {
-          await database?.close();
+          await closeStorage();
         }
         app.log.info("Server shutdown completed.");
       })().catch((error: unknown) => {
@@ -198,7 +209,7 @@ const start = async (): Promise<void> => {
     shutdownController.abort(error);
     await application?.close().catch(() => undefined);
     await pollingPromise?.catch(() => undefined);
-    await database?.close().catch(() => undefined);
+    await closeStorage().catch(() => undefined);
     process.exitCode = 1;
   }
 };

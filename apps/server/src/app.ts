@@ -1,6 +1,7 @@
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { startLeaseReaper } from "./background/lease-reaper.js";
+import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
 import type { ServerConfig } from "./config.js";
 import type { DatabaseClient } from "./database/database-client.js";
 import { DatabaseRequestError } from "./database/errors.js";
@@ -183,8 +184,14 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   }
 
   const stopLeaseReaper = startLeaseReaper(dependencies.database, dependencies.config, app.log);
+  const stopOperatorAuthReaper = startOperatorAuthReaper(
+    dependencies.database,
+    dependencies.config,
+    app.log,
+  );
   app.addHook("onClose", async () => {
     stopLeaseReaper();
+    await stopOperatorAuthReaper();
   });
 
   return app;

@@ -9,6 +9,7 @@ import type {
   JobExecutionEnvelope,
   JobExecutionTemplate,
   NormalizedSchedulingEvent,
+  RunTerminalResponse,
   SelfOrAllowlistPolicy,
   WorkerState,
 } from "@agentic-review/contracts";
@@ -17,18 +18,25 @@ import type {
   GitHubPollingProjectionKey,
 } from "../github/poller.js";
 import type {
-  ConsumeOperatorLoginTransactionInput,
-  CreateOperatorLoginTransactionInput,
+  BeginOperatorLoginInput,
+  BeginOperatorLoginResult,
   CreateOperatorSessionInput,
+  DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
+  FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
   OperatorSession,
+  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import type {
   CommitGitHubPollingReconciliationInput,
   CommitGitHubPollingReconciliationResult,
   WriteGitHubPollingProjectionInput,
 } from "./github-polling-state.js";
+import type {
+  CleanupExpiredOperatorAuthInput,
+  CleanupExpiredOperatorAuthResult,
+} from "./operator-auth.js";
 
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
@@ -126,12 +134,7 @@ export interface LeaseFailureInput {
   readonly retryDelaySeconds: number;
 }
 
-export interface LeaseTerminalResult {
-  readonly jobId: string;
-  readonly runAttemptId: string;
-  readonly jobState: "succeeded" | "retry_waiting" | "cancelled" | "failed" | "dead_letter";
-  readonly runState: "succeeded" | "failed" | "cancelled";
-}
+export type LeaseTerminalResult = RunTerminalResponse;
 
 export interface ReapExpiredLeasesInput {
   readonly retryDelaySeconds: number;
@@ -236,13 +239,17 @@ export interface DatabaseOperationMap {
     readonly input: Record<string, never>;
     readonly output: DashboardSystemRead;
   };
-  readonly createOperatorLoginTransaction: {
-    readonly input: CreateOperatorLoginTransactionInput;
-    readonly output: { readonly created: true };
+  readonly beginOperatorLogin: {
+    readonly input: BeginOperatorLoginInput;
+    readonly output: BeginOperatorLoginResult;
   };
-  readonly consumeOperatorLoginTransaction: {
-    readonly input: ConsumeOperatorLoginTransactionInput;
-    readonly output: { readonly consumed: boolean };
+  readonly validateOperatorLoginTransaction: {
+    readonly input: ValidateOperatorLoginTransactionInput;
+    readonly output: { readonly browserGeneration: number | null };
+  };
+  readonly finalizeOperatorLogin: {
+    readonly input: FinalizeOperatorLoginInput;
+    readonly output: { readonly finalized: boolean };
   };
   readonly createOperatorSession: {
     readonly input: CreateOperatorSessionInput;
@@ -255,6 +262,14 @@ export interface DatabaseOperationMap {
   readonly deleteOperatorSession: {
     readonly input: DeleteOperatorSessionInput;
     readonly output: { readonly deleted: boolean };
+  };
+  readonly deleteOperatorBrowserFlow: {
+    readonly input: DeleteOperatorBrowserFlowInput;
+    readonly output: { readonly deleted: boolean };
+  };
+  readonly cleanupExpiredOperatorAuth: {
+    readonly input: CleanupExpiredOperatorAuthInput;
+    readonly output: CleanupExpiredOperatorAuthResult;
   };
   readonly readGitHubPollingProjection: {
     readonly input: GitHubPollingProjectionKey;

@@ -189,3 +189,24 @@ export const RunFailureSubmissionSchema = Type.Composite(
   { additionalProperties: false },
 );
 export type RunFailureSubmission = Static<typeof RunFailureSubmissionSchema>;
+
+export const RunTerminalResponseSchema = Type.Object(
+  {
+    jobId: EntityIdSchema,
+    runAttemptId: EntityIdSchema,
+    jobState: Type.Union([
+      Type.Literal("succeeded"),
+      Type.Literal("retry_waiting"),
+      Type.Literal("cancelled"),
+      Type.Literal("failed"),
+      Type.Literal("dead_letter"),
+    ]),
+    runState: Type.Union([
+      Type.Literal("succeeded"),
+      Type.Literal("failed"),
+      Type.Literal("cancelled"),
+    ]),
+  },
+  { additionalProperties: false },
+);
+export type RunTerminalResponse = Static<typeof RunTerminalResponseSchema>;

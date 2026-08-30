@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
@@ -11,22 +11,27 @@ import {
   JobExecutionEnvelopeSchema,
   type JobExecutionTemplate,
   JobExecutionTemplateSchema,
+  type RunTerminalResponse,
+  RunTerminalResponseSchema,
 } from "@agentic-review/contracts";
 import { resolveExpiredAttempt } from "@agentic-review/domain";
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { GitHubPollingProjectionKey } from "../github/poller.js";
 import type {
-  ConsumeOperatorLoginTransactionInput,
-  CreateOperatorLoginTransactionInput,
+  BeginOperatorLoginInput,
   CreateOperatorSessionInput,
+  DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
+  FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
+  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
 import {
   LeaseLostError,
   ResultDigestMismatchError,
+  TerminalSubmissionConflictError,
   WorkerInstanceSupersededError,
   WorkerUnavailableError,
 } from "./errors.js";
@@ -38,13 +43,18 @@ import {
   type WriteGitHubPollingProjectionInput,
   writeGitHubPollingProjection,
 } from "./github-polling-state.js";
-import { runMigrations } from "./migrations.js";
+import { cleanupIncompleteMigrationBackups, createMigrationBackup } from "./migration-backup.js";
+import { inspectMigrationState, runMigrations } from "./migrations.js";
 import {
-  consumeOperatorLoginTransaction,
-  createOperatorLoginTransaction,
+  beginOperatorLogin,
+  type CleanupExpiredOperatorAuthInput,
+  cleanupExpiredOperatorAuth,
   createOperatorSession,
+  deleteOperatorBrowserFlow,
   deleteOperatorSession,
+  finalizeOperatorLogin,
   findOperatorSession,
+  validateOperatorLoginTransaction,
 } from "./operator-auth.js";
 import type {
   ClaimLeaseInput,
@@ -107,6 +117,26 @@ interface HeartbeatRow {
   readonly current_run_attempt_id: string | null;
   readonly worker_status: string;
   readonly worker_superseded_at: string | null;
+}
+
+interface TerminalAttemptRow extends HeartbeatRow {
+  readonly result_digest: string | null;
+  readonly result_json: string | null;
+  readonly failure_code: string | null;
+  readonly failure_message: string | null;
+}
+
+interface FailureTerminalPayload {
+  readonly code: string;
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+interface FailureTerminalReplayRecord {
+  readonly version: 1;
+  readonly terminalOutcome: "failure";
+  readonly payload: FailureTerminalPayload;
+  readonly response: RunTerminalResponse;
 }
 
 interface ExpiredAttemptRow {
@@ -788,6 +818,78 @@ const securelyMatchesHash = (actual: string, expected: string): boolean => {
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 };
 
+const matchesTerminalLeaseIdentity = (
+  row: TerminalAttemptRow,
+  input: LeaseCompletionInput | LeaseFailureInput,
+  leaseTokenHash: string,
+): boolean =>
+  row.job_id === input.jobId &&
+  row.worker_node_id === input.workerNodeId &&
+  row.worker_instance_id === input.workerInstanceId &&
+  row.lease_generation === input.leaseGeneration &&
+  securelyMatchesHash(row.lease_token_hash, leaseTokenHash);
+
+const isTerminalAttemptState = (status: string): status is "succeeded" | "failed" | "cancelled" =>
+  status === "succeeded" || status === "failed" || status === "cancelled";
+
+const failureTerminalPayload = (input: LeaseFailureInput): FailureTerminalPayload => ({
+  code: input.failureCode,
+  message: input.failureMessage,
+  retryable: input.retryable,
+});
+
+const parseFailureTerminalReplayRecord = (
+  serialized: string | null,
+): FailureTerminalReplayRecord | null => {
+  if (serialized === null) {
+    return null;
+  }
+
+  let value: unknown;
+  try {
+    value = parseJson(serialized);
+  } catch {
+    return null;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const payload = record.payload;
+  const response = record.response;
+  if (
+    record.version !== 1 ||
+    record.terminalOutcome !== "failure" ||
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    !Value.Check(RunTerminalResponseSchema, response)
+  ) {
+    return null;
+  }
+
+  const payloadRecord = payload as Record<string, unknown>;
+  if (
+    typeof payloadRecord.code !== "string" ||
+    typeof payloadRecord.message !== "string" ||
+    typeof payloadRecord.retryable !== "boolean"
+  ) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    terminalOutcome: "failure",
+    payload: {
+      code: payloadRecord.code,
+      message: payloadRecord.message,
+      retryable: payloadRecord.retryable,
+    },
+    response,
+  };
+};
+
 const heartbeatLease = (input: HeartbeatLeaseInput): HeartbeatLeaseResult =>
   withImmediateTransaction(() => {
     const now = new Date();
@@ -951,6 +1053,10 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           attempt.no_progress_timeout_ms,
           attempt.no_progress_deadline_at,
           attempt.progress_sequence,
+          attempt.result_digest,
+          attempt.result_json,
+          attempt.failure_code,
+          attempt.failure_message,
           job.status AS job_status,
           job.cancellation_requested_at,
           job.current_run_attempt_id,
@@ -961,14 +1067,32 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
         JOIN workers AS worker ON worker.id = attempt.worker_id
         WHERE attempt.id = ?
       `)
-      .get(input.runAttemptId) as unknown as HeartbeatRow | undefined;
+      .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
+    if (fence === undefined || !matchesTerminalLeaseIdentity(fence, input, tokenHash)) {
+      throw new LeaseLostError();
+    }
+
+    const resultJson = canonicalJson(input.result);
+    const expectedResultDigest = hash(resultJson);
+    if (isTerminalAttemptState(fence.status)) {
+      if (
+        fence.status === "succeeded" &&
+        fence.result_digest !== null &&
+        fence.result_json === resultJson &&
+        securelyMatchesHash(input.resultDigest, fence.result_digest) &&
+        securelyMatchesHash(expectedResultDigest, fence.result_digest)
+      ) {
+        return {
+          jobId: input.jobId,
+          runAttemptId: input.runAttemptId,
+          jobState: "succeeded",
+          runState: "succeeded",
+        };
+      }
+      throw new TerminalSubmissionConflictError();
+    }
+
     if (
-      fence === undefined ||
-      fence.job_id !== input.jobId ||
-      fence.worker_node_id !== input.workerNodeId ||
-      fence.worker_instance_id !== input.workerInstanceId ||
-      fence.lease_generation !== input.leaseGeneration ||
-      !securelyMatchesHash(fence.lease_token_hash, tokenHash) ||
       !["leased", "running"].includes(fence.status) ||
       !["leased", "running"].includes(fence.job_status) ||
       fence.current_run_attempt_id !== input.runAttemptId ||
@@ -979,8 +1103,6 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
     ) {
       throw new LeaseLostError();
     }
-    const resultJson = canonicalJson(input.result);
-    const expectedResultDigest = hash(resultJson);
     if (!securelyMatchesHash(input.resultDigest, expectedResultDigest)) {
       throw new ResultDigestMismatchError();
     }
@@ -1087,6 +1209,10 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
           attempt.no_progress_timeout_ms,
           attempt.no_progress_deadline_at,
           attempt.progress_sequence,
+          attempt.result_digest,
+          attempt.result_json,
+          attempt.failure_code,
+          attempt.failure_message,
           job.status AS job_status,
           job.cancellation_requested_at,
           job.current_run_attempt_id,
@@ -1097,14 +1223,32 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
         JOIN workers AS worker ON worker.id = attempt.worker_id
         WHERE attempt.id = ?
       `)
-      .get(input.runAttemptId) as unknown as HeartbeatRow | undefined;
+      .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
+    if (fence === undefined || !matchesTerminalLeaseIdentity(fence, input, tokenHash)) {
+      throw new LeaseLostError();
+    }
+
+    const terminalPayload = failureTerminalPayload(input);
+    const terminalPayloadJson = canonicalJson(terminalPayload);
+    const terminalPayloadDigest = hash(terminalPayloadJson);
+    if (isTerminalAttemptState(fence.status)) {
+      const replay = parseFailureTerminalReplayRecord(fence.result_json);
+      if (
+        (fence.status === "failed" || fence.status === "cancelled") &&
+        fence.result_digest !== null &&
+        replay !== null &&
+        securelyMatchesHash(terminalPayloadDigest, fence.result_digest) &&
+        canonicalJson(replay.payload) === terminalPayloadJson &&
+        replay.response.jobId === input.jobId &&
+        replay.response.runAttemptId === input.runAttemptId &&
+        replay.response.runState === fence.status
+      ) {
+        return replay.response;
+      }
+      throw new TerminalSubmissionConflictError();
+    }
+
     if (
-      fence === undefined ||
-      fence.job_id !== input.jobId ||
-      fence.worker_node_id !== input.workerNodeId ||
-      fence.worker_instance_id !== input.workerInstanceId ||
-      fence.lease_generation !== input.leaseGeneration ||
-      !securelyMatchesHash(fence.lease_token_hash, tokenHash) ||
       !["leased", "running"].includes(fence.status) ||
       !["leased", "running", "cancel_requested"].includes(fence.job_status) ||
       fence.current_run_attempt_id !== input.runAttemptId ||
@@ -1136,6 +1280,27 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
     const wasCancelled =
       job.status === "cancel_requested" || job.cancellation_requested_at !== null;
     const runState: LeaseTerminalResult["runState"] = wasCancelled ? "cancelled" : "failed";
+    const shouldRetry = !wasCancelled && input.retryable && job.attempt_count < job.max_attempts;
+    const jobState: LeaseTerminalResult["jobState"] = wasCancelled
+      ? "cancelled"
+      : shouldRetry
+        ? "retry_waiting"
+        : input.retryable
+          ? "dead_letter"
+          : "failed";
+    const terminalResponse: LeaseTerminalResult = {
+      jobId: input.jobId,
+      runAttemptId: input.runAttemptId,
+      jobState,
+      runState,
+    };
+    const replayRecord: FailureTerminalReplayRecord = {
+      version: 1,
+      terminalOutcome: "failure",
+      payload: terminalPayload,
+      response: terminalResponse,
+    };
+    const replayJson = canonicalJson(replayRecord);
     const attemptUpdate = database
       .prepare(`
         UPDATE run_attempts
@@ -1143,7 +1308,9 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
           status = ?,
           ended_at = ?,
           failure_code = ?,
-          failure_message = ?
+          failure_message = ?,
+          result_digest = ?,
+          result_json = ?
         WHERE id = ?
           AND job_id = ?
           AND worker_node_id = ?
@@ -1167,6 +1334,8 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
         now,
         input.failureCode,
         input.failureMessage,
+        terminalPayloadDigest,
+        replayJson,
         input.runAttemptId,
         input.jobId,
         input.workerNodeId,
@@ -1181,14 +1350,6 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
       throw new LeaseLostError();
     }
 
-    const shouldRetry = !wasCancelled && input.retryable && job.attempt_count < job.max_attempts;
-    const jobState: LeaseTerminalResult["jobState"] = wasCancelled
-      ? "cancelled"
-      : shouldRetry
-        ? "retry_waiting"
-        : input.retryable
-          ? "dead_letter"
-          : "failed";
     const jobUpdate = database
       .prepare(`
         UPDATE jobs
@@ -1228,12 +1389,7 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
       `)
       .run(now, now, input.workerNodeId, input.workerInstanceId);
 
-    return {
-      jobId: input.jobId,
-      runAttemptId: input.runAttemptId,
-      jobState,
-      runState,
-    };
+    return terminalResponse;
   });
 
 const reapExpiredLeases = (input: ReapExpiredLeasesInput): { readonly expiredCount: number } =>
@@ -1389,22 +1545,25 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return listWorkers(database, request.input as DashboardWorkerListQuery);
     case "getSystemSnapshot":
       return getSystemSnapshot(database, schemaVersion);
-    case "createOperatorLoginTransaction":
-      return createOperatorLoginTransaction(
+    case "beginOperatorLogin":
+      return beginOperatorLogin(database, request.input as BeginOperatorLoginInput);
+    case "validateOperatorLoginTransaction":
+      return validateOperatorLoginTransaction(
         database,
-        request.input as CreateOperatorLoginTransactionInput,
+        request.input as ValidateOperatorLoginTransactionInput,
       );
-    case "consumeOperatorLoginTransaction":
-      return consumeOperatorLoginTransaction(
-        database,
-        request.input as ConsumeOperatorLoginTransactionInput,
-      );
+    case "finalizeOperatorLogin":
+      return finalizeOperatorLogin(database, request.input as FinalizeOperatorLoginInput);
     case "createOperatorSession":
       return createOperatorSession(database, request.input as CreateOperatorSessionInput);
     case "findOperatorSession":
       return findOperatorSession(database, request.input as FindOperatorSessionInput);
     case "deleteOperatorSession":
       return deleteOperatorSession(database, request.input as DeleteOperatorSessionInput);
+    case "deleteOperatorBrowserFlow":
+      return deleteOperatorBrowserFlow(database, request.input as DeleteOperatorBrowserFlowInput);
+    case "cleanupExpiredOperatorAuth":
+      return cleanupExpiredOperatorAuth(database, request.input as CleanupExpiredOperatorAuthInput);
     case "readGitHubPollingProjection":
       return readGitHubPollingProjection(database, request.input as GitHubPollingProjectionKey);
     case "writeGitHubPollingProjection":
@@ -1424,6 +1583,12 @@ const handleRequest = (request: DatabaseRequest): unknown => {
 
 try {
   mkdirSync(dirname(options.databasePath), { recursive: true });
+  cleanupIncompleteMigrationBackups(options.databasePath);
+  const existingDatabaseStats = existsSync(options.databasePath)
+    ? statSync(options.databasePath)
+    : undefined;
+  const existingDatabase =
+    existingDatabaseStats?.isFile() === true && existingDatabaseStats.size > 0;
   database = new DatabaseSync(options.databasePath, {
     timeout: 5_000,
     enableForeignKeyConstraints: true,
@@ -1434,6 +1599,15 @@ try {
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
   database.exec("PRAGMA trusted_schema = OFF");
+  const migrationState = inspectMigrationState(database, options.migrationsDirectory);
+  if (existingDatabase && migrationState.pendingVersions.length > 0) {
+    await createMigrationBackup({
+      database,
+      databasePath: options.databasePath,
+      currentVersion: migrationState.currentVersion,
+      targetVersion: migrationState.targetVersion,
+    });
+  }
   schemaVersion = runMigrations(database, options.migrationsDirectory);
   port.postMessage({ type: "ready" });
 

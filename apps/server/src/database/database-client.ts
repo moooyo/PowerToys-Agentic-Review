@@ -57,8 +57,13 @@ export class DatabaseClient {
 
   public static async create(options: DatabaseWorkerOptions): Promise<DatabaseClient> {
     const client = new DatabaseClient(options);
-    await client.#ready;
-    return client;
+    try {
+      await client.#ready;
+      return client;
+    } catch (error) {
+      await client.#terminateAfterFailedStartup();
+      throw error;
+    }
   }
 
   public request<TOperation extends DatabaseOperation>(
@@ -146,5 +151,11 @@ export class DatabaseClient {
       pending.reject(error);
     }
     this.#pending.clear();
+  }
+
+  async #terminateAfterFailedStartup(): Promise<void> {
+    this.#isClosing = true;
+    await this.#worker.terminate().catch(() => undefined);
+    await this.#exited;
   }
 }

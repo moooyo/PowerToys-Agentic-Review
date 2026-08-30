@@ -26,6 +26,15 @@ export class ResultDigestMismatchError extends Error {
   }
 }
 
+export class TerminalSubmissionConflictError extends Error {
+  public readonly code = "TERMINAL_SUBMISSION_CONFLICT";
+
+  public constructor() {
+    super("The run attempt already has a different terminal submission.");
+    this.name = "TerminalSubmissionConflictError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 

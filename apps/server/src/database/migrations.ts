@@ -13,7 +13,21 @@ interface MigrationFile extends AppliedMigration {
   readonly sql: string;
 }
 
+export interface MigrationState {
+  readonly currentVersion: number;
+  readonly targetVersion: number;
+  readonly pendingVersions: readonly number[];
+}
+
 const migrationPattern = /^(\d+)_.*\.sql$/u;
+const migrationTableSql = `
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,
+    checksum TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+  ) STRICT;
+`;
 
 const readMigrations = (directory: string): readonly MigrationFile[] => {
   const migrations = readdirSync(directory, { withFileTypes: true })
@@ -60,54 +74,93 @@ const readMigrations = (directory: string): readonly MigrationFile[] => {
   return migrations;
 };
 
-export const runMigrations = (database: DatabaseSync, directory: string): number => {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      filename TEXT NOT NULL UNIQUE,
-      checksum TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    ) STRICT;
-  `);
+const readAppliedMigrations = (database: DatabaseSync): readonly AppliedMigration[] => {
+  const table = database
+    .prepare(
+      "SELECT 1 AS present FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'",
+    )
+    .get() as { readonly present: number } | undefined;
+  if (table === undefined) {
+    return [];
+  }
 
-  const appliedRows = database
+  return database
     .prepare("SELECT version, filename, checksum FROM schema_migrations ORDER BY version")
     .all() as unknown as AppliedMigration[];
-  const applied = new Map(appliedRows.map((row) => [row.version, row]));
-  const migrations = readMigrations(directory);
-  const availableVersions = new Set(migrations.map((migration) => migration.version));
-  for (const migration of appliedRows) {
-    if (!availableVersions.has(migration.version)) {
+};
+
+const validateAppliedMigrations = (
+  appliedRows: readonly AppliedMigration[],
+  migrations: readonly MigrationFile[],
+): void => {
+  const available = new Map(migrations.map((migration) => [migration.version, migration]));
+  for (const [index, applied] of appliedRows.entries()) {
+    const expectedVersion = index + 1;
+    if (applied.version !== expectedVersion) {
       throw new Error(
-        `Applied migration ${migration.version} (${migration.filename}) is missing from the deployment.`,
+        `Applied migration sequence has a gap: expected version ${expectedVersion}, found ${applied.version}.`,
       );
     }
+
+    const migration = available.get(applied.version);
+    if (migration === undefined) {
+      throw new Error(
+        `Applied migration ${applied.version} (${applied.filename}) is missing from the deployment.`,
+      );
+    }
+    if (applied.filename !== migration.filename || applied.checksum !== migration.checksum) {
+      throw new Error(`Applied migration ${applied.version} does not match ${migration.filename}.`);
+    }
   }
-  const insertMigration = database.prepare(`
-    INSERT INTO schema_migrations (version, filename, checksum, applied_at)
-    VALUES (?, ?, ?, ?)
-  `);
+};
+
+export const inspectMigrationState = (
+  database: DatabaseSync,
+  directory: string,
+): MigrationState => {
+  const migrations = readMigrations(directory);
+  const appliedRows = readAppliedMigrations(database);
+  validateAppliedMigrations(appliedRows, migrations);
+  const appliedVersions = new Set(appliedRows.map((migration) => migration.version));
+
+  return {
+    currentVersion: appliedRows.at(-1)?.version ?? 0,
+    targetVersion: migrations.at(-1)?.version ?? 0,
+    pendingVersions: migrations
+      .filter((migration) => !appliedVersions.has(migration.version))
+      .map((migration) => migration.version),
+  };
+};
+
+export const runMigrations = (database: DatabaseSync, directory: string): number => {
+  const migrations = readMigrations(directory);
+  validateAppliedMigrations(readAppliedMigrations(database), migrations);
 
   for (const migration of migrations) {
-    const existing = applied.get(migration.version);
-    if (existing !== undefined) {
-      if (existing.filename !== migration.filename || existing.checksum !== migration.checksum) {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(migrationTableSql);
+      const existing = database
+        .prepare("SELECT version, filename, checksum FROM schema_migrations WHERE version = ?")
+        .get(migration.version) as AppliedMigration | undefined;
+
+      if (existing === undefined) {
+        database.exec(migration.sql);
+        database
+          .prepare(`
+            INSERT INTO schema_migrations (version, filename, checksum, applied_at)
+            VALUES (?, ?, ?, ?)
+          `)
+          .run(migration.version, migration.filename, migration.checksum, new Date().toISOString());
+      } else if (
+        existing.filename !== migration.filename ||
+        existing.checksum !== migration.checksum
+      ) {
         throw new Error(
           `Applied migration ${migration.version} does not match ${migration.filename}.`,
         );
       }
-      continue;
-    }
 
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      database.exec(migration.sql);
-      insertMigration.run(
-        migration.version,
-        migration.filename,
-        migration.checksum,
-        new Date().toISOString(),
-      );
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");
@@ -115,5 +168,9 @@ export const runMigrations = (database: DatabaseSync, directory: string): number
     }
   }
 
-  return migrations.at(-1)?.version ?? 0;
+  const finalState = inspectMigrationState(database, directory);
+  if (finalState.pendingVersions.length !== 0) {
+    throw new Error(`Database migration did not reach target version ${finalState.targetVersion}.`);
+  }
+  return finalState.currentVersion;
 };

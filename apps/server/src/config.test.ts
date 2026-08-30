@@ -41,6 +41,12 @@ describe("loadConfig Phase 1 integrations", () => {
         AGENTIC_REVIEW_PORT: "65536",
       }),
     ).toThrow(/65535/u);
+    expect(() =>
+      loadConfig({
+        ...developmentEnvironment(),
+        AGENTIC_REVIEW_OPERATOR_AUTH_CLEANUP_BATCH_SIZE: "10001",
+      }),
+    ).toThrow(/10000/u);
   });
 
   it("loads repository and actor IDs separately from display logins", async () => {

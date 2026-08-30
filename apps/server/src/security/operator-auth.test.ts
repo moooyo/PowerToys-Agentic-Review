@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  type ConsumeOperatorLoginTransactionInput,
-  type CreateOperatorLoginTransactionInput,
+  type BeginOperatorLoginInput,
+  type BeginOperatorLoginResult,
   type CreateOperatorSessionInput,
+  type DeleteOperatorBrowserFlowInput,
   type DeleteOperatorSessionInput,
+  type FinalizeOperatorLoginInput,
   type FindOperatorSessionInput,
   OperatorAuthError,
   type OperatorAuthPersistence,
@@ -14,8 +16,12 @@ import {
   type OperatorOidcCallbackInput,
   type OperatorOidcClient,
   type OperatorSession,
+  type ValidateOperatorLoginTransactionInput,
 } from "../../dist/security/operator-auth.js";
-import { createOperatorOidcClient } from "../../dist/security/operator-auth-oidc.js";
+import {
+  createOperatorOidcClient,
+  validateExactOidcIssuer,
+} from "../../dist/security/operator-auth-oidc.js";
 
 const fixedNow = new Date("2026-08-30T05:00:00.000Z");
 const issuer = "https://identity.example.com";
@@ -27,23 +33,91 @@ const operatorIdentity: OperatorIdentity = {
 };
 
 const hash = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+const browserBindingToken = "Z".repeat(43);
+const browserBindingHash = hash(browserBindingToken);
 
 class MemoryAuthPersistence implements OperatorAuthPersistence {
-  public readonly transactions = new Map<string, CreateOperatorLoginTransactionInput>();
+  public readonly browserFlows = new Map<
+    string,
+    { readonly generation: number; readonly expiresAt: string }
+  >();
+  public readonly transactions = new Map<
+    string,
+    BeginOperatorLoginInput & { readonly browserGeneration: number }
+  >();
   public readonly sessions = new Map<string, CreateOperatorSessionInput>();
 
-  public async createLoginTransaction(input: CreateOperatorLoginTransactionInput): Promise<void> {
-    this.transactions.set(input.tokenSha256, input);
+  public async beginLogin(input: BeginOperatorLoginInput): Promise<BeginOperatorLoginResult> {
+    const generation = (this.browserFlows.get(input.browserSha256)?.generation ?? 0) + 1;
+    this.browserFlows.set(input.browserSha256, {
+      generation,
+      expiresAt: input.browserExpiresAt,
+    });
+    for (const [token, transaction] of this.transactions) {
+      if (transaction.browserSha256 === input.browserSha256) {
+        this.transactions.delete(token);
+      }
+    }
+    for (const [token, session] of this.sessions) {
+      if (session.browserSha256 === input.browserSha256) {
+        this.sessions.delete(token);
+      }
+    }
+    this.transactions.set(input.transactionTokenSha256, {
+      ...input,
+      browserGeneration: generation,
+    });
+    return { browserGeneration: generation, browserExpiresAt: input.browserExpiresAt };
   }
 
-  public async consumeLoginTransaction(
-    input: ConsumeOperatorLoginTransactionInput,
-  ): Promise<boolean> {
-    const transaction = this.transactions.get(input.tokenSha256);
-    if (transaction === undefined || transaction.expiresAt <= input.consumedAt) {
+  public async validateLoginTransaction(
+    input: ValidateOperatorLoginTransactionInput,
+  ): Promise<number | null> {
+    const transaction = this.transactions.get(input.transactionTokenSha256);
+    const browser = this.browserFlows.get(input.browserSha256);
+    if (
+      transaction === undefined ||
+      browser === undefined ||
+      transaction.browserSha256 !== input.browserSha256 ||
+      transaction.transactionExpiresAt <= fixedNow.toISOString() ||
+      browser.expiresAt <= fixedNow.toISOString() ||
+      transaction.browserGeneration !== browser.generation
+    ) {
+      return null;
+    }
+    return transaction.browserGeneration;
+  }
+
+  public async finalizeLogin(input: FinalizeOperatorLoginInput): Promise<boolean> {
+    const transaction = this.transactions.get(input.transactionTokenSha256);
+    const browser = this.browserFlows.get(input.browserSha256);
+    if (
+      transaction === undefined ||
+      browser === undefined ||
+      transaction.browserSha256 !== input.browserSha256 ||
+      transaction.browserGeneration !== input.browserGeneration ||
+      browser.generation !== input.browserGeneration ||
+      transaction.transactionExpiresAt <= input.createdAt ||
+      browser.expiresAt <= input.createdAt
+    ) {
       return false;
     }
-    this.transactions.delete(input.tokenSha256);
+    this.transactions.delete(input.transactionTokenSha256);
+    this.browserFlows.set(input.browserSha256, {
+      generation: input.browserGeneration,
+      expiresAt: input.expiresAt > browser.expiresAt ? input.expiresAt : browser.expiresAt,
+    });
+    this.sessions.set(input.sessionTokenSha256, {
+      tokenSha256: input.sessionTokenSha256,
+      browserSha256: input.browserSha256,
+      browserGeneration: input.browserGeneration,
+      issuer: input.issuer,
+      subject: input.subject,
+      displayName: input.displayName,
+      email: input.email,
+      createdAt: input.createdAt,
+      expiresAt: input.expiresAt,
+    });
     return true;
   }
 
@@ -53,15 +127,43 @@ class MemoryAuthPersistence implements OperatorAuthPersistence {
 
   public async findSession(input: FindOperatorSessionInput): Promise<OperatorSession | null> {
     const session = this.sessions.get(input.tokenSha256);
-    if (session === undefined || session.expiresAt <= input.accessedAt) {
+    const browser =
+      input.browserSha256 === null ? undefined : this.browserFlows.get(input.browserSha256);
+    const browserMatches =
+      input.browserSha256 === null
+        ? session?.browserSha256 === null && session.browserGeneration === null
+        : session?.browserSha256 === input.browserSha256 &&
+          session.browserGeneration === browser?.generation &&
+          browser.expiresAt > fixedNow.toISOString();
+    if (session === undefined || session.expiresAt <= fixedNow.toISOString() || !browserMatches) {
       return null;
     }
-    const { tokenSha256: _tokenSha256, ...stored } = session;
-    return stored;
+    return {
+      issuer: session.issuer,
+      subject: session.subject,
+      displayName: session.displayName,
+      email: session.email,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt,
+    };
   }
 
   public async deleteSession(input: DeleteOperatorSessionInput): Promise<void> {
     this.sessions.delete(input.tokenSha256);
+  }
+
+  public async deleteBrowserFlow(input: DeleteOperatorBrowserFlowInput): Promise<void> {
+    this.browserFlows.delete(input.browserSha256);
+    for (const [token, transaction] of this.transactions) {
+      if (transaction.browserSha256 === input.browserSha256) {
+        this.transactions.delete(token);
+      }
+    }
+    for (const [token, session] of this.sessions) {
+      if (session.browserSha256 === input.browserSha256) {
+        this.sessions.delete(token);
+      }
+    }
   }
 }
 
@@ -115,6 +217,24 @@ const createTokenGenerator = (...tokens: string[]): (() => string) => {
 };
 
 describe("OperatorAuthService", () => {
+  it("requires browser bootstrap before creating a first-login transaction", async () => {
+    const persistence = new MemoryAuthPersistence();
+    const auth = new OperatorAuthService({
+      config: oidcConfig,
+      persistence,
+      oidc: new FakeOidcClient(),
+      now: () => fixedNow,
+      generateOpaqueToken: createTokenGenerator("Q".repeat(43), "R".repeat(43)),
+    });
+
+    const first = auth.ensureBrowserBinding();
+    const second = auth.ensureBrowserBinding();
+
+    expect(first?.token).not.toBe(second?.token);
+    expect(persistence.browserFlows.size).toBe(0);
+    await expect(auth.startLogin()).rejects.toMatchObject({ code: "browser_binding_required" });
+  });
+
   it("uses a one-time transaction for Authorization Code with PKCE and stores only token hashes", async () => {
     const transactionToken = "A".repeat(43);
     const sessionToken = "B".repeat(43);
@@ -129,12 +249,13 @@ describe("OperatorAuthService", () => {
     });
 
     expect(auth.secureCookies).toBe(true);
-    const start = await auth.startLogin();
+    const start = await auth.startLogin(browserBindingToken);
     expect(start.kind).toBe("authorization_redirect");
     if (start.kind !== "authorization_redirect") {
       throw new Error("Expected an OIDC authorization redirect.");
     }
     expect(start.transactionToken).toBe(transactionToken);
+    expect(start.browserBindingToken).toBe(browserBindingToken);
     expect(oidc.authorizationInput).toEqual({
       state: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
       nonce: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
@@ -146,13 +267,14 @@ describe("OperatorAuthService", () => {
       oidc.authorizationInput?.pkceCodeVerifier,
     );
     expect(persistence.transactions.has(hash(transactionToken))).toBe(true);
+    expect(persistence.browserFlows.get(browserBindingHash)?.generation).toBe(1);
     expect([...persistence.transactions.keys()]).not.toContain(transactionToken);
 
     const callback = new URLSearchParams({
       code: "authorization-code",
       state: oidc.authorizationInput?.state ?? "",
     });
-    const completed = await auth.completeLogin(callback, transactionToken);
+    const completed = await auth.completeLogin(callback, transactionToken, browserBindingToken);
 
     expect(completed.sessionToken).toBe(sessionToken);
     expect(oidc.callbackInput).toMatchObject({
@@ -177,7 +299,7 @@ describe("OperatorAuthService", () => {
       now: () => fixedNow,
       generateOpaqueToken: createTokenGenerator(transactionToken, "D".repeat(43)),
     });
-    const start = await auth.startLogin();
+    const start = await auth.startLogin(browserBindingToken);
     if (start.kind !== "authorization_redirect") {
       throw new Error("Expected an OIDC authorization redirect.");
     }
@@ -186,12 +308,95 @@ describe("OperatorAuthService", () => {
       state: start.authorizationUrl.searchParams.get("state") ?? "",
     });
 
-    await auth.completeLogin(callback, transactionToken);
+    await auth.completeLogin(callback, transactionToken, browserBindingToken);
     oidc.callbackInput = undefined;
-    await expect(auth.completeLogin(callback, transactionToken)).rejects.toMatchObject({
+    await expect(
+      auth.completeLogin(callback, transactionToken, browserBindingToken),
+    ).rejects.toMatchObject({
       code: "login_transaction_expired",
     });
     expect(oidc.callbackInput).toBeUndefined();
+  });
+
+  it("fences an older callback when a newer browser generation completes first", async () => {
+    const firstTransactionToken = "M".repeat(43);
+    const secondTransactionToken = "N".repeat(43);
+    const secondSessionToken = "O".repeat(43);
+    const staleSessionToken = "P".repeat(43);
+    const persistence = new MemoryAuthPersistence();
+    const oidc = new FakeOidcClient();
+    let releaseFirstExchange!: () => void;
+    let markFirstExchangeStarted!: () => void;
+    const firstExchangeGate = new Promise<void>((resolve) => {
+      releaseFirstExchange = resolve;
+    });
+    const firstExchangeStarted = new Promise<void>((resolve) => {
+      markFirstExchangeStarted = resolve;
+    });
+    oidc.exchangeAuthorizationCode = async (input) => {
+      oidc.callbackInput = input;
+      if (input.callbackParameters.get("code") === "first-code") {
+        markFirstExchangeStarted();
+        await firstExchangeGate;
+      }
+      return operatorIdentity;
+    };
+    const auth = new OperatorAuthService({
+      config: oidcConfig,
+      persistence,
+      oidc,
+      now: () => fixedNow,
+      generateOpaqueToken: createTokenGenerator(
+        firstTransactionToken,
+        secondTransactionToken,
+        secondSessionToken,
+        staleSessionToken,
+      ),
+    });
+
+    const firstStart = await auth.startLogin(browserBindingToken);
+    if (firstStart.kind !== "authorization_redirect") {
+      throw new Error("Expected the first OIDC authorization redirect.");
+    }
+    const firstCompletion = auth
+      .completeLogin(
+        new URLSearchParams({
+          code: "first-code",
+          state: firstStart.authorizationUrl.searchParams.get("state") ?? "",
+        }),
+        firstTransactionToken,
+        browserBindingToken,
+      )
+      .then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    await firstExchangeStarted;
+
+    const secondStart = await auth.startLogin(browserBindingToken);
+    if (secondStart.kind !== "authorization_redirect") {
+      throw new Error("Expected the second OIDC authorization redirect.");
+    }
+    const secondCompletion = await auth.completeLogin(
+      new URLSearchParams({
+        code: "second-code",
+        state: secondStart.authorizationUrl.searchParams.get("state") ?? "",
+      }),
+      secondTransactionToken,
+      browserBindingToken,
+    );
+    releaseFirstExchange();
+    const staleCompletion = await firstCompletion;
+
+    expect(secondCompletion.sessionToken).toBe(secondSessionToken);
+    expect(staleCompletion.ok).toBe(false);
+    if (!staleCompletion.ok) {
+      expect(staleCompletion.error).toMatchObject({ code: "login_transaction_expired" });
+    }
+    await expect(auth.getSession(secondSessionToken, browserBindingToken)).resolves.toMatchObject(
+      operatorIdentity,
+    );
+    expect(persistence.sessions.has(hash(staleSessionToken))).toBe(false);
   });
 
   it("rejects a valid IdP identity that is not on the subject allowlist", async () => {
@@ -206,7 +411,7 @@ describe("OperatorAuthService", () => {
       now: () => fixedNow,
       generateOpaqueToken: createTokenGenerator(transactionToken),
     });
-    const start = await auth.startLogin();
+    const start = await auth.startLogin(browserBindingToken);
     if (start.kind !== "authorization_redirect") {
       throw new Error("Expected an OIDC authorization redirect.");
     }
@@ -218,9 +423,65 @@ describe("OperatorAuthService", () => {
           state: start.authorizationUrl.searchParams.get("state") ?? "",
         }),
         transactionToken,
+        browserBindingToken,
       ),
     ).rejects.toMatchObject({ code: "operator_not_authorized", statusCode: 403 });
     expect(persistence.sessions.size).toBe(0);
+  });
+
+  it("prevents an in-flight callback from finalizing after browser logout", async () => {
+    const transactionToken = "L".repeat(43);
+    const persistence = new MemoryAuthPersistence();
+    const oidc = new FakeOidcClient();
+    let releaseExchange!: () => void;
+    let markExchangeStarted!: () => void;
+    const exchangeGate = new Promise<void>((resolve) => {
+      releaseExchange = resolve;
+    });
+    const exchangeStarted = new Promise<void>((resolve) => {
+      markExchangeStarted = resolve;
+    });
+    oidc.exchangeAuthorizationCode = async (input) => {
+      oidc.callbackInput = input;
+      markExchangeStarted();
+      await exchangeGate;
+      return operatorIdentity;
+    };
+    const auth = new OperatorAuthService({
+      config: oidcConfig,
+      persistence,
+      oidc,
+      now: () => fixedNow,
+      generateOpaqueToken: createTokenGenerator(transactionToken, "K".repeat(43)),
+    });
+    const start = await auth.startLogin(browserBindingToken);
+    if (start.kind !== "authorization_redirect") {
+      throw new Error("Expected an OIDC authorization redirect.");
+    }
+
+    const completion = auth
+      .completeLogin(
+        new URLSearchParams({
+          code: "authorization-code",
+          state: start.authorizationUrl.searchParams.get("state") ?? "",
+        }),
+        transactionToken,
+        browserBindingToken,
+      )
+      .then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    await exchangeStarted;
+    await auth.logout(undefined, browserBindingToken);
+    releaseExchange();
+
+    const outcome = await completion;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toMatchObject({ code: "login_transaction_expired" });
+    }
+    expect(oidc.callbackInput).toBeDefined();
   });
 
   it("looks up and revokes sessions by SHA-256 without accepting malformed cookies", async () => {
@@ -228,8 +489,14 @@ describe("OperatorAuthService", () => {
     const persistence = new MemoryAuthPersistence();
     persistence.sessions.set(hash(sessionToken), {
       tokenSha256: hash(sessionToken),
+      browserSha256: browserBindingHash,
+      browserGeneration: 1,
       ...operatorIdentity,
       createdAt: fixedNow.toISOString(),
+      expiresAt: "2026-08-30T06:00:00.000Z",
+    });
+    persistence.browserFlows.set(browserBindingHash, {
+      generation: 1,
       expiresAt: "2026-08-30T06:00:00.000Z",
     });
     const oidc = new FakeOidcClient();
@@ -241,9 +508,11 @@ describe("OperatorAuthService", () => {
     });
 
     await expect(auth.getSession("malformed-cookie")).resolves.toBeNull();
-    await expect(auth.getSession(sessionToken)).resolves.toMatchObject(operatorIdentity);
+    await expect(auth.getSession(sessionToken, browserBindingToken)).resolves.toMatchObject(
+      operatorIdentity,
+    );
     await auth.logout(sessionToken);
-    await expect(auth.getSession(sessionToken)).resolves.toBeNull();
+    await expect(auth.getSession(sessionToken, browserBindingToken)).resolves.toBeNull();
   });
 
   it("revokes an existing session when its subject is removed from the current allowlist", async () => {
@@ -252,8 +521,14 @@ describe("OperatorAuthService", () => {
     const persistence = new MemoryAuthPersistence();
     persistence.sessions.set(tokenHash, {
       tokenSha256: tokenHash,
+      browserSha256: browserBindingHash,
+      browserGeneration: 1,
       ...operatorIdentity,
       createdAt: fixedNow.toISOString(),
+      expiresAt: "2026-08-30T06:00:00.000Z",
+    });
+    persistence.browserFlows.set(browserBindingHash, {
+      generation: 1,
       expiresAt: "2026-08-30T06:00:00.000Z",
     });
     const auth = new OperatorAuthService({
@@ -263,7 +538,7 @@ describe("OperatorAuthService", () => {
       now: () => fixedNow,
     });
 
-    await expect(auth.getSession(sessionToken)).resolves.toBeNull();
+    await expect(auth.getSession(sessionToken, browserBindingToken)).resolves.toBeNull();
     expect(persistence.sessions.has(tokenHash)).toBe(false);
   });
 
@@ -279,6 +554,57 @@ describe("OperatorAuthService", () => {
         requestTimeoutSeconds: 5,
       }),
     ).rejects.toThrow(/issuer, not a discovery document/u);
+  });
+
+  it.each(["common", "organizations", "consumers"])(
+    "rejects the Microsoft Entra %s multi-tenant issuer",
+    async (tenantAlias) => {
+      await expect(
+        createOperatorOidcClient({
+          issuerUrl: `https://login.microsoftonline.com/${tenantAlias}/v2.0`,
+          clientId: "agentic-review",
+          clientSecret: "test-secret",
+          clientAuthenticationMethod: "client_secret_basic",
+          redirectUri: "https://review.example.com/api/v1/auth/callback",
+          scopes: ["openid"],
+          requestTimeoutSeconds: 5,
+        }),
+      ).rejects.toThrow(/tenant-specific Microsoft Entra issuer/u);
+    },
+  );
+
+  it.each([
+    "https://login.microsoftonline.com/{tenantid}/v2.0",
+    "https://identity.example.com/%7Btenant%7D",
+  ])("rejects a template issuer before discovery: %s", async (issuerUrl) => {
+    await expect(
+      createOperatorOidcClient({
+        issuerUrl,
+        clientId: "agentic-review",
+        clientSecret: "test-secret",
+        clientAuthenticationMethod: "client_secret_basic",
+        redirectUri: "https://review.example.com/api/v1/auth/callback",
+        scopes: ["openid"],
+        requestTimeoutSeconds: 5,
+      }),
+    ).rejects.toThrow(/exact issuer.*template/u);
+  });
+
+  it("requires the discovered issuer to exactly match the configured issuer", () => {
+    const configuredIssuer = "https://login.microsoftonline.com/tenant-id/v2.0";
+    expect(validateExactOidcIssuer(configuredIssuer, configuredIssuer)).toBe(configuredIssuer);
+    expect(() =>
+      validateExactOidcIssuer(
+        configuredIssuer,
+        "https://login.microsoftonline.com/different-tenant/v2.0",
+      ),
+    ).toThrow(/exactly match the configured issuerUrl/u);
+    expect(() =>
+      validateExactOidcIssuer(
+        configuredIssuer,
+        "https://login.microsoftonline.com/{tenantid}/v2.0",
+      ),
+    ).toThrow(/must not contain a template/u);
   });
 
   it("fails closed for incomplete production OIDC and non-loopback development bypass", () => {

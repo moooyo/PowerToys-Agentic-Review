@@ -781,6 +781,188 @@ describe("DatabaseClient lease integration", () => {
       }),
     ).rejects.toMatchObject({ code: "RESULT_DIGEST_MISMATCH" });
   });
+
+  it("replays an identical completion and rejects conflicting terminal submissions", async () => {
+    const fixture = await createFixture();
+    const { client } = fixture;
+    const worker = await registerWorker(client, "worker-replay", "instance-complete-replay");
+    const claim = await claimLease(
+      client,
+      "worker-replay",
+      "instance-complete-replay",
+      worker.capabilitiesDigest,
+    );
+    expect(claim.outcome).toBe("granted");
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the Worker instance to receive the lease.");
+    }
+
+    const result = { findings: [], summary: "idempotent completion" };
+    const submission = {
+      ...claim.envelope.lease,
+      resultDigest: sha256(canonicalJson(result)),
+      result,
+    };
+    const first = await client.request("completeLease", submission);
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
+    });
+    const replay = await client.request("completeLease", submission);
+
+    expect(replay).toEqual(first);
+    await expect(
+      client.request("completeLease", {
+        ...submission,
+        leaseToken: "different-terminal-replay-token".padEnd(32, "x"),
+      }),
+    ).rejects.toMatchObject({ code: "LEASE_LOST" });
+    await expect(
+      client.request("completeLease", {
+        ...submission,
+        resultDigest: `${submission.resultDigest.startsWith("0") ? "1" : "0"}${submission.resultDigest.slice(1)}`,
+      }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+
+    const differentResult = { findings: [], summary: "different completion" };
+    await expect(
+      client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(differentResult)),
+        result: differentResult,
+      }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+    await expect(
+      client.request("failLease", {
+        ...claim.envelope.lease,
+        failureCode: "late_failure",
+        failureMessage: "A failure cannot replace a committed completion.",
+        retryable: false,
+        retryDelaySeconds: 1,
+      }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+  });
+
+  it("replays an identical failure and rejects a changed payload or outcome", async () => {
+    const fixture = await createFixture();
+    const { client } = fixture;
+    const worker = await registerWorker(client, "worker-replay", "instance-failure-replay");
+    const claim = await claimLease(
+      client,
+      "worker-replay",
+      "instance-failure-replay",
+      worker.capabilitiesDigest,
+    );
+    expect(claim.outcome).toBe("granted");
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the Worker instance to receive the lease.");
+    }
+
+    const submission = {
+      ...claim.envelope.lease,
+      failureCode: "temporary_execution_failure",
+      failureMessage: "The execution host ended unexpectedly.",
+      retryable: true,
+      retryDelaySeconds: 1,
+    };
+    const first = await client.request("failLease", submission);
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
+    });
+    const replay = await client.request("failLease", submission);
+
+    expect(first).toMatchObject({ jobState: "retry_waiting", runState: "failed" });
+    expect(replay).toEqual(first);
+
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE jobs SET next_attempt_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.job.jobId);
+    });
+    const nextClaim = await claimLease(
+      client,
+      "worker-replay",
+      "instance-failure-replay",
+      worker.capabilitiesDigest,
+    );
+    expect(nextClaim.outcome).toBe("granted");
+    if (nextClaim.outcome !== "granted") {
+      throw new Error("Expected the retry attempt to receive the lease.");
+    }
+    expect(nextClaim.envelope.lease.runAttemptId).not.toBe(claim.envelope.lease.runAttemptId);
+    await expect(client.request("failLease", submission)).resolves.toEqual(first);
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare("SELECT status, current_run_attempt_id FROM jobs WHERE id = ?")
+          .get(claim.envelope.job.jobId),
+      ).toEqual({
+        status: "leased",
+        current_run_attempt_id: nextClaim.envelope.lease.runAttemptId,
+      });
+    });
+
+    await expect(
+      client.request("failLease", { ...submission, retryable: false }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+
+    const completion = { summary: "too late" };
+    await expect(
+      client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(completion)),
+        result: completion,
+      }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+  });
+
+  it("rejects terminal submissions for an expired attempt that never committed a terminal state", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(fixture.client, "worker-expired", "instance-expired");
+    const claim = await claimLease(
+      fixture.client,
+      "worker-expired",
+      "instance-expired",
+      worker.capabilitiesDigest,
+    );
+    expect(claim.outcome).toBe("granted");
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the Worker instance to receive the lease.");
+    }
+
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
+    });
+    await expect(
+      fixture.client.request("reapExpiredLeases", {
+        retryDelaySeconds: 1,
+        workerOfflineAfterSeconds: 90,
+      }),
+    ).resolves.toEqual({ expiredCount: 1 });
+
+    const result = { summary: "expired" };
+    await expect(
+      fixture.client.request("completeLease", {
+        ...claim.envelope.lease,
+        resultDigest: sha256(canonicalJson(result)),
+        result,
+      }),
+    ).rejects.toMatchObject({ code: "LEASE_LOST" });
+    await expect(
+      fixture.client.request("failLease", {
+        ...claim.envelope.lease,
+        failureCode: "expired",
+        failureMessage: "The expired attempt cannot commit a terminal state.",
+        retryable: true,
+        retryDelaySeconds: 1,
+      }),
+    ).rejects.toMatchObject({ code: "LEASE_LOST" });
+  });
 });
 
 describe("DatabaseClient scheduling ingestion integration", () => {
