@@ -1,0 +1,62 @@
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f5f6f8;
+  color: #1f2329;
+}
+
+* {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
+
+.app-header-status {
+  min-width: 92px;
+  white-space: nowrap;
+}
+
+.app-menu-brand {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.app-menu-brand__icon {
+  color: #1677ff;
+  font-size: 20px;
+}
+
+.operational-page .ant-pro-page-container-children-container {
+  padding-block-start: 16px;
+}
+
+.operational-table .ant-pro-card-body {
+  padding: 0;
+}
+
+.operational-table .ant-table-cell {
+  vertical-align: middle;
+}
+
+.mono {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: rgba(0, 0, 0, 0.56);
+}
+
+@media (max-width: 768px) {
+  .app-header-status {
+    min-width: auto;
+  }
+
+  .app-header-status .ant-typography {
+    display: none;
+  }
+}

@@ -1,0 +1,343 @@
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  type ActiveLeaseHeartbeat,
+  type ClaimLeaseRequest,
+  ClaimLeaseRequestSchema,
+  ExecutionPhaseSchema,
+  type RunCompletionSubmission,
+  RunCompletionSubmissionSchema,
+  type RunFailureSubmission,
+  RunFailureSubmissionSchema,
+  type WorkerHeartbeatRequest,
+  WorkerHeartbeatRequestSchema,
+  type WorkerHeartbeatResponse,
+  type WorkerRegistrationRequest,
+  WorkerRegistrationRequestSchema,
+  type WorkerRegistrationResponse,
+} from "@agentic-review/contracts";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { ServerConfig } from "../config.js";
+import type { DatabaseClient } from "../database/database-client.js";
+import { DatabaseRequestError } from "../database/errors.js";
+import {
+  createWorkerAuthenticationPreHandler,
+  getAuthenticatedWorkerIdentity,
+} from "../security/worker-identity.js";
+
+interface RouteDependencies {
+  readonly config: ServerConfig;
+  readonly database: DatabaseClient;
+  readonly shutdownSignal: AbortSignal;
+}
+
+interface RunRouteParameters {
+  readonly runAttemptId: string;
+}
+
+interface LeaseHeartbeatBody {
+  readonly jobId: string;
+  readonly workerNodeId: string;
+  readonly workerInstanceId: string;
+  readonly leaseToken: string;
+  readonly leaseGeneration: number;
+  readonly phase: ActiveLeaseHeartbeat["phase"];
+  readonly progressSequence: number;
+  readonly progress: unknown;
+}
+
+const entityIdSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+} as const;
+
+const leaseFenceProperties = {
+  jobId: entityIdSchema,
+  workerNodeId: entityIdSchema,
+  workerInstanceId: entityIdSchema,
+  leaseToken: { type: "string", minLength: 32, maxLength: 1_024 },
+  leaseGeneration: { type: "integer", minimum: 1 },
+} as const;
+
+const parametersSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["runAttemptId"],
+  properties: { runAttemptId: entityIdSchema },
+} as const;
+
+const inlineSchema = (schema: unknown): Record<string, unknown> => {
+  const serialized = JSON.stringify(schema, (key, value: unknown) =>
+    key === "$id" ? undefined : value,
+  );
+  if (serialized === undefined) {
+    throw new Error("The route schema could not be serialized.");
+  }
+  return JSON.parse(serialized) as Record<string, unknown>;
+};
+
+const registrationRequestSchema = inlineSchema(WorkerRegistrationRequestSchema);
+const claimRequestSchema = inlineSchema(ClaimLeaseRequestSchema);
+const workerHeartbeatSchema = inlineSchema(WorkerHeartbeatRequestSchema);
+const executionPhaseSchema = inlineSchema(ExecutionPhaseSchema);
+const runCompletionSubmissionSchema = inlineSchema(RunCompletionSubmissionSchema);
+const runFailureSubmissionSchema = inlineSchema(RunFailureSubmissionSchema);
+
+const sendLeaseLost = (runAttemptId: string) => ({
+  runAttemptId,
+  leaseGeneration: 1,
+  action: "stale" as const,
+  leaseExpiresAt: null,
+  reasonCode: "lease_lost",
+});
+
+const heartbeatOneLease = async (
+  database: DatabaseClient,
+  config: ServerConfig,
+  heartbeat: ActiveLeaseHeartbeat,
+) => {
+  try {
+    const result = await database.request("heartbeatLease", {
+      jobId: heartbeat.jobId,
+      runAttemptId: heartbeat.runAttemptId,
+      workerNodeId: heartbeat.workerNodeId,
+      workerInstanceId: heartbeat.workerInstanceId,
+      leaseToken: heartbeat.leaseToken,
+      leaseGeneration: heartbeat.leaseGeneration,
+      phase: heartbeat.phase,
+      progressSequence: heartbeat.progressSequence,
+      progress: {
+        lastProgressAt: heartbeat.lastProgressAt,
+        elapsedMs: heartbeat.elapsedMs,
+        processCount: heartbeat.processCount,
+      },
+      leaseTtlSeconds: config.leaseTtlSeconds,
+    });
+    return {
+      runAttemptId: heartbeat.runAttemptId,
+      leaseGeneration: heartbeat.leaseGeneration,
+      action: result.command,
+      leaseExpiresAt: result.leaseExpiresAt,
+    };
+  } catch (error) {
+    if (error instanceof DatabaseRequestError && error.code === "LEASE_LOST") {
+      return {
+        ...sendLeaseLost(heartbeat.runAttemptId),
+        leaseGeneration: heartbeat.leaseGeneration,
+      };
+    }
+    throw error;
+  }
+};
+
+export const registerWorkerRoutes = (
+  app: FastifyInstance,
+  dependencies: RouteDependencies,
+): void => {
+  const { config, database, shutdownSignal } = dependencies;
+  const authenticateWorker = createWorkerAuthenticationPreHandler(config);
+
+  const registerWorker = async (
+    request: FastifyRequest<{ Body: WorkerRegistrationRequest }>,
+    reply: FastifyReply,
+  ) => {
+    if (request.body.protocolVersion !== config.protocolVersion) {
+      return reply.code(409).send({
+        code: "protocol_version_unsupported",
+        message: `Server protocol version is ${config.protocolVersion}.`,
+        retryable: false,
+      });
+    }
+
+    const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+    const worker = await database.request("registerWorker", {
+      ...request.body,
+      workerNodeId,
+    });
+    const response: WorkerRegistrationResponse = {
+      protocolVersion: "1.0",
+      workerId: worker.workerId,
+      state: worker.status,
+      heartbeatIntervalMs: config.heartbeatIntervalSeconds * 1_000,
+      leaseTtlMs: config.leaseTtlSeconds * 1_000,
+      serverTime: new Date().toISOString(),
+    };
+    return reply.code(200).send(response);
+  };
+  app.post<{ Body: WorkerRegistrationRequest }>(
+    "/api/v1/worker/instances",
+    {
+      schema: { body: registrationRequestSchema },
+      preHandler: authenticateWorker,
+    },
+    registerWorker,
+  );
+
+  app.post<{ Body: ClaimLeaseRequest }>(
+    "/api/v1/worker/leases/claim",
+    {
+      schema: { body: claimRequestSchema },
+      preHandler: authenticateWorker,
+    },
+    async (request) => {
+      const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+      const waitSeconds = Math.min(request.body.waitSeconds ?? 0, config.maxLongPollSeconds);
+      const deadline = Date.now() + waitSeconds * 1_000;
+
+      while (!shutdownSignal.aborted) {
+        const result = await database.request("claimLease", {
+          ...request.body,
+          workerNodeId,
+          protocolVersion: request.body.protocolVersion,
+          leaseTtlSeconds: config.leaseTtlSeconds,
+        });
+        if (result.outcome !== "no_work" || Date.now() >= deadline) {
+          return { ...result, serverTime: new Date().toISOString() };
+        }
+
+        const remaining = deadline - Date.now();
+        try {
+          await delay(Math.min(1_000, remaining), undefined, {
+            signal: shutdownSignal,
+          });
+        } catch {
+          break;
+        }
+      }
+
+      return {
+        outcome: "no_work" as const,
+        retryAfterMs: 1_000,
+        serverTime: new Date().toISOString(),
+      };
+    },
+  );
+
+  app.put<{
+    Params: { readonly workerInstanceId: string };
+    Body: WorkerHeartbeatRequest;
+  }>(
+    "/api/v1/worker/instances/:workerInstanceId/heartbeat",
+    {
+      schema: { body: workerHeartbeatSchema },
+      preHandler: authenticateWorker,
+    },
+    async (request, reply) => {
+      if (request.params.workerInstanceId !== request.body.workerInstanceId) {
+        return reply.code(400).send({
+          code: "worker_instance_mismatch",
+          message: "Route and body worker instance identifiers must match.",
+          retryable: false,
+        });
+      }
+      if (request.body.protocolVersion !== config.protocolVersion) {
+        return reply.code(409).send({
+          code: "protocol_version_unsupported",
+          message: `Server protocol version is ${config.protocolVersion}.`,
+          retryable: false,
+        });
+      }
+
+      const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+      const worker = await database.request("heartbeatWorker", {
+        workerNodeId,
+        workerInstanceId: request.body.workerInstanceId,
+        heartbeatSequence: request.body.heartbeatSequence,
+        availableSlots: request.body.availableSlots,
+        health: request.body.health,
+      });
+      const commands = await Promise.all(
+        request.body.activeLeases.map((heartbeat) =>
+          heartbeatOneLease(database, config, {
+            ...heartbeat,
+            workerNodeId,
+          }),
+        ),
+      );
+      const response: WorkerHeartbeatResponse = {
+        serverTime: new Date().toISOString(),
+        nextHeartbeatInMs: config.heartbeatIntervalSeconds * 1_000,
+        workerState: worker.state,
+        commands,
+      };
+      return response;
+    },
+  );
+
+  app.put<{ Params: RunRouteParameters; Body: LeaseHeartbeatBody }>(
+    "/api/v1/worker/leases/:runAttemptId/heartbeat",
+    {
+      schema: {
+        params: parametersSchema,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: [...Object.keys(leaseFenceProperties), "phase", "progressSequence", "progress"],
+          properties: {
+            ...leaseFenceProperties,
+            phase: executionPhaseSchema,
+            progressSequence: { type: "integer", minimum: 0 },
+            progress: {},
+          },
+        },
+      },
+      preHandler: authenticateWorker,
+    },
+    async (request) => {
+      const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+      const result = await database.request("heartbeatLease", {
+        ...request.body,
+        runAttemptId: request.params.runAttemptId,
+        workerNodeId,
+        leaseTtlSeconds: config.leaseTtlSeconds,
+      });
+      return { ...result, serverTime: new Date().toISOString() };
+    },
+  );
+
+  app.post<{ Params: RunRouteParameters; Body: RunCompletionSubmission }>(
+    "/api/v1/worker/runs/:runAttemptId/complete",
+    {
+      schema: {
+        params: parametersSchema,
+        body: runCompletionSubmissionSchema,
+      },
+      preHandler: authenticateWorker,
+    },
+    async (request) => {
+      const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+      return database.request("completeLease", {
+        ...request.body,
+        runAttemptId: request.params.runAttemptId,
+        workerNodeId,
+      });
+    },
+  );
+
+  app.post<{ Params: RunRouteParameters; Body: RunFailureSubmission }>(
+    "/api/v1/worker/runs/:runAttemptId/fail",
+    {
+      schema: {
+        params: parametersSchema,
+        body: runFailureSubmissionSchema,
+      },
+      preHandler: authenticateWorker,
+    },
+    async (request) => {
+      const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
+      return database.request("failLease", {
+        runAttemptId: request.params.runAttemptId,
+        jobId: request.body.jobId,
+        workerNodeId,
+        workerInstanceId: request.body.workerInstanceId,
+        leaseToken: request.body.leaseToken,
+        leaseGeneration: request.body.leaseGeneration,
+        failureCode: request.body.code,
+        failureMessage: request.body.message,
+        retryable: request.body.retryable,
+        retryDelaySeconds: config.retryDelaySeconds,
+      });
+    },
+  );
+};

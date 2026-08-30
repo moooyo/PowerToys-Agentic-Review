@@ -1,0 +1,24 @@
+{
+  "name": "@agentic-review/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.20.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -b && esbuild dist/main.js --bundle --platform=node --format=esm --target=node24 --outfile=dist/worker.mjs --sourcemap",
+    "start": "node --enable-source-maps dist/worker.mjs",
+    "test": "vitest run src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@agentic-review/contracts": "workspace:*",
+    "@sinclair/typebox": "0.34.52"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

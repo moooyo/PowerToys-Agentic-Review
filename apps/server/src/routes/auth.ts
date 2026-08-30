@@ -1,0 +1,296 @@
+import cookie from "@fastify/cookie";
+import rateLimit from "@fastify/rate-limit";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import {
+  OperatorAuthError,
+  type OperatorLoginStart,
+  type OperatorSession,
+} from "../security/operator-auth.js";
+
+export const OPERATOR_SESSION_COOKIE = "__Host-agentic_review_session";
+export const OPERATOR_LOGIN_TRANSACTION_COOKIE = "__Host-agentic_review_login";
+export const DEVELOPMENT_OPERATOR_SESSION_COOKIE = "agentic_review_dev_session";
+export const DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE = "agentic_review_dev_login";
+export const OPERATOR_SESSION_PATH = "/api/v1/auth/session";
+export const OPERATOR_LOGIN_PATH = "/api/v1/auth/login";
+export const OPERATOR_CALLBACK_PATH = "/api/v1/auth/callback";
+export const OPERATOR_LOGOUT_PATH = "/api/v1/auth/logout";
+
+export interface OperatorAuthRouteService {
+  readonly publicOrigin: string;
+  readonly postLoginRedirectPath: string;
+  readonly requiresLoopbackRequest: boolean;
+  readonly secureCookies: boolean;
+  startLogin(): Promise<OperatorLoginStart>;
+  completeLogin(
+    callbackParameters: URLSearchParams,
+    transactionToken: string | undefined,
+  ): Promise<{ readonly sessionToken: string; readonly session: OperatorSession }>;
+  getSession(sessionToken: string | undefined): Promise<OperatorSession | null>;
+  logout(sessionToken: string | undefined): Promise<void>;
+}
+
+const baseCookieOptions = {
+  httpOnly: true,
+  sameSite: "lax" as const,
+  path: "/",
+  priority: "high" as const,
+};
+
+interface OperatorCookiePolicy {
+  readonly sessionCookie: string;
+  readonly loginTransactionCookie: string;
+  readonly secure: boolean;
+}
+
+const cookiePolicyFor = (auth: OperatorAuthRouteService): OperatorCookiePolicy =>
+  auth.secureCookies
+    ? {
+        sessionCookie: OPERATOR_SESSION_COOKIE,
+        loginTransactionCookie: OPERATOR_LOGIN_TRANSACTION_COOKIE,
+        secure: true,
+      }
+    : {
+        sessionCookie: DEVELOPMENT_OPERATOR_SESSION_COOKIE,
+        loginTransactionCookie: DEVELOPMENT_OPERATOR_LOGIN_TRANSACTION_COOKIE,
+        secure: false,
+      };
+
+const noStore = (reply: FastifyReply): FastifyReply =>
+  reply
+    .header("cache-control", "no-store")
+    .header("pragma", "no-cache")
+    .header("referrer-policy", "no-referrer");
+
+const isLoopbackAddress = (address: string): boolean => {
+  const normalized = address.toLowerCase();
+  return (
+    normalized === "::1" || normalized.startsWith("127.") || normalized.startsWith("::ffff:127.")
+  );
+};
+
+const isLoopbackHostname = (hostname: string): boolean => {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]";
+};
+
+const validateRouteSecurityPolicy = (auth: OperatorAuthRouteService): void => {
+  let publicOrigin: URL;
+  try {
+    publicOrigin = new URL(auth.publicOrigin);
+  } catch {
+    throw new Error("Operator authentication routes require a valid public origin.");
+  }
+  if (publicOrigin.origin !== auth.publicOrigin) {
+    throw new Error("Operator authentication routes require a canonical public origin.");
+  }
+  if (auth.secureCookies && publicOrigin.protocol !== "https:") {
+    throw new Error("Secure operator cookies require an HTTPS public origin.");
+  }
+  if (
+    !auth.secureCookies &&
+    (publicOrigin.protocol !== "http:" ||
+      !isLoopbackHostname(publicOrigin.hostname) ||
+      !auth.requiresLoopbackRequest)
+  ) {
+    throw new Error(
+      "Non-Secure operator cookies are restricted to loopback HTTP development requests.",
+    );
+  }
+};
+
+const isAllowedRequest = (request: FastifyRequest, auth: OperatorAuthRouteService): boolean => {
+  if (!auth.requiresLoopbackRequest) {
+    return true;
+  }
+  const expectedHost = new URL(auth.publicOrigin).host.toLowerCase();
+  const actualHost = request.headers.host?.toLowerCase();
+  const hasForwardingHeaders = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+  ].some((name) => request.headers[name] !== undefined);
+  return isLoopbackAddress(request.ip) && actualHost === expectedHost && !hasForwardingHeaders;
+};
+
+const sendLoopbackDenied = (reply: FastifyReply): FastifyReply =>
+  noStore(reply).code(403).send({
+    code: "loopback_development_bypass_denied",
+    message: "Development authentication bypass is restricted to loopback requests.",
+    retryable: false,
+  });
+
+const sendAuthError = (reply: FastifyReply, error: OperatorAuthError): FastifyReply =>
+  noStore(reply).code(error.statusCode).send({
+    code: error.code,
+    message: error.message,
+    retryable: false,
+  });
+
+const sendInvalidOrigin = (reply: FastifyReply): FastifyReply =>
+  noStore(reply).code(403).send({
+    code: "invalid_operator_auth_origin",
+    message: "The request origin is not authorized for operator logout.",
+    retryable: false,
+  });
+
+const setSessionCookie = (
+  reply: FastifyReply,
+  auth: OperatorAuthRouteService,
+  sessionToken: string,
+  expiresAt: string,
+): void => {
+  const policy = cookiePolicyFor(auth);
+  reply.setCookie(policy.sessionCookie, sessionToken, {
+    ...baseCookieOptions,
+    secure: policy.secure,
+    expires: new Date(expiresAt),
+  });
+};
+
+const setLoginTransactionCookie = (
+  reply: FastifyReply,
+  auth: OperatorAuthRouteService,
+  transactionToken: string,
+  expiresAt: string,
+): void => {
+  const policy = cookiePolicyFor(auth);
+  reply.setCookie(policy.loginTransactionCookie, transactionToken, {
+    ...baseCookieOptions,
+    secure: policy.secure,
+    expires: new Date(expiresAt),
+  });
+};
+
+const clearSessionCookie = (reply: FastifyReply, auth: OperatorAuthRouteService): void => {
+  const policy = cookiePolicyFor(auth);
+  reply.clearCookie(policy.sessionCookie, { ...baseCookieOptions, secure: policy.secure });
+};
+
+const clearLoginTransactionCookie = (reply: FastifyReply, auth: OperatorAuthRouteService): void => {
+  const policy = cookiePolicyFor(auth);
+  reply.clearCookie(policy.loginTransactionCookie, {
+    ...baseCookieOptions,
+    secure: policy.secure,
+  });
+};
+
+const callbackParametersFrom = (request: FastifyRequest): URLSearchParams => {
+  const requestUrl = new URL(request.raw.url ?? OPERATOR_CALLBACK_PATH, "https://callback.invalid");
+  return requestUrl.searchParams;
+};
+
+export const readOperatorSession = async (
+  request: FastifyRequest,
+  auth: OperatorAuthRouteService,
+): Promise<OperatorSession | null> => {
+  if (!isAllowedRequest(request, auth)) {
+    return null;
+  }
+  return auth.getSession(request.cookies[cookiePolicyFor(auth).sessionCookie]);
+};
+
+export const registerOperatorAuthRoutes = (
+  app: FastifyInstance,
+  auth: OperatorAuthRouteService,
+): void => {
+  validateRouteSecurityPolicy(auth);
+  app.register(cookie, { hook: "onRequest" });
+  app.register(async (scope) => {
+    await scope.register(rateLimit, { global: false });
+
+    scope.get(OPERATOR_SESSION_PATH, async (request, reply) => {
+      if (!isAllowedRequest(request, auth)) {
+        return sendLoopbackDenied(reply);
+      }
+      noStore(reply);
+      const sessionToken = request.cookies[cookiePolicyFor(auth).sessionCookie];
+      const session = await auth.getSession(sessionToken);
+      if (session === null) {
+        if (sessionToken !== undefined) {
+          clearSessionCookie(reply, auth);
+        }
+        return { authenticated: false };
+      }
+      return {
+        authenticated: true,
+        operator: {
+          issuer: session.issuer,
+          subject: session.subject,
+          displayName: session.displayName,
+          email: session.email,
+        },
+        expiresAt: session.expiresAt,
+      };
+    });
+
+    scope.get(
+      OPERATOR_LOGIN_PATH,
+      {
+        config: {
+          rateLimit: {
+            max: 10,
+            timeWindow: "1 minute",
+          },
+        },
+      },
+      async (request, reply) => {
+        if (!isAllowedRequest(request, auth)) {
+          return sendLoopbackDenied(reply);
+        }
+        noStore(reply);
+        const start = await auth.startLogin();
+        if (start.kind === "authorization_redirect") {
+          setLoginTransactionCookie(
+            reply,
+            auth,
+            start.transactionToken,
+            start.transactionExpiresAt,
+          );
+          return reply.redirect(start.authorizationUrl.href, 302);
+        }
+
+        setSessionCookie(reply, auth, start.sessionToken, start.session.expiresAt);
+        return reply.redirect(auth.postLoginRedirectPath, 303);
+      },
+    );
+
+    scope.get(OPERATOR_CALLBACK_PATH, { logLevel: "silent" }, async (request, reply) => {
+      if (!isAllowedRequest(request, auth)) {
+        return sendLoopbackDenied(reply);
+      }
+      noStore(reply);
+      const transactionToken = request.cookies[cookiePolicyFor(auth).loginTransactionCookie];
+      try {
+        const completed = await auth.completeLogin(
+          callbackParametersFrom(request),
+          transactionToken,
+        );
+        clearLoginTransactionCookie(reply, auth);
+        setSessionCookie(reply, auth, completed.sessionToken, completed.session.expiresAt);
+        return reply.redirect(auth.postLoginRedirectPath, 303);
+      } catch (error) {
+        clearLoginTransactionCookie(reply, auth);
+        if (error instanceof OperatorAuthError) {
+          return sendAuthError(reply, error);
+        }
+        throw error;
+      }
+    });
+
+    scope.post(OPERATOR_LOGOUT_PATH, async (request, reply) => {
+      if (!isAllowedRequest(request, auth)) {
+        return sendLoopbackDenied(reply);
+      }
+      noStore(reply);
+      if (request.headers.origin !== auth.publicOrigin) {
+        return sendInvalidOrigin(reply);
+      }
+      await auth.logout(request.cookies[cookiePolicyFor(auth).sessionCookie]);
+      clearSessionCookie(reply, auth);
+      clearLoginTransactionCookie(reply, auth);
+      return reply.code(204).send();
+    });
+  });
+};
