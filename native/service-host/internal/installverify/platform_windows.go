@@ -5,95 +5,45 @@ package installverify
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
-type productionSecurityPolicies struct {
-	installation         secureconfig.SecurityPolicy
-	trustedConfiguration secureconfig.SecurityPolicy
-	installationAnchor   string
-	trustedAnchor        string
-	owned                []interface{ Close() error }
-}
-
-func (policies *productionSecurityPolicies) Close() error {
-	if policies == nil {
-		return nil
-	}
-	var result error
-	for index := len(policies.owned) - 1; index >= 0; index-- {
-		result = errors.Join(result, policies.owned[index].Close())
-	}
-	policies.owned = nil
-	return result
-}
-
-// Verify performs production installation verification. It deliberately fails
-// before filesystem access until the production filesystem policy factory can
-// validate complete DACL semantics from fixed identities and managed anchors.
-func Verify(ctx context.Context, options Options) (result Evidence, err error) {
-	if ctx == nil {
-		return Evidence{}, verificationError(ErrorInput, "verification context is required", ErrInvalidOptions)
-	}
-	options, err = normalizeOptions(options)
-	if err != nil {
-		return Evidence{}, err
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return Evidence{}, cause
-	}
-	policies, observedRole, err := newProductionSecurityPolicies()
-	if err != nil {
-		return Evidence{}, err
-	}
-	if observedRole != options.Role {
-		closeErr := policies.Close()
-		return Evidence{}, verificationError(
-			ErrorInput,
-			"selected role does not match the current restricted service token",
-			errors.Join(ErrInvalidOptions, closeErr),
-		)
-	}
-	defer func() {
-		if closeErr := policies.Close(); closeErr != nil {
-			result = Evidence{}
-			err = errors.Join(err, verificationError(
-				ErrorCleanup,
-				"close production installation security policies",
-				errors.Join(ErrCleanup, closeErr),
-			))
-		}
-	}()
-
-	signatureVerifier, err := authenticode.NewWindowsVerifier()
-	if err != nil {
-		return Evidence{}, verificationError(
-			ErrorSignature,
-			"construct production Authenticode verifier",
-			errors.Join(ErrAuthenticode, err),
-		)
-	}
+// Verify proves the fixed restricted service identity before constructing any
+// authorization policy or opening configuration and installation objects.
+func Verify(ctx context.Context, options Options) (Evidence, error) {
 	return verifyWithDependencies(ctx, options, dependencies{
-		secureRead:                 secureconfig.Read,
-		openTraversalRoot:          openWindowsTraversalRoot,
-		installationPolicy:         policies.installation,
-		trustedConfigurationPolicy: policies.trustedConfiguration,
-		installationManagedAnchor:  policies.installationAnchor,
-		trustedManagedAnchor:       policies.trustedAnchor,
-		authenticodeVerifier:       signatureVerifier,
+		identityPreflight: winidentity.Preflight,
+		newSecurityPolicy: newProductionFilesystemSecurityPolicy,
+		newAuthenticodeVerifier: func() (authenticode.Verifier, error) {
+			return authenticode.NewWindowsVerifier()
+		},
+		managedAnchor:     productionManagedAnchor,
+		secureRead:        secureconfig.Read,
+		openTraversalRoot: openWindowsTraversalRoot,
 	})
 }
 
-func newProductionSecurityPolicies() (*productionSecurityPolicies, config.Role, error) {
-	return nil, "", verificationError(
-		ErrorInput,
-		"production installation DACL policy construction is not implemented",
-		ErrProductionPolicyUnavailable,
-	)
+func productionManagedAnchor(root releasemanifest.FileRoot, path string) (string, error) {
+	if root != releasemanifest.RootInstallation && root != releasemanifest.RootTrustedConfiguration {
+		return "", fmt.Errorf("unsupported managed root %q", root)
+	}
+	parsed, err := parseWindowsPath(path, false)
+	if err != nil {
+		return "", err
+	}
+	if len(parsed.components) < 2 {
+		return "", errors.New("verified root has no non-volume product anchor")
+	}
+	// The direct parent is the product-managed anchor. Ancestors above it use
+	// the ambient profile; the anchor, verified root, and children are exact.
+	return parsed.drive + strings.Join(parsed.components[:len(parsed.components)-1], `\`), nil
 }
 
 type windowsDirectory struct {

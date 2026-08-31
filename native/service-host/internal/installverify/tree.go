@@ -128,7 +128,7 @@ func (tree *verifiedTree) openDirectoryChild(
 	opened, err := v.retainDirectory(
 		path,
 		handle,
-		tree.policy,
+		tree.rootType,
 		winfile.SecurityModeManaged,
 		parent.depth+1,
 		parent.depth+2,
@@ -166,9 +166,6 @@ func (tree *verifiedTree) openFileChild(
 		return nil, errors.Join(err, closeRejectedFile(handle))
 	}
 	resourceIndex := v.resources.addFile(path, handle, object)
-	if err := tree.policy.CheckFile(secureconfig.FileSecurityRequest{Object: cloneObjectEvidence(object)}); err != nil {
-		return nil, fmt.Errorf("file security policy rejected %s: %w", path, err)
-	}
 	if object.Evidence.Identity.VolumeSerialNumber != tree.root.object.Evidence.Identity.VolumeSerialNumber {
 		return nil, fmt.Errorf("file %s is on a different volume", path)
 	}
@@ -322,6 +319,9 @@ func (v *verifier) verifyExpectedFile(
 	if cause := context.Cause(v.ctx); cause != nil {
 		return cause
 	}
+	if err := v.checkFileSecurity(tree, file, expected); err != nil {
+		return err
+	}
 	switch expected.purpose {
 	case purposeManifest:
 		if !sameUnderlyingObject(file.object, v.manifestRead.File) {
@@ -384,7 +384,7 @@ func (v *verifier) verifyManifestFile(file *openedFile, expected releasemanifest
 
 	var signature *authenticode.Evidence
 	if requiresAuthenticode(expected.Role) {
-		evidence, err := file.handle.VerifyAuthenticode(v.deps.authenticodeVerifier)
+		evidence, err := file.handle.VerifyAuthenticode(v.signatureVerifier)
 		if err != nil {
 			return verificationError(ErrorSignature, "verify file Authenticode signature from retained handle", errors.Join(ErrAuthenticode, err))
 		}
@@ -406,6 +406,39 @@ func (v *verifier) verifyManifestFile(file *openedFile, expected releasemanifest
 		role: expected.Role, sha256: expected.SHA256, size: size,
 		object: cloneObjectEvidence(file.object), authenticode: signature,
 	}
+	return nil
+}
+
+func (v *verifier) checkFileSecurity(
+	tree *verifiedTree,
+	file *openedFile,
+	expected expectedFile,
+) error {
+	binding := fileSecurityBinding{
+		root: tree.rootType, relativePath: file.relativePath, purpose: expected.purpose,
+	}
+	var manifest *releasemanifest.File
+	if expected.manifest != nil {
+		copy := *expected.manifest
+		manifest = &copy
+		binding.role = copy.Role
+	}
+	if file.security != nil {
+		if *file.security != binding {
+			return fmt.Errorf("file %s was assigned conflicting security purposes", file.object.Path)
+		}
+		return nil
+	}
+	if err := v.policy.CheckFile(fileSecurityRequest{
+		root:         tree.rootType,
+		relativePath: file.relativePath,
+		purpose:      expected.purpose,
+		manifest:     manifest,
+		object:       cloneObjectEvidence(file.object),
+	}); err != nil {
+		return fmt.Errorf("file security policy rejected %s: %w", file.object.Path, err)
+	}
+	file.security = &binding
 	return nil
 }
 

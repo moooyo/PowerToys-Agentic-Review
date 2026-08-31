@@ -7,20 +7,21 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 var (
-	ErrUnsupportedPlatform         = errors.New("installation verification requires Windows")
-	ErrInvalidOptions              = errors.New("invalid installation verifier options")
-	ErrProductionPolicyUnavailable = errors.New("production installation security policy is unavailable")
-	ErrBootstrap                   = errors.New("bootstrap configuration verification failed")
-	ErrConfiguration               = errors.New("bootstrap configurations are inconsistent")
-	ErrManifest                    = errors.New("release manifest verification failed")
-	ErrClosedTree                  = errors.New("installed trees do not exactly match the release manifest")
-	ErrFileIdentity                = errors.New("installed objects reuse a filesystem identity")
-	ErrFileContent                 = errors.New("installed file content does not match the release manifest")
-	ErrAuthenticode                = errors.New("installed executable failed Authenticode verification")
-	ErrCleanup                     = errors.New("installation verifier cleanup failed")
+	ErrUnsupportedPlatform = errors.New("installation verification requires Windows")
+	ErrInvalidOptions      = errors.New("invalid installation verifier options")
+	ErrServiceIdentity     = errors.New("current process is not a verified restricted worker service")
+	ErrBootstrap           = errors.New("bootstrap configuration verification failed")
+	ErrConfiguration       = errors.New("bootstrap configurations are inconsistent")
+	ErrManifest            = errors.New("release manifest verification failed")
+	ErrClosedTree          = errors.New("installed trees do not exactly match the release manifest")
+	ErrFileIdentity        = errors.New("installed objects reuse a filesystem identity")
+	ErrFileContent         = errors.New("installed file content does not match the release manifest")
+	ErrAuthenticode        = errors.New("installed executable failed Authenticode verification")
+	ErrCleanup             = errors.New("installation verifier cleanup failed")
 )
 
 // Limits bound retained handles, directory enumeration, path depth, and
@@ -112,6 +113,7 @@ func (snapshot FileSnapshot) Authenticode() (authenticode.Evidence, bool) {
 
 type evidenceState struct {
 	role                config.Role
+	identity            winidentity.Evidence
 	actualBootstrapPath string
 	controlBootstrap    secureconfig.Result
 	executorBootstrap   secureconfig.Result
@@ -140,6 +142,9 @@ func (e Evidence) Validate() error {
 		e.state.approvedSignerPin == "" {
 		return errors.New("installation verification evidence is empty or incomplete")
 	}
+	if observedRole, err := roleFromIdentityEvidence(e.state.identity); err != nil || observedRole != e.state.role {
+		return errors.New("installation verification identity evidence is empty or inconsistent")
+	}
 	return nil
 }
 
@@ -148,6 +153,15 @@ func (e Evidence) Role() config.Role {
 		return ""
 	}
 	return e.state.role
+}
+
+// Identity returns the detached SCM and process-token snapshot that proved the
+// selected restricted service role before any configuration file was read.
+func (e Evidence) Identity() winidentity.Evidence {
+	if e.state == nil {
+		return winidentity.Evidence{}
+	}
+	return cloneIdentityEvidence(e.state.identity)
 }
 
 func (e Evidence) ActualBootstrapPath() string {
@@ -224,6 +238,7 @@ type ErrorCode string
 
 const (
 	ErrorInput         ErrorCode = "INSTALL_VERIFY_INPUT_INVALID"
+	ErrorIdentity      ErrorCode = "INSTALL_VERIFY_IDENTITY_FAILED"
 	ErrorBootstrap     ErrorCode = "INSTALL_VERIFY_BOOTSTRAP_FAILED"
 	ErrorConfiguration ErrorCode = "INSTALL_VERIFY_CONFIGURATION_MISMATCH"
 	ErrorManifest      ErrorCode = "INSTALL_VERIFY_MANIFEST_FAILED"

@@ -17,6 +17,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 const (
@@ -64,6 +65,11 @@ func TestVerifyWithDependenciesProducesOpaqueDetachedEvidence(t *testing.T) {
 	manifest.Files[0].Path = `tampered.exe`
 	if evidence.Manifest().Files[0].Path == `tampered.exe` {
 		t.Fatal("manifest getter retained caller-owned slice storage")
+	}
+	identity := evidence.Identity()
+	identity.Token.Groups = append(identity.Token.Groups, winidentity.SIDEntry{SID: "S-1-5-18"})
+	if len(evidence.Identity().Token.Groups) == len(identity.Token.Groups) {
+		t.Fatal("identity getter retained caller-owned slice storage")
 	}
 	rootObject := roots[0].Object()
 	rootObject.Evidence.Security.SelfRelativeDescriptor[0] ^= 0xff
@@ -200,8 +206,8 @@ func newInstallFixture(t *testing.T) *installFixture {
 		role releasemanifest.FileRole
 		data []byte
 	}{
-		{releasemanifest.RootInstallation, `control.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-control-wrapper")},
-		{releasemanifest.RootInstallation, `executor.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-executor-wrapper")},
+		{releasemanifest.RootInstallation, config.ControlServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-control-wrapper")},
+		{releasemanifest.RootInstallation, config.ExecutorServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-executor-wrapper")},
 		{releasemanifest.RootInstallation, `native\servicehost.exe`, releasemanifest.RoleServiceHost, []byte("MZ-service-host")},
 		{releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, []byte("MZ-node")},
 		{releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, []byte("export const role='control';")},
@@ -356,20 +362,53 @@ func (fixture *installFixture) dependencies() dependencies {
 	fixture.fs.signerDigest = fixture.signerDigest
 	policy := allowSecurityPolicy{}
 	return dependencies{
-		secureRead:                 fixture.fs.secureRead,
-		openTraversalRoot:          fixture.fs.openTraversalRoot,
-		installationPolicy:         policy,
-		trustedConfigurationPolicy: policy,
-		installationManagedAnchor:  `C:\Program Files\AgenticReview`,
-		trustedManagedAnchor:       `C:\ProgramData\AgenticReview`,
-		authenticodeVerifier:       fakeAuthenticodeVerifier{},
+		identityPreflight: func(options winidentity.Options) (winidentity.Evidence, error) {
+			return fakeIdentityEvidence(options), nil
+		},
+		newSecurityPolicy: func(winidentity.Evidence) (filesystemSecurityPolicy, error) {
+			return policy, nil
+		},
+		newAuthenticodeVerifier: func() (authenticode.Verifier, error) {
+			return fakeAuthenticodeVerifier{}, nil
+		},
+		managedAnchor: func(root releasemanifest.FileRoot, _ string) (string, error) {
+			if root == releasemanifest.RootInstallation {
+				return `C:\Program Files\AgenticReview`, nil
+			}
+			if root == releasemanifest.RootTrustedConfiguration {
+				return `C:\ProgramData\AgenticReview`, nil
+			}
+			return "", errors.New("unexpected fixture root")
+		},
+		secureRead:        fixture.fs.secureRead,
+		openTraversalRoot: fixture.fs.openTraversalRoot,
 	}
 }
 
 type allowSecurityPolicy struct{}
 
-func (allowSecurityPolicy) CheckAncestor(secureconfig.AncestorSecurityRequest) error { return nil }
-func (allowSecurityPolicy) CheckFile(secureconfig.FileSecurityRequest) error         { return nil }
+func (allowSecurityPolicy) CheckDirectory(directorySecurityRequest) error { return nil }
+func (allowSecurityPolicy) CheckFile(fileSecurityRequest) error           { return nil }
+
+func fakeIdentityEvidence(options winidentity.Options) winidentity.Evidence {
+	return winidentity.Evidence{
+		ProcessID: 42,
+		OwnService: winidentity.ServiceEvidence{
+			Name: options.OwnService.Name, SID: options.OwnService.SID,
+			SIDType: winidentity.ServiceSIDTypeRestricted,
+		},
+		PeerService: winidentity.ServiceEvidence{
+			Name: options.PeerService.Name, SID: options.PeerService.SID,
+			SIDType: winidentity.ServiceSIDTypeRestricted,
+		},
+		Token: winidentity.TokenEvidence{
+			HasRestrictions: true,
+			User:            winidentity.SIDEntry{SID: options.OwnService.SID},
+			Groups:          []winidentity.SIDEntry{{SID: options.OwnService.SID}},
+			RestrictedSIDs:  []winidentity.SIDEntry{{SID: options.OwnService.SID}},
+		},
+	}
+}
 
 type fakeAuthenticodeVerifier struct{}
 

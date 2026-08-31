@@ -4,6 +4,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 func cloneConfig(value config.Config) config.Config {
@@ -28,6 +29,13 @@ func cloneStringMap(value map[string]string) map[string]string {
 		copy[key] = item
 	}
 	return copy
+}
+
+func cloneIdentityEvidence(value winidentity.Evidence) winidentity.Evidence {
+	value.Token.Groups = append([]winidentity.SIDEntry(nil), value.Token.Groups...)
+	value.Token.RestrictedSIDs = append([]winidentity.SIDEntry(nil), value.Token.RestrictedSIDs...)
+	value.Token.Privileges = append([]winidentity.PrivilegeEvidence(nil), value.Token.Privileges...)
+	return value
 }
 
 func cloneManifest(value releasemanifest.Manifest) releasemanifest.Manifest {

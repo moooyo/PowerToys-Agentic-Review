@@ -59,10 +59,9 @@ func validateLimits(value Limits) error {
 }
 
 func validateDependencies(value dependencies) error {
-	if value.secureRead == nil || value.openTraversalRoot == nil ||
-		isNilInterface(value.installationPolicy) || isNilInterface(value.trustedConfigurationPolicy) ||
-		isNilInterface(value.authenticodeVerifier) || value.installationManagedAnchor == "" ||
-		value.trustedManagedAnchor == "" {
+	if value.identityPreflight == nil || value.newSecurityPolicy == nil ||
+		value.newAuthenticodeVerifier == nil || value.managedAnchor == nil ||
+		value.secureRead == nil || value.openTraversalRoot == nil {
 		return verificationError(ErrorInput, "installation verification dependencies are incomplete", ErrInvalidOptions)
 	}
 	return nil

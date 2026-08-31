@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 type openedDirectory struct {
@@ -28,12 +30,19 @@ type openedFile struct {
 	object        secureconfig.ObjectEvidence
 	resourceIndex int
 	relativePath  string
+	security      *fileSecurityBinding
+}
+
+type fileSecurityBinding struct {
+	root         releasemanifest.FileRoot
+	relativePath string
+	purpose      filePurpose
+	role         releasemanifest.FileRole
 }
 
 type verifiedTree struct {
 	rootType    releasemanifest.FileRoot
 	path        string
-	policy      secureconfig.SecurityPolicy
 	root        *openedDirectory
 	ancestors   []secureconfig.ObjectEvidence
 	directories map[string]*openedDirectory
@@ -41,10 +50,15 @@ type verifiedTree struct {
 }
 
 type verifier struct {
-	ctx       context.Context
-	options   Options
-	deps      dependencies
-	resources retainedResources
+	ctx                       context.Context
+	options                   Options
+	deps                      dependencies
+	resources                 retainedResources
+	identity                  winidentity.Evidence
+	policy                    filesystemSecurityPolicy
+	signatureVerifier         authenticode.Verifier
+	installationManagedAnchor string
+	trustedManagedAnchor      string
 
 	seenIdentities map[winfile.FileIdentity]string
 	directoryCount uint32
@@ -80,13 +94,54 @@ func verifyWithDependencies(
 	if cause := context.Cause(ctx); cause != nil {
 		return Evidence{}, cause
 	}
+	identityOptions, err := fixedIdentityOptions(options.Role)
+	if err != nil {
+		return Evidence{}, verificationError(ErrorIdentity, "select fixed service identity", errors.Join(ErrServiceIdentity, err))
+	}
+	identity, err := deps.identityPreflight(identityOptions)
+	if err != nil {
+		return Evidence{}, verificationError(
+			ErrorIdentity,
+			"prove current restricted service identity",
+			errors.Join(ErrServiceIdentity, err),
+		)
+	}
+	observedRole, err := roleFromIdentityEvidence(identity)
+	if err != nil || observedRole != options.Role {
+		return Evidence{}, verificationError(
+			ErrorIdentity,
+			"current restricted service identity does not match the selected role",
+			errors.Join(ErrServiceIdentity, err),
+		)
+	}
+	policy, err := deps.newSecurityPolicy(identity)
+	if err != nil {
+		return Evidence{}, verificationError(ErrorIdentity, "construct production filesystem policy", err)
+	}
+	if isNilInterface(policy) {
+		return Evidence{}, verificationError(ErrorIdentity, "filesystem policy factory returned nil", ErrServiceIdentity)
+	}
+	signatureVerifier, err := deps.newAuthenticodeVerifier()
+	if err != nil {
+		return Evidence{}, verificationError(
+			ErrorSignature,
+			"construct Authenticode verifier after service identity proof",
+			errors.Join(ErrAuthenticode, err),
+		)
+	}
+	if isNilInterface(signatureVerifier) {
+		return Evidence{}, verificationError(ErrorSignature, "Authenticode verifier factory returned nil", ErrAuthenticode)
+	}
 
 	state := &verifier{
-		ctx:            ctx,
-		options:        options,
-		deps:           deps,
-		seenIdentities: make(map[winfile.FileIdentity]string),
-		verifiedFiles:  make(map[string]FileSnapshot),
+		ctx:               ctx,
+		options:           options,
+		deps:              deps,
+		identity:          cloneIdentityEvidence(identity),
+		policy:            policy,
+		signatureVerifier: signatureVerifier,
+		seenIdentities:    make(map[winfile.FileIdentity]string),
+		verifiedFiles:     make(map[string]FileSnapshot),
 	}
 	defer func() {
 		cleanupErr := state.resources.finalize()
@@ -121,7 +176,8 @@ func verifyWithDependencies(
 		files = append(files, file)
 	}
 	result = Evidence{state: &evidenceState{
-		role:                options.Role,
+		role:                observedRole,
+		identity:            cloneIdentityEvidence(state.identity),
 		actualBootstrapPath: options.ActualBootstrapPath,
 		controlBootstrap:    cloneSecureResult(state.controlBootstrap),
 		executorBootstrap:   cloneSecureResult(state.executorBootstrap),
@@ -147,6 +203,10 @@ func (v *verifier) readBootstraps() error {
 	if err != nil {
 		return verificationError(ErrorBootstrap, "derive bootstrap root", errors.Join(ErrBootstrap, err))
 	}
+	v.trustedManagedAnchor, err = v.deps.managedAnchor(releasemanifest.RootTrustedConfiguration, parent)
+	if err != nil {
+		return verificationError(ErrorBootstrap, "resolve trusted configuration managed anchor", errors.Join(ErrBootstrap, err))
+	}
 	controlPath := joinPath(parent, releasemanifest.ControlBootstrapConfigurationPath)
 	executorPath := joinPath(parent, releasemanifest.ExecutorBootstrapConfigurationPath)
 	if v.options.Role == config.RoleControl {
@@ -155,11 +215,11 @@ func (v *verifier) readBootstraps() error {
 		executorPath = v.options.ActualBootstrapPath
 	}
 
-	v.controlBootstrap, err = v.readBootstrap("Control", controlPath)
+	v.controlBootstrap, err = v.readBootstrap("Control", controlPath, purposeControlBootstrap, parent)
 	if err != nil {
 		return err
 	}
-	v.executorBootstrap, err = v.readBootstrap("Executor", executorPath)
+	v.executorBootstrap, err = v.readBootstrap("Executor", executorPath, purposeExecutorBootstrap, parent)
 	if err != nil {
 		return err
 	}
@@ -194,14 +254,22 @@ func (v *verifier) readBootstraps() error {
 	return nil
 }
 
-func (v *verifier) readBootstrap(label, path string) (secureconfig.Result, error) {
+func (v *verifier) readBootstrap(
+	label string,
+	path string,
+	purpose filePurpose,
+	rootPath string,
+) (secureconfig.Result, error) {
 	if cause := context.Cause(v.ctx); cause != nil {
 		return secureconfig.Result{}, cause
 	}
 	result, err := v.deps.secureRead(path, secureconfig.Options{
 		MaximumBytes:      config.MaximumDocumentBytes,
-		ManagedAnchorPath: v.deps.trustedManagedAnchor,
-		Policy:            v.deps.trustedConfigurationPolicy,
+		ManagedAnchorPath: v.trustedManagedAnchor,
+		Policy: secureReadPolicy{
+			policy: v.policy, root: releasemanifest.RootTrustedConfiguration,
+			rootPath: rootPath, expectedPath: path, purpose: purpose,
+		},
 	})
 	if err != nil {
 		return secureconfig.Result{}, verificationError(ErrorBootstrap, "securely read "+label+" bootstrap", errors.Join(ErrBootstrap, err))
@@ -212,7 +280,7 @@ func (v *verifier) readBootstrap(label, path string) (secureconfig.Result, error
 	if err := validateSecureRead(
 		label+" bootstrap",
 		path,
-		v.deps.trustedManagedAnchor,
+		v.trustedManagedAnchor,
 		result,
 		config.MaximumDocumentBytes,
 	); err != nil {
@@ -247,11 +315,17 @@ func bindBootstrapRead(
 
 func (v *verifier) openRootsAndManifest() error {
 	var err error
+	v.installationManagedAnchor, err = v.deps.managedAnchor(
+		releasemanifest.RootInstallation,
+		v.controlConfig.Installation.Root,
+	)
+	if err != nil {
+		return verificationError(ErrorTree, "resolve installation managed anchor", errors.Join(ErrClosedTree, err))
+	}
 	v.installation, err = v.openTree(
 		releasemanifest.RootInstallation,
 		v.controlConfig.Installation.Root,
-		v.deps.installationManagedAnchor,
-		v.deps.installationPolicy,
+		v.installationManagedAnchor,
 	)
 	if err != nil {
 		return verificationError(ErrorTree, "open verified installation root", errors.Join(ErrClosedTree, err))
@@ -259,8 +333,7 @@ func (v *verifier) openRootsAndManifest() error {
 	v.trusted, err = v.openTree(
 		releasemanifest.RootTrustedConfiguration,
 		v.controlConfig.Installation.TrustedConfigurationRoot,
-		v.deps.trustedManagedAnchor,
-		v.deps.trustedConfigurationPolicy,
+		v.trustedManagedAnchor,
 	)
 	if err != nil {
 		return verificationError(ErrorTree, "open verified trusted configuration root", errors.Join(ErrClosedTree, err))
@@ -273,6 +346,13 @@ func (v *verifier) openRootsAndManifest() error {
 	manifestFile, ancestors, err := v.installation.openFilePath(v, manifestRelative)
 	if err != nil {
 		return verificationError(ErrorManifest, "open release manifest relative to its retained root", errors.Join(ErrManifest, err))
+	}
+	if err := v.checkFileSecurity(
+		v.installation,
+		manifestFile,
+		expectedFile{purpose: purposeManifest},
+	); err != nil {
+		return verificationError(ErrorManifest, "release manifest ACL is invalid", errors.Join(ErrManifest, err))
 	}
 	document, err := manifestFile.handle.ReadAll(releasemanifest.MaximumDocumentBytes)
 	if err != nil {
@@ -305,7 +385,7 @@ func (v *verifier) openRootsAndManifest() error {
 	if err := validateSecureRead(
 		"release manifest",
 		manifestFile.object.Path,
-		v.deps.installationManagedAnchor,
+		v.installationManagedAnchor,
 		v.manifestRead,
 		releasemanifest.MaximumDocumentBytes,
 	); err != nil {
@@ -324,7 +404,6 @@ func (v *verifier) openTree(
 	rootType releasemanifest.FileRoot,
 	path string,
 	managedAnchor string,
-	policy secureconfig.SecurityPolicy,
 ) (*verifiedTree, error) {
 	parsed, err := parseWindowsPath(path, false)
 	if err != nil || len(parsed.components) == 0 || uint32(len(parsed.components)) > v.options.Limits.MaximumPathDepth {
@@ -337,11 +416,10 @@ func (v *verifier) openTree(
 	tree := &verifiedTree{
 		rootType:    rootType,
 		path:        path,
-		policy:      policy,
 		directories: make(map[string]*openedDirectory),
 		files:       make(map[string]*openedFile),
 	}
-	current, err := v.openTraversalDirectory(parsed.drive, policy, 0, uint32(len(parsed.components)+1))
+	current, err := v.openTraversalDirectory(parsed.drive, rootType, 0, uint32(len(parsed.components)+1))
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +448,7 @@ func (v *verifier) openTree(
 		opened, err := v.retainDirectory(
 			childPath,
 			child,
-			policy,
+			rootType,
 			securityMode,
 			uint32(index+1),
 			uint32(len(parsed.components)+1),
@@ -395,7 +473,7 @@ func (v *verifier) openTree(
 
 func (v *verifier) openTraversalDirectory(
 	path string,
-	policy secureconfig.SecurityPolicy,
+	rootType releasemanifest.FileRoot,
 	index uint32,
 	count uint32,
 ) (*openedDirectory, error) {
@@ -408,13 +486,13 @@ func (v *verifier) openTraversalDirectory(
 	if err != nil {
 		return nil, err
 	}
-	return v.retainDirectory(path, directory, policy, winfile.SecurityModeAmbientAncestor, index, count)
+	return v.retainDirectory(path, directory, rootType, winfile.SecurityModeAmbientAncestor, index, count)
 }
 
 func (v *verifier) retainDirectory(
 	path string,
 	handle directoryHandle,
-	policy secureconfig.SecurityPolicy,
+	rootType releasemanifest.FileRoot,
 	securityMode winfile.SecurityMode,
 	index uint32,
 	count uint32,
@@ -434,8 +512,8 @@ func (v *verifier) retainDirectory(
 	if err := registerIdentity(v.seenIdentities, path, object.Evidence.Identity); err != nil {
 		return nil, err
 	}
-	if err := policy.CheckAncestor(secureconfig.AncestorSecurityRequest{
-		Index: int(index), Count: int(count), IsVolumeRoot: len(path) == 3, Object: cloneObjectEvidence(object),
+	if err := v.policy.CheckDirectory(directorySecurityRequest{
+		root: rootType, isVolumeRoot: len(path) == 3, object: cloneObjectEvidence(object),
 	}); err != nil {
 		return nil, fmt.Errorf("directory security policy rejected %s: %w", path, err)
 	}

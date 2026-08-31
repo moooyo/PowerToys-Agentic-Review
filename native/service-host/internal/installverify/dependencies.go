@@ -6,8 +6,10 @@ import (
 	"reflect"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 const closeAttempts = 3
@@ -35,14 +37,32 @@ type fileHandle interface {
 	Close() error
 }
 
+type directorySecurityRequest struct {
+	root         releasemanifest.FileRoot
+	isVolumeRoot bool
+	object       secureconfig.ObjectEvidence
+}
+
+type fileSecurityRequest struct {
+	root         releasemanifest.FileRoot
+	relativePath string
+	purpose      filePurpose
+	manifest     *releasemanifest.File
+	object       secureconfig.ObjectEvidence
+}
+
+type filesystemSecurityPolicy interface {
+	CheckDirectory(directorySecurityRequest) error
+	CheckFile(fileSecurityRequest) error
+}
+
 type dependencies struct {
-	secureRead                 func(string, secureconfig.Options) (secureconfig.Result, error)
-	openTraversalRoot          func(string, winfile.OpenOptions) (directoryHandle, error)
-	installationPolicy         secureconfig.SecurityPolicy
-	trustedConfigurationPolicy secureconfig.SecurityPolicy
-	installationManagedAnchor  string
-	trustedManagedAnchor       string
-	authenticodeVerifier       authenticode.Verifier
+	identityPreflight       func(winidentity.Options) (winidentity.Evidence, error)
+	newSecurityPolicy       func(winidentity.Evidence) (filesystemSecurityPolicy, error)
+	newAuthenticodeVerifier func() (authenticode.Verifier, error)
+	managedAnchor           func(releasemanifest.FileRoot, string) (string, error)
+	secureRead              func(string, secureconfig.Options) (secureconfig.Result, error)
+	openTraversalRoot       func(string, winfile.OpenOptions) (directoryHandle, error)
 }
 
 type retainedResource struct {
