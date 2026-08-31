@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 import { TextDecoder } from "node:util";
 
-const manifestSchemaVersion = 1 as const;
+const manifestSchemaVersion = 2 as const;
 const publisherPolicy = "authenticode-required-at-install" as const;
 const maximumManifestBytes = 4 * 1024 * 1024;
 const maximumManifestFiles = 8_192;
@@ -12,6 +12,8 @@ const maximumScannedPaths = 32_768;
 const maximumRelativePathLength = 4_096;
 const maximumWindowsPathLength = 32_767;
 const hashChunkBytes = 64 * 1024;
+const contentPrefixBytes = 4 * 1024;
+const maximumBootstrapConfigurationBytes = 64n * 1024n;
 const sha256Pattern = /^[a-f0-9]{64}$/u;
 const decimalSizePattern = /^(?:0|[1-9][0-9]{0,19})$/u;
 const releaseIdPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
@@ -19,10 +21,30 @@ const releaseIdPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
 export const TRUSTED_INSTALLATION_MANIFEST_SCHEMA_VERSION = manifestSchemaVersion;
 export const TRUSTED_INSTALLATION_PUBLISHER_POLICY = publisherPolicy;
 
+export interface TrustedInstallationCompatibility {
+  readonly workerApiProtocolVersion: "1.0";
+  readonly localProtocolMajor: 1;
+  readonly localProtocolMinimumMinor: 0;
+  readonly localProtocolMaximumMinor: 0;
+  readonly serviceHostRpcVersion: 1;
+  readonly processHostProtocolVersion: 1;
+}
+
+const requiredCompatibility: TrustedInstallationCompatibility = Object.freeze({
+  workerApiProtocolVersion: "1.0",
+  localProtocolMajor: 1,
+  localProtocolMinimumMinor: 0,
+  localProtocolMaximumMinor: 0,
+  serviceHostRpcVersion: 1,
+  processHostProtocolVersion: 1,
+});
+
 export const trustedInstallationFileRoles = [
   "service-wrapper",
+  "service-host",
   "node-runtime",
-  "worker-bundle",
+  "control-bundle",
+  "executor-bundle",
   "process-host",
   "codex-cli",
   "git-cli",
@@ -30,30 +52,141 @@ export const trustedInstallationFileRoles = [
   "codex-runtime",
   "native-library",
   "ca-bundle",
+  "service-config",
+  "trusted-config",
+  "policy",
+  "schema",
+  "prompt",
+  "recipe",
   "runtime-data",
   "license",
 ] as const;
 
 export type TrustedInstallationFileRole = (typeof trustedInstallationFileRoles)[number];
 
+export const trustedInstallationFileRoots = ["installation", "trusted-configuration"] as const;
+
+export type TrustedInstallationFileRoot = (typeof trustedInstallationFileRoots)[number];
+
+export const trustedInstallationBootstrapConfigurationNames = [
+  "control-service-host.json",
+  "executor-service-host.json",
+] as const;
+
+export type TrustedInstallationBootstrapConfigurationName =
+  (typeof trustedInstallationBootstrapConfigurationNames)[number];
+
 const allowedRoles = new Set<string>(trustedInstallationFileRoles);
-const requiredSingletonRoles = [
-  "service-wrapper",
-  "node-runtime",
-  "worker-bundle",
-  "process-host",
-  "codex-cli",
-  "git-cli",
-] as const satisfies readonly TrustedInstallationFileRole[];
+const allowedRoots = new Set<string>(trustedInstallationFileRoots);
+const rootSortOrder = new Map<TrustedInstallationFileRoot, number>([
+  ["installation", 0],
+  ["trusted-configuration", 1],
+]);
+const requiredRoleCounts = new Map<TrustedInstallationFileRole, number>([
+  ["service-wrapper", 2],
+  ["service-host", 1],
+  ["node-runtime", 1],
+  ["control-bundle", 1],
+  ["executor-bundle", 1],
+  ["process-host", 1],
+  ["codex-cli", 1],
+  ["git-cli", 1],
+  ["service-config", 2],
+]);
+// This is the format-level minimum, not a deployable release profile. Before execution is
+// enabled, a concrete profile and typed config binding must require every Git/Codex dependency and
+// the role-specific CA, public-key, policy, schema, prompt, and recipe inputs used by that release.
 const executableRoles = new Set<TrustedInstallationFileRole>([
   "service-wrapper",
+  "service-host",
   "node-runtime",
   "process-host",
   "codex-cli",
   "git-cli",
+  "git-helper",
+]);
+const portableExecutableRoles = new Set<TrustedInstallationFileRole>([
+  ...executableRoles,
+  "codex-runtime",
+  "native-library",
+]);
+const scriptRoles = new Set<TrustedInstallationFileRole>(["control-bundle", "executor-bundle"]);
+const installationOnlyRoles = new Set<TrustedInstallationFileRole>([
+  ...portableExecutableRoles,
+  ...scriptRoles,
+  "service-config",
+  "runtime-data",
+  "license",
+]);
+const trustedConfigurationOnlyRoles = new Set<TrustedInstallationFileRole>([
+  "trusted-config",
+  "policy",
+  "schema",
+  "prompt",
+  "recipe",
+]);
+const dangerousNonDataExtensions = new Set([
+  ".exe",
+  ".dll",
+  ".node",
+  ".com",
+  ".scr",
+  ".cpl",
+  ".sys",
+  ".drv",
+  ".ocx",
+  ".msi",
+  ".msp",
+  ".mst",
+  ".cmd",
+  ".bat",
+  ".ps1",
+  ".psm1",
+  ".psd1",
+  ".js",
+  ".jse",
+  ".mjs",
+  ".cjs",
+  ".vbs",
+  ".vbe",
+  ".wsf",
+  ".wsh",
+  ".hta",
+  ".lnk",
+  ".url",
+  ".reg",
+  ".inf",
+  ".scf",
+  ".application",
+  ".appref-ms",
+  ".gadget",
+  ".chm",
+]);
+const roleExtensions = new Map<TrustedInstallationFileRole, ReadonlySet<string>>([
+  ["service-wrapper", new Set([".exe"])],
+  ["service-host", new Set([".exe"])],
+  ["node-runtime", new Set([".exe"])],
+  ["control-bundle", new Set([".mjs"])],
+  ["executor-bundle", new Set([".mjs"])],
+  ["process-host", new Set([".exe"])],
+  ["codex-cli", new Set([".exe"])],
+  ["git-cli", new Set([".exe"])],
+  ["git-helper", new Set([".exe"])],
+  ["codex-runtime", new Set([".exe", ".dll", ".node"])],
+  ["native-library", new Set([".dll", ".node"])],
+  ["ca-bundle", new Set([".pem", ".crt", ".cer"])],
+  ["service-config", new Set([".xml"])],
+  ["trusted-config", new Set([".spki"])],
+  ["policy", new Set([".toml", ".json", ".yaml", ".yml"])],
+  ["schema", new Set([".json"])],
+  ["prompt", new Set([".md", ".txt"])],
+  ["recipe", new Set([".json", ".yaml", ".yml", ".toml"])],
+  ["runtime-data", new Set([".dat", ".bin", ".pak", ".json", ".txt"])],
+  ["license", new Set(["", ".txt", ".md", ".html", ".rtf"])],
 ]);
 
 export interface TrustedInstallationManifestFile {
+  readonly root: TrustedInstallationFileRoot;
   readonly path: string;
   readonly role: TrustedInstallationFileRole;
   readonly sha256: string;
@@ -61,6 +194,7 @@ export interface TrustedInstallationManifestFile {
 }
 
 export interface TrustedInstallationManifest {
+  readonly compatibility: TrustedInstallationCompatibility;
   readonly files: readonly TrustedInstallationManifestFile[];
   readonly publisherPolicy: typeof publisherPolicy;
   readonly releaseId: string;
@@ -113,7 +247,8 @@ export interface TrustedInstallationSecurityBoundary {
   readonly rootAndAncestorsReparseFree: true;
   readonly genericReparsePointInspection: true;
   readonly directoryHandleIdentity: true;
-  readonly installationTreeDaclWriteProtected: true;
+  readonly alternateDataStreamsAbsent: true;
+  readonly treeDaclWriteProtected: true;
   readonly workerTokenWriteDenied: true;
   readonly unprivilegedWriteDenied: true;
 }
@@ -147,7 +282,8 @@ export type TrustedInstallationVerificationErrorCode =
   | "INSTALLATION_FILE_DIGEST_MISMATCH"
   | "INSTALLATION_CONTENT_MISMATCH"
   | "INSTALLATION_SCAN_FAILED"
-  | "INSTALLATION_LIMIT_EXCEEDED";
+  | "INSTALLATION_LIMIT_EXCEEDED"
+  | "MANIFEST_BINDING_MISMATCH";
 
 export class TrustedInstallationVerificationError extends Error {
   public constructor(
@@ -161,12 +297,14 @@ export class TrustedInstallationVerificationError extends Error {
 
 export interface VerifyTrustedInstallationOptions {
   readonly installationRoot: string;
+  readonly trustedConfigurationRoot: string;
   readonly manifestPath: string;
   readonly expectedManifestSha256: string;
   readonly fileIO: TrustedInstallationFileIO;
 }
 
 export interface VerifiedTrustedInstallationFile {
+  readonly root: TrustedInstallationFileRoot;
   readonly path: string;
   readonly absolutePath: string;
   readonly role: TrustedInstallationFileRole;
@@ -174,19 +312,57 @@ export interface VerifiedTrustedInstallationFile {
   readonly size: bigint;
 }
 
+export interface VerifiedTrustedInstallationBootstrapConfiguration {
+  readonly name: TrustedInstallationBootstrapConfigurationName;
+  readonly absolutePath: string;
+  readonly sha256: string;
+  readonly size: bigint;
+  // Parse this exact immutable text instead of reopening the bootstrap file by name.
+  readonly content: string;
+  readonly identity: {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly nlink: 1n;
+    readonly mtimeNs: bigint;
+    readonly ctimeNs: bigint;
+  };
+}
+
 export interface VerifiedTrustedInstallation {
   readonly installationRoot: string;
+  readonly trustedConfigurationRoot: string;
   readonly manifestPath: string;
   readonly manifestSha256: string;
   readonly releaseId: string;
   readonly schemaVersion: typeof manifestSchemaVersion;
+  readonly compatibility: TrustedInstallationCompatibility;
   readonly files: readonly VerifiedTrustedInstallationFile[];
   readonly securityBoundary: TrustedInstallationSecurityBoundary;
+  readonly trustedConfigurationSecurityBoundary: TrustedInstallationSecurityBoundary;
+  readonly bootstrapConfigurations: readonly VerifiedTrustedInstallationBootstrapConfiguration[];
   readonly publisherVerification: {
     readonly authenticodeRequired: true;
     readonly performedByThisVerifier: false;
     readonly responsibility: "installer-and-release-pipeline";
   };
+}
+
+export interface TrustedInstallationFileLookup {
+  readonly root: TrustedInstallationFileRoot;
+  readonly path: string;
+}
+
+export interface TrustedInstallationFileBindingQuery extends TrustedInstallationFileLookup {
+  readonly role: TrustedInstallationFileRole;
+  readonly sha256: string;
+}
+
+export interface TrustedInstallationFileBindingEvidence {
+  readonly releaseId: string;
+  readonly manifestSha256: string;
+  readonly schemaVersion: typeof manifestSchemaVersion;
+  readonly compatibility: TrustedInstallationCompatibility;
+  readonly file: VerifiedTrustedInstallationFile;
 }
 
 interface FileMetadata {
@@ -208,6 +384,7 @@ interface VerifiedFileSnapshot {
   readonly metadata: FileMetadata;
   readonly identityKey: string;
   readonly digest: string;
+  readonly contentPrefix: Buffer;
   readonly bytes?: Buffer;
 }
 
@@ -241,33 +418,55 @@ export async function verifyTrustedInstallation(
     "MANIFEST_DIGEST_MISMATCH",
     "Pinned manifest",
   );
-  const rootPath = normalizeAbsoluteWindowsPath(
+  const installationRootPath = normalizeAbsoluteWindowsPath(
     options.installationRoot,
     "INSTALLATION_ROOT_INVALID",
   );
-  if (windowsPathsEqual(rootPath, win32.parse(rootPath).root)) {
+  const trustedConfigurationRootPath = normalizeAbsoluteWindowsPath(
+    options.trustedConfigurationRoot,
+    "INSTALLATION_ROOT_INVALID",
+  );
+  if (
+    windowsPathsEqual(installationRootPath, win32.parse(installationRootPath).root) ||
+    windowsPathsEqual(trustedConfigurationRootPath, win32.parse(trustedConfigurationRootPath).root)
+  ) {
     throw verificationError(
       "INSTALLATION_ROOT_INVALID",
-      "Installation root cannot be a filesystem root.",
+      "Trusted roots cannot be filesystem roots.",
+    );
+  }
+  if (windowsPathsOverlap(installationRootPath, trustedConfigurationRootPath)) {
+    throw verificationError(
+      "INSTALLATION_ROOT_INVALID",
+      "Installation and trusted-configuration roots must be disjoint.",
     );
   }
   const manifestPath = normalizeAbsoluteWindowsPath(options.manifestPath, "MANIFEST_PATH_UNSAFE");
-  if (!isStrictDescendant(rootPath, manifestPath)) {
+  if (!isStrictDescendant(installationRootPath, manifestPath)) {
     throw verificationError(
       "MANIFEST_PATH_UNSAFE",
       "Manifest must be strictly contained by the installation root.",
     );
   }
   const manifestRelativePath = validateRelativeWindowsPath(
-    win32.relative(rootPath, manifestPath),
+    win32.relative(installationRootPath, manifestPath),
     "MANIFEST_PATH_UNSAFE",
   );
-  const securityBoundary = await verifySecurityBoundary(fileIO, rootPath);
-  const root = await verifyRoot(fileIO, rootPath);
+  const securityBoundary = await verifySecurityBoundary(fileIO, installationRootPath);
+  const trustedConfigurationSecurityBoundary = await verifySecurityBoundary(
+    fileIO,
+    trustedConfigurationRootPath,
+  );
+  const installationRoot = await verifyRoot(fileIO, installationRootPath);
+  const trustedConfigurationRoot = await verifyRoot(fileIO, trustedConfigurationRootPath);
+  const roots: Readonly<Record<TrustedInstallationFileRoot, VerifiedRoot>> = {
+    installation: installationRoot,
+    "trusted-configuration": trustedConfigurationRoot,
+  };
 
   const manifestSnapshot = await verifyStableFile({
     fileIO,
-    rootPath: root.path,
+    rootPath: installationRoot.path,
     absolutePath: manifestPath,
     label: "release manifest",
     maximumBytes: BigInt(maximumManifestBytes),
@@ -282,15 +481,75 @@ export async function verifyTrustedInstallation(
   const manifest = parseCanonicalManifest(manifestSnapshot.bytes);
   assertManifestDoesNotListItself(manifest, manifestRelativePath);
 
-  const expectedFiles = new Map<string, ExpectedScannedFile>();
+  const installationExpectedFiles = new Map<string, ExpectedScannedFile>();
+  const trustedConfigurationExpectedFiles = new Map<string, ExpectedScannedFile>();
+  const expectedFiles: Readonly<
+    Record<TrustedInstallationFileRoot, Map<string, ExpectedScannedFile>>
+  > = {
+    installation: installationExpectedFiles,
+    "trusted-configuration": trustedConfigurationExpectedFiles,
+  };
   const identities = new Set<string>([manifestSnapshot.identityKey]);
-  expectedFiles.set(windowsPathKey(manifestPath), {
+  installationExpectedFiles.set(windowsPathKey(manifestPath), {
     snapshot: manifestSnapshot,
     relativePath: manifestRelativePath,
   });
 
+  const bootstrapConfigurations: VerifiedTrustedInstallationBootstrapConfiguration[] = [];
+  for (const name of trustedInstallationBootstrapConfigurationNames) {
+    const absolutePath = normalizeAbsoluteWindowsPath(
+      win32.join(trustedConfigurationRoot.path, name),
+      "INSTALLATION_FILE_UNSAFE",
+    );
+    const snapshot = await verifyStableFile({
+      fileIO,
+      rootPath: trustedConfigurationRoot.path,
+      absolutePath,
+      label: `bootstrap configuration ${name}`,
+      maximumBytes: maximumBootstrapConfigurationBytes,
+      collectBytes: true,
+      readFailureCode: "INSTALLATION_FILE_READ_FAILED",
+      digestFailureCode: "INSTALLATION_FILE_DIGEST_MISMATCH",
+    });
+    if (snapshot.metadata.size === 0n) {
+      throw verificationError(
+        "INSTALLATION_FILE_SIZE_MISMATCH",
+        `Bootstrap configuration ${name} must not be empty.`,
+      );
+    }
+    if (snapshot.bytes === undefined) {
+      throw verificationError(
+        "INSTALLATION_FILE_READ_FAILED",
+        `Bootstrap configuration ${name} bytes are unavailable.`,
+      );
+    }
+    const content = decodeBootstrapConfiguration(snapshot.bytes, name);
+    assertUniqueFileIdentity(identities, snapshot.identityKey);
+    trustedConfigurationExpectedFiles.set(windowsPathKey(absolutePath), {
+      snapshot,
+      relativePath: name,
+    });
+    bootstrapConfigurations.push(
+      Object.freeze({
+        name,
+        absolutePath,
+        sha256: snapshot.digest,
+        size: snapshot.metadata.size,
+        content,
+        identity: Object.freeze({
+          dev: snapshot.metadata.dev,
+          ino: snapshot.metadata.ino,
+          nlink: 1n as const,
+          mtimeNs: snapshot.metadata.mtimeNs,
+          ctimeNs: snapshot.metadata.ctimeNs,
+        }),
+      }),
+    );
+  }
+
   const verifiedFiles: VerifiedTrustedInstallationFile[] = [];
   for (const file of manifest.files) {
+    const root = roots[file.root];
     const absolutePath = normalizeAbsoluteWindowsPath(
       win32.join(root.path, file.path),
       "INSTALLATION_FILE_UNSAFE",
@@ -313,10 +572,15 @@ export async function verifyTrustedInstallation(
       readFailureCode: "INSTALLATION_FILE_READ_FAILED",
       digestFailureCode: "INSTALLATION_FILE_DIGEST_MISMATCH",
     });
+    assertRoleContent(file, snapshot.contentPrefix);
     assertUniqueFileIdentity(identities, snapshot.identityKey);
-    expectedFiles.set(windowsPathKey(absolutePath), { snapshot, relativePath: file.path });
+    expectedFiles[file.root].set(windowsPathKey(absolutePath), {
+      snapshot,
+      relativePath: file.path,
+    });
     verifiedFiles.push(
       Object.freeze({
+        root: file.root,
         path: file.path,
         absolutePath,
         role: file.role,
@@ -326,16 +590,26 @@ export async function verifyTrustedInstallation(
     );
   }
 
-  await verifyInstallationContents(fileIO, root, expectedFiles);
+  await verifyInstallationContents(fileIO, [
+    { root: installationRoot, expectedFiles: installationExpectedFiles },
+    {
+      root: trustedConfigurationRoot,
+      expectedFiles: trustedConfigurationExpectedFiles,
+    },
+  ]);
 
   return Object.freeze({
-    installationRoot: root.path,
+    installationRoot: installationRoot.path,
+    trustedConfigurationRoot: trustedConfigurationRoot.path,
     manifestPath,
     manifestSha256: expectedManifestSha256,
     releaseId: manifest.releaseId,
     schemaVersion: manifest.schemaVersion,
+    compatibility: Object.freeze({ ...manifest.compatibility }),
     files: Object.freeze(verifiedFiles),
     securityBoundary,
+    trustedConfigurationSecurityBoundary,
+    bootstrapConfigurations: Object.freeze(bootstrapConfigurations),
     publisherVerification: Object.freeze({
       authenticodeRequired: true as const,
       performedByThisVerifier: false as const,
@@ -349,9 +623,81 @@ export function serializeTrustedInstallationManifest(value: unknown): string {
   return serializeValidatedManifest(manifest);
 }
 
+export function lookupTrustedInstallationFile(
+  verified: Readonly<VerifiedTrustedInstallation>,
+  query: TrustedInstallationFileLookup,
+): Readonly<VerifiedTrustedInstallationFile> | undefined {
+  let path: string;
+  try {
+    path = validateRelativeWindowsPath(query.path, "INSTALLATION_FILE_UNSAFE");
+  } catch {
+    return undefined;
+  }
+  return verified.files.find(
+    (candidate) =>
+      candidate.root === query.root && relativePathKey(candidate.path) === relativePathKey(path),
+  );
+}
+
+export function requireTrustedInstallationFileBinding(
+  verified: Readonly<VerifiedTrustedInstallation>,
+  query: TrustedInstallationFileBindingQuery,
+): Readonly<TrustedInstallationFileBindingEvidence> {
+  const file = lookupTrustedInstallationFile(verified, query);
+  if (
+    file === undefined ||
+    file.role !== query.role ||
+    file.sha256 !== validateConfigurationBindingSha256(query.sha256)
+  ) {
+    throw configurationBindingMismatch();
+  }
+  return Object.freeze({
+    releaseId: verified.releaseId,
+    manifestSha256: verified.manifestSha256,
+    schemaVersion: verified.schemaVersion,
+    compatibility: verified.compatibility,
+    file,
+  });
+}
+
+export function requireTrustedInstallationBootstrapConfigurationBinding(
+  verified: Readonly<VerifiedTrustedInstallation>,
+  actual: Readonly<VerifiedTrustedInstallationBootstrapConfiguration>,
+): Readonly<VerifiedTrustedInstallationBootstrapConfiguration> {
+  const absolutePath = normalizeConfigurationBindingPath(actual.absolutePath);
+  const sha256 = validateConfigurationBindingSha256(actual.sha256);
+  const expected = verified.bootstrapConfigurations.find(
+    (candidate) => candidate.name === actual.name,
+  );
+  if (
+    expected === undefined ||
+    !windowsPathsEqual(expected.absolutePath, absolutePath) ||
+    expected.sha256 !== sha256 ||
+    expected.size !== actual.size ||
+    expected.content !== actual.content ||
+    expected.identity.dev !== actual.identity.dev ||
+    expected.identity.ino !== actual.identity.ino ||
+    expected.identity.nlink !== actual.identity.nlink ||
+    expected.identity.mtimeNs !== actual.identity.mtimeNs ||
+    expected.identity.ctimeNs !== actual.identity.ctimeNs
+  ) {
+    throw configurationBindingMismatch();
+  }
+  return expected;
+}
+
 function serializeValidatedManifest(manifest: ParsedManifest): string {
-  return JSON.stringify({
+  const document = JSON.stringify({
+    compatibility: {
+      workerApiProtocolVersion: manifest.compatibility.workerApiProtocolVersion,
+      localProtocolMajor: manifest.compatibility.localProtocolMajor,
+      localProtocolMinimumMinor: manifest.compatibility.localProtocolMinimumMinor,
+      localProtocolMaximumMinor: manifest.compatibility.localProtocolMaximumMinor,
+      serviceHostRpcVersion: manifest.compatibility.serviceHostRpcVersion,
+      processHostProtocolVersion: manifest.compatibility.processHostProtocolVersion,
+    },
     files: manifest.files.map((file) => ({
+      root: file.root,
       path: file.path,
       role: file.role,
       sha256: file.sha256,
@@ -361,6 +707,10 @@ function serializeValidatedManifest(manifest: ParsedManifest): string {
     releaseId: manifest.releaseId,
     schemaVersion: manifest.schemaVersion,
   });
+  if (Buffer.byteLength(document, "utf8") > maximumManifestBytes) {
+    throw verificationError("MANIFEST_LIMIT_EXCEEDED", "Release manifest exceeds its byte limit.");
+  }
+  return document;
 }
 
 function parseCanonicalManifest(bytes: Buffer): ParsedManifest {
@@ -396,7 +746,15 @@ function parseCanonicalManifest(bytes: Buffer): ParsedManifest {
 }
 
 function validateManifestValue(value: unknown): ParsedManifest {
-  if (!isRecordWithExactKeys(value, ["files", "publisherPolicy", "releaseId", "schemaVersion"])) {
+  if (
+    !isRecordWithExactKeys(value, [
+      "compatibility",
+      "files",
+      "publisherPolicy",
+      "releaseId",
+      "schemaVersion",
+    ])
+  ) {
     throw manifestFormatError("Release manifest has unexpected or missing fields.");
   }
   if (value.schemaVersion !== manifestSchemaVersion) {
@@ -405,6 +763,7 @@ function validateManifestValue(value: unknown): ParsedManifest {
   if (value.publisherPolicy !== publisherPolicy) {
     throw manifestFormatError("Release manifest publisherPolicy is unsupported.");
   }
+  const compatibility = validateCompatibility(value.compatibility);
   if (typeof value.releaseId !== "string" || !releaseIdPattern.test(value.releaseId)) {
     throw manifestFormatError("Release manifest releaseId is invalid.");
   }
@@ -420,13 +779,19 @@ function validateManifestValue(value: unknown): ParsedManifest {
   const roleCounts = new Map<TrustedInstallationFileRole, number>();
   let totalBytes = 0n;
   for (const rawFile of value.files) {
-    if (!isRecordWithExactKeys(rawFile, ["path", "role", "sha256", "size"])) {
+    if (!isRecordWithExactKeys(rawFile, ["root", "path", "role", "sha256", "size"])) {
       throw manifestFormatError("Release manifest file entry has unexpected or missing fields.");
     }
+    if (typeof rawFile.root !== "string" || !allowedRoots.has(rawFile.root)) {
+      throw manifestFormatError("Release manifest file root is unsupported.");
+    }
+    const root = rawFile.root as TrustedInstallationFileRoot;
     const path = validateRelativeWindowsPath(rawFile.path, "INSTALLATION_FILE_UNSAFE");
-    const pathKey = relativePathKey(path);
+    const pathKey = manifestFileKey(root, path);
     if (paths.has(pathKey)) {
-      throw manifestFormatError("Release manifest file paths must be case-insensitively unique.");
+      throw manifestFormatError(
+        "Release manifest file paths must be case-insensitively unique within each root.",
+      );
     }
     paths.add(pathKey);
 
@@ -434,7 +799,8 @@ function validateManifestValue(value: unknown): ParsedManifest {
       throw manifestFormatError("Release manifest file role is unsupported.");
     }
     const role = rawFile.role as TrustedInstallationFileRole;
-    validateRolePath(role, path);
+    validateRoleAndPath(root, role, path);
+    assertManifestFileIsNotBootstrapConfiguration(root, path);
     roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
 
     const sha256 = validateSha256(rawFile.sha256, "MANIFEST_FORMAT_INVALID", "Manifest file entry");
@@ -442,7 +808,7 @@ function validateManifestValue(value: unknown): ParsedManifest {
       throw manifestFormatError("Release manifest file size must be a canonical decimal string.");
     }
     const exactSize = BigInt(rawFile.size);
-    if ((executableRoles.has(role) || role === "worker-bundle") && exactSize === 0n) {
+    if (exactSize === 0n) {
       throw manifestFormatError(`Release manifest role ${role} must not be empty.`);
     }
     if (exactSize > maximumFileBytes) {
@@ -458,17 +824,20 @@ function validateManifestValue(value: unknown): ParsedManifest {
         "Release manifest total file size exceeds the installation limit.",
       );
     }
-    parsedFiles.push(Object.freeze({ path, role, sha256, size: rawFile.size, exactSize }));
+    parsedFiles.push(Object.freeze({ root, path, role, sha256, size: rawFile.size, exactSize }));
   }
 
-  for (const role of requiredSingletonRoles) {
-    if (roleCounts.get(role) !== 1) {
-      throw manifestFormatError(`Release manifest must contain exactly one ${role} file.`);
+  for (const [role, expectedCount] of requiredRoleCounts) {
+    if (roleCounts.get(role) !== expectedCount) {
+      throw manifestFormatError(
+        `Release manifest must contain exactly ${expectedCount} ${role} file(s).`,
+      );
     }
   }
 
-  parsedFiles.sort((left, right) => compareRelativePaths(left.path, right.path));
+  parsedFiles.sort(compareManifestFiles);
   return Object.freeze({
+    compatibility,
     files: Object.freeze(parsedFiles),
     publisherPolicy,
     releaseId: value.releaseId,
@@ -476,31 +845,121 @@ function validateManifestValue(value: unknown): ParsedManifest {
   });
 }
 
-function validateRolePath(role: TrustedInstallationFileRole, path: string): void {
+function validateRoleAndPath(
+  root: TrustedInstallationFileRoot,
+  role: TrustedInstallationFileRole,
+  path: string,
+): void {
+  if (installationOnlyRoles.has(role) && root !== "installation") {
+    throw manifestFormatError(`Release manifest role ${role} must use the installation root.`);
+  }
+  if (trustedConfigurationOnlyRoles.has(role) && root !== "trusted-configuration") {
+    throw manifestFormatError(
+      `Release manifest role ${role} must use the trusted-configuration root.`,
+    );
+  }
   const extension = win32.extname(path).toLowerCase();
-  if (executableRoles.has(role) && extension !== ".exe") {
-    throw manifestFormatError(`Release manifest role ${role} must identify an .exe file.`);
+  const allowedExtensions = roleExtensions.get(role);
+  if (allowedExtensions === undefined || !allowedExtensions.has(extension)) {
+    throw manifestFormatError(`Release manifest role ${role} has an unsupported file extension.`);
   }
-  if (role === "worker-bundle" && extension !== ".mjs") {
-    throw manifestFormatError("Release manifest role worker-bundle must identify an .mjs file.");
-  }
-  if (role === "native-library" && extension !== ".dll" && extension !== ".node") {
+  if (
+    !portableExecutableRoles.has(role) &&
+    !scriptRoles.has(role) &&
+    dangerousNonDataExtensions.has(extension)
+  ) {
     throw manifestFormatError(
-      "Release manifest role native-library must identify a .dll or .node file.",
+      `Release manifest non-executable role ${role} cannot identify executable or script content.`,
     );
   }
-  if (role === "ca-bundle" && ![".pem", ".crt", ".cer"].includes(extension)) {
+}
+
+function assertManifestFileIsNotBootstrapConfiguration(
+  root: TrustedInstallationFileRoot,
+  path: string,
+): void {
+  if (
+    root === "trusted-configuration" &&
+    trustedInstallationBootstrapConfigurationNames.some(
+      (name) => relativePathKey(name) === relativePathKey(path),
+    )
+  ) {
     throw manifestFormatError(
-      "Release manifest role ca-bundle must identify a .pem, .crt, or .cer file.",
+      "Bootstrap service-host configurations must not be listed in the release manifest.",
     );
   }
+}
+
+function assertRoleContent(file: TrustedInstallationManifestFile, contentPrefix: Uint8Array): void {
+  const portableExecutable =
+    contentPrefix.byteLength >= 2 && contentPrefix[0] === 0x4d && contentPrefix[1] === 0x5a;
+  const offset =
+    contentPrefix.byteLength >= 3 &&
+    contentPrefix[0] === 0xef &&
+    contentPrefix[1] === 0xbb &&
+    contentPrefix[2] === 0xbf
+      ? 3
+      : 0;
+  const shebang =
+    contentPrefix.byteLength >= offset + 2 &&
+    contentPrefix[offset] === 0x23 &&
+    contentPrefix[offset + 1] === 0x21;
+  if (portableExecutableRoles.has(file.role)) {
+    if (!portableExecutable) {
+      throw verificationError(
+        "INSTALLATION_FILE_UNSAFE",
+        `Release manifest role ${file.role} must identify Portable Executable content.`,
+      );
+    }
+    return;
+  }
+  if (scriptRoles.has(file.role)) {
+    if (portableExecutable) {
+      throw verificationError(
+        "INSTALLATION_FILE_UNSAFE",
+        `Release manifest role ${file.role} cannot disguise Portable Executable content.`,
+      );
+    }
+    return;
+  }
+  if (portableExecutable || shebang) {
+    throw verificationError(
+      "INSTALLATION_FILE_UNSAFE",
+      `Release manifest role ${file.role} cannot disguise executable or script content.`,
+    );
+  }
+}
+
+function validateCompatibility(value: unknown): TrustedInstallationCompatibility {
+  if (
+    !isRecordWithExactKeys(value, [
+      "localProtocolMajor",
+      "localProtocolMaximumMinor",
+      "localProtocolMinimumMinor",
+      "processHostProtocolVersion",
+      "serviceHostRpcVersion",
+      "workerApiProtocolVersion",
+    ])
+  ) {
+    throw manifestFormatError("Release manifest compatibility has unexpected or missing fields.");
+  }
+  for (const [name, expected] of Object.entries(requiredCompatibility)) {
+    if (value[name] !== expected) {
+      throw manifestFormatError(`Release manifest compatibility ${name} is unsupported.`);
+    }
+  }
+  return requiredCompatibility;
 }
 
 function assertManifestDoesNotListItself(
   manifest: ParsedManifest,
   manifestRelativePath: string,
 ): void {
-  const immutablePaths = new Set(manifest.files.map((file) => relativePathKey(file.path)));
+  const immutablePaths = new Set(
+    manifest.files
+      .filter((file) => file.root === "installation")
+      .map((file) => relativePathKey(file.path)),
+  );
   if (immutablePaths.has(relativePathKey(manifestRelativePath))) {
     throw manifestFormatError("Release manifest must not list itself as an installation file.");
   }
@@ -548,24 +1007,26 @@ async function verifySecurityBoundary(
   if (
     !isRecordWithExactKeys(value, [
       "adapterProtocolVersion",
+      "alternateDataStreamsAbsent",
       "directoryHandleIdentity",
       "filesystem",
       "genericReparsePointInspection",
       "implementation",
-      "installationTreeDaclWriteProtected",
       "rootAndAncestorsReparseFree",
+      "treeDaclWriteProtected",
       "unprivilegedWriteDenied",
       "volume",
       "workerTokenWriteDenied",
     ]) ||
     value.adapterProtocolVersion !== 1 ||
+    value.alternateDataStreamsAbsent !== true ||
     value.implementation !== "native-win32" ||
     value.filesystem !== "NTFS" ||
     value.volume !== "fixed-local" ||
     value.rootAndAncestorsReparseFree !== true ||
     value.genericReparsePointInspection !== true ||
     value.directoryHandleIdentity !== true ||
-    value.installationTreeDaclWriteProtected !== true ||
+    value.treeDaclWriteProtected !== true ||
     value.workerTokenWriteDenied !== true ||
     value.unprivilegedWriteDenied !== true
   ) {
@@ -576,13 +1037,14 @@ async function verifySecurityBoundary(
   }
   return Object.freeze({
     adapterProtocolVersion: 1 as const,
+    alternateDataStreamsAbsent: true as const,
     implementation: "native-win32" as const,
     filesystem: "NTFS" as const,
     volume: "fixed-local" as const,
     rootAndAncestorsReparseFree: true as const,
     genericReparsePointInspection: true as const,
     directoryHandleIdentity: true as const,
-    installationTreeDaclWriteProtected: true as const,
+    treeDaclWriteProtected: true as const,
     workerTokenWriteDenied: true as const,
     unprivilegedWriteDenied: true as const,
   });
@@ -751,6 +1213,7 @@ async function verifyStableFile(options: VerifyStableFileOptions): Promise<Verif
       metadata: openedMetadata,
       identityKey: identityKey(openedMetadata),
       digest: readResult.digest,
+      contentPrefix: readResult.contentPrefix,
       ...(readResult.bytes === undefined ? {} : { bytes: readResult.bytes }),
     };
   } catch (error) {
@@ -780,10 +1243,16 @@ async function hashOpenFile(
   collectBytes: boolean,
   label: string,
   readFailureCode: "MANIFEST_READ_FAILED" | "INSTALLATION_FILE_READ_FAILED",
-): Promise<{ readonly digest: string; readonly bytes?: Buffer }> {
+): Promise<{
+  readonly digest: string;
+  readonly contentPrefix: Buffer;
+  readonly bytes?: Buffer;
+}> {
   const size = Number(exactSize);
   const hash = createHash("sha256");
   const collected: Buffer[] | undefined = collectBytes ? [] : undefined;
+  const prefixChunks: Buffer[] = [];
+  let prefixLength = 0;
   const buffer = Buffer.allocUnsafe(hashChunkBytes);
   let position = 0;
   while (position < size) {
@@ -793,6 +1262,13 @@ async function hashOpenFile(
     const chunk = buffer.subarray(0, bytesRead);
     hash.update(chunk);
     collected?.push(Buffer.from(chunk));
+    if (prefixLength < contentPrefixBytes) {
+      const prefixChunk = Buffer.from(
+        chunk.subarray(0, Math.min(chunk.byteLength, contentPrefixBytes - prefixLength)),
+      );
+      prefixChunks.push(prefixChunk);
+      prefixLength += prefixChunk.byteLength;
+    }
     position += bytesRead;
   }
   const extra = Buffer.allocUnsafe(1);
@@ -801,6 +1277,7 @@ async function hashOpenFile(
   }
   return {
     digest: hash.digest("hex"),
+    contentPrefix: Buffer.concat(prefixChunks, prefixLength),
     ...(collected === undefined ? {} : { bytes: Buffer.concat(collected, size) }),
   };
 }
@@ -845,46 +1322,64 @@ function validateObservedSize(size: bigint, options: VerifyStableFileOptions): v
   }
 }
 
+interface RootContentsExpectation {
+  readonly root: VerifiedRoot;
+  readonly expectedFiles: ReadonlyMap<string, ExpectedScannedFile>;
+}
+
+interface ScannedRootContents extends RootContentsExpectation {
+  readonly directorySnapshots: readonly DirectorySnapshot[];
+}
+
 async function verifyInstallationContents(
   fileIO: TrustedInstallationFileIO,
-  root: VerifiedRoot,
-  expectedFiles: ReadonlyMap<string, ExpectedScannedFile>,
+  roots: readonly RootContentsExpectation[],
 ): Promise<void> {
-  const expectedDirectories = buildExpectedDirectories(root.path, expectedFiles.values());
-  const seenFiles = new Set<string>();
-  const directorySnapshots: DirectorySnapshot[] = [];
   const scanState = { pathCount: 0 };
-  await scanDirectory({
-    fileIO,
-    root,
-    directoryPath: root.path,
-    expectedDirectories,
-    expectedFiles,
-    seenFiles,
-    directorySnapshots,
-    scanState,
-  });
-  if (seenFiles.size !== expectedFiles.size) {
-    throw verificationError(
-      "INSTALLATION_CONTENT_MISMATCH",
-      "Installation is missing one or more manifest files.",
+  const scannedRoots: ScannedRootContents[] = [];
+  for (const expectation of roots) {
+    const expectedDirectories = buildExpectedDirectories(
+      expectation.root.path,
+      expectation.expectedFiles.values(),
     );
-  }
-  for (const key of expectedFiles.keys()) {
-    if (!seenFiles.has(key)) {
+    const seenFiles = new Set<string>();
+    const directorySnapshots: DirectorySnapshot[] = [];
+    await scanDirectory({
+      fileIO,
+      root: expectation.root,
+      directoryPath: expectation.root.path,
+      expectedDirectories,
+      expectedFiles: expectation.expectedFiles,
+      seenFiles,
+      directorySnapshots,
+      scanState,
+    });
+    if (seenFiles.size !== expectation.expectedFiles.size) {
       throw verificationError(
         "INSTALLATION_CONTENT_MISMATCH",
         "Installation is missing one or more manifest files.",
       );
     }
+    for (const key of expectation.expectedFiles.keys()) {
+      if (!seenFiles.has(key)) {
+        throw verificationError(
+          "INSTALLATION_CONTENT_MISMATCH",
+          "Installation is missing one or more manifest files.",
+        );
+      }
+    }
+    scannedRoots.push({ ...expectation, directorySnapshots });
   }
-  for (const snapshot of directorySnapshots) {
-    await reverifyDirectory(fileIO, snapshot);
+
+  for (const scanned of scannedRoots) {
+    for (const snapshot of scanned.directorySnapshots) {
+      await reverifyDirectory(fileIO, snapshot);
+    }
+    for (const file of scanned.expectedFiles.values()) {
+      await reverifyFile(fileIO, scanned.root.path, file);
+    }
   }
-  for (const file of expectedFiles.values()) {
-    await reverifyFile(fileIO, root.path, file);
-  }
-  await reverifyRoot(fileIO, root);
+  for (const scanned of scannedRoots) await reverifyRoot(fileIO, scanned.root);
 }
 
 interface ScanDirectoryOptions {
@@ -1105,10 +1600,36 @@ function buildExpectedDirectories(
         );
       }
       directories.add(windowsPathKey(current));
+      if (directories.size > maximumScannedPaths) {
+        throw verificationError(
+          "INSTALLATION_LIMIT_EXCEEDED",
+          "Manifest paths require too many installation directories.",
+        );
+      }
       current = win32.dirname(current);
     }
   }
   return directories;
+}
+
+function decodeBootstrapConfiguration(
+  bytes: Buffer,
+  name: TrustedInstallationBootstrapConfigurationName,
+): string {
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
+    throw verificationError(
+      "INSTALLATION_FILE_UNSAFE",
+      `Bootstrap configuration ${name} must not contain a byte-order mark.`,
+    );
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw verificationError(
+      "INSTALLATION_FILE_UNSAFE",
+      `Bootstrap configuration ${name} must be valid UTF-8.`,
+    );
+  }
 }
 
 async function reverifyDirectory(
@@ -1446,12 +1967,31 @@ function compareRelativePaths(left: string, right: string): number {
   return 0;
 }
 
+function compareManifestFiles(left: ParsedManifestFile, right: ParsedManifestFile): number {
+  const rootDifference =
+    (rootSortOrder.get(left.root) ?? Number.MAX_SAFE_INTEGER) -
+    (rootSortOrder.get(right.root) ?? Number.MAX_SAFE_INTEGER);
+  return rootDifference === 0 ? compareRelativePaths(left.path, right.path) : rootDifference;
+}
+
+function manifestFileKey(root: TrustedInstallationFileRoot, path: string): string {
+  return `${root}\0${relativePathKey(path)}`;
+}
+
 function relativePathKey(value: string): string {
   return value.toLowerCase();
 }
 
 function windowsPathsEqual(left: string, right: string): boolean {
   return windowsPathKey(left) === windowsPathKey(right);
+}
+
+function windowsPathsOverlap(left: string, right: string): boolean {
+  return (
+    windowsPathsEqual(left, right) ||
+    isStrictDescendant(left, right) ||
+    isStrictDescendant(right, left)
+  );
 }
 
 function windowsPathKey(value: string): string {
@@ -1508,6 +2048,28 @@ async function scanIO<T>(operation: () => Promise<T>): Promise<T> {
       "Installation filesystem contents could not be inspected.",
     );
   }
+}
+
+function normalizeConfigurationBindingPath(value: unknown): string {
+  try {
+    return normalizeAbsoluteWindowsPath(value, "INSTALLATION_FILE_UNSAFE");
+  } catch {
+    throw configurationBindingMismatch();
+  }
+}
+
+function validateConfigurationBindingSha256(value: unknown): string {
+  if (typeof value !== "string" || !sha256Pattern.test(value)) {
+    throw configurationBindingMismatch();
+  }
+  return value;
+}
+
+function configurationBindingMismatch(): TrustedInstallationVerificationError {
+  return verificationError(
+    "MANIFEST_BINDING_MISMATCH",
+    "Service configuration does not match the verified release manifest.",
+  );
 }
 
 function manifestFormatError(message: string): TrustedInstallationVerificationError {

@@ -30,7 +30,7 @@ Worker payload and must not be used to enable production execution.
 The only accepted forms are:
 
 ```text
-AgenticReview.ServiceHost.exe --config C:\Program Files\AgenticReview\config\control-service-host.json
+AgenticReview.ServiceHost.exe --config C:\ProgramData\AgenticReview\TrustedConfig\control-service-host.json
 AgenticReview.ServiceHost.exe --version
 ```
 
@@ -45,9 +45,40 @@ unknown properties, trailing bytes, or alternative number spellings. The complet
 limited to 64 KiB. Windows paths are lexical local-drive paths and are verified again by the future
 handle-based Windows security adapter.
 
+The schema version 2 Control document is:
+
 ```json
-{"schemaVersion":1,"role":"control","ownService":{"name":"AgenticReview.Worker.Control"},"peerService":{"name":"AgenticReview.Worker.Executor"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\control.mjs","bundleSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","workingDirectory":"C:\\ProgramData\\AgenticReview\\Control","environment":{"NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Control\\Profile"}},"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000}}
+{"schemaVersion":2,"role":"control","ownService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"peerService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\control.mjs","bundleSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dataRoot":"C:\\ProgramData\\AgenticReview\\Control","workingDirectory":"C:\\ProgramData\\AgenticReview\\Control\\Work","environment":{"NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Control\\Profile"}},"control":{"serverOrigin":"https://review.example.test","serverName":"review.example.test","rootCertificatePath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\server-root.cer","rootCertificateSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","clientCertificateStore":"MY","clientCertificateDerSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","clientPrivateKeySecurityDescriptorSha256":"0000000000000000000000000000000000000000000000000000000000000000","localAuthorityCngKeyName":"AgenticReview.Worker.Control.LocalAuthority","localAuthorityKeySecurityDescriptorSha256":"9999999999999999999999999999999999999999999999999999999999999999","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111"},"executor":null,"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000}}
 ```
+
+The matching Executor document uses the same release and pipe identity, reverses the service
+identities, and exposes only public policy and executable inputs:
+
+```json
+{"schemaVersion":2,"role":"executor","ownService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"peerService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\executor.mjs","bundleSha256":"4444444444444444444444444444444444444444444444444444444444444444","dataRoot":"C:\\ProgramData\\AgenticReview\\Executor","workingDirectory":"C:\\ProgramData\\AgenticReview\\Executor\\Work","environment":{"CODEX_HOME":"C:\\ProgramData\\AgenticReview\\Executor\\Codex","GCM_INTERACTIVE":"never","GIT_CONFIG_NOSYSTEM":"1","GIT_TERMINAL_PROMPT":"0","NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Executor\\Profile"}},"control":null,"executor":{"localAuthorityPublicKeyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\local-authority.spki","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111","codexPolicyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\codex-requirements.toml","codexPolicySha256":"2222222222222222222222222222222222222222222222222222222222222222","processHostPath":"C:\\Program Files\\AgenticReview\\Worker\\bin\\AgenticReview.ProcessHost.exe","processHostSha256":"3333333333333333333333333333333333333333333333333333333333333333"},"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000}}
+```
+
+Service names, service SIDs, role, and pipe name are a fixed production combination. Exactly one
+of `control` and `executor` is an object for the selected role; the other property is explicitly
+`null`. The release manifest and approved Authenticode signer certificate digest bind both
+documents to one installed package. The Control origin is a canonical HTTPS origin with no user
+information, path, query, fragment, or explicit default port, and `serverName` must equal its host.
+The client certificate store is fixed to the Windows `MY` store. No certificate or private-key
+bytes, CNG handle, mTLS key name, or provider selector is accepted in configuration. The mTLS
+credential is selected only by the configured certificate DER digest. The expected raw security
+descriptor digests bind the reviewed ACLs of both private keys. Native preflight fixes both keys to
+the machine-scope Microsoft Software Key Storage Provider, proves they are non-exportable and
+Control-only, and rejects reuse of one key for both mTLS and local-authority signing.
+
+The immutable manifest, executables, Node payloads, and ProcessHost are strict descendants of
+`installation.root`. Administrator-managed CA material, the local-authority public key, and the
+machine-enforced Codex policy are strict descendants of `installation.trustedConfigurationRoot`.
+That root, the installation tree, and `node.dataRoot` are pairwise disjoint. The working, temporary,
+profile, application-data, Codex, home, and Git configuration paths are strict descendants of that
+role's data root. Every `PATH` entry is inside the installation tree. Native preflight must
+additionally prove the configured ownership, DACL, volume, reparse-point, file identity, manifest
+membership, and Authenticode claims before use. The platform adapter must also prove that the
+actual `--config` file is below the configured trusted-configuration root after parsing it.
 
 The environment object is the eventual Node replacement environment, not an overlay on the
 ServiceHost environment. It uses a role-specific allowlist; unknown variables and variables that

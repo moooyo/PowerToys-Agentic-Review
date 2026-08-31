@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  lookupTrustedInstallationFile,
+  requireTrustedInstallationBootstrapConfigurationBinding,
+  requireTrustedInstallationFileBinding,
   serializeTrustedInstallationManifest,
   type TrustedInstallationDirectoryHandle,
   type TrustedInstallationFileHandle,
   type TrustedInstallationFileIO,
   type TrustedInstallationFileRole,
+  type TrustedInstallationFileRoot,
   type TrustedInstallationFileStat,
   type TrustedInstallationManifest,
   type TrustedInstallationSecurityBoundary,
@@ -16,7 +20,18 @@ import {
 } from "./trusted-installation-manifest.js";
 
 const installationRoot = "C:\\Program Files\\AgenticReview";
+const trustedConfigurationRoot = "C:\\ProgramData\\AgenticReview\\TrustedConfig";
 const manifestPath = `${installationRoot}\\trusted-installation.manifest.json`;
+const controlBootstrapPath = `${trustedConfigurationRoot}\\control-service-host.json`;
+const executorBootstrapPath = `${trustedConfigurationRoot}\\executor-service-host.json`;
+const compatibility = {
+  workerApiProtocolVersion: "1.0" as const,
+  localProtocolMajor: 1 as const,
+  localProtocolMinimumMinor: 0 as const,
+  localProtocolMaximumMinor: 0 as const,
+  serviceHostRpcVersion: 1 as const,
+  processHostProtocolVersion: 1 as const,
+};
 
 type FakeNodeKind = "directory" | "file";
 
@@ -142,10 +157,10 @@ class FakeFileIO implements TrustedInstallationFileIO {
   public onFirstRead: ((path: string, node: FakeNode) => void) | undefined;
   public onOpenDirectory: ((path: string) => void) | undefined;
   public maximumRequestedReadBytes = 0;
+  public readonly inspectedSecurityBoundaries: string[] = [];
 
-  public async inspectSecurityBoundary(
-    _path: string,
-  ): Promise<TrustedInstallationSecurityBoundary> {
+  public async inspectSecurityBoundary(path: string): Promise<TrustedInstallationSecurityBoundary> {
+    this.inspectedSecurityBoundaries.push(path);
     return this.securityBoundaryResult as TrustedInstallationSecurityBoundary;
   }
 
@@ -193,6 +208,7 @@ class FakeFileIO implements TrustedInstallationFileIO {
 }
 
 interface FixtureFile {
+  readonly root: TrustedInstallationFileRoot;
   readonly path: string;
   readonly role: TrustedInstallationFileRole;
   readonly content: Buffer;
@@ -207,19 +223,36 @@ interface Fixture {
 
 function createFixture(): Fixture {
   const files: FixtureFile[] = [
-    file("AgenticReview.Worker.exe", "service-wrapper", "winsw"),
-    file("app\\dist\\worker.mjs", "worker-bundle", "worker bundle"),
+    file("AgenticReview.Worker.Control.exe", "service-wrapper", "control winsw"),
+    file("AgenticReview.Worker.Executor.exe", "service-wrapper", "executor winsw"),
+    file("app\\control.mjs", "control-bundle", "control worker bundle"),
+    file("app\\executor.mjs", "executor-bundle", "executor worker bundle"),
     file("codex\\codex.exe", "codex-cli", "codex executable"),
-    file("codex\\runtime\\codex-runtime.dll", "native-library", "codex runtime"),
+    file("codex\\runtime\\codex-runtime.dll", "codex-runtime", "codex runtime"),
     file("git\\cmd\\git.exe", "git-cli", "git executable"),
     file("git\\mingw64\\bin\\git-remote-https.exe", "git-helper", "git helper"),
     file("git\\mingw64\\bin\\libcurl.dll", "native-library", "curl library"),
-    file("git\\mingw64\\ssl\\cert.pem", "ca-bundle", "certificate bundle"),
+    file("git\\mingw64\\ssl\\cert.pem", "ca-bundle", "git certificate bundle"),
+    file("native\\AgenticReview.ServiceHost.exe", "service-host", "service host"),
     file("native\\AgenticReview.ProcessHost.exe", "process-host", "process host"),
     file("runtime\\node.exe", "node-runtime", "node executable"),
+    file("service\\control.xml", "service-config", "control service config"),
+    file("service\\executor.xml", "service-config", "executor service config"),
+    file("LICENSE.txt", "license", "release license"),
+    file("server-root.cer", "ca-bundle", "server root certificate", "trusted-configuration"),
+    file(
+      "local-authority.spki",
+      "trusted-config",
+      "local authority public key",
+      "trusted-configuration",
+    ),
+    file("codex-requirements.toml", "policy", 'sandbox = "elevated"', "trusted-configuration"),
+    file("review.md", "prompt", "Review the assigned change.", "trusted-configuration"),
   ];
   const manifest: TrustedInstallationManifest = {
+    compatibility,
     files: files.map((item) => ({
+      root: item.root,
       path: item.path,
       role: item.role,
       sha256: digest(item.content),
@@ -227,28 +260,43 @@ function createFixture(): Fixture {
     })),
     publisherPolicy: "authenticode-required-at-install",
     releaseId: "2026.08.31-test.1",
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
   const manifestBytes = Buffer.from(serializeTrustedInstallationManifest(manifest), "utf8");
   const fileIO = new FakeFileIO();
   let ino = 1n;
   fileIO.add(new FakeNode({ path: installationRoot, kind: "directory", ino }));
-  for (const directory of collectDirectories(files.map((item) => item.path))) {
-    ino += 1n;
-    fileIO.add(
-      new FakeNode({ path: win32.join(installationRoot, directory), kind: "directory", ino }),
-    );
+  ino += 1n;
+  fileIO.add(new FakeNode({ path: trustedConfigurationRoot, kind: "directory", ino }));
+  for (const root of ["installation", "trusted-configuration"] as const) {
+    const absoluteRoot = root === "installation" ? installationRoot : trustedConfigurationRoot;
+    for (const directory of collectDirectories(
+      files.filter((item) => item.root === root).map((item) => item.path),
+    )) {
+      ino += 1n;
+      fileIO.add(
+        new FakeNode({ path: win32.join(absoluteRoot, directory), kind: "directory", ino }),
+      );
+    }
   }
   for (const item of files) {
     ino += 1n;
+    const root = item.root === "installation" ? installationRoot : trustedConfigurationRoot;
     fileIO.add(
       new FakeNode({
-        path: win32.join(installationRoot, item.path),
+        path: win32.join(root, item.path),
         kind: "file",
         ino,
         content: item.content,
       }),
     );
+  }
+  for (const [path, content] of [
+    [controlBootstrapPath, '{"role":"control"}'],
+    [executorBootstrapPath, '{"role":"executor"}'],
+  ] as const) {
+    ino += 1n;
+    fileIO.add(new FakeNode({ path, kind: "file", ino, content: Buffer.from(content, "utf8") }));
   }
   ino += 1n;
   fileIO.add(new FakeNode({ path: manifestPath, kind: "file", ino, content: manifestBytes }));
@@ -258,6 +306,7 @@ function createFixture(): Fixture {
     manifest,
     options: {
       installationRoot,
+      trustedConfigurationRoot,
       manifestPath,
       expectedManifestSha256: digest(manifestBytes),
       fileIO,
@@ -266,19 +315,114 @@ function createFixture(): Fixture {
 }
 
 describe("verifyTrustedInstallation", () => {
+  it("pins the schema-v2 canonical representation across TypeScript and Go", () => {
+    const manifest: TrustedInstallationManifest = {
+      compatibility,
+      files: [
+        manifestFile("runtime&tools\\node.exe", "node-runtime", "1"),
+        manifestFile("AgenticReview.Worker.Executor.exe", "service-wrapper", "2"),
+        manifestFile("app\\executor.mjs", "executor-bundle", "3"),
+        manifestFile("native\\AgenticReview.ProcessHost.exe", "process-host", "4"),
+        manifestFile("git\\cmd\\git.exe", "git-cli", "5"),
+        manifestFile("codex\\codex.exe", "codex-cli", "6"),
+        manifestFile("AgenticReview.Worker.Control.exe", "service-wrapper", "7"),
+        manifestFile("native\\AgenticReview.ServiceHost.exe", "service-host", "8"),
+        manifestFile("app\\control.mjs", "control-bundle", "9"),
+        manifestFile("service\\control.xml", "service-config", "a"),
+        manifestFile("service\\executor.xml", "service-config", "b"),
+        manifestFile("certificates\\server&root.cer", "ca-bundle", "c", "trusted-configuration"),
+        manifestFile("keys\\local-authority.spki", "trusted-config", "d", "trusted-configuration"),
+        manifestFile("policy\\codex-requirements.toml", "policy", "e", "trusted-configuration"),
+      ],
+      publisherPolicy: "authenticode-required-at-install",
+      releaseId: "2026.08.31-test.2",
+      schemaVersion: 2,
+    };
+
+    expect(digest(Buffer.from(serializeTrustedInstallationManifest(manifest), "utf8"))).toBe(
+      "b1ab8900b3fff2f3f54150dadaa779945dc0d5461962120ff1e7e8371c239e8c",
+    );
+  });
+
+  it("accepts an exact 4 MiB canonical document and rejects one additional byte", () => {
+    const maximumDocumentBytes = 4 * 1024 * 1024;
+    const manifest = cloneManifest(createFixture().manifest);
+    const baseLength = Buffer.byteLength(serializeTrustedInstallationManifest(manifest), "utf8");
+    const fixedPadding = "x".repeat(768);
+    const fixedEntry = manifestFile(`limits\\0000-${fixedPadding}.dat`, "runtime-data", "f");
+    const fixedContribution = 1 + JSON.stringify(fixedEntry).length;
+    const finalTemplate = manifestFile("limits\\zzzz-.dat", "runtime-data", "e");
+    const minimumFinalContribution = 1 + JSON.stringify(finalTemplate).length;
+    const fixedCount = Math.floor(
+      (maximumDocumentBytes - baseLength - minimumFinalContribution) / fixedContribution,
+    );
+    expect(manifest.files.length + fixedCount + 1).toBeLessThanOrEqual(8_192);
+
+    for (let index = 0; index < fixedCount; index += 1) {
+      manifest.files.push(
+        manifestFile(
+          `limits\\${index.toString().padStart(4, "0")}-${fixedPadding}.dat`,
+          "runtime-data",
+          "f",
+        ),
+      );
+    }
+    const remainingBytes = maximumDocumentBytes - baseLength - fixedCount * fixedContribution;
+    const finalPaddingBytes = remainingBytes - minimumFinalContribution;
+    expect(finalPaddingBytes).toBeGreaterThanOrEqual(0);
+    const finalEntry = {
+      ...finalTemplate,
+      path: `limits\\zzzz-${"y".repeat(finalPaddingBytes)}.dat`,
+    };
+    manifest.files.push(finalEntry);
+
+    const exactDocument = serializeTrustedInstallationManifest(manifest);
+    expect(Buffer.byteLength(exactDocument, "utf8")).toBe(maximumDocumentBytes);
+
+    finalEntry.path = finalEntry.path.replace(/\.dat$/u, "y.dat");
+    expect(() => serializeTrustedInstallationManifest(manifest)).toThrowError(
+      "Release manifest exceeds its byte limit.",
+    );
+  });
+
   it("verifies a closed installation tree with bounded streaming reads", async () => {
     const fixture = createFixture();
 
     const verified = await verifyTrustedInstallation(fixture.options);
 
     expect(verified.installationRoot).toBe(installationRoot);
+    expect(verified.trustedConfigurationRoot).toBe(trustedConfigurationRoot);
     expect(verified.releaseId).toBe("2026.08.31-test.1");
+    expect(verified.compatibility).toEqual(compatibility);
+    expect(Object.isFrozen(verified.compatibility)).toBe(true);
     expect(verified.files).toHaveLength(fixture.files.length);
     expect(verified.files.find((entry) => entry.role === "git-cli")).toMatchObject({
+      root: "installation",
       path: "git\\cmd\\git.exe",
-      size: BigInt(Buffer.byteLength("git executable")),
+      size: BigInt(Buffer.byteLength("MZgit executable")),
     });
     expect(verified.securityBoundary).toEqual(secureBoundary());
+    expect(verified.trustedConfigurationSecurityBoundary).toEqual(secureBoundary());
+    expect(fixture.fileIO.inspectedSecurityBoundaries).toEqual([
+      installationRoot,
+      trustedConfigurationRoot,
+    ]);
+    expect(verified.bootstrapConfigurations).toHaveLength(2);
+    expect(verified.bootstrapConfigurations[0]).toMatchObject({
+      name: "control-service-host.json",
+      absolutePath: controlBootstrapPath,
+      sha256: digest(fixture.fileIO.node(controlBootstrapPath).content),
+      size: fixture.fileIO.node(controlBootstrapPath).size,
+      content: '{"role":"control"}',
+    });
+    expect(verified.bootstrapConfigurations[1]).toMatchObject({
+      name: "executor-service-host.json",
+      absolutePath: executorBootstrapPath,
+      sha256: digest(fixture.fileIO.node(executorBootstrapPath).content),
+      size: fixture.fileIO.node(executorBootstrapPath).size,
+      content: '{"role":"executor"}',
+    });
+    expect(Object.isFrozen(verified.bootstrapConfigurations)).toBe(true);
     expect(verified.publisherVerification).toEqual({
       authenticodeRequired: true,
       performedByThisVerifier: false,
@@ -287,6 +431,96 @@ describe("verifyTrustedInstallation", () => {
     expect(Object.isFrozen(verified)).toBe(true);
     expect(Object.isFrozen(verified.files)).toBe(true);
     expect(fixture.fileIO.maximumRequestedReadBytes).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it("provides fail-closed file and bootstrap binding evidence", async () => {
+    const fixture = createFixture();
+    const verified = await verifyTrustedInstallation(fixture.options);
+    const publicKey = lookupTrustedInstallationFile(verified, {
+      root: "trusted-configuration",
+      path: "local-authority.spki",
+    });
+
+    expect(publicKey).toMatchObject({
+      root: "trusted-configuration",
+      role: "trusted-config",
+      absolutePath: `${trustedConfigurationRoot}\\local-authority.spki`,
+    });
+    const binding = requireTrustedInstallationFileBinding(verified, {
+      root: "trusted-configuration",
+      path: "local-authority.spki",
+      role: "trusted-config",
+      sha256: requiredFile(publicKey).sha256,
+    });
+    expect(binding).toEqual({
+      releaseId: verified.releaseId,
+      manifestSha256: verified.manifestSha256,
+      schemaVersion: verified.schemaVersion,
+      compatibility: verified.compatibility,
+      file: publicKey,
+    });
+    const bootstrapNode = fixture.fileIO.node(controlBootstrapPath);
+    const independentlyReadBootstrap = {
+      name: "control-service-host.json" as const,
+      absolutePath: controlBootstrapPath,
+      sha256: digest(bootstrapNode.content),
+      size: bootstrapNode.size,
+      content: bootstrapNode.content.toString("utf8"),
+      identity: {
+        dev: bootstrapNode.dev,
+        ino: bootstrapNode.ino,
+        nlink: 1n as const,
+        mtimeNs: bootstrapNode.mtimeNs,
+        ctimeNs: bootstrapNode.ctimeNs,
+      },
+    };
+    expect(
+      requireTrustedInstallationBootstrapConfigurationBinding(verified, independentlyReadBootstrap),
+    ).toBe(verified.bootstrapConfigurations[0]);
+
+    expect(() =>
+      requireTrustedInstallationFileBinding(verified, {
+        root: "trusted-configuration",
+        path: "local-authority.spki",
+        role: "trusted-config",
+        sha256: "0".repeat(64),
+      }),
+    ).toThrowError(TrustedInstallationVerificationError);
+    expect(() =>
+      requireTrustedInstallationBootstrapConfigurationBinding(verified, {
+        ...independentlyReadBootstrap,
+        sha256: "0".repeat(64),
+      }),
+    ).toThrowError(TrustedInstallationVerificationError);
+  });
+
+  it("requires disjoint installation and trusted-configuration roots", async () => {
+    const fixture = createFixture();
+    await expect(
+      verifyTrustedInstallation({
+        ...fixture.options,
+        trustedConfigurationRoot: `${installationRoot}\\config`,
+      }),
+    ).rejects.toMatchObject({ code: "INSTALLATION_ROOT_INVALID" });
+  });
+
+  it("keeps service-host bootstrap configurations outside the manifest", async () => {
+    const listed = createFixture();
+    const listedValue = cloneManifest(listed.manifest);
+    listedValue.files.push(
+      manifestFile("control-service-host.json", "policy", "f", "trusted-configuration"),
+    );
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(listed, Buffer.from(JSON.stringify(listedValue), "utf8")),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const missing = createFixture();
+    missing.fileIO.remove(controlBootstrapPath);
+    await expect(verifyTrustedInstallation(missing.options)).rejects.toMatchObject({
+      code: "INSTALLATION_FILE_READ_FAILED",
+    });
   });
 
   it("checks the pinned manifest digest before parsing its contents", async () => {
@@ -315,9 +549,18 @@ describe("verifyTrustedInstallation", () => {
     const incompleteBoundary = createFixture();
     incompleteBoundary.fileIO.securityBoundaryResult = {
       ...secureBoundary(),
-      installationTreeDaclWriteProtected: false,
+      treeDaclWriteProtected: false,
     };
     await expect(verifyTrustedInstallation(incompleteBoundary.options)).rejects.toMatchObject({
+      code: "INSTALLATION_SECURITY_BOUNDARY_INVALID",
+    });
+
+    const alternateStreamBoundary = createFixture();
+    alternateStreamBoundary.fileIO.securityBoundaryResult = {
+      ...secureBoundary(),
+      alternateDataStreamsAbsent: false,
+    };
+    await expect(verifyTrustedInstallation(alternateStreamBoundary.options)).rejects.toMatchObject({
       code: "INSTALLATION_SECURITY_BOUNDARY_INVALID",
     });
 
@@ -356,6 +599,31 @@ describe("verifyTrustedInstallation", () => {
     });
   });
 
+  it("rejects incompatible or incomplete component protocol ranges", async () => {
+    const incompatible = createFixture();
+    const incompatibleValue = cloneManifest(incompatible.manifest);
+    const incompatibleCompatibility = incompatibleValue.compatibility as unknown as Record<
+      string,
+      unknown
+    >;
+    incompatibleCompatibility.localProtocolMaximumMinor = 1;
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(incompatible, Buffer.from(JSON.stringify(incompatibleValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const missing = createFixture();
+    const missingValue = cloneManifest(missing.manifest);
+    const missingCompatibility = missingValue.compatibility as unknown as Record<string, unknown>;
+    delete missingCompatibility.serviceHostRpcVersion;
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(missing, Buffer.from(JSON.stringify(missingValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+  });
+
   it("rejects unsafe, duplicate, and non-canonical manifest paths", async () => {
     for (const unsafePath of [
       "git\\..\\codex.exe",
@@ -385,15 +653,35 @@ describe("verifyTrustedInstallation", () => {
         replaceManifest(duplicate, Buffer.from(JSON.stringify(rawDuplicate))),
       ),
     ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const crossRoot = createFixture();
+    const crossRootValue = cloneManifest(crossRoot.manifest);
+    crossRootValue.files.push(
+      manifestFile("shared.txt", "license", "c", "installation"),
+      manifestFile("shared.txt", "prompt", "d", "trusted-configuration"),
+    );
+    expect(() => serializeTrustedInstallationManifest(crossRootValue)).not.toThrow();
   });
 
-  it("requires the complete singleton runtime role set and role-appropriate extensions", async () => {
+  it("requires the complete dual-service runtime role set and role-appropriate extensions", async () => {
     const missing = createFixture();
     const missingValue = cloneManifest(missing.manifest);
     missingValue.files = missingValue.files.filter((entry) => entry.role !== "process-host");
     await expect(
       verifyTrustedInstallation(
         replaceManifest(missing, Buffer.from(JSON.stringify(missingValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const oneWrapper = createFixture();
+    const oneWrapperValue = cloneManifest(oneWrapper.manifest);
+    const secondWrapperIndex = oneWrapperValue.files.findLastIndex(
+      (entry) => entry.role === "service-wrapper",
+    );
+    oneWrapperValue.files.splice(secondWrapperIndex, 1);
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(oneWrapper, Buffer.from(JSON.stringify(oneWrapperValue))),
       ),
     ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
 
@@ -409,6 +697,102 @@ describe("verifyTrustedInstallation", () => {
         replaceManifest(wrongExtension, Buffer.from(JSON.stringify(wrongValue))),
       ),
     ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const wrongBundleExtension = createFixture();
+    const wrongBundleValue = cloneManifest(wrongBundleExtension.manifest);
+    const bundleIndex = wrongBundleValue.files.findIndex(
+      (entry) => entry.role === "executor-bundle",
+    );
+    wrongBundleValue.files[bundleIndex] = {
+      ...requiredFile(wrongBundleValue.files[bundleIndex]),
+      path: "app\\executor.js",
+    };
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(wrongBundleExtension, Buffer.from(JSON.stringify(wrongBundleValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const wrongRoot = createFixture();
+    const wrongRootValue = cloneManifest(wrongRoot.manifest);
+    const policyIndex = wrongRootValue.files.findIndex((entry) => entry.role === "policy");
+    wrongRootValue.files[policyIndex] = {
+      ...requiredFile(wrongRootValue.files[policyIndex]),
+      root: "installation",
+    };
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(wrongRoot, Buffer.from(JSON.stringify(wrongRootValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const scriptDisguise = createFixture();
+    const scriptDisguiseValue = cloneManifest(scriptDisguise.manifest);
+    const promptIndex = scriptDisguiseValue.files.findIndex((entry) => entry.role === "prompt");
+    scriptDisguiseValue.files[promptIndex] = {
+      ...requiredFile(scriptDisguiseValue.files[promptIndex]),
+      path: "review.ps1",
+    };
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(scriptDisguise, Buffer.from(JSON.stringify(scriptDisguiseValue))),
+      ),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+
+    const empty = createFixture();
+    const emptyValue = cloneManifest(empty.manifest);
+    const licenseIndex = emptyValue.files.findIndex((entry) => entry.role === "license");
+    emptyValue.files[licenseIndex] = {
+      ...requiredFile(emptyValue.files[licenseIndex]),
+      size: "0",
+    };
+    await expect(
+      verifyTrustedInstallation(replaceManifest(empty, Buffer.from(JSON.stringify(emptyValue)))),
+    ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
+  });
+
+  it("rejects PE and shebang content hidden behind non-executable roles", async () => {
+    for (const [role, relativePath, hiddenContent] of [
+      ["license", "LICENSE.txt", Buffer.from("MZhidden executable", "utf8")],
+      ["prompt", "review.md", Buffer.from("#!/usr/bin/env node\n", "utf8")],
+    ] as const) {
+      const fixture = createFixture();
+      const value = cloneManifest(fixture.manifest);
+      const index = value.files.findIndex((entry) => entry.role === role);
+      const entry = requiredFile(value.files[index]);
+      const root = entry.root === "installation" ? installationRoot : trustedConfigurationRoot;
+      setFileContent(fixture.fileIO.node(win32.join(root, relativePath)), hiddenContent);
+      value.files[index] = {
+        ...entry,
+        sha256: digest(hiddenContent),
+        size: hiddenContent.byteLength.toString(),
+      };
+      const manifestBytes = Buffer.from(serializeTrustedInstallationManifest(value), "utf8");
+
+      await expect(
+        verifyTrustedInstallation(replaceManifest(fixture, manifestBytes)),
+      ).rejects.toMatchObject({ code: "INSTALLATION_FILE_UNSAFE" });
+    }
+  });
+
+  it("requires Portable Executable content for executable and native-library roles", async () => {
+    const fixture = createFixture();
+    const value = cloneManifest(fixture.manifest);
+    const index = value.files.findIndex((entry) => entry.role === "node-runtime");
+    const entry = requiredFile(value.files[index]);
+    const content = Buffer.from("not a PE image", "utf8");
+    setFileContent(fixture.fileIO.node(win32.join(installationRoot, entry.path)), content);
+    value.files[index] = {
+      ...entry,
+      sha256: digest(content),
+      size: content.byteLength.toString(),
+    };
+
+    await expect(
+      verifyTrustedInstallation(
+        replaceManifest(fixture, Buffer.from(serializeTrustedInstallationManifest(value), "utf8")),
+      ),
+    ).rejects.toMatchObject({ code: "INSTALLATION_FILE_UNSAFE" });
   });
 
   it("uses lowercase digests and exact decimal bigint sizes", async () => {
@@ -502,13 +886,26 @@ describe("verifyTrustedInstallation", () => {
 
   it("rechecks files after the complete directory traversal", async () => {
     const fixture = createFixture();
-    const earlyFile = fixture.fileIO.node(win32.join(installationRoot, "AgenticReview.Worker.exe"));
+    const earlyFile = fixture.fileIO.node(
+      win32.join(installationRoot, "AgenticReview.Worker.Control.exe"),
+    );
     const lateDirectory = win32.join(installationRoot, "runtime");
     fixture.fileIO.onOpenDirectory = (path) => {
       if (pathKey(path) === pathKey(lateDirectory)) earlyFile.ctimeNs += 1n;
     };
 
     await expect(verifyTrustedInstallation(fixture.options)).rejects.toMatchObject({
+      code: "INSTALLATION_FILE_IDENTITY_CHANGED",
+    });
+
+    const crossRoot = createFixture();
+    const installationFile = crossRoot.fileIO.node(
+      win32.join(installationRoot, "AgenticReview.Worker.Control.exe"),
+    );
+    crossRoot.fileIO.onOpenDirectory = (path) => {
+      if (pathKey(path) === pathKey(trustedConfigurationRoot)) installationFile.ctimeNs += 1n;
+    };
+    await expect(verifyTrustedInstallation(crossRoot.options)).rejects.toMatchObject({
       code: "INSTALLATION_FILE_IDENTITY_CHANGED",
     });
   });
@@ -529,9 +926,7 @@ describe("verifyTrustedInstallation", () => {
 
     const manifestHardlink = createFixture();
     const manifest = manifestHardlink.fileIO.node(manifestPath);
-    const worker = manifestHardlink.fileIO.node(
-      win32.join(installationRoot, "app\\dist\\worker.mjs"),
-    );
+    const worker = manifestHardlink.fileIO.node(win32.join(installationRoot, "app\\control.mjs"));
     worker.dev = manifest.dev;
     worker.ino = manifest.ino;
     await expect(verifyTrustedInstallation(manifestHardlink.options)).rejects.toMatchObject({
@@ -541,6 +936,19 @@ describe("verifyTrustedInstallation", () => {
     const outsideHardlink = createFixture();
     outsideHardlink.fileIO.node(win32.join(installationRoot, "git\\cmd\\git.exe")).nlink = 2n;
     await expect(verifyTrustedInstallation(outsideHardlink.options)).rejects.toMatchObject({
+      code: "INSTALLATION_FILE_UNSAFE",
+    });
+
+    const crossRootHardlink = createFixture();
+    const installedNode = crossRootHardlink.fileIO.node(
+      win32.join(installationRoot, "runtime\\node.exe"),
+    );
+    const trustedPublicKey = crossRootHardlink.fileIO.node(
+      win32.join(trustedConfigurationRoot, "local-authority.spki"),
+    );
+    trustedPublicKey.dev = installedNode.dev;
+    trustedPublicKey.ino = installedNode.ino;
+    await expect(verifyTrustedInstallation(crossRootHardlink.options)).rejects.toMatchObject({
       code: "INSTALLATION_FILE_UNSAFE",
     });
   });
@@ -607,11 +1015,24 @@ describe("verifyTrustedInstallation", () => {
     await expect(verifyTrustedInstallation(reparseDirectory.options)).rejects.toMatchObject({
       code: "INSTALLATION_FILE_UNSAFE",
     });
+
+    const trustedExtra = createFixture();
+    trustedExtra.fileIO.add(
+      new FakeNode({
+        path: win32.join(trustedConfigurationRoot, "surprise.json"),
+        kind: "file",
+        ino: 90_004n,
+        content: Buffer.from("{}", "utf8"),
+      }),
+    );
+    await expect(verifyTrustedInstallation(trustedExtra.options)).rejects.toMatchObject({
+      code: "INSTALLATION_CONTENT_MISMATCH",
+    });
   });
 
   it("does not accept legacy mutable-file exceptions", async () => {
     const fixture = createFixture();
-    const serviceConfigPath = win32.join(installationRoot, "AgenticReview.Worker.xml");
+    const serviceConfigPath = win32.join(installationRoot, "legacy-mutable.xml");
     fixture.fileIO.add(
       new FakeNode({
         path: serviceConfigPath,
@@ -622,7 +1043,7 @@ describe("verifyTrustedInstallation", () => {
     );
     const legacyOptions = {
       ...fixture.options,
-      allowedMutableFiles: ["AgenticReview.Worker.xml"],
+      allowedMutableFiles: ["legacy-mutable.xml"],
     } as unknown as VerifyTrustedInstallationOptions;
 
     await expect(verifyTrustedInstallation(legacyOptions)).rejects.toMatchObject({
@@ -661,8 +1082,34 @@ describe("verifyTrustedInstallation", () => {
   });
 });
 
-function file(path: string, role: TrustedInstallationFileRole, content: string): FixtureFile {
-  return { path, role, content: Buffer.from(content, "utf8") };
+function file(
+  path: string,
+  role: TrustedInstallationFileRole,
+  content: string,
+  root: TrustedInstallationFileRoot = "installation",
+): FixtureFile {
+  const portableExecutableRoles = new Set<TrustedInstallationFileRole>([
+    "service-wrapper",
+    "service-host",
+    "node-runtime",
+    "process-host",
+    "codex-cli",
+    "git-cli",
+    "git-helper",
+    "codex-runtime",
+    "native-library",
+  ]);
+  const prefix = portableExecutableRoles.has(role) ? "MZ" : "";
+  return { root, path, role, content: Buffer.from(`${prefix}${content}`, "utf8") };
+}
+
+function manifestFile(
+  path: string,
+  role: TrustedInstallationFileRole,
+  digestByte: string,
+  root: TrustedInstallationFileRoot = "installation",
+) {
+  return { root, path, role, sha256: digestByte.repeat(64), size: "1" };
 }
 
 function collectDirectories(relativePaths: readonly string[]): readonly string[] {
@@ -691,7 +1138,16 @@ function setFileContent(node: FakeNode, content: Buffer): void {
 }
 
 type MutableManifest = {
+  compatibility: {
+    workerApiProtocolVersion: "1.0";
+    localProtocolMajor: 1;
+    localProtocolMinimumMinor: 0;
+    localProtocolMaximumMinor: 0;
+    serviceHostRpcVersion: 1;
+    processHostProtocolVersion: 1;
+  };
   files: Array<{
+    root: TrustedInstallationFileRoot;
     path: string;
     role: TrustedInstallationFileRole;
     sha256: string;
@@ -699,11 +1155,12 @@ type MutableManifest = {
   }>;
   publisherPolicy: "authenticode-required-at-install";
   releaseId: string;
-  schemaVersion: 1;
+  schemaVersion: 2;
 };
 
 function cloneManifest(manifest: TrustedInstallationManifest): MutableManifest {
   return {
+    compatibility: { ...manifest.compatibility },
     files: manifest.files.map((entry) => ({ ...entry })),
     publisherPolicy: manifest.publisherPolicy,
     releaseId: manifest.releaseId,
@@ -733,7 +1190,8 @@ function secureBoundary(): TrustedInstallationSecurityBoundary {
     rootAndAncestorsReparseFree: true,
     genericReparsePointInspection: true,
     directoryHandleIdentity: true,
-    installationTreeDaclWriteProtected: true,
+    alternateDataStreamsAbsent: true,
+    treeDaclWriteProtected: true,
     workerTokenWriteDenied: true,
     unprivilegedWriteDenied: true,
   };

@@ -2,10 +2,14 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -15,12 +19,15 @@ import (
 )
 
 const (
-	SchemaVersion            = 1
+	SchemaVersion            = 2
 	MaximumDocumentBytes     = 64 * 1024
 	MaximumFrameBytes        = 1_048_576
 	ControlServiceName       = "AgenticReview.Worker.Control"
 	ExecutorServiceName      = "AgenticReview.Worker.Executor"
+	ControlServiceSID        = "S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"
+	ExecutorServiceSID       = "S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"
 	ControlExecutorPipeName  = `\\.\pipe\AgenticReview.Worker.ControlExecutor.v1`
+	WindowsCertificateStore  = "MY"
 	minimumRootJobMemory     = uint64(256 * 1024 * 1024)
 	maximumRootJobMemory     = uint64(1 * 1024 * 1024 * 1024 * 1024)
 	maximumEnvironmentValues = 128
@@ -36,12 +43,16 @@ const (
 
 type ServiceIdentity struct {
 	Name string `json:"name"`
+	SID  string `json:"sid"`
 }
 
 type Installation struct {
-	Root           string `json:"root"`
-	ManifestPath   string `json:"manifestPath"`
-	ManifestSHA256 string `json:"manifestSha256"`
+	Root                                           string `json:"root"`
+	TrustedConfigurationRoot                       string `json:"trustedConfigurationRoot"`
+	ReleaseID                                      string `json:"releaseId"`
+	ManifestPath                                   string `json:"manifestPath"`
+	ManifestSHA256                                 string `json:"manifestSha256"`
+	ApprovedAuthenticodeSignerCertificateDERSHA256 string `json:"approvedAuthenticodeSignerCertificateDerSha256"`
 }
 
 type Node struct {
@@ -49,8 +60,31 @@ type Node struct {
 	ExecutableSHA256 string            `json:"executableSha256"`
 	BundlePath       string            `json:"bundlePath"`
 	BundleSHA256     string            `json:"bundleSha256"`
+	DataRoot         string            `json:"dataRoot"`
 	WorkingDirectory string            `json:"workingDirectory"`
 	Environment      map[string]string `json:"environment"`
+}
+
+type ControlConfiguration struct {
+	ServerOrigin                              string `json:"serverOrigin"`
+	ServerName                                string `json:"serverName"`
+	RootCertificatePath                       string `json:"rootCertificatePath"`
+	RootCertificateSHA256                     string `json:"rootCertificateSha256"`
+	ClientCertificateStore                    string `json:"clientCertificateStore"`
+	ClientCertificateDERSHA256                string `json:"clientCertificateDerSha256"`
+	ClientPrivateKeySecurityDescriptorSHA256  string `json:"clientPrivateKeySecurityDescriptorSha256"`
+	LocalAuthorityCNGKeyName                  string `json:"localAuthorityCngKeyName"`
+	LocalAuthorityKeySecurityDescriptorSHA256 string `json:"localAuthorityKeySecurityDescriptorSha256"`
+	LocalAuthorityPublicKeySHA256             string `json:"localAuthorityPublicKeySha256"`
+}
+
+type ExecutorConfiguration struct {
+	LocalAuthorityPublicKeyPath   string `json:"localAuthorityPublicKeyPath"`
+	LocalAuthorityPublicKeySHA256 string `json:"localAuthorityPublicKeySha256"`
+	CodexPolicyPath               string `json:"codexPolicyPath"`
+	CodexPolicySHA256             string `json:"codexPolicySha256"`
+	ProcessHostPath               string `json:"processHostPath"`
+	ProcessHostSHA256             string `json:"processHostSha256"`
 }
 
 type Limits struct {
@@ -63,14 +97,16 @@ type Limits struct {
 }
 
 type Config struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	Role          Role            `json:"role"`
-	OwnService    ServiceIdentity `json:"ownService"`
-	PeerService   ServiceIdentity `json:"peerService"`
-	PipeName      string          `json:"pipeName"`
-	Installation  Installation    `json:"installation"`
-	Node          Node            `json:"node"`
-	Limits        Limits          `json:"limits"`
+	SchemaVersion int                    `json:"schemaVersion"`
+	Role          Role                   `json:"role"`
+	OwnService    ServiceIdentity        `json:"ownService"`
+	PeerService   ServiceIdentity        `json:"peerService"`
+	PipeName      string                 `json:"pipeName"`
+	Installation  Installation           `json:"installation"`
+	Node          Node                   `json:"node"`
+	Control       *ControlConfiguration  `json:"control"`
+	Executor      *ExecutorConfiguration `json:"executor"`
+	Limits        Limits                 `json:"limits"`
 }
 
 type ErrorCode string
@@ -192,7 +228,7 @@ func MarshalCanonical(value Config) ([]byte, error) {
 
 func (c Config) Validate() error {
 	if c.SchemaVersion != SchemaVersion {
-		return invalid("schemaVersion must be 1")
+		return invalid("schemaVersion must be 2")
 	}
 	if c.Role != RoleControl && c.Role != RoleExecutor {
 		return invalid("role must be control or executor")
@@ -200,11 +236,20 @@ func (c Config) Validate() error {
 
 	expectedOwnName := ControlServiceName
 	expectedPeerName := ExecutorServiceName
+	expectedOwnSID := ControlServiceSID
+	expectedPeerSID := ExecutorServiceSID
 	if c.Role == RoleExecutor {
 		expectedOwnName, expectedPeerName = expectedPeerName, expectedOwnName
+		expectedOwnSID, expectedPeerSID = expectedPeerSID, expectedOwnSID
 	}
 	if c.OwnService.Name != expectedOwnName || c.PeerService.Name != expectedPeerName {
 		return invalid("service names do not match the selected role")
+	}
+	if c.OwnService.SID != expectedOwnSID || c.PeerService.SID != expectedPeerSID {
+		return invalid("service SIDs do not match the fixed service names")
+	}
+	if c.OwnService.SID == c.PeerService.SID {
+		return invalid("ownService.sid and peerService.sid must differ")
 	}
 	if c.PipeName != ControlExecutorPipeName {
 		return invalid("pipeName must be the version 1 Control-Executor endpoint")
@@ -212,6 +257,15 @@ func (c Config) Validate() error {
 
 	if err := validateWindowsPath(c.Installation.Root, false); err != nil {
 		return invalid("installation.root: " + err.Error())
+	}
+	if err := validateWindowsPath(c.Installation.TrustedConfigurationRoot, false); err != nil {
+		return invalid("installation.trustedConfigurationRoot: " + err.Error())
+	}
+	if pathsOverlap(c.Installation.Root, c.Installation.TrustedConfigurationRoot) {
+		return invalid("installation.root and installation.trustedConfigurationRoot must not overlap")
+	}
+	if !validIdentifier(c.Installation.ReleaseID, 128) {
+		return invalid("installation.releaseId must be a canonical release identifier")
 	}
 	if err := validateWindowsPath(c.Installation.ManifestPath, true); err != nil {
 		return invalid("installation.manifestPath: " + err.Error())
@@ -221,6 +275,9 @@ func (c Config) Validate() error {
 	}
 	if !validSHA256(c.Installation.ManifestSHA256) {
 		return invalid("installation.manifestSha256 must be a lowercase SHA-256 digest")
+	}
+	if !validSHA256(c.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256) {
+		return invalid("installation.approvedAuthenticodeSignerCertificateDerSha256 must be a lowercase SHA-256 digest")
 	}
 
 	if err := validateWindowsPath(c.Node.ExecutablePath, true); err != nil {
@@ -250,14 +307,31 @@ func (c Config) Validate() error {
 	if strings.EqualFold(c.Node.ExecutablePath, c.Node.BundlePath) {
 		return invalid("node executable and bundle paths must differ")
 	}
+	if err := validateWindowsPath(c.Node.DataRoot, false); err != nil {
+		return invalid("node.dataRoot: " + err.Error())
+	}
+	if pathsOverlap(c.Installation.Root, c.Node.DataRoot) {
+		return invalid("node.dataRoot and installation.root must not overlap")
+	}
+	if pathsOverlap(c.Installation.TrustedConfigurationRoot, c.Node.DataRoot) {
+		return invalid("node.dataRoot and installation.trustedConfigurationRoot must not overlap")
+	}
 	if err := validateWindowsPath(c.Node.WorkingDirectory, false); err != nil {
 		return invalid("node.workingDirectory: " + err.Error())
 	}
-	if pathsOverlap(c.Installation.Root, c.Node.WorkingDirectory) {
-		return invalid("node.workingDirectory and installation.root must not overlap")
+	if !isStrictDescendant(c.Node.DataRoot, c.Node.WorkingDirectory) {
+		return invalid("node.workingDirectory must be below node.dataRoot")
 	}
-	if err := validateEnvironment(c.Role, c.Node.Environment); err != nil {
+	if err := validateEnvironment(
+		c.Role,
+		c.Node.Environment,
+		c.Installation.Root,
+		c.Node.DataRoot,
+	); err != nil {
 		return invalid("node.environment: " + err.Error())
+	}
+	if err := c.validateRoleConfiguration(); err != nil {
+		return err
 	}
 
 	if c.Limits.RootJobMaximumProcesses < 1 || c.Limits.RootJobMaximumProcesses > 4_096 {
@@ -279,6 +353,133 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.ShutdownTimeoutMilliseconds < 1_000 || c.Limits.ShutdownTimeoutMilliseconds > 300_000 {
 		return invalid("limits.shutdownTimeoutMilliseconds is outside the allowed range")
+	}
+	return nil
+}
+
+func (c Config) validateRoleConfiguration() error {
+	if c.Role == RoleControl {
+		if c.Control == nil || c.Executor != nil {
+			return invalid("control must be an object and executor must be null for the control role")
+		}
+		return c.validateControlConfiguration(*c.Control)
+	}
+	if c.Control != nil || c.Executor == nil {
+		return invalid("control must be null and executor must be an object for the executor role")
+	}
+	return c.validateExecutorConfiguration(*c.Executor)
+}
+
+func (c Config) validateControlConfiguration(control ControlConfiguration) error {
+	if err := validateHTTPSOrigin(control.ServerOrigin, control.ServerName); err != nil {
+		return invalid("control.serverOrigin: " + err.Error())
+	}
+	if err := validateTrustedFile(
+		c.Installation.TrustedConfigurationRoot,
+		"installation.trustedConfigurationRoot",
+		control.RootCertificatePath,
+		control.RootCertificateSHA256,
+		"control.rootCertificatePath",
+		"control.rootCertificateSha256",
+	); err != nil {
+		return err
+	}
+	if control.ClientCertificateStore != WindowsCertificateStore {
+		return invalid("control.clientCertificateStore must be MY")
+	}
+	if !validSHA256(control.ClientCertificateDERSHA256) {
+		return invalid("control.clientCertificateDerSha256 must be a lowercase SHA-256 digest")
+	}
+	if !validSHA256(control.ClientPrivateKeySecurityDescriptorSHA256) {
+		return invalid("control.clientPrivateKeySecurityDescriptorSha256 must be a lowercase SHA-256 digest")
+	}
+	if !validCNGName(control.LocalAuthorityCNGKeyName) {
+		return invalid("control.localAuthorityCngKeyName must be bounded canonical text")
+	}
+	if !validSHA256(control.LocalAuthorityKeySecurityDescriptorSHA256) {
+		return invalid("control.localAuthorityKeySecurityDescriptorSha256 must be a lowercase SHA-256 digest")
+	}
+	if !validSHA256(control.LocalAuthorityPublicKeySHA256) {
+		return invalid("control.localAuthorityPublicKeySha256 must be a lowercase SHA-256 digest")
+	}
+	return assertDistinctFilePaths(
+		c.Installation.ManifestPath,
+		c.Node.ExecutablePath,
+		c.Node.BundlePath,
+		control.RootCertificatePath,
+	)
+}
+
+func (c Config) validateExecutorConfiguration(executor ExecutorConfiguration) error {
+	for _, file := range []struct {
+		pathName   string
+		digestName string
+		path       string
+		digest     string
+	}{
+		{
+			pathName:   "executor.localAuthorityPublicKeyPath",
+			digestName: "executor.localAuthorityPublicKeySha256",
+			path:       executor.LocalAuthorityPublicKeyPath,
+			digest:     executor.LocalAuthorityPublicKeySHA256,
+		},
+		{
+			pathName:   "executor.codexPolicyPath",
+			digestName: "executor.codexPolicySha256",
+			path:       executor.CodexPolicyPath,
+			digest:     executor.CodexPolicySHA256,
+		},
+	} {
+		if err := validateTrustedFile(
+			c.Installation.TrustedConfigurationRoot,
+			"installation.trustedConfigurationRoot",
+			file.path,
+			file.digest,
+			file.pathName,
+			file.digestName,
+		); err != nil {
+			return err
+		}
+	}
+	if err := validateTrustedFile(
+		c.Installation.Root,
+		"installation.root",
+		executor.ProcessHostPath,
+		executor.ProcessHostSHA256,
+		"executor.processHostPath",
+		"executor.processHostSha256",
+	); err != nil {
+		return err
+	}
+	if !strings.EqualFold(extension(executor.ProcessHostPath), ".exe") {
+		return invalid("executor.processHostPath must identify an .exe file")
+	}
+	return assertDistinctFilePaths(
+		c.Installation.ManifestPath,
+		c.Node.ExecutablePath,
+		c.Node.BundlePath,
+		executor.LocalAuthorityPublicKeyPath,
+		executor.CodexPolicyPath,
+		executor.ProcessHostPath,
+	)
+}
+
+func validateTrustedFile(
+	root string,
+	rootName string,
+	path string,
+	digest string,
+	pathName string,
+	digestName string,
+) error {
+	if err := validateWindowsPath(path, true); err != nil {
+		return invalid(pathName + ": " + err.Error())
+	}
+	if !isStrictDescendant(root, path) {
+		return invalid(pathName + " must be below " + rootName)
+	}
+	if !validSHA256(digest) {
+		return invalid(digestName + " must be a lowercase SHA-256 digest")
 	}
 	return nil
 }
@@ -337,7 +538,12 @@ func isReservedDeviceDigit(value rune) bool {
 	return value >= '1' && value <= '9' || value == '\u00b9' || value == '\u00b2' || value == '\u00b3'
 }
 
-func validateEnvironment(role Role, environment map[string]string) error {
+func validateEnvironment(
+	role Role,
+	environment map[string]string,
+	installationRoot string,
+	dataRoot string,
+) error {
 	if environment == nil {
 		return errors.New("must be an object")
 	}
@@ -372,10 +578,45 @@ func validateEnvironment(role Role, environment map[string]string) error {
 		if err := validateEnvironmentValue(folded, value); err != nil {
 			return fmt.Errorf("variable %s: %w", name, err)
 		}
+		if err := validateEnvironmentBoundary(folded, value, installationRoot, dataRoot); err != nil {
+			return fmt.Errorf("variable %s: %w", name, err)
+		}
 	}
 	for _, required := range []string{"NODE_ENV", "PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE"} {
 		if _, exists := seen[required]; !exists {
 			return fmt.Errorf("required variable %s is missing", required)
+		}
+	}
+	if windir, exists := environment["WINDIR"]; exists && !strings.EqualFold(windir, environment["SYSTEMROOT"]) {
+		return errors.New("WINDIR must identify the same directory as SYSTEMROOT")
+	}
+	return nil
+}
+
+func validateEnvironmentBoundary(
+	name string,
+	value string,
+	installationRoot string,
+	dataRoot string,
+) error {
+	switch name {
+	case "PATH":
+		for _, directory := range strings.Split(value, ";") {
+			if !isStrictDescendant(installationRoot, directory) {
+				return errors.New("must contain only directories below installation.root")
+			}
+		}
+	case "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOME", "CODEX_HOME", "GIT_CONFIG_GLOBAL":
+		if !isStrictDescendant(dataRoot, value) {
+			return errors.New("must be below node.dataRoot")
+		}
+	case "SYSTEMROOT", "WINDIR":
+		if pathsOverlap(installationRoot, value) || pathsOverlap(dataRoot, value) {
+			return errors.New("must be outside installation.root and node.dataRoot")
+		}
+	case "PROGRAMDATA":
+		if !isStrictDescendant(value, dataRoot) {
+			return errors.New("must be a strict ancestor of node.dataRoot")
 		}
 	}
 	return nil
@@ -469,6 +710,45 @@ func validOptionalText(value string, maximumUnits int) bool {
 		!strings.ContainsRune(value, '\x00') && len(utf16.Encode([]rune(value))) <= maximumUnits
 }
 
+func validIdentifier(value string, maximumBytes int) bool {
+	if len(value) == 0 || len(value) > maximumBytes {
+		return false
+	}
+	for index, character := range []byte(value) {
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '_' || character == '+' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// deriveServiceSID implements the Windows SERVICE SID derivation for the fixed ASCII service
+// names. SHA-1 is required by the Windows identifier algorithm and is not used as a trust digest.
+func deriveServiceSID(serviceName string) string {
+	units := utf16.Encode([]rune(strings.ToUpper(serviceName)))
+	encoded := make([]byte, len(units)*2)
+	for index, unit := range units {
+		binary.LittleEndian.PutUint16(encoded[index*2:], unit)
+	}
+	digest := sha1.Sum(encoded)
+	return fmt.Sprintf(
+		"S-1-5-80-%d-%d-%d-%d-%d",
+		binary.LittleEndian.Uint32(digest[0:4]),
+		binary.LittleEndian.Uint32(digest[4:8]),
+		binary.LittleEndian.Uint32(digest[8:12]),
+		binary.LittleEndian.Uint32(digest[12:16]),
+		binary.LittleEndian.Uint32(digest[16:20]),
+	)
+}
+
+func validCNGName(value string) bool {
+	return validText(value, 256) && !containsControl(value) && strings.TrimSpace(value) == value
+}
+
 func containsControl(value string) bool {
 	for _, character := range value {
 		if character < 32 || character == 127 {
@@ -488,6 +768,86 @@ func validSHA256(value string) bool {
 		}
 	}
 	return true
+}
+
+func validateHTTPSOrigin(origin string, serverName string) error {
+	if !validText(origin, 2_048) || containsControl(origin) {
+		return errors.New("must be bounded canonical text")
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Host == "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" ||
+		parsed.ForceQuery || parsed.Fragment != "" {
+		return errors.New("must be an HTTPS origin without credentials, path, query, or fragment")
+	}
+	hostname := parsed.Hostname()
+	if !validCanonicalHost(hostname) {
+		return errors.New("contains a noncanonical host name")
+	}
+	port := parsed.Port()
+	if port != "" {
+		portNumber, parseErr := strconv.ParseUint(port, 10, 16)
+		if parseErr != nil || portNumber == 0 || strconv.FormatUint(portNumber, 10) != port || port == "443" {
+			return errors.New("contains a noncanonical port")
+		}
+	}
+	canonicalHost := hostname
+	if strings.ContainsRune(hostname, ':') {
+		canonicalHost = "[" + hostname + "]"
+	}
+	canonicalOrigin := "https://" + canonicalHost
+	if port != "" {
+		canonicalOrigin += ":" + port
+	}
+	if origin != canonicalOrigin || parsed.String() != origin {
+		return errors.New("must use the canonical HTTPS origin representation")
+	}
+	if serverName != hostname || !validCanonicalHost(serverName) {
+		return errors.New("serverName must exactly match the canonical origin host")
+	}
+	return nil
+}
+
+func validCanonicalHost(value string) bool {
+	if len(value) == 0 || len(value) > 253 || value != strings.ToLower(value) {
+		return false
+	}
+	if address := net.ParseIP(value); address != nil {
+		return address.String() == value
+	}
+	if strings.IndexFunc(value, func(character rune) bool {
+		return character != '.' && (character < '0' || character > '9')
+	}) == -1 {
+		return false
+	}
+	if strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range []byte(label) {
+			if character >= 'a' && character <= 'z' ||
+				character >= '0' && character <= '9' || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func assertDistinctFilePaths(paths ...string) error {
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		folded := strings.ToLower(path)
+		if _, exists := seen[folded]; exists {
+			return invalid("trusted file paths must be pairwise distinct")
+		}
+		seen[folded] = struct{}{}
+	}
+	return nil
 }
 
 func parseCanonicalUint(value string) (uint64, error) {
