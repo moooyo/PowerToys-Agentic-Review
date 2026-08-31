@@ -8,22 +8,29 @@ This directory contains the fail-closed foundation and reviewed, unconnected Win
 blocks:
 
 - a strict canonical JSON configuration contract;
+- a canonical dual-root release manifest and typed config-to-manifest binding evidence;
 - the structural 48-byte ARWX frame boundary;
 - a byte-bounded bidirectional relay core;
 - a first-instance, remote-rejecting message-mode Named Pipe endpoint;
-- persisted CNG P-256 signing with non-exportability and signing-only policy checks;
+- handle-relative secure configuration traversal with owned AccessCheck tokens and final descriptor
+  reinspection;
+- exact restricted virtual-service identity and token preflight;
+- persisted CNG P-256 signing and Local Machine mTLS certificate acquisition with fixed provider,
+  non-exportability, exact key-DACL digests, detached key identities, and signing-only policy checks;
 - handle-bound NTFS object, volume, and protected-DACL evidence;
 - a fixed-origin TLS 1.3 Worker API client that accepts a non-exportable signer;
+- stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
+- bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
 - suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
   pre-resume process and primary-token DACLs, and stable WinSW wrapper observation;
 - platform interfaces and an explicit unavailable production platform factory; and
 - pure Go tests for those contracts.
 
-Secure configuration loading, complete ancestor validation, caller-token and service-SID
-verification, peer lineage/image/Authenticode verification, certificate-store composition,
-role-local RPC, and final platform orchestration are not implemented yet. Both the Windows and
-non-Windows production platform factories therefore return an error. This binary cannot launch a
-Worker payload and must not be used to enable production execution.
+The production Authenticode verifier, same-handle SCM wrapper/launch adapter, ServiceHost and
+wrapper process/token DACL bootstrap with readback, concrete config/manifest composition,
+role-specific RPC dispatchers, and final platform orchestration are not implemented yet. Both the
+Windows and non-Windows production platform factories therefore return an error. This binary cannot
+launch a Worker payload and must not be used to enable production execution.
 
 ## Command line
 
@@ -42,8 +49,8 @@ construct the Node command line itself from the pinned executable and bundle fie
 
 Configuration is canonical UTF-8 JSON without a byte-order mark, whitespace, duplicate keys,
 unknown properties, trailing bytes, or alternative number spellings. The complete document is
-limited to 64 KiB. Windows paths are lexical local-drive paths and are verified again by the future
-handle-based Windows security adapter.
+limited to 64 KiB. Windows paths are lexical local-drive paths; production composition must read
+them through the included handle-relative Windows security adapter.
 
 The schema version 2 Control document is:
 
@@ -92,10 +99,9 @@ bind `PATH` to manifest or trusted system directories, bind profile and temporar
 selected role's protected data root, and verify every directory by handle, volume identity, and
 DACL before launching Node.
 
-The Windows build currently rejects every configuration before opening it because the handle-bound
-reader has not yet been composed with complete ancestor traversal, expected ACL policy, manifest
-verification, and the production platform factory. The ordinary `os.Open` reader exists only for
-non-Windows contract tests.
+The Windows build currently rejects every configuration before opening it because the secure reader
+and expected ACL policy have not yet been composed with manifest verification and the production
+platform factory. The ordinary `os.Open` reader exists only for non-Windows contract tests.
 
 ## Framing and relay
 

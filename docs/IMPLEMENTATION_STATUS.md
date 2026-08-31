@@ -5,8 +5,8 @@ Status date: 2026-08-31
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1 read-only
 GitHub ingestion and immutable-result vertical slices, the static-review execution components, and
 the first split-service protocol and native-host foundations described in `ARCHITECTURE.md`. It is
-intentionally fail-closed where the production Windows identity and native filesystem security
-boundaries are not yet complete.
+intentionally fail-closed while production Windows composition and native runtime evidence remain
+incomplete.
 
 ## Implemented
 
@@ -79,10 +79,18 @@ boundaries are not yet complete.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
   shutdown, and explicit unavailable Windows/non-Windows platform adapters.
+- A schema-v2 dual-root release manifest shared by TypeScript and Go, with canonical cross-language
+  digests, closed installation and trusted-configuration trees, separately hashed bootstrap
+  configurations, strict role/root/content rules, and typed config-binding evidence.
 - Reviewed but not yet platform-wired Windows ServiceHost building blocks for first-instance,
-  remote-rejecting message-mode Named Pipes; persisted non-exportable CNG P-256 signing; handle-bound
-  NTFS file and directory evidence; fixed-origin TLS 1.3 Worker API transport using a caller-supplied
-  signer; stable WinSW wrapper observation; and suspended Node launch into a non-breakaway root Job.
+  remote-rejecting message-mode Named Pipes; handle-relative secure configuration traversal;
+  exact restricted virtual-service token verification; persisted non-exportable CNG P-256 signing;
+  Local Machine certificate-store mTLS acquisition; stable pipe-peer process and token verification;
+  canonical role-local RPC; fixed-origin TLS 1.3 transport; stable WinSW observation; and suspended
+  Node launch into a non-breakaway root Job.
+- Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy, Control-only
+  key ACL semantics, detached key identities, key-reuse detection inputs, and canonical public-SPKI
+  digests for both mTLS and local-authority signing paths.
 - Pre-resume Node process and primary-token protected DACL application with exact readback, plus
   root-Job drain semantics that retain the lifetime handle whenever zero active processes cannot be
   confirmed.
@@ -100,20 +108,21 @@ boundaries are not yet complete.
 - Bounded artifact upload and artifact storage are not implemented yet.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and
   native Windows runtime verification are not part of this milestone. The new ServiceHost Windows
-  primitives remain unreachable from the production platform factory. Secure configuration and
-  complete ancestor validation, service-token verification, peer lineage/image/signature checks,
-  certificate-store integration, role-local RPC, and the final orchestration layer are not yet
-  implemented.
+  primitives remain unreachable from the production platform factory. The production Authenticode
+  verifier, same-handle SCM wrapper/launch adapter, ServiceHost/wrapper DACL bootstrap and readback,
+  concrete config/manifest binding, role-specific RPC dispatchers, and final orchestration layer are
+  not yet implemented.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
 
 ## Next Milestone
 
-The next vertical slice should wire the reviewed ServiceHost primitives behind the Windows platform
-factory, add the secure configuration and peer-verification adapters, build separate Control and
-Executor TypeScript bundles, and connect the static executor in zero-slot shadow mode. The Control
-bundle must exclusively own Server lease tokens and fixed-origin mTLS; the Executor bundle must
+The next vertical slice should add the production Authenticode, SCM wrapper, process/token DACL, and
+config/manifest composition adapters; wire the reviewed primitives behind the Windows platform
+factory; build separate Control and Executor TypeScript bundles; and connect the static executor in
+zero-slot shadow mode. The Control bundle must exclusively own Server lease tokens and fixed-origin
+mTLS; the Executor bundle must
 exclusively own Codex, Git, workspaces, and execution credentials. The slice must pass native
 Windows token, ACL, Named Pipe, sandbox, Job Object, disk, cancellation, and tamper tests before
 claims are enabled. Bounded artifact upload and immutable diff manifests should follow, then
@@ -122,8 +131,8 @@ actions. Dynamic validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
-The Phase 1a, local-protocol, and fail-closed ServiceHost-foundation candidate was verified on the
-remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive
+The Phase 1a, local-protocol, and fail-closed ServiceHost security-contract candidate was verified
+on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive
 checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0 was provided
 through Corepack. No test, build, validation suite, or runtime probe was run on the local Windows
 development machine.
@@ -140,7 +149,7 @@ pnpm lint
 
 Combined TypeScript test results:
 
-- 741 tests passed: 201 Server tests, 375 Worker tests, 86 Codex package tests, 58 local-protocol
+- 749 tests passed: 201 Server tests, 383 Worker tests, 86 Codex package tests, 58 local-protocol
   tests, and 21 domain tests.
 - Database integration coverage includes atomic multi-worker claims, lease fencing, lease expiry,
   superseded worker instances, heartbeats, idempotent terminal replay, migration backups,
@@ -167,6 +176,8 @@ GOOS=windows GOARCH=amd64 go build -trimpath
 GOOS=windows GOARCH=arm64 go build -trimpath
 GOOS=windows GOARCH=amd64 go test -c ./internal/host
 GOOS=windows GOARCH=arm64 go test -c ./internal/host
+GOOS=windows GOARCH=amd64 go vet ./...
+GOOS=windows GOARCH=arm64 go vet ./...
 ```
 
 The fail-closed ServiceHost foundation completed these checks with Go 1.26.7 on `test-env`:
@@ -177,21 +188,17 @@ go test -count=1 -race ./...
 go vet ./...
 GOOS=windows GOARCH=amd64 go build -trimpath
 GOOS=windows GOARCH=arm64 go build -trimpath
-GOOS=windows GOARCH=amd64 go test -c ./internal/cng
-GOOS=windows GOARCH=arm64 go test -c ./internal/cng
-GOOS=windows GOARCH=amd64 go test -c ./internal/winfile
-GOOS=windows GOARCH=arm64 go test -c ./internal/winfile
-GOOS=windows GOARCH=amd64 go test -c ./internal/winpipe
-GOOS=windows GOARCH=arm64 go test -c ./internal/winpipe
-GOOS=windows GOARCH=amd64 go test -c ./internal/winprocess
-GOOS=windows GOARCH=arm64 go test -c ./internal/winprocess
+GOOS=windows GOARCH=amd64 go test -c <each ServiceHost package>
+GOOS=windows GOARCH=arm64 go test -c <each ServiceHost package>
+GOOS=windows GOARCH=amd64 go vet ./...
+GOOS=windows GOARCH=arm64 go vet ./...
 ```
 
 Runtime smoke results:
 
-- The Server started against a fresh database, migrated it to schema version 5, reported SQLite
-  3.53.4, returned HTTP 200 from readiness, served the built React application for an SPA route,
-  and shut down cleanly after the smoke run.
+- An earlier Server smoke run, before migration 0006, started against a fresh database, migrated it
+  to schema version 5, reported SQLite 3.53.4, returned HTTP 200 from readiness, served the built
+  React application for an SPA route, and shut down cleanly after the smoke run.
 - Anonymous Dashboard API access returned 401. Login by GET returned 404, POST without the exact
   Origin returned 403, and the same-origin loopback development login returned 303 and
   established an HttpOnly SameSite session; authenticated session, system, and work-item reads
@@ -210,9 +217,10 @@ Not yet verified:
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
   x64 and arm64, but their Named Pipe, CNG, filesystem, process/token DACL, root Job, wrapper-watch,
-  and fixed-origin mTLS behavior has not been exercised on a native Windows test machine. The
-  secure configuration reader, peer verifier, role-local RPC, and production platform composition
-  are still missing, so the real Codex executor remains disconnected from the production entrypoint.
+  certificate store, secure configuration, peer verification, role-local RPC, and fixed-origin mTLS
+  behavior has not been exercised on a native Windows test machine. Production Authenticode, SCM
+  wrapper/DACL adapters, and platform composition are still missing, so the real Codex executor
+  remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has

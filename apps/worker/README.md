@@ -25,8 +25,8 @@ Implemented boundaries:
 
 The default build still uses `PlaceholderJobExecutor` and advertises execution as disabled. This
 milestone rejects `WORKER_EXECUTION_ENABLED=true`; the reviewed executor is intentionally dormant
-until the split Control/Executor services, ServiceHost, native NTFS/DACL adapters, installer, and
-Windows runtime preflight described by ADR 0007 are complete.
+until the separate Control/Executor bundles, production ServiceHost composition and Authenticode
+adapter, dual-service installer, and native Windows preflight described by ADR 0007 are complete.
 
 ## Worker API
 

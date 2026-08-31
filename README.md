@@ -21,5 +21,6 @@ disabled boundaries are tracked in [docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEM
 - `deploy/worker`: WinSW service templates and the least-privilege Windows installer.
 
 Phase 1 supports authenticated, read-only GitHub ingestion and Dashboard views. Real Worker
-execution, approval persistence, GitHub publication, and dynamic validation remain deliberately
-disabled until their ProcessHost, approval, and isolation boundaries are implemented.
+execution remains disabled until the reviewed Windows primitives are composed into the split
+Control/Executor services, installer, and native Windows verification suite. Approval persistence,
+GitHub publication, and dynamic validation also remain deliberately disabled.
