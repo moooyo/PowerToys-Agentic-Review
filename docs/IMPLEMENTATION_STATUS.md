@@ -76,24 +76,43 @@ incomplete.
   lease-token-free Executor envelopes; snapshots the lease authority basis; binds artifact streams
   to the complete session and attempt context; and maps identity-checked Server terminal responses
   to local terminal dispositions.
+- Runtime-authenticated local capability and renewal proofs, monotonic hard-deadline budgeting,
+  permanent stale/cancel/terminal fences, strict snapshot projections, attempt-opaque issue revision
+  bindings, verified terminal artifact provenance, and cancellation facades that cannot expose an
+  `AbortSignal` reason to the local transport.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
   shutdown, and explicit unavailable Windows/non-Windows platform adapters.
 - A schema-v2 dual-root release manifest shared by TypeScript and Go, with canonical cross-language
   digests, closed installation and trusted-configuration trees, separately hashed bootstrap
   configurations, strict role/root/content rules, and typed config-binding evidence.
-- Reviewed but not yet platform-wired Windows ServiceHost building blocks for first-instance,
-  remote-rejecting message-mode Named Pipes; handle-relative secure configuration traversal;
-  exact restricted virtual-service token verification; persisted non-exportable CNG P-256 signing;
-  Local Machine certificate-store mTLS acquisition; stable pipe-peer process and token verification;
-  canonical role-local RPC; fixed-origin TLS 1.3 transport; stable WinSW observation; and suspended
-  Node launch into a non-breakaway root Job.
+- Reviewed Windows ServiceHost building blocks for first-instance, remote-rejecting Named Pipes;
+  handle-relative secure configuration traversal; exact restricted virtual-service token
+  verification; persisted non-exportable CNG P-256 signing; Local Machine certificate-store mTLS
+  acquisition; stable pipe-peer process and token verification; canonical role-local RPC;
+  fixed-origin TLS 1.3 transport; stable WinSW observation; and suspended Node launch into a
+  non-breakaway root Job.
 - Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy, Control-only
   key ACL semantics, detached key identities, key-reuse detection inputs, and canonical public-SPKI
   digests for both mTLS and local-authority signing paths.
 - Pre-resume Node process and primary-token protected DACL application with exact readback, plus
   root-Job drain semantics that retain the lifetime handle whenever zero active processes cannot be
   confirmed.
+- A per-launch, single-use HostControl Named Pipe prepared before Node starts and bound to the exact
+  retained Node process, with a one-process bootstrap Job limit followed by verified activation of
+  the configured process ceiling.
+- A production Authenticode verifier that uses the retained file handle, requires one embedded
+  SHA-256 primary signature, validates every timestamp countersigner and strong-signature chain,
+  binds the exact leaf certificate DER digest, disables network retrieval, and always closes the
+  WinTrust state.
+- Handle-bound closed-tree installation verification with exact directory re-enumeration, File ID,
+  hard-link, ADS, case-mode, reparse-point, content, manifest-role, and Authenticode checks.
+- Production Windows installation ACL policy composition. It proves the fixed restricted service
+  identity before filesystem access, parses complete self-relative DACLs, applies exact per-role
+  read/execute profiles, and accepts only the bounded ambient rights used by standard Windows
+  `Program Files` and `ProgramData` ancestors.
+- Opaque preflight evidence that consumes concrete installation, CNG, and certificate attestations
+  rather than caller-assembled prerequisite booleans or credential identity values.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
   before a lease is committed; oversized stored jobs are dead-lettered without creating an attempt.
 
@@ -107,26 +126,24 @@ incomplete.
   Dashboard therefore exposes the Phase 1 read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and
-  native Windows runtime verification are not part of this milestone. The new ServiceHost Windows
-  primitives remain unreachable from the production platform factory. The production Authenticode
-  verifier, same-handle SCM wrapper/launch adapter, ServiceHost/wrapper DACL bootstrap and readback,
-  concrete config/manifest binding, role-specific RPC dispatchers, and final orchestration layer are
-  not yet implemented.
+  native Windows runtime verification are not part of this milestone. `platform.NewHost()` remains
+  deliberately unavailable until role-owned data-root evidence, final startup ordering, the
+  HostControl Node client, and the concrete Control/Executor process orchestration are connected.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
 
 ## Next Milestone
 
-The next vertical slice should add the production Authenticode, SCM wrapper, process/token DACL, and
-config/manifest composition adapters; wire the reviewed primitives behind the Windows platform
-factory; build separate Control and Executor TypeScript bundles; and connect the static executor in
-zero-slot shadow mode. The Control bundle must exclusively own Server lease tokens and fixed-origin
-mTLS; the Executor bundle must
-exclusively own Codex, Git, workspaces, and execution credentials. The slice must pass native
-Windows token, ACL, Named Pipe, sandbox, Job Object, disk, cancellation, and tamper tests before
-claims are enabled. Bounded artifact upload and immutable diff manifests should follow, then
-publication drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write
+The next vertical slice should add role-owned data-root evidence, wire the reviewed primitives behind
+the Windows platform factory, build separate Control and Executor TypeScript bundles, implement the
+HostControl client and concrete local broker/run, and connect Server heartbeat outcomes to signed
+local renewals and synchronous stale fencing. It should first run in zero-slot shadow mode. The
+Control bundle must exclusively own Server lease tokens and fixed-origin mTLS; the Executor bundle
+must exclusively own Codex, Git, workspaces, and execution credentials. The slice must pass native
+Windows token, ACL, Named Pipe, Authenticode, sandbox, Job Object, disk, cancellation, and tamper
+tests before claims are enabled. Bounded artifact upload and immutable diff manifests should follow,
+then publication drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write
 actions. Dynamic validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
@@ -218,9 +235,10 @@ Not yet verified:
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
   x64 and arm64, but their Named Pipe, CNG, filesystem, process/token DACL, root Job, wrapper-watch,
   certificate store, secure configuration, peer verification, role-local RPC, and fixed-origin mTLS
-  behavior has not been exercised on a native Windows test machine. Production Authenticode, SCM
-  wrapper/DACL adapters, and platform composition are still missing, so the real Codex executor
-  remains disconnected from the production entrypoint.
+  behavior has not been exercised on a native Windows test machine. The production Authenticode and
+  installation-verification code has only fake-provider execution plus Windows cross-compilation;
+  real signed PE fixtures and Windows ABI checks remain release gates. Final platform composition is
+  still missing, so the real Codex executor remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has
