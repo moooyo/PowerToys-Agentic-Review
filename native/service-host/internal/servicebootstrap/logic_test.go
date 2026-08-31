@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -511,6 +512,139 @@ func TestSessionCloseKeepsFailedWrapperHandleForRetry(t *testing.T) {
 	}
 	if _, err := session.HandleProcessID(); !errors.Is(err, ErrClosed) {
 		t.Fatalf("post-close HandleProcessID error = %v, want ErrClosed", err)
+	}
+}
+
+func TestSessionCloseUsesReverseAcquisitionOrder(t *testing.T) {
+	platform, _, _ := newSuccessfulFakePlatform()
+	session, err := openWithPlatform(validOptions(), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*platform.events = nil
+
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"close-token", "close-wrapper", "close-scm"}
+	if !reflect.DeepEqual(*platform.events, want) {
+		t.Fatalf("Close events = %v, want %v", *platform.events, want)
+	}
+}
+
+func TestSessionCloseRetriesOnlyFailedResource(t *testing.T) {
+	tests := []struct {
+		name       string
+		fail       func(*fakePlatform, error)
+		retryEvent string
+		wantCalls  [3]int
+	}{
+		{
+			name: "primary token",
+			fail: func(platform *fakePlatform, closeFailure error) {
+				platform.token.closeErrs = []error{closeFailure, nil}
+			},
+			retryEvent: "close-token",
+			wantCalls:  [3]int{2, 1, 1},
+		},
+		{
+			name: "wrapper",
+			fail: func(platform *fakePlatform, closeFailure error) {
+				platform.wrapper.closeErrs = []error{closeFailure, nil}
+			},
+			retryEvent: "close-wrapper",
+			wantCalls:  [3]int{1, 2, 1},
+		},
+		{
+			name: "SCM service",
+			fail: func(platform *fakePlatform, closeFailure error) {
+				platform.service.closeErrs = []error{closeFailure, nil}
+			},
+			retryEvent: "close-scm",
+			wantCalls:  [3]int{1, 1, 2},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			platform, _, _ := newSuccessfulFakePlatform()
+			closeFailure := errors.New("injected close failure")
+			test.fail(platform, closeFailure)
+			session, err := openWithPlatform(validOptions(), platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			*platform.events = nil
+
+			if err := session.Close(); !errors.Is(err, closeFailure) {
+				t.Fatalf("first Close error = %v, want injected failure", err)
+			}
+			wantFirst := []string{"close-token", "close-wrapper", "close-scm"}
+			if !reflect.DeepEqual(*platform.events, wantFirst) {
+				t.Fatalf("first Close events = %v, want %v", *platform.events, wantFirst)
+			}
+
+			*platform.events = nil
+			if err := session.Close(); err != nil {
+				t.Fatalf("retry Close error = %v", err)
+			}
+			if !reflect.DeepEqual(*platform.events, []string{test.retryEvent}) {
+				t.Fatalf("retry Close events = %v, want [%s]", *platform.events, test.retryEvent)
+			}
+			if got := [3]int{platform.token.closeCalls, platform.wrapper.closeCalls, platform.service.closeCalls}; got != test.wantCalls {
+				t.Fatalf("close calls = %v, want %v", got, test.wantCalls)
+			}
+
+			*platform.events = nil
+			if err := session.Close(); err != nil {
+				t.Fatalf("repeated Close error = %v", err)
+			}
+			if len(*platform.events) != 0 {
+				t.Fatalf("repeated Close retried released resources: %v", *platform.events)
+			}
+		})
+	}
+}
+
+func TestSessionCopiesSerializeConcurrentClose(t *testing.T) {
+	platform, _, _ := newSuccessfulFakePlatform()
+	session, err := openWithPlatform(validOptions(), platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyOfSession := session
+	*platform.events = nil
+
+	const closeCount = 16
+	start := make(chan struct{})
+	errorsFound := make(chan error, closeCount)
+	var wait sync.WaitGroup
+	for index := 0; index < closeCount; index++ {
+		candidate := session
+		if index%2 == 1 {
+			candidate = copyOfSession
+		}
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errorsFound <- candidate.Close()
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatalf("concurrent Close error = %v", err)
+		}
+	}
+
+	want := []string{"close-token", "close-wrapper", "close-scm"}
+	if !reflect.DeepEqual(*platform.events, want) {
+		t.Fatalf("concurrent Close events = %v, want %v", *platform.events, want)
+	}
+	if got := [3]int{platform.token.closeCalls, platform.wrapper.closeCalls, platform.service.closeCalls}; got != [3]int{1, 1, 1} {
+		t.Fatalf("concurrent close calls = %v, want [1 1 1]", got)
 	}
 }
 

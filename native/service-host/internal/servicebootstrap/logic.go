@@ -503,26 +503,26 @@ func (s *bootstrapSession) Close() error {
 
 	s.mu.RLock()
 	token := s.token
-	service := s.service
 	wrapper := s.wrapper
+	service := s.service
 	s.mu.RUnlock()
 
 	tokenErr := closeOwnedSessionResource("close current ServiceHost primary token", token)
-	serviceErr := closeOwnedSessionResource("close SCM service handles", service)
 	wrapperErr := closeOwnedSessionResource("close retained WinSW wrapper process", wrapper)
+	serviceErr := closeOwnedSessionResource("close SCM service handles", service)
 
 	s.mu.Lock()
 	if tokenErr == nil && s.token == token {
 		s.token = nil
 	}
-	if serviceErr == nil && s.service == service {
-		s.service = nil
-	}
 	if wrapperErr == nil && s.wrapper == wrapper {
 		s.wrapper = nil
 	}
+	if serviceErr == nil && s.service == service {
+		s.service = nil
+	}
 	s.mu.Unlock()
-	return errors.Join(tokenErr, serviceErr, wrapperErr)
+	return errors.Join(tokenErr, wrapperErr, serviceErr)
 }
 
 func closeOwnedSessionResource(label string, resource ownedResource) error {
