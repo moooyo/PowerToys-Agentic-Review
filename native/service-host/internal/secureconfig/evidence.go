@@ -35,6 +35,16 @@ func makeObjectEvidence(path string, evidence winfile.Evidence) ObjectEvidence {
 	}
 }
 
+// NewObjectEvidence validates one detached winfile snapshot and applies the
+// canonical secureconfig evidence digest. It does not prove where the snapshot
+// came from; callers must retain their own opaque authorization provenance.
+func NewObjectEvidence(path string, evidence winfile.Evidence) (ObjectEvidence, error) {
+	if err := validateObjectEvidence(path, evidence.Kind, evidence, ^uint64(0)); err != nil {
+		return ObjectEvidence{}, err
+	}
+	return makeObjectEvidence(path, evidence), nil
+}
+
 // DigestSecurityDescriptor returns the SHA-256 digest of a self-relative
 // security descriptor byte sequence.
 func DigestSecurityDescriptor(descriptor []byte) Digest {

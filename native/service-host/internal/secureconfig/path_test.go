@@ -76,6 +76,30 @@ func TestEvidenceDigestExcludesDiagnosticsAndBindsSecurityEvidence(t *testing.T)
 	}
 }
 
+func TestNewObjectEvidenceValidatesAndDetachesWinfileSnapshot(t *testing.T) {
+	path := `C:\Program Files\AgenticReview\Worker\runtime\node.exe`
+	evidence := fixtureEvidence(path, winfile.ObjectKindFile, 41, 128)
+	object, err := NewObjectEvidence(path, evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.EvidenceSHA256 == (Digest{}) ||
+		object.SecurityDescriptorSHA256 != DigestSecurityDescriptor(evidence.Security.SelfRelativeDescriptor) {
+		t.Fatal("NewObjectEvidence omitted canonical evidence digests")
+	}
+	original := object.Evidence.Security.SelfRelativeDescriptor[0]
+	evidence.Security.SelfRelativeDescriptor[0] ^= 0xff
+	if object.Evidence.Security.SelfRelativeDescriptor[0] != original {
+		t.Fatal("NewObjectEvidence retained caller-owned security descriptor storage")
+	}
+
+	invalid := fixtureEvidence(path, winfile.ObjectKindFile, 42, 128)
+	invalid.Path.RequestedPath = `C:\Elsewhere\node.exe`
+	if _, err := NewObjectEvidence(path, invalid); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("NewObjectEvidence accepted inconsistent evidence: %v", err)
+	}
+}
+
 func TestValidateObjectEvidenceRejectsUnsafeClaims(t *testing.T) {
 	path := `C:\safe\config.json`
 	tests := []struct {
