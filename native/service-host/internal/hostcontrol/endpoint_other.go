@@ -40,6 +40,10 @@ func (*Connection) Evidence() VerificationEvidence {
 	return VerificationEvidence{}
 }
 
+func (*Connection) CommittedRuntimeBootstrap() localrpc.CommittedRuntimeBootstrap {
+	return localrpc.CommittedRuntimeBootstrap{}
+}
+
 func (*Connection) Read([]byte) (int, error) {
 	return 0, ErrUnsupportedPlatform
 }

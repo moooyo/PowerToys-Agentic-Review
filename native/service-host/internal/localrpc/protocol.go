@@ -31,6 +31,7 @@ const (
 	OperationInstanceHeartbeat Operation = "InstanceHeartbeat"
 	OperationCompleteRun       Operation = "CompleteRun"
 	OperationFailRun           Operation = "FailRun"
+	OperationArmArwxShutdown   Operation = "ArmArwxShutdown"
 	OperationSignLocalDigest   Operation = "SignLocalDigest"
 )
 
@@ -60,6 +61,7 @@ type CallRequest struct {
 	WorkerInstanceID string
 	RunAttemptID     string
 	Digest           [32]byte
+	ArwxShutdown     ArmArwxShutdownV1
 }
 
 func (r CallRequest) RequestID() string   { return r.ID }
@@ -117,7 +119,7 @@ func DecodeMessage(document []byte, role Role) (Message, error) {
 	if !ok {
 		return nil, protocolError("INVALID_MESSAGE", "Local RPC message type is missing.", requestID, ErrInvalidMessage)
 	}
-	if role != RoleControl {
+	if role != RoleControl && role != RoleExecutor {
 		return nil, protocolError(
 			"OPERATION_NOT_ALLOWED",
 			"Local RPC messages are not allowed for this service role.",
@@ -128,8 +130,16 @@ func DecodeMessage(document []byte, role Role) (Message, error) {
 
 	switch messageType {
 	case "call":
-		return decodeCall(document, requestID)
+		return decodeCall(document, requestID, role)
 	case "cancel":
+		if role != RoleControl {
+			return nil, protocolError(
+				"OPERATION_NOT_ALLOWED",
+				"Local RPC cancellation is not allowed for this service role.",
+				requestID,
+				ErrOperationNotAllowed,
+			)
+		}
 		if len(document) > MaximumCanonicalControlFrameBytes {
 			return nil, requestTooLargeError(requestID)
 		}
@@ -165,13 +175,24 @@ type digestPayload struct {
 	DigestSHA256 string `json:"digestSha256"`
 }
 
+type armArwxShutdownPayload struct {
+	BootstrapID         string `json:"bootstrapId"`
+	ShutdownID          string `json:"shutdownId"`
+	RemainingShutdownMS int    `json:"remainingShutdownMs"`
+	FinalMessageType    int    `json:"finalMessageType"`
+	FinalSequence       string `json:"finalSequence"`
+	FinalCorrelationID  string `json:"finalCorrelationId"`
+	FinalFrameBytes     int    `json:"finalFrameBytes"`
+	FinalFrameSHA256    string `json:"finalFrameSha256"`
+}
+
 type bodyDescriptor struct {
 	Base64URL  string `json:"base64Url"`
 	ByteLength int    `json:"byteLength"`
 	SHA256     string `json:"sha256"`
 }
 
-func decodeCall(document []byte, extractedRequestID string) (Message, error) {
+func decodeCall(document []byte, extractedRequestID string, role Role) (Message, error) {
 	if !hasExactObjectKeys(document, MaximumRequestFrameBytes, "operation", "payload", "protocolVersion", "requestId", "type") {
 		return nil, protocolError("INVALID_MESSAGE", "Local RPC call shape is invalid.", extractedRequestID, ErrInvalidMessage)
 	}
@@ -185,9 +206,19 @@ func decodeCall(document []byte, extractedRequestID string) (Message, error) {
 	if err := validateRequestID(wire.RequestID); err != nil {
 		return nil, protocolError("INVALID_REQUEST_ID", "Local RPC requestId is invalid.", "", err)
 	}
+	if wire.Operation != OperationArmArwxShutdown && role != RoleControl {
+		return nil, protocolError(
+			"OPERATION_NOT_ALLOWED",
+			"Local RPC operation is not allowed for this service role.",
+			wire.RequestID,
+			ErrOperationNotAllowed,
+		)
+	}
 	maximumFrameBytes := MaximumFrameBytes
 	if wire.Operation == OperationCompleteRun {
 		maximumFrameBytes = MaximumRequestFrameBytes
+	} else if wire.Operation == OperationArmArwxShutdown {
+		maximumFrameBytes = MaximumArmArwxShutdownBytes
 	} else if wire.Operation == OperationSignLocalDigest {
 		maximumFrameBytes = MaximumCanonicalControlFrameBytes
 	}
@@ -269,6 +300,29 @@ func decodeCall(document []byte, extractedRequestID string) (Message, error) {
 			return nil, protocolError("INVALID_PAYLOAD", "Local signing digest must be exactly 32 bytes.", wire.RequestID, err)
 		}
 		request.Digest = digest
+	case OperationArmArwxShutdown:
+		if !hasExactObjectKeys(
+			wire.Payload,
+			MaximumArmArwxShutdownBytes,
+			"bootstrapId", "finalCorrelationId", "finalFrameBytes", "finalFrameSha256",
+			"finalMessageType", "finalSequence", "remainingShutdownMs", "shutdownId",
+		) {
+			return nil, protocolError("INVALID_PAYLOAD", "ArmArwxShutdownV1 payload is invalid.", wire.RequestID, ErrArwxShutdownInvalid)
+		}
+		var payload armArwxShutdownPayload
+		if err := decodeExact(wire.Payload, &payload); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "ArmArwxShutdownV1 payload is invalid.", wire.RequestID, ErrArwxShutdownInvalid)
+		}
+		claim := ArmArwxShutdownV1(payload)
+		if err := validateArmArwxShutdownSyntax(
+			claim,
+			role,
+			RuntimeBootstrapARWXMaximumFrameBytes,
+			RuntimeBootstrapMaximumGracefulTimeoutMS-RuntimeBootstrapMinimumForceTerminationReserve,
+		); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "ArmArwxShutdownV1 payload is invalid.", wire.RequestID, err)
+		}
+		request.ArwxShutdown = claim
 	default:
 		return nil, protocolError("UNKNOWN_OPERATION", "Local RPC operation is not supported.", wire.RequestID, ErrUnknownOperation)
 	}

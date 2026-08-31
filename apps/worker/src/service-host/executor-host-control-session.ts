@@ -1,9 +1,28 @@
+import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import type { Duplex } from "node:stream";
+import {
+  type ArmArwxShutdownResultV1,
+  commitPreparedArmArwxShutdown,
+  failPreparedArmArwxShutdown,
+  type PreparedArmArwxShutdownV1,
+  prepareArmArwxShutdown,
+  readArmArwxShutdownDeadline,
+  readPreparedArmArwxShutdown,
+  validateArmArwxShutdownResult,
+} from "./arwx-shutdown.js";
+import type { ArwxFinalFrameReceipt } from "./arwx-stdio-channel.js";
+import {
+  encodeHostControlCall,
+  HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES,
+  HostControlFrameDecoder,
+  parseHostControlResponse,
+} from "./host-control-protocol.js";
 import type { HostControlSession } from "./host-control-session.js";
 import { type HostControlPipeSelector, isHostControlPipeSelector } from "./launch-contract.js";
 import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
 import {
+  type CompletedRuntimeBootstrap,
   performRuntimeBootstrapHandshake,
   RuntimeBootstrapHandshakeError,
   type RuntimeBootstrapPreparation,
@@ -35,6 +54,8 @@ export class ExecutorHostControlError extends Error {
       | "CONNECT_CANCELLED"
       | "CONNECT_FAILED"
       | "CONNECT_TIMEOUT"
+      | "LIFECYCLE_STATE_INVALID"
+      | "LIFECYCLE_TIMEOUT"
       | "PROTOCOL_FAILURE",
     message: string,
   ) {
@@ -68,7 +89,7 @@ export async function connectExecutorHostControl(
       "executor",
       options.prepareRuntimeBootstrap,
       absoluteDeadline,
-      (completed) => new ExecutorHostControlSession(stream, closeTimeoutMs, completed.parsed),
+      (completed) => new ExecutorHostControlSession(stream, closeTimeoutMs, completed),
       signal,
     );
   } catch (error) {
@@ -91,9 +112,21 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
+  readonly #decoder = new HostControlFrameDecoder(HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES);
+  readonly #runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"executor">>;
   #terminalError: ExecutorHostControlError | undefined;
-  #state: "open" | "draining" | "closing" | "closed" | "failed" = "open";
+  #state: "open" | "arming" | "armed" | "draining" | "closing" | "closed" | "failed" = "open";
   #readableEndObserved = false;
+  #armPending:
+    | {
+        readonly id: string;
+        readonly prepared: PreparedArmArwxShutdownV1;
+        readonly request: ReturnType<typeof readPreparedArmArwxShutdown>["request"];
+        readonly deferred: Deferred<Readonly<ArmArwxShutdownResultV1>>;
+        readonly timeout: NodeJS.Timeout;
+      }
+    | undefined;
+  #shutdownDeadline: number | undefined;
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
@@ -104,31 +137,61 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
   public constructor(
     private readonly stream: Duplex,
     private readonly closeTimeoutMs: number,
-    bootstrap: Readonly<ParsedRuntimeBootstrapV1>,
+    runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"executor">>,
   ) {
-    this.bootstrap = bootstrap;
+    this.#runtimeBootstrap = runtimeBootstrap;
+    this.bootstrap = runtimeBootstrap.parsed;
     void this.#done.then(undefined, () => undefined);
-    stream.on("data", () => {
-      this.#fail(
-        executorError(
-          "PROTOCOL_FAILURE",
-          "Executor HostControl received an unsupported RPC response.",
-        ),
-      );
+    stream.on("data", (chunk: Buffer | string) => {
+      this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
     });
     stream.once("error", () => {
       this.#fail(executorError("PROTOCOL_FAILURE", "Executor HostControl stream failed."));
     });
     stream.once("end", () => {
+      try {
+        this.#decoder.end();
+      } catch {
+        this.#fail(
+          executorError("PROTOCOL_FAILURE", "Executor HostControl response ended partially."),
+        );
+        return;
+      }
+      if (
+        this.#shutdownDeadline !== undefined &&
+        (this.#state === "armed" || this.#state === "draining") &&
+        performance.now() >= this.#shutdownDeadline
+      ) {
+        this.#fail(
+          executorError(
+            "LIFECYCLE_TIMEOUT",
+            "Executor HostControl shutdown EOF missed its deadline.",
+          ),
+        );
+        return;
+      }
       this.#readableEndObserved = true;
-      if (this.#state !== "draining" && this.#state !== "closing") {
+      if (this.#state !== "armed" && this.#state !== "draining" && this.#state !== "closing") {
         this.#fail(
           executorError("PROTOCOL_FAILURE", "Executor HostControl peer closed unexpectedly."),
         );
       }
     });
     stream.once("close", () => {
-      if (this.#state === "open" || (this.#state === "draining" && !this.#readableEndObserved)) {
+      if (
+        this.#shutdownDeadline !== undefined &&
+        (this.#state === "armed" || this.#state === "draining") &&
+        performance.now() >= this.#shutdownDeadline
+      ) {
+        this.#fail(
+          executorError(
+            "LIFECYCLE_TIMEOUT",
+            "Executor HostControl shutdown close missed its deadline.",
+          ),
+          false,
+        );
+      }
+      if (!this.#readableEndObserved && this.#state !== "failed" && this.#state !== "closing") {
         this.#fail(
           executorError("PROTOCOL_FAILURE", "Executor HostControl peer closed unexpectedly."),
           false,
@@ -149,12 +212,115 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     return this.#closePromise;
   }
 
+  public async armArwxShutdown(
+    receipt: ArwxFinalFrameReceipt,
+  ): Promise<Readonly<ArmArwxShutdownResultV1>> {
+    const shutdownDeadline = readArmArwxShutdownDeadline(this.#runtimeBootstrap, receipt);
+    if (shutdownDeadline !== undefined) this.#shutdownDeadline = shutdownDeadline;
+    if (this.#state !== "open" || this.#armPending !== undefined) {
+      const error = executorError(
+        "LIFECYCLE_STATE_INVALID",
+        "Executor HostControl cannot arm ARWX shutdown in its current state.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    let prepared: PreparedArmArwxShutdownV1;
+    try {
+      prepared = prepareArmArwxShutdown(this.#runtimeBootstrap, receipt);
+    } catch {
+      const error = executorError(
+        "LIFECYCLE_STATE_INVALID",
+        "Executor ARWX shutdown authority is invalid.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    const details = readPreparedArmArwxShutdown(prepared);
+    this.#shutdownDeadline = details.absoluteDeadline;
+    const requestId = `shutdown:${randomUUID()}`;
+    let frame: Buffer;
+    let timeoutMs: number;
+    try {
+      frame = encodeHostControlCall("ArmArwxShutdown", requestId, details.request);
+      timeoutMs = remainingShutdownMilliseconds(details.absoluteDeadline);
+    } catch {
+      failPreparedArmArwxShutdown(prepared);
+      const error = executorError(
+        "LIFECYCLE_TIMEOUT",
+        "Executor ARWX shutdown deadline expired before the Arm request.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    const deferred = new Deferred<Readonly<ArmArwxShutdownResultV1>>();
+    const timeout = setTimeout(() => {
+      this.#fail(executorError("LIFECYCLE_TIMEOUT", "Executor ARWX shutdown arm timed out."));
+    }, timeoutMs);
+    timeout.unref();
+    this.#armPending = { id: requestId, prepared, request: details.request, deferred, timeout };
+    this.#state = "arming";
+    try {
+      streamWrite(this.stream, frame).catch(() => {
+        this.#fail(executorError("PROTOCOL_FAILURE", "Executor ARWX shutdown write failed."));
+      });
+    } catch {
+      this.#fail(executorError("PROTOCOL_FAILURE", "Executor ARWX shutdown write failed."));
+    }
+    return await deferred.promise;
+  }
+
+  #onData(chunk: Buffer): void {
+    if (this.#state === "closed" || this.#state === "failed") return;
+    if (this.#state !== "arming" || this.#armPending === undefined) {
+      this.#fail(
+        executorError("PROTOCOL_FAILURE", "Executor HostControl received unsolicited bytes."),
+      );
+      return;
+    }
+    try {
+      for (const document of this.#decoder.push(chunk)) {
+        const pending = this.#armPending;
+        if (this.#state !== "arming" || pending === undefined) {
+          throw new Error("Executor HostControl received an unsolicited response.");
+        }
+        const response = parseHostControlResponse(document);
+        if (response.requestId !== pending.id || response.outcome !== "ok") {
+          throw new Error("Executor HostControl Arm response is invalid.");
+        }
+        const deadline = this.#shutdownDeadline;
+        if (deadline === undefined || performance.now() >= deadline) {
+          throw new Error("Executor HostControl Arm response missed its deadline.");
+        }
+        const result = validateArmArwxShutdownResult(response.body, pending.request);
+        commitPreparedArmArwxShutdown(pending.prepared);
+        this.#state = "armed";
+        const draining = this.drain();
+        draining.catch(() => undefined);
+        if (this.#terminalError !== undefined) throw this.#terminalError;
+        clearTimeout(pending.timeout);
+        this.#armPending = undefined;
+        pending.deferred.resolve(result);
+      }
+    } catch {
+      this.#fail(executorError("PROTOCOL_FAILURE", "Executor HostControl Arm response failed."));
+    }
+  }
+
   async #drain(): Promise<void> {
     if (this.#state === "closed") return;
     if (this.#state === "failed") throw this.#terminalError;
     if (this.#state === "closing") return this.close();
+    if (this.#state === "arming") {
+      const error = executorError(
+        "LIFECYCLE_STATE_INVALID",
+        "Executor HostControl cannot drain while ARWX shutdown is arming.",
+      );
+      this.#fail(error);
+      throw error;
+    }
     this.#state = "draining";
-    const deadline = performance.now() + this.closeTimeoutMs;
+    const deadline = this.#shutdownDeadline ?? performance.now() + this.closeTimeoutMs;
     try {
       await this.#awaitDrainPhase(
         new Promise<void>((resolve, reject) => {
@@ -168,6 +334,7 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       );
       await this.#awaitDrainPhase(this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      if (this.#shutdownDeadline !== undefined) remainingShutdownMilliseconds(deadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
       const error = executorError("CLOSE_TIMEOUT", "Executor HostControl drain timed out.");
@@ -182,6 +349,10 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       this.#fail(
         executorError("CLIENT_CLOSED", "Executor HostControl drain was interrupted by close."),
       );
+    } else if (this.#state === "arming") {
+      this.#fail(
+        executorError("CLIENT_CLOSED", "Executor HostControl Arm was interrupted by close."),
+      );
     } else if (this.#state !== "failed") {
       this.#state = "closing";
     }
@@ -191,7 +362,14 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       // The close event or deadline remains authoritative.
     }
     try {
-      await withTimeout(this.#closed.promise, this.closeTimeoutMs);
+      const timeout =
+        this.#shutdownDeadline === undefined
+          ? this.closeTimeoutMs
+          : remainingShutdownMilliseconds(this.#shutdownDeadline);
+      await withTimeout(this.#closed.promise, timeout);
+      if (this.#shutdownDeadline !== undefined) {
+        remainingShutdownMilliseconds(this.#shutdownDeadline);
+      }
     } catch {
       throw executorError("CLOSE_TIMEOUT", "Executor HostControl stream did not close in time.");
     }
@@ -201,6 +379,13 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     if (this.#state === "failed" || this.#state === "closed") return;
     this.#state = "failed";
     this.#terminalError = error;
+    const pending = this.#armPending;
+    this.#armPending = undefined;
+    if (pending !== undefined) {
+      clearTimeout(pending.timeout);
+      failPreparedArmArwxShutdown(pending.prepared);
+      pending.deferred.reject(error);
+    }
     this.#failure.reject(error);
     if (destroy) {
       try {
@@ -212,10 +397,11 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
   }
 
   #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    return withTimeout(
-      Promise.race([phase, this.#failure.promise]),
-      remainingMilliseconds(deadline),
-    );
+    const timeout =
+      this.#shutdownDeadline === undefined
+        ? remainingMilliseconds(deadline)
+        : remainingShutdownMilliseconds(deadline);
+    return withTimeout(Promise.race([phase, this.#failure.promise]), timeout);
   }
 }
 
@@ -355,4 +541,25 @@ function executorError(
 
 function remainingMilliseconds(deadline: number): number {
   return Math.max(1, deadline - performance.now());
+}
+
+function remainingShutdownMilliseconds(deadline: number): number {
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining < 1) {
+    throw executorError("LIFECYCLE_TIMEOUT", "Executor ARWX shutdown deadline expired.");
+  }
+  return remaining;
+}
+
+function streamWrite(stream: Duplex, frame: Buffer): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    try {
+      stream.write(frame, (error?: Error | null) => {
+        if (error !== undefined && error !== null) reject(error);
+        else resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
 }

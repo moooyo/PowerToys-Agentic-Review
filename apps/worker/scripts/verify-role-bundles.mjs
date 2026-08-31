@@ -179,6 +179,7 @@ const specifications = Object.freeze({
     outputs: new Set(["dist/control.mjs", "dist/control.mjs.map"]),
     requiredWorkerInputs: new Set([
       "apps/worker/src/control-main.ts",
+      "apps/worker/src/service-host/arwx-shutdown.ts",
       "apps/worker/src/service-host/arwx-stdio-channel.ts",
       "apps/worker/src/service-host/host-control-client.ts",
       "apps/worker/src/service-host/host-control-protocol.ts",
@@ -194,8 +195,10 @@ const specifications = Object.freeze({
     outputs: new Set(["dist/executor.mjs", "dist/executor.mjs.map"]),
     requiredWorkerInputs: new Set([
       "apps/worker/src/executor-main.ts",
+      "apps/worker/src/service-host/arwx-shutdown.ts",
       "apps/worker/src/service-host/arwx-stdio-channel.ts",
       "apps/worker/src/service-host/executor-host-control-session.ts",
+      "apps/worker/src/service-host/host-control-protocol.ts",
       "apps/worker/src/service-host/launch-contract.ts",
       "apps/worker/src/service-host/opaque-json.ts",
       "apps/worker/src/service-host/role-entrypoint.ts",

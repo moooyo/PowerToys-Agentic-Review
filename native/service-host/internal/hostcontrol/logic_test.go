@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -234,14 +235,18 @@ func TestCompleteRuntimeBootstrapActivatesBetweenAckAndCommit(t *testing.T) {
 	node.events = &events
 	evidence := VerificationEvidence{NodeIdentity: node.stable}
 
-	if err := completeRuntimeBootstrap(
+	committed, err := completeRuntimeBootstrap(
 		context.Background(),
 		channel,
 		node,
 		evidence,
 		bootstrap,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if reflect.ValueOf(committed).IsZero() {
+		t.Fatal("completed bootstrap did not return committed session authority")
 	}
 	wantEvents := []string{"write-bootstrap", "read-ack", "activate", "write-commit"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
@@ -293,7 +298,7 @@ func TestCompleteRuntimeBootstrapRejectsDriftAndCommitFailure(t *testing.T) {
 			node := newFakeRetainedNode(testNodeIdentity())
 			node.events = &events
 			test.configure(node, channel)
-			err := completeRuntimeBootstrap(
+			_, err := completeRuntimeBootstrap(
 				context.Background(),
 				channel,
 				node,
@@ -327,7 +332,7 @@ func TestCompleteRuntimeBootstrapRechecksDeadlineImmediatelyBeforeActivation(t *
 		}
 	}
 
-	err := completeRuntimeBootstrap(
+	_, err := completeRuntimeBootstrap(
 		ctx,
 		channel,
 		node,

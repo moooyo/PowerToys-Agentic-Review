@@ -9,6 +9,7 @@ import (
 
 const (
 	MaximumCanonicalControlFrameBytes    = 1_048_576
+	MaximumArmArwxShutdownBytes          = 1_024
 	MaximumWorkerAPIBodyBytes            = 1_048_576
 	MaximumRunCompletionRequestBodyBytes = 2*1024*1024 + 16*1024
 	MaximumClaimResponseBodyBytes        = 16 * 1024 * 1024
@@ -58,7 +59,7 @@ func ReadFrame(reader io.Reader, maximumBytes int) ([]byte, error) {
 	prefix := make([]byte, framePrefixBytes)
 	read, err := io.ReadFull(reader, prefix)
 	if err != nil {
-		if errors.Is(err, io.EOF) && read == 0 {
+		if err == io.EOF && read == 0 {
 			return nil, io.EOF
 		}
 		return nil, fmt.Errorf("%w: length prefix", ErrPartialFrame)

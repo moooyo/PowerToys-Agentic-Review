@@ -40,8 +40,12 @@ sends the bootstrap, Node acknowledges a validated role configuration and a runn
 loop, ServiceHost activates the retained Node, and Node accepts a bootstrap-bound commit before the
 RPC session is published. The Control and Executor entrypoints then remain in a zero-execution
 foundation state: they advertise no slots, claim no work, and emit no ARWX `Ready` until the
-business role supervisors are implemented. Before ServiceHost enables either payload, its fixed
-Node launch contract must include `--disallow-code-generation-from-strings` and `--no-addons`;
+business role supervisors are implemented. The dormant role bundles also implement the bounded,
+one-shot `ArmArwxShutdownV1` lifecycle gate: only an actual final `Drain` or `Drained` frame receipt
+from the same committed bootstrap and ARWX channel can authorize shutdown, and the role-local
+`shutdownId` does not claim cross-role transaction identity. The zero-execution entrypoints never
+send either final frame or arm shutdown themselves. Before ServiceHost enables either payload, its
+fixed Node launch contract must include `--disallow-code-generation-from-strings` and `--no-addons`;
 neither flag replaces the operating system boundaries above.
 
 ## Worker API

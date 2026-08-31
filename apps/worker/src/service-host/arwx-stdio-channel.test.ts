@@ -8,7 +8,13 @@ import {
   LocalMessageType,
 } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
-import { ArwxStdioChannel, ArwxStdioChannelError } from "./arwx-stdio-channel.js";
+import {
+  ArwxStdioChannel,
+  ArwxStdioChannelError,
+  commitArwxFinalFrameReceipt,
+  consumeArwxFinalFrameReceipt,
+} from "./arwx-stdio-channel.js";
+import { drainedPayload, drainPayload } from "./runtime-bootstrap.test-helpers.js";
 
 const sessionId = "10000000-0000-4000-8000-000000000001";
 const executorBootId = "20000000-0000-4000-8000-000000000002";
@@ -138,6 +144,142 @@ describe("ARWX standard-I/O channel", () => {
     });
 
     await expect(sending).rejects.toMatchObject({ code: "OUTPUT_FAILED" });
+    expect(channel.state).toBe("failed");
+  });
+
+  it("issues a final receipt only after the write and rejects every later send", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const channel = new ArwxStdioChannel({ localRole: "control", input, output });
+    const receipt = await channel.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 1_000,
+    );
+    expect(receipt.localRole).toBe("control");
+    expect(() =>
+      channel.send({
+        messageType: LocalMessageType.Ping,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: {},
+      }),
+    ).toThrowError(expect.objectContaining({ code: "SHUTDOWN_STATE_INVALID" }));
+    expect(channel.state).toBe("failed");
+  });
+
+  it("fails closed on the wrong final type or an expired final-write deadline", async () => {
+    const wrongType = new ArwxStdioChannel({
+      localRole: "control",
+      input: new PassThrough(),
+      output: new PassThrough(),
+    });
+    await expect(
+      wrongType.sendFinal(
+        {
+          messageType: LocalMessageType.Ping,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: {},
+        },
+        performance.now() + 1_000,
+      ),
+    ).rejects.toMatchObject({ code: "SHUTDOWN_STATE_INVALID" });
+
+    const expired = new ArwxStdioChannel({
+      localRole: "control",
+      input: new PassThrough(),
+      output: new PassThrough(),
+    });
+    await expect(
+      expired.sendFinal(
+        {
+          messageType: LocalMessageType.Drain,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: drainPayload(),
+        },
+        performance.now() - 1,
+      ),
+    ).rejects.toMatchObject({ code: "SHUTDOWN_STATE_INVALID" });
+  });
+
+  it("requires Executor to observe Drain before sending Drained", async () => {
+    const channel = new ArwxStdioChannel({
+      localRole: "executor",
+      input: new PassThrough(),
+      output: new PassThrough(),
+    });
+
+    await expect(
+      channel.sendFinal(
+        {
+          messageType: LocalMessageType.Drained,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: drainedPayload(),
+        },
+        performance.now() + 1_000,
+      ),
+    ).rejects.toMatchObject({ code: "SHUTDOWN_STATE_INVALID" });
+    expect(channel.state).toBe("failed");
+  });
+
+  it("rejects a business frame decoded in the same batch after peer Drain", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const channel = new ArwxStdioChannel({ localRole: "executor", input, output });
+    let dispatched = 0;
+    const running = channel.run(() => {
+      dispatched += 1;
+    });
+    input.write(
+      Buffer.concat([
+        encodeLocalFrame({
+          minorVersion: 0,
+          messageType: LocalMessageType.Drain,
+          sequence: 1n,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: drainPayload(),
+        }),
+        encodeLocalFrame({
+          minorVersion: 0,
+          messageType: LocalMessageType.Hello,
+          sequence: 2n,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: hello,
+        }),
+      ]),
+    );
+
+    await expect(running).rejects.toMatchObject({ code: "SHUTDOWN_STATE_INVALID" });
+    expect(dispatched).toBe(1);
+  });
+
+  it("starts the absolute drain deadline as part of the Arm commit", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const channel = new ArwxStdioChannel({
+      localRole: "control",
+      input,
+      output,
+      closeTimeoutMs: 100,
+    });
+    const running = channel.run(() => undefined);
+    const receipt = await channel.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 50,
+    );
+    expect(consumeArwxFinalFrameReceipt(receipt, channel, "control")).toBeDefined();
+    expect(commitArwxFinalFrameReceipt(receipt)).toBe(true);
+
+    await expect(running).rejects.toMatchObject({ code: "OUTPUT_FAILED" });
     expect(channel.state).toBe("failed");
   });
 

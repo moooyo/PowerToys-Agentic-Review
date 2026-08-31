@@ -14,6 +14,7 @@ export const HOST_CONTROL_MAXIMUM_RUN_COMPLETION_BODY_BYTES = 2 * 1_024 * 1_024 
 export const HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES = 2_818_535;
 export const HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES = 16 * 1_024 * 1_024;
 export const HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES = 22_369_945;
+export const HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES = 1_024;
 
 const framePrefixBytes = 4;
 
@@ -23,6 +24,7 @@ export type HostControlOperation =
   | "InstanceHeartbeat"
   | "CompleteRun"
   | "FailRun"
+  | "ArmArwxShutdown"
   | "SignLocalDigest";
 
 export type HostControlJsonObject = Readonly<Record<string, unknown>>;
@@ -79,9 +81,11 @@ export function encodeHostControlCall(
   const maximum =
     operation === "CompleteRun"
       ? HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES
-      : operation === "SignLocalDigest"
-        ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
-        : HOST_CONTROL_MAXIMUM_FRAME_BYTES;
+      : operation === "ArmArwxShutdown"
+        ? HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES
+        : operation === "SignLocalDigest"
+          ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
+          : HOST_CONTROL_MAXIMUM_FRAME_BYTES;
   if (document.byteLength > maximum) {
     throw new HostControlProtocolError("HostControl request exceeds its operation limit.");
   }
@@ -151,7 +155,7 @@ export function parseHostControlResponse(document: Uint8Array): ParsedHostContro
     !isRecord(error) ||
     !hasExactKeys(error, ["code", "message", "retryable"]) ||
     typeof error.code !== "string" ||
-    !/^[A-Z][A-Z0-9_]{0,63}$/u.test(error.code) ||
+    !/^[A-Z][A-Z0-9_]{0,63}(?![\s\S])/u.test(error.code) ||
     typeof error.message !== "string" ||
     Buffer.byteLength(error.message, "utf8") < 1 ||
     Buffer.byteLength(error.message, "utf8") > 512 ||
@@ -244,7 +248,7 @@ export class HostControlFrameDecoder {
 }
 
 export function validHostControlEntityId(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/u.test(value);
 }
 
 export function validP256LowSSignature(value: string): boolean {
@@ -292,6 +296,9 @@ function validateOperationPayload(
       assertBodyPayload(payload, ["body", "runAttemptId"], HOST_CONTROL_MAXIMUM_BODY_BYTES);
       assertEntityId(payload.runAttemptId as string, "runAttemptId");
       return;
+    case "ArmArwxShutdown":
+      assertArmArwxShutdownPayload(payload);
+      return;
     case "SignLocalDigest":
       if (
         !hasExactKeys(payload, ["digestSha256"]) ||
@@ -317,6 +324,45 @@ function assertBodyPayload(
   } catch {
     throw new HostControlProtocolError("HostControl operation body descriptor is invalid.");
   }
+}
+
+function assertArmArwxShutdownPayload(payload: HostControlJsonObject): void {
+  if (
+    !hasExactKeys(payload, [
+      "bootstrapId",
+      "finalCorrelationId",
+      "finalFrameBytes",
+      "finalFrameSha256",
+      "finalMessageType",
+      "finalSequence",
+      "remainingShutdownMs",
+      "shutdownId",
+    ]) ||
+    !isUuidV4(payload.bootstrapId) ||
+    !isUuidV4(payload.shutdownId) ||
+    !Number.isSafeInteger(payload.remainingShutdownMs) ||
+    (payload.remainingShutdownMs as number) < 1 ||
+    (payload.remainingShutdownMs as number) > 300_000 ||
+    (payload.finalMessageType !== 14 && payload.finalMessageType !== 15) ||
+    typeof payload.finalSequence !== "string" ||
+    !/^[1-9][0-9]{0,19}(?![\s\S])/u.test(payload.finalSequence) ||
+    BigInt(payload.finalSequence) > (1n << 64n) - 1n ||
+    payload.finalCorrelationId !== "00000000-0000-0000-0000-000000000000" ||
+    !Number.isSafeInteger(payload.finalFrameBytes) ||
+    (payload.finalFrameBytes as number) < 48 ||
+    (payload.finalFrameBytes as number) > 1_048_576 ||
+    typeof payload.finalFrameSha256 !== "string" ||
+    !/^[a-f0-9]{64}(?![\s\S])/u.test(payload.finalFrameSha256)
+  ) {
+    throw new HostControlProtocolError("ArmArwxShutdownV1 payload is invalid.");
+  }
+}
+
+function isUuidV4(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])/u.test(value)
+  );
 }
 
 function serializeDocument(value: HostControlJsonObject): Buffer {

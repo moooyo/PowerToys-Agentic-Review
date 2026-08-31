@@ -334,11 +334,20 @@ async function stopArwx(
   receiveLoopDone: Promise<void>,
   cleanupErrors: unknown[],
 ): Promise<void> {
-  arwx.abort();
+  const abortedOpenChannel = arwx.state === "open";
+  if (abortedOpenChannel) {
+    arwx.abort();
+  } else {
+    try {
+      await arwx.drain();
+    } catch (error) {
+      appendDistinctError(cleanupErrors, error);
+    }
+  }
   try {
     await receiveLoopDone;
   } catch (error) {
-    if (error instanceof ArwxStdioChannelError && error.code === "ABORTED") {
+    if (abortedOpenChannel && error instanceof ArwxStdioChannelError && error.code === "ABORTED") {
       return;
     }
     appendDistinctError(cleanupErrors, error);

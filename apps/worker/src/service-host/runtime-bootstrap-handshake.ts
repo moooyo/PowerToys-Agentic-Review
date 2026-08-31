@@ -3,8 +3,12 @@ import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { type Static, Type } from "@sinclair/typebox";
 import {
   type ArwxBootstrapReceiveLoopToken,
+  type ArwxFinalFrameBinding,
+  type ArwxFinalFrameReceipt,
   type ArwxStdioChannel,
   consumeArwxBootstrapReceiveLoopToken,
+  consumeArwxFinalFrameReceipt,
+  readArwxFinalFrameReceiptDeadline,
 } from "./arwx-stdio-channel.js";
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
 import {
@@ -82,6 +86,7 @@ interface BoundaryState<TRole extends ServiceHostPayloadRole = ServiceHostPayloa
   readonly guardDone: Promise<void>;
   acknowledged: boolean;
   committed: boolean;
+  shutdownAttempted: boolean;
 }
 
 const boundaryStates = new WeakMap<object, BoundaryState>();
@@ -122,6 +127,7 @@ export function createRuntimeBootstrapReadyBoundary<TRole extends ServiceHostPay
     guardDone,
     acknowledged: false,
     committed: false,
+    shutdownAttempted: false,
   });
   return boundary;
 }
@@ -137,6 +143,62 @@ export function isCompletedRuntimeBootstrap(
     state.arwx.state === "open" &&
     state.arwx.receiveLoopStarted
   );
+}
+
+export interface RuntimeBootstrapArwxShutdownBinding extends ArwxFinalFrameBinding {
+  readonly bootstrapId: string;
+}
+
+/** Reads a genuine receipt deadline without consuming or granting shutdown authority. */
+export function readCompletedRuntimeBootstrapArwxShutdownDeadline<
+  TRole extends ServiceHostPayloadRole,
+>(
+  completed: Readonly<CompletedRuntimeBootstrap<TRole>>,
+  receipt: ArwxFinalFrameReceipt,
+): number | undefined {
+  const state = boundaryStates.get(completed.boundary);
+  if (
+    state === undefined ||
+    state.shutdownAttempted ||
+    state.committed !== true ||
+    state.parsed !== completed.parsed ||
+    state.role !== completed.role
+  ) {
+    return undefined;
+  }
+  return readArwxFinalFrameReceiptDeadline(receipt, state.arwx, state.role);
+}
+
+/** Consumes one final-frame receipt bound to this exact completed bootstrap and ARWX channel. */
+export function consumeCompletedRuntimeBootstrapForArwxShutdown<
+  TRole extends ServiceHostPayloadRole,
+>(
+  completed: Readonly<CompletedRuntimeBootstrap<TRole>>,
+  receipt: ArwxFinalFrameReceipt,
+): Readonly<RuntimeBootstrapArwxShutdownBinding> | undefined {
+  const state = boundaryStates.get(completed.boundary);
+  if (
+    state === undefined ||
+    state.shutdownAttempted ||
+    state.committed !== true ||
+    state.parsed !== completed.parsed ||
+    state.role !== completed.role ||
+    state.arwx.state !== "open"
+  ) {
+    return undefined;
+  }
+  state.shutdownAttempted = true;
+  const finalFrame = consumeArwxFinalFrameReceipt(receipt, state.arwx, state.role);
+  if (
+    finalFrame === undefined ||
+    finalFrame.finalFrameBytes > state.parsed.bootstrap.arwx.maximumFrameBytes
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    ...finalFrame,
+    bootstrapId: state.parsed.bootstrap.bootstrapId,
+  });
 }
 
 /** Completes Bootstrap -> ReadyAck -> Commit while retaining exclusive ownership of the stream. */

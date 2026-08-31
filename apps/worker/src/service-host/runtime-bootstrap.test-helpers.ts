@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { type Duplex, PassThrough } from "node:stream";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
-import { ArwxStdioChannel } from "./arwx-stdio-channel.js";
+import {
+  type ArwxBootstrapReceiveLoop,
+  type ArwxInboundMessage,
+  ArwxStdioChannel,
+} from "./arwx-stdio-channel.js";
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
@@ -80,6 +84,10 @@ export function bootstrapTestAck(stream: Duplex): Buffer | undefined {
 
 export function createTestBootstrapPreparation<TRole extends ServiceHostPayloadRole>(
   role: TRole,
+  options: {
+    readonly handler?: (message: Readonly<ArwxInboundMessage>) => void | Promise<void>;
+    readonly onStarted?: (value: TestBootstrapArwxContext) => void;
+  } = {},
 ): RuntimeBootstrapPreparation<TRole> {
   return (parsed) => {
     const input = new PassThrough();
@@ -93,9 +101,13 @@ export function createTestBootstrapPreparation<TRole extends ServiceHostPayloadR
         parsed.bootstrap.shutdown.gracefulTimeoutMs -
         parsed.bootstrap.shutdown.forceTerminationReserveMs,
     });
-    const receiveLoop = arwx.startRuntimeBootstrapReceiveLoop(() => {
-      throw new Error("Test bootstrap guard rejects business messages.");
-    });
+    const receiveLoop = arwx.startRuntimeBootstrapReceiveLoop(
+      options.handler ??
+        (() => {
+          throw new Error("Test bootstrap guard rejects business messages.");
+        }),
+    );
+    options.onStarted?.({ arwx, input, output, receiveLoop });
     try {
       return createRuntimeBootstrapReadyBoundary(role, parsed, arwx, receiveLoop.token);
     } catch (error) {
@@ -103,6 +115,39 @@ export function createTestBootstrapPreparation<TRole extends ServiceHostPayloadR
       throw error;
     }
   };
+}
+
+export interface TestBootstrapArwxContext {
+  readonly arwx: ArwxStdioChannel;
+  readonly input: PassThrough;
+  readonly output: PassThrough;
+  readonly receiveLoop: Readonly<ArwxBootstrapReceiveLoop>;
+}
+
+export function drainPayload(): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    protocolMajor: 1,
+    protocolMinor: 0,
+    workerNodeId: "powertoys-node:01",
+    workerInstanceId: "worker-instance:01",
+    executorBootId: "00112233-4455-4677-8899-aabbccddeeff",
+    sessionId: "fedcba98-7654-4210-aedc-ba9876543210",
+    reasonCode: "SERVICE_STOP",
+    requestedAtUnixMs: 1_700_000_000_000,
+  });
+}
+
+export function drainedPayload(): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    protocolMajor: 1,
+    protocolMinor: 0,
+    workerNodeId: "powertoys-node:01",
+    workerInstanceId: "worker-instance:01",
+    executorBootId: "00112233-4455-4677-8899-aabbccddeeff",
+    sessionId: "fedcba98-7654-4210-aedc-ba9876543210",
+    activeAttemptCount: 0,
+    drainedAtUnixMs: 1_700_000_000_001,
+  });
 }
 
 export function bootstrapDocument(role: ServiceHostPayloadRole): Buffer {

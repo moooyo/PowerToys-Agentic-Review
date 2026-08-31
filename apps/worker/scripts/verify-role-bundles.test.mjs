@@ -79,6 +79,7 @@ test("exact role graph requires positive bytes from critical implementations", (
 
 test("both role policies require the reviewed bootstrap handshake closure", () => {
   const sharedBootstrapInputs = [
+    "apps/worker/src/service-host/arwx-shutdown.ts",
     "apps/worker/src/service-host/opaque-json.ts",
     "apps/worker/src/service-host/runtime-bootstrap.ts",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
@@ -92,6 +93,12 @@ test("both role policies require the reviewed bootstrap handshake closure", () =
       "apps/worker/src/service-host/host-control-client.ts",
     ),
     false,
+  );
+  assert.equal(
+    new Set(roleBundlePolicyForTest.executor.requiredWorkerInputs).has(
+      "apps/worker/src/service-host/host-control-protocol.ts",
+    ),
+    true,
   );
 });
 

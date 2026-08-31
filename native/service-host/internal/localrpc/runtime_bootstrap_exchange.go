@@ -3,6 +3,7 @@ package localrpc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,29 @@ type pendingRuntimeBootstrapCommitState struct {
 	document  []byte
 	role      Role
 	attempted bool
+}
+
+// CommittedRuntimeBootstrap is opaque, copy-safe authority for the exact role and channel that
+// completed the three-stage bootstrap exchange. A local RPC server may consume it only once.
+type CommittedRuntimeBootstrap struct {
+	state *committedRuntimeBootstrapState
+}
+
+type committedRuntimeBootstrapState struct {
+	mu        sync.Mutex
+	channel   RuntimeBootstrapChannel
+	bootstrap RuntimeBootstrapV1
+	digest    [32]byte
+	consumed  bool
+}
+
+type committedRuntimeBootstrapBinding struct {
+	channel                    RuntimeBootstrapChannel
+	role                       Role
+	bootstrapID                string
+	bootstrapSHA256            [32]byte
+	maximumFrameBytes          int
+	maximumRemainingShutdownMS int
 }
 
 // BeginRuntimeBootstrapExchange sends one canonical bootstrap frame and validates exactly one
@@ -77,16 +101,19 @@ func BeginRuntimeBootstrapExchange(
 	}, nil
 }
 
-// Commit sends the exact post-activation commit once. A failed attempt cannot be retried.
-func (pending *PendingRuntimeBootstrapCommit) Commit(ctx context.Context) error {
+// Commit sends the exact post-activation commit once and returns channel-bound session authority.
+// A failed attempt cannot be retried.
+func (pending *PendingRuntimeBootstrapCommit) Commit(
+	ctx context.Context,
+) (CommittedRuntimeBootstrap, error) {
 	if pending == nil || pending.state == nil || ctx == nil {
-		return fmt.Errorf("%w: pending commit and context are required", ErrRuntimeBootstrapExchange)
+		return CommittedRuntimeBootstrap{}, fmt.Errorf("%w: pending commit and context are required", ErrRuntimeBootstrapExchange)
 	}
 	state := pending.state
 	state.mu.Lock()
 	if state.attempted || isNilRuntimeBootstrapChannel(state.channel) {
 		state.mu.Unlock()
-		return fmt.Errorf("%w: commit is not available", ErrRuntimeBootstrapExchange)
+		return CommittedRuntimeBootstrap{}, fmt.Errorf("%w: commit is not available", ErrRuntimeBootstrapExchange)
 	}
 	state.attempted = true
 	channel := state.channel
@@ -97,20 +124,53 @@ func (pending *PendingRuntimeBootstrapCommit) Commit(ctx context.Context) error 
 	state.mu.Unlock()
 
 	if cause := context.Cause(ctx); cause != nil {
-		return errors.Join(ErrRuntimeBootstrapExchange, cause)
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, cause)
+	}
+	bootstrap, err := DecodeRuntimeBootstrap(document)
+	if err != nil {
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, err)
 	}
 	commitDocument, err := EncodeRuntimeBootstrapCommit(document, role)
 	if err != nil {
-		return errors.Join(ErrRuntimeBootstrapExchange, err)
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, err)
 	}
 	writer := runtimeBootstrapContextWriter{ctx: ctx, channel: channel}
 	if err := WriteFrame(writer, commitDocument, RuntimeBootstrapMaximumBytes); err != nil {
-		return errors.Join(ErrRuntimeBootstrapExchange, fmt.Errorf("write bootstrap commit: %w", err))
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, fmt.Errorf("write bootstrap commit: %w", err))
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return errors.Join(ErrRuntimeBootstrapExchange, cause)
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, cause)
 	}
-	return nil
+	digest := sha256.Sum256(document)
+	return CommittedRuntimeBootstrap{state: &committedRuntimeBootstrapState{
+		channel:   channel,
+		bootstrap: bootstrap,
+		digest:    digest,
+	}}, nil
+}
+
+func consumeCommittedRuntimeBootstrap(
+	committed CommittedRuntimeBootstrap,
+	role Role,
+) (committedRuntimeBootstrapBinding, error) {
+	if committed.state == nil || !validRuntimeBootstrapRole(role) {
+		return committedRuntimeBootstrapBinding{}, ErrRuntimeBootstrapBinding
+	}
+	state := committed.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.consumed || isNilRuntimeBootstrapChannel(state.channel) || state.bootstrap.Role != role {
+		return committedRuntimeBootstrapBinding{}, ErrRuntimeBootstrapBinding
+	}
+	state.consumed = true
+	return committedRuntimeBootstrapBinding{
+		channel:                    state.channel,
+		role:                       state.bootstrap.Role,
+		bootstrapID:                state.bootstrap.BootstrapID,
+		bootstrapSHA256:            state.digest,
+		maximumFrameBytes:          state.bootstrap.ARWX.MaximumFrameBytes,
+		maximumRemainingShutdownMS: state.bootstrap.Shutdown.GracefulTimeoutMS - state.bootstrap.Shutdown.ForceTerminationReserveMS,
+	}, nil
 }
 
 type runtimeBootstrapContextReader struct {

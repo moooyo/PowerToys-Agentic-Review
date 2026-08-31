@@ -2,8 +2,19 @@ import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import type { Duplex } from "node:stream";
 import {
+  type ArmArwxShutdownResultV1,
+  commitPreparedArmArwxShutdown,
+  failPreparedArmArwxShutdown,
+  prepareArmArwxShutdown,
+  readArmArwxShutdownDeadline,
+  readPreparedArmArwxShutdown,
+  validateArmArwxShutdownResult,
+} from "./arwx-shutdown.js";
+import { type ArwxFinalFrameReceipt, failArwxFinalFrameReceipt } from "./arwx-stdio-channel.js";
+import {
   encodeHostControlCall,
   encodeHostControlCancel,
+  HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES,
   HOST_CONTROL_MAXIMUM_BODY_BYTES,
   HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES,
   HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES,
@@ -26,6 +37,7 @@ import {
 } from "./opaque-json.js";
 import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
 import {
+  type CompletedRuntimeBootstrap,
   performRuntimeBootstrapHandshake,
   RuntimeBootstrapHandshakeError,
   type RuntimeBootstrapPreparation,
@@ -89,6 +101,7 @@ export interface ControlHostControlClient extends HostControlSession<"control"> 
     options?: HostControlCallOptions,
   ): Promise<unknown>;
   signLocalDigest(digestSha256: string, options?: HostControlCallOptions): Promise<string>;
+  armArwxShutdown(receipt: ArwxFinalFrameReceipt): Promise<Readonly<ArmArwxShutdownResultV1>>;
 }
 
 export type HostControlConnector = (
@@ -127,6 +140,8 @@ export class HostControlClientError extends Error {
       | "CONNECT_FAILED"
       | "CONNECT_TIMEOUT"
       | "DRAIN_TIMEOUT"
+      | "LIFECYCLE_STATE_INVALID"
+      | "LIFECYCLE_TIMEOUT"
       | "OPERATION_NOT_ALLOWED"
       | "OUTPUT_QUEUE_LIMIT_EXCEEDED"
       | "PROTOCOL_FAILURE"
@@ -177,7 +192,7 @@ interface FrameReservation {
   released: boolean;
 }
 
-type ClientState = "open" | "draining" | "closing" | "closed" | "failed";
+type ClientState = "open" | "arming" | "armed" | "draining" | "closing" | "closed" | "failed";
 
 export async function connectHostControl(
   options: ControlHostControlConnectOptions,
@@ -195,7 +210,7 @@ export async function connectHostControl(
       "control",
       normalized.prepareRuntimeBootstrap,
       absoluteDeadline,
-      (completed) => new HostControlRpcClient(stream, normalized, completed.parsed),
+      (completed) => new HostControlRpcClient(stream, normalized, completed),
       signal,
     );
   } catch (error) {
@@ -225,6 +240,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
   readonly #pendingEmptyWaiters = new Set<() => void>();
   readonly #frameReservations = new Set<FrameReservation>();
+  readonly #runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"control">>;
   #writeChain: Promise<void> = Promise.resolve();
   #state: ClientState = "open";
   #activeCalls = 0;
@@ -234,6 +250,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   #readableEndObserved = false;
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
+  #shutdownDeadline: number | undefined;
 
   public get done(): Promise<void> {
     return this.#done;
@@ -242,11 +259,12 @@ class HostControlRpcClient implements ControlHostControlClient {
   public constructor(
     stream: Duplex,
     options: NormalizedOptions,
-    bootstrap: Readonly<ParsedRuntimeBootstrapV1>,
+    runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"control">>,
   ) {
     this.#stream = stream;
     this.#options = options;
-    this.bootstrap = bootstrap;
+    this.#runtimeBootstrap = runtimeBootstrap;
+    this.bootstrap = runtimeBootstrap.parsed;
     void this.#done.then(undefined, () => undefined);
     stream.on("data", (chunk: Buffer | string) => {
       this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
@@ -324,6 +342,70 @@ class HostControlRpcClient implements ControlHostControlClient {
     return body.signatureP1363;
   }
 
+  public async armArwxShutdown(
+    receipt: ArwxFinalFrameReceipt,
+  ): Promise<Readonly<ArmArwxShutdownResultV1>> {
+    const shutdownDeadline = readArmArwxShutdownDeadline(this.#runtimeBootstrap, receipt);
+    if (shutdownDeadline !== undefined) this.#shutdownDeadline = shutdownDeadline;
+    this.#assertAccepting();
+    if (
+      this.#activeCalls !== 0 ||
+      this.#pending.size !== 0 ||
+      this.#frameReservations.size !== 0 ||
+      this.#queuedWriteBytes !== 0
+    ) {
+      failArwxFinalFrameReceipt(receipt);
+      const error = clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl cannot arm ARWX shutdown while RPC work is active.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    let prepared: ReturnType<typeof prepareArmArwxShutdown>;
+    try {
+      prepared = prepareArmArwxShutdown(this.#runtimeBootstrap, receipt);
+    } catch {
+      const error = clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl ARWX shutdown authority is invalid.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    const details = readPreparedArmArwxShutdown(prepared);
+    this.#shutdownDeadline = details.absoluteDeadline;
+    let response: unknown;
+    try {
+      const pending = this.#call(
+        "ArmArwxShutdown",
+        details.request,
+        "canonical",
+        undefined,
+        details.absoluteDeadline,
+      );
+      this.#state = "arming";
+      response = await pending;
+      if (this.#state !== "arming" || performance.now() >= details.absoluteDeadline) {
+        throw new Error("Arm response arrived outside its lifecycle state.");
+      }
+      const result = validateArmArwxShutdownResult(response, details.request);
+      commitPreparedArmArwxShutdown(prepared);
+      this.#state = "armed";
+      const draining = this.drain();
+      draining.catch(() => undefined);
+      if (this.#terminalError !== undefined) throw this.#terminalError;
+      return result;
+    } catch {
+      failPreparedArmArwxShutdown(prepared);
+      const error =
+        this.#terminalError ??
+        clientError("PROTOCOL_FAILURE", "HostControl ARWX shutdown arm failed.");
+      this.#fail(error);
+      throw error;
+    }
+  }
+
   public drain(): Promise<void> {
     this.#drainPromise ??= this.#drain();
     return this.#drainPromise;
@@ -339,6 +421,7 @@ class HostControlRpcClient implements ControlHostControlClient {
     payload: HostControlJsonObject,
     responseKind: "opaque-json" | "canonical",
     signal: AbortSignal | undefined,
+    absoluteDeadline?: number,
   ): Promise<unknown> {
     this.#assertControlOperation();
     this.#assertAccepting();
@@ -364,9 +447,11 @@ class HostControlRpcClient implements ControlHostControlClient {
       responseMaximumBytes:
         operation === "Claim"
           ? HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES
-          : operation === "SignLocalDigest"
-            ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
-            : HOST_CONTROL_MAXIMUM_FRAME_BYTES,
+          : operation === "ArmArwxShutdown"
+            ? HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES
+            : operation === "SignLocalDigest"
+              ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
+              : HOST_CONTROL_MAXIMUM_FRAME_BYTES,
       decodedResponseMaximumBytes:
         operation === "Claim"
           ? HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES
@@ -379,9 +464,17 @@ class HostControlRpcClient implements ControlHostControlClient {
     this.#pending.set(requestId, pending);
     this.#activeCalls += 1;
     const timeoutMs =
-      operation === "Claim" ? this.#options.claimTimeoutMs : this.#options.requestTimeoutMs;
+      absoluteDeadline === undefined
+        ? operation === "Claim"
+          ? this.#options.claimTimeoutMs
+          : this.#options.requestTimeoutMs
+        : remainingShutdownMilliseconds(absoluteDeadline);
     pending.timeout = setTimeout(() => {
-      this.#cancelPending(pending, "REQUEST_TIMEOUT");
+      if (operation === "ArmArwxShutdown") {
+        this.#fail(clientError("LIFECYCLE_TIMEOUT", "HostControl ARWX shutdown arm timed out."));
+      } else {
+        this.#cancelPending(pending, "REQUEST_TIMEOUT");
+      }
     }, timeoutMs);
     pending.timeout.unref();
     if (signal !== undefined) {
@@ -459,7 +552,6 @@ class HostControlRpcClient implements ControlHostControlClient {
     if (this.#state === "closed" || this.#state === "failed") return;
     try {
       this.#decoder.end();
-      this.#readableEndObserved = true;
     } catch {
       this.#fail(
         clientError("PROTOCOL_FAILURE", "HostControl response ended with a partial frame."),
@@ -467,7 +559,17 @@ class HostControlRpcClient implements ControlHostControlClient {
       return;
     }
     if (
+      this.#shutdownDeadline !== undefined &&
+      (this.#state === "armed" || this.#state === "draining") &&
+      performance.now() >= this.#shutdownDeadline
+    ) {
+      this.#fail(clientError("LIFECYCLE_TIMEOUT", "HostControl shutdown EOF missed its deadline."));
+      return;
+    }
+    this.#readableEndObserved = true;
+    if (
       this.#state === "open" ||
+      this.#state === "arming" ||
       (this.#state === "draining" && (this.#pending.size !== 0 || !this.#writableEndStarted))
     ) {
       this.#fail(clientError("PROTOCOL_FAILURE", "HostControl peer closed unexpectedly."));
@@ -475,6 +577,16 @@ class HostControlRpcClient implements ControlHostControlClient {
   }
 
   #onClose(): void {
+    if (
+      this.#shutdownDeadline !== undefined &&
+      (this.#state === "armed" || this.#state === "draining") &&
+      performance.now() >= this.#shutdownDeadline
+    ) {
+      this.#fail(
+        clientError("LIFECYCLE_TIMEOUT", "HostControl shutdown close missed its deadline."),
+        false,
+      );
+    }
     if (!this.#readableEndObserved && this.#state !== "failed" && this.#state !== "closing") {
       try {
         this.#decoder.end();
@@ -491,6 +603,7 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
     if (
       this.#state === "open" ||
+      this.#state === "arming" ||
       (this.#state === "draining" && (this.#pending.size !== 0 || !this.#writableEndStarted))
     ) {
       this.#fail(clientError("PROTOCOL_FAILURE", "HostControl peer closed unexpectedly."), false);
@@ -699,14 +812,23 @@ class HostControlRpcClient implements ControlHostControlClient {
     if (this.#state === "closed") return;
     if (this.#state === "failed") throw this.#terminalError;
     if (this.#state === "closing") return this.close();
+    if (this.#state === "arming") {
+      const error = clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl cannot drain while ARWX shutdown is arming.",
+      );
+      this.#fail(error);
+      throw error;
+    }
     this.#state = "draining";
-    const deadline = performance.now() + this.#options.closeTimeoutMs;
+    const deadline = this.#shutdownDeadline ?? performance.now() + this.#options.closeTimeoutMs;
     try {
       await this.#awaitDrainPhase(this.#waitForPendingEmpty(), deadline);
       await this.#awaitDrainPhase(this.#writeChain, deadline);
       await this.#awaitDrainPhase(this.#endWritable(), deadline);
       await this.#awaitDrainPhase(this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      if (this.#shutdownDeadline !== undefined) remainingShutdownMilliseconds(deadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
       const error = clientError("DRAIN_TIMEOUT", "HostControl drain did not finish in time.");
@@ -729,17 +851,25 @@ class HostControlRpcClient implements ControlHostControlClient {
       // The close event or deadline below remains authoritative.
     }
     try {
-      await withDeadline(this.#closed.promise, this.#options.closeTimeoutMs);
+      const timeout =
+        this.#shutdownDeadline === undefined
+          ? this.#options.closeTimeoutMs
+          : remainingShutdownMilliseconds(this.#shutdownDeadline);
+      await withDeadline(this.#closed.promise, timeout);
+      if (this.#shutdownDeadline !== undefined) {
+        remainingShutdownMilliseconds(this.#shutdownDeadline);
+      }
     } catch {
       throw clientError("CLOSE_TIMEOUT", "HostControl stream did not close in time.");
     }
   }
 
   #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    return withDeadline(
-      Promise.race([phase, this.#failure.promise]),
-      remainingMilliseconds(deadline),
-    );
+    const timeout =
+      this.#shutdownDeadline === undefined
+        ? remainingMilliseconds(deadline)
+        : remainingShutdownMilliseconds(deadline);
+    return withDeadline(Promise.race([phase, this.#failure.promise]), timeout);
   }
 }
 
@@ -933,6 +1063,14 @@ function boundedTimeout(value: number): number {
 
 function remainingMilliseconds(deadline: number): number {
   return Math.max(1, deadline - performance.now());
+}
+
+function remainingShutdownMilliseconds(deadline: number): number {
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining < 1) {
+    throw clientError("LIFECYCLE_TIMEOUT", "HostControl ARWX shutdown deadline expired.");
+  }
+  return remaining;
 }
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

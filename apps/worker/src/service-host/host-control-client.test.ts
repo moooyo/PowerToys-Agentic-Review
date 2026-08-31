@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
 import { Duplex } from "node:stream";
-import { serializeCanonicalJson } from "@agentic-review/local-protocol";
+import {
+  decodeLocalFrame,
+  encodeLocalFrame,
+  LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+  LocalMessageType,
+  serializeCanonicalJson,
+} from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
 import {
   type ControlHostControlClient,
@@ -24,9 +31,13 @@ import {
 } from "./opaque-json.js";
 import {
   createTestBootstrapPreparation,
+  drainedPayload,
+  drainPayload,
   handleBootstrapTestWrite,
   installBootstrapTestHost,
+  type TestBootstrapArwxContext,
 } from "./runtime-bootstrap.test-helpers.js";
+import type { RuntimeBootstrapPreparation } from "./runtime-bootstrap-handshake.js";
 
 class FakeHostControl extends Duplex {
   public readonly writes: Buffer[] = [];
@@ -115,6 +126,7 @@ async function connect(
     readonly maximumQueuedWriteBytes?: number;
     readonly requestTimeoutMs?: number;
     readonly host?: FakeHostControl;
+    readonly prepareRuntimeBootstrap?: RuntimeBootstrapPreparation<"control">;
   } = {},
 ): Promise<{ readonly client: ControlHostControlClient; readonly host: FakeHostControl }> {
   const host = options.host ?? new FakeHostControl();
@@ -122,7 +134,8 @@ async function connect(
   const client = await connectHostControl({
     role: "control",
     pipe,
-    prepareRuntimeBootstrap: createTestBootstrapPreparation("control"),
+    prepareRuntimeBootstrap:
+      options.prepareRuntimeBootstrap ?? createTestBootstrapPreparation("control"),
     ...(options.maximumConcurrentRequests === undefined
       ? {}
       : { maximumConcurrentRequests: options.maximumConcurrentRequests }),
@@ -162,6 +175,196 @@ describe("HostControl client", () => {
     await expect(registration).resolves.toEqual({ registered: true });
     await expect(claim).resolves.toEqual({ outcome: "no_work" });
     await client.close();
+  });
+
+  it("arms the exact final Drain frame and commits ARWX output only after the exact echo", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    const { client, host } = await connect({
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: () => undefined,
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    const runtime = defined(arwxContext, "ARWX context");
+    const receipt = await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 1_000,
+    );
+    const finalFrame = runtime.output.read() as Buffer;
+    expect(decodeLocalFrame(finalFrame)).toMatchObject({
+      messageType: LocalMessageType.Drain,
+      sequence: 1n,
+    });
+
+    const arming = client.armArwxShutdown(receipt);
+    await waitForWrites(host, 1);
+    const request = defined(host.requests()[0], "Arm request");
+    const payload = request.payload as Record<string, unknown>;
+    expect(request.operation).toBe("ArmArwxShutdown");
+    expect(payload).toMatchObject({
+      bootstrapId: client.bootstrap.bootstrap.bootstrapId,
+      finalMessageType: LocalMessageType.Drain,
+      finalSequence: "1",
+      finalCorrelationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+      finalFrameBytes: finalFrame.byteLength,
+      finalFrameSha256: createHash("sha256").update(finalFrame).digest("hex"),
+    });
+    expect(runtime.output.writableEnded).toBe(false);
+    host.respond(success(request.requestId as string, { armed: true, ...payload }), 3);
+
+    await expect(arming).resolves.toEqual({ armed: true, ...payload });
+    expect(runtime.output.writableEnded).toBe(true);
+    await waitFor(() => host.clientEnded);
+    expect(() => client.register(opaque({ workerNodeId: "node:1" }))).toThrowError(
+      expect.objectContaining({ code: "CLIENT_CLOSED" }),
+    );
+    expect(() =>
+      runtime.arwx.send({
+        messageType: LocalMessageType.Ping,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: {},
+      }),
+    ).toThrowError(expect.objectContaining({ code: "CHANNEL_STATE_INVALID" }));
+
+    runtime.input.end(
+      encodeLocalFrame({
+        minorVersion: 0,
+        messageType: LocalMessageType.Drained,
+        sequence: 1n,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainedPayload(),
+      }),
+    );
+    await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
+    await client.drain();
+  });
+
+  it("rejects close-only HostControl termination after Arm acknowledgement", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    const { client, host } = await connect({
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: () => undefined,
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    host.endReadableOnClientEnd = false;
+    const runtime = defined(arwxContext, "ARWX context");
+    const receipt = await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 1_000,
+    );
+    const arming = client.armArwxShutdown(receipt);
+    await waitForWrites(host, 1);
+    const request = defined(host.requests()[0], "Arm request");
+    const payload = request.payload as Record<string, unknown>;
+    host.respond(success(request.requestId as string, { armed: true, ...payload }));
+    await expect(arming).resolves.toBeDefined();
+    await waitFor(() => host.clientEnded);
+    host.destroy();
+
+    await expect(client.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    await expect(client.drain()).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    runtime.arwx.abort();
+    await runtime.receiveLoop.done.catch(() => undefined);
+  });
+
+  it("retains a genuine expired receipt deadline for failed Arm cleanup", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    const { client } = await connect({
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: () => undefined,
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    const runtime = defined(arwxContext, "ARWX context");
+    const receipt = await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 30,
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+
+    await expect(client.armArwxShutdown(receipt)).rejects.toMatchObject({
+      code: "LIFECYCLE_STATE_INVALID",
+    });
+    await expect(client.close()).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
+    await runtime.receiveLoop.done.catch(() => undefined);
+  });
+
+  it("fails closed without sending Arm while a business RPC is active", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    const { client, host } = await connect({
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: () => undefined,
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    const registration = client.register(opaque({ workerNodeId: "node:1" }));
+    await waitForWrites(host, 1);
+    const runtime = defined(arwxContext, "ARWX context");
+    const receipt = await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 1_000,
+    );
+
+    await expect(client.armArwxShutdown(receipt)).rejects.toMatchObject({
+      code: "LIFECYCLE_STATE_INVALID",
+    });
+    await expect(registration).rejects.toMatchObject({ code: "LIFECYCLE_STATE_INVALID" });
+    expect(host.requests()).toHaveLength(1);
+    await client.close();
+    await runtime.receiveLoop.done.catch(() => undefined);
+  });
+
+  it("uses the final-frame deadline for Arm timeout and never sends a Cancel", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    const { client, host } = await connect({
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: () => undefined,
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    const runtime = defined(arwxContext, "ARWX context");
+    const receipt = await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 100,
+    );
+
+    await expect(client.armArwxShutdown(receipt)).rejects.toMatchObject({
+      code: "LIFECYCLE_TIMEOUT",
+    });
+    expect(host.requests().map((request) => request.operation)).toEqual(["ArmArwxShutdown"]);
+    await expect(client.close()).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
+    await runtime.receiveLoop.done.catch(() => undefined);
   });
 
   it("sends cancellation with a fresh correlation and never serializes AbortSignal reason", async () => {
@@ -518,4 +721,9 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error("Timed out waiting for HostControl state.");
+}
+
+function defined<T>(value: T | undefined, name: string): T {
+  if (value === undefined) throw new Error(`${name} was not initialized.`);
+  return value;
 }

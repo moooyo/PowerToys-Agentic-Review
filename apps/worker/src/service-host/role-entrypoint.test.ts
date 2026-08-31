@@ -1,6 +1,6 @@
 import { Duplex, PassThrough } from "node:stream";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { HostControlSession } from "./host-control-session.js";
 import {
   SERVICE_HOST_CONTROL_PIPE_PREFIX,
@@ -71,6 +71,10 @@ class FakeHostControlSession<TRole extends ServiceHostPayloadRole>
 
   public fail(error: unknown): void {
     this.#rejectDone(error);
+  }
+
+  public async armArwxShutdown(): Promise<never> {
+    throw new Error("Fake foundation does not arm ARWX shutdown.");
   }
 }
 
@@ -376,6 +380,7 @@ describe("ServiceHost role entrypoint", () => {
         return host;
       },
     });
+    const drainOwner = vi.spyOn(foundation.arwx, "drain");
 
     input.end(Buffer.from([1, 0, 0]));
     await expect(foundation.done).rejects.toMatchObject({ code: "FRAME_INVALID" });
@@ -385,6 +390,7 @@ describe("ServiceHost role entrypoint", () => {
 
     await expect(foundation.close()).rejects.toMatchObject({ code: "FRAME_INVALID" });
     expect(host?.drainCalls).toBe(1);
+    expect(drainOwner).toHaveBeenCalledOnce();
   });
 
   it("bridges startup cancellation without forwarding its original reason", async () => {

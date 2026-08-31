@@ -50,7 +50,7 @@ func TestExchangeRuntimeBootstrapSendsCanonicalDocumentBeforeAcceptingAck(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pending.Commit(context.Background()); err != nil {
+	if _, err := pending.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	writtenStream := bytes.NewReader(channel.output.Bytes())
@@ -68,7 +68,7 @@ func TestExchangeRuntimeBootstrapSendsCanonicalDocumentBeforeAcceptingAck(t *tes
 	if err := ValidateRuntimeBootstrapCommit(commitDocument, bootstrapDocument, RoleControl); err != nil {
 		t.Fatalf("commit validation error = %v", err)
 	}
-	if err := pending.Commit(context.Background()); !errors.Is(err, ErrRuntimeBootstrapExchange) {
+	if _, err := pending.Commit(context.Background()); !errors.Is(err, ErrRuntimeBootstrapExchange) {
 		t.Fatalf("second commit error = %v", err)
 	}
 }
@@ -89,10 +89,10 @@ func TestPendingRuntimeBootstrapCommitCopyRemainsSingleUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyOfPending := *pending
-	if err := pending.Commit(context.Background()); err != nil {
+	if _, err := pending.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := copyOfPending.Commit(context.Background()); !errors.Is(err, ErrRuntimeBootstrapExchange) {
+	if _, err := copyOfPending.Commit(context.Background()); !errors.Is(err, ErrRuntimeBootstrapExchange) {
 		t.Fatalf("copied commit error = %v", err)
 	}
 }

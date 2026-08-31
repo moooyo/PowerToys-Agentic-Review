@@ -64,11 +64,12 @@ type Connection struct {
 	closeMu sync.Mutex
 	active  activityGroup
 
-	handle   windows.Handle
-	options  Options
-	evidence VerificationEvidence
-	closing  bool
-	terminal error
+	handle    windows.Handle
+	options   Options
+	evidence  VerificationEvidence
+	bootstrap localrpc.CommittedRuntimeBootstrap
+	closing   bool
+	terminal  error
 
 	readGate  chan struct{}
 	writeGate chan struct{}
@@ -212,13 +213,16 @@ func (l *Listener) Accept(
 	}
 
 	bootstrapContext, cancelBootstrap := context.WithDeadline(ctx, l.deadline)
-	err = completeRuntimeBootstrap(bootstrapContext, connection, node, connection.Evidence(), bootstrap)
+	committedBootstrap, err := completeRuntimeBootstrap(
+		bootstrapContext, connection, node, connection.Evidence(), bootstrap,
+	)
 	cancelBootstrap()
 	if err != nil {
 		return nil, errors.Join(err, terminateBeforeClose(node, func() {
 			connection.markTerminal(err)
 		}, connection.Close))
 	}
+	connection.bootstrap = committedBootstrap
 	return connection, nil
 }
 
@@ -485,6 +489,14 @@ func (c *Connection) Evidence() VerificationEvidence {
 	return c.evidence
 }
 
+// CommittedRuntimeBootstrap returns opaque authority for this exact accepted connection.
+func (c *Connection) CommittedRuntimeBootstrap() localrpc.CommittedRuntimeBootstrap {
+	if c == nil {
+		return localrpc.CommittedRuntimeBootstrap{}
+	}
+	return c.bootstrap
+}
+
 func (c *Connection) Read(buffer []byte) (int, error) {
 	if c == nil {
 		return 0, ErrClosed
@@ -520,7 +532,7 @@ func (c *Connection) ReadContext(ctx context.Context, buffer []byte) (int, error
 	defer finish()
 	runtime.KeepAlive(buffer)
 	if err != nil {
-		err = c.normalizeOperationError(err, true)
+		err = c.normalizeOperationError(err, true, transferred)
 		c.markTerminal(err)
 		return int(transferred), err
 	}
@@ -567,7 +579,7 @@ func (c *Connection) WriteContext(ctx context.Context, buffer []byte) (int, erro
 	defer finish()
 	runtime.KeepAlive(buffer)
 	if err != nil {
-		err = c.normalizeOperationError(err, false)
+		err = c.normalizeOperationError(err, false, transferred)
 		c.markTerminal(err)
 		return int(transferred), err
 	}
@@ -592,7 +604,9 @@ func (c *Connection) performOverlapped(
 		return 0, finish, fmt.Errorf("create HostControl I/O event: %w", err)
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, closeRejectedHandle("close HostControl I/O event", event))
+		if cleanupErr := closeRejectedHandle("close HostControl I/O event", event); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, cleanupErr)
+		}
 	}()
 	overlapped := windows.Overlapped{HEvent: event}
 
@@ -645,7 +659,7 @@ func (c *Connection) stateErrorLocked() error {
 	return c.terminal
 }
 
-func (c *Connection) normalizeOperationError(err error, reading bool) error {
+func (c *Connection) normalizeOperationError(err error, reading bool, transferred uint32) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrIOTimeout
 	}
@@ -657,13 +671,15 @@ func (c *Connection) normalizeOperationError(err error, reading bool) error {
 			return stateErr
 		}
 	}
-	if errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
-		errors.Is(err, windows.ERROR_NO_DATA) ||
-		errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED) {
-		if reading {
+	if err == windows.ERROR_BROKEN_PIPE ||
+		err == windows.ERROR_NO_DATA ||
+		err == windows.ERROR_PIPE_NOT_CONNECTED {
+		if reading && transferred == 0 {
 			return io.EOF
 		}
-		return io.ErrClosedPipe
+		if !reading {
+			return io.ErrClosedPipe
+		}
 	}
 	return err
 }

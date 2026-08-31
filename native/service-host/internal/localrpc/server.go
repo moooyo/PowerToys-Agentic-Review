@@ -37,6 +37,7 @@ type ControlDispatcher interface {
 
 type ServerOptions struct {
 	Role                      Role
+	RuntimeBootstrap          CommittedRuntimeBootstrap
 	MaximumConcurrentRequests int
 	MaximumRequestsPerSession int
 	RequestTimeout            time.Duration
@@ -48,6 +49,7 @@ type ServerOptions struct {
 type Server struct {
 	options    ServerOptions
 	dispatcher ControlDispatcher
+	shutdown   *arwxShutdownGate
 }
 
 func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, error) {
@@ -68,7 +70,15 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 		!validServerTimeout(options.ShutdownTimeout) {
 		return nil, fmt.Errorf("%w: timeout is outside the supported range", ErrInvalidServerOptions)
 	}
-	return &Server{options: options, dispatcher: dispatcher}, nil
+	var shutdown *arwxShutdownGate
+	if options.RuntimeBootstrap.state != nil {
+		var err error
+		shutdown, err = newArwxShutdownGate(options.RuntimeBootstrap, options.Role)
+		if err != nil {
+			return nil, fmt.Errorf("%w: committed runtime bootstrap is invalid", ErrInvalidServerOptions)
+		}
+	}
+	return &Server{options: options, dispatcher: dispatcher, shutdown: shutdown}, nil
 }
 
 // Serve owns the already-bootstrapped HostControl byte stream for one payload lifetime. Closing
@@ -80,6 +90,11 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	}
 	if input == nil || output == nil {
 		return errors.New("local RPC input and output are required")
+	}
+	if s.shutdown != nil {
+		if err := s.shutdown.bindServeStreams(input, output); err != nil {
+			return err
+		}
 	}
 
 	sessionContext, cancelSession := context.WithCancelCause(ctx)
@@ -121,9 +136,29 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 
 	var handlers sync.WaitGroup
 	terminalError := error(nil)
+	orderlyArmedEOF := false
+
+serveLoop:
 	for terminalError == nil {
+		readTimeout := s.options.IOTimeout
+		if state.shutdownArmed() {
+			deadline, valid := s.shutdown.armedDeadline()
+			if !valid {
+				terminalError = ErrIOTimeout
+				break serveLoop
+			}
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				s.shutdown.failCurrentAuthorization()
+				terminalError = ErrIOTimeout
+				break serveLoop
+			}
+			if remaining < readTimeout {
+				readTimeout = remaining
+			}
+		}
 		document, err := readFrameWithTimeout(
-			sessionContext, input, MaximumRequestFrameBytes, s.options.IOTimeout, closeInput,
+			sessionContext, input, MaximumRequestFrameBytes, readTimeout, closeInput,
 		)
 		if err != nil {
 			if fatalError := pollError(fatal); fatalError != nil {
@@ -131,7 +166,18 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 			} else if cause := context.Cause(sessionContext); cause != nil {
 				terminalError = cause
 			} else if errors.Is(err, io.EOF) {
-				terminalError = ErrPeerClosed
+				if state.shutdownArmed() {
+					if _, valid := s.shutdown.armedDeadline(); valid {
+						orderlyArmedEOF = true
+						break serveLoop
+					}
+					terminalError = ErrIOTimeout
+				} else {
+					terminalError = ErrPeerClosed
+				}
+			} else if state.shutdownArmed() && errors.Is(err, ErrIOTimeout) {
+				s.shutdown.failCurrentAuthorization()
+				terminalError = ErrIOTimeout
 			} else {
 				terminalError = protocolError("INVALID_FRAME", "Local RPC framing failed.", "", err)
 			}
@@ -147,6 +193,15 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 				})
 			}
 			terminalError = err
+			break
+		}
+		if state.shutdownStarted() {
+			terminalError = protocolError(
+				"ARWX_SHUTDOWN_ARMED",
+				"HostControl received a request after ARWX shutdown started.",
+				message.RequestID(),
+				ErrArwxShutdownArmed,
+			)
 			break
 		}
 		if err := state.reserveID(message.RequestID()); err != nil {
@@ -180,6 +235,10 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 				reportFatal(err)
 			}
 		case CallRequest:
+			if typed.Operation == OperationArmArwxShutdown {
+				terminalError = s.armArwxShutdown(sessionContext, state, writer, typed)
+				break
+			}
 			requestContext, cancelRequest, accepted := state.start(
 				sessionContext,
 				typed.ID,
@@ -254,19 +313,96 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 		}
 	}
 
+	if state.shutdownStarted() && !orderlyArmedEOF {
+		s.shutdown.failCurrentAuthorization()
+	}
 	cancelSession(terminalError)
 	closeInput()
 	closeOutput()
 	if !waitForHandlers(&handlers, s.options.ShutdownTimeout) {
+		if s.shutdown != nil {
+			s.shutdown.failCurrentAuthorization()
+		}
 		return errors.Join(terminalError, ErrServerShutdownTimeout)
 	}
 	if cause := context.Cause(ctx); cause != nil {
+		if s.shutdown != nil {
+			s.shutdown.failCurrentAuthorization()
+		}
 		return cause
 	}
 	if fatalError := pollError(fatal); fatalError != nil {
+		if s.shutdown != nil {
+			s.shutdown.failCurrentAuthorization()
+		}
 		return fatalError
 	}
+	if orderlyArmedEOF {
+		if _, valid := s.shutdown.armedDeadline(); valid {
+			return nil
+		}
+		s.shutdown.failCurrentAuthorization()
+		return ErrIOTimeout
+	}
 	return terminalError
+}
+
+// ArwxShutdownAuthorization returns opaque, acknowledged evidence for future exact relay EOF
+// validation. It never returns a planned or failed authorization.
+func (s *Server) ArwxShutdownAuthorization() (ArwxShutdownAuthorization, bool) {
+	if s == nil || s.shutdown == nil {
+		return ArwxShutdownAuthorization{}, false
+	}
+	return s.shutdown.authorizationEvidence()
+}
+
+func (s *Server) armArwxShutdown(
+	ctx context.Context,
+	state *sessionState,
+	writer *responseWriter,
+	request CallRequest,
+) error {
+	deadline := time.Now().Add(time.Duration(request.ArwxShutdown.RemainingShutdownMS) * time.Millisecond)
+	if err := state.beginShutdownArm(ctx, deadline); err != nil {
+		return protocolError(
+			"ARWX_SHUTDOWN_NOT_READY",
+			"ARWX shutdown cannot arm while local RPC work is active.",
+			request.ID,
+			err,
+		)
+	}
+	if s.shutdown == nil {
+		return protocolError(
+			"ARWX_SHUTDOWN_NOT_READY",
+			"ARWX shutdown is not bound to a committed bootstrap.",
+			request.ID,
+			ErrArwxShutdownUnavailable,
+		)
+	}
+	result, authorization, err := s.shutdown.prepare(request.ArwxShutdown, deadline)
+	if err != nil {
+		return protocolError(
+			"INVALID_PAYLOAD",
+			"ArmArwxShutdownV1 does not match the committed session.",
+			request.ID,
+			err,
+		)
+	}
+	document, err := marshalArmArwxShutdownResult(request.ID, result)
+	if err != nil {
+		failArwxShutdownAuthorization(authorization)
+		return err
+	}
+	if err := writer.writeUntil(document, MaximumArmArwxShutdownBytes, deadline); err != nil {
+		failArwxShutdownAuthorization(authorization)
+		return err
+	}
+	if !markArwxShutdownAcknowledged(authorization) {
+		failArwxShutdownAuthorization(authorization)
+		return ErrIOTimeout
+	}
+	state.finishShutdownArm()
+	return nil
 }
 
 func (s *Server) dispatch(ctx context.Context, request CallRequest) (json.RawMessage, error) {
@@ -332,12 +468,79 @@ type sessionState struct {
 	seen           map[string]struct{}
 	active         map[string]context.CancelCauseFunc
 	inFlight       int
+	responseIdle   chan struct{}
 	maximumSeenIDs int
+	shutdownPhase  uint8
+}
+
+func (s *sessionState) beginShutdownArm(ctx context.Context, deadline time.Time) error {
+	s.mu.Lock()
+	if s.shutdownPhase != 0 {
+		s.mu.Unlock()
+		return ErrArwxShutdownArmed
+	}
+	s.shutdownPhase = 1
+	if len(s.active) != 0 {
+		s.mu.Unlock()
+		return ErrArwxShutdownActive
+	}
+	if s.inFlight == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	idle := s.responseIdle
+	s.mu.Unlock()
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return ErrIOTimeout
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-idle:
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return ErrIOTimeout
+	}
+	if !time.Now().Before(deadline) {
+		return ErrIOTimeout
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight != 0 || len(s.active) != 0 {
+		return ErrArwxShutdownActive
+	}
+	return nil
+}
+
+func (s *sessionState) finishShutdownArm() {
+	s.mu.Lock()
+	if s.shutdownPhase == 1 {
+		s.shutdownPhase = 2
+	}
+	s.mu.Unlock()
+}
+
+func (s *sessionState) shutdownStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdownPhase != 0
+}
+
+func (s *sessionState) shutdownArmed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdownPhase == 2
 }
 
 func newSessionState(maximumSeenIDs int) *sessionState {
+	responseIdle := make(chan struct{})
+	close(responseIdle)
 	return &sessionState{
-		seen: make(map[string]struct{}), active: make(map[string]context.CancelCauseFunc), maximumSeenIDs: maximumSeenIDs,
+		seen: make(map[string]struct{}), active: make(map[string]context.CancelCauseFunc),
+		responseIdle: responseIdle, maximumSeenIDs: maximumSeenIDs,
 	}
 }
 
@@ -376,6 +579,9 @@ func (s *sessionState) start(
 		cancelTimeout()
 	}
 	s.active[requestID] = combinedCancel
+	if s.inFlight == 0 {
+		s.responseIdle = make(chan struct{})
+	}
 	s.inFlight++
 	return timed, combinedCancel, true
 }
@@ -400,6 +606,9 @@ func (s *sessionState) complete() {
 	s.mu.Lock()
 	if s.inFlight > 0 {
 		s.inFlight--
+		if s.inFlight == 0 {
+			close(s.responseIdle)
+		}
 	}
 	s.mu.Unlock()
 }
@@ -445,6 +654,28 @@ func (w *responseWriter) writeError(requestID string, body errorBody) error {
 
 func (w *responseWriter) write(document []byte, maximum int) error {
 	return w.buildAndWrite(maximum, func() ([]byte, error) { return document, nil })
+}
+
+func (w *responseWriter) writeUntil(document []byte, maximum int, deadline time.Time) error {
+	writeContext, cancelWrite := context.WithDeadlineCause(w.context, deadline, ErrIOTimeout)
+	defer cancelWrite()
+	done := make(chan error, 1)
+	go func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if cause := context.Cause(writeContext); cause != nil {
+			done <- cause
+			return
+		}
+		done <- WriteFrame(w.output, document, maximum)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-writeContext.Done():
+		w.closeOutput()
+		return context.Cause(writeContext)
+	}
 }
 
 func (w *responseWriter) buildAndWrite(maximum int, build func() ([]byte, error)) error {

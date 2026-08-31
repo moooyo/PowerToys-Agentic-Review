@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -47,6 +48,19 @@ func TestFrameRejectsEmptyPartialAndShortWrites(t *testing.T) {
 	large := bytes.Repeat([]byte{'x'}, MaximumFrameBytes+1)
 	if err := WriteFrame(io.Discard, large, MaximumFrameBytes); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("large WriteFrame error = %v", err)
+	}
+}
+
+func TestFrameRejectsWrappedOrJoinedEOFAsCleanStreamEnd(t *testing.T) {
+	cleanupFailure := errors.New("cleanup failed")
+	for _, err := range []error{
+		fmt.Errorf("wrapped EOF: %w", io.EOF),
+		errors.Join(io.EOF, cleanupFailure),
+	} {
+		_, readErr := ReadFrame(errorReader{err: err}, MaximumFrameBytes)
+		if !errors.Is(readErr, ErrPartialFrame) || errors.Is(readErr, io.EOF) {
+			t.Fatalf("ReadFrame error = %v, want non-EOF ErrPartialFrame", readErr)
+		}
 	}
 }
 
@@ -123,3 +137,9 @@ func (r *countingReader) Read(target []byte) (int, error) {
 type zeroWriter struct{}
 
 func (zeroWriter) Write([]byte) (int, error) { return 0, nil }
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }

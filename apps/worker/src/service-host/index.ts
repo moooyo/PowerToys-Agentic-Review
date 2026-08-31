@@ -1,3 +1,4 @@
+export * from "./arwx-shutdown.js";
 export * from "./arwx-stdio-channel.js";
 export * from "./executor-host-control-session.js";
 export * from "./host-control-client.js";

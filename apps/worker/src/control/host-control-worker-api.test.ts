@@ -85,6 +85,10 @@ class FakeControlClient implements ControlHostControlClient {
     return "signature";
   }
 
+  public async armArwxShutdown(): Promise<never> {
+    throw new Error("Worker API adapter does not arm ARWX shutdown.");
+  }
+
   public async drain(): Promise<void> {}
 
   public async close(): Promise<void> {}

@@ -335,27 +335,28 @@ func completeRuntimeBootstrap(
 	node runtimeBootstrapNode,
 	evidence VerificationEvidence,
 	bootstrap localrpc.RuntimeBootstrapV1,
-) error {
+) (localrpc.CommittedRuntimeBootstrap, error) {
 	pendingCommit, err := localrpc.BeginRuntimeBootstrapExchange(ctx, channel, bootstrap)
 	if err != nil {
-		return fmt.Errorf("exchange RuntimeBootstrapV1: %w", err)
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("exchange RuntimeBootstrapV1: %w", err)
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return cause
+		return localrpc.CommittedRuntimeBootstrap{}, cause
 	}
 	if err := verifyNodeBeforeActivation(node, evidence); err != nil {
-		return err
+		return localrpc.CommittedRuntimeBootstrap{}, err
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return cause
+		return localrpc.CommittedRuntimeBootstrap{}, cause
 	}
 	if err := node.ActivateAfterHostControl(); err != nil {
-		return fmt.Errorf("activate Node after RuntimeBootstrapV1 acknowledgement: %w", err)
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("activate Node after RuntimeBootstrapV1 acknowledgement: %w", err)
 	}
-	if err := pendingCommit.Commit(ctx); err != nil {
-		return fmt.Errorf("commit RuntimeBootstrapV1 after Node activation: %w", err)
+	committed, err := pendingCommit.Commit(ctx)
+	if err != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("commit RuntimeBootstrapV1 after Node activation: %w", err)
 	}
-	return nil
+	return committed, nil
 }
 
 func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence) error {
