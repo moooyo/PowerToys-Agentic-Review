@@ -4,9 +4,8 @@ import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
-  createRuntimeBootstrapAck,
-  encodeRuntimeBootstrapAck,
   parseRuntimeBootstrap,
+  parseRuntimeBootstrapCommit,
   RUNTIME_BOOTSTRAP_MAXIMUM_BYTES,
   RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
   RuntimeBootstrapError,
@@ -15,7 +14,7 @@ import {
 type MutableJsonObject = Record<string, unknown>;
 
 describe("RuntimeBootstrapV1", () => {
-  it("parses the shared Go/TypeScript golden and binds the exact bytes in its ACK", () => {
+  it("parses the shared Go/TypeScript golden and binds its exact bytes", () => {
     const golden = readSharedGolden();
     const parsed = parseRuntimeBootstrap(golden, "control");
 
@@ -40,31 +39,19 @@ describe("RuntimeBootstrapV1", () => {
 
     const digest = createHash("sha256").update(golden).digest("hex");
     expect(parsed.bootstrapSha256).toBe(digest);
-    expect(encodeRuntimeBootstrapAck(parsed).toString("utf8")).toBe(
-      `{"accepted":true,"arwxHandlerReady":true,"bootstrapId":"123e4567-e89b-42d3-a456-426614174000","bootstrapSha256":"${digest}","bootstrapVersion":1,"protocolVersion":"1.0","role":"control","type":"runtimeBootstrapAck"}`,
-    );
-    expect(createRuntimeBootstrapAck(parsed)).toEqual({
-      accepted: true,
-      arwxHandlerReady: true,
-      bootstrapId: "123e4567-e89b-42d3-a456-426614174000",
-      bootstrapSha256: digest,
-      bootstrapVersion: 1,
-      protocolVersion: "1.0",
-      role: "control",
-      type: "runtimeBootstrapAck",
-    });
-  });
-
-  it("does not let callers manufacture an ACK or select its protocol fields", () => {
-    const parsed = parseRuntimeBootstrap(readSharedGolden(), "control");
-    const forged = { ...parsed };
-    expect(() => createRuntimeBootstrapAck(forged)).toThrow(TypeError);
-    expect(() =>
-      createRuntimeBootstrapAck({
-        ...parsed,
-        bootstrapSha256: "0".repeat(64),
+    const commit = Buffer.from(
+      serializeCanonicalJson({
+        bootstrapId: parsed.bootstrap.bootstrapId,
+        bootstrapSha256: digest,
+        bootstrapVersion: 1,
+        committed: true,
+        protocolVersion: "1.0",
+        role: "control",
+        type: "runtimeBootstrapCommit",
       }),
-    ).toThrow(TypeError);
+      "utf8",
+    );
+    expect(parseRuntimeBootstrapCommit(commit, parsed).committed).toBe(true);
   });
 
   it("supports the exact executor role while binding the expected role", () => {
@@ -75,6 +62,31 @@ describe("RuntimeBootstrapV1", () => {
     expect(() => parseRuntimeBootstrap(executor, "control")).toThrowError(
       expect.objectContaining({ code: "ROLE_MISMATCH" }),
     );
+  });
+
+  it.each([
+    ["bootstrap ID", { bootstrapId: "123e4567-e89b-42d3-b456-426614174000" }],
+    ["digest", { bootstrapSha256: "0".repeat(64) }],
+    ["role", { role: "executor" }],
+    ["commit state", { committed: false }],
+    ["unknown field", { extra: true }],
+  ])("rejects a RuntimeBootstrapCommitV1 with a mismatched %s", (_name, mutation) => {
+    const bootstrap = readSharedGolden();
+    const parsed = parseRuntimeBootstrap(bootstrap, "control");
+    const commit = Buffer.from(
+      serializeCanonicalJson({
+        bootstrapId: parsed.bootstrap.bootstrapId,
+        bootstrapSha256: parsed.bootstrapSha256,
+        bootstrapVersion: 1,
+        committed: true,
+        protocolVersion: "1.0",
+        role: "control",
+        type: "runtimeBootstrapCommit",
+        ...mutation,
+      }),
+      "utf8",
+    );
+    expect(() => parseRuntimeBootstrapCommit(commit, parsed)).toThrow(RuntimeBootstrapError);
   });
 
   it("binds ACKs to opaque roleConfig exact bytes, not only parsed semantics", () => {
@@ -91,9 +103,6 @@ describe("RuntimeBootstrapV1", () => {
 
     expect(first.roleConfig).toEqual(second.roleConfig);
     expect(first.bootstrapSha256).not.toBe(second.bootstrapSha256);
-    expect(createRuntimeBootstrapAck(first).bootstrapSha256).not.toBe(
-      createRuntimeBootstrapAck(second).bootstrapSha256,
-    );
   });
 
   it.each([
@@ -232,11 +241,17 @@ describe("RuntimeBootstrapV1", () => {
       RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
     );
     const expanded = mutateGolden((value) => {
+      value.role = "executor";
+      value.workerNodeId = `n${"a".repeat(127)}`;
+      value.releaseId = `r${"a".repeat(127)}`;
+      nested(value, "arwx").maximumQueuedBytesPerDirection = 64 * 1_024 * 1_024;
+      nested(value, "shutdown").gracefulTimeoutMs = 300_000;
+      nested(value, "shutdown").forceTerminationReserveMs = 299_999;
       value.roleConfig = decodedLimitDescriptor;
     });
-    expect(expanded.byteLength).toBeGreaterThan(RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
-    expect(() => parseRuntimeBootstrap(expanded, "control")).toThrowError(
-      expect.objectContaining({ code: "INVALID_DOCUMENT" }),
+    expect(expanded.byteLength).toBeLessThanOrEqual(RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
+    expect(parseRuntimeBootstrap(expanded, "executor").bootstrap.roleConfig.byteLength).toBe(
+      RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
     );
 
     const forgedDecodedOversize = mutateGolden((value) => {
@@ -279,7 +294,7 @@ describe("RuntimeBootstrapV1", () => {
     const digest = createHash("sha256").update(source).digest("hex");
     const parsed = parseRuntimeBootstrap(source, "control");
     source.fill(0x78);
-    expect(createRuntimeBootstrapAck(parsed).bootstrapSha256).toBe(digest);
+    expect(parsed.bootstrapSha256).toBe(digest);
     expect(() => parseRuntimeBootstrap("not bytes" as unknown as Uint8Array, "control")).toThrow(
       RuntimeBootstrapError,
     );

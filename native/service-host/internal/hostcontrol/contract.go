@@ -1,6 +1,7 @@
 package hostcontrol
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
@@ -111,7 +113,12 @@ type retainedNode interface {
 	StableIdentity() winprocess.NodeIdentity
 	ObserveIdentity() (winprocess.NodeIdentity, error)
 	RootJobActiveProcessCount() (uint32, error)
+}
+
+type runtimeBootstrapNode interface {
+	retainedNode
 	ActivateAfterHostControl() error
+	Terminate() error
 }
 
 type activityGroup struct {
@@ -312,9 +319,6 @@ func verifyConnectedNode(
 	if countAfter != 1 {
 		return VerificationEvidence{}, fmt.Errorf("%w: root Job contains %d active processes after binding, want 1", ErrPeerMismatch, countAfter)
 	}
-	if err := node.ActivateAfterHostControl(); err != nil {
-		return VerificationEvidence{}, fmt.Errorf("commit HostControl binding and raise root Job process limit: %w", err)
-	}
 	return VerificationEvidence{
 		PipeName:                     pipeName,
 		ClientProcessIDBefore:        firstPID,
@@ -323,6 +327,75 @@ func verifyConnectedNode(
 		RootJobActiveProcessesBefore: countBefore,
 		RootJobActiveProcessesAfter:  countAfter,
 	}, nil
+}
+
+func completeRuntimeBootstrap(
+	ctx context.Context,
+	channel localrpc.RuntimeBootstrapChannel,
+	node runtimeBootstrapNode,
+	evidence VerificationEvidence,
+	bootstrap localrpc.RuntimeBootstrapV1,
+) error {
+	pendingCommit, err := localrpc.BeginRuntimeBootstrapExchange(ctx, channel, bootstrap)
+	if err != nil {
+		return fmt.Errorf("exchange RuntimeBootstrapV1: %w", err)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if err := verifyNodeBeforeActivation(node, evidence); err != nil {
+		return err
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if err := node.ActivateAfterHostControl(); err != nil {
+		return fmt.Errorf("activate Node after RuntimeBootstrapV1 acknowledgement: %w", err)
+	}
+	if err := pendingCommit.Commit(ctx); err != nil {
+		return fmt.Errorf("commit RuntimeBootstrapV1 after Node activation: %w", err)
+	}
+	return nil
+}
+
+func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence) error {
+	if isNilInterface(node) || !sameIdentity(node.StableIdentity(), evidence.NodeIdentity) ||
+		node.ProcessID() != evidence.NodeIdentity.ProcessID {
+		return fmt.Errorf("%w: retained Node activation identity is invalid", ErrPeerMismatch)
+	}
+	identityBefore, err := node.ObserveIdentity()
+	if err != nil {
+		return fmt.Errorf("reobserve retained Node before activation: %w", err)
+	}
+	if !sameIdentity(identityBefore, evidence.NodeIdentity) {
+		return fmt.Errorf("%w: retained Node identity changed during bootstrap", ErrPeerMismatch)
+	}
+	activeProcesses, err := node.RootJobActiveProcessCount()
+	if err != nil {
+		return fmt.Errorf("reobserve root Job before activation: %w", err)
+	}
+	if activeProcesses != 1 {
+		return fmt.Errorf("%w: root Job contains %d active processes before activation, want 1", ErrPeerMismatch, activeProcesses)
+	}
+	identityAfter, err := node.ObserveIdentity()
+	if err != nil {
+		return fmt.Errorf("reobserve retained Node after root Job check: %w", err)
+	}
+	if !sameIdentity(identityAfter, evidence.NodeIdentity) {
+		return fmt.Errorf("%w: retained Node identity changed around root Job activation check", ErrPeerMismatch)
+	}
+	return nil
+}
+
+func terminateBeforeClose(
+	node interface{ Terminate() error },
+	markTerminal func(),
+	closeEndpoint func() error,
+) error {
+	terminateErr := node.Terminate()
+	markTerminal()
+	closeErr := closeEndpoint()
+	return errors.Join(terminateErr, closeErr)
 }
 
 func sameIdentity(left, right winprocess.NodeIdentity) bool {

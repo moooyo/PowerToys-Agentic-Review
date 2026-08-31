@@ -22,6 +22,11 @@ import {
   encodeHostControlOpaqueJson,
   type HostControlOpaqueJsonDescriptor,
 } from "./opaque-json.js";
+import {
+  createTestBootstrapPreparation,
+  handleBootstrapTestWrite,
+  installBootstrapTestHost,
+} from "./runtime-bootstrap.test-helpers.js";
 
 class FakeHostControl extends Duplex {
   public readonly writes: Buffer[] = [];
@@ -61,6 +66,7 @@ class FakeHostControl extends Duplex {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
+    if (handleBootstrapTestWrite(this, chunk, callback)) return;
     this.writes.push(Buffer.from(chunk));
     callback();
   }
@@ -80,6 +86,7 @@ class SlowHostControl extends FakeHostControl {
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
+    if (handleBootstrapTestWrite(this, chunk, callback)) return;
     this.writes.push(Buffer.from(chunk));
     this.#callbacks.push(callback);
   }
@@ -115,6 +122,7 @@ async function connect(
   const client = await connectHostControl({
     role: "control",
     pipe,
+    prepareRuntimeBootstrap: createTestBootstrapPreparation("control"),
     ...(options.maximumConcurrentRequests === undefined
       ? {}
       : { maximumConcurrentRequests: options.maximumConcurrentRequests }),
@@ -126,6 +134,7 @@ async function connect(
       : { maximumQueuedWriteBytes: options.maximumQueuedWriteBytes }),
     connector: async (selected) => {
       expect(selected).toBe(selector);
+      installBootstrapTestHost(host, "control", 5);
       return host;
     },
     requestIdFactory: (kind) => `${kind}:${++sequence}`,
@@ -140,6 +149,7 @@ async function connect(
 describe("HostControl client", () => {
   it("multiplexes concurrent requests and correlates out-of-order fragmented responses", async () => {
     const { client, host } = await connect();
+    expect(client.bootstrap.bootstrap.role).toBe("control");
     const registration = client.register(opaque({ workerNodeId: "node:1" }));
     const claim = client.claim(opaque({ availableSlots: 1 }));
     await waitForWrites(host, 2);
@@ -302,10 +312,19 @@ describe("HostControl client", () => {
         host.push(null);
       }
       await expect(request).rejects.toBeInstanceOf(HostControlClientError);
+      await expect(client.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
       expect(host.destroyed).toBe(true);
       await client.close();
     },
   );
+
+  it("exposes a HostControl transport error through the session done promise", async () => {
+    const { client, host } = await connect();
+    host.destroy(new Error("transport failed"));
+
+    await expect(client.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    await client.close();
+  });
 
   it.each(["digest", "length", "base64url"])(
     "fails the session when an opaque response has a tampered %s",
@@ -400,6 +419,7 @@ describe("HostControl client", () => {
       {
         role: "control",
         pipe,
+        prepareRuntimeBootstrap: createTestBootstrapPreparation("control"),
         connector: async (_selected, cancellation) => {
           connectorCancellation = cancellation;
           return await new Promise<Duplex>((resolve) => {
@@ -429,6 +449,7 @@ describe("HostControl client", () => {
     const connecting = connectHostControl({
       role: "control",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control"),
       connector: async (_selected, cancellation) => {
         connectorCancellation = cancellation;
         return await new Promise<Duplex>(() => undefined);

@@ -24,6 +24,12 @@ import {
   decodeHostControlOpaqueJson,
   type HostControlOpaqueJsonDescriptor,
 } from "./opaque-json.js";
+import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
+import {
+  performRuntimeBootstrapHandshake,
+  RuntimeBootstrapHandshakeError,
+  type RuntimeBootstrapPreparation,
+} from "./runtime-bootstrap-handshake.js";
 
 export { HostControlRemoteError } from "./host-control-protocol.js";
 export type { HostControlSession } from "./host-control-session.js";
@@ -93,6 +99,7 @@ export type HostControlRequestIdFactory = (kind: "call" | "cancel") => string;
 
 interface CommonConnectOptions {
   readonly pipe: HostControlPipeSelector;
+  readonly prepareRuntimeBootstrap: RuntimeBootstrapPreparation<"control">;
   readonly maximumConcurrentRequests?: number;
   readonly maximumRequestIds?: number;
   readonly maximumQueuedWriteBytes?: number;
@@ -137,6 +144,7 @@ export class HostControlClientError extends Error {
 interface NormalizedOptions {
   readonly role: "control";
   readonly pipe: HostControlPipeSelector;
+  readonly prepareRuntimeBootstrap: RuntimeBootstrapPreparation<"control">;
   readonly maximumConcurrentRequests: number;
   readonly maximumRequestIds: number;
   readonly maximumQueuedWriteBytes: number;
@@ -179,12 +187,34 @@ export async function connectHostControl(
   if (signal?.aborted) {
     throw clientError("CONNECT_CANCELLED", "HostControl connection was cancelled.");
   }
-  const stream = await connectWithDeadline(normalized, signal);
-  return new HostControlRpcClient(stream, normalized);
+  const absoluteDeadline = performance.now() + normalized.connectTimeoutMs;
+  const stream = await connectWithDeadline(normalized, absoluteDeadline, signal);
+  try {
+    return await performRuntimeBootstrapHandshake(
+      stream,
+      "control",
+      normalized.prepareRuntimeBootstrap,
+      absoluteDeadline,
+      (completed) => new HostControlRpcClient(stream, normalized, completed.parsed),
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof RuntimeBootstrapHandshakeError) {
+      if (error.code === "BOOTSTRAP_CANCELLED") {
+        throw clientError("CONNECT_CANCELLED", "HostControl bootstrap was cancelled.");
+      }
+      if (error.code === "BOOTSTRAP_TIMEOUT") {
+        throw clientError("CONNECT_TIMEOUT", "HostControl bootstrap timed out.");
+      }
+      throw clientError("PROTOCOL_FAILURE", "HostControl bootstrap failed.");
+    }
+    throw error;
+  }
 }
 
 class HostControlRpcClient implements ControlHostControlClient {
   public readonly role = "control" as const;
+  public readonly bootstrap: Readonly<ParsedRuntimeBootstrapV1>;
   readonly #stream: Duplex;
   readonly #options: NormalizedOptions;
   readonly #decoder = new HostControlFrameDecoder(HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES);
@@ -192,6 +222,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   readonly #seenRequestIds = new Set<string>();
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
+  readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
   readonly #pendingEmptyWaiters = new Set<() => void>();
   readonly #frameReservations = new Set<FrameReservation>();
   #writeChain: Promise<void> = Promise.resolve();
@@ -204,9 +235,19 @@ class HostControlRpcClient implements ControlHostControlClient {
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
-  public constructor(stream: Duplex, options: NormalizedOptions) {
+  public get done(): Promise<void> {
+    return this.#done;
+  }
+
+  public constructor(
+    stream: Duplex,
+    options: NormalizedOptions,
+    bootstrap: Readonly<ParsedRuntimeBootstrapV1>,
+  ) {
     this.#stream = stream;
     this.#options = options;
+    this.bootstrap = bootstrap;
+    void this.#done.then(undefined, () => undefined);
     stream.on("data", (chunk: Buffer | string) => {
       this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
     });
@@ -740,9 +781,13 @@ function normalizeOptions(options: ControlHostControlConnectOptions): Normalized
   if (!isHostControlPipeSelector(options.pipe)) {
     throw new TypeError("HostControl pipe selector is invalid.");
   }
+  if (typeof options.prepareRuntimeBootstrap !== "function") {
+    throw new TypeError("HostControl runtime bootstrap preparation is required.");
+  }
   return {
     role: options.role,
     pipe: options.pipe,
+    prepareRuntimeBootstrap: options.prepareRuntimeBootstrap,
     maximumConcurrentRequests: boundedInteger(
       options.maximumConcurrentRequests ?? defaultMaximumConcurrentRequests,
       "maximumConcurrentRequests",
@@ -775,6 +820,7 @@ function normalizeOptions(options: ControlHostControlConnectOptions): Normalized
 
 async function connectWithDeadline(
   options: NormalizedOptions,
+  absoluteDeadline: number,
   signal: AbortSignal | undefined,
 ): Promise<Duplex> {
   const connectionCancellation = new AbortController();
@@ -802,7 +848,7 @@ async function connectWithDeadline(
         connectionCancellation.abort();
         reject(clientError("CONNECT_TIMEOUT", "HostControl connection timed out."));
       });
-    }, options.connectTimeoutMs);
+    }, remainingMilliseconds(absoluteDeadline));
     timer.unref();
     signal?.addEventListener("abort", onAbort, { once: true });
     void connection.then(

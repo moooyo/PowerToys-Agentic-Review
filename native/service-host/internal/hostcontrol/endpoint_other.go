@@ -5,6 +5,7 @@ package hostcontrol
 import (
 	"context"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
@@ -23,7 +24,11 @@ func (*Listener) PipeName() string {
 	return ""
 }
 
-func (*Listener) Accept(context.Context, winprocess.NodeProcess) (*Connection, error) {
+func (*Listener) Accept(
+	context.Context,
+	winprocess.NodeProcess,
+	localrpc.RuntimeBootstrapV1,
+) (*Connection, error) {
 	return nil, ErrUnsupportedPlatform
 }
 

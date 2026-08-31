@@ -1,10 +1,14 @@
 package hostcontrol
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
@@ -27,16 +31,20 @@ func (o *fakePIDObserver) ClientProcessID() (uint32, error) {
 }
 
 type fakeRetainedNode struct {
-	processID       uint32
-	stable          winprocess.NodeIdentity
-	observations    []winprocess.NodeIdentity
-	observeError    error
-	counts          []uint32
-	countError      error
-	activationError error
-	activated       bool
-	observeIndex    int
-	countIndex      int
+	processID        uint32
+	stable           winprocess.NodeIdentity
+	observations     []winprocess.NodeIdentity
+	observeError     error
+	counts           []uint32
+	countError       error
+	activationError  error
+	terminationError error
+	activated        bool
+	terminated       bool
+	events           *[]string
+	observeIndex     int
+	countIndex       int
+	onObserve        func(int)
 }
 
 func (n *fakeRetainedNode) ProcessID() uint32 {
@@ -56,6 +64,9 @@ func (n *fakeRetainedNode) ObserveIdentity() (winprocess.NodeIdentity, error) {
 	}
 	value := n.observations[n.observeIndex]
 	n.observeIndex++
+	if n.onObserve != nil {
+		n.onObserve(n.observeIndex)
+	}
 	return value, nil
 }
 
@@ -72,6 +83,9 @@ func (n *fakeRetainedNode) RootJobActiveProcessCount() (uint32, error) {
 }
 
 func (n *fakeRetainedNode) ActivateAfterHostControl() error {
+	if n.events != nil {
+		*n.events = append(*n.events, "activate")
+	}
 	if n.activationError != nil {
 		return n.activationError
 	}
@@ -80,6 +94,14 @@ func (n *fakeRetainedNode) ActivateAfterHostControl() error {
 	}
 	n.activated = true
 	return nil
+}
+
+func (n *fakeRetainedNode) Terminate() error {
+	if n.events != nil {
+		*n.events = append(*n.events, "terminate")
+	}
+	n.terminated = true
+	return n.terminationError
 }
 
 func TestVerifyConnectedNodeBindsExactPIDAndSingleProcessRootJob(t *testing.T) {
@@ -97,8 +119,8 @@ func TestVerifyConnectedNodeBindsExactPIDAndSingleProcessRootJob(t *testing.T) {
 		!sameIdentity(evidence.NodeIdentity, identity) {
 		t.Fatalf("unexpected verification evidence: %+v", evidence)
 	}
-	if !node.activated {
-		t.Fatal("successful verification did not activate the final root Job process limit")
+	if node.activated {
+		t.Fatal("peer verification activated the root Job before RuntimeBootstrapV1")
 	}
 }
 
@@ -150,12 +172,6 @@ func TestVerifyConnectedNodePropagatesRetainedHandleFailures(t *testing.T) {
 		t.Fatalf("Job failure = %v, want retained handle error", err)
 	}
 
-	node = newFakeRetainedNode(identity)
-	node.activationError = errors.New("root Job limit transition failed")
-	observer := &fakePIDObserver{values: []uint32{identity.ProcessID, identity.ProcessID}}
-	if _, err := verifyConnectedNode("test-pipe", observer, node); err == nil || errors.Is(err, ErrPeerMismatch) {
-		t.Fatalf("activation failure = %v, want retained Job transition error", err)
-	}
 }
 
 func testNodeIdentity() winprocess.NodeIdentity {
@@ -165,6 +181,228 @@ func testNodeIdentity() winprocess.NodeIdentity {
 		StartKeyAvailable:      true,
 		StartKeySequenceNumber: 9001,
 	}
+}
+
+type fakeRuntimeBootstrapChannel struct {
+	input         *bytes.Reader
+	output        bytes.Buffer
+	events        *[]string
+	readStarted   bool
+	writeCalls    int
+	failWriteCall int
+}
+
+func (channel *fakeRuntimeBootstrapChannel) ReadContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	if !channel.readStarted {
+		channel.readStarted = true
+		*channel.events = append(*channel.events, "read-ack")
+	}
+	return channel.input.Read(buffer)
+}
+
+func (channel *fakeRuntimeBootstrapChannel) WriteContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	channel.writeCalls++
+	if channel.writeCalls == 1 {
+		*channel.events = append(*channel.events, "write-bootstrap")
+	}
+	if channel.writeCalls == 3 {
+		*channel.events = append(*channel.events, "write-commit")
+	}
+	if channel.failWriteCall == channel.writeCalls {
+		return 0, errors.New("write failed")
+	}
+	return channel.output.Write(buffer)
+}
+
+func TestCompleteRuntimeBootstrapActivatesBetweenAckAndCommit(t *testing.T) {
+	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
+	events := []string{}
+	channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
+	node := newFakeRetainedNode(testNodeIdentity())
+	node.events = &events
+	evidence := VerificationEvidence{NodeIdentity: node.stable}
+
+	if err := completeRuntimeBootstrap(
+		context.Background(),
+		channel,
+		node,
+		evidence,
+		bootstrap,
+	); err != nil {
+		t.Fatal(err)
+	}
+	wantEvents := []string{"write-bootstrap", "read-ack", "activate", "write-commit"}
+	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+	if !node.activated || node.terminated {
+		t.Fatalf("Node state activated=%v terminated=%v", node.activated, node.terminated)
+	}
+	written := bytes.NewReader(channel.output.Bytes())
+	if _, err := localrpc.ReadFrame(written, localrpc.RuntimeBootstrapMaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	commitDocument, err := localrpc.ReadFrame(written, localrpc.RuntimeBootstrapMaximumBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := localrpc.ValidateRuntimeBootstrapCommit(
+		commitDocument,
+		bootstrapDocument,
+		localrpc.RoleControl,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompleteRuntimeBootstrapRejectsDriftAndCommitFailure(t *testing.T) {
+	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
+	tests := []struct {
+		name      string
+		configure func(*fakeRetainedNode, *fakeRuntimeBootstrapChannel)
+	}{
+		{name: "identity drift", configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel) {
+			node.observations[0].StartKeySequenceNumber++
+		}},
+		{name: "new child", configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel) {
+			node.counts[0] = 2
+		}},
+		{name: "activation failure", configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel) {
+			node.activationError = errors.New("activation failed")
+		}},
+		{name: "commit failure", configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel) {
+			channel.failWriteCall = 3
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := []string{}
+			channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
+			node := newFakeRetainedNode(testNodeIdentity())
+			node.events = &events
+			test.configure(node, channel)
+			err := completeRuntimeBootstrap(
+				context.Background(),
+				channel,
+				node,
+				VerificationEvidence{NodeIdentity: node.stable},
+				bootstrap,
+			)
+			if err == nil {
+				t.Fatal("completeRuntimeBootstrap unexpectedly succeeded")
+			}
+			if test.name == "commit failure" && !node.activated {
+				t.Fatal("commit failure occurred before activation")
+			}
+			if test.name != "commit failure" && node.activated {
+				t.Fatal("Node activated after a pre-activation failure")
+			}
+		})
+	}
+}
+
+func TestCompleteRuntimeBootstrapRechecksDeadlineImmediatelyBeforeActivation(t *testing.T) {
+	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
+	events := []string{}
+	channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
+	node := newFakeRetainedNode(testNodeIdentity())
+	node.events = &events
+	ctx, cancel := context.WithCancelCause(context.Background())
+	deadlineCause := errors.New("startup deadline expired")
+	node.onObserve = func(observation int) {
+		if observation == 2 {
+			cancel(deadlineCause)
+		}
+	}
+
+	err := completeRuntimeBootstrap(
+		ctx,
+		channel,
+		node,
+		VerificationEvidence{NodeIdentity: node.stable},
+		bootstrap,
+	)
+	if !errors.Is(err, deadlineCause) {
+		t.Fatalf("completeRuntimeBootstrap error = %v, want deadline cause", err)
+	}
+	if node.activated {
+		t.Fatal("Node activated after the startup deadline expired")
+	}
+}
+
+func TestTerminateBeforeClosePreservesKillFirstOrder(t *testing.T) {
+	events := []string{}
+	node := newFakeRetainedNode(testNodeIdentity())
+	node.events = &events
+	node.terminationError = errors.New("termination failed")
+	closeError := errors.New("close failed")
+	err := terminateBeforeClose(node, func() {
+		events = append(events, "mark-terminal")
+	}, func() error {
+		events = append(events, "close")
+		return closeError
+	})
+	if strings.Join(events, ",") != "terminate,mark-terminal,close" {
+		t.Fatalf("cleanup events = %v", events)
+	}
+	if !errors.Is(err, node.terminationError) || !errors.Is(err, closeError) {
+		t.Fatalf("cleanup error = %v", err)
+	}
+}
+
+func hostControlBootstrapForTest(t *testing.T) (localrpc.RuntimeBootstrapV1, []byte) {
+	t.Helper()
+	bootstrap, err := localrpc.NewRuntimeBootstrap(localrpc.RuntimeBootstrapOptions{
+		BootstrapID:                    "123e4567-e89b-42d3-a456-426614174000",
+		Role:                           localrpc.RoleControl,
+		WorkerNodeID:                   "powertoys-node:01",
+		ReleaseID:                      "2026.08.31-test+1",
+		ReleaseTemplateSHA256:          strings.Repeat("1", 64),
+		InstallationManifestSHA256:     strings.Repeat("2", 64),
+		PreflightSHA256:                strings.Repeat("3", 64),
+		NodeBundleSHA256:               strings.Repeat("4", 64),
+		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
+		GracefulTimeoutMS:              120_000,
+		ForceTerminationReserveMS:      15_000,
+		RoleConfigJSON:                 []byte(`{"executionEnabled":false,"foundationVersion":1,"role":"control"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := localrpc.EncodeRuntimeBootstrap(bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bootstrap, document
+}
+
+func hostControlBootstrapChannelForTest(
+	t *testing.T,
+	bootstrapDocument []byte,
+	events *[]string,
+) *fakeRuntimeBootstrapChannel {
+	t.Helper()
+	ackDocument, err := localrpc.EncodeRuntimeBootstrapAck(bootstrapDocument, localrpc.RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input bytes.Buffer
+	if err := localrpc.WriteFrame(&input, ackDocument, localrpc.RuntimeBootstrapMaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeRuntimeBootstrapChannel{input: bytes.NewReader(input.Bytes()), events: events}
 }
 
 func newFakeRetainedNode(identity winprocess.NodeIdentity) *fakeRetainedNode {

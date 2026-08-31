@@ -8,18 +8,29 @@ import {
   parseServiceHostLaunchContract,
   SERVICE_HOST_CONTROL_PIPE_PREFIX,
 } from "./launch-contract.js";
+import {
+  createTestBootstrapPreparation,
+  handleBootstrapTestWrite,
+  installBootstrapTestHost,
+} from "./runtime-bootstrap.test-helpers.js";
 
 class FakeExecutorHostControl extends Duplex {
   public clientEnded = false;
   public endReadableOnClientEnd = true;
 
+  public constructor() {
+    super({ allowHalfOpen: false });
+    installBootstrapTestHost(this, "executor", 5);
+  }
+
   public override _read(): void {}
 
   public override _write(
-    _chunk: Buffer | string,
+    chunk: Buffer | string,
     _encoding: BufferEncoding,
     callback: (error?: Error | null) => void,
   ): void {
+    if (handleBootstrapTestWrite(this, chunk, callback)) return;
     callback();
   }
 
@@ -46,11 +57,13 @@ describe("Executor HostControl session", () => {
     const session = await connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connector: async () => host,
       closeTimeoutMs: 1_000,
     });
 
     expect(session.role).toBe("executor");
+    expect(session.bootstrap.bootstrap.role).toBe("executor");
     expect("register" in session).toBe(false);
     expect("signLocalDigest" in session).toBe(false);
     await session.drain();
@@ -62,13 +75,30 @@ describe("Executor HostControl session", () => {
     const session = await connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connector: async () => host,
       closeTimeoutMs: 1_000,
     });
     host.push(Buffer.from([1]));
     await waitFor(() => host.destroyed);
+    await expect(session.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
     await session.close();
     expect(host.destroyed).toBe(true);
+  });
+
+  it("exposes unexpected readable EOF through the session done promise", async () => {
+    const host = new FakeExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    host.push(null);
+
+    await expect(session.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    await session.close();
   });
 
   it("rejects a close-only peer shutdown while draining", async () => {
@@ -77,6 +107,7 @@ describe("Executor HostControl session", () => {
     const session = await connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connector: async () => host,
       closeTimeoutMs: 1_000,
     });
@@ -92,6 +123,7 @@ describe("Executor HostControl session", () => {
     const session = await connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connector: async () => host,
       closeTimeoutMs: 1_000,
     });
@@ -107,6 +139,7 @@ describe("Executor HostControl session", () => {
     const session = await connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connector: async () => host,
       closeTimeoutMs: 1_000,
     });
@@ -122,7 +155,12 @@ describe("Executor HostControl session", () => {
     controller.abort(new Error("credential=must-not-cross"));
     await expect(
       connectExecutorHostControl(
-        { role: "executor", pipe, connector: async () => new FakeExecutorHostControl() },
+        {
+          role: "executor",
+          pipe,
+          prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+          connector: async () => new FakeExecutorHostControl(),
+        },
         controller.signal,
       ),
     ).rejects.toEqual(
@@ -143,6 +181,7 @@ describe("Executor HostControl session", () => {
       {
         role: "executor",
         pipe,
+        prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
         connectTimeoutMs: 1_000,
         connector: async (_selected, cancellation) => {
           connectorCancellation = cancellation;
@@ -172,6 +211,7 @@ describe("Executor HostControl session", () => {
     const connecting = connectExecutorHostControl({
       role: "executor",
       pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
       connectTimeoutMs: 20,
       connector: async (_selected, cancellation) => {
         connectorCancellation = cancellation;

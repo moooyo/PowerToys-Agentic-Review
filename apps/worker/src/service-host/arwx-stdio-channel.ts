@@ -37,6 +37,27 @@ export interface ArwxStdioChannelOptions {
   readonly closeTimeoutMs?: number;
 }
 
+declare const arwxBootstrapReceiveLoopTokenBrand: unique symbol;
+
+export interface ArwxBootstrapReceiveLoopToken {
+  readonly localRole: ArwxPeerRole;
+  readonly [arwxBootstrapReceiveLoopTokenBrand]: true;
+}
+
+export interface ArwxBootstrapReceiveLoop {
+  readonly token: ArwxBootstrapReceiveLoopToken;
+  readonly done: Promise<void>;
+}
+
+interface ArwxBootstrapReceiveLoopState {
+  readonly channel: ArwxStdioChannel;
+  readonly localRole: ArwxPeerRole;
+  readonly done: Promise<void>;
+  consumed: boolean;
+}
+
+const arwxBootstrapReceiveLoopStates = new WeakMap<object, ArwxBootstrapReceiveLoopState>();
+
 export class ArwxStdioChannelError extends Error {
   public constructor(
     public readonly code:
@@ -142,6 +163,43 @@ export class ArwxStdioChannel {
     return this.#state;
   }
 
+  public get receiveLoopStarted(): boolean {
+    return this.#runStarted;
+  }
+
+  public get configuredMaximumQueuedWriteBytes(): number {
+    return this.#maximumQueuedWriteBytes;
+  }
+
+  public get configuredCloseTimeoutMs(): number {
+    return this.#closeTimeoutMs;
+  }
+
+  /** Starts one pre-commit receiver and issues a channel-bound, single-use readiness token. */
+  public startRuntimeBootstrapReceiveLoop(
+    handler: (message: Readonly<ArwxInboundMessage>) => void | Promise<void>,
+  ): Readonly<ArwxBootstrapReceiveLoop> {
+    if (this.#runStarted || this.#state !== "open") {
+      throw arwxError(
+        "CHANNEL_STATE_INVALID",
+        "ARWX runtime bootstrap guard can start only once on an open channel.",
+      );
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError("ARWX runtime bootstrap receive handler is required.");
+    }
+    const done = this.run(handler);
+    done.catch(() => undefined);
+    const token = Object.freeze({ localRole: this.localRole }) as ArwxBootstrapReceiveLoopToken;
+    arwxBootstrapReceiveLoopStates.set(token, {
+      channel: this,
+      localRole: this.localRole,
+      done,
+      consumed: false,
+    });
+    return Object.freeze({ token, done });
+  }
+
   public async run(
     handler: (message: Readonly<ArwxInboundMessage>) => void | Promise<void>,
   ): Promise<void> {
@@ -164,6 +222,7 @@ export class ArwxStdioChannel {
           throw arwxError("FRAME_INVALID", "ARWX input frame is invalid.");
         }
         for (const frame of frames) {
+          if (this.#terminalError !== undefined) throw this.#terminalError;
           const message = this.#validateInbound(frame);
           try {
             await handler(message);
@@ -380,8 +439,16 @@ export class ArwxStdioChannel {
     this.#queuedWriteBytes = 0;
     this.#runDone.reject(error);
     this.#outputDone.reject(error);
-    this.#input.destroy();
-    this.#output.destroy();
+    try {
+      this.#input.destroy();
+    } catch {
+      // The terminal state is already committed.
+    }
+    try {
+      this.#output.destroy();
+    } catch {
+      // The terminal state is already committed.
+    }
   }
 
   #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
@@ -390,6 +457,28 @@ export class ArwxStdioChannel {
       remainingMilliseconds(deadline),
     );
   }
+}
+
+/** Consumes a genuine bootstrap-guard token for one exact live channel and role. */
+export function consumeArwxBootstrapReceiveLoopToken(
+  token: ArwxBootstrapReceiveLoopToken,
+  channel: ArwxStdioChannel,
+  role: ArwxPeerRole,
+): Promise<void> | undefined {
+  const state = arwxBootstrapReceiveLoopStates.get(token);
+  if (
+    state === undefined ||
+    state.consumed ||
+    state.channel !== channel ||
+    state.localRole !== role ||
+    channel.localRole !== role ||
+    channel.state !== "open" ||
+    !channel.receiveLoopStarted
+  ) {
+    return undefined;
+  }
+  state.consumed = true;
+  return state.done;
 }
 
 class Deferred<T> {

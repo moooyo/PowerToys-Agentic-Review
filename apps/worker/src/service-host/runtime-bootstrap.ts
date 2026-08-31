@@ -3,7 +3,6 @@ import {
   type DeepReadonly,
   deepFreezeJson,
   parseCanonicalJson,
-  serializeCanonicalJson,
 } from "@agentic-review/local-protocol";
 import { type Static, Type } from "@sinclair/typebox";
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
@@ -12,7 +11,7 @@ import { Value } from "./typebox-value-check.js";
 
 export const RUNTIME_BOOTSTRAP_VERSION = 1 as const;
 export const RUNTIME_BOOTSTRAP_MAXIMUM_BYTES = 64 * 1_024;
-export const RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES = 64 * 1_024;
+export const RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES = 47 * 1_024;
 export const RUNTIME_BOOTSTRAP_ARWX_PROTOCOL_MAJOR = 1 as const;
 export const RUNTIME_BOOTSTRAP_ARWX_MINIMUM_MINOR = 0 as const;
 export const RUNTIME_BOOTSTRAP_ARWX_MAXIMUM_MINOR = 0 as const;
@@ -101,13 +100,27 @@ export const RuntimeBootstrapAckV1Schema = Type.Object(
     role: Type.Union([Type.Literal("control"), Type.Literal("executor")]),
     bootstrapSha256: Sha256Schema,
     accepted: Type.Literal(true),
-    arwxHandlerReady: Type.Literal(true),
+    arwxReceiveLoopStarted: Type.Literal(true),
+  },
+  { additionalProperties: false },
+);
+
+export const RuntimeBootstrapCommitV1Schema = Type.Object(
+  {
+    protocolVersion: Type.Literal(protocolVersion),
+    type: Type.Literal("runtimeBootstrapCommit"),
+    bootstrapVersion: Type.Literal(RUNTIME_BOOTSTRAP_VERSION),
+    bootstrapId: Type.String({ minLength: 36, maxLength: 36, pattern: uuidV4Pattern }),
+    role: Type.Union([Type.Literal("control"), Type.Literal("executor")]),
+    bootstrapSha256: Sha256Schema,
+    committed: Type.Literal(true),
   },
   { additionalProperties: false },
 );
 
 export type RuntimeBootstrapV1 = Static<typeof RuntimeBootstrapV1Schema>;
 export type RuntimeBootstrapAckV1 = Static<typeof RuntimeBootstrapAckV1Schema>;
+export type RuntimeBootstrapCommitV1 = Static<typeof RuntimeBootstrapCommitV1Schema>;
 
 export interface ParsedRuntimeBootstrapV1 {
   readonly bootstrap: DeepReadonly<RuntimeBootstrapV1>;
@@ -117,7 +130,11 @@ export interface ParsedRuntimeBootstrapV1 {
 
 export class RuntimeBootstrapError extends Error {
   public constructor(
-    public readonly code: "INVALID_DOCUMENT" | "ROLE_MISMATCH" | "INVALID_ROLE_CONFIG",
+    public readonly code:
+      | "COMMIT_MISMATCH"
+      | "INVALID_DOCUMENT"
+      | "ROLE_MISMATCH"
+      | "INVALID_ROLE_CONFIG",
     message: string,
   ) {
     super(message);
@@ -186,36 +203,48 @@ export function parseRuntimeBootstrap(
   return parsed;
 }
 
-/** Creates the only accepted positive acknowledgement from a validated bootstrap document. */
-export function createRuntimeBootstrapAck(
+/** Validates the post-activation commit against the parser-issued bootstrap identity. */
+export function parseRuntimeBootstrapCommit(
+  document: Uint8Array,
   parsed: Readonly<ParsedRuntimeBootstrapV1>,
-): DeepReadonly<RuntimeBootstrapAckV1> {
+): DeepReadonly<RuntimeBootstrapCommitV1> {
   if (!parsedBootstraps.has(parsed)) {
-    throw new TypeError("Runtime bootstrap acknowledgement requires a parser-issued value.");
+    throw new TypeError("Runtime bootstrap commit requires a parser-issued bootstrap.");
   }
-  const ack: RuntimeBootstrapAckV1 = {
-    protocolVersion,
-    type: "runtimeBootstrapAck",
-    bootstrapVersion: RUNTIME_BOOTSTRAP_VERSION,
-    bootstrapId: parsed.bootstrap.bootstrapId,
-    role: parsed.bootstrap.role,
-    bootstrapSha256: parsed.bootstrapSha256,
-    accepted: true,
-    arwxHandlerReady: true,
-  };
-  if (!Value.Check(RuntimeBootstrapAckV1Schema, ack)) {
-    throw bootstrapError("INVALID_DOCUMENT", "RuntimeBootstrapAckV1 construction failed.");
+  if (
+    !(document instanceof Uint8Array) ||
+    document.byteLength === 0 ||
+    document.byteLength > RUNTIME_BOOTSTRAP_MAXIMUM_BYTES
+  ) {
+    throw bootstrapError("INVALID_DOCUMENT", "RuntimeBootstrapCommitV1 is outside its byte limit.");
   }
-  return deepFreezeJson(ack);
-}
-
-/** Encodes the parser-bound acknowledgement as exact canonical UTF-8 bytes. */
-export function encodeRuntimeBootstrapAck(parsed: Readonly<ParsedRuntimeBootstrapV1>): Buffer {
-  const document = Buffer.from(serializeCanonicalJson(createRuntimeBootstrapAck(parsed)), "utf8");
-  if (document.byteLength === 0 || document.byteLength > RUNTIME_BOOTSTRAP_MAXIMUM_BYTES) {
-    throw bootstrapError("INVALID_DOCUMENT", "RuntimeBootstrapAckV1 exceeds its byte limit.");
+  let candidate: unknown;
+  try {
+    candidate = parseCanonicalJson(Buffer.from(document), RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
+  } catch {
+    throw bootstrapError(
+      "INVALID_DOCUMENT",
+      "RuntimeBootstrapCommitV1 is not bounded canonical JSON.",
+    );
   }
-  return document;
+  if (!Value.Check(RuntimeBootstrapCommitV1Schema, candidate)) {
+    throw bootstrapError(
+      "INVALID_DOCUMENT",
+      "RuntimeBootstrapCommitV1 does not match its strict schema.",
+    );
+  }
+  const commit = candidate as RuntimeBootstrapCommitV1;
+  if (
+    commit.bootstrapId !== parsed.bootstrap.bootstrapId ||
+    commit.role !== parsed.bootstrap.role ||
+    commit.bootstrapSha256 !== parsed.bootstrapSha256
+  ) {
+    throw bootstrapError(
+      "COMMIT_MISMATCH",
+      "RuntimeBootstrapCommitV1 does not bind the accepted bootstrap.",
+    );
+  }
+  return deepFreezeJson(commit);
 }
 
 function assertRole(value: ServiceHostPayloadRole): void {

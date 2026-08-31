@@ -35,11 +35,14 @@ defense in depth, not a JavaScript sandbox and not authority for hostile source.
 authority must come from the exact path and SHA-256 input manifest inside a trusted, signed release
 build, together with the ServiceHost and Windows identity, ACL, Job Object, and pipe boundaries.
 
-The bounded `RuntimeBootstrapV1` codecs are implemented, but the Control and Executor role
-entrypoints remain fail closed until the bootstrap exchange and native runtime are wired.
-Before ServiceHost enables either payload, its fixed Node launch contract must include
-`--disallow-code-generation-from-strings` and `--no-addons`; neither flag replaces the operating
-system boundaries above.
+The bounded `RuntimeBootstrapV1` foundation uses a three-stage HostControl exchange: ServiceHost
+sends the bootstrap, Node acknowledges a validated role configuration and a running ARWX receive
+loop, ServiceHost activates the retained Node, and Node accepts a bootstrap-bound commit before the
+RPC session is published. The Control and Executor entrypoints then remain in a zero-execution
+foundation state: they advertise no slots, claim no work, and emit no ARWX `Ready` until the
+business role supervisors are implemented. Before ServiceHost enables either payload, its fixed
+Node launch contract must include `--disallow-code-generation-from-strings` and `--no-addons`;
+neither flag replaces the operating system boundaries above.
 
 ## Worker API
 

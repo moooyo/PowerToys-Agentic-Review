@@ -6,9 +6,10 @@
 // before callers launch Node. Accept consumes that pending listener only after
 // two kernel client-PID observations match the retained Node process identity,
 // Node remains live, and the service-root Job contains exactly that one process.
-// winprocess holds the root Job process limit at one until Accept commits this
-// verification and raises the limit through the retained Job handle. Any
-// rejected connection terminates the Node root Job.
+// winprocess holds the root Job process limit at one until Accept sends the
+// canonical RuntimeBootstrapV1 document, validates the exact acknowledgement,
+// and then raises the limit through the retained Job handle. Any rejected
+// connection or bootstrap terminates the Node root Job before closing the pipe.
 //
 // Pure Node net.connect uses GENERIC_READ | GENERIC_WRITE on Windows. The own
 // service SID therefore receives exactly FILE_GENERIC_READ |

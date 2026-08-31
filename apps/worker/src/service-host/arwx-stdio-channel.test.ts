@@ -176,6 +176,40 @@ describe("ARWX standard-I/O channel", () => {
     await expect(running).rejects.toMatchObject({ code: "FRAME_INVALID" });
     expect(dispatched).toBe(0);
   });
+
+  it("stops dispatching a decoded batch after the channel becomes terminal", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const channel = new ArwxStdioChannel({ localRole: "control", input, output });
+    let dispatched = 0;
+    const running = channel.run(() => {
+      dispatched += 1;
+      channel.abort();
+    });
+    const frame = (sequence: bigint): Buffer =>
+      encodeLocalFrame({
+        minorVersion: 0,
+        messageType: LocalMessageType.HelloAck,
+        sequence,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: helloAck,
+      });
+    input.write(Buffer.concat([frame(1n), frame(2n)]));
+
+    await expect(running).rejects.toMatchObject({ code: "ABORTED" });
+    expect(dispatched).toBe(1);
+  });
+
+  it("attempts to destroy both stream directions when one destroy throws", () => {
+    const input = new ThrowingDestroyPassThrough();
+    const output = new ThrowingDestroyPassThrough();
+    const channel = new ArwxStdioChannel({ localRole: "control", input, output });
+
+    expect(() => channel.abort()).not.toThrow();
+    expect(input.destroyCalls).toBe(1);
+    expect(output.destroyCalls).toBe(1);
+  });
 });
 
 class CallbackFailingWritable extends Writable {
@@ -185,6 +219,15 @@ class CallbackFailingWritable extends Writable {
     callback: (error?: Error | null) => void,
   ): void {
     callback(new Error("injected write failure"));
+  }
+}
+
+class ThrowingDestroyPassThrough extends PassThrough {
+  public destroyCalls = 0;
+
+  public override destroy(_error?: Error): this {
+    this.destroyCalls += 1;
+    throw new Error("injected destroy failure");
   }
 }
 

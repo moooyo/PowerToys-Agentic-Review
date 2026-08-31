@@ -2,6 +2,12 @@ import { createConnection } from "node:net";
 import type { Duplex } from "node:stream";
 import type { HostControlSession } from "./host-control-session.js";
 import { type HostControlPipeSelector, isHostControlPipeSelector } from "./launch-contract.js";
+import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
+import {
+  performRuntimeBootstrapHandshake,
+  RuntimeBootstrapHandshakeError,
+  type RuntimeBootstrapPreparation,
+} from "./runtime-bootstrap-handshake.js";
 
 const defaultConnectTimeoutMs = 30_000;
 const defaultCloseTimeoutMs = 15_000;
@@ -15,6 +21,7 @@ export type ExecutorHostControlConnector = (
 export interface ExecutorHostControlOptions {
   readonly role: "executor";
   readonly pipe: HostControlPipeSelector;
+  readonly prepareRuntimeBootstrap: RuntimeBootstrapPreparation<"executor">;
   readonly connectTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
   readonly connector?: ExecutorHostControlConnector;
@@ -44,30 +51,63 @@ export async function connectExecutorHostControl(
   if (options.role !== "executor" || !isHostControlPipeSelector(options.pipe)) {
     throw new TypeError("Executor HostControl options are invalid.");
   }
+  if (typeof options.prepareRuntimeBootstrap !== "function") {
+    throw new TypeError("Executor runtime bootstrap preparation is required.");
+  }
   const connectTimeoutMs = boundedTimeout(options.connectTimeoutMs ?? defaultConnectTimeoutMs);
   const closeTimeoutMs = boundedTimeout(options.closeTimeoutMs ?? defaultCloseTimeoutMs);
   if (signal?.aborted) {
     throw executorError("CONNECT_CANCELLED", "Executor HostControl connection was cancelled.");
   }
   const connector = options.connector ?? defaultConnector;
-  const stream = await connectWithDeadline(connector, options.pipe, connectTimeoutMs, signal);
-  return new ExecutorHostControlSession(stream, closeTimeoutMs);
+  const absoluteDeadline = performance.now() + connectTimeoutMs;
+  const stream = await connectWithDeadline(connector, options.pipe, absoluteDeadline, signal);
+  try {
+    return await performRuntimeBootstrapHandshake(
+      stream,
+      "executor",
+      options.prepareRuntimeBootstrap,
+      absoluteDeadline,
+      (completed) => new ExecutorHostControlSession(stream, closeTimeoutMs, completed.parsed),
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof RuntimeBootstrapHandshakeError) {
+      if (error.code === "BOOTSTRAP_CANCELLED") {
+        throw executorError("CONNECT_CANCELLED", "Executor HostControl bootstrap was cancelled.");
+      }
+      if (error.code === "BOOTSTRAP_TIMEOUT") {
+        throw executorError("CONNECT_TIMEOUT", "Executor HostControl bootstrap timed out.");
+      }
+      throw executorError("PROTOCOL_FAILURE", "Executor HostControl bootstrap failed.");
+    }
+    throw error;
+  }
 }
 
 class ExecutorHostControlSession implements HostControlSession<"executor"> {
   public readonly role = "executor" as const;
+  public readonly bootstrap: Readonly<ParsedRuntimeBootstrapV1>;
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
+  readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
   #terminalError: ExecutorHostControlError | undefined;
   #state: "open" | "draining" | "closing" | "closed" | "failed" = "open";
   #readableEndObserved = false;
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
+  public get done(): Promise<void> {
+    return this.#done;
+  }
+
   public constructor(
     private readonly stream: Duplex,
     private readonly closeTimeoutMs: number,
+    bootstrap: Readonly<ParsedRuntimeBootstrapV1>,
   ) {
+    this.bootstrap = bootstrap;
+    void this.#done.then(undefined, () => undefined);
     stream.on("data", () => {
       this.#fail(
         executorError(
@@ -213,7 +253,7 @@ class Deferred<T> {
 async function connectWithDeadline(
   connector: ExecutorHostControlConnector,
   pipe: HostControlPipeSelector,
-  timeoutMs: number,
+  absoluteDeadline: number,
   signal: AbortSignal | undefined,
 ): Promise<Duplex> {
   const connectionCancellation = new AbortController();
@@ -241,7 +281,7 @@ async function connectWithDeadline(
         connectionCancellation.abort();
         reject(executorError("CONNECT_TIMEOUT", "Executor HostControl connection timed out."));
       });
-    }, timeoutMs);
+    }, remainingMilliseconds(absoluteDeadline));
     timer.unref();
     signal?.addEventListener("abort", onAbort, { once: true });
     void connection.then(

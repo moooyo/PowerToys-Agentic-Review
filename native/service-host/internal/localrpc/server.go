@@ -71,9 +71,9 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 	return &Server{options: options, dispatcher: dispatcher}, nil
 }
 
-// Serve owns the inherited Node stdin/stdout pair for one payload lifetime. Closing either side
-// cancels every active operation. Responses may complete out of order and are correlated only by
-// the session-unique requestId.
+// Serve owns the already-bootstrapped HostControl byte stream for one payload lifetime. Closing
+// either side cancels every active operation. Responses may complete out of order and are
+// correlated only by the session-unique requestId.
 func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser) error {
 	if ctx == nil {
 		return errors.New("local RPC server context is required")

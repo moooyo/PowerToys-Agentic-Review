@@ -19,6 +19,8 @@ import {
   decodeHostControlOpaqueJson,
   type HostControlOpaqueJsonDescriptor,
 } from "../service-host/opaque-json.js";
+import { parseRuntimeBootstrap } from "../service-host/runtime-bootstrap.js";
+import { bootstrapDocument } from "../service-host/runtime-bootstrap.test-helpers.js";
 import { HostControlWorkerApi } from "./host-control-worker-api.js";
 
 const serverTime = "2026-08-31T00:00:00.000Z";
@@ -31,6 +33,8 @@ interface RecordedCall {
 
 class FakeControlClient implements ControlHostControlClient {
   public readonly role = "control" as const;
+  public readonly bootstrap = parseRuntimeBootstrap(bootstrapDocument("control"), "control");
+  public readonly done = new Promise<void>(() => undefined);
   public readonly calls: RecordedCall[] = [];
   public registrationResponse: unknown = validRegistrationResponse();
   public claimResponse: unknown = { outcome: "no_work", serverTime };

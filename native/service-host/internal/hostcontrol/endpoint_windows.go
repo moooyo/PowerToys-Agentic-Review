@@ -13,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 	"golang.org/x/sys/windows"
 )
@@ -181,10 +182,13 @@ func (l *Listener) PipeName() string {
 	return l.pipeName
 }
 
-// Accept waits for the pending connection and consumes the Listener only when
-// the client is the exact retained Node process and its root Job is still
-// single-process.
-func (l *Listener) Accept(ctx context.Context, node winprocess.NodeProcess) (*Connection, error) {
+// Accept verifies the retained Node, completes the RuntimeBootstrapV1 exchange, and raises the
+// root Job process limit before publishing the consumed connection.
+func (l *Listener) Accept(
+	ctx context.Context,
+	node winprocess.NodeProcess,
+	bootstrap localrpc.RuntimeBootstrapV1,
+) (*Connection, error) {
 	if ctx == nil {
 		return nil, errors.New("HostControl accept context is required")
 	}
@@ -200,14 +204,22 @@ func (l *Listener) Accept(ctx context.Context, node winprocess.NodeProcess) (*Co
 	}
 
 	connection, err := l.acceptConnected(ctx, node)
-	if err != nil {
-		l.markTerminal(err)
-	}
 	finish()
-	if err == nil {
-		return connection, nil
+	if err != nil {
+		return nil, errors.Join(err, terminateBeforeClose(node, func() {
+			l.markTerminal(err)
+		}, l.Close))
 	}
-	return nil, errors.Join(err, l.Close(), node.Terminate())
+
+	bootstrapContext, cancelBootstrap := context.WithDeadline(ctx, l.deadline)
+	err = completeRuntimeBootstrap(bootstrapContext, connection, node, connection.Evidence(), bootstrap)
+	cancelBootstrap()
+	if err != nil {
+		return nil, errors.Join(err, terminateBeforeClose(node, func() {
+			connection.markTerminal(err)
+		}, connection.Close))
+	}
+	return connection, nil
 }
 
 func (l *Listener) beginAccept() (func(), error) {

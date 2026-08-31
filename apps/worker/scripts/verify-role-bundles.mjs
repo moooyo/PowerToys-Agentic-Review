@@ -185,6 +185,8 @@ const specifications = Object.freeze({
       "apps/worker/src/service-host/launch-contract.ts",
       "apps/worker/src/service-host/opaque-json.ts",
       "apps/worker/src/service-host/role-entrypoint.ts",
+      "apps/worker/src/service-host/runtime-bootstrap.ts",
+      "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
     ]),
   },
   executor: {
@@ -195,7 +197,10 @@ const specifications = Object.freeze({
       "apps/worker/src/service-host/arwx-stdio-channel.ts",
       "apps/worker/src/service-host/executor-host-control-session.ts",
       "apps/worker/src/service-host/launch-contract.ts",
+      "apps/worker/src/service-host/opaque-json.ts",
       "apps/worker/src/service-host/role-entrypoint.ts",
+      "apps/worker/src/service-host/runtime-bootstrap.ts",
+      "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
     ]),
   },
 });

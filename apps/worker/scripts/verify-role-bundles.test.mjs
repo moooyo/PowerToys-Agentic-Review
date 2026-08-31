@@ -63,6 +63,8 @@ test("exact role graph requires positive bytes from critical implementations", (
   const validInputs = Object.fromEntries(policy.allowedInputs.map((input) => [input, 1]));
   for (const input of [
     policy.entryPoint,
+    "apps/worker/src/service-host/runtime-bootstrap.ts",
+    "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs",
   ]) {
     assert.throws(() =>
@@ -73,6 +75,24 @@ test("exact role graph requires positive bytes from critical implementations", (
       }),
     );
   }
+});
+
+test("both role policies require the reviewed bootstrap handshake closure", () => {
+  const sharedBootstrapInputs = [
+    "apps/worker/src/service-host/opaque-json.ts",
+    "apps/worker/src/service-host/runtime-bootstrap.ts",
+    "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+  ];
+  for (const role of ["control", "executor"]) {
+    const required = new Set(roleBundlePolicyForTest[role].requiredWorkerInputs);
+    for (const input of sharedBootstrapInputs) assert.equal(required.has(input), true);
+  }
+  assert.equal(
+    new Set(roleBundlePolicyForTest.executor.requiredWorkerInputs).has(
+      "apps/worker/src/service-host/host-control-client.ts",
+    ),
+    false,
+  );
 });
 
 test("role graph rejects extra output chunks", () => {

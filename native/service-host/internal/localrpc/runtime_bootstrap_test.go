@@ -44,7 +44,7 @@ func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 	}
 	digest := sha256.Sum256(golden)
 	wantAck := fmt.Sprintf(
-		`{"accepted":true,"arwxHandlerReady":true,"bootstrapId":"123e4567-e89b-42d3-a456-426614174000","bootstrapSha256":"%x","bootstrapVersion":1,"protocolVersion":"1.0","role":"control","type":"runtimeBootstrapAck"}`,
+		`{"accepted":true,"arwxReceiveLoopStarted":true,"bootstrapId":"123e4567-e89b-42d3-a456-426614174000","bootstrapSha256":"%x","bootstrapVersion":1,"protocolVersion":"1.0","role":"control","type":"runtimeBootstrapAck"}`,
 		digest,
 	)
 	if string(ackDocument) != wantAck {
@@ -52,6 +52,20 @@ func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 	}
 	if err := ValidateRuntimeBootstrapAck(ackDocument, golden, RoleControl); err != nil {
 		t.Fatalf("ValidateRuntimeBootstrapAck returned an error: %v", err)
+	}
+	commitDocument, err := EncodeRuntimeBootstrapCommit(golden, RoleControl)
+	if err != nil {
+		t.Fatalf("EncodeRuntimeBootstrapCommit returned an error: %v", err)
+	}
+	wantCommit := fmt.Sprintf(
+		`{"bootstrapId":"123e4567-e89b-42d3-a456-426614174000","bootstrapSha256":"%x","bootstrapVersion":1,"committed":true,"protocolVersion":"1.0","role":"control","type":"runtimeBootstrapCommit"}`,
+		digest,
+	)
+	if string(commitDocument) != wantCommit {
+		t.Fatalf("encoded commit = %s, want %s", commitDocument, wantCommit)
+	}
+	if err := ValidateRuntimeBootstrapCommit(commitDocument, golden, RoleControl); err != nil {
+		t.Fatalf("ValidateRuntimeBootstrapCommit returned an error: %v", err)
 	}
 }
 
@@ -278,6 +292,12 @@ func TestRuntimeBootstrapRejectsAmbiguousOrOversizedDocuments(t *testing.T) {
 	invalidRoleConfig.RoleConfigJSON = roleConfigArray
 
 	valid := validRuntimeBootstrapOptions()
+	valid.Role = RoleExecutor
+	valid.WorkerNodeID = "n" + strings.Repeat("a", 127)
+	valid.ReleaseID = "r" + strings.Repeat("a", 127)
+	valid.MaximumQueuedBytesPerDirection = RuntimeBootstrapARWXMaximumQueuedBytes
+	valid.GracefulTimeoutMS = RuntimeBootstrapMaximumGracefulTimeoutMS
+	valid.ForceTerminationReserveMS = RuntimeBootstrapMaximumGracefulTimeoutMS - 1
 	atDecodedLimit := []byte(`{"padding":"` + strings.Repeat("x", RuntimeBootstrapRoleConfigMaximumBytes-14) + `"}`)
 	if len(atDecodedLimit) != RuntimeBootstrapRoleConfigMaximumBytes {
 		t.Fatalf("role config fixture length = %d", len(atDecodedLimit))
@@ -304,8 +324,13 @@ func TestRuntimeBootstrapRejectsAmbiguousOrOversizedDocuments(t *testing.T) {
 	if _, err := NewRuntimeBootstrap(invalidRoleConfig); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
 		t.Fatalf("array role config error = %v", err)
 	}
-	if _, err := NewRuntimeBootstrap(valid); !errors.Is(err, ErrRuntimeBootstrapLimit) {
-		t.Fatalf("envelope expansion error = %v, want ErrRuntimeBootstrapLimit", err)
+	maximumRoleConfig, err := NewRuntimeBootstrap(valid)
+	if err != nil {
+		t.Fatalf("maximum roleConfig was rejected: %v", err)
+	}
+	maximumDocument, err := EncodeRuntimeBootstrap(maximumRoleConfig)
+	if err != nil || len(maximumDocument) > RuntimeBootstrapMaximumBytes {
+		t.Fatalf("maximum roleConfig envelope = %d bytes, error %v", len(maximumDocument), err)
 	}
 	valid.RoleConfigJSON = append(atDecodedLimit, ' ')
 	if _, err := NewRuntimeBootstrap(valid); !errors.Is(err, ErrRuntimeBootstrapLimit) {
@@ -329,7 +354,7 @@ func TestRuntimeBootstrapAckRejectsMutationAndNegativeAcknowledgement(t *testing
 		{"bootstrap ID", func(v *RuntimeBootstrapAckV1) { v.BootstrapID = "bad" }},
 		{"bootstrap digest", func(v *RuntimeBootstrapAckV1) { v.BootstrapSHA256 = strings.Repeat("A", 64) }},
 		{"negative acknowledgement", func(v *RuntimeBootstrapAckV1) { v.Accepted = false }},
-		{"ARWX handler not ready", func(v *RuntimeBootstrapAckV1) { v.ARWXHandlerReady = false }},
+		{"ARWX receive loop not started", func(v *RuntimeBootstrapAckV1) { v.ARWXReceiveLoopStarted = false }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -375,7 +400,7 @@ func TestRuntimeBootstrapAckRejectsMutationAndNegativeAcknowledgement(t *testing
 		}
 	}
 	for _, key := range []string{
-		"accepted", "arwxHandlerReady", "bootstrapId", "bootstrapSha256",
+		"accepted", "arwxReceiveLoopStarted", "bootstrapId", "bootstrapSha256",
 		"bootstrapVersion", "protocolVersion", "role", "type",
 	} {
 		parsed, err := ParseCanonicalJSON(validDocument, RuntimeBootstrapMaximumBytes)
