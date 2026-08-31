@@ -468,6 +468,9 @@ func credentialFactFixtures(
 			publicKeySPKI:              localSPKI,
 			validatedControlServiceSID: configuration.OwnService.SID,
 			validatedExecutorSID:       configuration.PeerService.SID,
+			algorithm:                  "ECDSA_P256",
+			keyLengthBits:              256,
+			keyUsage:                   2,
 		}, mtlsCredentialFacts{
 			storeScope:                 wincert.LocalMachineStoreScope,
 			storeName:                  configuration.Control.ClientCertificateStore,
@@ -477,6 +480,11 @@ func credentialFactFixtures(
 			publicKeySPKI:              mtlsSPKI,
 			validatedControlServiceSID: configuration.OwnService.SID,
 			validatedExecutorSID:       configuration.PeerService.SID,
+			containerName:              "mtls-container",
+			keyName:                    "mtls-container",
+			algorithm:                  "ECDSA_P256",
+			keyLengthBits:              256,
+			keyUsage:                   2,
 		}
 }
 

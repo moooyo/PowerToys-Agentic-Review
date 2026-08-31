@@ -7,11 +7,16 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 const (
@@ -83,20 +88,48 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 		executorConfig:      cloneConfig(executor),
 		manifestRead:        manifestRead,
 		manifest:            cloneManifest(parsedManifest),
+		identity:            identityFixture(role, control, executor),
 		approvedSignerPin:   control.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
 		roots: []VerifiedRoot{
-			{Root: releasemanifest.RootInstallation, Path: testInstallationRoot, Object: installationRootObject},
-			{Root: releasemanifest.RootTrustedConfiguration, Path: testTrustedRoot, Object: trustedRootObject},
+			{
+				Root: releasemanifest.RootInstallation, Path: testInstallationRoot,
+				Ancestors: factory.directoryAncestors(testInstallationRoot), Object: installationRootObject,
+			},
+			{
+				Root: releasemanifest.RootTrustedConfiguration, Path: testTrustedRoot,
+				Ancestors: factory.directoryAncestors(testTrustedRoot), Object: trustedRootObject,
+			},
 		},
 		files: verifiedFiles,
 	}
+	installation.contents = runtimeContentFixtures(t, role, control, executor, verifiedFiles)
 	profile := profileFixture(parsedManifest)
+	dataRootDigest := sha256.Sum256([]byte("data-root-evidence-" + string(role)))
+	currentConfig := control
+	peerConfig := executor
+	if role == config.RoleExecutor {
+		currentConfig, peerConfig = peerConfig, currentConfig
+	}
 	input := snapshotInput{
 		role: role, actualBootstrapPath: controlRead.File.Path,
 		installation: installation, releaseProfile: profile,
+		dataRoot: DataRootBinding{
+			role: role, currentPath: currentConfig.Node.DataRoot, peerPath: peerConfig.Node.DataRoot,
+			peerObservation:   dataroot.PeerLiveRootNotObservedByDesign,
+			installationRoots: dataRootInstallationBindingsFixture(installation.roots),
+			digest:            dataRootDigest, bound: true,
+		},
 	}
 	if role == config.RoleControl {
-		input.credentials = &ControlCredentialEvidence{bound: true}
+		localFacts, mtlsFacts := credentialFactFixtures(t, control)
+		input.credentials = &ControlCredentialEvidence{
+			localAuthority: cngAttestationFixture(localFacts),
+			mtls:           mtlsAttestationFixture(mtlsFacts),
+			localFacts:     localFacts,
+			mtlsFacts:      mtlsFacts,
+			bound:          true,
+			attested:       true,
+		}
 	} else {
 		input.actualBootstrapPath = executorRead.File.Path
 		installation.actualBootstrapPath = executorRead.File.Path
@@ -104,6 +137,87 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	return compositionFixture{
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
+	}
+}
+
+// These layouts exist only in tests because the production packages
+// deliberately expose no detached attestation constructor.
+func cngAttestationFixture(facts localCredentialFacts) cng.Attestation {
+	type layout struct {
+		keyName                     string
+		keySecurityDescriptorSHA256 [cng.DigestSize]byte
+		keyIdentity                 cng.KeyIdentity
+		publicKeySPKISHA256         [cng.DigestSize]byte
+		validatedControlServiceSID  string
+		validatedExecutorServiceSID string
+		algorithm                   string
+		keyLengthBits               uint32
+		exportPolicy                uint32
+		keyUsage                    uint32
+		validated                   bool
+	}
+	value := layout{
+		keyName: facts.keyName, keySecurityDescriptorSHA256: facts.keySecurityDescriptor,
+		keyIdentity: facts.identity, publicKeySPKISHA256: facts.publicKeySPKI,
+		validatedControlServiceSID:  facts.validatedControlServiceSID,
+		validatedExecutorServiceSID: facts.validatedExecutorSID,
+		algorithm:                   facts.algorithm, keyLengthBits: facts.keyLengthBits,
+		exportPolicy: facts.exportPolicy, keyUsage: facts.keyUsage, validated: true,
+	}
+	if unsafe.Sizeof(value) != unsafe.Sizeof(cng.Attestation{}) {
+		panic("cng attestation fixture layout changed")
+	}
+	return *(*cng.Attestation)(unsafe.Pointer(&value))
+}
+
+func mtlsAttestationFixture(facts mtlsCredentialFacts) wincert.Attestation {
+	type layout struct {
+		storeScope                  string
+		storeName                   string
+		certificateDERSHA256        [sha256.Size]byte
+		containerName               string
+		keyName                     string
+		keySecurityDescriptorSHA256 [sha256.Size]byte
+		keyIdentity                 cng.KeyIdentity
+		publicKeySPKISHA256         [sha256.Size]byte
+		validatedControlServiceSID  string
+		validatedExecutorServiceSID string
+		algorithm                   string
+		keyLengthBits               uint32
+		exportPolicy                uint32
+		keyUsage                    uint32
+		validated                   bool
+	}
+	value := layout{
+		storeScope: facts.storeScope, storeName: facts.storeName,
+		certificateDERSHA256: facts.certificateDER, containerName: facts.containerName,
+		keyName: facts.keyName, keySecurityDescriptorSHA256: facts.keySecurityDescriptor,
+		keyIdentity: facts.identity, publicKeySPKISHA256: facts.publicKeySPKI,
+		validatedControlServiceSID:  facts.validatedControlServiceSID,
+		validatedExecutorServiceSID: facts.validatedExecutorSID,
+		algorithm:                   facts.algorithm, keyLengthBits: facts.keyLengthBits,
+		exportPolicy: facts.exportPolicy, keyUsage: facts.keyUsage, validated: true,
+	}
+	if unsafe.Sizeof(value) != unsafe.Sizeof(wincert.Attestation{}) {
+		panic("wincert attestation fixture layout changed")
+	}
+	return *(*wincert.Attestation)(unsafe.Pointer(&value))
+}
+
+func identityFixture(role config.Role, control config.Config, executor config.Config) winidentity.Evidence {
+	current := control
+	peer := executor
+	if role == config.RoleExecutor {
+		current, peer = peer, current
+	}
+	return winidentity.Evidence{
+		ProcessID:   42,
+		OwnService:  winidentity.ServiceEvidence{Name: current.OwnService.Name, SID: current.OwnService.SID},
+		PeerService: winidentity.ServiceEvidence{Name: peer.OwnService.Name, SID: peer.OwnService.SID},
+		Token: winidentity.TokenEvidence{
+			User:   winidentity.SIDEntry{SID: current.OwnService.SID},
+			Groups: []winidentity.SIDEntry{{SID: current.OwnService.SID, Attributes: 4}},
+		},
 	}
 }
 
@@ -124,9 +238,9 @@ func productionManifestFixture() releasemanifest.Manifest {
 		manifestFixtureFile(releasemanifest.RootInstallation, `codex\runtime\codex-runtime.dll`, releasemanifest.RoleCodexRuntime, "d"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `git\mingw64\bin\libcurl.dll`, releasemanifest.RoleNativeLibrary, "e"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `git\mingw64\ssl\cert.pem`, releasemanifest.RoleCABundle, "f"),
-		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `server-root.cer`, releasemanifest.RoleCABundle, "0"),
-		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `local-authority.spki`, releasemanifest.RoleTrustedConfig, "1"),
-		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `codex-requirements.toml`, releasemanifest.RolePolicy, "2"),
+		manifestFixtureContentFile(releasemanifest.RootTrustedConfiguration, `server-root.cer`, releasemanifest.RoleCABundle, rootCAFixtureBytes()),
+		manifestFixtureContentFile(releasemanifest.RootTrustedConfiguration, `local-authority.spki`, releasemanifest.RoleTrustedConfig, localSPKIFixtureBytes()),
+		manifestFixtureContentFile(releasemanifest.RootTrustedConfiguration, `codex-requirements.toml`, releasemanifest.RolePolicy, codexPolicyFixtureBytes()),
 		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `pull-request-review-v1.md`, releasemanifest.RolePrompt, "3"),
 		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `schemas\review-result-v1.json`, releasemanifest.RoleSchema, "4"),
 		manifestFixtureFile(releasemanifest.RootTrustedConfiguration, `recipes\static-review-v1.toml`, releasemanifest.RoleRecipe, "5"),
@@ -151,6 +265,73 @@ func manifestFixtureFile(
 	digestByte string,
 ) releasemanifest.File {
 	return releasemanifest.File{Root: root, Path: path, Role: role, SHA256: strings.Repeat(digestByte, 64), Size: "1"}
+}
+
+func manifestFixtureContentFile(
+	root releasemanifest.FileRoot,
+	path string,
+	role releasemanifest.FileRole,
+	data []byte,
+) releasemanifest.File {
+	digest := sha256.Sum256(data)
+	return releasemanifest.File{
+		Root: root, Path: path, Role: role,
+		SHA256: hexDigest(digest), Size: strconv.FormatUint(uint64(len(data)), 10),
+	}
+}
+
+func rootCAFixtureBytes() []byte      { return []byte("test root certificate DER") }
+func localSPKIFixtureBytes() []byte   { return []byte("test local authority SPKI") }
+func codexPolicyFixtureBytes() []byte { return []byte("sandbox = \"elevated\"") }
+
+func runtimeContentFixtures(
+	t *testing.T,
+	role config.Role,
+	control config.Config,
+	executor config.Config,
+	files []VerifiedFile,
+) []VerifiedRuntimeContent {
+	t.Helper()
+	targets, err := runtimeContentTargetsFor(role, control, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make([]VerifiedRuntimeContent, 0, len(targets))
+	for _, target := range targets {
+		var data []byte
+		switch target.role {
+		case releasemanifest.RoleCABundle:
+			data = rootCAFixtureBytes()
+		case releasemanifest.RoleTrustedConfig:
+			data = localSPKIFixtureBytes()
+		case releasemanifest.RolePolicy:
+			data = codexPolicyFixtureBytes()
+		default:
+			t.Fatalf("unknown runtime content role %s", target.role)
+		}
+		relative, relativeErr := ManifestRelativePath(testTrustedRoot, target.path)
+		if relativeErr != nil {
+			t.Fatal(relativeErr)
+		}
+		var verified VerifiedFile
+		found := false
+		for _, file := range files {
+			if file.Root == releasemanifest.RootTrustedConfiguration && file.Path == relative {
+				verified = file
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("runtime content %s lacks verified file fixture", relative)
+		}
+		result = append(result, VerifiedRuntimeContent{
+			root: verified.Root, path: verified.Path, absolutePath: verified.AbsolutePath,
+			role: verified.Role, sha256: verified.SHA256, size: verified.Size,
+			object: cloneObject(verified.Object), data: append([]byte(nil), data...),
+		})
+	}
+	return result
 }
 
 func configurationFixtures(
@@ -372,16 +553,38 @@ func (f *objectFactory) object(path string, kind winfile.ObjectKind, size uint64
 }
 
 func (f *objectFactory) read(path string, data []byte) secureconfig.Result {
-	ancestors := ancestorPaths(path)
-	objects := make([]secureconfig.ObjectEvidence, len(ancestors))
-	for index, ancestor := range ancestors {
-		objects[index] = f.directory(ancestor)
-	}
+	objects := f.directoryAncestors(path)
 	bytes := append([]byte(nil), data...)
 	return secureconfig.Result{
 		Data: bytes, ContentSHA256: secureconfig.Digest(sha256.Sum256(bytes)),
 		File: f.file(path, uint64(len(bytes))), Ancestors: objects,
 	}
+}
+
+func (f *objectFactory) directoryAncestors(path string) []secureconfig.ObjectEvidence {
+	paths := ancestorPaths(path)
+	objects := make([]secureconfig.ObjectEvidence, len(paths))
+	for index, ancestor := range paths {
+		objects[index] = f.directory(ancestor)
+	}
+	return objects
+}
+
+func dataRootInstallationBindingsFixture(roots []VerifiedRoot) []dataRootInstallationBinding {
+	result := make([]dataRootInstallationBinding, len(roots))
+	for index, root := range roots {
+		binding := dataRootInstallationBinding{
+			root: root.Root, path: root.Path, target: root.Object.Evidence.Identity,
+			ancestorPaths: make([]string, len(root.Ancestors)),
+			ancestors:     make([]winfile.FileIdentity, len(root.Ancestors)),
+		}
+		for ancestorIndex, ancestor := range root.Ancestors {
+			binding.ancestorPaths[ancestorIndex] = ancestor.Path
+			binding.ancestors[ancestorIndex] = ancestor.Evidence.Identity
+		}
+		result[index] = binding
+	}
+	return result
 }
 
 func ancestorPaths(path string) []string {

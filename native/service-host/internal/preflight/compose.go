@@ -194,6 +194,19 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		return Evidence{}, err
 	}
 	bindings = append(bindings, profileBindings...)
+	if err := validateDataRootBinding(input.dataRoot, input.role, controlConfig, executorConfig, roots); err != nil {
+		return Evidence{}, err
+	}
+	contents, err := validateRuntimeContents(
+		input.role,
+		controlConfig,
+		executorConfig,
+		input.installation.contents,
+		bindings,
+	)
+	if err != nil {
+		return Evidence{}, err
+	}
 
 	if input.role == config.RoleControl {
 		if input.credentials == nil || !input.credentials.bound {
@@ -203,19 +216,30 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		return Evidence{}, preflightError(ErrorCredentialIdentity, "Executor snapshot contains Control credentials", nil)
 	}
 
-	return Evidence{
+	result := Evidence{
 		role:                input.role,
 		actualBootstrapPath: input.actualBootstrapPath,
 		control:             cloneConfigurationEvidence(controlEvidence),
 		executor:            cloneConfigurationEvidence(executorEvidence),
 		manifest:            cloneManifestEvidence(manifestEvidence),
+		identity:            cloneIdentityEvidence(input.installation.identity),
 		roots:               cloneRoots(roots),
 		files:               cloneFiles(files),
-		profile:             cloneProfile(input.releaseProfile),
+		profile:             canonicalReleaseProfile(input.releaseProfile.ID, manifestEvidence.Manifest),
 		bindings:            cloneBindings(bindings),
 		approvedSignerPin:   installationSigner,
 		controlCredentials:  cloneControlCredentials(input.credentials),
-	}, nil
+		dataRoot:            cloneDataRootBinding(input.dataRoot),
+		contents:            cloneRuntimeContents(contents),
+	}
+	result.digest, err = digestEvidence(result)
+	if err != nil {
+		return Evidence{}, preflightError(ErrorEvidence, "compute preflight evidence digest", err)
+	}
+	if err := result.Validate(); err != nil {
+		return Evidence{}, err
+	}
+	return result, nil
 }
 
 func parseConfigurationRead(label string, read secureconfig.Result) (config.Config, error) {
@@ -301,6 +325,9 @@ func validateRoots(
 		if err := validateObjectEvidence("verified root", root.Object, winfile.ObjectKindDirectory, nil); err != nil {
 			return nil, nil, preflightError(ErrorInstallation, "verified root object is invalid", err)
 		}
+		if err := validateVerifiedRootAncestors(root); err != nil {
+			return nil, nil, preflightError(ErrorInstallation, "verified root ancestor chain is invalid", err)
+		}
 		indexed[root.Root] = root
 	}
 	installation, installationExists := indexed[releasemanifest.RootInstallation]
@@ -318,6 +345,31 @@ func validateRoots(
 		}
 	}
 	return result, indexed, nil
+}
+
+func validateVerifiedRootAncestors(root VerifiedRoot) error {
+	if len(root.Ancestors) == 0 {
+		return fmt.Errorf("verified root has no ancestor evidence")
+	}
+	seen := make(map[fileIdentity]string, len(root.Ancestors)+1)
+	for index, ancestor := range root.Ancestors {
+		if err := validateObjectEvidence("verified root ancestor", ancestor, winfile.ObjectKindDirectory, nil); err != nil {
+			return err
+		}
+		if ancestor.Evidence.Identity.VolumeSerialNumber != root.Object.Evidence.Identity.VolumeSerialNumber {
+			return fmt.Errorf("verified root and ancestors use different volume identities")
+		}
+		if index > 0 && !isDirectWindowsChild(root.Ancestors[index-1].Path, ancestor.Path) {
+			return fmt.Errorf("verified root ancestor chain is not component-relative")
+		}
+		if err := registerFileIdentity(seen, "verified root ancestor", ancestor); err != nil {
+			return err
+		}
+	}
+	if !isDirectWindowsChild(root.Ancestors[len(root.Ancestors)-1].Path, root.Path) {
+		return fmt.Errorf("verified root is not a direct child of its retained parent")
+	}
+	return registerFileIdentity(seen, "verified root", root.Object)
 }
 
 func bindBootstrap(

@@ -61,3 +61,13 @@ func bindReleaseProfile(
 	}
 	return result, nil
 }
+
+func canonicalReleaseProfile(id string, manifest releasemanifest.Manifest) ReleaseProfile {
+	dependencies := make([]releasemanifest.FileBindingRequirement, len(manifest.Files))
+	for index, file := range manifest.Files {
+		dependencies[index] = releasemanifest.FileBindingRequirement{
+			Root: file.Root, Path: file.Path, Role: file.Role, SHA256: file.SHA256,
+		}
+	}
+	return ReleaseProfile{ID: id, Dependencies: dependencies}
+}

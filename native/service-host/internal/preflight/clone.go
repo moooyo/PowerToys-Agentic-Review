@@ -4,6 +4,8 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 func cloneConfig(value config.Config) config.Config {
@@ -23,6 +25,13 @@ func cloneConfig(value config.Config) config.Config {
 		result.Executor = &executor
 	}
 	return result
+}
+
+func cloneIdentityEvidence(value winidentity.Evidence) winidentity.Evidence {
+	value.Token.Groups = append([]winidentity.SIDEntry(nil), value.Token.Groups...)
+	value.Token.RestrictedSIDs = append([]winidentity.SIDEntry(nil), value.Token.RestrictedSIDs...)
+	value.Token.Privileges = append([]winidentity.PrivilegeEvidence(nil), value.Token.Privileges...)
+	return value
 }
 
 func cloneObject(value secureconfig.ObjectEvidence) secureconfig.ObjectEvidence {
@@ -50,6 +59,11 @@ func cloneManifest(value releasemanifest.Manifest) releasemanifest.Manifest {
 }
 
 func cloneRoot(value VerifiedRoot) VerifiedRoot {
+	ancestors := value.Ancestors
+	value.Ancestors = make([]secureconfig.ObjectEvidence, len(ancestors))
+	for index, ancestor := range ancestors {
+		value.Ancestors[index] = cloneObject(ancestor)
+	}
 	value.Object = cloneObject(value.Object)
 	return value
 }
@@ -110,4 +124,29 @@ func cloneControlCredentials(value *ControlCredentialEvidence) *ControlCredentia
 	}
 	copy := *value
 	return &copy
+}
+
+func cloneDataRootBinding(value DataRootBinding) DataRootBinding {
+	roots := value.installationRoots
+	value.installationRoots = make([]dataRootInstallationBinding, len(roots))
+	for index, root := range roots {
+		root.ancestorPaths = append([]string(nil), root.ancestorPaths...)
+		root.ancestors = append([]winfile.FileIdentity(nil), root.ancestors...)
+		value.installationRoots[index] = root
+	}
+	return value
+}
+
+func cloneRuntimeContent(value VerifiedRuntimeContent) VerifiedRuntimeContent {
+	value.object = cloneObject(value.object)
+	value.data = append([]byte(nil), value.data...)
+	return value
+}
+
+func cloneRuntimeContents(values []VerifiedRuntimeContent) []VerifiedRuntimeContent {
+	result := make([]VerifiedRuntimeContent, len(values))
+	for index, value := range values {
+		result[index] = cloneRuntimeContent(value)
+	}
+	return result
 }

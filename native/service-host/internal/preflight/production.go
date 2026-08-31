@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"reflect"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 )
 
@@ -22,6 +25,15 @@ func Compose(input Input) (Evidence, error) {
 		!windowsPathEqual(input.ActualBootstrapPath, installation.actualBootstrapPath) {
 		return Evidence{}, preflightError(ErrorInput, "preflight selectors do not match installation evidence", nil)
 	}
+	dataRoot, err := captureDataRootBinding(input.DataRoot, installation)
+	if err != nil {
+		return Evidence{}, err
+	}
+	contents, err := captureRuntimeContents(input.Installation, installation)
+	if err != nil {
+		return Evidence{}, err
+	}
+	installation.contents = cloneRuntimeContents(contents)
 	credentials, err := bindRoleCredentials(
 		input.Role,
 		installation.controlConfig,
@@ -37,6 +49,7 @@ func Compose(input Input) (Evidence, error) {
 		installation:        installation,
 		releaseProfile:      cloneProfile(input.ReleaseProfile),
 		credentials:         credentials,
+		dataRoot:            dataRoot,
 	})
 }
 
@@ -45,7 +58,7 @@ func captureInstallationSnapshot(evidence installverify.Evidence) *installationS
 	rootSnapshots := make([]VerifiedRoot, len(roots))
 	for index, root := range roots {
 		rootSnapshots[index] = VerifiedRoot{
-			Root: root.Root(), Path: root.Path(), Object: root.Object(),
+			Root: root.Root(), Path: root.Path(), Ancestors: root.Ancestors(), Object: root.Object(),
 		}
 	}
 	files := evidence.Files()
@@ -65,10 +78,146 @@ func captureInstallationSnapshot(evidence installverify.Evidence) *installationS
 		executorConfig:      evidence.ExecutorConfiguration(),
 		manifestRead:        evidence.ManifestRead(),
 		manifest:            evidence.Manifest(),
+		identity:            evidence.Identity(),
 		roots:               rootSnapshots,
 		files:               fileSnapshots,
 		approvedSignerPin:   evidence.ApprovedSignerCertificateDERSHA256(),
 	}
+}
+
+func captureDataRootBinding(
+	evidence dataroot.Evidence,
+	installation *installationSnapshot,
+) (DataRootBinding, error) {
+	if err := evidence.Validate(); err != nil {
+		return DataRootBinding{}, preflightError(ErrorDataRoot, "data-root evidence is zero, closed, or invalid", err)
+	}
+	digest, err := evidence.Digest()
+	if err != nil || digest == ([32]byte{}) {
+		return DataRootBinding{}, preflightError(ErrorDataRoot, "data-root evidence digest is unavailable", err)
+	}
+	return validateDataRootFacts(dataRootFacts{
+		role: evidence.Role(), current: evidence.CurrentConfiguration(), peer: evidence.PeerConfiguration(),
+		currentPath: evidence.DataRoot().Path(), peerPath: evidence.PeerDataRootPath(),
+		peerObservation:   evidence.PeerRootObservation(),
+		installationRoots: captureDataRootInstallationBindings(evidence.InstallationRoots()),
+		digest:            digest,
+	}, installation)
+}
+
+type dataRootFacts struct {
+	role              config.Role
+	current           config.Config
+	peer              config.Config
+	currentPath       string
+	peerPath          string
+	peerObservation   dataroot.PeerRootObservation
+	installationRoots []dataRootInstallationBinding
+	digest            [32]byte
+}
+
+func validateDataRootFacts(facts dataRootFacts, installation *installationSnapshot) (DataRootBinding, error) {
+	role := facts.role
+	current := facts.current
+	peer := facts.peer
+	expectedCurrent := installation.controlConfig
+	expectedPeer := installation.executorConfig
+	if role == config.RoleExecutor {
+		expectedCurrent, expectedPeer = expectedPeer, expectedCurrent
+	}
+	if facts.digest == ([32]byte{}) || role != installation.role || !reflect.DeepEqual(current, expectedCurrent) ||
+		!reflect.DeepEqual(peer, expectedPeer) {
+		return DataRootBinding{}, preflightError(ErrorDataRoot, "data-root role or configurations differ from installation evidence", nil)
+	}
+	if facts.peerObservation != dataroot.PeerLiveRootNotObservedByDesign ||
+		facts.currentPath != current.Node.DataRoot || facts.peerPath != peer.Node.DataRoot {
+		return DataRootBinding{}, preflightError(ErrorDataRoot, "data-root observation semantics or paths are invalid", nil)
+	}
+	if err := validateDataRootInstallationBindings(facts.installationRoots, installation.roots); err != nil {
+		return DataRootBinding{}, err
+	}
+	return cloneDataRootBinding(DataRootBinding{
+		role: role, currentPath: current.Node.DataRoot, peerPath: peer.Node.DataRoot,
+		peerObservation:   dataroot.PeerLiveRootNotObservedByDesign,
+		installationRoots: facts.installationRoots,
+		digest:            facts.digest, bound: true,
+	}), nil
+}
+
+func captureDataRootInstallationBindings(
+	values []dataroot.InstallationRootBinding,
+) []dataRootInstallationBinding {
+	result := make([]dataRootInstallationBinding, len(values))
+	for index, value := range values {
+		result[index] = dataRootInstallationBinding{
+			root: value.Root(), path: value.Path(), ancestorPaths: value.AncestorPaths(),
+			ancestors: value.Ancestors(), target: value.Target(),
+		}
+	}
+	return result
+}
+
+func validateDataRootInstallationBindings(
+	observed []dataRootInstallationBinding,
+	expected []VerifiedRoot,
+) error {
+	if len(observed) != len(expected) || len(expected) != 2 {
+		return preflightError(ErrorDataRoot, "data-root installation-root binding count is invalid", nil)
+	}
+	for index, root := range expected {
+		binding := observed[index]
+		if binding.root != root.Root || binding.path != root.Path ||
+			binding.target != root.Object.Evidence.Identity ||
+			len(binding.ancestorPaths) != len(root.Ancestors) ||
+			len(binding.ancestors) != len(root.Ancestors) {
+			return preflightError(ErrorDataRoot, "data-root installation-root target differs from installation evidence", nil)
+		}
+		for ancestorIndex, ancestor := range root.Ancestors {
+			if binding.ancestorPaths[ancestorIndex] != ancestor.Path ||
+				binding.ancestors[ancestorIndex] != ancestor.Evidence.Identity {
+				return preflightError(ErrorDataRoot, "data-root installation-root ancestor chain differs from installation evidence", nil)
+			}
+		}
+	}
+	return nil
+}
+
+type runtimeContentTarget struct {
+	path   string
+	role   releasemanifest.FileRole
+	sha256 string
+}
+
+func captureRuntimeContents(
+	evidence installverify.Evidence,
+	installation *installationSnapshot,
+) ([]VerifiedRuntimeContent, error) {
+	targets, err := runtimeContentTargetsFor(
+		installation.role,
+		installation.controlConfig,
+		installation.executorConfig,
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]VerifiedRuntimeContent, 0, len(targets))
+	trustedRoot := installation.controlConfig.Installation.TrustedConfigurationRoot
+	for _, target := range targets {
+		relative, err := ManifestRelativePath(trustedRoot, target.path)
+		if err != nil {
+			return nil, preflightError(ErrorRuntimeContent, "runtime content path is outside the trusted root", err)
+		}
+		content, err := evidence.VerifiedContent(releasemanifest.RootTrustedConfiguration, relative)
+		if err != nil || content.Validate() != nil {
+			return nil, preflightError(ErrorRuntimeContent, "required opaque runtime content is unavailable", err)
+		}
+		result = append(result, VerifiedRuntimeContent{
+			root: content.Root(), path: content.Path(), absolutePath: content.AbsolutePath(),
+			role: content.Role(), sha256: content.SHA256(), size: content.Size(),
+			object: content.Object(), data: content.Bytes(),
+		})
+	}
+	return result, nil
 }
 
 // BindControlCredentials obtains atomic attestations from the concrete live
@@ -101,17 +250,18 @@ func BindControlCredentials(
 	if err != nil {
 		return ControlCredentialEvidence{}, preflightError(ErrorCredentialIdentity, "read mTLS attestation", err)
 	}
-	if err := validateControlCredentialFacts(
-		configuration,
-		localCredentialFactsFrom(localAttestation),
-		mtlsCredentialFactsFrom(mtlsAttestation),
-	); err != nil {
+	localFacts := localCredentialFactsFrom(localAttestation)
+	mtlsFacts := mtlsCredentialFactsFrom(mtlsAttestation)
+	if err := validateControlCredentialFacts(configuration, localFacts, mtlsFacts); err != nil {
 		return ControlCredentialEvidence{}, err
 	}
 	return ControlCredentialEvidence{
 		localAuthority: localAttestation,
 		mtls:           mtlsAttestation,
+		localFacts:     localFacts,
+		mtlsFacts:      mtlsFacts,
 		bound:          true,
+		attested:       true,
 	}, nil
 }
 
@@ -145,6 +295,10 @@ type localCredentialFacts struct {
 	publicKeySPKI              [sha256.Size]byte
 	validatedControlServiceSID string
 	validatedExecutorSID       string
+	algorithm                  string
+	keyLengthBits              uint32
+	exportPolicy               uint32
+	keyUsage                   uint32
 }
 
 type mtlsCredentialFacts struct {
@@ -156,6 +310,12 @@ type mtlsCredentialFacts struct {
 	publicKeySPKI              [sha256.Size]byte
 	validatedControlServiceSID string
 	validatedExecutorSID       string
+	containerName              string
+	keyName                    string
+	algorithm                  string
+	keyLengthBits              uint32
+	exportPolicy               uint32
+	keyUsage                   uint32
 }
 
 func localCredentialFactsFrom(attestation cng.Attestation) localCredentialFacts {
@@ -166,6 +326,10 @@ func localCredentialFactsFrom(attestation cng.Attestation) localCredentialFacts 
 		publicKeySPKI:              attestation.PublicKeySPKISHA256(),
 		validatedControlServiceSID: attestation.ValidatedControlServiceSID(),
 		validatedExecutorSID:       attestation.ValidatedExecutorServiceSID(),
+		algorithm:                  attestation.Algorithm(),
+		keyLengthBits:              attestation.KeyLengthBits(),
+		exportPolicy:               attestation.ExportPolicy(),
+		keyUsage:                   attestation.KeyUsage(),
 	}
 }
 
@@ -179,6 +343,12 @@ func mtlsCredentialFactsFrom(attestation wincert.Attestation) mtlsCredentialFact
 		publicKeySPKI:              attestation.PublicKeySPKISHA256(),
 		validatedControlServiceSID: attestation.ValidatedControlServiceSID(),
 		validatedExecutorSID:       attestation.ValidatedExecutorServiceSID(),
+		containerName:              attestation.ContainerName(),
+		keyName:                    attestation.KeyName(),
+		algorithm:                  attestation.Algorithm(),
+		keyLengthBits:              attestation.KeyLengthBits(),
+		exportPolicy:               attestation.ExportPolicy(),
+		keyUsage:                   attestation.KeyUsage(),
 	}
 }
 
@@ -216,6 +386,11 @@ func validateControlCredentialFacts(
 	}
 	if !validCredentialIdentity(local.identity) || !validCredentialIdentity(mtls.identity) {
 		return preflightError(ErrorCredentialIdentity, "credential attestation contains an invalid key identity", nil)
+	}
+	if local.algorithm != "ECDSA_P256" || local.keyLengthBits != 256 || local.exportPolicy != 0 || local.keyUsage != 2 ||
+		mtls.containerName == "" || mtls.keyName != mtls.containerName || mtls.algorithm != "ECDSA_P256" ||
+		mtls.keyLengthBits != 256 || mtls.exportPolicy != 0 || mtls.keyUsage != 2 {
+		return preflightError(ErrorCredentialIdentity, "credential attestation key properties are invalid", nil)
 	}
 	if local.identity == mtls.identity {
 		return preflightError(ErrorCredentialIdentity, "mTLS and local-authority keys reuse one CNG identity", nil)

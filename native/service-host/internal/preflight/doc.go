@@ -9,8 +9,9 @@
 //
 // Lexical path validation rejects tilde-bearing DOS short-name forms as an
 // early defense. That check is not filesystem isolation evidence: custom short
-// names need not contain a tilde. Final data-root separation must come from a
-// dedicated verifier that compares retained-handle ancestor and File ID facts.
-// Platform orchestration must therefore remain disabled until that data-root
-// evidence is part of this composition contract.
+// names need not contain a tilde. Final data-root separation comes from the
+// dedicated verifier's retained-handle ancestor and File ID facts. Compose
+// binds that verifier's digest and installation-root identities without
+// consuming its handles. FinalizeRuntimePlan is the only plan-producing API;
+// it rechecks and closes the shared data-root evidence before returning.
 package preflight

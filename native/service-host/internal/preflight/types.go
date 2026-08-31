@@ -1,12 +1,17 @@
 package preflight
 
 import (
+	"errors"
+
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 const (
@@ -27,7 +32,12 @@ const (
 	ErrorReleaseProfile     ErrorCode = "PREFLIGHT_RELEASE_PROFILE_INVALID"
 	ErrorCompatibility      ErrorCode = "PREFLIGHT_COMPATIBILITY_MISMATCH"
 	ErrorCredentialIdentity ErrorCode = "PREFLIGHT_CREDENTIAL_IDENTITY_MISMATCH"
+	ErrorDataRoot           ErrorCode = "PREFLIGHT_DATA_ROOT_MISMATCH"
+	ErrorRuntimeContent     ErrorCode = "PREFLIGHT_RUNTIME_CONTENT_MISMATCH"
+	ErrorEvidence           ErrorCode = "PREFLIGHT_EVIDENCE_INVALID"
 )
+
+var ErrInvalidEvidence = errors.New("preflight evidence is invalid")
 
 type Error struct {
 	Code    ErrorCode
@@ -41,9 +51,10 @@ func (e *Error) Unwrap() error { return e.Cause }
 // VerifiedRoot is a detached root snapshot supplied by an installation
 // verifier. Object must describe the root directory itself.
 type VerifiedRoot struct {
-	Root   releasemanifest.FileRoot
-	Path   string
-	Object secureconfig.ObjectEvidence
+	Root      releasemanifest.FileRoot
+	Path      string
+	Ancestors []secureconfig.ObjectEvidence
+	Object    secureconfig.ObjectEvidence
 }
 
 // VerifiedFile is a detached stable-file result supplied by an installation
@@ -66,12 +77,14 @@ type ReleaseProfile struct {
 	Dependencies []releasemanifest.FileBindingRequirement
 }
 
-// Input accepts only the opaque installation verifier result and concrete live
-// credential objects. Executor must leave both credential pointers nil.
+// Input accepts opaque installation and retained data-root verifier results
+// plus concrete live credential objects. Executor must leave both credential
+// pointers nil.
 type Input struct {
 	Role                 config.Role
 	ActualBootstrapPath  string
 	Installation         installverify.Evidence
+	DataRoot             dataroot.Evidence
 	ReleaseProfile       ReleaseProfile
 	LocalAuthoritySigner *cng.Signer
 	MTLSCredential       *wincert.Credential
@@ -83,7 +96,10 @@ type Input struct {
 type ControlCredentialEvidence struct {
 	localAuthority cng.Attestation
 	mtls           wincert.Attestation
+	localFacts     localCredentialFacts
+	mtlsFacts      mtlsCredentialFacts
 	bound          bool
+	attested       bool
 }
 
 func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
@@ -91,6 +107,58 @@ func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
 }
 
 func (e ControlCredentialEvidence) MTLSAttestation() wincert.Attestation { return e.mtls }
+
+// DataRootBinding retains only detached role, installation-root identity, and
+// digest facts. It deliberately contains no dataroot Evidence or native handle.
+type DataRootBinding struct {
+	role              config.Role
+	currentPath       string
+	peerPath          string
+	peerObservation   dataroot.PeerRootObservation
+	installationRoots []dataRootInstallationBinding
+	digest            [32]byte
+	bound             bool
+}
+
+type dataRootInstallationBinding struct {
+	root          releasemanifest.FileRoot
+	path          string
+	ancestorPaths []string
+	ancestors     []winfile.FileIdentity
+	target        winfile.FileIdentity
+}
+
+func (binding DataRootBinding) Role() config.Role   { return binding.role }
+func (binding DataRootBinding) CurrentPath() string { return binding.currentPath }
+func (binding DataRootBinding) PeerPath() string    { return binding.peerPath }
+func (binding DataRootBinding) PeerObservation() dataroot.PeerRootObservation {
+	return binding.peerObservation
+}
+func (binding DataRootBinding) Digest() [32]byte { return binding.digest }
+
+// VerifiedRuntimeContent is a copy-only runtime trust input captured by the
+// installation verifier from the same retained handle as its file binding.
+type VerifiedRuntimeContent struct {
+	root         releasemanifest.FileRoot
+	path         string
+	absolutePath string
+	role         releasemanifest.FileRole
+	sha256       string
+	size         uint64
+	object       secureconfig.ObjectEvidence
+	data         []byte
+}
+
+func (content VerifiedRuntimeContent) Root() releasemanifest.FileRoot { return content.root }
+func (content VerifiedRuntimeContent) Path() string                   { return content.path }
+func (content VerifiedRuntimeContent) AbsolutePath() string           { return content.absolutePath }
+func (content VerifiedRuntimeContent) Role() releasemanifest.FileRole { return content.role }
+func (content VerifiedRuntimeContent) SHA256() string                 { return content.sha256 }
+func (content VerifiedRuntimeContent) Size() uint64                   { return content.size }
+func (content VerifiedRuntimeContent) Object() secureconfig.ObjectEvidence {
+	return cloneObject(content.object)
+}
+func (content VerifiedRuntimeContent) Bytes() []byte { return append([]byte(nil), content.data...) }
 
 type installationSnapshot struct {
 	role                config.Role
@@ -101,8 +169,10 @@ type installationSnapshot struct {
 	executorConfig      config.Config
 	manifestRead        secureconfig.Result
 	manifest            releasemanifest.Manifest
+	identity            winidentity.Evidence
 	roots               []VerifiedRoot
 	files               []VerifiedFile
+	contents            []VerifiedRuntimeContent
 	approvedSignerPin   string
 }
 
@@ -112,6 +182,7 @@ type snapshotInput struct {
 	installation        *installationSnapshot
 	releaseProfile      ReleaseProfile
 	credentials         *ControlCredentialEvidence
+	dataRoot            DataRootBinding
 }
 
 // ConfigurationEvidence binds parsed canonical configuration to the exact
@@ -145,12 +216,16 @@ type Evidence struct {
 	control             ConfigurationEvidence
 	executor            ConfigurationEvidence
 	manifest            ManifestEvidence
+	identity            winidentity.Evidence
 	roots               []VerifiedRoot
 	files               []VerifiedFile
 	profile             ReleaseProfile
 	bindings            []FileBindingEvidence
 	approvedSignerPin   string
 	controlCredentials  *ControlCredentialEvidence
+	dataRoot            DataRootBinding
+	contents            []VerifiedRuntimeContent
+	digest              [32]byte
 }
 
 func (e Evidence) Role() config.Role { return e.role }
@@ -174,6 +249,8 @@ func (e Evidence) ExecutorConfiguration() ConfigurationEvidence {
 
 func (e Evidence) Manifest() ManifestEvidence { return cloneManifestEvidence(e.manifest) }
 
+func (e Evidence) Identity() winidentity.Evidence { return cloneIdentityEvidence(e.identity) }
+
 func (e Evidence) Roots() []VerifiedRoot { return cloneRoots(e.roots) }
 
 func (e Evidence) Files() []VerifiedFile { return cloneFiles(e.files) }
@@ -189,6 +266,56 @@ func (e Evidence) ControlCredentials() (ControlCredentialEvidence, bool) {
 		return ControlCredentialEvidence{}, false
 	}
 	return *e.controlCredentials, true
+}
+
+func (e Evidence) DataRootBinding() (DataRootBinding, bool) {
+	if !e.dataRoot.bound {
+		return DataRootBinding{}, false
+	}
+	return cloneDataRootBinding(e.dataRoot), true
+}
+
+func (e Evidence) RuntimeContents() []VerifiedRuntimeContent {
+	return cloneRuntimeContents(e.contents)
+}
+
+// PinnedRuntimeFile contains one immutable path and digest selected for launch.
+type PinnedRuntimeFile struct {
+	path   string
+	sha256 string
+}
+
+func (file PinnedRuntimeFile) Path() string   { return file.path }
+func (file PinnedRuntimeFile) SHA256() string { return file.sha256 }
+
+// RuntimePlan is the copy-only, role-local output consumed after data-root
+// final reinspection and closure. It contains no credential or native handle.
+type RuntimePlan struct {
+	role            config.Role
+	configuration   config.Config
+	preflightDigest [32]byte
+	dataRootDigest  [32]byte
+	node            PinnedRuntimeFile
+	bundle          PinnedRuntimeFile
+	processHost     *PinnedRuntimeFile
+	runtimeContents []VerifiedRuntimeContent
+	valid           bool
+}
+
+func (plan RuntimePlan) Role() config.Role            { return plan.role }
+func (plan RuntimePlan) Configuration() config.Config { return cloneConfig(plan.configuration) }
+func (plan RuntimePlan) PreflightDigest() [32]byte    { return plan.preflightDigest }
+func (plan RuntimePlan) DataRootDigest() [32]byte     { return plan.dataRootDigest }
+func (plan RuntimePlan) Node() PinnedRuntimeFile      { return plan.node }
+func (plan RuntimePlan) Bundle() PinnedRuntimeFile    { return plan.bundle }
+func (plan RuntimePlan) ProcessHost() (PinnedRuntimeFile, bool) {
+	if plan.processHost == nil {
+		return PinnedRuntimeFile{}, false
+	}
+	return *plan.processHost, true
+}
+func (plan RuntimePlan) RuntimeContents() []VerifiedRuntimeContent {
+	return cloneRuntimeContents(plan.runtimeContents)
 }
 
 func preflightError(code ErrorCode, message string, cause error) error {
