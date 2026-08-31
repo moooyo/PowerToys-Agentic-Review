@@ -54,9 +54,9 @@ func waitForNoActiveProcesses(
 	}
 }
 
-// drainThenCloseJob preserves the lifetime handle when drain fails. The
-// caller can retry termination, while a later fatal Close may still close the
-// handle to enforce KILL_ON_JOB_CLOSE.
+// drainThenCloseJob preserves the lifetime handle when drain fails. Callers
+// retry the non-consuming termination/drain operation and never close the Job
+// or process handle until zero active processes has been proved.
 func drainThenCloseJob(drain func() error, closeJob func() error) error {
 	if drain == nil || closeJob == nil {
 		return errors.New("Job drain and close operations are required")
@@ -113,11 +113,9 @@ func (w *stableWrapper) Wait(ctx context.Context) error {
 }
 func (w *stableWrapper) Close() error { return w.process.Close() }
 
-const rejectedWrapperCloseAttempts = 3
-
-// openStableWrapper may return a non-nil watcher together with an error only
-// when every rejected-handle close attempt failed. That watcher is a cleanup
-// owner, not verified evidence, and callers must retry Close until it succeeds.
+// openStableWrapper consumes a rejected process owner exactly once. Concrete
+// Windows handles quarantine an unresolved close until process exit; callers
+// must never retry a raw numeric handle after Close reports an error.
 func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) (watcher WrapperWatcher, err error) {
 	if source == nil || opener == nil {
 		return nil, errors.New("SCM status source and process opener are required")
@@ -137,11 +135,8 @@ func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) 
 	keep := false
 	defer func() {
 		if !keep {
-			closed, closeErr := closeRejectedWrapper(process)
+			_, closeErr := closeRejectedWrapper(process)
 			err = errors.Join(err, closeErr)
-			if !closed {
-				watcher = &stableWrapper{process: process}
-			}
 		}
 	}()
 
@@ -190,15 +185,10 @@ func closeRejectedWrapper(resource interface{ Close() error }) (bool, error) {
 	if resource == nil {
 		return true, nil
 	}
-	var failures []error
-	for attempt := 1; attempt <= rejectedWrapperCloseAttempts; attempt++ {
-		if err := resource.Close(); err != nil {
-			failures = append(failures, fmt.Errorf("close rejected WinSW wrapper attempt %d: %w", attempt, err))
-			continue
-		}
-		return true, errors.Join(failures...)
+	if err := resource.Close(); err != nil {
+		return true, fmt.Errorf("consume rejected WinSW wrapper: %w", err)
 	}
-	return false, errors.Join(failures...)
+	return true, nil
 }
 
 func validateStableServiceStatus(status serviceProcessStatus) error {

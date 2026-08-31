@@ -3,7 +3,6 @@ package winprocess
 import (
 	"context"
 	"errors"
-	"io"
 	"time"
 )
 
@@ -45,8 +44,8 @@ type NodeIdentity struct {
 	StartKeySequenceNumber uint64
 }
 
-// NodeProcess owns the Node process handle, the service-root Job Object, and
-// the parent ends of the three standard-I/O pipes.
+// NodeProcess owns the Node process handle, the service-root Job Object, and,
+// until TakeStandardIO succeeds, the parent ends of the standard-I/O pipes.
 type NodeProcess interface {
 	ProcessID() uint32
 	StableIdentity() NodeIdentity
@@ -59,16 +58,22 @@ type NodeProcess interface {
 	// launch-time value of one to the reviewed final limit. It succeeds only
 	// once, after proving Node has not created any child process.
 	ActivateAfterHostControl() error
-	StandardInput() io.WriteCloser
-	StandardOutput() io.ReadCloser
-	StandardError() io.ReadCloser
+	// TakeStandardIO atomically transfers the three parent pipe ends to one
+	// explicit owner. It succeeds exactly once and never after shutdown starts.
+	// The caller must close the returned owner; NodeProcess never closes streams
+	// after transferring them.
+	TakeStandardIO() (*NodeStandardIO, error)
 	// Wait returns successfully only after Node has exited and the root Job
 	// reports no active processes. If Job drain fails, Wait returns the error
-	// while retaining the Job handle for a later Terminate retry or fatal Close.
+	// while retaining the Job handle for a later Terminate or Close retry.
 	Wait() (uint32, error)
 	// Terminate terminates the whole root Job and waits for zero active
-	// processes, bounded by NodeLaunchSpec.ShutdownTimeout.
+	// processes, bounded by NodeLaunchSpec.ShutdownTimeout. It also seals and
+	// closes standard I/O that has not been transferred.
 	Terminate() error
+	// Close seals all remaining ownership and abortively releases standard I/O.
+	// A raw-handle close is attempted once; failure poisons the host and requires
+	// process exit rather than retrying a potentially reused numeric handle.
 	Close() error
 }
 
@@ -78,6 +83,8 @@ type WrapperWatcher interface {
 	CreationTime() time.Time
 	// Wait returns nil only when the retained wrapper process handle signals.
 	Wait(context.Context) error
+	// Close consumes the retained raw handle once. Any close failure is fatal
+	// for the host process and must never be retried against the numeric value.
 	Close() error
 }
 

@@ -21,8 +21,8 @@ const (
 
 // OpenWrapperWatcher opens and verifies a stable handle to a local WinSW
 // service wrapper using only SCM status and limited process-query rights. A
-// non-nil watcher returned with an error is a cleanup owner only; its Close
-// method must be retried until it succeeds.
+// A rejected raw handle is consumed once; unresolved ownership is quarantined
+// until ServiceHost exits and is never returned as a retryable numeric handle.
 func OpenWrapperWatcher(serviceName string) (watcher WrapperWatcher, err error) {
 	if serviceName == "" || strings.ContainsRune(serviceName, '\x00') {
 		return nil, errors.New("WinSW service name must be non-empty and contain no NUL")
@@ -32,18 +32,21 @@ func OpenWrapperWatcher(serviceName string) (watcher WrapperWatcher, err error) 
 		return nil, fmt.Errorf("encode WinSW service name: %w", err)
 	}
 
-	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
-	if err != nil {
+	manager, openManagerErr := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err := validateOpenedWrapperHandle("Service Control Manager", manager, openManagerErr); err != nil {
 		return nil, fmt.Errorf("open local Service Control Manager: %w", err)
 	}
-	service, err := windows.OpenService(manager, serviceNameUTF16, windows.SERVICE_QUERY_STATUS)
-	if err != nil {
-		_ = windows.CloseServiceHandle(manager)
-		return nil, fmt.Errorf("open WinSW service for status query: %w", err)
+	service, openServiceErr := windows.OpenService(manager, serviceNameUTF16, windows.SERVICE_QUERY_STATUS)
+	if err := validateOpenedWrapperHandle("WinSW service status", service, openServiceErr); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("open WinSW service for status query: %w", err),
+			closeServiceHandle(manager, "close rejected Service Control Manager handle"),
+		)
 	}
 
+	statusSource := &scmServiceStatusSource{service: &service}
 	watcher, openErr := openStableWrapper(
-		scmServiceStatusSource{service: service},
+		statusSource,
 		windowsWrapperProcessOpener{},
 	)
 	closeErr := errors.Join(
@@ -54,29 +57,45 @@ func OpenWrapperWatcher(serviceName string) (watcher WrapperWatcher, err error) 
 		return watcher, errors.Join(openErr, closeErr)
 	}
 	if closeErr != nil {
-		closed, watcherCloseErr := closeRejectedWrapper(watcher)
-		if !closed {
-			return watcher, errors.Join(closeErr, watcherCloseErr)
-		}
+		_, watcherCloseErr := closeRejectedWrapper(watcher)
 		return nil, errors.Join(closeErr, watcherCloseErr)
 	}
 	return watcher, nil
 }
 
 type scmServiceStatusSource struct {
-	service windows.Handle
+	mu         sync.Mutex
+	service    *windows.Handle
+	poisonedBy error
 }
 
-func (s scmServiceStatusSource) Status() (serviceProcessStatus, error) {
+func (s *scmServiceStatusSource) Status() (serviceProcessStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.poisonedBy != nil {
+		return serviceProcessStatus{}, s.poisonedBy
+	}
+	if s.service == nil || *s.service == 0 {
+		return serviceProcessStatus{}, errors.New("WinSW service status handle is closed")
+	}
+	service := *s.service
 	status := windows.SERVICE_STATUS_PROCESS{}
 	var bytesNeeded uint32
 	if err := windows.QueryServiceStatusEx(
-		s.service,
+		service,
 		windows.SC_STATUS_PROCESS_INFO,
 		(*byte)(unsafe.Pointer(&status)),
 		uint32(unsafe.Sizeof(status)),
 		&bytesNeeded,
 	); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			*s.service = 0
+			s.poisonedBy = windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "WinSW service status handle", value: service},
+				fmt.Errorf("query WinSW service status: %w", err),
+			)
+			return serviceProcessStatus{}, s.poisonedBy
+		}
 		return serviceProcessStatus{}, err
 	}
 	return serviceProcessStatus{
@@ -93,36 +112,48 @@ func (windowsWrapperProcessOpener) Open(processID uint32) (wrapperProcessHandle,
 		false,
 		processID,
 	)
-	if err != nil {
+	if err := validateOpenedWrapperHandle("WinSW wrapper process", process, err); err != nil {
 		return nil, err
 	}
-	return &windowsWrapperProcess{process: process}, nil
+	return &windowsWrapperProcess{
+		process:    process,
+		quarantine: windowsProcessLifetimeQuarantine,
+	}, nil
 }
 
 type windowsWrapperProcess struct {
 	mu          sync.Mutex
 	process     windows.Handle
+	poisonedBy  error
+	quarantine  *processLifetimeQuarantine
 	closeHandle func(windows.Handle) error
 }
 
 func (p *windowsWrapperProcess) QueryProcessID() (uint32, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.poisonedBy != nil {
+		return 0, p.poisonedBy
+	}
 	if p.process == 0 {
 		return 0, errors.New("retained WinSW wrapper process handle is closed")
 	}
-	return windows.GetProcessId(p.process)
+	processID, err := windows.GetProcessId(p.process)
+	return processID, p.poisonInvalidHandleLocked("read retained WinSW wrapper process ID", err)
 }
 
 func (p *windowsWrapperProcess) StillActive() (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.poisonedBy != nil {
+		return false, p.poisonedBy
+	}
 	if p.process == 0 {
 		return false, errors.New("retained WinSW wrapper process handle is closed")
 	}
 	status, err := windows.WaitForSingleObject(p.process, 0)
 	if err != nil {
-		return false, err
+		return false, p.poisonInvalidHandleLocked("poll retained WinSW wrapper process", err)
 	}
 	switch status {
 	case windows.WAIT_OBJECT_0:
@@ -130,7 +161,7 @@ func (p *windowsWrapperProcess) StillActive() (bool, error) {
 	case uint32(windows.WAIT_TIMEOUT):
 		var exitCode uint32
 		if err := windows.GetExitCodeProcess(p.process, &exitCode); err != nil {
-			return false, err
+			return false, p.poisonInvalidHandleLocked("query retained WinSW wrapper exit code", err)
 		}
 		return exitCode == stillActiveExitCode, nil
 	default:
@@ -141,6 +172,9 @@ func (p *windowsWrapperProcess) StillActive() (bool, error) {
 func (p *windowsWrapperProcess) QueryCreationTime() (time.Time, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.poisonedBy != nil {
+		return time.Time{}, p.poisonedBy
+	}
 	if p.process == 0 {
 		return time.Time{}, errors.New("retained WinSW wrapper process handle is closed")
 	}
@@ -155,7 +189,7 @@ func (p *windowsWrapperProcess) QueryCreationTime() (time.Time, error) {
 		&kernelTime,
 		&userTime,
 	); err != nil {
-		return time.Time{}, err
+		return time.Time{}, p.poisonInvalidHandleLocked("query retained WinSW wrapper creation time", err)
 	}
 	return time.Unix(0, creationTime.Nanoseconds()).UTC(), nil
 }
@@ -166,11 +200,19 @@ func (p *windowsWrapperProcess) Wait(ctx context.Context) error {
 	}
 	for {
 		p.mu.Lock()
+		if p.poisonedBy != nil {
+			err := p.poisonedBy
+			p.mu.Unlock()
+			return err
+		}
 		if p.process == 0 {
 			p.mu.Unlock()
 			return errors.New("retained WinSW wrapper process handle is closed")
 		}
 		status, err := windows.WaitForSingleObject(p.process, uint32(wrapperWaitPoll/time.Millisecond))
+		if err != nil {
+			err = p.poisonInvalidHandleLocked("wait for retained WinSW wrapper process", err)
+		}
 		p.mu.Unlock()
 		if err != nil {
 			return fmt.Errorf("wait for WinSW wrapper process: %w", err)
@@ -195,6 +237,9 @@ func (p *windowsWrapperProcess) Close() error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.poisonedBy != nil {
+		return p.poisonedBy
+	}
 	if p.process == 0 {
 		return nil
 	}
@@ -202,19 +247,70 @@ func (p *windowsWrapperProcess) Close() error {
 	if closeHandle == nil {
 		closeHandle = windows.CloseHandle
 	}
-	if err := closeHandle(p.process); err != nil {
-		return fmt.Errorf("close retained WinSW wrapper process handle: %w", err)
-	}
+	handle := p.process
 	p.process = 0
-	return nil
+	err := consumeWindowsHandle(
+		"close retained WinSW wrapper process handle",
+		handle,
+		closeHandle,
+		p.lifetimeQuarantine(),
+	)
+	if err != nil {
+		p.poisonedBy = err
+	}
+	return err
 }
 
 func closeServiceHandle(handle windows.Handle, operation string) error {
-	if handle == 0 {
-		return nil
+	return consumeWindowsHandle(
+		operation,
+		handle,
+		windows.CloseServiceHandle,
+		windowsProcessLifetimeQuarantine,
+	)
+}
+
+func validateOpenedWrapperHandle(label string, handle windows.Handle, openErr error) error {
+	if openErr != nil {
+		if handle != 0 && handle != windows.InvalidHandle {
+			return errors.Join(
+				openErr,
+				windowsProcessLifetimeQuarantine.retain(
+					&windowsRawHandleOwner{kind: "untrusted " + label + " output", value: handle},
+					fmt.Errorf("%s returned a handle together with an error", label),
+				),
+			)
+		}
+		return openErr
 	}
-	if err := windows.CloseServiceHandle(handle); err != nil {
-		return fmt.Errorf("%s: %w", operation, err)
+	if handle == 0 {
+		return fmt.Errorf("%s returned a null handle", label)
+	}
+	if handle == windows.InvalidHandle {
+		return windowsProcessLifetimeQuarantine.retain(
+			&windowsRawHandleOwner{kind: label, value: handle},
+			fmt.Errorf("%s: %w", label, windows.ERROR_INVALID_HANDLE),
+		)
 	}
 	return nil
+}
+
+func (p *windowsWrapperProcess) lifetimeQuarantine() *processLifetimeQuarantine {
+	if p.quarantine != nil {
+		return p.quarantine
+	}
+	return windowsProcessLifetimeQuarantine
+}
+
+func (p *windowsWrapperProcess) poisonInvalidHandleLocked(operation string, err error) error {
+	if err == nil || !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return err
+	}
+	handle := p.process
+	p.process = 0
+	p.poisonedBy = p.lifetimeQuarantine().retain(
+		&windowsRawHandleOwner{kind: "retained WinSW wrapper process handle", value: handle},
+		fmt.Errorf("%s: %w", operation, err),
+	)
+	return p.poisonedBy
 }

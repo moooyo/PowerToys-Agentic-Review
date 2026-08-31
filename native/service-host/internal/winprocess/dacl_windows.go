@@ -79,13 +79,30 @@ func applyAndVerifyNodeDACLs(process windows.Handle, prepared preparedNodeDACLs)
 
 	var token windows.Token
 	desiredAccess := uint32(windows.READ_CONTROL | windows.WRITE_DAC | windows.TOKEN_QUERY)
-	if err := windows.OpenProcessToken(process, desiredAccess, &token); err != nil {
+	openErr := windows.OpenProcessToken(process, desiredAccess, &token)
+	tokenHandle, err := adoptWindowsHandleOutput(
+		"Node primary token handle",
+		windows.Handle(token),
+		openErr,
+		windowsProcessLifetimeQuarantine,
+	)
+	token = 0
+	if err != nil {
 		return fmt.Errorf("open Node primary token for DACL protection: %w", err)
 	}
+	token = windows.Token(tokenHandle)
 	defer func() {
-		if closeErr := token.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close Node primary token handle: %w", closeErr))
+		if token == 0 {
+			return
 		}
+		tokenHandle := windows.Handle(token)
+		err = errors.Join(err, consumeWindowsHandle(
+			"close Node primary token handle",
+			tokenHandle,
+			func(windows.Handle) error { return token.Close() },
+			windowsProcessLifetimeQuarantine,
+		))
+		token = 0
 	}()
 
 	var tokenType uint32
@@ -97,7 +114,7 @@ func applyAndVerifyNodeDACLs(process windows.Handle, prepared preparedNodeDACLs)
 		uint32(unsafe.Sizeof(tokenType)),
 		&returnedLength,
 	); err != nil {
-		return fmt.Errorf("verify Node token type: %w", err)
+		return poisonNodeTokenIfInvalid(&token, fmt.Errorf("verify Node token type: %w", err))
 	}
 	if returnedLength != uint32(unsafe.Sizeof(tokenType)) || tokenType != windows.TokenPrimary {
 		return fmt.Errorf("Node token type is %d with length %d, want primary token", tokenType, returnedLength)
@@ -108,10 +125,22 @@ func applyAndVerifyNodeDACLs(process windows.Handle, prepared preparedNodeDACLs)
 		prepared.tokenPolicy,
 		"Node primary token",
 	); err != nil {
-		return err
+		return poisonNodeTokenIfInvalid(&token, err)
 	}
 	runtime.KeepAlive(prepared)
 	return nil
+}
+
+func poisonNodeTokenIfInvalid(token *windows.Token, err error) error {
+	if err == nil || !errors.Is(err, windows.ERROR_INVALID_HANDLE) || token == nil || *token == 0 {
+		return err
+	}
+	handle := windows.Handle(*token)
+	*token = 0
+	return windowsProcessLifetimeQuarantine.retain(
+		&windowsRawHandleOwner{kind: "Node primary token handle", value: handle},
+		err,
+	)
 }
 
 func setAndVerifyKernelObjectDACL(

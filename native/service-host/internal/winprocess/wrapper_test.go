@@ -214,14 +214,14 @@ func TestOpenStableWrapperClosesHandleOnIdentityOrLivenessFailure(t *testing.T) 
 	}
 }
 
-func TestOpenStableWrapperReturnsCleanupOwnerWhenRejectedHandleCannotClose(t *testing.T) {
+func TestOpenStableWrapperConsumesRejectedHandleOnlyOnce(t *testing.T) {
 	var events []string
 	closeFailure := errors.New("injected CloseHandle failure")
 	process := &fakeWrapperProcess{
 		processID:    42,
 		active:       true,
 		creationTime: time.Now(),
-		closeErrs:    []error{closeFailure, closeFailure, closeFailure, nil},
+		closeErrs:    []error{closeFailure, nil},
 		events:       &events,
 	}
 	source := &fakeServiceStatusSource{
@@ -232,16 +232,10 @@ func TestOpenStableWrapperReturnsCleanupOwnerWhenRejectedHandleCannotClose(t *te
 		events: &events,
 	}
 	watcher, err := openStableWrapper(source, fakeWrapperProcessOpener{process: process, events: &events})
-	if watcher == nil || !errors.Is(err, ErrWrapperUnstable) || !errors.Is(err, closeFailure) {
+	if watcher != nil || !errors.Is(err, ErrWrapperUnstable) || !errors.Is(err, closeFailure) {
 		t.Fatalf("watcher = %v, error = %v", watcher, err)
 	}
-	if process.closed || process.closeCalls != rejectedWrapperCloseAttempts {
-		t.Fatalf("closed = %t, close calls = %d", process.closed, process.closeCalls)
-	}
-	if err := watcher.Close(); err != nil {
-		t.Fatalf("cleanup owner Close retry error = %v", err)
-	}
-	if !process.closed || process.closeCalls != rejectedWrapperCloseAttempts+1 {
+	if process.closed || process.closeCalls != 1 {
 		t.Fatalf("closed = %t, close calls = %d", process.closed, process.closeCalls)
 	}
 }

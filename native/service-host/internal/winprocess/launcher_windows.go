@@ -5,8 +5,6 @@ package winprocess
 import (
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -24,9 +22,17 @@ const (
 	nodeStillActiveExitCode    uint32  = 259
 )
 
+var processLaunchCleanupGate launchCleanupGate
+
 // LaunchNode starts exactly one reviewed Node executable and bundle in a new
 // non-breakaway service-root Job Object.
 func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
+	launchPermit, err := processLaunchCleanupGate.begin()
+	if err != nil {
+		return nil, err
+	}
+	defer launchPermit.release()
+
 	if err := validateLaunchSpec(spec); err != nil {
 		return nil, err
 	}
@@ -60,7 +66,7 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 		return nil, err
 	}
 
-	var parentFiles []*os.File
+	var parentStreams []*windowsStandardIOStream
 	var childHandles []windows.Handle
 	var job windows.Handle
 	processInfo := windows.ProcessInformation{}
@@ -69,33 +75,72 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 		if launchComplete {
 			return
 		}
-		cleanupErr := cleanupFailedLaunch(job, processInfo)
-		for _, handle := range childHandles {
-			cleanupErr = errors.Join(cleanupErr, closeHandle(handle, "close child standard-I/O handle"))
+		var cleanup launchCleanupReport
+		cleanup.merge(cleanupFailedLaunch(job, processInfo))
+		for index, handle := range childHandles {
+			if handle == 0 {
+				continue
+			}
+			closeErr := consumeWindowsHandle(
+				"close child standard-I/O handle",
+				handle,
+				windows.CloseHandle,
+				windowsProcessLifetimeQuarantine,
+			)
+			childHandles[index] = 0
+			if closeErr != nil {
+				cleanup.addUnresolved(closeErr)
+			}
 		}
-		for _, file := range parentFiles {
-			cleanupErr = errors.Join(cleanupErr, closeFile(file))
+		for index, stream := range parentStreams {
+			if stream == nil {
+				continue
+			}
+			closeErr := stream.Close()
+			parentStreams[index] = nil
+			if closeErr != nil {
+				cleanup.addUnresolved(windowsProcessLifetimeQuarantine.retain(stream, closeErr))
+			}
+		}
+		cleanupErr := cleanup.result()
+		if errors.Is(err, ErrLaunchCleanupFatal) || errors.Is(cleanupErr, ErrLaunchCleanupFatal) {
+			launchPermit.markFatal()
 		}
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	stdinParent, stdinChild, err := createStdioPipe(false, "service-node-stdin")
+	stdinParent, stdinChild, err := createStdioPipe(
+		false,
+		"service-node-stdin",
+		spec.OwnServiceSID,
+		spec.ShutdownTimeout,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create Node stdin pipe: %w", err)
 	}
-	parentFiles = append(parentFiles, stdinParent)
+	parentStreams = append(parentStreams, stdinParent)
 	childHandles = append(childHandles, stdinChild)
-	stdoutParent, stdoutChild, err := createStdioPipe(true, "service-node-stdout")
+	stdoutParent, stdoutChild, err := createStdioPipe(
+		true,
+		"service-node-stdout",
+		spec.OwnServiceSID,
+		spec.ShutdownTimeout,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create Node stdout pipe: %w", err)
 	}
-	parentFiles = append(parentFiles, stdoutParent)
+	parentStreams = append(parentStreams, stdoutParent)
 	childHandles = append(childHandles, stdoutChild)
-	stderrParent, stderrChild, err := createStdioPipe(true, "service-node-stderr")
+	stderrParent, stderrChild, err := createStdioPipe(
+		true,
+		"service-node-stderr",
+		spec.OwnServiceSID,
+		spec.ShutdownTimeout,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create Node stderr pipe: %w", err)
 	}
-	parentFiles = append(parentFiles, stderrParent)
+	parentStreams = append(parentStreams, stderrParent)
 	childHandles = append(childHandles, stderrChild)
 
 	job, err = createRootJob(preHostControlProcessLimit, uintptr(spec.MaximumMemoryBytes))
@@ -144,6 +189,9 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 	startupInfo.StdErr = stderrChild
 	startupInfo.ProcThreadAttributeList = attributeList.List()
 
+	if err := launchPermit.check(); err != nil {
+		return nil, err
+	}
 	if err := windows.CreateProcess(
 		executableUTF16,
 		&commandLineUTF16[0],
@@ -156,11 +204,45 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 		&startupInfo.StartupInfo,
 		&processInfo,
 	); err != nil {
-		return nil, fmt.Errorf("CreateProcessW for fixed Node payload: %w", err)
+		var outputErr error
+		for _, output := range []struct {
+			kind   string
+			handle *windows.Handle
+		}{
+			{kind: "untrusted Node process handle", handle: &processInfo.Process},
+			{kind: "untrusted Node primary thread handle", handle: &processInfo.Thread},
+		} {
+			if *output.handle != 0 && *output.handle != windows.InvalidHandle {
+				outputErr = errors.Join(outputErr, windowsProcessLifetimeQuarantine.retain(
+					&windowsRawHandleOwner{kind: output.kind, value: *output.handle},
+					errors.New("CreateProcess failed after writing an untrusted output handle"),
+				))
+			}
+			*output.handle = 0
+		}
+		return nil, errors.Join(fmt.Errorf("CreateProcessW for fixed Node payload: %w", err), outputErr)
+	}
+	if processInfo.Process == 0 || processInfo.Process == windows.InvalidHandle ||
+		processInfo.Thread == 0 || processInfo.Thread == windows.InvalidHandle {
+		if processInfo.Process == windows.InvalidHandle {
+			processInfo.Process = 0
+		}
+		if processInfo.Thread == windows.InvalidHandle {
+			processInfo.Thread = 0
+		}
+		return nil, fatalLaunchCleanupError(errors.New("CreateProcess returned invalid process ownership handles"))
 	}
 	runtime.KeepAlive(childHandles)
 	runtime.KeepAlive(jobHandles)
 	if err := applyAndVerifyNodeDACLs(processInfo.Process, protectedDACLs); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) && !errors.Is(err, ErrLaunchCleanupFatal) {
+			process := processInfo.Process
+			processInfo.Process = 0
+			return nil, windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "Node process handle during DACL protection", value: process},
+				err,
+			)
+		}
 		return nil, err
 	}
 
@@ -175,40 +257,76 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 		preHostControlProcessLimit,
 		uintptr(spec.MaximumMemoryBytes),
 	); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			invalidJob := job
+			job = 0
+			return nil, windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "service-root Job handle before resume", value: invalidJob},
+				err,
+			)
+		}
 		return nil, err
 	}
 	stableIdentity, err := observeNodeIdentity(processInfo.Process, processInfo.ProcessId)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			invalidProcess := processInfo.Process
+			processInfo.Process = 0
+			return nil, windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "Node process handle before resume", value: invalidProcess},
+				err,
+			)
+		}
 		return nil, fmt.Errorf("capture suspended Node identity before resume: %w", err)
+	}
+	if err := launchPermit.check(); err != nil {
+		return nil, err
 	}
 	previousSuspendCount, err := windows.ResumeThread(processInfo.Thread)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			thread := processInfo.Thread
+			processInfo.Thread = 0
+			return nil, windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "Node primary thread handle", value: thread},
+				err,
+			)
+		}
 		return nil, fmt.Errorf("resume verified Node process: %w", err)
 	}
 	if previousSuspendCount != 1 {
 		return nil, fmt.Errorf("resume verified Node process returned suspend count %d, want 1", previousSuspendCount)
 	}
-	if err := windows.CloseHandle(processInfo.Thread); err != nil {
-		return nil, fmt.Errorf("close Node primary thread handle: %w", err)
-	}
+	thread := processInfo.Thread
+	threadCloseErr := consumeWindowsHandle(
+		"close Node primary thread handle",
+		thread,
+		windows.CloseHandle,
+		windowsProcessLifetimeQuarantine,
+	)
 	processInfo.Thread = 0
+	if threadCloseErr != nil {
+		return nil, threadCloseErr
+	}
 
 	result := &windowsNodeProcess{
 		processID:        processInfo.ProcessId,
 		process:          processInfo.Process,
 		job:              job,
-		standardInput:    stdinParent,
-		standardOutput:   stdoutParent,
-		standardError:    stderrParent,
+		standardIO:       newStandardIOOwnership(newNodeStandardIO(stdinParent, stdoutParent, stderrParent)),
 		shutdownTimeout:  spec.ShutdownTimeout,
 		stableIdentity:   stableIdentity,
 		maximumProcesses: spec.MaximumProcesses,
 		maximumMemory:    uintptr(spec.MaximumMemoryBytes),
 	}
-	processInfo.Process = 0
-	job = 0
-	parentFiles = nil
-	launchComplete = true
+	if err := launchPermit.commit(func() {
+		processInfo.Process = 0
+		job = 0
+		parentStreams = nil
+		launchComplete = true
+	}); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -218,14 +336,41 @@ func createRootJob(maximumProcesses uint32, maximumMemory uintptr) (windows.Hand
 	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
+		if job != 0 && job != windows.InvalidHandle {
+			outputErr := windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "untrusted service-root Job handle", value: job},
+				errors.New("CreateJobObject failed after writing an untrusted output handle"),
+			)
+			return 0, errors.Join(fmt.Errorf("create service-root Job Object: %w", err), outputErr)
+		}
 		return 0, fmt.Errorf("create service-root Job Object: %w", err)
 	}
-	if err := setRootJobLimits(job, maximumProcesses, maximumMemory); err != nil {
-		_ = windows.CloseHandle(job)
-		return 0, err
+	if job == 0 || job == windows.InvalidHandle {
+		return 0, windowsProcessLifetimeQuarantine.retain(
+			&windowsRawHandleOwner{kind: "invalid service-root Job handle", value: job},
+			errors.New("CreateJobObject returned an invalid handle without an error"),
+		)
 	}
-	if err := verifyRootJobLimits(job, maximumProcesses, maximumMemory); err != nil {
-		_ = windows.CloseHandle(job)
+	if err := validateCreatedLaunchResource(
+		[]func() error{
+			func() error { return setRootJobLimits(job, maximumProcesses, maximumMemory) },
+			func() error { return verifyRootJobLimits(job, maximumProcesses, maximumMemory) },
+		},
+		func(validationErr error) error {
+			if errors.Is(validationErr, windows.ERROR_INVALID_HANDLE) {
+				return windowsProcessLifetimeQuarantine.retain(
+					&windowsRawHandleOwner{kind: "rejected service-root Job handle", value: job},
+					validationErr,
+				)
+			}
+			return consumeWindowsHandle(
+				"close rejected service-root Job handle",
+				job,
+				windows.CloseHandle,
+				windowsProcessLifetimeQuarantine,
+			)
+		},
+	); err != nil {
 		return 0, err
 	}
 	return job, nil
@@ -330,81 +475,124 @@ func verifyOnlyJobMember(job windows.Handle, processID uint32, maximumProcesses 
 	return nil
 }
 
-func createStdioPipe(parentReads bool, name string) (*os.File, windows.Handle, error) {
-	securityAttributes := windows.SecurityAttributes{
-		Length:        uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		InheritHandle: 1,
-	}
-	var readHandle windows.Handle
-	var writeHandle windows.Handle
-	if err := windows.CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0); err != nil {
-		return nil, 0, err
-	}
-	parentHandle := writeHandle
-	childHandle := readHandle
-	if parentReads {
-		parentHandle = readHandle
-		childHandle = writeHandle
-	}
-	if err := windows.SetHandleInformation(parentHandle, windows.HANDLE_FLAG_INHERIT, 0); err != nil {
-		_ = windows.CloseHandle(readHandle)
-		_ = windows.CloseHandle(writeHandle)
-		return nil, 0, err
-	}
-	return os.NewFile(uintptr(parentHandle), name), childHandle, nil
-}
-
 func closeChildHandles(handles []windows.Handle) error {
 	var result error
 	for index, handle := range handles {
-		if err := closeHandle(handle, "close inherited Node standard-I/O handle"); err != nil {
-			result = errors.Join(result, err)
-			continue
-		}
+		closeErr := consumeWindowsHandle(
+			"close inherited Node standard-I/O handle",
+			handle,
+			windows.CloseHandle,
+			windowsProcessLifetimeQuarantine,
+		)
 		handles[index] = 0
+		if closeErr != nil {
+			result = errors.Join(result, closeErr)
+		}
 	}
 	return result
 }
 
-func cleanupFailedLaunch(job windows.Handle, processInfo windows.ProcessInformation) error {
-	var result error
-	jobTerminated := false
-	if job != 0 {
-		if err := windows.TerminateJobObject(job, terminationExitCode); err != nil {
-			result = errors.Join(result, fmt.Errorf("terminate service-root Job after launch failure: %w", err))
+func cleanupFailedLaunch(job windows.Handle, processInfo windows.ProcessInformation) launchCleanupReport {
+	var report launchCleanupReport
+	terminationRequested := false
+	jobHandleUsable := job != 0
+	processHandleUsable := processInfo.Process != 0
+	if processHandleUsable && jobHandleUsable {
+		jobTermination := retryNonConsumingLaunchCleanup("terminate service-root Job after launch failure", func() error {
+			return windows.TerminateJobObject(job, terminationExitCode)
+		})
+		if jobTermination.invalidHandle {
+			report.addUnresolved(windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "failed-launch service-root Job handle", value: job},
+				jobTermination.err,
+			))
+			jobHandleUsable = false
 		} else {
-			jobTerminated = true
+			report.addDiagnostics(jobTermination.err)
+		}
+		terminationRequested = jobTermination.succeeded
+	}
+	if processHandleUsable && !terminationRequested {
+		processTermination := retryNonConsumingLaunchCleanup("terminate Node after launch failure", func() error {
+			return windows.TerminateProcess(processInfo.Process, terminationExitCode)
+		})
+		if processTermination.invalidHandle {
+			report.addUnresolved(windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "failed-launch Node process handle", value: processInfo.Process},
+				processTermination.err,
+			))
+			processHandleUsable = false
+		} else {
+			report.addDiagnostics(processTermination.err)
+		}
+		terminationRequested = processTermination.succeeded
+	}
+
+	processExited := processInfo.Process == 0
+	if processHandleUsable {
+		status, waitErr := windows.WaitForSingleObject(
+			processInfo.Process,
+			uint32(failedLaunchWait/time.Millisecond),
+		)
+		switch {
+		case waitErr != nil:
+			if errors.Is(waitErr, windows.ERROR_INVALID_HANDLE) {
+				report.addUnresolved(windowsProcessLifetimeQuarantine.retain(
+					&windowsRawHandleOwner{kind: "failed-launch Node process handle", value: processInfo.Process},
+					fmt.Errorf("wait for failed Node launch cleanup: %w", waitErr),
+				))
+				processHandleUsable = false
+			} else {
+				report.addUnresolved(fmt.Errorf("wait for failed Node launch cleanup: %w", waitErr))
+			}
+		case status != windows.WAIT_OBJECT_0:
+			report.addUnresolved(fmt.Errorf("failed Node launch cleanup wait returned 0x%x", status))
+		default:
+			processExited = true
 		}
 	}
-	if processInfo.Process != 0 {
-		if err := windows.TerminateProcess(processInfo.Process, terminationExitCode); err != nil && !jobTerminated {
-			result = errors.Join(result, fmt.Errorf("terminate suspended Node after launch failure: %w", err))
+	if !terminationRequested && !processExited && processHandleUsable {
+		report.addUnresolved(errors.New("failed Node launch did not accept a termination request"))
+	}
+
+	for _, resource := range []struct {
+		label  string
+		handle windows.Handle
+	}{
+		{label: "close failed Node primary thread handle", handle: processInfo.Thread},
+		{label: "close failed Node process handle", handle: func() windows.Handle {
+			if processHandleUsable {
+				return processInfo.Process
+			}
+			return 0
+		}()},
+		{label: "close failed service-root Job handle", handle: func() windows.Handle {
+			if jobHandleUsable {
+				return job
+			}
+			return 0
+		}()},
+	} {
+		if resource.handle == 0 {
+			continue
+		}
+		if closeErr := consumeWindowsHandle(
+			resource.label,
+			resource.handle,
+			windows.CloseHandle,
+			windowsProcessLifetimeQuarantine,
+		); closeErr != nil {
+			report.addUnresolved(closeErr)
 		}
 	}
-	if processInfo.Process != 0 {
-		status, err := windows.WaitForSingleObject(processInfo.Process, uint32(failedLaunchWait/time.Millisecond))
-		if err != nil {
-			result = errors.Join(result, fmt.Errorf("wait for failed Node launch cleanup: %w", err))
-		} else if status != windows.WAIT_OBJECT_0 {
-			result = errors.Join(result, fmt.Errorf("failed Node launch cleanup wait returned 0x%x", status))
-		}
-	}
-	result = errors.Join(
-		result,
-		closeHandle(processInfo.Thread, "close failed Node primary thread handle"),
-		closeHandle(processInfo.Process, "close failed Node process handle"),
-		closeHandle(job, "close failed service-root Job handle"),
-	)
-	return result
+	return report
 }
 
 type windowsNodeProcess struct {
 	processID        uint32
 	process          windows.Handle
 	job              windows.Handle
-	standardInput    *os.File
-	standardOutput   *os.File
-	standardError    *os.File
+	standardIO       *standardIOOwnership
 	shutdownTimeout  time.Duration
 	stableIdentity   NodeIdentity
 	maximumProcesses uint32
@@ -414,25 +602,33 @@ type windowsNodeProcess struct {
 	processMu            sync.RWMutex
 	terminationInitiated bool
 	hostControlActivated bool
-	closeOnce            sync.Once
-	closeErr             error
+	jobPoison            error
+	processPoison        error
+	closeMu              sync.Mutex
 }
 
-func (p *windowsNodeProcess) ProcessID() uint32             { return p.processID }
-func (p *windowsNodeProcess) StableIdentity() NodeIdentity  { return p.stableIdentity }
-func (p *windowsNodeProcess) StandardInput() io.WriteCloser { return p.standardInput }
-func (p *windowsNodeProcess) StandardOutput() io.ReadCloser { return p.standardOutput }
-func (p *windowsNodeProcess) StandardError() io.ReadCloser  { return p.standardError }
+func (p *windowsNodeProcess) ProcessID() uint32            { return p.processID }
+func (p *windowsNodeProcess) StableIdentity() NodeIdentity { return p.stableIdentity }
+
+func (p *windowsNodeProcess) TakeStandardIO() (*NodeStandardIO, error) {
+	if p == nil {
+		return nil, ErrStandardIOUnavailable
+	}
+	return p.standardIO.take()
+}
 
 func (p *windowsNodeProcess) ObserveIdentity() (NodeIdentity, error) {
 	if p == nil {
 		return NodeIdentity{}, errors.New("Node process is unavailable")
 	}
-	p.processMu.RLock()
-	defer p.processMu.RUnlock()
+	p.processMu.Lock()
+	defer p.processMu.Unlock()
+	if p.processPoison != nil {
+		return NodeIdentity{}, p.processPoison
+	}
 	identity, err := observeNodeIdentity(p.process, p.processID)
 	if err != nil {
-		return NodeIdentity{}, err
+		return NodeIdentity{}, p.poisonProcessHandleIfInvalidLocked(err)
 	}
 	if !sameNodeIdentity(identity, p.stableIdentity) {
 		return NodeIdentity{}, errors.New("retained Node process identity changed after launch")
@@ -446,10 +642,17 @@ func (p *windowsNodeProcess) RootJobActiveProcessCount() (uint32, error) {
 	}
 	p.jobMu.Lock()
 	defer p.jobMu.Unlock()
+	if p.jobPoison != nil {
+		return 0, p.jobPoison
+	}
 	if p.job == 0 {
 		return 0, errors.New("service-root Job handle is closed")
 	}
-	return (windowsJobCounter{job: p.job}).ActiveProcessCount()
+	count, err := (windowsJobCounter{job: p.job}).ActiveProcessCount()
+	if err != nil {
+		return 0, p.poisonJobHandleIfInvalidLocked(err)
+	}
+	return count, nil
 }
 
 func (p *windowsNodeProcess) ActivateAfterHostControl() error {
@@ -458,6 +661,9 @@ func (p *windowsNodeProcess) ActivateAfterHostControl() error {
 	}
 	p.jobMu.Lock()
 	defer p.jobMu.Unlock()
+	if p.jobPoison != nil {
+		return p.jobPoison
+	}
 	if p.hostControlActivated {
 		return errors.New("HostControl was already activated for this Node process")
 	}
@@ -466,20 +672,20 @@ func (p *windowsNodeProcess) ActivateAfterHostControl() error {
 	}
 	before, err := queryWindowsJobAccounting(p.job)
 	if err != nil {
-		return fmt.Errorf("query root Job before HostControl activation: %w", err)
+		return p.poisonJobHandleIfInvalidLocked(fmt.Errorf("query root Job before HostControl activation: %w", err))
 	}
 	if err := validateSingleNodeJobAccounting(before.TotalProcesses, before.ActiveProcesses); err != nil {
 		return fmt.Errorf("verify root Job before HostControl activation: %w", err)
 	}
 	if err := setRootJobLimits(p.job, p.maximumProcesses, p.maximumMemory); err != nil {
-		return fmt.Errorf("raise root Job process limit after HostControl binding: %w", err)
+		return p.poisonJobHandleIfInvalidLocked(fmt.Errorf("raise root Job process limit after HostControl binding: %w", err))
 	}
 	if err := verifyRootJobLimits(p.job, p.maximumProcesses, p.maximumMemory); err != nil {
-		return fmt.Errorf("verify root Job limits after HostControl binding: %w", err)
+		return p.poisonJobHandleIfInvalidLocked(fmt.Errorf("verify root Job limits after HostControl binding: %w", err))
 	}
 	after, err := queryWindowsJobAccounting(p.job)
 	if err != nil {
-		return fmt.Errorf("query root Job after HostControl activation: %w", err)
+		return p.poisonJobHandleIfInvalidLocked(fmt.Errorf("query root Job after HostControl activation: %w", err))
 	}
 	if err := validateSingleNodeJobAccounting(after.TotalProcesses, after.ActiveProcesses); err != nil {
 		return fmt.Errorf("verify root Job after HostControl activation: %w", err)
@@ -489,90 +695,246 @@ func (p *windowsNodeProcess) ActivateAfterHostControl() error {
 }
 
 func (p *windowsNodeProcess) Wait() (uint32, error) {
-	p.processMu.RLock()
-	status, waitErr := windows.WaitForSingleObject(p.process, windows.INFINITE)
-	if waitErr == nil && status != windows.WAIT_OBJECT_0 {
-		waitErr = fmt.Errorf("Node process wait returned 0x%x", status)
-	}
+	waitHandle, waitErr := p.duplicateProcessHandleForWait()
 	var exitCode uint32
-	exitErr := windows.GetExitCodeProcess(p.process, &exitCode)
-	p.processMu.RUnlock()
+	var exitErr error
+	if waitErr == nil {
+		status, err := windows.WaitForSingleObject(waitHandle, windows.INFINITE)
+		waitErr = err
+		if errors.Is(waitErr, windows.ERROR_INVALID_HANDLE) {
+			invalidHandle := waitHandle
+			waitHandle = 0
+			waitErr = windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "Node process wait handle", value: invalidHandle},
+				waitErr,
+			)
+		} else if waitErr == nil && status != windows.WAIT_OBJECT_0 {
+			waitErr = fmt.Errorf("Node process wait returned 0x%x", status)
+		} else if waitErr == nil {
+			exitErr = windows.GetExitCodeProcess(waitHandle, &exitCode)
+			if errors.Is(exitErr, windows.ERROR_INVALID_HANDLE) {
+				invalidHandle := waitHandle
+				waitHandle = 0
+				exitErr = windowsProcessLifetimeQuarantine.retain(
+					&windowsRawHandleOwner{kind: "Node process wait handle", value: invalidHandle},
+					exitErr,
+				)
+			}
+		}
+	}
+	var waitHandleCloseErr error
+	if waitHandle != 0 {
+		waitHandleCloseErr = consumeWindowsHandle(
+			"close Node process wait handle",
+			waitHandle,
+			windows.CloseHandle,
+			windowsProcessLifetimeQuarantine,
+		)
+		if waitHandleCloseErr != nil {
+			p.processMu.Lock()
+			waitHandleCloseErr = errors.Join(waitHandleCloseErr, p.poisonProcessHandleLocked(waitHandleCloseErr))
+			p.processMu.Unlock()
+		}
+	}
+	if errors.Is(waitErr, ErrLaunchCleanupFatal) || errors.Is(exitErr, ErrLaunchCleanupFatal) {
+		p.processMu.Lock()
+		poisonErr := p.poisonProcessHandleLocked(errors.Join(waitErr, exitErr))
+		p.processMu.Unlock()
+		waitErr = errors.Join(waitErr, poisonErr)
+	}
 
 	p.jobMu.Lock()
 	jobCleanupErr := drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
 	p.jobMu.Unlock()
-	if waitErr != nil || jobCleanupErr != nil {
-		_ = closeFile(p.standardInput)
-		_ = closeFile(p.standardOutput)
-		_ = closeFile(p.standardError)
+	var standardIOErr error
+	if waitErr != nil || exitErr != nil || waitHandleCloseErr != nil || jobCleanupErr != nil {
+		p.standardIO.seal()
+		standardIOErr = p.standardIO.closeOwned()
 	}
-	return exitCode, errors.Join(waitErr, exitErr, jobCleanupErr)
+	return exitCode, errors.Join(waitErr, exitErr, waitHandleCloseErr, jobCleanupErr, standardIOErr)
+}
+
+func (p *windowsNodeProcess) duplicateProcessHandleForWait() (windows.Handle, error) {
+	p.processMu.Lock()
+	defer p.processMu.Unlock()
+	if p.processPoison != nil {
+		return 0, p.processPoison
+	}
+	if p.process == 0 {
+		return 0, errors.New("retained Node process handle is closed")
+	}
+	var duplicate windows.Handle
+	currentProcess := windows.CurrentProcess()
+	if err := windows.DuplicateHandle(
+		currentProcess,
+		p.process,
+		currentProcess,
+		&duplicate,
+		0,
+		false,
+		windows.DUPLICATE_SAME_ACCESS,
+	); err != nil {
+		var outputErr error
+		// Unlike CreateFile's documented failure sentinel, any nonzero value
+		// written to this zero-initialized output is an untrusted native output.
+		if duplicate != 0 {
+			outputErr = windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "untrusted Node process wait handle", value: duplicate},
+				errors.New("DuplicateHandle failed after writing an untrusted output handle"),
+			)
+			duplicate = 0
+		}
+		if outputErr != nil {
+			return 0, errors.Join(err, outputErr, p.poisonProcessHandleLocked(outputErr))
+		}
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			return 0, errors.Join(p.poisonProcessHandleIfInvalidLocked(err), outputErr)
+		}
+		return 0, errors.Join(fmt.Errorf("duplicate Node process handle for wait: %w", err), outputErr)
+	}
+	if duplicate == 0 || duplicate == windows.InvalidHandle {
+		if duplicate == windows.InvalidHandle {
+			outputErr := windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "invalid Node process wait handle", value: duplicate},
+				errors.New("DuplicateHandle returned INVALID_HANDLE_VALUE without an error"),
+			)
+			return 0, errors.Join(outputErr, p.poisonProcessHandleLocked(outputErr))
+		}
+		return 0, errors.New("DuplicateHandle returned a zero Node wait handle")
+	}
+	return duplicate, nil
 }
 
 func (p *windowsNodeProcess) Terminate() error {
+	if p == nil {
+		return errors.New("Node process is unavailable")
+	}
+	p.standardIO.seal()
 	p.jobMu.Lock()
-	defer p.jobMu.Unlock()
-	return drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
+	jobErr := drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
+	p.jobMu.Unlock()
+	return errors.Join(jobErr, p.standardIO.closeOwned())
 }
 
 func (p *windowsNodeProcess) terminateAndDrainJobLocked() error {
+	if p.jobPoison != nil {
+		return p.jobPoison
+	}
 	if p.job == 0 {
 		return nil
 	}
 	if !p.terminationInitiated {
 		if err := windows.TerminateJobObject(p.job, terminationExitCode); err != nil {
-			return fmt.Errorf("terminate service-root Job: %w", err)
+			return p.poisonJobHandleIfInvalidLocked(fmt.Errorf("terminate service-root Job: %w", err))
 		}
 		p.terminationInitiated = true
 	}
-	return waitForNoActiveProcesses(
+	drainErr := waitForNoActiveProcesses(
 		windowsJobCounter{job: p.job},
 		p.shutdownTimeout,
 		jobDrainPollInterval,
 		wallDrainClock{},
 	)
+	return p.poisonJobHandleIfInvalidLocked(drainErr)
+}
+
+func (p *windowsNodeProcess) poisonJobHandleIfInvalidLocked(err error) error {
+	if err == nil || !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return err
+	}
+	if p.jobPoison != nil {
+		return p.jobPoison
+	}
+	handle := p.job
+	p.job = 0
+	p.jobPoison = windowsProcessLifetimeQuarantine.retain(
+		&windowsRawHandleOwner{kind: "service-root Job handle", value: handle},
+		err,
+	)
+	return p.jobPoison
 }
 
 func (p *windowsNodeProcess) closeJobLocked() error {
+	if p.jobPoison != nil {
+		return p.jobPoison
+	}
 	if p.job == 0 {
 		return nil
 	}
-	if err := windows.CloseHandle(p.job); err != nil {
-		return fmt.Errorf("close service-root Job handle: %w", err)
-	}
+	handle := p.job
+	closeErr := consumeWindowsHandle(
+		"close service-root Job handle",
+		handle,
+		windows.CloseHandle,
+		windowsProcessLifetimeQuarantine,
+	)
 	p.job = 0
-	return nil
+	if closeErr != nil {
+		p.jobPoison = closeErr
+	}
+	return closeErr
 }
 
 func (p *windowsNodeProcess) Close() error {
-	p.closeOnce.Do(func() {
-		p.jobMu.Lock()
-		drainErr := p.terminateAndDrainJobLocked()
-		closeJobErr := p.closeJobLocked()
-		p.jobMu.Unlock()
-		p.closeErr = errors.Join(
-			drainErr,
-			closeJobErr,
-			closeFile(p.standardInput),
-			closeFile(p.standardOutput),
-			closeFile(p.standardError),
-			p.closeProcessHandle(),
-		)
-	})
-	return p.closeErr
+	if p == nil {
+		return nil
+	}
+	p.standardIO.seal()
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+
+	return closeNodeResourcesAfterJob(
+		func() error {
+			p.jobMu.Lock()
+			defer p.jobMu.Unlock()
+			return drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
+		},
+		p.standardIO.closeOwned,
+		p.closeProcessHandle,
+	)
 }
 
 func (p *windowsNodeProcess) closeProcessHandle() error {
 	p.processMu.Lock()
 	defer p.processMu.Unlock()
+	if p.processPoison != nil {
+		return p.processPoison
+	}
 	if p.process == 0 {
 		return nil
 	}
-	if err := windows.CloseHandle(p.process); err != nil {
-		return fmt.Errorf("close Node process handle: %w", err)
-	}
+	handle := p.process
+	closeErr := consumeWindowsHandle(
+		"close Node process handle",
+		handle,
+		windows.CloseHandle,
+		windowsProcessLifetimeQuarantine,
+	)
 	p.process = 0
-	return nil
+	if closeErr != nil {
+		p.processPoison = closeErr
+	}
+	return closeErr
+}
+
+func (p *windowsNodeProcess) poisonProcessHandleIfInvalidLocked(err error) error {
+	if err == nil || !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return err
+	}
+	return p.poisonProcessHandleLocked(err)
+}
+
+func (p *windowsNodeProcess) poisonProcessHandleLocked(cause error) error {
+	if p.processPoison != nil {
+		return p.processPoison
+	}
+	handle := p.process
+	p.process = 0
+	p.processPoison = windowsProcessLifetimeQuarantine.retain(
+		&windowsRawHandleOwner{kind: "Node process handle", value: handle},
+		cause,
+	)
+	return p.processPoison
 }
 
 func observeNodeIdentity(handle windows.Handle, expectedProcessID uint32) (NodeIdentity, error) {
@@ -704,25 +1066,4 @@ func queryWindowsJobAccounting(job windows.Handle) (jobObjectBasicAccountingInfo
 		return jobObjectBasicAccountingInformation{}, err
 	}
 	return information, nil
-}
-
-func closeHandle(handle windows.Handle, operation string) error {
-	if handle == 0 {
-		return nil
-	}
-	if err := windows.CloseHandle(handle); err != nil {
-		return fmt.Errorf("%s: %w", operation, err)
-	}
-	return nil
-}
-
-func closeFile(file *os.File) error {
-	if file == nil {
-		return nil
-	}
-	err := file.Close()
-	if errors.Is(err, os.ErrClosed) {
-		return nil
-	}
-	return err
 }
