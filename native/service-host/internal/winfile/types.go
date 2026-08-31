@@ -142,10 +142,6 @@ type ReadResult struct {
 	Evidence Evidence
 }
 
-// AccessToken is an opaque Windows token handle for a future AccessCheck
-// implementation. A checker must require an impersonation token with TOKEN_QUERY.
-type AccessToken uintptr
-
 // AccessMask is a Windows access mask.
 type AccessMask uint32
 
@@ -158,25 +154,10 @@ type GenericMapping struct {
 	All     AccessMask
 }
 
-// AccessCheckRequest contains all typed inputs needed for a Windows AccessCheck.
-type AccessCheckRequest struct {
-	SecurityDescriptor SecurityDescriptorEvidence
-	Token              AccessToken
-	DesiredAccess      AccessMask
-	GenericMapping     GenericMapping
-}
-
 // AccessCheckDecision is the result of evaluating a token against a descriptor.
 type AccessCheckDecision struct {
 	Allowed       bool
 	GrantedAccess AccessMask
-}
-
-// AccessChecker deliberately separates semantic authorization from structural
-// descriptor evidence. Implementations must use Windows AccessCheck rather than
-// infer access from ACE text or the DACL-protected flag.
-type AccessChecker interface {
-	CheckAccess(AccessCheckRequest) (AccessCheckDecision, error)
 }
 
 func cloneEvidence(value Evidence) Evidence {
