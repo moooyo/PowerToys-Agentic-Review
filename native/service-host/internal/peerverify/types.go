@@ -226,6 +226,7 @@ type Options struct {
 // verification core and its tests. Production callers cannot supply them.
 type verificationOptions struct {
 	PipePeer                               PipePeer
+	LocalProcessID                         uint32
 	ExpectedServiceSID                     string
 	WrapperImage                           ImageExpectation
 	ServiceHostImage                       ImageExpectation
@@ -277,7 +278,12 @@ type VerificationEvidence struct {
 
 // Session owns the stable peer ServiceHost and WinSW wrapper objects. They stay
 // open until Close so PID reuse cannot retarget later checks in the session.
+// Session values may be copied; every copy shares one private lifetime state.
 type Session struct {
+	state *sessionState
+}
+
+type sessionState struct {
 	mu            sync.Mutex
 	activeWaits   sync.WaitGroup
 	peer          PeerProcess
@@ -292,12 +298,13 @@ type Session struct {
 
 // Evidence returns the detached facts captured during verification.
 func (s *Session) Evidence() VerificationEvidence {
-	if s == nil {
+	if s == nil || s.state == nil {
 		return VerificationEvidence{}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.evidence
+	state := s.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.evidence
 }
 
 // WaitPeer waits for the retained ServiceHost process or cancellation. Close
@@ -313,29 +320,30 @@ func (s *Session) WaitWrapper(ctx context.Context) error {
 }
 
 func (s *Session) wait(ctx context.Context, wrapper bool) error {
-	if s == nil || ctx == nil {
-		if ctx == nil {
-			return errors.New("process wait context is required")
-		}
+	if ctx == nil {
+		return errors.New("process wait context is required")
+	}
+	if s == nil || s.state == nil {
 		return ErrClosed
 	}
-	s.mu.Lock()
-	if s.closed || s.waitContext == nil {
-		s.mu.Unlock()
+	state := s.state
+	state.mu.Lock()
+	if state.closed || state.waitContext == nil {
+		state.mu.Unlock()
 		return ErrClosed
 	}
-	var process StableProcess = s.peer
+	var process StableProcess = state.peer
 	if wrapper {
-		process = s.wrapper
+		process = state.wrapper
 	}
 	if isNilInterface(process) {
-		s.mu.Unlock()
+		state.mu.Unlock()
 		return ErrClosed
 	}
-	lifetime := s.waitContext
-	s.activeWaits.Add(1)
-	s.mu.Unlock()
-	defer s.activeWaits.Done()
+	lifetime := state.waitContext
+	state.activeWaits.Add(1)
+	state.mu.Unlock()
+	defer state.activeWaits.Done()
 
 	waitContext, cancel := context.WithCancel(ctx)
 	stopLifetimeCancellation := context.AfterFunc(lifetime, cancel)
@@ -353,46 +361,50 @@ func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
+	if s.state == nil {
+		return ErrClosed
+	}
+	state := s.state
 	for {
-		s.mu.Lock()
-		if s.closing {
-			complete := s.closeComplete
-			s.mu.Unlock()
+		state.mu.Lock()
+		if state.closing {
+			complete := state.closeComplete
+			state.mu.Unlock()
 			<-complete
 			continue
 		}
-		if isNilInterface(s.peer) && isNilInterface(s.wrapper) {
-			s.closed = true
-			s.mu.Unlock()
+		if isNilInterface(state.peer) && isNilInterface(state.wrapper) {
+			state.closed = true
+			state.mu.Unlock()
 			return nil
 		}
-		s.closed = true
-		s.closing = true
-		s.closeComplete = make(chan struct{})
-		complete := s.closeComplete
-		cancelWaits := s.cancelWaits
-		peer := s.peer
-		wrapper := s.wrapper
-		s.mu.Unlock()
+		state.closed = true
+		state.closing = true
+		state.closeComplete = make(chan struct{})
+		complete := state.closeComplete
+		cancelWaits := state.cancelWaits
+		peer := state.peer
+		wrapper := state.wrapper
+		state.mu.Unlock()
 
 		if cancelWaits != nil {
 			cancelWaits()
 		}
-		s.activeWaits.Wait()
+		state.activeWaits.Wait()
 		peerErr := closeStableProcess("close verified peer ServiceHost process", peer)
 		wrapperErr := closeStableProcess("close verified WinSW wrapper process", wrapper)
 		closeErr := errors.Join(peerErr, wrapperErr)
 
-		s.mu.Lock()
+		state.mu.Lock()
 		if peerErr == nil {
-			s.peer = nil
+			state.peer = nil
 		}
 		if wrapperErr == nil {
-			s.wrapper = nil
+			state.wrapper = nil
 		}
-		s.closing = false
+		state.closing = false
 		close(complete)
-		s.mu.Unlock()
+		state.mu.Unlock()
 		return closeErr
 	}
 }

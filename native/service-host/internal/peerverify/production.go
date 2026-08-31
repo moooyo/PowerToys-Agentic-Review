@@ -22,8 +22,14 @@ type serviceStatusSource interface {
 
 type windowsVerificationPlatform interface {
 	processOpener
+	CurrentProcessID() uint32
 	OpenPeerService(string) (serviceStatusSource, error)
 	NewAuthenticodeVerifier() (AuthenticodeVerifier, error)
+}
+
+type productionPipeEndpoint interface {
+	winpipe.ProcessIDObserver
+	LocalSide() (winpipe.EndpointSide, error)
 }
 
 type resolvedWindowsOptions struct {
@@ -33,6 +39,7 @@ type resolvedWindowsOptions struct {
 
 type windowsVerificationOptions struct {
 	Role                                   config.Role
+	LocalEndpointSide                      winpipe.EndpointSide
 	PipeObserver                           winpipe.ProcessIDObserver
 	WrapperImage                           ImageExpectation
 	ServiceHostImage                       ImageExpectation
@@ -51,6 +58,54 @@ func (wrapper *scmStableWrapper) StableFacts() StableProcessFacts {
 	return wrapper.facts
 }
 
+func verifyWindowsEndpoint(
+	options Options,
+	endpoint productionPipeEndpoint,
+	platform windowsVerificationPlatform,
+) (*Session, error) {
+	expectedSide, err := expectedLocalEndpointSide(options.Role)
+	if err != nil {
+		return nil, err
+	}
+	if isNilInterface(endpoint) {
+		return nil, invalidOptions("concrete named-pipe endpoint is required")
+	}
+	localSide, err := endpoint.LocalSide()
+	if err != nil {
+		return nil, errors.Join(ErrInvalidOptions, fmt.Errorf("inspect concrete named-pipe endpoint side: %w", err))
+	}
+	if localSide != expectedSide {
+		return nil, invalidOptions(fmt.Sprintf(
+			"role %q requires local pipe endpoint side %d, got %d",
+			options.Role,
+			expectedSide,
+			localSide,
+		))
+	}
+	return verifyWindowsWithPlatform(
+		windowsVerificationOptions{
+			Role:                                   options.Role,
+			LocalEndpointSide:                      localSide,
+			PipeObserver:                           endpoint,
+			WrapperImage:                           options.WrapperImage,
+			ServiceHostImage:                       options.ServiceHostImage,
+			ExpectedLeafSignerCertificateDERSHA256: options.ExpectedLeafSignerCertificateDERSHA256,
+		},
+		platform,
+	)
+}
+
+func expectedLocalEndpointSide(role config.Role) (winpipe.EndpointSide, error) {
+	switch role {
+	case config.RoleControl:
+		return winpipe.EndpointSideServer, nil
+	case config.RoleExecutor:
+		return winpipe.EndpointSideClient, nil
+	default:
+		return winpipe.EndpointSideUnknown, invalidOptions("role must be control or executor")
+	}
+}
+
 func verifyWindowsWithPlatform(
 	options windowsVerificationOptions,
 	platform windowsVerificationPlatform,
@@ -61,6 +116,24 @@ func verifyWindowsWithPlatform(
 	}
 	if isNilInterface(platform) {
 		return nil, errors.New("Windows peer verification platform is required")
+	}
+	localProcessID := platform.CurrentProcessID()
+	if localProcessID == 0 {
+		return nil, fmt.Errorf("%w: Windows returned local process ID zero", ErrPeerUnstable)
+	}
+	initialPeerPID, err := observePipeProcessID(options.PipeObserver, resolved.pipePeer)
+	if err != nil {
+		return nil, fmt.Errorf("observe named-pipe peer before native acquisition: %w", err)
+	}
+	if initialPeerPID == 0 {
+		return nil, fmt.Errorf("%w: initial named-pipe peer observation returned PID zero", ErrPeerUnstable)
+	}
+	if initialPeerPID == localProcessID {
+		return nil, fmt.Errorf(
+			"%w: named-pipe peer PID %d is the local ServiceHost process",
+			ErrPeerUnstable,
+			initialPeerPID,
+		)
 	}
 	authenticodeVerifier, err := platform.NewAuthenticodeVerifier()
 	if err != nil {
@@ -78,6 +151,7 @@ func verifyWindowsWithPlatform(
 		wrapper,
 		verificationOptions{
 			PipePeer:                               resolved.pipePeer,
+			LocalProcessID:                         localProcessID,
 			ExpectedServiceSID:                     resolved.peerService.SID,
 			WrapperImage:                           options.WrapperImage,
 			ServiceHostImage:                       options.ServiceHostImage,
@@ -92,6 +166,10 @@ func verifyWindowsWithPlatform(
 func resolveWindowsOptions(options windowsVerificationOptions) (resolvedWindowsOptions, error) {
 	var expected config.ServiceIdentity
 	var pipePeer PipePeer
+	localSide, err := expectedLocalEndpointSide(options.Role)
+	if err != nil {
+		return resolvedWindowsOptions{}, err
+	}
 	switch options.Role {
 	case config.RoleControl:
 		expected = config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID}
@@ -99,8 +177,14 @@ func resolveWindowsOptions(options windowsVerificationOptions) (resolvedWindowsO
 	case config.RoleExecutor:
 		expected = config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID}
 		pipePeer = PipePeerServer
-	default:
-		return resolvedWindowsOptions{}, invalidOptions("role must be control or executor")
+	}
+	if options.LocalEndpointSide != localSide {
+		return resolvedWindowsOptions{}, invalidOptions(fmt.Sprintf(
+			"role %q requires local pipe endpoint side %d, got %d",
+			options.Role,
+			localSide,
+			options.LocalEndpointSide,
+		))
 	}
 	if isNilInterface(options.PipeObserver) {
 		return resolvedWindowsOptions{}, invalidOptions("named-pipe PID observer is required")

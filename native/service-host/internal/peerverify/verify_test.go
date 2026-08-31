@@ -645,6 +645,109 @@ func TestSessionCloseCancelsAndJoinsActiveWait(t *testing.T) {
 	}
 }
 
+func TestCopiedSessionCloseCancelsAndJoinsSharedActiveWait(t *testing.T) {
+	fixture := newVerificationFixture(PipePeerClient)
+	started := make(chan struct{})
+	fixture.peer.waitFunc = func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	session, err := verifyWithOpener(fixture.observer, fixture.wrapper, fixture.options, fixture.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- session.WaitPeer(context.Background())
+	}()
+	<-started
+	copied := *session
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- copied.Close()
+	}()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("copied Session.Close did not join the shared active wait")
+	}
+	if err := <-waitResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context.Canceled", err)
+	}
+	if fixture.peer.closeCount != 1 || fixture.wrapper.closeCount != 1 {
+		t.Fatalf("close counts = peer %d wrapper %d", fixture.peer.closeCount, fixture.wrapper.closeCount)
+	}
+}
+
+func TestConcurrentSessionCopiesShareOneCloseState(t *testing.T) {
+	fixture := newVerificationFixture(PipePeerClient)
+	session, err := verifyWithOpener(fixture.observer, fixture.wrapper, fixture.options, fixture.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := *session
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		results <- session.Close()
+	}()
+	go func() {
+		<-start
+		results <- copied.Close()
+	}()
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fixture.peer.closeCount != 1 || fixture.wrapper.closeCount != 1 {
+		t.Fatalf("close counts = peer %d wrapper %d", fixture.peer.closeCount, fixture.wrapper.closeCount)
+	}
+}
+
+func TestSessionCopiesShareLifetimeAndReturnDetachedEvidence(t *testing.T) {
+	fixture := newVerificationFixture(PipePeerClient)
+	session, err := verifyWithOpener(fixture.observer, fixture.wrapper, fixture.options, fixture.opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := *session
+	first := session.Evidence()
+	second := copied.Evidence()
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("copied session evidence differs: first=%+v second=%+v", first, second)
+	}
+	first.PeerToken.ServiceSID = "modified"
+	if copied.Evidence().PeerToken.ServiceSID != testServiceSID {
+		t.Fatal("Evidence returned mutable state shared with the copied session")
+	}
+	if err := copied.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WaitPeer(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("original copy remained open after copied Close: %v", err)
+	}
+}
+
+func TestZeroSessionFailsClosed(t *testing.T) {
+	var session Session
+	if evidence := session.Evidence(); evidence != (VerificationEvidence{}) {
+		t.Fatalf("zero Session evidence = %+v", evidence)
+	}
+	if err := session.WaitPeer(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("zero Session wait error = %v", err)
+	}
+	if err := session.Close(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("zero Session close error = %v", err)
+	}
+}
+
 func TestSessionCloseRetainsFailedObjectForRetry(t *testing.T) {
 	fixture := newVerificationFixture(PipePeerClient)
 	session, err := verifyWithOpener(fixture.observer, fixture.wrapper, fixture.options, fixture.opener)
@@ -756,6 +859,7 @@ func newVerificationFixture(pipePeer PipePeer) *verificationFixture {
 	fixture.opener = fakeOpener{process: fixture.peer, events: &fixture.events}
 	fixture.options = verificationOptions{
 		PipePeer:           pipePeer,
+		LocalProcessID:     999,
 		ExpectedServiceSID: testServiceSID,
 		WrapperImage: ImageExpectation{
 			Path:   testWrapperPath,

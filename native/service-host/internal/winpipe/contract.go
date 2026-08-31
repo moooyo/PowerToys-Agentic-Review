@@ -80,6 +80,17 @@ type ProcessIDObserver interface {
 	GetNamedPipeServerProcessID() (uint32, error)
 }
 
+// EndpointSide identifies which end of a connected pipe is owned by the local
+// Endpoint object. The value is derived from private endpoint construction
+// state and cannot be selected by peer-verification callers.
+type EndpointSide uint8
+
+const (
+	EndpointSideUnknown EndpointSide = iota
+	EndpointSideServer
+	EndpointSideClient
+)
+
 func validateServerOptions(options ServerOptions) (string, error) {
 	if err := validatePipeName(options.PipeName); err != nil {
 		return "", err

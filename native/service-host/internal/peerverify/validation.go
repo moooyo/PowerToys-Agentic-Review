@@ -15,6 +15,9 @@ func validateVerificationOptions(options verificationOptions) error {
 	if options.PipePeer != PipePeerClient && options.PipePeer != PipePeerServer {
 		return invalidOptions("pipe peer must select the client or server endpoint")
 	}
+	if options.LocalProcessID == 0 {
+		return invalidOptions("local process ID must be nonzero")
+	}
 	if err := validateServiceSID(options.ExpectedServiceSID); err != nil {
 		return invalidOptions("expected peer service SID must be canonical")
 	}

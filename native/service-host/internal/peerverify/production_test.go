@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 )
 
 type scriptedServiceObservation struct {
@@ -54,13 +55,39 @@ type fakeWindowsVerificationPlatform struct {
 	processes          map[uint32][]processOpenResult
 	authenticode       AuthenticodeVerifier
 	authenticodeErr    error
+	currentProcessID   uint32
 	openedServiceNames []string
+}
+
+type fakeProductionEndpoint struct {
+	events   *[]string
+	observer winpipe.ProcessIDObserver
+	side     winpipe.EndpointSide
+	sideErr  error
+}
+
+func (endpoint *fakeProductionEndpoint) LocalSide() (winpipe.EndpointSide, error) {
+	*endpoint.events = append(*endpoint.events, "endpoint-side")
+	return endpoint.side, endpoint.sideErr
+}
+
+func (endpoint *fakeProductionEndpoint) GetNamedPipeClientProcessID() (uint32, error) {
+	return endpoint.observer.GetNamedPipeClientProcessID()
+}
+
+func (endpoint *fakeProductionEndpoint) GetNamedPipeServerProcessID() (uint32, error) {
+	return endpoint.observer.GetNamedPipeServerProcessID()
 }
 
 func (platform *fakeWindowsVerificationPlatform) OpenPeerService(name string) (serviceStatusSource, error) {
 	*platform.events = append(*platform.events, "open-service-"+name)
 	platform.openedServiceNames = append(platform.openedServiceNames, name)
 	return platform.service, platform.serviceErr
+}
+
+func (platform *fakeWindowsVerificationPlatform) CurrentProcessID() uint32 {
+	*platform.events = append(*platform.events, "current-process-id")
+	return platform.currentProcessID
 }
 
 func (platform *fakeWindowsVerificationPlatform) OpenProcess(processID uint32) (PeerProcess, error) {
@@ -91,11 +118,15 @@ type productionFixture struct {
 func newProductionFixture(role config.Role) *productionFixture {
 	peerService := config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID}
 	pipePeer := PipePeerClient
+	localSide := winpipe.EndpointSideServer
 	if role == config.RoleExecutor {
 		peerService = config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID}
 		pipePeer = PipePeerServer
+		localSide = winpipe.EndpointSideClient
 	}
 	verification := newVerificationFixture(pipePeer)
+	verification.observer.client = []observedPID{{value: 200}, {value: 200}, {value: 200}}
+	verification.observer.server = []observedPID{{value: 200}, {value: 200}, {value: 200}}
 	verification.peer.token.User.SID = peerService.SID
 	verification.peer.token.Groups[0].SID = peerService.SID
 	verification.peer.token.RestrictedSIDs[0].SID = peerService.SID
@@ -107,9 +138,10 @@ func newProductionFixture(role config.Role) *productionFixture {
 		},
 	}
 	platform := &fakeWindowsVerificationPlatform{
-		events:       &verification.events,
-		service:      service,
-		authenticode: verification.options.AuthenticodeVerifier,
+		events:           &verification.events,
+		service:          service,
+		authenticode:     verification.options.AuthenticodeVerifier,
+		currentProcessID: verification.options.LocalProcessID,
 		processes: map[uint32][]processOpenResult{
 			100: {{process: verification.wrapper}},
 			200: {{process: verification.peer}},
@@ -121,6 +153,7 @@ func newProductionFixture(role config.Role) *productionFixture {
 		platform:     platform,
 		options: windowsVerificationOptions{
 			Role:                                   role,
+			LocalEndpointSide:                      localSide,
 			PipeObserver:                           verification.observer,
 			WrapperImage:                           verification.options.WrapperImage,
 			ServiceHostImage:                       verification.options.ServiceHostImage,
@@ -148,6 +181,8 @@ func TestProductionVerificationDerivesOpposingServiceAndPipeEndpointFromRole(t *
 				t.Fatal(err)
 			}
 			wantPrefix := []string{
+				"current-process-id",
+				test.observation,
 				"new-authenticode",
 				"open-service-" + fixture.peerService.Name,
 				"scm-status",
@@ -193,12 +228,61 @@ func TestProductionVerificationDerivesOpposingServiceAndPipeEndpointFromRole(t *
 	}
 }
 
+func TestProductionVerificationRejectsLoopbackPeerBeforePeerProcessOpen(t *testing.T) {
+	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
+		t.Run(string(role), func(t *testing.T) {
+			fixture := newProductionFixture(role)
+			localPID := fixture.platform.currentProcessID
+			if role == config.RoleControl {
+				fixture.verification.observer.client = []observedPID{{value: localPID}, {value: localPID}}
+			} else {
+				fixture.verification.observer.server = []observedPID{{value: localPID}, {value: localPID}}
+			}
+			_, err := verifyWindowsWithPlatform(fixture.options, fixture.platform)
+			if !errors.Is(err, ErrPeerUnstable) {
+				t.Fatalf("error = %v, want ErrPeerUnstable", err)
+			}
+			for _, event := range fixture.verification.events {
+				if event == fmt.Sprintf("open-process-%d", localPID) {
+					t.Fatalf("loopback peer reached process open: %v", fixture.verification.events)
+				}
+			}
+			if fixture.verification.peer.closeCount != 0 || fixture.verification.wrapper.closeCount != 0 {
+				t.Fatalf(
+					"loopback close counts = peer %d wrapper %d",
+					fixture.verification.peer.closeCount,
+					fixture.verification.wrapper.closeCount,
+				)
+			}
+		})
+	}
+}
+
+func TestProductionVerificationRejectsZeroCurrentProcessIDBeforeNativeAcquisition(t *testing.T) {
+	fixture := newProductionFixture(config.RoleControl)
+	fixture.platform.currentProcessID = 0
+	fixture.verification.events = nil
+	_, err := verifyWindowsWithPlatform(fixture.options, fixture.platform)
+	if !errors.Is(err, ErrPeerUnstable) {
+		t.Fatalf("error = %v, want ErrPeerUnstable", err)
+	}
+	if !reflect.DeepEqual(fixture.verification.events, []string{"current-process-id"}) {
+		t.Fatalf("zero current PID reached native acquisition: %v", fixture.verification.events)
+	}
+}
+
 func TestProductionOptionsRejectInvalidRoleOrObserverBeforePlatformUse(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*windowsVerificationOptions)
 	}{
 		{name: "unknown role", mutate: func(options *windowsVerificationOptions) { options.Role = config.Role("other") }},
+		{name: "Control on client endpoint", mutate: func(options *windowsVerificationOptions) {
+			options.LocalEndpointSide = winpipe.EndpointSideClient
+		}},
+		{name: "Executor on server endpoint", mutate: func(options *windowsVerificationOptions) {
+			options.Role = config.RoleExecutor
+		}},
 		{name: "missing pipe observer", mutate: func(options *windowsVerificationOptions) { options.PipeObserver = nil }},
 	}
 	for _, test := range tests {
@@ -212,6 +296,41 @@ func TestProductionOptionsRejectInvalidRoleOrObserverBeforePlatformUse(t *testin
 			}
 			if len(fixture.verification.events) != 0 {
 				t.Fatalf("invalid options reached platform: %v", fixture.verification.events)
+			}
+		})
+	}
+}
+
+func TestPublicOptionsRejectRoleEndpointSideMismatchBeforePlatformUse(t *testing.T) {
+	tests := []struct {
+		name string
+		role config.Role
+		side winpipe.EndpointSide
+	}{
+		{name: "Control cannot use client endpoint", role: config.RoleControl, side: winpipe.EndpointSideClient},
+		{name: "Executor cannot use server endpoint", role: config.RoleExecutor, side: winpipe.EndpointSideServer},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProductionFixture(test.role)
+			options := Options{
+				Role:                                   test.role,
+				WrapperImage:                           fixture.options.WrapperImage,
+				ServiceHostImage:                       fixture.options.ServiceHostImage,
+				ExpectedLeafSignerCertificateDERSHA256: fixture.options.ExpectedLeafSignerCertificateDERSHA256,
+			}
+			endpoint := &fakeProductionEndpoint{
+				events:   &fixture.verification.events,
+				observer: fixture.verification.observer,
+				side:     test.side,
+			}
+			fixture.verification.events = nil
+			_, err := verifyWindowsEndpoint(options, endpoint, fixture.platform)
+			if !errors.Is(err, ErrInvalidOptions) {
+				t.Fatalf("error = %v, want ErrInvalidOptions", err)
+			}
+			if !reflect.DeepEqual(fixture.verification.events, []string{"endpoint-side"}) {
+				t.Fatalf("mismatched role reached platform or SCM: %v", fixture.verification.events)
 			}
 		})
 	}
@@ -405,3 +524,4 @@ func TestProductionSessionRetainsFailedWrapperCloseForExplicitRetry(t *testing.T
 }
 
 var _ windowsVerificationPlatform = (*fakeWindowsVerificationPlatform)(nil)
+var _ productionPipeEndpoint = (*fakeProductionEndpoint)(nil)

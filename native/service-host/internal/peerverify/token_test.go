@@ -174,6 +174,7 @@ func TestValidateVerificationOptionsRejectsNoncanonicalSecurityInputs(t *testing
 		mutate func(*verificationOptions)
 	}{
 		{name: "unknown endpoint", mutate: func(value *verificationOptions) { value.PipePeer = PipePeerUnknown }},
+		{name: "zero local PID", mutate: func(value *verificationOptions) { value.LocalProcessID = 0 }},
 		{name: "noncanonical service SID", mutate: func(value *verificationOptions) { value.ExpectedServiceSID = "S-1-5-80-01-2-3-4-5" }},
 		{name: "relative wrapper path", mutate: func(value *verificationOptions) { value.WrapperImage.Path = "winsw.exe" }},
 		{name: "uppercase hash", mutate: func(value *verificationOptions) {

@@ -18,7 +18,13 @@ import (
 
 const overlappedPollMilliseconds = 25
 
+// Endpoint is a connected named-pipe endpoint. Copies share one private state
+// and therefore one raw handle owner, operation set, and close result.
 type Endpoint struct {
+	state *endpointState
+}
+
+type endpointState struct {
 	handle            windows.Handle
 	maximumFrameBytes uint32
 	server            bool
@@ -32,6 +38,10 @@ type Endpoint struct {
 
 	readGate  chan struct{}
 	writeGate chan struct{}
+
+	cancelIO    func(windows.Handle, *windows.Overlapped) error
+	disconnect  func(windows.Handle) error
+	closeHandle func(windows.Handle) error
 }
 
 // Accept creates the only server instance and waits for one client. The caller
@@ -146,16 +156,23 @@ func Dial(ctx context.Context, options ClientOptions) (*Endpoint, error) {
 }
 
 func newEndpoint(handle windows.Handle, maximumFrameBytes uint32, server bool) *Endpoint {
-	endpoint := &Endpoint{
+	state := &endpointState{
 		handle:            handle,
 		maximumFrameBytes: maximumFrameBytes,
 		server:            server,
 		readGate:          make(chan struct{}, 1),
 		writeGate:         make(chan struct{}, 1),
 	}
-	endpoint.readGate <- struct{}{}
-	endpoint.writeGate <- struct{}{}
-	return endpoint
+	state.readGate <- struct{}{}
+	state.writeGate <- struct{}{}
+	return &Endpoint{state: state}
+}
+
+func (e *Endpoint) currentState() (*endpointState, error) {
+	if e == nil || e.state == nil {
+		return nil, ErrClosed
+	}
+	return e.state, nil
 }
 
 func validateSecurityDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) error {
@@ -210,18 +227,19 @@ func (e *Endpoint) connect(ctx context.Context) error {
 }
 
 func (e *Endpoint) ReadFrame(ctx context.Context) ([]byte, error) {
-	if e == nil {
+	state, stateErr := e.currentState()
+	if stateErr != nil {
 		return nil, ErrClosed
 	}
 	if ctx == nil {
 		return nil, errors.New("named-pipe read context is required")
 	}
-	if err := acquire(ctx, e.readGate); err != nil {
+	if err := acquire(ctx, state.readGate); err != nil {
 		return nil, err
 	}
-	defer release(e.readGate)
+	defer release(state.readGate)
 
-	buffer := make([]byte, int(e.maximumFrameBytes))
+	buffer := make([]byte, int(state.maximumFrameBytes))
 	transferred, err := e.performOverlapped(ctx, func(handle windows.Handle, overlapped *windows.Overlapped, done *uint32) error {
 		return windows.ReadFile(handle, buffer, done, overlapped)
 	})
@@ -244,7 +262,7 @@ func (e *Endpoint) ReadFrame(ctx context.Context) ([]byte, error) {
 	}
 
 	value := append([]byte(nil), buffer[:transferred]...)
-	if _, err := framing.ValidateFrame(value, e.maximumFrameBytes); err != nil {
+	if _, err := framing.ValidateFrame(value, state.maximumFrameBytes); err != nil {
 		wrapped := fmt.Errorf("validate named-pipe frame: %w", err)
 		e.markFailed(wrapped)
 		return nil, wrapped
@@ -253,18 +271,19 @@ func (e *Endpoint) ReadFrame(ctx context.Context) ([]byte, error) {
 }
 
 func (e *Endpoint) WriteFrame(ctx context.Context, value []byte) error {
-	if e == nil {
+	state, stateErr := e.currentState()
+	if stateErr != nil {
 		return ErrClosed
 	}
 	if ctx == nil {
 		return errors.New("named-pipe write context is required")
 	}
-	if err := acquire(ctx, e.writeGate); err != nil {
+	if err := acquire(ctx, state.writeGate); err != nil {
 		return err
 	}
-	defer release(e.writeGate)
+	defer release(state.writeGate)
 
-	if _, err := framing.ValidateFrame(value, e.maximumFrameBytes); err != nil {
+	if _, err := framing.ValidateFrame(value, state.maximumFrameBytes); err != nil {
 		wrapped := fmt.Errorf("validate named-pipe frame: %w", err)
 		e.markFailed(wrapped)
 		return wrapped
@@ -291,6 +310,10 @@ func (e *Endpoint) performOverlapped(
 	ctx context.Context,
 	start func(windows.Handle, *windows.Overlapped, *uint32) error,
 ) (uint32, error) {
+	state, stateErr := e.currentState()
+	if stateErr != nil {
+		return 0, stateErr
+	}
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause
 	}
@@ -302,20 +325,20 @@ func (e *Endpoint) performOverlapped(
 
 	overlapped := windows.Overlapped{HEvent: event}
 	var transferred uint32
-	e.stateMu.Lock()
-	if stateErr := e.stateErrorLocked(); stateErr != nil {
-		e.stateMu.Unlock()
+	state.stateMu.Lock()
+	if stateErr := state.stateErrorLocked(); stateErr != nil {
+		state.stateMu.Unlock()
 		return 0, stateErr
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		e.stateMu.Unlock()
+		state.stateMu.Unlock()
 		return 0, cause
 	}
-	e.active.Add(1)
-	handle := e.handle
+	state.active.Add(1)
+	handle := state.handle
 	startErr := start(handle, &overlapped, &transferred)
-	e.stateMu.Unlock()
-	defer e.active.Done()
+	state.stateMu.Unlock()
+	defer state.active.Done()
 
 	if startErr == nil || !errors.Is(startErr, windows.ERROR_IO_PENDING) {
 		return transferred, startErr
@@ -378,22 +401,30 @@ func (e *Endpoint) markFailed(cause error) {
 	if cause == nil {
 		return
 	}
-	e.stateMu.Lock()
-	defer e.stateMu.Unlock()
-	if e.closed || e.terminal != nil {
+	state, err := e.currentState()
+	if err != nil {
 		return
 	}
-	e.terminal = cause
-	if err := windows.CancelIoEx(e.handle, nil); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
-		e.terminal = errors.Join(e.terminal, fmt.Errorf("cancel named-pipe I/O after failure: %w", err))
+	state.stateMu.Lock()
+	defer state.stateMu.Unlock()
+	if state.closed || state.terminal != nil {
+		return
+	}
+	state.terminal = cause
+	if err := windows.CancelIoEx(state.handle, nil); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
+		state.terminal = errors.Join(state.terminal, fmt.Errorf("cancel named-pipe I/O after failure: %w", err))
 	}
 }
 
 func (e *Endpoint) normalizeOperationError(err error, reading bool) error {
 	if errors.Is(err, windows.ERROR_OPERATION_ABORTED) {
-		e.stateMu.Lock()
-		stateErr := e.stateErrorLocked()
-		e.stateMu.Unlock()
+		state, stateErr := e.currentState()
+		if stateErr != nil {
+			return stateErr
+		}
+		state.stateMu.Lock()
+		stateErr = state.stateErrorLocked()
+		state.stateMu.Unlock()
 		if stateErr != nil {
 			return stateErr
 		}
@@ -409,40 +440,81 @@ func (e *Endpoint) normalizeOperationError(err error, reading bool) error {
 	return err
 }
 
-func (e *Endpoint) stateErrorLocked() error {
-	if e.closed {
+func (state *endpointState) stateErrorLocked() error {
+	if state.closed {
 		return ErrClosed
 	}
-	return e.terminal
+	return state.terminal
 }
 
 func (e *Endpoint) Close() error {
 	if e == nil {
 		return nil
 	}
-	e.closeOnce.Do(func() {
-		e.stateMu.Lock()
-		e.closed = true
-		handle := e.handle
-		cancelErr := windows.CancelIoEx(handle, nil)
+	state, stateErr := e.currentState()
+	if stateErr != nil {
+		return stateErr
+	}
+	state.closeOnce.Do(func() {
+		state.stateMu.Lock()
+		state.closed = true
+		handle := state.handle
+		cancelIO := state.cancelIO
+		if cancelIO == nil {
+			cancelIO = windows.CancelIoEx
+		}
+		cancelErr := cancelIO(handle, nil)
 		if errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
 			cancelErr = nil
 		}
-		e.stateMu.Unlock()
+		state.stateMu.Unlock()
 
-		e.active.Wait()
+		state.active.Wait()
 		var disconnectErr error
-		if e.server {
-			disconnectErr = windows.DisconnectNamedPipe(handle)
+		if state.server {
+			disconnect := state.disconnect
+			if disconnect == nil {
+				disconnect = windows.DisconnectNamedPipe
+			}
+			disconnectErr = disconnect(handle)
 			if errors.Is(disconnectErr, windows.ERROR_PIPE_NOT_CONNECTED) ||
 				errors.Is(disconnectErr, windows.ERROR_NO_DATA) {
 				disconnectErr = nil
 			}
 		}
-		closeErr := windows.CloseHandle(handle)
-		e.closeErr = errors.Join(cancelErr, disconnectErr, closeErr)
+		closeHandle := state.closeHandle
+		if closeHandle == nil {
+			closeHandle = windows.CloseHandle
+		}
+		closeErr := closeHandle(handle)
+		state.stateMu.Lock()
+		if closeErr == nil {
+			state.handle = 0
+		}
+		state.closeErr = errors.Join(cancelErr, disconnectErr, closeErr)
+		state.stateMu.Unlock()
 	})
-	return e.closeErr
+	return state.closeErr
+}
+
+// LocalSide returns the locally owned end of this live concrete endpoint.
+func (e *Endpoint) LocalSide() (EndpointSide, error) {
+	state, err := e.currentState()
+	if err != nil {
+		return EndpointSideUnknown, err
+	}
+	state.stateMu.Lock()
+	defer state.stateMu.Unlock()
+	if state.handle == 0 {
+		return EndpointSideUnknown, ErrClosed
+	}
+	if err := state.stateErrorLocked(); err != nil {
+		return EndpointSideUnknown, err
+	}
+	if state.server {
+		return EndpointSideServer, nil
+	}
+	return EndpointSideClient, nil
 }
 
 // GetNamedPipeClientProcessID returns one kernel observation. It must be
@@ -461,18 +533,19 @@ func (e *Endpoint) observeProcessID(
 	name string,
 	observe func(windows.Handle, *uint32) error,
 ) (uint32, error) {
-	if e == nil {
-		return 0, ErrClosed
+	state, stateErr := e.currentState()
+	if stateErr != nil {
+		return 0, stateErr
 	}
-	e.stateMu.Lock()
-	if err := e.stateErrorLocked(); err != nil {
-		e.stateMu.Unlock()
+	state.stateMu.Lock()
+	if err := state.stateErrorLocked(); err != nil {
+		state.stateMu.Unlock()
 		return 0, err
 	}
-	e.active.Add(1)
-	handle := e.handle
-	e.stateMu.Unlock()
-	defer e.active.Done()
+	state.active.Add(1)
+	handle := state.handle
+	state.stateMu.Unlock()
+	defer state.active.Done()
 
 	var processID uint32
 	if err := observe(handle, &processID); err != nil {

@@ -71,6 +71,13 @@ func verifyWithOpener(
 	if firstPID == 0 {
 		return nil, fmt.Errorf("%w: first named-pipe observation returned PID zero", ErrPeerUnstable)
 	}
+	if firstPID == options.LocalProcessID {
+		return nil, fmt.Errorf(
+			"%w: named-pipe peer PID %d is the local ServiceHost process",
+			ErrPeerUnstable,
+			firstPID,
+		)
+	}
 	peer, err = opener.OpenProcess(firstPID)
 	if err != nil {
 		return nil, fmt.Errorf("open named-pipe peer process %d: %w", firstPID, err)
@@ -187,7 +194,7 @@ func verifyWithOpener(
 	}
 
 	waitContext, cancelWaits := context.WithCancel(context.Background())
-	session = &Session{
+	session = &Session{state: &sessionState{
 		peer:        peer,
 		wrapper:     wrapper,
 		waitContext: waitContext,
@@ -209,7 +216,7 @@ func verifyWithOpener(
 			},
 			PeerToken: tokenEvidence,
 		},
-	}
+	}}
 	keep = true
 	return session, nil
 }

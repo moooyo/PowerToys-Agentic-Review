@@ -21,19 +21,14 @@ const (
 // ServiceHost child. Native process and verifier implementations are fixed by
 // this package and cannot be supplied by the caller.
 func VerifyWindows(options Options) (*Session, error) {
-	return verifyWindowsWithPlatform(
-		windowsVerificationOptions{
-			Role:                                   options.Role,
-			PipeObserver:                           options.PipeEndpoint,
-			WrapperImage:                           options.WrapperImage,
-			ServiceHostImage:                       options.ServiceHostImage,
-			ExpectedLeafSignerCertificateDERSHA256: options.ExpectedLeafSignerCertificateDERSHA256,
-		},
-		windowsVerificationPlatformImpl{},
-	)
+	return verifyWindowsEndpoint(options, options.PipeEndpoint, windowsVerificationPlatformImpl{})
 }
 
 type windowsVerificationPlatformImpl struct{}
+
+func (windowsVerificationPlatformImpl) CurrentProcessID() uint32 {
+	return windows.GetCurrentProcessId()
+}
 
 func (windowsVerificationPlatformImpl) OpenPeerService(name string) (serviceStatusSource, error) {
 	namePointer, err := windows.UTF16PtrFromString(name)

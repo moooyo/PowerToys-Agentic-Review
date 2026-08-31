@@ -28,6 +28,9 @@ func TestNonWindowsTransportFailsClosed(t *testing.T) {
 	if err := endpoint.Close(); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("Close returned %v", err)
 	}
+	if side, err := endpoint.LocalSide(); side != EndpointSideUnknown || !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("LocalSide returned (%d, %v)", side, err)
+	}
 	if _, err := endpoint.GetNamedPipeClientProcessID(); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("GetNamedPipeClientProcessID returned %v", err)
 	}
