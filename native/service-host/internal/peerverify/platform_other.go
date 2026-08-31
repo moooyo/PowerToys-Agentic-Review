@@ -2,8 +2,14 @@
 
 package peerverify
 
-// VerifyWindows is the non-Windows form of the low-level preflight bridge. It
-// fails closed without observing the pipe or opening any native resource.
-func VerifyWindows(Options) (*Session, error) {
+import "errors"
+
+func isNativeHandleOwnershipFatal(err error) bool {
+	return errors.Is(err, ErrNativeHandleOwnershipFatal)
+}
+
+// verifyPreflightWindows fails closed outside Windows without observing the
+// pipe or opening any native resource.
+func verifyPreflightWindows(productionOptions) (*Session, error) {
 	return nil, ErrUnsupportedPlatform
 }

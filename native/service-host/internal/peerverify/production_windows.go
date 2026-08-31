@@ -16,12 +16,15 @@ const (
 	scmServiceOpenAccess = uint32(windows.SERVICE_QUERY_STATUS)
 )
 
-// VerifyWindows is the low-level bridge called only by preflight's atomic peer
-// verification plan. It opens and retains the opposing service's WinSW
+func isNativeHandleOwnershipFatal(err error) bool {
+	return errors.Is(err, ErrNativeHandleOwnershipFatal) || errors.Is(err, windows.ERROR_INVALID_HANDLE)
+}
+
+// verifyPreflightWindows opens and retains the opposing service's WinSW
 // wrapper from a stable SCM observation, then verifies the named-pipe peer that
-// is its direct ServiceHost child. Native process and verifier implementations
-// are fixed by this package and cannot be supplied by the caller.
-func VerifyWindows(options Options) (*Session, error) {
+// is its direct ServiceHost child. It is reachable only through the claimed
+// PreflightWindowsVerifier authority.
+func verifyPreflightWindows(options productionOptions) (*Session, error) {
 	return verifyWindowsEndpoint(options, options.PipeEndpoint, windowsVerificationPlatformImpl{})
 }
 

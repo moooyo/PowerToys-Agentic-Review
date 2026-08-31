@@ -348,7 +348,7 @@ func closeRejectedImageHandle(handle windows.Handle) error {
 	if handle == 0 {
 		return nil
 	}
-	return closeDiscardedResource("close rejected image candidate handle", func() error {
+	return closeDiscardedResource("close rejected image candidate handle", handle, func() error {
 		return windows.CloseHandle(handle)
 	})
 }

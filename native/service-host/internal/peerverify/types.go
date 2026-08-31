@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,15 +15,17 @@ import (
 )
 
 var (
-	ErrUnsupportedPlatform = errors.New("ServiceHost peer verification requires Windows")
-	ErrInvalidOptions      = errors.New("invalid ServiceHost peer verification options")
-	ErrPeerUnstable        = errors.New("named-pipe peer process is not stable")
-	ErrWrapperUnstable     = errors.New("verified WinSW wrapper process is not stable")
-	ErrParentMismatch      = errors.New("ServiceHost is not a direct child of the verified WinSW wrapper")
-	ErrImageMismatch       = errors.New("reopened executable candidate does not match its pinned file identity")
-	ErrAuthenticode        = errors.New("reopened executable candidate failed Authenticode verification")
-	ErrTokenMismatch       = errors.New("peer process token does not have the expected restricted service SID")
-	ErrClosed              = errors.New("verified peer session is closed")
+	ErrUnsupportedPlatform          = errors.New("ServiceHost peer verification requires Windows")
+	ErrInvalidOptions               = errors.New("invalid ServiceHost peer verification options")
+	ErrPreflightVerifierUnavailable = errors.New("preflight Windows peer verifier authority is unavailable")
+	ErrNativeHandleOwnershipFatal   = errors.New("peer verifier native handle ownership is unresolved; the current ServiceHost process must exit")
+	ErrPeerUnstable                 = errors.New("named-pipe peer process is not stable")
+	ErrWrapperUnstable              = errors.New("verified WinSW wrapper process is not stable")
+	ErrParentMismatch               = errors.New("ServiceHost is not a direct child of the verified WinSW wrapper")
+	ErrImageMismatch                = errors.New("reopened executable candidate does not match its pinned file identity")
+	ErrAuthenticode                 = errors.New("reopened executable candidate failed Authenticode verification")
+	ErrTokenMismatch                = errors.New("peer process token does not have the expected restricted service SID")
+	ErrClosed                       = errors.New("verified peer session is closed")
 )
 
 // PipePeer selects which endpoint process ID is observed. Control verifies a
@@ -98,7 +102,9 @@ type StableProcess interface {
 	OpenImage() (ImageSubject, error)
 	Wait(context.Context) error
 	// Close must retain every original native handle when it returns an error
-	// so a later Close call can retry. Successful repeated calls return nil.
+	// so a later Close call can retry. ErrNativeHandleOwnershipFatal is the
+	// exception: the suspect numeric handle remains tombstoned and must never be
+	// passed to a native close again. Successful repeated calls return nil.
 	Close() error
 }
 
@@ -210,17 +216,102 @@ type TokenVerifier interface {
 	VerifyToken(TokenSnapshot, string) (TokenEvidence, error)
 }
 
-// Options is the low-level bridge input used only by preflight's atomic peer
-// verification plan. This Go type is not sealed; a repository architecture
-// test forbids production construction outside internal/preflight/peer_plan.go.
+// productionOptions is constructed only by a claimed PreflightWindowsVerifier.
 // The opposing service identity, pipe endpoint direction, and all native
-// verifier implementations are selected internally from Role.
-type Options struct {
+// implementations remain selected internally from Role.
+type productionOptions struct {
 	Role                                   config.Role
 	PipeEndpoint                           *winpipe.Endpoint
 	WrapperImage                           ImageExpectation
 	ServiceHostImage                       ImageExpectation
 	ExpectedLeafSignerCertificateDERSHA256 string
+}
+
+// PreflightWindowsVerifier is the opaque, process-wide authority for entering
+// native Windows peer verification. Its zero value fails closed. The sole
+// authority is claimed during preflight package initialization and is never
+// exposed by a preflight plan.
+type PreflightWindowsVerifier struct {
+	verify func(productionOptions) (*Session, error)
+}
+
+var preflightWindowsVerifierClaim struct {
+	sync.Mutex
+	claimed bool
+}
+
+const (
+	preflightPlanPackagePath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
+	preflightPlanClaimFunc   = preflightPlanPackagePath + ".claimProductionPeerWindowsVerifier"
+	preflightPlanSourcePath  = "/internal/preflight/peer_plan.go"
+)
+
+// ClaimPreflightWindowsVerifier transfers the sole process-wide verification
+// authority. Repository architecture tests restrict this call to preflight's
+// reviewed atomic plan bridge, and the runtime caller check prevents another
+// sibling package from claiming first. Concurrent and repeated claims fail
+// closed.
+//
+//go:noinline
+func ClaimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
+	programCounter, source, _, ok := runtime.Caller(1)
+	caller := runtime.FuncForPC(programCounter)
+	if !ok || caller == nil || caller.Name() != preflightPlanClaimFunc ||
+		!strings.HasSuffix(strings.ReplaceAll(source, `\`, "/"), preflightPlanSourcePath) {
+		return PreflightWindowsVerifier{}, errors.Join(
+			ErrPreflightVerifierUnavailable,
+			errors.New("caller is not preflight's reviewed package initializer"),
+		)
+	}
+	return claimPreflightWindowsVerifier()
+}
+
+func claimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
+	preflightWindowsVerifierClaim.Lock()
+	defer preflightWindowsVerifierClaim.Unlock()
+	if preflightWindowsVerifierClaim.claimed {
+		return PreflightWindowsVerifier{}, errors.Join(
+			ErrPreflightVerifierUnavailable,
+			errors.New("preflight Windows peer verifier authority was already claimed"),
+		)
+	}
+	preflightWindowsVerifierClaim.claimed = true
+	return PreflightWindowsVerifier{verify: verifyPreflightWindows}, nil
+}
+
+// Verify enters the fixed native verifier with copy-only inputs selected by a
+// validated preflight plan. Only the holder of the claimed authority can call
+// the production implementation successfully.
+func (verifier PreflightWindowsVerifier) Verify(
+	role config.Role,
+	endpoint *winpipe.Endpoint,
+	wrapper ImageExpectation,
+	serviceHost ImageExpectation,
+	expectedLeafSignerCertificateDERSHA256 string,
+) (*Session, error) {
+	if verifier.verify == nil {
+		return nil, ErrPreflightVerifierUnavailable
+	}
+	if fatal := rejectedNativeOwners.fatalError(); fatal != nil {
+		return nil, fatal
+	}
+	return verifier.verify(productionOptions{
+		Role:                                   role,
+		PipeEndpoint:                           endpoint,
+		WrapperImage:                           wrapper,
+		ServiceHostImage:                       serviceHost,
+		ExpectedLeafSignerCertificateDERSHA256: expectedLeafSignerCertificateDERSHA256,
+	})
+}
+
+// BeginCommit linearizes a successful verification result against unresolved
+// native-owner publication. The caller must hold the returned read lease until
+// its final endpoint reinspection and Session publication complete.
+func (verifier PreflightWindowsVerifier) BeginCommit() (func(), error) {
+	if verifier.verify == nil {
+		return func() {}, ErrPreflightVerifierUnavailable
+	}
+	return rejectedNativeOwners.beginUse()
 }
 
 // verificationOptions contains the private dependencies used by the pure
@@ -358,6 +449,8 @@ func (s *Session) wait(ctx context.Context, wrapper bool) error {
 // Close cancels and joins active waits before releasing retained process
 // objects. No new wait can begin after closing starts. If an underlying close
 // fails, that object remains owned by the Session and a later Close retries it.
+// ErrNativeHandleOwnershipFatal is sticky and must never retry the suspect
+// numeric handle; the Session must remain retained until process exit.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil

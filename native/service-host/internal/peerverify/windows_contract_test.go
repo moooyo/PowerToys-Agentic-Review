@@ -121,6 +121,30 @@ func TestWindowsProcessCloseRetainsHandleForRetry(t *testing.T) {
 	}
 }
 
+func TestWindowsProcessCloseInvalidHandleIsStickyAndNeverRetried(t *testing.T) {
+	attempts := 0
+	process := &windowsStableProcess{
+		handle: windows.Handle(123),
+		closeHandle: func(handle windows.Handle) error {
+			attempts++
+			if handle != windows.Handle(123) {
+				t.Fatalf("close handle = %d", handle)
+			}
+			return windows.ERROR_INVALID_HANDLE
+		},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := process.Close()
+		if !errors.Is(err, windows.ERROR_INVALID_HANDLE) ||
+			!errors.Is(err, ErrNativeHandleOwnershipFatal) {
+			t.Fatalf("Close attempt %d error = %v", attempt, err)
+		}
+	}
+	if process.handle != windows.Handle(123) || attempts != 1 {
+		t.Fatalf("invalid handle owner = %d after %d native attempts", process.handle, attempts)
+	}
+}
+
 func TestWindowsImageCloseRetainsHandleForRetry(t *testing.T) {
 	closeFailure := errors.New("close failed")
 	attempts := 0

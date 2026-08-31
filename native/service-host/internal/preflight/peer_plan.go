@@ -136,6 +136,7 @@ type peerVerificationRequest struct {
 
 type peerWindowsVerifier func(peerVerificationRequest) (*peerverify.Session, error)
 type peerSessionCloser func(*peerverify.Session) error
+type peerVerifierCommitGate func() (func(), error)
 
 const rejectedPeerSessionCloseAttempts = 3
 
@@ -147,12 +148,21 @@ type peerSessionLifetimeQuarantine struct {
 
 var rejectedPeerSessions = &peerSessionLifetimeQuarantine{}
 
+//go:noinline
+func claimProductionPeerWindowsVerifier() (peerverify.PreflightWindowsVerifier, error) {
+	return peerverify.ClaimPreflightWindowsVerifier()
+}
+
+var (
+	productionPeerWindowsVerifier, productionPeerWindowsVerifierErr = claimProductionPeerWindowsVerifier()
+)
+
 // VerifyWindows atomically validates the concrete endpoint attestation and
 // invokes peerverify without exposing mutable verification options.
 func (plan PeerVerificationPlan) VerifyWindows(
 	endpoint *winpipe.Endpoint,
 ) (*peerverify.Session, error) {
-	return verifyPeerWindows(
+	return verifyPeerWindowsWithNativeCommit(
 		plan,
 		endpoint,
 		func() (peerEndpointAttestationFacts, error) {
@@ -173,13 +183,26 @@ func (plan PeerVerificationPlan) VerifyWindows(
 			}, nil
 		},
 		func(request peerVerificationRequest) (*peerverify.Session, error) {
-			return peerverify.VerifyWindows(peerverify.Options{
-				Role:                                   request.role,
-				PipeEndpoint:                           request.endpoint,
-				WrapperImage:                           request.wrapper,
-				ServiceHostImage:                       request.serviceHost,
-				ExpectedLeafSignerCertificateDERSHA256: request.signerDERSHA,
-			})
+			if productionPeerWindowsVerifierErr != nil {
+				return nil, preflightError(
+					ErrorPeerVerification,
+					"claim native peer verifier authority",
+					productionPeerWindowsVerifierErr,
+				)
+			}
+			return productionPeerWindowsVerifier.Verify(
+				request.role,
+				request.endpoint,
+				request.wrapper,
+				request.serviceHost,
+				request.signerDERSHA,
+			)
+		},
+		func() (func(), error) {
+			if productionPeerWindowsVerifierErr != nil {
+				return func() {}, productionPeerWindowsVerifierErr
+			}
+			return productionPeerWindowsVerifier.BeginCommit()
 		},
 	)
 }
@@ -190,13 +213,24 @@ func verifyPeerWindows(
 	attest peerEndpointAttestor,
 	verify peerWindowsVerifier,
 ) (*peerverify.Session, error) {
-	return verifyPeerWindowsWithLifecycle(
+	return verifyPeerWindowsWithNativeCommit(plan, endpoint, attest, verify, nil)
+}
+
+func verifyPeerWindowsWithNativeCommit(
+	plan PeerVerificationPlan,
+	endpoint *winpipe.Endpoint,
+	attest peerEndpointAttestor,
+	verify peerWindowsVerifier,
+	beginNativeCommit peerVerifierCommitGate,
+) (*peerverify.Session, error) {
+	return verifyPeerWindowsWithLifecycleAndCommit(
 		plan,
 		endpoint,
 		attest,
 		verify,
 		func(session *peerverify.Session) error { return session.Close() },
 		rejectedPeerSessions,
+		beginNativeCommit,
 	)
 }
 
@@ -207,6 +241,26 @@ func verifyPeerWindowsWithLifecycle(
 	verify peerWindowsVerifier,
 	closeSession peerSessionCloser,
 	quarantine *peerSessionLifetimeQuarantine,
+) (*peerverify.Session, error) {
+	return verifyPeerWindowsWithLifecycleAndCommit(
+		plan,
+		endpoint,
+		attest,
+		verify,
+		closeSession,
+		quarantine,
+		nil,
+	)
+}
+
+func verifyPeerWindowsWithLifecycleAndCommit(
+	plan PeerVerificationPlan,
+	endpoint *winpipe.Endpoint,
+	attest peerEndpointAttestor,
+	verify peerWindowsVerifier,
+	closeSession peerSessionCloser,
+	quarantine *peerSessionLifetimeQuarantine,
+	beginNativeCommit peerVerifierCommitGate,
 ) (*peerverify.Session, error) {
 	quarantine = peerSessionQuarantineOrDefault(quarantine)
 	if fatal := quarantine.fatalError(); fatal != nil {
@@ -240,9 +294,13 @@ func verifyPeerWindowsWithLifecycle(
 		signerDERSHA: plan.approvedSignerPin,
 	})
 	if err != nil {
+		cleanupErr := closeRejectedPeerSession(session, closeSession, quarantine)
+		if errors.Is(err, peerverify.ErrNativeHandleOwnershipFatal) {
+			cleanupErr = errors.Join(cleanupErr, quarantine.markFatal(err))
+		}
 		return nil, errors.Join(
 			err,
-			closeRejectedPeerSession(session, closeSession, quarantine),
+			cleanupErr,
 		)
 	}
 	if session == nil {
@@ -264,10 +322,30 @@ func verifyPeerWindowsWithLifecycle(
 			closeRejectedPeerSession(session, closeSession, quarantine),
 		)
 	}
+	releaseNativeCommit := func() {}
+	if beginNativeCommit != nil {
+		var nativeFatal error
+		releaseNativeCommit, nativeFatal = beginNativeCommit()
+		if nativeFatal != nil {
+			cleanupErr := closeRejectedPeerSession(session, closeSession, quarantine)
+			if errors.Is(nativeFatal, peerverify.ErrNativeHandleOwnershipFatal) {
+				cleanupErr = errors.Join(cleanupErr, quarantine.markFatal(nativeFatal))
+			}
+			return nil, errors.Join(nativeFatal, cleanupErr)
+		}
+		if releaseNativeCommit == nil {
+			return nil, errors.Join(
+				invalidPeerVerificationPlan("native peer verifier commit lease is unavailable", nil),
+				closeRejectedPeerSession(session, closeSession, quarantine),
+			)
+		}
+	}
 	releaseCommit, fatal := quarantine.beginUse()
 	if fatal != nil {
+		releaseNativeCommit()
 		return nil, errors.Join(fatal, closeRejectedPeerSession(session, closeSession, quarantine))
 	}
+	defer releaseNativeCommit()
 	defer releaseCommit()
 	return session, nil
 }
@@ -288,6 +366,9 @@ func closeRejectedPeerSession(
 		for attempt := 1; attempt <= rejectedPeerSessionCloseAttempts; attempt++ {
 			if err := closeSession(session); err != nil {
 				failures = append(failures, fmt.Errorf("close rejected peer session attempt %d: %w", attempt, err))
+				if errors.Is(err, peerverify.ErrNativeHandleOwnershipFatal) {
+					break
+				}
 				continue
 			}
 			return errors.Join(failures...)
@@ -316,6 +397,17 @@ func (quarantine *peerSessionLifetimeQuarantine) retain(
 	result := errors.Join(ErrPeerCleanupFatal, cause)
 	quarantine.mu.Lock()
 	quarantine.owners = append(quarantine.owners, session)
+	quarantine.fatal = errors.Join(quarantine.fatal, result)
+	quarantine.mu.Unlock()
+	return result
+}
+
+func (quarantine *peerSessionLifetimeQuarantine) markFatal(cause error) error {
+	if quarantine == nil {
+		return errors.Join(ErrPeerCleanupFatal, cause, errors.New("peer session quarantine is unavailable"))
+	}
+	result := errors.Join(ErrPeerCleanupFatal, cause)
+	quarantine.mu.Lock()
 	quarantine.fatal = errors.Join(quarantine.fatal, result)
 	quarantine.mu.Unlock()
 	return result

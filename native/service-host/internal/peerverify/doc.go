@@ -10,14 +10,16 @@
 // process and token DACLs. This package does not accept caller assertions that
 // those prerequisite checks succeeded.
 //
-// VerifyWindows derives the opposing Control or Executor service from the
-// caller's fixed role, observes that peer service through SCM around process
-// acquisition, and retains the resulting wrapper and pipe-peer process handles
-// in the returned Session. Production Authenticode verification is
-// handle-bound and accepts exactly one embedded primary signature.
-//
-// Options and VerifyWindows remain a low-level bridge rather than a type-sealed
-// API. A repository architecture test permits their production use only from
-// preflight's atomic plan. Moving the bridge behind an inverted package
-// boundary is deferred Tier-2 hardening.
+// The package exposes no caller-constructible production options and no direct
+// verification function. Preflight claims the sole opaque Windows verifier
+// authority during package initialization, derives the opposing Control or
+// Executor service from its fixed role, and supplies only release-bound image
+// expectations. A runtime caller check plus repository architecture tests
+// prevent any other production package from claiming that authority. The
+// verifier observes the peer service through SCM around process acquisition
+// and retains the resulting wrapper and pipe-peer process handles in the
+// returned Session. Production Authenticode verification is handle-bound and
+// accepts exactly one embedded primary signature. An invalid native handle
+// during Session cleanup is sticky and requires process exit; its numeric value
+// is never retried.
 package peerverify

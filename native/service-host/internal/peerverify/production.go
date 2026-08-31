@@ -59,7 +59,7 @@ func (wrapper *scmStableWrapper) StableFacts() StableProcessFacts {
 }
 
 func verifyWindowsEndpoint(
-	options Options,
+	options productionOptions,
 	endpoint productionPipeEndpoint,
 	platform windowsVerificationPlatform,
 ) (*Session, error) {
@@ -303,7 +303,7 @@ func closeDiscardedServiceStatusSource(service serviceStatusSource) error {
 	if isNilInterface(service) {
 		return nil
 	}
-	return closeDiscardedResource("close peer SCM status handles", service.Close)
+	return closeDiscardedResource("close peer SCM status handles", service, service.Close)
 }
 
 var _ StableWrapper = (*scmStableWrapper)(nil)

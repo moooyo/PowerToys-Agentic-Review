@@ -204,7 +204,7 @@ func (p *windowsStableProcess) TokenSnapshot() (snapshot TokenSnapshot, err erro
 		return TokenSnapshot{}, err
 	}
 	defer func() {
-		closeErr := closeDiscardedResource("close TOKEN_QUERY peer token", token.Close)
+		closeErr := closeDiscardedResource("close TOKEN_QUERY peer token", token, token.Close)
 		err = errors.Join(err, closeErr)
 	}()
 	return queryWindowsTokenSnapshot(token)
@@ -247,6 +247,9 @@ func (p *windowsStableProcess) Close() error {
 	if p.handle == 0 {
 		return nil
 	}
+	if errors.Is(p.closeErr, ErrNativeHandleOwnershipFatal) {
+		return p.closeErr
+	}
 	handle := p.handle
 	closeHandle := p.closeHandle
 	if closeHandle == nil {
@@ -254,6 +257,9 @@ func (p *windowsStableProcess) Close() error {
 	}
 	if err := closeHandle(handle); err != nil {
 		p.closeErr = fmt.Errorf("CloseHandle process: %w", err)
+		if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			p.closeErr = errors.Join(ErrNativeHandleOwnershipFatal, p.closeErr)
+		}
 		return p.closeErr
 	}
 	p.handle = 0

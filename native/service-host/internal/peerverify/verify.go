@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
@@ -18,6 +19,14 @@ const (
 	maximumVerifiedImageBytes      = int64(1024 * 1024 * 1024)
 	discardedResourceCloseAttempts = 3
 )
+
+type nativeOwnershipLifetimeQuarantine struct {
+	mu     sync.RWMutex
+	owners []any
+	fatal  error
+}
+
+var rejectedNativeOwners = &nativeOwnershipLifetimeQuarantine{}
 
 type processOpener interface {
 	OpenProcess(uint32) (PeerProcess, error)
@@ -472,24 +481,61 @@ func closeDiscardedStableProcess(operation string, process StableProcess) error 
 	if isNilInterface(process) {
 		return nil
 	}
-	return closeDiscardedResource(operation, process.Close)
+	return closeDiscardedResource(operation, process, process.Close)
 }
 
 func closeDiscardedImageSubject(image ImageSubject) error {
 	if isNilInterface(image) {
 		return nil
 	}
-	return closeDiscardedResource("close verified image candidate", image.Close)
+	return closeDiscardedResource("close verified image candidate", image, image.Close)
 }
 
-func closeDiscardedResource(operation string, closeResource func() error) error {
+func closeDiscardedResource(operation string, owner any, closeResource func() error) error {
 	var failures []error
 	for attempt := 1; attempt <= discardedResourceCloseAttempts; attempt++ {
 		if err := closeResource(); err != nil {
 			failures = append(failures, fmt.Errorf("%s attempt %d: %w", operation, attempt, err))
+			if isNativeHandleOwnershipFatal(err) {
+				return rejectedNativeOwners.retain(owner, errors.Join(failures...))
+			}
 			continue
 		}
 		return errors.Join(failures...)
 	}
-	return errors.Join(failures...)
+	return rejectedNativeOwners.retain(owner, errors.Join(failures...))
+}
+
+func (quarantine *nativeOwnershipLifetimeQuarantine) retain(owner any, cause error) error {
+	result := errors.Join(ErrNativeHandleOwnershipFatal, cause)
+	if quarantine == nil || owner == nil {
+		return errors.Join(result, errors.New("peer verifier native owner quarantine is unavailable"))
+	}
+	quarantine.mu.Lock()
+	quarantine.owners = append(quarantine.owners, owner)
+	quarantine.fatal = errors.Join(quarantine.fatal, result)
+	quarantine.mu.Unlock()
+	return result
+}
+
+func (quarantine *nativeOwnershipLifetimeQuarantine) fatalError() error {
+	if quarantine == nil {
+		return ErrNativeHandleOwnershipFatal
+	}
+	quarantine.mu.RLock()
+	defer quarantine.mu.RUnlock()
+	return quarantine.fatal
+}
+
+func (quarantine *nativeOwnershipLifetimeQuarantine) beginUse() (func(), error) {
+	if quarantine == nil {
+		return func() {}, ErrNativeHandleOwnershipFatal
+	}
+	quarantine.mu.RLock()
+	if quarantine.fatal != nil {
+		fatal := quarantine.fatal
+		quarantine.mu.RUnlock()
+		return func() {}, fatal
+	}
+	return quarantine.mu.RUnlock, nil
 }

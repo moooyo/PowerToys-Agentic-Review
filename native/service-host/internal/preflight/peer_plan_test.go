@@ -85,6 +85,12 @@ func TestPeerVerificationPlanAtomicallyMapsAttestedRoleInputs(t *testing.T) {
 	}
 }
 
+func TestPreflightPackageInitializationClaimsPeerVerifierAuthority(t *testing.T) {
+	if productionPeerWindowsVerifierErr != nil {
+		t.Fatalf("preflight peer verifier authority was not claimed: %v", productionPeerWindowsVerifierErr)
+	}
+}
+
 func TestPeerVerificationPlanRejectsSecondAttestationFailureOrMutation(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
 	evidence, err := composeSnapshots(fixture.input)
@@ -261,6 +267,34 @@ func TestRejectedPeerSessionCleanupRetriesAndQuarantinesPersistentFailure(t *tes
 		}
 	})
 
+	t.Run("invalid native handle stops retry", func(t *testing.T) {
+		quarantine := &peerSessionLifetimeQuarantine{}
+		closeCalls := 0
+		attestCalls := 0
+		got, err := verifyPeerWindowsWithLifecycle(
+			plan,
+			new(winpipe.Endpoint),
+			func() (peerEndpointAttestationFacts, error) {
+				attestCalls++
+				if attestCalls == 2 {
+					return peerEndpointAttestationFacts{}, rejection
+				}
+				return validPeerAttestationFacts(plan), nil
+			},
+			func(peerVerificationRequest) (*peerverify.Session, error) { return session, nil },
+			func(*peerverify.Session) error {
+				closeCalls++
+				return peerverify.ErrNativeHandleOwnershipFatal
+			},
+			quarantine,
+		)
+		if got != nil || !errors.Is(err, rejection) ||
+			!errors.Is(err, peerverify.ErrNativeHandleOwnershipFatal) ||
+			!errors.Is(err, ErrPeerCleanupFatal) || closeCalls != 1 || quarantine.count() != 1 {
+			t.Fatalf("result=(%p,%v), close=%d quarantine=%d", got, err, closeCalls, quarantine.count())
+		}
+	})
+
 	t.Run("fatal published before return", func(t *testing.T) {
 		quarantine := &peerSessionLifetimeQuarantine{}
 		blocker := new(peerverify.Session)
@@ -284,6 +318,54 @@ func TestRejectedPeerSessionCleanupRetriesAndQuarantinesPersistentFailure(t *tes
 		)
 		if got != nil || !errors.Is(err, ErrPeerCleanupFatal) || closeCalls != 1 || quarantine.count() != 1 {
 			t.Fatalf("result=(%p,%v), close=%d quarantine=%d", got, err, closeCalls, quarantine.count())
+		}
+	})
+
+	t.Run("native owner fatal published before commit", func(t *testing.T) {
+		quarantine := &peerSessionLifetimeQuarantine{}
+		nativeFatal := errors.Join(
+			peerverify.ErrNativeHandleOwnershipFatal,
+			errors.New("concurrent native owner quarantine"),
+		)
+		closeCalls := 0
+		got, err := verifyPeerWindowsWithLifecycleAndCommit(
+			plan,
+			new(winpipe.Endpoint),
+			func() (peerEndpointAttestationFacts, error) { return validPeerAttestationFacts(plan), nil },
+			func(peerVerificationRequest) (*peerverify.Session, error) { return session, nil },
+			func(observed *peerverify.Session) error {
+				closeCalls++
+				if observed != session {
+					return errors.New("closed a different peer session")
+				}
+				return nil
+			},
+			quarantine,
+			func() (func(), error) { return func() {}, nativeFatal },
+		)
+		if got != nil || !errors.Is(err, peerverify.ErrNativeHandleOwnershipFatal) ||
+			!errors.Is(err, ErrPeerCleanupFatal) || closeCalls != 1 || quarantine.count() != 0 {
+			t.Fatalf("result=(%p,%v), close=%d quarantine=%d", got, err, closeCalls, quarantine.count())
+		}
+		attestCalled := false
+		verifyCalled := false
+		got, secondErr := verifyPeerWindowsWithLifecycleAndCommit(
+			plan,
+			new(winpipe.Endpoint),
+			func() (peerEndpointAttestationFacts, error) {
+				attestCalled = true
+				return validPeerAttestationFacts(plan), nil
+			},
+			func(peerVerificationRequest) (*peerverify.Session, error) {
+				verifyCalled = true
+				return new(peerverify.Session), nil
+			},
+			func(*peerverify.Session) error { return nil },
+			quarantine,
+			func() (func(), error) { return func() {}, nil },
+		)
+		if got != nil || !errors.Is(secondErr, ErrPeerCleanupFatal) || attestCalled || verifyCalled {
+			t.Fatalf("post-native-fatal result=(%p,%v), attest=%v verify=%v", got, secondErr, attestCalled, verifyCalled)
 		}
 	})
 }
@@ -493,10 +575,47 @@ func TestPeerVerificationPlanPropagatesEndpointFailureWithoutVerify(t *testing.T
 	if !errors.Is(err, verifyFailure) {
 		t.Fatalf("peer verifier error = %v, want %v", err, verifyFailure)
 	}
+	nativeOwnerFatal := errors.Join(peerverify.ErrNativeHandleOwnershipFatal, errors.New("raw verifier retained native owner"))
+	quarantine := &peerSessionLifetimeQuarantine{}
+	attestCalls := 0
+	got, err := verifyPeerWindowsWithLifecycle(
+		plan,
+		new(winpipe.Endpoint),
+		func() (peerEndpointAttestationFacts, error) {
+			attestCalls++
+			return validPeerAttestationFacts(plan), nil
+		},
+		func(peerVerificationRequest) (*peerverify.Session, error) { return nil, nativeOwnerFatal },
+		func(*peerverify.Session) error { return errors.New("nil session must not be closed") },
+		quarantine,
+	)
+	if got != nil || !errors.Is(err, peerverify.ErrNativeHandleOwnershipFatal) ||
+		!errors.Is(err, ErrPeerCleanupFatal) || attestCalls != 1 || quarantine.count() != 0 {
+		t.Fatalf("raw owner fatal result=(%p,%v), attest=%d quarantine=%d", got, err, attestCalls, quarantine.count())
+	}
+	attestCalled = false
+	verifyCalled := false
+	got, secondErr := verifyPeerWindowsWithLifecycle(
+		plan,
+		new(winpipe.Endpoint),
+		func() (peerEndpointAttestationFacts, error) {
+			attestCalled = true
+			return validPeerAttestationFacts(plan), nil
+		},
+		func(peerVerificationRequest) (*peerverify.Session, error) {
+			verifyCalled = true
+			return new(peerverify.Session), nil
+		},
+		func(*peerverify.Session) error { return nil },
+		quarantine,
+	)
+	if got != nil || !errors.Is(secondErr, ErrPeerCleanupFatal) || attestCalled || verifyCalled {
+		t.Fatalf("post-native-fatal result=(%p,%v), attest=%v verify=%v", got, secondErr, attestCalled, verifyCalled)
+	}
 	returnedSession := new(peerverify.Session)
 	closeCalls := 0
-	quarantine := &peerSessionLifetimeQuarantine{}
-	got, err := verifyPeerWindowsWithLifecycle(
+	quarantine = &peerSessionLifetimeQuarantine{}
+	got, err = verifyPeerWindowsWithLifecycle(
 		plan,
 		new(winpipe.Endpoint),
 		func() (peerEndpointAttestationFacts, error) { return validPeerAttestationFacts(plan), nil },
@@ -512,6 +631,45 @@ func TestPeerVerificationPlanPropagatesEndpointFailureWithoutVerify(t *testing.T
 	)
 	if got != nil || !errors.Is(err, verifyFailure) || closeCalls != 1 || quarantine.count() != 0 {
 		t.Fatalf("rejected verifier session=(%p,%v), close=%d quarantine=%d", got, err, closeCalls, quarantine.count())
+	}
+	persistentCloseFailure := errors.New("rejected verifier session close failed")
+	closeCalls = 0
+	attestCalls = 0
+	quarantine = &peerSessionLifetimeQuarantine{}
+	got, err = verifyPeerWindowsWithLifecycle(
+		plan,
+		new(winpipe.Endpoint),
+		func() (peerEndpointAttestationFacts, error) {
+			attestCalls++
+			return validPeerAttestationFacts(plan), nil
+		},
+		func(peerVerificationRequest) (*peerverify.Session, error) { return returnedSession, verifyFailure },
+		func(observed *peerverify.Session) error {
+			closeCalls++
+			if observed != returnedSession {
+				return errors.New("closed a different peer session")
+			}
+			return persistentCloseFailure
+		},
+		quarantine,
+	)
+	if got != nil || !errors.Is(err, verifyFailure) || !errors.Is(err, persistentCloseFailure) ||
+		!errors.Is(err, ErrPeerCleanupFatal) || attestCalls != 1 ||
+		closeCalls != rejectedPeerSessionCloseAttempts || quarantine.count() != 1 {
+		t.Fatalf(
+			"persistent rejected verifier session=(%p,%v), attest=%d close=%d quarantine=%d",
+			got,
+			err,
+			attestCalls,
+			closeCalls,
+			quarantine.count(),
+		)
+	}
+	quarantine.mu.RLock()
+	retained := append([]*peerverify.Session(nil), quarantine.owners...)
+	quarantine.mu.RUnlock()
+	if len(retained) != 1 || retained[0] != returnedSession {
+		t.Fatalf("quarantine retained %v, want rejected session %p", retained, returnedSession)
 	}
 	_, err = verifyPeerWindows(
 		plan,

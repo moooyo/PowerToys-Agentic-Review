@@ -115,6 +115,14 @@ type productionFixture struct {
 	pipePeer     PipePeer
 }
 
+func TestPreflightWindowsVerifierAuthorityHasNoPublicState(t *testing.T) {
+	authority := reflect.TypeOf(PreflightWindowsVerifier{})
+	if authority.NumField() != 1 || authority.Field(0).IsExported() ||
+		authority.Field(0).Type.Kind() != reflect.Func {
+		t.Fatalf("preflight verifier authority is constructible: %#v", authority)
+	}
+}
+
 func newProductionFixture(role config.Role) *productionFixture {
 	peerService := config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID}
 	pipePeer := PipePeerClient
@@ -301,7 +309,7 @@ func TestProductionOptionsRejectInvalidRoleOrObserverBeforePlatformUse(t *testin
 	}
 }
 
-func TestPublicOptionsRejectRoleEndpointSideMismatchBeforePlatformUse(t *testing.T) {
+func TestProductionOptionsRejectRoleEndpointSideMismatchBeforePlatformUse(t *testing.T) {
 	tests := []struct {
 		name string
 		role config.Role
@@ -313,7 +321,7 @@ func TestPublicOptionsRejectRoleEndpointSideMismatchBeforePlatformUse(t *testing
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newProductionFixture(test.role)
-			options := Options{
+			options := productionOptions{
 				Role:                                   test.role,
 				WrapperImage:                           fixture.options.WrapperImage,
 				ServiceHostImage:                       fixture.options.ServiceHostImage,

@@ -574,6 +574,9 @@ func TestMandatoryTokenPolicyCannotBeWeakenedByInjectedVerifier(t *testing.T) {
 }
 
 func TestVerifyJoinsCleanupFailures(t *testing.T) {
+	originalQuarantine := rejectedNativeOwners
+	rejectedNativeOwners = &nativeOwnershipLifetimeQuarantine{}
+	t.Cleanup(func() { rejectedNativeOwners = originalQuarantine })
 	fixture := newVerificationFixture(PipePeerClient)
 	peerCloseErr := errors.New("peer close failed")
 	wrapperCloseErr := errors.New("wrapper close failed")
@@ -581,8 +584,25 @@ func TestVerifyJoinsCleanupFailures(t *testing.T) {
 	fixture.wrapper.closeErr = wrapperCloseErr
 	fixture.peer.parents = []uint32{99}
 	_, err := verifyWithOpener(fixture.observer, fixture.wrapper, fixture.options, fixture.opener)
-	if !errors.Is(err, ErrParentMismatch) || !errors.Is(err, peerCloseErr) || !errors.Is(err, wrapperCloseErr) {
+	if !errors.Is(err, ErrParentMismatch) || !errors.Is(err, peerCloseErr) ||
+		!errors.Is(err, wrapperCloseErr) || !errors.Is(err, ErrNativeHandleOwnershipFatal) {
 		t.Fatalf("error = %v, want verification and both cleanup errors", err)
+	}
+	if fixture.peer.closeCount != discardedResourceCloseAttempts ||
+		fixture.wrapper.closeCount != discardedResourceCloseAttempts {
+		t.Fatalf("persistent cleanup attempts = peer %d wrapper %d", fixture.peer.closeCount, fixture.wrapper.closeCount)
+	}
+	rejectedNativeOwners.mu.Lock()
+	owners := append([]any(nil), rejectedNativeOwners.owners...)
+	rejectedNativeOwners.mu.Unlock()
+	peerRetained := false
+	wrapperRetained := false
+	for _, owner := range owners {
+		peerRetained = peerRetained || owner == fixture.peer
+		wrapperRetained = wrapperRetained || owner == fixture.wrapper
+	}
+	if !peerRetained || !wrapperRetained {
+		t.Fatalf("native quarantine omitted rejected owners: %#v", owners)
 	}
 }
 

@@ -19,8 +19,9 @@ import (
 const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 
 type peerverifyIdentifierCounts struct {
-	verifyWindows int
-	options       int
+	claimPreflightWindowsVerifier int
+	legacyVerifyWindows           int
+	legacyOptions                 int
 }
 
 func TestPublicPreflightInputUsesOnlyOpaqueAuthorityEvidence(t *testing.T) {
@@ -63,9 +64,10 @@ func TestPublicPreflightInputUsesOnlyOpaqueAuthorityEvidence(t *testing.T) {
 }
 
 type peerverifyReference struct {
-	symbol string
-	direct bool
-	line   int
+	symbol            string
+	enclosingFunction string
+	direct            bool
+	line              int
 }
 
 type peerverifySourceAnalysis struct {
@@ -81,13 +83,13 @@ var expectedPeerverifyIdentifiers = map[string]peerverifyIdentifierCounts{
 	"internal/peerverify/authenticode_windows.go": {},
 	"internal/peerverify/doc.go":                  {},
 	"internal/peerverify/image_windows.go":        {},
-	"internal/peerverify/platform_other.go":       {verifyWindows: 1, options: 1},
+	"internal/peerverify/platform_other.go":       {},
 	"internal/peerverify/process_windows.go":      {},
-	"internal/peerverify/production.go":           {options: 1},
-	"internal/peerverify/production_windows.go":   {verifyWindows: 1, options: 1},
+	"internal/peerverify/production.go":           {},
+	"internal/peerverify/production_windows.go":   {},
 	"internal/peerverify/token.go":                {},
 	"internal/peerverify/token_windows.go":        {},
-	"internal/peerverify/types.go":                {options: 1},
+	"internal/peerverify/types.go":                {claimPreflightWindowsVerifier: 1},
 	"internal/peerverify/validation.go":           {},
 	"internal/peerverify/verify.go":               {},
 }
@@ -136,8 +138,9 @@ func TestProductionPeerVerificationHasOneAtomicBridge(t *testing.T) {
 				t.Errorf("%s peerverify identifiers = %+v, want %+v", relative, analysis.identifiers, expected)
 			}
 			seenPeerverifyFiles[relative] = struct{}{}
-			internalTotals.verifyWindows += analysis.identifiers.verifyWindows
-			internalTotals.options += analysis.identifiers.options
+			internalTotals.claimPreflightWindowsVerifier += analysis.identifiers.claimPreflightWindowsVerifier
+			internalTotals.legacyVerifyWindows += analysis.identifiers.legacyVerifyWindows
+			internalTotals.legacyOptions += analysis.identifiers.legacyOptions
 			return nil
 		}
 		for _, alias := range analysis.shadowedAliases {
@@ -152,10 +155,20 @@ func TestProductionPeerVerificationHasOneAtomicBridge(t *testing.T) {
 				t.Errorf("%s:%d uses peerverify.%s outside its required direct syntax", relative, reference.line, reference.symbol)
 			}
 			switch reference.symbol {
+			case "ClaimPreflightWindowsVerifier":
+				if reference.enclosingFunction != "claimProductionPeerWindowsVerifier" {
+					t.Errorf(
+						"%s:%d claims peer verification authority from %q, want claimProductionPeerWindowsVerifier",
+						relative,
+						reference.line,
+						reference.enclosingFunction,
+					)
+				}
+				externalCounts.claimPreflightWindowsVerifier++
 			case "VerifyWindows":
-				externalCounts.verifyWindows++
+				externalCounts.legacyVerifyWindows++
 			case "Options":
-				externalCounts.options++
+				externalCounts.legacyOptions++
 			}
 		}
 		return nil
@@ -168,22 +181,23 @@ func TestProductionPeerVerificationHasOneAtomicBridge(t *testing.T) {
 			t.Errorf("peerverify production baseline file %s is missing", file)
 		}
 	}
-	if externalCounts != (peerverifyIdentifierCounts{verifyWindows: 1, options: 1}) {
-		t.Errorf("external raw peerverify references = %+v, want exactly one direct call and literal", externalCounts)
+	if externalCounts != (peerverifyIdentifierCounts{claimPreflightWindowsVerifier: 1}) {
+		t.Errorf("external peerverify authority references = %+v, want exactly one direct claim", externalCounts)
 	}
-	if internalTotals != (peerverifyIdentifierCounts{verifyWindows: 2, options: 4}) {
-		t.Errorf("peerverify internal identifier total = %+v, want fixed baseline {2 4}", internalTotals)
+	if internalTotals != (peerverifyIdentifierCounts{claimPreflightWindowsVerifier: 1}) {
+		t.Errorf("peerverify internal authority identifiers = %+v, want one claim and no legacy raw API", internalTotals)
 	}
 }
 
 func TestAnalyzePeerverifySourceRejectsArchitectureEscapes(t *testing.T) {
 	direct, err := analyzePeerverifySource("direct.go", []byte(`package sample
 import pv "`+peerverifyImportPath+`"
-func run() { _, _ = pv.VerifyWindows(pv.Options{}) }
+func run() { _, _ = pv.ClaimPreflightWindowsVerifier() }
 `))
-	if err != nil || len(direct.references) != 2 ||
-		direct.references[0] != (peerverifyReference{symbol: "VerifyWindows", direct: true, line: 3}) ||
-		direct.references[1] != (peerverifyReference{symbol: "Options", direct: true, line: 3}) ||
+	if err != nil || len(direct.references) != 1 ||
+		direct.references[0] != (peerverifyReference{
+			symbol: "ClaimPreflightWindowsVerifier", enclosingFunction: "run", direct: true, line: 3,
+		}) ||
 		len(direct.shadowedAliases) != 0 {
 		t.Fatalf("direct explicit-alias analysis = %#v, %v", direct, err)
 	}
@@ -201,10 +215,9 @@ func run() { _, _ = pv.VerifyWindows(pv.Options{}) }
 			name: "function alias",
 			source: `package sample
 import pv "` + peerverifyImportPath + `"
-var bridge = pv.VerifyWindows
-var _ = pv.Options{}
+var bridge = pv.ClaimPreflightWindowsVerifier
 `,
-			wantSymbol: "VerifyWindows", wantReference: true,
+			wantSymbol: "ClaimPreflightWindowsVerifier", wantReference: true,
 		},
 		{
 			name: "type alias",
@@ -219,7 +232,7 @@ func run() { _, _ = pv.VerifyWindows(RawOptions{}) }
 			name: "local shadow fake count",
 			source: `package sample
 import pv "` + peerverifyImportPath + `"
-func run() { pv := struct{ VerifyWindows func(); Options int }{}; pv.VerifyWindows(); _ = pv.Options }
+func run() { pv := struct{ ClaimPreflightWindowsVerifier func() }{}; pv.ClaimPreflightWindowsVerifier() }
 `,
 			wantShadow: true,
 		},
@@ -227,14 +240,14 @@ func run() { pv := struct{ VerifyWindows func(); Options int }{}; pv.VerifyWindo
 			name: "dot import",
 			source: `package sample
 import . "` + peerverifyImportPath + `"
-func run() { _, _ = VerifyWindows(Options{}) }
+func run() { _, _ = ClaimPreflightWindowsVerifier() }
 `,
 			wantDot: true,
 		},
 		{
 			name: "linkname",
 			source: `package sample
-//go:linkname rawVerify ` + peerverifyImportPath + `.VerifyWindows
+//go:linkname rawClaim ` + peerverifyImportPath + `.ClaimPreflightWindowsVerifier
 func rawVerify()
 `,
 			wantLinkname: true,
@@ -269,10 +282,10 @@ func rawVerify()
 	}
 
 	internal, err := analyzePeerverifySource("wrapper.go", []byte(`package peerverify
-func VerifyWindows(Options) {}
-func bridge(value Options) { VerifyWindows(value) }
+func ClaimPreflightWindowsVerifier() {}
+func bridge() { ClaimPreflightWindowsVerifier() }
 `))
-	if err != nil || internal.identifiers != (peerverifyIdentifierCounts{verifyWindows: 2, options: 2}) {
+	if err != nil || internal.identifiers != (peerverifyIdentifierCounts{claimPreflightWindowsVerifier: 2}) {
 		t.Fatalf("internal wrapper analysis = %#v, %v", internal, err)
 	}
 }
@@ -318,13 +331,16 @@ func analyzePeerverifySource(filename string, source []byte) (peerverifySourceAn
 		if !ok {
 			return true
 		}
-		if identifier.Name == "VerifyWindows" || identifier.Name == "Options" {
+		if identifier.Name == "ClaimPreflightWindowsVerifier" ||
+			identifier.Name == "VerifyWindows" || identifier.Name == "Options" {
 			if selector, ok := parents[identifier].(*ast.SelectorExpr); !ok || selector.Sel != identifier {
 				switch identifier.Name {
+				case "ClaimPreflightWindowsVerifier":
+					analysis.identifiers.claimPreflightWindowsVerifier++
 				case "VerifyWindows":
-					analysis.identifiers.verifyWindows++
+					analysis.identifiers.legacyVerifyWindows++
 				case "Options":
-					analysis.identifiers.options++
+					analysis.identifiers.legacyOptions++
 				}
 			}
 		}
@@ -338,7 +354,8 @@ func analyzePeerverifySource(filename string, source []byte) (peerverifySourceAn
 	}
 	ast.Inspect(parsed, func(node ast.Node) bool {
 		selector, ok := node.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "VerifyWindows" && selector.Sel.Name != "Options" {
+		if !ok || selector.Sel.Name != "ClaimPreflightWindowsVerifier" &&
+			selector.Sel.Name != "VerifyWindows" && selector.Sel.Name != "Options" {
 			return true
 		}
 		identifier, ok := selector.X.(*ast.Ident)
@@ -350,7 +367,7 @@ func analyzePeerverifySource(filename string, source []byte) (peerverifySourceAn
 		}
 		direct := false
 		switch selector.Sel.Name {
-		case "VerifyWindows":
+		case "ClaimPreflightWindowsVerifier", "VerifyWindows":
 			call, ok := parents[selector].(*ast.CallExpr)
 			direct = ok && call.Fun == selector
 		case "Options":
@@ -358,13 +375,23 @@ func analyzePeerverifySource(filename string, source []byte) (peerverifySourceAn
 			direct = ok && literal.Type == selector
 		}
 		analysis.references = append(analysis.references, peerverifyReference{
-			symbol: selector.Sel.Name,
-			direct: direct,
-			line:   fileSet.Position(selector.Pos()).Line,
+			symbol:            selector.Sel.Name,
+			enclosingFunction: enclosingFunctionName(selector, parents),
+			direct:            direct,
+			line:              fileSet.Position(selector.Pos()).Line,
 		})
 		return true
 	})
 	return analysis, nil
+}
+
+func enclosingFunctionName(node ast.Node, parents map[ast.Node]ast.Node) string {
+	for parent := parents[node]; parent != nil; parent = parents[parent] {
+		if function, ok := parent.(*ast.FuncDecl); ok {
+			return function.Name.Name
+		}
+	}
+	return ""
 }
 
 func astParentMap(root ast.Node) map[ast.Node]ast.Node {
