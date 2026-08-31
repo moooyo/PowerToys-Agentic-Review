@@ -37,3 +37,39 @@ func TestActivityGroupWaitsForCompleteOperationTail(t *testing.T) {
 		t.Fatal("operation tail was not complete before activity release")
 	}
 }
+
+func TestActivityGroupTimeoutsReuseOneDrainSignal(t *testing.T) {
+	var active activityGroup
+	finish := active.begin()
+	active.mu.Lock()
+	drained := active.drained
+	active.mu.Unlock()
+	if drained == nil {
+		t.Fatal("activity group did not create its drain signal")
+	}
+
+	results := make(chan bool, 2)
+	go func() { results <- active.wait(10 * time.Millisecond) }()
+	go func() { results <- active.wait(10 * time.Millisecond) }()
+	for range 2 {
+		if <-results {
+			t.Fatal("activity wait completed while work remained active")
+		}
+	}
+	active.mu.Lock()
+	if active.drained != drained {
+		active.mu.Unlock()
+		t.Fatal("timed waits replaced the shared drain signal")
+	}
+	active.mu.Unlock()
+
+	finish()
+	if !active.wait(time.Second) {
+		t.Fatal("activity group did not drain after timed waiters returned")
+	}
+	select {
+	case <-drained:
+	default:
+		t.Fatal("shared drain signal did not close")
+	}
+}

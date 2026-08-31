@@ -12,7 +12,7 @@ import (
 // Listener is an unavailable placeholder outside Windows.
 type Listener struct{}
 
-// Connection is an unavailable placeholder outside Windows.
+// Connection is an unavailable, copy-safe placeholder outside Windows.
 type Connection struct{}
 
 // Prepare fails closed outside Windows.
@@ -24,6 +24,7 @@ func (*Listener) PipeName() string {
 	return ""
 }
 
+// Accept fails before transferring any connection ownership outside Windows.
 func (*Listener) Accept(
 	context.Context,
 	winprocess.NodeProcess,
@@ -60,6 +61,7 @@ func (*Connection) WriteContext(context.Context, []byte) (int, error) {
 	return 0, ErrUnsupportedPlatform
 }
 
+// Close reports that HostControl connection cleanup is unavailable outside Windows.
 func (*Connection) Close() error {
 	return ErrUnsupportedPlatform
 }

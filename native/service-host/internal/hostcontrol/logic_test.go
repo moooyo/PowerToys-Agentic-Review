@@ -46,6 +46,7 @@ type fakeRetainedNode struct {
 	observeIndex     int
 	countIndex       int
 	onObserve        func(int)
+	onActivate       func()
 }
 
 func (n *fakeRetainedNode) ProcessID() uint32 {
@@ -94,6 +95,9 @@ func (n *fakeRetainedNode) ActivateAfterHostControl() error {
 		return errors.New("HostControl activated twice")
 	}
 	n.activated = true
+	if n.onActivate != nil {
+		n.onActivate()
+	}
 	return nil
 }
 
@@ -189,8 +193,11 @@ type fakeRuntimeBootstrapChannel struct {
 	output        bytes.Buffer
 	events        *[]string
 	readStarted   bool
+	readCalls     int
 	writeCalls    int
 	failWriteCall int
+	onReadCall    func(int)
+	onWriteCall   func(int)
 }
 
 func (channel *fakeRuntimeBootstrapChannel) ReadContext(
@@ -204,7 +211,12 @@ func (channel *fakeRuntimeBootstrapChannel) ReadContext(
 		channel.readStarted = true
 		*channel.events = append(*channel.events, "read-ack")
 	}
-	return channel.input.Read(buffer)
+	channel.readCalls++
+	read, err := channel.input.Read(buffer)
+	if channel.onReadCall != nil {
+		channel.onReadCall(channel.readCalls)
+	}
+	return read, err
 }
 
 func (channel *fakeRuntimeBootstrapChannel) WriteContext(
@@ -224,7 +236,11 @@ func (channel *fakeRuntimeBootstrapChannel) WriteContext(
 	if channel.failWriteCall == channel.writeCalls {
 		return 0, errors.New("write failed")
 	}
-	return channel.output.Write(buffer)
+	written, err := channel.output.Write(buffer)
+	if channel.onWriteCall != nil {
+		channel.onWriteCall(channel.writeCalls)
+	}
+	return written, err
 }
 
 func TestCompleteRuntimeBootstrapActivatesBetweenAckAndCommit(t *testing.T) {
@@ -347,22 +363,133 @@ func TestCompleteRuntimeBootstrapRechecksDeadlineImmediatelyBeforeActivation(t *
 	}
 }
 
-func TestTerminateBeforeClosePreservesKillFirstOrder(t *testing.T) {
+func TestCompleteRuntimeBootstrapFailureStages(t *testing.T) {
+	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
+	deadlineCause := errors.New("startup deadline expired")
+	tests := []struct {
+		name          string
+		configure     func(*fakeRetainedNode, *fakeRuntimeBootstrapChannel, context.CancelCauseFunc)
+		wantActivated bool
+	}{
+		{
+			name: "bootstrap write",
+			configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel, _ context.CancelCauseFunc) {
+				channel.failWriteCall = 1
+			},
+		},
+		{
+			name: "bootstrap acknowledgement",
+			configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel, _ context.CancelCauseFunc) {
+				channel.input = bytes.NewReader(nil)
+			},
+		},
+		{
+			name: "bootstrap acknowledgement deadline",
+			configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel, cancel context.CancelCauseFunc) {
+				channel.onReadCall = func(call int) {
+					if call == 2 {
+						cancel(deadlineCause)
+					}
+				}
+			},
+		},
+		{
+			name: "pre-activation identity",
+			configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel, _ context.CancelCauseFunc) {
+				node.observations[0].StartKeySequenceNumber++
+			},
+		},
+		{
+			name: "pre-activation deadline",
+			configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel, cancel context.CancelCauseFunc) {
+				node.onObserve = func(observation int) {
+					if observation == 2 {
+						cancel(deadlineCause)
+					}
+				}
+			},
+		},
+		{
+			name: "activation",
+			configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel, _ context.CancelCauseFunc) {
+				node.activationError = errors.New("activation failed")
+			},
+		},
+		{
+			name: "pre-commit deadline",
+			configure: func(node *fakeRetainedNode, _ *fakeRuntimeBootstrapChannel, cancel context.CancelCauseFunc) {
+				node.onActivate = func() {
+					cancel(deadlineCause)
+				}
+			},
+			wantActivated: true,
+		},
+		{
+			name: "commit write",
+			configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel, _ context.CancelCauseFunc) {
+				channel.failWriteCall = 3
+			},
+			wantActivated: true,
+		},
+		{
+			name: "commit completion deadline",
+			configure: func(_ *fakeRetainedNode, channel *fakeRuntimeBootstrapChannel, cancel context.CancelCauseFunc) {
+				channel.onWriteCall = func(call int) {
+					if call == 4 {
+						cancel(deadlineCause)
+					}
+				}
+			},
+			wantActivated: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := []string{}
+			channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
+			node := newFakeRetainedNode(testNodeIdentity())
+			node.events = &events
+			ctx, cancel := context.WithCancelCause(context.Background())
+			t.Cleanup(func() { cancel(nil) })
+			test.configure(node, channel, cancel)
+
+			_, primary := completeRuntimeBootstrap(
+				ctx,
+				channel,
+				node,
+				VerificationEvidence{NodeIdentity: node.stable},
+				bootstrap,
+			)
+			if primary == nil {
+				t.Fatal("completeRuntimeBootstrap unexpectedly succeeded")
+			}
+			if node.activated != test.wantActivated {
+				t.Fatalf("Node activated = %v, want %v", node.activated, test.wantActivated)
+			}
+		})
+	}
+}
+
+func TestPreTransferFailureNeverReturnsConnectionOwner(t *testing.T) {
 	events := []string{}
 	node := newFakeRetainedNode(testNodeIdentity())
 	node.events = &events
 	node.terminationError = errors.New("termination failed")
-	closeError := errors.New("close failed")
-	err := terminateBeforeClose(node, func() {
+	primary := errors.New("accept failed before transfer")
+	closeError := errors.New("listener close failed")
+	connection, err := rejectAcceptFailure(nil, primary, node, func() {
 		events = append(events, "mark-terminal")
 	}, func() error {
 		events = append(events, "close")
 		return closeError
 	})
+	if connection != nil {
+		t.Fatalf("pre-transfer failure returned connection %p", connection)
+	}
 	if strings.Join(events, ",") != "terminate,mark-terminal,close" {
 		t.Fatalf("cleanup events = %v", events)
 	}
-	if !errors.Is(err, node.terminationError) || !errors.Is(err, closeError) {
+	if !errors.Is(err, primary) || !errors.Is(err, node.terminationError) || !errors.Is(err, closeError) {
 		t.Fatalf("cleanup error = %v", err)
 	}
 }

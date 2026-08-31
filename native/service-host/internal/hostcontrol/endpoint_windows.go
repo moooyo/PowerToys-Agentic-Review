@@ -58,8 +58,14 @@ type Listener struct {
 }
 
 // Connection is the exclusive byte stream accepted for one retained Node
-// process. It permits one active reader and one active writer.
+// process. It permits one active reader and one active writer. Accidental value
+// copies share its private handle-owner state, so Close remains single-owner;
+// RuntimeBootstrap authority stays bound to the exact returned pointer.
 type Connection struct {
+	state *connectionState
+}
+
+type connectionState struct {
 	mu      sync.Mutex
 	closeMu sync.Mutex
 	active  activityGroup
@@ -73,6 +79,10 @@ type Connection struct {
 
 	readGate  chan struct{}
 	writeGate chan struct{}
+
+	cancelIO    func(windows.Handle) error
+	disconnect  func(windows.Handle) error
+	closeHandle func(windows.Handle) error
 }
 
 // Prepare creates the only pipe instance and starts ConnectNamedPipe before
@@ -184,7 +194,10 @@ func (l *Listener) PipeName() string {
 }
 
 // Accept verifies the retained Node, completes the RuntimeBootstrapV1 exchange, and raises the
-// root Job process limit before publishing the consumed connection.
+// root Job process limit before publishing the consumed connection. Failures before pipe-handle
+// transfer return a nil Connection. After transfer, Accept terminates Node and tries to close the
+// Connection; if that close fails, it returns the still-owning Connection together with the
+// joined primary and cleanup errors so the caller can retry Close or exit the process.
 func (l *Listener) Accept(
 	ctx context.Context,
 	node winprocess.NodeProcess,
@@ -207,9 +220,9 @@ func (l *Listener) Accept(
 	connection, err := l.acceptConnected(ctx, node)
 	finish()
 	if err != nil {
-		return nil, errors.Join(err, terminateBeforeClose(node, func() {
+		return rejectAcceptFailure(nil, err, node, func() {
 			l.markTerminal(err)
-		}, l.Close))
+		}, l.Close)
 	}
 
 	bootstrapContext, cancelBootstrap := context.WithDeadline(ctx, l.deadline)
@@ -218,12 +231,28 @@ func (l *Listener) Accept(
 	)
 	cancelBootstrap()
 	if err != nil {
-		return nil, errors.Join(err, terminateBeforeClose(node, func() {
-			connection.markTerminal(err)
-		}, connection.Close))
+		return rejectPostTransferAcceptFailure(connection, err, node)
 	}
-	connection.bootstrap = committedBootstrap
+	connection.setCommittedRuntimeBootstrap(committedBootstrap)
 	return connection, nil
+}
+
+// rejectPostTransferAcceptFailure is the sole cleanup path after the listener
+// has transferred its pipe handle into a Connection. It preserves the exact
+// Connection owner whenever Close cannot consume that handle.
+func rejectPostTransferAcceptFailure(
+	connection *Connection,
+	primary error,
+	node interface{ Terminate() error },
+) (*Connection, error) {
+	if connection == nil || connection.state == nil {
+		return rejectAcceptFailure(nil, errors.Join(primary, ErrClosed), node, func() {}, func() error {
+			return ErrClosed
+		})
+	}
+	return rejectAcceptFailure(connection, primary, node, func() {
+		connection.markTerminal(primary)
+	}, connection.Close)
 }
 
 func (l *Listener) beginAccept() (func(), error) {
@@ -469,32 +498,53 @@ func newConnection(
 	options Options,
 	evidence VerificationEvidence,
 ) *Connection {
-	connection := &Connection{
+	state := &connectionState{
 		handle:    handle,
 		options:   options,
 		evidence:  evidence,
 		readGate:  make(chan struct{}, 1),
 		writeGate: make(chan struct{}, 1),
+		cancelIO: func(handle windows.Handle) error {
+			return windows.CancelIoEx(handle, nil)
+		},
+		disconnect:  disconnectPipe,
+		closeHandle: windows.CloseHandle,
 	}
-	connection.readGate <- struct{}{}
-	connection.writeGate <- struct{}{}
-	return connection
+	state.readGate <- struct{}{}
+	state.writeGate <- struct{}{}
+	return &Connection{state: state}
 }
 
 // Evidence returns immutable detached verification observations.
 func (c *Connection) Evidence() VerificationEvidence {
-	if c == nil {
+	if c == nil || c.state == nil {
 		return VerificationEvidence{}
 	}
-	return c.evidence
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.evidence
 }
 
 // CommittedRuntimeBootstrap returns opaque authority for this exact accepted connection.
 func (c *Connection) CommittedRuntimeBootstrap() localrpc.CommittedRuntimeBootstrap {
-	if c == nil {
+	if c == nil || c.state == nil {
 		return localrpc.CommittedRuntimeBootstrap{}
 	}
-	return c.bootstrap
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.bootstrap
+}
+
+func (c *Connection) setCommittedRuntimeBootstrap(bootstrap localrpc.CommittedRuntimeBootstrap) {
+	if c == nil || c.state == nil {
+		return
+	}
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.bootstrap = bootstrap
 }
 
 func (c *Connection) Read(buffer []byte) (int, error) {
@@ -506,21 +556,22 @@ func (c *Connection) Read(buffer []byte) (int, error) {
 
 // ReadContext performs one overlapped byte-stream read.
 func (c *Connection) ReadContext(ctx context.Context, buffer []byte) (int, error) {
-	if c == nil {
+	if c == nil || c.state == nil {
 		return 0, ErrClosed
 	}
 	if ctx == nil {
 		return 0, errors.New("HostControl read context is required")
 	}
-	operationContext, cancel := context.WithTimeout(ctx, c.options.IOTimeout)
+	state := c.state
+	operationContext, cancel := context.WithTimeout(ctx, state.options.IOTimeout)
 	defer cancel()
 	if len(buffer) == 0 {
 		return 0, nil
 	}
-	if err := acquireGate(operationContext, c.readGate); err != nil {
+	if err := acquireGate(operationContext, state.readGate); err != nil {
 		return 0, normalizeContextError(err)
 	}
-	defer releaseGate(c.readGate)
+	defer releaseGate(state.readGate)
 
 	transferred, finish, err := c.performOverlapped(operationContext, func(
 		handle windows.Handle,
@@ -553,21 +604,22 @@ func (c *Connection) Write(buffer []byte) (int, error) {
 
 // WriteContext performs one overlapped byte-stream write.
 func (c *Connection) WriteContext(ctx context.Context, buffer []byte) (int, error) {
-	if c == nil {
+	if c == nil || c.state == nil {
 		return 0, ErrClosed
 	}
 	if ctx == nil {
 		return 0, errors.New("HostControl write context is required")
 	}
-	operationContext, cancel := context.WithTimeout(ctx, c.options.IOTimeout)
+	state := c.state
+	operationContext, cancel := context.WithTimeout(ctx, state.options.IOTimeout)
 	defer cancel()
 	if len(buffer) == 0 {
 		return 0, nil
 	}
-	if err := acquireGate(operationContext, c.writeGate); err != nil {
+	if err := acquireGate(operationContext, state.writeGate); err != nil {
 		return 0, normalizeContextError(err)
 	}
-	defer releaseGate(c.writeGate)
+	defer releaseGate(state.writeGate)
 
 	transferred, finish, err := c.performOverlapped(operationContext, func(
 		handle windows.Handle,
@@ -596,6 +648,10 @@ func (c *Connection) performOverlapped(
 	start func(windows.Handle, *windows.Overlapped, *uint32) error,
 ) (transferred uint32, finish func(), resultErr error) {
 	finish = func() {}
+	if c == nil || c.state == nil {
+		return 0, finish, ErrClosed
+	}
+	state := c.state
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, finish, cause
 	}
@@ -610,19 +666,19 @@ func (c *Connection) performOverlapped(
 	}()
 	overlapped := windows.Overlapped{HEvent: event}
 
-	c.mu.Lock()
+	state.mu.Lock()
 	if err := c.stateErrorLocked(); err != nil {
-		c.mu.Unlock()
+		state.mu.Unlock()
 		return 0, finish, err
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		c.mu.Unlock()
+		state.mu.Unlock()
 		return 0, finish, cause
 	}
-	finish = c.active.begin()
-	handle := c.handle
+	finish = state.active.begin()
+	handle := state.handle
 	startErr := start(handle, &overlapped, &transferred)
-	c.mu.Unlock()
+	state.mu.Unlock()
 
 	if startErr == nil || !errors.Is(startErr, windows.ERROR_IO_PENDING) {
 		return transferred, finish, startErr
@@ -653,10 +709,14 @@ func (c *Connection) performOverlapped(
 }
 
 func (c *Connection) stateErrorLocked() error {
-	if c.handle == 0 || c.closing {
+	if c == nil || c.state == nil {
 		return ErrClosed
 	}
-	return c.terminal
+	state := c.state
+	if state.handle == 0 || state.closing {
+		return ErrClosed
+	}
+	return state.terminal
 }
 
 func (c *Connection) normalizeOperationError(err error, reading bool, transferred uint32) error {
@@ -664,9 +724,13 @@ func (c *Connection) normalizeOperationError(err error, reading bool, transferre
 		return ErrIOTimeout
 	}
 	if errors.Is(err, windows.ERROR_OPERATION_ABORTED) {
-		c.mu.Lock()
+		if c == nil || c.state == nil {
+			return ErrClosed
+		}
+		state := c.state
+		state.mu.Lock()
 		stateErr := c.stateErrorLocked()
-		c.mu.Unlock()
+		state.mu.Unlock()
 		if stateErr != nil {
 			return stateErr
 		}
@@ -685,61 +749,69 @@ func (c *Connection) normalizeOperationError(err error, reading bool, transferre
 }
 
 func (c *Connection) markTerminal(cause error) {
-	if c == nil || cause == nil {
+	if c == nil || c.state == nil || cause == nil {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.terminal == nil {
-		c.terminal = cause
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.terminal == nil {
+		state.terminal = cause
 	}
-	if c.handle != 0 && !c.closing {
-		if err := windows.CancelIoEx(c.handle, nil); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
-			c.terminal = errors.Join(c.terminal, fmt.Errorf("cancel HostControl I/O after failure: %w", err))
+	if state.handle != 0 && !state.closing {
+		if err := state.cancelIO(state.handle); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
+			state.terminal = errors.Join(state.terminal, fmt.Errorf("cancel HostControl I/O after failure: %w", err))
 		}
 	}
 }
 
 // Close cancels and drains active I/O. A failed DisconnectNamedPipe or
-// CloseHandle leaves the original handle stored for a later retry.
+// CloseHandle leaves the original handle stored for a later retry. Calls made
+// through copied Connection values share the same close attempt and handle.
 func (c *Connection) Close() error {
-	if c == nil {
+	if c == nil || c.state == nil {
 		return nil
 	}
-	c.closeMu.Lock()
-	defer c.closeMu.Unlock()
+	state := c.state
+	state.closeMu.Lock()
+	defer state.closeMu.Unlock()
 
-	c.mu.Lock()
-	if c.handle == 0 {
-		c.mu.Unlock()
+	state.mu.Lock()
+	if state.handle == 0 {
+		state.mu.Unlock()
 		return nil
 	}
-	c.closing = true
-	handle := c.handle
-	c.mu.Unlock()
+	state.closing = true
+	handle := state.handle
+	state.mu.Unlock()
 
-	cancelErr := windows.CancelIoEx(handle, nil)
+	cancelErr := state.cancelIO(handle)
 	if errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
 		cancelErr = nil
 	}
-	if !c.active.wait(c.options.CloseTimeout) {
+	if !state.active.wait(state.options.CloseTimeout) {
 		return errors.Join(cancelErr, ErrCloseTimeout)
 	}
 	if cancelErr != nil {
 		return fmt.Errorf("cancel HostControl connection I/O: %w", cancelErr)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.handle != handle {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.handle != handle {
 		return ErrClosed
 	}
-	if err := disconnectPipe(handle); err != nil {
-		return fmt.Errorf("disconnect HostControl connection: %w", err)
+	disconnectErr := state.disconnect(handle)
+	if errors.Is(disconnectErr, windows.ERROR_PIPE_NOT_CONNECTED) ||
+		errors.Is(disconnectErr, windows.ERROR_NO_DATA) {
+		disconnectErr = nil
 	}
-	if err := windows.CloseHandle(handle); err != nil {
+	if disconnectErr != nil {
+		return fmt.Errorf("disconnect HostControl connection: %w", disconnectErr)
+	}
+	if err := state.closeHandle(handle); err != nil {
 		return fmt.Errorf("close HostControl connection handle: %w", err)
 	}
-	c.handle = 0
+	state.handle = 0
 	return nil
 }
 

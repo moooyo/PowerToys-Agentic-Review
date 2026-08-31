@@ -122,27 +122,49 @@ type runtimeBootstrapNode interface {
 }
 
 type activityGroup struct {
-	group sync.WaitGroup
+	mu      sync.Mutex
+	count   int
+	drained chan struct{}
 }
 
 func (a *activityGroup) begin() func() {
-	a.group.Add(1)
+	a.mu.Lock()
+	if a.count == 0 {
+		a.drained = make(chan struct{})
+	}
+	a.count++
+	a.mu.Unlock()
+
 	var once sync.Once
 	return func() {
-		once.Do(a.group.Done)
+		once.Do(func() {
+			a.mu.Lock()
+			a.count--
+			if a.count < 0 {
+				a.mu.Unlock()
+				panic("HostControl activity count underflow")
+			}
+			if a.count == 0 {
+				close(a.drained)
+			}
+			a.mu.Unlock()
+		})
 	}
 }
 
 func (a *activityGroup) wait(timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		a.group.Wait()
-		close(done)
-	}()
+	a.mu.Lock()
+	if a.count == 0 {
+		a.mu.Unlock()
+		return true
+	}
+	drained := a.drained
+	a.mu.Unlock()
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case <-drained:
 		return true
 	case <-timer.C:
 		return false
@@ -388,15 +410,33 @@ func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence
 	return nil
 }
 
+func rejectAcceptFailure(
+	connection *Connection,
+	primary error,
+	node interface{ Terminate() error },
+	markTerminal func(),
+	closeEndpoint func() error,
+) (*Connection, error) {
+	terminateErr, closeErr := terminateBeforeClose(node, markTerminal, closeEndpoint)
+	resultErr := primary
+	if cleanupErr := errors.Join(terminateErr, closeErr); cleanupErr != nil {
+		resultErr = errors.Join(primary, cleanupErr)
+	}
+	if connection != nil && closeErr != nil {
+		return connection, resultErr
+	}
+	return nil, resultErr
+}
+
 func terminateBeforeClose(
 	node interface{ Terminate() error },
 	markTerminal func(),
 	closeEndpoint func() error,
-) error {
+) (error, error) {
 	terminateErr := node.Terminate()
 	markTerminal()
 	closeErr := closeEndpoint()
-	return errors.Join(terminateErr, closeErr)
+	return terminateErr, closeErr
 }
 
 func sameIdentity(left, right winprocess.NodeIdentity) bool {
