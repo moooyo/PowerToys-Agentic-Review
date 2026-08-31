@@ -3,11 +3,13 @@ package relay
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 )
 
 var (
 	ErrQueueClosed  = errors.New("byte queue is closed")
+	ErrQueueSealed  = errors.New("byte queue is sealed")
 	ErrItemTooLarge = errors.New("item exceeds the byte queue capacity")
 	ErrEmptyItem    = errors.New("byte queue items must not be empty")
 	ErrInvalidQueue = errors.New("byte queue capacity must be positive")
@@ -18,18 +20,28 @@ type QueueStats struct {
 	ReservedBytes int
 	QueuedItems   int
 	InFlightItems int
+	Sealed        bool
+	Aborted       bool
 	Closed        bool
 }
 
+type byteQueueState uint8
+
+const (
+	byteQueueOpen byteQueueState = iota
+	byteQueueSealed
+	byteQueueAborted
+)
+
 type ByteQueue struct {
-	mu       sync.Mutex
-	capacity int
-	reserved int
-	queued   [][]byte
-	inFlight int
-	closed   bool
-	cause    error
-	changed  chan struct{}
+	mu         sync.Mutex
+	capacity   int
+	reserved   int
+	queued     [][]byte
+	inFlight   int
+	state      byteQueueState
+	abortCause error
+	changed    chan struct{}
 }
 
 type Item struct {
@@ -66,10 +78,14 @@ func (q *ByteQueue) Enqueue(ctx context.Context, value []byte) error {
 			q.mu.Unlock()
 			return cause
 		}
-		if q.closed {
-			err := q.closeCauseLocked()
+		if q.state == byteQueueAborted {
+			err := q.abortCauseLocked()
 			q.mu.Unlock()
 			return err
+		}
+		if q.state == byteQueueSealed {
+			q.mu.Unlock()
+			return ErrQueueSealed
 		}
 		if q.reserved+len(value) <= q.capacity {
 			// Ownership transfers to the queue after a successful enqueue. Relay readers
@@ -101,8 +117,8 @@ func (q *ByteQueue) Dequeue(ctx context.Context) (*Item, error) {
 			q.mu.Unlock()
 			return nil, cause
 		}
-		if q.closed {
-			err := q.closeCauseLocked()
+		if q.state == byteQueueAborted {
+			err := q.abortCauseLocked()
 			q.mu.Unlock()
 			return nil, err
 		}
@@ -114,6 +130,10 @@ func (q *ByteQueue) Dequeue(ctx context.Context) (*Item, error) {
 			q.signalLocked()
 			q.mu.Unlock()
 			return &Item{Bytes: value, queue: q, size: len(value)}, nil
+		}
+		if q.state == byteQueueSealed && q.inFlight == 0 {
+			q.mu.Unlock()
+			return nil, io.EOF
 		}
 		changed := q.changed
 		q.mu.Unlock()
@@ -136,22 +156,77 @@ func (item *Item) Release() {
 	})
 }
 
-func (q *ByteQueue) Close(cause error) {
+// Seal atomically prevents future enqueue operations while retaining every
+// queued and in-flight item for ordered delivery.
+func (q *ByteQueue) Seal() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.closed {
-		return
+	if q.state != byteQueueOpen {
+		return false
 	}
-	q.closed = true
+	q.state = byteQueueSealed
+	q.signalLocked()
+	return true
+}
+
+// Abort atomically stops the queue and drops items that have not transferred
+// to a consumer. In-flight reservations remain until their owners release them.
+func (q *ByteQueue) Abort(cause error) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.state == byteQueueAborted {
+		return false
+	}
 	if cause == nil {
 		cause = ErrQueueClosed
 	}
-	q.cause = cause
+	q.state = byteQueueAborted
+	q.abortCause = cause
 	for _, value := range q.queued {
 		q.reserved -= len(value)
 	}
 	q.queued = nil
 	q.signalLocked()
+	return true
+}
+
+// Close is the compatibility name for the abortive queue operation. Graceful
+// producers must call Seal instead.
+func (q *ByteQueue) Close(cause error) {
+	q.Abort(cause)
+}
+
+// WaitDrained waits until a terminal queue has released all queued and
+// in-flight byte ownership. A sealed queue drains successfully; an aborted
+// queue returns its first abort cause after ownership is released.
+func (q *ByteQueue) WaitDrained(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("queue drain context is required")
+	}
+	for {
+		q.mu.Lock()
+		if cause := context.Cause(ctx); cause != nil {
+			q.mu.Unlock()
+			return cause
+		}
+		if q.state != byteQueueOpen && q.reserved == 0 {
+			state := q.state
+			err := q.abortCauseLocked()
+			q.mu.Unlock()
+			if state == byteQueueAborted {
+				return err
+			}
+			return nil
+		}
+		changed := q.changed
+		q.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-changed:
+		}
+	}
 }
 
 func (q *ByteQueue) Stats() QueueStats {
@@ -162,7 +237,9 @@ func (q *ByteQueue) Stats() QueueStats {
 		ReservedBytes: q.reserved,
 		QueuedItems:   len(q.queued),
 		InFlightItems: q.inFlight,
-		Closed:        q.closed,
+		Sealed:        q.state == byteQueueSealed,
+		Aborted:       q.state == byteQueueAborted,
+		Closed:        q.state != byteQueueOpen,
 	}
 }
 
@@ -177,11 +254,17 @@ func (q *ByteQueue) release(size int) {
 	q.signalLocked()
 }
 
-func (q *ByteQueue) closeCauseLocked() error {
-	if q.cause != nil {
-		return q.cause
+func (q *ByteQueue) abortCauseLocked() error {
+	if q.abortCause != nil {
+		return q.abortCause
 	}
 	return ErrQueueClosed
+}
+
+func (q *ByteQueue) sealedAndDrained() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.state == byteQueueSealed && q.reserved == 0
 }
 
 func (q *ByteQueue) signalLocked() {

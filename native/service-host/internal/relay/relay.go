@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
@@ -11,7 +12,10 @@ import (
 var ErrShutdownTimeout = errors.New("relay did not stop before its shutdown deadline")
 
 type Endpoint interface {
-	// ReadFrame and WriteFrame must return when ctx is cancelled or Close is called.
+	// ReadFrame must return an empty value and the exact io.EOF sentinel for a
+	// clean directional end. Bytes returned with any error, and wrapped or joined
+	// EOF values, are protocol failures. ReadFrame and WriteFrame must return when
+	// ctx is cancelled or Close is called.
 	ReadFrame(context.Context) ([]byte, error)
 	WriteFrame(context.Context, []byte) error
 	Close() error
@@ -58,8 +62,8 @@ func Run(ctx context.Context, left Endpoint, right Endpoint, options Options) er
 			failure = err
 			failureMu.Unlock()
 			cancel(err)
-			leftToRight.Close(err)
-			rightToLeft.Close(err)
+			leftToRight.Abort(err)
+			rightToLeft.Abort(err)
 			close(failureStarted)
 			go closeEndpoint("left", left, closeResults)
 			go closeEndpoint("right", right, closeResults)
@@ -134,10 +138,32 @@ func readLoop(
 	workers *sync.WaitGroup,
 	fail func(error),
 ) {
+	readLoopWithEOFPolicy(ctx, name, endpoint, queue, nil, workers, fail)
+}
+
+// readLoopWithEOFPolicy is the narrow foundation for a future role-aware
+// shutdown coordinator. A nil or rejecting policy preserves Run's current
+// fail-closed EOF behavior. Only an explicitly authorized empty value paired
+// with the exact io.EOF sentinel seals the direction and leaves its writer to
+// drain queued ownership.
+func readLoopWithEOFPolicy(
+	ctx context.Context,
+	name string,
+	endpoint Endpoint,
+	queue *ByteQueue,
+	authorizeEOF func() bool,
+	workers *sync.WaitGroup,
+	fail func(error),
+) {
 	defer workers.Done()
 	for {
 		value, err := endpoint.ReadFrame(ctx)
 		if err != nil {
+			if len(value) == 0 && err == io.EOF && context.Cause(ctx) == nil &&
+				authorizeEOF != nil && authorizeEOF() {
+				queue.Seal()
+				return
+			}
 			fail(normalizeContextError(ctx, fmt.Errorf("read from %s endpoint: %w", name, err)))
 			return
 		}
@@ -156,10 +182,28 @@ func writeLoop(
 	workers *sync.WaitGroup,
 	fail func(error),
 ) {
+	writeLoopWithDrain(ctx, name, endpoint, queue, nil, workers, fail)
+}
+
+func writeLoopWithDrain(
+	ctx context.Context,
+	name string,
+	endpoint Endpoint,
+	queue *ByteQueue,
+	onDrained func(),
+	workers *sync.WaitGroup,
+	fail func(error),
+) {
 	defer workers.Done()
 	for {
 		item, err := queue.Dequeue(ctx)
 		if err != nil {
+			if err == io.EOF && queue.sealedAndDrained() {
+				if onDrained != nil {
+					onDrained()
+				}
+				return
+			}
 			fail(normalizeContextError(ctx, fmt.Errorf("dequeue frame for %s endpoint: %w", name, err)))
 			return
 		}

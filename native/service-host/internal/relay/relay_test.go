@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -32,6 +33,173 @@ func TestRelayTransfersFramesInBothDirections(t *testing.T) {
 	if err := receiveError(t, result); !errors.Is(err, cause) {
 		t.Fatalf("Run returned the wrong cancellation cause: %v", err)
 	}
+}
+
+func TestAuthorizedDirectionalEOFSealsAndDrainsQueuedTail(t *testing.T) {
+	left := newScriptedEndpoint()
+	right := newScriptedEndpoint()
+	releaseWrite := make(chan struct{})
+	right.writeBlock = releaseWrite
+	left.reads <- readResult{value: []byte("final-frame")}
+	left.reads <- readResult{err: io.EOF}
+
+	queue := mustQueue(t, 64)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	authorized := make(chan struct{})
+	drained := make(chan struct{})
+	failures := make(chan error, 1)
+	fail := func(err error) {
+		select {
+		case failures <- err:
+		default:
+		}
+		cancel(err)
+	}
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go readLoopWithEOFPolicy(ctx, "left", left, queue, func() bool {
+		close(authorized)
+		return true
+	}, &workers, fail)
+	go writeLoopWithDrain(ctx, "right", right, queue, func() { close(drained) }, &workers, fail)
+
+	select {
+	case <-authorized:
+	case err := <-failures:
+		t.Fatalf("direction failed before EOF authorization: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("read loop did not observe the authorized EOF")
+	}
+	select {
+	case <-drained:
+		t.Fatal("direction drained while its final write was blocked")
+	case err := <-failures:
+		t.Fatalf("direction failed while its final write was blocked: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseWrite)
+	if value := receiveBytes(t, right.writes); string(value) != "final-frame" {
+		t.Fatalf("right received %q", value)
+	}
+	select {
+	case <-drained:
+	case err := <-failures:
+		t.Fatalf("direction failed instead of draining: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("write loop did not report the sealed direction drained")
+	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-time.After(time.Second):
+		t.Fatal("authorized direction workers did not stop")
+	}
+	stats := queue.Stats()
+	if !stats.Sealed || stats.Aborted || stats.ReservedBytes != 0 ||
+		stats.QueuedItems != 0 || stats.InFlightItems != 0 {
+		t.Fatalf("drained direction stats = %#v", stats)
+	}
+	select {
+	case err := <-failures:
+		t.Fatalf("authorized direction reported a failure: %v", err)
+	default:
+	}
+}
+
+func TestEOFPolicyRejectsAmbiguousEOFTerminations(t *testing.T) {
+	secondary := errors.New("secondary failure")
+	tests := []struct {
+		name  string
+		value []byte
+		err   error
+	}{
+		{name: "value with exact EOF", value: []byte("tail"), err: io.EOF},
+		{name: "value with wrapped EOF", value: []byte("tail"), err: fmt.Errorf("wrapped: %w", io.EOF)},
+		{name: "empty wrapped EOF", err: fmt.Errorf("wrapped: %w", io.EOF)},
+		{name: "empty joined EOF", err: errors.Join(io.EOF, secondary)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint := newScriptedEndpoint()
+			endpoint.reads <- readResult{value: test.value, err: test.err}
+			queue := mustQueue(t, 64)
+			failures := make(chan error, 1)
+			authorizationCalls := 0
+			var workers sync.WaitGroup
+			workers.Add(1)
+			go readLoopWithEOFPolicy(
+				context.Background(),
+				"left",
+				endpoint,
+				queue,
+				func() bool {
+					authorizationCalls++
+					return true
+				},
+				&workers,
+				func(err error) {
+					queue.Abort(err)
+					failures <- err
+				},
+			)
+			var failure error
+			select {
+			case failure = <-failures:
+			case <-time.After(time.Second):
+				t.Fatal("ambiguous EOF did not fail closed")
+			}
+			workers.Wait()
+			if !errors.Is(failure, io.EOF) {
+				t.Fatalf("failure = %v, want original EOF cause", failure)
+			}
+			if authorizationCalls != 0 {
+				t.Fatalf("authorization callback calls = %d, want zero", authorizationCalls)
+			}
+			stats := queue.Stats()
+			if stats.Sealed || !stats.Aborted || stats.ReservedBytes != 0 ||
+				stats.QueuedItems != 0 || stats.InFlightItems != 0 {
+				t.Fatalf("ambiguous EOF queue stats = %#v", stats)
+			}
+			if err := queue.WaitDrained(context.Background()); !errors.Is(err, failure) {
+				t.Fatalf("WaitDrained error = %v, want failure %v", err, failure)
+			}
+		})
+	}
+}
+
+func TestWriteLoopDoesNotTreatAbortCauseEOFAsGracefulDrain(t *testing.T) {
+	queue := mustQueue(t, 64)
+	queue.Abort(io.EOF)
+	endpoint := newScriptedEndpoint()
+	drained := make(chan struct{})
+	failures := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go writeLoopWithDrain(
+		context.Background(),
+		"right",
+		endpoint,
+		queue,
+		func() { close(drained) },
+		&workers,
+		func(err error) { failures <- err },
+	)
+	select {
+	case err := <-failures:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("write loop failure = %v, want EOF cause", err)
+		}
+	case <-drained:
+		t.Fatal("aborted queue was reported as gracefully drained")
+	case <-time.After(time.Second):
+		t.Fatal("write loop did not classify the aborted queue")
+	}
+	workers.Wait()
 }
 
 func TestRelayClosesBothEndpointsAfterReadFailure(t *testing.T) {
@@ -108,6 +276,7 @@ type scriptedEndpoint struct {
 	writes     chan []byte
 	closed     chan struct{}
 	closeOnce  sync.Once
+	writeBlock <-chan struct{}
 	writeError error
 	closeBlock <-chan struct{}
 	closeError error
@@ -133,6 +302,15 @@ func (e *scriptedEndpoint) ReadFrame(ctx context.Context) ([]byte, error) {
 }
 
 func (e *scriptedEndpoint) WriteFrame(ctx context.Context, value []byte) error {
+	if e.writeBlock != nil {
+		select {
+		case <-e.writeBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-e.closed:
+			return io.ErrClosedPipe
+		}
+	}
 	if e.writeError != nil {
 		return e.writeError
 	}
