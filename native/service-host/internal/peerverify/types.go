@@ -33,9 +33,9 @@ const (
 )
 
 // ImageExpectation is a manifest-pinned executable path and SHA-256 digest.
-// SHA256 must be a lowercase, 64-character hexadecimal digest. The containing
-// installation tree must have already passed the prerequisite immutability and
-// protected-ancestor checks; this package only reopens this one path.
+// SHA256 must be a lowercase, 64-character hexadecimal digest. Platform
+// orchestration must verify the containing installation tree and protected
+// ancestors before invoking this package; this package only reopens this path.
 type ImageExpectation struct {
 	Path   string
 	SHA256 string
@@ -208,16 +208,6 @@ type TokenVerifier interface {
 	VerifyToken(TokenSnapshot, string) (TokenEvidence, error)
 }
 
-// PrerequisiteEvidence represents checks intentionally owned by other reviewed
-// platform adapters. Boolean values are not self-authenticating; production
-// composition must set them only from retained, independently validated
-// installation, SCM, and DACL evidence.
-type PrerequisiteEvidence struct {
-	ImmutableInstallationTreeVerified bool
-	StableSCMWrapperLaunchVerified    bool
-	ProcessAndTokenDACLsVerified      bool
-}
-
 // Options contain every caller-controlled peer-verification expectation.
 type Options struct {
 	PipePeer                               PipePeer
@@ -225,7 +215,6 @@ type Options struct {
 	WrapperImage                           ImageExpectation
 	ServiceHostImage                       ImageExpectation
 	ExpectedLeafSignerCertificateDERSHA256 string
-	Prerequisites                          PrerequisiteEvidence
 	AuthenticodeVerifier                   AuthenticodeVerifier
 	TokenVerifier                          TokenVerifier
 }
@@ -265,11 +254,10 @@ type ProcessEvidence struct {
 // VerificationEvidence is audit evidence, not a cryptographic authentication
 // assertion. The retained process objects are the lifetime anchors.
 type VerificationEvidence struct {
-	Prerequisites PrerequisiteEvidence
-	PipePID       PIDObservationEvidence
-	Wrapper       ProcessEvidence
-	ServiceHost   ProcessEvidence
-	PeerToken     TokenEvidence
+	PipePID     PIDObservationEvidence
+	Wrapper     ProcessEvidence
+	ServiceHost ProcessEvidence
+	PeerToken   TokenEvidence
 }
 
 // Session owns the stable peer ServiceHost and WinSW wrapper objects. They stay

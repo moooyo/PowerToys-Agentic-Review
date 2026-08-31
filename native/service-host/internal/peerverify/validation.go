@@ -30,15 +30,6 @@ func validateOptions(options Options) error {
 	if !validSHA256(options.ExpectedLeafSignerCertificateDERSHA256) {
 		return invalidOptions("expected Authenticode leaf signer certificate DER SHA-256 must be 64 lowercase hexadecimal characters")
 	}
-	if !options.Prerequisites.ImmutableInstallationTreeVerified {
-		return invalidOptions("verified immutable installation-tree evidence is required")
-	}
-	if !options.Prerequisites.StableSCMWrapperLaunchVerified {
-		return invalidOptions("verified stable SCM wrapper launch evidence is required")
-	}
-	if !options.Prerequisites.ProcessAndTokenDACLsVerified {
-		return invalidOptions("verified process and token DACL evidence is required")
-	}
 	if isNilInterface(options.AuthenticodeVerifier) {
 		return invalidOptions("Authenticode verifier is required")
 	}

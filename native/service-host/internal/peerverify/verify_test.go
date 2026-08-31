@@ -267,8 +267,7 @@ func TestVerifyUsesObserveOpenObserveBeforeHandleQueriesAndRetainsObjects(t *tes
 		evidence.ServiceHost.ProcessID != 200 || evidence.ServiceHost.DirectParentID != 100 ||
 		evidence.ServiceHost.StartKey.SequenceNumber != 1_001 ||
 		evidence.Wrapper.ProcessID != 100 || evidence.Wrapper.StartKey.SequenceNumber != 1_000 ||
-		evidence.PeerToken.ServiceSID != testServiceSID ||
-		!evidence.Prerequisites.ImmutableInstallationTreeVerified {
+		evidence.PeerToken.ServiceSID != testServiceSID {
 		t.Fatalf("unexpected verification evidence: %+v", evidence)
 	}
 	if err := session.Close(); err != nil {
@@ -767,13 +766,8 @@ func newVerificationFixture(pipePeer PipePeer) *verificationFixture {
 			SHA256: digestString(testPeerBytes),
 		},
 		ExpectedLeafSignerCertificateDERSHA256: testSignerDERSHA256,
-		Prerequisites: PrerequisiteEvidence{
-			ImmutableInstallationTreeVerified: true,
-			StableSCMWrapperLaunchVerified:    true,
-			ProcessAndTokenDACLsVerified:      true,
-		},
-		AuthenticodeVerifier: fakeAuthenticodeVerifier{trusted: true, events: &fixture.events},
-		TokenVerifier:        recordingTokenVerifier{events: &fixture.events},
+		AuthenticodeVerifier:                   fakeAuthenticodeVerifier{trusted: true, events: &fixture.events},
+		TokenVerifier:                          recordingTokenVerifier{events: &fixture.events},
 	}
 	return fixture
 }

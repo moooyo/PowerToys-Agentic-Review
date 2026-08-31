@@ -206,8 +206,7 @@ func verifyWithOpener(
 		waitContext: waitContext,
 		cancelWaits: cancelWaits,
 		evidence: VerificationEvidence{
-			Prerequisites: options.Prerequisites,
-			PipePID:       PIDObservationEvidence{BeforeOpen: firstPID, AfterOpen: secondPID},
+			PipePID: PIDObservationEvidence{BeforeOpen: firstPID, AfterOpen: secondPID},
 			Wrapper: ProcessEvidence{
 				ProcessID:    wrapperFacts.ProcessID,
 				CreationTime: wrapperFacts.CreationTime,

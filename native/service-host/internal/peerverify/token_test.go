@@ -181,15 +181,6 @@ func TestValidateOptionsRejectsNoncanonicalSecurityInputs(t *testing.T) {
 		}},
 		{name: "same image path", mutate: func(value *Options) { value.ServiceHostImage.Path = value.WrapperImage.Path }},
 		{name: "invalid signer pin", mutate: func(value *Options) { value.ExpectedLeafSignerCertificateDERSHA256 = "bad" }},
-		{name: "missing immutable tree evidence", mutate: func(value *Options) {
-			value.Prerequisites.ImmutableInstallationTreeVerified = false
-		}},
-		{name: "missing SCM launch evidence", mutate: func(value *Options) {
-			value.Prerequisites.StableSCMWrapperLaunchVerified = false
-		}},
-		{name: "missing DACL evidence", mutate: func(value *Options) {
-			value.Prerequisites.ProcessAndTokenDACLsVerified = false
-		}},
 		{name: "missing Authenticode", mutate: func(value *Options) { value.AuthenticodeVerifier = nil }},
 		{name: "missing token verifier", mutate: func(value *Options) { value.TokenVerifier = nil }},
 	}
