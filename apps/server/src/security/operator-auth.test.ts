@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type BeginOperatorLoginInput,
   type BeginOperatorLoginResult,
+  type ClaimOperatorLoginTransactionInput,
   type CreateOperatorSessionInput,
   type DeleteOperatorBrowserFlowInput,
   type DeleteOperatorSessionInput,
@@ -16,7 +17,6 @@ import {
   type OperatorOidcCallbackInput,
   type OperatorOidcClient,
   type OperatorSession,
-  type ValidateOperatorLoginTransactionInput,
 } from "../../dist/security/operator-auth.js";
 import {
   createOperatorOidcClient,
@@ -43,7 +43,10 @@ class MemoryAuthPersistence implements OperatorAuthPersistence {
   >();
   public readonly transactions = new Map<
     string,
-    BeginOperatorLoginInput & { readonly browserGeneration: number }
+    BeginOperatorLoginInput & {
+      readonly browserGeneration: number;
+      readonly claimedAt: string | null;
+    }
   >();
   public readonly sessions = new Map<string, CreateOperatorSessionInput>();
 
@@ -66,18 +69,20 @@ class MemoryAuthPersistence implements OperatorAuthPersistence {
     this.transactions.set(input.transactionTokenSha256, {
       ...input,
       browserGeneration: generation,
+      claimedAt: null,
     });
     return { browserGeneration: generation, browserExpiresAt: input.browserExpiresAt };
   }
 
-  public async validateLoginTransaction(
-    input: ValidateOperatorLoginTransactionInput,
+  public async claimLoginTransaction(
+    input: ClaimOperatorLoginTransactionInput,
   ): Promise<number | null> {
     const transaction = this.transactions.get(input.transactionTokenSha256);
     const browser = this.browserFlows.get(input.browserSha256);
     if (
       transaction === undefined ||
       browser === undefined ||
+      transaction.claimedAt !== null ||
       transaction.browserSha256 !== input.browserSha256 ||
       transaction.transactionExpiresAt <= fixedNow.toISOString() ||
       browser.expiresAt <= fixedNow.toISOString() ||
@@ -85,6 +90,10 @@ class MemoryAuthPersistence implements OperatorAuthPersistence {
     ) {
       return null;
     }
+    this.transactions.set(input.transactionTokenSha256, {
+      ...transaction,
+      claimedAt: fixedNow.toISOString(),
+    });
     return transaction.browserGeneration;
   }
 
@@ -94,6 +103,7 @@ class MemoryAuthPersistence implements OperatorAuthPersistence {
     if (
       transaction === undefined ||
       browser === undefined ||
+      transaction.claimedAt === null ||
       transaction.browserSha256 !== input.browserSha256 ||
       transaction.browserGeneration !== input.browserGeneration ||
       browser.generation !== input.browserGeneration ||
@@ -316,6 +326,88 @@ describe("OperatorAuthService", () => {
       code: "login_transaction_expired",
     });
     expect(oidc.callbackInput).toBeUndefined();
+  });
+
+  it("allows only one concurrent callback to exchange a claimed authorization code", async () => {
+    const transactionToken = "I".repeat(43);
+    const sessionToken = "J".repeat(43);
+    const persistence = new MemoryAuthPersistence();
+    const oidc = new FakeOidcClient();
+    let exchangeCount = 0;
+    let releaseExchange!: () => void;
+    let markExchangeStarted!: () => void;
+    const exchangeGate = new Promise<void>((resolve) => {
+      releaseExchange = resolve;
+    });
+    const exchangeStarted = new Promise<void>((resolve) => {
+      markExchangeStarted = resolve;
+    });
+    oidc.exchangeAuthorizationCode = async (input) => {
+      oidc.callbackInput = input;
+      exchangeCount += 1;
+      markExchangeStarted();
+      await exchangeGate;
+      return operatorIdentity;
+    };
+    const auth = new OperatorAuthService({
+      config: oidcConfig,
+      persistence,
+      oidc,
+      now: () => fixedNow,
+      generateOpaqueToken: createTokenGenerator(transactionToken, sessionToken),
+    });
+    const start = await auth.startLogin(browserBindingToken);
+    if (start.kind !== "authorization_redirect") {
+      throw new Error("Expected an OIDC authorization redirect.");
+    }
+    const callback = new URLSearchParams({
+      code: "authorization-code",
+      state: start.authorizationUrl.searchParams.get("state") ?? "",
+    });
+
+    const firstCompletion = auth.completeLogin(callback, transactionToken, browserBindingToken);
+    await exchangeStarted;
+    await expect(
+      auth.completeLogin(callback, transactionToken, browserBindingToken),
+    ).rejects.toMatchObject({ code: "login_transaction_expired" });
+    expect(exchangeCount).toBe(1);
+    releaseExchange();
+    await expect(firstCompletion).resolves.toMatchObject({ sessionToken });
+  });
+
+  it("does not exchange a claimed authorization code again after exchange failure", async () => {
+    const transactionToken = "V".repeat(43);
+    const persistence = new MemoryAuthPersistence();
+    const oidc = new FakeOidcClient();
+    let exchangeCount = 0;
+    oidc.exchangeAuthorizationCode = async (input) => {
+      oidc.callbackInput = input;
+      exchangeCount += 1;
+      throw new Error("The token endpoint failed.");
+    };
+    const auth = new OperatorAuthService({
+      config: oidcConfig,
+      persistence,
+      oidc,
+      now: () => fixedNow,
+      generateOpaqueToken: createTokenGenerator(transactionToken),
+    });
+    const start = await auth.startLogin(browserBindingToken);
+    if (start.kind !== "authorization_redirect") {
+      throw new Error("Expected an OIDC authorization redirect.");
+    }
+    const callback = new URLSearchParams({
+      code: "authorization-code",
+      state: start.authorizationUrl.searchParams.get("state") ?? "",
+    });
+
+    await expect(
+      auth.completeLogin(callback, transactionToken, browserBindingToken),
+    ).rejects.toMatchObject({ code: "oidc_authentication_failed" });
+    await expect(
+      auth.completeLogin(callback, transactionToken, browserBindingToken),
+    ).rejects.toMatchObject({ code: "login_transaction_expired" });
+    expect(exchangeCount).toBe(1);
   });
 
   it("fences an older callback when a newer browser generation completes first", async () => {

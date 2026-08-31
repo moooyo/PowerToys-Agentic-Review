@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 describe("DatabaseOperatorAuthPersistence", () => {
-  it("fences an older generation between validation and finalization", async () => {
+  it("claims a transaction once and fences an older generation before finalization", async () => {
     const { client } = await createFixture();
     const persistence = new DatabaseOperatorAuthPersistence(client);
     const browserSha256 = sha256("browser-binding");
@@ -59,11 +59,31 @@ describe("DatabaseOperatorAuthPersistence", () => {
       }),
     ).resolves.toMatchObject({ browserGeneration: 1 });
     await expect(
-      persistence.validateLoginTransaction({
+      persistence.finalizeLogin({
+        transactionTokenSha256: firstTransaction,
+        sessionTokenSha256: sha256("unclaimed-session"),
+        browserSha256,
+        browserGeneration: 1,
+        issuer: "https://identity.example.test",
+        subject: "operator-123",
+        displayName: null,
+        email: null,
+        createdAt: "2099-08-30T10:01:00.000Z",
+        expiresAt: "2099-08-30T11:01:00.000Z",
+      }),
+    ).resolves.toBe(false);
+    const claimResults = await Promise.all([
+      persistence.claimLoginTransaction({
         transactionTokenSha256: firstTransaction,
         browserSha256,
       }),
-    ).resolves.toBe(1);
+      persistence.claimLoginTransaction({
+        transactionTokenSha256: firstTransaction,
+        browserSha256,
+      }),
+    ]);
+    expect(claimResults.filter((result) => result === 1)).toHaveLength(1);
+    expect(claimResults.filter((result) => result === null)).toHaveLength(1);
 
     await expect(
       persistence.beginLogin({
@@ -105,6 +125,12 @@ describe("DatabaseOperatorAuthPersistence", () => {
       browserExpiresAt,
     });
     await expect(
+      persistence.claimLoginTransaction({
+        transactionTokenSha256: firstTransaction,
+        browserSha256,
+      }),
+    ).resolves.toBe(1);
+    await expect(
       persistence.finalizeLogin({
         transactionTokenSha256: firstTransaction,
         sessionTokenSha256: firstSession,
@@ -140,11 +166,49 @@ describe("DatabaseOperatorAuthPersistence", () => {
 
     await persistence.deleteBrowserFlow({ browserSha256 });
     await expect(
-      persistence.validateLoginTransaction({
+      persistence.claimLoginTransaction({
         transactionTokenSha256: secondTransaction,
         browserSha256,
       }),
     ).resolves.toBeNull();
+  });
+
+  it("rejects an expired transaction claim without marking it claimed", async () => {
+    const { client, databasePath } = await createFixture();
+    const persistence = new DatabaseOperatorAuthPersistence(client);
+    const browserSha256 = sha256("expired-browser-binding");
+    const transactionTokenSha256 = sha256("expired-transaction");
+    await persistence.beginLogin({
+      transactionTokenSha256,
+      browserSha256,
+      transactionExpiresAt: "2099-08-30T12:05:00.000Z",
+      browserExpiresAt: "2099-08-30T13:00:00.000Z",
+    });
+
+    const writer = new DatabaseSync(databasePath, { timeout: 5_000 });
+    try {
+      writer
+        .prepare("UPDATE operator_auth_clock SET last_observed_at = ? WHERE singleton = 1")
+        .run("2099-08-30T12:05:00.000Z");
+    } finally {
+      writer.close();
+    }
+
+    await expect(
+      persistence.claimLoginTransaction({ transactionTokenSha256, browserSha256 }),
+    ).resolves.toBeNull();
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        reader
+          .prepare(
+            "SELECT claimed_at AS claimedAt FROM operator_login_transactions WHERE token_sha256 = ?",
+          )
+          .get(transactionTokenSha256),
+      ).toEqual({ claimedAt: null });
+    } finally {
+      reader.close();
+    }
   });
 
   it("keeps development sessions unbound and stores only authentication hashes", async () => {

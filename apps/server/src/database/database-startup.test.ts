@@ -88,7 +88,7 @@ describe("DatabaseClient startup", () => {
     const backupDirectory = join(dataDirectory, "backups");
     await mkdir(backupDirectory, { mode: 0o700 });
     const staleBackupStem =
-      "state.sqlite.v1-to-v6.2026-08-31T00-00-00-000Z.00000000-0000-4000-8000-000000000000.sqlite.partial";
+      "state.sqlite.v1-to-v7.2026-08-31T00-00-00-000Z.00000000-0000-4000-8000-000000000000.sqlite.partial";
     await Promise.all([
       writeFile(join(backupDirectory, staleBackupStem), "partial", { mode: 0o600 }),
       writeFile(join(backupDirectory, `${staleBackupStem}-wal`), "partial", { mode: 0o600 }),
@@ -106,7 +106,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(6);
+      expect(readSchemaVersion(migratedDatabase)).toBe(7);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );

@@ -1,6 +1,7 @@
 import type {
   BeginOperatorLoginInput,
   BeginOperatorLoginResult,
+  ClaimOperatorLoginTransactionInput,
   CreateOperatorSessionInput,
   DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
@@ -8,7 +9,6 @@ import type {
   FindOperatorSessionInput,
   OperatorAuthPersistence,
   OperatorSession,
-  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import type { DatabaseClient } from "./database-client.js";
 
@@ -23,10 +23,10 @@ export class DatabaseOperatorAuthPersistence implements OperatorAuthPersistence 
     return this.#database.request("beginOperatorLogin", input);
   }
 
-  public async validateLoginTransaction(
-    input: ValidateOperatorLoginTransactionInput,
+  public async claimLoginTransaction(
+    input: ClaimOperatorLoginTransactionInput,
   ): Promise<number | null> {
-    const result = await this.#database.request("validateOperatorLoginTransaction", input);
+    const result = await this.#database.request("claimOperatorLoginTransaction", input);
     return result.browserGeneration;
   }
 

@@ -27,7 +27,7 @@ export interface BeginOperatorLoginResult {
   readonly browserExpiresAt: string;
 }
 
-export interface ValidateOperatorLoginTransactionInput {
+export interface ClaimOperatorLoginTransactionInput {
   readonly transactionTokenSha256: string;
   readonly browserSha256: string;
 }
@@ -60,7 +60,7 @@ export interface DeleteOperatorBrowserFlowInput {
 
 export interface OperatorAuthPersistence {
   beginLogin(input: BeginOperatorLoginInput): Promise<BeginOperatorLoginResult>;
-  validateLoginTransaction(input: ValidateOperatorLoginTransactionInput): Promise<number | null>;
+  claimLoginTransaction(input: ClaimOperatorLoginTransactionInput): Promise<number | null>;
   finalizeLogin(input: FinalizeOperatorLoginInput): Promise<boolean>;
   createSession(input: CreateOperatorSessionInput): Promise<void>;
   findSession(input: FindOperatorSessionInput): Promise<OperatorSession | null>;
@@ -415,7 +415,7 @@ export class OperatorAuthService {
 
     const transactionTokenSha256 = sha256Hex(transactionToken);
     const browserSha256 = sha256Hex(browserBindingToken);
-    const browserGeneration = await this.#persistence.validateLoginTransaction({
+    const browserGeneration = await this.#persistence.claimLoginTransaction({
       transactionTokenSha256,
       browserSha256,
     });

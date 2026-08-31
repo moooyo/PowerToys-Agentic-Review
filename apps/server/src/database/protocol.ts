@@ -20,13 +20,13 @@ import type {
 import type {
   BeginOperatorLoginInput,
   BeginOperatorLoginResult,
+  ClaimOperatorLoginTransactionInput,
   CreateOperatorSessionInput,
   DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
   OperatorSession,
-  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import type {
   CommitGitHubPollingReconciliationInput,
@@ -243,8 +243,8 @@ export interface DatabaseOperationMap {
     readonly input: BeginOperatorLoginInput;
     readonly output: BeginOperatorLoginResult;
   };
-  readonly validateOperatorLoginTransaction: {
-    readonly input: ValidateOperatorLoginTransactionInput;
+  readonly claimOperatorLoginTransaction: {
+    readonly input: ClaimOperatorLoginTransactionInput;
     readonly output: { readonly browserGeneration: number | null };
   };
   readonly finalizeOperatorLogin: {

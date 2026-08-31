@@ -28,8 +28,8 @@ describe("operator authentication cleanup", () => {
       const expiredAt = "2000-01-02T00:00:00.000Z";
       const insertLogin = database.prepare(`
         INSERT INTO operator_login_transactions (
-          token_sha256, created_at, expires_at, browser_sha256, browser_generation
-        ) VALUES (?, ?, ?, ?, 1)
+          token_sha256, created_at, expires_at, browser_sha256, browser_generation, claimed_at
+        ) VALUES (?, ?, ?, ?, 1, ?)
       `);
       const insertSession = database.prepare(`
         INSERT INTO operator_sessions (
@@ -51,7 +51,13 @@ describe("operator authentication cleanup", () => {
           "2000-01-01T00:00:00.000Z",
           expiredAt,
         );
-        insertLogin.run(token, "2000-01-01T00:00:00.000Z", expiredAt, browser);
+        insertLogin.run(
+          token,
+          "2000-01-01T00:00:00.000Z",
+          expiredAt,
+          browser,
+          "2000-01-01T12:00:00.000Z",
+        );
         insertSession.run(
           token,
           "https://issuer.example",

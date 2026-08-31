@@ -2,13 +2,13 @@ import type { DatabaseSync } from "node:sqlite";
 import type {
   BeginOperatorLoginInput,
   BeginOperatorLoginResult,
+  ClaimOperatorLoginTransactionInput,
   CreateOperatorSessionInput,
   DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
   OperatorSession,
-  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 
 const sha256Pattern = /^[0-9a-f]{64}$/u;
@@ -140,33 +140,48 @@ export const beginOperatorLogin = (
   }
 };
 
-export const validateOperatorLoginTransaction = (
+export const claimOperatorLoginTransaction = (
   database: DatabaseSync,
-  input: ValidateOperatorLoginTransactionInput,
+  input: ClaimOperatorLoginTransactionInput,
 ): { readonly browserGeneration: number | null } => {
   assertSha256(input.transactionTokenSha256);
   assertSha256(input.browserSha256);
-  const authoritativeNow = advanceOperatorAuthClock(database);
-  const row = database
-    .prepare(`
-      SELECT login_transaction.browser_generation AS "browserGeneration"
-      FROM operator_login_transactions AS login_transaction
-      JOIN operator_browser_flows AS browser
-        ON browser.browser_sha256 = login_transaction.browser_sha256
-      WHERE login_transaction.token_sha256 = ?
-        AND login_transaction.browser_sha256 = ?
-        AND login_transaction.expires_at > ?
-        AND browser.expires_at > ?
-        AND browser.generation = login_transaction.browser_generation
-    `)
-    .get(input.transactionTokenSha256, input.browserSha256, authoritativeNow, authoritativeNow) as
-    | { readonly browserGeneration: number }
-    | undefined;
-  if (row === undefined) {
-    return { browserGeneration: null };
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const authoritativeNow = advanceOperatorAuthClock(database);
+    const claimed = database
+      .prepare(`
+        UPDATE operator_login_transactions
+        SET claimed_at = ?
+        WHERE token_sha256 = ?
+          AND browser_sha256 = ?
+          AND claimed_at IS NULL
+          AND expires_at > ?
+          AND EXISTS (
+            SELECT 1
+            FROM operator_browser_flows AS browser
+            WHERE browser.browser_sha256 = operator_login_transactions.browser_sha256
+              AND browser.expires_at > ?
+              AND browser.generation = operator_login_transactions.browser_generation
+          )
+        RETURNING browser_generation AS "browserGeneration"
+      `)
+      .get(
+        authoritativeNow,
+        input.transactionTokenSha256,
+        input.browserSha256,
+        authoritativeNow,
+        authoritativeNow,
+      ) as { readonly browserGeneration: number } | undefined;
+    if (claimed !== undefined) {
+      assertGeneration(claimed.browserGeneration);
+    }
+    database.exec("COMMIT");
+    return { browserGeneration: claimed?.browserGeneration ?? null };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
   }
-  assertGeneration(row.browserGeneration);
-  return { browserGeneration: row.browserGeneration };
 };
 
 export const finalizeOperatorLogin = (
@@ -184,18 +199,22 @@ export const finalizeOperatorLogin = (
   try {
     const authoritativeNow = advanceOperatorAuthClock(database);
     assertFuture(input.expiresAt, authoritativeNow, "expiresAt");
-    const transaction = database
+    const claimedTransaction = database
       .prepare(`
-        SELECT 1 AS present
-        FROM operator_login_transactions AS login_transaction
-        JOIN operator_browser_flows AS browser
-          ON browser.browser_sha256 = login_transaction.browser_sha256
-        WHERE login_transaction.token_sha256 = ?
-          AND login_transaction.browser_sha256 = ?
-          AND login_transaction.browser_generation = ?
-          AND login_transaction.expires_at > ?
-          AND browser.expires_at > ?
-          AND browser.generation = login_transaction.browser_generation
+        DELETE FROM operator_login_transactions
+        WHERE token_sha256 = ?
+          AND browser_sha256 = ?
+          AND browser_generation = ?
+          AND claimed_at IS NOT NULL
+          AND expires_at > ?
+          AND EXISTS (
+            SELECT 1
+            FROM operator_browser_flows AS browser
+            WHERE browser.browser_sha256 = operator_login_transactions.browser_sha256
+              AND browser.expires_at > ?
+              AND browser.generation = operator_login_transactions.browser_generation
+          )
+        RETURNING 1 AS consumed
       `)
       .get(
         input.transactionTokenSha256,
@@ -203,21 +222,8 @@ export const finalizeOperatorLogin = (
         input.browserGeneration,
         authoritativeNow,
         authoritativeNow,
-      );
-    if (transaction === undefined) {
-      database.exec("ROLLBACK");
-      return { finalized: false };
-    }
-
-    const consumed = database
-      .prepare(`
-        DELETE FROM operator_login_transactions
-        WHERE token_sha256 = ?
-          AND browser_sha256 = ?
-          AND browser_generation = ?
-      `)
-      .run(input.transactionTokenSha256, input.browserSha256, input.browserGeneration);
-    if (Number(consumed.changes) !== 1) {
+      ) as { readonly consumed: number } | undefined;
+    if (claimedTransaction === undefined) {
       database.exec("ROLLBACK");
       return { finalized: false };
     }
@@ -304,10 +310,42 @@ export const findOperatorSession = (
   input: FindOperatorSessionInput,
 ): { readonly session: OperatorSession | null } => {
   assertSha256(input.tokenSha256);
-  const authoritativeNow = advanceOperatorAuthClock(database);
-  const session = (input.browserSha256 === null
-    ? database
-        .prepare(`
+  if (input.browserSha256 !== null) {
+    assertSha256(input.browserSha256);
+  }
+  const candidate = (
+    input.browserSha256 === null
+      ? database
+          .prepare(`
+            SELECT 1 AS present
+            FROM operator_sessions
+            WHERE token_sha256 = ?
+              AND browser_sha256 IS NULL
+              AND browser_generation IS NULL
+            LIMIT 1
+          `)
+          .get(input.tokenSha256)
+      : database
+          .prepare(`
+            SELECT 1 AS present
+            FROM operator_sessions
+            WHERE token_sha256 = ?
+              AND browser_sha256 = ?
+              AND browser_generation IS NOT NULL
+            LIMIT 1
+          `)
+          .get(input.tokenSha256, input.browserSha256)
+  ) as { readonly present: number } | undefined;
+  if (candidate === undefined) {
+    return { session: null };
+  }
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const authoritativeNow = advanceOperatorAuthClock(database);
+    const session = (input.browserSha256 === null
+      ? database
+          .prepare(`
             SELECT
               issuer,
               subject,
@@ -321,9 +359,9 @@ export const findOperatorSession = (
               AND browser_generation IS NULL
               AND expires_at > ?
           `)
-        .get(input.tokenSha256, authoritativeNow)
-    : database
-        .prepare(`
+          .get(input.tokenSha256, authoritativeNow)
+      : database
+          .prepare(`
             SELECT
               session.issuer,
               session.subject,
@@ -340,13 +378,38 @@ export const findOperatorSession = (
               AND browser.expires_at > ?
               AND browser.generation = session.browser_generation
           `)
-        .get(
-          input.tokenSha256,
-          input.browserSha256,
-          authoritativeNow,
-          authoritativeNow,
-        )) as unknown as OperatorSession | undefined;
-  return { session: session ?? null };
+          .get(
+            input.tokenSha256,
+            input.browserSha256,
+            authoritativeNow,
+            authoritativeNow,
+          )) as unknown as OperatorSession | undefined;
+    if (session === undefined) {
+      if (input.browserSha256 === null) {
+        database
+          .prepare(`
+            DELETE FROM operator_sessions
+            WHERE token_sha256 = ?
+              AND browser_sha256 IS NULL
+              AND browser_generation IS NULL
+          `)
+          .run(input.tokenSha256);
+      } else {
+        database
+          .prepare(`
+            DELETE FROM operator_sessions
+            WHERE token_sha256 = ?
+              AND browser_sha256 = ?
+          `)
+          .run(input.tokenSha256, input.browserSha256);
+      }
+    }
+    database.exec("COMMIT");
+    return { session: session ?? null };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
 };
 
 export const deleteOperatorSession = (

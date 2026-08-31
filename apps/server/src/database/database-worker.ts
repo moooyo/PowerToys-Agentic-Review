@@ -19,12 +19,12 @@ import { Value } from "@sinclair/typebox/value";
 import type { GitHubPollingProjectionKey } from "../github/poller.js";
 import type {
   BeginOperatorLoginInput,
+  ClaimOperatorLoginTransactionInput,
   CreateOperatorSessionInput,
   DeleteOperatorBrowserFlowInput,
   DeleteOperatorSessionInput,
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
-  ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
 import { adoptLegacyDatabase } from "./database-initialization.js";
@@ -49,13 +49,13 @@ import { inspectMigrationState, type MigrationState, runMigrations } from "./mig
 import {
   beginOperatorLogin,
   type CleanupExpiredOperatorAuthInput,
+  claimOperatorLoginTransaction,
   cleanupExpiredOperatorAuth,
   createOperatorSession,
   deleteOperatorBrowserFlow,
   deleteOperatorSession,
   finalizeOperatorLogin,
   findOperatorSession,
-  validateOperatorLoginTransaction,
 } from "./operator-auth.js";
 import type {
   ClaimLeaseInput,
@@ -1676,10 +1676,10 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return getSystemSnapshot(database, schemaVersion);
     case "beginOperatorLogin":
       return beginOperatorLogin(database, request.input as BeginOperatorLoginInput);
-    case "validateOperatorLoginTransaction":
-      return validateOperatorLoginTransaction(
+    case "claimOperatorLoginTransaction":
+      return claimOperatorLoginTransaction(
         database,
-        request.input as ValidateOperatorLoginTransactionInput,
+        request.input as ClaimOperatorLoginTransactionInput,
       );
     case "finalizeOperatorLogin":
       return finalizeOperatorLogin(database, request.input as FinalizeOperatorLoginInput);
