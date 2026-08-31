@@ -30,7 +30,7 @@ func TestAmbientProfileAcceptsTypicalProgramDataSemantics(t *testing.T) {
 			{
 				aceType: accessAllowedACEType,
 				flags:   aceContainerInherit,
-				mask:    fileWriteData | fileAppendData,
+				mask:    fileWriteData | fileAppendData | fileWriteEA | fileWriteAttributes,
 				sid:     testUsersSID,
 			},
 			{
@@ -46,7 +46,7 @@ func TestAmbientProfileAcceptsTypicalProgramDataSemantics(t *testing.T) {
 	}
 }
 
-func TestAmbientProfileAllowsSiblingCreationButRejectsObjectMutation(t *testing.T) {
+func TestAmbientProfileAllowsStandardProgramDataWritesButRejectsReplacementRights(t *testing.T) {
 	tests := []struct {
 		name    string
 		mask    winfile.AccessMask
@@ -55,13 +55,13 @@ func TestAmbientProfileAllowsSiblingCreationButRejectsObjectMutation(t *testing.
 		{name: "add file", mask: fileWriteData, allowed: true},
 		{name: "add directory", mask: fileAppendData, allowed: true},
 		{name: "add siblings", mask: fileWriteData | fileAppendData, allowed: true},
-		{name: "write EA", mask: fileWriteEA},
-		{name: "write attributes", mask: fileWriteAttributes},
+		{name: "write EA", mask: fileWriteEA, allowed: true},
+		{name: "write attributes", mask: fileWriteAttributes, allowed: true},
+		{name: "generic write", mask: genericWrite, allowed: true},
 		{name: "delete child", mask: fileDeleteChild},
 		{name: "delete object", mask: deleteAccess},
 		{name: "write DACL", mask: writeDACL},
 		{name: "write owner", mask: writeOwner},
-		{name: "generic write", mask: genericWrite},
 		{name: "generic all", mask: genericAll},
 	}
 	for _, test := range tests {
@@ -72,7 +72,7 @@ func TestAmbientProfileAllowsSiblingCreationButRejectsObjectMutation(t *testing.
 			}})
 			err := Audit(evidence, winfile.ObjectKindDirectory, NewAmbientAncestorProfile())
 			if test.allowed && err != nil {
-				t.Fatalf("Audit rejected permitted sibling creation: %v", err)
+				t.Fatalf("Audit rejected a standard ProgramData write: %v", err)
 			}
 			if !test.allowed && !errors.Is(err, ErrPolicyRejected) {
 				t.Fatalf("Audit returned %v, want ErrPolicyRejected", err)

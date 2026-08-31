@@ -79,8 +79,12 @@ const (
 	fileMutationAccess   = fileWriteData | fileAppendData | fileWriteEA | fileWriteAttributes |
 		deleteAccess | writeDACL | writeOwner
 	directoryMutationAccess = fileMutationAccess | fileDeleteChild
-	ambientForbiddenAccess  = fileWriteEA | fileWriteAttributes | fileDeleteChild |
-		deleteAccess | writeDACL | writeOwner
+	// Windows grants ordinary users WD, AD, WEA, and WA on a typical ProgramData
+	// directory. Those self rights may create siblings or change ambient
+	// metadata, but they cannot replace the already-existing product anchor.
+	// The managed anchor remains independently handle-opened, identity-checked,
+	// reparse-free, reinspected, and protected by its exact managed DACL.
+	ambientForbiddenAccess = fileDeleteChild | deleteAccess | writeDACL | writeOwner
 )
 
 // PolicyProfile is an immutable, constructor-validated ACL policy value.
