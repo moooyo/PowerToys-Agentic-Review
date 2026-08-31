@@ -191,6 +191,18 @@ func (p windowsCurrentProcess) DirectParentProcessID() (uint32, error) {
 	return queryWindowsDirectParentProcessID(p.handle)
 }
 
+func (p windowsCurrentProcess) ImagePathDiagnostic() (string, error) {
+	return queryWindowsProcessImagePath(p.handle)
+}
+
+func (p windowsCurrentProcess) OpenImage() (peerverify.ImageSubject, error) {
+	path, err := queryWindowsProcessImagePath(p.handle)
+	if err != nil {
+		return nil, err
+	}
+	return openWindowsImage(path)
+}
+
 func (p windowsCurrentProcess) ApplyAndVerifyDACL(policy daclPolicy) (DACLEvidence, error) {
 	return setAndReadBackWindowsDACL(p.handle, policy)
 }

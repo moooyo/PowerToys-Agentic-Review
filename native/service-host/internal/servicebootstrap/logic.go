@@ -36,6 +36,8 @@ type currentProcess interface {
 	processObservation
 	daclTarget
 	DirectParentProcessID() (uint32, error)
+	ImagePathDiagnostic() (string, error)
+	OpenImage() (peerverify.ImageSubject, error)
 }
 
 type primaryToken interface {
@@ -241,6 +243,7 @@ func openWithPlatform(options Options, platform bootstrapPlatform) (result Sessi
 		service:  service,
 		token:    token,
 		wrapper:  wrapper,
+		current:  current,
 		evidence: evidence,
 	}
 	keep = true
@@ -392,12 +395,16 @@ func closeRejectedResource(label string, resource ownedResource) error {
 }
 
 type bootstrapSession struct {
-	mu       sync.RWMutex
-	closeMu  sync.Mutex
-	service  scmStatusSource
-	token    primaryToken
-	wrapper  wrapperProcess
-	evidence Evidence
+	mu                        sync.RWMutex
+	closeMu                   sync.Mutex
+	service                   scmStatusSource
+	token                     primaryToken
+	wrapper                   wrapperProcess
+	current                   currentProcess
+	failedCurrentImageClose   peerverify.ImageSubject
+	imageMeasurementAttempted bool
+	imageMeasurementClosed    bool
+	evidence                  Evidence
 }
 
 func (s *bootstrapSession) Evidence() Evidence {
@@ -504,17 +511,24 @@ func (s *bootstrapSession) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 
-	s.mu.RLock()
+	s.mu.Lock()
+	s.imageMeasurementClosed = true
+	s.current = nil
+	failedImage := s.failedCurrentImageClose
 	token := s.token
 	wrapper := s.wrapper
 	service := s.service
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
+	imageErr := closeOwnedSessionResource("close retained current ServiceHost image after failed measurement", failedImage)
 	tokenErr := closeOwnedSessionResource("close current ServiceHost primary token", token)
 	wrapperErr := closeOwnedSessionResource("close retained WinSW wrapper process", wrapper)
 	serviceErr := closeOwnedSessionResource("close SCM service handles", service)
 
 	s.mu.Lock()
+	if imageErr == nil {
+		s.failedCurrentImageClose = nil
+	}
 	if tokenErr == nil && s.token == token {
 		s.token = nil
 	}
@@ -525,7 +539,7 @@ func (s *bootstrapSession) Close() error {
 		s.service = nil
 	}
 	s.mu.Unlock()
-	return errors.Join(tokenErr, wrapperErr, serviceErr)
+	return errors.Join(imageErr, tokenErr, wrapperErr, serviceErr)
 }
 
 func closeOwnedSessionResource(label string, resource ownedResource) error {

@@ -13,14 +13,17 @@ import (
 )
 
 var (
-	ErrUnsupportedPlatform = errors.New("ServiceHost bootstrap requires Windows")
-	ErrInvalidOptions      = errors.New("invalid ServiceHost bootstrap options")
-	ErrAlreadyBootstrapped = errors.New("ServiceHost bootstrap has already been attempted")
-	ErrWrapperUnstable     = errors.New("WinSW wrapper identity is not stable")
-	ErrParentMismatch      = errors.New("ServiceHost is not a direct child of the current WinSW wrapper")
-	ErrDACLVerification    = errors.New("ServiceHost bootstrap DACL verification failed")
-	ErrInvalidEvidence     = errors.New("ServiceHost bootstrap evidence is invalid")
-	ErrClosed              = errors.New("ServiceHost bootstrap session is closed")
+	ErrUnsupportedPlatform         = errors.New("ServiceHost bootstrap requires Windows")
+	ErrInvalidOptions              = errors.New("invalid ServiceHost bootstrap options")
+	ErrAlreadyBootstrapped         = errors.New("ServiceHost bootstrap has already been attempted")
+	ErrWrapperUnstable             = errors.New("WinSW wrapper identity is not stable")
+	ErrParentMismatch              = errors.New("ServiceHost is not a direct child of the current WinSW wrapper")
+	ErrDACLVerification            = errors.New("ServiceHost bootstrap DACL verification failed")
+	ErrInvalidEvidence             = errors.New("ServiceHost bootstrap evidence is invalid")
+	ErrCurrentImageMismatch        = errors.New("current ServiceHost image measurement is invalid")
+	ErrCurrentImageMeasured        = errors.New("current ServiceHost image measurement has already been attempted")
+	ErrInvalidCurrentImageEvidence = errors.New("current ServiceHost image evidence is invalid")
+	ErrClosed                      = errors.New("ServiceHost bootstrap session is closed")
 )
 
 const (
@@ -95,6 +98,7 @@ type Session interface {
 	winprocess.WrapperWatcher
 	peerverify.StableWrapper
 	Evidence() Evidence
+	MeasureCurrentImage() (CurrentImageEvidence, error)
 }
 
 type daclPolicy struct {

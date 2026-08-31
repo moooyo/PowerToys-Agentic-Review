@@ -58,6 +58,10 @@ type fakeProcess struct {
 	closeCalls    int
 	closed        bool
 	events        *[]string
+	imagePaths    []string
+	imagePathCall int
+	image         peerverify.ImageSubject
+	openImageErr  error
 }
 
 func (p *fakeProcess) HandleProcessID() (uint32, error) {
@@ -112,11 +116,27 @@ func (p *fakeProcess) ApplyAndVerifyDACL(policy daclPolicy) (DACLEvidence, error
 }
 
 func (p *fakeProcess) ImagePathDiagnostic() (string, error) {
+	*p.events = append(*p.events, "process-image-path")
+	if len(p.imagePaths) != 0 {
+		index := p.imagePathCall
+		p.imagePathCall++
+		if index >= len(p.imagePaths) {
+			index = len(p.imagePaths) - 1
+		}
+		return p.imagePaths[index], nil
+	}
 	return `C:\Program Files\AgenticReview\winsw.exe`, nil
 }
 
 func (p *fakeProcess) OpenImage() (peerverify.ImageSubject, error) {
-	return nil, errors.New("not used by bootstrap tests")
+	*p.events = append(*p.events, "process-open-image")
+	if p.openImageErr != nil {
+		return nil, p.openImageErr
+	}
+	if p.image == nil {
+		return nil, errors.New("no fake process image")
+	}
+	return p.image, nil
 }
 
 func (p *fakeProcess) Wait(ctx context.Context) error {
