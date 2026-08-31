@@ -36,6 +36,10 @@ func (*Endpoint) LocalSide() (EndpointSide, error) {
 	return EndpointSideUnknown, ErrUnsupportedPlatform
 }
 
+func (*Endpoint) Attestation() (EndpointAttestation, error) {
+	return EndpointAttestation{}, ErrUnsupportedPlatform
+}
+
 func (*Endpoint) GetNamedPipeClientProcessID() (uint32, error) {
 	return 0, ErrUnsupportedPlatform
 }
