@@ -366,7 +366,9 @@ func (state *guardState) nodeLaunchSpec(hostControlPipeName string) (winprocess.
 		Environment:         cloneConfig(configuration).Node.Environment,
 		MaximumProcesses:    configuration.Limits.RootJobMaximumProcesses,
 		MaximumMemoryBytes:  memory,
-		ShutdownTimeout:     time.Duration(configuration.Limits.ShutdownTimeoutMilliseconds) * time.Millisecond,
+		ShutdownTimeout: time.Duration(
+			configuration.Limits.ForceTerminationReserveMilliseconds,
+		) * time.Millisecond,
 	}, nil
 }
 

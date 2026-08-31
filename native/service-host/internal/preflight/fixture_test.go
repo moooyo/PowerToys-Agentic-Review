@@ -415,6 +415,7 @@ func configurationFixtures(
 	control := config.Config{
 		SchemaVersion: config.SchemaVersion,
 		Role:          config.RoleControl,
+		WorkerNodeID:  "powertoys-node:01",
 		OwnService:    config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},
 		PeerService:   config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID},
 		PipeName:      config.ControlExecutorPipeName,
@@ -492,6 +493,7 @@ func limitsFixture() config.Limits {
 		RootJobMaximumProcesses: 128, RootJobMaximumMemoryBytes: "17179869184",
 		MaximumFrameBytes: config.MaximumFrameBytes, MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		ConnectTimeoutMilliseconds: 30_000, ShutdownTimeoutMilliseconds: 120_000,
+		ForceTerminationReserveMilliseconds: 15_000,
 	}
 }
 

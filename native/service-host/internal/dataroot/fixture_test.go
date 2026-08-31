@@ -305,7 +305,8 @@ func baseConfig(role config.Role) config.Config {
 		"APPDATA": root + `\Profile\AppData`, "LOCALAPPDATA": root + `\Profile\LocalAppData`,
 	}
 	value := config.Config{
-		SchemaVersion: config.SchemaVersion, Role: role, OwnService: own, PeerService: peer,
+		SchemaVersion: config.SchemaVersion, Role: role, WorkerNodeID: "powertoys-node:01",
+		OwnService: own, PeerService: peer,
 		PipeName: config.ControlExecutorPipeName,
 		Installation: config.Installation{
 			Root: testInstallationRoot, TrustedConfigurationRoot: testTrustedRoot,
@@ -322,6 +323,7 @@ func baseConfig(role config.Role) config.Config {
 			RootJobMaximumProcesses: 16, RootJobMaximumMemoryBytes: "1073741824",
 			MaximumFrameBytes: config.MaximumFrameBytes, MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 			ConnectTimeoutMilliseconds: 30_000, ShutdownTimeoutMilliseconds: 120_000,
+			ForceTerminationReserveMilliseconds: 15_000,
 		},
 	}
 	if role == config.RoleControl {

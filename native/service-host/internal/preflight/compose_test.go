@@ -63,7 +63,11 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 
 	control := evidence.ControlConfiguration()
 	originalByte := control.Read.Data[0]
+	originalWorkerNodeID := control.Configuration.WorkerNodeID
+	originalReserve := control.Configuration.Limits.ForceTerminationReserveMilliseconds
 	control.Read.Data[0] ^= 0xff
+	control.Configuration.WorkerNodeID = "changed-node"
+	control.Configuration.Limits.ForceTerminationReserveMilliseconds++
 	control.Configuration.Node.Environment["PATH"] = `C:\Changed`
 	files := evidence.Files()
 	originalDescriptorByte := files[0].Object.Evidence.Security.SelfRelativeDescriptor[1]
@@ -77,6 +81,8 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 	controlAgain := evidence.ControlConfiguration()
 	filesAgain := evidence.Files()
 	if controlAgain.Read.Data[0] != originalByte ||
+		controlAgain.Configuration.WorkerNodeID != originalWorkerNodeID ||
+		controlAgain.Configuration.Limits.ForceTerminationReserveMilliseconds != originalReserve ||
 		controlAgain.Configuration.Node.Environment["PATH"] == `C:\Changed` ||
 		filesAgain[0].Object.Evidence.Security.SelfRelativeDescriptor[1] != originalDescriptorByte ||
 		evidence.ReleaseTemplateDigest() == releaseDigest ||
@@ -95,6 +101,7 @@ func TestValidateConfigurationPairRejectsEveryCrossConfigurationMismatch(t *test
 		mutate func(*config.Config, *config.Config)
 	}{
 		{"own and peer identity", func(_ *config.Config, executor *config.Config) { executor.PeerService.Name += ".Other" }},
+		{"worker node ID", func(_ *config.Config, executor *config.Config) { executor.WorkerNodeID = "powertoys-node:02" }},
 		{"pipe", func(_ *config.Config, executor *config.Config) { executor.PipeName += ".other" }},
 		{"installation root", func(_ *config.Config, executor *config.Config) { executor.Installation.Root += "2" }},
 		{"trusted root", func(_ *config.Config, executor *config.Config) { executor.Installation.TrustedConfigurationRoot += "2" }},
@@ -112,6 +119,19 @@ func TestValidateConfigurationPairRejectsEveryCrossConfigurationMismatch(t *test
 		{"local authority", func(_ *config.Config, executor *config.Config) {
 			executor.Executor.LocalAuthorityPublicKeySHA256 = strings.Repeat("c", 64)
 		}},
+		{"maximum frame", func(_ *config.Config, executor *config.Config) { executor.Limits.MaximumFrameBytes-- }},
+		{"maximum queue", func(_ *config.Config, executor *config.Config) {
+			executor.Limits.MaximumQueuedBytesPerDirection++
+		}},
+		{"connect timeout", func(_ *config.Config, executor *config.Config) {
+			executor.Limits.ConnectTimeoutMilliseconds++
+		}},
+		{"shutdown total", func(_ *config.Config, executor *config.Config) {
+			executor.Limits.ShutdownTimeoutMilliseconds++
+		}},
+		{"force termination reserve", func(_ *config.Config, executor *config.Config) {
+			executor.Limits.ForceTerminationReserveMilliseconds++
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -128,6 +148,7 @@ func TestComposeRejectsIndividuallyValidCrossConfigurationMismatches(t *testing.
 		name   string
 		mutate func(*compositionFixture)
 	}{
+		{"worker node ID", func(f *compositionFixture) { f.executor.WorkerNodeID = "powertoys-node:02" }},
 		{"release", func(f *compositionFixture) { f.executor.Installation.ReleaseID += ".other" }},
 		{"manifest digest", func(f *compositionFixture) { f.executor.Installation.ManifestSHA256 = strings.Repeat("a", 64) }},
 		{"signer pin", func(f *compositionFixture) {
@@ -146,6 +167,12 @@ func TestComposeRejectsIndividuallyValidCrossConfigurationMismatches(t *testing.
 		}},
 		{"local authority", func(f *compositionFixture) {
 			f.executor.Executor.LocalAuthorityPublicKeySHA256 = strings.Repeat("c", 64)
+		}},
+		{"maximum queue", func(f *compositionFixture) { f.executor.Limits.MaximumQueuedBytesPerDirection++ }},
+		{"connect timeout", func(f *compositionFixture) { f.executor.Limits.ConnectTimeoutMilliseconds++ }},
+		{"shutdown total", func(f *compositionFixture) { f.executor.Limits.ShutdownTimeoutMilliseconds++ }},
+		{"force termination reserve", func(f *compositionFixture) {
+			f.executor.Limits.ForceTerminationReserveMilliseconds++
 		}},
 	}
 	for _, test := range tests {

@@ -58,9 +58,16 @@ func TestVerifyWithDependenciesProducesOpaqueDetachedEvidence(t *testing.T) {
 	}
 
 	control := evidence.ControlConfiguration()
+	originalWorkerNodeID := control.WorkerNodeID
+	originalReserve := control.Limits.ForceTerminationReserveMilliseconds
+	control.WorkerNodeID = "changed-node"
+	control.Limits.ForceTerminationReserveMilliseconds++
 	control.Node.Environment["PATH"] = `C:\tampered`
-	if evidence.ControlConfiguration().Node.Environment["PATH"] == `C:\tampered` {
-		t.Fatal("configuration getter retained caller-owned map storage")
+	controlAgain := evidence.ControlConfiguration()
+	if controlAgain.WorkerNodeID != originalWorkerNodeID ||
+		controlAgain.Limits.ForceTerminationReserveMilliseconds != originalReserve ||
+		controlAgain.Node.Environment["PATH"] == `C:\tampered` {
+		t.Fatal("configuration getter retained caller-owned storage")
 	}
 	manifest := evidence.Manifest()
 	manifest.Files[0].Path = `tampered.exe`
@@ -148,6 +155,46 @@ func TestVerifyWithDependenciesRejectsSignerAndCleanupFailures(t *testing.T) {
 			t.Fatal("enumeration drift returned usable evidence")
 		}
 	})
+}
+
+func TestValidateConfigurationPairRejectsSharedIdentityAndProtocolLimitMismatches(t *testing.T) {
+	fixture := newInstallFixture(t)
+	controlDocument := fixture.fs.mustNode(
+		testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath,
+	).data
+	executorDocument := fixture.fs.mustNode(
+		testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath,
+	).data
+	control, err := config.Parse(controlDocument)
+	if err != nil {
+		t.Fatalf("parse Control fixture: %v", err)
+	}
+	executor, err := config.Parse(executorDocument)
+	if err != nil {
+		t.Fatalf("parse Executor fixture: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{"worker node ID", func(value *config.Config) { value.WorkerNodeID = "powertoys-node:02" }},
+		{"maximum frame", func(value *config.Config) { value.Limits.MaximumFrameBytes-- }},
+		{"maximum queue", func(value *config.Config) { value.Limits.MaximumQueuedBytesPerDirection++ }},
+		{"connect timeout", func(value *config.Config) { value.Limits.ConnectTimeoutMilliseconds++ }},
+		{"shutdown total", func(value *config.Config) { value.Limits.ShutdownTimeoutMilliseconds++ }},
+		{"force termination reserve", func(value *config.Config) {
+			value.Limits.ForceTerminationReserveMilliseconds++
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneConfig(executor)
+			test.mutate(&candidate)
+			if err := validateConfigurationPair(control, candidate); !errors.Is(err, ErrConfiguration) {
+				t.Fatalf("validateConfigurationPair returned %v, want ErrConfiguration", err)
+			}
+		})
+	}
 }
 
 func TestPublicInputsCannotAmplifyLimitsOrUseZeroEvidence(t *testing.T) {
@@ -289,6 +336,7 @@ func newInstallFixtureWithTrustedContent(
 
 	base := config.Config{
 		SchemaVersion: config.SchemaVersion,
+		WorkerNodeID:  "powertoys-node:01",
 		PipeName:      config.ControlExecutorPipeName,
 		Installation: config.Installation{
 			Root: testInstallationRoot, TrustedConfigurationRoot: testTrustedRoot,
@@ -301,6 +349,7 @@ func newInstallFixtureWithTrustedContent(
 			RootJobMaximumProcesses: 16, RootJobMaximumMemoryBytes: "1073741824",
 			MaximumFrameBytes: config.MaximumFrameBytes, MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 			ConnectTimeoutMilliseconds: 30_000, ShutdownTimeoutMilliseconds: 30_000,
+			ForceTerminationReserveMilliseconds: 5_000,
 		},
 	}
 	control := base

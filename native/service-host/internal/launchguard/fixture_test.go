@@ -250,9 +250,10 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 	buildEnumerations(fs)
 
 	configuration := config.Config{
-		Role:        role,
-		OwnService:  config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},
-		PeerService: config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID},
+		Role:         role,
+		WorkerNodeID: "powertoys-node:01",
+		OwnService:   config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},
+		PeerService:  config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID},
 		Node: config.Node{
 			ExecutablePath:   testNode,
 			ExecutableSHA256: digestOf(fs.file(testNode).data),
@@ -262,9 +263,10 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 			Environment:      map[string]string{"SYSTEMROOT": `C:\Windows`},
 		},
 		Limits: config.Limits{
-			RootJobMaximumProcesses:     32,
-			RootJobMaximumMemoryBytes:   "1073741824",
-			ShutdownTimeoutMilliseconds: 30000,
+			RootJobMaximumProcesses:             32,
+			RootJobMaximumMemoryBytes:           "1073741824",
+			ShutdownTimeoutMilliseconds:         30000,
+			ForceTerminationReserveMilliseconds: 5000,
 		},
 	}
 	if role == config.RoleExecutor {

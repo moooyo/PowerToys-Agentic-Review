@@ -18,4 +18,8 @@
 // prove the absence of dynamically resolved native calls, cgo, COM, WMI, or
 // SCM activation. Trusted source review, release signing, and operating-system
 // ACLs remain part of that threat boundary.
+//
+// The Node launcher's shutdown timeout is the configuration's force-termination
+// reserve only. Graceful ARWX and HostControl shutdown consume the remainder of
+// the total shutdown budget before that reserve begins.
 package launchguard

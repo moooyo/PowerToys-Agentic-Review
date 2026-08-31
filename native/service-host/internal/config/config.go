@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	SchemaVersion            = 2
+	SchemaVersion            = 3
 	MaximumDocumentBytes     = 64 * 1024
 	MaximumFrameBytes        = 1_048_576
 	ControlServiceName       = "AgenticReview.Worker.Control"
@@ -88,17 +88,19 @@ type ExecutorConfiguration struct {
 }
 
 type Limits struct {
-	RootJobMaximumProcesses        uint32 `json:"rootJobMaximumProcesses"`
-	RootJobMaximumMemoryBytes      string `json:"rootJobMaximumMemoryBytes"`
-	MaximumFrameBytes              uint32 `json:"maximumFrameBytes"`
-	MaximumQueuedBytesPerDirection uint32 `json:"maximumQueuedBytesPerDirection"`
-	ConnectTimeoutMilliseconds     uint32 `json:"connectTimeoutMilliseconds"`
-	ShutdownTimeoutMilliseconds    uint32 `json:"shutdownTimeoutMilliseconds"`
+	RootJobMaximumProcesses             uint32 `json:"rootJobMaximumProcesses"`
+	RootJobMaximumMemoryBytes           string `json:"rootJobMaximumMemoryBytes"`
+	MaximumFrameBytes                   uint32 `json:"maximumFrameBytes"`
+	MaximumQueuedBytesPerDirection      uint32 `json:"maximumQueuedBytesPerDirection"`
+	ConnectTimeoutMilliseconds          uint32 `json:"connectTimeoutMilliseconds"`
+	ShutdownTimeoutMilliseconds         uint32 `json:"shutdownTimeoutMilliseconds"`
+	ForceTerminationReserveMilliseconds uint32 `json:"forceTerminationReserveMilliseconds"`
 }
 
 type Config struct {
 	SchemaVersion int                    `json:"schemaVersion"`
 	Role          Role                   `json:"role"`
+	WorkerNodeID  string                 `json:"workerNodeId"`
 	OwnService    ServiceIdentity        `json:"ownService"`
 	PeerService   ServiceIdentity        `json:"peerService"`
 	PipeName      string                 `json:"pipeName"`
@@ -228,10 +230,13 @@ func MarshalCanonical(value Config) ([]byte, error) {
 
 func (c Config) Validate() error {
 	if c.SchemaVersion != SchemaVersion {
-		return invalid("schemaVersion must be 2")
+		return invalid("schemaVersion must be 3")
 	}
 	if c.Role != RoleControl && c.Role != RoleExecutor {
 		return invalid("role must be control or executor")
+	}
+	if !validEntityID(c.WorkerNodeID) {
+		return invalid("workerNodeId must be a canonical entity identifier")
 	}
 
 	expectedOwnName := ControlServiceName
@@ -353,6 +358,10 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.ShutdownTimeoutMilliseconds < 1_000 || c.Limits.ShutdownTimeoutMilliseconds > 300_000 {
 		return invalid("limits.shutdownTimeoutMilliseconds is outside the allowed range")
+	}
+	if c.Limits.ForceTerminationReserveMilliseconds == 0 ||
+		c.Limits.ForceTerminationReserveMilliseconds >= c.Limits.ShutdownTimeoutMilliseconds {
+		return invalid("limits.forceTerminationReserveMilliseconds must be positive and less than shutdownTimeoutMilliseconds")
 	}
 	return nil
 }
@@ -739,6 +748,26 @@ func validIdentifier(value string, maximumBytes int) bool {
 		return false
 	}
 	return true
+}
+
+func validEntityID(value string) bool {
+	if len(value) == 0 || len(value) > 128 || !asciiAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if asciiAlphaNumeric(character) || character == '.' || character == '_' ||
+			character == ':' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' ||
+		value >= '0' && value <= '9'
 }
 
 // deriveServiceSID implements the Windows SERVICE SID derivation for the fixed ASCII service

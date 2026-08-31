@@ -94,6 +94,8 @@ func TestEvidenceAndRuntimePlanContentAccessorsAreCopyOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.configuration.Node.Environment["TEMP"] = `C:\Changed`
+	plan.configuration.WorkerNodeID = "changed-node"
+	plan.configuration.Limits.ForceTerminationReserveMilliseconds++
 	plan.runtimeContents[0].data[0] ^= 0xff
 	identity := evidence.Identity()
 	identity.Token.Groups[0].SID = "changed"
@@ -107,6 +109,9 @@ func TestEvidenceAndRuntimePlanContentAccessorsAreCopyOnly(t *testing.T) {
 	dataRoot.installationRoots[0].target.FileID[0] ^= 0xff
 	if evidence.RuntimeContents()[0].Bytes()[0] != original ||
 		evidence.RuntimePlanMustForTest(t).Configuration().Node.Environment["TEMP"] == `C:\Changed` ||
+		evidence.RuntimePlanMustForTest(t).Configuration().WorkerNodeID == "changed-node" ||
+		evidence.RuntimePlanMustForTest(t).Configuration().Limits.ForceTerminationReserveMilliseconds !=
+			fixture.control.Limits.ForceTerminationReserveMilliseconds ||
 		evidence.RuntimePlanMustForTest(t).RuntimeContents()[0].Bytes()[0] != original ||
 		evidence.Identity().Token.Groups[0].SID == "changed" ||
 		evidence.Roots()[0].Ancestors[0].Evidence.Identity != rootAncestorID ||
@@ -223,6 +228,10 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 		{"role", func(value *Evidence) { value.role = config.RoleExecutor }},
 		{"bootstrap", func(value *Evidence) { value.control.Binding.SHA256 = strings.Repeat("a", 64) }},
 		{"configuration", func(value *Evidence) { value.control.Configuration.Limits.ConnectTimeoutMilliseconds++ }},
+		{"worker node ID", func(value *Evidence) { value.control.Configuration.WorkerNodeID = "powertoys-node:02" }},
+		{"force termination reserve", func(value *Evidence) {
+			value.control.Configuration.Limits.ForceTerminationReserveMilliseconds++
+		}},
 		{"Control read digest", func(value *Evidence) { value.control.Read.ContentSHA256[0] ^= 0xff }},
 		{"Control read bytes", func(value *Evidence) { value.control.Read.Data[0] ^= 0xff }},
 		{"Control read size", func(value *Evidence) { value.control.Read.File.Evidence.Size++ }},

@@ -134,6 +134,9 @@ func validateConfigurationPair(control, executor config.Config) error {
 	if control.OwnService != executor.PeerService || control.PeerService != executor.OwnService {
 		return mismatch("mutual service identities")
 	}
+	if control.WorkerNodeID != executor.WorkerNodeID {
+		return mismatch("workerNodeId")
+	}
 	if control.PipeName != executor.PipeName {
 		return mismatch("pipe name")
 	}
@@ -156,6 +159,22 @@ func validateConfigurationPair(control, executor config.Config) error {
 	if control.Control == nil || executor.Executor == nil ||
 		control.Control.LocalAuthorityPublicKeySHA256 != executor.Executor.LocalAuthorityPublicKeySHA256 {
 		return mismatch("local authority public key digest")
+	}
+	if control.Limits.MaximumFrameBytes != executor.Limits.MaximumFrameBytes {
+		return mismatch("limits.maximumFrameBytes")
+	}
+	if control.Limits.MaximumQueuedBytesPerDirection != executor.Limits.MaximumQueuedBytesPerDirection {
+		return mismatch("limits.maximumQueuedBytesPerDirection")
+	}
+	if control.Limits.ConnectTimeoutMilliseconds != executor.Limits.ConnectTimeoutMilliseconds {
+		return mismatch("limits.connectTimeoutMilliseconds")
+	}
+	if control.Limits.ShutdownTimeoutMilliseconds != executor.Limits.ShutdownTimeoutMilliseconds {
+		return mismatch("limits.shutdownTimeoutMilliseconds")
+	}
+	if control.Limits.ForceTerminationReserveMilliseconds !=
+		executor.Limits.ForceTerminationReserveMilliseconds {
+		return mismatch("limits.forceTerminationReserveMilliseconds")
 	}
 	return nil
 }

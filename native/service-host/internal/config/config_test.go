@@ -20,7 +20,8 @@ func TestCanonicalConfigurationRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse returned an error: %v", err)
 			}
-			if parsed.Role != original.Role || parsed.Node.ExecutablePath != original.Node.ExecutablePath {
+			if parsed.Role != original.Role || parsed.WorkerNodeID != original.WorkerNodeID ||
+				parsed.Node.ExecutablePath != original.Node.ExecutablePath {
 				t.Fatalf("Parse returned the wrong configuration: %#v", parsed)
 			}
 		})
@@ -48,7 +49,7 @@ func TestParseRejectsNonCanonicalAndDuplicateDocuments(t *testing.T) {
 		{name: "trailing newline", data: append(append([]byte(nil), document...), '\n'), code: ErrorCanonical},
 		{
 			name: "duplicate property",
-			data: bytes.Replace(document, []byte(`"schemaVersion":2`), []byte(`"schemaVersion":2,"schemaVersion":2`), 1),
+			data: bytes.Replace(document, []byte(`"schemaVersion":3`), []byte(`"schemaVersion":3,"schemaVersion":3`), 1),
 			code: ErrorCanonical,
 		},
 		{
@@ -64,6 +65,33 @@ func TestParseRejectsNonCanonicalAndDuplicateDocuments(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := Parse(test.data)
 			assertConfigErrorCode(t, err, test.code)
+		})
+	}
+}
+
+func TestParseRejectsMissingRequiredVersion3Fields(t *testing.T) {
+	document := mustCanonical(t, validConfig())
+	tests := []struct {
+		name string
+		old  []byte
+		new  []byte
+	}{
+		{
+			name: "schema version 2",
+			old:  []byte(`"schemaVersion":3`),
+			new:  []byte(`"schemaVersion":2`),
+		},
+		{name: "worker node ID", old: []byte(`"workerNodeId":"powertoys-node:01",`)},
+		{name: "force termination reserve", old: []byte(`,"forceTerminationReserveMilliseconds":15000`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutated := bytes.Replace(document, test.old, test.new, 1)
+			if bytes.Equal(mutated, document) {
+				t.Fatal("required field fixture was not found")
+			}
+			_, err := Parse(mutated)
+			assertConfigErrorCode(t, err, ErrorValidation)
 		})
 	}
 }
@@ -105,8 +133,15 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{name: "old schema", mutate: func(value *Config) { value.SchemaVersion = 1 }},
+		{name: "old schema", mutate: func(value *Config) { value.SchemaVersion = 2 }},
 		{name: "unsupported role", mutate: func(value *Config) { value.Role = "combined" }},
+		{name: "missing worker node ID", mutate: func(value *Config) { value.WorkerNodeID = "" }},
+		{name: "worker node ID prefix", mutate: func(value *Config) { value.WorkerNodeID = ":node" }},
+		{name: "worker node ID plus", mutate: func(value *Config) { value.WorkerNodeID = "node+1" }},
+		{name: "worker node ID non-ASCII", mutate: func(value *Config) {
+			value.WorkerNodeID = "node-" + string([]byte{0xc3, 0xa9})
+		}},
+		{name: "worker node ID length", mutate: func(value *Config) { value.WorkerNodeID = "n" + strings.Repeat("x", 128) }},
 		{name: "wrong own service", mutate: func(value *Config) { value.OwnService.Name = ExecutorServiceName }},
 		{name: "wrong own service SID", mutate: func(value *Config) { value.OwnService.SID = `S-1-5-80-1-2-3-4-5` }},
 		{name: "same service SID", mutate: func(value *Config) { value.PeerService.SID = value.OwnService.SID }},
@@ -179,6 +214,15 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		{name: "queue smaller than frame", mutate: func(value *Config) { value.Limits.MaximumQueuedBytesPerDirection = MaximumFrameBytes - 1 }},
 		{name: "connect timeout", mutate: func(value *Config) { value.Limits.ConnectTimeoutMilliseconds = 999 }},
 		{name: "shutdown timeout", mutate: func(value *Config) { value.Limits.ShutdownTimeoutMilliseconds = 300_001 }},
+		{name: "missing force termination reserve", mutate: func(value *Config) {
+			value.Limits.ForceTerminationReserveMilliseconds = 0
+		}},
+		{name: "force termination reserve equals total", mutate: func(value *Config) {
+			value.Limits.ForceTerminationReserveMilliseconds = value.Limits.ShutdownTimeoutMilliseconds
+		}},
+		{name: "force termination reserve exceeds total", mutate: func(value *Config) {
+			value.Limits.ForceTerminationReserveMilliseconds = value.Limits.ShutdownTimeoutMilliseconds + 1
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -186,6 +230,30 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 			test.mutate(&value)
 			err := value.Validate()
 			assertConfigErrorCode(t, err, ErrorValidation)
+		})
+	}
+}
+
+func TestWorkerNodeIDAndShutdownBudgetBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		worker  string
+		total   uint32
+		reserve uint32
+	}{
+		{name: "minimum", worker: "0", total: 1_000, reserve: 1},
+		{name: "all entity punctuation", worker: "A.b_c:d-0", total: 1_000, reserve: 999},
+		{name: "maximum", worker: "A" + strings.Repeat("z", 127), total: 300_000, reserve: 299_999},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := validConfig()
+			value.WorkerNodeID = test.worker
+			value.Limits.ShutdownTimeoutMilliseconds = test.total
+			value.Limits.ForceTerminationReserveMilliseconds = test.reserve
+			if err := value.Validate(); err != nil {
+				t.Fatalf("Validate rejected a boundary value: %v", err)
+			}
 		})
 	}
 }
@@ -272,6 +340,7 @@ func validConfig() Config {
 	return Config{
 		SchemaVersion: SchemaVersion,
 		Role:          RoleControl,
+		WorkerNodeID:  "powertoys-node:01",
 		OwnService: ServiceIdentity{
 			Name: ControlServiceName,
 			SID:  ControlServiceSID,
@@ -310,12 +379,13 @@ func validConfig() Config {
 		Control:  validControlConfiguration(),
 		Executor: nil,
 		Limits: Limits{
-			RootJobMaximumProcesses:        128,
-			RootJobMaximumMemoryBytes:      "17179869184",
-			MaximumFrameBytes:              MaximumFrameBytes,
-			MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
-			ConnectTimeoutMilliseconds:     30_000,
-			ShutdownTimeoutMilliseconds:    120_000,
+			RootJobMaximumProcesses:             128,
+			RootJobMaximumMemoryBytes:           "17179869184",
+			MaximumFrameBytes:                   MaximumFrameBytes,
+			MaximumQueuedBytesPerDirection:      4 * 1024 * 1024,
+			ConnectTimeoutMilliseconds:          30_000,
+			ShutdownTimeoutMilliseconds:         120_000,
+			ForceTerminationReserveMilliseconds: 15_000,
 		},
 	}
 }

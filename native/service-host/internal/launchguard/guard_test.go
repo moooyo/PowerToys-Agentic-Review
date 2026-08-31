@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
@@ -157,6 +158,26 @@ func TestVerifyUnchangedDetectsPostOpenTampering(t *testing.T) {
 	}
 	if _, err := guard.LaunchNode(context.Background(), validPipeName()); !errors.Is(err, ErrChanged) {
 		t.Fatalf("LaunchNode after tamper = %v, want ErrChanged", err)
+	}
+}
+
+func TestNodeLaunchSpecUsesOnlyForceTerminationReserve(t *testing.T) {
+	fixture := newGuardFixture(t, config.RoleControl)
+	fixture.authority.configuration.Limits.ShutdownTimeoutMilliseconds = 120_000
+	fixture.authority.configuration.Limits.ForceTerminationReserveMilliseconds = 7_000
+	guard, err := openWithDependencies(context.Background(), fixture.authority, fixture.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := guard.state.nodeLaunchSpec(validPipeName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.ShutdownTimeout != 7*time.Second {
+		t.Fatalf("Node launch shutdown timeout = %v, want the 7s force-termination reserve", spec.ShutdownTimeout)
+	}
+	if err := guard.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
