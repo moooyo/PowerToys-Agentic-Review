@@ -10,8 +10,9 @@
 // process and token DACLs. This package does not accept caller assertions that
 // those prerequisite checks succeeded.
 //
-// Production Authenticode verification is handle-bound and accepts exactly one
-// embedded primary signature. Production composition must remain fail-closed
-// until reviewed platform orchestration enforces the complete prerequisite
-// sequence before invoking this package.
+// VerifyWindows derives the opposing Control or Executor service from the
+// caller's fixed role, observes that peer service through SCM around process
+// acquisition, and retains the resulting wrapper and pipe-peer process handles
+// in the returned Session. Production Authenticode verification is
+// handle-bound and accepts exactly one embedded primary signature.
 package peerverify

@@ -24,10 +24,6 @@ const (
 
 type windowsProcessOpener struct{}
 
-func newPlatformProcessOpener() (processOpener, error) {
-	return windowsProcessOpener{}, nil
-}
-
 func (windowsProcessOpener) OpenProcess(processID uint32) (PeerProcess, error) {
 	handle, err := windows.OpenProcess(processOpenAccess, false, processID)
 	if err != nil {

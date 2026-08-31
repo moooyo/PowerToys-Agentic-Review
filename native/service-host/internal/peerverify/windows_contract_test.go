@@ -11,6 +11,12 @@ import (
 )
 
 func TestWindowsAccessMasksMatchReviewedContract(t *testing.T) {
+	if scmManagerOpenAccess != uint32(windows.SC_MANAGER_CONNECT) {
+		t.Fatalf("SCM manager access = 0x%x, want SC_MANAGER_CONNECT", scmManagerOpenAccess)
+	}
+	if scmServiceOpenAccess != uint32(windows.SERVICE_QUERY_STATUS) {
+		t.Fatalf("SCM service access = 0x%x, want SERVICE_QUERY_STATUS", scmServiceOpenAccess)
+	}
 	if processOpenAccess != uint32(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE) {
 		t.Fatalf("process access = 0x%x", processOpenAccess)
 	}
@@ -46,10 +52,43 @@ func TestWindowsImageSnapshotLayoutsMatchFileInformationClasses(t *testing.T) {
 
 func TestWindowsImplementationsSatisfyOpaqueContracts(t *testing.T) {
 	var _ processOpener = windowsProcessOpener{}
+	var _ windowsVerificationPlatform = windowsVerificationPlatformImpl{}
+	var _ serviceStatusSource = (*windowsServiceStatusSource)(nil)
 	var _ PeerProcess = (*windowsStableProcess)(nil)
 	var _ ImageSubject = (*windowsImageSubject)(nil)
 	var _ windowsAuthenticodeSubject = (*windowsImageSubject)(nil)
 	var _ AuthenticodeVerifier = (*windowsAuthenticodeVerifier)(nil)
+}
+
+func TestWindowsSCMCloseRetainsOnlyFailedHandlesForRetry(t *testing.T) {
+	closeFailure := errors.New("close failed")
+	serviceHandle := windows.Handle(123)
+	managerHandle := windows.Handle(456)
+	attempts := map[windows.Handle]int{}
+	source := &windowsServiceStatusSource{
+		service: serviceHandle,
+		manager: managerHandle,
+		closeHandle: func(handle windows.Handle) error {
+			attempts[handle]++
+			if handle == serviceHandle && attempts[handle] == 1 {
+				return closeFailure
+			}
+			return nil
+		},
+	}
+	if err := source.Close(); !errors.Is(err, closeFailure) {
+		t.Fatalf("first Close error = %v", err)
+	}
+	if source.service != serviceHandle || source.manager != 0 {
+		t.Fatalf("handles after failed Close = service %d manager %d", source.service, source.manager)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("retry Close error = %v", err)
+	}
+	if source.service != 0 || source.manager != 0 ||
+		attempts[serviceHandle] != 2 || attempts[managerHandle] != 1 {
+		t.Fatalf("retry handles=%d/%d attempts=%v", source.service, source.manager, attempts)
+	}
 }
 
 func TestWindowsProcessCloseRetainsHandleForRetry(t *testing.T) {

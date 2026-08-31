@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 )
 
 var (
@@ -208,8 +210,21 @@ type TokenVerifier interface {
 	VerifyToken(TokenSnapshot, string) (TokenEvidence, error)
 }
 
-// Options contain every caller-controlled peer-verification expectation.
+// Options contains only independently verified expectations and the concrete
+// connected pipe endpoint for the production Windows peer-verification
+// boundary. The opposing service identity, pipe endpoint direction, and all
+// native verifier implementations are selected internally from Role.
 type Options struct {
+	Role                                   config.Role
+	PipeEndpoint                           *winpipe.Endpoint
+	WrapperImage                           ImageExpectation
+	ServiceHostImage                       ImageExpectation
+	ExpectedLeafSignerCertificateDERSHA256 string
+}
+
+// verificationOptions contains the private dependencies used by the pure
+// verification core and its tests. Production callers cannot supply them.
+type verificationOptions struct {
 	PipePeer                               PipePeer
 	ExpectedServiceSID                     string
 	WrapperImage                           ImageExpectation

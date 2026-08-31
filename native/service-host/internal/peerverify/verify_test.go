@@ -712,7 +712,7 @@ type verificationFixture struct {
 	peer         *fakeProcess
 	wrapperImage *fakeImage
 	peerImage    *fakeImage
-	options      Options
+	options      verificationOptions
 }
 
 func newVerificationFixture(pipePeer PipePeer) *verificationFixture {
@@ -754,7 +754,7 @@ func newVerificationFixture(pipePeer PipePeer) *verificationFixture {
 		events: &fixture.events,
 	}
 	fixture.opener = fakeOpener{process: fixture.peer, events: &fixture.events}
-	fixture.options = Options{
+	fixture.options = verificationOptions{
 		PipePeer:           pipePeer,
 		ExpectedServiceSID: testServiceSID,
 		WrapperImage: ImageExpectation{

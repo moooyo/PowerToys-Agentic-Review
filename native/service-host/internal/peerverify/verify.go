@@ -23,27 +23,14 @@ type processOpener interface {
 	OpenProcess(uint32) (PeerProcess, error)
 }
 
-// Verify observes the selected named-pipe endpoint, acquires a stable process
-// object between two adjacent observations, and verifies lineage, image, and
-// token evidence. The call consumes wrapper on success and failure.
-//
+// verifyWithOpener observes the selected named-pipe endpoint, acquires a stable
+// process object between two adjacent observations, and verifies lineage,
+// image, and token evidence. The call consumes wrapper on success and failure.
 // Matching PIDs are only a race check. They do not authenticate the peer.
-func Verify(
-	observer winpipe.ProcessIDObserver,
-	wrapper StableWrapper,
-	options Options,
-) (*Session, error) {
-	opener, err := newPlatformProcessOpener()
-	if err != nil {
-		return nil, errors.Join(err, closeDiscardedStableProcess("close rejected WinSW wrapper process", wrapper))
-	}
-	return verifyWithOpener(observer, wrapper, options, opener)
-}
-
 func verifyWithOpener(
 	observer winpipe.ProcessIDObserver,
 	wrapper StableWrapper,
-	options Options,
+	options verificationOptions,
 	opener processOpener,
 ) (session *Session, err error) {
 	var peer PeerProcess
@@ -68,7 +55,7 @@ func verifyWithOpener(
 	if isNilInterface(opener) {
 		return nil, invalidOptions("process opener is required")
 	}
-	if err := validateOptions(options); err != nil {
+	if err := validateVerificationOptions(options); err != nil {
 		return nil, err
 	}
 

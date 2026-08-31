@@ -11,7 +11,7 @@ import (
 
 const maximumWindowsPathUnits = 32_767
 
-func validateOptions(options Options) error {
+func validateVerificationOptions(options verificationOptions) error {
 	if options.PipePeer != PipePeerClient && options.PipePeer != PipePeerServer {
 		return invalidOptions("pipe peer must select the client or server endpoint")
 	}
