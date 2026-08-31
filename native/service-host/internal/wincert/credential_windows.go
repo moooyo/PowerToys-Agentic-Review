@@ -5,6 +5,7 @@ package wincert
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -139,6 +140,15 @@ type credentialState struct {
 	keyIdentity    KeyIdentity
 	validFrom      time.Time
 	validUntil     time.Time
+	attestation    Attestation
+}
+
+type validatedNativeKey struct {
+	identity                 KeyIdentity
+	keyName                  string
+	securityDescriptorSHA256 [p256DigestBytes]byte
+	publicKeySPKISHA256      [p256DigestBytes]byte
+	properties               keyProperties
 }
 
 type cryptKeyProviderParameter struct {
@@ -179,7 +189,7 @@ func acquireWithAPI(api nativeAPI, config Config) (*Credential, error) {
 	store, err := api.openStore(
 		certificateStoreProvider,
 		certificateStoreEncoding,
-		config.StoreName,
+		LocalMachinePersonalStore,
 		certificateStoreOpenFlags,
 	)
 	if err != nil {
@@ -255,16 +265,33 @@ func acquireWithAPI(api nativeAPI, config Config) (*Credential, error) {
 		return nil, cleanup(fmt.Errorf("%w: acquired key spec is 0x%08x instead of CERT_NCRYPT_KEY_SPEC", ErrInvalidKey, keySpec))
 	}
 
-	keyIdentity, err := validateNativeKey(api, state.key, &certificatePublicKey, providerInfo, config)
+	validatedKey, err := validateNativeKey(api, state.key, &certificatePublicKey, providerInfo, config)
 	if err != nil {
 		return nil, cleanup(err)
 	}
 
 	state.tlsCertificate = tlsCertificate
 	state.publicKey = certificatePublicKey
-	state.keyIdentity = keyIdentity
+	state.keyIdentity = validatedKey.identity
 	state.validFrom = validFrom
 	state.validUntil = validUntil
+	state.attestation = Attestation{
+		storeScope:                  LocalMachineStoreScope,
+		storeName:                   LocalMachinePersonalStore,
+		certificateDERSHA256:        sha256.Sum256(selectedDER),
+		containerName:               providerInfo.containerName,
+		keyName:                     validatedKey.keyName,
+		keySecurityDescriptorSHA256: validatedKey.securityDescriptorSHA256,
+		keyIdentity:                 validatedKey.identity,
+		publicKeySPKISHA256:         validatedKey.publicKeySPKISHA256,
+		validatedControlServiceSID:  config.ControlServiceSID,
+		validatedExecutorServiceSID: config.ExecutorServiceSID,
+		algorithm:                   validatedKey.properties.algorithm,
+		keyLengthBits:               validatedKey.properties.length,
+		exportPolicy:                validatedKey.properties.exportPolicy,
+		keyUsage:                    validatedKey.properties.keyUsage,
+		validated:                   true,
+	}
 	return credential, nil
 }
 
@@ -353,77 +380,81 @@ func validateNativeKey(
 	certificatePublicKey *ecdsa.PublicKey,
 	providerInfo certificateProviderInfo,
 	config Config,
-) (KeyIdentity, error) {
+) (validatedNativeKey, error) {
 	algorithm, err := api.getKeyProperty(key, ncryptAlgorithmProperty, maximumAlgorithmPropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Algorithm property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Algorithm property: %w", err)
 	}
 	length, err := api.getKeyProperty(key, ncryptLengthProperty, uint32PropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Length property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Length property: %w", err)
 	}
 	exportPolicy, err := api.getKeyProperty(key, ncryptExportPolicyProperty, uint32PropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Export Policy property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Export Policy property: %w", err)
 	}
 	keyUsage, err := api.getKeyProperty(key, ncryptKeyUsageProperty, uint32PropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Key Usage property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Key Usage property: %w", err)
 	}
 	keyTypeValue, err := api.getKeyProperty(key, ncryptKeyTypeProperty, uint32PropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Key Type property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Key Type property: %w", err)
 	}
 	keyType, err := decodeUint32Property(keyTypeValue)
 	if err != nil || keyType != cryptMachineKeysetFlag {
-		return KeyIdentity{}, fmt.Errorf("%w: Key Type is not machine-key only", ErrInvalidKey)
+		return validatedNativeKey{}, fmt.Errorf("%w: Key Type is not machine-key only", ErrInvalidKey)
 	}
 	uniqueNameValue, err := api.getKeyProperty(key, ncryptUniqueNameProperty, maximumUniqueNamePropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Unique Name property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Unique Name property: %w", err)
 	}
 	uniqueName, err := decodeUTF16Property(uniqueNameValue)
 	if err != nil || !validCNGName(uniqueName, 256) {
-		return KeyIdentity{}, fmt.Errorf("%w: Unique Name is missing or invalid", ErrInvalidKey)
+		return validatedNativeKey{}, fmt.Errorf("%w: Unique Name is missing or invalid", ErrInvalidKey)
 	}
 	keyNameValue, err := api.getKeyProperty(key, ncryptNameProperty, maximumUniqueNamePropertyBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG Name property: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG Name property: %w", err)
 	}
 	keyName, err := decodeUTF16Property(keyNameValue)
 	if err != nil || keyName != providerInfo.containerName {
-		return KeyIdentity{}, fmt.Errorf("%w: key Name does not match the certificate container", ErrInvalidKey)
+		return validatedNativeKey{}, fmt.Errorf("%w: key Name does not match the certificate container", ErrInvalidKey)
 	}
 	actualProviderName, providerImplementation, err := api.readKeyProviderIdentity(key)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read acquired CNG provider name: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read acquired CNG provider name: %w", err)
 	}
 	if actualProviderName != approvedKeyStorageProvider || actualProviderName != providerInfo.providerName ||
 		providerImplementation != ncryptSoftwareImplementationFlag {
-		return KeyIdentity{}, fmt.Errorf("%w: acquired key provider is not the approved certificate provider", ErrInvalidKey)
+		return validatedNativeKey{}, fmt.Errorf("%w: acquired key provider is not the approved certificate provider", ErrInvalidKey)
 	}
 	properties, err := parseKeyProperties(algorithm, length, exportPolicy, keyUsage)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("%w: %v", ErrInvalidKey, err)
+		return validatedNativeKey{}, fmt.Errorf("%w: %v", ErrInvalidKey, err)
 	}
 	if err := validateP256SigningProperties(properties); err != nil {
-		return KeyIdentity{}, err
+		return validatedNativeKey{}, err
 	}
 
 	publicBlob, err := api.exportPublicKey(key, ncryptECCPublicBlob, maximumPublicBlobBytes)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("export CNG public key: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("export CNG public key: %w", err)
 	}
 	cngPublicKey, err := parseP256PublicBlob(publicBlob)
 	if err != nil {
-		return KeyIdentity{}, err
+		return validatedNativeKey{}, err
 	}
 	if err := validateMatchingPublicKeys(certificatePublicKey, cngPublicKey); err != nil {
-		return KeyIdentity{}, err
+		return validatedNativeKey{}, err
+	}
+	publicKeyDigest, err := p256PublicKeySPKISHA256(cngPublicKey)
+	if err != nil {
+		return validatedNativeKey{}, err
 	}
 	securityEvidence, err := api.readKeySecurityEvidence(key)
 	if err != nil {
-		return KeyIdentity{}, fmt.Errorf("read CNG key security descriptor: %w", err)
+		return validatedNativeKey{}, fmt.Errorf("read CNG key security descriptor: %w", err)
 	}
 	if err := validateKeySecurityEvidence(
 		securityEvidence,
@@ -431,12 +462,18 @@ func validateNativeKey(
 		config.ControlServiceSID,
 		config.ExecutorServiceSID,
 	); err != nil {
-		return KeyIdentity{}, err
+		return validatedNativeKey{}, err
 	}
-	return KeyIdentity{
-		ProviderName: actualProviderName,
-		UniqueName:   uniqueName,
-		MachineKey:   true,
+	return validatedNativeKey{
+		identity: KeyIdentity{
+			ProviderName: actualProviderName,
+			UniqueName:   uniqueName,
+			MachineKey:   true,
+		},
+		keyName:                  keyName,
+		securityDescriptorSHA256: sha256.Sum256(securityEvidence.raw),
+		publicKeySPKISHA256:      publicKeyDigest,
+		properties:               properties,
 	}, nil
 }
 
@@ -469,6 +506,30 @@ func (c *Credential) Identity() KeyIdentity {
 // KeyIdentity returns the same detached identity as Identity.
 func (c *Credential) KeyIdentity() KeyIdentity {
 	return c.Identity()
+}
+
+// Attestation returns the detached values observed and validated for this
+// credential. The fixed store scope and name identify the selectors used by
+// the successful native open; Windows does not provide a store-name readback.
+func (c *Credential) Attestation() (Attestation, error) {
+	if c == nil || c.state == nil {
+		return Attestation{}, ErrClosed
+	}
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed {
+		return Attestation{}, ErrClosed
+	}
+	if state.store == 0 || state.certificate == nil || state.key == 0 || !state.attestation.isComplete() ||
+		state.validFrom.IsZero() || state.validUntil.IsZero() {
+		return Attestation{}, ErrAttestationUnavailable
+	}
+	now := time.Now()
+	if now.Before(state.validFrom) || now.After(state.validUntil) {
+		return Attestation{}, fmt.Errorf("%w: transmitted certificate chain is not currently valid", ErrInvalidCertificate)
+	}
+	return state.attestation, nil
 }
 
 // Sign signs an exactly 32-byte SHA-256 digest and returns ASN.1 DER ECDSA.

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -356,6 +357,166 @@ func TestWindowsAcquireUsesPinnedRestrictedStoreAndCNGContract(t *testing.T) {
 		!reflect.DeepEqual(api.closedStores, []nativeStore{api.storeHandle}) ||
 		!reflect.DeepEqual(api.closeFlags, []uint32{certificateStoreCloseFlags}) {
 		t.Fatalf("unexpected native cleanup: keys=%v certificates=%v stores=%v flags=%v", api.freedKeys, api.freedCertificates, api.closedStores, api.closeFlags)
+	}
+}
+
+func TestWindowsAttestationReportsObservedValuesAndReturnsCopies(t *testing.T) {
+	api, config, _ := validFakeNativeAPI(t)
+	credential, err := acquireWithAPI(api, config)
+	if err != nil {
+		t.Fatalf("acquireWithAPI returned an error: %v", err)
+	}
+	defer credential.Close()
+
+	attestation, err := credential.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation returned an error: %v", err)
+	}
+	expectedCertificateDigest := sha256.Sum256(api.certificateValues[api.certificateOrder[1]])
+	expectedSecurityDigest := sha256.Sum256(api.securityEvidence.raw)
+	expectedContainerName := api.providerInfo.containerName
+	expectedPublicDigest, err := p256PublicKeySPKISHA256(&api.signingKey.PublicKey)
+	if err != nil {
+		t.Fatalf("derive expected public-key digest: %v", err)
+	}
+	expectedIdentity := KeyIdentity{
+		ProviderName: approvedKeyStorageProvider,
+		UniqueName:   "machine-key-unique-name",
+		MachineKey:   true,
+	}
+	if attestation.StoreScope() != LocalMachineStoreScope ||
+		attestation.StoreName() != LocalMachinePersonalStore ||
+		attestation.CertificateDERSHA256() != expectedCertificateDigest ||
+		attestation.ContainerName() != expectedContainerName ||
+		attestation.KeyName() != "machine-key" ||
+		attestation.KeySecurityDescriptorSHA256() != expectedSecurityDigest ||
+		attestation.KeyIdentity() != expectedIdentity ||
+		attestation.PublicKeySPKISHA256() != expectedPublicDigest ||
+		attestation.ValidatedControlServiceSID() != config.ControlServiceSID ||
+		attestation.ValidatedExecutorServiceSID() != config.ExecutorServiceSID ||
+		attestation.Algorithm() != "ECDSA_P256" ||
+		attestation.KeyLengthBits() != 256 ||
+		attestation.ExportPolicy() != 0 ||
+		attestation.KeyUsage() != ncryptAllowSigningFlag {
+		t.Fatalf("Attestation returned unexpected observed values: %#v", attestation)
+	}
+
+	var crossPurposeDigest [cng.DigestSize]byte = attestation.PublicKeySPKISHA256()
+	if crossPurposeDigest != expectedPublicDigest {
+		t.Fatal("public SPKI digest cannot be compared across credential purposes")
+	}
+
+	config.StoreName = "changed-store"
+	config.CertificateSHA256 = strings.Repeat("0", 64)
+	config.ExpectedKeySecurityDescriptorSHA256 = strings.Repeat("1", 64)
+	config.ControlServiceSID = "S-1-5-80-11-12-13-14-15"
+	config.ExecutorServiceSID = "S-1-5-80-16-17-18-19-20"
+	api.providerInfo.containerName = "changed-container"
+	api.actualProviderName = "changed-provider"
+	api.properties[ncryptNameProperty] = encodeUTF16Property("changed-key")
+	api.properties[ncryptAlgorithmProperty] = encodeUTF16Property("ECDSA_P384")
+	api.properties[ncryptLengthProperty] = encodeUint32Property(384)
+	api.properties[ncryptExportPolicyProperty] = encodeUint32Property(1)
+	api.properties[ncryptKeyUsageProperty] = encodeUint32Property(0)
+	api.securityEvidence.raw[0] ^= 0xff
+	api.publicBlob[0] ^= 0xff
+	api.certificateValues[api.certificateOrder[1]][0] ^= 0xff
+	cached, err := credential.Attestation()
+	if err != nil || cached != attestation {
+		t.Fatalf("Attestation reread mutable native or configuration values: %#v, %v", cached, err)
+	}
+
+	attestation.storeScope = "mutated"
+	attestation.containerName = "mutated"
+	attestation.certificateDERSHA256[0] ^= 0xff
+	attestation.keySecurityDescriptorSHA256[0] ^= 0xff
+	attestation.publicKeySPKISHA256[0] ^= 0xff
+	attestation.keyIdentity.UniqueName = "mutated"
+	again, err := credential.Attestation()
+	if err != nil {
+		t.Fatalf("second Attestation returned an error: %v", err)
+	}
+	if again.StoreScope() != LocalMachineStoreScope ||
+		again.ContainerName() != expectedContainerName ||
+		again.CertificateDERSHA256() != expectedCertificateDigest ||
+		again.KeySecurityDescriptorSHA256() != expectedSecurityDigest ||
+		again.PublicKeySPKISHA256() != expectedPublicDigest ||
+		again.KeyIdentity() != expectedIdentity {
+		t.Fatal("Attestation returned state aliased by an earlier value")
+	}
+}
+
+func TestWindowsAttestationFailsForNilIncompleteClosedAndExpiredCredentials(t *testing.T) {
+	var nilCredential *Credential
+	if _, err := nilCredential.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("nil Attestation error = %v, want ErrClosed", err)
+	}
+	if _, err := (&Credential{}).Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("empty Attestation error = %v, want ErrClosed", err)
+	}
+	incomplete := &Credential{state: &credentialState{
+		store:       1,
+		certificate: &windows.CertContext{},
+		key:         2,
+	}}
+	if _, err := incomplete.Attestation(); !errors.Is(err, ErrAttestationUnavailable) {
+		t.Fatalf("incomplete Attestation error = %v, want ErrAttestationUnavailable", err)
+	}
+
+	api, config, _ := validFakeNativeAPI(t)
+	credential, err := acquireWithAPI(api, config)
+	if err != nil {
+		t.Fatalf("acquireWithAPI returned an error: %v", err)
+	}
+	credential.state.mu.Lock()
+	credential.state.validUntil = time.Now().Add(-time.Second)
+	credential.state.mu.Unlock()
+	if _, err := credential.Attestation(); !errors.Is(err, ErrInvalidCertificate) {
+		t.Fatalf("expired Attestation error = %v, want ErrInvalidCertificate", err)
+	}
+	if err := credential.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	if _, err := credential.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed Attestation error = %v, want ErrClosed", err)
+	}
+}
+
+func TestWindowsAttestationAndCloseAreConcurrentSafe(t *testing.T) {
+	api, config, _ := validFakeNativeAPI(t)
+	credential, err := acquireWithAPI(api, config)
+	if err != nil {
+		t.Fatalf("acquireWithAPI returned an error: %v", err)
+	}
+
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 16)
+	var readers sync.WaitGroup
+	for range 16 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for range 100 {
+				_, attestationErr := credential.Attestation()
+				if attestationErr != nil && !errors.Is(attestationErr, ErrClosed) {
+					errorsSeen <- attestationErr
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	if err := credential.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	readers.Wait()
+	close(errorsSeen)
+	for attestationErr := range errorsSeen {
+		t.Fatalf("concurrent Attestation returned an unexpected error: %v", attestationErr)
+	}
+	if _, err := credential.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Attestation after Close error = %v, want ErrClosed", err)
 	}
 }
 
@@ -754,6 +915,9 @@ func TestWindowsCloseRetainsFailedResourcesForRetry(t *testing.T) {
 	if _, err := credential.Sign(nil, make([]byte, p256DigestBytes), crypto.SHA256); !errors.Is(err, ErrClosed) {
 		t.Fatalf("failed Close left credential usable: %v", err)
 	}
+	if _, err := credential.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("failed Close left attestation available: %v", err)
+	}
 	if err := credential.Close(); err != nil {
 		t.Fatalf("second Close did not release retained resources: %v", err)
 	}
@@ -785,11 +949,22 @@ func TestWindowsCredentialValueCopiesShareStateAndOwnership(t *testing.T) {
 	if copyByValue.Identity() != credential.Identity() {
 		t.Fatal("Credential value copy changed detached identity")
 	}
+	originalAttestation, err := credential.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation through original credential returned an error: %v", err)
+	}
+	copyAttestation, err := copyByValue.Attestation()
+	if err != nil || copyAttestation != originalAttestation {
+		t.Fatalf("Credential value copy changed attestation: %#v, %v", copyAttestation, err)
+	}
 	if err := copyByValue.Close(); err != nil {
 		t.Fatalf("Close through value copy returned an error: %v", err)
 	}
 	if _, err := credential.Sign(nil, make([]byte, p256DigestBytes), crypto.SHA256); !errors.Is(err, ErrClosed) {
 		t.Fatalf("original credential remained usable after copy closed: %v", err)
+	}
+	if _, err := credential.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("original credential retained attestation after copy closed: %v", err)
 	}
 	if err := credential.Close(); err != nil {
 		t.Fatalf("Close through original credential returned an error: %v", err)

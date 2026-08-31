@@ -40,6 +40,11 @@ func (c *Credential) KeyIdentity() KeyIdentity {
 	return c.Identity()
 }
 
+// Attestation fails closed because no native certificate or key can be observed.
+func (*Credential) Attestation() (Attestation, error) {
+	return Attestation{}, ErrUnsupportedPlatform
+}
+
 // Sign fails closed on unsupported platforms.
 func (*Credential) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform

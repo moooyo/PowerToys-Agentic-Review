@@ -4,6 +4,7 @@ package cng
 
 import (
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"runtime"
@@ -76,14 +77,13 @@ type Signer struct {
 }
 
 type signerState struct {
-	mu                  sync.Mutex
-	api                 nativeCNG
-	provider            nativeHandle
-	key                 nativeHandle
-	closed              bool
-	identity            KeyIdentity
-	publicKey           ecdsa.PublicKey
-	publicKeySPKISHA256 [DigestSize]byte
+	mu          sync.Mutex
+	api         nativeCNG
+	provider    nativeHandle
+	key         nativeHandle
+	closed      bool
+	attestation Attestation
+	publicKey   ecdsa.PublicKey
 }
 
 // Open opens one persisted Local Machine CNG key and validates its security-sensitive properties.
@@ -123,17 +123,11 @@ func openWithAPI(api nativeCNG, options Options) (*Signer, error) {
 
 	state := &signerState{api: api, provider: provider, key: key}
 	signer := &Signer{state: state}
-	identity, publicKey, err := state.validateKey(options, expectedSecurityDigest)
+	_, publicKey, err := state.validateKey(options, expectedSecurityDigest)
 	if err != nil {
 		return nil, errors.Join(err, discardSigner(signer))
 	}
-	publicKeyDigest, err := p256PublicKeySPKISHA256(publicKey)
-	if err != nil {
-		return nil, errors.Join(err, discardSigner(signer))
-	}
-	state.identity = identity
 	state.publicKey = *publicKey
-	state.publicKeySPKISHA256 = publicKeyDigest
 	return signer, nil
 }
 
@@ -142,7 +136,7 @@ func (s *Signer) Identity() KeyIdentity {
 	if s == nil || s.state == nil {
 		return KeyIdentity{}
 	}
-	return s.state.identity
+	return s.state.attestation.KeyIdentity()
 }
 
 // PublicKeySPKISHA256 returns the SHA-256 digest of canonical PKIX SPKI DER.
@@ -151,7 +145,25 @@ func (s *Signer) PublicKeySPKISHA256() [DigestSize]byte {
 	if s == nil || s.state == nil {
 		return [DigestSize]byte{}
 	}
-	return s.state.publicKeySPKISHA256
+	return s.state.attestation.PublicKeySPKISHA256()
+}
+
+// Attestation returns one atomic, detached snapshot of the values read and
+// validated for the currently usable key.
+func (s *Signer) Attestation() (Attestation, error) {
+	if s == nil || s.state == nil {
+		return Attestation{}, ErrClosed
+	}
+	state := s.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed {
+		return Attestation{}, ErrClosed
+	}
+	if state.key == 0 || state.provider == 0 || !state.attestation.isComplete() {
+		return Attestation{}, ErrAttestationUnavailable
+	}
+	return state.attestation, nil
 }
 
 // IsOpen reports whether the validated key and provider handles remain usable. It does not
@@ -328,11 +340,29 @@ func (s *signerState) validateKey(
 	if err != nil {
 		return KeyIdentity{}, nil, err
 	}
-	return KeyIdentity{
+	publicKeyDigest, err := p256PublicKeySPKISHA256(publicKey)
+	if err != nil {
+		return KeyIdentity{}, nil, err
+	}
+	identity := KeyIdentity{
 		ProviderName: providerName,
 		UniqueName:   uniqueName,
 		MachineKey:   true,
-	}, publicKey, nil
+	}
+	s.attestation = Attestation{
+		keyName:                     name,
+		keySecurityDescriptorSHA256: sha256.Sum256(descriptorValue),
+		keyIdentity:                 identity,
+		publicKeySPKISHA256:         publicKeyDigest,
+		validatedControlServiceSID:  options.ControlServiceSID,
+		validatedExecutorServiceSID: options.ExecutorServiceSID,
+		algorithm:                   properties.algorithm,
+		keyLengthBits:               properties.length,
+		exportPolicy:                properties.exportPolicy,
+		keyUsage:                    properties.keyUsage,
+		validated:                   true,
+	}
+	return identity, publicKey, nil
 }
 
 func freeNativeHandle(api nativeCNG, description string, handle nativeHandle) error {

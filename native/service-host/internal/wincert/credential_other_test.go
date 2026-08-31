@@ -36,6 +36,13 @@ func TestNonWindowsAcquisitionFailsClosed(t *testing.T) {
 	if identity := credential.Identity(); identity != (KeyIdentity{}) {
 		t.Fatalf("unsupported credential returned an identity: %#v", identity)
 	}
+	if attestation, err := credential.Attestation(); !errors.Is(err, ErrUnsupportedPlatform) || attestation != (Attestation{}) {
+		t.Fatalf("unsupported Attestation returned %#v, %v", attestation, err)
+	}
+	var nilCredential *Credential
+	if _, err := nilCredential.Attestation(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("nil unsupported Attestation returned the wrong error: %v", err)
+	}
 	if _, err := credential.Sign(nil, make([]byte, p256DigestBytes), crypto.SHA256); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("Sign returned the wrong error: %v", err)
 	}

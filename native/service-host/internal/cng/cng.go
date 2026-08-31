@@ -18,13 +18,14 @@ const (
 )
 
 var (
-	ErrUnsupported        = errors.New("Windows CNG signing is unsupported on this platform")
-	ErrInvalidOptions     = errors.New("invalid CNG signer options")
-	ErrInvalidDigest      = errors.New("CNG signing requires an exactly 32-byte digest")
-	ErrInvalidKey         = errors.New("CNG key does not satisfy the P-256 signing policy")
-	ErrInvalidKeySecurity = errors.New("CNG key security descriptor is invalid")
-	ErrInvalidSignature   = errors.New("CNG returned an invalid P-256 signature")
-	ErrClosed             = errors.New("CNG signer is closed")
+	ErrUnsupported            = errors.New("Windows CNG signing is unsupported on this platform")
+	ErrInvalidOptions         = errors.New("invalid CNG signer options")
+	ErrInvalidDigest          = errors.New("CNG signing requires an exactly 32-byte digest")
+	ErrInvalidKey             = errors.New("CNG key does not satisfy the P-256 signing policy")
+	ErrInvalidKeySecurity     = errors.New("CNG key security descriptor is invalid")
+	ErrInvalidSignature       = errors.New("CNG returned an invalid P-256 signature")
+	ErrAttestationUnavailable = errors.New("CNG key attestation is unavailable")
+	ErrClosed                 = errors.New("CNG signer is closed")
 )
 
 // Options selects one Local Machine key and pins its installed access policy.
@@ -43,6 +44,79 @@ type KeyIdentity struct {
 	ProviderName string
 	UniqueName   string
 	MachineKey   bool
+}
+
+// Attestation is a detached snapshot of the values read and validated for one
+// open persisted CNG key. Its fields are private so callers cannot construct a
+// trusted attestation from configuration values.
+type Attestation struct {
+	keyName                     string
+	keySecurityDescriptorSHA256 [DigestSize]byte
+	keyIdentity                 KeyIdentity
+	publicKeySPKISHA256         [DigestSize]byte
+	validatedControlServiceSID  string
+	validatedExecutorServiceSID string
+	algorithm                   string
+	keyLengthBits               uint32
+	exportPolicy                uint32
+	keyUsage                    uint32
+	validated                   bool
+}
+
+// KeyName returns the persisted key name read back from CNG.
+func (a Attestation) KeyName() string { return a.keyName }
+
+// KeySecurityDescriptorSHA256 returns the digest of the exact validated
+// self-relative security descriptor bytes read from CNG.
+func (a Attestation) KeySecurityDescriptorSHA256() [DigestSize]byte {
+	return a.keySecurityDescriptorSHA256
+}
+
+// KeyIdentity returns the detached provider and persisted-key identity.
+func (a Attestation) KeyIdentity() KeyIdentity { return a.keyIdentity }
+
+// PublicKeySPKISHA256 returns the digest of canonical PKIX SPKI DER derived
+// from the public key exported by CNG.
+func (a Attestation) PublicKeySPKISHA256() [DigestSize]byte {
+	return a.publicKeySPKISHA256
+}
+
+// ValidatedControlServiceSID returns the service SID used to validate the key
+// security descriptor.
+func (a Attestation) ValidatedControlServiceSID() string {
+	return a.validatedControlServiceSID
+}
+
+// ValidatedExecutorServiceSID returns the service SID explicitly excluded by
+// the validated key security descriptor.
+func (a Attestation) ValidatedExecutorServiceSID() string {
+	return a.validatedExecutorServiceSID
+}
+
+// Algorithm returns the CNG Algorithm property read from the key.
+func (a Attestation) Algorithm() string { return a.algorithm }
+
+// KeyLengthBits returns the CNG Length property read from the key.
+func (a Attestation) KeyLengthBits() uint32 { return a.keyLengthBits }
+
+// ExportPolicy returns the CNG Export Policy property read from the key.
+func (a Attestation) ExportPolicy() uint32 { return a.exportPolicy }
+
+// KeyUsage returns the CNG Key Usage property read from the key.
+func (a Attestation) KeyUsage() uint32 { return a.keyUsage }
+
+func (a Attestation) isComplete() bool {
+	if !a.validated || !validCNGName(a.keyName, 256) ||
+		a.keyIdentity.ProviderName != approvedKeyStorageProvider ||
+		!validCNGName(a.keyIdentity.UniqueName, 256) || !a.keyIdentity.MachineKey ||
+		a.algorithm != "ECDSA_P256" || a.keyLengthBits != 256 ||
+		a.exportPolicy != 0 || a.keyUsage != ncryptAllowSigningFlag ||
+		validateCanonicalServiceSID(a.validatedControlServiceSID) != nil ||
+		validateCanonicalServiceSID(a.validatedExecutorServiceSID) != nil ||
+		a.validatedControlServiceSID == a.validatedExecutorServiceSID {
+		return false
+	}
+	return true
 }
 
 // StatusError reports a failing SECURITY_STATUS returned by an NCrypt function.

@@ -24,6 +24,8 @@ import (
 )
 
 const (
+	// LocalMachineStoreScope identifies the fixed native certificate-store scope.
+	LocalMachineStoreScope = "LocalMachine"
 	// LocalMachinePersonalStore is the only certificate store accepted by Acquire.
 	LocalMachinePersonalStore = "MY"
 
@@ -80,6 +82,7 @@ var (
 	ErrUnsupportedSignerOptions = errors.New("certificate signing requires SHA-256 signer options")
 	ErrInvalidSignature         = errors.New("CNG returned an invalid P-256 signature")
 	ErrClosed                   = errors.New("Windows certificate credential is closed")
+	ErrAttestationUnavailable   = errors.New("Windows certificate credential attestation is unavailable")
 )
 
 // Config selects one certificate by the SHA-256 digest of its exact DER form
@@ -100,6 +103,87 @@ type Config struct {
 // KeyIdentity is the shared detached CNG identity used to reject key reuse
 // across the mTLS and local-authority purposes.
 type KeyIdentity = cng.KeyIdentity
+
+// Attestation is a detached snapshot of the native certificate and key values
+// that were observed and validated during acquisition. Its fields are private;
+// every accessor returns a value copy.
+type Attestation struct {
+	storeScope                  string
+	storeName                   string
+	certificateDERSHA256        [sha256.Size]byte
+	containerName               string
+	keyName                     string
+	keySecurityDescriptorSHA256 [sha256.Size]byte
+	keyIdentity                 KeyIdentity
+	publicKeySPKISHA256         [sha256.Size]byte
+	validatedControlServiceSID  string
+	validatedExecutorServiceSID string
+	algorithm                   string
+	keyLengthBits               uint32
+	exportPolicy                uint32
+	keyUsage                    uint32
+	validated                   bool
+}
+
+// StoreScope returns the fixed scope selector used by the successful native store open.
+func (a Attestation) StoreScope() string { return a.storeScope }
+
+// StoreName returns the fixed name selector used by the successful native store open.
+func (a Attestation) StoreName() string { return a.storeName }
+
+// CertificateDERSHA256 returns the digest of the selected certificate's observed DER.
+func (a Attestation) CertificateDERSHA256() [sha256.Size]byte { return a.certificateDERSHA256 }
+
+// ContainerName returns the container name observed in CERT_KEY_PROV_INFO.
+func (a Attestation) ContainerName() string { return a.containerName }
+
+// KeyName returns the key name observed from the acquired CNG key.
+func (a Attestation) KeyName() string { return a.keyName }
+
+// KeySecurityDescriptorSHA256 returns the digest of the observed key security descriptor.
+func (a Attestation) KeySecurityDescriptorSHA256() [sha256.Size]byte {
+	return a.keySecurityDescriptorSHA256
+}
+
+// KeyIdentity returns the observed persisted CNG key identity.
+func (a Attestation) KeyIdentity() KeyIdentity { return a.keyIdentity }
+
+// PublicKeySPKISHA256 returns the digest of canonical PKIX SPKI DER for the observed key.
+func (a Attestation) PublicKeySPKISHA256() [sha256.Size]byte { return a.publicKeySPKISHA256 }
+
+// ValidatedControlServiceSID returns the policy SID used to validate the observed key DACL.
+func (a Attestation) ValidatedControlServiceSID() string { return a.validatedControlServiceSID }
+
+// ValidatedExecutorServiceSID returns the exclusion SID used to validate the observed key DACL.
+func (a Attestation) ValidatedExecutorServiceSID() string { return a.validatedExecutorServiceSID }
+
+// Algorithm returns the observed CNG algorithm name.
+func (a Attestation) Algorithm() string { return a.algorithm }
+
+// KeyLengthBits returns the observed CNG key length in bits.
+func (a Attestation) KeyLengthBits() uint32 { return a.keyLengthBits }
+
+// ExportPolicy returns the observed CNG export policy.
+func (a Attestation) ExportPolicy() uint32 { return a.exportPolicy }
+
+// KeyUsage returns the observed CNG key usage policy.
+func (a Attestation) KeyUsage() uint32 { return a.keyUsage }
+
+func (a Attestation) isComplete() bool {
+	if !a.validated || a.storeScope != LocalMachineStoreScope ||
+		a.storeName != LocalMachinePersonalStore ||
+		!validCNGName(a.containerName, 256) || a.keyName != a.containerName ||
+		a.keyIdentity.ProviderName != approvedKeyStorageProvider ||
+		!validCNGName(a.keyIdentity.UniqueName, 256) || !a.keyIdentity.MachineKey ||
+		a.algorithm != "ECDSA_P256" || a.keyLengthBits != 256 ||
+		a.exportPolicy != 0 || a.keyUsage != ncryptAllowSigningFlag ||
+		validateCanonicalServiceSID(a.validatedControlServiceSID) != nil ||
+		validateCanonicalServiceSID(a.validatedExecutorServiceSID) != nil ||
+		a.validatedControlServiceSID == a.validatedExecutorServiceSID {
+		return false
+	}
+	return true
+}
 
 type certificateProviderInfo struct {
 	containerName         string
@@ -542,6 +626,18 @@ func validateMatchingPublicKeys(certificateKey *ecdsa.PublicKey, cngKey *ecdsa.P
 		return fmt.Errorf("%w: public key does not match the certificate", ErrInvalidKey)
 	}
 	return nil
+}
+
+func p256PublicKeySPKISHA256(publicKey *ecdsa.PublicKey) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	if !isP256PublicKey(publicKey) {
+		return digest, fmt.Errorf("%w: public key is not canonical P-256", ErrInvalidKey)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return digest, fmt.Errorf("%w: encode public key SPKI: %v", ErrInvalidKey, err)
+	}
+	return sha256.Sum256(spki), nil
 }
 
 func isP256PublicKey(publicKey *ecdsa.PublicKey) bool {

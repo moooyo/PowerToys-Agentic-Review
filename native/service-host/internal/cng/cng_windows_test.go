@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -170,6 +171,23 @@ func TestWindowsOpenContract(t *testing.T) {
 	if digest := signer.PublicKeySPKISHA256(); digest != expectedSPKIDigest {
 		t.Fatalf("PublicKeySPKISHA256 returned %x, want %x", digest, expectedSPKIDigest)
 	}
+	attestation, err := signer.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation returned an error: %v", err)
+	}
+	expectedSecurityDigest := sha256.Sum256(api.properties[ncryptSecurityDescriptorProperty])
+	if attestation.KeyName() != options.KeyName ||
+		attestation.KeySecurityDescriptorSHA256() != expectedSecurityDigest ||
+		attestation.KeyIdentity() != identity ||
+		attestation.PublicKeySPKISHA256() != expectedSPKIDigest ||
+		attestation.ValidatedControlServiceSID() != options.ControlServiceSID ||
+		attestation.ValidatedExecutorServiceSID() != options.ExecutorServiceSID ||
+		attestation.Algorithm() != "ECDSA_P256" ||
+		attestation.KeyLengthBits() != 256 ||
+		attestation.ExportPolicy() != 0 ||
+		attestation.KeyUsage() != ncryptAllowSigningFlag {
+		t.Fatalf("Attestation returned incomplete or incorrect evidence: %#v", attestation)
+	}
 	if !signer.IsOpen() {
 		t.Fatal("validated signer did not report itself open")
 	}
@@ -183,8 +201,154 @@ func TestWindowsOpenContract(t *testing.T) {
 	if signer.IsOpen() {
 		t.Fatal("closed signer reported itself open")
 	}
+	if _, err := signer.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Attestation returned the wrong error after Close: %v", err)
+	}
 	if fmt.Sprint(api.freed) != fmt.Sprint([]nativeHandle{api.keyHandle, api.providerHandle}) {
 		t.Fatalf("handles were not freed exactly once in key/provider order: %v", api.freed)
+	}
+}
+
+func TestWindowsAttestationCachesValidatedNativeValuesAndReturnsCopies(t *testing.T) {
+	api := validFakeNativeCNG()
+	options, _ := validTestOptions()
+	signer, err := openWithAPI(api, options)
+	if err != nil {
+		t.Fatalf("openWithAPI returned an error: %v", err)
+	}
+	defer signer.Close()
+
+	first, err := signer.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation returned an error: %v", err)
+	}
+	options.KeyName = "changed-option-key"
+	options.ExpectedSecurityDescriptorSHA256 = strings.Repeat("0", 64)
+	options.ControlServiceSID = "S-1-5-80-11-12-13-14-15"
+	options.ExecutorServiceSID = "S-1-5-80-16-17-18-19-20"
+	api.properties[ncryptNameProperty] = encodeUTF16Property("changed-native-key")
+	api.properties[ncryptAlgorithmProperty] = encodeUTF16Property("ECDSA_P384")
+	api.properties[ncryptLengthProperty] = encodeUint32Property(384)
+	api.properties[ncryptExportPolicyProperty] = encodeUint32Property(1)
+	api.properties[ncryptKeyUsageProperty] = encodeUint32Property(0)
+	api.properties[ncryptUniqueNameProperty] = encodeUTF16Property("changed-unique-key")
+	api.properties[ncryptSecurityDescriptorProperty][0] ^= 0xff
+	api.publicBlob[0] ^= 0xff
+
+	second, err := signer.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation reread mutable native or option values: %v", err)
+	}
+	if second != first {
+		t.Fatalf("cached attestation changed after its native inputs changed: first=%#v second=%#v", first, second)
+	}
+
+	securityDigest := first.KeySecurityDescriptorSHA256()
+	publicDigest := first.PublicKeySPKISHA256()
+	identity := first.KeyIdentity()
+	securityDigest[0] ^= 0xff
+	publicDigest[0] ^= 0xff
+	identity.UniqueName = "mutated-copy"
+	first.keyName = "mutated-copy"
+	first.keySecurityDescriptorSHA256 = securityDigest
+	first.publicKeySPKISHA256 = publicDigest
+	first.keyIdentity = identity
+	third, err := signer.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation returned an error after caller mutation: %v", err)
+	}
+	if third != second {
+		t.Fatal("Attestation or one of its getters aliased the cached evidence")
+	}
+}
+
+func TestWindowsAttestationRejectsNilAndIncompleteSigner(t *testing.T) {
+	var nilSigner *Signer
+	if _, err := nilSigner.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("nil signer Attestation returned %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*signerState)
+	}{
+		{name: "cache", mutate: func(state *signerState) { state.attestation = Attestation{} }},
+		{name: "key handle", mutate: func(state *signerState) { state.key = 0 }},
+		{name: "provider handle", mutate: func(state *signerState) { state.provider = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := validFakeNativeCNG()
+			options, _ := validTestOptions()
+			signer, err := openWithAPI(api, options)
+			if err != nil {
+				t.Fatalf("openWithAPI returned an error: %v", err)
+			}
+			state := signer.state
+			state.mu.Lock()
+			originalKey := state.key
+			originalProvider := state.provider
+			originalAttestation := state.attestation
+			test.mutate(state)
+			state.mu.Unlock()
+			if _, err := signer.Attestation(); !errors.Is(err, ErrAttestationUnavailable) {
+				t.Fatalf("incomplete signer Attestation returned %v", err)
+			}
+			state.mu.Lock()
+			state.key = originalKey
+			state.provider = originalProvider
+			state.attestation = originalAttestation
+			state.mu.Unlock()
+			if err := signer.Close(); err != nil {
+				t.Fatalf("Close returned an error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsAttestationAndCloseAreConcurrentSafe(t *testing.T) {
+	api := validFakeNativeCNG()
+	options, _ := validTestOptions()
+	signer, err := openWithAPI(api, options)
+	if err != nil {
+		t.Fatalf("openWithAPI returned an error: %v", err)
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, 16)
+	var readers sync.WaitGroup
+	for range 16 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for range 100 {
+				attestation, err := signer.Attestation()
+				if err == nil {
+					if !attestation.isComplete() {
+						errCh <- errors.New("Attestation returned an incomplete snapshot")
+						return
+					}
+					continue
+				}
+				if !errors.Is(err, ErrClosed) {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	if err := signer.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	readers.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent Attestation returned an invalid result: %v", err)
+	}
+	if _, err := signer.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Attestation returned the wrong error after concurrent Close: %v", err)
 	}
 }
 
@@ -500,6 +664,9 @@ func TestWindowsCloseAttemptsBothHandlesAfterFailure(t *testing.T) {
 	if _, err := signer.SignDigest(make([]byte, DigestSize)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("failed Close left the signer usable: %v", err)
 	}
+	if _, err := signer.Attestation(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("failed Close left attestation available: %v", err)
+	}
 	if err := signer.Close(); err != nil {
 		t.Fatalf("repeated Close did not recover the retained handle: %v", err)
 	}
@@ -529,6 +696,14 @@ func TestWindowsSignerValueCopiesShareHandleOwnership(t *testing.T) {
 	if copyByValue.Identity() != signer.Identity() ||
 		copyByValue.PublicKeySPKISHA256() != signer.PublicKeySPKISHA256() {
 		t.Fatal("Signer value copy changed detached evidence")
+	}
+	copyAttestation, err := copyByValue.Attestation()
+	if err != nil {
+		t.Fatalf("Attestation through value copy returned an error: %v", err)
+	}
+	originalAttestation, err := signer.Attestation()
+	if err != nil || copyAttestation != originalAttestation {
+		t.Fatalf("Signer value copy changed attestation: copy=%#v original=%#v err=%v", copyAttestation, originalAttestation, err)
 	}
 	if err := copyByValue.Close(); err != nil {
 		t.Fatalf("Close through value copy returned an error: %v", err)

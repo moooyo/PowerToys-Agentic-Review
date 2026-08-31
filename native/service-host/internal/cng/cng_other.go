@@ -20,6 +20,11 @@ func (*Signer) PublicKeySPKISHA256() [DigestSize]byte {
 	return [DigestSize]byte{}
 }
 
+// Attestation fails because no CNG key can be validated on this platform.
+func (*Signer) Attestation() (Attestation, error) {
+	return Attestation{}, ErrUnsupported
+}
+
 // IsOpen reports false because no CNG key can be opened on this platform.
 func (*Signer) IsOpen() bool {
 	return false
