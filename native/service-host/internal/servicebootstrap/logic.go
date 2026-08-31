@@ -223,22 +223,25 @@ func openWithPlatform(options Options, platform bootstrapPlatform) (result Sessi
 		return nil, err
 	}
 
-	evidence := Evidence{
-		ServiceName:                 options.ServiceName,
-		SCMBeforeOpen:               before,
-		SCMAfterOpen:                after,
-		StableWrapperFacts:          wrapperAfter,
-		StableServiceHostFacts:      serviceHostAfter,
-		DirectParentProcessID:       parentAfter,
-		ServiceHostProcessDACL:      serviceHostProcessDACL,
-		ServiceHostPrimaryTokenDACL: serviceHostTokenDACL,
-		WinSWWrapperProcessDACL:     wrapperProcessDACL,
+	evidence, err := issueEvidence(
+		options,
+		before,
+		after,
+		wrapperAfter,
+		serviceHostAfter,
+		parentAfter,
+		serviceHostProcessDACL,
+		serviceHostTokenDACL,
+		wrapperProcessDACL,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("seal ServiceHost bootstrap evidence: %w", err)
 	}
 	bootstrap := &bootstrapSession{
 		service:  service,
 		token:    token,
 		wrapper:  wrapper,
-		evidence: cloneEvidence(evidence),
+		evidence: evidence,
 	}
 	keep = true
 	return bootstrap, nil
@@ -403,7 +406,7 @@ func (s *bootstrapSession) Evidence() Evidence {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneEvidence(s.evidence)
+	return s.evidence
 }
 
 func (s *bootstrapSession) ProcessID() uint32 {
@@ -420,7 +423,7 @@ func (s *bootstrapSession) StableFacts() peerverify.StableProcessFacts {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.evidence.StableWrapperFacts
+	return s.evidence.StableWrapperFacts()
 }
 
 func (s *bootstrapSession) currentWrapper() (wrapperProcess, error) {

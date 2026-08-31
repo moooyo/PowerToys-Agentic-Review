@@ -19,6 +19,7 @@ var (
 	ErrWrapperUnstable     = errors.New("WinSW wrapper identity is not stable")
 	ErrParentMismatch      = errors.New("ServiceHost is not a direct child of the current WinSW wrapper")
 	ErrDACLVerification    = errors.New("ServiceHost bootstrap DACL verification failed")
+	ErrInvalidEvidence     = errors.New("ServiceHost bootstrap evidence is invalid")
 	ErrClosed              = errors.New("ServiceHost bootstrap session is closed")
 )
 
@@ -83,21 +84,6 @@ type DACLEvidence struct {
 	Null        bool
 	Defaulted   bool
 	AccessRules []AccessEntry
-}
-
-// Evidence contains detached facts from the complete bootstrap transaction.
-// StableWrapperFacts remains bound to the retained wrapper object owned by the
-// Session, while every value in this structure is safe to retain independently.
-type Evidence struct {
-	ServiceName                 string
-	SCMBeforeOpen               ServiceObservation
-	SCMAfterOpen                ServiceObservation
-	StableWrapperFacts          peerverify.StableProcessFacts
-	StableServiceHostFacts      peerverify.StableProcessFacts
-	DirectParentProcessID       uint32
-	ServiceHostProcessDACL      DACLEvidence
-	ServiceHostPrimaryTokenDACL DACLEvidence
-	WinSWWrapperProcessDACL     DACLEvidence
 }
 
 // Session owns the current service's stable WinSW process handle and all
@@ -221,12 +207,5 @@ func validateDACL(evidence DACLEvidence, policy daclPolicy) error {
 
 func cloneDACLEvidence(value DACLEvidence) DACLEvidence {
 	value.AccessRules = append([]AccessEntry(nil), value.AccessRules...)
-	return value
-}
-
-func cloneEvidence(value Evidence) Evidence {
-	value.ServiceHostProcessDACL = cloneDACLEvidence(value.ServiceHostProcessDACL)
-	value.ServiceHostPrimaryTokenDACL = cloneDACLEvidence(value.ServiceHostPrimaryTokenDACL)
-	value.WinSWWrapperProcessDACL = cloneDACLEvidence(value.WinSWWrapperProcessDACL)
 	return value
 }

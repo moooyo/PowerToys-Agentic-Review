@@ -257,9 +257,13 @@ func TestOpenUsesOneSCMObservedWrapperForWatcherAndPeerVerification(t *testing.T
 	}
 
 	evidence := session.Evidence()
-	if evidence.SCMBeforeOpen != evidence.SCMAfterOpen ||
-		evidence.DirectParentProcessID != 41 ||
-		!evidence.StableServiceHostFacts.CreationTime.Equal(hostCreated) {
+	if err := evidence.Validate(); err != nil {
+		t.Fatalf("evidence validation error = %v", err)
+	}
+	if evidence.Options() != validOptions() ||
+		evidence.SCMBeforeOpen() != evidence.SCMAfterOpen() ||
+		evidence.DirectParentProcessID() != 41 ||
+		!evidence.StableServiceHostFacts().CreationTime.Equal(hostCreated) {
 		t.Fatalf("unexpected evidence: %+v", evidence)
 	}
 	if len(platform.current.daclPolicies) != 1 || len(platform.wrapper.daclPolicies) != 1 ||
@@ -483,9 +487,10 @@ func TestEvidenceIsDetached(t *testing.T) {
 	}
 	defer session.Close()
 	first := session.Evidence()
-	first.ServiceHostProcessDACL.AccessRules[0].SID = "mutated"
+	firstDACL := first.ServiceHostProcessDACL()
+	firstDACL.AccessRules[0].SID = "mutated"
 	second := session.Evidence()
-	if second.ServiceHostProcessDACL.AccessRules[0].SID == "mutated" {
+	if second.ServiceHostProcessDACL().AccessRules[0].SID == "mutated" {
 		t.Fatal("Evidence exposed mutable internal DACL storage")
 	}
 }
