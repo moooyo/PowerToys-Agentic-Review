@@ -8,19 +8,34 @@ import (
 )
 
 const (
-	MaximumFrameBytes                        = 1_048_576
-	MaximumRunCompletionRequestBodyBytes     = 2*1024*1024 + 16*1024
-	MaximumClaimResponseBodyBytes            = 16 * 1024 * 1024
-	maximumIdentifierBytes                   = 128
+	MaximumCanonicalControlFrameBytes    = 1_048_576
+	MaximumWorkerAPIBodyBytes            = 1_048_576
+	MaximumRunCompletionRequestBodyBytes = 2*1024*1024 + 16*1024
+	MaximumClaimResponseBodyBytes        = 16 * 1024 * 1024
+	maximumIdentifierBytes               = 128
+
+	maximumWorkerAPIBodyDescriptorBytes = (MaximumWorkerAPIBodyBytes*8+5)/6 +
+		len(`{"base64Url":"","byteLength":1048576,"sha256":""}`) + 64
+	maximumWorkerAPIRequestEnvelopeBytes = len(`{"operation":"InstanceHeartbeat","payload":{"body":`) +
+		len(`,"workerInstanceId":""},"protocolVersion":"1.0","requestId":"","type":"call"}`) +
+		2*maximumIdentifierBytes
+	MaximumFrameBytes = maximumWorkerAPIBodyDescriptorBytes +
+		maximumWorkerAPIRequestEnvelopeBytes
+
+	maximumRunCompletionDescriptorBytes = (MaximumRunCompletionRequestBodyBytes*8+5)/6 +
+		len(`{"base64Url":"","byteLength":2113536,"sha256":""}`) + 64
 	maximumRunCompletionRequestEnvelopeBytes = len(`{"operation":"CompleteRun","payload":{"body":`) +
 		len(`,"runAttemptId":""},"protocolVersion":"1.0","requestId":"","type":"call"}`) +
 		2*maximumIdentifierBytes
-	MaximumRequestFrameBytes = MaximumRunCompletionRequestBodyBytes +
+	MaximumRequestFrameBytes = maximumRunCompletionDescriptorBytes +
 		maximumRunCompletionRequestEnvelopeBytes
+
+	maximumClaimResponseDescriptorBytes = (MaximumClaimResponseBodyBytes*8+5)/6 +
+		len(`{"base64Url":"","byteLength":16777216,"sha256":""}`) + 64
 	maximumSuccessResponseEnvelopeBytes = len(`{"body":`) +
 		len(`,"outcome":"ok","protocolVersion":"1.0","requestId":"","type":"response"}`) +
 		maximumIdentifierBytes
-	MaximumClaimResponseFrameBytes = MaximumClaimResponseBodyBytes +
+	MaximumClaimResponseFrameBytes = maximumClaimResponseDescriptorBytes +
 		maximumSuccessResponseEnvelopeBytes
 	framePrefixBytes = 4
 )

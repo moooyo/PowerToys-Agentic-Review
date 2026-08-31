@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"math/big"
 	"reflect"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
@@ -102,7 +100,7 @@ func (d *Dispatcher) Register(ctx context.Context, body json.RawMessage) (json.R
 	}
 	defer finish()
 
-	requestBody, err := copyCanonicalObject(body, localrpc.MaximumFrameBytes)
+	requestBody, err := copyWorkerAPIBody(body, localrpc.MaximumWorkerAPIBodyBytes)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -113,7 +111,7 @@ func (d *Dispatcher) Register(ctx context.Context, body json.RawMessage) (json.R
 	if err := contextError(operationContext); err != nil {
 		return nil, err
 	}
-	return canonicalizeWorkerResponse(response.Body, localrpc.MaximumFrameBytes)
+	return copyWorkerAPIResponse(response.Body, localrpc.MaximumWorkerAPIBodyBytes)
 }
 
 func (d *Dispatcher) Claim(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
@@ -123,7 +121,7 @@ func (d *Dispatcher) Claim(ctx context.Context, body json.RawMessage) (json.RawM
 	}
 	defer finish()
 
-	requestBody, err := copyCanonicalObject(body, localrpc.MaximumFrameBytes)
+	requestBody, err := copyWorkerAPIBody(body, localrpc.MaximumWorkerAPIBodyBytes)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -134,7 +132,7 @@ func (d *Dispatcher) Claim(ctx context.Context, body json.RawMessage) (json.RawM
 	if err := contextError(operationContext); err != nil {
 		return nil, err
 	}
-	return canonicalizeWorkerResponse(response.Body, localrpc.MaximumClaimResponseBodyBytes)
+	return copyWorkerAPIResponse(response.Body, localrpc.MaximumClaimResponseBodyBytes)
 }
 
 func (d *Dispatcher) InstanceHeartbeat(
@@ -148,7 +146,7 @@ func (d *Dispatcher) InstanceHeartbeat(
 	}
 	defer finish()
 
-	requestBody, err := copyCanonicalObject(body, localrpc.MaximumFrameBytes)
+	requestBody, err := copyWorkerAPIBody(body, localrpc.MaximumWorkerAPIBodyBytes)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -165,7 +163,7 @@ func (d *Dispatcher) InstanceHeartbeat(
 	if err := contextError(operationContext); err != nil {
 		return nil, err
 	}
-	return canonicalizeWorkerResponse(response.Body, localrpc.MaximumFrameBytes)
+	return copyWorkerAPIResponse(response.Body, localrpc.MaximumWorkerAPIBodyBytes)
 }
 
 func (d *Dispatcher) CompleteRun(
@@ -179,7 +177,7 @@ func (d *Dispatcher) CompleteRun(
 	}
 	defer finish()
 
-	requestBody, err := copyCanonicalObject(body, localrpc.MaximumRunCompletionRequestBodyBytes)
+	requestBody, err := copyWorkerAPIBody(body, localrpc.MaximumRunCompletionRequestBodyBytes)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -193,7 +191,7 @@ func (d *Dispatcher) CompleteRun(
 	if err := contextError(operationContext); err != nil {
 		return nil, err
 	}
-	return canonicalizeWorkerResponse(response.Body, localrpc.MaximumFrameBytes)
+	return copyWorkerAPIResponse(response.Body, localrpc.MaximumWorkerAPIBodyBytes)
 }
 
 func (d *Dispatcher) FailRun(
@@ -207,7 +205,7 @@ func (d *Dispatcher) FailRun(
 	}
 	defer finish()
 
-	requestBody, err := copyCanonicalObject(body, localrpc.MaximumFrameBytes)
+	requestBody, err := copyWorkerAPIBody(body, localrpc.MaximumWorkerAPIBodyBytes)
 	if err != nil {
 		return nil, internalError()
 	}
@@ -221,7 +219,7 @@ func (d *Dispatcher) FailRun(
 	if err := contextError(operationContext); err != nil {
 		return nil, err
 	}
-	return canonicalizeWorkerResponse(response.Body, localrpc.MaximumFrameBytes)
+	return copyWorkerAPIResponse(response.Body, localrpc.MaximumWorkerAPIBodyBytes)
 }
 
 func (d *Dispatcher) SignLocalDigest(ctx context.Context, digest [cng.DigestSize]byte) ([]byte, error) {
@@ -313,158 +311,17 @@ func (d *Dispatcher) begin(ctx context.Context) (context.Context, func(), error)
 	return operationContext, finish, nil
 }
 
-func copyCanonicalObject(body json.RawMessage, maximumBytes int) (json.RawMessage, error) {
-	value, err := localrpc.ParseCanonicalJSON(body, maximumBytes)
-	if err != nil {
-		return nil, err
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return nil, localrpc.ErrInvalidCanonicalJSON
-	}
-	return json.RawMessage(bytes.Clone(body)), nil
+func copyWorkerAPIBody(body json.RawMessage, maximumBytes int) (json.RawMessage, error) {
+	snapshot, err := localrpc.CopyWorkerAPIBody(body, maximumBytes)
+	return json.RawMessage(snapshot), err
 }
 
-func canonicalizeWorkerResponse(body json.RawMessage, maximumBytes int) (json.RawMessage, error) {
-	if len(body) == 0 || len(body) > maximumBytes || !validJSONUnicode(body) {
-		return nil, upstreamProtocolError()
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	value, err := decodeUniqueJSONValue(decoder, 0)
+func copyWorkerAPIResponse(body json.RawMessage, maximumBytes int) (json.RawMessage, error) {
+	snapshot, err := copyWorkerAPIBody(body, maximumBytes)
 	if err != nil {
 		return nil, upstreamProtocolError()
 	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return nil, upstreamProtocolError()
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return nil, upstreamProtocolError()
-	}
-	canonical, err := localrpc.MarshalCanonicalJSON(value, maximumBytes)
-	if err != nil {
-		return nil, upstreamProtocolError()
-	}
-	return json.RawMessage(bytes.Clone(canonical)), nil
-}
-
-func validJSONUnicode(document []byte) bool {
-	if !utf8.Valid(document) {
-		return false
-	}
-	inString := false
-	for index := 0; index < len(document); index++ {
-		switch document[index] {
-		case '"':
-			inString = !inString
-		case '\\':
-			if !inString || index+1 >= len(document) {
-				continue
-			}
-			if document[index+1] != 'u' {
-				index++
-				continue
-			}
-			codeUnit, ok := decodeHexCodeUnit(document, index+2)
-			if !ok {
-				return false
-			}
-			if codeUnit >= 0xdc00 && codeUnit <= 0xdfff {
-				return false
-			}
-			if codeUnit >= 0xd800 && codeUnit <= 0xdbff {
-				if index+11 >= len(document) || document[index+6] != '\\' || document[index+7] != 'u' {
-					return false
-				}
-				low, lowOK := decodeHexCodeUnit(document, index+8)
-				if !lowOK || low < 0xdc00 || low > 0xdfff {
-					return false
-				}
-				index += 11
-				continue
-			}
-			index += 5
-		}
-	}
-	return true
-}
-
-func decodeHexCodeUnit(document []byte, offset int) (uint16, bool) {
-	if offset < 0 || offset+4 > len(document) {
-		return 0, false
-	}
-	var value uint16
-	for _, character := range document[offset : offset+4] {
-		value <<= 4
-		switch {
-		case character >= '0' && character <= '9':
-			value |= uint16(character - '0')
-		case character >= 'a' && character <= 'f':
-			value |= uint16(character-'a') + 10
-		case character >= 'A' && character <= 'F':
-			value |= uint16(character-'A') + 10
-		default:
-			return 0, false
-		}
-	}
-	return value, true
-}
-
-func decodeUniqueJSONValue(decoder *json.Decoder, depth int) (any, error) {
-	if depth > 64 {
-		return nil, localrpc.ErrCanonicalJSONLimit
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return nil, err
-	}
-	delimiter, isDelimiter := token.(json.Delim)
-	if !isDelimiter {
-		return token, nil
-	}
-
-	switch delimiter {
-	case '{':
-		object := make(map[string]any)
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return nil, err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return nil, localrpc.ErrInvalidCanonicalJSON
-			}
-			if _, exists := object[key]; exists {
-				return nil, localrpc.ErrInvalidCanonicalJSON
-			}
-			value, err := decodeUniqueJSONValue(decoder, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			object[key] = value
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return nil, localrpc.ErrInvalidCanonicalJSON
-		}
-		return object, nil
-	case '[':
-		array := make([]any, 0)
-		for decoder.More() {
-			value, err := decodeUniqueJSONValue(decoder, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			array = append(array, value)
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return nil, localrpc.ErrInvalidCanonicalJSON
-		}
-		return array, nil
-	default:
-		return nil, localrpc.ErrInvalidCanonicalJSON
-	}
+	return snapshot, nil
 }
 
 func validP256LowSSignature(signature []byte) bool {

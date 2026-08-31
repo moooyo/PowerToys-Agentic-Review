@@ -17,9 +17,9 @@ import {
   type WorkerRegistrationResponse,
   WorkerRegistrationResponseSchema,
 } from "@agentic-review/contracts";
-import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { WorkerConfig } from "../config.js";
+import { registerWorkerContractFormats } from "../contracts-formats.js";
 import type { Logger } from "../logging/logger.js";
 import { ProtocolError, WorkerApiError } from "./errors.js";
 import type { WorkerApi } from "./worker-api.js";
@@ -40,9 +40,7 @@ export interface HttpWorkerApiDependencies {
   readonly httpsRequest?: RequestFactory;
 }
 
-if (!FormatRegistry.Has("date-time")) {
-  FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
-}
+registerWorkerContractFormats();
 
 export class HttpWorkerApi implements WorkerApi {
   readonly #secureContext: SecureContext | undefined;

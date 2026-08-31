@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -171,7 +172,7 @@ func TestServerKeepsClaimResponseOnDedicated16MiBPath(t *testing.T) {
 }
 
 func TestServerAcceptsLargeCompletionWithoutRelaxingOtherRequests(t *testing.T) {
-	largeBody := map[string]any{"result": strings.Repeat("x", MaximumFrameBytes)}
+	largeBody := map[string]any{"result": strings.Repeat("x", MaximumWorkerAPIBodyBytes+512)}
 	seen := make(chan int, 1)
 	dispatcher := &fakeControlDispatcher{
 		completeRun: func(_ context.Context, _ string, body json.RawMessage) (json.RawMessage, error) {
@@ -193,8 +194,82 @@ func TestServerAcceptsLargeCompletionWithoutRelaxingOtherRequests(t *testing.T) 
 	if response["outcome"] != "ok" {
 		t.Fatalf("large completion failed: %#v", response)
 	}
-	if got := <-seen; got <= MaximumFrameBytes {
+	if got := <-seen; got <= MaximumWorkerAPIBodyBytes {
 		t.Fatalf("dispatcher received only %d completion bytes", got)
+	}
+}
+
+func TestServerPreservesExactWorkerAPIBodiesAcrossDescriptorBoundary(t *testing.T) {
+	requestBody := json.RawMessage(" { \"confidence\" : 0.8, \"escaped\" : \"\\u0061\" } ")
+	responseBody := json.RawMessage(" { \"z\" : 1e0, \"a\" : -0 } \n")
+	dispatcher := &fakeControlDispatcher{
+		register: func(_ context.Context, body json.RawMessage) (json.RawMessage, error) {
+			if !bytes.Equal(body, requestBody) {
+				t.Fatalf("dispatcher body = %q, want %q", body, requestBody)
+			}
+			body[0] = '['
+			return responseBody, nil
+		},
+	}
+	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	defer harness.close(t)
+	harness.send(t, callDocument(t, "register:exact", OperationRegister, map[string]any{"body": requestBody}))
+	response := harness.readResponse(t, MaximumFrameBytes)
+	decoded := workerAPIBodyFromResponseForTest(t, response, MaximumWorkerAPIBodyBytes)
+	if !bytes.Equal(decoded, responseBody) {
+		t.Fatalf("response body = %q, want %q", decoded, responseBody)
+	}
+	responseBody[0] = '['
+	if decoded[0] != ' ' {
+		t.Fatal("encoded response aliases dispatcher storage")
+	}
+	if requestBody[0] != ' ' {
+		t.Fatal("dispatcher mutation escaped into caller request storage")
+	}
+}
+
+func TestServerSerializesClaimDispatchThroughResponseWrite(t *testing.T) {
+	started := make(chan int32, 2)
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	dispatcher := &fakeControlDispatcher{
+		claim: func(context.Context, json.RawMessage) (json.RawMessage, error) {
+			call := calls.Add(1)
+			started <- call
+			if call == 1 {
+				<-releaseFirst
+			}
+			return json.RawMessage(`{"outcome":"no_work"}`), nil
+		},
+	}
+	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	defer harness.close(t)
+	harness.send(t, callDocument(t, "claim:1", OperationClaim, map[string]any{"body": map[string]any{}}))
+	if call := <-started; call != 1 {
+		t.Fatalf("first claim call = %d", call)
+	}
+	harness.send(t, callDocument(t, "claim:2", OperationClaim, map[string]any{"body": map[string]any{}}))
+	select {
+	case call := <-started:
+		t.Fatalf("second claim started before first response completed: %d", call)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirst)
+	first := harness.readResponse(t, MaximumClaimResponseFrameBytes)
+	if first["requestId"] != "claim:1" {
+		t.Fatalf("first claim response = %#v", first)
+	}
+	select {
+	case call := <-started:
+		if call != 2 {
+			t.Fatalf("second claim call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second claim did not start after first response completed")
+	}
+	second := harness.readResponse(t, MaximumClaimResponseFrameBytes)
+	if second["requestId"] != "claim:2" {
+		t.Fatalf("second claim response = %#v", second)
 	}
 }
 
@@ -320,6 +395,37 @@ func TestConcurrencyReservationIncludesResponseWrite(t *testing.T) {
 	cancelThird(nil)
 }
 
+func TestResponseWriterDoesNotStartWriteAfterBuildDeadline(t *testing.T) {
+	buildStarted := make(chan struct{})
+	releaseBuild := make(chan struct{})
+	buildFinished := make(chan struct{})
+	output := &signalingWriter{writes: make(chan []byte, 1)}
+	writer := &responseWriter{
+		context: context.Background(), output: output, timeout: 20 * time.Millisecond,
+		closeOutput: func() {},
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- writer.buildAndWrite(MaximumCanonicalControlFrameBytes, func() ([]byte, error) {
+			close(buildStarted)
+			<-releaseBuild
+			close(buildFinished)
+			return []byte(`{}`), nil
+		})
+	}()
+	<-buildStarted
+	if err := <-result; !errors.Is(err, ErrIOTimeout) {
+		t.Fatalf("buildAndWrite error = %v", err)
+	}
+	close(releaseBuild)
+	<-buildFinished
+	select {
+	case written := <-output.writes:
+		t.Fatalf("writer started after its deadline: %q", written)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 type fakeControlDispatcher struct {
 	register    func(context.Context, json.RawMessage) (json.RawMessage, error)
 	claim       func(context.Context, json.RawMessage) (json.RawMessage, error)
@@ -399,6 +505,15 @@ type blockingWriteCloser struct {
 
 type stubbornWriteCloser struct {
 	release chan struct{}
+}
+
+type signalingWriter struct {
+	writes chan []byte
+}
+
+func (w *signalingWriter) Write(value []byte) (int, error) {
+	w.writes <- bytes.Clone(value)
+	return len(value), nil
 }
 
 func newStubbornWriteCloser() *stubbornWriteCloser {
@@ -496,10 +611,36 @@ func (h *serverHarness) close(t *testing.T) {
 
 func callDocument(t *testing.T, requestID string, operation Operation, payload map[string]any) []byte {
 	t.Helper()
+	payload = cloneObjectForTest(payload)
+	if body, exists := payload["body"]; exists {
+		var document []byte
+		switch typed := body.(type) {
+		case json.RawMessage:
+			document = bytes.Clone(typed)
+		case []byte:
+			document = bytes.Clone(typed)
+		default:
+			document = canonicalForTest(t, typed)
+		}
+		payload["body"] = rawBodyDescriptorForTest(document)
+	}
 	return canonicalForTest(t, map[string]any{
 		"operation": operation, "payload": payload, "protocolVersion": ProtocolVersion,
 		"requestId": requestID, "type": "call",
 	})
+}
+
+func workerAPIBodyFromResponseForTest(t *testing.T, response map[string]any, maximumBytes int) []byte {
+	t.Helper()
+	descriptor, ok := response["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("response body descriptor = %#v", response["body"])
+	}
+	body, err := decodeWorkerAPIBodyDescriptor(canonicalForTest(t, descriptor), maximumBytes)
+	if err != nil {
+		t.Fatalf("decode response body descriptor: %v", err)
+	}
+	return body
 }
 
 func assertResponseErrorCode(t *testing.T, response map[string]any, expected string) {

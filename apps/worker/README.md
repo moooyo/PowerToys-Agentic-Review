@@ -28,6 +28,18 @@ milestone rejects `WORKER_EXECUTION_ENABLED=true`; the reviewed executor is inte
 until the separate Control/Executor bundles, production ServiceHost composition and Authenticode
 adapter, dual-service installer, and native Windows preflight described by ADR 0007 are complete.
 
+## Role bundle trust boundary
+
+The role-bundle AST scanner is a review-time hazard lint for known runtime-loader patterns. It is
+defense in depth, not a JavaScript sandbox and not authority for hostile source. Production
+authority must come from the exact path and SHA-256 input manifest inside a trusted, signed release
+build, together with the ServiceHost and Windows identity, ACL, Job Object, and pipe boundaries.
+
+The Control and Executor role entrypoints remain fail closed until `RuntimeBootstrapV1` is wired.
+Before ServiceHost enables either payload, its fixed Node launch contract must include
+`--disallow-code-generation-from-strings` and `--no-addons`; neither flag replaces the operating
+system boundaries above.
+
 ## Worker API
 
 The Worker currently calls:

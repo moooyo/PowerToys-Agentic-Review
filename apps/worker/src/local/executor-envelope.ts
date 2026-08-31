@@ -16,8 +16,8 @@ import {
   serializeCanonicalJson,
   sha256Hex,
 } from "@agentic-review/local-protocol";
-import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { registerWorkerContractFormats } from "../contracts-formats.js";
 
 export type { DeepReadonly, LocalSnapshotProjectionV1 } from "@agentic-review/local-protocol";
 
@@ -114,7 +114,7 @@ interface SnapshotCandidate {
   readonly envelopeJson: string;
 }
 
-registerContractFormats();
+registerWorkerContractFormats();
 
 /** Creates the only value that Control may submit to a local execution broker. */
 export function prepareLocalExecutionStart(
@@ -901,13 +901,4 @@ function unicodeCodePointBoundaries(value: string): number[] {
     boundaries.push(offset);
   }
   return boundaries;
-}
-
-function registerContractFormats(): void {
-  if (!FormatRegistry.Has("date-time")) {
-    FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
-  }
-  if (!FormatRegistry.Has("uri")) {
-    FormatRegistry.Set("uri", (value) => URL.canParse(value));
-  }
 }

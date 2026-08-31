@@ -104,6 +104,7 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	}()
 
 	state := newSessionState(s.options.MaximumRequestsPerSession)
+	claimGate := make(chan struct{}, 1)
 	writer := &responseWriter{
 		context: sessionContext, output: output, timeout: s.options.IOTimeout, closeOutput: closeOutput,
 	}
@@ -172,11 +173,9 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 				}
 				continue
 			}
-			if err := writer.writeSuccess(
+			if err := writer.writeCanonicalSuccess(
 				typed.ID,
 				successBooleanBody("cancelled", true),
-				MaximumFrameBytes,
-				MaximumFrameBytes,
 			); err != nil {
 				reportFatal(err)
 			}
@@ -200,7 +199,12 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 				defer handlers.Done()
 				defer state.complete()
 				defer cancelRequest(nil)
-				body, dispatchError := s.dispatchSafely(requestContext, request)
+				releaseClaim, dispatchError := acquireClaim(requestContext, request.Operation, claimGate)
+				var body json.RawMessage
+				if dispatchError == nil {
+					defer releaseClaim()
+					body, dispatchError = s.dispatchSafely(requestContext, request)
+				}
 				// Remove the request under the same mutex used by cancel. If cancel wins, its
 				// cause is visible below; if finish wins, a later cancel reports not-active.
 				state.finishDispatch(request.ID)
@@ -213,13 +217,19 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 					}
 					return
 				}
-				bodyMaximum := MaximumFrameBytes
+				if request.Operation == OperationSignLocalDigest {
+					if err := writer.writeCanonicalSuccess(request.ID, body); err != nil {
+						reportFatal(err)
+					}
+					return
+				}
+				bodyMaximum := MaximumWorkerAPIBodyBytes
 				frameMaximum := MaximumFrameBytes
 				if request.Operation == OperationClaim {
 					bodyMaximum = MaximumClaimResponseBodyBytes
 					frameMaximum = MaximumClaimResponseFrameBytes
 				}
-				if err := writer.writeSuccess(request.ID, body, bodyMaximum, frameMaximum); err != nil {
+				if err := writer.writeWorkerAPISuccess(request.ID, body, bodyMaximum, frameMaximum); err != nil {
 					if errors.Is(err, ErrCanonicalJSONLimit) || errors.Is(err, ErrResponseTooLarge) ||
 						errors.Is(err, ErrInvalidHandlerResult) {
 						writeErr := writer.writeError(request.ID, errorBody{
@@ -303,6 +313,18 @@ func (s *Server) requestTimeout(operation Operation) time.Duration {
 		return s.options.ClaimTimeout
 	}
 	return s.options.RequestTimeout
+}
+
+func acquireClaim(ctx context.Context, operation Operation, gate chan struct{}) (func(), error) {
+	if operation != OperationClaim {
+		return func() {}, nil
+	}
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
 }
 
 type sessionState struct {
@@ -390,20 +412,27 @@ type responseWriter struct {
 	closeOutput func()
 }
 
-func (w *responseWriter) writeSuccess(
+func (w *responseWriter) writeWorkerAPISuccess(
 	requestID string,
 	body json.RawMessage,
 	bodyMaximum int,
 	frameMaximum int,
 ) error {
-	document, err := marshalSuccessResponse(requestID, body, bodyMaximum, frameMaximum)
-	if err != nil {
+	return w.buildAndWrite(frameMaximum, func() ([]byte, error) {
+		document, err := marshalSuccessResponse(requestID, body, bodyMaximum, frameMaximum)
 		if errors.Is(err, ErrCanonicalJSONLimit) {
-			return ErrResponseTooLarge
+			return nil, ErrResponseTooLarge
 		}
+		return document, err
+	})
+}
+
+func (w *responseWriter) writeCanonicalSuccess(requestID string, body json.RawMessage) error {
+	document, err := marshalCanonicalSuccessResponse(requestID, body)
+	if err != nil {
 		return err
 	}
-	return w.write(document, frameMaximum)
+	return w.write(document, MaximumCanonicalControlFrameBytes)
 }
 
 func (w *responseWriter) writeError(requestID string, body errorBody) error {
@@ -411,31 +440,41 @@ func (w *responseWriter) writeError(requestID string, body errorBody) error {
 	if err != nil {
 		return err
 	}
-	return w.write(document, MaximumFrameBytes)
+	return w.write(document, MaximumCanonicalControlFrameBytes)
 }
 
 func (w *responseWriter) write(document []byte, maximum int) error {
+	return w.buildAndWrite(maximum, func() ([]byte, error) { return document, nil })
+}
+
+func (w *responseWriter) buildAndWrite(maximum int, build func() ([]byte, error)) error {
+	writeContext, cancelWrite := context.WithTimeoutCause(w.context, w.timeout, ErrIOTimeout)
+	defer cancelWrite()
 	done := make(chan error, 1)
 	go func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		if cause := context.Cause(w.context); cause != nil {
+		if cause := context.Cause(writeContext); cause != nil {
+			done <- cause
+			return
+		}
+		document, err := build()
+		if err != nil {
+			done <- err
+			return
+		}
+		if cause := context.Cause(writeContext); cause != nil {
 			done <- cause
 			return
 		}
 		done <- WriteFrame(w.output, document, maximum)
 	}()
-	timer := time.NewTimer(w.timeout)
-	defer timer.Stop()
 	select {
 	case err := <-done:
 		return err
-	case <-w.context.Done():
+	case <-writeContext.Done():
 		w.closeOutput()
-		return context.Cause(w.context)
-	case <-timer.C:
-		w.closeOutput()
-		return ErrIOTimeout
+		return context.Cause(writeContext)
 	}
 }
 

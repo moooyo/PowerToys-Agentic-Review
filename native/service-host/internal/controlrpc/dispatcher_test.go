@@ -19,20 +19,20 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
 )
 
-func TestDispatcherForwardsEveryOperationWithDetachedCanonicalBodies(t *testing.T) {
-	registerBody := json.RawMessage(`{"operation":"register"}`)
-	claimBody := json.RawMessage(`{"operation":"claim"}`)
-	heartbeatBody := json.RawMessage(`{"operation":"heartbeat"}`)
-	completeBody := json.RawMessage(`{"operation":"complete"}`)
-	failBody := json.RawMessage(`{"operation":"fail"}`)
-	registerResponse := json.RawMessage(`{"z":1,"a":2}`)
-	claimResponse := json.RawMessage(`{"retryAfterMs":1,"outcome":"no_work"}`)
-	heartbeatResponse := json.RawMessage(`{"workerState":"online","nextHeartbeatInMs":1}`)
+func TestDispatcherForwardsEveryOperationWithDetachedExactBodies(t *testing.T) {
+	registerBody := json.RawMessage(` { "operation" : "register", "confidence" : 0.8 } `)
+	claimBody := json.RawMessage(` { "operation" : "claim", "minimum" : 5e-324 } `)
+	heartbeatBody := json.RawMessage(` { "operation" : "heartbeat", "escaped" : "\u0061" } `)
+	completeBody := json.RawMessage(` { "operation" : "complete", "maximum" : 1.7976931348623157e+308 } `)
+	failBody := json.RawMessage(` { "operation" : "fail", "value" : -0 } `)
+	registerResponse := json.RawMessage(` { "z" : 1, "a" : 2 } `)
+	claimResponse := json.RawMessage(` { "retryAfterMs" : 1e0, "outcome" : "no_work" } `)
+	heartbeatResponse := json.RawMessage(` { "workerState" : "online", "nextHeartbeatInMs" : 1.0 } `)
 	completeResponse := json.RawMessage(
-		`{"runState":"succeeded","runAttemptId":"run:complete","jobState":"succeeded","jobId":"job:complete"}`,
+		` { "runState" : "succeeded", "runAttemptId" : "run:complete", "jobState" : "succeeded", "jobId" : "job:complete" } `,
 	)
 	failResponse := json.RawMessage(
-		`{"runState":"failed","runAttemptId":"run:fail","jobState":"failed","jobId":"job:fail"}`,
+		` { "runState" : "failed", "runAttemptId" : "run:fail", "jobState" : "failed", "jobId" : "job:fail" } `,
 	)
 
 	client := &fakeWorkerClient{}
@@ -89,25 +89,23 @@ func TestDispatcherForwardsEveryOperationWithDetachedCanonicalBodies(t *testing.
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	registered, err := dispatcher.Register(context.Background(), registerBody)
-	if err != nil || string(registered) != `{"a":2,"z":1}` {
+	if err != nil || !bytes.Equal(registered, registerResponse) {
 		t.Fatalf("Register returned (%s, %v)", registered, err)
 	}
 	claimed, err := dispatcher.Claim(context.Background(), claimBody)
-	if err != nil || string(claimed) != `{"outcome":"no_work","retryAfterMs":1}` {
+	if err != nil || !bytes.Equal(claimed, claimResponse) {
 		t.Fatalf("Claim returned (%s, %v)", claimed, err)
 	}
 	heartbeat, err := dispatcher.InstanceHeartbeat(context.Background(), "worker:instance", heartbeatBody)
-	if err != nil || string(heartbeat) != `{"nextHeartbeatInMs":1,"workerState":"online"}` {
+	if err != nil || !bytes.Equal(heartbeat, heartbeatResponse) {
 		t.Fatalf("InstanceHeartbeat returned (%s, %v)", heartbeat, err)
 	}
 	completed, err := dispatcher.CompleteRun(context.Background(), "run:complete", completeBody)
-	if err != nil || string(completed) !=
-		`{"jobId":"job:complete","jobState":"succeeded","runAttemptId":"run:complete","runState":"succeeded"}` {
+	if err != nil || !bytes.Equal(completed, completeResponse) {
 		t.Fatalf("CompleteRun returned (%s, %v)", completed, err)
 	}
 	failed, err := dispatcher.FailRun(context.Background(), "run:fail", failBody)
-	if err != nil || string(failed) !=
-		`{"jobId":"job:fail","jobState":"failed","runAttemptId":"run:fail","runState":"failed"}` {
+	if err != nil || !bytes.Equal(failed, failResponse) {
 		t.Fatalf("FailRun returned (%s, %v)", failed, err)
 	}
 
@@ -126,15 +124,13 @@ func TestDispatcherForwardsEveryOperationWithDetachedCanonicalBodies(t *testing.
 	completeResponse[0] = '['
 	failResponse[0] = '['
 	signatureSource[0] = 0xff
-	if string(registered) != `{"a":2,"z":1}` ||
-		string(claimed) != `{"outcome":"no_work","retryAfterMs":1}` ||
-		string(heartbeat) != `{"nextHeartbeatInMs":1,"workerState":"online"}` ||
-		completed[0] != '{' || failed[0] != '{' ||
+	if registered[0] != ' ' || claimed[0] != ' ' || heartbeat[0] != ' ' ||
+		completed[0] != ' ' || failed[0] != ' ' ||
 		signature[0] != 0 {
 		t.Fatal("dispatcher returned storage aliased to a dependency")
 	}
 	for _, body := range []json.RawMessage{registerBody, claimBody, heartbeatBody, completeBody, failBody} {
-		if body[0] != '{' {
+		if body[0] != ' ' {
 			t.Fatal("dependency mutation escaped into a caller request body")
 		}
 	}
@@ -147,22 +143,31 @@ func TestDispatcherAppliesIndependentRequestAndResponseLimits(t *testing.T) {
 		registerCalls.Add(1)
 		return workertransport.RegisterResponse{Body: json.RawMessage(`{}`)}, nil
 	}
-	largeClaim := json.RawMessage(`{"value":"` + strings.Repeat("x", localrpc.MaximumFrameBytes) + `"}`)
+	claimOverhead := len(`{"value":""}`)
+	largeClaim := json.RawMessage(
+		`{"value":"` + strings.Repeat("x", localrpc.MaximumClaimResponseBodyBytes-claimOverhead) + `"}`,
+	)
 	client.claim = func(context.Context, workertransport.ClaimRequest) (workertransport.ClaimResponse, error) {
 		return workertransport.ClaimResponse{Body: largeClaim}, nil
 	}
 	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
+	noncanonical := json.RawMessage(` { "z" : 1.0, "a" : 2e0 } `)
+	if response, err := dispatcher.Register(context.Background(), noncanonical); err != nil || string(response) != `{}` {
+		t.Fatalf("noncanonical request returned (%q, %v)", response, err)
+	}
 	invalidInputs := []json.RawMessage{
-		json.RawMessage(`{"z":1,"a":2}`),
-		json.RawMessage(bytes.Repeat([]byte{'x'}, localrpc.MaximumFrameBytes+1)),
+		json.RawMessage(`{"z":`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`{"value":1,"value":2}`),
+		json.RawMessage(`{"value":"` + strings.Repeat("x", localrpc.MaximumWorkerAPIBodyBytes) + `"}`),
 	}
 	for _, body := range invalidInputs {
 		_, err := dispatcher.Register(context.Background(), body)
 		assertPublicError(t, err, internalErrorSpec)
 	}
-	if registerCalls.Load() != 0 {
+	if registerCalls.Load() != 1 {
 		t.Fatal("an invalid request reached the Worker API client")
 	}
 
@@ -218,8 +223,7 @@ func TestCompleteRunUsesTheDedicatedBodyBudgetAndValidatesTerminalResponse(t *te
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	response, err := dispatcher.CompleteRun(context.Background(), "run:large", maximumBody)
-	if err != nil || string(response) !=
-		`{"jobId":"job:large","jobState":"succeeded","runAttemptId":"run:large","runState":"succeeded"}` {
+	if err != nil || !bytes.Equal(response, terminalBody) {
 		t.Fatalf("maximum CompleteRun returned (%s, %v)", response, err)
 	}
 	if maximumBody[0] != '{' {
@@ -541,7 +545,7 @@ func TestConcurrentCloseCallsReleaseTheSignerOnce(t *testing.T) {
 	}
 }
 
-func TestWorkerResponseCanonicalizationRejectsInvalidUnicode(t *testing.T) {
+func TestWorkerResponseExactCopyRejectsInvalidUnicode(t *testing.T) {
 	invalid := []json.RawMessage{
 		json.RawMessage{'{', '"', 'v', '"', ':', '"', 0xff, '"', '}'},
 		json.RawMessage(`{"v":"\ud800"}`),
@@ -549,8 +553,8 @@ func TestWorkerResponseCanonicalizationRejectsInvalidUnicode(t *testing.T) {
 		json.RawMessage(`{"v":"\ud800\u0041"}`),
 	}
 	for _, body := range invalid {
-		if _, err := canonicalizeWorkerResponse(body, localrpc.MaximumFrameBytes); err == nil {
-			t.Errorf("canonicalizer accepted invalid Unicode %q", body)
+		if _, err := copyWorkerAPIResponse(body, localrpc.MaximumWorkerAPIBodyBytes); err == nil {
+			t.Errorf("exact-copy validator accepted invalid Unicode %q", body)
 		} else {
 			assertPublicError(t, err, upstreamErrorSpec)
 		}
@@ -560,10 +564,12 @@ func TestWorkerResponseCanonicalizationRejectsInvalidUnicode(t *testing.T) {
 		json.RawMessage(`{"v":"\ud83d\ude00"}`),
 		json.RawMessage("{\"v\":\"\xef\xbf\xbd\"}"),
 		json.RawMessage(`{"v":"\ufffd"}`),
+		json.RawMessage(` { "confidence" : 0.8 } `),
 	}
 	for _, body := range valid {
-		if _, err := canonicalizeWorkerResponse(body, localrpc.MaximumFrameBytes); err != nil {
-			t.Errorf("canonicalizer rejected valid Unicode %q: %v", body, err)
+		copy, err := copyWorkerAPIResponse(body, localrpc.MaximumWorkerAPIBodyBytes)
+		if err != nil || !bytes.Equal(copy, body) {
+			t.Errorf("exact-copy validator returned (%q, %v) for %q", copy, err, body)
 		}
 	}
 }
@@ -596,8 +602,11 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	go func() { serveResult <- server.Serve(ctx, serverInput, serverOutput) }()
 
 	request, err := localrpc.MarshalCanonicalJSON(map[string]any{
-		"operation":       localrpc.OperationRegister,
-		"payload":         map[string]any{"body": map[string]any{}},
+		"operation": localrpc.OperationRegister,
+		"payload": map[string]any{"body": map[string]any{
+			"base64Url": "e30", "byteLength": 2,
+			"sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+		}},
 		"protocolVersion": localrpc.ProtocolVersion,
 		"requestId":       "panic:1",
 		"type":            "call",
@@ -612,7 +621,7 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	responseResult := make(chan []byte, 1)
 	responseError := make(chan error, 1)
 	go func() {
-		response, readErr := localrpc.ReadFrame(clientOutput, localrpc.MaximumFrameBytes)
+		response, readErr := localrpc.ReadFrame(clientOutput, localrpc.MaximumCanonicalControlFrameBytes)
 		if readErr != nil {
 			responseError <- readErr
 			return
@@ -627,7 +636,7 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not recover the dispatcher panic")
 	}
-	value, err := localrpc.ParseCanonicalJSON(response, localrpc.MaximumFrameBytes)
+	value, err := localrpc.ParseCanonicalJSON(response, localrpc.MaximumCanonicalControlFrameBytes)
 	if err != nil {
 		t.Fatalf("parse response: %v", err)
 	}

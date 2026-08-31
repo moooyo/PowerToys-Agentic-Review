@@ -25,7 +25,7 @@ func TestLengthPrefixedFrameRoundTrip(t *testing.T) {
 
 func TestFrameRejectsOversizeBeforeReadingPayload(t *testing.T) {
 	prefix := make([]byte, 4)
-	binary.LittleEndian.PutUint32(prefix, MaximumFrameBytes+1)
+	binary.LittleEndian.PutUint32(prefix, uint32(MaximumFrameBytes+1))
 	reader := &countingReader{reader: bytes.NewReader(prefix)}
 	if _, err := ReadFrame(reader, MaximumFrameBytes); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("ReadFrame error = %v, want ErrFrameTooLarge", err)
@@ -91,6 +91,21 @@ func TestDedicatedPhysicalFrameCeilings(t *testing.T) {
 	}
 	if err := WriteFrame(io.Discard, append(claim, 'x'), MaximumClaimResponseFrameBytes); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("oversized claim frame error = %v", err)
+	}
+}
+
+func TestDescriptorFrameCeilingsMatchCrossLanguageContract(t *testing.T) {
+	if MaximumCanonicalControlFrameBytes != 1_048_576 || MaximumWorkerAPIBodyBytes != 1_048_576 {
+		t.Fatalf("ordinary limits = control %d body %d", MaximumCanonicalControlFrameBytes, MaximumWorkerAPIBodyBytes)
+	}
+	if MaximumFrameBytes != 1_398_599 {
+		t.Fatalf("ordinary Worker API frame maximum = %d", MaximumFrameBytes)
+	}
+	if MaximumRunCompletionRequestBodyBytes != 2_113_536 || MaximumRequestFrameBytes != 2_818_535 {
+		t.Fatalf("completion limits = body %d frame %d", MaximumRunCompletionRequestBodyBytes, MaximumRequestFrameBytes)
+	}
+	if MaximumClaimResponseBodyBytes != 16_777_216 || MaximumClaimResponseFrameBytes != 22_369_945 {
+		t.Fatalf("claim limits = body %d frame %d", MaximumClaimResponseBodyBytes, MaximumClaimResponseFrameBytes)
 	}
 }
 
