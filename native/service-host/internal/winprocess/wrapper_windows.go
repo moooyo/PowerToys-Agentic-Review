@@ -20,7 +20,9 @@ const (
 )
 
 // OpenWrapperWatcher opens and verifies a stable handle to a local WinSW
-// service wrapper using only SCM status and limited process-query rights.
+// service wrapper using only SCM status and limited process-query rights. A
+// non-nil watcher returned with an error is a cleanup owner only; its Close
+// method must be retried until it succeeds.
 func OpenWrapperWatcher(serviceName string) (watcher WrapperWatcher, err error) {
 	if serviceName == "" || strings.ContainsRune(serviceName, '\x00') {
 		return nil, errors.New("WinSW service name must be non-empty and contain no NUL")
@@ -48,11 +50,15 @@ func OpenWrapperWatcher(serviceName string) (watcher WrapperWatcher, err error) 
 		closeServiceHandle(service, "close WinSW service status handle"),
 		closeServiceHandle(manager, "close Service Control Manager handle"),
 	)
-	if openErr != nil || closeErr != nil {
-		if watcher != nil {
-			_ = watcher.Close()
+	if openErr != nil {
+		return watcher, errors.Join(openErr, closeErr)
+	}
+	if closeErr != nil {
+		closed, watcherCloseErr := closeRejectedWrapper(watcher)
+		if !closed {
+			return watcher, errors.Join(closeErr, watcherCloseErr)
 		}
-		return nil, errors.Join(openErr, closeErr)
+		return nil, errors.Join(closeErr, watcherCloseErr)
 	}
 	return watcher, nil
 }
@@ -94,16 +100,26 @@ func (windowsWrapperProcessOpener) Open(processID uint32) (wrapperProcessHandle,
 }
 
 type windowsWrapperProcess struct {
-	process   windows.Handle
-	closeOnce sync.Once
-	closeErr  error
+	mu          sync.Mutex
+	process     windows.Handle
+	closeHandle func(windows.Handle) error
 }
 
 func (p *windowsWrapperProcess) QueryProcessID() (uint32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.process == 0 {
+		return 0, errors.New("retained WinSW wrapper process handle is closed")
+	}
 	return windows.GetProcessId(p.process)
 }
 
 func (p *windowsWrapperProcess) StillActive() (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.process == 0 {
+		return false, errors.New("retained WinSW wrapper process handle is closed")
+	}
 	status, err := windows.WaitForSingleObject(p.process, 0)
 	if err != nil {
 		return false, err
@@ -123,6 +139,11 @@ func (p *windowsWrapperProcess) StillActive() (bool, error) {
 }
 
 func (p *windowsWrapperProcess) QueryCreationTime() (time.Time, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.process == 0 {
+		return time.Time{}, errors.New("retained WinSW wrapper process handle is closed")
+	}
 	var creationTime windows.Filetime
 	var exitTime windows.Filetime
 	var kernelTime windows.Filetime
@@ -144,7 +165,13 @@ func (p *windowsWrapperProcess) Wait(ctx context.Context) error {
 		return errors.New("wrapper wait context is required")
 	}
 	for {
+		p.mu.Lock()
+		if p.process == 0 {
+			p.mu.Unlock()
+			return errors.New("retained WinSW wrapper process handle is closed")
+		}
 		status, err := windows.WaitForSingleObject(p.process, uint32(wrapperWaitPoll/time.Millisecond))
+		p.mu.Unlock()
 		if err != nil {
 			return fmt.Errorf("wait for WinSW wrapper process: %w", err)
 		}
@@ -163,11 +190,23 @@ func (p *windowsWrapperProcess) Wait(ctx context.Context) error {
 }
 
 func (p *windowsWrapperProcess) Close() error {
-	p.closeOnce.Do(func() {
-		p.closeErr = closeHandle(p.process, "close retained WinSW wrapper process handle")
-		p.process = 0
-	})
-	return p.closeErr
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.process == 0 {
+		return nil
+	}
+	closeHandle := p.closeHandle
+	if closeHandle == nil {
+		closeHandle = windows.CloseHandle
+	}
+	if err := closeHandle(p.process); err != nil {
+		return fmt.Errorf("close retained WinSW wrapper process handle: %w", err)
+	}
+	p.process = 0
+	return nil
 }
 
 func closeServiceHandle(handle windows.Handle, operation string) error {

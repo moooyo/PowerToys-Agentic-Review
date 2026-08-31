@@ -113,7 +113,12 @@ func (w *stableWrapper) Wait(ctx context.Context) error {
 }
 func (w *stableWrapper) Close() error { return w.process.Close() }
 
-func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) (WrapperWatcher, error) {
+const rejectedWrapperCloseAttempts = 3
+
+// openStableWrapper may return a non-nil watcher together with an error only
+// when every rejected-handle close attempt failed. That watcher is a cleanup
+// owner, not verified evidence, and callers must retry Close until it succeeds.
+func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) (watcher WrapperWatcher, err error) {
 	if source == nil || opener == nil {
 		return nil, errors.New("SCM status source and process opener are required")
 	}
@@ -132,7 +137,11 @@ func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) 
 	keep := false
 	defer func() {
 		if !keep {
-			_ = process.Close()
+			closed, closeErr := closeRejectedWrapper(process)
+			err = errors.Join(err, closeErr)
+			if !closed {
+				watcher = &stableWrapper{process: process}
+			}
 		}
 	}()
 
@@ -175,6 +184,21 @@ func openStableWrapper(source serviceStatusSource, opener wrapperProcessOpener) 
 		processID:    handlePID,
 		creationTime: creationTime,
 	}, nil
+}
+
+func closeRejectedWrapper(resource interface{ Close() error }) (bool, error) {
+	if resource == nil {
+		return true, nil
+	}
+	var failures []error
+	for attempt := 1; attempt <= rejectedWrapperCloseAttempts; attempt++ {
+		if err := resource.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close rejected WinSW wrapper attempt %d: %w", attempt, err))
+			continue
+		}
+		return true, errors.Join(failures...)
+	}
+	return false, errors.Join(failures...)
 }
 
 func validateStableServiceStatus(status serviceProcessStatus) error {

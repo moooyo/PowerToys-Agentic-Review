@@ -40,6 +40,8 @@ type fakeWrapperProcess struct {
 	active       bool
 	creationTime time.Time
 	waitErr      error
+	closeErrs    []error
+	closeCalls   int
 	closed       bool
 	events       *[]string
 }
@@ -65,8 +67,13 @@ func (p *fakeWrapperProcess) Wait(context.Context) error {
 }
 
 func (p *fakeWrapperProcess) Close() error {
-	p.closed = true
 	*p.events = append(*p.events, "close")
+	index := p.closeCalls
+	p.closeCalls++
+	if index < len(p.closeErrs) && p.closeErrs[index] != nil {
+		return p.closeErrs[index]
+	}
+	p.closed = true
 	return nil
 }
 
@@ -204,6 +211,38 @@ func TestOpenStableWrapperClosesHandleOnIdentityOrLivenessFailure(t *testing.T) 
 				t.Fatal("rejected wrapper process handle was not closed")
 			}
 		})
+	}
+}
+
+func TestOpenStableWrapperReturnsCleanupOwnerWhenRejectedHandleCannotClose(t *testing.T) {
+	var events []string
+	closeFailure := errors.New("injected CloseHandle failure")
+	process := &fakeWrapperProcess{
+		processID:    42,
+		active:       true,
+		creationTime: time.Now(),
+		closeErrs:    []error{closeFailure, closeFailure, closeFailure, nil},
+		events:       &events,
+	}
+	source := &fakeServiceStatusSource{
+		statuses: []serviceProcessStatus{
+			{state: serviceRunning, processID: 42},
+			{state: serviceRunning, processID: 43},
+		},
+		events: &events,
+	}
+	watcher, err := openStableWrapper(source, fakeWrapperProcessOpener{process: process, events: &events})
+	if watcher == nil || !errors.Is(err, ErrWrapperUnstable) || !errors.Is(err, closeFailure) {
+		t.Fatalf("watcher = %v, error = %v", watcher, err)
+	}
+	if process.closed || process.closeCalls != rejectedWrapperCloseAttempts {
+		t.Fatalf("closed = %t, close calls = %d", process.closed, process.closeCalls)
+	}
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("cleanup owner Close retry error = %v", err)
+	}
+	if !process.closed || process.closeCalls != rejectedWrapperCloseAttempts+1 {
+		t.Fatalf("closed = %t, close calls = %d", process.closed, process.closeCalls)
 	}
 }
 

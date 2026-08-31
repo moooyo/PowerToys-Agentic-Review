@@ -3,6 +3,7 @@
 package winprocess
 
 import (
+	"errors"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -56,4 +57,34 @@ func TestWindowsImplementationsSatisfyStableInterfaces(t *testing.T) {
 	var _ NodeProcess = (*windowsNodeProcess)(nil)
 	var _ WrapperWatcher = (*stableWrapper)(nil)
 	var _ wrapperProcessHandle = (*windowsWrapperProcess)(nil)
+}
+
+func TestWindowsWrapperCloseRetainsHandleAfterFailure(t *testing.T) {
+	closeFailure := errors.New("injected CloseHandle failure")
+	closeCalls := 0
+	process := &windowsWrapperProcess{
+		process: windows.Handle(123),
+		closeHandle: func(handle windows.Handle) error {
+			closeCalls++
+			if handle != windows.Handle(123) {
+				t.Fatalf("close handle = %d, want 123", handle)
+			}
+			if closeCalls == 1 {
+				return closeFailure
+			}
+			return nil
+		},
+	}
+	if err := process.Close(); !errors.Is(err, closeFailure) {
+		t.Fatalf("first Close error = %v", err)
+	}
+	if process.process != windows.Handle(123) {
+		t.Fatal("failed Close discarded the retained WinSW process handle")
+	}
+	if err := process.Close(); err != nil {
+		t.Fatalf("retry Close error = %v", err)
+	}
+	if process.process != 0 || closeCalls != 2 {
+		t.Fatalf("process handle = %d, close calls = %d", process.process, closeCalls)
+	}
 }
