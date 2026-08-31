@@ -113,6 +113,7 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	input := snapshotInput{
 		role: role, actualBootstrapPath: controlRead.File.Path,
 		installation: installation, releaseProfile: profile,
+		bootstrap: bootstrapBindingFixture(role, currentConfig, installation.identity),
 		dataRoot: DataRootBinding{
 			role: role, currentPath: currentConfig.Node.DataRoot, peerPath: peerConfig.Node.DataRoot,
 			peerObservation:   dataroot.PeerLiveRootNotObservedByDesign,
@@ -137,6 +138,24 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	return compositionFixture{
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
+	}
+}
+
+func bootstrapBindingFixture(
+	role config.Role,
+	current config.Config,
+	identity winidentity.Evidence,
+) BootstrapBinding {
+	digest := sha256.Sum256([]byte("service-bootstrap-evidence-" + string(role)))
+	return BootstrapBinding{
+		role:                 role,
+		ownServiceName:       current.OwnService.Name,
+		ownServiceSID:        current.OwnService.SID,
+		peerServiceName:      current.PeerService.Name,
+		peerServiceSID:       current.PeerService.SID,
+		serviceHostProcessID: identity.ProcessID,
+		sourceDigest:         digest,
+		bound:                true,
 	}
 }
 

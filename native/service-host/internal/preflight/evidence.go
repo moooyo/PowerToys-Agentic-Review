@@ -147,6 +147,15 @@ func (e Evidence) Validate() error {
 		e.identity.PeerService.Name != peer.OwnService.Name || e.identity.PeerService.SID != peer.OwnService.SID {
 		return invalidEvidenceError("service identity evidence differs from the selected configuration", nil)
 	}
+	if err := validateBootstrapBinding(
+		e.bootstrap,
+		e.role,
+		e.control.Configuration,
+		e.executor.Configuration,
+		e.identity,
+	); err != nil {
+		return invalidEvidenceError("service bootstrap binding is invalid", err)
+	}
 	if err := validateDataRootBinding(e.dataRoot, e.role, e.control.Configuration, e.executor.Configuration, roots); err != nil {
 		return invalidEvidenceError("data-root binding is invalid", err)
 	}
@@ -280,7 +289,7 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	encoder := preflightDigestEncoder{hash: sha256.New()}
-	encoder.text("agentic-review/service-host-preflight-evidence/v1")
+	encoder.text("agentic-review/service-host-preflight-evidence/v2")
 	encoder.text(string(e.role))
 	encoder.text(e.actualBootstrapPath)
 	encodeConfigurationEvidence(&encoder, e.control, controlDocument)
@@ -319,6 +328,7 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 	}
 	encoder.text(e.approvedSignerPin)
 	encodeIdentityEvidence(&encoder, e.identity)
+	encodeBootstrapBinding(&encoder, e.bootstrap)
 	encoder.text(string(e.dataRoot.role))
 	encoder.text(e.dataRoot.currentPath)
 	encoder.text(e.dataRoot.peerPath)
@@ -358,6 +368,16 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 	var result [32]byte
 	copy(result[:], encoder.hash.Sum(nil))
 	return result, nil
+}
+
+func encodeBootstrapBinding(encoder *preflightDigestEncoder, binding BootstrapBinding) {
+	encoder.text(string(binding.role))
+	encoder.text(binding.ownServiceName)
+	encoder.text(binding.ownServiceSID)
+	encoder.text(binding.peerServiceName)
+	encoder.text(binding.peerServiceSID)
+	encoder.u32(binding.serviceHostProcessID)
+	encoder.bytes(binding.sourceDigest[:])
 }
 
 func encodeIdentityEvidence(encoder *preflightDigestEncoder, evidence winidentity.Evidence) {

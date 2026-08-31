@@ -440,9 +440,9 @@ func TestComposeSnapshotsRequiresRoleAppropriateCredentials(t *testing.T) {
 	assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
 }
 
-func TestPublicComposeRejectsZeroInstallationEvidenceFirst(t *testing.T) {
+func TestPublicComposeRejectsZeroBootstrapEvidenceFirst(t *testing.T) {
 	_, err := Compose(Input{Role: config.RoleControl, ActualBootstrapPath: `C:\trusted\control-service-host.json`})
-	assertPreflightErrorCode(t, err, ErrorInstallation)
+	assertPreflightErrorCode(t, err, ErrorServiceBootstrap)
 }
 
 func TestBindControlCredentialsRejectsMissingConcreteObjects(t *testing.T) {

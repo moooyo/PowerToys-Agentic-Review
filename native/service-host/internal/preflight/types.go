@@ -9,6 +9,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
@@ -35,6 +36,8 @@ const (
 	ErrorDataRoot           ErrorCode = "PREFLIGHT_DATA_ROOT_MISMATCH"
 	ErrorRuntimeContent     ErrorCode = "PREFLIGHT_RUNTIME_CONTENT_MISMATCH"
 	ErrorEvidence           ErrorCode = "PREFLIGHT_EVIDENCE_INVALID"
+	ErrorPeerVerification   ErrorCode = "PREFLIGHT_PEER_VERIFICATION_PLAN_INVALID"
+	ErrorServiceBootstrap   ErrorCode = "PREFLIGHT_SERVICE_BOOTSTRAP_MISMATCH"
 )
 
 var ErrInvalidEvidence = errors.New("preflight evidence is invalid")
@@ -77,18 +80,43 @@ type ReleaseProfile struct {
 	Dependencies []releasemanifest.FileBindingRequirement
 }
 
-// Input accepts opaque installation and retained data-root verifier results
-// plus concrete live credential objects. Executor must leave both credential
-// pointers nil.
+// Input accepts opaque service-bootstrap and installation evidence, retained
+// data-root verifier evidence, and concrete live credential objects. Executor
+// must leave both credential pointers nil.
 type Input struct {
 	Role                 config.Role
 	ActualBootstrapPath  string
+	Bootstrap            servicebootstrap.Evidence
 	Installation         installverify.Evidence
 	DataRoot             dataroot.Evidence
 	ReleaseProfile       ReleaseProfile
 	LocalAuthoritySigner *cng.Signer
 	MTLSCredential       *wincert.Credential
 }
+
+// BootstrapBinding is the detached cross-package proof captured from opaque
+// servicebootstrap evidence. Its private fields cannot be populated by a
+// production caller, and it contains no native handles.
+type BootstrapBinding struct {
+	role                 config.Role
+	ownServiceName       string
+	ownServiceSID        string
+	peerServiceName      string
+	peerServiceSID       string
+	serviceHostProcessID uint32
+	sourceDigest         [32]byte
+	bound                bool
+}
+
+func (binding BootstrapBinding) Role() config.Role       { return binding.role }
+func (binding BootstrapBinding) OwnServiceName() string  { return binding.ownServiceName }
+func (binding BootstrapBinding) OwnServiceSID() string   { return binding.ownServiceSID }
+func (binding BootstrapBinding) PeerServiceName() string { return binding.peerServiceName }
+func (binding BootstrapBinding) PeerServiceSID() string  { return binding.peerServiceSID }
+func (binding BootstrapBinding) ServiceHostProcessID() uint32 {
+	return binding.serviceHostProcessID
+}
+func (binding BootstrapBinding) SourceDigest() [32]byte { return binding.sourceDigest }
 
 // ControlCredentialEvidence contains only attestations returned atomically by
 // the concrete validated credential objects. Its fields cannot be populated by
@@ -183,6 +211,7 @@ type snapshotInput struct {
 	releaseProfile      ReleaseProfile
 	credentials         *ControlCredentialEvidence
 	dataRoot            DataRootBinding
+	bootstrap           BootstrapBinding
 }
 
 // ConfigurationEvidence binds parsed canonical configuration to the exact
@@ -226,6 +255,7 @@ type Evidence struct {
 	dataRoot            DataRootBinding
 	contents            []VerifiedRuntimeContent
 	digest              [32]byte
+	bootstrap           BootstrapBinding
 }
 
 func (e Evidence) Role() config.Role { return e.role }
@@ -277,6 +307,13 @@ func (e Evidence) DataRootBinding() (DataRootBinding, bool) {
 
 func (e Evidence) RuntimeContents() []VerifiedRuntimeContent {
 	return cloneRuntimeContents(e.contents)
+}
+
+func (e Evidence) BootstrapBinding() (BootstrapBinding, bool) {
+	if !e.bootstrap.bound {
+		return BootstrapBinding{}, false
+	}
+	return e.bootstrap, true
 }
 
 // PinnedRuntimeFile contains one immutable path and digest selected for launch.

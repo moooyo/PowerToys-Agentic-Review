@@ -17,6 +17,13 @@ import (
 // Compose validates opaque installation evidence, binds any role-specific live
 // credentials, and then delegates to the side-effect-free snapshot composer.
 func Compose(input Input) (Evidence, error) {
+	if err := input.Bootstrap.Validate(); err != nil {
+		return Evidence{}, preflightError(ErrorServiceBootstrap, "service bootstrap evidence is invalid", err)
+	}
+	bootstrapDigest, err := input.Bootstrap.Digest()
+	if err != nil || bootstrapDigest == ([32]byte{}) {
+		return Evidence{}, preflightError(ErrorServiceBootstrap, "service bootstrap evidence digest is unavailable", err)
+	}
 	if err := input.Installation.Validate(); err != nil {
 		return Evidence{}, preflightError(ErrorInstallation, "installation evidence is invalid", err)
 	}
@@ -24,6 +31,10 @@ func Compose(input Input) (Evidence, error) {
 	if input.Role != installation.role ||
 		!windowsPathEqual(input.ActualBootstrapPath, installation.actualBootstrapPath) {
 		return Evidence{}, preflightError(ErrorInput, "preflight selectors do not match installation evidence", nil)
+	}
+	bootstrap, err := captureBootstrapBinding(input.Bootstrap, bootstrapDigest, installation)
+	if err != nil {
+		return Evidence{}, err
 	}
 	dataRoot, err := captureDataRootBinding(input.DataRoot, installation)
 	if err != nil {
@@ -50,6 +61,7 @@ func Compose(input Input) (Evidence, error) {
 		releaseProfile:      cloneProfile(input.ReleaseProfile),
 		credentials:         credentials,
 		dataRoot:            dataRoot,
+		bootstrap:           bootstrap,
 	})
 }
 
