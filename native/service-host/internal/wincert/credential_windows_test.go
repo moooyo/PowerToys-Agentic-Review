@@ -116,11 +116,11 @@ func (f *fakeNativeAPI) openStore(provider uintptr, encoding uint32, name string
 
 func (f *fakeNativeAPI) enumCertificates(_ nativeStore, previous nativeCertificate) (nativeCertificate, error) {
 	f.enumCalls++
-	if previous != 0 {
+	if previous != nil {
 		f.consumed = append(f.consumed, previous)
 	}
 	if f.enumIndex >= len(f.certificateOrder) {
-		return 0, errNoMoreCertificates
+		return nil, errNoMoreCertificates
 	}
 	certificate := f.certificateOrder[f.enumIndex]
 	f.enumIndex++
@@ -136,7 +136,7 @@ func (f *fakeNativeAPI) duplicateCertificate(certificate nativeCertificate) (nat
 func (f *fakeNativeAPI) certificateDER(certificate nativeCertificate) ([]byte, error) {
 	value, exists := f.certificateValues[certificate]
 	if !exists {
-		return nil, fmt.Errorf("unknown certificate %d", certificate)
+		return nil, fmt.Errorf("unknown certificate %p", certificate)
 	}
 	return bytes.Clone(value), nil
 }
@@ -278,20 +278,20 @@ func TestWindowsAcquireUsesPinnedRestrictedStoreAndCNGContract(t *testing.T) {
 		t.Fatalf("unexpected enumeration ownership: calls=%d consumed=%v", api.enumCalls, api.consumed)
 	}
 	if api.duplicateSource != api.certificateOrder[1] || api.duplicateCalls != 1 {
-		t.Fatalf("pinned context was not duplicated exactly once: source=%d calls=%d", api.duplicateSource, api.duplicateCalls)
+		t.Fatalf("pinned context was not duplicated exactly once: source=%p calls=%d", api.duplicateSource, api.duplicateCalls)
 	}
 	if api.providerInfoCert != selectedHandle || api.providerInfoCalls != 1 {
-		t.Fatalf("certificate provider info was not read from the selected context: certificate=%d calls=%d", api.providerInfoCert, api.providerInfoCalls)
+		t.Fatalf("certificate provider info was not read from the selected context: certificate=%p calls=%d", api.providerInfoCert, api.providerInfoCalls)
 	}
 	if api.chainEngine != localMachineChainEngine || api.chainLeaf != selectedHandle ||
 		api.chainStore != api.storeHandle || api.chainFlags != certificateChainFlags {
-		t.Fatalf("unexpected chain contract: engine=%d leaf=%d store=%d flags=0x%x", api.chainEngine, api.chainLeaf, api.chainStore, api.chainFlags)
+		t.Fatalf("unexpected chain contract: engine=%d leaf=%p store=%d flags=0x%x", api.chainEngine, api.chainLeaf, api.chainStore, api.chainFlags)
 	}
 	if !reflect.DeepEqual(api.freedChains, []nativeChain{api.chainHandle}) {
 		t.Fatalf("chain context was not released exactly once: %v", api.freedChains)
 	}
 	if api.acquireCert != selectedHandle || api.acquireFlags != certificateAcquireFlags {
-		t.Fatalf("unexpected private-key acquisition: certificate=%d flags=0x%x", api.acquireCert, api.acquireFlags)
+		t.Fatalf("unexpected private-key acquisition: certificate=%p flags=0x%x", api.acquireCert, api.acquireFlags)
 	}
 	expectedProperties := []keyPropertyRequest{
 		{name: ncryptAlgorithmProperty, maximumBytes: maximumAlgorithmPropertyBytes},
@@ -390,7 +390,7 @@ func TestWindowsBorrowedKeyRemainsBoundToRetryableCertificateContext(t *testing.
 	if err := credential.Close(); err == nil {
 		t.Fatal("Close hid certificate-context release failure")
 	}
-	if credential.state.key == 0 || credential.state.certificate == 0 {
+	if credential.state.key == 0 || credential.state.certificate == nil {
 		t.Fatal("failed certificate release discarded borrowed-key lifetime")
 	}
 	if len(api.freedKeys) != 0 {
@@ -399,7 +399,7 @@ func TestWindowsBorrowedKeyRemainsBoundToRetryableCertificateContext(t *testing.
 	if err := credential.Close(); err != nil {
 		t.Fatalf("Close did not retry certificate context: %v", err)
 	}
-	if credential.state.key != 0 || credential.state.certificate != 0 {
+	if credential.state.key != 0 || credential.state.certificate != nil {
 		t.Fatal("successful certificate release retained borrowed-key state")
 	}
 	if !reflect.DeepEqual(api.freedCertificates, []nativeCertificate{selectedHandle, selectedHandle}) ||
@@ -410,7 +410,7 @@ func TestWindowsBorrowedKeyRemainsBoundToRetryableCertificateContext(t *testing.
 
 func TestWindowsDuplicatePinnedDERFailsClosed(t *testing.T) {
 	api, config, selectedHandle := validFakeNativeAPI(t)
-	const secondMatch = nativeCertificate(104)
+	secondMatch := &windows.CertContext{Length: 104}
 	originalMatch := api.certificateOrder[1]
 	api.certificateOrder = []nativeCertificate{originalMatch, secondMatch}
 	api.certificateValues[secondMatch] = bytes.Clone(api.certificateValues[originalMatch])
@@ -425,9 +425,9 @@ func TestWindowsDuplicatePinnedDERFailsClosed(t *testing.T) {
 	if !reflect.DeepEqual(api.freedCertificates, []nativeCertificate{secondMatch, selectedHandle}) {
 		t.Fatalf("duplicate contexts were not released: %v", api.freedCertificates)
 	}
-	if len(api.freedChains) != 0 || api.acquireCert != 0 ||
+	if len(api.freedChains) != 0 || api.acquireCert != nil ||
 		!reflect.DeepEqual(api.closedStores, []nativeStore{api.storeHandle}) {
-		t.Fatalf("duplicate certificate progressed or leaked the store: chains=%v acquire=%d stores=%v", api.freedChains, api.acquireCert, api.closedStores)
+		t.Fatalf("duplicate certificate progressed or leaked the store: chains=%v acquire=%p stores=%v", api.freedChains, api.acquireCert, api.closedStores)
 	}
 }
 
@@ -670,10 +670,10 @@ func TestWindowsAcquisitionRejectsUnapprovedProviderInfo(t *testing.T) {
 	if !errors.Is(err, ErrInvalidProviderInfo) {
 		t.Fatalf("expected ErrInvalidProviderInfo, got %v", err)
 	}
-	if api.acquireCert != 0 || len(api.freedKeys) != 0 ||
+	if api.acquireCert != nil || len(api.freedKeys) != 0 ||
 		!reflect.DeepEqual(api.freedCertificates, []nativeCertificate{selectedHandle}) ||
 		!reflect.DeepEqual(api.closedStores, []nativeStore{api.storeHandle}) {
-		t.Fatalf("provider rejection progressed or leaked resources: acquire=%d keys=%v certificates=%v stores=%v", api.acquireCert, api.freedKeys, api.freedCertificates, api.closedStores)
+		t.Fatalf("provider rejection progressed or leaked resources: acquire=%p keys=%v certificates=%v stores=%v", api.acquireCert, api.freedKeys, api.freedCertificates, api.closedStores)
 	}
 }
 
@@ -697,7 +697,7 @@ func TestWindowsEnumerationIsBounded(t *testing.T) {
 	api.certificateOrder = make([]nativeCertificate, maximumStoreCertificates)
 	api.certificateValues = make(map[nativeCertificate][]byte, maximumStoreCertificates)
 	for index := range api.certificateOrder {
-		handle := nativeCertificate(index + 1)
+		handle := &windows.CertContext{Length: uint32(index + 1)}
 		api.certificateOrder[index] = handle
 		api.certificateValues[handle] = unmatchedDER
 	}
@@ -709,7 +709,8 @@ func TestWindowsEnumerationIsBounded(t *testing.T) {
 	if api.enumCalls != maximumStoreCertificates {
 		t.Fatalf("enumeration made %d calls instead of %d", api.enumCalls, maximumStoreCertificates)
 	}
-	if !reflect.DeepEqual(api.freedCertificates, []nativeCertificate{maximumStoreCertificates}) {
+	lastCertificate := api.certificateOrder[len(api.certificateOrder)-1]
+	if !reflect.DeepEqual(api.freedCertificates, []nativeCertificate{lastCertificate}) {
 		t.Fatalf("last unconsumed context was not released: %v", api.freedCertificates)
 	}
 	if !reflect.DeepEqual(api.closedStores, []nativeStore{api.storeHandle}) {
@@ -747,8 +748,8 @@ func TestWindowsCloseRetainsFailedResourcesForRetry(t *testing.T) {
 		t.Fatal("Close hid native cleanup failures")
 	}
 	state := credential.state
-	if !state.closed || state.key == 0 || state.certificate == 0 || state.store == 0 {
-		t.Fatalf("failed Close discarded retryable ownership: key=%d certificate=%d store=%d", state.key, state.certificate, state.store)
+	if !state.closed || state.key == 0 || state.certificate == nil || state.store == 0 {
+		t.Fatalf("failed Close discarded retryable ownership: key=%d certificate=%p store=%d", state.key, state.certificate, state.store)
 	}
 	if _, err := credential.Sign(nil, make([]byte, p256DigestBytes), crypto.SHA256); !errors.Is(err, ErrClosed) {
 		t.Fatalf("failed Close left credential usable: %v", err)
@@ -756,8 +757,8 @@ func TestWindowsCloseRetainsFailedResourcesForRetry(t *testing.T) {
 	if err := credential.Close(); err != nil {
 		t.Fatalf("second Close did not release retained resources: %v", err)
 	}
-	if state.key != 0 || state.certificate != 0 || state.store != 0 {
-		t.Fatalf("successful retry retained resources: key=%d certificate=%d store=%d", state.key, state.certificate, state.store)
+	if state.key != 0 || state.certificate != nil || state.store != 0 {
+		t.Fatalf("successful retry retained resources: key=%d certificate=%p store=%d", state.key, state.certificate, state.store)
 	}
 	expectedEvents := []string{"key", "certificate", "store", "key", "certificate", "store"}
 	if !reflect.DeepEqual(api.releaseEvents, expectedEvents) {
@@ -891,13 +892,13 @@ func validFakeNativeAPI(t *testing.T) (*fakeNativeAPI, Config, nativeCertificate
 	t.Helper()
 	chain, leafKey := testCertificateChain(t)
 	const (
-		storeHandle     = nativeStore(100)
-		unmatchedHandle = nativeCertificate(101)
-		leafHandle      = nativeCertificate(102)
-		duplicateHandle = nativeCertificate(103)
-		chainHandle     = nativeChain(200)
-		keyHandle       = nativeKey(300)
+		storeHandle = nativeStore(100)
+		keyHandle   = nativeKey(300)
 	)
+	unmatchedHandle := &windows.CertContext{Length: 101}
+	leafHandle := &windows.CertContext{Length: 102}
+	duplicateHandle := &windows.CertContext{Length: 103}
+	chainHandle := &windows.CertChainContext{Size: 200}
 	one := fixedWidthScalar(big.NewInt(1))
 	api := &fakeNativeAPI{
 		storeHandle:      storeHandle,

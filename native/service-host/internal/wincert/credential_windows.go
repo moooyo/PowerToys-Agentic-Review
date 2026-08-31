@@ -91,8 +91,8 @@ var (
 )
 
 type nativeStore uintptr
-type nativeCertificate uintptr
-type nativeChain uintptr
+type nativeCertificate = *windows.CertContext
+type nativeChain = *windows.CertChainContext
 type nativeChainEngine uintptr
 type nativeKey uintptr
 
@@ -215,12 +215,12 @@ func acquireWithAPI(api nativeAPI, config Config) (*Credential, error) {
 		certificateChainFlags,
 	)
 	if err != nil {
-		if chain != 0 {
+		if chain != nil {
 			api.freeCertificateChain(chain)
 		}
 		return nil, cleanup(fmt.Errorf("build local certificate chain: %w", err))
 	}
-	if chain == 0 {
+	if chain == nil {
 		return nil, cleanup(errors.New("CertGetCertificateChain returned a null context"))
 	}
 	// The local engine supplies certificates only. Its trust status is not an
@@ -281,41 +281,41 @@ func findPinnedCertificate(
 	}
 	for count := 0; count < maximumStoreCertificates; count++ {
 		current, err := api.enumCertificates(store, previous)
-		previous = 0
+		previous = nil
 		if err != nil {
 			if errors.Is(err, errNoMoreCertificates) {
-				if selected != 0 {
+				if selected != nil {
 					return selected, selectedDER, nil
 				}
-				return 0, nil, ErrCertificateNotFound
+				return nil, nil, ErrCertificateNotFound
 			}
-			return 0, nil, releaseSelected(fmt.Errorf("enumerate Local Machine certificate store: %w", err))
+			return nil, nil, releaseSelected(fmt.Errorf("enumerate Local Machine certificate store: %w", err))
 		}
-		if current == 0 {
-			return 0, nil, releaseSelected(errors.New("CertEnumCertificatesInStore returned a null context without an error"))
+		if current == nil {
+			return nil, nil, releaseSelected(errors.New("CertEnumCertificatesInStore returned a null context without an error"))
 		}
 		previous = current
 		der, err := api.certificateDER(current)
 		if err != nil {
-			previous = 0
-			return 0, nil, errors.Join(
+			previous = nil
+			return nil, nil, errors.Join(
 				fmt.Errorf("copy certificate DER: %w", err),
 				freeNativeCertificate(api, current),
 				freeNativeCertificate(api, selected),
 			)
 		}
 		if len(der) == 0 || len(der) > maximumCertificateDERBytes {
-			previous = 0
-			return 0, nil, errors.Join(
+			previous = nil
+			return nil, nil, errors.Join(
 				fmt.Errorf("%w: store certificate DER size is outside the supported range", ErrInvalidCertificate),
 				freeNativeCertificate(api, current),
 				freeNativeCertificate(api, selected),
 			)
 		}
 		if certificateDigestMatches(expectedDigest, der) {
-			if selected != 0 {
-				previous = 0
-				return 0, nil, errors.Join(
+			if selected != nil {
+				previous = nil
+				return nil, nil, errors.Join(
 					ErrDuplicateCertificate,
 					freeNativeCertificate(api, current),
 					freeNativeCertificate(api, selected),
@@ -323,15 +323,15 @@ func findPinnedCertificate(
 			}
 			duplicate, err := api.duplicateCertificate(current)
 			if err != nil {
-				previous = 0
-				return 0, nil, errors.Join(
+				previous = nil
+				return nil, nil, errors.Join(
 					fmt.Errorf("duplicate pinned certificate context: %w", err),
 					freeNativeCertificate(api, current),
 				)
 			}
-			if duplicate == 0 {
-				previous = 0
-				return 0, nil, errors.Join(
+			if duplicate == nil {
+				previous = nil
+				return nil, nil, errors.Join(
 					errors.New("CertDuplicateCertificateContext returned a null context"),
 					freeNativeCertificate(api, current),
 				)
@@ -340,7 +340,7 @@ func findPinnedCertificate(
 			selectedDER = der
 		}
 	}
-	return 0, nil, errors.Join(
+	return nil, nil, errors.Join(
 		ErrEnumerationLimit,
 		freeNativeCertificate(api, previous),
 		freeNativeCertificate(api, selected),
@@ -530,17 +530,17 @@ func (c *Credential) Close() error {
 			state.callerFreeKey = false
 		}
 	}
-	if state.certificate != 0 {
+	if state.certificate != nil {
 		if err := freeNativeCertificate(state.api, state.certificate); err != nil {
 			result = errors.Join(result, err)
 		} else {
-			state.certificate = 0
+			state.certificate = nil
 			if !state.callerFreeKey {
 				state.key = 0
 			}
 		}
 	}
-	if state.certificate == 0 && !state.callerFreeKey {
+	if state.certificate == nil && !state.callerFreeKey {
 		state.key = 0
 	}
 	if state.store != 0 {
@@ -579,7 +579,7 @@ func freeNativeKey(api nativeAPI, key nativeKey, callerFree bool) error {
 }
 
 func freeNativeCertificate(api nativeAPI, certificate nativeCertificate) error {
-	if certificate == 0 {
+	if certificate == nil {
 		return nil
 	}
 	if err := api.freeCertificate(certificate); err != nil {
@@ -650,33 +650,30 @@ func (systemAPI) openStore(provider uintptr, encoding uint32, name string, flags
 }
 
 func (systemAPI) enumCertificates(store nativeStore, previous nativeCertificate) (nativeCertificate, error) {
-	previousContext := (*windows.CertContext)(unsafe.Pointer(uintptr(previous)))
-	context, err := windows.CertEnumCertificatesInStore(windows.Handle(store), previousContext)
-	runtime.KeepAlive(previousContext)
+	context, err := windows.CertEnumCertificatesInStore(windows.Handle(store), previous)
+	runtime.KeepAlive(previous)
 	if err != nil {
 		if errors.Is(err, syscall.Errno(windows.CRYPT_E_NOT_FOUND)) {
-			return 0, errNoMoreCertificates
+			return nil, errNoMoreCertificates
 		}
-		return 0, err
+		return nil, err
 	}
 	if context == nil {
-		return 0, errors.New("CertEnumCertificatesInStore returned a null context")
+		return nil, errors.New("CertEnumCertificatesInStore returned a null context")
 	}
-	return nativeCertificate(uintptr(unsafe.Pointer(context))), nil
+	return context, nil
 }
 
 func (systemAPI) duplicateCertificate(certificate nativeCertificate) (nativeCertificate, error) {
-	duplicate := windows.CertDuplicateCertificateContext(
-		(*windows.CertContext)(unsafe.Pointer(uintptr(certificate))),
-	)
+	duplicate := windows.CertDuplicateCertificateContext(certificate)
 	if duplicate == nil {
-		return 0, errors.New("CertDuplicateCertificateContext returned a null context")
+		return nil, errors.New("CertDuplicateCertificateContext returned a null context")
 	}
-	return nativeCertificate(uintptr(unsafe.Pointer(duplicate))), nil
+	return duplicate, nil
 }
 
 func (systemAPI) certificateDER(certificate nativeCertificate) ([]byte, error) {
-	context := (*windows.CertContext)(unsafe.Pointer(uintptr(certificate)))
+	context := certificate
 	if context == nil || context.EncodedCert == nil || context.Length == 0 ||
 		context.Length > maximumCertificateDERBytes {
 		return nil, errors.New("certificate context contains an invalid DER buffer")
@@ -687,7 +684,7 @@ func (systemAPI) certificateDER(certificate nativeCertificate) ([]byte, error) {
 }
 
 func (systemAPI) readCertificateProviderInfo(certificate nativeCertificate) (certificateProviderInfo, error) {
-	context := (*windows.CertContext)(unsafe.Pointer(uintptr(certificate)))
+	context := certificate
 	var requiredBytes uint32
 	result, _, callErr := certGetCertificateContextProperty.Call(
 		uintptr(unsafe.Pointer(context)),
@@ -789,7 +786,7 @@ func (systemAPI) getCertificateChain(
 	var chain *windows.CertChainContext
 	err := windows.CertGetCertificateChain(
 		windows.Handle(engine),
-		(*windows.CertContext)(unsafe.Pointer(uintptr(certificate))),
+		certificate,
 		nil,
 		windows.Handle(additionalStore),
 		&parameters,
@@ -800,18 +797,18 @@ func (systemAPI) getCertificateChain(
 	runtime.KeepAlive(parameters)
 	if err != nil {
 		if chain != nil {
-			return nativeChain(uintptr(unsafe.Pointer(chain))), err
+			return chain, err
 		}
-		return 0, err
+		return nil, err
 	}
 	if chain == nil {
-		return 0, errors.New("CertGetCertificateChain returned a null context")
+		return nil, errors.New("CertGetCertificateChain returned a null context")
 	}
-	return nativeChain(uintptr(unsafe.Pointer(chain))), nil
+	return chain, nil
 }
 
 func (systemAPI) certificateChainDER(chain nativeChain) ([][]byte, error) {
-	context := (*windows.CertChainContext)(unsafe.Pointer(uintptr(chain)))
+	context := chain
 	if context == nil || context.ChainCount != 1 || context.Chains == nil {
 		return nil, errors.New("certificate chain does not contain exactly one simple chain")
 	}
@@ -827,9 +824,7 @@ func (systemAPI) certificateChainDER(chain nativeChain) ([][]byte, error) {
 		if element == nil || element.CertContext == nil {
 			return nil, errors.New("certificate chain contains a null element")
 		}
-		der, err := (systemAPI{}).certificateDER(
-			nativeCertificate(uintptr(unsafe.Pointer(element.CertContext))),
-		)
+		der, err := (systemAPI{}).certificateDER(element.CertContext)
 		if err != nil {
 			return nil, fmt.Errorf("copy certificate chain element %d: %w", index, err)
 		}
@@ -844,8 +839,8 @@ func (systemAPI) certificateChainDER(chain nativeChain) ([][]byte, error) {
 }
 
 func (systemAPI) freeCertificateChain(chain nativeChain) {
-	if chain != 0 {
-		windows.CertFreeCertificateChain((*windows.CertChainContext)(unsafe.Pointer(uintptr(chain))))
+	if chain != nil {
+		windows.CertFreeCertificateChain(chain)
 	}
 }
 
@@ -857,7 +852,7 @@ func (systemAPI) acquirePrivateKey(
 	var keySpec uint32
 	var callerFree bool
 	err := windows.CryptAcquireCertificatePrivateKey(
-		(*windows.CertContext)(unsafe.Pointer(uintptr(certificate))),
+		certificate,
 		flags,
 		nil,
 		&key,
@@ -1089,9 +1084,7 @@ func (systemAPI) freeKey(key nativeKey) error {
 }
 
 func (systemAPI) freeCertificate(certificate nativeCertificate) error {
-	return windows.CertFreeCertificateContext(
-		(*windows.CertContext)(unsafe.Pointer(uintptr(certificate))),
-	)
+	return windows.CertFreeCertificateContext(certificate)
 }
 
 func (systemAPI) closeStore(store nativeStore, flags uint32) error {
