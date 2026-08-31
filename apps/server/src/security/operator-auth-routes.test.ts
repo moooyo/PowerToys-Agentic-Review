@@ -267,28 +267,31 @@ describe("operator authentication routes", () => {
     }
   });
 
-  it("bootstraps an HttpOnly browser binding before login begins", async () => {
+  it("does not mint a browser binding from concurrent passive session probes", async () => {
     const auth = createService();
     const app = createApp(auth);
 
     try {
-      const response = await app.inject({ method: "GET", url: OPERATOR_SESSION_PATH });
-      const browserCookie =
-        setCookies(response.headers["set-cookie"]).find((value) =>
-          value.startsWith(`${OPERATOR_BROWSER_BINDING_COOKIE}=`),
-        ) ?? "";
+      const responses = await Promise.all([
+        app.inject({ method: "GET", url: OPERATOR_SESSION_PATH }),
+        app.inject({ method: "GET", url: OPERATOR_SESSION_PATH }),
+      ]);
 
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ authenticated: false });
-      expectHardenedCookie(browserCookie, OPERATOR_BROWSER_BINDING_COOKIE);
-      expect(browserCookie).toContain(browserBindingToken);
-      expect(auth.getSession).toHaveBeenCalledWith(undefined, browserBindingToken);
+      for (const response of responses) {
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ authenticated: false });
+        expect(response.headers["set-cookie"]).toBeUndefined();
+      }
+      expect(auth.ensureBrowserBinding).not.toHaveBeenCalled();
+      expect(auth.getSession).toHaveBeenCalledTimes(2);
+      expect(auth.getSession).toHaveBeenNthCalledWith(1, undefined, undefined);
+      expect(auth.getSession).toHaveBeenNthCalledWith(2, undefined, undefined);
     } finally {
       await app.close();
     }
   });
 
-  it("requires same-origin POST and a bootstrapped browser binding for login", async () => {
+  it("bootstraps a missing browser binding only from same-origin login POST", async () => {
     const auth = createService();
     const app = createApp(auth);
 
@@ -311,12 +314,18 @@ describe("operator authentication routes", () => {
         url: OPERATOR_LOGIN_PATH,
         headers: { origin: auth.publicOrigin },
       });
-      expect(missingBinding.statusCode).toBe(409);
-      expect(missingBinding.json()).toMatchObject({ code: "browser_binding_required" });
-      expect(setCookies(missingBinding.headers["set-cookie"])[0]).toContain(
-        `${OPERATOR_BROWSER_BINDING_COOKIE}=${browserBindingToken}`,
-      );
-      expect(auth.startLogin).not.toHaveBeenCalled();
+      expect(missingBinding.statusCode).toBe(302);
+      const cookies = setCookies(missingBinding.headers["set-cookie"]);
+      const transactionCookie =
+        cookies.find((value) => value.startsWith(`${OPERATOR_LOGIN_TRANSACTION_COOKIE}=`)) ?? "";
+      const browserCookie =
+        cookies.find((value) => value.startsWith(`${OPERATOR_BROWSER_BINDING_COOKIE}=`)) ?? "";
+      expectHardenedCookie(transactionCookie, OPERATOR_LOGIN_TRANSACTION_COOKIE);
+      expectHardenedCookie(browserCookie, OPERATOR_BROWSER_BINDING_COOKIE);
+      expect(transactionCookie).toContain(transactionToken);
+      expect(browserCookie).toContain(browserBindingToken);
+      expect(auth.ensureBrowserBinding).toHaveBeenCalledWith(undefined);
+      expect(auth.startLogin).toHaveBeenCalledWith(browserBindingToken);
     } finally {
       await app.close();
     }

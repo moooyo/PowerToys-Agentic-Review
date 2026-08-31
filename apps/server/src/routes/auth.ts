@@ -264,20 +264,7 @@ export const registerOperatorAuthRoutes = (
       }
       noStore(reply);
       const sessionToken = request.cookies[cookiePolicyFor(auth).sessionCookie];
-      const existingBrowserBinding = browserBindingTokenFrom(request, auth);
-      const issuedBrowserBinding = auth.ensureBrowserBinding(existingBrowserBinding);
-      if (issuedBrowserBinding !== undefined) {
-        setBrowserBindingCookie(
-          reply,
-          auth,
-          issuedBrowserBinding.token,
-          issuedBrowserBinding.expiresAt,
-        );
-      }
-      const session = await auth.getSession(
-        sessionToken,
-        existingBrowserBinding ?? issuedBrowserBinding?.token,
-      );
+      const session = await auth.getSession(sessionToken, browserBindingTokenFrom(request, auth));
       if (session === null) {
         return { authenticated: false };
       }
@@ -312,18 +299,10 @@ export const registerOperatorAuthRoutes = (
           return sendInvalidOrigin(reply);
         }
         const browserBindingToken = browserBindingTokenFrom(request, auth);
-        if (auth.usesBrowserBinding && browserBindingToken === undefined) {
-          const issued = auth.ensureBrowserBinding();
-          if (issued !== undefined) {
-            setBrowserBindingCookie(reply, auth, issued.token, issued.expiresAt);
-          }
-          return noStore(reply).code(409).send({
-            code: "browser_binding_required",
-            message: "Reload the sign-in page before starting operator login.",
-            retryable: true,
-          });
-        }
-        const start = await auth.startLogin(browserBindingToken);
+        const issuedBrowserBinding = auth.usesBrowserBinding
+          ? auth.ensureBrowserBinding(browserBindingToken)
+          : undefined;
+        const start = await auth.startLogin(issuedBrowserBinding?.token ?? browserBindingToken);
         if (start.kind === "authorization_redirect") {
           setLoginTransactionCookie(
             reply,
