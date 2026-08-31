@@ -1,6 +1,7 @@
 package launchguard
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"strings"
@@ -178,7 +179,15 @@ func (node *fakeNodeProcess) ObserveIdentity() (winprocess.NodeIdentity, error) 
 func (node *fakeNodeProcess) RootJobActiveProcessCount() (uint32, error)          { return 1, nil }
 func (node *fakeNodeProcess) ActivateAfterHostControl() error                     { return nil }
 func (node *fakeNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO, error) { return nil, nil }
-func (node *fakeNodeProcess) Wait() (uint32, error)                               { return 0, node.waitErr }
+func (node *fakeNodeProcess) Wait() (uint32, error) {
+	return node.WaitContext(context.Background())
+}
+func (node *fakeNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return 0, node.waitErr
+}
 func (node *fakeNodeProcess) Terminate() error {
 	node.mu.Lock()
 	defer node.mu.Unlock()

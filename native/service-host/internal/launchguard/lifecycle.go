@@ -434,7 +434,10 @@ func (process *guardedNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO,
 	return process.inner.TakeStandardIO()
 }
 func (process *guardedNodeProcess) Wait() (uint32, error) {
-	exitCode, err := process.inner.Wait()
+	return process.WaitContext(context.Background())
+}
+func (process *guardedNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
+	exitCode, err := process.inner.WaitContext(ctx)
 	return exitCode, process.releaseAfterDrain(err)
 }
 func (process *guardedNodeProcess) Terminate() error {

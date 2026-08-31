@@ -241,6 +241,61 @@ func TestGuardedNodeRetainsHandlesUntilSuccessfulDrain(t *testing.T) {
 	assertFilesClosedBeforeDirectories(t, fixture.fs.events)
 }
 
+func TestGuardedNodeWaitContextCancellationRetainsHandlesAndCanRetry(t *testing.T) {
+	fixture := newGuardFixture(t, config.RoleExecutor)
+	guard, err := openWithDependencies(context.Background(), fixture.authority, fixture.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := guard.LaunchNode(context.Background(), validPipeName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("stop observing Node")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	if _, err := process.WaitContext(ctx); !errors.Is(err, cause) {
+		t.Fatalf("canceled WaitContext error=%v", err)
+	}
+	if len(fixture.fs.events) != 0 {
+		t.Fatal("observational wait cancellation released launch handles")
+	}
+	if _, err := process.WaitContext(context.Background()); err != nil {
+		t.Fatalf("retry WaitContext error=%v", err)
+	}
+	assertFilesClosedBeforeDirectories(t, fixture.fs.events)
+}
+
+func TestGuardedNodeWaitContextFatalCleanupQuarantinesCompositeOwner(t *testing.T) {
+	fixture := newGuardFixture(t, config.RoleExecutor)
+	fatalNode := errors.Join(winprocess.ErrLaunchCleanupFatal, errors.New("wait handle ownership unresolved"))
+	fixture.node.waitErr = fatalNode
+	guard, err := openWithDependencies(context.Background(), fixture.authority, fixture.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := guard.LaunchNode(context.Background(), validPipeName())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.WaitContext(context.Background()); !errors.Is(err, ErrCleanupFatal) || !errors.Is(err, fatalNode) {
+		t.Fatalf("guarded WaitContext error=%v", err)
+	}
+	fixture.deps.quarantine.mu.RLock()
+	owners := append([]any(nil), fixture.deps.quarantine.owners...)
+	fixture.deps.quarantine.mu.RUnlock()
+	if len(owners) != 1 {
+		t.Fatalf("quarantine owners=%d, want 1", len(owners))
+	}
+	owner, ok := owners[0].(*rejectedLaunchOwner)
+	if !ok || owner.guard != guard.state || owner.node != fixture.node {
+		t.Fatal("fatal WaitContext did not quarantine the composite owner")
+	}
+	if len(fixture.fs.events) != 0 {
+		t.Fatal("fatal WaitContext released guarded installation handles")
+	}
+}
+
 func TestGuardedNodeFatalCleanupQuarantinesCompositeOwner(t *testing.T) {
 	fixture := newGuardFixture(t, config.RoleExecutor)
 	fatalNode := errors.Join(winprocess.ErrLaunchCleanupFatal, errors.New("raw Node owner unresolved"))

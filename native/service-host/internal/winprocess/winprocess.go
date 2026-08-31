@@ -69,6 +69,10 @@ type NodeProcess interface {
 	// reports no active processes. If Job drain fails, Wait returns the error
 	// while retaining the Job handle for a later Terminate or Close retry.
 	Wait() (uint32, error)
+	// WaitContext observes Node exit without making cancellation terminate the
+	// process. Cancellation consumes only this call's duplicate wait handle, so
+	// callers may wait again or explicitly terminate the root Job.
+	WaitContext(context.Context) (uint32, error)
 	// Terminate terminates the whole root Job and waits for zero active
 	// processes, bounded by NodeLaunchSpec.ShutdownTimeout. It also seals and
 	// closes standard I/O that has not been transferred.

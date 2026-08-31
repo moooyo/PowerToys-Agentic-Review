@@ -115,6 +115,7 @@ var expectedWinprocessExportedTypeMembers = map[string][]string{
 		"interface:NodeProcess.TakeStandardIO",
 		"interface:NodeProcess.Terminate",
 		"interface:NodeProcess.Wait",
+		"interface:NodeProcess.WaitContext",
 		"interface:RootTerminator.Terminate",
 		"interface:WrapperWatcher.Close",
 		"interface:WrapperWatcher.CreationTime",
@@ -135,6 +136,7 @@ var expectedWinprocessExportedMethods = map[string][]string{
 		"method:windowsNodeProcess.TakeStandardIO",
 		"method:windowsNodeProcess.Terminate",
 		"method:windowsNodeProcess.Wait",
+		"method:windowsNodeProcess.WaitContext",
 	},
 	"internal/winprocess/logic.go": {
 		"method:stableWrapper.Close",
@@ -174,7 +176,7 @@ var expectedWinprocessExportedSurfaceDigests = map[string]string{
 	"internal/winprocess/contract.go":           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/dacl_windows.go":       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/doc.go":                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-	"internal/winprocess/launcher_windows.go":   "d3d3064f7aa6e6e9550d1dbef2fa5b7c9f63b96e62bc46a8708cfa707638362e",
+	"internal/winprocess/launcher_windows.go":   "cd3d48e7ff146e219dc6cd0c8864e8bc442fa168695c4659f9b3bbc3f60c34be",
 	"internal/winprocess/logic.go":              "dcd96c0a8dff976be674d0cdbaaceb80d5fe7d99dfb68eb5e31192b6c0f9384d",
 	"internal/winprocess/platform_other.go":     "47c834f8acc5396050ebf481b07930f6053b3e2b4e9c15f7ad01bc22ab07f33b",
 	"internal/winprocess/quarantine_windows.go": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -182,7 +184,7 @@ var expectedWinprocessExportedSurfaceDigests = map[string]string{
 	"internal/winprocess/stdio_pipe.go":         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/stdio_pipe_windows.go": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/stdio_windows.go":      "7237adfa7268973a9cb23e808c993f0d4ad8acb40440130965173c7b5012db78",
-	"internal/winprocess/winprocess.go":         "4812dbb7f5e409a0aa25de6d7caad97c9bdc84548531329f537bb06497aa432c",
+	"internal/winprocess/winprocess.go":         "c2d7876c75bb324dbbc256c45a4005763e4ef61108d21cad0a036032ca274585",
 	"internal/winprocess/wrapper_windows.go":    "20ceda2e0f03d709e6fdd8b7fac8ed974b4c313ea97475f9c9f8bffaa2bc4fc7",
 }
 

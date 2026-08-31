@@ -3,6 +3,7 @@
 package winprocess
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -19,8 +20,21 @@ const (
 	procThreadAttributeJobList uintptr = 0x0002000D
 	jobDrainPollInterval               = 10 * time.Millisecond
 	failedLaunchWait                   = 5 * time.Second
-	nodeStillActiveExitCode    uint32  = 259
 )
+
+type nodeDuplicateHandleFunc func(
+	windows.Handle,
+	windows.Handle,
+	windows.Handle,
+	*windows.Handle,
+	uint32,
+	bool,
+	uint32,
+) error
+
+type nodeWaitForSingleObjectFunc func(windows.Handle, uint32) (uint32, error)
+type nodeGetExitCodeProcessFunc func(windows.Handle, *uint32) error
+type nodeCloseProcessHandleFunc func(windows.Handle) error
 
 var processLaunchCleanupGate launchCleanupGate
 
@@ -605,6 +619,11 @@ type windowsNodeProcess struct {
 	jobPoison            error
 	processPoison        error
 	closeMu              sync.Mutex
+
+	duplicateHandle          nodeDuplicateHandleFunc
+	waitForSingleObject      nodeWaitForSingleObjectFunc
+	getExitCodeProcess       nodeGetExitCodeProcessFunc
+	closeProcessNativeHandle nodeCloseProcessHandleFunc
 }
 
 func (p *windowsNodeProcess) ProcessID() uint32            { return p.processID }
@@ -695,12 +714,41 @@ func (p *windowsNodeProcess) ActivateAfterHostControl() error {
 }
 
 func (p *windowsNodeProcess) Wait() (uint32, error) {
+	return p.WaitContext(context.Background())
+}
+
+// WaitContext polls a private duplicate of the process handle. Cancellation
+// ends only this observation; process and Job ownership remain available to a
+// later wait, Terminate, or Close call.
+func (p *windowsNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
+	if p == nil {
+		return 0, errors.New("Node process is unavailable")
+	}
+	if ctx == nil {
+		return 0, errors.New("Node process wait context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+
 	waitHandle, waitErr := p.duplicateProcessHandleForWait()
 	var exitCode uint32
 	var exitErr error
+	terminal := waitErr != nil
 	if waitErr == nil {
-		status, err := windows.WaitForSingleObject(waitHandle, windows.INFINITE)
-		waitErr = err
+		outcome := waitForNodeProcessContext(
+			ctx,
+			func(interval time.Duration) (uint32, error) {
+				return p.processWaiter()(waitHandle, uint32(interval/time.Millisecond))
+			},
+			func(code *uint32) error {
+				return p.processExitCodeReader()(waitHandle, code)
+			},
+		)
+		exitCode = outcome.exitCode
+		waitErr = outcome.waitErr
+		exitErr = outcome.exitErr
+		terminal = outcome.terminal
 		if errors.Is(waitErr, windows.ERROR_INVALID_HANDLE) {
 			invalidHandle := waitHandle
 			waitHandle = 0
@@ -708,18 +756,13 @@ func (p *windowsNodeProcess) Wait() (uint32, error) {
 				&windowsRawHandleOwner{kind: "Node process wait handle", value: invalidHandle},
 				waitErr,
 			)
-		} else if waitErr == nil && status != windows.WAIT_OBJECT_0 {
-			waitErr = fmt.Errorf("Node process wait returned 0x%x", status)
-		} else if waitErr == nil {
-			exitErr = windows.GetExitCodeProcess(waitHandle, &exitCode)
-			if errors.Is(exitErr, windows.ERROR_INVALID_HANDLE) {
-				invalidHandle := waitHandle
-				waitHandle = 0
-				exitErr = windowsProcessLifetimeQuarantine.retain(
-					&windowsRawHandleOwner{kind: "Node process wait handle", value: invalidHandle},
-					exitErr,
-				)
-			}
+		} else if errors.Is(exitErr, windows.ERROR_INVALID_HANDLE) {
+			invalidHandle := waitHandle
+			waitHandle = 0
+			exitErr = windowsProcessLifetimeQuarantine.retain(
+				&windowsRawHandleOwner{kind: "Node process wait handle", value: invalidHandle},
+				exitErr,
+			)
 		}
 	}
 	var waitHandleCloseErr error
@@ -727,7 +770,7 @@ func (p *windowsNodeProcess) Wait() (uint32, error) {
 		waitHandleCloseErr = consumeWindowsHandle(
 			"close Node process wait handle",
 			waitHandle,
-			windows.CloseHandle,
+			p.processHandleCloser(),
 			windowsProcessLifetimeQuarantine,
 		)
 		if waitHandleCloseErr != nil {
@@ -742,6 +785,10 @@ func (p *windowsNodeProcess) Wait() (uint32, error) {
 		p.processMu.Unlock()
 		waitErr = errors.Join(waitErr, poisonErr)
 	}
+	resultErr := errors.Join(waitErr, exitErr, waitHandleCloseErr)
+	if !terminal {
+		return exitCode, resultErr
+	}
 
 	p.jobMu.Lock()
 	jobCleanupErr := drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
@@ -751,7 +798,7 @@ func (p *windowsNodeProcess) Wait() (uint32, error) {
 		p.standardIO.seal()
 		standardIOErr = p.standardIO.closeOwned()
 	}
-	return exitCode, errors.Join(waitErr, exitErr, waitHandleCloseErr, jobCleanupErr, standardIOErr)
+	return exitCode, errors.Join(resultErr, jobCleanupErr, standardIOErr)
 }
 
 func (p *windowsNodeProcess) duplicateProcessHandleForWait() (windows.Handle, error) {
@@ -765,7 +812,8 @@ func (p *windowsNodeProcess) duplicateProcessHandleForWait() (windows.Handle, er
 	}
 	var duplicate windows.Handle
 	currentProcess := windows.CurrentProcess()
-	if err := windows.DuplicateHandle(
+	duplicateHandle := p.processHandleDuplicator()
+	if err := duplicateHandle(
 		currentProcess,
 		p.process,
 		currentProcess,
@@ -803,6 +851,34 @@ func (p *windowsNodeProcess) duplicateProcessHandleForWait() (windows.Handle, er
 		return 0, errors.New("DuplicateHandle returned a zero Node wait handle")
 	}
 	return duplicate, nil
+}
+
+func (p *windowsNodeProcess) processHandleDuplicator() nodeDuplicateHandleFunc {
+	if p.duplicateHandle != nil {
+		return p.duplicateHandle
+	}
+	return windows.DuplicateHandle
+}
+
+func (p *windowsNodeProcess) processWaiter() nodeWaitForSingleObjectFunc {
+	if p.waitForSingleObject != nil {
+		return p.waitForSingleObject
+	}
+	return windows.WaitForSingleObject
+}
+
+func (p *windowsNodeProcess) processExitCodeReader() nodeGetExitCodeProcessFunc {
+	if p.getExitCodeProcess != nil {
+		return p.getExitCodeProcess
+	}
+	return windows.GetExitCodeProcess
+}
+
+func (p *windowsNodeProcess) processHandleCloser() nodeCloseProcessHandleFunc {
+	if p.closeProcessNativeHandle != nil {
+		return p.closeProcessNativeHandle
+	}
+	return windows.CloseHandle
 }
 
 func (p *windowsNodeProcess) Terminate() error {
@@ -907,7 +983,7 @@ func (p *windowsNodeProcess) closeProcessHandle() error {
 	closeErr := consumeWindowsHandle(
 		"close Node process handle",
 		handle,
-		windows.CloseHandle,
+		p.processHandleCloser(),
 		windowsProcessLifetimeQuarantine,
 	)
 	p.process = 0

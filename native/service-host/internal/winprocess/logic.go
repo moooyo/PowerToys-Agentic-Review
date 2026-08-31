@@ -21,6 +21,70 @@ type wallDrainClock struct{}
 func (wallDrainClock) Now() time.Time               { return time.Now() }
 func (wallDrainClock) Sleep(duration time.Duration) { time.Sleep(duration) }
 
+const (
+	nodeWaitObjectStatus    uint32 = 0
+	nodeWaitTimeoutStatus   uint32 = 258
+	nodeStillActiveExitCode uint32 = 259
+	nodeWaitPollInterval           = 10 * time.Millisecond
+)
+
+type nodeProcessWaitOutcome struct {
+	exitCode uint32
+	waitErr  error
+	exitErr  error
+	terminal bool
+}
+
+// waitForNodeProcessContext keeps cancellation observational. A signaled
+// process or native wait failure is terminal; cancellation after a timeout is
+// not, so the caller may create another duplicate and wait again.
+func waitForNodeProcessContext(
+	ctx context.Context,
+	poll func(time.Duration) (uint32, error),
+	readExitCode func(*uint32) error,
+) nodeProcessWaitOutcome {
+	if ctx == nil {
+		return nodeProcessWaitOutcome{waitErr: errors.New("Node process wait context is required")}
+	}
+	if poll == nil || readExitCode == nil {
+		return nodeProcessWaitOutcome{
+			waitErr:  errors.New("Node process wait operations are required"),
+			terminal: true,
+		}
+	}
+	for {
+		if cause := context.Cause(ctx); cause != nil {
+			return nodeProcessWaitOutcome{waitErr: cause}
+		}
+		status, err := poll(nodeWaitPollInterval)
+		if err != nil {
+			return nodeProcessWaitOutcome{waitErr: err, terminal: true}
+		}
+		switch status {
+		case nodeWaitObjectStatus:
+			var exitCode uint32
+			exitErr := readExitCode(&exitCode)
+			if exitErr == nil && exitCode == nodeStillActiveExitCode {
+				exitErr = errors.New("signaled Node process wait handle reported STILL_ACTIVE")
+			}
+			return nodeProcessWaitOutcome{
+				exitCode: exitCode,
+				exitErr:  exitErr,
+				terminal: true,
+			}
+		case nodeWaitTimeoutStatus:
+			if cause := context.Cause(ctx); cause != nil {
+				return nodeProcessWaitOutcome{waitErr: cause}
+			}
+		default:
+			return nodeProcessWaitOutcome{
+				waitErr:  fmt.Errorf("Node process wait returned 0x%x", status),
+				terminal: true,
+			}
+		}
+	}
+}
+
 func waitForNoActiveProcesses(
 	counter activeProcessCounter,
 	timeout time.Duration,
