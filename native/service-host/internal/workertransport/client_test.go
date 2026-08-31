@@ -3,6 +3,7 @@ package workertransport
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -33,9 +34,9 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 		t.Fatalf("NewClient returned an error: %v", err)
 	}
 
-	transport, ok := client.httpClient.Transport.(*http.Transport)
+	transport, ok := client.state.httpClient.Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("NewClient installed transport type %T", client.httpClient.Transport)
+		t.Fatalf("NewClient installed transport type %T", client.state.httpClient.Transport)
 	}
 	if transport.Proxy != nil {
 		t.Fatal("transport enabled proxy discovery")
@@ -64,8 +65,12 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 		t.Fatal("transport did not build one private pinned root pool")
 	}
 	rootSubjects := tlsConfig.RootCAs.Subjects()
-	if len(tlsConfig.Certificates) != 1 || tlsConfig.Certificates[0].PrivateKey != signer {
-		t.Fatal("transport did not bind the supplied crypto.Signer to one client certificate")
+	if len(tlsConfig.Certificates) != 1 {
+		t.Fatal("transport did not install exactly one client certificate")
+	}
+	signerGate, ok := tlsConfig.Certificates[0].PrivateKey.(*clientSignerGate)
+	if !ok || signerGate.signer != signer {
+		t.Fatal("transport did not bind a gate around the supplied crypto.Signer")
 	}
 	if tlsConfig.Certificates[0].Leaf == nil {
 		t.Fatal("transport did not parse the client certificate leaf")
@@ -82,11 +87,118 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	if !reflect.DeepEqual(tlsConfig.RootCAs.Subjects(), rootSubjects) {
 		t.Fatal("transport root pool changed after caller DER mutation")
 	}
-	if client.origin.String() != "https://api.worker.test:8443" {
-		t.Fatalf("client stored the wrong origin: %s", client.origin.String())
+	if client.state.origin.String() != "https://api.worker.test:8443" {
+		t.Fatalf("client stored the wrong origin: %s", client.state.origin.String())
 	}
-	if err := client.httpClient.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
+	if err := client.state.httpClient.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Fatalf("redirect callback returned %v", err)
+	}
+}
+
+func TestCloseReleasesTransportWithoutClosingBorrowedSigner(t *testing.T) {
+	config, privateKey := validConfig(t)
+	signer := &closableSigner{PrivateKey: privateKey}
+	config.ClientSigner = signer
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient returned an error: %v", err)
+	}
+	transport := client.state.httpClient.Transport.(*http.Transport)
+	signerGate, ok := transport.TLSClientConfig.Certificates[0].PrivateKey.(*clientSignerGate)
+	if !ok || signerGate.signer != signer {
+		t.Fatal("transport did not borrow the configured signer")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	if signer.closeCalls.Load() != 0 {
+		t.Fatalf("Client closed the borrowed signer %d times", signer.closeCalls.Load())
+	}
+	if client.state.httpClient != nil || !client.state.transportReleased {
+		t.Fatal("Close retained the TLS transport after returning success")
+	}
+	if err := signer.Close(); err != nil || signer.closeCalls.Load() != 1 {
+		t.Fatalf("caller could not close signer after Client.Close: calls=%d error=%v", signer.closeCalls.Load(), err)
+	}
+}
+
+func TestCloseWaitsForActiveSignerAndFencesLateSignerCalls(t *testing.T) {
+	config, privateKey := validConfig(t)
+	signer := &blockingSigner{
+		PrivateKey: privateKey,
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	config.ClientSigner = signer
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient returned an error: %v", err)
+	}
+	transport := client.state.httpClient.Transport.(*http.Transport)
+	gate, ok := transport.TLSClientConfig.Certificates[0].PrivateKey.(*clientSignerGate)
+	if !ok {
+		t.Fatalf("TLS private key type = %T, want client signer gate", transport.TLSClientConfig.Certificates[0].PrivateKey)
+	}
+
+	digest := make([]byte, 32)
+	signResult := make(chan error, 1)
+	go func() {
+		_, err := gate.Sign(rand.Reader, digest, crypto.SHA256)
+		signResult <- err
+	}()
+	select {
+	case <-signer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("signer call did not start")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- client.Close() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		gate.mu.Lock()
+		gateClosed := gate.closed
+		gate.mu.Unlock()
+		if gateClosed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not fence the signer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, err := gate.Sign(rand.Reader, digest, crypto.SHA256); !errors.Is(err, ErrClosed) {
+		t.Fatalf("late Sign returned %v, want ErrClosed", err)
+	}
+	if publicKey := gate.Public(); publicKey == nil {
+		t.Fatal("closed gate did not return its detached public key")
+	}
+	if signer.publicCalls.Load() != 1 || signer.signCalls.Load() != 1 {
+		t.Fatalf("late gate calls reached signer: public=%d sign=%d", signer.publicCalls.Load(), signer.signCalls.Load())
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned before active Sign completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(signer.release)
+	if err := <-signResult; err != nil {
+		t.Fatalf("active Sign returned an error: %v", err)
+	}
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	if _, err := gate.Sign(rand.Reader, digest, crypto.SHA256); !errors.Is(err, ErrClosed) {
+		t.Fatalf("post-close Sign returned %v, want ErrClosed", err)
+	}
+	if signer.signCalls.Load() != 1 {
+		t.Fatalf("post-close Sign reached borrowed signer; calls=%d", signer.signCalls.Load())
+	}
+	if client.state.signerGate != nil || client.state.httpClient != nil {
+		t.Fatal("Close retained signer gate or HTTP transport")
 	}
 }
 
@@ -140,7 +252,7 @@ func TestTransportHeaderTimeoutCoversEveryOperationDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient returned an error: %v", err)
 	}
-	transport := client.httpClient.Transport.(*http.Transport)
+	transport := client.state.httpClient.Transport.(*http.Transport)
 	if transport.ResponseHeaderTimeout != config.Limits.RequestTimeout {
 		t.Fatalf("response header timeout = %v, want %v", transport.ResponseHeaderTimeout, config.Limits.RequestTimeout)
 	}
@@ -159,14 +271,16 @@ func TestInvalidOriginErrorDoesNotEchoRawSecret(t *testing.T) {
 	}
 }
 
-func TestClientExportsOnlyTypedWorkerOperations(t *testing.T) {
+func TestClientExportsOnlyTypedWorkerOperationsAndLifecycle(t *testing.T) {
 	typeOfClient := reflect.TypeOf((*Client)(nil))
 	expected := map[string]bool{
-		"Claim":             true,
-		"CompleteRun":       true,
-		"FailRun":           true,
-		"HeartbeatInstance": true,
-		"Register":          true,
+		"Claim":                true,
+		"Close":                true,
+		"CloseIdleConnections": true,
+		"CompleteRun":          true,
+		"FailRun":              true,
+		"HeartbeatInstance":    true,
+		"Register":             true,
 	}
 	if typeOfClient.NumMethod() != len(expected) {
 		t.Fatalf("Client exposes %d methods, expected %d", typeOfClient.NumMethod(), len(expected))
@@ -340,7 +454,7 @@ func TestEntityIdentifiersAreValidatedBeforeSingleSegmentEscaping(t *testing.T) 
 		t.Fatalf("invalid identifiers reached the HTTP transport %d times", calls.Load())
 	}
 
-	target, err := client.entityTarget(runPathStart, "A0._:-z", completePathEnd)
+	target, err := client.state.entityTarget(runPathStart, "A0._:-z", completePathEnd)
 	if err != nil {
 		t.Fatalf("valid EntityId was rejected: %v", err)
 	}
@@ -634,10 +748,456 @@ func TestConcurrentRequestsNeverExceedPinnedLimit(t *testing.T) {
 	}
 }
 
+func TestCloseCancelsWaitsForRequestAndClosesItsResponse(t *testing.T) {
+	started := make(chan struct{})
+	body := &contextBody{started: started}
+	transport := &lifecycleRoundTripper{
+		roundTrip: func(request *http.Request) (*http.Response, error) {
+			body.context = request.Context()
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": {"application/json"}},
+				Body:          body,
+				ContentLength: -1,
+			}, nil
+		},
+		closeIdle: func() error {
+			if !body.closed.Load() {
+				return errors.New("request was still active")
+			}
+			return nil
+		},
+	}
+	client := testClient(t, transport, testLimits())
+
+	requestResult := make(chan error, 1)
+	go func() {
+		_, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)})
+		requestResult <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request body was not read")
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- client.Close() }()
+	select {
+	case err := <-requestResult:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("request returned %v, want ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not cancel the active request")
+	}
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not wait for and release the active request")
+	}
+	if !body.closed.Load() {
+		t.Fatal("Close did not cause the response body to close")
+	}
+	if transport.closeCalls.Load() != 1 {
+		t.Fatalf("idle connections closed %d times, want 1", transport.closeCalls.Load())
+	}
+}
+
+func TestCloseCancelsRequestWaitingForConcurrencySlot(t *testing.T) {
+	entered := make(chan struct{})
+	var calls atomic.Int32
+	transport := &lifecycleRoundTripper{
+		roundTrip: func(request *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				close(entered)
+			}
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		},
+	}
+	limits := testLimits()
+	limits.MaximumConcurrentRequests = 1
+	client := testClient(t, transport, limits)
+
+	results := make(chan error, 2)
+	request := func() {
+		_, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)})
+		results <- err
+	}
+	go request()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not enter the transport")
+	}
+	go request()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		client.state.lifecycleMu.Lock()
+		activeRequests := len(client.state.requests)
+		client.state.lifecycleMu.Unlock()
+		if activeRequests == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second request did not wait for the concurrency slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	for index := 0; index < 2; index++ {
+		if err := <-results; !errors.Is(err, ErrClosed) {
+			t.Errorf("request %d returned %v, want ErrClosed", index, err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("request waiting for a slot entered the transport; calls=%d", calls.Load())
+	}
+}
+
+func TestClientValueCopiesShareRequestAndCloseLifecycle(t *testing.T) {
+	entered := make(chan struct{})
+	var calls atomic.Int32
+	transport := &lifecycleRoundTripper{
+		roundTrip: func(request *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			close(entered)
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		},
+	}
+	client := testClient(t, transport, testLimits())
+	clientCopy := *client
+	if clientCopy.state != client.state {
+		t.Fatal("Client value copy did not retain shared state")
+	}
+
+	requestResult := make(chan error, 1)
+	go func() {
+		_, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)})
+		requestResult <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not enter the transport")
+	}
+	if err := clientCopy.Close(); err != nil {
+		t.Fatalf("Close through value copy returned an error: %v", err)
+	}
+	if err := <-requestResult; !errors.Is(err, ErrClosed) {
+		t.Fatalf("request through original Client returned %v, want ErrClosed", err)
+	}
+	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("original Client bypassed copied Close: %v", err)
+	}
+	if err := client.Close(); err != nil || transport.closeCalls.Load() != 1 || calls.Load() != 1 {
+		t.Fatalf("shared lifecycle was not idempotent: closeCalls=%d requests=%d error=%v", transport.closeCalls.Load(), calls.Load(), err)
+	}
+}
+
+func TestCloseIsIdempotentAndConcurrentSafe(t *testing.T) {
+	const callers = 16
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	transport := &lifecycleRoundTripper{
+		closeIdle: func() error {
+			close(entered)
+			<-release
+			return nil
+		},
+	}
+	client := testClient(t, transport, testLimits())
+
+	results := make(chan error, callers)
+	for index := 0; index < callers; index++ {
+		go func() { results <- client.Close() }()
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not reach the transport")
+	}
+	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("request while Close was releasing the transport returned %v, want ErrClosed", err)
+	}
+	close(release)
+	for index := 0; index < callers; index++ {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Close returned an error: %v", err)
+		}
+	}
+	if transport.closeCalls.Load() != 1 {
+		t.Fatalf("concurrent Close closed idle connections %d times, want 1", transport.closeCalls.Load())
+	}
+	if err := client.Close(); err != nil || transport.closeCalls.Load() != 1 {
+		t.Fatalf("repeated Close returned %v or repeated transport cleanup", err)
+	}
+}
+
+func TestCloseFailureRetainsTransportForRetry(t *testing.T) {
+	sentinel := errors.New("close idle connections")
+	var attempts atomic.Int32
+	_, privateKey := validConfig(t)
+	signer := &closableSigner{PrivateKey: privateKey}
+	signerGate, err := newClientSignerGate(signer)
+	if err != nil {
+		t.Fatalf("newClientSignerGate returned an error: %v", err)
+	}
+	transport := &lifecycleRoundTripper{
+		closeIdle: func() error {
+			if attempts.Add(1) == 1 {
+				return sentinel
+			}
+			return nil
+		},
+	}
+	client := testClient(t, transport, testLimits())
+	client.state.signerGate = signerGate
+
+	if err := client.Close(); !errors.Is(err, sentinel) {
+		t.Fatalf("first Close returned %v, want transport failure", err)
+	}
+	if client.state.httpClient == nil || client.state.transportReleased {
+		t.Fatal("failed Close discarded the retryable transport state")
+	}
+	if _, err := signerGate.Sign(rand.Reader, make([]byte, 32), crypto.SHA256); !errors.Is(err, ErrClosed) {
+		t.Fatalf("detached Sign after failed Close returned %v, want ErrClosed", err)
+	}
+	if signerGate.Public() == nil || signer.publicCalls.Load() != 1 || signer.signCalls.Load() != 0 {
+		t.Fatalf("detached gate reached signer after failed Close: public=%d sign=%d", signer.publicCalls.Load(), signer.signCalls.Load())
+	}
+	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("request after failed Close returned %v, want ErrClosed", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("second Close did not retry transport cleanup: %v", err)
+	}
+	if client.state.httpClient != nil || !client.state.transportReleased {
+		t.Fatal("successful Close retained the transport and signer reference")
+	}
+	if err := client.Close(); err != nil || attempts.Load() != 2 {
+		t.Fatalf("successful retry was not idempotent: attempts=%d error=%v", attempts.Load(), err)
+	}
+}
+
+func TestCloseIdleConnectionsDoesNotCloseOpenClient(t *testing.T) {
+	transport := &lifecycleRoundTripper{
+		roundTrip: func(*http.Request) (*http.Response, error) {
+			return jsonHTTPResponse(http.StatusOK, `{}`), nil
+		},
+	}
+	client := testClient(t, transport, testLimits())
+
+	if err := client.CloseIdleConnections(); err != nil {
+		t.Fatalf("CloseIdleConnections returned an error: %v", err)
+	}
+	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("CloseIdleConnections closed the client: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	if transport.closeCalls.Load() != 2 {
+		t.Fatalf("idle connections closed %d times, want once explicitly and once after drain", transport.closeCalls.Load())
+	}
+}
+
+func TestPostCloseTypedOperationsRejectWithoutUsingTransport(t *testing.T) {
+	var calls atomic.Int32
+	transport := &lifecycleRoundTripper{
+		roundTrip: func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return jsonHTTPResponse(http.StatusOK, `{}`), nil
+		},
+	}
+	client := testClient(t, transport, testLimits())
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+
+	body := json.RawMessage(`{}`)
+	operations := []struct {
+		name string
+		call func() error
+	}{
+		{name: "Register", call: func() error { _, err := client.Register(context.Background(), RegisterRequest{Body: body}); return err }},
+		{name: "Claim", call: func() error { _, err := client.Claim(context.Background(), ClaimRequest{Body: body}); return err }},
+		{name: "HeartbeatInstance", call: func() error {
+			_, err := client.HeartbeatInstance(context.Background(), InstanceHeartbeatRequest{WorkerInstanceID: "worker:1", Body: body})
+			return err
+		}},
+		{name: "CompleteRun", call: func() error {
+			_, err := client.CompleteRun(context.Background(), RunCompleteRequest{RunAttemptID: "run:1", Body: body})
+			return err
+		}},
+		{name: "FailRun", call: func() error {
+			_, err := client.FailRun(context.Background(), RunFailRequest{RunAttemptID: "run:1", Body: body})
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		if err := operation.call(); !errors.Is(err, ErrClosed) {
+			t.Errorf("%s after Close returned %v, want ErrClosed", operation.name, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("post-close operations reached the transport %d times", calls.Load())
+	}
+}
+
+func TestZeroAndNilClientsAreClosedAndPanicFree(t *testing.T) {
+	var zero Client
+	clients := []*Client{nil, &zero}
+	for index, client := range clients {
+		if err := client.Close(); err != nil {
+			t.Errorf("client %d Close returned an error: %v", index, err)
+		}
+		if err := client.CloseIdleConnections(); err != nil {
+			t.Errorf("client %d CloseIdleConnections returned an error: %v", index, err)
+		}
+		if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
+			t.Errorf("client %d Register returned %v, want ErrClosed", index, err)
+		}
+		if _, err := client.Claim(context.Background(), ClaimRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
+			t.Errorf("client %d Claim returned %v, want ErrClosed", index, err)
+		}
+		if _, err := client.HeartbeatInstance(context.Background(), InstanceHeartbeatRequest{}); !errors.Is(err, ErrClosed) {
+			t.Errorf("client %d HeartbeatInstance returned %v, want ErrClosed", index, err)
+		}
+		if _, err := client.CompleteRun(context.Background(), RunCompleteRequest{}); !errors.Is(err, ErrClosed) {
+			t.Errorf("client %d CompleteRun returned %v, want ErrClosed", index, err)
+		}
+		if _, err := client.FailRun(context.Background(), RunFailRequest{}); !errors.Is(err, ErrClosed) {
+			t.Errorf("client %d FailRun returned %v, want ErrClosed", index, err)
+		}
+	}
+}
+
+func TestRequestClosesDerivedContextAndResponseBody(t *testing.T) {
+	var requestContext context.Context
+	body := &countingBody{reader: bytes.NewReader([]byte(`{}`))}
+	client := testClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestContext = request.Context()
+		response := jsonHTTPResponse(http.StatusOK, `{}`)
+		response.Body = body
+		return response, nil
+	}), testLimits())
+
+	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("Register returned an error: %v", err)
+	}
+	if !body.closed.Load() {
+		t.Fatal("successful request did not close its response body")
+	}
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("successful request retained its derived context")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+type lifecycleRoundTripper struct {
+	roundTrip  func(*http.Request) (*http.Response, error)
+	closeIdle  func() error
+	closeCalls atomic.Int32
+}
+
+func (t *lifecycleRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if t.roundTrip == nil {
+		return nil, errors.New("unexpected request")
+	}
+	return t.roundTrip(request)
+}
+
+func (t *lifecycleRoundTripper) CloseIdleConnections() error {
+	t.closeCalls.Add(1)
+	if t.closeIdle == nil {
+		return nil
+	}
+	return t.closeIdle()
+}
+
+type contextBody struct {
+	context context.Context
+	started chan struct{}
+	once    sync.Once
+	closed  atomic.Bool
+}
+
+func (b *contextBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.context.Done()
+	return 0, b.context.Err()
+}
+
+func (b *contextBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type closableSigner struct {
+	*ecdsa.PrivateKey
+	closeCalls  atomic.Int32
+	publicCalls atomic.Int32
+	signCalls   atomic.Int32
+}
+
+func (s *closableSigner) Public() crypto.PublicKey {
+	s.publicCalls.Add(1)
+	return s.PrivateKey.Public()
+}
+
+func (s *closableSigner) Sign(
+	random io.Reader,
+	digest []byte,
+	options crypto.SignerOpts,
+) ([]byte, error) {
+	s.signCalls.Add(1)
+	return s.PrivateKey.Sign(random, digest, options)
+}
+
+func (s *closableSigner) Close() error {
+	s.closeCalls.Add(1)
+	return nil
+}
+
+type blockingSigner struct {
+	*ecdsa.PrivateKey
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	publicCalls atomic.Int32
+	signCalls   atomic.Int32
+}
+
+func (s *blockingSigner) Public() crypto.PublicKey {
+	s.publicCalls.Add(1)
+	return s.PrivateKey.Public()
+}
+
+func (s *blockingSigner) Sign(
+	random io.Reader,
+	digest []byte,
+	options crypto.SignerOpts,
+) ([]byte, error) {
+	s.signCalls.Add(1)
+	s.startOnce.Do(func() { close(s.started) })
+	<-s.release
+	return s.PrivateKey.Sign(random, digest, options)
 }
 
 type countingBody struct {
@@ -663,7 +1223,7 @@ func testClient(t *testing.T, roundTripper http.RoundTripper, limits Limits) *Cl
 	if err != nil {
 		t.Fatalf("parse test origin: %v", err)
 	}
-	return newClient(origin, roundTripper, limits)
+	return newClient(origin, roundTripper, nil, limits)
 }
 
 func testLimits() Limits {
@@ -747,4 +1307,6 @@ func testCertificate(t *testing.T, commonName string) (tls.Certificate, *ecdsa.P
 }
 
 var _ http.RoundTripper = roundTripFunc(nil)
+var _ http.RoundTripper = (*lifecycleRoundTripper)(nil)
 var _ io.ReadCloser = (*countingBody)(nil)
+var _ io.ReadCloser = (*contextBody)(nil)

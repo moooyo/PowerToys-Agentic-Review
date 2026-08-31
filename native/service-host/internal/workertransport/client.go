@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,6 +51,7 @@ var (
 	ErrUnexpectedMediaType  = errors.New("worker API returned an unexpected media type")
 	ErrContentEncoded       = errors.New("worker API returned a content-encoded response")
 	ErrRedirect             = errors.New("worker API redirects are disabled")
+	ErrClosed               = errors.New("worker API client is closed")
 )
 
 type Limits struct {
@@ -65,8 +67,10 @@ type Config struct {
 	ServerName         string
 	RootCertificateDER [][]byte
 	ClientCertificate  tls.Certificate
-	ClientSigner       crypto.Signer
-	Limits             Limits
+	// ClientSigner is borrowed by a successfully constructed Client until Client.Close succeeds.
+	// The caller retains ownership and must close the signer only after that lifecycle barrier.
+	ClientSigner crypto.Signer
+	Limits       Limits
 }
 
 type RegisterRequest struct {
@@ -125,7 +129,13 @@ func (e *StatusError) Unwrap() error {
 	return ErrUnexpectedStatus
 }
 
+// Client is safe for concurrent requests and lifecycle calls. Value copies share one private
+// lifecycle state; its zero value is closed and fail-closed for every Worker API operation.
 type Client struct {
+	state *clientState
+}
+
+type clientState struct {
 	origin               url.URL
 	httpClient           *http.Client
 	maximumRequestBytes  int64
@@ -133,6 +143,35 @@ type Client struct {
 	requestTimeout       time.Duration
 	claimTimeout         time.Duration
 	concurrentRequests   chan struct{}
+
+	lifecycleMu sync.Mutex
+	closed      bool
+	drained     bool
+	requests    map[uint64]context.CancelCauseFunc
+	nextRequest uint64
+	active      sync.WaitGroup
+	closeOnce   sync.Once
+
+	closeMu              sync.Mutex
+	closeIdleConnections func() error
+	transportReleased    bool
+	signerGate           *clientSignerGate
+}
+
+type clientSignerGate struct {
+	mu           sync.Mutex
+	closed       bool
+	signer       crypto.Signer
+	publicKeyDER []byte
+	active       sync.WaitGroup
+}
+
+type errorIdleConnectionCloser interface {
+	CloseIdleConnections() error
+}
+
+type idleConnectionCloser interface {
+	CloseIdleConnections()
 }
 
 func NewClient(config Config) (*Client, error) {
@@ -151,8 +190,13 @@ func NewClient(config Config) (*Client, error) {
 		return nil, err
 	}
 
-	certificate, err := prepareClientCertificate(config.ClientCertificate, config.ClientSigner)
+	signerGate, err := newClientSignerGate(config.ClientSigner)
 	if err != nil {
+		return nil, err
+	}
+	certificate, err := prepareClientCertificate(config.ClientCertificate, signerGate)
+	if err != nil {
+		signerGate.closeAndWait()
 		return nil, err
 	}
 	tlsConfig := &tls.Config{
@@ -177,11 +221,21 @@ func NewClient(config Config) (*Client, error) {
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: maximumResponseHeaders,
 	}
-	return newClient(origin, transport, config.Limits), nil
+	return newClient(origin, transport, signerGate, config.Limits), nil
 }
 
 func (c *Client) Register(ctx context.Context, request RegisterRequest) (RegisterResponse, error) {
-	response, err := c.execute(ctx, http.MethodPost, c.fixedTarget(registerPath), request.Body, c.requestTimeout)
+	state, err := c.clientState()
+	if err != nil {
+		return RegisterResponse{}, err
+	}
+	response, err := state.execute(
+		ctx,
+		http.MethodPost,
+		state.fixedTarget(registerPath),
+		request.Body,
+		state.requestTimeout,
+	)
 	if err != nil {
 		return RegisterResponse{}, err
 	}
@@ -189,7 +243,11 @@ func (c *Client) Register(ctx context.Context, request RegisterRequest) (Registe
 }
 
 func (c *Client) Claim(ctx context.Context, request ClaimRequest) (ClaimResponse, error) {
-	response, err := c.execute(ctx, http.MethodPost, c.fixedTarget(claimPath), request.Body, c.claimTimeout)
+	state, err := c.clientState()
+	if err != nil {
+		return ClaimResponse{}, err
+	}
+	response, err := state.execute(ctx, http.MethodPost, state.fixedTarget(claimPath), request.Body, state.claimTimeout)
 	if err != nil {
 		return ClaimResponse{}, err
 	}
@@ -200,11 +258,15 @@ func (c *Client) HeartbeatInstance(
 	ctx context.Context,
 	request InstanceHeartbeatRequest,
 ) (InstanceHeartbeatResponse, error) {
-	target, err := c.entityTarget(heartbeatPathStart, request.WorkerInstanceID, heartbeatPathEnd)
+	state, err := c.clientState()
 	if err != nil {
 		return InstanceHeartbeatResponse{}, err
 	}
-	response, err := c.execute(ctx, http.MethodPut, target, request.Body, c.requestTimeout)
+	target, err := state.entityTarget(heartbeatPathStart, request.WorkerInstanceID, heartbeatPathEnd)
+	if err != nil {
+		return InstanceHeartbeatResponse{}, err
+	}
+	response, err := state.execute(ctx, http.MethodPut, target, request.Body, state.requestTimeout)
 	if err != nil {
 		return InstanceHeartbeatResponse{}, err
 	}
@@ -212,11 +274,15 @@ func (c *Client) HeartbeatInstance(
 }
 
 func (c *Client) CompleteRun(ctx context.Context, request RunCompleteRequest) (RunCompleteResponse, error) {
-	target, err := c.entityTarget(runPathStart, request.RunAttemptID, completePathEnd)
+	state, err := c.clientState()
 	if err != nil {
 		return RunCompleteResponse{}, err
 	}
-	response, err := c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
+	target, err := state.entityTarget(runPathStart, request.RunAttemptID, completePathEnd)
+	if err != nil {
+		return RunCompleteResponse{}, err
+	}
+	response, err := state.execute(ctx, http.MethodPost, target, request.Body, state.requestTimeout)
 	if err != nil {
 		return RunCompleteResponse{}, err
 	}
@@ -224,30 +290,205 @@ func (c *Client) CompleteRun(ctx context.Context, request RunCompleteRequest) (R
 }
 
 func (c *Client) FailRun(ctx context.Context, request RunFailRequest) (RunFailResponse, error) {
-	target, err := c.entityTarget(runPathStart, request.RunAttemptID, failPathEnd)
+	state, err := c.clientState()
 	if err != nil {
 		return RunFailResponse{}, err
 	}
-	response, err := c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
+	target, err := state.entityTarget(runPathStart, request.RunAttemptID, failPathEnd)
+	if err != nil {
+		return RunFailResponse{}, err
+	}
+	response, err := state.execute(ctx, http.MethodPost, target, request.Body, state.requestTimeout)
 	if err != nil {
 		return RunFailResponse{}, err
 	}
 	return RunFailResponse{Body: response}, nil
 }
 
-func newClient(origin url.URL, roundTripper http.RoundTripper, limits Limits) *Client {
-	return &Client{
-		origin: origin,
-		httpClient: &http.Client{
-			Transport:     roundTripper,
-			CheckRedirect: rejectRedirect,
-		},
-		maximumRequestBytes:  limits.MaximumRequestBytes,
-		maximumResponseBytes: limits.MaximumResponseBytes,
-		requestTimeout:       limits.RequestTimeout,
-		claimTimeout:         limits.ClaimTimeout,
-		concurrentRequests:   make(chan struct{}, limits.MaximumConcurrentRequests),
+// Close rejects new requests, cancels and waits for active requests, and releases the HTTP
+// transport's idle connections. A failed transport release may be retried by calling Close again.
+// After Close succeeds, the client no longer retains the transport that borrows ClientSigner; it
+// never closes that caller-owned signer.
+func (c *Client) Close() error {
+	if c == nil || c.state == nil {
+		return nil
 	}
+	state := c.state
+	state.closeOnce.Do(func() {
+		state.lifecycleMu.Lock()
+		state.closed = true
+		cancellations := make([]context.CancelCauseFunc, 0, len(state.requests))
+		for _, cancel := range state.requests {
+			cancellations = append(cancellations, cancel)
+		}
+		signerGate := state.signerGate
+		state.lifecycleMu.Unlock()
+
+		signerGate.close()
+
+		for _, cancel := range cancellations {
+			cancel(ErrClosed)
+		}
+		state.active.Wait()
+		signerGate.waitAndRelease()
+
+		state.lifecycleMu.Lock()
+		state.signerGate = nil
+		state.drained = true
+		state.lifecycleMu.Unlock()
+	})
+	return c.CloseIdleConnections()
+}
+
+// CloseIdleConnections closes pooled HTTP connections without closing an open client. Once Close
+// has drained all active requests, a successful call also releases the transport reference. A
+// failed call retains the transport so either lifecycle method can retry the release.
+func (c *Client) CloseIdleConnections() error {
+	if c == nil || c.state == nil {
+		return nil
+	}
+	state := c.state
+	state.closeMu.Lock()
+	defer state.closeMu.Unlock()
+
+	state.lifecycleMu.Lock()
+	if state.transportReleased {
+		state.lifecycleMu.Unlock()
+		return nil
+	}
+	closeIdleConnections := state.closeIdleConnections
+	finalRelease := state.closed && state.drained
+	state.lifecycleMu.Unlock()
+
+	if err := closeIdleConnections(); err != nil {
+		return fmt.Errorf("close worker API idle connections: %w", err)
+	}
+	if finalRelease {
+		state.lifecycleMu.Lock()
+		state.httpClient = nil
+		state.closeIdleConnections = nil
+		state.transportReleased = true
+		state.lifecycleMu.Unlock()
+	}
+	return nil
+}
+
+func newClient(
+	origin url.URL,
+	roundTripper http.RoundTripper,
+	signerGate *clientSignerGate,
+	limits Limits,
+) *Client {
+	return &Client{
+		state: &clientState{
+			origin: origin,
+			httpClient: &http.Client{
+				Transport:     roundTripper,
+				CheckRedirect: rejectRedirect,
+			},
+			maximumRequestBytes:  limits.MaximumRequestBytes,
+			maximumResponseBytes: limits.MaximumResponseBytes,
+			requestTimeout:       limits.RequestTimeout,
+			claimTimeout:         limits.ClaimTimeout,
+			concurrentRequests:   make(chan struct{}, limits.MaximumConcurrentRequests),
+			requests:             make(map[uint64]context.CancelCauseFunc),
+			closeIdleConnections: prepareIdleConnectionCloser(roundTripper),
+			signerGate:           signerGate,
+		},
+	}
+}
+
+func (c *Client) clientState() (*clientState, error) {
+	if c == nil || c.state == nil {
+		return nil, ErrClosed
+	}
+	return c.state, nil
+}
+
+func prepareIdleConnectionCloser(roundTripper http.RoundTripper) func() error {
+	if closer, ok := roundTripper.(errorIdleConnectionCloser); ok {
+		return closer.CloseIdleConnections
+	}
+	if closer, ok := roundTripper.(idleConnectionCloser); ok {
+		return func() error {
+			closer.CloseIdleConnections()
+			return nil
+		}
+	}
+	return func() error { return nil }
+}
+
+func newClientSignerGate(signer crypto.Signer) (*clientSignerGate, error) {
+	if isNilSigner(signer) {
+		return nil, configurationError("ClientSigner is required", nil)
+	}
+	publicKeyDER, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return nil, configurationError("ClientSigner public key is invalid", err)
+	}
+	if _, err := x509.ParsePKIXPublicKey(publicKeyDER); err != nil {
+		return nil, configurationError("ClientSigner public key is invalid", err)
+	}
+	return &clientSignerGate{
+		signer:       signer,
+		publicKeyDER: bytes.Clone(publicKeyDER),
+	}, nil
+}
+
+func (g *clientSignerGate) Public() crypto.PublicKey {
+	if g == nil {
+		return nil
+	}
+	publicKey, err := x509.ParsePKIXPublicKey(bytes.Clone(g.publicKeyDER))
+	if err != nil {
+		return nil
+	}
+	return publicKey
+}
+
+func (g *clientSignerGate) Sign(
+	random io.Reader,
+	digest []byte,
+	options crypto.SignerOpts,
+) ([]byte, error) {
+	if g == nil {
+		return nil, ErrClosed
+	}
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil, ErrClosed
+	}
+	g.active.Add(1)
+	signer := g.signer
+	g.mu.Unlock()
+
+	defer g.active.Done()
+	return signer.Sign(random, digest, options)
+}
+
+func (g *clientSignerGate) close() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
+func (g *clientSignerGate) waitAndRelease() {
+	if g == nil {
+		return
+	}
+	g.active.Wait()
+	g.mu.Lock()
+	g.signer = nil
+	g.mu.Unlock()
+}
+
+func (g *clientSignerGate) closeAndWait() {
+	g.close()
+	g.waitAndRelease()
 }
 
 func rejectRedirect(*http.Request, []*http.Request) error {
@@ -256,14 +497,14 @@ func rejectRedirect(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-func (c *Client) fixedTarget(path string) url.URL {
+func (c *clientState) fixedTarget(path string) url.URL {
 	target := c.origin
 	target.Path = path
 	target.RawPath = ""
 	return target
 }
 
-func (c *Client) entityTarget(prefix string, entityID string, suffix string) (url.URL, error) {
+func (c *clientState) entityTarget(prefix string, entityID string, suffix string) (url.URL, error) {
 	if err := validateEntityID(entityID); err != nil {
 		return url.URL{}, err
 	}
@@ -273,7 +514,7 @@ func (c *Client) entityTarget(prefix string, entityID string, suffix string) (ur
 	return target, nil
 }
 
-func (c *Client) execute(
+func (c *clientState) execute(
 	ctx context.Context,
 	method string,
 	target url.URL,
@@ -284,10 +525,15 @@ func (c *Client) execute(
 		return nil, errors.New("worker API context is required")
 	}
 	requestContext, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	if err := requestContext.Err(); err != nil {
+		cancel()
 		return nil, err
 	}
+	requestContext, httpClient, finish, err := c.beginRequest(requestContext, cancel)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	if int64(len(body)) > c.maximumRequestBytes {
 		return nil, fmt.Errorf("%w: maximum is %d bytes", ErrRequestTooLarge, c.maximumRequestBytes)
 	}
@@ -299,7 +545,10 @@ func (c *Client) execute(
 	case c.concurrentRequests <- struct{}{}:
 		defer func() { <-c.concurrentRequests }()
 	case <-requestContext.Done():
-		return nil, requestContext.Err()
+		return nil, context.Cause(requestContext)
+	}
+	if err := context.Cause(requestContext); err != nil {
+		return nil, err
 	}
 	requestBody := bytes.Clone(body)
 
@@ -319,25 +568,33 @@ func (c *Client) execute(
 	}
 	request.ContentLength = int64(len(requestBody))
 
-	response, err := c.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
+		var closeError error
 		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
+			closeError = response.Body.Close()
 		}
-		return nil, fmt.Errorf("worker API request failed: %w", err)
+		return nil, fmt.Errorf(
+			"worker API request failed: %w",
+			errors.Join(err, context.Cause(requestContext), closeError),
+		)
 	}
 	if response == nil {
 		return nil, errors.New("worker API transport returned a nil response")
 	}
 	if err := validateResponseHeaders(response.Header); err != nil {
+		var closeError error
 		if response.Body != nil {
-			_ = response.Body.Close()
+			closeError = response.Body.Close()
 		}
-		return nil, err
+		return nil, errors.Join(err, closeError)
 	}
 	responseBody, err := readResponseBody(response, c.maximumResponseBytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, context.Cause(requestContext))
+	}
+	if errors.Is(context.Cause(requestContext), ErrClosed) {
+		return nil, ErrClosed
 	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		return nil, ErrRedirect
@@ -358,6 +615,40 @@ func (c *Client) execute(
 		}
 	}
 	return json.RawMessage(responseBody), nil
+}
+
+func (c *clientState) beginRequest(
+	requestContext context.Context,
+	timeoutCancel context.CancelFunc,
+) (context.Context, *http.Client, func(), error) {
+	operationContext, operationCancel := context.WithCancelCause(requestContext)
+
+	c.lifecycleMu.Lock()
+	if c.closed {
+		c.lifecycleMu.Unlock()
+		operationCancel(ErrClosed)
+		timeoutCancel()
+		return nil, nil, nil, ErrClosed
+	}
+	c.nextRequest++
+	requestID := c.nextRequest
+	c.requests[requestID] = operationCancel
+	c.active.Add(1)
+	httpClient := c.httpClient
+	c.lifecycleMu.Unlock()
+
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			c.lifecycleMu.Lock()
+			delete(c.requests, requestID)
+			c.lifecycleMu.Unlock()
+			operationCancel(nil)
+			timeoutCancel()
+			c.active.Done()
+		})
+	}
+	return operationContext, httpClient, finish, nil
 }
 
 func readResponseBody(response *http.Response, maximumBytes int64) ([]byte, error) {
