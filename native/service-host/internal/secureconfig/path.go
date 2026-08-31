@@ -15,32 +15,10 @@ type pathPlan struct {
 }
 
 func planCanonicalFilePath(path string) (pathPlan, error) {
-	if !utf8.ValidString(path) || strings.ContainsRune(path, utf8.RuneError) || strings.ContainsRune(path, '\x00') {
-		return pathPlan{}, fmt.Errorf("%w: path is not well-formed Unicode", ErrInvalidPath)
+	if err := validateCanonicalAbsolutePath(path, false); err != nil {
+		return pathPlan{}, err
 	}
-	if len(utf16.Encode([]rune(path))) > maximumWindowsPathUnits {
-		return pathPlan{}, fmt.Errorf("%w: path exceeds the Windows UTF-16 limit", ErrInvalidPath)
-	}
-	if len(path) < 3 || path[0] < 'A' || path[0] > 'Z' || path[1] != ':' || path[2] != '\\' {
-		return pathPlan{}, fmt.Errorf("%w: expected an uppercase local drive path", ErrInvalidPath)
-	}
-	if strings.Contains(path, "/") || strings.Contains(path[2:], ":") {
-		return pathPlan{}, fmt.Errorf("%w: alternate separators and data streams are not permitted", ErrInvalidPath)
-	}
-	if len(path) == 3 {
-		return pathPlan{}, fmt.Errorf("%w: the volume root is not a file", ErrInvalidPath)
-	}
-	if strings.HasSuffix(path, `\`) {
-		return pathPlan{}, fmt.Errorf("%w: trailing separators are not canonical", ErrInvalidPath)
-	}
-
 	components := strings.Split(path[3:], `\`)
-	for _, component := range components {
-		if err := validatePathComponent(component); err != nil {
-			return pathPlan{}, err
-		}
-	}
-
 	ancestors := make([]string, 0, len(components))
 	current := path[:3]
 	ancestors = append(ancestors, current)
@@ -55,12 +33,62 @@ func planCanonicalFilePath(path string) (pathPlan, error) {
 	return pathPlan{ancestors: ancestors, file: path}, nil
 }
 
+func resolveManagedAnchor(plan pathPlan, anchor string) (int, error) {
+	if err := validateCanonicalAbsolutePath(anchor, false); err != nil {
+		return -1, fmt.Errorf("%w: ManagedAnchorPath is invalid: %v", ErrInvalidOptions, err)
+	}
+	for index := 1; index < len(plan.ancestors); index++ {
+		if strings.EqualFold(plan.ancestors[index], anchor) {
+			return index, nil
+		}
+	}
+	return -1, fmt.Errorf(
+		"%w: ManagedAnchorPath must be a non-volume-root strict ancestor of the target file",
+		ErrInvalidOptions,
+	)
+}
+
+func validateCanonicalAbsolutePath(path string, allowVolumeRoot bool) error {
+	if !utf8.ValidString(path) || strings.ContainsRune(path, utf8.RuneError) || strings.ContainsRune(path, '\x00') {
+		return fmt.Errorf("%w: path is not well-formed Unicode", ErrInvalidPath)
+	}
+	if len(utf16.Encode([]rune(path))) > maximumWindowsPathUnits {
+		return fmt.Errorf("%w: path exceeds the Windows UTF-16 limit", ErrInvalidPath)
+	}
+	if len(path) < 3 || path[0] < 'A' || path[0] > 'Z' || path[1] != ':' || path[2] != '\\' {
+		return fmt.Errorf("%w: expected an uppercase local drive path", ErrInvalidPath)
+	}
+	if strings.Contains(path, "/") || strings.Contains(path[2:], ":") {
+		return fmt.Errorf("%w: alternate separators and data streams are not permitted", ErrInvalidPath)
+	}
+	if len(path) == 3 {
+		if allowVolumeRoot {
+			return nil
+		}
+		return fmt.Errorf("%w: the volume root is not permitted", ErrInvalidPath)
+	}
+	if strings.HasSuffix(path, `\`) {
+		return fmt.Errorf("%w: trailing separators are not canonical", ErrInvalidPath)
+	}
+
+	components := strings.Split(path[3:], `\`)
+	for _, component := range components {
+		if err := validatePathComponent(component); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validatePathComponent(component string) error {
 	if component == "" || component == "." || component == ".." {
 		return fmt.Errorf("%w: empty and relative components are not permitted", ErrInvalidPath)
 	}
 	if strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
 		return fmt.Errorf("%w: trailing dots and spaces are not canonical", ErrInvalidPath)
+	}
+	if strings.ContainsRune(component, '~') {
+		return fmt.Errorf("%w: DOS short-name markers are not permitted", ErrInvalidPath)
 	}
 	for _, character := range component {
 		if character < 32 || strings.ContainsRune(`<>:"|?*`, character) {

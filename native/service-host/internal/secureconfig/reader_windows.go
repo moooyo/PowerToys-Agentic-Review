@@ -12,22 +12,36 @@ func Read(path string, options Options) (Result, error) {
 
 type windowsBackend struct{}
 
-func (windowsBackend) OpenRoot(path string) (directoryHandle, error) {
-	return winfile.OpenTraversalRoot(path, winfile.OpenOptions{VolumeUse: winfile.VolumeUseReadOnly})
+func (windowsBackend) OpenRoot(path string, mode winfile.SecurityMode) (directoryHandle, error) {
+	return winfile.OpenTraversalRoot(path, winfile.OpenOptions{
+		VolumeUse: winfile.VolumeUseReadOnly, SecurityMode: mode,
+	})
 }
 
-func (windowsBackend) OpenDirectory(parent directoryHandle, component string) (directoryHandle, error) {
+func (windowsBackend) OpenDirectory(
+	parent directoryHandle,
+	component string,
+	mode winfile.SecurityMode,
+) (directoryHandle, error) {
 	directory, ok := parent.(*winfile.Directory)
 	if !ok {
 		return nil, ErrInvalidEvidence
 	}
-	return directory.OpenDirectoryComponent(component, winfile.OpenOptions{VolumeUse: winfile.VolumeUseReadOnly})
+	return directory.OpenDirectoryComponent(component, winfile.OpenOptions{
+		VolumeUse: winfile.VolumeUseReadOnly, SecurityMode: mode,
+	})
 }
 
-func (windowsBackend) OpenFile(parent directoryHandle, component string) (fileHandle, error) {
+func (windowsBackend) OpenFile(
+	parent directoryHandle,
+	component string,
+	mode winfile.SecurityMode,
+) (fileHandle, error) {
 	directory, ok := parent.(*winfile.Directory)
 	if !ok {
 		return nil, ErrInvalidEvidence
 	}
-	return directory.OpenFileComponent(component, winfile.OpenOptions{VolumeUse: winfile.VolumeUseReadOnly})
+	return directory.OpenFileComponent(component, winfile.OpenOptions{
+		VolumeUse: winfile.VolumeUseReadOnly, SecurityMode: mode,
+	})
 }

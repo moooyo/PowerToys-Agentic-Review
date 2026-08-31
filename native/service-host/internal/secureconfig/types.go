@@ -48,11 +48,15 @@ type Result struct {
 	Ancestors     []ObjectEvidence
 }
 
-// Options controls one secure configuration read. Policy remains caller-owned
-// and is not closed by Read.
+// Options controls one secure configuration read. ManagedAnchorPath must be a
+// canonical non-volume-root directory that is a strict ancestor of the target
+// file. Ancestors before it use ambient structural security; it and every
+// descendant use managed structural security. Policy remains caller-owned and
+// is not closed by Read.
 type Options struct {
-	MaximumBytes uint64
-	Policy       SecurityPolicy
+	MaximumBytes      uint64
+	ManagedAnchorPath string
+	Policy            SecurityPolicy
 }
 
 // AncestorSecurityRequest describes one separately opened ancestor handle.

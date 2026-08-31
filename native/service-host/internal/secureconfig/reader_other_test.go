@@ -8,7 +8,10 @@ import (
 )
 
 func TestReadFailsClosedOutsideWindows(t *testing.T) {
-	result, err := Read(`C:\trusted\config.json`, Options{MaximumBytes: 64, Policy: &fixturePolicy{}})
+	result, err := Read(
+		`C:\trusted\config.json`,
+		Options{MaximumBytes: 64, ManagedAnchorPath: `C:\trusted`, Policy: &fixturePolicy{}},
+	)
 	if !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("Read returned %v", err)
 	}

@@ -39,7 +39,18 @@ func makeObjectEvidence(path string, evidence winfile.Evidence) ObjectEvidence {
 // canonical secureconfig evidence digest. It does not prove where the snapshot
 // came from; callers must retain their own opaque authorization provenance.
 func NewObjectEvidence(path string, evidence winfile.Evidence) (ObjectEvidence, error) {
-	if err := validateObjectEvidence(path, evidence.Kind, evidence, ^uint64(0)); err != nil {
+	return NewObjectEvidenceForMode(path, evidence.SecurityMode, evidence)
+}
+
+// NewObjectEvidenceForMode additionally requires the snapshot to report the
+// caller-selected structural security mode. This prevents a verifier from
+// accidentally accepting ambient evidence where managed evidence was required.
+func NewObjectEvidenceForMode(
+	path string,
+	expectedMode winfile.SecurityMode,
+	evidence winfile.Evidence,
+) (ObjectEvidence, error) {
+	if err := validateObjectEvidence(path, evidence.Kind, evidence, ^uint64(0), expectedMode); err != nil {
 		return ObjectEvidence{}, err
 	}
 	return makeObjectEvidence(path, evidence), nil
@@ -51,9 +62,33 @@ func DigestSecurityDescriptor(descriptor []byte) Digest {
 	return Digest(sha256.Sum256(descriptor))
 }
 
-func validateObjectEvidence(path string, kind winfile.ObjectKind, evidence winfile.Evidence, maximumBytes uint64) error {
+func validateObjectEvidence(
+	path string,
+	kind winfile.ObjectKind,
+	evidence winfile.Evidence,
+	maximumBytes uint64,
+	expectedMode winfile.SecurityMode,
+) error {
+	if kind != winfile.ObjectKindFile && kind != winfile.ObjectKindDirectory {
+		return fmt.Errorf("%w: %s requires an unknown object kind", ErrInvalidEvidence, path)
+	}
 	if evidence.Kind != kind {
 		return fmt.Errorf("%w: %s reports kind %s", ErrInvalidEvidence, path, evidence.Kind)
+	}
+	if expectedMode != winfile.SecurityModeManaged && expectedMode != winfile.SecurityModeAmbientAncestor {
+		return fmt.Errorf("%w: %w: %s requires an unknown security mode", ErrInvalidEvidence, winfile.ErrInvalidOptions, path)
+	}
+	if evidence.SecurityMode != expectedMode {
+		return fmt.Errorf(
+			"%w: %s reports security mode %d, expected %d",
+			ErrInvalidEvidence,
+			path,
+			evidence.SecurityMode,
+			expectedMode,
+		)
+	}
+	if expectedMode == winfile.SecurityModeAmbientAncestor && kind != winfile.ObjectKindDirectory {
+		return fmt.Errorf("%w: %w: ambient security mode requires a directory", ErrInvalidEvidence, winfile.ErrInvalidOptions)
 	}
 	if evidence.Path.RequestedPath != path {
 		return fmt.Errorf("%w: evidence path %q does not match %q", ErrInvalidEvidence, evidence.Path.RequestedPath, path)
@@ -84,11 +119,19 @@ func validateObjectEvidence(path string, kind winfile.ObjectKind, evidence winfi
 		return fmt.Errorf("%w: %s was not inspected for read-only use", ErrInvalidEvidence, path)
 	}
 	security := evidence.Security
-	requiredControl := securityDACLPresent | securityDACLProtected | securityDescriptorRelative
+	requiredControl := securityDACLPresent | securityDescriptorRelative
 	if security.OwnerSID == "" || security.GroupSID == "" || !security.DACLPresent || security.DACLNull ||
-		!security.DACLProtected || security.Control&requiredControl != requiredControl ||
+		security.Control&requiredControl != requiredControl ||
 		len(security.SelfRelativeDescriptor) == 0 {
 		return fmt.Errorf("%w: %w: %s has incomplete security descriptor evidence", ErrInvalidEvidence, winfile.ErrUnsafeSecurityDescriptor, path)
+	}
+	protectedByControl := security.Control&securityDACLProtected != 0
+	if security.DACLProtected != protectedByControl {
+		return fmt.Errorf("%w: %w: %s has inconsistent DACL protection evidence", ErrInvalidEvidence, winfile.ErrUnsafeSecurityDescriptor, path)
+	}
+	if expectedMode == winfile.SecurityModeManaged && (!security.DACLProtected ||
+		security.OwnerDefaulted || security.GroupDefaulted || security.DACLDefaulted) {
+		return fmt.Errorf("%w: %w: %s managed security is not protected and non-defaulted", ErrInvalidEvidence, winfile.ErrUnsafeSecurityDescriptor, path)
 	}
 	return nil
 }
@@ -170,9 +213,10 @@ func cloneObjectEvidence(value ObjectEvidence) ObjectEvidence {
 
 func digestObjectEvidence(path string, evidence winfile.Evidence) Digest {
 	encoder := evidenceDigestEncoder{hash: sha256.New()}
-	encoder.bytes([]byte("secureconfig-object-evidence-v1"))
+	encoder.bytes([]byte("secureconfig-object-evidence-v2"))
 	encoder.text(path)
 	encoder.u8(uint8(evidence.Kind))
+	encoder.u8(uint8(evidence.SecurityMode))
 	encoder.u64(evidence.Identity.VolumeSerialNumber)
 	encoder.bytes(evidence.Identity.FileID[:])
 	encoder.u32(evidence.Attributes)

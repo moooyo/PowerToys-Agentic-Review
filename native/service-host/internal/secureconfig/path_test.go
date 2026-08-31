@@ -35,6 +35,52 @@ func TestPlanCanonicalFilePathIncludesEveryAncestor(t *testing.T) {
 	}
 }
 
+func TestResolveManagedAnchorRequiresCanonicalStrictAncestor(t *testing.T) {
+	plan, err := planCanonicalFilePath(`C:\Program Files\AgenticReview\Trusted\config.json`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := resolveManagedAnchor(plan, `C:\PROGRAM FILES\AgenticReview`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 || plan.ancestors[index] != `C:\Program Files\AgenticReview` {
+		t.Fatalf("managed anchor index = %d", index)
+	}
+
+	for _, anchor := range []string{
+		"",
+		`C:\`,
+		`c:\Program Files\AgenticReview`,
+		`C:\Program Files\AgenticReview\Trusted\config.json`,
+		`C:\Program Files\Elsewhere`,
+		`C:\PROGRA~1\AgenticReview`,
+		`C:\Program Files\AgenticReview\Trusted\missing`,
+	} {
+		if _, err := resolveManagedAnchor(plan, anchor); !errors.Is(err, ErrInvalidOptions) {
+			t.Fatalf("resolveManagedAnchor(%q) returned %v", anchor, err)
+		}
+	}
+}
+
+func TestManagedAnchorAndTargetRejectDOSShortNames(t *testing.T) {
+	if _, err := planCanonicalFilePath(
+		`C:\PROGRA~1\AgenticReview\config.json`,
+	); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("DOS-short-name target returned %v", err)
+	}
+	plan, err := planCanonicalFilePath(`C:\Program Files\AgenticReview\config.json`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveManagedAnchor(
+		plan,
+		`C:\PROGRA~1\AgenticReview`,
+	); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("DOS-short-name managed anchor returned %v", err)
+	}
+}
+
 func TestPlanCanonicalFilePathRejectsNoncanonicalInputs(t *testing.T) {
 	tests := []string{
 		"",
@@ -46,6 +92,7 @@ func TestPlanCanonicalFilePathRejectsNoncanonicalInputs(t *testing.T) {
 		`C:\safe\\config.json`,
 		`C:\safe\config.json\`,
 		`C:\safe\config.json:payload`,
+		`C:\PROGRA~1\AgenticReview\config.json`,
 		`C:\safe\CON.json`,
 		"C:\\safe\\COM\u00b9.json",
 		"C:\\safe\\bad\x00name.json",
@@ -76,6 +123,24 @@ func TestEvidenceDigestExcludesDiagnosticsAndBindsSecurityEvidence(t *testing.T)
 	}
 }
 
+func TestEvidenceDigestBindsSecurityMode(t *testing.T) {
+	path := `C:\safe`
+	managed := fixtureEvidenceForMode(path, winfile.ObjectKindDirectory, 1, 0, winfile.SecurityModeManaged)
+	ambient := cloneEvidence(managed)
+	ambient.SecurityMode = winfile.SecurityModeAmbientAncestor
+	managedObject, err := NewObjectEvidence(path, managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambientObject, err := NewObjectEvidence(path, ambient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managedObject.EvidenceSHA256 == ambientObject.EvidenceSHA256 {
+		t.Fatal("security mode did not change the canonical evidence digest")
+	}
+}
+
 func TestNewObjectEvidenceValidatesAndDetachesWinfileSnapshot(t *testing.T) {
 	path := `C:\Program Files\AgenticReview\Worker\runtime\node.exe`
 	evidence := fixtureEvidence(path, winfile.ObjectKindFile, 41, 128)
@@ -97,6 +162,23 @@ func TestNewObjectEvidenceValidatesAndDetachesWinfileSnapshot(t *testing.T) {
 	invalid.Path.RequestedPath = `C:\Elsewhere\node.exe`
 	if _, err := NewObjectEvidence(path, invalid); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("NewObjectEvidence accepted inconsistent evidence: %v", err)
+	}
+	if _, err := NewObjectEvidenceForMode(
+		path,
+		winfile.SecurityModeAmbientAncestor,
+		evidence,
+	); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("NewObjectEvidenceForMode accepted a mode mismatch: %v", err)
+	}
+	unknownMode := cloneEvidence(evidence)
+	unknownMode.SecurityMode = winfile.SecurityMode(255)
+	if _, err := NewObjectEvidence(path, unknownMode); !errors.Is(err, winfile.ErrInvalidOptions) {
+		t.Fatalf("NewObjectEvidence accepted an unknown mode: %v", err)
+	}
+	unknownKind := cloneEvidence(evidence)
+	unknownKind.Kind = winfile.ObjectKindUnknown
+	if _, err := NewObjectEvidence(path, unknownKind); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("NewObjectEvidence accepted an unknown object kind: %v", err)
 	}
 }
 
@@ -149,15 +231,65 @@ func TestValidateObjectEvidenceRejectsUnsafeClaims(t *testing.T) {
 			},
 			want: winfile.ErrUnsafeSecurityDescriptor,
 		},
+		{
+			name: "defaulted managed DACL",
+			mutate: func(value *winfile.Evidence) {
+				value.Security.DACLDefaulted = true
+			},
+			want: winfile.ErrUnsafeSecurityDescriptor,
+		},
+		{
+			name: "mode mismatch",
+			mutate: func(value *winfile.Evidence) {
+				value.SecurityMode = winfile.SecurityModeAmbientAncestor
+			},
+			want: ErrInvalidEvidence,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			evidence := fixtureEvidence(path, winfile.ObjectKindFile, 10, 3)
 			test.mutate(&evidence)
-			err := validateObjectEvidence(path, winfile.ObjectKindFile, evidence, 64)
+			err := validateObjectEvidence(
+				path,
+				winfile.ObjectKindFile,
+				evidence,
+				64,
+				winfile.SecurityModeManaged,
+			)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("validateObjectEvidence returned %v, want %v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestAmbientObjectEvidenceAllowsInheritedAndDefaultedSecurity(t *testing.T) {
+	path := `C:\Program Files`
+	evidence := fixtureEvidenceForMode(
+		path,
+		winfile.ObjectKindDirectory,
+		10,
+		0,
+		winfile.SecurityModeAmbientAncestor,
+	)
+	evidence.Security.OwnerDefaulted = true
+	evidence.Security.GroupDefaulted = true
+	evidence.Security.DACLDefaulted = true
+	evidence.Security.DACLProtected = false
+	evidence.Security.Control = securityDACLPresent | securityDescriptorRelative
+	if _, err := NewObjectEvidenceForMode(
+		path,
+		winfile.SecurityModeAmbientAncestor,
+		evidence,
+	); err != nil {
+		t.Fatalf("ambient evidence was rejected: %v", err)
+	}
+	if _, err := NewObjectEvidenceForMode(
+		path,
+		winfile.SecurityModeManaged,
+		evidence,
+	); !errors.Is(err, ErrInvalidEvidence) {
+		t.Fatalf("managed validation accepted ambient evidence: %v", err)
 	}
 }

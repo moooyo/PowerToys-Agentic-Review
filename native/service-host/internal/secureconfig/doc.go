@@ -9,6 +9,12 @@
 // This is an aggregate proof over separately inspected components; it is not a
 // claim that any single winfile handle validated its own ancestors.
 //
+// A caller-selected managed anchor divides structural descriptor handling.
+// Operating-system ancestors before the anchor may use inherited or defaulted
+// ambient security. The anchor, its descendants, and the file must use
+// protected, non-defaulted managed security. SecurityPolicy still makes the
+// semantic authorization decision for every opened object in both regions.
+//
 // The retained handles deny delete sharing during this transaction. That does
 // not prove durable immutability after Read returns. The supplied SecurityPolicy
 // must enforce the deployment's write, delete, DACL, owner, and parent-directory

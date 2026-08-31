@@ -24,9 +24,9 @@ type fileHandle interface {
 }
 
 type fileBackend interface {
-	OpenRoot(string) (directoryHandle, error)
-	OpenDirectory(directoryHandle, string) (directoryHandle, error)
-	OpenFile(directoryHandle, string) (fileHandle, error)
+	OpenRoot(string, winfile.SecurityMode) (directoryHandle, error)
+	OpenDirectory(directoryHandle, string, winfile.SecurityMode) (directoryHandle, error)
+	OpenFile(directoryHandle, string, winfile.SecurityMode) (fileHandle, error)
 }
 
 type openedResource struct {
@@ -53,6 +53,10 @@ func readWithBackend(path string, options Options, backend fileBackend) (result 
 	if isNilInterface(backend) {
 		return Result{}, fmt.Errorf("%w: file backend is required", ErrInvalidOptions)
 	}
+	managedAnchorIndex, err := resolveManagedAnchor(plan, options.ManagedAnchorPath)
+	if err != nil {
+		return Result{}, err
+	}
 
 	resources := make([]openedResource, 0, len(plan.ancestors)+1)
 	defer func() {
@@ -75,12 +79,16 @@ func readWithBackend(path string, options Options, backend fileBackend) (result 
 	var parent directoryHandle
 
 	for index, ancestorPath := range plan.ancestors {
+		securityMode := winfile.SecurityModeAmbientAncestor
+		if index >= managedAnchorIndex {
+			securityMode = winfile.SecurityModeManaged
+		}
 		var directory directoryHandle
 		var openErr error
 		if index == 0 {
-			directory, openErr = backend.OpenRoot(ancestorPath)
+			directory, openErr = backend.OpenRoot(ancestorPath, securityMode)
 		} else {
-			directory, openErr = backend.OpenDirectory(parent, finalPathComponent(ancestorPath))
+			directory, openErr = backend.OpenDirectory(parent, finalPathComponent(ancestorPath), securityMode)
 		}
 		if openErr != nil {
 			return Result{}, fmt.Errorf("open configuration ancestor %s: %w", ancestorPath, openErr)
@@ -90,7 +98,13 @@ func readWithBackend(path string, options Options, backend fileBackend) (result 
 		parent = directory
 
 		evidence := directory.Evidence()
-		if evidenceErr := validateObjectEvidence(ancestorPath, winfile.ObjectKindDirectory, evidence, options.MaximumBytes); evidenceErr != nil {
+		if evidenceErr := validateObjectEvidence(
+			ancestorPath,
+			winfile.ObjectKindDirectory,
+			evidence,
+			options.MaximumBytes,
+			securityMode,
+		); evidenceErr != nil {
 			return Result{}, evidenceErr
 		}
 		object := makeObjectEvidence(ancestorPath, evidence)
@@ -115,13 +129,19 @@ func readWithBackend(path string, options Options, backend fileBackend) (result 
 		ancestorEvidence = append(ancestorEvidence, object)
 	}
 
-	file, openErr := backend.OpenFile(parent, finalPathComponent(plan.file))
+	file, openErr := backend.OpenFile(parent, finalPathComponent(plan.file), winfile.SecurityModeManaged)
 	if openErr != nil {
 		return Result{}, fmt.Errorf("open configuration file %s: %w", plan.file, openErr)
 	}
 	resources = append(resources, openedResource{path: plan.file, close: file.Close})
 	fileEvidence := file.Evidence()
-	if evidenceErr := validateObjectEvidence(plan.file, winfile.ObjectKindFile, fileEvidence, options.MaximumBytes); evidenceErr != nil {
+	if evidenceErr := validateObjectEvidence(
+		plan.file,
+		winfile.ObjectKindFile,
+		fileEvidence,
+		options.MaximumBytes,
+		winfile.SecurityModeManaged,
+	); evidenceErr != nil {
 		return Result{}, evidenceErr
 	}
 	fileObject := makeObjectEvidence(plan.file, fileEvidence)

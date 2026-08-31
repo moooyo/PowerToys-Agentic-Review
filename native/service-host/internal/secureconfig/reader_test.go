@@ -10,13 +10,15 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
+const fixtureManagedAnchor = `C:\trusted`
+
 func TestReadWithBackendRetainsHandlesAndReturnsDetachedEvidence(t *testing.T) {
 	path := `C:\trusted\config\service.json`
 	events := make([]string, 0)
 	backend := newFixtureBackend(path, []byte("config"), &events)
 	policy := &fixturePolicy{events: &events, mutateRequests: true}
 
-	result, err := readWithBackend(path, Options{MaximumBytes: 64, Policy: policy}, backend)
+	result, err := readWithBackend(path, readerOptions(64, policy), backend)
 	if err != nil {
 		t.Fatalf("readWithBackend returned an error: %v", err)
 	}
@@ -60,6 +62,20 @@ func TestReadWithBackendRetainsHandlesAndReturnsDetachedEvidence(t *testing.T) {
 		result.File.SecurityDescriptorSHA256 == (Digest{}) {
 		t.Fatalf("file evidence is incomplete: %#v", result.File)
 	}
+	if result.Ancestors[0].Evidence.SecurityMode != winfile.SecurityModeAmbientAncestor ||
+		result.Ancestors[1].Evidence.SecurityMode != winfile.SecurityModeManaged ||
+		result.Ancestors[2].Evidence.SecurityMode != winfile.SecurityModeManaged ||
+		result.File.Evidence.SecurityMode != winfile.SecurityModeManaged {
+		t.Fatalf("unexpected ambient/managed mode transition: %#v", result)
+	}
+	if len(policy.ancestorRequests) != 3 {
+		t.Fatalf("policy received %d ancestor requests", len(policy.ancestorRequests))
+	}
+	for index, request := range policy.ancestorRequests {
+		if request.Index != index || request.Count != 3 || request.IsVolumeRoot != (index == 0) {
+			t.Fatalf("policy ancestor request %d = %#v", index, request)
+		}
+	}
 	if result.File.Evidence.Security.SelfRelativeDescriptor[0] == 0xff {
 		t.Fatal("policy mutation escaped its detached evidence request")
 	}
@@ -71,6 +87,101 @@ func TestReadWithBackendRetainsHandlesAndReturnsDetachedEvidence(t *testing.T) {
 	}
 	if result.File.Evidence.Security.SelfRelativeDescriptor[0] == 0xee {
 		t.Fatal("result evidence aliases backend storage")
+	}
+}
+
+func TestReadWithBackendAllowsAmbientSecurityBeforeManagedAnchor(t *testing.T) {
+	path := `C:\ambient\parent\managed\service.json`
+	anchor := `C:\ambient\parent\managed`
+	events := make([]string, 0)
+	backend := newFixtureBackendWithAnchor(path, []byte("config"), &events, anchor)
+	for index := 0; index < 3; index++ {
+		makeAmbientSecurity(&backend.directories[index].evidence)
+	}
+	result, err := readWithBackend(path, Options{
+		MaximumBytes: 64, ManagedAnchorPath: `C:\AMBIENT\PARENT\MANAGED`,
+		Policy: &fixturePolicy{events: &events},
+	}, backend)
+	if err != nil {
+		t.Fatalf("readWithBackend rejected ambient ancestors: %v", err)
+	}
+	for index, ancestor := range result.Ancestors {
+		want := winfile.SecurityModeAmbientAncestor
+		if index >= 3 {
+			want = winfile.SecurityModeManaged
+		}
+		if ancestor.Evidence.SecurityMode != want || backend.requested[ancestor.Path] != want {
+			t.Fatalf("ancestor %s mode = %d, requested %d, want %d", ancestor.Path, ancestor.Evidence.SecurityMode, backend.requested[ancestor.Path], want)
+		}
+	}
+	if result.File.Evidence.SecurityMode != winfile.SecurityModeManaged ||
+		backend.requested[path] != winfile.SecurityModeManaged {
+		t.Fatal("configuration file was not opened and validated as managed")
+	}
+}
+
+func TestReadWithBackendRejectsManagedSecurityAndModeMismatch(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*fixtureBackend)
+		want   error
+	}{
+		{
+			name: "managed descriptor",
+			mutate: func(backend *fixtureBackend) {
+				makeAmbientSecurity(&backend.directories[1].evidence)
+				backend.directories[1].evidence.SecurityMode = winfile.SecurityModeManaged
+			},
+			want: winfile.ErrUnsafeSecurityDescriptor,
+		},
+		{
+			name: "ambient mode mismatch",
+			mutate: func(backend *fixtureBackend) {
+				backend.directories[0].evidence.SecurityMode = winfile.SecurityModeManaged
+			},
+			want: ErrInvalidEvidence,
+		},
+		{
+			name: "file mode mismatch",
+			mutate: func(backend *fixtureBackend) {
+				backend.file.evidence.SecurityMode = winfile.SecurityModeAmbientAncestor
+			},
+			want: ErrInvalidEvidence,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := make([]string, 0)
+			backend := newFixtureBackend(`C:\trusted\service.json`, []byte("abc"), &events)
+			test.mutate(backend)
+			_, err := readWithBackend(
+				`C:\trusted\service.json`,
+				readerOptions(8, &fixturePolicy{events: &events}),
+				backend,
+			)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("readWithBackend returned %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestReadWithBackendFailsWhenManagedAnchorCannotBeOpened(t *testing.T) {
+	path := `C:\ambient\managed\service.json`
+	anchor := `C:\ambient\managed`
+	events := make([]string, 0)
+	backend := newFixtureBackendWithAnchor(path, []byte("abc"), &events, anchor)
+	backend.openErrorAt = anchor
+	_, err := readWithBackend(path, Options{
+		MaximumBytes: 8, ManagedAnchorPath: anchor, Policy: &fixturePolicy{events: &events},
+	}, backend)
+	if err == nil || backend.file.reads != 0 {
+		t.Fatalf("missing managed anchor returned %v with %d file reads", err, backend.file.reads)
+	}
+	for _, directory := range backend.directories[:2] {
+		if directory.opens != directory.closes {
+			t.Fatalf("opened directory %s was not closed", directory.path)
+		}
 	}
 }
 
@@ -102,7 +213,7 @@ func TestReadWithBackendRejectsVolumeAndIdentityDrift(t *testing.T) {
 			test.mutate(backend)
 			_, err := readWithBackend(
 				`C:\trusted\service.json`,
-				Options{MaximumBytes: 8, Policy: &fixturePolicy{events: &events}},
+				readerOptions(8, &fixturePolicy{events: &events}),
 				backend,
 			)
 			if !errors.Is(err, test.want) {
@@ -131,7 +242,7 @@ func TestReadWithBackendRejectsPolicyBeforeDescending(t *testing.T) {
 
 	_, err := readWithBackend(
 		`C:\trusted\config\service.json`,
-		Options{MaximumBytes: 8, Policy: policy},
+		readerOptions(8, policy),
 		backend,
 	)
 	if !errors.Is(err, ErrPolicyRejected) || !errors.Is(err, policyErr) {
@@ -151,7 +262,7 @@ func TestReadWithBackendRejectsOversizeAndUnstableObjects(t *testing.T) {
 		backend := newFixtureBackend(`C:\trusted\service.json`, []byte("abc"), &events)
 		_, err := readWithBackend(
 			`C:\trusted\service.json`,
-			Options{MaximumBytes: 2, Policy: &fixturePolicy{events: &events}},
+			readerOptions(2, &fixturePolicy{events: &events}),
 			backend,
 		)
 		if !errors.Is(err, winfile.ErrTooLarge) || backend.file.reads != 0 {
@@ -165,7 +276,7 @@ func TestReadWithBackendRejectsOversizeAndUnstableObjects(t *testing.T) {
 		backend.file.verifyErr = winfile.ErrObjectChanged
 		_, err := readWithBackend(
 			`C:\trusted\service.json`,
-			Options{MaximumBytes: 8, Policy: &fixturePolicy{events: &events}},
+			readerOptions(8, &fixturePolicy{events: &events}),
 			backend,
 		)
 		if !errors.Is(err, winfile.ErrObjectChanged) {
@@ -179,7 +290,7 @@ func TestReadWithBackendRejectsOversizeAndUnstableObjects(t *testing.T) {
 		backend.directories[0].verifyErr = winfile.ErrIdentityChanged
 		_, err := readWithBackend(
 			`C:\trusted\service.json`,
-			Options{MaximumBytes: 8, Policy: &fixturePolicy{events: &events}},
+			readerOptions(8, &fixturePolicy{events: &events}),
 			backend,
 		)
 		if !errors.Is(err, winfile.ErrIdentityChanged) {
@@ -195,7 +306,7 @@ func TestReadWithBackendRejectsOversizeAndUnstableObjects(t *testing.T) {
 		backend.directories[1].securityOverride = &changed
 		_, err := readWithBackend(
 			`C:\trusted\service.json`,
-			Options{MaximumBytes: 8, Policy: &fixturePolicy{events: &events}},
+			readerOptions(8, &fixturePolicy{events: &events}),
 			backend,
 		)
 		if !errors.Is(err, ErrSecurityChanged) {
@@ -212,7 +323,7 @@ func TestReadWithBackendTreatsCloseFailureAsFatal(t *testing.T) {
 
 	result, err := readWithBackend(
 		`C:\trusted\service.json`,
-		Options{MaximumBytes: 8, Policy: &fixturePolicy{events: &events}},
+		readerOptions(8, &fixturePolicy{events: &events}),
 		backend,
 	)
 	if !errors.Is(err, closeErr) {
@@ -228,7 +339,9 @@ func TestReadWithBackendValidatesOptionsBeforeOpening(t *testing.T) {
 	tests := []Options{
 		{},
 		{MaximumBytes: 8},
-		{MaximumBytes: maximumReadableBytes() + 1, Policy: &fixturePolicy{}},
+		{MaximumBytes: 8, Policy: &fixturePolicy{}},
+		{MaximumBytes: 8, ManagedAnchorPath: `C:\elsewhere`, Policy: &fixturePolicy{}},
+		{MaximumBytes: maximumReadableBytes() + 1, ManagedAnchorPath: fixtureManagedAnchor, Policy: &fixturePolicy{}},
 	}
 	for _, options := range tests {
 		if _, err := readWithBackend(`C:\trusted\service.json`, options, backend); !errors.Is(err, ErrInvalidOptions) {
@@ -245,18 +358,35 @@ type fixtureBackend struct {
 	directories []*fixtureDirectory
 	file        *fixtureFile
 	data        []byte
+	requested   map[string]winfile.SecurityMode
+	openErrorAt string
 }
 
 func newFixtureBackend(path string, data []byte, events *[]string) *fixtureBackend {
+	return newFixtureBackendWithAnchor(path, data, events, fixtureManagedAnchor)
+}
+
+func newFixtureBackendWithAnchor(path string, data []byte, events *[]string, anchor string) *fixtureBackend {
 	plan, err := planCanonicalFilePath(path)
 	if err != nil {
 		panic(err)
 	}
-	backend := &fixtureBackend{events: events, data: append([]byte(nil), data...)}
+	anchorIndex, err := resolveManagedAnchor(plan, anchor)
+	if err != nil {
+		panic(err)
+	}
+	backend := &fixtureBackend{
+		events: events, data: append([]byte(nil), data...),
+		requested: make(map[string]winfile.SecurityMode),
+	}
 	for index, ancestor := range plan.ancestors {
+		mode := winfile.SecurityModeAmbientAncestor
+		if index >= anchorIndex {
+			mode = winfile.SecurityModeManaged
+		}
 		backend.directories = append(backend.directories, &fixtureDirectory{
 			path:     ancestor,
-			evidence: fixtureEvidence(ancestor, winfile.ObjectKindDirectory, byte(index+1), 0),
+			evidence: fixtureEvidenceForMode(ancestor, winfile.ObjectKindDirectory, byte(index+1), 0, mode),
 			events:   events,
 		})
 	}
@@ -269,21 +399,30 @@ func newFixtureBackend(path string, data []byte, events *[]string) *fixtureBacke
 	return backend
 }
 
-func (backend *fixtureBackend) OpenRoot(path string) (directoryHandle, error) {
+func (backend *fixtureBackend) OpenRoot(path string, mode winfile.SecurityMode) (directoryHandle, error) {
 	if len(backend.directories) == 0 || backend.directories[0].path != path {
 		return nil, fmt.Errorf("unexpected root %s", path)
 	}
 	directory := backend.directories[0]
+	backend.requested[path] = mode
 	directory.opens++
 	*backend.events = append(*backend.events, "open-root:"+path)
 	return directory, nil
 }
 
-func (backend *fixtureBackend) OpenDirectory(parent directoryHandle, component string) (directoryHandle, error) {
+func (backend *fixtureBackend) OpenDirectory(
+	parent directoryHandle,
+	component string,
+	mode winfile.SecurityMode,
+) (directoryHandle, error) {
 	parentPath := parent.Evidence().Path.RequestedPath
 	path := parentPath + `\` + component
 	if len(parentPath) == 3 {
 		path = parentPath + component
+	}
+	backend.requested[path] = mode
+	if path == backend.openErrorAt {
+		return nil, errors.New("fixture directory does not exist")
 	}
 	for _, directory := range backend.directories {
 		if directory.path == path {
@@ -295,12 +434,17 @@ func (backend *fixtureBackend) OpenDirectory(parent directoryHandle, component s
 	return nil, fmt.Errorf("unexpected directory %s", path)
 }
 
-func (backend *fixtureBackend) OpenFile(parent directoryHandle, component string) (fileHandle, error) {
+func (backend *fixtureBackend) OpenFile(
+	parent directoryHandle,
+	component string,
+	mode winfile.SecurityMode,
+) (fileHandle, error) {
 	parentPath := parent.Evidence().Path.RequestedPath
 	path := parentPath + `\` + component
 	if len(parentPath) == 3 {
 		path = parentPath + component
 	}
+	backend.requested[path] = mode
 	if backend.file.path != path {
 		return nil, fmt.Errorf("unexpected file %s", path)
 	}
@@ -394,13 +538,15 @@ func (file *fixtureFile) Close() error {
 }
 
 type fixturePolicy struct {
-	events         *[]string
-	rejectAncestor string
-	err            error
-	mutateRequests bool
+	events           *[]string
+	rejectAncestor   string
+	err              error
+	mutateRequests   bool
+	ancestorRequests []AncestorSecurityRequest
 }
 
 func (policy *fixturePolicy) CheckAncestor(request AncestorSecurityRequest) error {
+	policy.ancestorRequests = append(policy.ancestorRequests, request)
 	if policy.events != nil {
 		*policy.events = append(*policy.events, "policy-ancestor:"+request.Object.Path)
 	}
@@ -411,6 +557,15 @@ func (policy *fixturePolicy) CheckAncestor(request AncestorSecurityRequest) erro
 		return policy.err
 	}
 	return nil
+}
+
+func makeAmbientSecurity(evidence *winfile.Evidence) {
+	evidence.SecurityMode = winfile.SecurityModeAmbientAncestor
+	evidence.Security.OwnerDefaulted = true
+	evidence.Security.GroupDefaulted = true
+	evidence.Security.DACLDefaulted = true
+	evidence.Security.DACLProtected = false
+	evidence.Security.Control = securityDACLPresent | securityDescriptorRelative
 }
 
 func (policy *fixturePolicy) CheckFile(request FileSecurityRequest) error {
@@ -424,6 +579,16 @@ func (policy *fixturePolicy) CheckFile(request FileSecurityRequest) error {
 }
 
 func fixtureEvidence(path string, kind winfile.ObjectKind, identityByte byte, size uint64) winfile.Evidence {
+	return fixtureEvidenceForMode(path, kind, identityByte, size, winfile.SecurityModeManaged)
+}
+
+func fixtureEvidenceForMode(
+	path string,
+	kind winfile.ObjectKind,
+	identityByte byte,
+	size uint64,
+	mode winfile.SecurityMode,
+) winfile.Evidence {
 	attributes := uint32(0x20)
 	linkCount := uint32(1)
 	if kind == winfile.ObjectKindDirectory {
@@ -433,11 +598,12 @@ func fixtureEvidence(path string, kind winfile.ObjectKind, identityByte byte, si
 	fileID := [16]byte{}
 	fileID[0] = identityByte
 	return winfile.Evidence{
-		Kind:       kind,
-		Identity:   winfile.FileIdentity{VolumeSerialNumber: 0x1020304050607080, FileID: fileID},
-		Attributes: attributes,
-		Size:       size,
-		LinkCount:  linkCount,
+		Kind:         kind,
+		Identity:     winfile.FileIdentity{VolumeSerialNumber: 0x1020304050607080, FileID: fileID},
+		Attributes:   attributes,
+		Size:         size,
+		LinkCount:    linkCount,
+		SecurityMode: mode,
 		Path: winfile.PathEvidence{
 			RequestedPath:                path,
 			TerminalComponentReparseFree: true,
@@ -463,5 +629,11 @@ func fixtureEvidence(path string, kind winfile.ObjectKind, identityByte byte, si
 			Revision:               1,
 			SelfRelativeDescriptor: []byte{identityByte, 2, 3, 4},
 		},
+	}
+}
+
+func readerOptions(maximumBytes uint64, policy SecurityPolicy) Options {
+	return Options{
+		MaximumBytes: maximumBytes, ManagedAnchorPath: fixtureManagedAnchor, Policy: policy,
 	}
 }
