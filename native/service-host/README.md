@@ -18,6 +18,7 @@ blocks:
 - persisted CNG P-256 signing and Local Machine mTLS certificate acquisition with fixed provider,
   non-exportability, exact key-DACL digests, detached key identities, and signing-only policy checks;
 - handle-bound NTFS object, volume, and protected-DACL evidence;
+- handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
 - a fixed-origin TLS 1.3 Worker API client that accepts a non-exportable signer;
 - stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
@@ -26,11 +27,11 @@ blocks:
 - platform interfaces and an explicit unavailable production platform factory; and
 - pure Go tests for those contracts.
 
-The production Authenticode verifier, same-handle SCM wrapper/launch adapter, ServiceHost and
-wrapper process/token DACL bootstrap with readback, concrete config/manifest composition,
-role-specific RPC dispatchers, and final platform orchestration are not implemented yet. Both the
-Windows and non-Windows production platform factories therefore return an error. This binary cannot
-launch a Worker payload and must not be used to enable production execution.
+The same-handle SCM wrapper/launch adapter, ServiceHost and wrapper process/token DACL bootstrap
+with readback, concrete config/manifest composition, role-specific RPC dispatchers, and final
+platform orchestration are not implemented yet. Both the Windows and non-Windows production
+platform factories therefore return an error. This binary cannot launch a Worker payload and must
+not be used to enable production execution.
 
 ## Command line
 
@@ -98,6 +99,37 @@ Lexical environment-path validation is not sufficient for execution. The Windows
 bind `PATH` to manifest or trusted system directories, bind profile and temporary paths to the
 selected role's protected data root, and verify every directory by handle, volume identity, and
 DACL before launching Node.
+
+## Runtime Authenticode policy
+
+The Windows Authenticode verifier consumes the same already-open file handle used for image
+identity and hashing. `WinVerifyTrust` receives `WTD_CHOICE_FILE`, that handle in
+`WINTRUST_FILE_INFO.hFile`, a null path, and the PE subject GUID. There is no path reopen, catalog
+fallback, detached signature, UI, or URL-reference input. Verification state is always closed with
+`WTD_STATEACTION_CLOSE`, and a close failure makes the verification fail.
+
+Runtime verification accepts exactly one embedded primary signature at index zero. Secondary and
+nested signatures, multiple primary SignerInfo values, and a timestamp selected as the primary
+signer fail closed. Timestamp countersigners may exist, but signer identity is the DER SHA-256 of
+the chain leaf whose issuer and serial exactly match the verified primary SignerInfo. A timestamp
+countersigner, CA certificate, unrelated PKCS#7 certificate, or signer from another signature can
+never satisfy the configured leaf-certificate pin.
+
+The digest policy is `sha256-only`. WinVerifyTrust receives
+`CERT_STRONG_SIGN_PARA_OS_CURRENT`, and verification additionally requires the selected primary
+SignerInfo digest OID and the same provider state's PE indirect-data digest OID to both be SHA-256.
+The indirect digest must contain exactly 32 bytes, and a certificate chain carrying
+`CERT_TRUST_HAS_WEAK_SIGNATURE` is rejected. Every reported countersigner is separately resolved
+from the primary signer, required to be an error-free timestamp signer with a complete bounded
+chain, and never used as the executable signer identity.
+
+The runtime revocation evidence value is `runtime-cache-only-no-revocation-check`. WinVerifyTrust is
+called with `WTD_REVOKE_NONE`, `WTD_REVOCATION_CHECK_NONE`, and
+`WTD_CACHE_ONLY_URL_RETRIEVAL`; it performs no CRL or OCSP check and blocks trust-provider CRL and
+AIA retrieval. The verifier supplies no URL reference. The release pipeline, installer, and
+signer-pin rotation process must perform online code-signing revocation checks before authorizing a
+release. Independently, the Server remains the live Worker revocation authority through mTLS and
+can deny a revoked Worker regardless of its locally pinned executable signature.
 
 The Windows build currently rejects every configuration before opening it because the secure reader
 and expected ACL policy have not yet been composed with manifest verification and the production

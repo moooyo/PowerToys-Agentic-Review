@@ -48,6 +48,8 @@ func TestWindowsImplementationsSatisfyOpaqueContracts(t *testing.T) {
 	var _ processOpener = windowsProcessOpener{}
 	var _ PeerProcess = (*windowsStableProcess)(nil)
 	var _ ImageSubject = (*windowsImageSubject)(nil)
+	var _ windowsAuthenticodeSubject = (*windowsImageSubject)(nil)
+	var _ AuthenticodeVerifier = (*windowsAuthenticodeVerifier)(nil)
 }
 
 func TestWindowsProcessCloseRetainsHandleForRetry(t *testing.T) {

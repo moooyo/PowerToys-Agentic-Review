@@ -371,6 +371,30 @@ func verifyProcessImage(
 	if !authenticodeEvidence.Trusted {
 		return ImageEvidence{}, fmt.Errorf("%w: verifier did not report an approved signer", ErrAuthenticode)
 	}
+	if authenticodeEvidence.SignatureKind != AuthenticodeSignatureKindEmbedded ||
+		authenticodeEvidence.SignatureCount != 1 ||
+		authenticodeEvidence.VerifiedSignatureIndex != 0 {
+		return ImageEvidence{}, fmt.Errorf(
+			"%w: verifier did not report exactly one embedded primary signature",
+			ErrAuthenticode,
+		)
+	}
+	if authenticodeEvidence.RevocationPolicy != AuthenticodeRuntimeRevocationPolicy {
+		return ImageEvidence{}, fmt.Errorf(
+			"%w: verifier reported unexpected runtime revocation policy %q",
+			ErrAuthenticode,
+			authenticodeEvidence.RevocationPolicy,
+		)
+	}
+	if authenticodeEvidence.DigestPolicy != AuthenticodeDigestPolicySHA256Only ||
+		authenticodeEvidence.StrongSignaturePolicy != AuthenticodeStrongSignaturePolicyCurrent ||
+		authenticodeEvidence.SignerDigestAlgorithmOID != AuthenticodeSHA256ObjectIdentifier ||
+		authenticodeEvidence.FileDigestAlgorithmOID != AuthenticodeSHA256ObjectIdentifier {
+		return ImageEvidence{}, fmt.Errorf(
+			"%w: verifier did not report the required SHA-256 strong-sign policy",
+			ErrAuthenticode,
+		)
+	}
 	if strings.TrimSpace(authenticodeEvidence.SignerIdentity) == "" ||
 		strings.ContainsRune(authenticodeEvidence.SignerIdentity, '\x00') {
 		return ImageEvidence{}, fmt.Errorf("%w: verifier returned no auditable signer identity", ErrAuthenticode)

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"golang.org/x/sys/windows"
 )
 
@@ -280,6 +281,23 @@ func (image *windowsImageSubject) VerifyUnchanged() error {
 		return err
 	}
 	return compareWindowsImageSnapshots(image.baseline, current)
+}
+
+func (image *windowsImageSubject) withAuthenticodeSubject(
+	verify func(authenticode.Subject) (authenticode.Evidence, error),
+) (authenticode.Evidence, error) {
+	if image == nil {
+		return authenticode.Evidence{}, ErrClosed
+	}
+	if verify == nil {
+		return authenticode.Evidence{}, errors.New("Authenticode verification callback is required")
+	}
+	image.mu.Lock()
+	defer image.mu.Unlock()
+	if image.handle == 0 {
+		return authenticode.Evidence{}, ErrClosed
+	}
+	return authenticode.WithBorrowedFileHandle(image.handle, verify)
 }
 
 func (image *windowsImageSubject) Close() error {

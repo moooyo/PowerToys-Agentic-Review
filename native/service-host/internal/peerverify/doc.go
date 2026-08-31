@@ -9,7 +9,8 @@
 // protected installation tree and trusted SCM launch evidence, then perform
 // the protocol-level authentication required by the ServiceHost threat model.
 //
-// This package intentionally provides no production Authenticode, SCM wrapper,
-// or process/token DACL adapter. Production composition must remain fail-closed
-// until reviewed implementations supply all three prerequisites.
+// Production Authenticode verification is handle-bound and accepts exactly one
+// embedded primary signature. Production composition must remain fail-closed
+// until reviewed SCM wrapper and process/token DACL adapters supply the other
+// prerequisites.
 package peerverify

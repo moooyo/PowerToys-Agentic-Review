@@ -205,6 +205,7 @@ type fakeAuthenticodeVerifier struct {
 	signerDERSHA256 string
 	err             error
 	events          *[]string
+	mutateEvidence  func(*AuthenticodeEvidence)
 }
 
 func (v fakeAuthenticodeVerifier) VerifyAuthenticode(subject ImageSubject) (AuthenticodeEvidence, error) {
@@ -213,11 +214,23 @@ func (v fakeAuthenticodeVerifier) VerifyAuthenticode(subject ImageSubject) (Auth
 	if signerDigest == "" {
 		signerDigest = testSignerDERSHA256
 	}
-	return AuthenticodeEvidence{
+	evidence := AuthenticodeEvidence{
 		Trusted:                                v.trusted,
+		SignatureKind:                          AuthenticodeSignatureKindEmbedded,
+		SignatureCount:                         1,
+		VerifiedSignatureIndex:                 0,
+		RevocationPolicy:                       AuthenticodeRuntimeRevocationPolicy,
+		DigestPolicy:                           AuthenticodeDigestPolicySHA256Only,
+		StrongSignaturePolicy:                  AuthenticodeStrongSignaturePolicyCurrent,
+		SignerDigestAlgorithmOID:               AuthenticodeSHA256ObjectIdentifier,
+		FileDigestAlgorithmOID:                 AuthenticodeSHA256ObjectIdentifier,
 		SignerIdentity:                         "test signer",
 		VerifiedLeafSignerCertificateDERSHA256: signerDigest,
-	}, v.err
+	}
+	if v.mutateEvidence != nil {
+		v.mutateEvidence(&evidence)
+	}
+	return evidence, v.err
 }
 
 type recordingTokenVerifier struct {
@@ -462,6 +475,58 @@ func TestVerifyRejectsImageAndTokenFailuresAndClosesSubjects(t *testing.T) {
 			mutate: func(f *verificationFixture) {
 				f.options.AuthenticodeVerifier = fakeAuthenticodeVerifier{
 					trusted: true, signerDERSHA256: digestString([]byte("wrong signer")), events: &f.events,
+				}
+			},
+			err: ErrAuthenticode,
+		},
+		{
+			name: "non-embedded Authenticode evidence",
+			mutate: func(f *verificationFixture) {
+				f.options.AuthenticodeVerifier = fakeAuthenticodeVerifier{
+					trusted: true,
+					events:  &f.events,
+					mutateEvidence: func(evidence *AuthenticodeEvidence) {
+						evidence.SignatureKind = "catalog"
+					},
+				}
+			},
+			err: ErrAuthenticode,
+		},
+		{
+			name: "multiple Authenticode signatures",
+			mutate: func(f *verificationFixture) {
+				f.options.AuthenticodeVerifier = fakeAuthenticodeVerifier{
+					trusted: true,
+					events:  &f.events,
+					mutateEvidence: func(evidence *AuthenticodeEvidence) {
+						evidence.SignatureCount = 2
+					},
+				}
+			},
+			err: ErrAuthenticode,
+		},
+		{
+			name: "unexpected Authenticode revocation policy",
+			mutate: func(f *verificationFixture) {
+				f.options.AuthenticodeVerifier = fakeAuthenticodeVerifier{
+					trusted: true,
+					events:  &f.events,
+					mutateEvidence: func(evidence *AuthenticodeEvidence) {
+						evidence.RevocationPolicy = "online"
+					},
+				}
+			},
+			err: ErrAuthenticode,
+		},
+		{
+			name: "weak Authenticode digest policy",
+			mutate: func(f *verificationFixture) {
+				f.options.AuthenticodeVerifier = fakeAuthenticodeVerifier{
+					trusted: true,
+					events:  &f.events,
+					mutateEvidence: func(evidence *AuthenticodeEvidence) {
+						evidence.FileDigestAlgorithmOID = "1.3.14.3.2.26"
+					},
 				}
 			},
 			err: ErrAuthenticode,

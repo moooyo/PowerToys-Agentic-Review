@@ -6,6 +6,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 )
 
 var (
@@ -118,23 +120,24 @@ type StableWrapper interface {
 	StableFacts() StableProcessFacts
 }
 
-// AuthenticodeEvidence is returned by a policy-aware verifier. Trusted may be
-// true only when the selected Authenticode signature and its trust policy both
-// pass. VerifiedLeafSignerCertificateDERSHA256 must be the SHA-256 of the exact
-// DER leaf certificate referenced by that same signature's SignerInfo. It must
-// never identify a chain CA, timestamp countersigner, unrelated PKCS#7
-// certificate, or a signer from another signature on a multi-signed file.
-type AuthenticodeEvidence struct {
-	Trusted                                bool
-	SignerIdentity                         string
-	VerifiedLeafSignerCertificateDERSHA256 string
-}
+// AuthenticodeEvidence is detached evidence from a policy-aware verifier.
+// The production runtime policy accepts only one embedded primary signature
+// and binds its exact SignerInfo leaf certificate DER to the configured pin.
+type AuthenticodeEvidence = authenticode.Evidence
+
+const (
+	AuthenticodeSignatureKindEmbedded        = authenticode.SignatureKindEmbedded
+	AuthenticodeRuntimeRevocationPolicy      = authenticode.RevocationPolicyRuntimeCacheOnlyNoCheck
+	AuthenticodeDigestPolicySHA256Only       = authenticode.DigestPolicySHA256Only
+	AuthenticodeStrongSignaturePolicyCurrent = authenticode.StrongSignaturePolicyWindowsOSCurrent
+	AuthenticodeSHA256ObjectIdentifier       = authenticode.SHA256ObjectIdentifier
+)
 
 // AuthenticodeVerifier validates the PE signature from the supplied reopened
 // file handle. It must not reopen ProcessPathDiagnostic or otherwise replace
-// the supplied subject with another path-based check. This package does not
-// provide a production implementation. A multi-signature verifier must bind
-// trust and the reported leaf certificate atomically to the same signature.
+// the supplied subject with another path-based check. A multi-signature
+// verifier must bind trust and the reported leaf certificate atomically to the
+// same signature.
 type AuthenticodeVerifier interface {
 	VerifyAuthenticode(ImageSubject) (AuthenticodeEvidence, error)
 }

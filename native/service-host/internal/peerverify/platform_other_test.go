@@ -20,3 +20,10 @@ func TestVerifyFailsClosedAndClosesWrapperOutsideWindows(t *testing.T) {
 		t.Fatalf("events = %v, want only wrapper-close", fixture.events)
 	}
 }
+
+func TestNewWindowsAuthenticodeVerifierFailsClosedOutsideWindows(t *testing.T) {
+	verifier, err := NewWindowsAuthenticodeVerifier()
+	if verifier != nil || !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("NewWindowsAuthenticodeVerifier returned (%v, %v)", verifier, err)
+	}
+}
