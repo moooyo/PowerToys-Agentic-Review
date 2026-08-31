@@ -18,14 +18,18 @@ func TestFixedNodeArgumentsCannotBeExtendedByCallers(t *testing.T) {
 		"--enable-source-maps",
 		`C:\Program Files\AgenticReview\Worker\app\control.mjs`,
 		"--service-role=control",
-		"--servicehost-stdio",
+		"--servicehost-arwx-stdio",
+		"--servicehost-host-control-pipe=\\\\.\\pipe\\AgenticReview.ServiceHost.HostControl.v1." + strings.Repeat("a", 64),
 	}
-	if got := fixedNodeArguments(RoleControl, want[1]); !reflect.DeepEqual(got, want) {
+	if got := fixedNodeArguments(RoleControl, want[1], validLaunchSpec().HostControlPipeName); !reflect.DeepEqual(got, want) {
 		t.Fatalf("fixedNodeArguments() = %#v, want %#v", got, want)
 	}
 }
 
 func TestCreationContractRequiresHandleAndJobListsWithoutBreakaway(t *testing.T) {
+	if preHostControlProcessLimit != 1 {
+		t.Fatalf("pre-HostControl root Job process limit = %d, want 1", preHostControlProcessLimit)
+	}
 	wantAttributes := []processCreationAttribute{attributeHandleList, attributeJobList}
 	if got := requiredProcessCreationAttributes(); !reflect.DeepEqual(got, wantAttributes) {
 		t.Fatalf("requiredProcessCreationAttributes() = %v, want %v", got, wantAttributes)
@@ -39,6 +43,24 @@ func TestCreationContractRequiresHandleAndJobListsWithoutBreakaway(t *testing.T)
 	for _, forbidden := range []uint32{jobLimitBreakawayOK, jobLimitSilentBreakaway} {
 		if err := validateRootJobLimitFlags(rootJobRequiredLimitFlags | forbidden); err == nil {
 			t.Fatalf("root Job flags accepted forbidden breakaway flag 0x%x", forbidden)
+		}
+	}
+}
+
+func TestHostControlActivationRejectsAnyPreviousChildProcess(t *testing.T) {
+	if err := validateSingleNodeJobAccounting(1, 1); err != nil {
+		t.Fatalf("single Node accounting rejected: %v", err)
+	}
+	for _, accounting := range []struct {
+		total  uint32
+		active uint32
+	}{
+		{total: 2, active: 1}, // A short-lived child already exited.
+		{total: 2, active: 2},
+		{total: 1, active: 0},
+	} {
+		if err := validateSingleNodeJobAccounting(accounting.total, accounting.active); err == nil {
+			t.Fatalf("accounting total=%d active=%d unexpectedly accepted", accounting.total, accounting.active)
 		}
 	}
 }
@@ -174,6 +196,10 @@ func TestLaunchSpecRejectsCallerControlledContractViolations(t *testing.T) {
 		{name: "missing executable", mutate: func(spec *NodeLaunchSpec) { spec.ExecutablePath = "" }},
 		{name: "missing bundle", mutate: func(spec *NodeLaunchSpec) { spec.BundlePath = "" }},
 		{name: "missing directory", mutate: func(spec *NodeLaunchSpec) { spec.WorkingDirectory = "" }},
+		{name: "missing HostControl pipe", mutate: func(spec *NodeLaunchSpec) { spec.HostControlPipeName = "" }},
+		{name: "noncanonical HostControl pipe", mutate: func(spec *NodeLaunchSpec) {
+			spec.HostControlPipeName = `\\.\pipe\AgenticReview.ServiceHost.HostControl.v1.not-random`
+		}},
 		{name: "nil environment", mutate: func(spec *NodeLaunchSpec) { spec.Environment = nil }},
 		{name: "zero processes", mutate: func(spec *NodeLaunchSpec) { spec.MaximumProcesses = 0 }},
 		{name: "too many processes", mutate: func(spec *NodeLaunchSpec) { spec.MaximumProcesses = maximumRootJobProcesses + 1 }},
@@ -194,15 +220,16 @@ func TestLaunchSpecRejectsCallerControlledContractViolations(t *testing.T) {
 
 func validLaunchSpec() NodeLaunchSpec {
 	return NodeLaunchSpec{
-		ExecutablePath:     `C:\Program Files\AgenticReview\Worker\runtime\node.exe`,
-		BundlePath:         `C:\Program Files\AgenticReview\Worker\app\control.mjs`,
-		WorkingDirectory:   `C:\ProgramData\AgenticReview\Control`,
-		Role:               RoleControl,
-		OwnServiceSID:      testOwnServiceSID,
-		PeerServiceSID:     testPeerServiceSID,
-		Environment:        map[string]string{"NODE_ENV": "production"},
-		MaximumProcesses:   128,
-		MaximumMemoryBytes: 16 * 1024 * 1024 * 1024,
-		ShutdownTimeout:    2 * time.Minute,
+		ExecutablePath:      `C:\Program Files\AgenticReview\Worker\runtime\node.exe`,
+		BundlePath:          `C:\Program Files\AgenticReview\Worker\app\control.mjs`,
+		WorkingDirectory:    `C:\ProgramData\AgenticReview\Control`,
+		HostControlPipeName: `\\.\pipe\AgenticReview.ServiceHost.HostControl.v1.` + strings.Repeat("a", 64),
+		Role:                RoleControl,
+		OwnServiceSID:       testOwnServiceSID,
+		PeerServiceSID:      testPeerServiceSID,
+		Environment:         map[string]string{"NODE_ENV": "production"},
+		MaximumProcesses:    128,
+		MaximumMemoryBytes:  16 * 1024 * 1024 * 1024,
+		ShutdownTimeout:     2 * time.Minute,
 	}
 }

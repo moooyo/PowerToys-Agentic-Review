@@ -1,0 +1,56 @@
+//go:build !windows
+
+package hostcontrol
+
+import (
+	"context"
+
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
+)
+
+// Listener is an unavailable placeholder outside Windows.
+type Listener struct{}
+
+// Connection is an unavailable placeholder outside Windows.
+type Connection struct{}
+
+// Prepare fails closed outside Windows.
+func Prepare(Options) (*Listener, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Listener) PipeName() string {
+	return ""
+}
+
+func (*Listener) Accept(context.Context, winprocess.NodeProcess) (*Connection, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Listener) Close() error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Connection) Evidence() VerificationEvidence {
+	return VerificationEvidence{}
+}
+
+func (*Connection) Read([]byte) (int, error) {
+	return 0, ErrUnsupportedPlatform
+}
+
+func (*Connection) ReadContext(context.Context, []byte) (int, error) {
+	return 0, ErrUnsupportedPlatform
+}
+
+func (*Connection) Write([]byte) (int, error) {
+	return 0, ErrUnsupportedPlatform
+}
+
+func (*Connection) WriteContext(context.Context, []byte) (int, error) {
+	return 0, ErrUnsupportedPlatform
+}
+
+func (*Connection) Close() error {
+	return ErrUnsupportedPlatform
+}

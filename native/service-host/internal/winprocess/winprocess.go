@@ -22,7 +22,10 @@ type NodeLaunchSpec struct {
 	ExecutablePath   string
 	BundlePath       string
 	WorkingDirectory string
-	Role             Role
+	// HostControlPipeName is a per-launch rendezvous name created by
+	// hostcontrol before Node starts. The name is not an authentication secret.
+	HostControlPipeName string
+	Role                Role
 	// OwnServiceSID and PeerServiceSID must be independently verified,
 	// canonical S-1-5-80 service SIDs for distinct service identities.
 	OwnServiceSID      string
@@ -33,10 +36,29 @@ type NodeLaunchSpec struct {
 	ShutdownTimeout    time.Duration
 }
 
+// NodeIdentity is immutable process identity captured from the retained
+// CreateProcess handle before the suspended Node primary thread is resumed.
+type NodeIdentity struct {
+	ProcessID              uint32
+	CreationTime           time.Time
+	StartKeyAvailable      bool
+	StartKeySequenceNumber uint64
+}
+
 // NodeProcess owns the Node process handle, the service-root Job Object, and
 // the parent ends of the three standard-I/O pipes.
 type NodeProcess interface {
 	ProcessID() uint32
+	StableIdentity() NodeIdentity
+	// ObserveIdentity re-reads identity and liveness through the original
+	// retained process handle. It fails after Node exits or identity changes.
+	ObserveIdentity() (NodeIdentity, error)
+	// RootJobActiveProcessCount observes the original service-root Job handle.
+	RootJobActiveProcessCount() (uint32, error)
+	// ActivateAfterHostControl raises the root Job process limit from the
+	// launch-time value of one to the reviewed final limit. It succeeds only
+	// once, after proving Node has not created any child process.
+	ActivateAfterHostControl() error
 	StandardInput() io.WriteCloser
 	StandardOutput() io.ReadCloser
 	StandardError() io.ReadCloser

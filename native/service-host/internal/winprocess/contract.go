@@ -33,6 +33,9 @@ const (
 	noACEFlags                      uint8  = 0
 	maximumEnvironmentUnits                = 32_767
 	maximumRootJobProcesses                = 4_096
+	preHostControlProcessLimit      uint32 = 1
+	hostControlPipePrefix                  = `\\.\pipe\AgenticReview.ServiceHost.HostControl.v1.`
+	hostControlPipeNonceHexLength          = 64
 	localSystemSID                         = "S-1-5-18"
 	builtinAdministratorsSID               = "S-1-5-32-544"
 )
@@ -60,12 +63,13 @@ func requiredProcessCreationAttributes() []processCreationAttribute {
 	return []processCreationAttribute{attributeHandleList, attributeJobList}
 }
 
-func fixedNodeArguments(role Role, bundlePath string) []string {
+func fixedNodeArguments(role Role, bundlePath, hostControlPipeName string) []string {
 	return []string{
 		"--enable-source-maps",
 		bundlePath,
 		"--service-role=" + string(role),
-		"--servicehost-stdio",
+		"--servicehost-arwx-stdio",
+		"--servicehost-host-control-pipe=" + hostControlPipeName,
 	}
 }
 
@@ -174,6 +178,7 @@ func validateLaunchSpec(spec NodeLaunchSpec) error {
 		{name: "Node executable path", value: spec.ExecutablePath},
 		{name: "Node bundle path", value: spec.BundlePath},
 		{name: "working directory", value: spec.WorkingDirectory},
+		{name: "HostControl pipe name", value: spec.HostControlPipeName},
 	}
 	for _, path := range paths {
 		if !validText(path.value) {
@@ -182,6 +187,9 @@ func validateLaunchSpec(spec NodeLaunchSpec) error {
 	}
 	if spec.Role != RoleControl && spec.Role != RoleExecutor {
 		return errors.New("Node role must be control or executor")
+	}
+	if !validHostControlPipeName(spec.HostControlPipeName) {
+		return errors.New("HostControl pipe name must contain the fixed prefix and a lowercase 256-bit hexadecimal leaf")
 	}
 	if _, _, err := nodeDACLPolicies(spec.OwnServiceSID, spec.PeerServiceSID); err != nil {
 		return err
@@ -206,6 +214,34 @@ func validateLaunchSpec(spec NodeLaunchSpec) error {
 	}
 	_, err := buildEnvironmentBlock(spec.Environment)
 	return err
+}
+
+func validHostControlPipeName(value string) bool {
+	if !strings.HasPrefix(value, hostControlPipePrefix) {
+		return false
+	}
+	nonce := strings.TrimPrefix(value, hostControlPipePrefix)
+	if len(nonce) != hostControlPipeNonceHexLength {
+		return false
+	}
+	for _, character := range nonce {
+		if character >= '0' && character <= '9' || character >= 'a' && character <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validateSingleNodeJobAccounting(totalProcesses, activeProcesses uint32) error {
+	if totalProcesses != 1 || activeProcesses != 1 {
+		return fmt.Errorf(
+			"root Job process accounting is total=%d active=%d, want 1 and 1",
+			totalProcesses,
+			activeProcesses,
+		)
+	}
+	return nil
 }
 
 func validateRootJobLimitFlags(flags uint32) error {

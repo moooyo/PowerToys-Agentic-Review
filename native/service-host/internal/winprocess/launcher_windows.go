@@ -21,6 +21,7 @@ const (
 	procThreadAttributeJobList uintptr = 0x0002000D
 	jobDrainPollInterval               = 10 * time.Millisecond
 	failedLaunchWait                   = 5 * time.Second
+	nodeStillActiveExitCode    uint32  = 259
 )
 
 // LaunchNode starts exactly one reviewed Node executable and bundle in a new
@@ -37,7 +38,7 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 		return nil, err
 	}
 
-	arguments := fixedNodeArguments(spec.Role, spec.BundlePath)
+	arguments := fixedNodeArguments(spec.Role, spec.BundlePath, spec.HostControlPipeName)
 	commandLine := windows.ComposeCommandLine(append([]string{spec.ExecutablePath}, arguments...))
 	commandLineUTF16, err := windows.UTF16FromString(commandLine)
 	if err != nil {
@@ -97,7 +98,7 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 	parentFiles = append(parentFiles, stderrParent)
 	childHandles = append(childHandles, stderrChild)
 
-	job, err = createRootJob(spec.MaximumProcesses, uintptr(spec.MaximumMemoryBytes))
+	job, err = createRootJob(preHostControlProcessLimit, uintptr(spec.MaximumMemoryBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -171,10 +172,14 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 	if err := verifyRootJobBeforeResume(
 		job,
 		processInfo.ProcessId,
-		spec.MaximumProcesses,
+		preHostControlProcessLimit,
 		uintptr(spec.MaximumMemoryBytes),
 	); err != nil {
 		return nil, err
+	}
+	stableIdentity, err := observeNodeIdentity(processInfo.Process, processInfo.ProcessId)
+	if err != nil {
+		return nil, fmt.Errorf("capture suspended Node identity before resume: %w", err)
 	}
 	previousSuspendCount, err := windows.ResumeThread(processInfo.Thread)
 	if err != nil {
@@ -189,13 +194,16 @@ func LaunchNode(spec NodeLaunchSpec) (node NodeProcess, err error) {
 	processInfo.Thread = 0
 
 	result := &windowsNodeProcess{
-		processID:       processInfo.ProcessId,
-		process:         processInfo.Process,
-		job:             job,
-		standardInput:   stdinParent,
-		standardOutput:  stdoutParent,
-		standardError:   stderrParent,
-		shutdownTimeout: spec.ShutdownTimeout,
+		processID:        processInfo.ProcessId,
+		process:          processInfo.Process,
+		job:              job,
+		standardInput:    stdinParent,
+		standardOutput:   stdoutParent,
+		standardError:    stderrParent,
+		shutdownTimeout:  spec.ShutdownTimeout,
+		stableIdentity:   stableIdentity,
+		maximumProcesses: spec.MaximumProcesses,
+		maximumMemory:    uintptr(spec.MaximumMemoryBytes),
 	}
 	processInfo.Process = 0
 	job = 0
@@ -212,6 +220,18 @@ func createRootJob(maximumProcesses uint32, maximumMemory uintptr) (windows.Hand
 	if err != nil {
 		return 0, fmt.Errorf("create service-root Job Object: %w", err)
 	}
+	if err := setRootJobLimits(job, maximumProcesses, maximumMemory); err != nil {
+		_ = windows.CloseHandle(job)
+		return 0, err
+	}
+	if err := verifyRootJobLimits(job, maximumProcesses, maximumMemory); err != nil {
+		_ = windows.CloseHandle(job)
+		return 0, err
+	}
+	return job, nil
+}
+
+func setRootJobLimits(job windows.Handle, maximumProcesses uint32, maximumMemory uintptr) error {
 	information := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	information.BasicLimitInformation.LimitFlags = rootJobRequiredLimitFlags
 	information.BasicLimitInformation.ActiveProcessLimit = maximumProcesses
@@ -223,14 +243,9 @@ func createRootJob(maximumProcesses uint32, maximumMemory uintptr) (windows.Hand
 		uintptr(unsafe.Pointer(&information)),
 		uint32(unsafe.Sizeof(information)),
 	); err != nil {
-		_ = windows.CloseHandle(job)
-		return 0, fmt.Errorf("set service-root Job limits: %w", err)
+		return fmt.Errorf("set service-root Job limits: %w", err)
 	}
-	if err := verifyRootJobLimits(job, maximumProcesses, maximumMemory); err != nil {
-		_ = windows.CloseHandle(job)
-		return 0, err
-	}
-	return job, nil
+	return nil
 }
 
 func verifyRootJobBeforeResume(
@@ -245,13 +260,12 @@ func verifyRootJobBeforeResume(
 	if err := verifyOnlyJobMember(job, processID, maximumProcesses); err != nil {
 		return fmt.Errorf("verify atomic service-root Job membership before resume: %w", err)
 	}
-	accounting := windowsJobCounter{job: job}
-	active, err := accounting.ActiveProcessCount()
+	accounting, err := queryWindowsJobAccounting(job)
 	if err != nil {
-		return fmt.Errorf("query active service-root Job count before resume: %w", err)
+		return fmt.Errorf("query service-root Job accounting before resume: %w", err)
 	}
-	if active != 1 {
-		return fmt.Errorf("service-root Job active process count is %d before resume, want 1", active)
+	if err := validateSingleNodeJobAccounting(accounting.TotalProcesses, accounting.ActiveProcesses); err != nil {
+		return fmt.Errorf("verify service-root Job accounting before resume: %w", err)
 	}
 	return nil
 }
@@ -385,32 +399,104 @@ func cleanupFailedLaunch(job windows.Handle, processInfo windows.ProcessInformat
 }
 
 type windowsNodeProcess struct {
-	processID       uint32
-	process         windows.Handle
-	job             windows.Handle
-	standardInput   *os.File
-	standardOutput  *os.File
-	standardError   *os.File
-	shutdownTimeout time.Duration
+	processID        uint32
+	process          windows.Handle
+	job              windows.Handle
+	standardInput    *os.File
+	standardOutput   *os.File
+	standardError    *os.File
+	shutdownTimeout  time.Duration
+	stableIdentity   NodeIdentity
+	maximumProcesses uint32
+	maximumMemory    uintptr
 
 	jobMu                sync.Mutex
+	processMu            sync.RWMutex
 	terminationInitiated bool
+	hostControlActivated bool
 	closeOnce            sync.Once
 	closeErr             error
 }
 
 func (p *windowsNodeProcess) ProcessID() uint32             { return p.processID }
+func (p *windowsNodeProcess) StableIdentity() NodeIdentity  { return p.stableIdentity }
 func (p *windowsNodeProcess) StandardInput() io.WriteCloser { return p.standardInput }
 func (p *windowsNodeProcess) StandardOutput() io.ReadCloser { return p.standardOutput }
 func (p *windowsNodeProcess) StandardError() io.ReadCloser  { return p.standardError }
 
+func (p *windowsNodeProcess) ObserveIdentity() (NodeIdentity, error) {
+	if p == nil {
+		return NodeIdentity{}, errors.New("Node process is unavailable")
+	}
+	p.processMu.RLock()
+	defer p.processMu.RUnlock()
+	identity, err := observeNodeIdentity(p.process, p.processID)
+	if err != nil {
+		return NodeIdentity{}, err
+	}
+	if !sameNodeIdentity(identity, p.stableIdentity) {
+		return NodeIdentity{}, errors.New("retained Node process identity changed after launch")
+	}
+	return identity, nil
+}
+
+func (p *windowsNodeProcess) RootJobActiveProcessCount() (uint32, error) {
+	if p == nil {
+		return 0, errors.New("Node process is unavailable")
+	}
+	p.jobMu.Lock()
+	defer p.jobMu.Unlock()
+	if p.job == 0 {
+		return 0, errors.New("service-root Job handle is closed")
+	}
+	return (windowsJobCounter{job: p.job}).ActiveProcessCount()
+}
+
+func (p *windowsNodeProcess) ActivateAfterHostControl() error {
+	if p == nil {
+		return errors.New("Node process is unavailable")
+	}
+	p.jobMu.Lock()
+	defer p.jobMu.Unlock()
+	if p.hostControlActivated {
+		return errors.New("HostControl was already activated for this Node process")
+	}
+	if p.job == 0 {
+		return errors.New("service-root Job handle is closed")
+	}
+	before, err := queryWindowsJobAccounting(p.job)
+	if err != nil {
+		return fmt.Errorf("query root Job before HostControl activation: %w", err)
+	}
+	if err := validateSingleNodeJobAccounting(before.TotalProcesses, before.ActiveProcesses); err != nil {
+		return fmt.Errorf("verify root Job before HostControl activation: %w", err)
+	}
+	if err := setRootJobLimits(p.job, p.maximumProcesses, p.maximumMemory); err != nil {
+		return fmt.Errorf("raise root Job process limit after HostControl binding: %w", err)
+	}
+	if err := verifyRootJobLimits(p.job, p.maximumProcesses, p.maximumMemory); err != nil {
+		return fmt.Errorf("verify root Job limits after HostControl binding: %w", err)
+	}
+	after, err := queryWindowsJobAccounting(p.job)
+	if err != nil {
+		return fmt.Errorf("query root Job after HostControl activation: %w", err)
+	}
+	if err := validateSingleNodeJobAccounting(after.TotalProcesses, after.ActiveProcesses); err != nil {
+		return fmt.Errorf("verify root Job after HostControl activation: %w", err)
+	}
+	p.hostControlActivated = true
+	return nil
+}
+
 func (p *windowsNodeProcess) Wait() (uint32, error) {
+	p.processMu.RLock()
 	status, waitErr := windows.WaitForSingleObject(p.process, windows.INFINITE)
 	if waitErr == nil && status != windows.WAIT_OBJECT_0 {
 		waitErr = fmt.Errorf("Node process wait returned 0x%x", status)
 	}
 	var exitCode uint32
 	exitErr := windows.GetExitCodeProcess(p.process, &exitCode)
+	p.processMu.RUnlock()
 
 	p.jobMu.Lock()
 	jobCleanupErr := drainThenCloseJob(p.terminateAndDrainJobLocked, p.closeJobLocked)
@@ -470,10 +556,117 @@ func (p *windowsNodeProcess) Close() error {
 			closeFile(p.standardInput),
 			closeFile(p.standardOutput),
 			closeFile(p.standardError),
-			closeHandle(p.process, "close Node process handle"),
+			p.closeProcessHandle(),
 		)
 	})
 	return p.closeErr
+}
+
+func (p *windowsNodeProcess) closeProcessHandle() error {
+	p.processMu.Lock()
+	defer p.processMu.Unlock()
+	if p.process == 0 {
+		return nil
+	}
+	if err := windows.CloseHandle(p.process); err != nil {
+		return fmt.Errorf("close Node process handle: %w", err)
+	}
+	p.process = 0
+	return nil
+}
+
+func observeNodeIdentity(handle windows.Handle, expectedProcessID uint32) (NodeIdentity, error) {
+	if handle == 0 {
+		return NodeIdentity{}, errors.New("retained Node process handle is closed")
+	}
+	processID, err := windows.GetProcessId(handle)
+	if err != nil {
+		return NodeIdentity{}, fmt.Errorf("query retained Node process ID: %w", err)
+	}
+	if processID == 0 || processID != expectedProcessID {
+		return NodeIdentity{}, fmt.Errorf("retained Node process ID is %d, want %d", processID, expectedProcessID)
+	}
+	active, err := nodeProcessStillActive(handle)
+	if err != nil {
+		return NodeIdentity{}, fmt.Errorf("query retained Node process liveness: %w", err)
+	}
+	if !active {
+		return NodeIdentity{}, errors.New("retained Node process is not active")
+	}
+
+	var created windows.Filetime
+	var exited windows.Filetime
+	var kernel windows.Filetime
+	var user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
+		return NodeIdentity{}, fmt.Errorf("query retained Node creation time: %w", err)
+	}
+	identity := NodeIdentity{
+		ProcessID:    processID,
+		CreationTime: time.Unix(0, created.Nanoseconds()).UTC(),
+	}
+	if identity.CreationTime.IsZero() {
+		return NodeIdentity{}, errors.New("retained Node creation time is zero")
+	}
+
+	var sequenceNumber uint64
+	err = windows.NtQueryInformationProcess(
+		handle,
+		windows.ProcessSequenceNumber,
+		unsafe.Pointer(&sequenceNumber),
+		uint32(unsafe.Sizeof(sequenceNumber)),
+		nil,
+	)
+	startKeyAvailable := err == nil
+	if errors.Is(err, windows.STATUS_INVALID_INFO_CLASS) || errors.Is(err, windows.STATUS_NOT_SUPPORTED) {
+		err = nil
+		startKeyAvailable = false
+	}
+	if err != nil {
+		return NodeIdentity{}, fmt.Errorf("query retained Node process sequence number: %w", err)
+	}
+	if startKeyAvailable && sequenceNumber == 0 {
+		return NodeIdentity{}, errors.New("retained Node process sequence number is zero")
+	}
+	if startKeyAvailable {
+		identity.StartKeyAvailable = true
+		identity.StartKeySequenceNumber = sequenceNumber
+	}
+
+	active, err = nodeProcessStillActive(handle)
+	if err != nil {
+		return NodeIdentity{}, fmt.Errorf("requery retained Node process liveness: %w", err)
+	}
+	if !active {
+		return NodeIdentity{}, errors.New("retained Node process exited during identity observation")
+	}
+	return identity, nil
+}
+
+func nodeProcessStillActive(handle windows.Handle) (bool, error) {
+	status, err := windows.WaitForSingleObject(handle, 0)
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case windows.WAIT_OBJECT_0:
+		return false, nil
+	case uint32(windows.WAIT_TIMEOUT):
+		var exitCode uint32
+		if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+			return false, err
+		}
+		return exitCode == nodeStillActiveExitCode, nil
+	default:
+		return false, fmt.Errorf("unexpected Node process wait status 0x%x", status)
+	}
+}
+
+func sameNodeIdentity(left, right NodeIdentity) bool {
+	return left.ProcessID == right.ProcessID &&
+		left.CreationTime.Equal(right.CreationTime) &&
+		left.StartKeyAvailable == right.StartKeyAvailable &&
+		left.StartKeySequenceNumber == right.StartKeySequenceNumber
 }
 
 type jobObjectBasicAccountingInformation struct {
@@ -492,17 +685,25 @@ type windowsJobCounter struct {
 }
 
 func (c windowsJobCounter) ActiveProcessCount() (uint32, error) {
+	information, err := queryWindowsJobAccounting(c.job)
+	if err != nil {
+		return 0, err
+	}
+	return information.ActiveProcesses, nil
+}
+
+func queryWindowsJobAccounting(job windows.Handle) (jobObjectBasicAccountingInformation, error) {
 	information := jobObjectBasicAccountingInformation{}
 	if err := windows.QueryInformationJobObject(
-		c.job,
+		job,
 		int32(windows.JobObjectBasicAccountingInformation),
 		uintptr(unsafe.Pointer(&information)),
 		uint32(unsafe.Sizeof(information)),
 		nil,
 	); err != nil {
-		return 0, err
+		return jobObjectBasicAccountingInformation{}, err
 	}
-	return information.ActiveProcesses, nil
+	return information, nil
 }
 
 func closeHandle(handle windows.Handle, operation string) error {
