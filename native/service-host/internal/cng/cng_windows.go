@@ -3,12 +3,11 @@
 package cng
 
 import (
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"runtime"
-	"strings"
 	"sync"
-	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -23,13 +22,24 @@ const (
 	keyOpenFlags      = ncryptMachineKeyFlag | ncryptSilentFlag
 	signHashFlags     = ncryptSilentFlag
 
-	ncryptAlgorithmProperty    = "Algorithm Name"
-	ncryptLengthProperty       = "Length"
-	ncryptExportPolicyProperty = "Export Policy"
-	ncryptKeyUsageProperty     = "Key Usage"
+	ncryptAlgorithmProperty          = "Algorithm Name"
+	ncryptLengthProperty             = "Length"
+	ncryptExportPolicyProperty       = "Export Policy"
+	ncryptKeyUsageProperty           = "Key Usage"
+	ncryptKeyTypeProperty            = "Key Type"
+	ncryptNameProperty               = "Name"
+	ncryptUniqueNameProperty         = "Unique Name"
+	ncryptImplementationProperty     = "Impl Type"
+	ncryptSecurityDescriptorProperty = "Security Descr"
+	ncryptECCPublicBlob              = "ECCPUBLICBLOB"
 
-	maximumAlgorithmPropertyBytes = uint32(64)
-	uint32PropertyBytes           = uint32(4)
+	maximumAlgorithmPropertyBytes    = uint32(64)
+	maximumNamePropertyBytes         = uint32(1024)
+	maximumPublicBlobBytes           = uint32(128)
+	uint32PropertyBytes              = uint32(4)
+	securityDescriptorPropertyFlags  = uint32(0x00000001 | 0x00000002 | 0x00000004)
+	ncryptSoftwareImplementationFlag = uint32(0x00000002)
+	discardFreeAttempts              = 3
 )
 
 var (
@@ -38,6 +48,7 @@ var (
 	ncryptOpenStorageProvider = ncryptDLL.NewProc("NCryptOpenStorageProvider")
 	ncryptOpenKey             = ncryptDLL.NewProc("NCryptOpenKey")
 	ncryptGetProperty         = ncryptDLL.NewProc("NCryptGetProperty")
+	ncryptExportKey           = ncryptDLL.NewProc("NCryptExportKey")
 	ncryptSignHash            = ncryptDLL.NewProc("NCryptSignHash")
 	ncryptFreeObject          = ncryptDLL.NewProc("NCryptFreeObject")
 
@@ -50,38 +61,49 @@ type nativeHandle uintptr
 type nativeCNG interface {
 	openStorageProvider(string, uint32) (nativeHandle, error)
 	openKey(nativeHandle, string, uint32) (nativeHandle, error)
-	getProperty(nativeHandle, string, uint32) ([]byte, error)
+	getProperty(nativeHandle, string, uint32, uint32) ([]byte, error)
+	exportPublicKey(nativeHandle, string, uint32) ([]byte, error)
 	signHash(nativeHandle, []byte, uint32) ([]byte, error)
 	freeObject(nativeHandle) error
 }
 
 type systemCNG struct{}
 
-// Signer owns a validated persisted CNG P-256 key handle.
+// Signer owns shared private state for one validated persisted CNG P-256 key.
+// Accidental value copies retain the same lock and native-handle ownership.
 type Signer struct {
-	mu       sync.Mutex
-	api      nativeCNG
-	provider nativeHandle
-	key      nativeHandle
+	state *signerState
+}
+
+type signerState struct {
+	mu                  sync.Mutex
+	api                 nativeCNG
+	provider            nativeHandle
+	key                 nativeHandle
+	closed              bool
+	identity            KeyIdentity
+	publicKey           ecdsa.PublicKey
+	publicKeySPKISHA256 [DigestSize]byte
 }
 
 // Open opens one persisted Local Machine CNG key and validates its security-sensitive properties.
-func Open(providerName string, keyName string) (*Signer, error) {
-	if err := validateOpenNames(providerName, keyName); err != nil {
+func Open(options Options) (*Signer, error) {
+	if _, err := validateOptions(options); err != nil {
 		return nil, err
 	}
 	if err := ensureNCryptAvailable(); err != nil {
 		return nil, err
 	}
-	return openWithAPI(systemCNG{}, providerName, keyName)
+	return openWithAPI(systemCNG{}, options)
 }
 
-func openWithAPI(api nativeCNG, providerName string, keyName string) (*Signer, error) {
-	if err := validateOpenNames(providerName, keyName); err != nil {
+func openWithAPI(api nativeCNG, options Options) (*Signer, error) {
+	expectedSecurityDigest, err := validateOptions(options)
+	if err != nil {
 		return nil, err
 	}
 
-	provider, err := api.openStorageProvider(providerName, providerOpenFlags)
+	provider, err := api.openStorageProvider(approvedKeyStorageProvider, providerOpenFlags)
 	if err != nil {
 		return nil, fmt.Errorf("open CNG storage provider: %w", err)
 	}
@@ -89,21 +111,47 @@ func openWithAPI(api nativeCNG, providerName string, keyName string) (*Signer, e
 		return nil, errors.New("NCryptOpenStorageProvider returned a null handle")
 	}
 
-	key, err := api.openKey(provider, keyName, keyOpenFlags)
+	key, err := api.openKey(provider, options.KeyName, keyOpenFlags)
 	if err != nil {
-		cleanupErr := freeNativeHandle(api, "CNG storage provider", provider)
+		cleanupErr := discardNativeHandle(api, "CNG storage provider", provider)
 		return nil, errors.Join(fmt.Errorf("open CNG key: %w", err), cleanupErr)
 	}
 	if key == 0 {
-		cleanupErr := freeNativeHandle(api, "CNG storage provider", provider)
+		cleanupErr := discardNativeHandle(api, "CNG storage provider", provider)
 		return nil, errors.Join(errors.New("NCryptOpenKey returned a null handle"), cleanupErr)
 	}
 
-	signer := &Signer{api: api, provider: provider, key: key}
-	if err := signer.validateKeyProperties(); err != nil {
-		return nil, errors.Join(err, signer.Close())
+	state := &signerState{api: api, provider: provider, key: key}
+	signer := &Signer{state: state}
+	identity, publicKey, err := state.validateKey(options, expectedSecurityDigest)
+	if err != nil {
+		return nil, errors.Join(err, discardSigner(signer))
 	}
+	publicKeyDigest, err := p256PublicKeySPKISHA256(publicKey)
+	if err != nil {
+		return nil, errors.Join(err, discardSigner(signer))
+	}
+	state.identity = identity
+	state.publicKey = *publicKey
+	state.publicKeySPKISHA256 = publicKeyDigest
 	return signer, nil
+}
+
+// Identity returns a detached identity with no native CNG handle.
+func (s *Signer) Identity() KeyIdentity {
+	if s == nil || s.state == nil {
+		return KeyIdentity{}
+	}
+	return s.state.identity
+}
+
+// PublicKeySPKISHA256 returns the SHA-256 digest of canonical PKIX SPKI DER.
+// The fixed-size value is detached and contains no native key material.
+func (s *Signer) PublicKeySPKISHA256() [DigestSize]byte {
+	if s == nil || s.state == nil {
+		return [DigestSize]byte{}
+	}
+	return s.state.publicKeySPKISHA256
 }
 
 // SignDigest signs one SHA-256-sized prehash without hashing it again.
@@ -113,81 +161,166 @@ func (s *Signer) SignDigest(digest []byte) ([]byte, error) {
 	if len(digest) != DigestSize {
 		return nil, ErrInvalidDigest
 	}
-	if s == nil {
+	var digestSnapshot [DigestSize]byte
+	copy(digestSnapshot[:], digest)
+	if s == nil || s.state == nil {
 		return nil, ErrClosed
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.key == 0 {
+	state := s.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed || state.key == 0 {
 		return nil, ErrClosed
 	}
 
-	signature, err := s.api.signHash(s.key, digest, signHashFlags)
+	signature, err := state.api.signHash(state.key, digestSnapshot[:], signHashFlags)
 	if err != nil {
 		return nil, fmt.Errorf("sign CNG digest: %w", err)
 	}
-	return canonicalizeP256Signature(signature)
+	canonical, err := canonicalizeP256Signature(signature)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyP256Signature(&state.publicKey, digestSnapshot[:], canonical); err != nil {
+		return nil, err
+	}
+	return canonical, nil
 }
 
 // Close releases the key and provider handles. Repeated calls are safe.
 func (s *Signer) Close() error {
-	if s == nil {
+	if s == nil || s.state == nil {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := s.key
-	provider := s.provider
-	s.key = 0
-	s.provider = 0
-	return errors.Join(
-		freeNativeHandle(s.api, "CNG key", key),
-		freeNativeHandle(s.api, "CNG storage provider", provider),
-	)
+	state := s.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.closed = true
+	var result error
+	if state.key != 0 {
+		if err := freeNativeHandle(state.api, "CNG key", state.key); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			state.key = 0
+		}
+	}
+	if state.provider != 0 {
+		if err := freeNativeHandle(state.api, "CNG storage provider", state.provider); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			state.provider = 0
+		}
+	}
+	return result
 }
 
-func (s *Signer) validateKeyProperties() error {
-	algorithm, err := s.api.getProperty(s.key, ncryptAlgorithmProperty, maximumAlgorithmPropertyBytes)
+func (s *signerState) validateKey(
+	options Options,
+	expectedSecurityDigest [DigestSize]byte,
+) (KeyIdentity, *ecdsa.PublicKey, error) {
+	providerNameValue, err := s.api.getProperty(s.provider, ncryptNameProperty, 0, maximumNamePropertyBytes)
 	if err != nil {
-		return fmt.Errorf("read CNG Algorithm property: %w", err)
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG provider Name property: %w", err)
 	}
-	length, err := s.api.getProperty(s.key, ncryptLengthProperty, uint32PropertyBytes)
-	if err != nil {
-		return fmt.Errorf("read CNG Length property: %w", err)
+	providerName, err := decodeUTF16Property(providerNameValue)
+	if err != nil || providerName != approvedKeyStorageProvider {
+		return KeyIdentity{}, nil, fmt.Errorf("%w: provider Name is %q", ErrInvalidKey, providerName)
 	}
-	exportPolicy, err := s.api.getProperty(s.key, ncryptExportPolicyProperty, uint32PropertyBytes)
+	implementationValue, err := s.api.getProperty(s.provider, ncryptImplementationProperty, 0, uint32PropertyBytes)
 	if err != nil {
-		return fmt.Errorf("read CNG Export Policy property: %w", err)
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG provider Impl Type property: %w", err)
 	}
-	keyUsage, err := s.api.getProperty(s.key, ncryptKeyUsageProperty, uint32PropertyBytes)
-	if err != nil {
-		return fmt.Errorf("read CNG Key Usage property: %w", err)
+	implementation, err := decodeUint32Property(implementationValue)
+	if err != nil || implementation != ncryptSoftwareImplementationFlag {
+		return KeyIdentity{}, nil, fmt.Errorf("%w: provider Impl Type is 0x%08x", ErrInvalidKey, implementation)
 	}
 
+	algorithm, err := s.api.getProperty(s.key, ncryptAlgorithmProperty, 0, maximumAlgorithmPropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Algorithm property: %w", err)
+	}
+	length, err := s.api.getProperty(s.key, ncryptLengthProperty, 0, uint32PropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Length property: %w", err)
+	}
+	exportPolicy, err := s.api.getProperty(s.key, ncryptExportPolicyProperty, 0, uint32PropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Export Policy property: %w", err)
+	}
+	keyUsage, err := s.api.getProperty(s.key, ncryptKeyUsageProperty, 0, uint32PropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Key Usage property: %w", err)
+	}
 	properties, err := parseKeyProperties(algorithm, length, exportPolicy, keyUsage)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidKey, err)
+		return KeyIdentity{}, nil, fmt.Errorf("%w: %v", ErrInvalidKey, err)
 	}
-	return validateP256SigningProperties(properties)
-}
+	if err := validateP256SigningProperties(properties); err != nil {
+		return KeyIdentity{}, nil, err
+	}
 
-func validateOpenNames(providerName string, keyName string) error {
-	if err := validateOpenName("provider", providerName); err != nil {
-		return err
+	keyTypeValue, err := s.api.getProperty(s.key, ncryptKeyTypeProperty, 0, uint32PropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Key Type property: %w", err)
 	}
-	return validateOpenName("key", keyName)
-}
+	keyType, err := decodeUint32Property(keyTypeValue)
+	if err != nil || keyType != ncryptMachineKeyFlag {
+		return KeyIdentity{}, nil, fmt.Errorf("%w: Key Type is 0x%08x instead of machine-key only", ErrInvalidKey, keyType)
+	}
+	nameValue, err := s.api.getProperty(s.key, ncryptNameProperty, 0, maximumNamePropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Name property: %w", err)
+	}
+	name, err := decodeUTF16Property(nameValue)
+	if err != nil || name != options.KeyName {
+		return KeyIdentity{}, nil, fmt.Errorf("%w: Name is %q instead of the selected key name", ErrInvalidKey, name)
+	}
+	uniqueNameValue, err := s.api.getProperty(s.key, ncryptUniqueNameProperty, 0, maximumNamePropertyBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Unique Name property: %w", err)
+	}
+	uniqueName, err := decodeUTF16Property(uniqueNameValue)
+	if err != nil || !validCNGName(uniqueName, 256) {
+		return KeyIdentity{}, nil, fmt.Errorf("%w: Unique Name is missing or invalid", ErrInvalidKey)
+	}
 
-func validateOpenName(label string, value string) error {
-	if value == "" {
-		return fmt.Errorf("CNG %s name is required", label)
+	descriptorValue, err := s.api.getProperty(
+		s.key,
+		ncryptSecurityDescriptorProperty,
+		securityDescriptorPropertyFlags,
+		maximumKeySecurityDescriptorBytes,
+	)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("read CNG Security Descr property: %w", err)
 	}
-	if !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
-		return fmt.Errorf("CNG %s name is not valid text", label)
+	securityEvidence, err := parseKeySecurityDescriptor(descriptorValue)
+	if err != nil {
+		return KeyIdentity{}, nil, err
 	}
-	return nil
+	if err := validateKeySecurityEvidence(
+		securityEvidence,
+		expectedSecurityDigest,
+		options.ControlServiceSID,
+		options.ExecutorServiceSID,
+	); err != nil {
+		return KeyIdentity{}, nil, err
+	}
+
+	publicBlob, err := s.api.exportPublicKey(s.key, ncryptECCPublicBlob, maximumPublicBlobBytes)
+	if err != nil {
+		return KeyIdentity{}, nil, fmt.Errorf("export CNG public key: %w", err)
+	}
+	publicKey, err := parseP256PublicBlob(publicBlob)
+	if err != nil {
+		return KeyIdentity{}, nil, err
+	}
+	return KeyIdentity{
+		ProviderName: providerName,
+		UniqueName:   uniqueName,
+		MachineKey:   true,
+	}, publicKey, nil
 }
 
 func freeNativeHandle(api nativeCNG, description string, handle nativeHandle) error {
@@ -200,6 +333,30 @@ func freeNativeHandle(api nativeCNG, description string, handle nativeHandle) er
 	return nil
 }
 
+func discardNativeHandle(api nativeCNG, description string, handle nativeHandle) error {
+	var failures error
+	for attempt := 0; attempt < discardFreeAttempts; attempt++ {
+		err := freeNativeHandle(api, description, handle)
+		if err == nil {
+			return nil
+		}
+		failures = errors.Join(failures, err)
+	}
+	return failures
+}
+
+func discardSigner(signer *Signer) error {
+	var failures error
+	for attempt := 0; attempt < discardFreeAttempts; attempt++ {
+		err := signer.Close()
+		if err == nil {
+			return nil
+		}
+		failures = errors.Join(failures, err)
+	}
+	return failures
+}
+
 func ensureNCryptAvailable() error {
 	ncryptLoadOnce.Do(func() {
 		if err := ncryptDLL.Load(); err != nil {
@@ -210,6 +367,7 @@ func ensureNCryptAvailable() error {
 			ncryptOpenStorageProvider,
 			ncryptOpenKey,
 			ncryptGetProperty,
+			ncryptExportKey,
 			ncryptSignHash,
 			ncryptFreeObject,
 		} {
@@ -266,7 +424,12 @@ func (systemCNG) openKey(provider nativeHandle, keyName string, flags uint32) (n
 	return key, nil
 }
 
-func (systemCNG) getProperty(handle nativeHandle, propertyName string, maximumBytes uint32) ([]byte, error) {
+func (systemCNG) getProperty(
+	handle nativeHandle,
+	propertyName string,
+	flags uint32,
+	maximumBytes uint32,
+) ([]byte, error) {
 	propertyNamePointer, err := windows.UTF16PtrFromString(propertyName)
 	if err != nil {
 		return nil, fmt.Errorf("encode CNG property name: %w", err)
@@ -279,7 +442,7 @@ func (systemCNG) getProperty(handle nativeHandle, propertyName string, maximumBy
 		0,
 		0,
 		uintptr(unsafe.Pointer(&requiredBytes)),
-		0,
+		uintptr(flags),
 	)
 	runtime.KeepAlive(propertyNamePointer)
 	if err := securityStatusError("NCryptGetProperty", status); err != nil {
@@ -297,7 +460,7 @@ func (systemCNG) getProperty(handle nativeHandle, propertyName string, maximumBy
 		uintptr(unsafe.Pointer(&value[0])),
 		uintptr(len(value)),
 		uintptr(unsafe.Pointer(&writtenBytes)),
-		0,
+		uintptr(flags),
 	)
 	runtime.KeepAlive(propertyNamePointer)
 	runtime.KeepAlive(value)
@@ -306,6 +469,53 @@ func (systemCNG) getProperty(handle nativeHandle, propertyName string, maximumBy
 	}
 	if writtenBytes != requiredBytes {
 		return nil, fmt.Errorf("NCryptGetProperty changed the %s size from %d to %d bytes", propertyName, requiredBytes, writtenBytes)
+	}
+	return value, nil
+}
+
+func (systemCNG) exportPublicKey(handle nativeHandle, blobType string, maximumBytes uint32) ([]byte, error) {
+	blobTypePointer, err := windows.UTF16PtrFromString(blobType)
+	if err != nil {
+		return nil, fmt.Errorf("encode CNG blob type: %w", err)
+	}
+	var requiredBytes uint32
+	status, _, _ := ncryptExportKey.Call(
+		uintptr(handle),
+		0,
+		uintptr(unsafe.Pointer(blobTypePointer)),
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&requiredBytes)),
+		0,
+	)
+	runtime.KeepAlive(blobTypePointer)
+	if err := securityStatusError("NCryptExportKey", status); err != nil {
+		return nil, err
+	}
+	if requiredBytes == 0 || requiredBytes > maximumBytes {
+		return nil, fmt.Errorf("NCryptExportKey reported an invalid public blob size of %d bytes", requiredBytes)
+	}
+
+	value := make([]byte, requiredBytes)
+	var writtenBytes uint32
+	status, _, _ = ncryptExportKey.Call(
+		uintptr(handle),
+		0,
+		uintptr(unsafe.Pointer(blobTypePointer)),
+		0,
+		uintptr(unsafe.Pointer(&value[0])),
+		uintptr(len(value)),
+		uintptr(unsafe.Pointer(&writtenBytes)),
+		0,
+	)
+	runtime.KeepAlive(blobTypePointer)
+	runtime.KeepAlive(value)
+	if err := securityStatusError("NCryptExportKey", status); err != nil {
+		return nil, err
+	}
+	if writtenBytes != requiredBytes {
+		return nil, fmt.Errorf("NCryptExportKey changed the public blob size from %d to %d bytes", requiredBytes, writtenBytes)
 	}
 	return value, nil
 }

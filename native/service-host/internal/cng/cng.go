@@ -18,12 +18,32 @@ const (
 )
 
 var (
-	ErrUnsupported      = errors.New("Windows CNG signing is unsupported on this platform")
-	ErrInvalidDigest    = errors.New("CNG signing requires an exactly 32-byte digest")
-	ErrInvalidKey       = errors.New("CNG key does not satisfy the P-256 signing policy")
-	ErrInvalidSignature = errors.New("CNG returned an invalid P-256 signature")
-	ErrClosed           = errors.New("CNG signer is closed")
+	ErrUnsupported        = errors.New("Windows CNG signing is unsupported on this platform")
+	ErrInvalidOptions     = errors.New("invalid CNG signer options")
+	ErrInvalidDigest      = errors.New("CNG signing requires an exactly 32-byte digest")
+	ErrInvalidKey         = errors.New("CNG key does not satisfy the P-256 signing policy")
+	ErrInvalidKeySecurity = errors.New("CNG key security descriptor is invalid")
+	ErrInvalidSignature   = errors.New("CNG returned an invalid P-256 signature")
+	ErrClosed             = errors.New("CNG signer is closed")
 )
+
+// Options selects one Local Machine key and pins its installed access policy.
+// The storage provider is deliberately fixed and is not caller-selectable.
+type Options struct {
+	KeyName                          string
+	ExpectedSecurityDescriptorSHA256 string
+	ControlServiceSID                string
+	ExecutorServiceSID               string
+}
+
+// KeyIdentity is a detached, comparable identity for a persisted CNG key.
+// It contains no native handle and can be compared with another credential's
+// identity to reject accidental key reuse across security purposes.
+type KeyIdentity struct {
+	ProviderName string
+	UniqueName   string
+	MachineKey   bool
+}
 
 // StatusError reports a failing SECURITY_STATUS returned by an NCrypt function.
 type StatusError struct {
