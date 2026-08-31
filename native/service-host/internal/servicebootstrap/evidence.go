@@ -3,11 +3,14 @@ package servicebootstrap
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 type evidenceIssuer struct {
@@ -18,7 +21,8 @@ var successfulEvidenceIssuer = &evidenceIssuer{marker: 1}
 
 type evidenceState struct {
 	issuer                      *evidenceIssuer
-	options                     Options
+	options                     ResolvedOptions
+	identity                    winidentity.Evidence
 	scmBeforeOpen               ServiceObservation
 	scmAfterOpen                ServiceObservation
 	stableWrapperFacts          peerverify.StableProcessFacts
@@ -31,14 +35,17 @@ type evidenceState struct {
 }
 
 // Evidence is an opaque, immutable snapshot issued only after the complete
-// bootstrap transaction succeeds. Its zero value is invalid. Copies share
-// immutable private state, while every getter returns a detached value.
+// production identity preflight and bootstrap transaction succeed. Its zero
+// value is invalid. Copies share immutable private state, while every getter
+// returns a detached value. The private test seam cannot be supplied through
+// Open and is not an alternative production authority.
 type Evidence struct {
 	state *evidenceState
 }
 
 func issueEvidence(
-	options Options,
+	options ResolvedOptions,
+	identity winidentity.Evidence,
 	scmBeforeOpen ServiceObservation,
 	scmAfterOpen ServiceObservation,
 	stableWrapperFacts peerverify.StableProcessFacts,
@@ -51,6 +58,7 @@ func issueEvidence(
 	state := &evidenceState{
 		issuer:                      successfulEvidenceIssuer,
 		options:                     options,
+		identity:                    cloneIdentityEvidence(identity),
 		scmBeforeOpen:               scmBeforeOpen,
 		scmAfterOpen:                scmAfterOpen,
 		stableWrapperFacts:          stableWrapperFacts,
@@ -76,8 +84,12 @@ func (e Evidence) Validate() error {
 		state.digest == ([sha256.Size]byte{}) {
 		return invalidEvidenceError("evidence was not issued by a successful bootstrap", nil)
 	}
-	if err := validateOptions(state.options); err != nil {
+	expectedOptions, err := resolveOptions(Options{Role: state.options.Role})
+	if err != nil || state.options != expectedOptions {
 		return invalidEvidenceError("captured bootstrap options are invalid", err)
+	}
+	if err := validateIdentityBinding(state.options, state.identity); err != nil {
+		return invalidEvidenceError("captured identity preflight is invalid", err)
 	}
 	if err := validateSCMObservation(state.scmBeforeOpen); err != nil {
 		return invalidEvidenceError("SCM observation before wrapper acquisition is invalid", err)
@@ -100,6 +112,9 @@ func (e Evidence) Validate() error {
 	if state.stableServiceHostFacts.ProcessID == state.stableWrapperFacts.ProcessID {
 		return invalidEvidenceError("ServiceHost and WinSW wrapper have the same PID", ErrParentMismatch)
 	}
+	if state.identity.ProcessID != state.stableServiceHostFacts.ProcessID {
+		return invalidEvidenceError("identity preflight PID differs from the retained ServiceHost", nil)
+	}
 	if err := validateDirectParent(
 		state.stableServiceHostFacts,
 		state.stableWrapperFacts,
@@ -107,10 +122,7 @@ func (e Evidence) Validate() error {
 	); err != nil {
 		return invalidEvidenceError("captured process lineage is invalid", err)
 	}
-	processPolicy, tokenPolicy, err := serviceDACLPolicies(
-		state.options.OwnServiceSID,
-		state.options.PeerServiceSID,
-	)
+	processPolicy, tokenPolicy, err := fixedDACLPolicies(state.options)
 	if err != nil {
 		return invalidEvidenceError("captured service identities cannot reconstruct DACL policy", err)
 	}
@@ -145,16 +157,25 @@ func (e Evidence) issuedState() *evidenceState {
 	return e.state
 }
 
-func (e Evidence) Options() Options {
+func (e Evidence) Options() ResolvedOptions {
 	if state := e.issuedState(); state != nil {
 		return state.options
 	}
-	return Options{}
+	return ResolvedOptions{}
 }
 
-func (e Evidence) ServiceName() string    { return e.Options().ServiceName }
-func (e Evidence) OwnServiceSID() string  { return e.Options().OwnServiceSID }
-func (e Evidence) PeerServiceSID() string { return e.Options().PeerServiceSID }
+func (e Evidence) Role() config.Role       { return e.Options().Role }
+func (e Evidence) ServiceName() string     { return e.Options().ServiceName }
+func (e Evidence) OwnServiceSID() string   { return e.Options().OwnServiceSID }
+func (e Evidence) PeerServiceName() string { return e.Options().PeerServiceName }
+func (e Evidence) PeerServiceSID() string  { return e.Options().PeerServiceSID }
+
+func (e Evidence) Identity() winidentity.Evidence {
+	if state := e.issuedState(); state != nil {
+		return cloneIdentityEvidence(state.identity)
+	}
+	return winidentity.Evidence{}
+}
 
 func (e Evidence) SCMBeforeOpen() ServiceObservation {
 	if state := e.issuedState(); state != nil {
@@ -237,10 +258,13 @@ func invalidEvidenceError(message string, cause error) error {
 
 func digestEvidenceState(state *evidenceState) [sha256.Size]byte {
 	encoder := evidenceDigestEncoder{hash: sha256.New()}
-	encoder.text("agentic-review/service-bootstrap-evidence/v1")
+	encoder.text("agentic-review/service-bootstrap-evidence/v2")
+	encoder.text(string(state.options.Role))
 	encoder.text(state.options.ServiceName)
 	encoder.text(state.options.OwnServiceSID)
+	encoder.text(state.options.PeerServiceName)
 	encoder.text(state.options.PeerServiceSID)
+	encodeIdentityEvidence(&encoder, state.identity)
 	encodeServiceObservation(&encoder, state.scmBeforeOpen)
 	encodeServiceObservation(&encoder, state.scmAfterOpen)
 	encodeStableProcessFacts(&encoder, state.stableWrapperFacts)
@@ -252,6 +276,70 @@ func digestEvidenceState(state *evidenceState) [sha256.Size]byte {
 	var result [sha256.Size]byte
 	copy(result[:], encoder.hash.Sum(nil))
 	return result
+}
+
+func validateIdentityBinding(options ResolvedOptions, identity winidentity.Evidence) error {
+	if identity.ProcessID == 0 {
+		return errors.New("identity preflight process ID is zero")
+	}
+	if identity.OwnService.Name != options.ServiceName || identity.OwnService.SID != options.OwnServiceSID ||
+		identity.PeerService.Name != options.PeerServiceName || identity.PeerService.SID != options.PeerServiceSID {
+		return errors.New("identity preflight differs from the fixed role identities")
+	}
+	return nil
+}
+
+func cloneIdentityEvidence(value winidentity.Evidence) winidentity.Evidence {
+	value.Token.Groups = append([]winidentity.SIDEntry(nil), value.Token.Groups...)
+	value.Token.RestrictedSIDs = append([]winidentity.SIDEntry(nil), value.Token.RestrictedSIDs...)
+	value.Token.Privileges = append([]winidentity.PrivilegeEvidence(nil), value.Token.Privileges...)
+	return value
+}
+
+func encodeIdentityEvidence(encoder *evidenceDigestEncoder, identity winidentity.Evidence) {
+	encoder.u32(identity.ProcessID)
+	encodeIdentityService(encoder, identity.OwnService)
+	encodeIdentityService(encoder, identity.PeerService)
+	encoder.u32(identity.Token.TokenID.LowPart)
+	encoder.u32(uint32(identity.Token.TokenID.HighPart))
+	encoder.u32(identity.Token.AuthenticationID.LowPart)
+	encoder.u32(uint32(identity.Token.AuthenticationID.HighPart))
+	encoder.u32(identity.Token.ModifiedID.LowPart)
+	encoder.u32(uint32(identity.Token.ModifiedID.HighPart))
+	encoder.u32(identity.Token.Type)
+	encoder.u32(identity.Token.ImpersonationLevel)
+	encoder.boolean(identity.Token.HasRestrictions)
+	encodeIdentitySIDEntry(encoder, identity.Token.User)
+	encoder.u64(uint64(len(identity.Token.Groups)))
+	for _, entry := range identity.Token.Groups {
+		encodeIdentitySIDEntry(encoder, entry)
+	}
+	encoder.u64(uint64(len(identity.Token.RestrictedSIDs)))
+	for _, entry := range identity.Token.RestrictedSIDs {
+		encodeIdentitySIDEntry(encoder, entry)
+	}
+	encoder.u64(uint64(len(identity.Token.Privileges)))
+	for _, privilege := range identity.Token.Privileges {
+		encoder.text(privilege.Name)
+		encoder.u32(privilege.LUID.LowPart)
+		encoder.u32(uint32(privilege.LUID.HighPart))
+		encoder.u32(privilege.Attributes)
+	}
+}
+
+func encodeIdentityService(encoder *evidenceDigestEncoder, service winidentity.ServiceEvidence) {
+	encoder.text(service.Name)
+	encoder.text(service.SID)
+	encoder.u32(uint32(service.SIDType))
+	encoder.u32(service.ServiceType)
+	encoder.text(service.StartAccount)
+	encoder.text(service.Domain)
+	encoder.u32(service.AccountType)
+}
+
+func encodeIdentitySIDEntry(encoder *evidenceDigestEncoder, entry winidentity.SIDEntry) {
+	encoder.text(entry.SID)
+	encoder.u32(entry.Attributes)
 }
 
 func encodeServiceObservation(encoder *evidenceDigestEncoder, observation ServiceObservation) {

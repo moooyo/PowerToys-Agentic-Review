@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 const rejectedResourceCloseAttempts = 3
@@ -61,6 +62,13 @@ type bootstrapPlatform interface {
 	OpenCurrentPrimaryToken() (primaryToken, error)
 }
 
+type identityPreflight func(winidentity.Options) (winidentity.Evidence, error)
+
+type bootstrapDependencies struct {
+	platform          bootstrapPlatform
+	identityPreflight identityPreflight
+}
+
 // bootstrapGate makes the production bootstrap a process-wide one-shot. A
 // failed attempt remains terminal because it may already have changed one of
 // the three protected DACLs; retrying with another policy could create mixed
@@ -72,7 +80,7 @@ type bootstrapGate struct {
 
 var productionBootstrapGate bootstrapGate
 
-func (g *bootstrapGate) open(options Options, platform bootstrapPlatform) (Session, error) {
+func (g *bootstrapGate) open(options Options, dependencies bootstrapDependencies) (Session, error) {
 	if err := validateOptions(options); err != nil {
 		return nil, err
 	}
@@ -83,18 +91,32 @@ func (g *bootstrapGate) open(options Options, platform bootstrapPlatform) (Sessi
 	}
 	g.attempted = true
 	g.mu.Unlock()
-	return openWithPlatform(options, platform)
+	return openWithDependencies(options, dependencies)
 }
 
-func openWithPlatform(options Options, platform bootstrapPlatform) (result Session, err error) {
-	if err := validateOptions(options); err != nil {
+func openWithDependencies(options Options, dependencies bootstrapDependencies) (result Session, err error) {
+	resolved, err := resolveOptions(options)
+	if err != nil {
 		return nil, err
 	}
-	if platform == nil {
+	if dependencies.platform == nil || dependencies.identityPreflight == nil {
 		return nil, fmt.Errorf("%w: Windows platform adapter is required", ErrInvalidOptions)
 	}
+	identityOptions := winidentity.Options{
+		OwnService:  winidentity.ServiceIdentity{Name: resolved.ServiceName, SID: resolved.OwnServiceSID},
+		PeerService: winidentity.ServiceIdentity{Name: resolved.PeerServiceName, SID: resolved.PeerServiceSID},
+	}
+	identityEvidence, err := dependencies.identityPreflight(identityOptions)
+	if err != nil {
+		return nil, fmt.Errorf("verify fixed ServiceHost identity before bootstrap mutation: %w", err)
+	}
+	identityEvidence = cloneIdentityEvidence(identityEvidence)
+	if err := validateIdentityBinding(resolved, identityEvidence); err != nil {
+		return nil, err
+	}
+	platform := dependencies.platform
 
-	service, err := platform.OpenSCMService(options.ServiceName)
+	service, err := platform.OpenSCMService(resolved.ServiceName)
 	if err != nil {
 		return nil, fmt.Errorf("open WinSW service in the local SCM: %w", err)
 	}
@@ -162,6 +184,14 @@ func openWithPlatform(options Options, platform bootstrapPlatform) (result Sessi
 	if err != nil {
 		return nil, err
 	}
+	if serviceHostBefore.ProcessID != identityEvidence.ProcessID {
+		return nil, fmt.Errorf(
+			"%w: identity preflight PID %d differs from retained current process PID %d",
+			ErrInvalidEvidence,
+			identityEvidence.ProcessID,
+			serviceHostBefore.ProcessID,
+		)
+	}
 	parentBefore, err := current.DirectParentProcessID()
 	if err != nil {
 		return nil, fmt.Errorf("query current ServiceHost direct parent: %w", err)
@@ -170,7 +200,7 @@ func openWithPlatform(options Options, platform bootstrapPlatform) (result Sessi
 		return nil, err
 	}
 
-	processPolicy, tokenPolicy, err := serviceDACLPolicies(options.OwnServiceSID, options.PeerServiceSID)
+	processPolicy, tokenPolicy, err := fixedDACLPolicies(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidOptions, err)
 	}
@@ -226,7 +256,8 @@ func openWithPlatform(options Options, platform bootstrapPlatform) (result Sessi
 	}
 
 	evidence, err := issueEvidence(
-		options,
+		resolved,
+		identityEvidence,
 		before,
 		after,
 		wrapperAfter,

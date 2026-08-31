@@ -312,7 +312,7 @@ func TestMeasureCurrentImageRejectsClosedSession(t *testing.T) {
 func newCurrentImageSession(t *testing.T) (*bootstrapSession, *fakePlatform, *fakeCurrentImage) {
 	t.Helper()
 	platform, _, _ := newSuccessfulFakePlatform()
-	opened, err := openWithPlatform(validOptions(), platform)
+	opened, err := openWithTestPlatform(validOptions(), platform)
 	if err != nil {
 		t.Fatal(err)
 	}

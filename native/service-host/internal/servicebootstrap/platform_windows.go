@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 	"golang.org/x/sys/windows"
 )
 
@@ -35,7 +36,10 @@ const (
 
 // Open atomically bootstraps the current ServiceHost and its WinSW wrapper.
 func Open(options Options) (Session, error) {
-	return productionBootstrapGate.open(options, windowsBootstrapPlatform{})
+	return productionBootstrapGate.open(options, bootstrapDependencies{
+		platform:          windowsBootstrapPlatform{},
+		identityPreflight: winidentity.Preflight,
+	})
 }
 
 type windowsBootstrapPlatform struct{}

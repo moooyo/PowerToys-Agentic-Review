@@ -8,6 +8,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
@@ -42,12 +43,20 @@ const (
 	maximumServiceNameUnits                = 256
 )
 
-// Options names the current WinSW service and the independently verified
-// service SIDs used in the exact process and token DACLs.
+// Options selects one of the two fixed production service identities. Callers
+// cannot supply service names or SIDs.
 type Options struct {
-	ServiceName    string
-	OwnServiceSID  string
-	PeerServiceSID string
+	Role config.Role
+}
+
+// ResolvedOptions contains the fixed identities selected from Options.Role.
+// It is detached evidence output and is never accepted as bootstrap input.
+type ResolvedOptions struct {
+	Role            config.Role
+	ServiceName     string
+	OwnServiceSID   string
+	PeerServiceName string
+	PeerServiceSID  string
 }
 
 // ServiceState is the SCM SERVICE_STATUS_PROCESS state sampled around opening
@@ -135,17 +144,42 @@ func serviceDACLPolicies(ownServiceSID, peerServiceSID string) (daclPolicy, dacl
 	return daclPolicy{entries: processEntries}, daclPolicy{entries: tokenEntries}, nil
 }
 
+func fixedDACLPolicies(options ResolvedOptions) (daclPolicy, daclPolicy, error) {
+	expected, err := resolveOptions(Options{Role: options.Role})
+	if err != nil || options != expected {
+		return daclPolicy{}, daclPolicy{}, fmt.Errorf("%w: resolved service identities are not fixed for role", ErrInvalidOptions)
+	}
+	return serviceDACLPolicies(expected.OwnServiceSID, expected.PeerServiceSID)
+}
+
+func resolveOptions(options Options) (ResolvedOptions, error) {
+	resolved := ResolvedOptions{
+		Role:            options.Role,
+		ServiceName:     config.ControlServiceName,
+		OwnServiceSID:   config.ControlServiceSID,
+		PeerServiceName: config.ExecutorServiceName,
+		PeerServiceSID:  config.ExecutorServiceSID,
+	}
+	if options.Role == config.RoleExecutor {
+		resolved.ServiceName, resolved.PeerServiceName = resolved.PeerServiceName, resolved.ServiceName
+		resolved.OwnServiceSID, resolved.PeerServiceSID = resolved.PeerServiceSID, resolved.OwnServiceSID
+	} else if options.Role != config.RoleControl {
+		return ResolvedOptions{}, fmt.Errorf("%w: role must be control or executor", ErrInvalidOptions)
+	}
+	if !utf8.ValidString(resolved.ServiceName) || strings.ContainsRune(resolved.ServiceName, utf8.RuneError) ||
+		strings.ContainsRune(resolved.ServiceName, '\x00') ||
+		len(utf16.Encode([]rune(resolved.ServiceName))) > maximumServiceNameUnits {
+		return ResolvedOptions{}, fmt.Errorf("%w: fixed WinSW service name is invalid", ErrInvalidOptions)
+	}
+	if _, _, err := serviceDACLPolicies(resolved.OwnServiceSID, resolved.PeerServiceSID); err != nil {
+		return ResolvedOptions{}, fmt.Errorf("%w: fixed service identities: %v", ErrInvalidOptions, err)
+	}
+	return resolved, nil
+}
+
 func validateOptions(options Options) error {
-	if options.ServiceName == "" || !utf8.ValidString(options.ServiceName) ||
-		strings.ContainsRune(options.ServiceName, utf8.RuneError) ||
-		strings.ContainsRune(options.ServiceName, '\x00') ||
-		len(utf16.Encode([]rune(options.ServiceName))) > maximumServiceNameUnits {
-		return fmt.Errorf("%w: WinSW service name is not canonical text", ErrInvalidOptions)
-	}
-	if _, _, err := serviceDACLPolicies(options.OwnServiceSID, options.PeerServiceSID); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidOptions, err)
-	}
-	return nil
+	_, err := resolveOptions(options)
+	return err
 }
 
 func validateCanonicalServiceSID(value string) error {

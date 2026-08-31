@@ -15,7 +15,8 @@ func TestEvidenceZeroValueAndUnissuedStateAreInvalid(t *testing.T) {
 	if _, err := zero.Digest(); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("zero Digest error = %v, want ErrInvalidEvidence", err)
 	}
-	if zero.Options() != (Options{}) || zero.SCMBeforeOpen() != (ServiceObservation{}) ||
+	if zero.Options() != (ResolvedOptions{}) || zero.Identity().ProcessID != 0 ||
+		zero.SCMBeforeOpen() != (ServiceObservation{}) ||
 		zero.StableWrapperFacts().ProcessID != 0 || zero.DirectParentProcessID() != 0 ||
 		len(zero.ServiceHostProcessDACL().AccessRules) != 0 {
 		t.Fatal("zero evidence getters returned authorization facts")
@@ -48,6 +49,10 @@ func TestEvidenceGettersReturnDetachedCopies(t *testing.T) {
 
 	options := evidence.Options()
 	options.ServiceName = "mutated"
+	identity := evidence.Identity()
+	identity.Token.Groups[0].SID = "mutated"
+	identity.Token.RestrictedSIDs[0].SID = "mutated"
+	identity.Token.Privileges[0].Name = "mutated"
 	dacls := []DACLEvidence{
 		evidence.ServiceHostProcessDACL(),
 		evidence.ServiceHostPrimaryTokenDACL(),
@@ -57,8 +62,14 @@ func TestEvidenceGettersReturnDetachedCopies(t *testing.T) {
 		dacls[index].AccessRules[0].SID = "mutated"
 	}
 
-	if evidence.Options() != validOptions() {
+	if evidence.Options() != validResolvedOptions() {
 		t.Fatalf("Options getter exposed mutable state: %+v", evidence.Options())
+	}
+	currentIdentity := evidence.Identity()
+	if currentIdentity.Token.Groups[0].SID == "mutated" ||
+		currentIdentity.Token.RestrictedSIDs[0].SID == "mutated" ||
+		currentIdentity.Token.Privileges[0].Name == "mutated" {
+		t.Fatal("Identity getter exposed mutable slice storage")
 	}
 	for _, current := range []DACLEvidence{
 		evidence.ServiceHostProcessDACL(),
@@ -120,8 +131,16 @@ func TestEvidenceDigestIsDeterministicAndCoversAuthorizationFacts(t *testing.T) 
 		mutate func(*evidenceState)
 	}{
 		{name: "service name", mutate: func(state *evidenceState) { state.options.ServiceName += ".Other" }},
+		{name: "role", mutate: func(state *evidenceState) { state.options.Role = "other" }},
 		{name: "own service SID", mutate: func(state *evidenceState) { state.options.OwnServiceSID += "0" }},
+		{name: "peer service name", mutate: func(state *evidenceState) { state.options.PeerServiceName += ".Other" }},
 		{name: "peer service SID", mutate: func(state *evidenceState) { state.options.PeerServiceSID += "0" }},
+		{name: "identity PID", mutate: func(state *evidenceState) { state.identity.ProcessID++ }},
+		{name: "identity service", mutate: func(state *evidenceState) { state.identity.OwnService.StartAccount += ".Other" }},
+		{name: "identity token", mutate: func(state *evidenceState) { state.identity.Token.ModifiedID.LowPart++ }},
+		{name: "identity group", mutate: func(state *evidenceState) { state.identity.Token.Groups[0].Attributes++ }},
+		{name: "identity restricted SID", mutate: func(state *evidenceState) { state.identity.Token.RestrictedSIDs[0].SID += ".Other" }},
+		{name: "identity privilege", mutate: func(state *evidenceState) { state.identity.Token.Privileges[0].Name += ".Other" }},
 		{name: "SCM before state", mutate: func(state *evidenceState) { state.scmBeforeOpen.State = ServicePaused }},
 		{name: "SCM before PID", mutate: func(state *evidenceState) { state.scmBeforeOpen.ProcessID++ }},
 		{name: "SCM after state", mutate: func(state *evidenceState) { state.scmAfterOpen.State = ServicePaused }},
@@ -177,6 +196,9 @@ func TestEvidenceValidateRejectsInternalInconsistency(t *testing.T) {
 	}{
 		{name: "issuer", recomputeDigest: true, mutate: func(state *evidenceState) { state.issuer = &evidenceIssuer{marker: 1} }},
 		{name: "options", recomputeDigest: true, mutate: func(state *evidenceState) { state.options.ServiceName = "" }},
+		{name: "role", recomputeDigest: true, mutate: func(state *evidenceState) { state.options.Role = "other" }},
+		{name: "identity service", recomputeDigest: true, mutate: func(state *evidenceState) { state.identity.OwnService.Name += ".Other" }},
+		{name: "identity PID", recomputeDigest: true, mutate: func(state *evidenceState) { state.identity.ProcessID++ }},
 		{name: "SCM state", recomputeDigest: true, mutate: func(state *evidenceState) {
 			state.scmBeforeOpen.State = ServiceStopped
 			state.scmAfterOpen.State = ServiceStopped
@@ -224,7 +246,7 @@ func TestEvidenceValidateRejectsInternalInconsistency(t *testing.T) {
 func mustSuccessfulEvidence(t *testing.T) Evidence {
 	t.Helper()
 	platform, _, _ := newSuccessfulFakePlatform()
-	session, err := openWithPlatform(validOptions(), platform)
+	session, err := openWithTestPlatform(validOptions(), platform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +262,7 @@ func mustSuccessfulEvidence(t *testing.T) Evidence {
 
 func cloneEvidenceForTest(evidence Evidence) Evidence {
 	state := *evidence.state
+	state.identity = cloneIdentityEvidence(state.identity)
 	state.serviceHostProcessDACL = cloneDACLEvidence(state.serviceHostProcessDACL)
 	state.serviceHostPrimaryTokenDACL = cloneDACLEvidence(state.serviceHostPrimaryTokenDACL)
 	state.winSWWrapperProcessDACL = cloneDACLEvidence(state.winSWWrapperProcessDACL)
