@@ -506,7 +506,7 @@ restricted service SIDs.
 |---|---|---|---|
 | Signed manifest, WinSW and ServiceHost configs, launchers, and Worker bundles | Read; execute Control only | Read; execute Executor only | Full control |
 | Trusted policy: capability public keys, Codex requirements, repository and recipe allowlists | Read | Read | Full control |
-| Codex, Git, ProcessHost, and validation-tool program files | Deny | Read/execute | Full control |
+| Codex, Git, ProcessHost, and validation-tool program files | Read for complete-tree integrity verification; no execute | Read/execute | Full control |
 | Control configuration and state | Modify | Deny | Full control |
 | Control logs | Append/read | Deny | Full control |
 | Server mTLS certificate public material | Read | Deny | Full control |
