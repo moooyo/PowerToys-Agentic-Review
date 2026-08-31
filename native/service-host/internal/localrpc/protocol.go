@@ -1,0 +1,479 @@
+package localrpc
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"unicode/utf8"
+)
+
+const ProtocolVersion = "1.0"
+
+type Role string
+
+const (
+	RoleControl  Role = "control"
+	RoleExecutor Role = "executor"
+)
+
+type Operation string
+
+const (
+	OperationRegister          Operation = "Register"
+	OperationClaim             Operation = "Claim"
+	OperationInstanceHeartbeat Operation = "InstanceHeartbeat"
+	OperationCompleteRun       Operation = "CompleteRun"
+	OperationFailRun           Operation = "FailRun"
+	OperationSignLocalDigest   Operation = "SignLocalDigest"
+)
+
+var (
+	ErrInvalidMessage       = errors.New("invalid local RPC message")
+	ErrUnknownMessageType   = errors.New("unknown local RPC message type")
+	ErrUnknownOperation     = errors.New("unknown local RPC operation")
+	ErrOperationNotAllowed  = errors.New("local RPC operation is not allowed for this role")
+	ErrDuplicateRequestID   = errors.New("local RPC requestId was already used")
+	ErrRequestIDCapacity    = errors.New("local RPC requestId capacity is exhausted")
+	ErrRequestNotActive     = errors.New("local RPC target request is not active")
+	ErrRequestCancelled     = errors.New("local RPC request was cancelled")
+	ErrRequestTimeout       = errors.New("local RPC request timed out")
+	ErrResponseTooLarge     = errors.New("local RPC response exceeds its byte limit")
+	ErrInvalidHandlerResult = errors.New("local RPC handler returned an invalid result")
+)
+
+type Message interface {
+	RequestID() string
+	messageType() string
+}
+
+type CallRequest struct {
+	ID               string
+	Operation        Operation
+	Body             json.RawMessage
+	WorkerInstanceID string
+	RunAttemptID     string
+	Digest           [32]byte
+}
+
+func (r CallRequest) RequestID() string   { return r.ID }
+func (r CallRequest) messageType() string { return "call" }
+
+type CancelRequest struct {
+	ID              string
+	TargetRequestID string
+}
+
+func (r CancelRequest) RequestID() string   { return r.ID }
+func (r CancelRequest) messageType() string { return "cancel" }
+
+type ProtocolError struct {
+	Code      string
+	Message   string
+	RequestID string
+	Cause     error
+}
+
+func (e *ProtocolError) Error() string { return e.Message }
+func (e *ProtocolError) Unwrap() error { return e.Cause }
+
+// PublicError is the only handler error form whose text may cross to the Node payload.
+type PublicError struct {
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+func (e *PublicError) Error() string { return e.Message }
+
+func NewPublicError(code, message string, retryable bool) error {
+	return &PublicError{Code: code, Message: message, Retryable: retryable}
+}
+
+type errorBody struct {
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+// DecodeMessage parses a canonical request and applies the role-specific operation allowlist.
+func DecodeMessage(document []byte, role Role) (Message, error) {
+	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+	if err != nil {
+		return nil, protocolError("INVALID_CANONICAL_JSON", "Local RPC input is not canonical JSON.", "", err)
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC input must be an object.", "", ErrInvalidMessage)
+	}
+	requestID := validRequestIDFromObject(object)
+	messageType, ok := object["type"].(string)
+	if !ok {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC message type is missing.", requestID, ErrInvalidMessage)
+	}
+	if role != RoleControl {
+		return nil, protocolError(
+			"OPERATION_NOT_ALLOWED",
+			"Local RPC messages are not allowed for this service role.",
+			requestID,
+			ErrOperationNotAllowed,
+		)
+	}
+
+	switch messageType {
+	case "call":
+		return decodeCall(document, requestID)
+	case "cancel":
+		return decodeCancel(document, requestID)
+	default:
+		return nil, protocolError("UNKNOWN_MESSAGE_TYPE", "Local RPC message type is not supported.", requestID, ErrUnknownMessageType)
+	}
+}
+
+type wireCall struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Type            string          `json:"type"`
+	RequestID       string          `json:"requestId"`
+	Operation       Operation       `json:"operation"`
+	Payload         json.RawMessage `json:"payload"`
+}
+
+type bodyPayload struct {
+	Body json.RawMessage `json:"body"`
+}
+
+type heartbeatPayload struct {
+	Body             json.RawMessage `json:"body"`
+	WorkerInstanceID string          `json:"workerInstanceId"`
+}
+
+type runPayload struct {
+	Body         json.RawMessage `json:"body"`
+	RunAttemptID string          `json:"runAttemptId"`
+}
+
+type digestPayload struct {
+	DigestSHA256 string `json:"digestSha256"`
+}
+
+func decodeCall(document []byte, extractedRequestID string) (Message, error) {
+	if !hasExactObjectKeys(document, "operation", "payload", "protocolVersion", "requestId", "type") {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC call shape is invalid.", extractedRequestID, ErrInvalidMessage)
+	}
+	var wire wireCall
+	if err := decodeExact(document, &wire); err != nil {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC call shape is invalid.", extractedRequestID, errors.Join(ErrInvalidMessage, err))
+	}
+	if wire.ProtocolVersion != ProtocolVersion || wire.Type != "call" {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC call version or type is invalid.", extractedRequestID, ErrInvalidMessage)
+	}
+	if err := validateRequestID(wire.RequestID); err != nil {
+		return nil, protocolError("INVALID_REQUEST_ID", "Local RPC requestId is invalid.", "", err)
+	}
+	request := CallRequest{ID: wire.RequestID, Operation: wire.Operation}
+	switch wire.Operation {
+	case OperationRegister, OperationClaim:
+		if !hasExactObjectKeys(wire.Payload, "body") {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		var payload bodyPayload
+		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		request.Body = bytes.Clone(payload.Body)
+	case OperationInstanceHeartbeat:
+		if !hasExactObjectKeys(wire.Payload, "body", "workerInstanceId") {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		var payload heartbeatPayload
+		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		if err := validateEntityID(payload.WorkerInstanceID); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC workerInstanceId is invalid.", wire.RequestID, err)
+		}
+		request.Body = bytes.Clone(payload.Body)
+		request.WorkerInstanceID = payload.WorkerInstanceID
+	case OperationCompleteRun, OperationFailRun:
+		if !hasExactObjectKeys(wire.Payload, "body", "runAttemptId") {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		var payload runPayload
+		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		if err := validateEntityID(payload.RunAttemptID); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC runAttemptId is invalid.", wire.RequestID, err)
+		}
+		request.Body = bytes.Clone(payload.Body)
+		request.RunAttemptID = payload.RunAttemptID
+	case OperationSignLocalDigest:
+		if !hasExactObjectKeys(wire.Payload, "digestSha256") {
+			return nil, protocolError("INVALID_PAYLOAD", "Local signing payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		var payload digestPayload
+		if err := decodeExact(wire.Payload, &payload); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local signing payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		digest, err := decodeDigest(payload.DigestSHA256)
+		if err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local signing digest must be exactly 32 bytes.", wire.RequestID, err)
+		}
+		request.Digest = digest
+	default:
+		return nil, protocolError("UNKNOWN_OPERATION", "Local RPC operation is not supported.", wire.RequestID, ErrUnknownOperation)
+	}
+	return request, nil
+}
+
+type wireCancel struct {
+	ProtocolVersion string `json:"protocolVersion"`
+	Type            string `json:"type"`
+	RequestID       string `json:"requestId"`
+	TargetRequestID string `json:"targetRequestId"`
+}
+
+func decodeCancel(document []byte, extractedRequestID string) (Message, error) {
+	if !hasExactObjectKeys(document, "protocolVersion", "requestId", "targetRequestId", "type") {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC cancel shape is invalid.", extractedRequestID, ErrInvalidMessage)
+	}
+	var wire wireCancel
+	if err := decodeExact(document, &wire); err != nil {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC cancel shape is invalid.", extractedRequestID, errors.Join(ErrInvalidMessage, err))
+	}
+	if wire.ProtocolVersion != ProtocolVersion || wire.Type != "cancel" {
+		return nil, protocolError("INVALID_MESSAGE", "Local RPC cancel version or type is invalid.", extractedRequestID, ErrInvalidMessage)
+	}
+	if err := validateRequestID(wire.RequestID); err != nil {
+		return nil, protocolError("INVALID_REQUEST_ID", "Local RPC requestId is invalid.", "", err)
+	}
+	if err := validateRequestID(wire.TargetRequestID); err != nil || wire.TargetRequestID == wire.RequestID {
+		return nil, protocolError("INVALID_TARGET_REQUEST_ID", "Local RPC cancel target is invalid.", wire.RequestID, ErrInvalidMessage)
+	}
+	return CancelRequest{ID: wire.RequestID, TargetRequestID: wire.TargetRequestID}, nil
+}
+
+func MarshalSuccessResponse(requestID string, body json.RawMessage, maximumBytes int) ([]byte, error) {
+	if err := validateRequestID(requestID); err != nil {
+		return nil, err
+	}
+	value, err := ParseCanonicalJSON(body, maximumBytes)
+	if err != nil {
+		return nil, ErrInvalidHandlerResult
+	}
+	if _, ok := value.(map[string]any); !ok {
+		return nil, ErrInvalidHandlerResult
+	}
+	return MarshalCanonicalJSON(map[string]any{
+		"body":            value,
+		"outcome":         "ok",
+		"protocolVersion": ProtocolVersion,
+		"requestId":       requestID,
+		"type":            "response",
+	}, maximumBytes)
+}
+
+func MarshalErrorResponse(requestID string, publicError errorBody) ([]byte, error) {
+	if err := validateRequestID(requestID); err != nil {
+		return nil, err
+	}
+	if !validErrorCode(publicError.Code) || !validPublicMessage(publicError.Message) {
+		return nil, errors.New("local RPC public error is invalid")
+	}
+	return MarshalCanonicalJSON(map[string]any{
+		"error": map[string]any{
+			"code":      publicError.Code,
+			"message":   publicError.Message,
+			"retryable": publicError.Retryable,
+		},
+		"outcome":         "error",
+		"protocolVersion": ProtocolVersion,
+		"requestId":       requestID,
+		"type":            "response",
+	}, MaximumFrameBytes)
+}
+
+func successBooleanBody(name string, value bool) json.RawMessage {
+	document, _ := MarshalCanonicalJSON(map[string]any{name: value}, MaximumFrameBytes)
+	return document
+}
+
+func signatureBody(signature []byte) (json.RawMessage, error) {
+	if !validP256LowSSignature(signature) {
+		return nil, ErrInvalidHandlerResult
+	}
+	document, err := MarshalCanonicalJSON(map[string]any{
+		"signatureP1363": base64.RawURLEncoding.EncodeToString(signature),
+	}, MaximumFrameBytes)
+	return json.RawMessage(document), err
+}
+
+var p256Order = [32]byte{
+	0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
+	0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+}
+
+var p256HalfOrder = [32]byte{
+	0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
+	0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42,
+	0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
+}
+
+func validP256LowSSignature(signature []byte) bool {
+	if len(signature) != 64 {
+		return false
+	}
+	r := signature[:32]
+	s := signature[32:]
+	return validP256Scalar(r, p256Order[:], false) && validP256Scalar(s, p256HalfOrder[:], true)
+}
+
+func validP256Scalar(value, maximum []byte, inclusive bool) bool {
+	comparison := bytes.Compare(value, maximum)
+	if comparison > 0 || comparison == 0 && !inclusive {
+		return false
+	}
+	for _, octet := range value {
+		if octet != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeOperationError(err error) errorBody {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRequestTimeout) {
+		return errorBody{Code: "REQUEST_TIMEOUT", Message: "The local RPC operation timed out.", Retryable: true}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrRequestCancelled) {
+		return errorBody{Code: "REQUEST_CANCELLED", Message: "The local RPC operation was cancelled.", Retryable: true}
+	}
+	var publicError *PublicError
+	if errors.As(err, &publicError) && publicError != nil && validErrorCode(publicError.Code) && validPublicMessage(publicError.Message) {
+		return errorBody{Code: publicError.Code, Message: publicError.Message, Retryable: publicError.Retryable}
+	}
+	return errorBody{Code: "INTERNAL_ERROR", Message: "The ServiceHost operation failed.", Retryable: true}
+}
+
+func protocolError(code, message, requestID string, cause error) *ProtocolError {
+	return &ProtocolError{Code: code, Message: message, RequestID: requestID, Cause: cause}
+}
+
+func decodeExact(document []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func isCanonicalJSONObject(document []byte) bool {
+	if len(document) == 0 {
+		return false
+	}
+	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+	if err != nil {
+		return false
+	}
+	_, ok := value.(map[string]any)
+	return ok
+}
+
+func hasExactObjectKeys(document []byte, expected ...string) bool {
+	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+	if err != nil {
+		return false
+	}
+	object, ok := value.(map[string]any)
+	if !ok || len(object) != len(expected) {
+		return false
+	}
+	for _, key := range expected {
+		if _, exists := object[key]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeDigest(value string) ([32]byte, error) {
+	var result [32]byte
+	if len(value) != hex.EncodedLen(len(result)) || strings.ToLower(value) != value {
+		return result, errors.New("digest is not canonical lowercase hexadecimal")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != len(result) {
+		return result, errors.New("digest is not a 32-byte value")
+	}
+	copy(result[:], decoded)
+	return result, nil
+}
+
+func validateRequestID(value string) error {
+	if len(value) == 0 || len(value) > 128 || !asciiAlphaNumeric(value[0]) {
+		return errors.New("requestId is outside the supported syntax")
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if asciiAlphaNumeric(character) || character == '.' || character == '_' || character == ':' || character == '-' {
+			continue
+		}
+		return errors.New("requestId contains an unsupported character")
+	}
+	return nil
+}
+
+func validateEntityID(value string) error { return validateRequestID(value) }
+
+func validRequestIDFromObject(object map[string]any) string {
+	value, ok := object["requestId"].(string)
+	if !ok || validateRequestID(value) != nil {
+		return ""
+	}
+	return value
+}
+
+func validErrorCode(value string) bool {
+	if len(value) == 0 || len(value) > 64 || value[0] < 'A' || value[0] > 'Z' {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validPublicMessage(value string) bool {
+	if value == "" || len(value) > 512 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character == 0 || character < 0x20 && character != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+}
