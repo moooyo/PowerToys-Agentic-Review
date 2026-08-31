@@ -196,16 +196,57 @@ func TestDiscardedObjectRetriesCloseAndPreservesFailures(t *testing.T) {
 	}
 }
 
-func TestDiscardedNativeHandleUsesBoundedRetries(t *testing.T) {
+func TestDiscardedNativeHandleIsConsumedOnceAndQuarantined(t *testing.T) {
 	closeFailure := errors.New("persistent close failure")
 	attempts := 0
-	err := closeDiscardedHandle(windows.Handle(601), "close native fixture", func(windows.Handle) error {
+	quarantine := &discardedHandleQuarantine{}
+	err := closeDiscardedHandleWithQuarantine(windows.Handle(601), "close native fixture", func(windows.Handle) error {
 		attempts++
 		return closeFailure
-	})
-	if !errors.Is(err, closeFailure) || attempts != discardedHandleCloseAttempts {
+	}, quarantine)
+	if !errors.Is(err, closeFailure) || !errors.Is(err, ErrCleanupFatal) || attempts != 1 ||
+		!errors.Is(quarantine.status(), ErrCleanupFatal) || len(quarantine.owners) != 1 ||
+		quarantine.owners[0].handle != windows.Handle(601) {
 		t.Fatalf("close returned %v after %d attempts", err, attempts)
 	}
+}
+
+func TestDiscardedHandleFatalPublicationLinearizesWithHealthyCommit(t *testing.T) {
+	t.Run("commit first", func(t *testing.T) {
+		quarantine := &discardedHandleQuarantine{}
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		committed := false
+		commitDone := make(chan error, 1)
+		go func() {
+			commitDone <- quarantine.commitIfHealthy(func() {
+				close(entered)
+				<-release
+				committed = true
+			})
+		}()
+		<-entered
+		publishDone := make(chan error, 1)
+		go func() {
+			publishDone <- quarantine.retain(windows.Handle(602), "publish fixture", errors.New("close failed"))
+		}()
+		close(release)
+		if err := <-commitDone; err != nil || !committed {
+			t.Fatalf("healthy commit = %v, committed=%v", err, committed)
+		}
+		if err := <-publishDone; !errors.Is(err, ErrCleanupFatal) {
+			t.Fatalf("fatal publication = %v", err)
+		}
+	})
+
+	t.Run("fatal first", func(t *testing.T) {
+		quarantine := &discardedHandleQuarantine{}
+		_ = quarantine.retain(windows.Handle(603), "publish fixture", errors.New("close failed"))
+		committed := false
+		if err := quarantine.commitIfHealthy(func() { committed = true }); !errors.Is(err, ErrCleanupFatal) || committed {
+			t.Fatalf("post-fatal commit = %v, committed=%v", err, committed)
+		}
+	})
 }
 
 func TestWindowsFileVerifyAuthenticodeUsesOpaqueRetainedHandle(t *testing.T) {

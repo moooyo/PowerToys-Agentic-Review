@@ -26,6 +26,7 @@ var (
 	ErrCaseSensitiveDirectory   = errors.New("case-sensitive directories are not supported")
 	ErrNamedDataStream          = errors.New("named NTFS data streams are not permitted")
 	ErrStreamEnumeration        = errors.New("secure data-stream enumeration failed")
+	ErrCleanupFatal             = errors.New("secure file handle cleanup is unresolved; ServiceHost must exit")
 )
 
 const (

@@ -36,6 +36,9 @@ var (
 )
 
 func openObject(path string, kind ObjectKind, options OpenOptions) (result openedObject, err error) {
+	if fatal := ProcessCleanupStatus(); fatal != nil {
+		return openedObject{}, fatal
+	}
 	if err := validateOpenRequest(path, kind, options); err != nil {
 		return openedObject{}, err
 	}
@@ -356,19 +359,28 @@ func closeDiscardedHandle(
 	operation string,
 	closeHandle func(windows.Handle) error,
 ) error {
+	return closeDiscardedHandleWithQuarantine(
+		handle,
+		operation,
+		closeHandle,
+		&processDiscardedHandles,
+	)
+}
+
+func closeDiscardedHandleWithQuarantine(
+	handle windows.Handle,
+	operation string,
+	closeHandle func(windows.Handle) error,
+	quarantine *discardedHandleQuarantine,
+) error {
 	if handle == 0 || handle == windows.InvalidHandle {
 		return nil
 	}
 	if closeHandle == nil {
 		closeHandle = windows.CloseHandle
 	}
-	var failures []error
-	for attempt := 1; attempt <= discardedHandleCloseAttempts; attempt++ {
-		if err := closeHandle(handle); err != nil {
-			failures = append(failures, fmt.Errorf("%s attempt %d: %w", operation, attempt, err))
-			continue
-		}
-		return errors.Join(failures...)
+	if err := closeHandle(handle); err != nil {
+		return quarantine.retain(handle, operation, err)
 	}
-	return errors.Join(failures...)
+	return nil
 }

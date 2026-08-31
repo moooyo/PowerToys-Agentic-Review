@@ -15,6 +15,9 @@ import (
 // OpenTraversalRoot opens a canonical drive root with the traverse access
 // needed for subsequent handle-relative component opens.
 func OpenTraversalRoot(path string, options OpenOptions) (result *Directory, err error) {
+	if fatal := ProcessCleanupStatus(); fatal != nil {
+		return nil, fatal
+	}
 	if err := validateOpenRequest(path, ObjectKindDirectory, options); err != nil {
 		return nil, err
 	}
@@ -91,6 +94,9 @@ func (directory *Directory) openComponent(
 	kind ObjectKind,
 	options OpenOptions,
 ) (openedObject, error) {
+	if fatal := ProcessCleanupStatus(); fatal != nil {
+		return openedObject{}, fatal
+	}
 	if directory == nil {
 		return openedObject{}, ErrClosed
 	}
