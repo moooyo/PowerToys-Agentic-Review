@@ -14,15 +14,28 @@ const (
 )
 
 func TestFixedNodeArgumentsCannotBeExtendedByCallers(t *testing.T) {
-	want := []string{
-		"--enable-source-maps",
-		`C:\Program Files\AgenticReview\Worker\app\control.mjs`,
-		"--service-role=control",
-		"--servicehost-arwx-stdio",
-		"--servicehost-host-control-pipe=\\\\.\\pipe\\AgenticReview.ServiceHost.HostControl.v1." + strings.Repeat("a", 64),
-	}
-	if got := fixedNodeArguments(RoleControl, want[1], validLaunchSpec().HostControlPipeName); !reflect.DeepEqual(got, want) {
-		t.Fatalf("fixedNodeArguments() = %#v, want %#v", got, want)
+	pipeArgument := "--servicehost-host-control-pipe=" + validLaunchSpec().HostControlPipeName
+	for _, test := range []struct {
+		role   Role
+		bundle string
+	}{
+		{role: RoleControl, bundle: `C:\Program Files\AgenticReview\Worker\app\control.mjs`},
+		{role: RoleExecutor, bundle: `C:\Program Files\AgenticReview\Worker\app\executor.mjs`},
+	} {
+		t.Run(string(test.role), func(t *testing.T) {
+			want := []string{
+				"--enable-source-maps",
+				"--disallow-code-generation-from-strings",
+				"--no-addons",
+				test.bundle,
+				"--service-role=" + string(test.role),
+				"--servicehost-arwx-stdio",
+				pipeArgument,
+			}
+			if got := fixedNodeArguments(test.role, test.bundle, validLaunchSpec().HostControlPipeName); !reflect.DeepEqual(got, want) {
+				t.Fatalf("fixedNodeArguments() = %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 
@@ -201,6 +214,7 @@ func TestLaunchSpecRejectsCallerControlledContractViolations(t *testing.T) {
 			spec.HostControlPipeName = `\\.\pipe\AgenticReview.ServiceHost.HostControl.v1.not-random`
 		}},
 		{name: "nil environment", mutate: func(spec *NodeLaunchSpec) { spec.Environment = nil }},
+		{name: "Node options", mutate: func(spec *NodeLaunchSpec) { spec.Environment["NODE_OPTIONS"] = "--addons" }},
 		{name: "zero processes", mutate: func(spec *NodeLaunchSpec) { spec.MaximumProcesses = 0 }},
 		{name: "too many processes", mutate: func(spec *NodeLaunchSpec) { spec.MaximumProcesses = maximumRootJobProcesses + 1 }},
 		{name: "zero memory", mutate: func(spec *NodeLaunchSpec) { spec.MaximumMemoryBytes = 0 }},

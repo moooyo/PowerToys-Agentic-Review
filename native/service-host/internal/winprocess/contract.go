@@ -66,6 +66,8 @@ func requiredProcessCreationAttributes() []processCreationAttribute {
 func fixedNodeArguments(role Role, bundlePath, hostControlPipeName string) []string {
 	return []string{
 		"--enable-source-maps",
+		"--disallow-code-generation-from-strings",
+		"--no-addons",
 		bundlePath,
 		"--service-role=" + string(role),
 		"--servicehost-arwx-stdio",
@@ -196,6 +198,9 @@ func validateLaunchSpec(spec NodeLaunchSpec) error {
 	}
 	if spec.Environment == nil {
 		return errors.New("replacement environment is required")
+	}
+	if _, exists := spec.Environment["NODE_OPTIONS"]; exists {
+		return errors.New("replacement environment must not contain NODE_OPTIONS")
 	}
 	if spec.MaximumProcesses == 0 || spec.MaximumProcesses > maximumRootJobProcesses {
 		return fmt.Errorf("root Job process limit must be from 1 through %d", maximumRootJobProcesses)

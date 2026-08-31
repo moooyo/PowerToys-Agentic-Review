@@ -15,8 +15,10 @@ const (
 )
 
 // NodeLaunchSpec contains the reviewed inputs to the fixed Node launcher.
-// It intentionally has no arguments field: callers cannot add Node flags or
-// select another payload command line.
+// It intentionally has no arguments field: callers cannot remove, reorder, or
+// extend the fixed Node hardening flags or select another payload command line.
+// NODE_OPTIONS is rejected even though the configuration layer also excludes
+// it from the reviewed replacement environment.
 type NodeLaunchSpec struct {
 	ExecutablePath   string
 	BundlePath       string

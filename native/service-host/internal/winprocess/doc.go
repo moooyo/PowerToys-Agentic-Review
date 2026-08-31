@@ -2,6 +2,9 @@
 // primitives for ServiceHost. Before resuming Node, it applies and reads back
 // exact protected DACLs on the process object and primary token. Standard I/O
 // uses per-launch random, single-instance local named pipes.
+// Node starts with fixed code-generation and native-addon restrictions placed
+// before the sole reviewed bundle path; neither caller arguments nor
+// NODE_OPTIONS can weaken or reorder them.
 // Only each synchronous child end is inheritable; parent ends use overlapped
 // I/O and protected DACLs containing SYSTEM, Administrators, and the owning
 // service SID. The owning restricted service SID receives file-generic read

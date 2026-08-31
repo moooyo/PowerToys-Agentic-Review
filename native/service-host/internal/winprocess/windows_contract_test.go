@@ -4,6 +4,7 @@ package winprocess
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -77,6 +78,27 @@ func TestWindowsConstantsMatchReviewedProcessContract(t *testing.T) {
 	}
 	if standardIOMaximumInstances != 1 {
 		t.Fatal("standard-I/O named pipe permits more than one server instance")
+	}
+}
+
+func TestFixedNodeCommandLinesRemainWithinWindowsLimit(t *testing.T) {
+	spec := validLaunchSpec()
+	for _, role := range []Role{RoleControl, RoleExecutor} {
+		arguments := fixedNodeArguments(role, spec.BundlePath, spec.HostControlPipeName)
+		commandLine := windows.ComposeCommandLine(append([]string{spec.ExecutablePath}, arguments...))
+		encoded, err := windows.UTF16FromString(commandLine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) > 32_767 {
+			t.Fatalf("%s command line uses %d UTF-16 units", role, len(encoded))
+		}
+		bundleIndex := strings.Index(commandLine, spec.BundlePath)
+		for _, fixedFlag := range []string{"--disallow-code-generation-from-strings", "--no-addons"} {
+			if flagIndex := strings.Index(commandLine, fixedFlag); flagIndex < 0 || flagIndex >= bundleIndex {
+				t.Fatalf("%s command line does not place %s before the bundle: %q", role, fixedFlag, commandLine)
+			}
+		}
 	}
 }
 
