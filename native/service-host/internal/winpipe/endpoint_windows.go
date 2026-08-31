@@ -18,6 +18,14 @@ import (
 
 const overlappedPollMilliseconds = 25
 
+type endpointCloseMode uint8
+
+const (
+	endpointCloseModeNone endpointCloseMode = iota
+	endpointCloseModeAbortive
+	endpointCloseModeFlush
+)
+
 // Endpoint is a connected named-pipe endpoint. Copies share one private state
 // and therefore one raw handle owner, operation set, and close result.
 type Endpoint struct {
@@ -44,19 +52,29 @@ type endpointState struct {
 	peerServiceSID         string
 	serverSecurityVerified bool
 
-	stateMu      sync.Mutex
-	closed       bool
-	closing      bool
-	quarantined  bool
-	terminal     error
-	fatal        error
-	active       endpointActivity
-	closeOnce    sync.Once
-	closeErr     error
-	operations   map[*endpointOperation]struct{}
-	quarantine   *endpointLifetimeQuarantine
-	cleanupGrace time.Duration
-	closeGrace   time.Duration
+	stateMu          sync.Mutex
+	closed           bool
+	closing          bool
+	quarantined      bool
+	terminal         error
+	fatal            error
+	active           endpointActivity
+	closeOnce        sync.Once
+	abortiveOnce     sync.Once
+	closeMode        endpointCloseMode
+	closeErr         error
+	flushErr         error
+	closeDone        chan struct{}
+	abortWaitDone    chan struct{}
+	abortWaitErr     error
+	abortWaitStarted bool
+	closeCompleted   bool
+	activeFlush      *endpointFlushOwner
+	operations       map[*endpointOperation]struct{}
+	quarantine       *endpointLifetimeQuarantine
+	cleanupGrace     time.Duration
+	closeGrace       time.Duration
+	abortiveClose    chan struct{}
 
 	readGate  chan struct{}
 	writeGate chan struct{}
@@ -66,6 +84,7 @@ type endpointState struct {
 	connectPipe         endpointConnectFunc
 	createEvent         endpointCreateEventFunc
 	disconnect          endpointDisconnectFunc
+	flushBuffers        endpointFlushFunc
 	getOverlappedResult endpointGetResultFunc
 	readFile            endpointReadFunc
 	waitForSingleObject endpointWaitFunc
@@ -316,6 +335,9 @@ func newEndpoint(handle windows.Handle, metadata endpointMetadata) *Endpoint {
 		quarantine:             windowsEndpointLifetimeQuarantine,
 		cleanupGrace:           endpointOperationCleanupGrace,
 		closeGrace:             endpointCloseGrace,
+		abortiveClose:          make(chan struct{}),
+		closeDone:              make(chan struct{}),
+		abortWaitDone:          make(chan struct{}),
 	}
 	state.readGate <- struct{}{}
 	state.writeGate <- struct{}{}
@@ -415,6 +437,9 @@ func (e *Endpoint) ReadFrame(ctx context.Context) ([]byte, error) {
 		return nil, wrapped
 	}
 	if err != nil {
+		if transferred == 0 && isExactNamedPipeReadEOF(err) {
+			return nil, io.EOF
+		}
 		err = e.normalizeOperationError(err, true)
 		wrapped := fmt.Errorf("read named-pipe frame: %w", err)
 		e.markFailed(wrapped)
@@ -433,6 +458,12 @@ func (e *Endpoint) ReadFrame(ctx context.Context) ([]byte, error) {
 		return nil, wrapped
 	}
 	return value, nil
+}
+
+func isExactNamedPipeReadEOF(err error) bool {
+	return err == windows.ERROR_BROKEN_PIPE ||
+		err == windows.ERROR_NO_DATA ||
+		err == windows.ERROR_PIPE_NOT_CONNECTED
 }
 
 func (e *Endpoint) WriteFrame(ctx context.Context, value []byte) error {
@@ -536,6 +567,109 @@ func (state *endpointState) stateErrorLocked() error {
 	return state.terminal
 }
 
+type endpointCloseSnapshot struct {
+	handle     windows.Handle
+	server     bool
+	closeGrace time.Duration
+	terminal   error
+}
+
+type endpointFlushOwner struct {
+	state     *endpointState
+	handle    windows.Handle
+	done      chan endpointFlushResult
+	finish    func()
+	started   bool
+	canceled  bool
+	completed bool
+}
+
+type endpointFlushResult struct {
+	err               error
+	nativeStarted     bool
+	admissionCanceled bool
+}
+
+// FlushThenClose is the server's consume-once graceful close. It proves that
+// the client consumed every successful write before disconnecting and closing
+// the server handle. A blocked flush is quarantined rather than raced by Close.
+func (e *Endpoint) FlushThenClose(ctx context.Context) error {
+	if e == nil || e.state == nil {
+		return ErrClosed
+	}
+	state := e.state
+	state.stateMu.Lock()
+	server := state.server
+	mode := state.closeMode
+	done := state.closeDoneLocked()
+	abortWaitStarted := state.abortWaitStarted
+	abortWaitDone := state.abortWaitDoneLocked()
+	localFatal := state.fatal
+	state.stateMu.Unlock()
+	if mode != endpointCloseModeNone {
+		if abortWaitStarted {
+			<-abortWaitDone
+			<-done
+			return state.completedFlushCloseResult(mode)
+		}
+		if localFatal != nil {
+			if mode == endpointCloseModeAbortive {
+				return errors.Join(ErrFlushInterrupted, localFatal)
+			}
+			return localFatal
+		}
+		return state.waitForFlushCloseResult(ctx, mode, done)
+	}
+	if localFatal != nil {
+		return localFatal
+	}
+	if fatal := state.quarantineOrDefault().fatalError(); fatal != nil {
+		state.markFatal(fatal)
+		return fatal
+	}
+	if !server {
+		return ErrFlushServerOnly
+	}
+	if ctx == nil {
+		return ErrFlushDeadline
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return ErrFlushDeadline
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+
+	state.stateMu.Lock()
+	mode = state.closeMode
+	done = state.closeDoneLocked()
+	selected := false
+	if mode == endpointCloseModeNone {
+		if state.fatal != nil {
+			fatal := state.fatal
+			state.stateMu.Unlock()
+			return fatal
+		}
+		if state.closed || state.closing || state.handle == 0 {
+			state.stateMu.Unlock()
+			return ErrClosed
+		}
+		state.closeMode = endpointCloseModeFlush
+		mode = endpointCloseModeFlush
+		selected = true
+	}
+	state.stateMu.Unlock()
+	if !selected {
+		return state.waitForFlushCloseResult(ctx, mode, done)
+	}
+	abortive := state.abortiveCloseChannel()
+	state.closeOnce.Do(func() {
+		defer state.publishCloseCompletion(done)
+		state.flushErr, state.closeErr = state.flushThenClose(ctx, abortive)
+	})
+	return state.completedFlushCloseResult(mode)
+}
+
 // Close is bounded and consumes the raw pipe handle at most once. An
 // ErrIOUnresolvedFatal result requires the current ServiceHost process to exit.
 func (e *Endpoint) Close() error {
@@ -543,23 +677,319 @@ func (e *Endpoint) Close() error {
 		return nil
 	}
 	state := e.state
-	state.closeOnce.Do(func() { state.closeErr = state.close() })
+	state.signalAbortiveClose()
+	state.stateMu.Lock()
+	done := state.closeDoneLocked()
+	mode := state.closeMode
+	selected := false
+	if mode == endpointCloseModeNone {
+		state.closeMode = endpointCloseModeAbortive
+		mode = endpointCloseModeAbortive
+		selected = true
+	}
+	closeGrace := state.closeGrace
+	if closeGrace <= 0 {
+		closeGrace = endpointCloseGrace
+	}
+	fatal := state.fatal
+	abortWaitStarted := state.abortWaitStarted
+	abortWaitDone := state.abortWaitDoneLocked()
+	state.stateMu.Unlock()
+	if selected {
+		state.closeOnce.Do(func() {
+			defer state.publishCloseCompletion(done)
+			if fatal != nil {
+				state.closeErr = fatal
+				return
+			}
+			state.closeErr = state.close()
+		})
+		return state.completedCloseResult()
+	}
+	if abortWaitStarted {
+		<-abortWaitDone
+		return state.abortiveWaitResult()
+	}
+	if fatal != nil {
+		return fatal
+	}
+	if mode == endpointCloseModeFlush {
+		timer := time.NewTimer(closeGrace)
+		defer timer.Stop()
+		select {
+		case <-done:
+			return state.completedCloseResult()
+		case <-timer.C:
+			select {
+			case <-done:
+				return state.completedCloseResult()
+			default:
+			}
+			return state.finalizeAbortiveWaitTimeout()
+		}
+	}
+	<-done
+	return state.completedCloseResult()
+}
+
+func (state *endpointState) closeDoneLocked() chan struct{} {
+	if state.closeDone == nil {
+		state.closeDone = make(chan struct{})
+	}
+	return state.closeDone
+}
+
+func (state *endpointState) publishCloseCompletion(done chan struct{}) {
+	state.stateMu.Lock()
+	if state.closeCompleted {
+		state.stateMu.Unlock()
+		return
+	}
+	if !state.abortWaitStarted {
+		state.closeCompleted = true
+		state.activeFlush = nil
+		close(done)
+		state.stateMu.Unlock()
+		return
+	}
+	abortDone := state.abortWaitDoneLocked()
+	state.stateMu.Unlock()
+
+	<-abortDone
+	state.stateMu.Lock()
+	if !state.closeCompleted {
+		state.closeCompleted = true
+		state.activeFlush = nil
+		close(done)
+	}
+	state.stateMu.Unlock()
+}
+
+func (state *endpointState) abortWaitDoneLocked() chan struct{} {
+	if state.abortWaitDone == nil {
+		state.abortWaitDone = make(chan struct{})
+	}
+	return state.abortWaitDone
+}
+
+func (state *endpointState) finalizeAbortiveWaitTimeout() error {
+	cause := errors.Join(
+		ErrCloseTimeout,
+		errors.New("abortive close did not interrupt graceful named-pipe close"),
+	)
+	state.stateMu.Lock()
+	if state.closeCompleted {
+		state.stateMu.Unlock()
+		return state.completedCloseResult()
+	}
+	owner := state.activeFlush
+	closeDone := state.closeDoneLocked()
+	state.stateMu.Unlock()
+	if owner == nil {
+		return state.finalizeStateAbortiveWait(cause)
+	}
+	canceled, completed, fatal := state.quarantineOrDefault().cancelOrRetainFlush(owner, cause)
+	if completed || canceled {
+		if canceled && owner.finish != nil {
+			owner.finish()
+		}
+		<-closeDone
+		return state.completedCloseResult()
+	}
+	if fatal == nil {
+		fatal = state.quarantineCloseState(owner, cause)
+	} else {
+		state.markFatal(fatal)
+	}
+	return state.publishAbortiveWaitResult(fatal)
+}
+
+func (state *endpointState) completedAbortiveWaitResult() (error, bool) {
+	state.stateMu.Lock()
+	started := state.abortWaitStarted
+	done := state.abortWaitDoneLocked()
+	state.stateMu.Unlock()
+	if !started {
+		return nil, false
+	}
+	<-done
+	return state.abortiveWaitResult(), true
+}
+
+func (state *endpointState) abortiveWaitResult() error {
+	state.stateMu.Lock()
+	defer state.stateMu.Unlock()
+	return state.abortWaitErr
+}
+
+func (state *endpointState) completedCloseResult() error {
+	if abortiveErr, exists := state.completedAbortiveWaitResult(); exists {
+		return abortiveErr
+	}
 	return state.closeErr
 }
 
-func (state *endpointState) close() error {
+func (state *endpointState) publishAbortiveWaitResult(result error) error {
 	state.stateMu.Lock()
-	if state.fatal != nil {
-		fatal := state.fatal
+	if state.closeCompleted {
 		state.stateMu.Unlock()
-		return fatal
+		return state.completedCloseResult()
+	}
+	if state.abortWaitStarted {
+		done := state.abortWaitDoneLocked()
+		state.stateMu.Unlock()
+		<-done
+		return state.abortiveWaitResult()
+	}
+	state.abortWaitStarted = true
+	done := state.abortWaitDoneLocked()
+	state.abortWaitErr = result
+	close(done)
+	state.stateMu.Unlock()
+	return result
+}
+
+func (state *endpointState) finalizeStateAbortiveWait(cause error) error {
+	state.stateMu.Lock()
+	if state.closeCompleted {
+		state.stateMu.Unlock()
+		return state.completedCloseResult()
+	}
+	if state.abortWaitStarted {
+		done := state.abortWaitDoneLocked()
+		state.stateMu.Unlock()
+		<-done
+		return state.abortiveWaitResult()
+	}
+	state.abortWaitStarted = true
+	done := state.abortWaitDoneLocked()
+	state.stateMu.Unlock()
+	retained := state.quarantineOwner(state, cause)
+	result := errors.Join(state.markFatal(retained), retained)
+	state.stateMu.Lock()
+	state.abortWaitErr = result
+	close(done)
+	state.stateMu.Unlock()
+	return result
+}
+
+func (state *endpointState) waitForFlushCloseResult(
+	ctx context.Context,
+	mode endpointCloseMode,
+	done <-chan struct{},
+) error {
+	select {
+	case <-done:
+		return state.completedFlushCloseResult(mode)
+	default:
+	}
+	if ctx == nil {
+		return ErrFlushDeadline
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return ErrFlushDeadline
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	select {
+	case <-done:
+		return state.completedFlushCloseResult(mode)
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return state.completedFlushCloseResult(mode)
+		default:
+		}
+		return context.Cause(ctx)
+	}
+}
+
+func (state *endpointState) flushCloseResult(mode endpointCloseMode) error {
+	if mode != endpointCloseModeFlush {
+		return errors.Join(ErrFlushInterrupted, state.closeErr)
+	}
+	return errors.Join(state.flushErr, state.closeErr)
+}
+
+func (state *endpointState) completedFlushCloseResult(mode endpointCloseMode) error {
+	result := state.flushCloseResult(mode)
+	if abortiveErr, exists := state.completedAbortiveWaitResult(); exists {
+		return errors.Join(result, abortiveErr)
+	}
+	return result
+}
+
+func (state *endpointState) close() error {
+	snapshot, done, err := state.beginClose()
+	if done || err != nil {
+		return err
+	}
+	if !state.active.wait(snapshot.closeGrace) {
+		cause := errors.Join(ErrCloseTimeout, errors.New("active named-pipe operation did not reach terminal completion"))
+		return state.quarantineCloseState(state, cause)
+	}
+	return state.consumeAfterDrain(snapshot)
+}
+
+func (state *endpointState) flushThenClose(
+	ctx context.Context,
+	abortive <-chan struct{},
+) (error, error) {
+	snapshot, done, err := state.beginClose()
+	if done || err != nil {
+		return nil, err
+	}
+	if waitErr := state.active.waitContext(ctx, abortive); waitErr != nil {
+		if errors.Is(waitErr, ErrFlushInterrupted) {
+			if state.active.wait(snapshot.closeGrace) {
+				return waitErr, state.consumeAfterDrain(snapshot)
+			}
+			cause := errors.Join(
+				ErrCloseTimeout,
+				waitErr,
+				errors.New("active named-pipe operation did not stop after abortive close"),
+			)
+			return waitErr, state.finalizeStateAbortiveWait(cause)
+		}
+		if state.active.idle() {
+			return waitErr, state.consumeAfterDrain(snapshot)
+		}
+		cause := errors.Join(waitErr, errors.New("active named-pipe operation outlived the graceful-close deadline"))
+		if errors.Is(waitErr, context.DeadlineExceeded) {
+			cause = errors.Join(ErrCloseTimeout, cause)
+		}
+		return waitErr, state.finalizeStateAbortiveWait(cause)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause, state.consumeAfterDrain(snapshot)
+	}
+	if snapshot.terminal != nil {
+		return snapshot.terminal, state.consumeAfterDrain(snapshot)
+	}
+	select {
+	case <-abortive:
+		return ErrFlushInterrupted, state.consumeAfterDrain(snapshot)
+	default:
+	}
+	flushErr, fatalErr := state.flushServer(ctx, abortive, snapshot.handle)
+	if fatalErr != nil {
+		return flushErr, fatalErr
+	}
+	return flushErr, state.consumeAfterDrain(snapshot)
+}
+
+func (state *endpointState) beginClose() (endpointCloseSnapshot, bool, error) {
+	state.stateMu.Lock()
+	defer state.stateMu.Unlock()
+	if state.fatal != nil {
+		return endpointCloseSnapshot{}, true, state.fatal
 	}
 	if state.handle == 0 {
 		state.closed = true
 		state.closing = true
 		state.connected = false
-		state.stateMu.Unlock()
-		return nil
+		return endpointCloseSnapshot{}, true, nil
 	}
 	state.closed = true
 	state.closing = true
@@ -570,14 +1000,16 @@ func (state *endpointState) close() error {
 	if closeGrace <= 0 {
 		closeGrace = endpointCloseGrace
 	}
-	state.stateMu.Unlock()
+	return endpointCloseSnapshot{
+		handle:     handle,
+		server:     server,
+		closeGrace: closeGrace,
+		terminal:   state.terminal,
+	}, false, nil
+}
 
-	if !state.active.wait(closeGrace) {
-		cause := errors.Join(ErrCloseTimeout, errors.New("active named-pipe operation did not reach terminal completion"))
-		fatal := state.markFatal(cause)
-		return errors.Join(fatal, state.quarantineOwner(state, cause))
-	}
-
+func (state *endpointState) consumeAfterDrain(snapshot endpointCloseSnapshot) error {
+	handle := snapshot.handle
 	state.stateMu.Lock()
 	if state.fatal != nil || state.quarantined {
 		fatal := errors.Join(state.fatal, ErrIOUnresolvedFatal)
@@ -602,7 +1034,7 @@ func (state *endpointState) close() error {
 		return errors.Join(state.markFatal(gateErr), quarantine.retain(state, gateErr))
 	}
 	var disconnectErr error
-	if server {
+	if snapshot.server {
 		disconnect := state.disconnect
 		if disconnect == nil {
 			disconnect = windows.DisconnectNamedPipe
@@ -646,6 +1078,173 @@ func (state *endpointState) close() error {
 		return errors.Join(disconnectErr, state.markFatal(fatal))
 	}
 	return disconnectErr
+}
+
+func (state *endpointState) flushServer(
+	ctx context.Context,
+	abortive <-chan struct{},
+	handle windows.Handle,
+) (error, error) {
+	quarantine := state.quarantineOrDefault()
+	flush := state.flushBuffers
+	if flush == nil {
+		flush = windows.FlushFileBuffers
+	}
+	owner := &endpointFlushOwner{
+		state:  state,
+		handle: handle,
+		done:   make(chan endpointFlushResult, 1),
+	}
+	owner.finish = state.active.begin()
+	if gateErr := quarantine.registerFlush(owner); gateErr != nil {
+		owner.finish()
+		return nil, state.quarantineCloseState(state, gateErr)
+	}
+	state.stateMu.Lock()
+	state.activeFlush = owner
+	state.stateMu.Unlock()
+	go func() {
+		flushErr := quarantine.beginFlush(owner)
+		nativeStarted := flushErr == nil
+		admissionCanceled := errors.Is(flushErr, errEndpointFlushAdmissionCanceled)
+		if flushErr == nil {
+			flushErr = flush(handle)
+			_ = quarantine.markFlushCompleted(owner)
+		}
+		owner.finish()
+		owner.done <- endpointFlushResult{
+			err:               flushErr,
+			nativeStarted:     nativeStarted,
+			admissionCanceled: admissionCanceled,
+		}
+		runtime.KeepAlive(owner)
+	}()
+	select {
+	case result := <-owner.done:
+		return state.finishFlush(ctx, quarantine, owner, handle, result)
+	case <-ctx.Done():
+		select {
+		case result := <-owner.done:
+			return state.finishFlush(ctx, quarantine, owner, handle, result)
+		default:
+		}
+		cause := context.Cause(ctx)
+		if errors.Is(cause, context.DeadlineExceeded) {
+			cause = errors.Join(ErrCloseTimeout, cause)
+		}
+		return state.interruptRegisteredFlush(ctx, quarantine, owner, handle, context.Cause(ctx), cause)
+	case <-abortive:
+		select {
+		case result := <-owner.done:
+			return state.finishFlush(ctx, quarantine, owner, handle, result)
+		default:
+		}
+		return state.interruptRegisteredFlush(ctx, quarantine, owner, handle, ErrFlushInterrupted, ErrFlushInterrupted)
+	}
+}
+
+func (state *endpointState) finishFlush(
+	ctx context.Context,
+	quarantine *endpointLifetimeQuarantine,
+	owner *endpointFlushOwner,
+	handle windows.Handle,
+	result endpointFlushResult,
+) (error, error) {
+	concurrentFatal := quarantine.completeFlush(owner)
+	if !result.nativeStarted {
+		if result.admissionCanceled && concurrentFatal == nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return cause, nil
+			}
+			return ErrFlushInterrupted, nil
+		}
+		fatal := errors.Join(result.err, concurrentFatal)
+		if fatal == nil {
+			fatal = errors.New("named-pipe flush failed before native-use admission")
+		}
+		return nil, errors.Join(fatal, state.markFatal(fatal))
+	}
+	flushErr := result.err
+	var semanticErr error
+	var invalidHandleErr error
+	if flushErr == nil {
+		if cause := context.Cause(ctx); cause != nil {
+			semanticErr = cause
+		}
+	} else if errors.Is(flushErr, windows.ERROR_INVALID_HANDLE) {
+		state.stateMu.Lock()
+		if state.handle == handle {
+			state.handle = 0
+		}
+		state.stateMu.Unlock()
+		invalidHandleErr = fmt.Errorf("flush named-pipe server before close: %w", flushErr)
+		semanticErr = invalidHandleErr
+	} else if errors.Is(flushErr, windows.ERROR_BROKEN_PIPE) ||
+		errors.Is(flushErr, windows.ERROR_NO_DATA) ||
+		errors.Is(flushErr, windows.ERROR_PIPE_NOT_CONNECTED) {
+		semanticErr = errors.Join(io.ErrClosedPipe, fmt.Errorf("flush named-pipe server before close: %w", flushErr))
+	} else {
+		semanticErr = fmt.Errorf("flush named-pipe server before close: %w", flushErr)
+	}
+
+	if invalidHandleErr != nil {
+		localFatal := state.markFatal(invalidHandleErr)
+		retained := quarantine.retainFlush(owner, invalidHandleErr)
+		return semanticErr, errors.Join(concurrentFatal, localFatal, retained)
+	}
+	if concurrentFatal != nil {
+		state.markFatal(concurrentFatal)
+		return semanticErr, concurrentFatal
+	}
+	return semanticErr, nil
+}
+
+func (state *endpointState) interruptRegisteredFlush(
+	ctx context.Context,
+	quarantine *endpointLifetimeQuarantine,
+	owner *endpointFlushOwner,
+	handle windows.Handle,
+	semanticCause error,
+	retentionCause error,
+) (error, error) {
+	canceled, completed, fatal := quarantine.cancelOrRetainFlush(owner, retentionCause)
+	if completed {
+		result := <-owner.done
+		return state.finishFlush(ctx, quarantine, owner, handle, result)
+	}
+	if fatal != nil {
+		state.markFatal(fatal)
+		return semanticCause, state.publishAbortiveWaitResult(fatal)
+	}
+	if !canceled {
+		cause := errors.New("named-pipe flush interruption lost its registered owner")
+		return semanticCause, state.quarantineCloseState(owner, cause)
+	}
+	if owner.finish == nil {
+		cause := errors.New("canceled named-pipe flush has no activity owner")
+		return semanticCause, state.quarantineCloseState(owner, cause)
+	}
+	owner.finish()
+	return semanticCause, nil
+}
+
+func (state *endpointState) quarantineCloseState(owner any, cause error) error {
+	fatal := state.markFatal(cause)
+	return errors.Join(fatal, state.quarantineOwner(owner, cause))
+}
+
+func (state *endpointState) abortiveCloseChannel() chan struct{} {
+	state.stateMu.Lock()
+	defer state.stateMu.Unlock()
+	if state.abortiveClose == nil {
+		state.abortiveClose = make(chan struct{})
+	}
+	return state.abortiveClose
+}
+
+func (state *endpointState) signalAbortiveClose() {
+	abortive := state.abortiveCloseChannel()
+	state.abortiveOnce.Do(func() { close(abortive) })
 }
 
 // Attestation returns an immutable value snapshot of this concrete endpoint's

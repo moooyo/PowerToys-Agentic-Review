@@ -19,11 +19,14 @@ const (
 	endpointCloseGrace            = 3 * time.Second
 )
 
+var errEndpointFlushAdmissionCanceled = errors.New("named-pipe flush native-use admission was canceled")
+
 type endpointCancelFunc func(windows.Handle, *windows.Overlapped) error
 type endpointCloseHandleFunc func(windows.Handle) error
 type endpointConnectFunc func(windows.Handle, *windows.Overlapped) error
 type endpointCreateEventFunc func(*windows.SecurityAttributes, uint32, uint32, *uint16) (windows.Handle, error)
 type endpointDisconnectFunc func(windows.Handle) error
+type endpointFlushFunc func(windows.Handle) error
 type endpointGetResultFunc func(windows.Handle, *windows.Overlapped, *uint32, bool) error
 type endpointReadFunc func(windows.Handle, []byte, *uint32, *windows.Overlapped) error
 type endpointWaitFunc func(windows.Handle, uint32) (uint32, error)
@@ -81,10 +84,38 @@ func (activity *endpointActivity) wait(timeout time.Duration) bool {
 	}
 }
 
+func (activity *endpointActivity) idle() bool {
+	activity.mu.Lock()
+	defer activity.mu.Unlock()
+	return activity.count == 0
+}
+
+func (activity *endpointActivity) waitContext(
+	ctx context.Context,
+	abortive <-chan struct{},
+) error {
+	activity.mu.Lock()
+	if activity.count == 0 {
+		activity.mu.Unlock()
+		return nil
+	}
+	drained := activity.drained
+	activity.mu.Unlock()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-abortive:
+		return ErrFlushInterrupted
+	}
+}
+
 type endpointLifetimeQuarantine struct {
-	mu     sync.RWMutex
-	owners []any
-	fatal  error
+	mu              sync.RWMutex
+	owners          []any
+	registeredFlush map[*endpointFlushOwner]struct{}
+	fatal           error
 }
 
 var windowsEndpointLifetimeQuarantine = &endpointLifetimeQuarantine{}
@@ -98,10 +129,174 @@ func (quarantine *endpointLifetimeQuarantine) retain(owner any, cause error) err
 	}
 	result := errors.Join(ErrIOUnresolvedFatal, cause)
 	quarantine.mu.Lock()
+	quarantine.retainRegisteredFlushesLocked()
 	quarantine.owners = append(quarantine.owners, owner)
 	quarantine.fatal = errors.Join(quarantine.fatal, result)
 	quarantine.mu.Unlock()
 	return result
+}
+
+func (quarantine *endpointLifetimeQuarantine) registerFlush(
+	owner *endpointFlushOwner,
+) error {
+	if quarantine == nil || owner == nil {
+		return ErrIOUnresolvedFatal
+	}
+	quarantine.mu.Lock()
+	defer quarantine.mu.Unlock()
+	if quarantine.fatal != nil {
+		return quarantine.fatal
+	}
+	if quarantine.registeredFlush == nil {
+		quarantine.registeredFlush = make(map[*endpointFlushOwner]struct{})
+	}
+	if _, exists := quarantine.registeredFlush[owner]; exists {
+		return errors.New("named-pipe flush owner is already registered")
+	}
+	quarantine.registeredFlush[owner] = struct{}{}
+	return nil
+}
+
+func (quarantine *endpointLifetimeQuarantine) beginFlush(
+	owner *endpointFlushOwner,
+) error {
+	if quarantine == nil || owner == nil {
+		return ErrIOUnresolvedFatal
+	}
+	quarantine.mu.Lock()
+	defer quarantine.mu.Unlock()
+	if owner.canceled {
+		return errEndpointFlushAdmissionCanceled
+	}
+	if quarantine.fatal != nil {
+		return quarantine.fatal
+	}
+	if _, registered := quarantine.registeredFlush[owner]; !registered || owner.started {
+		cause := errors.New("named-pipe flush native-use admission changed")
+		quarantine.appendFlushOwnerLocked(owner)
+		delete(quarantine.registeredFlush, owner)
+		quarantine.fatal = errors.Join(quarantine.fatal, ErrIOUnresolvedFatal, cause)
+		return quarantine.fatal
+	}
+	owner.started = true
+	return nil
+}
+
+func (quarantine *endpointLifetimeQuarantine) cancelOrRetainFlush(
+	owner *endpointFlushOwner,
+	cause error,
+) (bool, bool, error) {
+	if quarantine == nil || owner == nil {
+		return false, false, errors.Join(ErrIOUnresolvedFatal, cause)
+	}
+	quarantine.mu.Lock()
+	defer quarantine.mu.Unlock()
+	if _, registered := quarantine.registeredFlush[owner]; registered {
+		if owner.completed {
+			return false, true, quarantine.fatal
+		}
+		delete(quarantine.registeredFlush, owner)
+		if !owner.started {
+			owner.canceled = true
+			return true, false, nil
+		}
+		quarantine.appendFlushOwnerLocked(owner)
+		result := errors.Join(ErrIOUnresolvedFatal, cause)
+		quarantine.fatal = errors.Join(quarantine.fatal, result)
+		return false, false, result
+	}
+	if owner.canceled {
+		return true, false, nil
+	}
+	if owner.completed {
+		return false, true, quarantine.fatal
+	}
+	if quarantine.fatal != nil {
+		return false, false, quarantine.fatal
+	}
+	invariant := errors.Join(
+		ErrIOUnresolvedFatal,
+		cause,
+		errors.New("named-pipe flush registration disappeared during interruption"),
+	)
+	quarantine.appendFlushOwnerLocked(owner)
+	quarantine.fatal = errors.Join(quarantine.fatal, invariant)
+	return false, false, invariant
+}
+
+func (quarantine *endpointLifetimeQuarantine) markFlushCompleted(
+	owner *endpointFlushOwner,
+) error {
+	if quarantine == nil || owner == nil {
+		return ErrIOUnresolvedFatal
+	}
+	quarantine.mu.Lock()
+	defer quarantine.mu.Unlock()
+	if !owner.started || owner.canceled {
+		cause := errors.New("named-pipe flush completion state is invalid")
+		quarantine.appendFlushOwnerLocked(owner)
+		delete(quarantine.registeredFlush, owner)
+		quarantine.fatal = errors.Join(quarantine.fatal, ErrIOUnresolvedFatal, cause)
+		return quarantine.fatal
+	}
+	owner.completed = true
+	return quarantine.fatal
+}
+
+func (quarantine *endpointLifetimeQuarantine) completeFlush(
+	owner *endpointFlushOwner,
+) error {
+	if quarantine == nil || owner == nil {
+		return ErrIOUnresolvedFatal
+	}
+	quarantine.mu.Lock()
+	defer quarantine.mu.Unlock()
+	if _, registered := quarantine.registeredFlush[owner]; registered {
+		delete(quarantine.registeredFlush, owner)
+		if !owner.started {
+			cause := errors.New("named-pipe flush completed without native-use admission")
+			quarantine.appendFlushOwnerLocked(owner)
+			quarantine.fatal = errors.Join(quarantine.fatal, ErrIOUnresolvedFatal, cause)
+		}
+		if quarantine.fatal != nil {
+			quarantine.appendFlushOwnerLocked(owner)
+		}
+	}
+	return quarantine.fatal
+}
+
+func (quarantine *endpointLifetimeQuarantine) retainFlush(
+	owner *endpointFlushOwner,
+	cause error,
+) error {
+	if quarantine == nil || owner == nil {
+		return errors.Join(ErrIOUnresolvedFatal, cause)
+	}
+	result := errors.Join(ErrIOUnresolvedFatal, cause)
+	quarantine.mu.Lock()
+	delete(quarantine.registeredFlush, owner)
+	quarantine.appendFlushOwnerLocked(owner)
+	quarantine.fatal = errors.Join(quarantine.fatal, result)
+	quarantine.mu.Unlock()
+	return result
+}
+
+func (quarantine *endpointLifetimeQuarantine) retainRegisteredFlushesLocked() {
+	for owner := range quarantine.registeredFlush {
+		quarantine.appendFlushOwnerLocked(owner)
+		delete(quarantine.registeredFlush, owner)
+	}
+}
+
+func (quarantine *endpointLifetimeQuarantine) appendFlushOwnerLocked(
+	owner *endpointFlushOwner,
+) {
+	for _, retained := range quarantine.owners {
+		if existing, ok := retained.(*endpointFlushOwner); ok && existing == owner {
+			return
+		}
+	}
+	quarantine.owners = append(quarantine.owners, owner)
 }
 
 func (quarantine *endpointLifetimeQuarantine) count() int {
@@ -624,7 +819,9 @@ func (e *Endpoint) performOverlapped(
 		} else {
 			lifecycleErr = state.quarantineIncompleteOperation(operation, resultErr)
 		}
-		resultErr = errors.Join(resultErr, lifecycleErr)
+		if lifecycleErr != nil {
+			resultErr = errors.Join(resultErr, lifecycleErr)
+		}
 	}()
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause

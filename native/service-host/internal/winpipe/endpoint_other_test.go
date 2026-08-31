@@ -25,6 +25,9 @@ func TestNonWindowsTransportFailsClosed(t *testing.T) {
 	if err := endpoint.WriteFrame(context.Background(), nil); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("WriteFrame returned %v", err)
 	}
+	if err := endpoint.FlushThenClose(context.Background()); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("FlushThenClose returned %v", err)
+	}
 	if err := endpoint.Close(); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("Close returned %v", err)
 	}

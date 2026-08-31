@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"testing"
 	"time"
@@ -61,6 +62,10 @@ type relayEndpointContract interface {
 	ReadFrame(context.Context) ([]byte, error)
 	WriteFrame(context.Context, []byte) error
 	Close() error
+}
+
+type gracefulServerEndpointContract interface {
+	FlushThenClose(context.Context) error
 }
 
 func TestWindowsEndpointLocalSideComesFromLivePrivateState(t *testing.T) {
@@ -508,6 +513,53 @@ func TestWindowsEndpointReadUsesPinnedInternalBufferAndPublishesAfterCompletion(
 	}
 }
 
+func TestWindowsEndpointReadReturnsOnlyExactCleanEOF(t *testing.T) {
+	quarantine := &endpointLifetimeQuarantine{}
+	endpoint := testEndpointWithQuarantine(705, framing.HeaderBytes, quarantine)
+	endpoint.state.createEvent = func(*windows.SecurityAttributes, uint32, uint32, *uint16) (windows.Handle, error) {
+		return 706, nil
+	}
+	endpoint.state.readFile = func(windows.Handle, []byte, *uint32, *windows.Overlapped) error {
+		return windows.ERROR_BROKEN_PIPE
+	}
+	closedEvents := 0
+	endpoint.state.closeHandle = func(handle windows.Handle) error {
+		if handle != 706 {
+			return errors.New("clean EOF closed the pipe handle")
+		}
+		closedEvents++
+		return nil
+	}
+	value, err := endpoint.ReadFrame(context.Background())
+	if value != nil || err != io.EOF || !errors.Is(err, io.EOF) {
+		t.Fatalf("clean EOF returned (%x, %T %v), want exact io.EOF", value, err, err)
+	}
+	if closedEvents != 1 || quarantine.count() != 0 || endpoint.state.terminal != nil {
+		t.Fatalf("clean EOF event closes=%d quarantine=%d terminal=%v", closedEvents, quarantine.count(), endpoint.state.terminal)
+	}
+}
+
+func TestWindowsEndpointCleanEOFClassifierRejectsWrappedOrJoinedErrors(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("wrapped: %w", windows.ERROR_BROKEN_PIPE),
+		errors.Join(windows.ERROR_BROKEN_PIPE),
+		errors.Join(windows.ERROR_BROKEN_PIPE, context.Canceled),
+	} {
+		if isExactNamedPipeReadEOF(err) {
+			t.Fatalf("classified %T %v as an exact clean EOF", err, err)
+		}
+	}
+	for _, err := range []error{
+		windows.ERROR_BROKEN_PIPE,
+		windows.ERROR_NO_DATA,
+		windows.ERROR_PIPE_NOT_CONNECTED,
+	} {
+		if !isExactNamedPipeReadEOF(err) {
+			t.Fatalf("rejected exact clean EOF %v", err)
+		}
+	}
+}
+
 func TestWindowsEndpointTerminalReadPreservesFatalEventCleanupError(t *testing.T) {
 	for _, completionErr := range []error{windows.ERROR_MORE_DATA, windows.ERROR_BROKEN_PIPE} {
 		t.Run(completionErr.Error(), func(t *testing.T) {
@@ -539,6 +591,9 @@ func TestWindowsEndpointTerminalReadPreservesFatalEventCleanupError(t *testing.T
 			if !errors.Is(err, completionErr) || !errors.Is(err, closeFailure) ||
 				!errors.Is(err, ErrIOUnresolvedFatal) {
 				t.Fatalf("terminal read error = %v", err)
+			}
+			if err == io.EOF {
+				t.Fatal("read with a cleanup failure returned the exact EOF sentinel")
 			}
 			if errors.Is(completionErr, windows.ERROR_MORE_DATA) && !errors.Is(err, framing.ErrFrameTooLarge) {
 				t.Fatalf("ERROR_MORE_DATA lost frame-too-large classification: %v", err)
@@ -1054,6 +1109,557 @@ func TestWindowsEndpointRawCloseFailureIsConsumedOnce(t *testing.T) {
 	}
 }
 
+func TestWindowsEndpointFlushThenCloseContracts(t *testing.T) {
+	t.Run("copied abortive waiters share one fatal finalizer", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1190, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		endpoint.state.closeMode = endpointCloseModeFlush
+		endpoint.state.closeGrace = time.Millisecond
+		first := *endpoint
+		second := *endpoint
+		results := make(chan error, 2)
+		go func() { results <- first.Close() }()
+		go func() { results <- second.Close() }()
+		firstErr := <-results
+		secondErr := <-results
+		owners := endpointTestQuarantineOwners(quarantine)
+		if firstErr != secondErr || !errors.Is(firstErr, ErrCloseTimeout) ||
+			!errors.Is(firstErr, ErrIOUnresolvedFatal) || len(owners) != 1 ||
+			owners[0] != endpoint.state {
+			t.Fatalf("first=%v second=%v owners=%#v", firstErr, secondErr, owners)
+		}
+		if err := endpoint.FlushThenClose(context.Background()); !errors.Is(err, firstErr) ||
+			!errors.Is(err, ErrFlushInterrupted) {
+			t.Fatalf("repeat after abortive timeout = %v", err)
+		}
+	})
+
+	t.Run("registered flush cannot start after process fatal publication", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		owner := &endpointFlushOwner{done: make(chan endpointFlushResult, 1)}
+		if err := quarantine.registerFlush(owner); err != nil {
+			t.Fatal(err)
+		}
+		fatalCause := errors.New("concurrent fatal publication")
+		fatal := quarantine.retain(
+			&endpointRawHandleOwner{kind: "other failed owner", value: 1199},
+			fatalCause,
+		)
+		if err := quarantine.beginFlush(owner); !errors.Is(err, fatal) || owner.started {
+			t.Fatalf("beginFlush after fatal = %v, started=%v", err, owner.started)
+		}
+		owners := endpointTestQuarantineOwners(quarantine)
+		if len(owners) != 2 || owners[0] != owner {
+			t.Fatalf("registered owner was not retained before fatal publication: %#v", owners)
+		}
+	})
+
+	t.Run("pending flush cancellation does not publish process fatal", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		owner := &endpointFlushOwner{done: make(chan endpointFlushResult, 1)}
+		if err := quarantine.registerFlush(owner); err != nil {
+			t.Fatal(err)
+		}
+		canceled, completed, fatal := quarantine.cancelOrRetainFlush(owner, context.Canceled)
+		if !canceled || completed || fatal != nil || !owner.canceled || owner.started {
+			t.Fatalf("canceled=%v completed=%v fatal=%v owner=%#v", canceled, completed, fatal, owner)
+		}
+		if err := quarantine.beginFlush(owner); !errors.Is(err, errEndpointFlushAdmissionCanceled) {
+			t.Fatalf("begin canceled flush = %v", err)
+		}
+		if quarantine.fatalError() != nil || quarantine.count() != 0 {
+			t.Fatalf("pending cancellation published fatal=%v owners=%d", quarantine.fatalError(), quarantine.count())
+		}
+	})
+
+	t.Run("claimed abortive result delays close completion publication", func(t *testing.T) {
+		endpoint := testEndpointWithQuarantine(1195, framing.HeaderBytes, &endpointLifetimeQuarantine{})
+		state := endpoint.state
+		state.stateMu.Lock()
+		state.abortWaitStarted = true
+		abortDone := state.abortWaitDoneLocked()
+		closeDone := state.closeDoneLocked()
+		state.stateMu.Unlock()
+
+		published := make(chan struct{})
+		go func() {
+			state.publishCloseCompletion(closeDone)
+			close(published)
+		}()
+		select {
+		case <-closeDone:
+			t.Fatal("close completion overtook the claimed abortive result")
+		case <-time.After(10 * time.Millisecond):
+		}
+		state.stateMu.Lock()
+		state.abortWaitErr = errors.Join(ErrCloseTimeout, ErrIOUnresolvedFatal)
+		close(abortDone)
+		state.stateMu.Unlock()
+		select {
+		case <-published:
+		case <-time.After(time.Second):
+			t.Fatal("close completion did not publish after the abortive result")
+		}
+	})
+
+	t.Run("canceled pre-admission flush stays nonfatal", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1196, framing.HeaderBytes, quarantine)
+		owner := &endpointFlushOwner{
+			state:  endpoint.state,
+			handle: 1196,
+			done:   make(chan endpointFlushResult, 1),
+		}
+		if err := quarantine.registerFlush(owner); err != nil {
+			t.Fatal(err)
+		}
+		canceled, completed, fatal := quarantine.cancelOrRetainFlush(owner, ErrFlushInterrupted)
+		if !canceled || completed || fatal != nil {
+			t.Fatalf("canceled=%v completed=%v fatal=%v", canceled, completed, fatal)
+		}
+		semanticErr, fatalErr := endpoint.state.finishFlush(
+			context.Background(),
+			quarantine,
+			owner,
+			1196,
+			endpointFlushResult{
+				err:               errEndpointFlushAdmissionCanceled,
+				admissionCanceled: true,
+			},
+		)
+		if !errors.Is(semanticErr, ErrFlushInterrupted) || fatalErr != nil ||
+			quarantine.fatalError() != nil || endpoint.state.fatal != nil {
+			t.Fatalf(
+				"semantic=%v fatal=%v processFatal=%v endpointFatal=%v",
+				semanticErr,
+				fatalErr,
+				quarantine.fatalError(),
+				endpoint.state.fatal,
+			)
+		}
+	})
+
+	t.Run("server flushes before disconnect and close", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1200, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		events := make([]string, 0, 3)
+		endpoint.state.flushBuffers = func(handle windows.Handle) error {
+			if handle != 1200 {
+				return errors.New("flush received the wrong handle")
+			}
+			events = append(events, "flush")
+			return nil
+		}
+		endpoint.state.disconnect = func(windows.Handle) error {
+			events = append(events, "disconnect")
+			return nil
+		}
+		endpoint.state.closeHandle = func(windows.Handle) error {
+			events = append(events, "close")
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		copied := *endpoint
+		if err := endpoint.FlushThenClose(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := copied.FlushThenClose(ctx); err != nil {
+			t.Fatalf("repeated FlushThenClose = %v", err)
+		}
+		if err := copied.FlushThenClose(context.Background()); err != nil {
+			t.Fatalf("completed FlushThenClose revalidated a new context: %v", err)
+		}
+		canceledContext, cancelRepeat := context.WithCancel(context.Background())
+		cancelRepeat()
+		if err := copied.FlushThenClose(canceledContext); err != nil {
+			t.Fatalf("completed FlushThenClose used a canceled repeat context: %v", err)
+		}
+		endpoint.state.closeGrace = time.Nanosecond
+		if err := endpoint.Close(); err != nil {
+			t.Fatalf("Close after graceful close = %v", err)
+		}
+		want := []string{"flush", "disconnect", "close"}
+		if fmt.Sprint(events) != fmt.Sprint(want) || endpoint.state.handle != 0 || quarantine.count() != 0 {
+			t.Fatalf("events=%v handle=%d quarantine=%d", events, endpoint.state.handle, quarantine.count())
+		}
+	})
+
+	t.Run("client and missing deadline do not consume the endpoint", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1210, framing.HeaderBytes, quarantine)
+		flushCalls := 0
+		endpoint.state.flushBuffers = func(windows.Handle) error { flushCalls++; return nil }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := endpoint.FlushThenClose(ctx); !errors.Is(err, ErrFlushServerOnly) {
+			t.Fatalf("client FlushThenClose = %v", err)
+		}
+		endpoint.state.server = true
+		endpoint.state.disconnect = func(windows.Handle) error { return nil }
+		if err := endpoint.FlushThenClose(context.Background()); !errors.Is(err, ErrFlushDeadline) {
+			t.Fatalf("deadline-free FlushThenClose = %v", err)
+		}
+		if err := endpoint.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := endpoint.FlushThenClose(ctx); !errors.Is(err, ErrFlushInterrupted) {
+			t.Fatalf("FlushThenClose after abortive Close = %v", err)
+		}
+		if flushCalls != 0 || closeCalls != 1 || endpoint.state.closeMode != endpointCloseModeAbortive {
+			t.Fatalf("flush=%d close=%d mode=%d", flushCalls, closeCalls, endpoint.state.closeMode)
+		}
+	})
+
+	t.Run("process fatal state dominates wrong-side validation", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1215, framing.HeaderBytes, quarantine)
+		fatalCause := errors.New("earlier endpoint ownership failure")
+		fatal := quarantine.retain(
+			&endpointRawHandleOwner{kind: "earlier failed owner", value: 1214},
+			fatalCause,
+		)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := endpoint.FlushThenClose(ctx)
+		if !errors.Is(err, fatal) || !errors.Is(err, ErrIOUnresolvedFatal) ||
+			errors.Is(err, ErrFlushServerOnly) {
+			t.Fatalf("FlushThenClose after process fatal = %v", err)
+		}
+	})
+
+	t.Run("abortive election publishes completion for an existing local fatal", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1218, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		localCause := errors.New("local fatal before global retention")
+		endpoint.state.fatal = errors.Join(ErrIOUnresolvedFatal, localCause)
+		if err := endpoint.Close(); !errors.Is(err, localCause) {
+			t.Fatalf("Close with existing local fatal = %v", err)
+		}
+		select {
+		case <-endpoint.state.closeDone:
+		default:
+			t.Fatal("Close did not publish completion for the elected fatal result")
+		}
+		err := endpoint.FlushThenClose(context.Background())
+		if !errors.Is(err, ErrFlushInterrupted) || !errors.Is(err, localCause) {
+			t.Fatalf("repeated graceful close after local fatal = %v", err)
+		}
+	})
+
+	t.Run("ordinary flush failure is visible only to graceful close", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1220, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushFailure := errors.New("flush failed")
+		endpoint.state.flushBuffers = func(windows.Handle) error { return flushFailure }
+		endpoint.state.disconnect = func(windows.Handle) error { return nil }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := endpoint.FlushThenClose(ctx); !errors.Is(err, flushFailure) || errors.Is(err, ErrIOUnresolvedFatal) {
+			t.Fatalf("ordinary flush failure = %v", err)
+		}
+		if err := endpoint.FlushThenClose(context.Background()); !errors.Is(err, flushFailure) {
+			t.Fatalf("memoized flush failure = %v", err)
+		}
+		if err := endpoint.Close(); err != nil {
+			t.Fatalf("abortive close result inherited semantic flush failure: %v", err)
+		}
+		if closeCalls != 1 || endpoint.state.handle != 0 || quarantine.count() != 0 {
+			t.Fatalf("close=%d handle=%d quarantine=%d", closeCalls, endpoint.state.handle, quarantine.count())
+		}
+	})
+
+	t.Run("concurrent graceful waiter honors its earlier deadline", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1228, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushStarted := make(chan struct{})
+		releaseFlush := make(chan struct{})
+		endpoint.state.flushBuffers = func(windows.Handle) error {
+			close(flushStarted)
+			<-releaseFlush
+			return nil
+		}
+		endpoint.state.disconnect = func(windows.Handle) error { return nil }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		firstResult := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			firstResult <- endpoint.FlushThenClose(ctx)
+		}()
+		<-flushStarted
+		waiterContext, cancelWaiter := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancelWaiter()
+		if err := endpoint.FlushThenClose(waiterContext); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("concurrent waiter = %v", err)
+		}
+		if quarantine.fatalError() != nil || closeCalls != 0 {
+			t.Fatalf("waiter deadline altered owner: fatal=%v close=%d", quarantine.fatalError(), closeCalls)
+		}
+		close(releaseFlush)
+		if err := <-firstResult; err != nil {
+			t.Fatalf("owning FlushThenClose = %v", err)
+		}
+		if closeCalls != 1 || quarantine.count() != 0 {
+			t.Fatalf("close=%d quarantine=%d", closeCalls, quarantine.count())
+		}
+	})
+
+	t.Run("terminal endpoint skips flush and is still consumed", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1225, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		terminal := errors.New("earlier protocol failure")
+		endpoint.state.terminal = terminal
+		flushCalls := 0
+		endpoint.state.flushBuffers = func(windows.Handle) error { flushCalls++; return nil }
+		endpoint.state.disconnect = func(windows.Handle) error { return nil }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := endpoint.FlushThenClose(ctx); !errors.Is(err, terminal) || errors.Is(err, ErrIOUnresolvedFatal) {
+			t.Fatalf("terminal FlushThenClose = %v", err)
+		}
+		if err := endpoint.Close(); err != nil {
+			t.Fatalf("Close inherited terminal semantic error: %v", err)
+		}
+		if flushCalls != 0 || closeCalls != 1 || endpoint.state.handle != 0 || quarantine.count() != 0 {
+			t.Fatalf("flush=%d close=%d handle=%d quarantine=%d", flushCalls, closeCalls, endpoint.state.handle, quarantine.count())
+		}
+	})
+
+	t.Run("blocked flush deadline quarantines without closing", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		retainEndpointTestQuarantine(quarantine)
+		endpoint := testEndpointWithQuarantine(1230, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushStarted := make(chan struct{})
+		releaseFlush := make(chan struct{})
+		endpoint.state.flushBuffers = func(windows.Handle) error {
+			close(flushStarted)
+			<-releaseFlush
+			return nil
+		}
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		deadlineContext, cancelDeadline := context.WithTimeout(context.Background(), time.Second)
+		defer cancelDeadline()
+		ctx, cancelCause := context.WithCancelCause(deadlineContext)
+		result := make(chan error, 1)
+		go func() { result <- endpoint.FlushThenClose(ctx) }()
+		select {
+		case <-flushStarted:
+		case <-time.After(time.Second):
+			t.Fatal("FlushFileBuffers did not start before the test deadline")
+		}
+		cancelCause(context.DeadlineExceeded)
+		err := <-result
+		owners := endpointTestQuarantineOwners(quarantine)
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrCloseTimeout) ||
+			!errors.Is(err, ErrIOUnresolvedFatal) || closeCalls != 0 || len(owners) != 1 {
+			t.Fatalf("error=%v close=%d owners=%#v", err, closeCalls, owners)
+		}
+		owner, ok := owners[0].(*endpointFlushOwner)
+		if !ok || owner.state != endpoint.state || owner.handle != 1230 || endpoint.state.handle != 1230 {
+			t.Fatalf("retained owner=%#v state handle=%d", owners[0], endpoint.state.handle)
+		}
+		repeatErr := endpoint.FlushThenClose(context.Background())
+		if !errors.Is(repeatErr, context.DeadlineExceeded) || !errors.Is(repeatErr, ErrIOUnresolvedFatal) {
+			t.Fatalf("repeated deadline FlushThenClose = %v", repeatErr)
+		}
+		if closeErr := endpoint.Close(); !errors.Is(closeErr, ErrIOUnresolvedFatal) || closeCalls != 0 {
+			t.Fatalf("Close after flush timeout = %v, close calls=%d", closeErr, closeCalls)
+		}
+		close(releaseFlush)
+		if !endpoint.state.active.wait(time.Second) {
+			t.Fatal("timed-out flush goroutine did not release activity ownership")
+		}
+	})
+
+	t.Run("abortive close before flush drains active ownership without quarantine", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1235, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushCalls := 0
+		endpoint.state.flushBuffers = func(windows.Handle) error { flushCalls++; return nil }
+		endpoint.state.disconnect = func(windows.Handle) error { return nil }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		finishActive := endpoint.state.active.begin()
+		flushResult := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			flushResult <- endpoint.FlushThenClose(ctx)
+		}()
+		deadline := time.Now().Add(time.Second)
+		for {
+			endpoint.state.stateMu.Lock()
+			closing := endpoint.state.closing
+			endpoint.state.stateMu.Unlock()
+			if closing {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("FlushThenClose did not publish closing state")
+			}
+			runtime.Gosched()
+		}
+		closeResult := make(chan error, 1)
+		go func() { closeResult <- endpoint.Close() }()
+		select {
+		case <-endpoint.state.abortiveCloseChannel():
+		case <-time.After(time.Second):
+			t.Fatal("Close did not publish the abortive-close signal")
+		}
+		finishActive()
+		if err := <-closeResult; err != nil {
+			t.Fatalf("abortive Close before flush = %v", err)
+		}
+		if err := <-flushResult; !errors.Is(err, ErrFlushInterrupted) || errors.Is(err, ErrIOUnresolvedFatal) {
+			t.Fatalf("interrupted pre-flush result = %v", err)
+		}
+		if flushCalls != 0 || closeCalls != 1 || quarantine.count() != 0 || endpoint.state.handle != 0 {
+			t.Fatalf("flush=%d close=%d quarantine=%d handle=%d", flushCalls, closeCalls, quarantine.count(), endpoint.state.handle)
+		}
+	})
+
+	t.Run("abortive close quarantines an in-flight flush", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		retainEndpointTestQuarantine(quarantine)
+		endpoint := testEndpointWithQuarantine(1240, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushStarted := make(chan struct{})
+		releaseFlush := make(chan struct{})
+		endpoint.state.flushBuffers = func(windows.Handle) error {
+			close(flushStarted)
+			<-releaseFlush
+			return nil
+		}
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		flushResult := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			flushResult <- endpoint.FlushThenClose(ctx)
+		}()
+		<-flushStarted
+		closeResult := make(chan error, 1)
+		go func() { closeResult <- endpoint.Close() }()
+		select {
+		case err := <-closeResult:
+			if !errors.Is(err, ErrFlushInterrupted) || !errors.Is(err, ErrIOUnresolvedFatal) {
+				t.Fatalf("Close during flush = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close blocked behind the graceful deadline")
+		}
+		if err := <-flushResult; !errors.Is(err, ErrFlushInterrupted) || !errors.Is(err, ErrIOUnresolvedFatal) {
+			t.Fatalf("interrupted FlushThenClose = %v", err)
+		}
+		if closeCalls != 0 || quarantine.count() != 1 {
+			t.Fatalf("close=%d quarantine=%d", closeCalls, quarantine.count())
+		}
+		close(releaseFlush)
+		if !endpoint.state.active.wait(time.Second) {
+			t.Fatal("interrupted flush goroutine did not release activity ownership")
+		}
+	})
+
+	t.Run("invalid flush handle becomes sticky fatal", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1250, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		endpoint.state.flushBuffers = func(windows.Handle) error { return windows.ERROR_INVALID_HANDLE }
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := endpoint.FlushThenClose(ctx)
+		if !errors.Is(err, windows.ERROR_INVALID_HANDLE) || !errors.Is(err, ErrIOUnresolvedFatal) ||
+			closeCalls != 0 || endpoint.state.handle != 0 || quarantine.count() != 1 {
+			t.Fatalf("error=%v close=%d handle=%d quarantine=%d", err, closeCalls, endpoint.state.handle, quarantine.count())
+		}
+	})
+
+	t.Run("flush completion error is retained beside concurrent process fatal", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1260, framing.HeaderBytes, quarantine)
+		endpoint.state.server = true
+		flushStarted := make(chan struct{})
+		releaseFlush := make(chan struct{})
+		endpoint.state.flushBuffers = func(windows.Handle) error {
+			close(flushStarted)
+			<-releaseFlush
+			return windows.ERROR_INVALID_HANDLE
+		}
+		closeCalls := 0
+		endpoint.state.closeHandle = func(windows.Handle) error { closeCalls++; return nil }
+		result := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result <- endpoint.FlushThenClose(ctx)
+		}()
+		<-flushStarted
+		concurrentCause := errors.New("other endpoint became fatal")
+		concurrentFatal := quarantine.retain(
+			&endpointRawHandleOwner{kind: "other endpoint owner", value: 1261},
+			concurrentCause,
+		)
+		close(releaseFlush)
+		err := <-result
+		if !errors.Is(err, windows.ERROR_INVALID_HANDLE) || !errors.Is(err, concurrentFatal) ||
+			!errors.Is(err, concurrentCause) || !errors.Is(err, ErrIOUnresolvedFatal) ||
+			closeCalls != 0 || endpoint.state.handle != 0 {
+			t.Fatalf("error=%v close=%d handle=%d", err, closeCalls, endpoint.state.handle)
+		}
+		owners := endpointTestQuarantineOwners(quarantine)
+		if len(owners) != 2 {
+			t.Fatalf("concurrent fatal owners=%#v", owners)
+		}
+	})
+
+	t.Run("admission failure never tombstones this endpoint handle", func(t *testing.T) {
+		quarantine := &endpointLifetimeQuarantine{}
+		endpoint := testEndpointWithQuarantine(1270, framing.HeaderBytes, quarantine)
+		owner := &endpointFlushOwner{
+			state:  endpoint.state,
+			handle: 1270,
+			done:   make(chan endpointFlushResult, 1),
+		}
+		if err := quarantine.registerFlush(owner); err != nil {
+			t.Fatal(err)
+		}
+		concurrentFatal := quarantine.retain(
+			&endpointRawHandleOwner{kind: "other invalid owner", value: 1271},
+			windows.ERROR_INVALID_HANDLE,
+		)
+		semanticErr, fatalErr := endpoint.state.finishFlush(
+			context.Background(),
+			quarantine,
+			owner,
+			1270,
+			endpointFlushResult{err: concurrentFatal, nativeStarted: false},
+		)
+		if semanticErr != nil || !errors.Is(fatalErr, concurrentFatal) || endpoint.state.handle != 1270 {
+			t.Fatalf("semantic=%v fatal=%v handle=%d", semanticErr, fatalErr, endpoint.state.handle)
+		}
+	})
+}
+
 func TestWindowsEndpointCopiedCloseCancelsExactPendingOperation(t *testing.T) {
 	frame := testEndpointFrame(nil)
 	quarantine := &endpointLifetimeQuarantine{}
@@ -1158,8 +1764,9 @@ func TestWindowsEndpointCopiedCloseCancelsExactPendingOperation(t *testing.T) {
 func TestWindowsEndpointContractsCompile(t *testing.T) {
 	var endpoint *Endpoint
 	var relayContract relayEndpointContract = endpoint
+	var gracefulContract gracefulServerEndpointContract = endpoint
 	var processIDContract ProcessIDObserver = endpoint
-	if relayContract == nil || processIDContract == nil {
+	if relayContract == nil || gracefulContract == nil || processIDContract == nil {
 		t.Fatal("typed nil endpoint did not populate interface contracts")
 	}
 }

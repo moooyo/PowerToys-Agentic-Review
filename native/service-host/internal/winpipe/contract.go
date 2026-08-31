@@ -20,6 +20,9 @@ var (
 	// not reuse the endpoint or create a replacement connection.
 	ErrIOUnresolvedFatal = errors.New("Windows named-pipe I/O ownership is unresolved; the current ServiceHost process must exit")
 	ErrCloseTimeout      = errors.New("Windows named-pipe endpoint did not stop before the close deadline")
+	ErrFlushServerOnly   = errors.New("graceful named-pipe flush-close requires the server endpoint")
+	ErrFlushDeadline     = errors.New("graceful named-pipe flush-close requires an absolute deadline")
+	ErrFlushInterrupted  = errors.New("graceful named-pipe flush-close was interrupted by abortive close")
 )
 
 const (

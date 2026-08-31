@@ -155,6 +155,16 @@ calls `Release`, so a slow write cannot silently exceed the configured queue bud
 requires endpoints whose `ReadFrame` and `WriteFrame` calls return when their context is cancelled
 or `Close` is called.
 
+The Windows inter-service endpoint returns the exact `io.EOF` sentinel only when a read observes
+zero bytes with an unwrapped pipe-disconnect status and all OVERLAPPED cleanup succeeds. Partial,
+wrapped, joined, or cleanup-bearing EOF observations remain terminal transport failures. The
+Control-owned server endpoint also exposes a deadline-required `FlushThenClose`: it waits for
+active I/O ownership to settle, uses `FlushFileBuffers` to prove the client consumed queued writes,
+then disconnects and closes the handle. If that synchronous flush outlives its deadline, or an
+abortive close arrives while it is in flight, the whole flush owner is retained in the
+process-lifetime quarantine and the current ServiceHost must exit; no goroutine may race the flush
+by closing the same handle.
+
 Relay shutdown has a hard deadline. A shutdown timeout is host-fatal: the process must exit and let
 WinSW recovery create a fresh host; the same process must never reconnect or reuse endpoints whose
 closure was not confirmed. The timeout result retains the primary transport failure and every

@@ -28,6 +28,10 @@ func (*Endpoint) WriteFrame(context.Context, []byte) error {
 	return ErrUnsupportedPlatform
 }
 
+func (*Endpoint) FlushThenClose(context.Context) error {
+	return ErrUnsupportedPlatform
+}
+
 func (*Endpoint) Close() error {
 	return ErrUnsupportedPlatform
 }
