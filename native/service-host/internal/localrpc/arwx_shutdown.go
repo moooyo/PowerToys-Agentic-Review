@@ -2,6 +2,9 @@ package localrpc
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	arwxframing "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/framing"
 )
 
 const (
@@ -52,19 +57,16 @@ type ArmArwxShutdownResultV1 struct {
 	FinalFrameSHA256    string `json:"finalFrameSha256"`
 }
 
-// ArwxShutdownAuthorization is opaque evidence saved before the Arm response write. It becomes
-// usable only after that exact response is written successfully.
-type ArwxShutdownAuthorization struct {
-	state *arwxShutdownAuthorizationState
-}
-
 type arwxShutdownAuthorizationState struct {
-	mu           sync.Mutex
-	binding      committedRuntimeBootstrapBinding
-	claim        ArmArwxShutdownV1
-	deadline     time.Time
-	acknowledged bool
-	failed       bool
+	mu               sync.Mutex
+	binding          committedRuntimeBootstrapBinding
+	claim            ArmArwxShutdownV1
+	deadline         time.Time
+	settlement       chan struct{}
+	settlementClosed bool
+	acknowledged     bool
+	consumed         bool
+	failed           bool
 }
 
 type arwxShutdownGate struct {
@@ -72,7 +74,8 @@ type arwxShutdownGate struct {
 	binding       committedRuntimeBootstrapBinding
 	serveBound    bool
 	attempted     bool
-	authorization ArwxShutdownAuthorization
+	eofAttempted  bool
+	authorization *arwxShutdownAuthorizationState
 }
 
 func newArwxShutdownGate(
@@ -104,53 +107,126 @@ func (gate *arwxShutdownGate) bindServeStreams(input io.ReadCloser, output io.Wr
 func (gate *arwxShutdownGate) prepare(
 	claim ArmArwxShutdownV1,
 	deadline time.Time,
-) (ArmArwxShutdownResultV1, ArwxShutdownAuthorization, error) {
+) (ArmArwxShutdownResultV1, *arwxShutdownAuthorizationState, error) {
 	if gate == nil {
-		return ArmArwxShutdownResultV1{}, ArwxShutdownAuthorization{}, ErrArwxShutdownUnavailable
+		return ArmArwxShutdownResultV1{}, nil, ErrArwxShutdownUnavailable
 	}
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	if !gate.serveBound || gate.attempted {
-		return ArmArwxShutdownResultV1{}, ArwxShutdownAuthorization{}, ErrArwxShutdownUnavailable
+	if !gate.serveBound || gate.attempted || gate.eofAttempted {
+		return ArmArwxShutdownResultV1{}, nil, ErrArwxShutdownUnavailable
 	}
 	gate.attempted = true
 	if err := validateArmArwxShutdownClaim(claim, gate.binding); err != nil {
-		return ArmArwxShutdownResultV1{}, ArwxShutdownAuthorization{}, err
+		return ArmArwxShutdownResultV1{}, nil, err
 	}
 	if !time.Now().Before(deadline) {
-		return ArmArwxShutdownResultV1{}, ArwxShutdownAuthorization{}, ErrIOTimeout
+		return ArmArwxShutdownResultV1{}, nil, ErrIOTimeout
 	}
 	state := &arwxShutdownAuthorizationState{
-		binding:  gate.binding,
-		claim:    claim,
-		deadline: deadline,
+		binding:    gate.binding,
+		claim:      claim,
+		deadline:   deadline,
+		settlement: make(chan struct{}),
 	}
-	authorization := ArwxShutdownAuthorization{state: state}
-	gate.authorization = authorization
-	return armArwxShutdownResult(claim), authorization, nil
+	gate.authorization = state
+	return armArwxShutdownResult(claim), state, nil
 }
 
-func (gate *arwxShutdownGate) authorizationEvidence() (ArwxShutdownAuthorization, bool) {
+func (gate *arwxShutdownGate) authorizeEOF(
+	ctx context.Context,
+	finalFrame []byte,
+) (time.Time, error) {
 	if gate == nil {
-		return ArwxShutdownAuthorization{}, false
+		return time.Time{}, ErrArwxShutdownUnavailable
 	}
 	gate.mu.Lock()
+	if gate.eofAttempted {
+		gate.mu.Unlock()
+		return time.Time{}, ErrArwxShutdownUnavailable
+	}
+	gate.eofAttempted = true
 	authorization := gate.authorization
 	gate.mu.Unlock()
-	if authorization.state == nil {
-		return ArwxShutdownAuthorization{}, false
+	if authorization == nil {
+		return time.Time{}, ErrArwxShutdownUnavailable
 	}
-	authorization.state.mu.Lock()
-	if authorization.state.failed || !authorization.state.acknowledged {
-		authorization.state.mu.Unlock()
-		return ArwxShutdownAuthorization{}, false
+
+	authorization.mu.Lock()
+	if authorization.failed || authorization.consumed {
+		authorization.mu.Unlock()
+		return time.Time{}, ErrArwxShutdownUnavailable
 	}
-	valid := time.Now().Before(authorization.state.deadline)
-	if !valid {
-		authorization.state.failed = true
+	authorization.consumed = true
+	if cause := context.Cause(ctx); cause != nil {
+		authorization.failLocked()
+		authorization.mu.Unlock()
+		return time.Time{}, cause
 	}
-	authorization.state.mu.Unlock()
-	return authorization, valid
+	if !time.Now().Before(authorization.deadline) {
+		authorization.failLocked()
+		authorization.mu.Unlock()
+		return time.Time{}, ErrIOTimeout
+	}
+	if len(finalFrame) < arwxframing.HeaderBytes ||
+		len(finalFrame) != authorization.claim.FinalFrameBytes ||
+		len(finalFrame) > authorization.binding.maximumFrameBytes {
+		authorization.failLocked()
+		authorization.mu.Unlock()
+		return time.Time{}, fmt.Errorf("%w: final frame length", ErrArwxShutdownInvalid)
+	}
+	frameSnapshot := bytes.Clone(finalFrame)
+	deadline := authorization.deadline
+	settlement := authorization.settlement
+	acknowledged := authorization.acknowledged
+	authorization.mu.Unlock()
+
+	if !acknowledged {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			authorization.fail()
+			return time.Time{}, ErrIOTimeout
+		}
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-settlement:
+		case <-ctx.Done():
+			authorization.fail()
+			return time.Time{}, context.Cause(ctx)
+		case <-timer.C:
+			authorization.fail()
+			return time.Time{}, ErrIOTimeout
+		}
+	}
+
+	authorization.mu.Lock()
+	defer authorization.mu.Unlock()
+	if cause := context.Cause(ctx); cause != nil {
+		authorization.failLocked()
+		return time.Time{}, cause
+	}
+	if authorization.failed || !authorization.acknowledged {
+		authorization.failLocked()
+		return time.Time{}, ErrArwxShutdownUnavailable
+	}
+	if !time.Now().Before(authorization.deadline) {
+		authorization.failLocked()
+		return time.Time{}, ErrIOTimeout
+	}
+	if err := validateArwxShutdownFinalFrame(frameSnapshot, authorization.claim, authorization.binding); err != nil {
+		authorization.failLocked()
+		return time.Time{}, err
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		authorization.failLocked()
+		return time.Time{}, cause
+	}
+	if !time.Now().Before(authorization.deadline) {
+		authorization.failLocked()
+		return time.Time{}, ErrIOTimeout
+	}
+	return authorization.deadline, nil
 }
 
 func (gate *arwxShutdownGate) armedDeadline() (time.Time, bool) {
@@ -160,20 +236,19 @@ func (gate *arwxShutdownGate) armedDeadline() (time.Time, bool) {
 	gate.mu.Lock()
 	authorization := gate.authorization
 	gate.mu.Unlock()
-	if authorization.state == nil {
+	if authorization == nil {
 		return time.Time{}, false
 	}
-	state := authorization.state
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if !state.acknowledged || state.failed {
+	authorization.mu.Lock()
+	defer authorization.mu.Unlock()
+	if !authorization.acknowledged || authorization.failed {
 		return time.Time{}, false
 	}
-	if !time.Now().Before(state.deadline) {
-		state.failed = true
+	if !time.Now().Before(authorization.deadline) {
+		authorization.failLocked()
 		return time.Time{}, false
 	}
-	return state.deadline, true
+	return authorization.deadline, true
 }
 
 func (gate *arwxShutdownGate) failCurrentAuthorization() {
@@ -186,28 +261,80 @@ func (gate *arwxShutdownGate) failCurrentAuthorization() {
 	failArwxShutdownAuthorization(authorization)
 }
 
-func markArwxShutdownAcknowledged(authorization ArwxShutdownAuthorization) bool {
-	if authorization.state == nil {
+func markArwxShutdownAcknowledged(authorization *arwxShutdownAuthorizationState) bool {
+	if authorization == nil {
 		return false
 	}
-	state := authorization.state
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.failed || state.acknowledged || !time.Now().Before(state.deadline) {
-		state.failed = true
+	authorization.mu.Lock()
+	defer authorization.mu.Unlock()
+	if authorization.failed || authorization.acknowledged || !time.Now().Before(authorization.deadline) {
+		authorization.failLocked()
 		return false
 	}
-	state.acknowledged = true
+	authorization.acknowledged = true
+	authorization.signalSettlementLocked()
 	return true
 }
 
-func failArwxShutdownAuthorization(authorization ArwxShutdownAuthorization) {
-	if authorization.state == nil {
+func failArwxShutdownAuthorization(authorization *arwxShutdownAuthorizationState) {
+	if authorization == nil {
 		return
 	}
-	authorization.state.mu.Lock()
-	authorization.state.failed = true
-	authorization.state.mu.Unlock()
+	authorization.fail()
+}
+
+func (state *arwxShutdownAuthorizationState) fail() {
+	state.mu.Lock()
+	state.failLocked()
+	state.mu.Unlock()
+}
+
+func (state *arwxShutdownAuthorizationState) failLocked() {
+	state.failed = true
+	state.signalSettlementLocked()
+}
+
+func (state *arwxShutdownAuthorizationState) signalSettlementLocked() {
+	if state.settlementClosed {
+		return
+	}
+	state.settlementClosed = true
+	close(state.settlement)
+}
+
+func validateArwxShutdownFinalFrame(
+	finalFrame []byte,
+	claim ArmArwxShutdownV1,
+	binding committedRuntimeBootstrapBinding,
+) error {
+	if err := validateArmArwxShutdownClaim(claim, binding); err != nil {
+		return fmt.Errorf("%w: bootstrap binding", ErrArwxShutdownInvalid)
+	}
+	if len(finalFrame) != claim.FinalFrameBytes {
+		return fmt.Errorf("%w: final frame length", ErrArwxShutdownInvalid)
+	}
+	header, err := arwxframing.ValidateFrame(finalFrame, uint32(binding.maximumFrameBytes))
+	if err != nil {
+		return fmt.Errorf("%w: final frame structure: %v", ErrArwxShutdownInvalid, err)
+	}
+	sequence, err := strconv.ParseUint(claim.FinalSequence, 10, 64)
+	if err != nil || strconv.FormatUint(sequence, 10) != claim.FinalSequence {
+		return fmt.Errorf("%w: final frame sequence claim", ErrArwxShutdownInvalid)
+	}
+	var nilCorrelationID [16]byte
+	if int(header.MessageType) != claim.FinalMessageType || header.Sequence != sequence ||
+		subtle.ConstantTimeCompare(header.CorrelationID[:], nilCorrelationID[:]) != 1 {
+		return fmt.Errorf("%w: final frame header binding", ErrArwxShutdownInvalid)
+	}
+	expectedDigest, err := decodeDigest(claim.FinalFrameSHA256)
+	if err != nil {
+		return fmt.Errorf("%w: final frame digest claim", ErrArwxShutdownInvalid)
+	}
+	actualDigest := sha256.Sum256(finalFrame)
+	if subtle.ConstantTimeCompare(actualDigest[:], expectedDigest[:]) != 1 {
+		return fmt.Errorf("%w: final frame digest", ErrArwxShutdownInvalid)
+	}
+	return nil
 }
 
 func validateArmArwxShutdownClaim(

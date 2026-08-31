@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	arwxframing "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/framing"
 )
 
 func TestArmArwxShutdownMatchesSharedCrossLanguageGolden(t *testing.T) {
@@ -118,7 +123,7 @@ func TestCommittedRuntimeBootstrapIsCopySafeAndChannelBound(t *testing.T) {
 	}
 }
 
-func TestServerArmsBothRolesAndStoresAcknowledgedEvidence(t *testing.T) {
+func TestServerArmsBothRolesAndAcceptsOrderlyHostControlEOF(t *testing.T) {
 	lines := armArwxShutdownGoldenLines(t)
 	for _, test := range []struct {
 		name         string
@@ -154,24 +159,6 @@ func TestServerArmsBothRolesAndStoresAcknowledgedEvidence(t *testing.T) {
 			}
 			if !bytes.Equal(response, lines[test.responseLine]) {
 				t.Fatalf("response = %s", response)
-			}
-			var authorization ArwxShutdownAuthorization
-			var ok bool
-			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-				authorization, ok = server.ArwxShutdownAuthorization()
-				if ok {
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if !ok || authorization.state == nil {
-				t.Fatal("acknowledged authorization evidence is unavailable")
-			}
-			authorization.state.mu.Lock()
-			valid := authorization.state.acknowledged && !authorization.state.failed
-			authorization.state.mu.Unlock()
-			if !valid {
-				t.Fatal("authorization evidence is not acknowledged")
 			}
 			_ = clientConn.Close()
 			select {
@@ -234,41 +221,207 @@ func TestSessionStateWaitsForCompletedResponseAccountingBeforeArm(t *testing.T) 
 	}
 }
 
-func TestArmAuthorizationIsStoredBeforeAckAndBecomesValidOnlyAfterAck(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-	channel := &armRuntimeBootstrapChannel{Conn: serverConn}
-	committed := committedRuntimeBootstrapForArmTest(t, channel, RoleControl)
-	binding, err := consumeCommittedRuntimeBootstrap(committed, RoleControl)
-	if err != nil {
-		t.Fatal(err)
+func TestAuthorizeArwxEOFRejectsEarlyEOFAndPermanentlyPoisonsGate(t *testing.T) {
+	server, claim, frame := arwxEOFServerForTest(t, RoleControl)
+	if _, err := server.AuthorizeArwxEOF(nil, frame); err == nil {
+		t.Fatal("nil authorization context was accepted")
 	}
-	gate := &arwxShutdownGate{binding: binding, serveBound: true}
-	claim := armArwxShutdownClaim(RoleControl)
-	_, authorization, err := gate.prepare(claim, time.Now().Add(time.Second))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrArwxShutdownUnavailable) {
+		t.Fatalf("pre-prepare EOF error = %v", err)
 	}
-	if _, ok := gate.authorizationEvidence(); ok {
-		t.Fatal("authorization became valid before its response acknowledgement")
+	if _, _, err := server.shutdown.prepare(claim, time.Now().Add(time.Second)); !errors.Is(err, ErrArwxShutdownUnavailable) {
+		t.Fatalf("Arm after pre-prepare EOF error = %v", err)
+	}
+	if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrArwxShutdownUnavailable) {
+		t.Fatalf("replayed early EOF error = %v", err)
+	}
+}
+
+func TestAuthorizeArwxEOFWaitsForPendingAcknowledgement(t *testing.T) {
+	server, authorization, frame, deadline := preparedArwxEOFServerForTest(t, RoleControl)
+	type result struct {
+		deadline time.Time
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := server.AuthorizeArwxEOF(context.Background(), frame)
+		done <- result{deadline: got, err: err}
+	}()
+	waitForArwxAuthorizationConsumed(t, authorization)
+	select {
+	case value := <-done:
+		t.Fatalf("authorization returned before ACK settlement: %+v", value)
+	default:
 	}
 	if !markArwxShutdownAcknowledged(authorization) {
 		t.Fatal("authorization acknowledgement was rejected")
 	}
-	if evidence, ok := gate.authorizationEvidence(); !ok || evidence.state != authorization.state {
-		t.Fatal("acknowledged authorization evidence is unavailable")
-	}
-	if _, _, err := gate.prepare(claim, time.Now().Add(time.Second)); !errors.Is(err, ErrArwxShutdownUnavailable) {
-		t.Fatalf("repeated gate prepare error = %v", err)
-	}
-	failArwxShutdownAuthorization(authorization)
-	if _, ok := gate.authorizationEvidence(); ok {
-		t.Fatal("failed authorization evidence remained usable")
+	select {
+	case value := <-done:
+		if value.err != nil || !value.deadline.Equal(deadline) {
+			t.Fatalf("pending authorization result = %+v, want deadline %v", value, deadline)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authorization did not observe ACK settlement")
 	}
 }
 
-func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesEvidence(t *testing.T) {
+func TestAuthorizeArwxEOFConsumesSuccessfulAuthorizationForBothRoles(t *testing.T) {
+	for _, role := range []Role{RoleControl, RoleExecutor} {
+		t.Run(string(role), func(t *testing.T) {
+			server, authorization, frame, deadline := preparedArwxEOFServerForTest(t, role)
+			if !markArwxShutdownAcknowledged(authorization) {
+				t.Fatal("authorization acknowledgement was rejected")
+			}
+			got, err := server.AuthorizeArwxEOF(context.Background(), frame)
+			if err != nil || !got.Equal(deadline) {
+				t.Fatalf("authorization = (%v, %v), want (%v, nil)", got, err, deadline)
+			}
+			if _, err := server.AuthorizeArwxEOF(context.Background(), bytes.Clone(frame)); !errors.Is(err, ErrArwxShutdownUnavailable) {
+				t.Fatalf("replayed authorization error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthorizeArwxEOFRejectsFinalFrameMutationsAndConsumesFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "magic", mutate: func(value []byte) []byte { value[0] = 'X'; return value }},
+		{name: "message type", mutate: func(value []byte) []byte {
+			binary.LittleEndian.PutUint16(value[10:12], ArmArwxShutdownExecutorFinalMessageType)
+			return value
+		}},
+		{name: "sequence", mutate: func(value []byte) []byte {
+			binary.LittleEndian.PutUint64(value[20:28], binary.LittleEndian.Uint64(value[20:28])+1)
+			return value
+		}},
+		{name: "correlation", mutate: func(value []byte) []byte { value[28] = 1; return value }},
+		{name: "payload", mutate: func(value []byte) []byte { value[len(value)-1] ^= 1; return value }},
+		{name: "truncated", mutate: func(value []byte) []byte { return value[:len(value)-1] }},
+		{name: "trailing", mutate: func(value []byte) []byte { return append(value, 0) }},
+		{name: "oversized", mutate: func([]byte) []byte {
+			return make([]byte, RuntimeBootstrapARWXMaximumFrameBytes+1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, authorization, frame, _ := preparedArwxEOFServerForTest(t, RoleControl)
+			if !markArwxShutdownAcknowledged(authorization) {
+				t.Fatal("authorization acknowledgement was rejected")
+			}
+			mutated := test.mutate(bytes.Clone(frame))
+			if _, err := server.AuthorizeArwxEOF(context.Background(), mutated); !errors.Is(err, ErrArwxShutdownInvalid) {
+				t.Fatalf("mutated final frame error = %v", err)
+			}
+			authorization.mu.Lock()
+			consumed, failed := authorization.consumed, authorization.failed
+			authorization.mu.Unlock()
+			if !consumed || !failed {
+				t.Fatalf("failed state = consumed:%t failed:%t", consumed, failed)
+			}
+			if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrArwxShutdownUnavailable) {
+				t.Fatalf("valid replay after mutation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthorizeArwxEOFAllowsOnlyOneConcurrentFrameCopy(t *testing.T) {
+	server, authorization, frame, deadline := preparedArwxEOFServerForTest(t, RoleControl)
+	if !markArwxShutdownAcknowledged(authorization) {
+		t.Fatal("authorization acknowledgement was rejected")
+	}
+	const callers = 16
+	type result struct {
+		deadline time.Time
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan result, callers)
+	for range callers {
+		go func() {
+			<-start
+			got, err := server.AuthorizeArwxEOF(context.Background(), bytes.Clone(frame))
+			results <- result{deadline: got, err: err}
+		}()
+	}
+	close(start)
+	successes := 0
+	for range callers {
+		value := <-results
+		if value.err == nil {
+			successes++
+			if !value.deadline.Equal(deadline) {
+				t.Fatalf("successful deadline = %v, want %v", value.deadline, deadline)
+			}
+			continue
+		}
+		if !errors.Is(value.err, ErrArwxShutdownUnavailable) {
+			t.Fatalf("concurrent replay error = %v", value.err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent authorizations = %d, want 1", successes)
+	}
+}
+
+func TestAuthorizeArwxEOFCancellationFailsPendingAuthorization(t *testing.T) {
+	server, authorization, frame, _ := preparedArwxEOFServerForTest(t, RoleControl)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.AuthorizeArwxEOF(ctx, frame)
+		done <- err
+	}()
+	waitForArwxAuthorizationConsumed(t, authorization)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled authorization error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled authorization did not return")
+	}
+	if markArwxShutdownAcknowledged(authorization) {
+		t.Fatal("cancelled authorization accepted a later acknowledgement")
+	}
+	if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrArwxShutdownUnavailable) {
+		t.Fatalf("cancelled authorization replay error = %v", err)
+	}
+}
+
+func TestAuthorizeArwxEOFRejectsExpiredAndNonOrderlyAuthorization(t *testing.T) {
+	t.Run("expired", func(t *testing.T) {
+		server, authorization, frame, _ := preparedArwxEOFServerForTest(t, RoleControl)
+		if !markArwxShutdownAcknowledged(authorization) {
+			t.Fatal("authorization acknowledgement was rejected")
+		}
+		authorization.mu.Lock()
+		authorization.deadline = time.Now().Add(-time.Second)
+		authorization.mu.Unlock()
+		if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrIOTimeout) {
+			t.Fatalf("expired authorization error = %v", err)
+		}
+	})
+
+	t.Run("non-orderly", func(t *testing.T) {
+		server, authorization, frame, _ := preparedArwxEOFServerForTest(t, RoleControl)
+		if !markArwxShutdownAcknowledged(authorization) {
+			t.Fatal("authorization acknowledgement was rejected")
+		}
+		server.shutdown.failCurrentAuthorization()
+		if _, err := server.AuthorizeArwxEOF(context.Background(), frame); !errors.Is(err, ErrArwxShutdownUnavailable) {
+			t.Fatalf("non-orderly authorization error = %v", err)
+		}
+	})
+}
+
+func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesAuthorization(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	channel := &armRuntimeBootstrapChannel{Conn: serverConn}
@@ -294,17 +447,6 @@ func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesEvidence(t *testing.T) {
 	if _, err := ReadFrame(clientConn, MaximumArmArwxShutdownBytes); err != nil {
 		t.Fatal(err)
 	}
-	authorizationVisible := false
-	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); {
-		if _, ok := server.ArwxShutdownAuthorization(); ok {
-			authorizationVisible = true
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if !authorizationVisible {
-		t.Fatal("authorization was unavailable immediately after acknowledgement")
-	}
 	select {
 	case err := <-served:
 		if !errors.Is(err, ErrIOTimeout) {
@@ -313,9 +455,89 @@ func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesEvidence(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("armed session did not stop at its absolute deadline")
 	}
-	if _, ok := server.ArwxShutdownAuthorization(); ok {
-		t.Fatal("expired authorization evidence remained usable")
+	if _, err := server.AuthorizeArwxEOF(context.Background(), make([]byte, claim.FinalFrameBytes)); err == nil {
+		t.Fatal("expired authorization remained usable")
 	}
+}
+
+func arwxEOFServerForTest(
+	t *testing.T,
+	role Role,
+) (*Server, ArmArwxShutdownV1, []byte) {
+	t.Helper()
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+	})
+	channel := &armRuntimeBootstrapChannel{Conn: serverConn}
+	options := defaultServerOptions()
+	options.Role = role
+	options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, role)
+	var dispatcher ControlDispatcher
+	if role == RoleControl {
+		dispatcher = &fakeControlDispatcher{}
+	}
+	server, err := NewServer(options, dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.shutdown.bindServeStreams(channel, channel); err != nil {
+		t.Fatal(err)
+	}
+	const sequence = uint64(17)
+	frame := armArwxFinalFrame(role, sequence, []byte("final-frame"))
+	digest := sha256.Sum256(frame)
+	claim := armArwxShutdownClaim(role)
+	claim.FinalSequence = strconv.FormatUint(sequence, 10)
+	claim.FinalFrameBytes = len(frame)
+	claim.FinalFrameSHA256 = hex.EncodeToString(digest[:])
+	return server, claim, frame
+}
+
+func preparedArwxEOFServerForTest(
+	t *testing.T,
+	role Role,
+) (*Server, *arwxShutdownAuthorizationState, []byte, time.Time) {
+	t.Helper()
+	server, claim, frame := arwxEOFServerForTest(t, role)
+	deadline := time.Now().Add(time.Second)
+	_, authorization, err := server.shutdown.prepare(claim, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, authorization, frame, deadline
+}
+
+func waitForArwxAuthorizationConsumed(t *testing.T, authorization *arwxShutdownAuthorizationState) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		authorization.mu.Lock()
+		consumed := authorization.consumed
+		authorization.mu.Unlock()
+		if consumed {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("authorization was not consumed")
+}
+
+func armArwxFinalFrame(role Role, sequence uint64, payload []byte) []byte {
+	messageType := ArmArwxShutdownControlFinalMessageType
+	if role == RoleExecutor {
+		messageType = ArmArwxShutdownExecutorFinalMessageType
+	}
+	frame := make([]byte, arwxframing.HeaderBytes+len(payload))
+	copy(frame[0:4], arwxframing.Magic)
+	binary.LittleEndian.PutUint16(frame[4:6], arwxframing.HeaderBytes)
+	binary.LittleEndian.PutUint16(frame[6:8], arwxframing.MajorVersion)
+	binary.LittleEndian.PutUint16(frame[8:10], arwxframing.MinorVersion)
+	binary.LittleEndian.PutUint16(frame[10:12], uint16(messageType))
+	binary.LittleEndian.PutUint32(frame[16:20], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(frame[20:28], sequence)
+	copy(frame[arwxframing.HeaderBytes:], payload)
+	return frame
 }
 
 type armRuntimeBootstrapChannel struct {

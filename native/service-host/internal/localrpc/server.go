@@ -347,13 +347,17 @@ serveLoop:
 	return terminalError
 }
 
-// ArwxShutdownAuthorization returns opaque, acknowledged evidence for future exact relay EOF
-// validation. It never returns a planned or failed authorization.
-func (s *Server) ArwxShutdownAuthorization() (ArwxShutdownAuthorization, bool) {
-	if s == nil || s.shutdown == nil {
-		return ArwxShutdownAuthorization{}, false
+// AuthorizeArwxEOF consumes the sole prepared shutdown authorization and validates the exact
+// role-local final ARWX frame. A prepared authorization may wait for its response acknowledgement
+// only until the Arm claim's absolute deadline.
+func (s *Server) AuthorizeArwxEOF(ctx context.Context, finalFrame []byte) (time.Time, error) {
+	if ctx == nil {
+		return time.Time{}, errors.New("ARWX EOF authorization context is required")
 	}
-	return s.shutdown.authorizationEvidence()
+	if s == nil || s.shutdown == nil {
+		return time.Time{}, ErrArwxShutdownUnavailable
+	}
+	return s.shutdown.authorizeEOF(ctx, finalFrame)
 }
 
 func (s *Server) armArwxShutdown(
