@@ -7,10 +7,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
 )
 
 const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
@@ -18,6 +21,45 @@ const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/
 type peerverifyIdentifierCounts struct {
 	verifyWindows int
 	options       int
+}
+
+func TestPublicPreflightInputUsesOnlyOpaqueAuthorityEvidence(t *testing.T) {
+	inputType := reflect.TypeOf(Input{})
+	if _, exists := inputType.FieldByName("ReleaseProfile"); exists {
+		t.Fatal("Input exposes caller-constructible release authority")
+	}
+	currentImage, exists := inputType.FieldByName("CurrentImage")
+	if !exists || currentImage.Type != reflect.TypeOf(servicebootstrap.CurrentImageEvidence{}) {
+		t.Fatal("Input does not require concrete opaque CurrentImageEvidence")
+	}
+	for _, value := range []any{CurrentImageBinding{}, Evidence{}, PeerVerificationPlan{}} {
+		typeOfValue := reflect.TypeOf(value)
+		for index := 0; index < typeOfValue.NumField(); index++ {
+			if typeOfValue.Field(index).IsExported() {
+				t.Fatalf("%s exposes constructible authority field %s", typeOfValue.Name(), typeOfValue.Field(index).Name)
+			}
+		}
+	}
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve architecture test source path")
+	}
+	typesSource, err := os.ReadFile(filepath.Join(filepath.Dir(source), "types.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), "types.go", typesSource, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		typeSpec, ok := node.(*ast.TypeSpec)
+		if ok && typeSpec.Name.Name == "ReleaseProfile" {
+			t.Error("preflight still declares caller-constructible ReleaseProfile")
+		}
+		return true
+	})
 }
 
 type peerverifyReference struct {

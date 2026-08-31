@@ -89,11 +89,8 @@ func cloneFiles(values []VerifiedFile) []VerifiedFile {
 	return result
 }
 
-func cloneProfile(value ReleaseProfile) ReleaseProfile {
-	value.Dependencies = append(
-		[]releasemanifest.FileBindingRequirement(nil),
-		value.Dependencies...,
-	)
+func cloneReleaseBinding(value releaseBindingSnapshot) releaseBindingSnapshot {
+	value.dependencies = append([]releasemanifest.File(nil), value.dependencies...)
 	return value
 }
 

@@ -18,20 +18,19 @@ func captureBootstrapBinding(
 	if err != nil || digest == ([32]byte{}) || digest != expectedDigest {
 		return BootstrapBinding{}, preflightError(ErrorServiceBootstrap, "service bootstrap digest changed during capture", err)
 	}
-	options := source.Options()
 	current := installation.controlConfig
 	if installation.role == config.RoleExecutor {
 		current = installation.executorConfig
 	}
 	binding := BootstrapBinding{
-		role:                 installation.role,
-		ownServiceName:       options.ServiceName,
-		ownServiceSID:        options.OwnServiceSID,
-		peerServiceName:      current.PeerService.Name,
-		peerServiceSID:       options.PeerServiceSID,
-		serviceHostProcessID: source.StableServiceHostFacts().ProcessID,
-		sourceDigest:         digest,
-		bound:                true,
+		role:             installation.role,
+		ownServiceName:   source.ServiceName(),
+		ownServiceSID:    source.OwnServiceSID(),
+		peerServiceName:  current.PeerService.Name,
+		peerServiceSID:   source.PeerServiceSID(),
+		serviceHostFacts: source.StableServiceHostFacts(),
+		sourceDigest:     digest,
+		bound:            true,
 	}
 	if err := validateBootstrapBinding(
 		binding,
@@ -63,7 +62,7 @@ func validateBootstrapBinding(
 	if role == config.RoleExecutor {
 		expectedOwn, expectedPeer = expectedPeer, expectedOwn
 	}
-	if !binding.bound || binding.sourceDigest == ([32]byte{}) || binding.serviceHostProcessID == 0 {
+	if !binding.bound || binding.sourceDigest == ([32]byte{}) || !validStableProcessFacts(binding.serviceHostFacts) {
 		return preflightError(ErrorServiceBootstrap, "service bootstrap binding is empty", nil)
 	}
 	if binding.role != role || current.Role != role || current.OwnService != expectedOwn ||
@@ -82,7 +81,7 @@ func validateBootstrapBinding(
 		identity.PeerService.SID != current.PeerService.SID {
 		return preflightError(ErrorServiceBootstrap, "service bootstrap options differ from installation identity", nil)
 	}
-	if binding.serviceHostProcessID != identity.ProcessID {
+	if binding.serviceHostFacts.ProcessID != identity.ProcessID {
 		return preflightError(ErrorServiceBootstrap, "service bootstrap ServiceHost PID differs from installation identity", nil)
 	}
 	return nil

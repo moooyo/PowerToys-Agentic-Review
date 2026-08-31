@@ -10,6 +10,7 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
@@ -21,8 +22,7 @@ import (
 func (e Evidence) Validate() error {
 	if e.role != config.RoleControl && e.role != config.RoleExecutor ||
 		e.actualBootstrapPath == "" || e.digest == ([32]byte{}) ||
-		len(e.roots) != 2 || len(e.files) == 0 || len(e.bindings) != 8+len(e.manifest.Manifest.Files) ||
-		e.approvedSignerPin == "" {
+		len(e.roots) != 2 || len(e.files) == 0 || len(e.bindings) != 8+len(e.manifest.Manifest.Files) {
 		return invalidEvidenceError("preflight evidence is empty or incomplete", nil)
 	}
 	controlConfiguration, err := parseConfigurationRead("Control", e.control.Read)
@@ -104,21 +104,21 @@ func (e Evidence) Validate() error {
 	if err != nil {
 		return invalidEvidenceError("configured file bindings are invalid", err)
 	}
-	profileBindings, err := bindReleaseProfile(e.profile, e.manifest, fileIndex)
+	releaseBindings, serviceHost, err := bindReleaseBinding(e.release, e.manifest, fileIndex)
 	if err != nil {
-		return invalidEvidenceError("release profile bindings are invalid", err)
+		return invalidEvidenceError("compiled release bindings are invalid", err)
 	}
-	expectedBindings = append(expectedBindings, profileBindings...)
+	expectedBindings = append(expectedBindings, releaseBindings...)
 	if !sameFileBindings(expectedBindings, e.bindings) {
 		return invalidEvidenceError("stored file bindings differ from recomposed bindings", nil)
 	}
-	if !validSHA256(e.approvedSignerPin) ||
+	if !validSHA256(e.release.signerPin) ||
 		subtle.ConstantTimeCompare(
-			[]byte(e.approvedSignerPin),
+			[]byte(e.release.signerPin),
 			[]byte(e.control.Configuration.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256),
 		) != 1 ||
 		subtle.ConstantTimeCompare(
-			[]byte(e.approvedSignerPin),
+			[]byte(e.release.signerPin),
 			[]byte(e.executor.Configuration.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256),
 		) != 1 ||
 		e.manifest.SHA256 != e.control.Configuration.Installation.ManifestSHA256 ||
@@ -126,16 +126,6 @@ func (e Evidence) Validate() error {
 		e.manifest.Manifest.ReleaseID != e.control.Configuration.Installation.ReleaseID ||
 		e.manifest.Manifest.Compatibility != CompiledCompatibility() {
 		return invalidEvidenceError("release or signer binding is inconsistent", nil)
-	}
-	if e.profile.ID != ProductionProfileID || len(e.profile.Dependencies) != len(e.manifest.Manifest.Files) {
-		return invalidEvidenceError("release profile is incomplete", nil)
-	}
-	for index, file := range e.manifest.Manifest.Files {
-		requirement := e.profile.Dependencies[index]
-		if requirement.Root != file.Root || requirement.Path != file.Path ||
-			requirement.Role != file.Role || requirement.SHA256 != file.SHA256 {
-			return invalidEvidenceError("release profile differs from the manifest", nil)
-		}
 	}
 	current := e.control.Configuration
 	peer := e.executor.Configuration
@@ -155,6 +145,9 @@ func (e Evidence) Validate() error {
 		e.identity,
 	); err != nil {
 		return invalidEvidenceError("service bootstrap binding is invalid", err)
+	}
+	if err := validateCurrentImageBinding(e.currentImage, e.bootstrap, e.identity.ProcessID, serviceHost); err != nil {
+		return invalidEvidenceError("current ServiceHost image binding is invalid", err)
 	}
 	if err := validateDataRootBinding(e.dataRoot, e.role, e.control.Configuration, e.executor.Configuration, roots); err != nil {
 		return invalidEvidenceError("data-root binding is invalid", err)
@@ -289,7 +282,7 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	encoder := preflightDigestEncoder{hash: sha256.New()}
-	encoder.text("agentic-review/service-host-preflight-evidence/v2")
+	encoder.text("agentic-review/service-host-preflight-evidence/v3")
 	encoder.text(string(e.role))
 	encoder.text(e.actualBootstrapPath)
 	encodeConfigurationEvidence(&encoder, e.control, controlDocument)
@@ -297,11 +290,7 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 	encoder.bytes(manifestDocument)
 	encoder.text(e.manifest.SHA256)
 	encodeSecureRead(&encoder, e.manifest.Read)
-	encoder.text(e.profile.ID)
-	encoder.u64(uint64(len(e.profile.Dependencies)))
-	for _, dependency := range e.profile.Dependencies {
-		encodeRequirement(&encoder, dependency)
-	}
+	encodeReleaseBinding(&encoder, e.release)
 	encoder.u64(uint64(len(e.roots)))
 	for _, root := range e.roots {
 		encoder.text(string(root.Root))
@@ -326,9 +315,9 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		encodeManifestFile(&encoder, binding.Manifest.File)
 		encodeVerifiedFile(&encoder, binding.VerifiedFile)
 	}
-	encoder.text(e.approvedSignerPin)
 	encodeIdentityEvidence(&encoder, e.identity)
 	encodeBootstrapBinding(&encoder, e.bootstrap)
+	encodeCurrentImageBinding(&encoder, e.currentImage)
 	encoder.text(string(e.dataRoot.role))
 	encoder.text(e.dataRoot.currentPath)
 	encoder.text(e.dataRoot.peerPath)
@@ -376,8 +365,42 @@ func encodeBootstrapBinding(encoder *preflightDigestEncoder, binding BootstrapBi
 	encoder.text(binding.ownServiceSID)
 	encoder.text(binding.peerServiceName)
 	encoder.text(binding.peerServiceSID)
-	encoder.u32(binding.serviceHostProcessID)
+	encodeStableProcessFacts(encoder, binding.serviceHostFacts)
 	encoder.bytes(binding.sourceDigest[:])
+}
+
+func encodeReleaseBinding(encoder *preflightDigestEncoder, binding releaseBindingSnapshot) {
+	encoder.bytes(binding.templateDigest[:])
+	encoder.text(binding.manifestSHA256)
+	encoder.u32(binding.templateSchemaVersion)
+	encoder.text(binding.profileID)
+	encoder.text(binding.releaseID)
+	encodeCompatibility(encoder, binding.compatibility)
+	encoder.text(binding.signerPin)
+	encoder.u64(uint64(len(binding.dependencies)))
+	for _, dependency := range binding.dependencies {
+		encodeManifestFile(encoder, dependency)
+	}
+	encodeManifestFile(encoder, binding.serviceHost)
+}
+
+func encodeCurrentImageBinding(encoder *preflightDigestEncoder, binding CurrentImageBinding) {
+	encoder.bytes(binding.sourceDigest[:])
+	encoder.bytes(binding.bootstrapDigest[:])
+	encodeStableProcessFacts(encoder, binding.processFacts)
+	encoder.text(binding.processPath)
+	encoder.u64(binding.identity.VolumeSerialNumber)
+	encoder.bytes(binding.identity.FileID[:])
+	encoder.u64(binding.size)
+	encoder.bytes(binding.sha256[:])
+}
+
+func encodeStableProcessFacts(encoder *preflightDigestEncoder, facts peerverify.StableProcessFacts) {
+	encoder.u32(facts.ProcessID)
+	encoder.i64(facts.CreationTime.Unix())
+	encoder.u32(uint32(facts.CreationTime.Nanosecond()))
+	encoder.boolean(facts.StartKey.Available)
+	encoder.u64(facts.StartKey.SequenceNumber)
 }
 
 func encodeIdentityEvidence(encoder *preflightDigestEncoder, evidence winidentity.Evidence) {
@@ -491,13 +514,6 @@ func encodeControlCredentials(encoder *preflightDigestEncoder, evidence ControlC
 	encoder.u32(mtls.keyUsage)
 }
 
-func encodeRequirement(encoder *preflightDigestEncoder, requirement releasemanifest.FileBindingRequirement) {
-	encoder.text(string(requirement.Root))
-	encoder.text(requirement.Path)
-	encoder.text(string(requirement.Role))
-	encoder.text(requirement.SHA256)
-}
-
 func encodeManifestFile(encoder *preflightDigestEncoder, file releasemanifest.File) {
 	encoder.text(string(file.Root))
 	encoder.text(file.Path)
@@ -548,6 +564,8 @@ func (encoder *preflightDigestEncoder) u64(value uint64) {
 	binary.LittleEndian.PutUint64(buffer[:], value)
 	_, _ = encoder.hash.Write(buffer[:])
 }
+
+func (encoder *preflightDigestEncoder) i64(value int64) { encoder.u64(uint64(value)) }
 
 func (encoder *preflightDigestEncoder) bytes(value []byte) {
 	encoder.u64(uint64(len(value)))

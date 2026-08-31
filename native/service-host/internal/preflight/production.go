@@ -27,12 +27,19 @@ func Compose(input Input) (Evidence, error) {
 	if err := input.Installation.Validate(); err != nil {
 		return Evidence{}, preflightError(ErrorInstallation, "installation evidence is invalid", err)
 	}
-	installation := captureInstallationSnapshot(input.Installation)
+	installation, err := captureInstallationSnapshot(input.Installation)
+	if err != nil {
+		return Evidence{}, err
+	}
 	if input.Role != installation.role ||
 		!windowsPathEqual(input.ActualBootstrapPath, installation.actualBootstrapPath) {
 		return Evidence{}, preflightError(ErrorInput, "preflight selectors do not match installation evidence", nil)
 	}
 	bootstrap, err := captureBootstrapBinding(input.Bootstrap, bootstrapDigest, installation)
+	if err != nil {
+		return Evidence{}, err
+	}
+	currentImage, err := captureCurrentImageBinding(input.CurrentImage, input.Bootstrap, bootstrapDigest)
 	if err != nil {
 		return Evidence{}, err
 	}
@@ -58,14 +65,18 @@ func Compose(input Input) (Evidence, error) {
 		role:                input.Role,
 		actualBootstrapPath: input.ActualBootstrapPath,
 		installation:        installation,
-		releaseProfile:      cloneProfile(input.ReleaseProfile),
 		credentials:         credentials,
 		dataRoot:            dataRoot,
 		bootstrap:           bootstrap,
+		currentImage:        currentImage,
 	})
 }
 
-func captureInstallationSnapshot(evidence installverify.Evidence) *installationSnapshot {
+func captureInstallationSnapshot(evidence installverify.Evidence) (*installationSnapshot, error) {
+	release, err := captureReleaseBinding(evidence)
+	if err != nil {
+		return nil, err
+	}
 	roots := evidence.Roots()
 	rootSnapshots := make([]VerifiedRoot, len(roots))
 	for index, root := range roots {
@@ -93,8 +104,8 @@ func captureInstallationSnapshot(evidence installverify.Evidence) *installationS
 		identity:            evidence.Identity(),
 		roots:               rootSnapshots,
 		files:               fileSnapshots,
-		approvedSignerPin:   evidence.ApprovedSignerCertificateDERSHA256(),
-	}
+		release:             release,
+	}, nil
 }
 
 func captureDataRootBinding(

@@ -7,6 +7,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
@@ -16,7 +17,6 @@ import (
 )
 
 const (
-	ProductionProfileID = "static-review-v1"
 	ApprovedCNGProvider = "Microsoft Software Key Storage Provider"
 )
 
@@ -30,7 +30,8 @@ const (
 	ErrorInstallation       ErrorCode = "PREFLIGHT_INSTALLATION_EVIDENCE_INVALID"
 	ErrorManifest           ErrorCode = "PREFLIGHT_MANIFEST_INVALID"
 	ErrorManifestBinding    ErrorCode = "PREFLIGHT_MANIFEST_BINDING_MISMATCH"
-	ErrorReleaseProfile     ErrorCode = "PREFLIGHT_RELEASE_PROFILE_INVALID"
+	ErrorReleaseAuthority   ErrorCode = "PREFLIGHT_RELEASE_AUTHORITY_INVALID"
+	ErrorCurrentImage       ErrorCode = "PREFLIGHT_CURRENT_IMAGE_MISMATCH"
 	ErrorCompatibility      ErrorCode = "PREFLIGHT_COMPATIBILITY_MISMATCH"
 	ErrorCredentialIdentity ErrorCode = "PREFLIGHT_CREDENTIAL_IDENTITY_MISMATCH"
 	ErrorDataRoot           ErrorCode = "PREFLIGHT_DATA_ROOT_MISMATCH"
@@ -77,24 +78,16 @@ type VerifiedFile struct {
 	Object       secureconfig.ObjectEvidence
 }
 
-// ReleaseProfile is an independently trusted bill of materials for one
-// production workflow. Dependencies must cover every manifest file exactly;
-// deriving this value from the manifest would remove its independent value.
-type ReleaseProfile struct {
-	ID           string
-	Dependencies []releasemanifest.FileBindingRequirement
-}
-
-// Input accepts opaque service-bootstrap and installation evidence, retained
-// data-root verifier evidence, and concrete live credential objects. Executor
-// must leave both credential pointers nil.
+// Input accepts opaque service-bootstrap, current-image, and installation
+// evidence, retained data-root verifier evidence, and concrete live credential
+// objects. Executor must leave both credential pointers nil.
 type Input struct {
 	Role                 config.Role
 	ActualBootstrapPath  string
 	Bootstrap            servicebootstrap.Evidence
+	CurrentImage         servicebootstrap.CurrentImageEvidence
 	Installation         installverify.Evidence
 	DataRoot             dataroot.Evidence
-	ReleaseProfile       ReleaseProfile
 	LocalAuthoritySigner *cng.Signer
 	MTLSCredential       *wincert.Credential
 }
@@ -103,14 +96,14 @@ type Input struct {
 // servicebootstrap evidence. Its private fields cannot be populated by a
 // production caller, and it contains no native handles.
 type BootstrapBinding struct {
-	role                 config.Role
-	ownServiceName       string
-	ownServiceSID        string
-	peerServiceName      string
-	peerServiceSID       string
-	serviceHostProcessID uint32
-	sourceDigest         [32]byte
-	bound                bool
+	role             config.Role
+	ownServiceName   string
+	ownServiceSID    string
+	peerServiceName  string
+	peerServiceSID   string
+	serviceHostFacts peerverify.StableProcessFacts
+	sourceDigest     [32]byte
+	bound            bool
 }
 
 func (binding BootstrapBinding) Role() config.Role       { return binding.role }
@@ -119,9 +112,51 @@ func (binding BootstrapBinding) OwnServiceSID() string   { return binding.ownSer
 func (binding BootstrapBinding) PeerServiceName() string { return binding.peerServiceName }
 func (binding BootstrapBinding) PeerServiceSID() string  { return binding.peerServiceSID }
 func (binding BootstrapBinding) ServiceHostProcessID() uint32 {
-	return binding.serviceHostProcessID
+	return binding.serviceHostFacts.ProcessID
+}
+func (binding BootstrapBinding) ServiceHostProcessFacts() peerverify.StableProcessFacts {
+	return binding.serviceHostFacts
 }
 func (binding BootstrapBinding) SourceDigest() [32]byte { return binding.sourceDigest }
+
+// CurrentImageBinding is the detached cross-package binding captured from the
+// opaque current-image evidence. Final-path diagnostics are intentionally not
+// retained because they are not authorization facts.
+type CurrentImageBinding struct {
+	sourceDigest    [32]byte
+	bootstrapDigest [32]byte
+	processFacts    peerverify.StableProcessFacts
+	processPath     string
+	identity        peerverify.FileIdentity
+	size            uint64
+	sha256          [32]byte
+	bound           bool
+}
+
+func (binding CurrentImageBinding) SourceDigest() [32]byte { return binding.sourceDigest }
+func (binding CurrentImageBinding) BootstrapDigest() [32]byte {
+	return binding.bootstrapDigest
+}
+func (binding CurrentImageBinding) ProcessFacts() peerverify.StableProcessFacts {
+	return binding.processFacts
+}
+func (binding CurrentImageBinding) ProcessPath() string               { return binding.processPath }
+func (binding CurrentImageBinding) Identity() peerverify.FileIdentity { return binding.identity }
+func (binding CurrentImageBinding) Size() uint64                      { return binding.size }
+func (binding CurrentImageBinding) SHA256() [32]byte                  { return binding.sha256 }
+
+type releaseBindingSnapshot struct {
+	templateDigest        [32]byte
+	manifestSHA256        string
+	templateSchemaVersion uint32
+	profileID             string
+	releaseID             string
+	compatibility         releasemanifest.Compatibility
+	signerPin             string
+	dependencies          []releasemanifest.File
+	serviceHost           releasemanifest.File
+	bound                 bool
+}
 
 // ControlCredentialEvidence contains only attestations returned atomically by
 // the concrete validated credential objects. Its fields cannot be populated by
@@ -206,17 +241,17 @@ type installationSnapshot struct {
 	roots               []VerifiedRoot
 	files               []VerifiedFile
 	contents            []VerifiedRuntimeContent
-	approvedSignerPin   string
+	release             releaseBindingSnapshot
 }
 
 type snapshotInput struct {
 	role                config.Role
 	actualBootstrapPath string
 	installation        *installationSnapshot
-	releaseProfile      ReleaseProfile
 	credentials         *ControlCredentialEvidence
 	dataRoot            DataRootBinding
 	bootstrap           BootstrapBinding
+	currentImage        CurrentImageBinding
 }
 
 // ConfigurationEvidence binds parsed canonical configuration to the exact
@@ -253,14 +288,14 @@ type Evidence struct {
 	identity            winidentity.Evidence
 	roots               []VerifiedRoot
 	files               []VerifiedFile
-	profile             ReleaseProfile
+	release             releaseBindingSnapshot
 	bindings            []FileBindingEvidence
-	approvedSignerPin   string
 	controlCredentials  *ControlCredentialEvidence
 	dataRoot            DataRootBinding
 	contents            []VerifiedRuntimeContent
 	digest              [32]byte
 	bootstrap           BootstrapBinding
+	currentImage        CurrentImageBinding
 }
 
 func (e Evidence) Role() config.Role { return e.role }
@@ -290,11 +325,11 @@ func (e Evidence) Roots() []VerifiedRoot { return cloneRoots(e.roots) }
 
 func (e Evidence) Files() []VerifiedFile { return cloneFiles(e.files) }
 
-func (e Evidence) ReleaseProfile() ReleaseProfile { return cloneProfile(e.profile) }
-
 func (e Evidence) FileBindings() []FileBindingEvidence { return cloneBindings(e.bindings) }
 
-func (e Evidence) ApprovedSignerCertificateDERSHA256() string { return e.approvedSignerPin }
+func (e Evidence) ReleaseTemplateDigest() [32]byte { return e.release.templateDigest }
+
+func (e Evidence) ApprovedSignerCertificateDERSHA256() string { return e.release.signerPin }
 
 func (e Evidence) ControlCredentials() (ControlCredentialEvidence, bool) {
 	if e.controlCredentials == nil || !e.controlCredentials.bound {
@@ -319,6 +354,13 @@ func (e Evidence) BootstrapBinding() (BootstrapBinding, bool) {
 		return BootstrapBinding{}, false
 	}
 	return e.bootstrap, true
+}
+
+func (e Evidence) CurrentImageBinding() (CurrentImageBinding, bool) {
+	if !e.currentImage.bound {
+		return CurrentImageBinding{}, false
+	}
+	return e.currentImage, true
 }
 
 // PinnedRuntimeFile contains one immutable path and digest selected for launch.

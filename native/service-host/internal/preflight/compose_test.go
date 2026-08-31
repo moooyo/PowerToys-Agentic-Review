@@ -57,7 +57,7 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 	}
 
 	fixture.input.installation.controlBootstrap.Data[0] ^= 0xff
-	fixture.input.releaseProfile.Dependencies[0].Path = `changed\dependency.exe`
+	fixture.installation.release.dependencies[0].Path = `changed\dependency.exe`
 	fixture.installation.files[0].Object.Evidence.Security.SelfRelativeDescriptor[0] ^= 0xff
 	fixture.input.credentials.bound = false
 
@@ -68,8 +68,8 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 	files := evidence.Files()
 	originalDescriptorByte := files[0].Object.Evidence.Security.SelfRelativeDescriptor[1]
 	files[0].Object.Evidence.Security.SelfRelativeDescriptor[1] ^= 0xff
-	profile := evidence.ReleaseProfile()
-	profile.Dependencies[0].Path = `changed\again.exe`
+	releaseDigest := evidence.ReleaseTemplateDigest()
+	releaseDigest[0] ^= 0xff
 	bindings := evidence.FileBindings()
 	originalBindingDescriptorByte := bindings[0].VerifiedFile.Object.Evidence.Security.SelfRelativeDescriptor[1]
 	bindings[0].VerifiedFile.Object.Evidence.Security.SelfRelativeDescriptor[1] ^= 0xff
@@ -79,7 +79,7 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 	if controlAgain.Read.Data[0] != originalByte ||
 		controlAgain.Configuration.Node.Environment["PATH"] == `C:\Changed` ||
 		filesAgain[0].Object.Evidence.Security.SelfRelativeDescriptor[1] != originalDescriptorByte ||
-		evidence.ReleaseProfile().Dependencies[0].Path == `changed\again.exe` ||
+		evidence.ReleaseTemplateDigest() == releaseDigest ||
 		evidence.FileBindings()[0].VerifiedFile.Object.Evidence.Security.SelfRelativeDescriptor[1] != originalBindingDescriptorByte {
 		t.Fatal("Evidence accessor exposed mutable internal storage")
 	}
@@ -250,8 +250,8 @@ func TestComposeRejectsManifestAndVerifiedFileMismatch(t *testing.T) {
 			mutate: func(f *compositionFixture) { f.installation.files[0].AbsolutePath = `C:\Elsewhere\node.exe` },
 		},
 		{
-			name: "verified signer pin", code: ErrorInstallation,
-			mutate: func(f *compositionFixture) { f.installation.approvedSignerPin = strings.Repeat("a", 64) },
+			name: "verified signer pin", code: ErrorReleaseAuthority,
+			mutate: func(f *compositionFixture) { f.installation.release.signerPin = strings.Repeat("a", 64) },
 		},
 		{
 			name: "duplicate file identity", code: ErrorInstallation,
@@ -286,48 +286,61 @@ func TestComposeRejectsManifestAndVerifiedFileMismatch(t *testing.T) {
 	}
 }
 
-func TestComposeRequiresCompleteConcreteReleaseProfile(t *testing.T) {
+func TestComposeRequiresCompleteOpaqueReleaseBinding(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*ReleaseProfile)
+		mutate func(*releaseBindingSnapshot)
 	}{
-		{"profile ID", func(profile *ReleaseProfile) { profile.ID = "other" }},
-		{"missing dependency", func(profile *ReleaseProfile) {
-			profile.Dependencies = profile.Dependencies[:len(profile.Dependencies)-1]
+		{"unbound", func(release *releaseBindingSnapshot) { release.bound = false }},
+		{"template digest", func(release *releaseBindingSnapshot) { release.templateDigest = [32]byte{} }},
+		{"manifest digest", func(release *releaseBindingSnapshot) { release.manifestSHA256 = strings.Repeat("a", 64) }},
+		{"template schema", func(release *releaseBindingSnapshot) { release.templateSchemaVersion++ }},
+		{"profile ID", func(release *releaseBindingSnapshot) { release.profileID = "other" }},
+		{"release ID", func(release *releaseBindingSnapshot) { release.releaseID = "other" }},
+		{"compatibility", func(release *releaseBindingSnapshot) { release.compatibility.ServiceHostRPCVersion++ }},
+		{"signer", func(release *releaseBindingSnapshot) { release.signerPin = strings.Repeat("a", 64) }},
+		{"missing dependency", func(release *releaseBindingSnapshot) {
+			release.dependencies = release.dependencies[:len(release.dependencies)-1]
 		}},
-		{"extra dependency", func(profile *ReleaseProfile) {
-			profile.Dependencies = append(profile.Dependencies, profile.Dependencies[0])
+		{"extra dependency", func(release *releaseBindingSnapshot) {
+			release.dependencies = append(release.dependencies, release.dependencies[0])
 		}},
-		{"duplicate dependency", func(profile *ReleaseProfile) {
-			profile.Dependencies[len(profile.Dependencies)-1] = profile.Dependencies[0]
+		{"duplicate dependency", func(release *releaseBindingSnapshot) {
+			release.dependencies[len(release.dependencies)-1] = release.dependencies[0]
 		}},
-		{"role mismatch", func(profile *ReleaseProfile) {
-			profile.Dependencies[0].Role = releasemanifest.RolePrompt
+		{"dependency order", func(release *releaseBindingSnapshot) {
+			release.dependencies[0], release.dependencies[1] = release.dependencies[1], release.dependencies[0]
 		}},
-		{"digest mismatch", func(profile *ReleaseProfile) {
-			profile.Dependencies[0].SHA256 = strings.Repeat("a", 64)
+		{"role mismatch", func(release *releaseBindingSnapshot) {
+			release.dependencies[0].Role = releasemanifest.RolePrompt
 		}},
-		{"root mismatch", func(profile *ReleaseProfile) {
-			profile.Dependencies[0].Root = releasemanifest.RootTrustedConfiguration
+		{"digest mismatch", func(release *releaseBindingSnapshot) {
+			release.dependencies[0].SHA256 = strings.Repeat("a", 64)
 		}},
-		{"path mismatch", func(profile *ReleaseProfile) {
-			profile.Dependencies[0].Path += ".other"
+		{"size mismatch", func(release *releaseBindingSnapshot) { release.dependencies[0].Size = "2" }},
+		{"root mismatch", func(release *releaseBindingSnapshot) {
+			release.dependencies[0].Root = releasemanifest.RootTrustedConfiguration
 		}},
-		{"path case mismatch", func(profile *ReleaseProfile) {
-			profile.Dependencies[0].Path = strings.ToUpper(profile.Dependencies[0].Path)
+		{"path mismatch", func(release *releaseBindingSnapshot) { release.dependencies[0].Path += ".other" }},
+		{"path case mismatch", func(release *releaseBindingSnapshot) {
+			release.dependencies[0].Path = strings.ToUpper(release.dependencies[0].Path)
 		}},
+		{"self path", func(release *releaseBindingSnapshot) { release.serviceHost.Path += ".other" }},
+		{"self role", func(release *releaseBindingSnapshot) { release.serviceHost.Role = releasemanifest.RoleNodeRuntime }},
+		{"self digest", func(release *releaseBindingSnapshot) { release.serviceHost.SHA256 = strings.Repeat("a", 64) }},
+		{"self size", func(release *releaseBindingSnapshot) { release.serviceHost.Size = "2" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newCompositionFixture(t, config.RoleControl)
-			test.mutate(&fixture.input.releaseProfile)
+			test.mutate(&fixture.installation.release)
 			_, err := composeSnapshots(fixture.input)
-			assertPreflightErrorCode(t, err, ErrorReleaseProfile)
+			assertPreflightErrorCode(t, err, ErrorReleaseAuthority)
 		})
 	}
 }
 
-func TestReleaseProfileCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
+func TestReleaseBindingCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
 	requiredRoles := map[releasemanifest.FileRole]bool{
 		releasemanifest.RoleSchema:        false,
@@ -337,7 +350,7 @@ func TestReleaseProfileCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
 		releasemanifest.RoleTrustedConfig: false,
 		releasemanifest.RoleLicense:       false,
 	}
-	for _, dependency := range fixture.input.releaseProfile.Dependencies {
+	for _, dependency := range fixture.installation.release.dependencies {
 		if _, tracked := requiredRoles[dependency.Role]; tracked {
 			requiredRoles[dependency.Role] = true
 		}
@@ -348,10 +361,6 @@ func TestReleaseProfileCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
 		}
 	}
 
-	dependencies := fixture.input.releaseProfile.Dependencies
-	for left, right := 0, len(dependencies)-1; left < right; left, right = left+1, right-1 {
-		dependencies[left], dependencies[right] = dependencies[right], dependencies[left]
-	}
 	evidence, err := composeSnapshots(fixture.input)
 	if err != nil {
 		t.Fatal(err)

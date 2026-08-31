@@ -3,6 +3,7 @@ package preflight
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 )
@@ -25,6 +26,7 @@ func TestBootstrapBindingMatchesSelectedRoleConfigurationAndInstallationIdentity
 				binding.PeerServiceName() != current.PeerService.Name ||
 				binding.PeerServiceSID() != current.PeerService.SID ||
 				binding.ServiceHostProcessID() != evidence.Identity().ProcessID ||
+				!sameStableProcessFacts(binding.ServiceHostProcessFacts(), fixture.input.bootstrap.serviceHostFacts) ||
 				binding.SourceDigest() != fixture.input.bootstrap.sourceDigest {
 				t.Fatalf("unexpected bootstrap binding: %#v", binding)
 			}
@@ -45,8 +47,14 @@ func TestBootstrapBindingRejectsZeroAndEveryCrossBindingMismatch(t *testing.T) {
 		{"own service SID", func(value *compositionFixture) { value.input.bootstrap.ownServiceSID = config.ExecutorServiceSID }},
 		{"peer service name", func(value *compositionFixture) { value.input.bootstrap.peerServiceName += ".Other" }},
 		{"peer service SID", func(value *compositionFixture) { value.input.bootstrap.peerServiceSID = config.ControlServiceSID }},
-		{"zero PID", func(value *compositionFixture) { value.input.bootstrap.serviceHostProcessID = 0 }},
-		{"wrong PID", func(value *compositionFixture) { value.input.bootstrap.serviceHostProcessID++ }},
+		{"zero PID", func(value *compositionFixture) { value.input.bootstrap.serviceHostFacts.ProcessID = 0 }},
+		{"wrong PID", func(value *compositionFixture) { value.input.bootstrap.serviceHostFacts.ProcessID++ }},
+		{"zero creation time", func(value *compositionFixture) {
+			value.input.bootstrap.serviceHostFacts.CreationTime = time.Time{}
+		}},
+		{"wrong start key", func(value *compositionFixture) {
+			value.input.bootstrap.serviceHostFacts.StartKey.SequenceNumber = 0
+		}},
 		{"zero source digest", func(value *compositionFixture) { value.input.bootstrap.sourceDigest = [32]byte{} }},
 		{"installation own name", func(value *compositionFixture) { value.installation.identity.OwnService.Name += ".Other" }},
 		{"installation own SID", func(value *compositionFixture) {
@@ -97,7 +105,7 @@ func TestBootstrapBindingGetterIsCopyOnlyAndEvidenceMutationIsRejected(t *testin
 	}
 
 	candidate := cloneEvidenceForDigestTest(evidence)
-	candidate.bootstrap.serviceHostProcessID++
+	candidate.bootstrap.serviceHostFacts.ProcessID++
 	if err := candidate.Validate(); !errors.Is(err, ErrInvalidEvidence) {
 		t.Fatalf("mutated bootstrap Evidence.Validate = %v", err)
 	}

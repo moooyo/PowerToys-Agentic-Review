@@ -94,7 +94,7 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 	); err != nil {
 		return Evidence{}, err
 	}
-	installationSigner := input.installation.approvedSignerPin
+	installationSigner := input.installation.release.signerPin
 	if !validSHA256(installationSigner) ||
 		subtle.ConstantTimeCompare(
 			[]byte(installationSigner),
@@ -105,7 +105,7 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 			[]byte(executorConfig.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256),
 		) != 1 {
 		return Evidence{}, preflightError(
-			ErrorInstallation,
+			ErrorReleaseAuthority,
 			"installation verification signer pin does not match both configurations",
 			nil,
 		)
@@ -194,15 +194,23 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 	if err != nil {
 		return Evidence{}, err
 	}
-	profileBindings, err := bindReleaseProfile(
-		input.releaseProfile,
+	releaseBindings, serviceHost, err := bindReleaseBinding(
+		input.installation.release,
 		manifestEvidence,
 		fileIndex,
 	)
 	if err != nil {
 		return Evidence{}, err
 	}
-	bindings = append(bindings, profileBindings...)
+	bindings = append(bindings, releaseBindings...)
+	if err := validateCurrentImageBinding(
+		input.currentImage,
+		input.bootstrap,
+		input.installation.identity.ProcessID,
+		serviceHost,
+	); err != nil {
+		return Evidence{}, err
+	}
 	if err := validateDataRootBinding(input.dataRoot, input.role, controlConfig, executorConfig, roots); err != nil {
 		return Evidence{}, err
 	}
@@ -234,13 +242,13 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		identity:            cloneIdentityEvidence(input.installation.identity),
 		roots:               cloneRoots(roots),
 		files:               cloneFiles(files),
-		profile:             canonicalReleaseProfile(input.releaseProfile.ID, manifestEvidence.Manifest),
+		release:             cloneReleaseBinding(input.installation.release),
 		bindings:            cloneBindings(bindings),
-		approvedSignerPin:   installationSigner,
 		controlCredentials:  cloneControlCredentials(input.credentials),
 		dataRoot:            cloneDataRootBinding(input.dataRoot),
 		contents:            cloneRuntimeContents(contents),
 		bootstrap:           input.bootstrap,
+		currentImage:        input.currentImage,
 	}
 	result.digest, err = digestEvidence(result)
 	if err != nil {

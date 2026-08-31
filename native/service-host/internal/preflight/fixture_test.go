@@ -7,12 +7,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
@@ -89,7 +92,11 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 		manifestRead:        manifestRead,
 		manifest:            cloneManifest(parsedManifest),
 		identity:            identityFixture(role, control, executor),
-		approvedSignerPin:   control.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
+		release: releaseBindingFixture(
+			parsedManifest,
+			hexDigest(manifestDigest),
+			control.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
+		),
 		roots: []VerifiedRoot{
 			{
 				Root: releasemanifest.RootInstallation, Path: testInstallationRoot,
@@ -103,17 +110,18 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 		files: verifiedFiles,
 	}
 	installation.contents = runtimeContentFixtures(t, role, control, executor, verifiedFiles)
-	profile := profileFixture(parsedManifest)
 	dataRootDigest := sha256.Sum256([]byte("data-root-evidence-" + string(role)))
 	currentConfig := control
 	peerConfig := executor
 	if role == config.RoleExecutor {
 		currentConfig, peerConfig = peerConfig, currentConfig
 	}
+	bootstrap := bootstrapBindingFixture(role, currentConfig, installation.identity)
 	input := snapshotInput{
 		role: role, actualBootstrapPath: controlRead.File.Path,
-		installation: installation, releaseProfile: profile,
-		bootstrap: bootstrapBindingFixture(role, currentConfig, installation.identity),
+		installation: installation,
+		bootstrap:    bootstrap,
+		currentImage: currentImageBindingFixture(t, bootstrap, verifiedFiles),
 		dataRoot: DataRootBinding{
 			role: role, currentPath: currentConfig.Node.DataRoot, peerPath: peerConfig.Node.DataRoot,
 			peerObservation:   dataroot.PeerLiveRootNotObservedByDesign,
@@ -148,14 +156,54 @@ func bootstrapBindingFixture(
 ) BootstrapBinding {
 	digest := sha256.Sum256([]byte("service-bootstrap-evidence-" + string(role)))
 	return BootstrapBinding{
-		role:                 role,
-		ownServiceName:       current.OwnService.Name,
-		ownServiceSID:        current.OwnService.SID,
-		peerServiceName:      current.PeerService.Name,
-		peerServiceSID:       current.PeerService.SID,
-		serviceHostProcessID: identity.ProcessID,
-		sourceDigest:         digest,
-		bound:                true,
+		role:             role,
+		ownServiceName:   current.OwnService.Name,
+		ownServiceSID:    current.OwnService.SID,
+		peerServiceName:  current.PeerService.Name,
+		peerServiceSID:   current.PeerService.SID,
+		serviceHostFacts: stableServiceHostFactsFixture(identity.ProcessID),
+		sourceDigest:     digest,
+		bound:            true,
+	}
+}
+
+func stableServiceHostFactsFixture(processID uint32) peerverify.StableProcessFacts {
+	return peerverify.StableProcessFacts{
+		ProcessID:    processID,
+		CreationTime: time.Date(2026, time.August, 31, 12, 0, 0, 123, time.UTC),
+		StartKey:     peerverify.ProcessStartKey{Available: true, SequenceNumber: 9001},
+	}
+}
+
+func currentImageBindingFixture(
+	t *testing.T,
+	bootstrap BootstrapBinding,
+	files []VerifiedFile,
+) CurrentImageBinding {
+	t.Helper()
+	var serviceHost VerifiedFile
+	for _, file := range files {
+		if file.Role == releasemanifest.RoleServiceHost {
+			serviceHost = file
+			break
+		}
+	}
+	if serviceHost.Role != releasemanifest.RoleServiceHost {
+		t.Fatal("fixture has no ServiceHost")
+	}
+	digest := mustDecodeDigest(t, serviceHost.SHA256)
+	return CurrentImageBinding{
+		sourceDigest:    sha256.Sum256([]byte("current-image-evidence")),
+		bootstrapDigest: bootstrap.sourceDigest,
+		processFacts:    bootstrap.serviceHostFacts,
+		processPath:     serviceHost.AbsolutePath,
+		identity: peerverify.FileIdentity{
+			VolumeSerialNumber: serviceHost.Object.Evidence.Identity.VolumeSerialNumber,
+			FileID:             serviceHost.Object.Evidence.Identity.FileID,
+		},
+		size:   serviceHost.Size,
+		sha256: digest,
+		bound:  true,
 	}
 }
 
@@ -447,16 +495,31 @@ func limitsFixture() config.Limits {
 	}
 }
 
-func profileFixture(manifest releasemanifest.Manifest) ReleaseProfile {
-	dependencies := make([]releasemanifest.FileBindingRequirement, len(manifest.Files))
-	for index, file := range manifest.Files {
-		dependencies[index] = releasemanifest.FileBindingRequirement{
-			Root: file.Root, Path: file.Path, Role: file.Role, SHA256: file.SHA256,
+func releaseBindingFixture(
+	manifest releasemanifest.Manifest,
+	manifestSHA256 string,
+	signerPin string,
+) releaseBindingSnapshot {
+	dependencies := make([]releasemanifest.File, 0, len(manifest.Files)-1)
+	var serviceHost releasemanifest.File
+	for _, file := range manifest.Files {
+		if file.Role == releasemanifest.RoleServiceHost {
+			serviceHost = file
+			continue
 		}
+		dependencies = append(dependencies, file)
 	}
-	return ReleaseProfile{
-		ID:           ProductionProfileID,
-		Dependencies: dependencies,
+	return releaseBindingSnapshot{
+		templateDigest:        sha256.Sum256([]byte("compiled-release-template")),
+		manifestSHA256:        manifestSHA256,
+		templateSchemaVersion: releaseprofile.SchemaVersion,
+		profileID:             releaseprofile.ProductionProfileID,
+		releaseID:             manifest.ReleaseID,
+		compatibility:         manifest.Compatibility,
+		signerPin:             signerPin,
+		dependencies:          dependencies,
+		serviceHost:           serviceHost,
+		bound:                 true,
 	}
 }
 

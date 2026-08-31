@@ -26,13 +26,24 @@ func TestPeerVerificationPlanAtomicallyMapsAttestedRoleInputs(t *testing.T) {
 			if err := plan.Validate(); err != nil {
 				t.Fatal(err)
 			}
+			preflightDigest, err := evidence.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentImage, ok := evidence.CurrentImageBinding()
+			if !ok {
+				t.Fatal("Evidence omitted current-image binding")
+			}
 			configuration := evidence.Configuration()
 			expectedWrapper := configuration.Installation.Root + `\` + configuration.PeerService.Name + ".exe"
 			if plan.Role() != role || plan.OwnService() != configuration.OwnService ||
 				plan.PeerService() != configuration.PeerService || plan.PipeName() != configuration.PipeName ||
 				!windowsPathEqual(plan.Wrapper().Path(), expectedWrapper) ||
 				plan.Wrapper().SHA256() == "" || plan.ServiceHost().SHA256() == "" ||
-				plan.ApprovedSignerCertificateDERSHA256() != evidence.ApprovedSignerCertificateDERSHA256() {
+				plan.ApprovedSignerCertificateDERSHA256() != evidence.ApprovedSignerCertificateDERSHA256() ||
+				plan.PreflightDigest() != preflightDigest ||
+				plan.ReleaseTemplateDigest() != evidence.ReleaseTemplateDigest() ||
+				plan.CurrentImageDigest() != currentImage.SourceDigest() {
 				t.Fatalf("plan omitted or selected wrong peer inputs: %#v", plan)
 			}
 
@@ -343,6 +354,9 @@ func TestPeerVerificationPlanRejectsZeroAndBoundMutations(t *testing.T) {
 		{"ServiceHost path", func(value *PeerVerificationPlan) { value.serviceHost.path += ".other" }},
 		{"ServiceHost digest", func(value *PeerVerificationPlan) { value.serviceHost.sha256 = "bad" }},
 		{"signer", func(value *PeerVerificationPlan) { value.approvedSignerPin = "bad" }},
+		{"preflight digest", func(value *PeerVerificationPlan) { value.preflightDigest = [32]byte{} }},
+		{"release digest", func(value *PeerVerificationPlan) { value.releaseDigest = [32]byte{} }},
+		{"current image digest", func(value *PeerVerificationPlan) { value.currentImageDigest = [32]byte{} }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -583,7 +597,7 @@ func TestPeerVerificationFileSelectionRequiresFixedWrappersAndUniqueServiceHost(
 		t.Run(test.name, func(t *testing.T) {
 			files := cloneFiles(fixture.installation.files)
 			files = test.mutate(files)
-			_, _, err := selectPeerVerificationFiles(configuration, files)
+			_, _, err := selectPeerVerificationFiles(configuration, files, fixture.installation.release)
 			assertPreflightErrorCode(t, err, ErrorPeerVerification)
 		})
 	}

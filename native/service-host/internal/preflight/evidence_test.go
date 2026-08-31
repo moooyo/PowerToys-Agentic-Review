@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
@@ -236,7 +237,14 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 		{"manifest read bytes", func(value *Evidence) { value.manifest.Read.Data[0] ^= 0xff }},
 		{"manifest read file", func(value *Evidence) { value.manifest.Read.File.EvidenceSHA256[0] ^= 0xff }},
 		{"manifest read ancestor", func(value *Evidence) { value.manifest.Read.Ancestors[0].EvidenceSHA256[0] ^= 0xff }},
-		{"profile", func(value *Evidence) { value.profile.Dependencies[0].SHA256 = strings.Repeat("a", 64) }},
+		{"release template digest", func(value *Evidence) { value.release.templateDigest[0] ^= 0xff }},
+		{"release manifest digest", func(value *Evidence) { value.release.manifestSHA256 = strings.Repeat("a", 64) }},
+		{"release template schema", func(value *Evidence) { value.release.templateSchemaVersion++ }},
+		{"release profile ID", func(value *Evidence) { value.release.profileID += ".other" }},
+		{"release ID", func(value *Evidence) { value.release.releaseID += ".other" }},
+		{"release compatibility", func(value *Evidence) { value.release.compatibility.ServiceHostRPCVersion++ }},
+		{"release dependency", func(value *Evidence) { value.release.dependencies[0].SHA256 = strings.Repeat("a", 64) }},
+		{"release self", func(value *Evidence) { value.release.serviceHost.Size = "2" }},
 		{"file binding", func(value *Evidence) { value.bindings[0].Purpose += ".other" }},
 		{"binding compatibility", func(value *Evidence) { value.bindings[0].Manifest.Compatibility.LocalProtocolMajor++ }},
 		{"root identity", func(value *Evidence) { value.roots[0].Object.Evidence.Identity.FileID[0] ^= 0xff }},
@@ -248,9 +256,25 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 		{"bootstrap own SID", func(value *Evidence) { value.bootstrap.ownServiceSID = config.ExecutorServiceSID }},
 		{"bootstrap peer name", func(value *Evidence) { value.bootstrap.peerServiceName += ".other" }},
 		{"bootstrap peer SID", func(value *Evidence) { value.bootstrap.peerServiceSID = config.ControlServiceSID }},
-		{"bootstrap PID", func(value *Evidence) { value.bootstrap.serviceHostProcessID++ }},
+		{"bootstrap PID", func(value *Evidence) { value.bootstrap.serviceHostFacts.ProcessID++ }},
+		{"bootstrap creation time", func(value *Evidence) {
+			value.bootstrap.serviceHostFacts.CreationTime = value.bootstrap.serviceHostFacts.CreationTime.Add(time.Nanosecond)
+		}},
+		{"bootstrap start key", func(value *Evidence) { value.bootstrap.serviceHostFacts.StartKey.SequenceNumber++ }},
 		{"bootstrap source digest", func(value *Evidence) { value.bootstrap.sourceDigest[0] ^= 0xff }},
-		{"signer", func(value *Evidence) { value.approvedSignerPin = strings.Repeat("a", 64) }},
+		{"signer", func(value *Evidence) { value.release.signerPin = strings.Repeat("a", 64) }},
+		{"current image digest", func(value *Evidence) { value.currentImage.sourceDigest[0] ^= 0xff }},
+		{"current image bootstrap", func(value *Evidence) { value.currentImage.bootstrapDigest[0] ^= 0xff }},
+		{"current image process", func(value *Evidence) { value.currentImage.processFacts.ProcessID++ }},
+		{"current image creation time", func(value *Evidence) {
+			value.currentImage.processFacts.CreationTime = value.currentImage.processFacts.CreationTime.Add(time.Nanosecond)
+		}},
+		{"current image start key", func(value *Evidence) { value.currentImage.processFacts.StartKey.SequenceNumber++ }},
+		{"current image path", func(value *Evidence) { value.currentImage.processPath += ".other" }},
+		{"current image volume", func(value *Evidence) { value.currentImage.identity.VolumeSerialNumber++ }},
+		{"current image identity", func(value *Evidence) { value.currentImage.identity.FileID[0] ^= 0xff }},
+		{"current image size", func(value *Evidence) { value.currentImage.size++ }},
+		{"current image SHA-256", func(value *Evidence) { value.currentImage.sha256[0] ^= 0xff }},
 		{"data root", func(value *Evidence) { value.dataRoot.digest[0] ^= 0xff }},
 		{"data-root installation target", func(value *Evidence) { value.dataRoot.installationRoots[0].target.FileID[0] ^= 0xff }},
 		{"data-root installation ancestor", func(value *Evidence) { value.dataRoot.installationRoots[0].ancestors[0].FileID[0] ^= 0xff }},
@@ -324,6 +348,11 @@ func TestEvidenceValidateRejectsSecureReadAndAttestationDrift(t *testing.T) {
 			value.manifest.Read.Ancestors[0].Evidence.Identity.FileID[0] ^= 0xff
 			rebuildObjectEvidence(t, &value.manifest.Read.Ancestors[0])
 		}},
+		{"release template digest", func(value *Evidence) { value.release.templateDigest[0] ^= 0xff }},
+		{"release self", func(value *Evidence) { value.release.serviceHost.SHA256 = strings.Repeat("a", 64) }},
+		{"current image bootstrap digest", func(value *Evidence) { value.currentImage.bootstrapDigest[0] ^= 0xff }},
+		{"current image process", func(value *Evidence) { value.currentImage.processFacts.ProcessID++ }},
+		{"current image identity", func(value *Evidence) { value.currentImage.identity.FileID[0] ^= 0xff }},
 		{"local attestation getters", func(value *Evidence) {
 			facts := value.controlCredentials.localFacts
 			facts.identity.UniqueName += ".other"
@@ -481,7 +510,7 @@ func cloneEvidenceForDigestTest(value Evidence) Evidence {
 	value.identity = cloneIdentityEvidence(value.identity)
 	value.roots = cloneRoots(value.roots)
 	value.files = cloneFiles(value.files)
-	value.profile = cloneProfile(value.profile)
+	value.release = cloneReleaseBinding(value.release)
 	value.bindings = cloneBindings(value.bindings)
 	value.controlCredentials = cloneControlCredentials(value.controlCredentials)
 	value.dataRoot = cloneDataRootBinding(value.dataRoot)
