@@ -6,3 +6,4 @@ export * from "./host-control-session.js";
 export * from "./launch-contract.js";
 export * from "./opaque-json.js";
 export * from "./role-entrypoint.js";
+export * from "./runtime-bootstrap.js";

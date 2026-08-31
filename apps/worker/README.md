@@ -35,7 +35,8 @@ defense in depth, not a JavaScript sandbox and not authority for hostile source.
 authority must come from the exact path and SHA-256 input manifest inside a trusted, signed release
 build, together with the ServiceHost and Windows identity, ACL, Job Object, and pipe boundaries.
 
-The Control and Executor role entrypoints remain fail closed until `RuntimeBootstrapV1` is wired.
+The bounded `RuntimeBootstrapV1` codecs are implemented, but the Control and Executor role
+entrypoints remain fail closed until the bootstrap exchange and native runtime are wired.
 Before ServiceHost enables either payload, its fixed Node launch contract must include
 `--disallow-code-generation-from-strings` and `--no-addons`; neither flag replaces the operating
 system boundaries above.
