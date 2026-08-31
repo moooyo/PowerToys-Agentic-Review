@@ -5,8 +5,8 @@ package hostcontrol
 import (
 	"context"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
 // Listener is an unavailable placeholder outside Windows.
@@ -27,8 +27,7 @@ func (*Listener) PipeName() string {
 // Accept fails before transferring any connection ownership outside Windows.
 func (*Listener) Accept(
 	context.Context,
-	winprocess.NodeProcess,
-	localrpc.RuntimeBootstrapV1,
+	*launchguard.GuardedNodeProcess,
 ) (*Connection, error) {
 	return nil, ErrUnsupportedPlatform
 }

@@ -2,13 +2,127 @@ package hostcontrol
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 )
 
 const testOwnServiceSID = "S-1-5-80-1-2-3-4-5"
+
+func TestAcceptRequiresExactGuardedNodeWithoutBootstrapArgument(t *testing.T) {
+	method := reflect.TypeOf((*Listener).Accept)
+	wantContext := reflect.TypeOf((*context.Context)(nil)).Elem()
+	wantNode := reflect.TypeOf((*launchguard.GuardedNodeProcess)(nil))
+	if method.NumIn() != 3 || method.In(1) != wantContext || method.In(2) != wantNode {
+		t.Fatalf("Listener.Accept signature = %v", method)
+	}
+}
+
+func TestAcceptClaimsBeforeConnectionWorkAndRejectsClaimByNodeTermination(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve HostControl test source")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(testFile), "endpoint_windows.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, "endpoint_windows.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accept *ast.FuncDecl
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "Accept" {
+			accept = function
+			break
+		}
+	}
+	if accept == nil || accept.Body == nil {
+		t.Fatal("Windows Listener.Accept declaration is unavailable")
+	}
+	positions := make(map[string][]token.Pos)
+	claimRejectPositions := []token.Pos{}
+	connectionRejectPositions := []token.Pos{}
+	ast.Inspect(accept.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := ""
+		switch function := call.Fun.(type) {
+		case *ast.Ident:
+			name = function.Name
+		case *ast.SelectorExpr:
+			name = function.Sel.Name
+		}
+		switch name {
+		case "beginAccept", "ClaimHostControlLaunch", "finish", "rejectAcceptFailure", "acceptConnected", "completeRuntimeBootstrap":
+			positions[name] = append(positions[name], call.Pos())
+		}
+		if name == "rejectAcceptFailure" && len(call.Args) == 5 {
+			first, firstOK := call.Args[0].(*ast.Ident)
+			third, thirdOK := call.Args[2].(*ast.Ident)
+			closer, closerOK := call.Args[4].(*ast.SelectorExpr)
+			closerReceiver, receiverOK := closer.X.(*ast.Ident)
+			if firstOK && first.Name == "nil" && thirdOK && closerOK && receiverOK &&
+				closerReceiver.Name == "l" && closer.Sel.Name == "Close" {
+				switch third.Name {
+				case "node":
+					claimRejectPositions = append(claimRejectPositions, call.Pos())
+				case "claimedNode":
+					connectionRejectPositions = append(connectionRejectPositions, call.Pos())
+				}
+			}
+		}
+		return true
+	})
+	for _, name := range []string{"beginAccept", "ClaimHostControlLaunch", "acceptConnected", "completeRuntimeBootstrap"} {
+		if len(positions[name]) != 1 {
+			t.Fatalf("Listener.Accept %s call count = %d, want 1", name, len(positions[name]))
+		}
+	}
+	if len(positions["rejectAcceptFailure"]) != 2 || len(claimRejectPositions) != 1 ||
+		len(connectionRejectPositions) != 1 {
+		t.Fatalf(
+			"Listener.Accept rejection calls = all:%d claim:%d connection:%d, want 2/1/1",
+			len(positions["rejectAcceptFailure"]),
+			len(claimRejectPositions),
+			len(connectionRejectPositions),
+		)
+	}
+	begin := positions["beginAccept"][0]
+	claim := positions["ClaimHostControlLaunch"][0]
+	claimReject := claimRejectPositions[0]
+	acceptConnected := positions["acceptConnected"][0]
+	connectionReject := connectionRejectPositions[0]
+	bootstrap := positions["completeRuntimeBootstrap"][0]
+	finishBeforeReject := false
+	finishBeforeConnectionReject := false
+	for _, position := range positions["finish"] {
+		finishBeforeReject = finishBeforeReject || claim < position && position < claimReject
+		finishBeforeConnectionReject = finishBeforeConnectionReject ||
+			acceptConnected < position && position < connectionReject
+	}
+	if !(begin < claim && claim < claimReject && claimReject < acceptConnected &&
+		acceptConnected < connectionReject && connectionReject < bootstrap) || !finishBeforeReject ||
+		!finishBeforeConnectionReject || len(positions["finish"]) != 2 {
+		t.Fatal("Listener.Accept no longer claims before connection work or rejects claims through the exact Node owner")
+	}
+}
 
 func TestGeneratePipeNameUsesExactly256RandomBits(t *testing.T) {
 	random := bytes.Repeat([]byte{0xab}, pipeNonceBytes)

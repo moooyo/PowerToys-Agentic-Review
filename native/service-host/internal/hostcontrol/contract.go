@@ -117,7 +117,10 @@ type retainedNode interface {
 
 type runtimeBootstrapNode interface {
 	retainedNode
-	ActivateAfterHostControl() error
+	ActivateAndCommitRuntimeBootstrap(
+		context.Context,
+		*localrpc.PendingRuntimeBootstrapCommit,
+	) (localrpc.CommittedRuntimeBootstrap, error)
 	Terminate() error
 }
 
@@ -356,7 +359,7 @@ func completeRuntimeBootstrap(
 	channel localrpc.RuntimeBootstrapChannel,
 	node runtimeBootstrapNode,
 	evidence VerificationEvidence,
-	bootstrap localrpc.RuntimeBootstrapV1,
+	bootstrap localrpc.LaunchRuntimeBootstrap,
 ) (localrpc.CommittedRuntimeBootstrap, error) {
 	pendingCommit, err := localrpc.BeginRuntimeBootstrapExchange(ctx, channel, bootstrap)
 	if err != nil {
@@ -371,12 +374,9 @@ func completeRuntimeBootstrap(
 	if cause := context.Cause(ctx); cause != nil {
 		return localrpc.CommittedRuntimeBootstrap{}, cause
 	}
-	if err := node.ActivateAfterHostControl(); err != nil {
-		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("activate Node after RuntimeBootstrapV1 acknowledgement: %w", err)
-	}
-	committed, err := pendingCommit.Commit(ctx)
+	committed, err := node.ActivateAndCommitRuntimeBootstrap(ctx, pendingCommit)
 	if err != nil {
-		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("commit RuntimeBootstrapV1 after Node activation: %w", err)
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("activate Node and commit RuntimeBootstrapV1: %w", err)
 	}
 	return committed, nil
 }

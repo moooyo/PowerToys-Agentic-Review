@@ -32,6 +32,7 @@ func captureAuthority(
 func validateAuthoritySnapshot(value authoritySnapshot) error {
 	if value.role != config.RoleControl && value.role != config.RoleExecutor ||
 		value.configuration.Role != value.role || value.preflightDigest == ([32]byte{}) ||
+		value.releaseDigest == ([32]byte{}) ||
 		value.root.Root != releasemanifest.RootInstallation || value.root.Path == "" ||
 		len(value.root.Ancestors) == 0 || !validSHA256(value.signerPin) {
 		return authorityError("captured launch authority is empty or inconsistent", nil)
@@ -123,7 +124,8 @@ func captureAuthorityOnce(
 	}
 	return authoritySnapshot{
 		role: configuration.Role, configuration: cloneConfig(configuration),
-		preflightDigest: digest, root: cloneRoot(root), targets: targets, signerPin: signerPin,
+		preflightDigest: digest, releaseDigest: plan.ReleaseTemplateDigest(),
+		root: cloneRoot(root), targets: targets, signerPin: signerPin,
 	}, nil
 }
 

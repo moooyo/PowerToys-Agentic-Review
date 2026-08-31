@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -67,6 +69,13 @@ func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 	}
 	if err := ValidateRuntimeBootstrapCommit(commitDocument, golden, RoleControl); err != nil {
 		t.Fatalf("ValidateRuntimeBootstrapCommit returned an error: %v", err)
+	}
+}
+
+func TestLaunchRuntimeBootstrapExposesNoConstructibleAuthorityFields(t *testing.T) {
+	typeOfValue := reflect.TypeOf(LaunchRuntimeBootstrap{})
+	if typeOfValue.NumField() != 1 || typeOfValue.Field(0).IsExported() {
+		t.Fatalf("LaunchRuntimeBootstrap fields = %v", typeOfValue)
 	}
 }
 
@@ -191,12 +200,11 @@ func TestRuntimeBootstrapOutboundAuthorityRejectsDecodedOrMutatedValues(t *testi
 	if _, err := EncodeRuntimeBootstrap(decoded); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
 		t.Fatalf("decoded bootstrap encode error = %v", err)
 	}
-	if _, err := BeginRuntimeBootstrapExchange(
-		context.Background(),
-		noIORuntimeBootstrapChannel{},
+	if _, err := BindRuntimeBootstrapToLaunch(
 		decoded,
+		validFoundationRuntimeBootstrapOptions(decoded.Role),
 	); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
-		t.Fatalf("decoded bootstrap exchange error = %v", err)
+		t.Fatalf("decoded bootstrap launch binding error = %v", err)
 	}
 	otherRoleConfigDescriptor, err := describeWorkerAPIBody(
 		[]byte(` { "executionEnabled" : false, "foundationVersion" : 1, "role" : "control" } `),
@@ -228,6 +236,114 @@ func TestRuntimeBootstrapOutboundAuthorityRejectsDecodedOrMutatedValues(t *testi
 				t.Fatalf("mutated bootstrap encode error = %v", err)
 			}
 		})
+	}
+}
+
+func TestRuntimeBootstrapLaunchBindingMatchesEveryExpectedFact(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*FoundationRuntimeBootstrapOptions)
+	}{
+		{"role", func(value *FoundationRuntimeBootstrapOptions) { value.Role = RoleExecutor }},
+		{"worker node", func(value *FoundationRuntimeBootstrapOptions) { value.WorkerNodeID = "other-node" }},
+		{"release", func(value *FoundationRuntimeBootstrapOptions) { value.ReleaseID = "other-release" }},
+		{"release template", func(value *FoundationRuntimeBootstrapOptions) { value.ReleaseTemplateSHA256 = strings.Repeat("a", 64) }},
+		{"manifest", func(value *FoundationRuntimeBootstrapOptions) {
+			value.InstallationManifestSHA256 = strings.Repeat("a", 64)
+		}},
+		{"preflight", func(value *FoundationRuntimeBootstrapOptions) { value.PreflightSHA256 = strings.Repeat("a", 64) }},
+		{"bundle", func(value *FoundationRuntimeBootstrapOptions) { value.NodeBundleSHA256 = strings.Repeat("a", 64) }},
+		{"queue", func(value *FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
+		{"shutdown", func(value *FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},
+		{"reserve", func(value *FoundationRuntimeBootstrapOptions) { value.ForceTerminationReserveMS++ }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			expected := validFoundationRuntimeBootstrapOptions(RoleControl)
+			issued, err := newFoundationRuntimeBootstrap(expected, bytes.NewReader(make([]byte, 16)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mismatch := expected
+			test.mutate(&mismatch)
+			if _, err := BindRuntimeBootstrapToLaunch(issued, mismatch); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+				t.Fatalf("mismatched launch binding error = %v", err)
+			}
+			if _, err := BindRuntimeBootstrapToLaunch(issued, expected); err != nil {
+				t.Fatalf("failed mismatch burned issuance: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeBootstrapLaunchBindingCopiesAreImmutableAndSingleUse(t *testing.T) {
+	expected := validFoundationRuntimeBootstrapOptions(RoleControl)
+	issued, err := newFoundationRuntimeBootstrap(expected, bytes.NewReader(make([]byte, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := EncodeRuntimeBootstrap(issued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedCopy := issued
+	bound, err := BindRuntimeBootstrapToLaunch(issued, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BindRuntimeBootstrapToLaunch(issuedCopy, expected); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+		t.Fatalf("issued copy rebound error = %v", err)
+	}
+	boundCopy := bound
+	issued.WorkerNodeID = "mutated-after-binding"
+	decoded, consumedDocument, err := consumeLaunchRuntimeBootstrapIssuance(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.WorkerNodeID != expected.WorkerNodeID || !bytes.Equal(consumedDocument, document) {
+		t.Fatal("bound bootstrap did not retain immutable canonical bytes")
+	}
+	if _, _, err := consumeLaunchRuntimeBootstrapIssuance(boundCopy); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+		t.Fatalf("bound copy reuse error = %v", err)
+	}
+}
+
+func TestRuntimeBootstrapLaunchBindingRejectsConcurrentCopies(t *testing.T) {
+	expected := validFoundationRuntimeBootstrapOptions(RoleControl)
+	issued, err := newFoundationRuntimeBootstrap(expected, bytes.NewReader(make([]byte, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		candidate := issued
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, bindErr := BindRuntimeBootstrapToLaunch(candidate, expected)
+			results <- bindErr
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	succeeded := 0
+	rejected := 0
+	for result := range results {
+		switch {
+		case result == nil:
+			succeeded++
+		case errors.Is(result, ErrRuntimeBootstrapBinding):
+			rejected++
+		default:
+			t.Fatalf("concurrent bind error = %v", result)
+		}
+	}
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("concurrent bind outcomes = success:%d rejected:%d", succeeded, rejected)
 	}
 }
 

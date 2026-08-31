@@ -704,7 +704,7 @@ func committedRuntimeBootstrapForDispatcherTest(
 		_ = channel.SetDeadline(time.Time{})
 		_ = peer.SetDeadline(time.Time{})
 	}()
-	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(localrpc.FoundationRuntimeBootstrapOptions{
+	bootstrapOptions := localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           localrpc.RoleControl,
 		WorkerNodeID:                   "powertoys-node:01",
 		ReleaseID:                      "2026.08.31-test+1",
@@ -715,7 +715,12 @@ func committedRuntimeBootstrapForDispatcherTest(
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,
-	})
+	}
+	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(bootstrapOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundBootstrap, err := localrpc.BindRuntimeBootstrapToLaunch(bootstrap, bootstrapOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +747,7 @@ func committedRuntimeBootstrapForDispatcherTest(
 		}
 		peerResult <- localrpc.ValidateRuntimeBootstrapCommit(commit, bootstrapDocument, localrpc.RoleControl)
 	}()
-	pending, err := localrpc.BeginRuntimeBootstrapExchange(context.Background(), channel, bootstrap)
+	pending, err := localrpc.BeginRuntimeBootstrapExchange(context.Background(), channel, boundBootstrap)
 	if err != nil {
 		t.Fatal(err)
 	}

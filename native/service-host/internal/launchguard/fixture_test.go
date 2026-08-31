@@ -3,6 +3,7 @@ package launchguard
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -46,6 +48,7 @@ type fakeFileNode struct {
 	streamErr  error
 	authErr    error
 	closeErr   error
+	onClose    func()
 	authCalls  int
 	closeCalls int
 }
@@ -151,6 +154,9 @@ func (handle *fakeFileHandle) Close() error {
 	handle.closed = true
 	handle.node.closeCalls++
 	handle.fs.events = append(handle.fs.events, "close-file:"+handle.node.path)
+	if handle.node.onClose != nil {
+		handle.node.onClose()
+	}
 	return handle.node.closeErr
 }
 
@@ -165,6 +171,8 @@ type fakeNodeProcess struct {
 	waitErr         error
 	terminateErrors []error
 	closeErrors     []error
+	onActivate      func()
+	activateCalls   int
 	terminateCalls  int
 	closeCalls      int
 }
@@ -176,8 +184,16 @@ func (node *fakeNodeProcess) StableIdentity() winprocess.NodeIdentity {
 func (node *fakeNodeProcess) ObserveIdentity() (winprocess.NodeIdentity, error) {
 	return node.StableIdentity(), nil
 }
-func (node *fakeNodeProcess) RootJobActiveProcessCount() (uint32, error)          { return 1, nil }
-func (node *fakeNodeProcess) ActivateAfterHostControl() error                     { return nil }
+func (node *fakeNodeProcess) RootJobActiveProcessCount() (uint32, error) { return 1, nil }
+func (node *fakeNodeProcess) ActivateAfterHostControl() error {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.activateCalls++
+	if node.onActivate != nil {
+		node.onActivate()
+	}
+	return nil
+}
 func (node *fakeNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO, error) { return nil, nil }
 func (node *fakeNodeProcess) Wait() (uint32, error) {
 	return node.WaitContext(context.Background())
@@ -263,6 +279,10 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		WorkerNodeID: "powertoys-node:01",
 		OwnService:   config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},
 		PeerService:  config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID},
+		Installation: config.Installation{
+			ReleaseID:      "2026.08.31-test+1",
+			ManifestSHA256: strings.Repeat("b", 64),
+		},
 		Node: config.Node{
 			ExecutablePath:   testNode,
 			ExecutableSHA256: digestOf(fs.file(testNode).data),
@@ -274,6 +294,8 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		Limits: config.Limits{
 			RootJobMaximumProcesses:             32,
 			RootJobMaximumMemoryBytes:           "1073741824",
+			MaximumFrameBytes:                   config.MaximumFrameBytes,
+			MaximumQueuedBytesPerDirection:      4 * 1024 * 1024,
 			ShutdownTimeoutMilliseconds:         30000,
 			ForceTerminationReserveMilliseconds: 5000,
 		},
@@ -310,11 +332,13 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		)
 	}
 	node := &fakeNodeProcess{}
+	releaseDigest := sha256.Sum256([]byte("release-template"))
 	fixture := &guardFixture{
 		authority: authoritySnapshot{
 			role:            role,
 			configuration:   configuration,
 			preflightDigest: sha256.Sum256([]byte("preflight-" + string(role))),
+			releaseDigest:   releaseDigest,
 			root:            root,
 			targets:         targets,
 			signerPin:       signer,
@@ -342,6 +366,36 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		quarantine:            &lifetimeQuarantine{},
 	}
 	return fixture
+}
+
+func (fixture *guardFixture) newRuntimeBootstrap(t *testing.T) localrpc.RuntimeBootstrapV1 {
+	t.Helper()
+	options := fixture.runtimeBootstrapOptions(t)
+	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bootstrap
+}
+
+func (fixture *guardFixture) runtimeBootstrapOptions(t *testing.T) localrpc.FoundationRuntimeBootstrapOptions {
+	t.Helper()
+	role, err := launchRuntimeBootstrapRole(fixture.authority.role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localrpc.FoundationRuntimeBootstrapOptions{
+		Role:                           role,
+		WorkerNodeID:                   fixture.authority.configuration.WorkerNodeID,
+		ReleaseID:                      fixture.authority.configuration.Installation.ReleaseID,
+		ReleaseTemplateSHA256:          hex.EncodeToString(fixture.authority.releaseDigest[:]),
+		InstallationManifestSHA256:     fixture.authority.configuration.Installation.ManifestSHA256,
+		PreflightSHA256:                hex.EncodeToString(fixture.authority.preflightDigest[:]),
+		NodeBundleSHA256:               fixture.authority.configuration.Node.BundleSHA256,
+		MaximumQueuedBytesPerDirection: int(fixture.authority.configuration.Limits.MaximumQueuedBytesPerDirection),
+		TotalShutdownTimeoutMS:         int(fixture.authority.configuration.Limits.ShutdownTimeoutMilliseconds),
+		ForceTerminationReserveMS:      int(fixture.authority.configuration.Limits.ForceTerminationReserveMilliseconds),
+	}
 }
 
 func (fs *fakeFilesystem) directory(path string) *fakeDirectoryNode {

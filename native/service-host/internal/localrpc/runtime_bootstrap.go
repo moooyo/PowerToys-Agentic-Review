@@ -113,10 +113,28 @@ type RuntimeBootstrapV1 struct {
 	issuance                   *runtimeBootstrapIssuance
 }
 
-type runtimeBootstrapIssuance struct {
-	seal     [32]byte
-	consumed atomic.Bool
+// LaunchRuntimeBootstrap is opaque, copy-safe authority for one bootstrap that
+// has been bound to the exact reviewed launch facts. Only the launch guard may
+// create this authority; the HostControl exchange consumes it once.
+type LaunchRuntimeBootstrap struct {
+	state *launchRuntimeBootstrapState
 }
+
+type runtimeBootstrapIssuance struct {
+	seal  [32]byte
+	phase atomic.Uint32
+}
+
+type launchRuntimeBootstrapState struct {
+	issuance *runtimeBootstrapIssuance
+	document []byte
+}
+
+const (
+	runtimeBootstrapIssued uint32 = iota
+	runtimeBootstrapLaunchBound
+	runtimeBootstrapExchangeConsumed
+)
 
 type RuntimeBootstrapAckV1 struct {
 	ProtocolVersion        string `json:"protocolVersion"`
@@ -272,14 +290,63 @@ func EncodeRuntimeBootstrap(value RuntimeBootstrapV1) ([]byte, error) {
 	return document, nil
 }
 
-func consumeRuntimeBootstrapIssuance(value RuntimeBootstrapV1) ([]byte, error) {
-	if value.issuance == nil || value.issuance.seal == ([32]byte{}) {
-		return nil, fmt.Errorf("%w: bootstrap was not issued by the fixed factory", ErrInvalidRuntimeBootstrap)
+// BindRuntimeBootstrapToLaunch validates an unchanged factory issuance and
+// atomically binds it to one exact guarded launch. A failed validation leaves
+// the issuance unbound; a successful binding permanently invalidates all
+// RuntimeBootstrapV1 copies as exchange authority.
+func BindRuntimeBootstrapToLaunch(
+	value RuntimeBootstrapV1,
+	expected FoundationRuntimeBootstrapOptions,
+) (LaunchRuntimeBootstrap, error) {
+	document, err := EncodeRuntimeBootstrap(value)
+	if err != nil {
+		return LaunchRuntimeBootstrap{}, err
 	}
-	if !value.issuance.consumed.CompareAndSwap(false, true) {
-		return nil, fmt.Errorf("%w: bootstrap issuance was already consumed", ErrRuntimeBootstrapBinding)
+	expectedRoleConfig, err := foundationRoleConfigJSON(expected.Role)
+	if err != nil || value.Role != expected.Role || value.WorkerNodeID != expected.WorkerNodeID ||
+		value.ReleaseID != expected.ReleaseID ||
+		subtle.ConstantTimeCompare([]byte(value.ReleaseTemplateSHA256), []byte(expected.ReleaseTemplateSHA256)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(value.InstallationManifestSHA256), []byte(expected.InstallationManifestSHA256)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(value.PreflightSHA256), []byte(expected.PreflightSHA256)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(value.NodeBundleSHA256), []byte(expected.NodeBundleSHA256)) != 1 ||
+		value.ARWX.MaximumQueuedBytesPerDirection != expected.MaximumQueuedBytesPerDirection ||
+		value.Shutdown.GracefulTimeoutMS != expected.TotalShutdownTimeoutMS ||
+		value.Shutdown.ForceTerminationReserveMS != expected.ForceTerminationReserveMS ||
+		!bytes.Equal(value.roleConfigJSON, []byte(expectedRoleConfig)) {
+		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: guarded launch facts", ErrRuntimeBootstrapBinding)
 	}
-	return EncodeRuntimeBootstrap(value)
+	if !value.issuance.phase.CompareAndSwap(runtimeBootstrapIssued, runtimeBootstrapLaunchBound) {
+		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: bootstrap issuance is not available for launch binding", ErrRuntimeBootstrapBinding)
+	}
+	return LaunchRuntimeBootstrap{state: &launchRuntimeBootstrapState{
+		issuance: value.issuance,
+		document: bytes.Clone(document),
+	}}, nil
+}
+
+func consumeLaunchRuntimeBootstrapIssuance(
+	bound LaunchRuntimeBootstrap,
+) (RuntimeBootstrapV1, []byte, error) {
+	if bound.state == nil || bound.state.issuance == nil ||
+		bound.state.issuance.seal == ([32]byte{}) || len(bound.state.document) == 0 {
+		return RuntimeBootstrapV1{}, nil, fmt.Errorf("%w: launch-bound bootstrap is unavailable", ErrRuntimeBootstrapBinding)
+	}
+	if !bound.state.issuance.phase.CompareAndSwap(
+		runtimeBootstrapLaunchBound,
+		runtimeBootstrapExchangeConsumed,
+	) {
+		return RuntimeBootstrapV1{}, nil, fmt.Errorf("%w: launch-bound bootstrap was already consumed", ErrRuntimeBootstrapBinding)
+	}
+	document := bytes.Clone(bound.state.document)
+	digest := sha256.Sum256(document)
+	if subtle.ConstantTimeCompare(digest[:], bound.state.issuance.seal[:]) != 1 {
+		return RuntimeBootstrapV1{}, nil, fmt.Errorf("%w: launch-bound bootstrap document changed", ErrRuntimeBootstrapBinding)
+	}
+	value, err := DecodeRuntimeBootstrap(document)
+	if err != nil {
+		return RuntimeBootstrapV1{}, nil, err
+	}
+	return value, document, nil
 }
 
 func encodeRuntimeBootstrapDocument(value RuntimeBootstrapV1) ([]byte, error) {
@@ -293,6 +360,7 @@ func encodeRuntimeBootstrapDocument(value RuntimeBootstrapV1) ([]byte, error) {
 	return document, nil
 }
 
+// DecodeRuntimeBootstrap returns an untrusted DTO with no outbound issuance.
 func DecodeRuntimeBootstrap(document []byte) (RuntimeBootstrapV1, error) {
 	if len(document) == 0 || len(document) > RuntimeBootstrapMaximumBytes {
 		return RuntimeBootstrapV1{}, fmt.Errorf("%w: document", ErrRuntimeBootstrapLimit)

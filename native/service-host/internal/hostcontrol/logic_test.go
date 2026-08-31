@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
@@ -99,6 +100,19 @@ func (n *fakeRetainedNode) ActivateAfterHostControl() error {
 		n.onActivate()
 	}
 	return nil
+}
+
+func (n *fakeRetainedNode) ActivateAndCommitRuntimeBootstrap(
+	ctx context.Context,
+	pending *localrpc.PendingRuntimeBootstrapCommit,
+) (localrpc.CommittedRuntimeBootstrap, error) {
+	if err := n.ActivateAfterHostControl(); err != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, err
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, cause
+	}
+	return pending.Commit(ctx)
 }
 
 func (n *fakeRetainedNode) Terminate() error {
@@ -494,7 +508,32 @@ func TestPreTransferFailureNeverReturnsConnectionOwner(t *testing.T) {
 	}
 }
 
-func hostControlBootstrapForTest(t *testing.T) (localrpc.RuntimeBootstrapV1, []byte) {
+func TestRejectedHostControlClaimTerminatesBeforeClosingListener(t *testing.T) {
+	events := []string{}
+	node := newFakeRetainedNode(testNodeIdentity())
+	node.events = &events
+	node.terminationError = errors.New("claim rejection termination failed")
+	claimErr := errors.Join(launchguard.ErrHostControlClaim, errors.New("launch binding was replayed"))
+	listenerCloseErr := errors.New("listener close failed")
+	connection, err := rejectAcceptFailure(nil, claimErr, node, func() {
+		events = append(events, "mark-terminal")
+	}, func() error {
+		events = append(events, "close")
+		return listenerCloseErr
+	})
+	if connection != nil {
+		t.Fatalf("claim rejection returned connection %p", connection)
+	}
+	if strings.Join(events, ",") != "terminate,mark-terminal,close" {
+		t.Fatalf("claim rejection cleanup events = %v", events)
+	}
+	if !errors.Is(err, claimErr) || !errors.Is(err, node.terminationError) ||
+		!errors.Is(err, listenerCloseErr) {
+		t.Fatalf("claim rejection error = %v", err)
+	}
+}
+
+func hostControlBootstrapForTest(t *testing.T) (localrpc.LaunchRuntimeBootstrap, []byte) {
 	t.Helper()
 	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           localrpc.RoleControl,
@@ -515,7 +554,25 @@ func hostControlBootstrapForTest(t *testing.T) (localrpc.RuntimeBootstrapV1, []b
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bootstrap, document
+	bound, err := localrpc.BindRuntimeBootstrapToLaunch(
+		bootstrap,
+		localrpc.FoundationRuntimeBootstrapOptions{
+			Role:                           localrpc.RoleControl,
+			WorkerNodeID:                   "powertoys-node:01",
+			ReleaseID:                      "2026.08.31-test+1",
+			ReleaseTemplateSHA256:          strings.Repeat("1", 64),
+			InstallationManifestSHA256:     strings.Repeat("2", 64),
+			PreflightSHA256:                strings.Repeat("3", 64),
+			NodeBundleSHA256:               strings.Repeat("4", 64),
+			MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
+			TotalShutdownTimeoutMS:         120_000,
+			ForceTerminationReserveMS:      15_000,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bound, document
 }
 
 func hostControlBootstrapChannelForTest(

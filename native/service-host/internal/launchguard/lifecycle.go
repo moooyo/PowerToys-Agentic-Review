@@ -2,6 +2,7 @@ package launchguard
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
@@ -157,13 +160,14 @@ func (guard *Guard) VerifyUnchanged(ctx context.Context) error {
 	return nil
 }
 
-// LaunchNode consumes the guard and launches exactly the Node executable and
-// role bundle selected by preflight. The only caller input is a per-launch
-// HostControl rendezvous name validated by winprocess.
+// LaunchNode binds a fixed-factory bootstrap to the retained preflight facts,
+// then consumes the guard and launches exactly the selected Node executable
+// and role bundle. A binding rejection leaves the guard available for retry.
 func (guard *Guard) LaunchNode(
 	ctx context.Context,
 	hostControlPipeName string,
-) (winprocess.NodeProcess, error) {
+	bootstrap localrpc.RuntimeBootstrapV1,
+) (*GuardedNodeProcess, error) {
 	if guard == nil || guard.state == nil {
 		return nil, ErrInvalidAuthority
 	}
@@ -178,6 +182,30 @@ func (guard *Guard) LaunchNode(
 	}
 	if state.terminal != nil {
 		return nil, state.terminal
+	}
+	bootstrapRole, err := launchRuntimeBootstrapRole(state.authority.role)
+	if err != nil {
+		return nil, err
+	}
+	configuration := state.authority.configuration
+	bootstrapOptions := localrpc.FoundationRuntimeBootstrapOptions{
+		Role:                           bootstrapRole,
+		WorkerNodeID:                   configuration.WorkerNodeID,
+		ReleaseID:                      configuration.Installation.ReleaseID,
+		ReleaseTemplateSHA256:          hex.EncodeToString(state.authority.releaseDigest[:]),
+		InstallationManifestSHA256:     configuration.Installation.ManifestSHA256,
+		PreflightSHA256:                hex.EncodeToString(state.authority.preflightDigest[:]),
+		NodeBundleSHA256:               configuration.Node.BundleSHA256,
+		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
+		TotalShutdownTimeoutMS:         int(configuration.Limits.ShutdownTimeoutMilliseconds),
+		ForceTerminationReserveMS:      int(configuration.Limits.ForceTerminationReserveMilliseconds),
+	}
+	boundBootstrap, err := localrpc.BindRuntimeBootstrapToLaunch(
+		bootstrap,
+		bootstrapOptions,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("bind RuntimeBootstrapV1 to guarded Node launch: %w", err)
 	}
 	permit, err := state.deps.quarantine.beginLaunch(
 		state.deps.platformCleanupStatus,
@@ -238,15 +266,32 @@ func (guard *Guard) LaunchNode(
 		state.terminal = cause
 		return nil, state.rejectLaunchedNodeLocked(node, cause)
 	}
-	var guarded winprocess.NodeProcess
+	var guarded *GuardedNodeProcess
 	if err := permit.commit(func() {
 		state.consumed = true
-		guarded = &guardedNodeProcess{inner: node, guard: state}
+		guarded = &GuardedNodeProcess{state: &guardedNodeProcessState{
+			inner:          node,
+			guard:          state,
+			permit:         permit,
+			bootstrap:      boundBootstrap,
+			bootstrapBound: true,
+		}}
 	}); err != nil {
 		state.terminal = err
 		return nil, state.rejectLaunchedNodeLocked(node, err)
 	}
 	return guarded, nil
+}
+
+func launchRuntimeBootstrapRole(role config.Role) (localrpc.Role, error) {
+	switch role {
+	case config.RoleControl:
+		return localrpc.RoleControl, nil
+	case config.RoleExecutor:
+		return localrpc.RoleExecutor, nil
+	default:
+		return "", ErrInvalidAuthority
+	}
 }
 
 func (state *guardState) rejectLaunchedNodeLocked(
@@ -409,72 +454,302 @@ func (state *guardState) closeResourcesLocked() error {
 	return result
 }
 
-type guardedNodeProcess struct {
-	inner    winprocess.NodeProcess
-	guard    *guardState
-	mu       sync.Mutex
-	released bool
-	terminal error
+// ClaimHostControlLaunch atomically transfers the launch-bound bootstrap to a
+// private Node adapter that alone may activate the root Job. Production callers
+// are restricted to HostControl by architecture tests.
+func ClaimHostControlLaunch(
+	process *GuardedNodeProcess,
+) (HostControlNodeProcess, localrpc.LaunchRuntimeBootstrap, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return nil, localrpc.LaunchRuntimeBootstrap{}, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.guard.mu.Lock()
+	guardClosed := state.guard.closed
+	guardTerminal := state.guard.terminal
+	state.guard.mu.Unlock()
+	if state.hostControlClaimed || state.shutdownStarted || state.released || state.terminal != nil ||
+		guardClosed || guardTerminal != nil || !state.bootstrapBound {
+		return nil, localrpc.LaunchRuntimeBootstrap{}, errors.Join(
+			ErrHostControlClaim,
+			state.terminal,
+			guardTerminal,
+		)
+	}
+	var bootstrap localrpc.LaunchRuntimeBootstrap
+	if err := state.permit.commit(func() {
+		state.hostControlClaimed = true
+		state.bootstrapBound = false
+		bootstrap = state.bootstrap
+		state.bootstrap = localrpc.LaunchRuntimeBootstrap{}
+	}); err != nil {
+		return nil, localrpc.LaunchRuntimeBootstrap{}, errors.Join(ErrHostControlClaim, err)
+	}
+	return &claimedGuardedNodeProcess{owner: process}, bootstrap, nil
 }
 
-func (process *guardedNodeProcess) ProcessID() uint32 { return process.inner.ProcessID() }
-func (process *guardedNodeProcess) StableIdentity() winprocess.NodeIdentity {
-	return process.inner.StableIdentity()
+type claimedGuardedNodeProcess struct {
+	owner *GuardedNodeProcess
 }
-func (process *guardedNodeProcess) ObserveIdentity() (winprocess.NodeIdentity, error) {
-	return process.inner.ObserveIdentity()
+
+func (process *GuardedNodeProcess) ProcessID() uint32 {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return 0
+	}
+	return state.inner.ProcessID()
 }
-func (process *guardedNodeProcess) RootJobActiveProcessCount() (uint32, error) {
-	return process.inner.RootJobActiveProcessCount()
+
+func (process *GuardedNodeProcess) StableIdentity() winprocess.NodeIdentity {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return winprocess.NodeIdentity{}
+	}
+	return state.inner.StableIdentity()
 }
-func (process *guardedNodeProcess) ActivateAfterHostControl() error {
-	return process.inner.ActivateAfterHostControl()
+
+func (process *GuardedNodeProcess) ObserveIdentity() (winprocess.NodeIdentity, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return winprocess.NodeIdentity{}, err
+	}
+	return state.inner.ObserveIdentity()
 }
-func (process *guardedNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO, error) {
-	return process.inner.TakeStandardIO()
+
+func (process *GuardedNodeProcess) RootJobActiveProcessCount() (uint32, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return 0, err
+	}
+	return state.inner.RootJobActiveProcessCount()
 }
-func (process *guardedNodeProcess) Wait() (uint32, error) {
+
+// ActivateAfterHostControl rejects direct activation. HostControl receives a
+// private claimed adapter whose activation attempt is one-shot.
+func (*GuardedNodeProcess) ActivateAfterHostControl() error {
+	return ErrHostControlClaim
+}
+
+func (process *GuardedNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return nil, err
+	}
+	return state.inner.TakeStandardIO()
+}
+
+func (process *GuardedNodeProcess) Wait() (uint32, error) {
 	return process.WaitContext(context.Background())
 }
-func (process *guardedNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
-	exitCode, err := process.inner.WaitContext(ctx)
-	return exitCode, process.releaseAfterDrain(err)
-}
-func (process *guardedNodeProcess) Terminate() error {
-	return process.releaseAfterDrain(process.inner.Terminate())
-}
-func (process *guardedNodeProcess) Close() error {
-	return process.releaseAfterDrain(process.inner.Close())
+
+func (process *GuardedNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return 0, err
+	}
+	state.mu.Lock()
+	if state.terminal != nil {
+		err := state.terminal
+		state.mu.Unlock()
+		return 0, err
+	}
+	inner := state.inner
+	state.mu.Unlock()
+	exitCode, waitErr := inner.WaitContext(ctx)
+	return exitCode, process.releaseAfterDrain(waitErr)
 }
 
-func (process *guardedNodeProcess) releaseAfterDrain(operationErr error) error {
-	process.mu.Lock()
-	defer process.mu.Unlock()
-	if process.terminal != nil {
-		return process.terminal
+func (process *GuardedNodeProcess) Terminate() error {
+	inner, done, err := process.beginShutdown()
+	if err != nil {
+		return err
+	}
+	if done {
+		return process.releaseAfterDrain(nil)
+	}
+	return process.releaseAfterDrain(inner.Terminate())
+}
+
+func (process *GuardedNodeProcess) Close() error {
+	inner, done, err := process.beginShutdown()
+	if err != nil {
+		return err
+	}
+	if done {
+		return process.releaseAfterDrain(nil)
+	}
+	closeErr := inner.Close()
+	if closeErr == nil {
+		process.state.mu.Lock()
+		process.state.nodeClosed = true
+		process.state.mu.Unlock()
+	}
+	return process.releaseAfterDrain(closeErr)
+}
+
+func (process *GuardedNodeProcess) beginShutdown() (winprocess.NodeProcess, bool, error) {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return nil, false, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.terminal != nil {
+		return nil, false, state.terminal
+	}
+	if state.nodeClosed {
+		return nil, true, nil
+	}
+	state.shutdownStarted = true
+	return state.inner, false, nil
+}
+
+func (process *GuardedNodeProcess) releaseAfterDrain(operationErr error) error {
+	state, err := guardedNodeState(process)
+	if err != nil {
+		return errors.Join(operationErr, err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.guard.mu.Lock()
+	guardTerminal := state.guard.terminal
+	state.guard.mu.Unlock()
+	if state.terminal != nil {
+		return errors.Join(state.terminal, guardTerminal)
 	}
 	if operationErr != nil {
+		operationErr = errors.Join(guardTerminal, operationErr)
 		if errors.Is(operationErr, winprocess.ErrLaunchCleanupFatal) {
-			owner := &rejectedLaunchOwner{guard: process.guard, node: process.inner}
-			process.terminal = process.guard.deps.quarantine.retain(owner, operationErr)
-			process.guard.mu.Lock()
-			process.guard.terminal = process.terminal
-			process.guard.closed = true
-			process.guard.mu.Unlock()
-			return process.terminal
+			owner := &rejectedLaunchOwner{guard: state.guard, node: process}
+			state.terminal = state.guard.deps.quarantine.retain(owner, operationErr)
+			state.guard.mu.Lock()
+			state.guard.terminal = errors.Join(state.guard.terminal, state.terminal)
+			state.guard.closed = true
+			state.guard.mu.Unlock()
+			return state.terminal
 		}
 		return operationErr
 	}
-	if process.released {
+	if state.released {
 		return nil
 	}
-	process.guard.mu.Lock()
-	closeErr := process.guard.closeResourcesLocked()
-	process.guard.mu.Unlock()
+	state.guard.mu.Lock()
+	closeErr := state.guard.closeResourcesLocked()
+	state.guard.mu.Unlock()
 	if closeErr == nil {
-		process.released = true
+		state.released = true
 	}
 	return closeErr
 }
 
-var _ winprocess.NodeProcess = (*guardedNodeProcess)(nil)
+func guardedNodeState(process *GuardedNodeProcess) (*guardedNodeProcessState, error) {
+	if process == nil || process.state == nil || process.state.guard == nil || process.state.permit == nil ||
+		isNilNodeProcess(process.state.inner) {
+		return nil, ErrInvalidAuthority
+	}
+	return process.state, nil
+}
+
+func isNilNodeProcess(process winprocess.NodeProcess) bool {
+	if process == nil {
+		return true
+	}
+	value := reflect.ValueOf(process)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (process *claimedGuardedNodeProcess) ProcessID() uint32 {
+	return process.owner.ProcessID()
+}
+
+func (process *claimedGuardedNodeProcess) StableIdentity() winprocess.NodeIdentity {
+	return process.owner.StableIdentity()
+}
+
+func (process *claimedGuardedNodeProcess) ObserveIdentity() (winprocess.NodeIdentity, error) {
+	return process.owner.ObserveIdentity()
+}
+
+func (process *claimedGuardedNodeProcess) RootJobActiveProcessCount() (uint32, error) {
+	return process.owner.RootJobActiveProcessCount()
+}
+
+func (process *claimedGuardedNodeProcess) ActivateAfterHostControl() error {
+	return ErrHostControlClaim
+}
+
+func (process *claimedGuardedNodeProcess) ActivateAndCommitRuntimeBootstrap(
+	ctx context.Context,
+	pending *localrpc.PendingRuntimeBootstrapCommit,
+) (localrpc.CommittedRuntimeBootstrap, error) {
+	if ctx == nil || pending == nil {
+		return localrpc.CommittedRuntimeBootstrap{}, ErrHostControlClaim
+	}
+	state, err := guardedNodeState(process.owner)
+	if err != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, err
+	}
+	state.mu.Lock()
+	if !state.hostControlClaimed || state.activationAttempted || state.shutdownStarted ||
+		state.released || state.terminal != nil {
+		err := errors.Join(ErrHostControlClaim, state.terminal)
+		state.mu.Unlock()
+		return localrpc.CommittedRuntimeBootstrap{}, err
+	}
+	var committed localrpc.CommittedRuntimeBootstrap
+	var operationErr error
+	if err := state.permit.commit(func() {
+		state.activationAttempted = true
+		if cause := context.Cause(ctx); cause != nil {
+			operationErr = cause
+			return
+		}
+		if err := state.inner.ActivateAfterHostControl(); err != nil {
+			operationErr = err
+			return
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			operationErr = cause
+			return
+		}
+		committed, operationErr = pending.Commit(ctx)
+	}); err != nil {
+		state.mu.Unlock()
+		return localrpc.CommittedRuntimeBootstrap{}, errors.Join(ErrHostControlClaim, err)
+	}
+	state.mu.Unlock()
+	return committed, operationErr
+}
+
+func (process *claimedGuardedNodeProcess) TakeStandardIO() (*winprocess.NodeStandardIO, error) {
+	return process.owner.TakeStandardIO()
+}
+
+func (process *claimedGuardedNodeProcess) Wait() (uint32, error) {
+	return process.owner.Wait()
+}
+
+func (process *claimedGuardedNodeProcess) WaitContext(ctx context.Context) (uint32, error) {
+	return process.owner.WaitContext(ctx)
+}
+
+func (process *claimedGuardedNodeProcess) Terminate() error {
+	return process.owner.Terminate()
+}
+
+func (process *claimedGuardedNodeProcess) Close() error {
+	return process.owner.Close()
+}
+
+var (
+	_ winprocess.NodeProcess = (*GuardedNodeProcess)(nil)
+	_ winprocess.NodeProcess = (*claimedGuardedNodeProcess)(nil)
+	_ HostControlNodeProcess = (*claimedGuardedNodeProcess)(nil)
+)

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -20,6 +21,8 @@ const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/
 
 const localRPCImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 
+const launchguardImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
+
 const cryptoRandImportPath = "crypto/rand"
 
 func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
@@ -29,8 +32,10 @@ func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
 	}
 	serviceHostRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
 	const allowedFile = "internal/preflight/runtime_bootstrap.go"
+	const bindingFactsFile = "internal/launchguard/lifecycle.go"
 	factoryCalls := 0
 	optionLiterals := 0
+	bindingOptionLiterals := 0
 	privateFoundationCalls := 0
 	rawConstructorCalls := 0
 	rawOptionLiterals := 0
@@ -179,10 +184,16 @@ func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
 					t.Errorf("%s:%d calls or aliases the foundation bootstrap factory outside the plan-bound builder", relative, fileSet.Position(selector.Pos()).Line)
 				}
 			case "FoundationRuntimeBootstrapOptions":
-				optionLiterals++
 				literal, direct := parents[selector].(*ast.CompositeLit)
-				if relative != allowedFile || !direct || literal.Type != selector ||
-					enclosingRuntimeBootstrapFunction(selector, parents) != "NewRuntimeBootstrapV1" {
+				enclosing := enclosingRuntimeBootstrapFunction(selector, parents)
+				owner, insideFunctionLiteral := runtimeBootstrapBindingOwner(selector, parents)
+				switch {
+				case relative == allowedFile && direct && literal.Type == selector && enclosing == "NewRuntimeBootstrapV1":
+					optionLiterals++
+				case relative == bindingFactsFile && direct && literal.Type == selector &&
+					owner == "*Guard.LaunchNode" && !insideFunctionLiteral:
+					bindingOptionLiterals++
+				default:
 					t.Errorf("%s:%d constructs or aliases foundation bootstrap options outside the plan-bound builder", relative, fileSet.Position(selector.Pos()).Line)
 				}
 			case "RuntimeBootstrapV1":
@@ -198,8 +209,13 @@ func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if factoryCalls != 1 || optionLiterals != 1 {
-		t.Fatalf("production foundation bootstrap references = factory:%d options:%d, want 1 and 1", factoryCalls, optionLiterals)
+	if factoryCalls != 1 || optionLiterals != 1 || bindingOptionLiterals != 1 {
+		t.Fatalf(
+			"production foundation bootstrap references = factory:%d options:%d binding-options:%d, want 1, 1, and 1",
+			factoryCalls,
+			optionLiterals,
+			bindingOptionLiterals,
+		)
 	}
 	if privateFoundationCalls != 1 || rawConstructorCalls != 1 || rawOptionLiterals != 1 {
 		t.Fatalf(
@@ -208,6 +224,304 @@ func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
 			rawConstructorCalls,
 			rawOptionLiterals,
 		)
+	}
+}
+
+func TestRuntimeBootstrapLaunchBindingHasOneProductionChain(t *testing.T) {
+	type expectedCall struct {
+		importPath      string
+		definingPackage string
+		file            string
+		function        string
+	}
+	expected := map[string]expectedCall{
+		"BindRuntimeBootstrapToLaunch": {
+			importPath: localRPCImportPath, definingPackage: "localrpc",
+			file: "internal/launchguard/lifecycle.go", function: "*Guard.LaunchNode",
+		},
+		"ClaimHostControlLaunch": {
+			importPath: launchguardImportPath, definingPackage: "launchguard",
+			file: "internal/hostcontrol/endpoint_windows.go", function: "*Listener.Accept",
+		},
+		"BeginRuntimeBootstrapExchange": {
+			importPath: localRPCImportPath, definingPackage: "localrpc",
+			file: "internal/hostcontrol/contract.go", function: "completeRuntimeBootstrap",
+		},
+	}
+	counts := make(map[string]int, len(expected))
+	combinedCommitCalls := 0
+	rawActivationCalls := 0
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve architecture test source path")
+	}
+	serviceHostRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+	err := filepath.WalkDir(serviceHostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		relative, err := filepath.Rel(serviceHostRoot, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, path, contents, parser.ParseComments)
+		if err != nil {
+			return err
+		}
+		aliases := make(map[string]string)
+		for _, imported := range parsed.Imports {
+			importPath, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				return err
+			}
+			if importPath != localRPCImportPath && importPath != launchguardImportPath {
+				continue
+			}
+			alias := pathpkg.Base(importPath)
+			if imported.Name != nil {
+				alias = imported.Name.Name
+			}
+			if alias == "." {
+				t.Errorf("%s uses a forbidden authority dot import", relative)
+				continue
+			}
+			if alias != "_" {
+				aliases[alias] = importPath
+			}
+		}
+		parents := astParentMap(parsed)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			identifier, isIdentifier := node.(*ast.Ident)
+			if isIdentifier {
+				if importPath, imported := aliases[identifier.Name]; imported && identifier.Obj != nil {
+					t.Errorf("%s:%d shadows authority import %s", relative, fileSet.Position(identifier.Pos()).Line, importPath)
+				}
+				callSpec, tracked := expected[identifier.Name]
+				if tracked && parsed.Name.Name == callSpec.definingPackage {
+					if declaration, ok := parents[identifier].(*ast.FuncDecl); ok && declaration.Name == identifier {
+						return true
+					}
+					if selector, ok := parents[identifier].(*ast.SelectorExpr); !ok || selector.Sel != identifier {
+						t.Errorf("%s:%d references private-package authority %s outside its declaration", relative, fileSet.Position(identifier.Pos()).Line, identifier.Name)
+					}
+				}
+			}
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch selector.Sel.Name {
+			case "ActivateAndCommitRuntimeBootstrap":
+				if !isReviewedRuntimeBootstrapBindingCall(
+					selector,
+					parents,
+					relative,
+					"internal/hostcontrol/contract.go",
+					"completeRuntimeBootstrap",
+				) {
+					t.Errorf("%s:%d calls combined bootstrap activation outside HostControl", relative, fileSet.Position(selector.Pos()).Line)
+				}
+				combinedCommitCalls++
+			case "ActivateAfterHostControl":
+				if !isReviewedPermittedRawActivation(selector, parents, relative) {
+					t.Errorf("%s:%d calls raw Node activation outside the claimed combined commit", relative, fileSet.Position(selector.Pos()).Line)
+				}
+				rawActivationCalls++
+			}
+			callSpec, tracked := expected[selector.Sel.Name]
+			if !tracked {
+				return true
+			}
+			alias, ok := selector.X.(*ast.Ident)
+			if !ok || alias.Obj != nil || aliases[alias.Name] != callSpec.importPath {
+				return true
+			}
+			if !isReviewedRuntimeBootstrapBindingCall(
+				selector,
+				parents,
+				relative,
+				callSpec.file,
+				callSpec.function,
+			) {
+				t.Errorf("%s:%d references %s outside its reviewed production caller", relative, fileSet.Position(selector.Pos()).Line, selector.Sel.Name)
+			}
+			counts[selector.Sel.Name]++
+			return true
+		})
+		for _, group := range parsed.Comments {
+			for _, comment := range group.List {
+				if strings.Contains(comment.Text, "go:linkname") {
+					t.Errorf("%s uses forbidden go:linkname", relative)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range expected {
+		if counts[name] != 1 {
+			t.Errorf("production %s call count = %d, want 1", name, counts[name])
+		}
+	}
+	if combinedCommitCalls != 1 || rawActivationCalls != 1 {
+		t.Errorf(
+			"production activation calls = combined:%d raw:%d, want 1 and 1",
+			combinedCommitCalls,
+			rawActivationCalls,
+		)
+	}
+}
+
+func isReviewedPermittedRawActivation(
+	selector *ast.SelectorExpr,
+	parents map[ast.Node]ast.Node,
+	actualFile string,
+) bool {
+	call, direct := parents[selector].(*ast.CallExpr)
+	owner, insideFunctionLiteral := runtimeBootstrapBindingOwner(selector, parents)
+	if actualFile != "internal/launchguard/lifecycle.go" || !direct || call.Fun != selector ||
+		owner != "*claimedGuardedNodeProcess.ActivateAndCommitRuntimeBootstrap" || !insideFunctionLiteral {
+		return false
+	}
+	var callback *ast.FuncLit
+	for current := parents[selector]; current != nil; current = parents[current] {
+		if function, ok := current.(*ast.FuncLit); ok {
+			callback = function
+			break
+		}
+	}
+	if callback == nil {
+		return false
+	}
+	permitCall, ok := parents[callback].(*ast.CallExpr)
+	if !ok || len(permitCall.Args) != 1 || permitCall.Args[0] != callback {
+		return false
+	}
+	permitSelector, ok := permitCall.Fun.(*ast.SelectorExpr)
+	if !ok || permitSelector.Sel.Name != "commit" {
+		return false
+	}
+	permitOwner, ok := permitSelector.X.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	state, stateOK := permitOwner.X.(*ast.Ident)
+	return stateOK && state.Name == "state" && permitOwner.Sel.Name == "permit"
+}
+
+func isReviewedRuntimeBootstrapBindingCall(
+	selector *ast.SelectorExpr,
+	parents map[ast.Node]ast.Node,
+	actualFile string,
+	expectedFile string,
+	expectedOwner string,
+) bool {
+	call, direct := parents[selector].(*ast.CallExpr)
+	owner, insideFunctionLiteral := runtimeBootstrapBindingOwner(selector, parents)
+	return actualFile == expectedFile && direct && call.Fun == selector &&
+		owner == expectedOwner && !insideFunctionLiteral
+}
+
+func runtimeBootstrapBindingOwner(
+	node ast.Node,
+	parents map[ast.Node]ast.Node,
+) (string, bool) {
+	insideFunctionLiteral := false
+	for current := parents[node]; current != nil; current = parents[current] {
+		switch typed := current.(type) {
+		case *ast.FuncLit:
+			insideFunctionLiteral = true
+		case *ast.FuncDecl:
+			if typed.Recv == nil || len(typed.Recv.List) != 1 {
+				return typed.Name.Name, insideFunctionLiteral
+			}
+			return runtimeBootstrapReceiverName(typed.Recv.List[0].Type) + "." + typed.Name.Name,
+				insideFunctionLiteral
+		}
+	}
+	return "", insideFunctionLiteral
+}
+
+func runtimeBootstrapReceiverName(expression ast.Expr) string {
+	switch typed := expression.(type) {
+	case *ast.Ident:
+		return typed.Name
+	case *ast.StarExpr:
+		return "*" + runtimeBootstrapReceiverName(typed.X)
+	case *ast.IndexExpr:
+		return runtimeBootstrapReceiverName(typed.X)
+	case *ast.IndexListExpr:
+		return runtimeBootstrapReceiverName(typed.X)
+	default:
+		return ""
+	}
+}
+
+func TestRuntimeBootstrapBindingCallGateRejectsEscapedClosuresAndWrongReceivers(t *testing.T) {
+	tests := []struct {
+		name        string
+		source      string
+		expected    bool
+		expectedOwn string
+	}{
+		{
+			name:        "exact",
+			source:      `package sample; func (guard *Guard) LaunchNode() { localrpc.BindRuntimeBootstrapToLaunch() }`,
+			expected:    true,
+			expectedOwn: "*Guard.LaunchNode",
+		},
+		{
+			name:        "closure",
+			source:      `package sample; func (guard *Guard) LaunchNode() { f := func() { localrpc.BindRuntimeBootstrapToLaunch() }; f() }`,
+			expectedOwn: "*Guard.LaunchNode",
+		},
+		{
+			name:        "wrong receiver",
+			source:      `package sample; func (other *Other) LaunchNode() { localrpc.BindRuntimeBootstrapToLaunch() }`,
+			expectedOwn: "*Guard.LaunchNode",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fileSet := token.NewFileSet()
+			parsed, err := parser.ParseFile(fileSet, "sample.go", test.source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parents := astParentMap(parsed)
+			var selector *ast.SelectorExpr
+			ast.Inspect(parsed, func(node ast.Node) bool {
+				candidate, ok := node.(*ast.SelectorExpr)
+				if ok && candidate.Sel.Name == "BindRuntimeBootstrapToLaunch" {
+					selector = candidate
+				}
+				return true
+			})
+			if selector == nil {
+				t.Fatal("test source omitted binding selector")
+			}
+			actual := isReviewedRuntimeBootstrapBindingCall(
+				selector,
+				parents,
+				"reviewed.go",
+				"reviewed.go",
+				test.expectedOwn,
+			)
+			if actual != test.expected {
+				t.Fatalf("reviewed call = %t, want %t", actual, test.expected)
+			}
+		})
 	}
 }
 

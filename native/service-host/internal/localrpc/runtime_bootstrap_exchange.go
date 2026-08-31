@@ -62,9 +62,9 @@ type committedRuntimeBootstrapBinding struct {
 func BeginRuntimeBootstrapExchange(
 	ctx context.Context,
 	channel RuntimeBootstrapChannel,
-	bootstrap RuntimeBootstrapV1,
+	bound LaunchRuntimeBootstrap,
 ) (*PendingRuntimeBootstrapCommit, error) {
-	document, err := consumeRuntimeBootstrapIssuance(bootstrap)
+	bootstrap, document, err := consumeLaunchRuntimeBootstrapIssuance(bound)
 	if err != nil {
 		return nil, errors.Join(ErrRuntimeBootstrapExchange, err)
 	}

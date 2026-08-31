@@ -1,11 +1,13 @@
 package launchguard
 
 import (
+	"context"
 	"errors"
 	"sync"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -19,6 +21,7 @@ var (
 	ErrChanged             = errors.New("guarded installation object changed")
 	ErrConsumed            = errors.New("installation launch guard was already consumed")
 	ErrCleanupFatal        = errors.New("installation launch guard cleanup is unresolved; ServiceHost must exit")
+	ErrHostControlClaim    = errors.New("guarded Node HostControl launch binding is unavailable")
 )
 
 type targetKind uint8
@@ -38,6 +41,7 @@ type authoritySnapshot struct {
 	role            config.Role
 	configuration   config.Config
 	preflightDigest [32]byte
+	releaseDigest   [32]byte
 	root            preflight.VerifiedRoot
 	targets         []launchTarget
 	signerPin       string
@@ -104,6 +108,38 @@ type guardState struct {
 // Copies share one private lifecycle state.
 type Guard struct {
 	state *guardState
+}
+
+// GuardedNodeProcess is an opaque, copy-safe Node owner bound to the exact
+// factory-issued bootstrap selected before launch. Its private state can be
+// claimed for HostControl exactly once.
+type GuardedNodeProcess struct {
+	state *guardedNodeProcessState
+}
+
+// HostControlNodeProcess is the claimed Node view that combines activation and
+// bootstrap commit under the original launch cleanup permit.
+type HostControlNodeProcess interface {
+	winprocess.NodeProcess
+	ActivateAndCommitRuntimeBootstrap(
+		context.Context,
+		*localrpc.PendingRuntimeBootstrapCommit,
+	) (localrpc.CommittedRuntimeBootstrap, error)
+}
+
+type guardedNodeProcessState struct {
+	inner               winprocess.NodeProcess
+	guard               *guardState
+	permit              *guardLaunchPermit
+	bootstrap           localrpc.LaunchRuntimeBootstrap
+	mu                  sync.Mutex
+	bootstrapBound      bool
+	hostControlClaimed  bool
+	activationAttempted bool
+	shutdownStarted     bool
+	released            bool
+	nodeClosed          bool
+	terminal            error
 }
 
 func (guard *Guard) Role() config.Role {

@@ -352,7 +352,6 @@ func TestWindowsConnectionCloseRetriesPartialFailures(t *testing.T) {
 }
 
 func TestWindowsPostTransferFailureStagesUseActualConnectionOwner(t *testing.T) {
-	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 	deadlineCause := errors.New("startup deadline expired")
 	tests := []struct {
 		name          string
@@ -437,6 +436,7 @@ func TestWindowsPostTransferFailureStagesUseActualConnectionOwner(t *testing.T) 
 				closeName = "close fails"
 			}
 			t.Run(test.name+"/"+closeName, func(t *testing.T) {
+				bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 				events := []string{}
 				channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
 				node := newFakeRetainedNode(testNodeIdentity())

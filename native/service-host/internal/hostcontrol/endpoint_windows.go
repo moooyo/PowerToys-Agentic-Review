@@ -13,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 	"golang.org/x/sys/windows"
@@ -193,21 +194,21 @@ func (l *Listener) PipeName() string {
 	return l.pipeName
 }
 
-// Accept verifies the retained Node, completes the RuntimeBootstrapV1 exchange, and raises the
-// root Job process limit before publishing the consumed connection. Failures before pipe-handle
-// transfer return a nil Connection. After transfer, Accept terminates Node and tries to close the
-// Connection; if that close fails, it returns the still-owning Connection together with the
-// joined primary and cleanup errors so the caller can retry Close or exit the process.
+// Accept claims the guarded Node's launch-bound bootstrap before observing the
+// connection, verifies the retained Node, completes the RuntimeBootstrapV1
+// exchange, and raises the root Job process limit. Failures before pipe-handle
+// transfer return a nil Connection. After transfer, Accept terminates Node and
+// tries to close the Connection; if that close fails, it returns the still-owning
+// Connection with the joined primary and cleanup errors.
 func (l *Listener) Accept(
 	ctx context.Context,
-	node winprocess.NodeProcess,
-	bootstrap localrpc.RuntimeBootstrapV1,
+	node *launchguard.GuardedNodeProcess,
 ) (*Connection, error) {
 	if ctx == nil {
 		return nil, errors.New("HostControl accept context is required")
 	}
-	if isNilInterface(node) {
-		return nil, errors.New("retained Node process is required")
+	if node == nil {
+		return nil, errors.New("guarded Node process is required")
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, cause
@@ -216,22 +217,30 @@ func (l *Listener) Accept(
 	if err != nil {
 		return nil, err
 	}
+	claimedNode, bootstrap, err := launchguard.ClaimHostControlLaunch(node)
+	if err != nil {
+		finish()
+		claimErr := fmt.Errorf("claim guarded Node HostControl launch binding: %w", err)
+		return rejectAcceptFailure(nil, claimErr, node, func() {
+			l.markTerminal(claimErr)
+		}, l.Close)
+	}
 
-	connection, err := l.acceptConnected(ctx, node)
+	connection, err := l.acceptConnected(ctx, claimedNode)
 	finish()
 	if err != nil {
-		return rejectAcceptFailure(nil, err, node, func() {
+		return rejectAcceptFailure(nil, err, claimedNode, func() {
 			l.markTerminal(err)
 		}, l.Close)
 	}
 
 	bootstrapContext, cancelBootstrap := context.WithDeadline(ctx, l.deadline)
 	committedBootstrap, err := completeRuntimeBootstrap(
-		bootstrapContext, connection, node, connection.Evidence(), bootstrap,
+		bootstrapContext, connection, claimedNode, connection.Evidence(), bootstrap,
 	)
 	cancelBootstrap()
 	if err != nil {
-		return rejectPostTransferAcceptFailure(connection, err, node)
+		return rejectPostTransferAcceptFailure(connection, err, claimedNode)
 	}
 	connection.setCommittedRuntimeBootstrap(committedBootstrap)
 	return connection, nil

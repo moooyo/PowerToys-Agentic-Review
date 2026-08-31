@@ -191,6 +191,16 @@ func TestExchangeRuntimeBootstrapRejectsEOFPartialOversizeAndCancellation(t *tes
 	}
 }
 
+func TestBeginRuntimeBootstrapRejectsZeroLaunchBindingBeforeIO(t *testing.T) {
+	if _, err := BeginRuntimeBootstrapExchange(
+		context.Background(),
+		noIORuntimeBootstrapChannel{},
+		LaunchRuntimeBootstrap{},
+	); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+		t.Fatalf("zero launch binding error = %v", err)
+	}
+}
+
 func TestRuntimeBootstrapIssuanceIsCopySafeAndSingleUse(t *testing.T) {
 	bootstrap, bootstrapDocument := runtimeBootstrapForExchangeTest(t)
 	copyOfBootstrap := bootstrap
@@ -326,9 +336,10 @@ func TestBeginRuntimeBootstrapPreservesCoalescedFirstRPCFrame(t *testing.T) {
 	}
 }
 
-func runtimeBootstrapForExchangeTest(t *testing.T) (RuntimeBootstrapV1, []byte) {
+func runtimeBootstrapForExchangeTest(t *testing.T) (LaunchRuntimeBootstrap, []byte) {
 	t.Helper()
-	bootstrap, err := newRuntimeBootstrap(validRuntimeBootstrapOptions())
+	options := validFoundationRuntimeBootstrapOptions(RoleControl)
+	bootstrap, err := newFoundationRuntimeBootstrap(options, bytes.NewReader(make([]byte, 16)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,5 +347,9 @@ func runtimeBootstrapForExchangeTest(t *testing.T) (RuntimeBootstrapV1, []byte) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bootstrap, document
+	bound, err := BindRuntimeBootstrapToLaunch(bootstrap, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bound, document
 }
