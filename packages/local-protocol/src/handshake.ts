@@ -59,6 +59,12 @@ export class LocalHandshakeProofError extends Error {
 
 const verifiedTranscripts = new WeakSet<object>();
 
+export function isVerifiedHandshakeTranscriptV1(
+  value: unknown,
+): value is VerifiedHandshakeTranscriptV1 {
+  return typeof value === "object" && value !== null && verifiedTranscripts.has(value);
+}
+
 export function createHandshakeTranscriptV1(
   helloValue: unknown,
   helloAckValue: unknown,
@@ -209,11 +215,7 @@ export function validateReadyAfterHandshakeProofV1(
   readyValue: unknown,
   verifiedTranscript: VerifiedHandshakeTranscriptV1,
 ): Readonly<ReadyMessage> {
-  if (
-    typeof verifiedTranscript !== "object" ||
-    verifiedTranscript === null ||
-    !verifiedTranscripts.has(verifiedTranscript)
-  ) {
+  if (!isVerifiedHandshakeTranscriptV1(verifiedTranscript)) {
     throw handshakeError(
       "HANDSHAKE_CONTEXT_MISMATCH",
       "Ready validation requires a cryptographically verified handshake proof.",

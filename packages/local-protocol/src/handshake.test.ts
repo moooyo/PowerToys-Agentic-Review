@@ -14,6 +14,7 @@ import {
   createHandshakeTranscriptSigningDigest,
   createHandshakeTranscriptV1,
   createSignedHandshakeProofV1,
+  isVerifiedHandshakeTranscriptV1,
   LocalHandshakeProofError,
   type VerifiedHandshakeTranscriptV1,
   validateReadyAfterHandshakeProofV1,
@@ -119,6 +120,8 @@ describe("handshake transcript proof", () => {
 
     const verified = verifyControlProofMessageV1(validatedMessage, publicKey, context);
     expect(verified).toEqual(transcript);
+    expect(isVerifiedHandshakeTranscriptV1(verified)).toBe(true);
+    expect(isVerifiedHandshakeTranscriptV1(transcript)).toBe(false);
     expect(Object.isFrozen(verified.hello)).toBe(true);
 
     const ready = readyMessage();

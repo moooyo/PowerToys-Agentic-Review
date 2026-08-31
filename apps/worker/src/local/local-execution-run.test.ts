@@ -1,7 +1,23 @@
+import { generateKeyPairSync, type KeyObject, sign as nodeSign } from "node:crypto";
 import type { RunTerminalResponse } from "@agentic-review/contracts";
 import {
   ArtifactStreamVerifier,
   createCanonicalJsonDocument,
+  createHandshakeTranscriptSigningBytes,
+  createHandshakeTranscriptV1,
+  createSignedHandshakeProofV1,
+  deriveCapabilityKeyId,
+  type ExecutionCapabilityV1,
+  type HandshakeTranscriptV1,
+  type HelloAckMessage,
+  type HelloMessage,
+  LOCAL_CAPABILITY_AUDIENCE,
+  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
+  signExecutionCapability,
+  type VerifiedExecutionCapability,
+  type VerifiedHandshakeTranscriptV1,
+  verifyExecutionCapability,
+  verifySignedHandshakeProofV1,
 } from "@agentic-review/local-protocol";
 import { describe, expect, expectTypeOf, it } from "vitest";
 
@@ -18,6 +34,21 @@ import {
 } from "./local-execution-run.js";
 
 const identity = { jobId: "job-1", runAttemptId: "run-1" } as const;
+const authorityNow = 1_800_000_000_000;
+const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+const p256HalfOrder = p256Order >> 1n;
+const authorityKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+const authorityKeyId = deriveCapabilityKeyId(authorityKeys.publicKey);
+const artifactSession = {
+  protocolMajor: 1 as const,
+  protocolMinor: 0 as const,
+  workerNodeId: "worker-node-1",
+  workerInstanceId: "worker-instance-1",
+  executorBootId: "20000000-0000-4000-8000-000000000002",
+  sessionId: "30000000-0000-4000-8000-000000000003",
+  attemptCorrelationId: "40000000-0000-4000-8000-000000000004",
+};
+const artifactHandshake = createVerifiedArtifactHandshake();
 
 describe("mapRunTerminalResponseOutcome", () => {
   it.each([
@@ -203,13 +234,7 @@ describe("LocalExecutionBroker boundary", () => {
 
 function verifiedFailure(runAttemptId: string = identity.runAttemptId) {
   const context = {
-    protocolMajor: 1 as const,
-    protocolMinor: 0 as const,
-    workerNodeId: "worker-node-1",
-    workerInstanceId: "worker-instance-1",
-    executorBootId: "20000000-0000-4000-8000-000000000002",
-    sessionId: "30000000-0000-4000-8000-000000000003",
-    attemptCorrelationId: "40000000-0000-4000-8000-000000000004",
+    ...artifactSession,
     runAttemptId,
   };
   const terminal = {
@@ -219,12 +244,131 @@ function verifiedFailure(runAttemptId: string = identity.runAttemptId) {
     retryable: true,
     failedAtUnixMs: 1_800_000_000_000,
   };
-  const verifier = new ArtifactStreamVerifier({
-    ...context,
-    maximumArtifactBytes: 64n,
-    expectedOutputSchemaSha256: "a".repeat(64),
-  });
+  const verifier = new ArtifactStreamVerifier(
+    createVerifiedArtifactCapability(runAttemptId),
+    artifactHandshake,
+  );
   const verified = verifier.acceptFailed(terminal);
   expect(verified.terminalPayloadSha256).toBe(createCanonicalJsonDocument(terminal).sha256);
   return verified;
+}
+
+function createVerifiedArtifactCapability(runAttemptId: string): VerifiedExecutionCapability {
+  const capability: ExecutionCapabilityV1 = {
+    capabilityVersion: 1,
+    canonicalizationVersion: 1,
+    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
+    keyId: authorityKeyId,
+    audience: LOCAL_CAPABILITY_AUDIENCE,
+    capabilityId: "1".repeat(64),
+    nonce: "2".repeat(64),
+    workerNodeId: artifactSession.workerNodeId,
+    workerInstanceId: artifactSession.workerInstanceId,
+    executorBootId: artifactSession.executorBootId,
+    sessionId: artifactSession.sessionId,
+    attemptCorrelationId: artifactSession.attemptCorrelationId,
+    runAttemptId,
+    jobId: identity.jobId,
+    leaseGeneration: 7,
+    grantSequence: 1,
+    repository: { githubRepositoryId: 184456251, fullName: "microsoft/PowerToys" },
+    targetRevision: { kind: "issue", revisionDigest: "3".repeat(64) },
+    digests: {
+      executorEnvelopeSha256: "4".repeat(64),
+      promptSha256: "5".repeat(64),
+      outputSchemaSha256: "a".repeat(64),
+      policySha256: "6".repeat(64),
+      recipeSetSha256: "7".repeat(64),
+    },
+    operation: { kind: "static_review" },
+    resources: {
+      maximumProcesses: 4,
+      memoryBytes: "134217728",
+      outputBytes: 1_048_576,
+      artifactBytes: "64",
+      diskBytes: "1048576",
+      hardTimeoutMs: 60_000,
+    },
+    issuedAtUnixMs: authorityNow,
+    serverLeaseExpiresAtUnixMs: authorityNow + 90_000,
+    grantExpiresAtUnixMs: authorityNow + 30_000,
+    hardDeadlineUnixMs: authorityNow + 60_000,
+  };
+  return verifyExecutionCapability(
+    signExecutionCapability(capability, authorityKeys.privateKey),
+    authorityKeys.publicKey,
+    {
+      expectedKeyId: authorityKeyId,
+      expectedWorkerNodeId: capability.workerNodeId,
+      expectedWorkerInstanceId: capability.workerInstanceId,
+      expectedExecutorBootId: capability.executorBootId,
+      expectedSessionId: capability.sessionId,
+      nowUnixMs: authorityNow + 1_000,
+    },
+  );
+}
+
+function createVerifiedArtifactHandshake(): VerifiedHandshakeTranscriptV1 {
+  const hello: HelloMessage = {
+    protocolMajor: artifactSession.protocolMajor,
+    minimumMinor: artifactSession.protocolMinor,
+    maximumMinor: artifactSession.protocolMinor,
+    workerNodeId: artifactSession.workerNodeId,
+    workerInstanceId: artifactSession.workerInstanceId,
+    executorBootId: null,
+    sessionId: artifactSession.sessionId,
+    controlNonce: "8".repeat(64),
+    controlManifestSha256: "9".repeat(64),
+    controlPreflightSha256: "a".repeat(64),
+  };
+  const helloAck: HelloAckMessage = {
+    protocolMajor: artifactSession.protocolMajor,
+    protocolMinor: artifactSession.protocolMinor,
+    workerNodeId: artifactSession.workerNodeId,
+    workerInstanceId: artifactSession.workerInstanceId,
+    executorBootId: artifactSession.executorBootId,
+    sessionId: artifactSession.sessionId,
+    controlNonce: hello.controlNonce,
+    executorNonce: "b".repeat(64),
+    executorManifestSha256: hello.controlManifestSha256,
+    executorPolicySha256: "c".repeat(64),
+    executorPreflightSha256: "d".repeat(64),
+    maximumSlots: 4,
+  };
+  const transcript = createHandshakeTranscriptV1(hello, helloAck, authorityKeyId);
+  const proof = createSignedHandshakeProofV1(
+    transcript,
+    signArtifactTranscript(transcript, authorityKeys.privateKey),
+  );
+  return verifySignedHandshakeProofV1(proof, authorityKeys.publicKey, {
+    expectedKeyId: authorityKeyId,
+    expectedHello: hello,
+    expectedHelloAck: helloAck,
+  });
+}
+
+function signArtifactTranscript(transcript: HandshakeTranscriptV1, privateKey: KeyObject): Buffer {
+  const result = Buffer.from(
+    nodeSign("sha256", createHandshakeTranscriptSigningBytes(transcript), {
+      key: privateKey,
+      dsaEncoding: "ieee-p1363",
+    }),
+  );
+  const s = readUnsigned(result.subarray(32));
+  if (s > p256HalfOrder) writeUnsigned(p256Order - s, result, 32);
+  return result;
+}
+
+function readUnsigned(bytes: Uint8Array): bigint {
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  return value;
+}
+
+function writeUnsigned(value: bigint, target: Uint8Array, offset: number): void {
+  let remaining = value;
+  for (let index = offset + 31; index >= offset; index -= 1) {
+    target[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
 }

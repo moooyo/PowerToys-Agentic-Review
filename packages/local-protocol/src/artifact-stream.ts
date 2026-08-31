@@ -1,7 +1,12 @@
 import { createHash, type Hash } from "node:crypto";
 
 import { createCanonicalJsonDocument, type DeepReadonly, deepFreezeJson } from "./canonical.js";
+import { isVerifiedExecutionCapability, type VerifiedExecutionCapability } from "./capability.js";
 import { LocalMessageType } from "./framing.js";
+import {
+  isVerifiedHandshakeTranscriptV1,
+  type VerifiedHandshakeTranscriptV1,
+} from "./handshake.js";
 import {
   type ArtifactChunkMessage,
   type ArtifactEndMessage,
@@ -24,6 +29,13 @@ export interface VerifiedArtifact {
   readonly totalBytes: bigint;
   readonly sha256: string;
   readonly chunkCount: number;
+}
+
+export interface VerifiedArtifactChunk {
+  readonly artifactId: string;
+  readonly chunkIndex: number;
+  readonly offsetBytes: bigint;
+  readonly bytes: Buffer;
 }
 
 export interface VerifiedAttemptCompletion {
@@ -57,7 +69,7 @@ interface ActiveArtifact {
   nextChunkIndex: number;
 }
 
-export type ArtifactStreamContext = Readonly<
+type ArtifactStreamContext = Readonly<
   Pick<
     ArtifactStartMessage,
     | "protocolMajor"
@@ -71,12 +83,10 @@ export type ArtifactStreamContext = Readonly<
   >
 >;
 
-export type ArtifactStreamVerifierOptions = ArtifactStreamContext & {
-  readonly maximumArtifactBytes: bigint;
-  readonly expectedOutputSchemaSha256: string;
+export interface ArtifactStreamVerifierOptions {
   readonly maximumArtifactCount?: number;
   readonly maximumConcurrentArtifacts?: number;
-};
+}
 
 export class ArtifactStreamProtocolError extends Error {
   public constructor(
@@ -91,7 +101,8 @@ export class ArtifactStreamProtocolError extends Error {
       | "ARTIFACT_STREAM_INCOMPLETE"
       | "ARTIFACT_TERMINAL_MISMATCH"
       | "ARTIFACT_TERMINAL_REPLAYED"
-      | "ARTIFACT_ABORTED",
+      | "ARTIFACT_ABORTED"
+      | "ARTIFACT_AUTHORITY_INVALID",
     message: string,
   ) {
     super(message);
@@ -112,18 +123,45 @@ export class ArtifactStreamVerifier {
   #terminalAccepted = false;
   #aborted = false;
 
-  public constructor(options: ArtifactStreamVerifierOptions) {
+  public constructor(
+    capability: VerifiedExecutionCapability,
+    handshake: VerifiedHandshakeTranscriptV1,
+    options: ArtifactStreamVerifierOptions = {},
+  ) {
+    if (!isVerifiedExecutionCapability(capability)) {
+      throw artifactError(
+        "ARTIFACT_AUTHORITY_INVALID",
+        "Artifact verification requires a cryptographically verified execution capability.",
+      );
+    }
+    if (!isVerifiedHandshakeTranscriptV1(handshake)) {
+      throw artifactError(
+        "ARTIFACT_AUTHORITY_INVALID",
+        "Artifact verification requires a cryptographically verified handshake transcript.",
+      );
+    }
+    const session = handshake.helloAck;
     if (
-      options.maximumArtifactBytes < 1n ||
-      options.maximumArtifactBytes > LOCAL_ARTIFACT_MAXIMUM_BYTES
+      capability.keyId !== handshake.keyId ||
+      capability.workerNodeId !== session.workerNodeId ||
+      capability.workerInstanceId !== session.workerInstanceId ||
+      capability.executorBootId !== session.executorBootId ||
+      capability.sessionId !== session.sessionId
     ) {
-      throw new RangeError("maximumArtifactBytes is outside the local protocol range");
+      throw artifactError(
+        "ARTIFACT_CONTEXT_MISMATCH",
+        "Verified execution capability and handshake transcript identify different sessions.",
+      );
     }
-    this.#maximumArtifactBytes = options.maximumArtifactBytes;
-    if (!/^[a-f0-9]{64}$/u.test(options.expectedOutputSchemaSha256)) {
-      throw new TypeError("expectedOutputSchemaSha256 must be a lowercase SHA-256 digest");
+    const maximumArtifactBytes = BigInt(capability.resources.artifactBytes);
+    if (maximumArtifactBytes < 1n || maximumArtifactBytes > LOCAL_ARTIFACT_MAXIMUM_BYTES) {
+      throw artifactError(
+        "ARTIFACT_AUTHORITY_INVALID",
+        "Verified execution capability has an invalid artifact byte ceiling.",
+      );
     }
-    this.#expectedOutputSchemaSha256 = options.expectedOutputSchemaSha256;
+    this.#maximumArtifactBytes = maximumArtifactBytes;
+    this.#expectedOutputSchemaSha256 = capability.digests.outputSchemaSha256;
     this.#maximumArtifactCount = requireBoundedInteger(
       options.maximumArtifactCount ?? 64,
       1,
@@ -140,14 +178,14 @@ export class ArtifactStreamVerifier {
       throw new RangeError("maximumConcurrentArtifacts cannot exceed maximumArtifactCount");
     }
     this.#context = Object.freeze({
-      protocolMajor: options.protocolMajor,
-      protocolMinor: options.protocolMinor,
-      workerNodeId: options.workerNodeId,
-      workerInstanceId: options.workerInstanceId,
-      executorBootId: options.executorBootId,
-      sessionId: options.sessionId,
-      attemptCorrelationId: options.attemptCorrelationId,
-      runAttemptId: options.runAttemptId,
+      protocolMajor: session.protocolMajor,
+      protocolMinor: session.protocolMinor,
+      workerNodeId: capability.workerNodeId,
+      workerInstanceId: capability.workerInstanceId,
+      executorBootId: capability.executorBootId,
+      sessionId: capability.sessionId,
+      attemptCorrelationId: capability.attemptCorrelationId,
+      runAttemptId: capability.runAttemptId,
     });
   }
 
@@ -186,7 +224,7 @@ export class ArtifactStreamVerifier {
     return message;
   }
 
-  public acceptChunk(value: unknown): Buffer {
+  public acceptChunk(value: unknown): Readonly<VerifiedArtifactChunk> {
     this.#assertNotTerminal();
     const message = this.#validate(LocalMessageType.ArtifactChunk, value) as ArtifactChunkMessage;
     const active = this.#requireActive(message.artifactId);
@@ -207,7 +245,12 @@ export class ArtifactStreamVerifier {
     active.digest.update(bytes);
     active.receivedBytes = nextBytes;
     active.nextChunkIndex += 1;
-    return bytes;
+    return Object.freeze({
+      artifactId: message.artifactId,
+      chunkIndex: message.chunkIndex,
+      offsetBytes: BigInt(message.offsetBytes),
+      bytes: Buffer.from(bytes),
+    });
   }
 
   public end(value: unknown): Readonly<VerifiedArtifact> {
