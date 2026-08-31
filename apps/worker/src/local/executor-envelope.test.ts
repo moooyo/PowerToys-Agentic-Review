@@ -632,7 +632,7 @@ describe("prepareLocalExecutionStart", () => {
     );
 
     expect(prepared.authorityBasis).toMatchObject({
-      observedAtMonotonicMilliseconds: 10_001,
+      observedAtMonotonicMilliseconds: 10_000,
       remainingLeaseMilliseconds: 239_999,
       remainingHardDeadlineMilliseconds: 539_999,
     });

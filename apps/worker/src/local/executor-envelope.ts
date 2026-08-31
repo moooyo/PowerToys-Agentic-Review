@@ -40,12 +40,19 @@ export type SanitizedExecutorJobEnvelopeV1 = DeepReadonly<ExecutorJobEnvelopeV1>
 export type LocalSnapshotProjectionBodyV1 = LocalSnapshotProjectionV1["body"];
 
 declare const preparedLocalExecutionStartBrand: unique symbol;
+const preparedLocalExecutionStarts = new WeakSet<object>();
 
 export interface PreparedLocalExecutionStart {
   readonly attemptCorrelationId: string;
   readonly authorityBasis: DeepReadonly<LocalExecutionAuthorityBasis>;
   readonly executorEnvelope: SanitizedExecutorJobEnvelopeV1;
   readonly [preparedLocalExecutionStartBrand]: true;
+}
+
+export function isPreparedLocalExecutionStart(
+  value: unknown,
+): value is PreparedLocalExecutionStart {
+  return typeof value === "object" && value !== null && preparedLocalExecutionStarts.has(value);
 }
 
 export interface LocalExecutionClaimTiming {
@@ -117,11 +124,13 @@ export function prepareLocalExecutionStart(
 ): PreparedLocalExecutionStart {
   const executorEnvelope = createExecutorJobEnvelopeV1(serverEnvelope, attemptCorrelationId);
   const authorityBasis = createAuthorityBasis(serverEnvelope, timing);
-  return deepFreezeJson({
+  const prepared = deepFreezeJson({
     attemptCorrelationId,
     authorityBasis,
     executorEnvelope,
   }) as PreparedLocalExecutionStart;
+  preparedLocalExecutionStarts.add(prepared);
+  return prepared;
 }
 
 function createAuthorityBasis(
@@ -199,7 +208,7 @@ export function normalizeLocalMonotonicObservationMilliseconds(value: number): n
   if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
     throw new RangeError("Monotonic observation is outside the supported range.");
   }
-  const normalized = Math.ceil(value);
+  const normalized = Math.floor(value);
   if (!Number.isSafeInteger(normalized)) {
     throw new RangeError("Monotonic observation is outside the supported range.");
   }
