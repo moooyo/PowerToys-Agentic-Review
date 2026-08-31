@@ -13,6 +13,20 @@ interface PendingRequest {
   readonly reject: (reason: Error) => void;
 }
 
+export const terminateWorkerAndWaitForExit = async (
+  worker: Pick<Worker, "terminate">,
+  exited: Promise<number>,
+): Promise<unknown | undefined> => {
+  let terminationError: unknown;
+  try {
+    await worker.terminate();
+  } catch (error) {
+    terminationError = error;
+  }
+  await exited;
+  return terminationError;
+};
+
 export class DatabaseClient {
   readonly #worker: Worker;
   readonly #pending = new Map<number, PendingRequest>();
@@ -87,7 +101,14 @@ export class DatabaseClient {
       try {
         await this.#send("shutdown", {});
       } catch (error) {
-        void this.#worker.terminate().catch(() => undefined);
+        const terminationError = await terminateWorkerAndWaitForExit(this.#worker, this.#exited);
+        if (terminationError !== undefined) {
+          throw new AggregateError(
+            [error, terminationError],
+            "Database shutdown and Worker termination both failed.",
+            { cause: error },
+          );
+        }
         throw error;
       }
     }

@@ -6,6 +6,7 @@ import {
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DatabaseClient } from "./database/database-client.js";
+import { closeDatabaseStorage } from "./database/database-shutdown.js";
 import { DatabaseGitHubPollingState } from "./database/github-polling-state.js";
 import { DatabaseOperatorAuthPersistence } from "./database/operator-auth-persistence.js";
 import { DatabaseOwnerLock } from "./database/owner-lock.js";
@@ -28,20 +29,16 @@ const start = async (): Promise<void> => {
   let pollingPromise: Promise<void> | undefined;
   let application: { close(): Promise<void> } | undefined;
 
-  const closeStorage = async (): Promise<void> => {
-    try {
-      await database?.close();
-    } finally {
-      await databaseOwnerLock?.close();
-    }
-  };
+  const closeStorage = async (): Promise<void> => closeDatabaseStorage(database, databaseOwnerLock);
 
   try {
     databaseOwnerLock = await DatabaseOwnerLock.acquire(config.databasePath);
+    const databasePath = databaseOwnerLock.databasePath;
     database = await DatabaseClient.create({
-      databasePath: config.databasePath,
+      databasePath,
       migrationsDirectory: config.migrationsDirectory,
     });
+    databaseOwnerLock.assertReady();
     const operatorAuthConfig = config.operatorAuth;
     const oidc =
       operatorAuthConfig?.oidc === undefined
@@ -195,7 +192,7 @@ const start = async (): Promise<void> => {
       {
         host: config.host,
         port: config.port,
-        databasePath: config.databasePath,
+        databasePath,
         protocolVersion: config.protocolVersion,
       },
       "Agentic Review server is ready.",

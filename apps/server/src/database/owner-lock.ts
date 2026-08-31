@@ -1,45 +1,105 @@
-import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-
-const canonicalizeDatabasePath = (databasePath: string): string => {
-  const resolvedPath = resolve(databasePath);
-  const parentDirectory = dirname(resolvedPath);
-  mkdirSync(parentDirectory, { recursive: true, mode: 0o700 });
-
-  if (existsSync(resolvedPath)) {
-    const stats = statSync(resolvedPath);
-    if (!stats.isFile()) {
-      throw new Error(`Database path ${resolvedPath} is not a regular file.`);
-    }
-    if (stats.nlink !== 1) {
-      throw new Error(`Database path ${resolvedPath} must not have hard links.`);
-    }
-    return realpathSync.native(resolvedPath);
-  }
-
-  return join(realpathSync.native(parentDirectory), basename(resolvedPath));
-};
+import {
+  assertPrivateRegularFile,
+  assertPrivateSqliteSidecars,
+  assertSecureDatabaseOwnerPlatform,
+  createPrivateRegularFile,
+  DatabaseStorageBinding,
+  type FileIdentity,
+} from "./storage-security.js";
 
 const isBusy = (error: unknown): boolean =>
   error instanceof Error &&
   (("errcode" in error && error.errcode === 5) ||
     error.message.toLowerCase().includes("database is locked"));
 
+interface OwnerLockDatabaseHandle {
+  readonly isTransaction: boolean;
+  close(): void;
+  exec(sql: string): void;
+}
+
+export interface OwnerLockCloseAttempt {
+  readonly closeSucceeded: boolean;
+  readonly errors: readonly unknown[];
+}
+
+export const closeOwnerLockDatabase = (
+  database: OwnerLockDatabaseHandle,
+): OwnerLockCloseAttempt => {
+  const errors: unknown[] = [];
+  try {
+    if (database.isTransaction) {
+      database.exec("ROLLBACK");
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+
+  let closeSucceeded = false;
+  try {
+    database.close();
+    closeSucceeded = true;
+  } catch (error) {
+    errors.push(error);
+  }
+  return { closeSucceeded, errors };
+};
+
+export const closeOwnerLockDatabaseWithRetries = (
+  database: OwnerLockDatabaseHandle,
+  maximumAttempts = 3,
+): OwnerLockCloseAttempt => {
+  const errors: unknown[] = [];
+  for (let attemptNumber = 1; attemptNumber <= maximumAttempts; attemptNumber += 1) {
+    const attempt = closeOwnerLockDatabase(database);
+    errors.push(...attempt.errors);
+    if (attempt.closeSucceeded) {
+      return { closeSucceeded: true, errors };
+    }
+  }
+  return { closeSucceeded: false, errors };
+};
+
+const throwCloseErrors = (errors: readonly unknown[], message: string): void => {
+  if (errors.length === 0) {
+    return;
+  }
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  throw new AggregateError(errors, message);
+};
+
 export class DatabaseOwnerLock {
   readonly #database: DatabaseSync;
+  readonly #lockIdentity: FileIdentity;
+  readonly #lockPath: string;
+  readonly #storage: DatabaseStorageBinding;
   #closed = false;
+  #readyValidated = false;
 
-  private constructor(database: DatabaseSync) {
+  public readonly databasePath: string;
+
+  private constructor(
+    database: DatabaseSync,
+    storage: DatabaseStorageBinding,
+    lockPath: string,
+    lockIdentity: FileIdentity,
+  ) {
     this.#database = database;
+    this.#storage = storage;
+    this.#lockPath = lockPath;
+    this.#lockIdentity = lockIdentity;
+    this.databasePath = storage.databasePath;
   }
 
   public static async acquire(databasePath: string): Promise<DatabaseOwnerLock> {
-    const canonicalDatabasePath = canonicalizeDatabasePath(databasePath);
-    const lockPath = `${canonicalDatabasePath}.owner-lock.sqlite`;
-    if (existsSync(lockPath) && statSync(lockPath).nlink !== 1) {
-      throw new Error(`Database owner lock ${lockPath} must not have hard links.`);
-    }
+    assertSecureDatabaseOwnerPlatform();
+    const storage = DatabaseStorageBinding.prepare(databasePath);
+    const lockPath = `${storage.databasePath}.owner-lock.sqlite`;
+    const lockIdentity = createPrivateRegularFile(lockPath, "Database owner lock");
+    assertPrivateSqliteSidecars(lockPath, "Database owner lock");
 
     let lockDatabase: DatabaseSync | undefined;
     try {
@@ -48,33 +108,64 @@ export class DatabaseOwnerLock {
         enableForeignKeyConstraints: true,
         enableDoubleQuotedStringLiterals: false,
       });
-      if (process.platform !== "win32") {
-        chmodSync(lockPath, 0o600);
-      }
+      assertPrivateRegularFile(lockPath, "Database owner lock", lockIdentity);
       lockDatabase.exec("PRAGMA journal_mode = DELETE");
       lockDatabase.exec("PRAGMA synchronous = FULL");
       lockDatabase.exec("BEGIN EXCLUSIVE");
-      return new DatabaseOwnerLock(lockDatabase);
+      assertPrivateSqliteSidecars(lockPath, "Database owner lock");
+      storage.assertDirectoryIdentity();
+      return new DatabaseOwnerLock(lockDatabase, storage, lockPath, lockIdentity);
     } catch (error) {
-      lockDatabase?.close();
-      if (isBusy(error)) {
-        throw new Error(
-          `Another Agentic Review Server already owns database ${canonicalDatabasePath}.`,
-          { cause: error },
+      const primaryError = isBusy(error)
+        ? new Error(
+            `Another Agentic Review Server already owns database ${storage.databasePath}.`,
+            { cause: error },
+          )
+        : error;
+      const cleanup =
+        lockDatabase === undefined
+          ? { closeSucceeded: false, errors: [] }
+          : closeOwnerLockDatabaseWithRetries(lockDatabase);
+      if (cleanup.errors.length > 0) {
+        throw new AggregateError(
+          [primaryError, ...cleanup.errors],
+          cleanup.closeSucceeded
+            ? "Database owner lock acquisition failed and cleanup required retries."
+            : "FATAL: database owner lock acquisition failed and its handle could not be closed.",
+          { cause: primaryError },
         );
       }
-      throw error;
+      throw primaryError;
     }
+  }
+
+  public assertReady(): void {
+    if (this.#closed) {
+      throw new Error("Database owner lock is already closed.");
+    }
+    this.#storage.assertReady();
+    assertPrivateRegularFile(this.#lockPath, "Database owner lock", this.#lockIdentity);
+    assertPrivateSqliteSidecars(this.#lockPath, "Database owner lock");
+    this.#readyValidated = true;
   }
 
   public async close(): Promise<void> {
     if (this.#closed) {
       return;
     }
-    this.#closed = true;
-    if (this.#database.isTransaction) {
-      this.#database.exec("ROLLBACK");
+    const errors: unknown[] = [];
+    if (this.#readyValidated) {
+      try {
+        this.assertReady();
+      } catch (error) {
+        errors.push(error);
+      }
     }
-    this.#database.close();
+    const attempt = closeOwnerLockDatabaseWithRetries(this.#database);
+    if (attempt.closeSucceeded) {
+      this.#closed = true;
+    }
+    errors.push(...attempt.errors);
+    throwCloseErrors(errors, "Database owner lock validation, rollback, or close failed.");
   }
 }

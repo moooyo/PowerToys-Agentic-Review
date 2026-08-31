@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -19,6 +19,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
+import {
+  databaseInitializationMarkerContent,
+  databaseInitializationMarkerPath,
+} from "../../dist/database/storage-security.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
 const protocolVersion = "1.0";
@@ -530,6 +534,10 @@ const createFixture = async (seedLeaseJob = true): Promise<DatabaseFixture> => {
     } finally {
       seedDatabase.close();
     }
+    if (process.platform !== "win32") {
+      await chmod(databasePath, 0o600);
+    }
+    await writeInitializationMarker(databasePath);
 
     const client = await DatabaseClient.create({
       databasePath,
@@ -542,6 +550,14 @@ const createFixture = async (seedLeaseJob = true): Promise<DatabaseFixture> => {
     await rm(directory, { force: true, recursive: true });
     throw error;
   }
+};
+
+const writeInitializationMarker = async (databasePath: string): Promise<void> => {
+  await writeFile(
+    databaseInitializationMarkerPath(databasePath),
+    databaseInitializationMarkerContent,
+    { mode: 0o600 },
+  );
 };
 
 const withFixtureDatabase = <T>(
@@ -1808,7 +1824,7 @@ describe("DatabaseClient lease integration", () => {
 
   it("preserves idempotent replay for a linked review completed before migration 0006", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agentic-review-server-v5-replay-"));
-    const databasePath = join(directory, "server.sqlite");
+    const databasePath = join(directory, "data", "server.sqlite");
     const versionFiveMigrations = join(directory, "migrations-v5");
     await mkdir(versionFiveMigrations);
     await Promise.all(

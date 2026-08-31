@@ -1,6 +1,4 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import {
@@ -29,6 +27,8 @@ import type {
   ValidateOperatorLoginTransactionInput,
 } from "../security/operator-auth.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
+import { adoptLegacyDatabase } from "./database-initialization.js";
+import { completeDatabaseShutdown } from "./database-shutdown.js";
 import {
   LeaseLostError,
   ResultDigestMismatchError,
@@ -45,7 +45,7 @@ import {
   writeGitHubPollingProjection,
 } from "./github-polling-state.js";
 import { cleanupIncompleteMigrationBackups, createMigrationBackup } from "./migration-backup.js";
-import { inspectMigrationState, runMigrations } from "./migrations.js";
+import { inspectMigrationState, type MigrationState, runMigrations } from "./migrations.js";
 import {
   beginOperatorLogin,
   type CleanupExpiredOperatorAuthInput,
@@ -81,6 +81,7 @@ import {
   type ReviewCompletionJobContext,
   validateReviewCompletion,
 } from "./review-results.js";
+import { DatabaseStorageBinding } from "./storage-security.js";
 
 interface WorkerRow {
   readonly id: string;
@@ -1710,43 +1711,106 @@ const handleRequest = (request: DatabaseRequest): unknown => {
 };
 
 try {
-  mkdirSync(dirname(options.databasePath), { recursive: true });
-  cleanupIncompleteMigrationBackups(options.databasePath);
-  const existingDatabaseStats = existsSync(options.databasePath)
-    ? statSync(options.databasePath)
-    : undefined;
-  const existingDatabase =
-    existingDatabaseStats?.isFile() === true && existingDatabaseStats.size > 0;
-  database = new DatabaseSync(options.databasePath, {
+  const storage = DatabaseStorageBinding.prepare(options.databasePath);
+  let migrationState: MigrationState | undefined;
+  if (storage.snapshot.initializationState === "legacy") {
+    storage.assertLegacyCandidate();
+    const legacyDatabase = new DatabaseSync(storage.databasePath, {
+      readOnly: true,
+      enableForeignKeyConstraints: true,
+      enableDoubleQuotedStringLiterals: false,
+    });
+    let adoptionError: unknown;
+    try {
+      migrationState = await adoptLegacyDatabase({
+        database: legacyDatabase,
+        databasePath: storage.databasePath,
+        migrationsDirectory: options.migrationsDirectory,
+        storage,
+      });
+    } catch (error) {
+      adoptionError = error;
+    }
+    let closeError: unknown;
+    try {
+      legacyDatabase.close();
+    } catch (error) {
+      closeError = error;
+    }
+    if (adoptionError !== undefined && closeError !== undefined) {
+      throw new AggregateError(
+        [adoptionError, closeError],
+        "Legacy database adoption and read-only close both failed.",
+        { cause: adoptionError },
+      );
+    }
+    if (adoptionError !== undefined) {
+      throw adoptionError;
+    }
+    if (closeError !== undefined) {
+      throw closeError;
+    }
+  } else {
+    cleanupIncompleteMigrationBackups(storage.databasePath);
+    storage.createDatabaseFile();
+  }
+  database = new DatabaseSync(storage.databasePath, {
     timeout: 5_000,
     enableForeignKeyConstraints: true,
     enableDoubleQuotedStringLiterals: false,
   });
+  storage.assertDatabaseOpened();
+  database.exec("PRAGMA trusted_schema = OFF");
   database.exec("PRAGMA journal_mode = WAL");
   database.exec("PRAGMA synchronous = FULL");
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
-  database.exec("PRAGMA trusted_schema = OFF");
-  const migrationState = inspectMigrationState(database, options.migrationsDirectory);
-  if (existingDatabase && migrationState.pendingVersions.length > 0) {
+  migrationState ??= inspectMigrationState(database, options.migrationsDirectory);
+  if (
+    storage.snapshot.initializationState === "initialized" &&
+    migrationState.pendingVersions.length > 0
+  ) {
     await createMigrationBackup({
       database,
-      databasePath: options.databasePath,
+      databasePath: storage.databasePath,
       currentVersion: migrationState.currentVersion,
       targetVersion: migrationState.targetVersion,
     });
   }
   schemaVersion = runMigrations(database, options.migrationsDirectory);
+  if (storage.snapshot.initializationState === "fresh") {
+    storage.finalizeDatabaseInitialization();
+  }
+  storage.assertReady();
   port.postMessage({ type: "ready" });
 
   port.on("message", (request: DatabaseRequest) => {
+    if (request.operation === "shutdown") {
+      completeDatabaseShutdown(
+        database,
+        () => {
+          port.postMessage({
+            type: "response",
+            id: request.id,
+            ok: true,
+            output: { closed: true },
+          });
+          port.close();
+        },
+        (error) => {
+          port.postMessage({
+            type: "response",
+            id: request.id,
+            ok: false,
+            error: serializeError(error),
+          });
+        },
+      );
+      return;
+    }
     try {
       const output = handleRequest(request);
       port.postMessage({ type: "response", id: request.id, ok: true, output });
-      if (request.operation === "shutdown") {
-        database.close();
-        port.close();
-      }
     } catch (error) {
       port.postMessage({
         type: "response",
