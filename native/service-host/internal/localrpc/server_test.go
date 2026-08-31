@@ -143,7 +143,7 @@ func TestServerSanitizesDispatcherPanic(t *testing.T) {
 }
 
 func TestServerKeepsClaimResponseOnDedicated16MiBPath(t *testing.T) {
-	largeValue := strings.Repeat("x", MaximumFrameBytes+1024)
+	largeValue := strings.Repeat("x", MaximumClaimResponseBodyBytes-len(`{"value":""}`))
 	largeBody := json.RawMessage(canonicalForTest(t, map[string]any{"value": largeValue}))
 	dispatcher := &fakeControlDispatcher{
 		claim: func(context.Context, json.RawMessage) (json.RawMessage, error) {
@@ -153,10 +153,13 @@ func TestServerKeepsClaimResponseOnDedicated16MiBPath(t *testing.T) {
 			return largeBody, nil
 		},
 	}
-	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	options := defaultServerOptions()
+	options.IOTimeout = 10 * time.Second
+	harness := newServerHarness(t, dispatcher, options)
 	defer harness.close(t)
 
-	harness.send(t, callDocument(t, "claim:1", OperationClaim, map[string]any{"body": map[string]any{}}))
+	claimID := strings.Repeat("c", maximumIdentifierBytes)
+	harness.send(t, callDocument(t, claimID, OperationClaim, map[string]any{"body": map[string]any{}}))
 	claimResponse := harness.readResponse(t, MaximumClaimResponseFrameBytes)
 	if claimResponse["outcome"] != "ok" {
 		t.Fatalf("large claim response failed: %#v", claimResponse)
@@ -165,6 +168,34 @@ func TestServerKeepsClaimResponseOnDedicated16MiBPath(t *testing.T) {
 	harness.send(t, callDocument(t, "register:1", OperationRegister, map[string]any{"body": map[string]any{}}))
 	registerResponse := harness.readResponse(t, MaximumFrameBytes)
 	assertResponseErrorCode(t, registerResponse, "INVALID_HANDLER_RESPONSE")
+}
+
+func TestServerAcceptsLargeCompletionWithoutRelaxingOtherRequests(t *testing.T) {
+	largeBody := map[string]any{"result": strings.Repeat("x", MaximumFrameBytes)}
+	seen := make(chan int, 1)
+	dispatcher := &fakeControlDispatcher{
+		completeRun: func(_ context.Context, _ string, body json.RawMessage) (json.RawMessage, error) {
+			seen <- len(body)
+			return json.RawMessage(`{"runState":"succeeded"}`), nil
+		},
+	}
+	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	defer harness.close(t)
+
+	document := callDocument(t, "complete:large", OperationCompleteRun, map[string]any{
+		"body": largeBody, "runAttemptId": "run:large",
+	})
+	if len(document) <= MaximumFrameBytes || len(document) > MaximumRequestFrameBytes {
+		t.Fatalf("completion fixture has unexpected size %d", len(document))
+	}
+	harness.send(t, document)
+	response := harness.readResponse(t, MaximumFrameBytes)
+	if response["outcome"] != "ok" {
+		t.Fatalf("large completion failed: %#v", response)
+	}
+	if got := <-seen; got <= MaximumFrameBytes {
+		t.Fatalf("dispatcher received only %d completion bytes", got)
+	}
 }
 
 func TestServerRejectsDuplicateRequestIDAndClosesSession(t *testing.T) {
@@ -290,11 +321,12 @@ func TestConcurrencyReservationIncludesResponseWrite(t *testing.T) {
 }
 
 type fakeControlDispatcher struct {
-	register   func(context.Context, json.RawMessage) (json.RawMessage, error)
-	claim      func(context.Context, json.RawMessage) (json.RawMessage, error)
-	failRun    func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	signDigest string
-	mu         sync.Mutex
+	register    func(context.Context, json.RawMessage) (json.RawMessage, error)
+	claim       func(context.Context, json.RawMessage) (json.RawMessage, error)
+	completeRun func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	failRun     func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	signDigest  string
+	mu          sync.Mutex
 }
 
 func (d *fakeControlDispatcher) Register(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
@@ -315,7 +347,10 @@ func (*fakeControlDispatcher) InstanceHeartbeat(context.Context, string, json.Ra
 	return json.RawMessage(`{"workerState":"online"}`), nil
 }
 
-func (*fakeControlDispatcher) CompleteRun(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+func (d *fakeControlDispatcher) CompleteRun(ctx context.Context, id string, body json.RawMessage) (json.RawMessage, error) {
+	if d.completeRun != nil {
+		return d.completeRun(ctx, id, body)
+	}
 	return json.RawMessage(`{"runState":"succeeded"}`), nil
 }
 
@@ -409,7 +444,7 @@ func newServerHarness(t *testing.T, dispatcher ControlDispatcher, options Server
 
 func (h *serverHarness) send(t *testing.T, document []byte) {
 	t.Helper()
-	if err := WriteFrame(h.input, document, MaximumFrameBytes); err != nil {
+	if err := WriteFrame(h.input, document, MaximumRequestFrameBytes); err != nil {
 		t.Fatalf("send local RPC request: %v", err)
 	}
 }

@@ -19,6 +19,9 @@ func TestNonWindowsCNGFailsExplicitly(t *testing.T) {
 	if digest := signer.PublicKeySPKISHA256(); digest != ([DigestSize]byte{}) {
 		t.Fatalf("PublicKeySPKISHA256 returned %x", digest)
 	}
+	if signer.IsOpen() {
+		t.Fatal("unsupported signer reported itself open")
+	}
 	if _, err := signer.SignDigest(make([]byte, DigestSize)); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("SignDigest returned the wrong error: %v", err)
 	}

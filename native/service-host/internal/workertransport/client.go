@@ -99,9 +99,17 @@ type RunCompleteRequest struct {
 	Body         json.RawMessage
 }
 
+type RunCompleteResponse struct {
+	Body json.RawMessage
+}
+
 type RunFailRequest struct {
 	RunAttemptID string
 	Body         json.RawMessage
+}
+
+type RunFailResponse struct {
+	Body json.RawMessage
 }
 
 type StatusError struct {
@@ -203,22 +211,28 @@ func (c *Client) HeartbeatInstance(
 	return InstanceHeartbeatResponse{Body: response}, nil
 }
 
-func (c *Client) CompleteRun(ctx context.Context, request RunCompleteRequest) error {
+func (c *Client) CompleteRun(ctx context.Context, request RunCompleteRequest) (RunCompleteResponse, error) {
 	target, err := c.entityTarget(runPathStart, request.RunAttemptID, completePathEnd)
 	if err != nil {
-		return err
+		return RunCompleteResponse{}, err
 	}
-	_, err = c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
-	return err
+	response, err := c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
+	if err != nil {
+		return RunCompleteResponse{}, err
+	}
+	return RunCompleteResponse{Body: response}, nil
 }
 
-func (c *Client) FailRun(ctx context.Context, request RunFailRequest) error {
+func (c *Client) FailRun(ctx context.Context, request RunFailRequest) (RunFailResponse, error) {
 	target, err := c.entityTarget(runPathStart, request.RunAttemptID, failPathEnd)
 	if err != nil {
-		return err
+		return RunFailResponse{}, err
 	}
-	_, err = c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
-	return err
+	response, err := c.execute(ctx, http.MethodPost, target, request.Body, c.requestTimeout)
+	if err != nil {
+		return RunFailResponse{}, err
+	}
+	return RunFailResponse{Body: response}, nil
 }
 
 func newClient(origin url.URL, roundTripper http.RoundTripper, limits Limits) *Client {

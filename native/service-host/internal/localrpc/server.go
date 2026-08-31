@@ -122,7 +122,7 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	terminalError := error(nil)
 	for terminalError == nil {
 		document, err := readFrameWithTimeout(
-			sessionContext, input, MaximumFrameBytes, s.options.IOTimeout, closeInput,
+			sessionContext, input, MaximumRequestFrameBytes, s.options.IOTimeout, closeInput,
 		)
 		if err != nil {
 			if fatalError := pollError(fatal); fatalError != nil {
@@ -172,7 +172,12 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 				}
 				continue
 			}
-			if err := writer.writeSuccess(typed.ID, successBooleanBody("cancelled", true), MaximumFrameBytes); err != nil {
+			if err := writer.writeSuccess(
+				typed.ID,
+				successBooleanBody("cancelled", true),
+				MaximumFrameBytes,
+				MaximumFrameBytes,
+			); err != nil {
 				reportFatal(err)
 			}
 		case CallRequest:
@@ -208,11 +213,13 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 					}
 					return
 				}
-				maximum := MaximumFrameBytes
+				bodyMaximum := MaximumFrameBytes
+				frameMaximum := MaximumFrameBytes
 				if request.Operation == OperationClaim {
-					maximum = MaximumClaimResponseFrameBytes
+					bodyMaximum = MaximumClaimResponseBodyBytes
+					frameMaximum = MaximumClaimResponseFrameBytes
 				}
-				if err := writer.writeSuccess(request.ID, body, maximum); err != nil {
+				if err := writer.writeSuccess(request.ID, body, bodyMaximum, frameMaximum); err != nil {
 					if errors.Is(err, ErrCanonicalJSONLimit) || errors.Is(err, ErrResponseTooLarge) ||
 						errors.Is(err, ErrInvalidHandlerResult) {
 						writeErr := writer.writeError(request.ID, errorBody{
@@ -383,15 +390,20 @@ type responseWriter struct {
 	closeOutput func()
 }
 
-func (w *responseWriter) writeSuccess(requestID string, body json.RawMessage, maximum int) error {
-	document, err := MarshalSuccessResponse(requestID, body, maximum)
+func (w *responseWriter) writeSuccess(
+	requestID string,
+	body json.RawMessage,
+	bodyMaximum int,
+	frameMaximum int,
+) error {
+	document, err := marshalSuccessResponse(requestID, body, bodyMaximum, frameMaximum)
 	if err != nil {
 		if errors.Is(err, ErrCanonicalJSONLimit) {
 			return ErrResponseTooLarge
 		}
 		return err
 	}
-	return w.write(document, maximum)
+	return w.write(document, frameMaximum)
 }
 
 func (w *responseWriter) writeError(requestID string, body errorBody) error {

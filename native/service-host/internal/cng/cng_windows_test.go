@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 )
 
@@ -169,6 +170,9 @@ func TestWindowsOpenContract(t *testing.T) {
 	if digest := signer.PublicKeySPKISHA256(); digest != expectedSPKIDigest {
 		t.Fatalf("PublicKeySPKISHA256 returned %x, want %x", digest, expectedSPKIDigest)
 	}
+	if !signer.IsOpen() {
+		t.Fatal("validated signer did not report itself open")
+	}
 
 	if err := signer.Close(); err != nil {
 		t.Fatalf("Close returned an error: %v", err)
@@ -176,8 +180,41 @@ func TestWindowsOpenContract(t *testing.T) {
 	if err := signer.Close(); err != nil {
 		t.Fatalf("repeated Close returned an error: %v", err)
 	}
+	if signer.IsOpen() {
+		t.Fatal("closed signer reported itself open")
+	}
 	if fmt.Sprint(api.freed) != fmt.Sprint([]nativeHandle{api.keyHandle, api.providerHandle}) {
 		t.Fatalf("handles were not freed exactly once in key/provider order: %v", api.freed)
+	}
+}
+
+func TestWindowsIsOpenAndCloseAreConcurrentSafe(t *testing.T) {
+	api := validFakeNativeCNG()
+	options, _ := validTestOptions()
+	signer, err := openWithAPI(api, options)
+	if err != nil {
+		t.Fatalf("openWithAPI returned an error: %v", err)
+	}
+
+	start := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 16 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for range 100 {
+				_ = signer.IsOpen()
+			}
+		}()
+	}
+	close(start)
+	if err := signer.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+	readers.Wait()
+	if signer.IsOpen() {
+		t.Fatal("signer remained open after concurrent Close")
 	}
 }
 

@@ -154,6 +154,18 @@ func (s *Signer) PublicKeySPKISHA256() [DigestSize]byte {
 	return s.state.publicKeySPKISHA256
 }
 
+// IsOpen reports whether the validated key and provider handles remain usable. It does not
+// expose either handle and is serialized with signing and closing.
+func (s *Signer) IsOpen() bool {
+	if s == nil || s.state == nil {
+		return false
+	}
+	state := s.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return !state.closed && state.key != 0 && state.provider != 0
+}
+
 // SignDigest signs one SHA-256-sized prehash without hashing it again.
 //
 // The result is exactly 64 bytes in P1363 r || s form with canonical low-S.

@@ -20,6 +20,11 @@ func (*Signer) PublicKeySPKISHA256() [DigestSize]byte {
 	return [DigestSize]byte{}
 }
 
+// IsOpen reports false because no CNG key can be opened on this platform.
+func (*Signer) IsOpen() bool {
+	return false
+}
+
 // SignDigest fails explicitly because persisted CNG keys are a Windows-only facility.
 func (*Signer) SignDigest([]byte) ([]byte, error) {
 	return nil, ErrUnsupported

@@ -8,9 +8,21 @@ import (
 )
 
 const (
-	MaximumFrameBytes              = 1_048_576
-	MaximumClaimResponseFrameBytes = 16 * 1024 * 1024
-	framePrefixBytes               = 4
+	MaximumFrameBytes                        = 1_048_576
+	MaximumRunCompletionRequestBodyBytes     = 2*1024*1024 + 16*1024
+	MaximumClaimResponseBodyBytes            = 16 * 1024 * 1024
+	maximumIdentifierBytes                   = 128
+	maximumRunCompletionRequestEnvelopeBytes = len(`{"operation":"CompleteRun","payload":{"body":`) +
+		len(`,"runAttemptId":""},"protocolVersion":"1.0","requestId":"","type":"call"}`) +
+		2*maximumIdentifierBytes
+	MaximumRequestFrameBytes = MaximumRunCompletionRequestBodyBytes +
+		maximumRunCompletionRequestEnvelopeBytes
+	maximumSuccessResponseEnvelopeBytes = len(`{"body":`) +
+		len(`,"outcome":"ok","protocolVersion":"1.0","requestId":"","type":"response"}`) +
+		maximumIdentifierBytes
+	MaximumClaimResponseFrameBytes = MaximumClaimResponseBodyBytes +
+		maximumSuccessResponseEnvelopeBytes
+	framePrefixBytes = 4
 )
 
 var (

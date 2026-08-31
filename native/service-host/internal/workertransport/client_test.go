@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -221,17 +222,17 @@ func TestTypedOperationsUseOnlyFixedOriginRoutesAndHeaders(t *testing.T) {
 	}); err != nil || string(response.Body) != `{"accepted":true}` {
 		t.Fatalf("HeartbeatInstance returned (%s, %v)", response.Body, err)
 	}
-	if err := client.CompleteRun(context.Background(), RunCompleteRequest{
+	if response, err := client.CompleteRun(context.Background(), RunCompleteRequest{
 		RunAttemptID: "run:attempt_1.test-2",
 		Body:         requestBody,
-	}); err != nil {
-		t.Fatalf("CompleteRun returned an error: %v", err)
+	}); err != nil || string(response.Body) != `{"accepted":true}` {
+		t.Fatalf("CompleteRun returned (%s, %v)", response.Body, err)
 	}
-	if err := client.FailRun(context.Background(), RunFailRequest{
+	if response, err := client.FailRun(context.Background(), RunFailRequest{
 		RunAttemptID: "run:attempt_1.test-2",
 		Body:         requestBody,
-	}); err != nil {
-		t.Fatalf("FailRun returned an error: %v", err)
+	}); err != nil || string(response.Body) != `{"accepted":true}` {
+		t.Fatalf("FailRun returned (%s, %v)", response.Body, err)
 	}
 
 	expected := []struct {
@@ -280,6 +281,34 @@ func TestTypedOperationsUseOnlyFixedOriginRoutesAndHeaders(t *testing.T) {
 	}
 }
 
+func TestTerminalOperationsReturnTheirExactResponseBodies(t *testing.T) {
+	completeBody := `{"jobId":"job:complete","jobState":"succeeded","runAttemptId":"run:complete","runState":"succeeded"}`
+	failBody := `{"jobId":"job:fail","jobState":"failed","runAttemptId":"run:fail","runState":"failed"}`
+	client := testClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case runPathStart + "run:complete" + completePathEnd:
+			return jsonHTTPResponse(http.StatusOK, completeBody), nil
+		case runPathStart + "run:fail" + failPathEnd:
+			return jsonHTTPResponse(http.StatusOK, failBody), nil
+		default:
+			return nil, fmt.Errorf("unexpected path %s", request.URL.Path)
+		}
+	}), testLimits())
+
+	completed, err := client.CompleteRun(context.Background(), RunCompleteRequest{
+		RunAttemptID: "run:complete", Body: json.RawMessage(`{}`),
+	})
+	if err != nil || string(completed.Body) != completeBody {
+		t.Fatalf("CompleteRun returned (%s, %v)", completed.Body, err)
+	}
+	failed, err := client.FailRun(context.Background(), RunFailRequest{
+		RunAttemptID: "run:fail", Body: json.RawMessage(`{}`),
+	})
+	if err != nil || string(failed.Body) != failBody {
+		t.Fatalf("FailRun returned (%s, %v)", failed.Body, err)
+	}
+}
+
 func TestEntityIdentifiersAreValidatedBeforeSingleSegmentEscaping(t *testing.T) {
 	var calls atomic.Int32
 	client := testClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -299,7 +328,7 @@ func TestEntityIdentifiersAreValidatedBeforeSingleSegmentEscaping(t *testing.T) 
 		if !errors.Is(heartbeatError, ErrInvalidEntityID) {
 			t.Errorf("HeartbeatInstance accepted %q: %v", value, heartbeatError)
 		}
-		completeError := client.CompleteRun(context.Background(), RunCompleteRequest{
+		_, completeError := client.CompleteRun(context.Background(), RunCompleteRequest{
 			RunAttemptID: value,
 			Body:         json.RawMessage(`{}`),
 		})

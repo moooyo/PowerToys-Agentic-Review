@@ -146,6 +146,116 @@ func TestDecodeSigningDigestIsExactlyCanonical32Bytes(t *testing.T) {
 	}
 }
 
+func TestCompleteRunUsesItsDedicatedRequestBudget(t *testing.T) {
+	requestID := strings.Repeat("r", maximumIdentifierBytes)
+	runAttemptID := strings.Repeat("a", maximumIdentifierBytes)
+	bodyOverhead := len(`{"result":""}`)
+	body := map[string]any{
+		"result": strings.Repeat("x", MaximumRunCompletionRequestBodyBytes-bodyOverhead),
+	}
+	document := canonicalForTest(t, map[string]any{
+		"operation": OperationCompleteRun,
+		"payload": map[string]any{
+			"body": body, "runAttemptId": runAttemptID,
+		},
+		"protocolVersion": ProtocolVersion,
+		"requestId":       requestID,
+		"type":            "call",
+	})
+	if len(document) != MaximumRequestFrameBytes {
+		t.Fatalf("maximum completion frame has %d bytes, want %d", len(document), MaximumRequestFrameBytes)
+	}
+	message, err := DecodeMessage(document, RoleControl)
+	if err != nil {
+		t.Fatalf("maximum completion request was rejected: %v", err)
+	}
+	request := message.(CallRequest)
+	if len(request.Body) != MaximumRunCompletionRequestBodyBytes {
+		t.Fatalf("completion body has %d bytes", len(request.Body))
+	}
+
+	tooLargeBody := map[string]any{
+		"result": strings.Repeat("x", MaximumRunCompletionRequestBodyBytes-bodyOverhead+1),
+	}
+	tooLarge := canonicalForTest(t, map[string]any{
+		"operation": OperationCompleteRun,
+		"payload": map[string]any{
+			"body": tooLargeBody, "runAttemptId": "run:1",
+		},
+		"protocolVersion": ProtocolVersion,
+		"requestId":       "request:1",
+		"type":            "call",
+	})
+	if len(tooLarge) > MaximumRequestFrameBytes {
+		t.Fatal("body-boundary fixture exceeded the physical request limit")
+	}
+	_, err = DecodeMessage(tooLarge, RoleControl)
+	var protocolFailure *ProtocolError
+	if !errors.As(err, &protocolFailure) || protocolFailure.Code != "REQUEST_TOO_LARGE" {
+		t.Fatalf("oversized completion error = %v", err)
+	}
+}
+
+func TestNonCompletionMessagesRetainTheOneMiBFrameBudget(t *testing.T) {
+	largeBody := map[string]any{"value": strings.Repeat("x", MaximumFrameBytes)}
+	for _, operation := range []Operation{OperationRegister, OperationFailRun} {
+		payload := map[string]any{"body": largeBody}
+		if operation == OperationFailRun {
+			payload["runAttemptId"] = "run:1"
+		}
+		document := canonicalForTest(t, map[string]any{
+			"operation": operation, "payload": payload,
+			"protocolVersion": ProtocolVersion, "requestId": "request:1", "type": "call",
+		})
+		_, err := DecodeMessage(document, RoleControl)
+		var protocolFailure *ProtocolError
+		if !errors.As(err, &protocolFailure) || protocolFailure.Code != "REQUEST_TOO_LARGE" {
+			t.Errorf("%s oversized frame error = %v", operation, err)
+		}
+	}
+
+	cancel := canonicalForTest(t, map[string]any{
+		"padding":         strings.Repeat("x", MaximumFrameBytes),
+		"protocolVersion": ProtocolVersion,
+		"requestId":       "cancel:1",
+		"targetRequestId": "request:1",
+		"type":            "cancel",
+	})
+	_, err := DecodeMessage(cancel, RoleControl)
+	var protocolFailure *ProtocolError
+	if !errors.As(err, &protocolFailure) || protocolFailure.Code != "REQUEST_TOO_LARGE" {
+		t.Fatalf("oversized cancel error = %v", err)
+	}
+}
+
+func TestClaimSuccessSeparatesBodyAndFrameBudgets(t *testing.T) {
+	requestID := strings.Repeat("r", maximumIdentifierBytes)
+	bodyOverhead := len(`{"value":""}`)
+	body := json.RawMessage(`{"value":"` + strings.Repeat("x", MaximumClaimResponseBodyBytes-bodyOverhead) + `"}`)
+	document, err := marshalSuccessResponse(
+		requestID,
+		body,
+		MaximumClaimResponseBodyBytes,
+		MaximumClaimResponseFrameBytes,
+	)
+	if err != nil {
+		t.Fatalf("maximum claim response was rejected: %v", err)
+	}
+	if len(document) != MaximumClaimResponseFrameBytes {
+		t.Fatalf("maximum claim frame has %d bytes, want %d", len(document), MaximumClaimResponseFrameBytes)
+	}
+
+	tooLarge := append(bytes.Clone(body[:len(body)-2]), 'x', '"', '}')
+	if _, err := marshalSuccessResponse(
+		requestID,
+		tooLarge,
+		MaximumClaimResponseBodyBytes,
+		MaximumClaimResponseFrameBytes,
+	); !errors.Is(err, ErrInvalidHandlerResult) {
+		t.Fatalf("oversized claim body error = %v", err)
+	}
+}
+
 func TestResponsesAreCanonicalAndErrorsAreSanitized(t *testing.T) {
 	body := json.RawMessage(`{"value":1}`)
 	success, err := MarshalSuccessResponse("request:1", body, MaximumFrameBytes)

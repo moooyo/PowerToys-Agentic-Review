@@ -102,7 +102,7 @@ type errorBody struct {
 
 // DecodeMessage parses a canonical request and applies the role-specific operation allowlist.
 func DecodeMessage(document []byte, role Role) (Message, error) {
-	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+	value, err := ParseCanonicalJSON(document, MaximumRequestFrameBytes)
 	if err != nil {
 		return nil, protocolError("INVALID_CANONICAL_JSON", "Local RPC input is not canonical JSON.", "", err)
 	}
@@ -128,6 +128,9 @@ func DecodeMessage(document []byte, role Role) (Message, error) {
 	case "call":
 		return decodeCall(document, requestID)
 	case "cancel":
+		if len(document) > MaximumFrameBytes {
+			return nil, requestTooLargeError(requestID)
+		}
 		return decodeCancel(document, requestID)
 	default:
 		return nil, protocolError("UNKNOWN_MESSAGE_TYPE", "Local RPC message type is not supported.", requestID, ErrUnknownMessageType)
@@ -161,7 +164,7 @@ type digestPayload struct {
 }
 
 func decodeCall(document []byte, extractedRequestID string) (Message, error) {
-	if !hasExactObjectKeys(document, "operation", "payload", "protocolVersion", "requestId", "type") {
+	if !hasExactObjectKeys(document, MaximumRequestFrameBytes, "operation", "payload", "protocolVersion", "requestId", "type") {
 		return nil, protocolError("INVALID_MESSAGE", "Local RPC call shape is invalid.", extractedRequestID, ErrInvalidMessage)
 	}
 	var wire wireCall
@@ -174,23 +177,42 @@ func decodeCall(document []byte, extractedRequestID string) (Message, error) {
 	if err := validateRequestID(wire.RequestID); err != nil {
 		return nil, protocolError("INVALID_REQUEST_ID", "Local RPC requestId is invalid.", "", err)
 	}
+	maximumFrameBytes := MaximumFrameBytes
+	if wire.Operation == OperationCompleteRun {
+		maximumFrameBytes = MaximumRequestFrameBytes
+	}
+	if len(document) > maximumFrameBytes {
+		return nil, requestTooLargeError(wire.RequestID)
+	}
 	request := CallRequest{ID: wire.RequestID, Operation: wire.Operation}
 	switch wire.Operation {
 	case OperationRegister, OperationClaim:
-		if !hasExactObjectKeys(wire.Payload, "body") {
+		if !hasExactObjectKeys(wire.Payload, maximumFrameBytes, "body") {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		var payload bodyPayload
-		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+		if err := decodeExact(wire.Payload, &payload); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		if len(payload.Body) > MaximumFrameBytes {
+			return nil, requestTooLargeError(wire.RequestID)
+		}
+		if !isCanonicalJSONObject(payload.Body, MaximumFrameBytes) {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		request.Body = bytes.Clone(payload.Body)
 	case OperationInstanceHeartbeat:
-		if !hasExactObjectKeys(wire.Payload, "body", "workerInstanceId") {
+		if !hasExactObjectKeys(wire.Payload, maximumFrameBytes, "body", "workerInstanceId") {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		var payload heartbeatPayload
-		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+		if err := decodeExact(wire.Payload, &payload); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		if len(payload.Body) > MaximumFrameBytes {
+			return nil, requestTooLargeError(wire.RequestID)
+		}
+		if !isCanonicalJSONObject(payload.Body, MaximumFrameBytes) {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		if err := validateEntityID(payload.WorkerInstanceID); err != nil {
@@ -199,11 +221,21 @@ func decodeCall(document []byte, extractedRequestID string) (Message, error) {
 		request.Body = bytes.Clone(payload.Body)
 		request.WorkerInstanceID = payload.WorkerInstanceID
 	case OperationCompleteRun, OperationFailRun:
-		if !hasExactObjectKeys(wire.Payload, "body", "runAttemptId") {
+		if !hasExactObjectKeys(wire.Payload, maximumFrameBytes, "body", "runAttemptId") {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		var payload runPayload
-		if err := decodeExact(wire.Payload, &payload); err != nil || !isCanonicalJSONObject(payload.Body) {
+		if err := decodeExact(wire.Payload, &payload); err != nil {
+			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
+		}
+		maximumBodyBytes := MaximumFrameBytes
+		if wire.Operation == OperationCompleteRun {
+			maximumBodyBytes = MaximumRunCompletionRequestBodyBytes
+		}
+		if len(payload.Body) > maximumBodyBytes {
+			return nil, requestTooLargeError(wire.RequestID)
+		}
+		if !isCanonicalJSONObject(payload.Body, maximumBodyBytes) {
 			return nil, protocolError("INVALID_PAYLOAD", "Local RPC operation payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		if err := validateEntityID(payload.RunAttemptID); err != nil {
@@ -212,7 +244,7 @@ func decodeCall(document []byte, extractedRequestID string) (Message, error) {
 		request.Body = bytes.Clone(payload.Body)
 		request.RunAttemptID = payload.RunAttemptID
 	case OperationSignLocalDigest:
-		if !hasExactObjectKeys(wire.Payload, "digestSha256") {
+		if !hasExactObjectKeys(wire.Payload, maximumFrameBytes, "digestSha256") {
 			return nil, protocolError("INVALID_PAYLOAD", "Local signing payload is invalid.", wire.RequestID, ErrInvalidMessage)
 		}
 		var payload digestPayload
@@ -238,7 +270,7 @@ type wireCancel struct {
 }
 
 func decodeCancel(document []byte, extractedRequestID string) (Message, error) {
-	if !hasExactObjectKeys(document, "protocolVersion", "requestId", "targetRequestId", "type") {
+	if !hasExactObjectKeys(document, MaximumFrameBytes, "protocolVersion", "requestId", "targetRequestId", "type") {
 		return nil, protocolError("INVALID_MESSAGE", "Local RPC cancel shape is invalid.", extractedRequestID, ErrInvalidMessage)
 	}
 	var wire wireCancel
@@ -258,10 +290,19 @@ func decodeCancel(document []byte, extractedRequestID string) (Message, error) {
 }
 
 func MarshalSuccessResponse(requestID string, body json.RawMessage, maximumBytes int) ([]byte, error) {
+	return marshalSuccessResponse(requestID, body, maximumBytes, maximumBytes)
+}
+
+func marshalSuccessResponse(
+	requestID string,
+	body json.RawMessage,
+	bodyMaximumBytes int,
+	frameMaximumBytes int,
+) ([]byte, error) {
 	if err := validateRequestID(requestID); err != nil {
 		return nil, err
 	}
-	value, err := ParseCanonicalJSON(body, maximumBytes)
+	value, err := ParseCanonicalJSON(body, bodyMaximumBytes)
 	if err != nil {
 		return nil, ErrInvalidHandlerResult
 	}
@@ -274,7 +315,7 @@ func MarshalSuccessResponse(requestID string, body json.RawMessage, maximumBytes
 		"protocolVersion": ProtocolVersion,
 		"requestId":       requestID,
 		"type":            "response",
-	}, maximumBytes)
+	}, frameMaximumBytes)
 }
 
 func MarshalErrorResponse(requestID string, publicError errorBody) ([]byte, error) {
@@ -383,11 +424,11 @@ func decodeExact(document []byte, target any) error {
 	return nil
 }
 
-func isCanonicalJSONObject(document []byte) bool {
+func isCanonicalJSONObject(document []byte, maximumBytes int) bool {
 	if len(document) == 0 {
 		return false
 	}
-	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+	value, err := ParseCanonicalJSON(document, maximumBytes)
 	if err != nil {
 		return false
 	}
@@ -395,8 +436,8 @@ func isCanonicalJSONObject(document []byte) bool {
 	return ok
 }
 
-func hasExactObjectKeys(document []byte, expected ...string) bool {
-	value, err := ParseCanonicalJSON(document, MaximumFrameBytes)
+func hasExactObjectKeys(document []byte, maximumBytes int, expected ...string) bool {
+	value, err := ParseCanonicalJSON(document, maximumBytes)
 	if err != nil {
 		return false
 	}
@@ -410,6 +451,15 @@ func hasExactObjectKeys(document []byte, expected ...string) bool {
 		}
 	}
 	return true
+}
+
+func requestTooLargeError(requestID string) *ProtocolError {
+	return protocolError(
+		"REQUEST_TOO_LARGE",
+		"Local RPC request exceeds its byte limit.",
+		requestID,
+		ErrCanonicalJSONLimit,
+	)
 }
 
 func decodeDigest(value string) ([32]byte, error) {

@@ -61,6 +61,39 @@ func TestClaimResponseMaximumIsSeparate(t *testing.T) {
 	}
 }
 
+func TestDedicatedPhysicalFrameCeilings(t *testing.T) {
+	request := bytes.Repeat([]byte{'x'}, MaximumRequestFrameBytes)
+	var requestStream bytes.Buffer
+	if err := WriteFrame(&requestStream, request, MaximumRequestFrameBytes); err != nil {
+		t.Fatalf("maximum request frame was rejected: %v", err)
+	}
+	if _, err := ReadFrame(&requestStream, MaximumRequestFrameBytes); err != nil {
+		t.Fatalf("maximum request frame could not be read: %v", err)
+	}
+
+	prefix := make([]byte, framePrefixBytes)
+	binary.LittleEndian.PutUint32(prefix, uint32(MaximumRequestFrameBytes+1))
+	reader := &countingReader{reader: bytes.NewReader(prefix)}
+	if _, err := ReadFrame(reader, MaximumRequestFrameBytes); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("oversized request frame error = %v", err)
+	}
+	if reader.bytesRead != framePrefixBytes {
+		t.Fatal("oversized request frame allocated or consumed its payload")
+	}
+
+	claim := bytes.Repeat([]byte{'x'}, MaximumClaimResponseFrameBytes)
+	var claimStream bytes.Buffer
+	if err := WriteFrame(&claimStream, claim, MaximumClaimResponseFrameBytes); err != nil {
+		t.Fatalf("maximum claim frame was rejected: %v", err)
+	}
+	if _, err := ReadFrame(&claimStream, MaximumClaimResponseFrameBytes); err != nil {
+		t.Fatalf("maximum claim frame could not be read: %v", err)
+	}
+	if err := WriteFrame(io.Discard, append(claim, 'x'), MaximumClaimResponseFrameBytes); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("oversized claim frame error = %v", err)
+	}
+}
+
 type countingReader struct {
 	reader    io.Reader
 	bytesRead int
