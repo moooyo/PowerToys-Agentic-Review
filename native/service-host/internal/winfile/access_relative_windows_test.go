@@ -9,6 +9,28 @@ import (
 	"testing"
 )
 
+func TestAmbientSecurityModeAcceptsInheritedTemporaryDirectory(t *testing.T) {
+	path := t.TempDir()
+	directory, err := OpenDirectory(path, OpenOptions{
+		VolumeUse:    VolumeUseReadOnly,
+		SecurityMode: SecurityModeAmbientAncestor,
+	})
+	if err != nil {
+		t.Fatalf("OpenDirectory with ambient security returned an error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := directory.Close(); err != nil {
+			t.Errorf("close ambient directory: %v", err)
+		}
+	})
+	if directory.Evidence().SecurityMode != SecurityModeAmbientAncestor {
+		t.Fatalf("security mode = %d", directory.Evidence().SecurityMode)
+	}
+	if _, err := directory.ReinspectSecurity(); err != nil {
+		t.Fatalf("ReinspectSecurity with ambient mode returned an error: %v", err)
+	}
+}
+
 // TestProvisionedRelativeTraversal exercises the native RootDirectory path on
 // a fixture whose complete ancestor chain has protected DACLs. Windows test
 // jobs opt in by setting AGENTIC_REVIEW_WINFILE_FIXTURE to a canonical regular

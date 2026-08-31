@@ -13,26 +13,33 @@ import (
 
 // File owns a Windows file handle opened without write or delete sharing.
 type File struct {
-	mu       sync.Mutex
-	handle   windows.Handle
-	baseline objectSnapshot
-	evidence Evidence
-	closed   bool
+	mu          sync.Mutex
+	handle      windows.Handle
+	closeHandle func(windows.Handle) error
+	baseline    objectSnapshot
+	auxiliary   objectAuxiliarySnapshot
+	evidence    Evidence
+	closed      bool
 }
 
 // Directory owns a Windows directory handle opened without delete sharing.
 type Directory struct {
-	mu       sync.Mutex
-	handle   windows.Handle
-	baseline objectSnapshot
-	evidence Evidence
-	closed   bool
+	mu                 sync.Mutex
+	handle             windows.Handle
+	closeHandle        func(windows.Handle) error
+	baseline           objectSnapshot
+	auxiliary          objectAuxiliarySnapshot
+	evidence           Evidence
+	enumerationAllowed bool
+	closed             bool
 }
 
 type openedObject struct {
-	handle   windows.Handle
-	baseline objectSnapshot
-	evidence Evidence
+	handle             windows.Handle
+	baseline           objectSnapshot
+	auxiliary          objectAuxiliarySnapshot
+	evidence           Evidence
+	enumerationAllowed bool
 }
 
 // OpenFile opens and validates a regular, single-link file. The returned handle
@@ -43,9 +50,10 @@ func OpenFile(path string, options OpenOptions) (*File, error) {
 		return nil, err
 	}
 	return &File{
-		handle:   opened.handle,
-		baseline: opened.baseline,
-		evidence: opened.evidence,
+		handle:    opened.handle,
+		baseline:  opened.baseline,
+		auxiliary: opened.auxiliary,
+		evidence:  opened.evidence,
 	}, nil
 }
 
@@ -57,9 +65,11 @@ func OpenDirectory(path string, options OpenOptions) (*Directory, error) {
 		return nil, err
 	}
 	return &Directory{
-		handle:   opened.handle,
-		baseline: opened.baseline,
-		evidence: opened.evidence,
+		handle:             opened.handle,
+		baseline:           opened.baseline,
+		auxiliary:          opened.auxiliary,
+		evidence:           opened.evidence,
+		enumerationAllowed: opened.enumerationAllowed,
 	}, nil
 }
 
@@ -74,9 +84,9 @@ func ReadFile(path string, options ReadOptions) (ReadResult, error) {
 	}
 	data, readErr := file.ReadAll(options.MaximumBytes)
 	evidence := file.Evidence()
-	closeErr := file.Close()
+	closeErr := closeDiscardedObject("close validated file handle", file)
 	if readErr != nil || closeErr != nil {
-		return ReadResult{}, errors.Join(readErr, wrapCloseError(closeErr))
+		return ReadResult{}, errors.Join(readErr, closeErr)
 	}
 	return ReadResult{Data: data, Evidence: evidence}, nil
 }
@@ -88,8 +98,8 @@ func InspectDirectory(path string, options OpenOptions) (Evidence, error) {
 		return Evidence{}, err
 	}
 	evidence := directory.Evidence()
-	if err := directory.Close(); err != nil {
-		return Evidence{}, fmt.Errorf("close inspected directory: %w", err)
+	if err := closeDiscardedObject("close inspected directory", directory); err != nil {
+		return Evidence{}, err
 	}
 	return evidence, nil
 }
@@ -137,6 +147,13 @@ func (file *File) ReadAll(maximumBytes uint64) ([]byte, error) {
 	if err := compareSnapshots(file.baseline, before); err != nil {
 		return nil, fmt.Errorf("verify file before read: %w", err)
 	}
+	beforeAuxiliary, err := queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, uint64(before.standard.EndOfFile))
+	if err != nil {
+		return nil, fmt.Errorf("inspect file streams before read: %w", err)
+	}
+	if err := compareObjectAuxiliarySnapshots(file.auxiliary, beforeAuxiliary); err != nil {
+		return nil, fmt.Errorf("verify file streams before read: %w", err)
+	}
 	if uint64(before.standard.EndOfFile) > maximumBytes {
 		return nil, fmt.Errorf("%w: observed %d bytes", ErrTooLarge, before.standard.EndOfFile)
 	}
@@ -149,11 +166,22 @@ func (file *File) ReadAll(maximumBytes uint64) ([]byte, error) {
 	if inspectErr != nil {
 		inspectErr = fmt.Errorf("inspect file after read: %w", inspectErr)
 	}
-	if readErr != nil || inspectErr != nil {
-		return nil, errors.Join(wrapReadError(readErr), inspectErr)
+	var afterAuxiliary objectAuxiliarySnapshot
+	var auxiliaryErr error
+	if inspectErr == nil {
+		afterAuxiliary, auxiliaryErr = queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, uint64(after.standard.EndOfFile))
+		if auxiliaryErr != nil {
+			auxiliaryErr = fmt.Errorf("inspect file streams after read: %w", auxiliaryErr)
+		}
+	}
+	if readErr != nil || inspectErr != nil || auxiliaryErr != nil {
+		return nil, errors.Join(wrapReadError(readErr), inspectErr, auxiliaryErr)
 	}
 	if err := compareSnapshots(before, after); err != nil {
 		return nil, fmt.Errorf("verify stable file read: %w", err)
+	}
+	if err := compareObjectAuxiliarySnapshots(beforeAuxiliary, afterAuxiliary); err != nil {
+		return nil, fmt.Errorf("verify stable file streams during read: %w", err)
 	}
 	if uint64(len(data)) != uint64(after.standard.EndOfFile) {
 		return nil, fmt.Errorf(
@@ -164,6 +192,71 @@ func (file *File) ReadAll(maximumBytes uint64) ([]byte, error) {
 		)
 	}
 	return data, nil
+}
+
+// HashSHA256 streams the exact expected byte count from offset zero and checks
+// the retained file's identity, metadata, and stream set before and after.
+func (file *File) HashSHA256(options HashOptions) (HashResult, error) {
+	if file == nil {
+		return HashResult{}, ErrClosed
+	}
+	if err := validateHashOptions(options); err != nil {
+		return HashResult{}, err
+	}
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.closed || file.handle == 0 {
+		return HashResult{}, ErrClosed
+	}
+
+	before, err := querySnapshot(file.handle, ObjectKindFile)
+	if err != nil {
+		return HashResult{}, fmt.Errorf("inspect file before hashing: %w", err)
+	}
+	if err := compareSnapshots(file.baseline, before); err != nil {
+		return HashResult{}, fmt.Errorf("verify file before hashing: %w", err)
+	}
+	observedSize := uint64(before.standard.EndOfFile)
+	if observedSize > options.MaximumBytes {
+		return HashResult{}, fmt.Errorf("%w: observed %d bytes", ErrTooLarge, observedSize)
+	}
+	if observedSize != options.ExpectedSize {
+		return HashResult{}, fmt.Errorf("%w: observed %d bytes, expected %d", ErrSizeMismatch, observedSize, options.ExpectedSize)
+	}
+	beforeAuxiliary, err := queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, observedSize)
+	if err != nil {
+		return HashResult{}, fmt.Errorf("inspect file streams before hashing: %w", err)
+	}
+	if err := compareObjectAuxiliarySnapshots(file.auxiliary, beforeAuxiliary); err != nil {
+		return HashResult{}, fmt.Errorf("verify file streams before hashing: %w", err)
+	}
+	if _, err := windows.SetFilePointer(file.handle, 0, nil, windows.FILE_BEGIN); err != nil {
+		return HashResult{}, fmt.Errorf("rewind file handle before hashing: %w", err)
+	}
+
+	result, hashErr := hashExact(handleReader{handle: file.handle}, options)
+	after, inspectErr := querySnapshot(file.handle, ObjectKindFile)
+	if inspectErr != nil {
+		inspectErr = fmt.Errorf("inspect file after hashing: %w", inspectErr)
+	}
+	var afterAuxiliary objectAuxiliarySnapshot
+	var auxiliaryErr error
+	if inspectErr == nil {
+		afterAuxiliary, auxiliaryErr = queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, uint64(after.standard.EndOfFile))
+		if auxiliaryErr != nil {
+			auxiliaryErr = fmt.Errorf("inspect file streams after hashing: %w", auxiliaryErr)
+		}
+	}
+	if hashErr != nil || inspectErr != nil || auxiliaryErr != nil {
+		return HashResult{}, errors.Join(hashErr, inspectErr, auxiliaryErr)
+	}
+	if err := compareSnapshots(before, after); err != nil {
+		return HashResult{}, fmt.Errorf("verify stable file hashing: %w", err)
+	}
+	if err := compareObjectAuxiliarySnapshots(beforeAuxiliary, afterAuxiliary); err != nil {
+		return HashResult{}, fmt.Errorf("verify stable file streams during hashing: %w", err)
+	}
+	return result, nil
 }
 
 // VerifyUnchanged checks that the file still has the identity and metadata
@@ -181,7 +274,14 @@ func (file *File) VerifyUnchanged() error {
 	if err != nil {
 		return fmt.Errorf("reinspect file: %w", err)
 	}
-	return compareSnapshots(file.baseline, current)
+	if err := compareSnapshots(file.baseline, current); err != nil {
+		return err
+	}
+	auxiliary, err := queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, uint64(current.standard.EndOfFile))
+	if err != nil {
+		return err
+	}
+	return compareObjectAuxiliarySnapshots(file.auxiliary, auxiliary)
 }
 
 // VerifyUnchanged checks that the directory still has the identity and metadata
@@ -199,41 +299,148 @@ func (directory *Directory) VerifyUnchanged() error {
 	if err != nil {
 		return fmt.Errorf("reinspect directory: %w", err)
 	}
-	return compareSnapshots(directory.baseline, current)
+	if err := compareSnapshots(directory.baseline, current); err != nil {
+		return err
+	}
+	auxiliary, err := queryObjectAuxiliarySnapshot(directory.handle, ObjectKindDirectory, uint64(current.standard.EndOfFile))
+	if err != nil {
+		return err
+	}
+	return compareObjectAuxiliarySnapshots(directory.auxiliary, auxiliary)
 }
 
-// Close releases the file handle.
+// ReinspectDataStreams returns a detached stream snapshot after confirming it
+// still matches the retained file's opening snapshot.
+func (file *File) ReinspectDataStreams() ([]DataStream, error) {
+	if file == nil {
+		return nil, ErrClosed
+	}
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.closed || file.handle == 0 {
+		return nil, ErrClosed
+	}
+	current, err := querySnapshot(file.handle, ObjectKindFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := compareSnapshots(file.baseline, current); err != nil {
+		return nil, err
+	}
+	auxiliary, err := queryObjectAuxiliarySnapshot(file.handle, ObjectKindFile, uint64(current.standard.EndOfFile))
+	if err != nil {
+		return nil, err
+	}
+	if err := compareObjectAuxiliarySnapshots(file.auxiliary, auxiliary); err != nil {
+		return nil, err
+	}
+	return cloneDataStreams(auxiliary.streams), nil
+}
+
+// ReinspectDataStreams returns a detached stream snapshot after confirming it
+// still matches the retained directory's opening snapshot.
+func (directory *Directory) ReinspectDataStreams() ([]DataStream, error) {
+	if directory == nil {
+		return nil, ErrClosed
+	}
+	directory.mu.Lock()
+	defer directory.mu.Unlock()
+	if directory.closed || directory.handle == 0 {
+		return nil, ErrClosed
+	}
+	current, err := querySnapshot(directory.handle, ObjectKindDirectory)
+	if err != nil {
+		return nil, err
+	}
+	if err := compareSnapshots(directory.baseline, current); err != nil {
+		return nil, err
+	}
+	auxiliary, err := queryObjectAuxiliarySnapshot(directory.handle, ObjectKindDirectory, uint64(current.standard.EndOfFile))
+	if err != nil {
+		return nil, err
+	}
+	if err := compareObjectAuxiliarySnapshots(directory.auxiliary, auxiliary); err != nil {
+		return nil, err
+	}
+	return cloneDataStreams(auxiliary.streams), nil
+}
+
+// ReinspectCaseSensitivity confirms the retained directory remains compatible
+// with case-insensitive manifest path matching.
+func (directory *Directory) ReinspectCaseSensitivity() (bool, error) {
+	if directory == nil {
+		return false, ErrClosed
+	}
+	directory.mu.Lock()
+	defer directory.mu.Unlock()
+	if directory.closed || directory.handle == 0 {
+		return false, ErrClosed
+	}
+	current, err := querySnapshot(directory.handle, ObjectKindDirectory)
+	if err != nil {
+		return false, err
+	}
+	if err := compareSnapshots(directory.baseline, current); err != nil {
+		return false, err
+	}
+	caseSensitive, err := queryCaseSensitiveDirectory(directory.handle)
+	if err != nil {
+		return false, err
+	}
+	if caseSensitive != directory.auxiliary.caseSensitiveDirectory {
+		return false, ErrObjectChanged
+	}
+	return caseSensitive, nil
+}
+
+// Close permanently prevents new file operations and releases the handle. A
+// failed native close retains the handle only so a later Close can retry it.
 func (file *File) Close() error {
 	if file == nil {
 		return nil
 	}
 	file.mu.Lock()
 	defer file.mu.Unlock()
-	if file.closed || file.handle == 0 {
+	if file.handle == 0 {
 		file.closed = true
 		return nil
 	}
 	file.closed = true
 	handle := file.handle
+	closeHandle := file.closeHandle
+	if closeHandle == nil {
+		closeHandle = windows.CloseHandle
+	}
+	if err := closeHandle(handle); err != nil {
+		return err
+	}
 	file.handle = 0
-	return windows.CloseHandle(handle)
+	return nil
 }
 
-// Close releases the directory handle.
+// Close permanently prevents new directory operations and releases the handle.
+// A failed native close retains the handle only so a later Close can retry it.
 func (directory *Directory) Close() error {
 	if directory == nil {
 		return nil
 	}
 	directory.mu.Lock()
 	defer directory.mu.Unlock()
-	if directory.closed || directory.handle == 0 {
+	if directory.handle == 0 {
 		directory.closed = true
 		return nil
 	}
 	directory.closed = true
 	handle := directory.handle
+	closeHandle := directory.closeHandle
+	if closeHandle == nil {
+		closeHandle = windows.CloseHandle
+	}
+	if err := closeHandle(handle); err != nil {
+		return err
+	}
 	directory.handle = 0
-	return windows.CloseHandle(handle)
+	return nil
 }
 
 type handleReader struct {
@@ -262,9 +469,21 @@ func wrapReadError(err error) error {
 	return fmt.Errorf("read validated file handle: %w", err)
 }
 
-func wrapCloseError(err error) error {
-	if err == nil {
+type discardedObject interface {
+	Close() error
+}
+
+func closeDiscardedObject(operation string, object discardedObject) error {
+	if object == nil {
 		return nil
 	}
-	return fmt.Errorf("close validated file handle: %w", err)
+	var failures []error
+	for attempt := 1; attempt <= discardedHandleCloseAttempts; attempt++ {
+		if err := object.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("%s attempt %d: %w", operation, attempt, err))
+			continue
+		}
+		return errors.Join(failures...)
+	}
+	return errors.Join(failures...)
 }

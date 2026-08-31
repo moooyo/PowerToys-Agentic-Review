@@ -20,4 +20,26 @@ func TestNonWindowsOperationsFailClosed(t *testing.T) {
 	if _, err := InspectDirectory(`C:\safe`, OpenOptions{VolumeUse: VolumeUseReadOnly}); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("InspectDirectory returned the wrong error: %v", err)
 	}
+	file := &File{}
+	if _, err := file.HashSHA256(HashOptions{MaximumBytes: 1}); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("HashSHA256 returned the wrong error: %v", err)
+	}
+	if _, err := file.ReinspectDataStreams(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("file ReinspectDataStreams returned the wrong error: %v", err)
+	}
+	if _, err := file.VerifyAuthenticode(nil); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("VerifyAuthenticode returned the wrong error: %v", err)
+	}
+	directory := &Directory{}
+	if _, err := directory.Enumerate(DirectoryEnumerationOptions{
+		MaximumEntries: 1, MaximumNameUTF16Units: 1, MaximumTotalNameUTF16Units: 1,
+	}); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("Enumerate returned the wrong error: %v", err)
+	}
+	if _, err := directory.ReinspectDataStreams(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("directory ReinspectDataStreams returned the wrong error: %v", err)
+	}
+	if _, err := directory.ReinspectCaseSensitivity(); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("ReinspectCaseSensitivity returned the wrong error: %v", err)
+	}
 }

@@ -15,6 +15,9 @@ const (
 	fileReadOnlyVolume        uint32 = 0x00080000
 	driveTypeFixed            uint32 = 3
 	maximumWindowsPathUnits          = 32_767
+	securityDACLPresent       uint16 = 0x0004
+	securityDACLProtected     uint16 = 0x1000
+	securitySelfRelative      uint16 = 0x8000
 )
 
 type fileAttributeTagInfo struct {
@@ -67,6 +70,37 @@ func validateOpenRequest(path string, kind ObjectKind, options OpenOptions) erro
 	}
 	if options.VolumeUse != VolumeUseReadOnly && options.VolumeUse != VolumeUseWritable {
 		return fmt.Errorf("%w: volume use must be read-only or writable", ErrInvalidOptions)
+	}
+	if kind != ObjectKindDirectory && options.DirectoryEnumeration {
+		return fmt.Errorf("%w: directory enumeration access requires a directory", ErrInvalidOptions)
+	}
+	if options.SecurityMode != SecurityModeManaged && options.SecurityMode != SecurityModeAmbientAncestor {
+		return fmt.Errorf("%w: unknown security mode", ErrInvalidOptions)
+	}
+	if options.SecurityMode == SecurityModeAmbientAncestor && kind != ObjectKindDirectory {
+		return fmt.Errorf("%w: ambient ancestor security mode requires a directory", ErrInvalidOptions)
+	}
+	return nil
+}
+
+func validateSecurityDescriptorForMode(security SecurityDescriptorEvidence, mode SecurityMode) error {
+	if mode != SecurityModeManaged && mode != SecurityModeAmbientAncestor {
+		return fmt.Errorf("%w: unknown security mode", ErrInvalidOptions)
+	}
+	requiredControl := securityDACLPresent | securitySelfRelative
+	if security.OwnerSID == "" || security.GroupSID == "" ||
+		!security.DACLPresent || security.DACLNull ||
+		security.Control&requiredControl != requiredControl ||
+		len(security.SelfRelativeDescriptor) == 0 {
+		return fmt.Errorf("%w: security descriptor lacks a valid owner, group, or DACL", ErrUnsafeSecurityDescriptor)
+	}
+	protectedByControl := security.Control&securityDACLProtected != 0
+	if security.DACLProtected != protectedByControl {
+		return fmt.Errorf("%w: DACL protection evidence is inconsistent", ErrUnsafeSecurityDescriptor)
+	}
+	if mode == SecurityModeManaged && (!security.DACLProtected ||
+		security.OwnerDefaulted || security.GroupDefaulted || security.DACLDefaulted) {
+		return fmt.Errorf("%w: managed security must be protected and non-defaulted", ErrUnsafeSecurityDescriptor)
 	}
 	return nil
 }

@@ -25,9 +25,13 @@ func OpenTraversalRoot(path string, options OpenOptions) (result *Directory, err
 	if err != nil {
 		return nil, fmt.Errorf("encode traversal root: %w", err)
 	}
+	desiredAccess := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES | windows.FILE_TRAVERSE)
+	if options.DirectoryEnumeration {
+		desiredAccess |= windows.FILE_LIST_DIRECTORY
+	}
 	handle, err := windows.CreateFile(
 		pathPointer,
-		windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE,
+		desiredAccess,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -39,12 +43,14 @@ func OpenTraversalRoot(path string, options OpenOptions) (result *Directory, err
 	}
 	opened, err := inspectRelativeOpenHandle(handle, path, ObjectKindDirectory, options)
 	if err != nil {
-		return nil, errors.Join(err, wrapRejectedHandleClose(windows.CloseHandle(handle)))
+		return nil, errors.Join(err, closeDiscardedHandle(handle, "close rejected traversal root handle", windows.CloseHandle))
 	}
 	return &Directory{
-		handle:   opened.handle,
-		baseline: opened.baseline,
-		evidence: opened.evidence,
+		handle:             opened.handle,
+		baseline:           opened.baseline,
+		auxiliary:          opened.auxiliary,
+		evidence:           opened.evidence,
+		enumerationAllowed: opened.enumerationAllowed,
 	}, nil
 }
 
@@ -57,9 +63,11 @@ func (directory *Directory) OpenDirectoryComponent(component string, options Ope
 		return nil, err
 	}
 	return &Directory{
-		handle:   opened.handle,
-		baseline: opened.baseline,
-		evidence: opened.evidence,
+		handle:             opened.handle,
+		baseline:           opened.baseline,
+		auxiliary:          opened.auxiliary,
+		evidence:           opened.evidence,
+		enumerationAllowed: opened.enumerationAllowed,
 	}, nil
 }
 
@@ -71,9 +79,10 @@ func (directory *Directory) OpenFileComponent(component string, options OpenOpti
 		return nil, err
 	}
 	return &File{
-		handle:   opened.handle,
-		baseline: opened.baseline,
-		evidence: opened.evidence,
+		handle:    opened.handle,
+		baseline:  opened.baseline,
+		auxiliary: opened.auxiliary,
+		evidence:  opened.evidence,
 	}, nil
 }
 
@@ -124,6 +133,9 @@ func (directory *Directory) openComponent(
 		createOptions |= windows.FILE_NON_DIRECTORY_FILE
 	} else {
 		desiredAccess |= windows.FILE_TRAVERSE
+		if options.DirectoryEnumeration {
+			desiredAccess |= windows.FILE_LIST_DIRECTORY
+		}
 		shareMode |= windows.FILE_SHARE_WRITE
 		createOptions |= windows.FILE_DIRECTORY_FILE
 	}
@@ -146,7 +158,7 @@ func (directory *Directory) openComponent(
 	if ntErr != nil {
 		var closeErr error
 		if handle != 0 && handle != windows.InvalidHandle {
-			closeErr = wrapRejectedHandleClose(windows.CloseHandle(handle))
+			closeErr = closeDiscardedHandle(handle, "close failed relative-open handle", windows.CloseHandle)
 		}
 		return openedObject{}, errors.Join(
 			fmt.Errorf("NtCreateFile relative %s %q: %w", kind, component, ntErr),
@@ -155,7 +167,10 @@ func (directory *Directory) openComponent(
 	}
 	opened, err := inspectRelativeOpenHandle(handle, requestedPath, kind, options)
 	if err != nil {
-		return openedObject{}, errors.Join(err, wrapRejectedHandleClose(windows.CloseHandle(handle)))
+		return openedObject{}, errors.Join(
+			err,
+			closeDiscardedHandle(handle, "close rejected relative-open handle", windows.CloseHandle),
+		)
 	}
 	return opened, nil
 }
@@ -177,11 +192,15 @@ func inspectRelativeOpenHandle(
 	if err != nil {
 		return openedObject{}, fmt.Errorf("inspect relative %s: %w", kind, err)
 	}
+	beforeAuxiliary, err := queryObjectAuxiliarySnapshot(handle, kind, uint64(before.standard.EndOfFile))
+	if err != nil {
+		return openedObject{}, fmt.Errorf("inspect relative %s streams and case mode: %w", kind, err)
+	}
 	volume, err := inspectVolume(handle, requestedPath, options.VolumeUse)
 	if err != nil {
 		return openedObject{}, err
 	}
-	security, err := inspectSecurityDescriptor(handle)
+	security, err := inspectSecurityDescriptor(handle, options.SecurityMode)
 	if err != nil {
 		return openedObject{}, err
 	}
@@ -192,6 +211,13 @@ func inspectRelativeOpenHandle(
 	}
 	if err := compareSnapshots(before, after); err != nil {
 		return openedObject{}, fmt.Errorf("verify stable relative %s inspection: %w", kind, err)
+	}
+	afterAuxiliary, err := queryObjectAuxiliarySnapshot(handle, kind, uint64(after.standard.EndOfFile))
+	if err != nil {
+		return openedObject{}, fmt.Errorf("reinspect relative %s streams and case mode: %w", kind, err)
+	}
+	if err := compareObjectAuxiliarySnapshots(beforeAuxiliary, afterAuxiliary); err != nil {
+		return openedObject{}, fmt.Errorf("verify stable relative %s auxiliary inspection: %w", kind, err)
 	}
 	finalPathError := ""
 	if finalPathErr != nil {
@@ -213,10 +239,17 @@ func inspectRelativeOpenHandle(
 			FinalPathDiagnostic:          finalPath,
 			FinalPathDiagnosticError:     finalPathError,
 		},
-		Volume:   volume,
-		Security: security,
+		Volume:       volume,
+		SecurityMode: options.SecurityMode,
+		Security:     security,
 	}
-	return openedObject{handle: handle, baseline: after, evidence: evidence}, nil
+	return openedObject{
+		handle:             handle,
+		baseline:           after,
+		auxiliary:          afterAuxiliary,
+		evidence:           evidence,
+		enumerationAllowed: kind == ObjectKindDirectory && options.DirectoryEnumeration,
+	}, nil
 }
 
 // ReinspectSecurity reads a detached security descriptor from the retained
@@ -230,7 +263,7 @@ func (file *File) ReinspectSecurity() (SecurityDescriptorEvidence, error) {
 	if file.closed || file.handle == 0 {
 		return SecurityDescriptorEvidence{}, ErrClosed
 	}
-	return inspectSecurityDescriptor(file.handle)
+	return inspectSecurityDescriptor(file.handle, file.evidence.SecurityMode)
 }
 
 // ReinspectSecurity reads a detached security descriptor from the retained
@@ -244,5 +277,5 @@ func (directory *Directory) ReinspectSecurity() (SecurityDescriptorEvidence, err
 	if directory.closed || directory.handle == 0 {
 		return SecurityDescriptorEvidence{}, ErrClosed
 	}
-	return inspectSecurityDescriptor(directory.handle)
+	return inspectSecurityDescriptor(directory.handle, directory.evidence.SecurityMode)
 }

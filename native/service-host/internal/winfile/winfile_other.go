@@ -43,6 +43,31 @@ func (*File) ReadAll(uint64) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
+// HashSHA256 fails closed outside Windows.
+func (*File) HashSHA256(HashOptions) (HashResult, error) {
+	return HashResult{}, ErrUnsupportedPlatform
+}
+
+// Enumerate fails closed outside Windows.
+func (*Directory) Enumerate(DirectoryEnumerationOptions) (DirectoryEnumeration, error) {
+	return DirectoryEnumeration{}, ErrUnsupportedPlatform
+}
+
+// ReinspectDataStreams fails closed outside Windows.
+func (*File) ReinspectDataStreams() ([]DataStream, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+// ReinspectDataStreams fails closed outside Windows.
+func (*Directory) ReinspectDataStreams() ([]DataStream, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+// ReinspectCaseSensitivity fails closed outside Windows.
+func (*Directory) ReinspectCaseSensitivity() (bool, error) {
+	return false, ErrUnsupportedPlatform
+}
+
 // VerifyUnchanged fails closed outside Windows.
 func (*File) VerifyUnchanged() error {
 	return ErrUnsupportedPlatform

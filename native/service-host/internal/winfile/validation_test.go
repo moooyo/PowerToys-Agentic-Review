@@ -58,12 +58,77 @@ func TestValidateOpenAndReadOptions(t *testing.T) {
 	if err := validateOpenRequest(
 		`C:\safe\config.json`,
 		ObjectKindFile,
+		OpenOptions{VolumeUse: VolumeUseReadOnly, DirectoryEnumeration: true},
+	); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("file enumeration access returned the wrong error: %v", err)
+	}
+	if err := validateOpenRequest(
+		`C:\safe`,
+		ObjectKindDirectory,
+		OpenOptions{VolumeUse: VolumeUseReadOnly, SecurityMode: SecurityModeAmbientAncestor},
+	); err != nil {
+		t.Fatalf("ambient ancestor mode was rejected: %v", err)
+	}
+	if err := validateOpenRequest(
+		`C:\safe`,
+		ObjectKindDirectory,
+		OpenOptions{VolumeUse: VolumeUseReadOnly, SecurityMode: SecurityMode(255)},
+	); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("unknown security mode returned the wrong error: %v", err)
+	}
+	if err := validateOpenRequest(
+		`C:\safe\config.json`,
+		ObjectKindFile,
+		OpenOptions{VolumeUse: VolumeUseReadOnly, SecurityMode: SecurityModeAmbientAncestor},
+	); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("file ambient ancestor mode returned the wrong error: %v", err)
+	}
+	if err := validateOpenRequest(
+		`C:\safe\config.json`,
+		ObjectKindFile,
 		OpenOptions{},
 	); !errors.Is(err, ErrInvalidOptions) {
 		t.Fatalf("unknown volume use returned the wrong error: %v", err)
 	}
 	if err := validateReadOptions(ReadOptions{MaximumBytes: 0, VolumeUse: VolumeUseReadOnly}); !errors.Is(err, ErrInvalidOptions) {
 		t.Fatalf("zero read limit returned the wrong error: %v", err)
+	}
+}
+
+func TestValidateSecurityDescriptorForMode(t *testing.T) {
+	managed := SecurityDescriptorEvidence{
+		OwnerSID:               "S-1-5-18",
+		GroupSID:               "S-1-5-18",
+		DACLPresent:            true,
+		DACLProtected:          true,
+		Control:                securityDACLPresent | securityDACLProtected | securitySelfRelative,
+		SelfRelativeDescriptor: []byte{1},
+	}
+	if err := validateSecurityDescriptorForMode(managed, SecurityModeManaged); err != nil {
+		t.Fatalf("managed descriptor rejected: %v", err)
+	}
+
+	ambient := managed
+	ambient.OwnerDefaulted = true
+	ambient.GroupDefaulted = true
+	ambient.DACLDefaulted = true
+	ambient.DACLProtected = false
+	ambient.Control &^= securityDACLProtected
+	if err := validateSecurityDescriptorForMode(ambient, SecurityModeAmbientAncestor); err != nil {
+		t.Fatalf("ambient descriptor rejected: %v", err)
+	}
+	if err := validateSecurityDescriptorForMode(ambient, SecurityModeManaged); !errors.Is(err, ErrUnsafeSecurityDescriptor) {
+		t.Fatalf("managed mode accepted ambient descriptor: %v", err)
+	}
+
+	missingDACL := ambient
+	missingDACL.DACLPresent = false
+	missingDACL.Control &^= securityDACLPresent
+	if err := validateSecurityDescriptorForMode(missingDACL, SecurityModeAmbientAncestor); !errors.Is(err, ErrUnsafeSecurityDescriptor) {
+		t.Fatalf("ambient mode accepted missing DACL: %v", err)
+	}
+	if err := validateSecurityDescriptorForMode(managed, SecurityMode(255)); !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("unknown security mode returned %v", err)
 	}
 }
 
