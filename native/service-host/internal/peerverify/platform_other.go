@@ -2,8 +2,8 @@
 
 package peerverify
 
-// VerifyWindows fails closed outside Windows without observing the pipe or
-// opening any native resource.
+// VerifyWindows is the non-Windows form of the low-level preflight bridge. It
+// fails closed without observing the pipe or opening any native resource.
 func VerifyWindows(Options) (*Session, error) {
 	return nil, ErrUnsupportedPlatform
 }

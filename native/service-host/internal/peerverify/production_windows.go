@@ -16,10 +16,11 @@ const (
 	scmServiceOpenAccess = uint32(windows.SERVICE_QUERY_STATUS)
 )
 
-// VerifyWindows opens and retains the opposing service's WinSW wrapper from a
-// stable SCM observation, then verifies the named-pipe peer that is its direct
-// ServiceHost child. Native process and verifier implementations are fixed by
-// this package and cannot be supplied by the caller.
+// VerifyWindows is the low-level bridge called only by preflight's atomic peer
+// verification plan. It opens and retains the opposing service's WinSW
+// wrapper from a stable SCM observation, then verifies the named-pipe peer that
+// is its direct ServiceHost child. Native process and verifier implementations
+// are fixed by this package and cannot be supplied by the caller.
 func VerifyWindows(options Options) (*Session, error) {
 	return verifyWindowsEndpoint(options, options.PipeEndpoint, windowsVerificationPlatformImpl{})
 }

@@ -15,4 +15,9 @@
 // acquisition, and retains the resulting wrapper and pipe-peer process handles
 // in the returned Session. Production Authenticode verification is
 // handle-bound and accepts exactly one embedded primary signature.
+//
+// Options and VerifyWindows remain a low-level bridge rather than a type-sealed
+// API. A repository architecture test permits their production use only from
+// preflight's atomic plan. Moving the bridge behind an inverted package
+// boundary is deferred Tier-2 hardening.
 package peerverify

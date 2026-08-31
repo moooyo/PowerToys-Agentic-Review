@@ -210,10 +210,11 @@ type TokenVerifier interface {
 	VerifyToken(TokenSnapshot, string) (TokenEvidence, error)
 }
 
-// Options contains only independently verified expectations and the concrete
-// connected pipe endpoint for the production Windows peer-verification
-// boundary. The opposing service identity, pipe endpoint direction, and all
-// native verifier implementations are selected internally from Role.
+// Options is the low-level bridge input used only by preflight's atomic peer
+// verification plan. This Go type is not sealed; a repository architecture
+// test forbids production construction outside internal/preflight/peer_plan.go.
+// The opposing service identity, pipe endpoint direction, and all native
+// verifier implementations are selected internally from Role.
 type Options struct {
 	Role                                   config.Role
 	PipeEndpoint                           *winpipe.Endpoint

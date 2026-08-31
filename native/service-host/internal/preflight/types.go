@@ -40,7 +40,12 @@ const (
 	ErrorServiceBootstrap   ErrorCode = "PREFLIGHT_SERVICE_BOOTSTRAP_MISMATCH"
 )
 
-var ErrInvalidEvidence = errors.New("preflight evidence is invalid")
+var (
+	ErrInvalidEvidence = errors.New("preflight evidence is invalid")
+	// ErrPeerCleanupFatal requires immediate ServiceHost process termination;
+	// the rejected peer session remains retained until process exit.
+	ErrPeerCleanupFatal = errors.New("rejected peer session cleanup failed; the current ServiceHost process must exit")
+)
 
 type Error struct {
 	Code    ErrorCode
