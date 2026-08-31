@@ -5,6 +5,7 @@ package winprocess
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -277,6 +278,85 @@ func TestWindowsOverlappedTerminalClassification(t *testing.T) {
 		if completed, got := classifyOverlappedCompletion(err); completed || !errors.Is(got, err) {
 			t.Fatalf("unknown classification for %v = (%v, %v)", err, completed, got)
 		}
+	}
+}
+
+func TestWindowsStandardIOReadEOFNormalizationRequiresExactZeroBytePipeError(t *testing.T) {
+	stream := newWindowsStandardIOStream(windows.Handle(790), "test-stdout", true, false, time.Second)
+	cleanupFailure := errors.New("cleanup failed")
+	for _, pipeErr := range []error{
+		windows.ERROR_BROKEN_PIPE,
+		windows.ERROR_NO_DATA,
+		windows.ERROR_PIPE_NOT_CONNECTED,
+	} {
+		if normalized := stream.normalizeOperationError(pipeErr, true, 0); normalized != io.EOF {
+			t.Fatalf("exact zero-byte pipe error normalized to %v, want literal EOF", normalized)
+		}
+		for _, mutation := range []struct {
+			name        string
+			err         error
+			transferred uint32
+			preserved   error
+		}{
+			{name: "wrapped", err: fmt.Errorf("wrapped pipe error: %w", pipeErr), preserved: pipeErr},
+			{name: "joined", err: errors.Join(pipeErr), preserved: pipeErr},
+			{name: "cleanup", err: errors.Join(pipeErr, cleanupFailure), preserved: cleanupFailure},
+			{name: "transferred", err: pipeErr, transferred: 1, preserved: pipeErr},
+		} {
+			t.Run(mutation.name, func(t *testing.T) {
+				normalized := stream.normalizeOperationError(
+					mutation.err,
+					true,
+					mutation.transferred,
+				)
+				if normalized == io.EOF {
+					t.Fatal("mutated pipe failure normalized to literal EOF")
+				}
+				if !errors.Is(normalized, mutation.preserved) {
+					t.Fatalf("pipe failure was lost: %v", normalized)
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsStandardIOReadReturnsLiteralEOFOnlyAfterCleanLifecycle(t *testing.T) {
+	for _, pipeErr := range []error{
+		windows.ERROR_BROKEN_PIPE,
+		windows.ERROR_NO_DATA,
+		windows.ERROR_PIPE_NOT_CONNECTED,
+	} {
+		t.Run(pipeErr.Error(), func(t *testing.T) {
+			stream := newWindowsStandardIOStream(windows.Handle(795), "test-stdout", true, false, time.Second)
+			stream.createEvent = func(*windows.SecurityAttributes, uint32, uint32, *uint16) (windows.Handle, error) {
+				return windows.Handle(796), nil
+			}
+			stream.readFile = func(windows.Handle, []byte, *uint32, *windows.Overlapped) error {
+				return pipeErr
+			}
+			stream.closeHandle = func(windows.Handle) error { return nil }
+
+			if count, err := stream.ReadContext(context.Background(), make([]byte, 1)); count != 0 || err != io.EOF {
+				t.Fatalf("ReadContext = (%d, %T %v), want (0, literal EOF)", count, err, err)
+			}
+		})
+	}
+
+	cleanupFailure := errors.New("event cleanup failed")
+	quarantine := &processLifetimeQuarantine{}
+	stream := newWindowsStandardIOStream(windows.Handle(797), "test-stdout", true, false, time.Second)
+	stream.quarantine = quarantine
+	stream.createEvent = func(*windows.SecurityAttributes, uint32, uint32, *uint16) (windows.Handle, error) {
+		return windows.Handle(798), nil
+	}
+	stream.readFile = func(windows.Handle, []byte, *uint32, *windows.Overlapped) error {
+		return windows.ERROR_BROKEN_PIPE
+	}
+	stream.closeHandle = func(windows.Handle) error { return cleanupFailure }
+
+	count, err := stream.ReadContext(context.Background(), make([]byte, 1))
+	if count != 0 || err == io.EOF || !errors.Is(err, cleanupFailure) || !errors.Is(err, ErrLaunchCleanupFatal) {
+		t.Fatalf("ReadContext with lifecycle failure = (%d, %T %v)", count, err, err)
 	}
 }
 

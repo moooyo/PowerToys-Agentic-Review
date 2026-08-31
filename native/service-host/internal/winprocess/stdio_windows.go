@@ -323,7 +323,10 @@ func (s *windowsStandardIOStream) performOverlapped(
 		} else {
 			lifecycleErr = s.quarantineIncompleteOperation(operation, resultErr)
 		}
-		resultErr = errors.Join(resultErr, lifecycleErr)
+		// A literal EOF is valid only when operation cleanup also succeeds.
+		if lifecycleErr != nil {
+			resultErr = errors.Join(resultErr, lifecycleErr)
+		}
 	}()
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause
@@ -337,10 +340,14 @@ func (s *windowsStandardIOStream) performOverlapped(
 		completed, completionErr := s.completeOperation(operation)
 		operation.completed = completed
 		if !completed {
-			return 0, s.normalizeOperationError(completionErr, reading)
+			return 0, s.normalizeOperationError(completionErr, reading, operation.transferred)
 		}
 		count, countErr := publishCompletedStandardIO(operation, buffer, reading)
-		return count, errors.Join(s.normalizeOperationError(completionErr, reading), countErr)
+		operationErr := s.normalizeOperationError(completionErr, reading, operation.transferred)
+		if countErr != nil {
+			operationErr = errors.Join(operationErr, countErr)
+		}
+		return count, operationErr
 	}
 	if !errors.Is(startErr, windows.ERROR_IO_PENDING) {
 		if operation.forcedQuarantine.Load() {
@@ -349,7 +356,11 @@ func (s *windowsStandardIOStream) performOverlapped(
 		}
 		operation.completed = true
 		count, countErr := publishCompletedStandardIO(operation, buffer, reading)
-		return count, errors.Join(s.normalizeOperationError(startErr, reading), countErr)
+		operationErr := s.normalizeOperationError(startErr, reading, operation.transferred)
+		if countErr != nil {
+			operationErr = errors.Join(operationErr, countErr)
+		}
+		return count, operationErr
 	}
 
 	waitForSingleObject := s.waitForSingleObject
@@ -395,10 +406,14 @@ func (s *windowsStandardIOStream) performOverlapped(
 			completed, completionErr := s.completeOperation(operation)
 			operation.completed = completed
 			if !completed {
-				return 0, s.normalizeOperationError(completionErr, reading)
+				return 0, s.normalizeOperationError(completionErr, reading, operation.transferred)
 			}
 			count, countErr := publishCompletedStandardIO(operation, buffer, reading)
-			return count, errors.Join(s.normalizeOperationError(completionErr, reading), countErr)
+			operationErr := s.normalizeOperationError(completionErr, reading, operation.transferred)
+			if countErr != nil {
+				operationErr = errors.Join(operationErr, countErr)
+			}
+			return count, operationErr
 		case uint32(windows.WAIT_TIMEOUT):
 			continue
 		default:
@@ -670,16 +685,24 @@ func classifyOverlappedCompletion(err error) (bool, error) {
 	return false, err
 }
 
-func (s *windowsStandardIOStream) normalizeOperationError(err error, reading bool) error {
+func (s *windowsStandardIOStream) normalizeOperationError(
+	err error,
+	reading bool,
+	transferred uint32,
+) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
-		errors.Is(err, windows.ERROR_NO_DATA) ||
-		errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED) {
-		if reading {
-			return io.EOF
-		}
+	if reading && transferred == 0 &&
+		(err == windows.ERROR_BROKEN_PIPE ||
+			err == windows.ERROR_NO_DATA ||
+			err == windows.ERROR_PIPE_NOT_CONNECTED) {
+		return io.EOF
+	}
+	if !reading &&
+		(errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
+			errors.Is(err, windows.ERROR_NO_DATA) ||
+			errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED)) {
 		return io.ErrClosedPipe
 	}
 	if errors.Is(err, windows.ERROR_OPERATION_ABORTED) {

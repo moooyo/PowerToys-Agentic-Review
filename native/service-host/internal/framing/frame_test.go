@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -34,8 +35,36 @@ func TestReadFrameSupportsPartialAndCoalescedStreamReads(t *testing.T) {
 	if !bytes.Equal(readFirst.Bytes, first) || !bytes.Equal(readSecond.Bytes, second) {
 		t.Fatal("ReadFrame changed frame bytes")
 	}
-	if _, err := ReadFrame(reader, MaximumFrameBytes); !errors.Is(err, io.EOF) {
-		t.Fatalf("ReadFrame did not preserve clean EOF: %v", err)
+	if _, err := ReadFrame(reader, MaximumFrameBytes); err != io.EOF {
+		t.Fatalf("ReadFrame clean EOF = %T %v, want literal EOF", err, err)
+	}
+}
+
+func TestReadFrameCleanEOFRequiresLiteralZeroByteReaderEOF(t *testing.T) {
+	cleanupFailure := errors.New("cleanup failed")
+	for _, test := range []struct {
+		name      string
+		reader    io.Reader
+		wantClean bool
+	}{
+		{name: "literal", reader: terminalReader{err: io.EOF}, wantClean: true},
+		{name: "wrapped", reader: terminalReader{err: fmt.Errorf("wrapped EOF: %w", io.EOF)}},
+		{name: "joined", reader: terminalReader{err: errors.Join(io.EOF)}},
+		{name: "cleanup", reader: terminalReader{err: errors.Join(io.EOF, cleanupFailure)}},
+		{name: "partial", reader: terminalReader{count: 1, err: io.EOF}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ReadFrame(test.reader, MaximumFrameBytes)
+			if test.wantClean {
+				if err != io.EOF {
+					t.Fatalf("ReadFrame error = %T %v, want literal EOF", err, err)
+				}
+				return
+			}
+			if err == io.EOF || !errors.Is(err, ErrPartialFrame) || errors.Is(err, io.EOF) {
+				t.Fatalf("ReadFrame error = %v, want non-EOF ErrPartialFrame", err)
+			}
+		})
 	}
 }
 
@@ -132,6 +161,17 @@ func (r *oneByteReader) Read(value []byte) (int, error) {
 		value = value[:1]
 	}
 	return r.reader.Read(value)
+}
+
+type terminalReader struct {
+	count int
+	err   error
+}
+
+func (r terminalReader) Read(value []byte) (int, error) {
+	count := min(r.count, len(value))
+	clear(value[:count])
+	return count, r.err
 }
 
 type boundedWriter struct {

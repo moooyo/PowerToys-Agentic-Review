@@ -106,7 +106,9 @@ func ReadFrame(reader io.Reader, maximumFrameBytes uint32) (Frame, error) {
 	headerBytes := make([]byte, HeaderBytes)
 	read, err := io.ReadFull(reader, headerBytes)
 	if err != nil {
-		if errors.Is(err, io.EOF) && read == 0 {
+		// Wrapped EOF values can carry operation or cleanup failures and are not
+		// clean stream termination.
+		if err == io.EOF && read == 0 {
 			return Frame{}, io.EOF
 		}
 		return Frame{}, fmt.Errorf("%w: read header: %v", ErrPartialFrame, err)
