@@ -6,6 +6,14 @@ export const LOCAL_CANONICAL_JSON_MAXIMUM_DEPTH = 64;
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
+export type DeepReadonly<T> = T extends (...argumentsList: never[]) => unknown
+  ? T
+  : T extends readonly unknown[]
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
 export class CanonicalJsonError extends Error {
   public constructor(
     public readonly code:
@@ -40,6 +48,28 @@ export function createCanonicalJsonDocument(value: unknown): Readonly<CanonicalJ
 
 export function digestCanonicalJson(value: unknown): string {
   return createCanonicalJsonDocument(value).sha256;
+}
+
+/** Recursively freezes canonical JSON data, including children of an already-frozen parent. */
+export function deepFreezeJson<T>(value: T): DeepReadonly<T> {
+  return deepFreezeJsonValue(value, new WeakSet<object>());
+}
+
+function deepFreezeJsonValue<T>(value: T, seen: WeakSet<object>): DeepReadonly<T> {
+  if (value === null || typeof value !== "object") {
+    return value as DeepReadonly<T>;
+  }
+  if (seen.has(value)) {
+    return value as DeepReadonly<T>;
+  }
+  seen.add(value);
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    deepFreezeJsonValue(child, seen);
+  }
+  if (!Object.isFrozen(value)) {
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
 }
 
 export function parseCanonicalJson(bytes: Uint8Array, maximumBytes: number): unknown {

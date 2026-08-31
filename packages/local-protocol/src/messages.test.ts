@@ -46,8 +46,29 @@ function envelope(): ExecutorJobEnvelopeV1 {
   });
   const renderedPrompt = "Review this PowerToys change.";
   const canonicalSnapshotJson = serializeCanonicalJson({
-    body: "Pull request body",
-    labels: ["Area-PowerToysRun"],
+    projectionVersion: 1,
+    repository: {
+      githubRepositoryId: 184456251,
+      fullName: "microsoft/PowerToys",
+    },
+    resource: {
+      kind: "pull_request",
+      githubNodeId: "PR_kwDOAv9ZBc5-test",
+      number: 123,
+      title: "Improve PowerToys Run",
+      author: {
+        githubUserId: 42,
+        login: "contributor",
+        accountType: "user",
+        githubNodeId: "MDQ6VXNlcjQy",
+      },
+      revision: {
+        kind: "pull_request",
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+      },
+    },
+    body: { state: "complete", text: "Pull request body" },
   });
   return {
     envelopeVersion: 1,
@@ -296,6 +317,76 @@ describe("local protocol message schemas", () => {
     ).toThrowError(expect.objectContaining({ code: "MESSAGE_CONTEXT_MISMATCH" }));
   });
 
+  it("deeply freezes validated StartAttempt authority and execution data", () => {
+    const localEnvelope = envelope();
+    const start = {
+      ...attempt,
+      signedAuthorization: {
+        capability: capability(localEnvelope),
+        signature: "A".repeat(86),
+      },
+      executorEnvelope: localEnvelope,
+    };
+    const validated = validateLocalMessagePayload(
+      LocalMessageType.StartAttempt,
+      start,
+      runAttemptId,
+    ) as typeof start;
+
+    expect(Object.isFrozen(validated)).toBe(true);
+    expect(Object.isFrozen(validated.signedAuthorization.capability.resources)).toBe(true);
+    expect(Object.isFrozen(validated.signedAuthorization.capability.digests)).toBe(true);
+    expect(Object.isFrozen(validated.executorEnvelope.policy.allowedRecipeIds)).toBe(true);
+    expect(() => {
+      (validated.executorEnvelope.policy.allowedRecipeIds as string[]).push("changed");
+    }).toThrow();
+  });
+
+  it("requires the strict snapshot projection schema and matching outer identity", () => {
+    const original = envelope();
+    const projection = JSON.parse(original.resource.canonicalSnapshotJson) as Record<
+      string,
+      unknown
+    >;
+    for (const changedProjection of [
+      { ...projection, leaseToken: "must-not-cross" },
+      {
+        ...projection,
+        resource: {
+          ...(projection.resource as Record<string, unknown>),
+          title: "Different title",
+        },
+      },
+    ]) {
+      const canonicalSnapshotJson = serializeCanonicalJson(changedProjection);
+      const changedEnvelope: ExecutorJobEnvelopeV1 = {
+        ...original,
+        resource: {
+          ...original.resource,
+          canonicalSnapshotJson,
+          canonicalSnapshotSha256: sha256Hex(canonicalSnapshotJson),
+        },
+      };
+      const start = {
+        ...attempt,
+        signedAuthorization: {
+          capability: capability(changedEnvelope),
+          signature: "A".repeat(86),
+        },
+        executorEnvelope: changedEnvelope,
+      };
+      expect(() =>
+        validateLocalMessagePayload(LocalMessageType.StartAttempt, start, runAttemptId),
+      ).toThrowError(
+        expect.objectContaining({
+          code: Object.hasOwn(changedProjection, "leaseToken")
+            ? "MESSAGE_SCHEMA_INVALID"
+            : "MESSAGE_CONTEXT_MISMATCH",
+        }),
+      );
+    }
+  });
+
   it("maps malformed embedded JSON to the local message error boundary", () => {
     const localEnvelope = envelope();
     const start = {
@@ -342,6 +433,19 @@ describe("local protocol message schemas", () => {
   it("binds issue jobs to their revision digest without requiring Git commit IDs", () => {
     const base = envelope();
     const revisionDigest = hex("d");
+    const canonicalSnapshotJson = serializeCanonicalJson({
+      projectionVersion: 1,
+      repository: base.repository,
+      resource: {
+        kind: "issue",
+        githubNodeId: "I_kwDOAv9ZBc5-test",
+        number: 456,
+        title: "PowerToys issue",
+        author: base.resource.author,
+        revision: { kind: "issue", revisionDigest },
+      },
+      body: { state: "complete", text: "Issue body" },
+    });
     const issueEnvelope: ExecutorJobEnvelopeV1 = {
       ...base,
       jobKind: "issue_triage",
@@ -351,8 +455,8 @@ describe("local protocol message schemas", () => {
         number: 456,
         title: "PowerToys issue",
         author: base.resource.author,
-        canonicalSnapshotJson: base.resource.canonicalSnapshotJson,
-        canonicalSnapshotSha256: base.resource.canonicalSnapshotSha256,
+        canonicalSnapshotJson,
+        canonicalSnapshotSha256: sha256Hex(canonicalSnapshotJson),
         revisionDigest,
       },
     };

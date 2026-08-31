@@ -242,6 +242,11 @@ describe("execution capabilities", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     const keyId = deriveCapabilityKeyId(publicKey);
     const original = capability(keyId);
+    const verifiedOriginal = verifyExecutionCapability(
+      signExecutionCapability(original, privateKey),
+      publicKey,
+      context(keyId),
+    );
     const previousGrantSha256 = digestExecutionCapability(original);
     const grant = {
       renewalVersion: 1 as const,
@@ -275,10 +280,11 @@ describe("execution capabilities", () => {
       verifyRenewalGrant(signed, publicKey, {
         ...context(keyId),
         nowUnixMs: now + 31_000,
-        capability: original,
+        capability: verifiedOriginal,
         expectedPreviousGrantSha256: previousGrantSha256,
         expectedPreviousGrantSequence: 1,
         expectedGrantSequence: 2,
+        expectedPreviousServerHeartbeatSequence: -1,
       }),
     ).toEqual(grant);
     expect(digestRenewalGrant(grant)).toMatch(/^[a-f0-9]{64}$/u);
@@ -287,12 +293,104 @@ describe("execution capabilities", () => {
       verifyRenewalGrant(signed, publicKey, {
         ...context(keyId),
         nowUnixMs: now + 31_000,
-        capability: original,
+        capability: verifiedOriginal,
         expectedPreviousGrantSha256: previousGrantSha256,
         expectedPreviousGrantSequence: 1,
         expectedGrantSequence: 3,
+        expectedPreviousServerHeartbeatSequence: -1,
       }),
     ).toThrowError(expect.objectContaining({ code: "RENEWAL_SEQUENCE_INVALID" }));
+  });
+
+  it("accepts heartbeat sequence zero once and requires later renewals to advance", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const keyId = deriveCapabilityKeyId(publicKey);
+    const original = capability(keyId);
+    const verifiedOriginal = verifyExecutionCapability(
+      signExecutionCapability(original, privateKey),
+      publicKey,
+      context(keyId),
+    );
+    const previousGrantSha256 = digestExecutionCapability(original);
+    const grant = {
+      renewalVersion: 1 as const,
+      canonicalizationVersion: 1 as const,
+      signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
+      keyId,
+      audience: LOCAL_CAPABILITY_AUDIENCE,
+      renewalId: hex("8"),
+      capabilityId: original.capabilityId,
+      nonce: hex("9"),
+      workerNodeId: original.workerNodeId,
+      workerInstanceId: original.workerInstanceId,
+      executorBootId: original.executorBootId,
+      sessionId: original.sessionId,
+      attemptCorrelationId: original.attemptCorrelationId,
+      runAttemptId: original.runAttemptId,
+      jobId: original.jobId,
+      leaseGeneration: original.leaseGeneration,
+      grantSequence: 2,
+      previousGrantSequence: 1,
+      serverHeartbeatSequence: 0,
+      initialCapabilitySha256: previousGrantSha256,
+      previousGrantSha256,
+      issuedAtUnixMs: now + 1_000,
+      serverLeaseExpiresAtUnixMs: now + 90_000,
+      grantExpiresAtUnixMs: now + 30_000,
+      hardDeadlineUnixMs: original.hardDeadlineUnixMs,
+    };
+    const signed = signRenewalGrant(grant, privateKey);
+    expect(
+      verifyRenewalGrant(signed, publicKey, {
+        ...context(keyId),
+        nowUnixMs: now + 2_000,
+        capability: verifiedOriginal,
+        expectedPreviousGrantSha256: previousGrantSha256,
+        expectedPreviousGrantSequence: 1,
+        expectedGrantSequence: 2,
+        expectedPreviousServerHeartbeatSequence: -1,
+      }).serverHeartbeatSequence,
+    ).toBe(0);
+    expect(() =>
+      verifyRenewalGrant(signed, publicKey, {
+        ...context(keyId),
+        nowUnixMs: now + 2_000,
+        capability: verifiedOriginal,
+        expectedPreviousGrantSha256: previousGrantSha256,
+        expectedPreviousGrantSequence: 1,
+        expectedGrantSequence: 2,
+        expectedPreviousServerHeartbeatSequence: 0,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "RENEWAL_SEQUENCE_INVALID" }));
+  });
+
+  it("does not let allowed future clock skew extend receipt-to-expiry beyond 45 seconds", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const keyId = deriveCapabilityKeyId(publicKey);
+    const futureIssued = {
+      ...capability(keyId),
+      issuedAtUnixMs: now + 5_000,
+      grantExpiresAtUnixMs: now + 50_000,
+    };
+    const signed = signExecutionCapability(futureIssued, privateKey);
+
+    expect(() =>
+      verifyExecutionCapability(signed, publicKey, {
+        ...context(keyId),
+        nowUnixMs: now,
+        maximumClockSkewMs: 5_000,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_TIME_INVALID" }));
+  });
+
+  it("deeply freezes normalized execution capabilities", () => {
+    const validated = validateExecutionCapability(capability());
+    expect(Object.isFrozen(validated)).toBe(true);
+    expect(Object.isFrozen(validated.resources)).toBe(true);
+    expect(Object.isFrozen(validated.digests)).toBe(true);
+    expect(() => {
+      (validated.resources as { memoryBytes: string }).memoryBytes = "67108864";
+    }).toThrow();
   });
 
   it("rejects non-P256 and private/public key role confusion", () => {

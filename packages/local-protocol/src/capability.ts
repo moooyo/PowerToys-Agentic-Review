@@ -11,6 +11,8 @@ import { Value } from "@sinclair/typebox/value";
 
 import {
   createCanonicalJsonDocument,
+  type DeepReadonly,
+  deepFreezeJson,
   LOCAL_CANONICAL_JSON_VERSION,
   serializeCanonicalJson,
 } from "./canonical.js";
@@ -190,7 +192,7 @@ export const RenewalGrantV1Schema = Type.Object(
     leaseGeneration: SafePositiveIntegerSchema,
     grantSequence: SafePositiveIntegerSchema,
     previousGrantSequence: SafePositiveIntegerSchema,
-    serverHeartbeatSequence: SafePositiveIntegerSchema,
+    serverHeartbeatSequence: SafeNonNegativeIntegerSchema,
     initialCapabilitySha256: Sha256Schema,
     previousGrantSha256: Sha256Schema,
     issuedAtUnixMs: SafeNonNegativeIntegerSchema,
@@ -249,13 +251,38 @@ export interface CapabilityVerificationContext {
 }
 
 export interface RenewalVerificationContext extends CapabilityVerificationContext {
-  readonly capability: ExecutionCapabilityV1;
+  readonly capability: VerifiedExecutionCapability;
   readonly expectedPreviousGrantSha256: string;
   readonly expectedPreviousGrantSequence: number;
   readonly expectedGrantSequence: number;
+  readonly expectedPreviousServerHeartbeatSequence: number;
 }
 
-export function validateExecutionCapability(value: unknown): Readonly<ExecutionCapabilityV1> {
+declare const verifiedExecutionCapabilityBrand: unique symbol;
+declare const verifiedRenewalGrantBrand: unique symbol;
+
+export type VerifiedExecutionCapability = DeepReadonly<ExecutionCapabilityV1> & {
+  readonly [verifiedExecutionCapabilityBrand]: true;
+};
+
+export type VerifiedRenewalGrant = DeepReadonly<RenewalGrantV1> & {
+  readonly [verifiedRenewalGrantBrand]: true;
+};
+
+const verifiedExecutionCapabilities = new WeakSet<object>();
+const verifiedRenewalGrants = new WeakSet<object>();
+
+export function isVerifiedExecutionCapability(
+  value: unknown,
+): value is VerifiedExecutionCapability {
+  return typeof value === "object" && value !== null && verifiedExecutionCapabilities.has(value);
+}
+
+export function isVerifiedRenewalGrant(value: unknown): value is VerifiedRenewalGrant {
+  return typeof value === "object" && value !== null && verifiedRenewalGrants.has(value);
+}
+
+export function validateExecutionCapability(value: unknown): DeepReadonly<ExecutionCapabilityV1> {
   const capability = normalizeSchemaValue<ExecutionCapabilityV1>(
     value,
     ExecutionCapabilityV1Schema,
@@ -283,10 +310,10 @@ export function validateExecutionCapability(value: unknown): Readonly<ExecutionC
       "Capability replay identifiers must be independent.",
     );
   }
-  return Object.freeze(capability);
+  return deepFreezeJson(capability);
 }
 
-export function validateRenewalGrant(value: unknown): Readonly<RenewalGrantV1> {
+export function validateRenewalGrant(value: unknown): DeepReadonly<RenewalGrantV1> {
   const grant = normalizeSchemaValue<RenewalGrantV1>(
     value,
     RenewalGrantV1Schema,
@@ -306,7 +333,7 @@ export function validateRenewalGrant(value: unknown): Readonly<RenewalGrantV1> {
       "Renewal replay identifiers must be independent.",
     );
   }
-  return Object.freeze(grant);
+  return deepFreezeJson(grant);
 }
 
 export function serializeExecutionCapability(capability: unknown): string {
@@ -328,7 +355,7 @@ export function digestRenewalGrant(grant: unknown): string {
 export function signExecutionCapability(
   capabilityValue: unknown,
   privateKey: KeyObject,
-): Readonly<SignedExecutionCapabilityV1> {
+): DeepReadonly<SignedExecutionCapabilityV1> {
   const capability = validateExecutionCapability(capabilityValue);
   assertP256PrivateKey(privateKey);
   assertLocalAuthorityKeyIdMatches(capability.keyId, privateKey);
@@ -336,25 +363,25 @@ export function signExecutionCapability(
     createLocalAuthoritySigningBytes("ExecutionCapabilityV1", capability),
     privateKey,
   );
-  return Object.freeze({ capability, signature });
+  return deepFreezeJson({ capability, signature });
 }
 
 export function signRenewalGrant(
   grantValue: unknown,
   privateKey: KeyObject,
-): Readonly<SignedRenewalGrantV1> {
+): DeepReadonly<SignedRenewalGrantV1> {
   const grant = validateRenewalGrant(grantValue);
   assertP256PrivateKey(privateKey);
   assertLocalAuthorityKeyIdMatches(grant.keyId, privateKey);
   const signature = signLowS(createLocalAuthoritySigningBytes("RenewalGrantV1", grant), privateKey);
-  return Object.freeze({ grant, signature });
+  return deepFreezeJson({ grant, signature });
 }
 
 export function verifyExecutionCapability(
   signedValue: unknown,
   publicKey: KeyObject,
   context: CapabilityVerificationContext,
-): Readonly<ExecutionCapabilityV1> {
+): VerifiedExecutionCapability {
   const signed = normalizeSchemaValue<SignedExecutionCapabilityV1>(
     signedValue,
     SignedExecutionCapabilityV1Schema,
@@ -365,14 +392,15 @@ export function verifyExecutionCapability(
   assertLocalAuthorityKeyIdMatches(capability.keyId, publicKey);
   verifyLocalAuthoritySignature("ExecutionCapabilityV1", capability, signed.signature, publicKey);
   validateContext(capability, context);
-  return capability;
+  verifiedExecutionCapabilities.add(capability);
+  return capability as VerifiedExecutionCapability;
 }
 
 export function verifyRenewalGrant(
   signedValue: unknown,
   publicKey: KeyObject,
   context: RenewalVerificationContext,
-): Readonly<RenewalGrantV1> {
+): VerifiedRenewalGrant {
   const signed = normalizeSchemaValue<SignedRenewalGrantV1>(
     signedValue,
     SignedRenewalGrantV1Schema,
@@ -384,6 +412,12 @@ export function verifyRenewalGrant(
   verifyLocalAuthoritySignature("RenewalGrantV1", grant, signed.signature, publicKey);
   validateContext(grant, context);
   const capability = context.capability;
+  if (!isVerifiedExecutionCapability(capability)) {
+    throw capabilityError(
+      "CAPABILITY_CONTEXT_MISMATCH",
+      "Renewal verification requires an authenticated initial capability.",
+    );
+  }
   for (const key of [
     "capabilityId",
     "keyId",
@@ -410,6 +444,16 @@ export function verifyRenewalGrant(
   ) {
     throw capabilityError("RENEWAL_SEQUENCE_INVALID", "Renewal grant sequence is invalid.");
   }
+  if (
+    !Number.isSafeInteger(context.expectedPreviousServerHeartbeatSequence) ||
+    context.expectedPreviousServerHeartbeatSequence < -1 ||
+    grant.serverHeartbeatSequence <= context.expectedPreviousServerHeartbeatSequence
+  ) {
+    throw capabilityError(
+      "RENEWAL_SEQUENCE_INVALID",
+      "Renewal grant does not follow a fresh successful Server heartbeat.",
+    );
+  }
   if (!secureHexEqual(grant.previousGrantSha256, context.expectedPreviousGrantSha256)) {
     throw capabilityError("CAPABILITY_CONTEXT_MISMATCH", "Renewal grant chain digest is invalid.");
   }
@@ -419,7 +463,8 @@ export function verifyRenewalGrant(
       "Renewal grant does not bind the initial capability.",
     );
   }
-  return grant;
+  verifiedRenewalGrants.add(grant);
+  return grant as VerifiedRenewalGrant;
 }
 
 export function deriveCapabilityPublicKey(privateKey: KeyObject): KeyObject {
@@ -614,6 +659,12 @@ function validateContext(
   }
   if (value.grantExpiresAtUnixMs <= context.nowUnixMs) {
     throw capabilityError("CAPABILITY_EXPIRED", "Signed local authority has expired.");
+  }
+  if (value.grantExpiresAtUnixMs - context.nowUnixMs > LOCAL_GRANT_MAXIMUM_DURATION_MS) {
+    throw capabilityError(
+      "CAPABILITY_TIME_INVALID",
+      "Signed local authority exceeds the maximum receipt-to-expiry duration.",
+    );
   }
 }
 

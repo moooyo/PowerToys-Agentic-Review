@@ -1,15 +1,20 @@
 import { createHash, type Hash } from "node:crypto";
 
+import { createCanonicalJsonDocument, type DeepReadonly, deepFreezeJson } from "./canonical.js";
 import { LocalMessageType } from "./framing.js";
 import {
   type ArtifactChunkMessage,
   type ArtifactEndMessage,
   type ArtifactStartMessage,
+  type CompleteMessage,
+  type FailedMessage,
   LOCAL_ARTIFACT_MAXIMUM_BYTES,
   type LocalMessagePayload,
   LocalMessageValidationError,
   validateLocalMessagePayload,
 } from "./messages.js";
+
+declare const verifiedAttemptTerminalBrand: unique symbol;
 
 export interface VerifiedArtifact {
   readonly artifactId: string;
@@ -19,6 +24,29 @@ export interface VerifiedArtifact {
   readonly totalBytes: bigint;
   readonly sha256: string;
   readonly chunkCount: number;
+}
+
+export interface VerifiedAttemptCompletion {
+  readonly terminal: DeepReadonly<CompleteMessage>;
+  readonly terminalPayloadSha256: string;
+  readonly resultArtifact: DeepReadonly<VerifiedArtifact>;
+  readonly [verifiedAttemptTerminalBrand]: true;
+}
+
+export interface VerifiedAttemptFailure {
+  readonly terminal: DeepReadonly<FailedMessage>;
+  readonly terminalPayloadSha256: string;
+  readonly [verifiedAttemptTerminalBrand]: true;
+}
+
+export type VerifiedAttemptTerminal = DeepReadonly<
+  VerifiedAttemptCompletion | VerifiedAttemptFailure
+>;
+
+const verifiedAttemptTerminals = new WeakSet<object>();
+
+export function isVerifiedAttemptTerminal(value: unknown): value is VerifiedAttemptTerminal {
+  return typeof value === "object" && value !== null && verifiedAttemptTerminals.has(value);
 }
 
 interface ActiveArtifact {
@@ -45,6 +73,7 @@ export type ArtifactStreamContext = Readonly<
 
 export type ArtifactStreamVerifierOptions = ArtifactStreamContext & {
   readonly maximumArtifactBytes: bigint;
+  readonly expectedOutputSchemaSha256: string;
   readonly maximumArtifactCount?: number;
   readonly maximumConcurrentArtifacts?: number;
 };
@@ -59,7 +88,10 @@ export class ArtifactStreamProtocolError extends Error {
       | "ARTIFACT_SEQUENCE_INVALID"
       | "ARTIFACT_LENGTH_MISMATCH"
       | "ARTIFACT_DIGEST_MISMATCH"
-      | "ARTIFACT_STREAM_INCOMPLETE",
+      | "ARTIFACT_STREAM_INCOMPLETE"
+      | "ARTIFACT_TERMINAL_MISMATCH"
+      | "ARTIFACT_TERMINAL_REPLAYED"
+      | "ARTIFACT_ABORTED",
     message: string,
   ) {
     super(message);
@@ -72,9 +104,13 @@ export class ArtifactStreamVerifier {
   readonly #maximumArtifactBytes: bigint;
   readonly #maximumArtifactCount: number;
   readonly #maximumConcurrentArtifacts: number;
+  readonly #expectedOutputSchemaSha256: string;
   readonly #seenArtifactIds = new Set<string>();
   readonly #active = new Map<string, ActiveArtifact>();
+  readonly #completed = new Map<string, DeepReadonly<VerifiedArtifact>>();
   #reservedArtifactBytes = 0n;
+  #terminalAccepted = false;
+  #aborted = false;
 
   public constructor(options: ArtifactStreamVerifierOptions) {
     if (
@@ -84,6 +120,10 @@ export class ArtifactStreamVerifier {
       throw new RangeError("maximumArtifactBytes is outside the local protocol range");
     }
     this.#maximumArtifactBytes = options.maximumArtifactBytes;
+    if (!/^[a-f0-9]{64}$/u.test(options.expectedOutputSchemaSha256)) {
+      throw new TypeError("expectedOutputSchemaSha256 must be a lowercase SHA-256 digest");
+    }
+    this.#expectedOutputSchemaSha256 = options.expectedOutputSchemaSha256;
     this.#maximumArtifactCount = requireBoundedInteger(
       options.maximumArtifactCount ?? 64,
       1,
@@ -112,6 +152,7 @@ export class ArtifactStreamVerifier {
   }
 
   public start(value: unknown): Readonly<ArtifactStartMessage> {
+    this.#assertNotTerminal();
     const message = this.#validate(LocalMessageType.ArtifactStart, value) as ArtifactStartMessage;
     if (this.#seenArtifactIds.has(message.artifactId)) {
       throw artifactError("ARTIFACT_DUPLICATE", "Artifact identifier was already used.");
@@ -146,6 +187,7 @@ export class ArtifactStreamVerifier {
   }
 
   public acceptChunk(value: unknown): Buffer {
+    this.#assertNotTerminal();
     const message = this.#validate(LocalMessageType.ArtifactChunk, value) as ArtifactChunkMessage;
     const active = this.#requireActive(message.artifactId);
     if (
@@ -169,6 +211,7 @@ export class ArtifactStreamVerifier {
   }
 
   public end(value: unknown): Readonly<VerifiedArtifact> {
+    this.#assertNotTerminal();
     const message = this.#validate(LocalMessageType.ArtifactEnd, value) as ArtifactEndMessage;
     const active = this.#requireActive(message.artifactId);
     if (
@@ -191,7 +234,7 @@ export class ArtifactStreamVerifier {
       );
     }
     this.#active.delete(message.artifactId);
-    return Object.freeze({
+    const verified = deepFreezeJson({
       artifactId: message.artifactId,
       purpose: active.start.purpose,
       name: active.start.name,
@@ -200,9 +243,59 @@ export class ArtifactStreamVerifier {
       sha256: digest,
       chunkCount: active.nextChunkIndex,
     });
+    this.#completed.set(message.artifactId, verified);
+    return verified;
+  }
+
+  public acceptComplete(value: unknown): DeepReadonly<VerifiedAttemptCompletion> {
+    this.#assertNotTerminal();
+    this.assertComplete();
+    const terminal = this.#validate(
+      LocalMessageType.Complete,
+      value,
+    ) as DeepReadonly<CompleteMessage>;
+    const resultArtifacts = [...this.#completed.values()].filter(
+      (artifact) => artifact.purpose === "result",
+    );
+    const result = this.#completed.get(terminal.resultArtifactId);
+    if (
+      resultArtifacts.length !== 1 ||
+      result === undefined ||
+      result.purpose !== "result" ||
+      result.totalBytes !== BigInt(terminal.resultBytes) ||
+      result.sha256 !== terminal.resultSha256 ||
+      terminal.outputSchemaSha256 !== this.#expectedOutputSchemaSha256
+    ) {
+      throw artifactError(
+        "ARTIFACT_TERMINAL_MISMATCH",
+        "Completion does not bind the unique verified result artifact and output schema.",
+      );
+    }
+    const verified = deepFreezeJson({
+      terminal,
+      terminalPayloadSha256: createCanonicalJsonDocument(terminal).sha256,
+      resultArtifact: result,
+    }) as DeepReadonly<VerifiedAttemptCompletion>;
+    this.#terminalAccepted = true;
+    verifiedAttemptTerminals.add(verified);
+    return verified;
+  }
+
+  public acceptFailed(value: unknown): DeepReadonly<VerifiedAttemptFailure> {
+    this.#assertNotTerminal();
+    const terminal = this.#validate(LocalMessageType.Failed, value) as DeepReadonly<FailedMessage>;
+    this.#active.clear();
+    const verified = deepFreezeJson({
+      terminal,
+      terminalPayloadSha256: createCanonicalJsonDocument(terminal).sha256,
+    }) as DeepReadonly<VerifiedAttemptFailure>;
+    this.#terminalAccepted = true;
+    verifiedAttemptTerminals.add(verified);
+    return verified;
   }
 
   public assertComplete(): void {
+    this.#assertNotAborted();
     if (this.#active.size !== 0) {
       throw artifactError(
         "ARTIFACT_STREAM_INCOMPLETE",
@@ -212,11 +305,30 @@ export class ArtifactStreamVerifier {
   }
 
   public abort(): void {
+    if (this.#aborted) return;
+    this.#aborted = true;
     this.#active.clear();
+    this.#completed.clear();
   }
 
-  #validate(messageType: LocalMessageType, value: unknown): Readonly<LocalMessagePayload> {
-    let message: Readonly<LocalMessagePayload>;
+  #assertNotTerminal(): void {
+    this.#assertNotAborted();
+    if (this.#terminalAccepted) {
+      throw artifactError(
+        "ARTIFACT_TERMINAL_REPLAYED",
+        "Attempt output cannot change after a terminal message is accepted.",
+      );
+    }
+  }
+
+  #assertNotAborted(): void {
+    if (this.#aborted) {
+      throw artifactError("ARTIFACT_ABORTED", "Attempt output is permanently fenced after abort.");
+    }
+  }
+
+  #validate(messageType: LocalMessageType, value: unknown): DeepReadonly<LocalMessagePayload> {
+    let message: DeepReadonly<LocalMessagePayload>;
     try {
       message = validateLocalMessagePayload(messageType, value, this.#context.attemptCorrelationId);
     } catch (error) {

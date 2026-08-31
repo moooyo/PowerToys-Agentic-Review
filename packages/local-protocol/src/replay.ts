@@ -1,26 +1,36 @@
+import type { DeepReadonly } from "./canonical.js";
 import {
   digestExecutionCapability,
   digestRenewalGrant,
-  type ExecutionCapabilityV1,
-  type RenewalGrantV1,
-  validateExecutionCapability,
-  validateRenewalGrant,
+  isVerifiedExecutionCapability,
+  isVerifiedRenewalGrant,
+  type VerifiedExecutionCapability,
+  type VerifiedRenewalGrant,
 } from "./capability.js";
 
 interface AuthorityState {
-  readonly capability: Readonly<ExecutionCapabilityV1>;
+  readonly capability: VerifiedExecutionCapability;
   readonly initialCapabilitySha256: string;
   active: boolean;
   grantSequence: number;
   authorizationSha256: string;
   serverHeartbeatSequence: number;
+  fenceReason?: LocalAuthorityFenceReason;
 }
 
+export type LocalAuthorityFenceReason =
+  | "stale_revision"
+  | "lease_lost"
+  | "cancelled"
+  | "terminal"
+  | "shutdown";
+
 export interface ExpectedRenewalChain {
-  readonly capability: Readonly<ExecutionCapabilityV1>;
+  readonly capability: VerifiedExecutionCapability;
   readonly expectedPreviousGrantSha256: string;
   readonly expectedPreviousGrantSequence: number;
   readonly expectedGrantSequence: number;
+  readonly expectedPreviousServerHeartbeatSequence: number;
 }
 
 export class LocalAuthorityReplayError extends Error {
@@ -28,10 +38,12 @@ export class LocalAuthorityReplayError extends Error {
     public readonly code:
       | "REPLAY_CAPACITY_EXCEEDED"
       | "CAPABILITY_REPLAYED"
+      | "CAPABILITY_UNVERIFIED"
       | "ATTEMPT_REPLAYED"
       | "CAPABILITY_UNKNOWN"
       | "CAPABILITY_TERMINAL"
       | "RENEWAL_REPLAYED"
+      | "RENEWAL_UNVERIFIED"
       | "RENEWAL_CHAIN_INVALID"
       | "RENEWAL_CONTEXT_MISMATCH",
     message: string,
@@ -60,9 +72,15 @@ export class LocalAuthorityReplayGuard {
     this.#maximumCapabilities = maximumCapabilities;
   }
 
-  // Call only after verifyExecutionCapability succeeds for the authenticated session.
-  public reserveVerifiedCapability(value: unknown): Readonly<ExecutionCapabilityV1> {
-    const capability = validateExecutionCapability(value);
+  public reserveVerifiedCapability(
+    capability: VerifiedExecutionCapability,
+  ): VerifiedExecutionCapability {
+    if (!isVerifiedExecutionCapability(capability)) {
+      throw replayError(
+        "CAPABILITY_UNVERIFIED",
+        "Execution capability was not authenticated by this protocol runtime.",
+      );
+    }
     if (this.#states.has(capability.capabilityId)) {
       throw replayError("CAPABILITY_REPLAYED", "Execution capability was already observed.");
     }
@@ -92,12 +110,12 @@ export class LocalAuthorityReplayGuard {
       active: true,
       grantSequence: capability.grantSequence,
       authorizationSha256: digest,
-      serverHeartbeatSequence: 0,
+      serverHeartbeatSequence: -1,
     });
     return capability;
   }
 
-  public expectedRenewal(capabilityId: string): Readonly<ExpectedRenewalChain> {
+  public expectedRenewal(capabilityId: string): DeepReadonly<ExpectedRenewalChain> {
     const state = this.#requireActive(capabilityId);
     if (state.grantSequence >= Number.MAX_SAFE_INTEGER) {
       throw replayError("RENEWAL_CHAIN_INVALID", "Local grant sequence is exhausted.");
@@ -107,13 +125,19 @@ export class LocalAuthorityReplayGuard {
       expectedPreviousGrantSha256: state.authorizationSha256,
       expectedPreviousGrantSequence: state.grantSequence,
       expectedGrantSequence: state.grantSequence + 1,
+      expectedPreviousServerHeartbeatSequence: state.serverHeartbeatSequence,
     });
   }
 
-  // Call only after verifyRenewalGrant succeeds with expectedRenewal(). This synchronous commit is
-  // the replay reservation point and must precede extending the monotonic execution deadline.
-  public acceptVerifiedRenewal(value: unknown): Readonly<RenewalGrantV1> {
-    const grant = validateRenewalGrant(value);
+  // This synchronous commit is the replay reservation point and must precede extending the
+  // monotonic execution deadline.
+  public acceptVerifiedRenewal(grant: VerifiedRenewalGrant): VerifiedRenewalGrant {
+    if (!isVerifiedRenewalGrant(grant)) {
+      throw replayError(
+        "RENEWAL_UNVERIFIED",
+        "Renewal grant was not authenticated by this protocol runtime.",
+      );
+    }
     const state = this.#requireActive(grant.capabilityId);
     const capability = state.capability;
     if (
@@ -155,11 +179,17 @@ export class LocalAuthorityReplayGuard {
   }
 
   public markTerminal(capabilityId: string): void {
+    this.fence(capabilityId, "terminal");
+  }
+
+  /** Synchronously prevents every later renewal before asynchronous cancellation begins. */
+  public fence(capabilityId: string, reason: LocalAuthorityFenceReason): void {
     const state = this.#states.get(capabilityId);
     if (state === undefined) {
       throw replayError("CAPABILITY_UNKNOWN", "Execution capability was not reserved.");
     }
     state.active = false;
+    state.fenceReason = reason;
   }
 
   public isActive(capabilityId: string): boolean {
@@ -172,7 +202,10 @@ export class LocalAuthorityReplayGuard {
       throw replayError("CAPABILITY_UNKNOWN", "Execution capability was not reserved.");
     }
     if (!state.active) {
-      throw replayError("CAPABILITY_TERMINAL", "Terminal capability cannot be renewed or resumed.");
+      throw replayError(
+        "CAPABILITY_TERMINAL",
+        `Fenced capability cannot be renewed or resumed (${state.fenceReason ?? "unknown"}).`,
+      );
     }
     return state;
   }

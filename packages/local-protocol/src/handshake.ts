@@ -1,5 +1,10 @@
 import type { KeyObject } from "node:crypto";
-import { LOCAL_CANONICAL_JSON_VERSION, serializeCanonicalJson } from "./canonical.js";
+import {
+  type DeepReadonly,
+  deepFreezeJson,
+  LOCAL_CANONICAL_JSON_VERSION,
+  serializeCanonicalJson,
+} from "./canonical.js";
 import {
   assertLocalAuthorityKeyIdMatches,
   createLocalAuthoritySigningBytes,
@@ -27,7 +32,7 @@ import {
 
 declare const verifiedHandshakeTranscriptBrand: unique symbol;
 
-export type VerifiedHandshakeTranscriptV1 = Readonly<HandshakeTranscriptV1> & {
+export type VerifiedHandshakeTranscriptV1 = DeepReadonly<HandshakeTranscriptV1> & {
   readonly [verifiedHandshakeTranscriptBrand]: true;
 };
 
@@ -183,7 +188,7 @@ export function verifySignedHandshakeProofV1(
     );
   }
 
-  const verified = deepFreeze(transcript) as VerifiedHandshakeTranscriptV1;
+  const verified = deepFreezeJson(transcript) as VerifiedHandshakeTranscriptV1;
   verifiedTranscripts.add(verified);
   return verified;
 }
@@ -235,12 +240,12 @@ export function validateReadyAfterHandshakeProofV1(
       "Ready message does not match the verified handshake transcript.",
     );
   }
-  return deepFreeze(ready);
+  return deepFreezeJson(ready);
 }
 
-function validatePeerMessage<T>(messageType: LocalMessageType, value: unknown): Readonly<T> {
+function validatePeerMessage<T>(messageType: LocalMessageType, value: unknown): DeepReadonly<T> {
   try {
-    return deepFreeze(
+    return deepFreezeJson(
       validateLocalMessagePayload(
         messageType,
         value,
@@ -252,17 +257,17 @@ function validatePeerMessage<T>(messageType: LocalMessageType, value: unknown): 
   }
 }
 
-function normalizeTranscript(value: unknown): Readonly<HandshakeTranscriptV1> {
+function normalizeTranscript(value: unknown): DeepReadonly<HandshakeTranscriptV1> {
   try {
-    return deepFreeze(validateHandshakeTranscriptV1(value));
+    return deepFreezeJson(validateHandshakeTranscriptV1(value));
   } catch (error) {
     throw mapMessageError(error);
   }
 }
 
-function normalizeSignedProof(value: unknown): Readonly<SignedHandshakeProofV1> {
+function normalizeSignedProof(value: unknown): DeepReadonly<SignedHandshakeProofV1> {
   try {
-    return deepFreeze(validateSignedHandshakeProofV1(value));
+    return deepFreezeJson(validateSignedHandshakeProofV1(value));
   } catch (error) {
     throw mapMessageError(error);
   }
@@ -274,16 +279,6 @@ function mapMessageError(error: unknown): LocalHandshakeProofError {
       ? "HANDSHAKE_CONTEXT_MISMATCH"
       : "HANDSHAKE_SCHEMA_INVALID";
   return handshakeError(code, "Handshake data is invalid.", error);
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object") {
-    for (const child of Object.values(value as Record<string, unknown>)) {
-      deepFreeze(child);
-    }
-    if (!Object.isFrozen(value)) Object.freeze(value);
-  }
-  return value;
 }
 
 function handshakeError(

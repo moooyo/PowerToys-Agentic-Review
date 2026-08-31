@@ -2,17 +2,24 @@ import type { JobExecutionEnvelope } from "@agentic-review/contracts";
 import { JobExecutionEnvelopeSchema } from "@agentic-review/contracts";
 import {
   createCanonicalJsonDocument,
+  type DeepReadonly,
+  deepFreezeJson,
   digestExecutorJobEnvelope,
   type ExecutorJobEnvelopeV1,
+  LOCAL_SNAPSHOT_PROJECTION_VERSION,
+  LOCAL_SNAPSHOT_TRUNCATION_MARKER,
   LOCAL_START_ENVELOPE_MAXIMUM_UTF8_BYTES,
   LOCAL_START_PROMPT_MAXIMUM_UTF8_BYTES,
   LOCAL_START_SCHEMA_MAXIMUM_UTF8_BYTES,
   LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES,
+  type LocalSnapshotProjectionV1,
   serializeCanonicalJson,
   sha256Hex,
 } from "@agentic-review/local-protocol";
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+
+export type { DeepReadonly, LocalSnapshotProjectionV1 } from "@agentic-review/local-protocol";
 
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const localPriorityMinimum = -1_000_000;
@@ -24,45 +31,13 @@ const localMaxCodexTurnsMaximum = 128;
 const localRepositoryPattern = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
 const localRecipeIdPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
 const localCapabilityLabelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
-
-export const LOCAL_SNAPSHOT_PROJECTION_VERSION = 1 as const;
-
-export type DeepReadonly<T> = T extends (...argumentsList: never[]) => unknown
-  ? T
-  : T extends readonly (infer Item)[]
-    ? readonly DeepReadonly<Item>[]
-    : T extends object
-      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
-      : T;
+const serverPromptTruncationMetadataPattern =
+  /\[UNTRUSTED_BODY_TRUNCATED originalUtf16Length=(?:0|[1-9][0-9]*) originalUtf8Bytes=(?:0|[1-9][0-9]*) sha256=[a-f0-9]{64}\]/gu;
+const localPromptTruncationMarker = LOCAL_SNAPSHOT_TRUNCATION_MARKER.slice(1);
 
 export type SanitizedExecutorJobEnvelopeV1 = DeepReadonly<ExecutorJobEnvelopeV1>;
 
-export type LocalSnapshotProjectionBodyV1 =
-  | { readonly state: "absent" }
-  | { readonly state: "null" }
-  | {
-      readonly state: "complete" | "truncated";
-      readonly text: string;
-    };
-
-export interface LocalSnapshotProjectionV1 {
-  readonly projectionVersion: typeof LOCAL_SNAPSHOT_PROJECTION_VERSION;
-  readonly repository: {
-    readonly githubRepositoryId: number;
-    readonly fullName: string;
-  };
-  readonly resource: {
-    readonly kind: "issue" | "pull_request";
-    readonly githubNodeId: string;
-    readonly number: number;
-    readonly title: string;
-    readonly author: DeepReadonly<ExecutorJobEnvelopeV1["resource"]["author"]>;
-    readonly revision:
-      | { readonly kind: "issue"; readonly revisionDigest: string }
-      | { readonly kind: "pull_request"; readonly baseSha: string; readonly headSha: string };
-  };
-  readonly body: LocalSnapshotProjectionBodyV1;
-}
+export type LocalSnapshotProjectionBodyV1 = LocalSnapshotProjectionV1["body"];
 
 declare const preparedLocalExecutionStartBrand: unique symbol;
 
@@ -73,12 +48,20 @@ export interface PreparedLocalExecutionStart {
   readonly [preparedLocalExecutionStartBrand]: true;
 }
 
+export interface LocalExecutionClaimTiming {
+  readonly observedAtMonotonicMilliseconds: number;
+  readonly remainingLeaseMilliseconds: number;
+  readonly remainingHardDeadlineMilliseconds: number;
+}
+
 export interface LocalExecutionAuthorityBasis {
+  readonly authorityBasisVersion: 2;
   readonly workerNodeId: string;
   readonly workerInstanceId: string;
   readonly leaseGeneration: number;
-  readonly serverLeaseExpiresAtUnixMs: number;
-  readonly hardDeadlineUnixMs: number;
+  readonly observedAtMonotonicMilliseconds: number;
+  readonly remainingLeaseMilliseconds: number;
+  readonly remainingHardDeadlineMilliseconds: number;
 }
 
 export type LocalExecutionBoundaryErrorCode =
@@ -130,17 +113,21 @@ registerContractFormats();
 export function prepareLocalExecutionStart(
   serverEnvelope: JobExecutionEnvelope,
   attemptCorrelationId: string,
+  timing: LocalExecutionClaimTiming,
 ): PreparedLocalExecutionStart {
   const executorEnvelope = createExecutorJobEnvelopeV1(serverEnvelope, attemptCorrelationId);
-  const authorityBasis = createAuthorityBasis(serverEnvelope);
-  return deepFreeze({
+  const authorityBasis = createAuthorityBasis(serverEnvelope, timing);
+  return deepFreezeJson({
     attemptCorrelationId,
     authorityBasis,
     executorEnvelope,
   }) as PreparedLocalExecutionStart;
 }
 
-function createAuthorityBasis(envelope: JobExecutionEnvelope): LocalExecutionAuthorityBasis {
+function createAuthorityBasis(
+  envelope: JobExecutionEnvelope,
+  timing: LocalExecutionClaimTiming,
+): LocalExecutionAuthorityBasis {
   if (!Number.isSafeInteger(envelope.lease.leaseGeneration) || envelope.lease.leaseGeneration < 1) {
     throw boundaryError(
       "LEASE_GENERATION_INVALID",
@@ -166,13 +153,68 @@ function createAuthorityBasis(envelope: JobExecutionEnvelope): LocalExecutionAut
       "Server lease and execution deadline timestamps are inconsistent.",
     );
   }
+  let observedAtMonotonicMilliseconds: number;
+  let remainingLeaseMilliseconds: number;
+  let remainingHardDeadlineMilliseconds: number;
+  try {
+    observedAtMonotonicMilliseconds = normalizeLocalMonotonicObservationMilliseconds(
+      timing.observedAtMonotonicMilliseconds,
+    );
+    remainingLeaseMilliseconds = normalizeLocalRemainingBudgetMilliseconds(
+      timing.remainingLeaseMilliseconds,
+    );
+    remainingHardDeadlineMilliseconds = normalizeLocalRemainingBudgetMilliseconds(
+      timing.remainingHardDeadlineMilliseconds,
+    );
+  } catch (error) {
+    throw boundaryError(
+      "LEASE_TIME_INVALID",
+      "Conservative local lease and hard-deadline timing evidence is invalid.",
+      error,
+    );
+  }
+  if (
+    remainingLeaseMilliseconds > remainingHardDeadlineMilliseconds ||
+    remainingLeaseMilliseconds > serverLeaseExpiresAtUnixMs - assignedAtUnixMs ||
+    remainingHardDeadlineMilliseconds > hardDeadlineUnixMs - assignedAtUnixMs ||
+    remainingHardDeadlineMilliseconds > envelope.executionPolicy.hardTimeoutMs
+  ) {
+    throw boundaryError(
+      "LEASE_TIME_INVALID",
+      "Conservative local lease and hard-deadline timing evidence is invalid.",
+    );
+  }
   return {
+    authorityBasisVersion: 2,
     workerNodeId: envelope.lease.workerNodeId,
     workerInstanceId: envelope.lease.workerInstanceId,
     leaseGeneration: envelope.lease.leaseGeneration,
-    serverLeaseExpiresAtUnixMs,
-    hardDeadlineUnixMs,
+    observedAtMonotonicMilliseconds,
+    remainingLeaseMilliseconds,
+    remainingHardDeadlineMilliseconds,
   };
+}
+
+export function normalizeLocalMonotonicObservationMilliseconds(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Monotonic observation is outside the supported range.");
+  }
+  const normalized = Math.ceil(value);
+  if (!Number.isSafeInteger(normalized)) {
+    throw new RangeError("Monotonic observation is outside the supported range.");
+  }
+  return normalized;
+}
+
+export function normalizeLocalRemainingBudgetMilliseconds(value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Remaining monotonic budget is outside the supported range.");
+  }
+  const normalized = Math.floor(value);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) {
+    throw new RangeError("Remaining monotonic budget is outside the supported range.");
+  }
+  return normalized;
 }
 
 function parseServerTimestamp(value: string, name: string): number {
@@ -200,11 +242,11 @@ function createExecutorJobEnvelopeV1(
   assertIndependentAttemptCorrelationId(attemptCorrelationId, serverEnvelope);
   assertServerEnvelopeConsistency(serverEnvelope);
 
-  const originalSnapshot = canonicalDocument(
+  const originalSnapshotJson = canonicalJson(
     serverEnvelope.resource.canonicalSnapshot,
     "canonical snapshot",
   );
-  const normalizedSnapshot = JSON.parse(originalSnapshot.json) as unknown;
+  const normalizedSnapshot = JSON.parse(originalSnapshotJson) as unknown;
   assertSnapshotIdentity(serverEnvelope, normalizedSnapshot);
 
   const outputSchema = canonicalDocument(serverEnvelope.prompt.outputSchema, "output schema");
@@ -215,8 +257,8 @@ function createExecutorJobEnvelopeV1(
     "Output schema",
   );
 
-  const promptSha256 = sha256Hex(serverEnvelope.prompt.renderedPrompt);
-  if (promptSha256 !== serverEnvelope.prompt.promptSha256) {
+  const serverPromptSha256 = sha256Hex(serverEnvelope.prompt.renderedPrompt);
+  if (serverPromptSha256 !== serverEnvelope.prompt.promptSha256) {
     throw boundaryError(
       "PROMPT_DIGEST_MISMATCH",
       "Rendered prompt digest does not match the Server envelope.",
@@ -234,11 +276,20 @@ function createExecutorJobEnvelopeV1(
     "PROMPT_LIMIT_EXCEEDED",
     "Rendered prompt",
   );
+  const renderedPrompt = sanitizeRenderedPrompt(serverEnvelope.prompt.renderedPrompt);
+  const promptSha256 = sha256Hex(renderedPrompt);
 
   const candidateFactory = (body: LocalSnapshotProjectionBodyV1): SnapshotCandidate => {
-    const projection = createSnapshotProjection(serverEnvelope, body);
+    const projection = createSnapshotProjection(serverEnvelope, attemptCorrelationId, body);
     const document = canonicalDocument(projection, "snapshot projection");
-    const envelope = buildExecutorEnvelope(serverEnvelope, document, outputSchema, promptSha256);
+    const envelope = buildExecutorEnvelope(
+      serverEnvelope,
+      attemptCorrelationId,
+      document,
+      outputSchema,
+      renderedPrompt,
+      promptSha256,
+    );
     let envelopeJson: string;
     try {
       envelopeJson = serializeCanonicalJson(envelope);
@@ -262,7 +313,7 @@ function createExecutorJobEnvelopeV1(
       error,
     );
   }
-  return deepFreeze(selected.envelope);
+  return deepFreezeJson(selected.envelope);
 }
 
 function selectSnapshotProjection(
@@ -293,11 +344,10 @@ function selectSnapshotProjection(
     return completeCandidate;
   }
 
-  const marker = "\n[UNTRUSTED_BODY_TRUNCATED]";
   const truncatedCandidate = (end: number): SnapshotCandidate =>
     createCandidate({
       state: "truncated",
-      text: `${body.slice(0, end)}${marker}`,
+      text: `${body.slice(0, end)}${LOCAL_SNAPSHOT_TRUNCATION_MARKER}`,
     });
   const boundaries = unicodeCodePointBoundaries(body);
   let selected = requireCandidateFits(truncatedCandidate(0));
@@ -325,39 +375,61 @@ function selectSnapshotProjection(
 
 function createSnapshotProjection(
   envelope: JobExecutionEnvelope,
+  attemptCorrelationId: string,
   body: LocalSnapshotProjectionBodyV1,
 ): LocalSnapshotProjectionV1 {
   const actor = createLocalActor(envelope.resource.author);
-  const revision =
-    envelope.resource.kind === "issue"
-      ? { kind: "issue" as const, revisionDigest: envelope.resource.revisionDigest }
-      : {
-          kind: "pull_request" as const,
-          baseSha: envelope.resource.baseSha,
-          headSha: envelope.resource.headSha,
-        };
-  return {
+  const repository = {
+    githubRepositoryId: envelope.repository.githubRepositoryId,
+    fullName: envelope.repository.fullName,
+  };
+  const resourceIdentity = {
+    githubNodeId: envelope.resource.githubNodeId,
+    number: envelope.resource.number,
+    title: envelope.resource.title,
+    author: actor,
+  };
+  const common = {
     projectionVersion: LOCAL_SNAPSHOT_PROJECTION_VERSION,
-    repository: {
-      githubRepositoryId: envelope.repository.githubRepositoryId,
-      fullName: envelope.repository.fullName,
-    },
-    resource: {
-      kind: envelope.resource.kind,
-      githubNodeId: envelope.resource.githubNodeId,
-      number: envelope.resource.number,
-      title: envelope.resource.title,
-      author: actor,
-      revision,
-    },
+    repository,
     body,
   };
+  return envelope.resource.kind === "issue"
+    ? {
+        ...common,
+        resource: {
+          ...resourceIdentity,
+          kind: "issue",
+          revision: {
+            kind: "issue",
+            revisionDigest: createLocalIssueRevisionBinding(
+              envelope.job.jobId,
+              envelope.lease.runAttemptId,
+              attemptCorrelationId,
+            ),
+          },
+        },
+      }
+    : {
+        ...common,
+        resource: {
+          ...resourceIdentity,
+          kind: "pull_request",
+          revision: {
+            kind: "pull_request",
+            baseSha: envelope.resource.baseSha,
+            headSha: envelope.resource.headSha,
+          },
+        },
+      };
 }
 
 function buildExecutorEnvelope(
   serverEnvelope: JobExecutionEnvelope,
+  attemptCorrelationId: string,
   snapshot: Readonly<{ readonly json: string; readonly sha256: string }>,
   outputSchema: Readonly<{ readonly json: string; readonly sha256: string }>,
+  renderedPrompt: string,
   promptSha256: string,
 ): ExecutorJobEnvelopeV1 {
   const resource: ExecutorJobEnvelopeV1["resource"] =
@@ -370,7 +442,11 @@ function buildExecutorEnvelope(
           author: createLocalActor(serverEnvelope.resource.author),
           canonicalSnapshotJson: snapshot.json,
           canonicalSnapshotSha256: snapshot.sha256,
-          revisionDigest: serverEnvelope.resource.revisionDigest,
+          revisionDigest: createLocalIssueRevisionBinding(
+            serverEnvelope.job.jobId,
+            serverEnvelope.lease.runAttemptId,
+            attemptCorrelationId,
+          ),
         }
       : {
           kind: "pull_request",
@@ -406,7 +482,7 @@ function buildExecutorEnvelope(
     prompt: {
       name: serverEnvelope.prompt.name,
       version: serverEnvelope.prompt.version,
-      renderedPrompt: serverEnvelope.prompt.renderedPrompt,
+      renderedPrompt,
       promptSha256,
       outputSchemaJson: outputSchema.json,
       outputSchemaSha256: outputSchema.sha256,
@@ -432,6 +508,16 @@ function createLocalActor(
     accountType: actor.accountType ?? null,
     githubNodeId: actor.githubNodeId ?? null,
   };
+}
+
+function createLocalIssueRevisionBinding(
+  jobId: string,
+  runAttemptId: string,
+  attemptCorrelationId: string,
+): string {
+  return sha256Hex(
+    `AgenticReview.LocalIssueRevisionBindingV1\u0000${jobId}\u0000${runAttemptId}\u0000${attemptCorrelationId}`,
+  );
 }
 
 function assertAttemptCorrelationId(value: string): void {
@@ -729,6 +815,22 @@ function canonicalDocument(
   }
 }
 
+function canonicalJson(value: unknown, description: string): string {
+  try {
+    return serializeCanonicalJson(value);
+  } catch (error) {
+    throw boundaryError(
+      "CANONICAL_VALUE_INVALID",
+      `Server ${description} is not valid local canonical JSON data.`,
+      error,
+    );
+  }
+}
+
+function sanitizeRenderedPrompt(value: string): string {
+  return value.replace(serverPromptTruncationMetadataPattern, localPromptTruncationMarker);
+}
+
 function candidateFits(candidate: SnapshotCandidate): boolean {
   return (
     Buffer.byteLength(candidate.document.json, "utf8") <= LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES &&
@@ -790,16 +892,6 @@ function unicodeCodePointBoundaries(value: string): number[] {
     boundaries.push(offset);
   }
   return boundaries;
-}
-
-function deepFreeze<T>(value: T): DeepReadonly<T> {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const child of Object.values(value as Record<string, unknown>)) {
-      deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value as DeepReadonly<T>;
 }
 
 function registerContractFormats(): void {

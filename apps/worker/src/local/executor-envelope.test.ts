@@ -14,6 +14,11 @@ import { LocalExecutionBoundaryError, prepareLocalExecutionStart } from "./execu
 
 const attemptCorrelationId = "1000000a-0000-4000-8000-000000000001";
 const otherAttemptCorrelationId = "2000000b-0000-4000-8000-000000000002";
+const claimTiming = {
+  observedAtMonotonicMilliseconds: 10_000,
+  remainingLeaseMilliseconds: 240_000,
+  remainingHardDeadlineMilliseconds: 540_000,
+} as const;
 
 describe("prepareLocalExecutionStart", () => {
   it("projects an issue envelope and makes optional actor fields explicit", () => {
@@ -28,7 +33,6 @@ describe("prepareLocalExecutionStart", () => {
       repository: { githubRepositoryId: 184_456_251, fullName: "microsoft/PowerToys" },
       resource: {
         kind: "issue",
-        revisionDigest: "c".repeat(64),
         author: {
           githubUserId: 42,
           login: "contributor",
@@ -38,12 +42,15 @@ describe("prepareLocalExecutionStart", () => {
       },
     });
     const projection = parseProjection(executorEnvelope.resource.canonicalSnapshotJson);
+    if (executorEnvelope.resource.kind !== "issue" || serverEnvelope.resource.kind !== "issue") {
+      throw new Error("Expected an issue executor envelope.");
+    }
     expect(projection).toMatchObject({
       projectionVersion: 1,
       repository: { githubRepositoryId: 184_456_251, fullName: "microsoft/PowerToys" },
       resource: {
         kind: "issue",
-        revision: { kind: "issue", revisionDigest: "c".repeat(64) },
+        revision: { kind: "issue", revisionDigest: executorEnvelope.resource.revisionDigest },
       },
       body: { state: "complete", text: "Issue body" },
     });
@@ -52,6 +59,9 @@ describe("prepareLocalExecutionStart", () => {
     );
     expect(executorEnvelope.prompt.outputSchemaSha256).toBe(
       createCanonicalJsonDocument(serverEnvelope.prompt.outputSchema).sha256,
+    );
+    expect(serializeCanonicalJson(executorEnvelope)).not.toContain(
+      serverEnvelope.resource.revisionDigest,
     );
     expect(() => digestExecutorJobEnvelope(executorEnvelope)).not.toThrow();
     expect(Object.isFrozen(executorEnvelope)).toBe(true);
@@ -100,7 +110,9 @@ describe("prepareLocalExecutionStart", () => {
     const marker = "\n[UNTRUSTED_BODY_TRUNCATED]";
     const retainedPrefix = String(projectedText).slice(0, -marker.length);
     expect(body.startsWith(retainedPrefix)).toBe(true);
-    const repeated = createExecutorJobEnvelopeV1(serverEnvelope, otherAttemptCorrelationId);
+    expect(retainedPrefix.isWellFormed()).toBe(true);
+    expectNextCodePointWouldExceedLimit(body, retainedPrefix, projection, executorEnvelope);
+    const repeated = createExecutorJobEnvelopeV1(serverEnvelope, attemptCorrelationId);
     expect(repeated.resource.canonicalSnapshotJson).toBe(
       executorEnvelope.resource.canonicalSnapshotJson,
     );
@@ -110,6 +122,98 @@ describe("prepareLocalExecutionStart", () => {
     expect(Buffer.byteLength(serializeCanonicalJson(executorEnvelope), "utf8")).toBeLessThanOrEqual(
       LOCAL_START_ENVELOPE_MAXIMUM_UTF8_BYTES,
     );
+  });
+
+  it.each([
+    ["ASCII", "a".repeat(400_000)],
+    ["astral Unicode", "🙂".repeat(100_000)],
+    ["JSON escapes", '\\"\n'.repeat(100_000)],
+  ])("selects the maximum well-formed truncation prefix for %s", (_name, body) => {
+    const original = createEnvelope("issue_triage");
+    const executorEnvelope = createExecutorJobEnvelopeV1(
+      withSnapshot(original, {
+        ...(original.resource.canonicalSnapshot as Record<string, unknown>),
+        body,
+      }),
+      attemptCorrelationId,
+    );
+    const projection = parseProjection(executorEnvelope.resource.canonicalSnapshotJson);
+    const projected = projection.body as { readonly state: string; readonly text: string };
+    const marker = "\n[UNTRUSTED_BODY_TRUNCATED]";
+    const retainedPrefix = projected.text.slice(0, -marker.length);
+
+    expect(projected.state).toBe("truncated");
+    expect(projected.text.endsWith(marker)).toBe(true);
+    expect(retainedPrefix.isWellFormed()).toBe(true);
+    expect(body.startsWith(retainedPrefix)).toBe(true);
+    expectNextCodePointWouldExceedLimit(body, retainedPrefix, projection, executorEnvelope);
+  });
+
+  it("preserves complete snapshots at the exact UTF-8 boundary and truncates the next byte", () => {
+    const original = createEnvelope("issue_triage");
+    const empty = createExecutorJobEnvelopeV1(
+      withSnapshot(original, {
+        ...(original.resource.canonicalSnapshot as Record<string, unknown>),
+        body: "",
+      }),
+      attemptCorrelationId,
+    );
+    const emptyBytes = Buffer.byteLength(empty.resource.canonicalSnapshotJson, "utf8");
+    const capacity = LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES - emptyBytes;
+
+    for (const [delta, expectedState] of [
+      [-1, "complete"],
+      [0, "complete"],
+      [1, "truncated"],
+    ] as const) {
+      const projected = createExecutorJobEnvelopeV1(
+        withSnapshot(original, {
+          ...(original.resource.canonicalSnapshot as Record<string, unknown>),
+          body: "a".repeat(capacity + delta),
+        }),
+        attemptCorrelationId,
+      );
+      const projection = parseProjection(projected.resource.canonicalSnapshotJson);
+      expect((projection.body as { readonly state: string }).state).toBe(expectedState);
+      expect(
+        Buffer.byteLength(projected.resource.canonicalSnapshotJson, "utf8"),
+      ).toBeLessThanOrEqual(LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES);
+      if (delta === 0) {
+        expect(Buffer.byteLength(projected.resource.canonicalSnapshotJson, "utf8")).toBe(
+          LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES,
+        );
+      }
+    }
+  });
+
+  it("removes Server truncation length and unsalted body digests from the Executor prompt", () => {
+    const original = createEnvelope("issue_triage");
+    const body = "low-entropy-secret-tail";
+    const bodyDigest = sha256Hex(body);
+    const marker =
+      `[UNTRUSTED_BODY_TRUNCATED originalUtf16Length=${body.length}` +
+      ` originalUtf8Bytes=${Buffer.byteLength(body, "utf8")} sha256=${bodyDigest}]`;
+    const renderedPrompt = `Trusted prefix. ${marker} Trusted suffix.`;
+    const serverEnvelope: JobExecutionEnvelope = {
+      ...original,
+      prompt: {
+        ...original.prompt,
+        renderedPrompt,
+        promptSha256: sha256Hex(renderedPrompt),
+      },
+    };
+
+    const executorEnvelope = createExecutorJobEnvelopeV1(serverEnvelope, attemptCorrelationId);
+    const serialized = serializeCanonicalJson(executorEnvelope);
+    expect(executorEnvelope.prompt.renderedPrompt).toBe(
+      "Trusted prefix. [UNTRUSTED_BODY_TRUNCATED] Trusted suffix.",
+    );
+    expect(executorEnvelope.prompt.promptSha256).toBe(
+      sha256Hex(executorEnvelope.prompt.renderedPrompt),
+    );
+    expect(serialized).not.toContain("originalUtf16Length");
+    expect(serialized).not.toContain("originalUtf8Bytes");
+    expect(serialized).not.toContain(bodyDigest);
   });
 
   it("fails closed when the output schema exceeds its UTF-8 byte limit", () => {
@@ -317,6 +421,26 @@ describe("prepareLocalExecutionStart", () => {
     );
   });
 
+  it("accepts the shared Server/local recipe and capability-label boundaries", () => {
+    const original = createEnvelope("issue_triage");
+    const recipeId = `r${"x".repeat(127)}`;
+    const label = `l${"y".repeat(63)}`;
+    const executorEnvelope = createExecutorJobEnvelopeV1(
+      {
+        ...original,
+        executionPolicy: {
+          ...original.executionPolicy,
+          allowedRecipeIds: [recipeId],
+          requiredCapabilityLabels: { [label]: "v".repeat(256) },
+        },
+      },
+      attemptCorrelationId,
+    );
+
+    expect(executorEnvelope.policy.allowedRecipeIds).toEqual([recipeId]);
+    expect(executorEnvelope.policy.requiredCapabilityLabels).toEqual({ [label]: "v".repeat(256) });
+  });
+
   it("validates job, lease, resource, repository, revision, and policy consistency", () => {
     const issue = createEnvelope("issue_triage");
     const cases: ReadonlyArray<readonly [JobExecutionEnvelope, string]> = [
@@ -401,6 +525,21 @@ describe("prepareLocalExecutionStart", () => {
     );
   });
 
+  it.each(["\uD800", "\uDC00"])("rejects an isolated snapshot surrogate %j", (body) => {
+    const original = createEnvelope("issue_triage");
+    expectBoundaryCode(
+      () =>
+        createExecutorJobEnvelopeV1(
+          withSnapshot(original, {
+            ...(original.resource.canonicalSnapshot as Record<string, unknown>),
+            body,
+          }),
+          attemptCorrelationId,
+        ),
+      "CANONICAL_VALUE_INVALID",
+    );
+  });
+
   it("rejects unsafe Server integers before local canonicalization", () => {
     const original = createEnvelope("issue_triage");
     const unsafeEnvelope: JobExecutionEnvelope = {
@@ -456,6 +595,7 @@ describe("prepareLocalExecutionStart", () => {
     const prepared = prepareLocalExecutionStart(
       createEnvelope("issue_triage"),
       attemptCorrelationId,
+      claimTiming,
     );
 
     expect(Object.keys(prepared).sort()).toEqual([
@@ -465,16 +605,37 @@ describe("prepareLocalExecutionStart", () => {
     ]);
     expect(prepared.attemptCorrelationId).toBe(attemptCorrelationId);
     expect(prepared.authorityBasis).toEqual({
+      authorityBasisVersion: 2,
       workerNodeId: "worker-node-1",
       workerInstanceId: "worker-instance-1",
       leaseGeneration: 7,
-      serverLeaseExpiresAtUnixMs: Date.parse("2026-08-31T00:05:00.000Z"),
-      hardDeadlineUnixMs: Date.parse("2026-08-31T00:20:00.000Z"),
+      observedAtMonotonicMilliseconds: 10_000,
+      remainingLeaseMilliseconds: 240_000,
+      remainingHardDeadlineMilliseconds: 540_000,
     });
     expect(Object.isFrozen(prepared)).toBe(true);
     expect(Object.isFrozen(prepared.authorityBasis)).toBe(true);
+    expectDeepFrozen(prepared);
     expect(findForbiddenKeys(prepared, new Set(["lease", "leasetoken"]))).toEqual([]);
     expect(serializeCanonicalJson(prepared)).not.toContain("server-lease-secret");
+  });
+
+  it("conservatively normalizes fractional performance clock observations and budgets", () => {
+    const prepared = prepareLocalExecutionStart(
+      createEnvelope("issue_triage"),
+      attemptCorrelationId,
+      {
+        observedAtMonotonicMilliseconds: 10_000.1,
+        remainingLeaseMilliseconds: 239_999.9,
+        remainingHardDeadlineMilliseconds: 539_999.9,
+      },
+    );
+
+    expect(prepared.authorityBasis).toMatchObject({
+      observedAtMonotonicMilliseconds: 10_001,
+      remainingLeaseMilliseconds: 239_999,
+      remainingHardDeadlineMilliseconds: 539_999,
+    });
   });
 
   it("rejects inconsistent lease and hard-deadline timestamps", () => {
@@ -488,10 +649,95 @@ describe("prepareLocalExecutionStart", () => {
       },
     ]) {
       expectBoundaryCode(
-        () => prepareLocalExecutionStart({ ...original, ...mutation }, attemptCorrelationId),
+        () =>
+          prepareLocalExecutionStart(
+            { ...original, ...mutation },
+            attemptCorrelationId,
+            claimTiming,
+          ),
         "LEASE_TIME_INVALID",
       );
     }
+  });
+
+  it("uses conservative monotonic budgets instead of treating Server clock offset as authority", () => {
+    const original = createEnvelope("issue_triage");
+    const shifted: JobExecutionEnvelope = {
+      ...original,
+      assignedAt: "2026-08-31T01:00:00.000Z",
+      leaseExpiresAt: "2026-08-31T01:05:00.000Z",
+      executionDeadlineAt: "2026-08-31T01:20:00.000Z",
+    };
+    const first = prepareLocalExecutionStart(original, attemptCorrelationId, claimTiming);
+    const second = prepareLocalExecutionStart(shifted, attemptCorrelationId, claimTiming);
+
+    expect(second.authorityBasis).toEqual(first.authorityBasis);
+    expect(second.authorityBasis).not.toHaveProperty("serverLeaseExpiresAtUnixMs");
+    expect(second.authorityBasis).not.toHaveProperty("hardDeadlineUnixMs");
+  });
+
+  it.each([
+    ["zero remaining lease", { remainingLeaseMilliseconds: 0 }],
+    ["lease beyond Server interval", { remainingLeaseMilliseconds: 300_001 }],
+    ["hard budget beyond Server interval", { remainingHardDeadlineMilliseconds: 1_200_001 }],
+    [
+      "lease beyond hard budget",
+      { remainingLeaseMilliseconds: 200_000, remainingHardDeadlineMilliseconds: 199_999 },
+    ],
+  ] as const)("rejects %s", (_name, change) => {
+    expectBoundaryCode(
+      () =>
+        prepareLocalExecutionStart(createEnvelope("issue_triage"), attemptCorrelationId, {
+          ...claimTiming,
+          ...change,
+        }),
+      "LEASE_TIME_INVALID",
+    );
+  });
+
+  it.each([
+    { observedAtMonotonicMilliseconds: Number.NaN },
+    { observedAtMonotonicMilliseconds: Number.POSITIVE_INFINITY },
+    { observedAtMonotonicMilliseconds: -0.1 },
+    { remainingLeaseMilliseconds: 0.9 },
+    { remainingHardDeadlineMilliseconds: Number.MAX_SAFE_INTEGER + 1 },
+  ])("rejects unsafe timing input %#j", (change) => {
+    expectBoundaryCode(
+      () =>
+        prepareLocalExecutionStart(createEnvelope("issue_triage"), attemptCorrelationId, {
+          ...claimTiming,
+          ...change,
+        }),
+      "LEASE_TIME_INVALID",
+    );
+  });
+
+  it("uses an attempt-local opaque issue revision without exposing a Server digest oracle", () => {
+    const original = createEnvelope("issue_triage");
+    if (original.resource.kind !== "issue") throw new Error("Expected issue envelope.");
+    const changedRevisionDigest = "d".repeat(64);
+    const changed: JobExecutionEnvelope = {
+      ...original,
+      resource: { ...original.resource, revisionDigest: changedRevisionDigest },
+    };
+    const first = prepareLocalExecutionStart(original, attemptCorrelationId, claimTiming);
+    const second = prepareLocalExecutionStart(changed, attemptCorrelationId, claimTiming);
+    const third = prepareLocalExecutionStart(original, otherAttemptCorrelationId, claimTiming);
+
+    if (
+      first.executorEnvelope.resource.kind !== "issue" ||
+      second.executorEnvelope.resource.kind !== "issue" ||
+      third.executorEnvelope.resource.kind !== "issue"
+    ) {
+      throw new Error("Expected issue executor envelopes.");
+    }
+    expect(first.executorEnvelope.resource.revisionDigest).toBe(
+      second.executorEnvelope.resource.revisionDigest,
+    );
+    expect(first.executorEnvelope.resource.revisionDigest).not.toBe(
+      third.executorEnvelope.resource.revisionDigest,
+    );
+    expect(serializeCanonicalJson(second.executorEnvelope)).not.toContain(changedRevisionDigest);
   });
 });
 
@@ -611,7 +857,7 @@ function parseProjection(json: string): SnapshotProjectionView {
 }
 
 function createExecutorJobEnvelopeV1(serverEnvelope: JobExecutionEnvelope, correlationId: string) {
-  return prepareLocalExecutionStart(serverEnvelope, correlationId).executorEnvelope;
+  return prepareLocalExecutionStart(serverEnvelope, correlationId, claimTiming).executorEnvelope;
 }
 
 function expectBoundaryCode(operation: () => unknown, code: string): void {
@@ -635,4 +881,49 @@ function findForbiddenKeys(value: unknown, forbidden: ReadonlySet<string>): stri
     found.push(...findForbiddenKeys(child, forbidden));
   }
   return found;
+}
+
+function expectNextCodePointWouldExceedLimit(
+  body: string,
+  retainedPrefix: string,
+  projection: SnapshotProjectionView,
+  executorEnvelope: ReturnType<typeof createExecutorJobEnvelopeV1>,
+): void {
+  const nextCodePoint = body.codePointAt(retainedPrefix.length);
+  expect(nextCodePoint).toBeDefined();
+  if (nextCodePoint === undefined) {
+    throw new Error("Expected another source code point after the retained prefix.");
+  }
+  const nextProjection = {
+    ...projection,
+    body: {
+      state: "truncated",
+      text: `${retainedPrefix}${String.fromCodePoint(nextCodePoint)}\n[UNTRUSTED_BODY_TRUNCATED]`,
+    },
+  };
+  const nextSnapshot = createCanonicalJsonDocument(nextProjection);
+  const nextEnvelope = {
+    ...executorEnvelope,
+    resource: {
+      ...executorEnvelope.resource,
+      canonicalSnapshotJson: nextSnapshot.json,
+      canonicalSnapshotSha256: nextSnapshot.sha256,
+    },
+  };
+  expect(
+    Buffer.byteLength(nextSnapshot.json, "utf8") > LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES ||
+      Buffer.byteLength(serializeCanonicalJson(nextEnvelope), "utf8") >
+        LOCAL_START_ENVELOPE_MAXIMUM_UTF8_BYTES,
+  ).toBe(true);
+}
+
+function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
+  if (value === null || typeof value !== "object" || seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+  expect(Object.isFrozen(value)).toBe(true);
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    expectDeepFrozen(child, seen);
+  }
 }

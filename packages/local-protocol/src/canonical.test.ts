@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CanonicalJsonError,
   createCanonicalJsonDocument,
+  deepFreezeJson,
   parseCanonicalJson,
   serializeCanonicalJson,
 } from "./canonical.js";
@@ -15,6 +16,19 @@ describe("canonical JSON", () => {
       json: '{"a":{"one":1,"two":2},"z":[true,null,7]}',
       sha256: "3e1bff36b8409f2053561f066de744d96e635d1f73d52534c1cd97e77987e5f2",
     });
+  });
+
+  it("deeply freezes descendants even when the parent was already frozen", () => {
+    const child = { values: [1, 2, 3] };
+    const parent = Object.freeze({ child });
+    const frozen = deepFreezeJson(parent);
+
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen.child)).toBe(true);
+    expect(Object.isFrozen(frozen.child.values)).toBe(true);
+    expect(() => {
+      (frozen.child.values as unknown as number[]).push(4);
+    }).toThrow();
   });
 
   it("parses only exact canonical UTF-8", () => {

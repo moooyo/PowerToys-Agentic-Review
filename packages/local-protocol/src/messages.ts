@@ -3,6 +3,8 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
   createCanonicalJsonDocument,
+  type DeepReadonly,
+  deepFreezeJson,
   LOCAL_CANONICAL_JSON_VERSION,
   parseCanonicalJson,
   serializeCanonicalJson,
@@ -32,6 +34,8 @@ export const LOCAL_START_SCHEMA_MAXIMUM_UTF8_BYTES = 256 * 1024;
 export const LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES = 256 * 1024;
 export const LOCAL_START_ENVELOPE_MAXIMUM_UTF8_BYTES = 900 * 1024;
 export const LOCAL_PROGRESS_STATUS_MAXIMUM_UTF8_BYTES = 2 * 1024;
+export const LOCAL_SNAPSHOT_PROJECTION_VERSION = 1 as const;
+export const LOCAL_SNAPSHOT_TRUNCATION_MARKER = "\n[UNTRUSTED_BODY_TRUNCATED]" as const;
 export const HANDSHAKE_TRANSCRIPT_VERSION = 1 as const;
 export const LOCAL_HANDSHAKE_AUDIENCE = "agentic-review/windows-executor-handshake/v1" as const;
 
@@ -195,6 +199,71 @@ const LocalGitHubActorSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+
+const LocalSnapshotProjectionBodyV1Schema = Type.Union([
+  Type.Object({ state: Type.Literal("absent") }, { additionalProperties: false }),
+  Type.Object({ state: Type.Literal("null") }, { additionalProperties: false }),
+  Type.Object(
+    { state: Type.Literal("complete"), text: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { state: Type.Literal("truncated"), text: Type.String() },
+    { additionalProperties: false },
+  ),
+]);
+
+export const LocalSnapshotProjectionV1Schema = Type.Object(
+  {
+    projectionVersion: Type.Literal(LOCAL_SNAPSHOT_PROJECTION_VERSION),
+    repository: LocalRepositoryIdentitySchema,
+    resource: Type.Union([
+      Type.Object(
+        {
+          kind: Type.Literal("issue"),
+          githubNodeId: Type.String({ minLength: 1, maxLength: 256 }),
+          number: SafePositiveIntegerSchema,
+          title: Type.String({ minLength: 1, maxLength: 1_024 }),
+          author: LocalGitHubActorSchema,
+          revision: Type.Object(
+            { kind: Type.Literal("issue"), revisionDigest: Sha256Schema },
+            { additionalProperties: false },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          kind: Type.Literal("pull_request"),
+          githubNodeId: Type.String({ minLength: 1, maxLength: 256 }),
+          number: SafePositiveIntegerSchema,
+          title: Type.String({ minLength: 1, maxLength: 1_024 }),
+          author: LocalGitHubActorSchema,
+          revision: Type.Object(
+            {
+              kind: Type.Literal("pull_request"),
+              baseSha: Type.String({
+                minLength: 40,
+                maxLength: 64,
+                pattern: "^[a-f0-9]{40,64}$",
+              }),
+              headSha: Type.String({
+                minLength: 40,
+                maxLength: 64,
+                pattern: "^[a-f0-9]{40,64}$",
+              }),
+            },
+            { additionalProperties: false },
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    ]),
+    body: LocalSnapshotProjectionBodyV1Schema,
+  },
+  { additionalProperties: false },
+);
+export type LocalSnapshotProjectionV1 = Static<typeof LocalSnapshotProjectionV1Schema>;
 
 const LocalResourceBaseProperties = {
   githubNodeId: Type.String({ minLength: 1, maxLength: 256 }),
@@ -595,7 +664,7 @@ export function validateLocalMessagePayload(
   messageType: LocalMessageTypeId,
   value: unknown,
   correlationId: string,
-): Readonly<LocalMessagePayload> {
+): DeepReadonly<LocalMessagePayload> {
   const schema = localMessageSchemas[messageType];
   let canonical: string;
   try {
@@ -610,7 +679,7 @@ export function validateLocalMessagePayload(
   const message = normalized as LocalMessagePayload;
   validateCorrelation(messageType, message, correlationId);
   validateSemanticRules(messageType, message);
-  return Object.freeze(message);
+  return deepFreezeJson(message);
 }
 
 export function digestExecutorJobEnvelope(envelope: unknown): string {
@@ -621,16 +690,18 @@ export function digestExecutorJobEnvelope(envelope: unknown): string {
   return createCanonicalJsonDocument(normalized).sha256;
 }
 
-export function validateHandshakeTranscriptV1(value: unknown): Readonly<HandshakeTranscriptV1> {
+export function validateHandshakeTranscriptV1(value: unknown): DeepReadonly<HandshakeTranscriptV1> {
   const transcript = validateSchemaValue<HandshakeTranscriptV1>(value, HandshakeTranscriptV1Schema);
   assertHandshakeTranscriptContext(transcript);
-  return Object.freeze(transcript);
+  return deepFreezeJson(transcript);
 }
 
-export function validateSignedHandshakeProofV1(value: unknown): Readonly<SignedHandshakeProofV1> {
+export function validateSignedHandshakeProofV1(
+  value: unknown,
+): DeepReadonly<SignedHandshakeProofV1> {
   const signed = validateSchemaValue<SignedHandshakeProofV1>(value, SignedHandshakeProofV1Schema);
   validateHandshakeTranscriptV1(signed.transcript);
-  return Object.freeze(signed);
+  return deepFreezeJson(signed);
 }
 
 function validateSemanticRules(
@@ -776,6 +847,11 @@ function validateStartAttempt(message: StartAttemptMessage): void {
     LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES,
     "Canonical snapshot",
   );
+  const snapshot = validateSchemaValue<LocalSnapshotProjectionV1>(
+    snapshotValue,
+    LocalSnapshotProjectionV1Schema,
+  );
+  validateSnapshotProjection(message.executorEnvelope, snapshot);
   validateTargetRevision(message.executorEnvelope, capability);
   const recipeSet = [...message.executorEnvelope.policy.allowedRecipeIds].sort();
   if (
@@ -796,7 +872,7 @@ function validateStartAttempt(message: StartAttemptMessage): void {
       capability.digests.outputSchemaSha256,
     ) ||
     !secureDigestEqual(
-      createCanonicalJsonDocument(snapshotValue).sha256,
+      createCanonicalJsonDocument(snapshot).sha256,
       message.executorEnvelope.resource.canonicalSnapshotSha256,
     ) ||
     !secureDigestEqual(
@@ -825,6 +901,56 @@ function validateStartAttempt(message: StartAttemptMessage): void {
     throw messageError(
       "MESSAGE_CONTEXT_MISMATCH",
       "Authorized recipe is absent from the local policy.",
+    );
+  }
+}
+
+function validateSnapshotProjection(
+  envelope: ExecutorJobEnvelopeV1,
+  snapshot: LocalSnapshotProjectionV1,
+): void {
+  const resource = envelope.resource;
+  const projected = snapshot.resource;
+  if (
+    snapshot.repository.githubRepositoryId !== envelope.repository.githubRepositoryId ||
+    snapshot.repository.fullName !== envelope.repository.fullName ||
+    projected.kind !== resource.kind ||
+    projected.githubNodeId !== resource.githubNodeId ||
+    projected.number !== resource.number ||
+    projected.title !== resource.title ||
+    projected.author.githubUserId !== resource.author.githubUserId ||
+    projected.author.login !== resource.author.login ||
+    projected.author.accountType !== resource.author.accountType ||
+    projected.author.githubNodeId !== resource.author.githubNodeId
+  ) {
+    throw messageError(
+      "MESSAGE_CONTEXT_MISMATCH",
+      "Canonical snapshot projection does not match its execution envelope.",
+    );
+  }
+  if (
+    (resource.kind === "issue" &&
+      (projected.kind !== "issue" ||
+        projected.revision.kind !== "issue" ||
+        projected.revision.revisionDigest !== resource.revisionDigest)) ||
+    (resource.kind === "pull_request" &&
+      (projected.kind !== "pull_request" ||
+        projected.revision.kind !== "pull_request" ||
+        projected.revision.baseSha !== resource.baseSha ||
+        projected.revision.headSha !== resource.headSha))
+  ) {
+    throw messageError(
+      "MESSAGE_CONTEXT_MISMATCH",
+      "Canonical snapshot projection revision does not match its execution envelope.",
+    );
+  }
+  if (
+    snapshot.body.state === "truncated" &&
+    !snapshot.body.text.endsWith(LOCAL_SNAPSHOT_TRUNCATION_MARKER)
+  ) {
+    throw messageError(
+      "MESSAGE_CONTEXT_MISMATCH",
+      "Truncated canonical snapshot projection is missing its fixed marker.",
     );
   }
 }
