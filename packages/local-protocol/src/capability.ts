@@ -21,6 +21,11 @@ export const LOCAL_CAPABILITY_AUDIENCE = "agentic-review/windows-executor/v1" as
 export const LOCAL_CAPABILITY_SIGNATURE_ALGORITHM = "ECDSA_P256_SHA256_P1363_LOW_S" as const;
 export const LOCAL_GRANT_MAXIMUM_DURATION_MS = 45_000;
 
+export type LocalAuthoritySigningDomain =
+  | "ExecutionCapabilityV1"
+  | "RenewalGrantV1"
+  | "HandshakeTranscriptV1";
+
 export const localCapabilityResourceBounds = Object.freeze({
   maximumProcesses: Object.freeze({ minimum: 1, maximum: 1_024 }),
   memoryBytes: Object.freeze({ minimum: 64n * 1024n * 1024n, maximum: 1n << 40n }),
@@ -47,6 +52,12 @@ const UuidV4Schema = Type.String({ minLength: 36, maxLength: 36, pattern: uuidV4
 const Sha256Schema = Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 const Random256BitSchema = Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 const DecimalSchema = Type.String({ minLength: 1, maxLength: 21, pattern: decimalPattern });
+
+export const LocalAuthoritySignatureSchema = Type.String({
+  minLength: 86,
+  maxLength: 86,
+  pattern: p1363SignaturePattern,
+});
 
 export const LocalCapabilityResourceLimitsSchema = Type.Object(
   {
@@ -194,11 +205,7 @@ export type RenewalGrantV1 = Static<typeof RenewalGrantV1Schema>;
 export const SignedExecutionCapabilityV1Schema = Type.Object(
   {
     capability: ExecutionCapabilityV1Schema,
-    signature: Type.String({
-      minLength: 86,
-      maxLength: 86,
-      pattern: p1363SignaturePattern,
-    }),
+    signature: LocalAuthoritySignatureSchema,
   },
   { additionalProperties: false },
 );
@@ -207,11 +214,7 @@ export type SignedExecutionCapabilityV1 = Static<typeof SignedExecutionCapabilit
 export const SignedRenewalGrantV1Schema = Type.Object(
   {
     grant: RenewalGrantV1Schema,
-    signature: Type.String({
-      minLength: 86,
-      maxLength: 86,
-      pattern: p1363SignaturePattern,
-    }),
+    signature: LocalAuthoritySignatureSchema,
   },
   { additionalProperties: false },
 );
@@ -328,8 +331,11 @@ export function signExecutionCapability(
 ): Readonly<SignedExecutionCapabilityV1> {
   const capability = validateExecutionCapability(capabilityValue);
   assertP256PrivateKey(privateKey);
-  assertKeyIdMatches(capability.keyId, privateKey);
-  const signature = signLowS(signingBytes("ExecutionCapabilityV1", capability), privateKey);
+  assertLocalAuthorityKeyIdMatches(capability.keyId, privateKey);
+  const signature = signLowS(
+    createLocalAuthoritySigningBytes("ExecutionCapabilityV1", capability),
+    privateKey,
+  );
   return Object.freeze({ capability, signature });
 }
 
@@ -339,8 +345,8 @@ export function signRenewalGrant(
 ): Readonly<SignedRenewalGrantV1> {
   const grant = validateRenewalGrant(grantValue);
   assertP256PrivateKey(privateKey);
-  assertKeyIdMatches(grant.keyId, privateKey);
-  const signature = signLowS(signingBytes("RenewalGrantV1", grant), privateKey);
+  assertLocalAuthorityKeyIdMatches(grant.keyId, privateKey);
+  const signature = signLowS(createLocalAuthoritySigningBytes("RenewalGrantV1", grant), privateKey);
   return Object.freeze({ grant, signature });
 }
 
@@ -356,8 +362,8 @@ export function verifyExecutionCapability(
   );
   const capability = validateExecutionCapability(signed.capability);
   assertP256PublicKey(publicKey);
-  assertKeyIdMatches(capability.keyId, publicKey);
-  verifyLowS(signingBytes("ExecutionCapabilityV1", capability), signed.signature, publicKey);
+  assertLocalAuthorityKeyIdMatches(capability.keyId, publicKey);
+  verifyLocalAuthoritySignature("ExecutionCapabilityV1", capability, signed.signature, publicKey);
   validateContext(capability, context);
   return capability;
 }
@@ -374,8 +380,8 @@ export function verifyRenewalGrant(
   );
   const grant = validateRenewalGrant(signed.grant);
   assertP256PublicKey(publicKey);
-  assertKeyIdMatches(grant.keyId, publicKey);
-  verifyLowS(signingBytes("RenewalGrantV1", grant), signed.signature, publicKey);
+  assertLocalAuthorityKeyIdMatches(grant.keyId, publicKey);
+  verifyLocalAuthoritySignature("RenewalGrantV1", grant, signed.signature, publicKey);
   validateContext(grant, context);
   const capability = context.capability;
   for (const key of [
@@ -429,21 +435,72 @@ export function deriveCapabilityKeyId(key: KeyObject): string {
 }
 
 export function createExecutionCapabilitySigningBytes(capability: unknown): Buffer {
-  return signingBytes("ExecutionCapabilityV1", validateExecutionCapability(capability));
+  return createLocalAuthoritySigningBytes(
+    "ExecutionCapabilityV1",
+    validateExecutionCapability(capability),
+  );
 }
 
 export function createRenewalGrantSigningBytes(grant: unknown): Buffer {
-  return signingBytes("RenewalGrantV1", validateRenewalGrant(grant));
+  return createLocalAuthoritySigningBytes("RenewalGrantV1", validateRenewalGrant(grant));
 }
 
 // Native CNG adapters sign this 32-byte digest directly with ECDSA P-256. They must not request
 // CNG to hash this digest again. Node's sign helper instead hashes the corresponding signing bytes.
 export function createExecutionCapabilitySigningDigest(capability: unknown): Buffer {
-  return createHash("sha256").update(createExecutionCapabilitySigningBytes(capability)).digest();
+  return createLocalAuthoritySigningDigest(
+    "ExecutionCapabilityV1",
+    validateExecutionCapability(capability),
+  );
 }
 
 export function createRenewalGrantSigningDigest(grant: unknown): Buffer {
-  return createHash("sha256").update(createRenewalGrantSigningBytes(grant)).digest();
+  return createLocalAuthoritySigningDigest("RenewalGrantV1", validateRenewalGrant(grant));
+}
+
+export function createLocalAuthoritySigningBytes(
+  type: LocalAuthoritySigningDomain,
+  value: unknown,
+): Buffer {
+  const domain = Buffer.from(
+    `AgenticReview.LocalAuthority/${type}/ECDSA-P256-SHA256/P1363/1`,
+    "ascii",
+  );
+  const payload = Buffer.from(serializeCanonicalJson(value), "utf8");
+  const lengths = Buffer.allocUnsafe(8);
+  lengths.writeUInt32BE(domain.byteLength, 0);
+  lengths.writeUInt32BE(payload.byteLength, 4);
+  return Buffer.concat([lengths, domain, payload]);
+}
+
+export function createLocalAuthoritySigningDigest(
+  type: LocalAuthoritySigningDomain,
+  value: unknown,
+): Buffer {
+  return createHash("sha256").update(createLocalAuthoritySigningBytes(type, value)).digest();
+}
+
+/** Encodes a ServiceHost signature only when it is already canonical 64-byte P1363 low-S. */
+export function encodeLocalAuthoritySignature(signature: Uint8Array): string {
+  if (!(signature instanceof Uint8Array) || signature.byteLength !== 64) {
+    throw capabilityError(
+      "CAPABILITY_SIGNATURE_INVALID",
+      "Local authority signature must be exactly 64 bytes.",
+    );
+  }
+  const encoded = Buffer.from(signature).toString("base64url");
+  decodeCanonicalSignature(encoded);
+  return encoded;
+}
+
+export function verifyLocalAuthoritySignature(
+  type: LocalAuthoritySigningDomain,
+  value: unknown,
+  signature: string,
+  publicKey: KeyObject,
+): void {
+  assertP256PublicKey(publicKey);
+  verifyLowS(createLocalAuthoritySigningBytes(type, value), signature, publicKey);
 }
 
 function normalizeSchemaValue<T>(
@@ -560,21 +617,6 @@ function validateContext(
   }
 }
 
-function signingBytes(
-  type: "ExecutionCapabilityV1" | "RenewalGrantV1",
-  value: ExecutionCapabilityV1 | RenewalGrantV1,
-): Buffer {
-  const domain = Buffer.from(
-    `AgenticReview.LocalAuthority/${type}/ECDSA-P256-SHA256/P1363/1`,
-    "ascii",
-  );
-  const payload = Buffer.from(serializeCanonicalJson(value), "utf8");
-  const lengths = Buffer.allocUnsafe(8);
-  lengths.writeUInt32BE(domain.byteLength, 0);
-  lengths.writeUInt32BE(payload.byteLength, 4);
-  return Buffer.concat([lengths, domain, payload]);
-}
-
 function signLowS(bytes: Uint8Array, privateKey: KeyObject): string {
   const raw = nodeSign("sha256", bytes, { key: privateKey, dsaEncoding: "ieee-p1363" });
   if (raw.byteLength !== 64) {
@@ -666,7 +708,7 @@ function isP256EcKey(key: KeyObject): boolean {
   );
 }
 
-function assertKeyIdMatches(keyId: string, key: KeyObject): void {
+export function assertLocalAuthorityKeyIdMatches(keyId: string, key: KeyObject): void {
   const derived = deriveCapabilityKeyId(key);
   if (!secureHexEqual(keyId, derived)) {
     throw capabilityError(

@@ -45,6 +45,19 @@ request base/head commits, canonical data
 digests, operation, ceilings, deadlines, and replay identifiers. `RenewalGrantV1` chains the initial
 capability and previous grant with an exact next sequence and Server heartbeat sequence.
 
+Before Executor may report `Ready`, Control proves possession of the installed local-authority key.
+The session sequence is `Hello` (Control), `HelloAck` (Executor), `ControlProof` (Control), then
+`Ready` (Executor). `ControlProof` is appended message type 20; message IDs 1 through 19 are unchanged.
+It is a Control-sent session message and therefore uses the nil correlation UUID.
+
+`HandshakeTranscriptV1` embeds the strict normalized `Hello` and `HelloAck` values in full. Its
+signature consequently binds the negotiated protocol, both nonces, worker node and Control instance,
+session and Executor boot IDs, matching Control/Executor package-manifest attestations, both preflight attestations, the Executor
+policy digest, and `maximumSlots`. It also binds canonicalization version 1, the
+`ECDSA_P256_SHA256_P1363_LOW_S` algorithm, the installed local-authority SPKI `keyId`, and the fixed
+`agentic-review/windows-executor-handshake/v1` audience. A transcript cannot be replayed into another
+session because the expected `Hello` and `HelloAck` are supplied again during proof verification.
+
 Signatures use ECDSA P-256 with SHA-256 over length-prefixed, domain-separated canonical bytes. The
 `keyId` is the lowercase SHA-256 digest of the public key's DER SubjectPublicKeyInfo. The wire encoding is
 exactly 64-byte IEEE P1363 `r || s`, base64url without padding, with low-S normalization. DER,
@@ -52,6 +65,15 @@ high-S, wrong-curve, malformed, and noncanonical encodings are rejected. Product
 the responsibility of the Control-only non-exportable CNG adapter. That adapter signs the exported
 32-byte signing digest directly and must not hash it a second time. The Node helpers hash the
 domain-separated signing bytes internally and are the shared contract implementation and test oracle.
+
+For the handshake, Control calls `createHandshakeTranscriptV1`, sends the exact 32-byte result of
+`createHandshakeTranscriptSigningDigest` to the narrow ServiceHost signing operation, and passes the
+returned 64-byte P1363 low-S signature to `createSignedHandshakeProofV1`. Executor calls
+`verifyControlProofMessageV1` with its pinned P-256 public key and the exact expected peer messages.
+Only the returned `VerifiedHandshakeTranscriptV1` may be supplied to
+`validateReadyAfterHandshakeProofV1`. Framing and schema validation alone do not authenticate a
+`ControlProof`; connection state machines must reject `Ready` before proof verification and must
+reject duplicate or out-of-order handshake messages.
 
 `StartAttempt` carries a from-zero allowlisted local envelope containing all execution inputs but no
 Server lease identity: job metadata, repository identity, issue or pull-request resource metadata,

@@ -28,6 +28,7 @@ const sessionMessageTypes = new Set<LocalMessageTypeValue>([
   LocalMessageType.Drained,
   LocalMessageType.Ping,
   LocalMessageType.Pong,
+  LocalMessageType.ControlProof,
 ]);
 
 function correlationIdFor(messageType: LocalMessageTypeValue): string {
@@ -76,7 +77,7 @@ describe("local protocol framing constants", () => {
     expect(LOCAL_PROTOCOL_MAX_ARTIFACT_CHUNK_BYTES).toBe(262_144);
   });
 
-  it("pins the ADR message IDs and terminal disposition extension", () => {
+  it("pins the ADR message IDs and appended protocol extensions", () => {
     expect(LocalMessageType).toEqual({
       Hello: 1,
       HelloAck: 2,
@@ -97,9 +98,10 @@ describe("local protocol framing constants", () => {
       Pong: 17,
       TerminalDisposition: 18,
       TerminalAck: 19,
+      ControlProof: 20,
     });
     expect(Object.values(LocalMessageType)).toEqual(
-      Array.from({ length: 19 }, (_, index) => index + 1),
+      Array.from({ length: 20 }, (_, index) => index + 1),
     );
   });
 });
@@ -205,7 +207,7 @@ describe("encodeLocalFrame", () => {
       ).toThrow(LocalProtocolError);
     }
 
-    for (const messageType of [0, 20, 65_535]) {
+    for (const messageType of [0, 21, 65_535]) {
       expect(() =>
         encodeLocalFrame({
           correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -280,7 +282,7 @@ describe("decodeLocalFrame", () => {
         frame.writeUInt16LE(1, 8);
       }),
       copyAndMutate(valid, (frame) => {
-        frame.writeUInt16LE(20, 10);
+        frame.writeUInt16LE(21, 10);
       }),
       copyAndMutate(valid, (frame) => {
         frame.writeUInt32LE(1, 12);

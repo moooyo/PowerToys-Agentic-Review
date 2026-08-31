@@ -3,11 +3,14 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
   createCanonicalJsonDocument,
+  LOCAL_CANONICAL_JSON_VERSION,
   parseCanonicalJson,
   serializeCanonicalJson,
 } from "./canonical.js";
 import {
   type ExecutionCapabilityV1,
+  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
+  LocalAuthoritySignatureSchema,
   LocalRepositoryIdentitySchema,
   type RenewalGrantV1,
   SignedExecutionCapabilityV1Schema,
@@ -29,6 +32,8 @@ export const LOCAL_START_SCHEMA_MAXIMUM_UTF8_BYTES = 256 * 1024;
 export const LOCAL_START_SNAPSHOT_MAXIMUM_UTF8_BYTES = 256 * 1024;
 export const LOCAL_START_ENVELOPE_MAXIMUM_UTF8_BYTES = 900 * 1024;
 export const LOCAL_PROGRESS_STATUS_MAXIMUM_UTF8_BYTES = 2 * 1024;
+export const HANDSHAKE_TRANSCRIPT_VERSION = 1 as const;
+export const LOCAL_HANDSHAKE_AUDIENCE = "agentic-review/windows-executor-handshake/v1" as const;
 
 const safeIntegerMaximum = Number.MAX_SAFE_INTEGER;
 const uuidV4Pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
@@ -98,6 +103,38 @@ export const HelloAckMessageSchema = Type.Object(
   { additionalProperties: false },
 );
 export type HelloAckMessage = Static<typeof HelloAckMessageSchema>;
+
+export const HandshakeTranscriptV1Schema = Type.Object(
+  {
+    transcriptVersion: Type.Literal(HANDSHAKE_TRANSCRIPT_VERSION),
+    canonicalizationVersion: Type.Literal(LOCAL_CANONICAL_JSON_VERSION),
+    signatureAlgorithm: Type.Literal(LOCAL_CAPABILITY_SIGNATURE_ALGORITHM),
+    keyId: Sha256Schema,
+    audience: Type.Literal(LOCAL_HANDSHAKE_AUDIENCE),
+    hello: HelloMessageSchema,
+    helloAck: HelloAckMessageSchema,
+  },
+  { additionalProperties: false },
+);
+export type HandshakeTranscriptV1 = Static<typeof HandshakeTranscriptV1Schema>;
+
+export const SignedHandshakeProofV1Schema = Type.Object(
+  {
+    transcript: HandshakeTranscriptV1Schema,
+    signature: LocalAuthoritySignatureSchema,
+  },
+  { additionalProperties: false },
+);
+export type SignedHandshakeProofV1 = Static<typeof SignedHandshakeProofV1Schema>;
+
+export const ControlProofMessageSchema = Type.Object(
+  {
+    ...SessionProperties,
+    signedProof: SignedHandshakeProofV1Schema,
+  },
+  { additionalProperties: false },
+);
+export type ControlProofMessage = Static<typeof ControlProofMessageSchema>;
 
 export const ReadyMessageSchema = Type.Object(
   {
@@ -476,6 +513,7 @@ export const localMessageSchemas = Object.freeze({
   [LocalMessageType.Pong]: PongMessageSchema,
   [LocalMessageType.TerminalDisposition]: TerminalDispositionMessageSchema,
   [LocalMessageType.TerminalAck]: TerminalAckMessageSchema,
+  [LocalMessageType.ControlProof]: ControlProofMessageSchema,
 } satisfies Record<LocalMessageTypeId, TSchema>);
 
 export type LocalProtocolPeerRole = "control" | "executor" | "either";
@@ -500,6 +538,7 @@ export const localMessageSender = Object.freeze({
   [LocalMessageType.Pong]: "either",
   [LocalMessageType.TerminalDisposition]: "control",
   [LocalMessageType.TerminalAck]: "executor",
+  [LocalMessageType.ControlProof]: "control",
 } as const satisfies Record<LocalMessageTypeId, LocalProtocolPeerRole>);
 
 export type LocalMessagePayload =
@@ -521,7 +560,8 @@ export type LocalMessagePayload =
   | PingMessage
   | PongMessage
   | TerminalDispositionMessage
-  | TerminalAckMessage;
+  | TerminalAckMessage
+  | ControlProofMessage;
 
 export class LocalMessageValidationError extends Error {
   public constructor(
@@ -581,6 +621,18 @@ export function digestExecutorJobEnvelope(envelope: unknown): string {
   return createCanonicalJsonDocument(normalized).sha256;
 }
 
+export function validateHandshakeTranscriptV1(value: unknown): Readonly<HandshakeTranscriptV1> {
+  const transcript = validateSchemaValue<HandshakeTranscriptV1>(value, HandshakeTranscriptV1Schema);
+  assertHandshakeTranscriptContext(transcript);
+  return Object.freeze(transcript);
+}
+
+export function validateSignedHandshakeProofV1(value: unknown): Readonly<SignedHandshakeProofV1> {
+  const signed = validateSchemaValue<SignedHandshakeProofV1>(value, SignedHandshakeProofV1Schema);
+  validateHandshakeTranscriptV1(signed.transcript);
+  return Object.freeze(signed);
+}
+
 function validateSemanticRules(
   messageType: LocalMessageTypeId,
   message: LocalMessagePayload,
@@ -593,6 +645,9 @@ function validateSemanticRules(
     ) {
       throw messageError("MESSAGE_CONTEXT_MISMATCH", "Ready state fields are inconsistent.");
     }
+  }
+  if (messageType === LocalMessageType.ControlProof) {
+    validateControlProofMessage(message as ControlProofMessage);
   }
   if (messageType === LocalMessageType.StartAttempt) {
     validateStartAttempt(message as StartAttemptMessage);
@@ -627,6 +682,47 @@ function validateSemanticRules(
     if (pong.observedAtUnixMs < pong.sentAtUnixMs) {
       throw messageError("MESSAGE_CONTEXT_MISMATCH", "Pong timestamps are inconsistent.");
     }
+  }
+}
+
+function assertHandshakeTranscriptContext(transcript: HandshakeTranscriptV1): void {
+  const hello = transcript.hello;
+  const helloAck = transcript.helloAck;
+  if (
+    helloAck.protocolMajor !== hello.protocolMajor ||
+    helloAck.protocolMinor < hello.minimumMinor ||
+    helloAck.protocolMinor > hello.maximumMinor ||
+    helloAck.workerNodeId !== hello.workerNodeId ||
+    helloAck.workerInstanceId !== hello.workerInstanceId ||
+    helloAck.sessionId !== hello.sessionId ||
+    helloAck.controlNonce !== hello.controlNonce ||
+    helloAck.executorManifestSha256 !== hello.controlManifestSha256 ||
+    hello.controlNonce === helloAck.executorNonce ||
+    isZeroDigest(hello.controlNonce) ||
+    isZeroDigest(helloAck.executorNonce)
+  ) {
+    throw messageError(
+      "MESSAGE_CONTEXT_MISMATCH",
+      "Handshake transcript contains inconsistent peer context.",
+    );
+  }
+}
+
+function validateControlProofMessage(message: ControlProofMessage): void {
+  const transcript = validateSignedHandshakeProofV1(message.signedProof).transcript;
+  const helloAck = transcript.helloAck;
+  if (
+    message.protocolMajor !== helloAck.protocolMajor ||
+    message.protocolMinor !== helloAck.protocolMinor ||
+    message.workerNodeId !== helloAck.workerNodeId ||
+    message.workerInstanceId !== helloAck.workerInstanceId ||
+    message.executorBootId !== helloAck.executorBootId ||
+    message.sessionId !== helloAck.sessionId
+  ) {
+    throw messageError(
+      "MESSAGE_CONTEXT_MISMATCH",
+      "ControlProof message does not match its signed handshake transcript.",
+    );
   }
 }
 
@@ -890,6 +986,10 @@ function validateSchemaValue<T>(value: unknown, schema: TSchema): T {
 function secureDigestEqual(left: string, right: string): boolean {
   if (!/^[a-f0-9]{64}$/u.test(left) || !/^[a-f0-9]{64}$/u.test(right)) return false;
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+function isZeroDigest(value: string): boolean {
+  return value === "0".repeat(64);
 }
 
 function messageError(

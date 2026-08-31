@@ -11,7 +11,9 @@ import {
   assertLocalMessageSender,
   type ExecutorJobEnvelopeV1,
   encodeArtifactChunkData,
+  HANDSHAKE_TRANSCRIPT_VERSION,
   LOCAL_ARTIFACT_CHUNK_MAXIMUM_BYTES,
+  LOCAL_HANDSHAKE_AUDIENCE,
   LocalMessageValidationError,
   validateLocalMessagePayload,
 } from "./messages.js";
@@ -153,6 +155,10 @@ describe("local protocol message schemas", () => {
     expect(() => assertLocalMessageSender(LocalMessageType.StartAttempt, "executor")).toThrow(
       LocalMessageValidationError,
     );
+    expect(() => assertLocalMessageSender(LocalMessageType.ControlProof, "control")).not.toThrow();
+    expect(() => assertLocalMessageSender(LocalMessageType.ControlProof, "executor")).toThrow(
+      LocalMessageValidationError,
+    );
     expect(() => assertLocalMessageSender(LocalMessageType.Ping, "control")).not.toThrow();
     expect(() => assertLocalMessageSender(LocalMessageType.Ping, "executor")).not.toThrow();
   });
@@ -201,6 +207,51 @@ describe("local protocol message schemas", () => {
     expect(() =>
       validateLocalMessagePayload(LocalMessageType.Hello, { ...hello, command: "cmd.exe" }, nil),
     ).toThrow(LocalMessageValidationError);
+
+    const helloAck = {
+      ...session,
+      controlNonce: hello.controlNonce,
+      executorNonce: hex("4"),
+      executorManifestSha256: hello.controlManifestSha256,
+      executorPolicySha256: hex("6"),
+      executorPreflightSha256: hex("7"),
+      maximumSlots: 4,
+    };
+    const controlProof = {
+      ...session,
+      signedProof: {
+        transcript: {
+          transcriptVersion: HANDSHAKE_TRANSCRIPT_VERSION,
+          canonicalizationVersion: 1,
+          signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
+          keyId: hex("8"),
+          audience: LOCAL_HANDSHAKE_AUDIENCE,
+          hello,
+          helloAck,
+        },
+        signature: "A".repeat(86),
+      },
+    };
+    expect(validateLocalMessagePayload(LocalMessageType.ControlProof, controlProof, nil)).toEqual(
+      controlProof,
+    );
+    expect(() =>
+      validateLocalMessagePayload(
+        LocalMessageType.ControlProof,
+        { ...controlProof, sessionId: "90000000-0000-4000-8000-000000000009" },
+        nil,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "MESSAGE_CONTEXT_MISMATCH" }));
+    expect(() =>
+      validateLocalMessagePayload(
+        LocalMessageType.ControlProof,
+        {
+          ...controlProof,
+          signedProof: { ...controlProof.signedProof, privateKey: "must-not-cross" },
+        },
+        nil,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "MESSAGE_SCHEMA_INVALID" }));
 
     const ready = {
       ...session,

@@ -50,7 +50,7 @@ func TestFrameValidationRejectsInvalidHeaders(t *testing.T) {
 		{name: "major", mutate: func(value []byte) { binary.LittleEndian.PutUint16(value[6:8], 2) }, target: ErrInvalidHeader},
 		{name: "minor", mutate: func(value []byte) { binary.LittleEndian.PutUint16(value[8:10], 1) }, target: ErrInvalidHeader},
 		{name: "message zero", mutate: func(value []byte) { binary.LittleEndian.PutUint16(value[10:12], 0) }, target: ErrInvalidHeader},
-		{name: "message unknown", mutate: func(value []byte) { binary.LittleEndian.PutUint16(value[10:12], 20) }, target: ErrInvalidHeader},
+		{name: "message unknown", mutate: func(value []byte) { binary.LittleEndian.PutUint16(value[10:12], 21) }, target: ErrInvalidHeader},
 		{name: "flags", mutate: func(value []byte) { binary.LittleEndian.PutUint32(value[12:16], 1) }, target: ErrInvalidHeader},
 		{name: "sequence", mutate: func(value []byte) { binary.LittleEndian.PutUint64(value[20:28], 0) }, target: ErrInvalidHeader},
 		{name: "reserved", mutate: func(value []byte) { binary.LittleEndian.PutUint32(value[44:48], 1) }, target: ErrInvalidHeader},
@@ -65,6 +65,18 @@ func TestFrameValidationRejectsInvalidHeaders(t *testing.T) {
 				t.Fatalf("expected %v, got %v", test.target, err)
 			}
 		})
+	}
+}
+
+func TestFrameValidationAcceptsControlProofMessageType(t *testing.T) {
+	value := testFrame([]byte(`{"signedProof":{}}`))
+	binary.LittleEndian.PutUint16(value[10:12], 20)
+	header, err := ValidateFrame(value, MaximumFrameBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.MessageType != 20 {
+		t.Fatalf("message type = %d, want 20", header.MessageType)
 	}
 }
 
