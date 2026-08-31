@@ -41,9 +41,11 @@ The Server sees only the Control service. It continues to identify the machine b
 Executor boot ID, local protocol version, installation-manifest digest, and preflight status as
 capability metadata. These fields do not create a second schedulable Worker.
 
-The services communicate only through one local, ACL-restricted Windows Named Pipe. Control sends
-typed, signed, short-lived execution capabilities instead of forwarding the Server lease token.
-Executor streams bounded progress, artifacts, and terminal results back over the same pipe.
+The services communicate with each other only through one local, ACL-restricted Windows Named
+Pipe. Control sends typed, signed, short-lived execution capabilities instead of forwarding the
+Server lease token. Executor streams bounded progress, artifacts, and terminal results back over
+the same pipe. Each ServiceHost also owns one separate, per-launch HostControl pipe used only by its
+own Node child; that private bootstrap/RPC channel is not an inter-service transport.
 
 `WORKER_EXECUTION_ENABLED=true` is invalid in production unless `split-service-v1` isolation and
 all preflight checks in this ADR succeed. The current single-process mode may remain available for
@@ -130,7 +132,8 @@ no scheduling, lease, repository, prompt, result, or publication policy.
 ServiceHost performs only these duties:
 
 - own or connect the ACL-restricted Named Pipe and verify its peer ServiceHost;
-- expose a role-local, typed native RPC endpoint to its own Node payload;
+- create a private per-launch HostControl pipe, bind its only client to the exact Node child, and
+  expose a role-local typed native RPC endpoint over that channel;
 - on Control, use the non-exportable CNG client-certificate key through a fixed-origin,
   route-limited mTLS Worker API transport and sign dedicated local-authority prehashes requested by
   the trusted Control payload;
@@ -142,13 +145,23 @@ ServiceHost performs only these duties:
   `KILL_ON_JOB_CLOSE`.
 
 Before opening the application channel, each ServiceHost applies an object DACL that grants the peer
-SID `PROCESS_QUERY_LIMITED_INFORMATION` only and a token-object DACL that grants `TOKEN_QUERY` only.
-It does not grant process-memory, handle-duplication, token-duplication, token-assignment,
-impersonation, adjustment, or thread-control rights.
+SID `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` and a token-object DACL that grants
+`TOKEN_QUERY` only. `SYNCHRONIZE` is required to retain and wait on the verified peer lifetime; it
+does not grant process-memory or process-control access. The DACL does not grant handle duplication,
+token duplication, token assignment, impersonation, adjustment, or thread-control rights.
 
-The Control and Executor Node payloads communicate with their local ServiceHost through inherited
-anonymous pipe handles that are not inherited by Codex, Git, ProcessHost, recipes, or any other
-child. Executor's ProcessHost Job Objects are nested inside the Executor service-root Job Object.
+Each Node payload uses its inherited stdin/stdout anonymous pipes exclusively for the ARWX stream
+that ServiceHost relays to the verified inter-service Named Pipe. Role-local bootstrap and RPC use a
+separate byte-mode HostControl Named Pipe. ServiceHost creates its only instance before launching
+Node with `FILE_FLAG_FIRST_PIPE_INSTANCE`, a protected own-service DACL, and remote-client rejection.
+The pipe has a random 256-bit leaf name, but the name is not treated as a credential. After connect,
+ServiceHost observes the kernel-reported client PID around checks against the retained Node process
+handle, including liveness and stable creation identity. A mismatch, extra connection, framing
+failure, or reconnect attempt is host-fatal. Node must connect before it may launch any child.
+
+The inherited ARWX handles and the HostControl connection are not inherited by Codex, Git,
+ProcessHost, recipes, or any other child. Executor's ProcessHost Job Objects are nested inside the
+Executor service-root Job Object.
 ServiceHost is the sole long-lived owner of the root Job handle and never leaks it to Node. Process
 exit closes that handle automatically. Parent-child lineage alone does not make WinSW exit close a
 child-owned handle, so ServiceHost also retains and continuously waits on a stable handle to its
@@ -365,6 +378,12 @@ but it does not claim to contain a compromised Control process. Making the route
 against Control would require another token and service SID, which is outside this two-service
 design.
 
+The HostControl pipe is independent of the ARWX stream, so a large Worker API response cannot delay
+an authorization renewal or cancellation frame. Its first exchange is a bounded,
+role-specific `RuntimeBootstrapV1` document and acknowledgement. Control then keeps the connection
+for typed Worker API and signing RPC; Executor exposes only explicitly approved native bootstrap and
+workspace operations. An ARWX frame can never select a HostControl operation.
+
 The role-local RPC accepts only typed Worker API operations. Each operation maps locally to one
 fixed method and path template; schema-validated identifiers are encoded as individual path
 segments. It pins the configured Server origin, SNI, TLS roots, client certificate,
@@ -496,7 +515,9 @@ restricted service SIDs.
 | Executor runtime state and logs | Deny | Modify | Full control |
 | Executor Codex home and authentication state | Deny | Modify | Full control |
 | Attempt workspaces, temp, and Git object data | Deny | Modify | Full control |
-| Named Pipe server/client endpoint | Server owner | Connect/read/write | Full control |
+| Inter-service Named Pipe endpoint | Server owner | Connect/read/write | Full control |
+| Per-launch Control HostControl endpoint | Connect/read/write | Deny | Full control |
+| Per-launch Executor HostControl endpoint | Deny | Connect/read/write | Full control |
 | Executor service object | Query/start/stop only | Query own status | Full control |
 | Control service object | Query own status | Query status only | Full control |
 
@@ -573,7 +594,8 @@ Executor requires:
 - the required Codex version, machine-enforced profile, elevated native sandbox, private desktop,
   and selected authentication mode;
 - disk, process, memory, output, and artifact budgets; and
-- the exact pipe ACL, first-instance ownership, peer identity, and capability public key.
+- the exact inter-service and HostControl pipe ACLs, first-instance ownership, bound peer/child
+  identities, and capability public key.
 
 Preflight is rerun at service start, after pipe reconnect, after upgrade, after credential rotation,
 and periodically for drift. A configuration request to enable production execution while the
