@@ -81,11 +81,7 @@ func cloneRoots(values []RootSnapshot) []RootSnapshot {
 func cloneFiles(values []FileSnapshot) []FileSnapshot {
 	result := append([]FileSnapshot(nil), values...)
 	for index := range result {
-		result[index].object = cloneObjectEvidence(result[index].object)
-		if result[index].authenticode != nil {
-			copy := *result[index].authenticode
-			result[index].authenticode = &copy
-		}
+		result[index] = cloneFileSnapshot(result[index])
 	}
 	return result
 }

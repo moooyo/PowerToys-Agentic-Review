@@ -74,6 +74,8 @@ type verifier struct {
 	installation      *verifiedTree
 	trusted           *verifiedTree
 	verifiedFiles     map[string]FileSnapshot
+	contentTargets    map[string]verifiedContentTarget
+	verifiedContents  map[string]VerifiedContent
 }
 
 func verifyWithDependencies(
@@ -142,6 +144,7 @@ func verifyWithDependencies(
 		signatureVerifier: signatureVerifier,
 		seenIdentities:    make(map[winfile.FileIdentity]string),
 		verifiedFiles:     make(map[string]FileSnapshot),
+		verifiedContents:  make(map[string]VerifiedContent),
 	}
 	defer func() {
 		cleanupErr := state.resources.finalize()
@@ -190,6 +193,7 @@ func verifyWithDependencies(
 			state.trusted.rootSnapshot(),
 		},
 		files:             cloneFiles(files),
+		contents:          cloneVerifiedContents(state.verifiedContents),
 		approvedSignerPin: state.controlConfig.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
 	}}
 	if validateErr := result.Validate(); validateErr != nil {
@@ -396,6 +400,9 @@ func (v *verifier) openRootsAndManifest() error {
 	}
 	if err := validateConfiguredBindings(v.controlConfig, v.executorConfig, v.manifest); err != nil {
 		return verificationError(ErrorManifest, "configuration path is not bound by the release manifest", errors.Join(ErrManifest, err))
+	}
+	if err := v.prepareVerifiedContentTargets(); err != nil {
+		return verificationError(ErrorManifest, "prepare role-required trusted content", errors.Join(ErrManifest, err))
 	}
 	return nil
 }

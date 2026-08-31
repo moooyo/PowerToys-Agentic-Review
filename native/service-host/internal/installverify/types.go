@@ -11,17 +11,18 @@ import (
 )
 
 var (
-	ErrUnsupportedPlatform = errors.New("installation verification requires Windows")
-	ErrInvalidOptions      = errors.New("invalid installation verifier options")
-	ErrServiceIdentity     = errors.New("current process is not a verified restricted worker service")
-	ErrBootstrap           = errors.New("bootstrap configuration verification failed")
-	ErrConfiguration       = errors.New("bootstrap configurations are inconsistent")
-	ErrManifest            = errors.New("release manifest verification failed")
-	ErrClosedTree          = errors.New("installed trees do not exactly match the release manifest")
-	ErrFileIdentity        = errors.New("installed objects reuse a filesystem identity")
-	ErrFileContent         = errors.New("installed file content does not match the release manifest")
-	ErrAuthenticode        = errors.New("installed executable failed Authenticode verification")
-	ErrCleanup             = errors.New("installation verifier cleanup failed")
+	ErrUnsupportedPlatform        = errors.New("installation verification requires Windows")
+	ErrInvalidOptions             = errors.New("invalid installation verifier options")
+	ErrServiceIdentity            = errors.New("current process is not a verified restricted worker service")
+	ErrBootstrap                  = errors.New("bootstrap configuration verification failed")
+	ErrConfiguration              = errors.New("bootstrap configurations are inconsistent")
+	ErrManifest                   = errors.New("release manifest verification failed")
+	ErrClosedTree                 = errors.New("installed trees do not exactly match the release manifest")
+	ErrFileIdentity               = errors.New("installed objects reuse a filesystem identity")
+	ErrFileContent                = errors.New("installed file content does not match the release manifest")
+	ErrAuthenticode               = errors.New("installed executable failed Authenticode verification")
+	ErrCleanup                    = errors.New("installation verifier cleanup failed")
+	ErrVerifiedContentUnavailable = errors.New("verified runtime content is unavailable")
 )
 
 // Limits bound retained handles, directory enumeration, path depth, and
@@ -123,6 +124,7 @@ type evidenceState struct {
 	manifest            releasemanifest.Manifest
 	roots               []RootSnapshot
 	files               []FileSnapshot
+	contents            map[string]VerifiedContent
 	approvedSignerPin   string
 }
 
@@ -144,6 +146,9 @@ func (e Evidence) Validate() error {
 	}
 	if observedRole, err := roleFromIdentityEvidence(e.state.identity); err != nil || observedRole != e.state.role {
 		return errors.New("installation verification identity evidence is empty or inconsistent")
+	}
+	if err := validateVerifiedContents(e.state); err != nil {
+		return errors.New("installation verification trusted content is empty or inconsistent")
 	}
 	return nil
 }

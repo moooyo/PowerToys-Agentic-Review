@@ -401,11 +401,15 @@ func (v *verifier) verifyManifestFile(file *openedFile, expected releasemanifest
 	if _, duplicate := v.verifiedFiles[key]; duplicate {
 		return verificationError(ErrorTree, "manifest file was verified more than once", ErrClosedTree)
 	}
-	v.verifiedFiles[key] = FileSnapshot{
+	snapshot := FileSnapshot{
 		root: expected.Root, path: expected.Path, absolutePath: file.object.Path,
 		role: expected.Role, sha256: expected.SHA256, size: size,
 		object: cloneObjectEvidence(file.object), authenticode: signature,
 	}
+	if err := v.captureVerifiedContent(file, expected, size, hash.SHA256, snapshot); err != nil {
+		return err
+	}
+	v.verifiedFiles[key] = snapshot
 	return nil
 }
 

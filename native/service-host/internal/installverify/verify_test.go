@@ -198,6 +198,20 @@ type installFixture struct {
 }
 
 func newInstallFixture(t *testing.T) *installFixture {
+	return newInstallFixtureWithTrustedContent(
+		t,
+		[]byte("certificate"),
+		[]byte("public-key"),
+		[]byte("sandbox='required'"),
+	)
+}
+
+func newInstallFixtureWithTrustedContent(
+	t *testing.T,
+	rootCertificate []byte,
+	localAuthoritySPKI []byte,
+	codexPolicy []byte,
+) *installFixture {
 	t.Helper()
 	fs := newFakeFileSystem()
 	files := []struct {
@@ -217,9 +231,9 @@ func newInstallFixture(t *testing.T) *installFixture {
 		{releasemanifest.RootInstallation, `git\git.exe`, releasemanifest.RoleGitCLI, []byte("MZ-git")},
 		{releasemanifest.RootInstallation, `service\control.xml`, releasemanifest.RoleServiceConfig, []byte("<service id='control'/>")},
 		{releasemanifest.RootInstallation, `service\executor.xml`, releasemanifest.RoleServiceConfig, []byte("<service id='executor'/>")},
-		{releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, []byte("certificate")},
-		{releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, []byte("public-key")},
-		{releasemanifest.RootTrustedConfiguration, `policy\codex.toml`, releasemanifest.RolePolicy, []byte("sandbox='required'")},
+		{releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, append([]byte(nil), rootCertificate...)},
+		{releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, append([]byte(nil), localAuthoritySPKI...)},
+		{releasemanifest.RootTrustedConfiguration, `policy\codex.toml`, releasemanifest.RolePolicy, append([]byte(nil), codexPolicy...)},
 	}
 	manifest := releasemanifest.Manifest{
 		SchemaVersion:   releasemanifest.SchemaVersion,
@@ -417,15 +431,17 @@ func (fakeAuthenticodeVerifier) Verify(authenticode.Subject) (authenticode.Evide
 }
 
 type fakeNode struct {
-	name           string
-	path           string
-	directory      bool
-	data           []byte
-	children       map[string]*fakeNode
-	identity       winfile.FileIdentity
-	closeFailures  int
-	afterEnumerate func()
-	enumerations   int
+	name                   string
+	path                   string
+	directory              bool
+	data                   []byte
+	children               map[string]*fakeNode
+	identity               winfile.FileIdentity
+	closeFailures          int
+	afterEnumerate         func()
+	afterHash              func()
+	reinspectSecurityError error
+	enumerations           int
 }
 
 type fakeFileSystem struct {
@@ -666,14 +682,20 @@ func (file *fakeFile) HashSHA256(options winfile.HashOptions) (winfile.HashResul
 	if options.ExpectedSize != uint64(len(file.node.data)) || options.ExpectedSize > options.MaximumBytes {
 		return winfile.HashResult{}, winfile.ErrSizeMismatch
 	}
-	digest := sha256.Sum256(file.node.data)
+	data := append([]byte(nil), file.node.data...)
+	digest := sha256.Sum256(data)
+	if file.node.afterHash != nil {
+		afterHash := file.node.afterHash
+		file.node.afterHash = nil
+		afterHash()
+	}
 	prefixBytes := int(options.PrefixBytes)
-	if prefixBytes > len(file.node.data) {
-		prefixBytes = len(file.node.data)
+	if prefixBytes > len(data) {
+		prefixBytes = len(data)
 	}
 	return winfile.HashResult{
-		SHA256: digest, Size: uint64(len(file.node.data)),
-		Prefix: append([]byte(nil), file.node.data[:prefixBytes]...),
+		SHA256: digest, Size: uint64(len(data)),
+		Prefix: append([]byte(nil), data[:prefixBytes]...),
 	}, nil
 }
 func (file *fakeFile) VerifyAuthenticode(authenticode.Verifier) (authenticode.Evidence, error) {
@@ -697,6 +719,9 @@ func (file *fakeFile) VerifyUnchanged() error {
 	return nil
 }
 func (file *fakeFile) ReinspectSecurity() (winfile.SecurityDescriptorEvidence, error) {
+	if file.node.reinspectSecurityError != nil {
+		return winfile.SecurityDescriptorEvidence{}, file.node.reinspectSecurityError
+	}
 	return fakeSecurityForMode(file.securityMode), nil
 }
 func (file *fakeFile) ReinspectDataStreams() ([]winfile.DataStream, error) {
