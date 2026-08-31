@@ -10,6 +10,7 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
@@ -17,8 +18,12 @@ import (
 
 // Verify proves the fixed restricted service identity before constructing any
 // authorization policy or opening configuration and installation objects.
-func Verify(ctx context.Context, options Options) (Evidence, error) {
-	return verifyWithDependencies(ctx, options, dependencies{
+func Verify(ctx context.Context, options Options, authority releaseprofile.Evidence) (Evidence, error) {
+	facts, err := captureReleaseAuthority(authority)
+	if err != nil {
+		return Evidence{}, err
+	}
+	return verifyWithDependencies(ctx, options, facts, dependencies{
 		identityPreflight: winidentity.Preflight,
 		newSecurityPolicy: newProductionFilesystemSecurityPolicy,
 		newAuthenticodeVerifier: func() (authenticode.Verifier, error) {

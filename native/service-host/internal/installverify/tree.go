@@ -390,9 +390,9 @@ func (v *verifier) verifyManifestFile(file *openedFile, expected releasemanifest
 		}
 		if err := validateAuthenticodeEvidence(
 			evidence,
-			v.controlConfig.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
+			v.releaseAuthority.signerPin,
 		); err != nil {
-			return verificationError(ErrorSignature, "file Authenticode signer differs from the bootstrap pin", err)
+			return verificationError(ErrorSignature, "file Authenticode signer differs from the compiled release authority", err)
 		}
 		copy := evidence
 		signature = &copy

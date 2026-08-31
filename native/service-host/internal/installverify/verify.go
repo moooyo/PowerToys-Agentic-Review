@@ -55,6 +55,8 @@ type verifier struct {
 	deps                      dependencies
 	resources                 retainedResources
 	identity                  winidentity.Evidence
+	releaseAuthority          releaseAuthorityFacts
+	releaseBinding            ReleaseBinding
 	policy                    filesystemSecurityPolicy
 	signatureVerifier         authenticode.Verifier
 	installationManagedAnchor string
@@ -81,10 +83,14 @@ type verifier struct {
 func verifyWithDependencies(
 	ctx context.Context,
 	options Options,
+	authority releaseAuthorityFacts,
 	deps dependencies,
 ) (result Evidence, err error) {
 	if ctx == nil {
 		return Evidence{}, verificationError(ErrorInput, "verification context is required", ErrInvalidOptions)
+	}
+	if err := validateReleaseAuthorityFacts(authority); err != nil {
+		return Evidence{}, releaseAuthorityError("compiled release authority is invalid", err)
 	}
 	options, err = normalizeOptions(options)
 	if err != nil {
@@ -140,6 +146,7 @@ func verifyWithDependencies(
 		options:           options,
 		deps:              deps,
 		identity:          cloneIdentityEvidence(identity),
+		releaseAuthority:  cloneReleaseAuthorityFacts(authority),
 		policy:            policy,
 		signatureVerifier: signatureVerifier,
 		seenIdentities:    make(map[winfile.FileIdentity]string),
@@ -188,13 +195,13 @@ func verifyWithDependencies(
 		executorConfig:      cloneConfig(state.executorConfig),
 		manifestRead:        cloneSecureResult(state.manifestRead),
 		manifest:            cloneManifest(state.manifest),
+		releaseBinding:      cloneReleaseBinding(state.releaseBinding),
 		roots: []RootSnapshot{
 			state.installation.rootSnapshot(),
 			state.trusted.rootSnapshot(),
 		},
-		files:             cloneFiles(files),
-		contents:          cloneVerifiedContents(state.verifiedContents),
-		approvedSignerPin: state.controlConfig.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256,
+		files:    cloneFiles(files),
+		contents: cloneVerifiedContents(state.verifiedContents),
 	}}
 	if validateErr := result.Validate(); validateErr != nil {
 		return Evidence{}, verificationError(ErrorInput, "constructed installation evidence is incomplete", validateErr)
@@ -237,6 +244,9 @@ func (v *verifier) readBootstraps() error {
 	}
 	if err := validateConfigurationPair(v.controlConfig, v.executorConfig); err != nil {
 		return verificationError(ErrorConfiguration, "cross-check bootstrap configurations", err)
+	}
+	if err := validateConfigurationAuthority(v.controlConfig, v.executorConfig, v.releaseAuthority); err != nil {
+		return err
 	}
 	if !windowsPathEqual(parent, v.controlConfig.Installation.TrustedConfigurationRoot) ||
 		!windowsPathEqual(parent, v.executorConfig.Installation.TrustedConfigurationRoot) {
@@ -373,9 +383,13 @@ func (v *verifier) openRootsAndManifest() error {
 	if err != nil {
 		return verificationError(ErrorManifest, "parse canonical release manifest", errors.Join(ErrManifest, err))
 	}
-	if v.manifest.ReleaseID != v.controlConfig.Installation.ReleaseID ||
-		v.manifest.Compatibility != releasemanifest.RequiredCompatibility() {
-		return verificationError(ErrorManifest, "release manifest identity or compatibility is not pinned", ErrManifest)
+	v.releaseBinding, err = bindReleaseManifest(
+		v.releaseAuthority,
+		v.manifest,
+		fmt.Sprintf("%x", digest),
+	)
+	if err != nil {
+		return err
 	}
 	if _, listed := v.manifest.LookupFile(releasemanifest.RootInstallation, manifestRelative); listed {
 		return verificationError(ErrorManifest, "release manifest lists itself", ErrManifest)

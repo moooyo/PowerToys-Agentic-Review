@@ -175,7 +175,7 @@ func TestIdentityMismatchStopsBeforeFactoriesAndFilesystem(t *testing.T) {
 		return fakeAuthenticodeVerifier{}, nil
 	}
 
-	evidence, err := verifyWithDependencies(context.Background(), fixture.options, deps)
+	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, deps)
 	if !errors.Is(err, ErrServiceIdentity) {
 		t.Fatalf("identity mismatch returned %v, want ErrServiceIdentity", err)
 	}

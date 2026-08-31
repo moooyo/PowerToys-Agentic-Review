@@ -13,7 +13,7 @@ import (
 func TestVerifiedContentIsRoleScopedAndCopyOnly(t *testing.T) {
 	t.Run("Control", func(t *testing.T) {
 		fixture := newInstallFixture(t)
-		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 		if err != nil {
 			t.Fatalf("verifyWithDependencies returned an error: %v", err)
 		}
@@ -54,7 +54,7 @@ func TestVerifiedContentIsRoleScopedAndCopyOnly(t *testing.T) {
 		fixture := newInstallFixture(t)
 		fixture.options.Role = config.RoleExecutor
 		fixture.options.ActualBootstrapPath = testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
-		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 		if err != nil {
 			t.Fatalf("verifyWithDependencies returned an error: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestVerifiedContentRejectsPostHashTampering(t *testing.T) {
 	node.afterHash = func() {
 		node.data = []byte("tampered-after-hash")
 	}
-	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 	if !errors.Is(err, ErrFileContent) {
 		t.Fatalf("post-hash tampering returned %v, want ErrFileContent", err)
 	}
@@ -132,7 +132,7 @@ func TestVerifiedContentEnforcesFixedPerPurposeBounds(t *testing.T) {
 			if test.role == config.RoleExecutor {
 				fixture.options.ActualBootstrapPath = testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
 			}
-			evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+			evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 			if !errors.Is(err, ErrFileContent) {
 				t.Fatalf("oversized content returned %v, want ErrFileContent", err)
 			}
@@ -154,7 +154,7 @@ func TestVerifiedContentRequiresFinalReinspectionAndClose(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newInstallFixture(t)
 			test.mutate(fixture.fs.mustNode(testTrustedRoot + `\certificates\server-root.cer`))
-			evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+			evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 			if !errors.Is(err, ErrCleanup) {
 				t.Fatalf("cleanup failure returned %v, want ErrCleanup", err)
 			}

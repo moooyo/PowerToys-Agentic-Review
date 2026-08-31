@@ -15,6 +15,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
@@ -28,7 +29,7 @@ const (
 
 func TestVerifyWithDependenciesProducesOpaqueDetachedEvidence(t *testing.T) {
 	fixture := newInstallFixture(t)
-	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 	if err != nil {
 		t.Fatalf("verifyWithDependencies returned an error: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestVerifyWithDependenciesRejectsClosedTreeAndIdentityViolations(t *testing
 	t.Run("reused file identity", func(t *testing.T) {
 		fixture := newInstallFixture(t)
 		first := fixture.fs.mustNode(testInstallationRoot + `\runtime\node.exe`)
-		second := fixture.fs.mustNode(testInstallationRoot + `\native\servicehost.exe`)
+		second := fixture.fs.mustNode(testInstallationRoot + `\` + releaseprofile.ServiceHostRelativePath)
 		second.identity = first.identity
 		assertVerificationError(t, fixture, ErrFileIdentity)
 	})
@@ -124,7 +125,7 @@ func TestVerifyWithDependenciesRejectsSignerAndCleanupFailures(t *testing.T) {
 	t.Run("close failure suppresses evidence", func(t *testing.T) {
 		fixture := newInstallFixture(t)
 		fixture.fs.mustNode(testInstallationRoot + `\runtime\node.exe`).closeFailures = 1
-		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 		if !errors.Is(err, ErrCleanup) {
 			t.Fatalf("close failure returned %v, want ErrCleanup", err)
 		}
@@ -139,7 +140,7 @@ func TestVerifyWithDependenciesRejectsSignerAndCleanupFailures(t *testing.T) {
 		root.afterEnumerate = func() {
 			fixture.fs.addFile(testInstallationRoot+`\late.txt`, []byte("late"))
 		}
-		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+		evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 		if !errors.Is(err, ErrCleanup) {
 			t.Fatalf("enumeration drift returned %v, want ErrCleanup", err)
 		}
@@ -174,14 +175,14 @@ func TestVerifyFailsClosedOutsideWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("non-Windows contract")
 	}
-	if _, err := Verify(context.Background(), Options{}); !errors.Is(err, ErrUnsupportedPlatform) {
+	if _, err := Verify(context.Background(), Options{}, releaseprofile.Evidence{}); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("Verify returned %v, want ErrUnsupportedPlatform", err)
 	}
 }
 
 func assertVerificationError(t *testing.T, fixture *installFixture, target error) {
 	t.Helper()
-	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.dependencies())
+	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
 	if !errors.Is(err, target) {
 		t.Fatalf("verification returned %v, want %v", err, target)
 	}
@@ -193,6 +194,7 @@ func assertVerificationError(t *testing.T, fixture *installFixture, target error
 type installFixture struct {
 	fs           *fakeFileSystem
 	options      Options
+	authority    releaseAuthorityFacts
 	manifest     releasemanifest.Manifest
 	signerDigest string
 }
@@ -222,7 +224,7 @@ func newInstallFixtureWithTrustedContent(
 	}{
 		{releasemanifest.RootInstallation, config.ControlServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-control-wrapper")},
 		{releasemanifest.RootInstallation, config.ExecutorServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-executor-wrapper")},
-		{releasemanifest.RootInstallation, `native\servicehost.exe`, releasemanifest.RoleServiceHost, []byte("MZ-service-host")},
+		{releasemanifest.RootInstallation, releaseprofile.ServiceHostRelativePath, releasemanifest.RoleServiceHost, []byte("MZ-service-host")},
 		{releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, []byte("MZ-node")},
 		{releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, []byte("export const role='control';")},
 		{releasemanifest.RootInstallation, `app\executor.mjs`, releasemanifest.RoleExecutorBundle, []byte("export const role='executor';")},
@@ -259,6 +261,7 @@ func newInstallFixtureWithTrustedContent(
 		t.Fatalf("parse fixture manifest: %v", err)
 	}
 	manifestDigest := sha256.Sum256(manifestDocument)
+	authority := fixtureReleaseAuthority(manifest)
 
 	for _, file := range manifest.Files {
 		root := testInstallationRoot
@@ -347,8 +350,35 @@ func newInstallFixtureWithTrustedContent(
 			ActualBootstrapPath: testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath,
 			Limits:              ProductionLimits(),
 		},
+		authority:    authority,
 		manifest:     manifest,
 		signerDigest: testSignerDigest,
+	}
+}
+
+func fixtureReleaseAuthority(manifest releasemanifest.Manifest) releaseAuthorityFacts {
+	dependencies := make([]releaseprofile.Dependency, 0, len(manifest.Files)-1)
+	for _, file := range manifest.Files {
+		if file.Role == releasemanifest.RoleServiceHost {
+			continue
+		}
+		dependencies = append(dependencies, releaseprofile.Dependency{
+			Root: file.Root, Path: file.Path, Role: file.Role, SHA256: file.SHA256, Size: file.Size,
+		})
+	}
+	return releaseAuthorityFacts{
+		templateDigest: sha256.Sum256([]byte("fixture compiled release template")),
+		schemaVersion:  releaseprofile.SchemaVersion,
+		profileID:      releaseprofile.ProductionProfileID,
+		releaseID:      manifest.ReleaseID,
+		compatibility:  manifest.Compatibility,
+		signerPin:      testSignerDigest,
+		dependencies:   dependencies,
+		serviceHost: releaseprofile.SelfRequirement{
+			Root: releasemanifest.RootInstallation,
+			Path: releaseprofile.ServiceHostRelativePath,
+			Role: releasemanifest.RoleServiceHost,
+		},
 	}
 }
 
@@ -459,6 +489,7 @@ type fakeFileSystem struct {
 	root                *fakeNode
 	nextID              uint64
 	signerDigest        string
+	authenticodeCount   int
 	secureReadCount     int
 	afterBootstrapReads func()
 }
@@ -710,6 +741,7 @@ func (file *fakeFile) HashSHA256(options winfile.HashOptions) (winfile.HashResul
 	}, nil
 }
 func (file *fakeFile) VerifyAuthenticode(authenticode.Verifier) (authenticode.Evidence, error) {
+	file.fs.authenticodeCount++
 	fixtureSigner := file.fs.signerDigest
 	return authenticode.Evidence{
 		Trusted: true, SignatureKind: authenticode.SignatureKindEmbedded,

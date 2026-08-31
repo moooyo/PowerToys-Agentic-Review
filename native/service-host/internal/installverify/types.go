@@ -13,6 +13,7 @@ import (
 var (
 	ErrUnsupportedPlatform        = errors.New("installation verification requires Windows")
 	ErrInvalidOptions             = errors.New("invalid installation verifier options")
+	ErrReleaseAuthority           = errors.New("compiled release authority verification failed")
 	ErrServiceIdentity            = errors.New("current process is not a verified restricted worker service")
 	ErrBootstrap                  = errors.New("bootstrap configuration verification failed")
 	ErrConfiguration              = errors.New("bootstrap configurations are inconsistent")
@@ -122,10 +123,10 @@ type evidenceState struct {
 	executorConfig      config.Config
 	manifestRead        secureconfig.Result
 	manifest            releasemanifest.Manifest
+	releaseBinding      ReleaseBinding
 	roots               []RootSnapshot
 	files               []FileSnapshot
 	contents            map[string]VerifiedContent
-	approvedSignerPin   string
 }
 
 // Evidence is an opaque successful verification result. Its zero value is not
@@ -141,7 +142,7 @@ func (e Evidence) Validate() error {
 		e.state.actualBootstrapPath == "" || len(e.state.controlBootstrap.Data) == 0 ||
 		len(e.state.executorBootstrap.Data) == 0 || len(e.state.manifestRead.Data) == 0 ||
 		len(e.state.roots) != 2 || len(e.state.files) != len(e.state.manifest.Files) ||
-		e.state.approvedSignerPin == "" {
+		e.state.releaseBinding.Validate() != nil {
 		return errors.New("installation verification evidence is empty or incomplete")
 	}
 	if observedRole, err := roleFromIdentityEvidence(e.state.identity); err != nil || observedRole != e.state.role {
@@ -149,6 +150,9 @@ func (e Evidence) Validate() error {
 	}
 	if err := validateVerifiedContents(e.state); err != nil {
 		return errors.New("installation verification trusted content is empty or inconsistent")
+	}
+	if err := validateReleaseEvidenceState(e.state); err != nil {
+		return errors.New("installation verification release authority is empty or inconsistent")
 	}
 	return nil
 }
@@ -236,21 +240,38 @@ func (e Evidence) ApprovedSignerCertificateDERSHA256() string {
 	if e.state == nil {
 		return ""
 	}
-	return e.state.approvedSignerPin
+	return e.state.releaseBinding.ApprovedSignerCertificateDERSHA256()
+}
+
+// ReleaseBinding returns a detached copy of the compiled-template-to-manifest
+// authorization binding sealed by installation verification.
+func (e Evidence) ReleaseBinding() (ReleaseBinding, bool) {
+	if e.state == nil || e.state.releaseBinding.Validate() != nil {
+		return ReleaseBinding{}, false
+	}
+	return cloneReleaseBinding(e.state.releaseBinding), true
+}
+
+func (e Evidence) ReleaseTemplateDigest() [32]byte {
+	if binding, ok := e.ReleaseBinding(); ok {
+		return binding.TemplateDigest()
+	}
+	return [32]byte{}
 }
 
 type ErrorCode string
 
 const (
-	ErrorInput         ErrorCode = "INSTALL_VERIFY_INPUT_INVALID"
-	ErrorIdentity      ErrorCode = "INSTALL_VERIFY_IDENTITY_FAILED"
-	ErrorBootstrap     ErrorCode = "INSTALL_VERIFY_BOOTSTRAP_FAILED"
-	ErrorConfiguration ErrorCode = "INSTALL_VERIFY_CONFIGURATION_MISMATCH"
-	ErrorManifest      ErrorCode = "INSTALL_VERIFY_MANIFEST_FAILED"
-	ErrorTree          ErrorCode = "INSTALL_VERIFY_TREE_MISMATCH"
-	ErrorFile          ErrorCode = "INSTALL_VERIFY_FILE_FAILED"
-	ErrorSignature     ErrorCode = "INSTALL_VERIFY_AUTHENTICODE_FAILED"
-	ErrorCleanup       ErrorCode = "INSTALL_VERIFY_CLEANUP_FAILED"
+	ErrorInput            ErrorCode = "INSTALL_VERIFY_INPUT_INVALID"
+	ErrorReleaseAuthority ErrorCode = "INSTALL_VERIFY_RELEASE_AUTHORITY_FAILED"
+	ErrorIdentity         ErrorCode = "INSTALL_VERIFY_IDENTITY_FAILED"
+	ErrorBootstrap        ErrorCode = "INSTALL_VERIFY_BOOTSTRAP_FAILED"
+	ErrorConfiguration    ErrorCode = "INSTALL_VERIFY_CONFIGURATION_MISMATCH"
+	ErrorManifest         ErrorCode = "INSTALL_VERIFY_MANIFEST_FAILED"
+	ErrorTree             ErrorCode = "INSTALL_VERIFY_TREE_MISMATCH"
+	ErrorFile             ErrorCode = "INSTALL_VERIFY_FILE_FAILED"
+	ErrorSignature        ErrorCode = "INSTALL_VERIFY_AUTHENTICODE_FAILED"
+	ErrorCleanup          ErrorCode = "INSTALL_VERIFY_CLEANUP_FAILED"
 )
 
 type Error struct {
