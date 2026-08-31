@@ -109,6 +109,75 @@ describe("DatabaseOperatorAuthPersistence", () => {
     ).resolves.toBe(false);
   });
 
+  it("rolls back a consumed login transaction when session insertion fails", async () => {
+    const { client, databasePath } = await createFixture();
+    const persistence = new DatabaseOperatorAuthPersistence(client);
+    const browserSha256 = sha256("rollback-browser-binding");
+    const transactionTokenSha256 = sha256("rollback-transaction");
+    const conflictingSessionSha256 = sha256("rollback-session");
+
+    await persistence.beginLogin({
+      transactionTokenSha256,
+      browserSha256,
+      transactionExpiresAt: "2099-08-30T10:05:00.000Z",
+      browserExpiresAt: "2099-08-30T11:00:00.000Z",
+    });
+    await expect(
+      persistence.claimLoginTransaction({ transactionTokenSha256, browserSha256 }),
+    ).resolves.toBe(1);
+    await persistence.createSession({
+      tokenSha256: conflictingSessionSha256,
+      browserSha256: null,
+      browserGeneration: null,
+      issuer: "urn:agentic-review:test",
+      subject: "conflicting-session",
+      displayName: null,
+      email: null,
+      createdAt: "2099-08-30T10:01:00.000Z",
+      expiresAt: "2099-08-30T11:01:00.000Z",
+    });
+
+    await expect(
+      persistence.finalizeLogin({
+        transactionTokenSha256,
+        sessionTokenSha256: conflictingSessionSha256,
+        browserSha256,
+        browserGeneration: 1,
+        issuer: "https://identity.example.test",
+        subject: "operator-123",
+        displayName: null,
+        email: null,
+        createdAt: "2099-08-30T10:02:00.000Z",
+        expiresAt: "2099-08-30T11:02:00.000Z",
+      }),
+    ).rejects.toThrow(/UNIQUE constraint failed: operator_sessions\.token_sha256/u);
+
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        reader
+          .prepare(`
+            SELECT
+              browser_generation AS browserGeneration,
+              claimed_at AS claimedAt
+            FROM operator_login_transactions
+            WHERE token_sha256 = ?
+          `)
+          .get(transactionTokenSha256),
+      ).toMatchObject({ browserGeneration: 1, claimedAt: expect.any(String) });
+      expect(
+        reader
+          .prepare("SELECT subject FROM operator_sessions WHERE token_sha256 = ?")
+          .get(conflictingSessionSha256),
+      ).toEqual({ subject: "conflicting-session" });
+    } finally {
+      reader.close();
+    }
+    await expect(
+      persistence.claimLoginTransaction({ transactionTokenSha256, browserSha256 }),
+    ).resolves.toBeNull();
+  });
+
   it("invalidates an older browser-bound session when a new login begins", async () => {
     const { client } = await createFixture();
     const persistence = new DatabaseOperatorAuthPersistence(client);

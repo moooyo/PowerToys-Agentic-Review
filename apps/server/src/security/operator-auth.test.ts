@@ -410,6 +410,58 @@ describe("OperatorAuthService", () => {
     expect(exchangeCount).toBe(1);
   });
 
+  it.each(["return_false", "throw"] as const)(
+    "does not exchange a claimed authorization code again when finalizeLogin faults: %s",
+    async (failureMode) => {
+      const transactionToken = "W".repeat(43);
+      const persistence = new MemoryAuthPersistence();
+      const oidc = new FakeOidcClient();
+      let exchangeCount = 0;
+      let finalizeCount = 0;
+      oidc.exchangeAuthorizationCode = async (input) => {
+        oidc.callbackInput = input;
+        exchangeCount += 1;
+        return operatorIdentity;
+      };
+      persistence.finalizeLogin = async () => {
+        finalizeCount += 1;
+        if (failureMode === "throw") {
+          throw new Error("Injected finalizeLogin failure.");
+        }
+        return false;
+      };
+      const auth = new OperatorAuthService({
+        config: oidcConfig,
+        persistence,
+        oidc,
+        now: () => fixedNow,
+        generateOpaqueToken: createTokenGenerator(transactionToken, "X".repeat(43)),
+      });
+      const start = await auth.startLogin(browserBindingToken);
+      if (start.kind !== "authorization_redirect") {
+        throw new Error("Expected an OIDC authorization redirect.");
+      }
+      const callback = new URLSearchParams({
+        code: "authorization-code",
+        state: start.authorizationUrl.searchParams.get("state") ?? "",
+      });
+
+      const firstCompletion = auth.completeLogin(callback, transactionToken, browserBindingToken);
+      if (failureMode === "throw") {
+        await expect(firstCompletion).rejects.toThrow("Injected finalizeLogin failure.");
+      } else {
+        await expect(firstCompletion).rejects.toMatchObject({
+          code: "login_transaction_expired",
+        });
+      }
+      await expect(
+        auth.completeLogin(callback, transactionToken, browserBindingToken),
+      ).rejects.toMatchObject({ code: "login_transaction_expired" });
+      expect(exchangeCount).toBe(1);
+      expect(finalizeCount).toBe(1);
+    },
+  );
+
   it("fences an older callback when a newer browser generation completes first", async () => {
     const firstTransactionToken = "M".repeat(43);
     const secondTransactionToken = "N".repeat(43);
@@ -417,6 +469,7 @@ describe("OperatorAuthService", () => {
     const staleSessionToken = "P".repeat(43);
     const persistence = new MemoryAuthPersistence();
     const oidc = new FakeOidcClient();
+    let firstCodeExchangeCount = 0;
     let releaseFirstExchange!: () => void;
     let markFirstExchangeStarted!: () => void;
     const firstExchangeGate = new Promise<void>((resolve) => {
@@ -428,6 +481,7 @@ describe("OperatorAuthService", () => {
     oidc.exchangeAuthorizationCode = async (input) => {
       oidc.callbackInput = input;
       if (input.callbackParameters.get("code") === "first-code") {
+        firstCodeExchangeCount += 1;
         markFirstExchangeStarted();
         await firstExchangeGate;
       }
@@ -450,15 +504,12 @@ describe("OperatorAuthService", () => {
     if (firstStart.kind !== "authorization_redirect") {
       throw new Error("Expected the first OIDC authorization redirect.");
     }
+    const firstCallback = new URLSearchParams({
+      code: "first-code",
+      state: firstStart.authorizationUrl.searchParams.get("state") ?? "",
+    });
     const firstCompletion = auth
-      .completeLogin(
-        new URLSearchParams({
-          code: "first-code",
-          state: firstStart.authorizationUrl.searchParams.get("state") ?? "",
-        }),
-        firstTransactionToken,
-        browserBindingToken,
-      )
+      .completeLogin(firstCallback, firstTransactionToken, browserBindingToken)
       .then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
@@ -485,6 +536,10 @@ describe("OperatorAuthService", () => {
     if (!staleCompletion.ok) {
       expect(staleCompletion.error).toMatchObject({ code: "login_transaction_expired" });
     }
+    await expect(
+      auth.completeLogin(firstCallback, firstTransactionToken, browserBindingToken),
+    ).rejects.toMatchObject({ code: "login_transaction_expired" });
+    expect(firstCodeExchangeCount).toBe(1);
     await expect(auth.getSession(secondSessionToken, browserBindingToken)).resolves.toMatchObject(
       operatorIdentity,
     );
