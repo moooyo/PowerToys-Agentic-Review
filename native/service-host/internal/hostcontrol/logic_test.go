@@ -289,7 +289,6 @@ func TestCompleteRuntimeBootstrapActivatesBetweenAckAndCommit(t *testing.T) {
 }
 
 func TestCompleteRuntimeBootstrapRejectsDriftAndCommitFailure(t *testing.T) {
-	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 	tests := []struct {
 		name      string
 		configure func(*fakeRetainedNode, *fakeRuntimeBootstrapChannel)
@@ -309,6 +308,7 @@ func TestCompleteRuntimeBootstrapRejectsDriftAndCommitFailure(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 			events := []string{}
 			channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
 			node := newFakeRetainedNode(testNodeIdentity())
@@ -364,7 +364,6 @@ func TestCompleteRuntimeBootstrapRechecksDeadlineImmediatelyBeforeActivation(t *
 }
 
 func TestCompleteRuntimeBootstrapFailureStages(t *testing.T) {
-	bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 	deadlineCause := errors.New("startup deadline expired")
 	tests := []struct {
 		name          string
@@ -445,6 +444,7 @@ func TestCompleteRuntimeBootstrapFailureStages(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			bootstrap, bootstrapDocument := hostControlBootstrapForTest(t)
 			events := []string{}
 			channel := hostControlBootstrapChannelForTest(t, bootstrapDocument, &events)
 			node := newFakeRetainedNode(testNodeIdentity())
@@ -496,8 +496,7 @@ func TestPreTransferFailureNeverReturnsConnectionOwner(t *testing.T) {
 
 func hostControlBootstrapForTest(t *testing.T) (localrpc.RuntimeBootstrapV1, []byte) {
 	t.Helper()
-	bootstrap, err := localrpc.NewRuntimeBootstrap(localrpc.RuntimeBootstrapOptions{
-		BootstrapID:                    "123e4567-e89b-42d3-a456-426614174000",
+	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           localrpc.RoleControl,
 		WorkerNodeID:                   "powertoys-node:01",
 		ReleaseID:                      "2026.08.31-test+1",
@@ -506,9 +505,8 @@ func hostControlBootstrapForTest(t *testing.T) (localrpc.RuntimeBootstrapV1, []b
 		PreflightSHA256:                strings.Repeat("3", 64),
 		NodeBundleSHA256:               strings.Repeat("4", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
-		GracefulTimeoutMS:              120_000,
+		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,
-		RoleConfigJSON:                 []byte(`{"executionEnabled":false,"foundationVersion":1,"role":"control"}`),
 	})
 	if err != nil {
 		t.Fatal(err)

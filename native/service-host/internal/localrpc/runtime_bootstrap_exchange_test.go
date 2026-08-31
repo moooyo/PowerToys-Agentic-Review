@@ -98,7 +98,7 @@ func TestPendingRuntimeBootstrapCommitCopyRemainsSingleUse(t *testing.T) {
 }
 
 func TestExchangeRuntimeBootstrapRejectsInvalidAcknowledgements(t *testing.T) {
-	bootstrap, bootstrapDocument := runtimeBootstrapForExchangeTest(t)
+	_, bootstrapDocument := runtimeBootstrapForExchangeTest(t)
 	validAck, err := NewRuntimeBootstrapAck(bootstrapDocument, RoleControl)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +141,10 @@ func TestExchangeRuntimeBootstrapRejectsInvalidAcknowledgements(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			bootstrap, candidateDocument := runtimeBootstrapForExchangeTest(t)
+			if !bytes.Equal(candidateDocument, bootstrapDocument) {
+				t.Fatal("deterministic test bootstrap document changed")
+			}
 			var input bytes.Buffer
 			if err := WriteFrame(&input, test.ack, RuntimeBootstrapMaximumBytes); err != nil {
 				t.Fatal(err)
@@ -154,7 +158,6 @@ func TestExchangeRuntimeBootstrapRejectsInvalidAcknowledgements(t *testing.T) {
 }
 
 func TestExchangeRuntimeBootstrapRejectsEOFPartialOversizeAndCancellation(t *testing.T) {
-	bootstrap, _ := runtimeBootstrapForExchangeTest(t)
 	oversizedPrefix := []byte{1, 0, 1, 0}
 	tests := []struct {
 		name  string
@@ -166,6 +169,7 @@ func TestExchangeRuntimeBootstrapRejectsEOFPartialOversizeAndCancellation(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			bootstrap, _ := runtimeBootstrapForExchangeTest(t)
 			channel := &runtimeBootstrapTestChannel{input: bytes.NewReader(test.input)}
 			if _, err := BeginRuntimeBootstrapExchange(context.Background(), channel, bootstrap); !errors.Is(err, ErrRuntimeBootstrapExchange) {
 				t.Fatalf("exchange error = %v", err)
@@ -176,12 +180,112 @@ func TestExchangeRuntimeBootstrapRejectsEOFPartialOversizeAndCancellation(t *tes
 	cancelled, cancel := context.WithCancelCause(context.Background())
 	cancel(io.ErrClosedPipe)
 	channel := &runtimeBootstrapTestChannel{input: bytes.NewReader(nil)}
+	bootstrap, _ := runtimeBootstrapForExchangeTest(t)
 	if _, err := BeginRuntimeBootstrapExchange(cancelled, channel, bootstrap); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("cancelled exchange error = %v", err)
 	}
 	var nilChannel *runtimeBootstrapTestChannel
+	bootstrap, _ = runtimeBootstrapForExchangeTest(t)
 	if _, err := BeginRuntimeBootstrapExchange(context.Background(), nilChannel, bootstrap); err == nil {
 		t.Fatal("ExchangeRuntimeBootstrap accepted a typed nil channel")
+	}
+}
+
+func TestRuntimeBootstrapIssuanceIsCopySafeAndSingleUse(t *testing.T) {
+	bootstrap, bootstrapDocument := runtimeBootstrapForExchangeTest(t)
+	copyOfBootstrap := bootstrap
+	ackDocument, err := EncodeRuntimeBootstrapAck(bootstrapDocument, RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input bytes.Buffer
+	if err := WriteFrame(&input, ackDocument, RuntimeBootstrapMaximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	first := &runtimeBootstrapTestChannel{input: bytes.NewReader(input.Bytes())}
+	if _, err := BeginRuntimeBootstrapExchange(context.Background(), first, bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BeginRuntimeBootstrapExchange(
+		context.Background(),
+		noIORuntimeBootstrapChannel{},
+		copyOfBootstrap,
+	); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+		t.Fatalf("copied bootstrap reuse error = %v", err)
+	}
+}
+
+func TestRuntimeBootstrapIssuanceBurnsBeforeValidationOrIO(t *testing.T) {
+	bootstrap, _ := runtimeBootstrapForExchangeTest(t)
+	copyOfBootstrap := bootstrap
+	cancelled, cancel := context.WithCancelCause(context.Background())
+	cancel(io.ErrClosedPipe)
+	if _, err := BeginRuntimeBootstrapExchange(
+		cancelled,
+		noIORuntimeBootstrapChannel{},
+		bootstrap,
+	); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("cancelled first exchange error = %v", err)
+	}
+	if _, err := BeginRuntimeBootstrapExchange(
+		context.Background(),
+		noIORuntimeBootstrapChannel{},
+		copyOfBootstrap,
+	); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+		t.Fatalf("burned bootstrap reuse error = %v", err)
+	}
+}
+
+func TestRuntimeBootstrapIssuanceRejectsConcurrentCopies(t *testing.T) {
+	bootstrap, bootstrapDocument := runtimeBootstrapForExchangeTest(t)
+	ackDocument, err := EncodeRuntimeBootstrapAck(bootstrapDocument, RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channels := make([]*runtimeBootstrapTestChannel, 2)
+	for index := range channels {
+		var input bytes.Buffer
+		if err := WriteFrame(&input, ackDocument, RuntimeBootstrapMaximumBytes); err != nil {
+			t.Fatal(err)
+		}
+		channels[index] = &runtimeBootstrapTestChannel{input: bytes.NewReader(input.Bytes())}
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for index := range channels {
+		candidate := bootstrap
+		channel := channels[index]
+		go func() {
+			<-start
+			_, err := BeginRuntimeBootstrapExchange(context.Background(), channel, candidate)
+			results <- err
+		}()
+	}
+	close(start)
+	succeeded := 0
+	rejected := 0
+	for range channels {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrRuntimeBootstrapBinding):
+			rejected++
+		default:
+			t.Fatalf("concurrent Begin error = %v", err)
+		}
+	}
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("concurrent Begin outcomes = success:%d rejected:%d", succeeded, rejected)
+	}
+	written := 0
+	for _, channel := range channels {
+		if channel.output.Len() != 0 {
+			written++
+		}
+	}
+	if written != 1 {
+		t.Fatalf("concurrent Begin wrote to %d channels, want 1", written)
 	}
 }
 
@@ -224,7 +328,7 @@ func TestBeginRuntimeBootstrapPreservesCoalescedFirstRPCFrame(t *testing.T) {
 
 func runtimeBootstrapForExchangeTest(t *testing.T) (RuntimeBootstrapV1, []byte) {
 	t.Helper()
-	bootstrap, err := NewRuntimeBootstrap(validRuntimeBootstrapOptions())
+	bootstrap, err := newRuntimeBootstrap(validRuntimeBootstrapOptions())
 	if err != nil {
 		t.Fatal(err)
 	}

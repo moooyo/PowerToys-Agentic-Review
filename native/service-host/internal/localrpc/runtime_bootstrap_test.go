@@ -2,6 +2,7 @@ package localrpc
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -12,9 +13,9 @@ import (
 
 func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 	golden := runtimeBootstrapGolden(t)
-	bootstrap, err := NewRuntimeBootstrap(validRuntimeBootstrapOptions())
+	bootstrap, err := newRuntimeBootstrap(validRuntimeBootstrapOptions())
 	if err != nil {
-		t.Fatalf("NewRuntimeBootstrap returned an error: %v", err)
+		t.Fatalf("newRuntimeBootstrap returned an error: %v", err)
 	}
 	document, err := EncodeRuntimeBootstrap(bootstrap)
 	if err != nil {
@@ -72,7 +73,7 @@ func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 func TestRuntimeBootstrapSupportsBothRoles(t *testing.T) {
 	options := validRuntimeBootstrapOptions()
 	options.Role = RoleExecutor
-	bootstrap, err := NewRuntimeBootstrap(options)
+	bootstrap, err := newRuntimeBootstrap(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,13 +87,157 @@ func TestRuntimeBootstrapSupportsBothRoles(t *testing.T) {
 	}
 }
 
+func TestFoundationRuntimeBootstrapFixesUUIDRoleConfigAndTotalShutdown(t *testing.T) {
+	tests := []struct {
+		name        string
+		role        Role
+		entropy     []byte
+		bootstrapID string
+		roleConfig  string
+		roleDigest  string
+	}{
+		{
+			name:        "control zero entropy",
+			role:        RoleControl,
+			entropy:     make([]byte, 16),
+			bootstrapID: "00000000-0000-4000-8000-000000000000",
+			roleConfig:  controlFoundationRoleConfigJSON,
+			roleDigest:  "9053420658d77ca392810a9e1a42deb2b232a6eb70dc92f4b35473203c564de2",
+		},
+		{
+			name:        "executor maximum entropy",
+			role:        RoleExecutor,
+			entropy:     bytes.Repeat([]byte{0xff}, 16),
+			bootstrapID: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+			roleConfig:  executorFoundationRoleConfigJSON,
+			roleDigest:  "1a42461a4a41aab7da75c992bad85d19617b5bdbb1057eba36f63836695297e2",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := validFoundationRuntimeBootstrapOptions(test.role)
+			bootstrap, err := newFoundationRuntimeBootstrap(options, bytes.NewReader(test.entropy))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bootstrap.BootstrapID != test.bootstrapID || bootstrap.Role != test.role {
+				t.Fatalf("bootstrap identity = (%q, %q)", bootstrap.BootstrapID, bootstrap.Role)
+			}
+			if string(bootstrap.RoleConfigJSON()) != test.roleConfig ||
+				bootstrap.RoleConfig.ByteLength != len(test.roleConfig) ||
+				bootstrap.RoleConfig.SHA256 != test.roleDigest {
+				t.Fatalf("roleConfig = (%s, %#v)", bootstrap.RoleConfigJSON(), bootstrap.RoleConfig)
+			}
+			if bootstrap.Shutdown.GracefulTimeoutMS != options.TotalShutdownTimeoutMS ||
+				bootstrap.Shutdown.ForceTerminationReserveMS != options.ForceTerminationReserveMS {
+				t.Fatalf("shutdown limits = %#v, options = %#v", bootstrap.Shutdown, options)
+			}
+		})
+	}
+}
+
+func TestFoundationRuntimeBootstrapUsesPrivateEntropyAndFailsClosed(t *testing.T) {
+	options := validFoundationRuntimeBootstrapOptions(RoleControl)
+	bootstrap, err := NewFoundationRuntimeBootstrap(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeBootstrapUUIDV4.MatchString(bootstrap.BootstrapID) {
+		t.Fatalf("public factory bootstrapId = %q", bootstrap.BootstrapID)
+	}
+
+	if _, err := newFoundationRuntimeBootstrap(options, nil); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+		t.Fatalf("nil entropy error = %v", err)
+	}
+	if _, err := newFoundationRuntimeBootstrap(options, bytes.NewReader(make([]byte, 15))); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+		t.Fatalf("short entropy error = %v", err)
+	}
+	for _, role := range []Role{"", "Control", "other"} {
+		invalidRole := options
+		invalidRole.Role = role
+		reader := &countingRuntimeBootstrapEntropy{}
+		if _, err := newFoundationRuntimeBootstrap(invalidRole, reader); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+			t.Fatalf("invalid role %q error = %v", role, err)
+		}
+		if reader.reads != 0 {
+			t.Fatalf("invalid role %q consumed entropy %d times", role, reader.reads)
+		}
+	}
+	entropyFailure := errors.New("entropy failed")
+	if _, err := newFoundationRuntimeBootstrap(
+		options,
+		runtimeBootstrapEntropyError{err: entropyFailure},
+	); !errors.Is(err, ErrInvalidRuntimeBootstrap) || !errors.Is(err, entropyFailure) {
+		t.Fatalf("entropy failure error = %v", err)
+	}
+}
+
+func TestRuntimeBootstrapOutboundAuthorityRejectsDecodedOrMutatedValues(t *testing.T) {
+	issued, err := newFoundationRuntimeBootstrap(
+		validFoundationRuntimeBootstrapOptions(RoleControl),
+		bytes.NewReader(make([]byte, 16)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := EncodeRuntimeBootstrap(issued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeRuntimeBootstrap(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeRuntimeBootstrap(decoded); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+		t.Fatalf("decoded bootstrap encode error = %v", err)
+	}
+	if _, err := BeginRuntimeBootstrapExchange(
+		context.Background(),
+		noIORuntimeBootstrapChannel{},
+		decoded,
+	); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+		t.Fatalf("decoded bootstrap exchange error = %v", err)
+	}
+	otherRoleConfigDescriptor, err := describeWorkerAPIBody(
+		[]byte(` { "executionEnabled" : false, "foundationVersion" : 1, "role" : "control" } `),
+		RuntimeBootstrapRoleConfigMaximumBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRoleConfig := RuntimeBootstrapRoleConfigV1{
+		Base64URL:  otherRoleConfigDescriptor["base64Url"].(string),
+		ByteLength: otherRoleConfigDescriptor["byteLength"].(int),
+		SHA256:     otherRoleConfigDescriptor["sha256"].(string),
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*RuntimeBootstrapV1)
+	}{
+		{"worker node", func(value *RuntimeBootstrapV1) { value.WorkerNodeID = "other-node" }},
+		{"release", func(value *RuntimeBootstrapV1) { value.ReleaseID = "other-release" }},
+		{"queue", func(value *RuntimeBootstrapV1) { value.ARWX.MaximumQueuedBytesPerDirection++ }},
+		{"role config", func(value *RuntimeBootstrapV1) { value.RoleConfig = otherRoleConfig }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := issued
+			test.mutate(&candidate)
+			if _, err := EncodeRuntimeBootstrap(candidate); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+				t.Fatalf("mutated bootstrap encode error = %v", err)
+			}
+		})
+	}
+}
+
 func TestRuntimeBootstrapAckBindsOpaqueRoleConfigExactBytes(t *testing.T) {
 	firstOptions := validRuntimeBootstrapOptions()
 	firstOptions.RoleConfigJSON = []byte(`{"confidence":0.8}`)
 	secondOptions := firstOptions
 	secondOptions.RoleConfigJSON = []byte(` { "confidence" : 0.8 } `)
 
-	first, err := NewRuntimeBootstrap(firstOptions)
+	first, err := newRuntimeBootstrap(firstOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +245,7 @@ func TestRuntimeBootstrapAckBindsOpaqueRoleConfigExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewRuntimeBootstrap(secondOptions)
+	second, err := newRuntimeBootstrap(secondOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +266,7 @@ func TestRuntimeBootstrapAckBindsOpaqueRoleConfigExactBytes(t *testing.T) {
 }
 
 func TestRuntimeBootstrapRejectsEveryWireFieldMutation(t *testing.T) {
-	valid, err := NewRuntimeBootstrap(validRuntimeBootstrapOptions())
+	valid, err := newRuntimeBootstrap(validRuntimeBootstrapOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,14 +321,14 @@ func TestRuntimeBootstrapRejectsEveryWireFieldMutation(t *testing.T) {
 func TestRuntimeBootstrapAcceptsExactLimitEndpoints(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*RuntimeBootstrapOptions)
+		mutate func(*runtimeBootstrapOptions)
 	}{
-		{"minimums", func(options *RuntimeBootstrapOptions) {
+		{"minimums", func(options *runtimeBootstrapOptions) {
 			options.MaximumQueuedBytesPerDirection = RuntimeBootstrapARWXMinimumQueuedBytes
 			options.GracefulTimeoutMS = RuntimeBootstrapMinimumGracefulTimeoutMS
 			options.ForceTerminationReserveMS = RuntimeBootstrapMinimumForceTerminationReserve
 		}},
-		{"maximums", func(options *RuntimeBootstrapOptions) {
+		{"maximums", func(options *runtimeBootstrapOptions) {
 			options.MaximumQueuedBytesPerDirection = RuntimeBootstrapARWXMaximumQueuedBytes
 			options.GracefulTimeoutMS = RuntimeBootstrapMaximumGracefulTimeoutMS
 			options.ForceTerminationReserveMS = RuntimeBootstrapMaximumGracefulTimeoutMS - 1
@@ -193,7 +338,7 @@ func TestRuntimeBootstrapAcceptsExactLimitEndpoints(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			options := validRuntimeBootstrapOptions()
 			test.mutate(&options)
-			bootstrap, err := NewRuntimeBootstrap(options)
+			bootstrap, err := newRuntimeBootstrap(options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -321,10 +466,10 @@ func TestRuntimeBootstrapRejectsAmbiguousOrOversizedDocuments(t *testing.T) {
 			}
 		})
 	}
-	if _, err := NewRuntimeBootstrap(invalidRoleConfig); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+	if _, err := newRuntimeBootstrap(invalidRoleConfig); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
 		t.Fatalf("array role config error = %v", err)
 	}
-	maximumRoleConfig, err := NewRuntimeBootstrap(valid)
+	maximumRoleConfig, err := newRuntimeBootstrap(valid)
 	if err != nil {
 		t.Fatalf("maximum roleConfig was rejected: %v", err)
 	}
@@ -333,7 +478,7 @@ func TestRuntimeBootstrapRejectsAmbiguousOrOversizedDocuments(t *testing.T) {
 		t.Fatalf("maximum roleConfig envelope = %d bytes, error %v", len(maximumDocument), err)
 	}
 	valid.RoleConfigJSON = append(atDecodedLimit, ' ')
-	if _, err := NewRuntimeBootstrap(valid); !errors.Is(err, ErrRuntimeBootstrapLimit) {
+	if _, err := newRuntimeBootstrap(valid); !errors.Is(err, ErrRuntimeBootstrapLimit) {
 		t.Fatalf("decoded role config limit error = %v, want ErrRuntimeBootstrapLimit", err)
 	}
 }
@@ -415,8 +560,8 @@ func TestRuntimeBootstrapAckRejectsMutationAndNegativeAcknowledgement(t *testing
 	}
 }
 
-func validRuntimeBootstrapOptions() RuntimeBootstrapOptions {
-	return RuntimeBootstrapOptions{
+func validRuntimeBootstrapOptions() runtimeBootstrapOptions {
+	return runtimeBootstrapOptions{
 		BootstrapID:                    "123e4567-e89b-42d3-a456-426614174000",
 		Role:                           RoleControl,
 		WorkerNodeID:                   "powertoys-node:01",
@@ -430,6 +575,50 @@ func validRuntimeBootstrapOptions() RuntimeBootstrapOptions {
 		ForceTerminationReserveMS:      15_000,
 		RoleConfigJSON:                 []byte(crossLanguageWorkerAPIBody),
 	}
+}
+
+func validFoundationRuntimeBootstrapOptions(role Role) FoundationRuntimeBootstrapOptions {
+	raw := validRuntimeBootstrapOptions()
+	return FoundationRuntimeBootstrapOptions{
+		Role:                           role,
+		WorkerNodeID:                   raw.WorkerNodeID,
+		ReleaseID:                      raw.ReleaseID,
+		ReleaseTemplateSHA256:          raw.ReleaseTemplateSHA256,
+		InstallationManifestSHA256:     raw.InstallationManifestSHA256,
+		PreflightSHA256:                raw.PreflightSHA256,
+		NodeBundleSHA256:               raw.NodeBundleSHA256,
+		MaximumQueuedBytesPerDirection: raw.MaximumQueuedBytesPerDirection,
+		TotalShutdownTimeoutMS:         raw.GracefulTimeoutMS,
+		ForceTerminationReserveMS:      raw.ForceTerminationReserveMS,
+	}
+}
+
+type countingRuntimeBootstrapEntropy struct {
+	reads int
+}
+
+func (reader *countingRuntimeBootstrapEntropy) Read(buffer []byte) (int, error) {
+	reader.reads++
+	clear(buffer)
+	return len(buffer), nil
+}
+
+type runtimeBootstrapEntropyError struct {
+	err error
+}
+
+type noIORuntimeBootstrapChannel struct{}
+
+func (noIORuntimeBootstrapChannel) ReadContext(context.Context, []byte) (int, error) {
+	panic("unsealed bootstrap reached channel read")
+}
+
+func (noIORuntimeBootstrapChannel) WriteContext(context.Context, []byte) (int, error) {
+	panic("unsealed bootstrap reached channel write")
+}
+
+func (reader runtimeBootstrapEntropyError) Read([]byte) (int, error) {
+	return 0, reader.err
 }
 
 func runtimeBootstrapGolden(t *testing.T) []byte {

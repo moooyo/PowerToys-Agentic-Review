@@ -30,6 +30,7 @@ func TestEvidenceDigestAndRuntimePlanAreRoleLocal(t *testing.T) {
 			}
 			plan, err := evidence.runtimePlan()
 			if err != nil || plan.Role() != role || plan.PreflightDigest() != digest ||
+				plan.ReleaseTemplateDigest() != evidence.ReleaseTemplateDigest() ||
 				plan.DataRootDigest() != binding.Digest() || plan.Configuration().Role != role {
 				t.Fatalf("RuntimePlan is inconsistent: %#v, %v", plan, err)
 			}
@@ -96,6 +97,7 @@ func TestEvidenceAndRuntimePlanContentAccessorsAreCopyOnly(t *testing.T) {
 	plan.configuration.Node.Environment["TEMP"] = `C:\Changed`
 	plan.configuration.WorkerNodeID = "changed-node"
 	plan.configuration.Limits.ForceTerminationReserveMilliseconds++
+	plan.releaseTemplateDigest[0] ^= 0xff
 	plan.runtimeContents[0].data[0] ^= 0xff
 	identity := evidence.Identity()
 	identity.Token.Groups[0].SID = "changed"
@@ -112,6 +114,7 @@ func TestEvidenceAndRuntimePlanContentAccessorsAreCopyOnly(t *testing.T) {
 		evidence.RuntimePlanMustForTest(t).Configuration().WorkerNodeID == "changed-node" ||
 		evidence.RuntimePlanMustForTest(t).Configuration().Limits.ForceTerminationReserveMilliseconds !=
 			fixture.control.Limits.ForceTerminationReserveMilliseconds ||
+		evidence.RuntimePlanMustForTest(t).ReleaseTemplateDigest() != evidence.ReleaseTemplateDigest() ||
 		evidence.RuntimePlanMustForTest(t).RuntimeContents()[0].Bytes()[0] != original ||
 		evidence.Identity().Token.Groups[0].SID == "changed" ||
 		evidence.Roots()[0].Ancestors[0].Evidence.Identity != rootAncestorID ||

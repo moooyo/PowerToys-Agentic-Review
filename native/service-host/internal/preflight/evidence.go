@@ -220,8 +220,8 @@ func (e Evidence) runtimePlan() (RuntimePlan, error) {
 	}
 	configuration := e.Configuration()
 	plan := RuntimePlan{
-		role: e.role, configuration: configuration, preflightDigest: e.digest,
-		dataRootDigest:  e.dataRoot.digest,
+		role: e.role, configuration: configuration, releaseTemplateDigest: e.release.templateDigest,
+		preflightDigest: e.digest, dataRootDigest: e.dataRoot.digest,
 		node:            PinnedRuntimeFile{path: configuration.Node.ExecutablePath, sha256: configuration.Node.ExecutableSHA256},
 		bundle:          PinnedRuntimeFile{path: configuration.Node.BundlePath, sha256: configuration.Node.BundleSHA256},
 		runtimeContents: cloneRuntimeContents(e.contents), valid: true,
@@ -241,7 +241,8 @@ func (e Evidence) runtimePlan() (RuntimePlan, error) {
 
 // Validate rejects a zero or internally inconsistent role-local plan.
 func (plan RuntimePlan) Validate() error {
-	if !plan.valid || plan.preflightDigest == ([32]byte{}) || plan.dataRootDigest == ([32]byte{}) ||
+	if !plan.valid || plan.releaseTemplateDigest == ([32]byte{}) ||
+		plan.preflightDigest == ([32]byte{}) || plan.dataRootDigest == ([32]byte{}) ||
 		plan.role != config.RoleControl && plan.role != config.RoleExecutor {
 		return invalidEvidenceError("runtime plan is empty or incomplete", nil)
 	}

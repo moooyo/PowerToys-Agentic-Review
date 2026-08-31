@@ -566,7 +566,7 @@ func committedRuntimeBootstrapForArmTest(
 	t.Helper()
 	options := validRuntimeBootstrapOptions()
 	options.Role = role
-	bootstrap, err := NewRuntimeBootstrap(options)
+	bootstrap, err := newRuntimeBootstrap(options)
 	if err != nil {
 		t.Fatal(err)
 	}

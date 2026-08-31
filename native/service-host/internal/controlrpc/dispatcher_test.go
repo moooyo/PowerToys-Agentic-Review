@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -582,8 +581,16 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	}
 	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
 	t.Cleanup(func() { _ = dispatcher.Close() })
+	serverConnection, clientConnection := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverConnection.Close()
+		_ = clientConnection.Close()
+	})
+	channel := &dispatcherRuntimeBootstrapChannel{Conn: serverConnection}
+	committed := committedRuntimeBootstrapForDispatcherTest(t, channel, clientConnection)
 	server, err := localrpc.NewServer(localrpc.ServerOptions{
 		Role:                      localrpc.RoleControl,
+		RuntimeBootstrap:          committed,
 		MaximumConcurrentRequests: 1,
 		MaximumRequestsPerSession: 4,
 		RequestTimeout:            time.Second,
@@ -595,11 +602,9 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 		t.Fatalf("NewServer returned an error: %v", err)
 	}
 
-	serverInput, clientInput := io.Pipe()
-	clientOutput, serverOutput := io.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	serveResult := make(chan error, 1)
-	go func() { serveResult <- server.Serve(ctx, serverInput, serverOutput) }()
+	go func() { serveResult <- server.Serve(ctx, channel, channel) }()
 
 	request, err := localrpc.MarshalCanonicalJSON(map[string]any{
 		"operation": localrpc.OperationRegister,
@@ -614,14 +619,14 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	if err := localrpc.WriteFrame(clientInput, request, localrpc.MaximumFrameBytes); err != nil {
+	if err := localrpc.WriteFrame(clientConnection, request, localrpc.MaximumFrameBytes); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
 
 	responseResult := make(chan []byte, 1)
 	responseError := make(chan error, 1)
 	go func() {
-		response, readErr := localrpc.ReadFrame(clientOutput, localrpc.MaximumCanonicalControlFrameBytes)
+		response, readErr := localrpc.ReadFrame(clientConnection, localrpc.MaximumCanonicalControlFrameBytes)
 		if readErr != nil {
 			responseError <- readErr
 			return
@@ -650,13 +655,110 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 	}
 
 	cancel()
-	_ = clientInput.Close()
-	_ = clientOutput.Close()
+	_ = clientConnection.Close()
 	select {
 	case <-serveResult:
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop after cancellation")
 	}
+}
+
+type dispatcherRuntimeBootstrapChannel struct {
+	net.Conn
+}
+
+func (channel *dispatcherRuntimeBootstrapChannel) ReadContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return channel.Read(buffer)
+}
+
+func (channel *dispatcherRuntimeBootstrapChannel) WriteContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return channel.Write(buffer)
+}
+
+func committedRuntimeBootstrapForDispatcherTest(
+	t *testing.T,
+	channel *dispatcherRuntimeBootstrapChannel,
+	peer net.Conn,
+) localrpc.CommittedRuntimeBootstrap {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	if err := channel.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = channel.SetDeadline(time.Time{})
+		_ = peer.SetDeadline(time.Time{})
+	}()
+	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(localrpc.FoundationRuntimeBootstrapOptions{
+		Role:                           localrpc.RoleControl,
+		WorkerNodeID:                   "powertoys-node:01",
+		ReleaseID:                      "2026.08.31-test+1",
+		ReleaseTemplateSHA256:          strings.Repeat("1", 64),
+		InstallationManifestSHA256:     strings.Repeat("2", 64),
+		PreflightSHA256:                strings.Repeat("3", 64),
+		NodeBundleSHA256:               strings.Repeat("4", 64),
+		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
+		TotalShutdownTimeoutMS:         120_000,
+		ForceTerminationReserveMS:      15_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerResult := make(chan error, 1)
+	go func() {
+		bootstrapDocument, readErr := localrpc.ReadFrame(peer, localrpc.RuntimeBootstrapMaximumBytes)
+		if readErr != nil {
+			peerResult <- readErr
+			return
+		}
+		ack, encodeErr := localrpc.EncodeRuntimeBootstrapAck(bootstrapDocument, localrpc.RoleControl)
+		if encodeErr != nil {
+			peerResult <- encodeErr
+			return
+		}
+		if writeErr := localrpc.WriteFrame(peer, ack, localrpc.RuntimeBootstrapMaximumBytes); writeErr != nil {
+			peerResult <- writeErr
+			return
+		}
+		commit, readErr := localrpc.ReadFrame(peer, localrpc.RuntimeBootstrapMaximumBytes)
+		if readErr != nil {
+			peerResult <- readErr
+			return
+		}
+		peerResult <- localrpc.ValidateRuntimeBootstrapCommit(commit, bootstrapDocument, localrpc.RoleControl)
+	}()
+	pending, err := localrpc.BeginRuntimeBootstrapExchange(context.Background(), channel, bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := pending.Commit(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-peerResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime bootstrap peer did not receive commit")
+	}
+	return committed
 }
 
 func TestDependencyValidationRejectsNilInterfaces(t *testing.T) {

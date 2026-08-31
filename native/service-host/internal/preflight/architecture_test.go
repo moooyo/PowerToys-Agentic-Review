@@ -18,6 +18,226 @@ import (
 
 const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 
+const localRPCImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
+
+const cryptoRandImportPath = "crypto/rand"
+
+func TestProductionRuntimeBootstrapFactoryHasOnePlanBoundCaller(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve architecture test source path")
+	}
+	serviceHostRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+	const allowedFile = "internal/preflight/runtime_bootstrap.go"
+	factoryCalls := 0
+	optionLiterals := 0
+	privateFoundationCalls := 0
+	rawConstructorCalls := 0
+	rawOptionLiterals := 0
+	err := filepath.WalkDir(serviceHostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		relative, err := filepath.Rel(serviceHostRoot, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fileSet := token.NewFileSet()
+		parsed, err := parser.ParseFile(fileSet, path, contents, 0)
+		if err != nil {
+			return err
+		}
+		if relative == "internal/localrpc/runtime_bootstrap.go" {
+			for _, declaration := range parsed.Decls {
+				switch typed := declaration.(type) {
+				case *ast.FuncDecl:
+					if typed.Name.Name == "NewRuntimeBootstrap" {
+						t.Error("localrpc exposes the raw RuntimeBootstrapV1 constructor")
+					}
+				case *ast.GenDecl:
+					for _, specification := range typed.Specs {
+						if typeSpec, ok := specification.(*ast.TypeSpec); ok && typeSpec.Name.Name == "RuntimeBootstrapOptions" {
+							t.Error("localrpc exposes raw RuntimeBootstrapV1 options")
+						}
+					}
+				}
+			}
+		}
+		aliases := make(map[string]struct{})
+		cryptoRandAliases := make(map[string]struct{})
+		for _, imported := range parsed.Imports {
+			importPath, err := strconv.Unquote(imported.Path.Value)
+			if err != nil {
+				return err
+			}
+			switch importPath {
+			case localRPCImportPath:
+				alias := "localrpc"
+				if imported.Name != nil {
+					alias = imported.Name.Name
+				}
+				if alias == "." {
+					t.Errorf("%s uses a forbidden localrpc dot import", relative)
+					continue
+				}
+				if alias != "_" {
+					aliases[alias] = struct{}{}
+				}
+			case cryptoRandImportPath:
+				alias := "rand"
+				if imported.Name != nil {
+					alias = imported.Name.Name
+				}
+				if alias != "." && alias != "_" {
+					cryptoRandAliases[alias] = struct{}{}
+				}
+			}
+		}
+		parents := astParentMap(parsed)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			if identifier, ok := node.(*ast.Ident); ok &&
+				(identifier.Name == "newFoundationRuntimeBootstrap" || identifier.Name == "newRuntimeBootstrap") {
+				parent := parents[identifier]
+				if declaration, isDeclaration := parent.(*ast.FuncDecl); isDeclaration && declaration.Name == identifier {
+					return true
+				}
+				call, isDirectCall := parent.(*ast.CallExpr)
+				if !isDirectCall || call.Fun != identifier {
+					t.Errorf("%s:%d aliases private bootstrap issuer %s", relative, fileSet.Position(identifier.Pos()).Line, identifier.Name)
+					return true
+				}
+				enclosing := enclosingRuntimeBootstrapFunction(call, parents)
+				if identifier.Name == "newFoundationRuntimeBootstrap" {
+					privateFoundationCalls++
+					if relative != "internal/localrpc/runtime_bootstrap.go" || enclosing != "NewFoundationRuntimeBootstrap" {
+						t.Errorf("%s:%d calls the entropy-injecting bootstrap issuer outside the public fixed factory", relative, fileSet.Position(identifier.Pos()).Line)
+					} else if len(call.Args) != 2 || !isNamedIdentifier(call.Args[0], "options") ||
+						!isCryptoRandReaderExpression(call.Args[1], cryptoRandAliases) {
+						t.Errorf("%s:%d fixed bootstrap factory must pass options and crypto/rand.Reader directly", relative, fileSet.Position(identifier.Pos()).Line)
+					}
+				} else if relative != "internal/localrpc/runtime_bootstrap.go" || enclosing != "newFoundationRuntimeBootstrap" {
+					t.Errorf("%s:%d calls the raw bootstrap issuer outside the private fixed factory", relative, fileSet.Position(identifier.Pos()).Line)
+				}
+			}
+			switch typed := node.(type) {
+			case *ast.CallExpr:
+				if function, ok := typed.Fun.(*ast.Ident); ok {
+					switch function.Name {
+					case "newRuntimeBootstrap":
+						rawConstructorCalls++
+						if relative != "internal/localrpc/runtime_bootstrap.go" ||
+							enclosingRuntimeBootstrapFunction(typed, parents) != "newFoundationRuntimeBootstrap" {
+							t.Errorf("%s:%d calls the raw bootstrap constructor outside the fixed factory", relative, fileSet.Position(function.Pos()).Line)
+						}
+					case "NewFoundationRuntimeBootstrap":
+						t.Errorf("%s:%d calls the foundation bootstrap factory from inside localrpc", relative, fileSet.Position(function.Pos()).Line)
+					}
+				}
+			case *ast.CompositeLit:
+				if typeName, ok := typed.Type.(*ast.Ident); ok {
+					switch typeName.Name {
+					case "runtimeBootstrapOptions":
+						rawOptionLiterals++
+						if relative != "internal/localrpc/runtime_bootstrap.go" ||
+							enclosingRuntimeBootstrapFunction(typed, parents) != "newFoundationRuntimeBootstrap" {
+							t.Errorf("%s:%d constructs raw bootstrap options outside the fixed factory", relative, fileSet.Position(typeName.Pos()).Line)
+						}
+					case "FoundationRuntimeBootstrapOptions":
+						t.Errorf("%s:%d constructs foundation bootstrap options from inside localrpc", relative, fileSet.Position(typeName.Pos()).Line)
+					}
+				}
+			}
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			identifier, ok := selector.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if _, imported := aliases[identifier.Name]; !imported {
+				return true
+			}
+			if identifier.Obj != nil {
+				t.Errorf("%s:%d shadows the localrpc import", relative, fileSet.Position(identifier.Pos()).Line)
+				return true
+			}
+			switch selector.Sel.Name {
+			case "NewFoundationRuntimeBootstrap":
+				factoryCalls++
+				call, direct := parents[selector].(*ast.CallExpr)
+				if relative != allowedFile || !direct || call.Fun != selector ||
+					enclosingRuntimeBootstrapFunction(selector, parents) != "NewRuntimeBootstrapV1" {
+					t.Errorf("%s:%d calls or aliases the foundation bootstrap factory outside the plan-bound builder", relative, fileSet.Position(selector.Pos()).Line)
+				}
+			case "FoundationRuntimeBootstrapOptions":
+				optionLiterals++
+				literal, direct := parents[selector].(*ast.CompositeLit)
+				if relative != allowedFile || !direct || literal.Type != selector ||
+					enclosingRuntimeBootstrapFunction(selector, parents) != "NewRuntimeBootstrapV1" {
+					t.Errorf("%s:%d constructs or aliases foundation bootstrap options outside the plan-bound builder", relative, fileSet.Position(selector.Pos()).Line)
+				}
+			case "RuntimeBootstrapV1":
+				if literal, direct := parents[selector].(*ast.CompositeLit); direct &&
+					literal.Type == selector && len(literal.Elts) != 0 {
+					t.Errorf("%s:%d constructs a populated RuntimeBootstrapV1 outside localrpc", relative, fileSet.Position(selector.Pos()).Line)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factoryCalls != 1 || optionLiterals != 1 {
+		t.Fatalf("production foundation bootstrap references = factory:%d options:%d, want 1 and 1", factoryCalls, optionLiterals)
+	}
+	if privateFoundationCalls != 1 || rawConstructorCalls != 1 || rawOptionLiterals != 1 {
+		t.Fatalf(
+			"production private bootstrap references = foundation:%d raw:%d options:%d, want 1, 1, and 1",
+			privateFoundationCalls,
+			rawConstructorCalls,
+			rawOptionLiterals,
+		)
+	}
+}
+
+func isNamedIdentifier(expression ast.Expr, name string) bool {
+	identifier, ok := expression.(*ast.Ident)
+	return ok && identifier.Name == name
+}
+
+func isCryptoRandReaderExpression(expression ast.Expr, aliases map[string]struct{}) bool {
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Reader" {
+		return false
+	}
+	identifier, ok := selector.X.(*ast.Ident)
+	if !ok || identifier.Obj != nil {
+		return false
+	}
+	_, imported := aliases[identifier.Name]
+	return imported
+}
+
+func enclosingRuntimeBootstrapFunction(node ast.Node, parents map[ast.Node]ast.Node) string {
+	for current := parents[node]; current != nil; current = parents[current] {
+		if function, ok := current.(*ast.FuncDecl); ok {
+			return function.Name.Name
+		}
+	}
+	return ""
+}
+
 type peerverifyIdentifierCounts struct {
 	claimPreflightWindowsVerifier int
 	legacyVerifyWindows           int

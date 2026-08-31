@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -56,7 +57,7 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 	if options.Role != RoleControl && options.Role != RoleExecutor {
 		return nil, fmt.Errorf("%w: role must be control or executor", ErrInvalidServerOptions)
 	}
-	if options.Role == RoleControl && dispatcher == nil {
+	if options.Role == RoleControl && isNilControlDispatcher(dispatcher) {
 		return nil, fmt.Errorf("%w: control dispatcher is required", ErrInvalidServerOptions)
 	}
 	if options.MaximumConcurrentRequests < 1 || options.MaximumConcurrentRequests > maximumConfiguredConcurrency {
@@ -70,15 +71,24 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 		!validServerTimeout(options.ShutdownTimeout) {
 		return nil, fmt.Errorf("%w: timeout is outside the supported range", ErrInvalidServerOptions)
 	}
-	var shutdown *arwxShutdownGate
-	if options.RuntimeBootstrap.state != nil {
-		var err error
-		shutdown, err = newArwxShutdownGate(options.RuntimeBootstrap, options.Role)
-		if err != nil {
-			return nil, fmt.Errorf("%w: committed runtime bootstrap is invalid", ErrInvalidServerOptions)
-		}
+	shutdown, err := newArwxShutdownGate(options.RuntimeBootstrap, options.Role)
+	if err != nil {
+		return nil, fmt.Errorf("%w: committed runtime bootstrap is invalid", ErrInvalidServerOptions)
 	}
 	return &Server{options: options, dispatcher: dispatcher, shutdown: shutdown}, nil
+}
+
+func isNilControlDispatcher(dispatcher ControlDispatcher) bool {
+	if dispatcher == nil {
+		return true
+	}
+	value := reflect.ValueOf(dispatcher)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // Serve owns the already-bootstrapped HostControl byte stream for one payload lifetime. Closing
@@ -91,10 +101,8 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	if input == nil || output == nil {
 		return errors.New("local RPC input and output are required")
 	}
-	if s.shutdown != nil {
-		if err := s.shutdown.bindServeStreams(input, output); err != nil {
-			return err
-		}
+	if err := s.shutdown.bindServeStreams(input, output); err != nil {
+		return err
 	}
 
 	sessionContext, cancelSession := context.WithCancelCause(ctx)

@@ -2,12 +2,16 @@ package localrpc
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"sync/atomic"
 )
 
 const (
@@ -36,9 +40,27 @@ var (
 	runtimeBootstrapReleaseID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 )
 
-// RuntimeBootstrapOptions contains only caller-selected deployment facts. Wire protocol fields are
-// fixed by NewRuntimeBootstrap and cannot be selected by its caller.
-type RuntimeBootstrapOptions struct {
+const (
+	controlFoundationRoleConfigJSON  = `{"executionEnabled":false,"foundationVersion":1,"role":"control"}`
+	executorFoundationRoleConfigJSON = `{"executionEnabled":false,"foundationVersion":1,"role":"executor"}`
+)
+
+// FoundationRuntimeBootstrapOptions contains only verified deployment facts. The bootstrap ID,
+// role configuration, and wire protocol fields are fixed by NewFoundationRuntimeBootstrap.
+type FoundationRuntimeBootstrapOptions struct {
+	Role                           Role
+	WorkerNodeID                   string
+	ReleaseID                      string
+	ReleaseTemplateSHA256          string
+	InstallationManifestSHA256     string
+	PreflightSHA256                string
+	NodeBundleSHA256               string
+	MaximumQueuedBytesPerDirection int
+	TotalShutdownTimeoutMS         int
+	ForceTerminationReserveMS      int
+}
+
+type runtimeBootstrapOptions struct {
 	BootstrapID                    string
 	Role                           Role
 	WorkerNodeID                   string
@@ -88,6 +110,12 @@ type RuntimeBootstrapV1 struct {
 	Shutdown                   RuntimeBootstrapShutdownV1   `json:"shutdown"`
 	RoleConfig                 RuntimeBootstrapRoleConfigV1 `json:"roleConfig"`
 	roleConfigJSON             []byte
+	issuance                   *runtimeBootstrapIssuance
+}
+
+type runtimeBootstrapIssuance struct {
+	seal     [32]byte
+	consumed atomic.Bool
 }
 
 type RuntimeBootstrapAckV1 struct {
@@ -111,7 +139,77 @@ type RuntimeBootstrapCommitV1 struct {
 	Committed        bool   `json:"committed"`
 }
 
-func NewRuntimeBootstrap(options RuntimeBootstrapOptions) (RuntimeBootstrapV1, error) {
+// NewFoundationRuntimeBootstrap creates a fresh zero-execution bootstrap from verified facts.
+func NewFoundationRuntimeBootstrap(
+	options FoundationRuntimeBootstrapOptions,
+) (RuntimeBootstrapV1, error) {
+	return newFoundationRuntimeBootstrap(options, cryptorand.Reader)
+}
+
+func newFoundationRuntimeBootstrap(
+	options FoundationRuntimeBootstrapOptions,
+	random io.Reader,
+) (RuntimeBootstrapV1, error) {
+	roleConfig, err := foundationRoleConfigJSON(options.Role)
+	if err != nil {
+		return RuntimeBootstrapV1{}, err
+	}
+	bootstrapID, err := newRuntimeBootstrapUUIDV4(random)
+	if err != nil {
+		return RuntimeBootstrapV1{}, err
+	}
+	return newRuntimeBootstrap(runtimeBootstrapOptions{
+		BootstrapID:                    bootstrapID,
+		Role:                           options.Role,
+		WorkerNodeID:                   options.WorkerNodeID,
+		ReleaseID:                      options.ReleaseID,
+		ReleaseTemplateSHA256:          options.ReleaseTemplateSHA256,
+		InstallationManifestSHA256:     options.InstallationManifestSHA256,
+		PreflightSHA256:                options.PreflightSHA256,
+		NodeBundleSHA256:               options.NodeBundleSHA256,
+		MaximumQueuedBytesPerDirection: options.MaximumQueuedBytesPerDirection,
+		GracefulTimeoutMS:              options.TotalShutdownTimeoutMS,
+		ForceTerminationReserveMS:      options.ForceTerminationReserveMS,
+		RoleConfigJSON:                 []byte(roleConfig),
+	})
+}
+
+func foundationRoleConfigJSON(role Role) (string, error) {
+	switch role {
+	case RoleControl:
+		return controlFoundationRoleConfigJSON, nil
+	case RoleExecutor:
+		return executorFoundationRoleConfigJSON, nil
+	default:
+		return "", fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
+	}
+}
+
+func newRuntimeBootstrapUUIDV4(random io.Reader) (string, error) {
+	if random == nil {
+		return "", fmt.Errorf("%w: bootstrapId entropy source is required", ErrInvalidRuntimeBootstrap)
+	}
+	var value [16]byte
+	if _, err := io.ReadFull(random, value[:]); err != nil {
+		return "", errors.Join(ErrInvalidRuntimeBootstrap, fmt.Errorf("read bootstrapId entropy: %w", err))
+	}
+	value[6] = value[6]&0x0f | 0x40
+	value[8] = value[8]&0x3f | 0x80
+
+	var encoded [36]byte
+	hex.Encode(encoded[0:8], value[0:4])
+	encoded[8] = '-'
+	hex.Encode(encoded[9:13], value[4:6])
+	encoded[13] = '-'
+	hex.Encode(encoded[14:18], value[6:8])
+	encoded[18] = '-'
+	hex.Encode(encoded[19:23], value[8:10])
+	encoded[23] = '-'
+	hex.Encode(encoded[24:36], value[10:16])
+	return string(encoded[:]), nil
+}
+
+func newRuntimeBootstrap(options runtimeBootstrapOptions) (RuntimeBootstrapV1, error) {
 	if len(options.RoleConfigJSON) > RuntimeBootstrapRoleConfigMaximumBytes {
 		return RuntimeBootstrapV1{}, fmt.Errorf("%w: roleConfig", ErrRuntimeBootstrapLimit)
 	}
@@ -150,13 +248,41 @@ func NewRuntimeBootstrap(options RuntimeBootstrapOptions) (RuntimeBootstrapV1, e
 		},
 		roleConfigJSON: roleConfigSnapshot,
 	}
-	if _, err := EncodeRuntimeBootstrap(value); err != nil {
+	document, err := encodeRuntimeBootstrapDocument(value)
+	if err != nil {
 		return RuntimeBootstrapV1{}, err
 	}
+	value.issuance = &runtimeBootstrapIssuance{seal: sha256.Sum256(document)}
 	return value, nil
 }
 
+// EncodeRuntimeBootstrap accepts only an unchanged value issued by the fixed factory.
 func EncodeRuntimeBootstrap(value RuntimeBootstrapV1) ([]byte, error) {
+	if value.issuance == nil || value.issuance.seal == ([32]byte{}) {
+		return nil, fmt.Errorf("%w: bootstrap was not issued by the fixed factory", ErrInvalidRuntimeBootstrap)
+	}
+	document, err := encodeRuntimeBootstrapDocument(value)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(document)
+	if subtle.ConstantTimeCompare(digest[:], value.issuance.seal[:]) != 1 {
+		return nil, fmt.Errorf("%w: bootstrap changed after factory issuance", ErrInvalidRuntimeBootstrap)
+	}
+	return document, nil
+}
+
+func consumeRuntimeBootstrapIssuance(value RuntimeBootstrapV1) ([]byte, error) {
+	if value.issuance == nil || value.issuance.seal == ([32]byte{}) {
+		return nil, fmt.Errorf("%w: bootstrap was not issued by the fixed factory", ErrInvalidRuntimeBootstrap)
+	}
+	if !value.issuance.consumed.CompareAndSwap(false, true) {
+		return nil, fmt.Errorf("%w: bootstrap issuance was already consumed", ErrRuntimeBootstrapBinding)
+	}
+	return EncodeRuntimeBootstrap(value)
+}
+
+func encodeRuntimeBootstrapDocument(value RuntimeBootstrapV1) ([]byte, error) {
 	if _, err := validateRuntimeBootstrap(value); err != nil {
 		return nil, err
 	}

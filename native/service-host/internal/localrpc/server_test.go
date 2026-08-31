@@ -39,24 +39,48 @@ func TestServerDispatchesConcurrentTypedCallsAndCorrelatesResponses(t *testing.T
 }
 
 func TestServerOptionsEnforceRoleAndBounds(t *testing.T) {
-	valid := defaultServerOptions()
+	if _, err := NewServer(defaultServerOptions(), &fakeControlDispatcher{}); !errors.Is(err, ErrInvalidServerOptions) {
+		t.Fatalf("server without committed bootstrap error = %v", err)
+	}
+	valid := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
 	if _, err := NewServer(valid, nil); !errors.Is(err, ErrInvalidServerOptions) {
 		t.Fatalf("control server without dispatcher error = %v", err)
 	}
-	executor := valid
+	typedNilOptions := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
+	var typedNilDispatcher *fakeControlDispatcher
+	if _, err := NewServer(typedNilOptions, typedNilDispatcher); !errors.Is(err, ErrInvalidServerOptions) {
+		t.Fatalf("control server with typed-nil dispatcher error = %v", err)
+	}
+	if _, err := NewServer(typedNilOptions, &fakeControlDispatcher{}); err != nil {
+		t.Fatalf("typed-nil rejection consumed committed bootstrap: %v", err)
+	}
+	executor := defaultServerOptions()
 	executor.Role = RoleExecutor
+	executor = serverOptionsWithBootstrapForTest(t, executor, &serverTestChannel{})
 	if _, err := NewServer(executor, nil); err != nil {
 		t.Fatalf("executor transport-only server was rejected: %v", err)
 	}
-	tooConcurrent := valid
+	tooConcurrent := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
 	tooConcurrent.MaximumConcurrentRequests = maximumConfiguredConcurrency + 1
 	if _, err := NewServer(tooConcurrent, &fakeControlDispatcher{}); !errors.Is(err, ErrInvalidServerOptions) {
 		t.Fatalf("excess concurrency error = %v", err)
 	}
-	missingIOTimeout := valid
+	missingIOTimeout := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
 	missingIOTimeout.IOTimeout = 0
 	if _, err := NewServer(missingIOTimeout, &fakeControlDispatcher{}); !errors.Is(err, ErrInvalidServerOptions) {
 		t.Fatalf("missing I/O timeout error = %v", err)
+	}
+	reusable := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
+	if _, err := NewServer(reusable, &fakeControlDispatcher{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewServer(reusable, &fakeControlDispatcher{}); !errors.Is(err, ErrInvalidServerOptions) {
+		t.Fatalf("reused committed bootstrap error = %v", err)
+	}
+	mismatched := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), &serverTestChannel{})
+	mismatched.Role = RoleExecutor
+	if _, err := NewServer(mismatched, nil); !errors.Is(err, ErrInvalidServerOptions) {
+		t.Fatalf("role-mismatched committed bootstrap error = %v", err)
 	}
 }
 
@@ -296,14 +320,16 @@ func TestServerBoundsPartialInputAndBlockedOutput(t *testing.T) {
 	t.Run("partial input", func(t *testing.T) {
 		options := defaultServerOptions()
 		options.IOTimeout = 20 * time.Millisecond
+		inputReader, inputWriter := io.Pipe()
+		outputReader, outputWriter := io.Pipe()
+		channel := newServerTestChannel(inputReader, outputWriter)
+		options = serverOptionsWithBootstrapForTest(t, options, channel)
 		server, err := NewServer(options, &fakeControlDispatcher{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		inputReader, inputWriter := io.Pipe()
-		outputReader, outputWriter := io.Pipe()
 		done := make(chan error, 1)
-		go func() { done <- server.Serve(context.Background(), inputReader, outputWriter) }()
+		go func() { done <- server.Serve(context.Background(), channel, channel) }()
 		if _, err := inputWriter.Write([]byte{10, 0, 0, 0, '{'}); err != nil {
 			t.Fatal(err)
 		}
@@ -322,15 +348,17 @@ func TestServerBoundsPartialInputAndBlockedOutput(t *testing.T) {
 	t.Run("blocked output", func(t *testing.T) {
 		options := defaultServerOptions()
 		options.IOTimeout = 20 * time.Millisecond
+		inputReader, inputWriter := io.Pipe()
+		output := newBlockingWriteCloser()
+		channel := newServerTestChannel(inputReader, output)
+		options = serverOptionsWithBootstrapForTest(t, options, channel)
 		server, err := NewServer(options, &fakeControlDispatcher{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		request := callDocument(t, "register:1", OperationRegister, map[string]any{"body": map[string]any{}})
-		inputReader, inputWriter := io.Pipe()
-		output := newBlockingWriteCloser()
 		done := make(chan error, 1)
-		go func() { done <- server.Serve(context.Background(), inputReader, output) }()
+		go func() { done <- server.Serve(context.Background(), channel, channel) }()
 		if err := WriteFrame(inputWriter, request, MaximumFrameBytes); err != nil {
 			t.Fatal(err)
 		}
@@ -348,14 +376,16 @@ func TestServerBoundsPartialInputAndBlockedOutput(t *testing.T) {
 	t.Run("blocked close", func(t *testing.T) {
 		options := defaultServerOptions()
 		options.IOTimeout = 20 * time.Millisecond
+		inputReader, inputWriter := io.Pipe()
+		output := newStubbornWriteCloser()
+		channel := newServerTestChannel(inputReader, output)
+		options = serverOptionsWithBootstrapForTest(t, options, channel)
 		server, err := NewServer(options, &fakeControlDispatcher{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		inputReader, inputWriter := io.Pipe()
-		output := newStubbornWriteCloser()
 		done := make(chan error, 1)
-		go func() { done <- server.Serve(context.Background(), inputReader, output) }()
+		go func() { done <- server.Serve(context.Background(), channel, channel) }()
 		request := callDocument(t, "register:1", OperationRegister, map[string]any{"body": map[string]any{}})
 		if err := WriteFrame(inputWriter, request, MaximumFrameBytes); err != nil {
 			t.Fatal(err)
@@ -498,6 +528,13 @@ type serverHarness struct {
 	done   chan error
 }
 
+type serverTestChannel struct {
+	input     io.ReadCloser
+	output    io.WriteCloser
+	closeOnce sync.Once
+	closeErr  error
+}
+
 type blockingWriteCloser struct {
 	closed chan struct{}
 	once   sync.Once
@@ -546,15 +583,74 @@ func (w *blockingWriteCloser) Close() error {
 
 func newServerHarness(t *testing.T, dispatcher ControlDispatcher, options ServerOptions) *serverHarness {
 	t.Helper()
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	channel := newServerTestChannel(inputReader, outputWriter)
+	options = serverOptionsWithBootstrapForTest(t, options, channel)
 	server, err := NewServer(options, dispatcher)
 	if err != nil {
 		t.Fatalf("NewServer returned an error: %v", err)
 	}
-	inputReader, inputWriter := io.Pipe()
-	outputReader, outputWriter := io.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- server.Serve(context.Background(), inputReader, outputWriter) }()
+	go func() { done <- server.Serve(context.Background(), channel, channel) }()
 	return &serverHarness{input: inputWriter, output: outputReader, done: done}
+}
+
+func newServerTestChannel(input io.ReadCloser, output io.WriteCloser) *serverTestChannel {
+	return &serverTestChannel{input: input, output: output}
+}
+
+func (channel *serverTestChannel) Read(buffer []byte) (int, error) {
+	if channel.input == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return channel.input.Read(buffer)
+}
+
+func (channel *serverTestChannel) Write(buffer []byte) (int, error) {
+	if channel.output == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return channel.output.Write(buffer)
+}
+
+func (channel *serverTestChannel) ReadContext(ctx context.Context, buffer []byte) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return channel.Read(buffer)
+}
+
+func (channel *serverTestChannel) WriteContext(ctx context.Context, buffer []byte) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return channel.Write(buffer)
+}
+
+func (channel *serverTestChannel) Close() error {
+	channel.closeOnce.Do(func() {
+		var inputErr error
+		if channel.input != nil {
+			inputErr = channel.input.Close()
+		}
+		var outputErr error
+		if channel.output != nil {
+			outputErr = channel.output.Close()
+		}
+		channel.closeErr = errors.Join(inputErr, outputErr)
+	})
+	return channel.closeErr
+}
+
+func serverOptionsWithBootstrapForTest(
+	t *testing.T,
+	options ServerOptions,
+	channel RuntimeBootstrapChannel,
+) ServerOptions {
+	t.Helper()
+	options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, options.Role)
+	return options
 }
 
 func (h *serverHarness) send(t *testing.T, document []byte) {

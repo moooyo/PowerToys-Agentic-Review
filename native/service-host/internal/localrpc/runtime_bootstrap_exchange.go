@@ -64,6 +64,10 @@ func BeginRuntimeBootstrapExchange(
 	channel RuntimeBootstrapChannel,
 	bootstrap RuntimeBootstrapV1,
 ) (*PendingRuntimeBootstrapCommit, error) {
+	document, err := consumeRuntimeBootstrapIssuance(bootstrap)
+	if err != nil {
+		return nil, errors.Join(ErrRuntimeBootstrapExchange, err)
+	}
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is required", ErrRuntimeBootstrapExchange)
 	}
@@ -72,10 +76,6 @@ func BeginRuntimeBootstrapExchange(
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, errors.Join(ErrRuntimeBootstrapExchange, cause)
-	}
-	document, err := EncodeRuntimeBootstrap(bootstrap)
-	if err != nil {
-		return nil, errors.Join(ErrRuntimeBootstrapExchange, err)
 	}
 	writer := runtimeBootstrapContextWriter{ctx: ctx, channel: channel}
 	if err := WriteFrame(writer, document, RuntimeBootstrapMaximumBytes); err != nil {

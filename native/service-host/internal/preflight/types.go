@@ -375,23 +375,27 @@ func (file PinnedRuntimeFile) SHA256() string { return file.sha256 }
 // RuntimePlan is the copy-only, role-local output consumed after data-root
 // final reinspection and closure. It contains no credential or native handle.
 type RuntimePlan struct {
-	role            config.Role
-	configuration   config.Config
-	preflightDigest [32]byte
-	dataRootDigest  [32]byte
-	node            PinnedRuntimeFile
-	bundle          PinnedRuntimeFile
-	processHost     *PinnedRuntimeFile
-	runtimeContents []VerifiedRuntimeContent
-	valid           bool
+	role                  config.Role
+	configuration         config.Config
+	releaseTemplateDigest [32]byte
+	preflightDigest       [32]byte
+	dataRootDigest        [32]byte
+	node                  PinnedRuntimeFile
+	bundle                PinnedRuntimeFile
+	processHost           *PinnedRuntimeFile
+	runtimeContents       []VerifiedRuntimeContent
+	valid                 bool
 }
 
 func (plan RuntimePlan) Role() config.Role            { return plan.role }
 func (plan RuntimePlan) Configuration() config.Config { return cloneConfig(plan.configuration) }
-func (plan RuntimePlan) PreflightDigest() [32]byte    { return plan.preflightDigest }
-func (plan RuntimePlan) DataRootDigest() [32]byte     { return plan.dataRootDigest }
-func (plan RuntimePlan) Node() PinnedRuntimeFile      { return plan.node }
-func (plan RuntimePlan) Bundle() PinnedRuntimeFile    { return plan.bundle }
+func (plan RuntimePlan) ReleaseTemplateDigest() [32]byte {
+	return plan.releaseTemplateDigest
+}
+func (plan RuntimePlan) PreflightDigest() [32]byte { return plan.preflightDigest }
+func (plan RuntimePlan) DataRootDigest() [32]byte  { return plan.dataRootDigest }
+func (plan RuntimePlan) Node() PinnedRuntimeFile   { return plan.node }
+func (plan RuntimePlan) Bundle() PinnedRuntimeFile { return plan.bundle }
 func (plan RuntimePlan) ProcessHost() (PinnedRuntimeFile, bool) {
 	if plan.processHost == nil {
 		return PinnedRuntimeFile{}, false
