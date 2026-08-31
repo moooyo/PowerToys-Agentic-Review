@@ -100,11 +100,11 @@ type Evidence struct {
 	WinSWWrapperProcessDACL     DACLEvidence
 }
 
-// Session owns the stable WinSW process handle and all auxiliary bootstrap
-// handles. It is both the wrapper watcher and the exact StableWrapper object
-// transferred to peerverify; callers must not create a second wrapper object
-// by reopening Evidence.StableWrapperFacts.ProcessID. Passing a Session to
-// peerverify.Verify transfers ownership; the caller must not close it again.
+// Session owns the current service's stable WinSW process handle and all
+// auxiliary bootstrap handles. It is both the local wrapper watcher and the
+// StableWrapper identity anchor for this service lifetime. Peer verification
+// independently opens and retains the opposing service wrapper through SCM;
+// callers must never reconstruct either wrapper from a detached PID.
 type Session interface {
 	winprocess.WrapperWatcher
 	peerverify.StableWrapper

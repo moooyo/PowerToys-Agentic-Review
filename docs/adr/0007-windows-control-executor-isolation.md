@@ -234,9 +234,9 @@ a client. Before exchanging job data:
 3. For each SCM or Named Pipe PID, the verifier reads the source PID, opens
    `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, reads the source PID again, requires
    `GetProcessId(handle)` to match, verifies the process is active and records its creation time,
-   then retains the handle for the full session. SCM PIDs are accepted only in stable running or
-   paused states; startup and stop pending states fail closed. Each side requires ServiceHost to be
-   the wrapper's direct child. It verifies the exact restricted service SID on the ServiceHost token
+   then retains the handle for the full session. SCM PIDs are accepted only in a stable
+   `SERVICE_RUNNING` state; paused, startup, and stop-pending states fail closed. Each side requires
+   ServiceHost to be the wrapper's direct child. It verifies the exact restricted service SID on the ServiceHost token
    plus the manifest-pinned paths and SHA-256 hashes of the WinSW wrapper, ServiceHost, Node
    launcher, Worker bundle, and protected configuration; PE files must also have the approved
    Authenticode signer. Neither peer impersonates the other. This wrapper-to-ServiceHost check is
