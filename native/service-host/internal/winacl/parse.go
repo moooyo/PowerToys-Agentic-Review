@@ -17,12 +17,13 @@ const (
 )
 
 const (
-	securityOwnerDefaulted uint16 = 0x0001
-	securityGroupDefaulted uint16 = 0x0002
-	securityDACLPresent    uint16 = 0x0004
-	securityDACLDefaulted  uint16 = 0x0008
-	securityDACLProtected  uint16 = 0x1000
-	securitySelfRelative   uint16 = 0x8000
+	securityOwnerDefaulted    uint16 = 0x0001
+	securityGroupDefaulted    uint16 = 0x0002
+	securityDACLPresent       uint16 = 0x0004
+	securityDACLDefaulted     uint16 = 0x0008
+	securityDACLAutoInherited uint16 = 0x0400
+	securityDACLProtected     uint16 = 0x1000
+	securitySelfRelative      uint16 = 0x8000
 )
 
 const (

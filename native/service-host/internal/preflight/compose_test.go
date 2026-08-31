@@ -138,6 +138,7 @@ func TestComposeRejectsIndividuallyValidCrossConfigurationMismatches(t *testing.
 		}},
 		{"data root", func(f *compositionFixture) {
 			f.executor.Node = nodeConfiguration(
+				config.RoleExecutor,
 				requireManifestFixture(f.manifest, releasemanifest.RoleNodeRuntime, `runtime\node.exe`),
 				requireManifestFixture(f.manifest, releasemanifest.RoleExecutorBundle, `app\executor.mjs`),
 				f.control.Node.DataRoot,
@@ -371,6 +372,8 @@ func TestComposeRejectsDOSShortNameFormInConfiguration(t *testing.T) {
 	fixture.control.Node.Environment["TEMP"] = dataRoot + `\Temp`
 	fixture.control.Node.Environment["TMP"] = dataRoot + `\Temp`
 	fixture.control.Node.Environment["USERPROFILE"] = dataRoot + `\Profile`
+	fixture.control.Node.Environment["APPDATA"] = dataRoot + `\Profile\AppData`
+	fixture.control.Node.Environment["LOCALAPPDATA"] = dataRoot + `\Profile\LocalAppData`
 	fixture.installation.controlConfig = cloneConfig(fixture.control)
 	replaceConfigurationRead(t, &fixture.installation.controlBootstrap, fixture.control)
 	_, err := composeSnapshots(fixture.input)

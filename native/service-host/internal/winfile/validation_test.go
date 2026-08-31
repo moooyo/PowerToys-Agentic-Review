@@ -84,6 +84,13 @@ func TestValidateOpenAndReadOptions(t *testing.T) {
 		t.Fatalf("file ambient ancestor mode returned the wrong error: %v", err)
 	}
 	if err := validateOpenRequest(
+		`C:\safe\runtime.dat`,
+		ObjectKindFile,
+		OpenOptions{VolumeUse: VolumeUseWritable, SecurityMode: SecurityModeRoleDataInherited},
+	); err != nil {
+		t.Fatalf("inherited role data mode was rejected: %v", err)
+	}
+	if err := validateOpenRequest(
 		`C:\safe\config.json`,
 		ObjectKindFile,
 		OpenOptions{},
@@ -119,6 +126,22 @@ func TestValidateSecurityDescriptorForMode(t *testing.T) {
 	}
 	if err := validateSecurityDescriptorForMode(ambient, SecurityModeManaged); !errors.Is(err, ErrUnsafeSecurityDescriptor) {
 		t.Fatalf("managed mode accepted ambient descriptor: %v", err)
+	}
+	inherited := ambient
+	inherited.Control |= securityDACLAutoInherited
+	if err := validateSecurityDescriptorForMode(inherited, SecurityModeRoleDataInherited); err != nil {
+		t.Fatalf("inherited role data descriptor rejected: %v", err)
+	}
+	withoutAutoInheritance := inherited
+	withoutAutoInheritance.Control &^= securityDACLAutoInherited
+	if err := validateSecurityDescriptorForMode(withoutAutoInheritance, SecurityModeRoleDataInherited); !errors.Is(err, ErrUnsafeSecurityDescriptor) {
+		t.Fatalf("role data mode accepted a non-inherited descriptor: %v", err)
+	}
+	protectedInherited := inherited
+	protectedInherited.DACLProtected = true
+	protectedInherited.Control |= securityDACLProtected
+	if err := validateSecurityDescriptorForMode(protectedInherited, SecurityModeRoleDataInherited); !errors.Is(err, ErrUnsafeSecurityDescriptor) {
+		t.Fatalf("role data mode accepted a protected descriptor: %v", err)
 	}
 
 	missingDACL := ambient

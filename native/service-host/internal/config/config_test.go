@@ -144,6 +144,8 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		{name: "invalid environment name", mutate: func(value *Config) { value.Node.Environment["A=B"] = "x" }},
 		{name: "environment control", mutate: func(value *Config) { value.Node.Environment["A"] = "x\ny" }},
 		{name: "missing required environment", mutate: func(value *Config) { delete(value.Node.Environment, "SYSTEMROOT") }},
+		{name: "missing APPDATA", mutate: func(value *Config) { delete(value.Node.Environment, "APPDATA") }},
+		{name: "missing LOCALAPPDATA", mutate: func(value *Config) { delete(value.Node.Environment, "LOCALAPPDATA") }},
 		{name: "unsafe PATH", mutate: func(value *Config) { value.Node.Environment["PATH"] = `C:\Trusted;;C:\Other` }},
 		{name: "PATH outside installation", mutate: func(value *Config) { value.Node.Environment["PATH"] = `C:\Windows\System32` }},
 		{name: "TEMP outside data root", mutate: func(value *Config) { value.Node.Environment["TEMP"] = `C:\Temp` }},
@@ -190,10 +192,6 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 
 func TestExecutorEnvironmentAllowsOnlyItsReviewedExtensions(t *testing.T) {
 	value := validExecutorConfig()
-	value.Node.Environment["CODEX_HOME"] = `C:\ProgramData\AgenticReview\Executor\Codex`
-	value.Node.Environment["GIT_CONFIG_NOSYSTEM"] = "1"
-	value.Node.Environment["GIT_TERMINAL_PROMPT"] = "0"
-	value.Node.Environment["GCM_INTERACTIVE"] = "never"
 	if err := value.Validate(); err != nil {
 		t.Fatalf("Validate rejected the reviewed Executor environment: %v", err)
 	}
@@ -204,6 +202,29 @@ func TestExecutorEnvironmentAllowsOnlyItsReviewedExtensions(t *testing.T) {
 	control.Node.Environment["GCM_INTERACTIVE"] = "never"
 	if err := control.Validate(); err == nil {
 		t.Fatal("Validate allowed Executor-only environment variables for Control")
+	}
+}
+
+func TestExecutorRequiresCompleteEnvironmentAndDirectGlobalGitConfig(t *testing.T) {
+	for _, name := range []string{
+		"APPDATA", "LOCALAPPDATA", "HOME", "CODEX_HOME", "GIT_CONFIG_GLOBAL",
+		"GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "GCM_INTERACTIVE",
+	} {
+		t.Run("missing "+name, func(t *testing.T) {
+			value := validExecutorConfig()
+			delete(value.Node.Environment, name)
+			assertConfigErrorCode(t, value.Validate(), ErrorValidation)
+		})
+	}
+	for _, path := range []string{
+		`C:\ProgramData\AgenticReview\Executor\.gitconfig`,
+		`C:\ProgramData\AgenticReview\Executor\Profile\Config\.gitconfig`,
+	} {
+		t.Run(path, func(t *testing.T) {
+			value := validExecutorConfig()
+			value.Node.Environment["GIT_CONFIG_GLOBAL"] = path
+			assertConfigErrorCode(t, value.Validate(), ErrorValidation)
+		})
 	}
 }
 
@@ -276,12 +297,14 @@ func validConfig() Config {
 			DataRoot:         `C:\ProgramData\AgenticReview\Control`,
 			WorkingDirectory: `C:\ProgramData\AgenticReview\Control\Work`,
 			Environment: map[string]string{
-				"NODE_ENV":    "production",
-				"PATH":        `C:\Program Files\AgenticReview\Worker\runtime`,
-				"SYSTEMROOT":  `C:\Windows`,
-				"TEMP":        `C:\ProgramData\AgenticReview\Control\Temp`,
-				"TMP":         `C:\ProgramData\AgenticReview\Control\Temp`,
-				"USERPROFILE": `C:\ProgramData\AgenticReview\Control\Profile`,
+				"APPDATA":      `C:\ProgramData\AgenticReview\Control\Profile\AppData`,
+				"LOCALAPPDATA": `C:\ProgramData\AgenticReview\Control\Profile\LocalAppData`,
+				"NODE_ENV":     "production",
+				"PATH":         `C:\Program Files\AgenticReview\Worker\runtime`,
+				"SYSTEMROOT":   `C:\Windows`,
+				"TEMP":         `C:\ProgramData\AgenticReview\Control\Temp`,
+				"TMP":          `C:\ProgramData\AgenticReview\Control\Temp`,
+				"USERPROFILE":  `C:\ProgramData\AgenticReview\Control\Profile`,
 			},
 		},
 		Control:  validControlConfiguration(),
@@ -340,6 +363,14 @@ func validExecutorConfig() Config {
 	value.Node.Environment["TEMP"] = `C:\ProgramData\AgenticReview\Executor\Temp`
 	value.Node.Environment["TMP"] = `C:\ProgramData\AgenticReview\Executor\Temp`
 	value.Node.Environment["USERPROFILE"] = `C:\ProgramData\AgenticReview\Executor\Profile`
+	value.Node.Environment["APPDATA"] = `C:\ProgramData\AgenticReview\Executor\Profile\AppData`
+	value.Node.Environment["LOCALAPPDATA"] = `C:\ProgramData\AgenticReview\Executor\Profile\LocalAppData`
+	value.Node.Environment["HOME"] = `C:\ProgramData\AgenticReview\Executor\Profile`
+	value.Node.Environment["CODEX_HOME"] = `C:\ProgramData\AgenticReview\Executor\Codex`
+	value.Node.Environment["GIT_CONFIG_GLOBAL"] = `C:\ProgramData\AgenticReview\Executor\Profile\.gitconfig`
+	value.Node.Environment["GIT_CONFIG_NOSYSTEM"] = "1"
+	value.Node.Environment["GIT_TERMINAL_PROMPT"] = "0"
+	value.Node.Environment["GCM_INTERACTIVE"] = "never"
 	value.Control = nil
 	value.Executor = validExecutorConfiguration()
 	return value

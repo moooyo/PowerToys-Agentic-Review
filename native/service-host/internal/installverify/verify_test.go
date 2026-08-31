@@ -354,7 +354,7 @@ func newInstallFixtureWithTrustedContent(
 
 func fixtureNode(role string, node, bundle releasemanifest.File) config.Node {
 	dataRoot := `C:\ProgramData\AgenticReview\` + role
-	return config.Node{
+	result := config.Node{
 		ExecutablePath:   testInstallationRoot + `\` + node.Path,
 		ExecutableSHA256: node.SHA256,
 		BundlePath:       testInstallationRoot + `\` + bundle.Path,
@@ -362,14 +362,25 @@ func fixtureNode(role string, node, bundle releasemanifest.File) config.Node {
 		DataRoot:         dataRoot,
 		WorkingDirectory: dataRoot + `\Work`,
 		Environment: map[string]string{
-			"NODE_ENV":    "production",
-			"PATH":        testInstallationRoot + `\runtime`,
-			"SYSTEMROOT":  `C:\Windows`,
-			"TEMP":        dataRoot + `\Temp`,
-			"TMP":         dataRoot + `\Temp`,
-			"USERPROFILE": dataRoot + `\Profile`,
+			"APPDATA":      dataRoot + `\Profile\AppData`,
+			"LOCALAPPDATA": dataRoot + `\Profile\LocalAppData`,
+			"NODE_ENV":     "production",
+			"PATH":         testInstallationRoot + `\runtime`,
+			"SYSTEMROOT":   `C:\Windows`,
+			"TEMP":         dataRoot + `\Temp`,
+			"TMP":          dataRoot + `\Temp`,
+			"USERPROFILE":  dataRoot + `\Profile`,
 		},
 	}
+	if role == "Executor" {
+		result.Environment["HOME"] = dataRoot + `\Profile`
+		result.Environment["CODEX_HOME"] = dataRoot + `\Codex`
+		result.Environment["GIT_CONFIG_GLOBAL"] = dataRoot + `\Profile\.gitconfig`
+		result.Environment["GIT_CONFIG_NOSYSTEM"] = "1"
+		result.Environment["GIT_TERMINAL_PROMPT"] = "0"
+		result.Environment["GCM_INTERACTIVE"] = "never"
+	}
+	return result
 }
 
 func (fixture *installFixture) dependencies() dependencies {

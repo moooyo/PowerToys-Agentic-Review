@@ -177,6 +177,7 @@ func configurationFixtures(
 			ApprovedAuthenticodeSignerCertificateDERSHA256: strings.Repeat("4", 64),
 		},
 		Node: nodeConfiguration(
+			config.RoleControl,
 			node,
 			controlBundle,
 			`C:\ProgramData\AgenticReview\Control`,
@@ -198,6 +199,7 @@ func configurationFixtures(
 	executor.Role = config.RoleExecutor
 	executor.OwnService, executor.PeerService = control.PeerService, control.OwnService
 	executor.Node = nodeConfiguration(
+		config.RoleExecutor,
 		node,
 		executorBundle,
 		`C:\ProgramData\AgenticReview\Executor`,
@@ -214,17 +216,27 @@ func configurationFixtures(
 	return control, executor
 }
 
-func nodeConfiguration(node releasemanifest.File, bundle releasemanifest.File, dataRoot string) config.Node {
-	return config.Node{
+func nodeConfiguration(role config.Role, node releasemanifest.File, bundle releasemanifest.File, dataRoot string) config.Node {
+	result := config.Node{
 		ExecutablePath: testInstallationRoot + `\` + node.Path, ExecutableSHA256: node.SHA256,
 		BundlePath: testInstallationRoot + `\` + bundle.Path, BundleSHA256: bundle.SHA256,
 		DataRoot: dataRoot, WorkingDirectory: dataRoot + `\Work`,
 		Environment: map[string]string{
+			"APPDATA": dataRoot + `\Profile\AppData`, "LOCALAPPDATA": dataRoot + `\Profile\LocalAppData`,
 			"NODE_ENV": "production", "PATH": testInstallationRoot + `\runtime`,
 			"SYSTEMROOT": `C:\Windows`, "TEMP": dataRoot + `\Temp`, "TMP": dataRoot + `\Temp`,
 			"USERPROFILE": dataRoot + `\Profile`,
 		},
 	}
+	if role == config.RoleExecutor {
+		result.Environment["HOME"] = dataRoot + `\Profile`
+		result.Environment["CODEX_HOME"] = dataRoot + `\Codex`
+		result.Environment["GIT_CONFIG_GLOBAL"] = dataRoot + `\Profile\.gitconfig`
+		result.Environment["GIT_CONFIG_NOSYSTEM"] = "1"
+		result.Environment["GIT_TERMINAL_PROMPT"] = "0"
+		result.Environment["GCM_INTERACTIVE"] = "never"
+	}
+	return result
 }
 
 func limitsFixture() config.Limits {

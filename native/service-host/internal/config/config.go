@@ -582,9 +582,24 @@ func validateEnvironment(
 			return fmt.Errorf("variable %s: %w", name, err)
 		}
 	}
-	for _, required := range []string{"NODE_ENV", "PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE"} {
+	for _, required := range []string{
+		"APPDATA", "LOCALAPPDATA", "NODE_ENV", "PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
+	} {
 		if _, exists := seen[required]; !exists {
 			return fmt.Errorf("required variable %s is missing", required)
+		}
+	}
+	if role == RoleExecutor {
+		for _, required := range []string{
+			"CODEX_HOME", "GCM_INTERACTIVE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+			"GIT_TERMINAL_PROMPT", "HOME",
+		} {
+			if _, exists := seen[required]; !exists {
+				return fmt.Errorf("required Executor variable %s is missing", required)
+			}
+		}
+		if !isDirectChild(environment["HOME"], environment["GIT_CONFIG_GLOBAL"]) {
+			return errors.New("GIT_CONFIG_GLOBAL must be a direct HOME child file")
 		}
 	}
 	if windir, exists := environment["WINDIR"]; exists && !strings.EqualFold(windir, environment["SYSTEMROOT"]) {
@@ -868,6 +883,14 @@ func extension(value string) string {
 
 func isStrictDescendant(parent string, child string) bool {
 	return strings.HasPrefix(strings.ToLower(child), strings.ToLower(parent)+`\`)
+}
+
+func isDirectChild(parent string, child string) bool {
+	prefix := parent + `\`
+	if len(child) <= len(prefix) || !strings.EqualFold(child[:len(prefix)], prefix) {
+		return false
+	}
+	return !strings.Contains(child[len(prefix):], `\`)
 }
 
 func pathsOverlap(left string, right string) bool {

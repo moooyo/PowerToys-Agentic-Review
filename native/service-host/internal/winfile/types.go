@@ -15,7 +15,7 @@ var (
 	ErrUnsupportedVolume        = errors.New("object is not on a supported NTFS volume")
 	ErrReadOnlyVolume           = errors.New("object is on a read-only volume")
 	ErrVolumeIdentityMismatch   = errors.New("path and handle resolve to different volume identities")
-	ErrUnsafeSecurityDescriptor = errors.New("object security descriptor is incomplete or unprotected")
+	ErrUnsafeSecurityDescriptor = errors.New("object security descriptor does not satisfy the requested security mode")
 	ErrIdentityChanged          = errors.New("object identity changed during inspection")
 	ErrObjectChanged            = errors.New("object changed during inspection")
 	ErrTooLarge                 = errors.New("file exceeds the configured byte limit")
@@ -88,6 +88,10 @@ const (
 	// SecurityModeAmbientAncestor permits inherited and defaulted security on
 	// operating-system-managed ancestors while retaining all structural checks.
 	SecurityModeAmbientAncestor
+	// SecurityModeRoleDataInherited requires an unprotected, auto-inherited
+	// DACL. Closed role-specific trustee and mask checks remain the caller's
+	// responsibility because winfile does not accept policy inputs.
+	SecurityModeRoleDataInherited
 )
 
 // FileIdentity is the FILE_ID_INFO identity captured from an open handle.

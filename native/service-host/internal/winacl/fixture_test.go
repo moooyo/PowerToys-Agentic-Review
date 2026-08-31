@@ -24,14 +24,15 @@ type fixtureACE struct {
 }
 
 type descriptorFixture struct {
-	ownerSID       string
-	groupSID       string
-	ownerDefaulted bool
-	groupDefaulted bool
-	daclDefaulted  bool
-	daclProtected  bool
-	aclRevision    uint8
-	aces           []fixtureACE
+	ownerSID          string
+	groupSID          string
+	ownerDefaulted    bool
+	groupDefaulted    bool
+	daclDefaulted     bool
+	daclAutoInherited bool
+	daclProtected     bool
+	aclRevision       uint8
+	aces              []fixtureACE
 }
 
 func fixtureEvidence(t *testing.T, fixture descriptorFixture) winfile.SecurityDescriptorEvidence {
@@ -63,6 +64,9 @@ func fixtureEvidence(t *testing.T, fixture descriptorFixture) winfile.SecurityDe
 	}
 	if fixture.daclDefaulted {
 		control |= securityDACLDefaulted
+	}
+	if fixture.daclAutoInherited {
+		control |= securityDACLAutoInherited
 	}
 	if fixture.daclProtected {
 		control |= securityDACLProtected

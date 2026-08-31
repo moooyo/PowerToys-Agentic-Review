@@ -24,7 +24,109 @@ func Audit(
 	if profile.kind == ProfileAmbientAncestor {
 		return auditAmbient(parsed)
 	}
+	if profile.kind == ProfileManagedRoleDataBoundaryDirectory {
+		return auditRoleDataBoundary(parsed, profile)
+	}
+	if profile.kind == ProfileInheritedRoleDataDirectory || profile.kind == ProfileInheritedRoleDataFile {
+		return auditInheritedRoleData(parsed, profile)
+	}
 	return auditManaged(parsed, profile)
+}
+
+type expectedACE struct {
+	flags uint8
+	mask  winfile.AccessMask
+	sid   string
+}
+
+type expectedACEKey struct {
+	flags uint8
+	sid   string
+}
+
+func auditRoleDataBoundary(descriptor parsedDescriptor, profile PolicyProfile) error {
+	if descriptor.ownerSID != localSystemSID && descriptor.ownerSID != builtinAdministratorsSID {
+		return rejected("role data boundary has unexpected owner %s", descriptor.ownerSID)
+	}
+	if descriptor.groupSID != localSystemSID && descriptor.groupSID != builtinAdministratorsSID {
+		return rejected("role data boundary has unexpected group %s", descriptor.groupSID)
+	}
+	if descriptor.ownerDefaulted || descriptor.groupDefaulted || descriptor.daclDefaulted {
+		return rejected("role data boundary has defaulted owner, group, or DACL metadata")
+	}
+	if !descriptor.daclProtected || descriptor.control&securityDACLAutoInherited != 0 {
+		return rejected("role data boundary DACL is not protected and explicit")
+	}
+	return auditExactACEs(descriptor, []expectedACE{
+		{flags: aceObjectInherit | aceContainerInherit, mask: fileAllAccess, sid: localSystemSID},
+		{flags: aceObjectInherit | aceContainerInherit, mask: fileAllAccess, sid: builtinAdministratorsSID},
+		{mask: managedBoundaryDirectoryModify, sid: profile.controlSID},
+		{flags: aceObjectInherit | aceInheritOnly, mask: managedFileModify, sid: profile.controlSID},
+		{flags: aceContainerInherit | aceInheritOnly, mask: managedDirectoryModify, sid: profile.controlSID},
+		{flags: aceObjectInherit | aceContainerInherit | aceInheritOnly, mask: readControl, sid: ownerRightsSID},
+	})
+}
+
+func auditInheritedRoleData(descriptor parsedDescriptor, profile PolicyProfile) error {
+	if descriptor.ownerSID != profile.controlSID {
+		return rejected("inherited role data object has unexpected owner %s", descriptor.ownerSID)
+	}
+	// Defaulted metadata bits vary across ordinary CreateFile call paths. They
+	// do not grant access; the exact owner, auto-inheritance state, and raw ACE
+	// tuples below form the authorization contract.
+	if descriptor.daclProtected || descriptor.control&securityDACLAutoInherited == 0 {
+		return rejected("role data object DACL is not unprotected and auto-inherited")
+	}
+	if profile.kind == ProfileInheritedRoleDataFile {
+		return auditExactACEs(descriptor, []expectedACE{
+			{flags: aceInherited, mask: fileAllAccess, sid: localSystemSID},
+			{flags: aceInherited, mask: fileAllAccess, sid: builtinAdministratorsSID},
+			{flags: aceInherited, mask: managedFileModify, sid: profile.controlSID},
+			{flags: aceInherited, mask: readControl, sid: ownerRightsSID},
+		})
+	}
+	return auditExactACEs(descriptor, []expectedACE{
+		{flags: aceObjectInherit | aceContainerInherit | aceInherited, mask: fileAllAccess, sid: localSystemSID},
+		{flags: aceObjectInherit | aceContainerInherit | aceInherited, mask: fileAllAccess, sid: builtinAdministratorsSID},
+		{flags: aceObjectInherit | aceInheritOnly | aceInherited, mask: managedFileModify, sid: profile.controlSID},
+		{flags: aceContainerInherit | aceInherited, mask: managedDirectoryModify, sid: profile.controlSID},
+		{flags: aceObjectInherit | aceContainerInherit | aceInherited, mask: readControl, sid: ownerRightsSID},
+	})
+}
+
+func auditExactACEs(descriptor parsedDescriptor, expected []expectedACE) error {
+	if descriptor.aclRevision != 2 {
+		return rejected("role data ACL revision is %d, want 2", descriptor.aclRevision)
+	}
+	if len(descriptor.aces) != len(expected) {
+		return rejected("role data DACL has %d ACEs, want %d", len(descriptor.aces), len(expected))
+	}
+	wanted := make(map[expectedACEKey]winfile.AccessMask, len(expected))
+	for _, entry := range expected {
+		key := expectedACEKey{flags: entry.flags, sid: entry.sid}
+		if _, duplicate := wanted[key]; duplicate {
+			return fmt.Errorf("%w: role data profile repeats an expected ACE", ErrInvalidProfile)
+		}
+		wanted[key] = entry.mask
+	}
+	for index, ace := range descriptor.aces {
+		if ace.aceType != accessAllowedACEType {
+			return rejected("role data ACE %d is not access-allowed", index)
+		}
+		key := expectedACEKey{flags: ace.flags, sid: ace.sid}
+		mask, exists := wanted[key]
+		if !exists {
+			return rejected("role data ACE %d has unexpected trustee or flags", index)
+		}
+		if ace.rawMask != mask {
+			return rejected("role data ACE %d has raw mask 0x%x, want 0x%x", index, ace.rawMask, mask)
+		}
+		delete(wanted, key)
+	}
+	if len(wanted) != 0 {
+		return rejected("role data DACL is missing an expected ACE")
+	}
+	return nil
 }
 
 func auditAmbient(descriptor parsedDescriptor) error {
@@ -129,7 +231,8 @@ func managedEntries(profile PolicyProfile) map[string]winfile.AccessMask {
 }
 
 func managedServiceAccess(kind ProfileKind, access AccessClass) winfile.AccessMask {
-	if kind == ProfileManagedInstallationDirectory || kind == ProfileManagedTrustedDirectory {
+	if kind == ProfileManagedInstallationDirectory || kind == ProfileManagedTrustedDirectory ||
+		kind == ProfileManagedProductAnchorDirectory {
 		return managedDirectoryRead
 	}
 	switch access {

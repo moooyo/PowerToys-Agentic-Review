@@ -68,6 +68,58 @@ func NewManagedTrustedFileProfile(controlSID, executorSID string) (PolicyProfile
 	)
 }
 
+// NewManagedProductAnchorDirectoryProfile creates the exact shared product
+// anchor policy. Both services may inspect and traverse the anchor, but neither
+// may create, delete, rename, or change its security descriptor.
+func NewManagedProductAnchorDirectoryProfile(controlSID, executorSID string) (PolicyProfile, error) {
+	return newManagedProfile(
+		ProfileManagedProductAnchorDirectory,
+		controlSID,
+		executorSID,
+		AccessReadExecute,
+		AccessReadExecute,
+	)
+}
+
+// NewManagedRoleDataBoundaryDirectoryProfile creates the protected policy for
+// an installer-owned role data boundary. The own-service self ACE permits
+// creation and mutation but omits DELETE and FILE_DELETE_CHILD so fixed
+// boundaries cannot be removed. Separate templates grant ordinary descendant
+// directory Modify and non-executable file Modify. The peer receives no ACE.
+func NewManagedRoleDataBoundaryDirectoryProfile(ownSID, peerSID string) (PolicyProfile, error) {
+	return newManagedProfile(
+		ProfileManagedRoleDataBoundaryDirectory,
+		ownSID,
+		peerSID,
+		AccessModify,
+		AccessNone,
+	)
+}
+
+// NewInheritedRoleDataDirectoryProfile creates the closed policy for a
+// runtime-created directory whose ACL was inherited from a role data boundary.
+func NewInheritedRoleDataDirectoryProfile(ownSID, peerSID string) (PolicyProfile, error) {
+	return newManagedProfile(
+		ProfileInheritedRoleDataDirectory,
+		ownSID,
+		peerSID,
+		AccessModify,
+		AccessNone,
+	)
+}
+
+// NewInheritedRoleDataFileProfile creates the closed policy for a
+// runtime-created file. File Modify deliberately excludes FILE_EXECUTE.
+func NewInheritedRoleDataFileProfile(ownSID, peerSID string) (PolicyProfile, error) {
+	return newManagedProfile(
+		ProfileInheritedRoleDataFile,
+		ownSID,
+		peerSID,
+		AccessModify,
+		AccessNone,
+	)
+}
+
 func newManagedProfile(
 	kind ProfileKind,
 	controlSID string,
@@ -75,7 +127,7 @@ func newManagedProfile(
 	controlAccess AccessClass,
 	executorAccess AccessClass,
 ) (PolicyProfile, error) {
-	if kind < ProfileManagedInstallationDirectory || kind > ProfileManagedTrustedFile {
+	if kind < ProfileManagedInstallationDirectory || kind > ProfileInheritedRoleDataFile {
 		return PolicyProfile{}, fmt.Errorf("%w: unsupported managed profile kind %d", ErrInvalidProfile, kind)
 	}
 	if err := validateServiceSID(controlSID); err != nil {
@@ -95,7 +147,8 @@ func newManagedProfile(
 	}
 
 	switch kind {
-	case ProfileManagedInstallationDirectory, ProfileManagedTrustedDirectory:
+	case ProfileManagedInstallationDirectory, ProfileManagedTrustedDirectory,
+		ProfileManagedProductAnchorDirectory:
 		if controlAccess != AccessReadExecute || executorAccess != AccessReadExecute {
 			return PolicyProfile{}, fmt.Errorf("%w: directory access classes are fixed", ErrInvalidProfile)
 		}
@@ -104,6 +157,15 @@ func newManagedProfile(
 			return PolicyProfile{}, fmt.Errorf("%w: trusted file access classes are fixed", ErrInvalidProfile)
 		}
 	case ProfileManagedInstallationFile:
+		if controlAccess == AccessModify || executorAccess == AccessModify {
+			return PolicyProfile{}, fmt.Errorf("%w: installation files cannot grant Modify", ErrInvalidProfile)
+		}
+	case ProfileManagedRoleDataBoundaryDirectory,
+		ProfileInheritedRoleDataDirectory,
+		ProfileInheritedRoleDataFile:
+		if controlAccess != AccessModify || executorAccess != AccessNone {
+			return PolicyProfile{}, fmt.Errorf("%w: role data access classes are fixed", ErrInvalidProfile)
+		}
 	}
 
 	return PolicyProfile{
@@ -136,7 +198,10 @@ func validateProfile(profile PolicyProfile, kind winfile.ObjectKind) error {
 		}
 		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
 	}
-	if profile.kind == ProfileManagedInstallationDirectory || profile.kind == ProfileManagedTrustedDirectory {
+	if profile.kind == ProfileManagedInstallationDirectory || profile.kind == ProfileManagedTrustedDirectory ||
+		profile.kind == ProfileManagedProductAnchorDirectory ||
+		profile.kind == ProfileManagedRoleDataBoundaryDirectory ||
+		profile.kind == ProfileInheritedRoleDataDirectory {
 		if kind != winfile.ObjectKindDirectory {
 			return fmt.Errorf("%w: directory profile used for a non-directory", ErrInvalidProfile)
 		}
@@ -149,7 +214,7 @@ func validateProfile(profile PolicyProfile, kind winfile.ObjectKind) error {
 }
 
 func validAccessClass(value AccessClass) bool {
-	return value == AccessNone || value == AccessRead || value == AccessReadExecute
+	return value == AccessNone || value == AccessRead || value == AccessReadExecute || value == AccessModify
 }
 
 func validateServiceSID(value string) error {

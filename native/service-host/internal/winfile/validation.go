@@ -16,6 +16,7 @@ const (
 	driveTypeFixed            uint32 = 3
 	maximumWindowsPathUnits          = 32_767
 	securityDACLPresent       uint16 = 0x0004
+	securityDACLAutoInherited uint16 = 0x0400
 	securityDACLProtected     uint16 = 0x1000
 	securitySelfRelative      uint16 = 0x8000
 )
@@ -74,7 +75,9 @@ func validateOpenRequest(path string, kind ObjectKind, options OpenOptions) erro
 	if kind != ObjectKindDirectory && options.DirectoryEnumeration {
 		return fmt.Errorf("%w: directory enumeration access requires a directory", ErrInvalidOptions)
 	}
-	if options.SecurityMode != SecurityModeManaged && options.SecurityMode != SecurityModeAmbientAncestor {
+	if options.SecurityMode != SecurityModeManaged &&
+		options.SecurityMode != SecurityModeAmbientAncestor &&
+		options.SecurityMode != SecurityModeRoleDataInherited {
 		return fmt.Errorf("%w: unknown security mode", ErrInvalidOptions)
 	}
 	if options.SecurityMode == SecurityModeAmbientAncestor && kind != ObjectKindDirectory {
@@ -84,7 +87,8 @@ func validateOpenRequest(path string, kind ObjectKind, options OpenOptions) erro
 }
 
 func validateSecurityDescriptorForMode(security SecurityDescriptorEvidence, mode SecurityMode) error {
-	if mode != SecurityModeManaged && mode != SecurityModeAmbientAncestor {
+	if mode != SecurityModeManaged && mode != SecurityModeAmbientAncestor &&
+		mode != SecurityModeRoleDataInherited {
 		return fmt.Errorf("%w: unknown security mode", ErrInvalidOptions)
 	}
 	requiredControl := securityDACLPresent | securitySelfRelative
@@ -101,6 +105,10 @@ func validateSecurityDescriptorForMode(security SecurityDescriptorEvidence, mode
 	if mode == SecurityModeManaged && (!security.DACLProtected ||
 		security.OwnerDefaulted || security.GroupDefaulted || security.DACLDefaulted) {
 		return fmt.Errorf("%w: managed security must be protected and non-defaulted", ErrUnsafeSecurityDescriptor)
+	}
+	if mode == SecurityModeRoleDataInherited && (security.DACLProtected ||
+		security.Control&securityDACLAutoInherited == 0) {
+		return fmt.Errorf("%w: role data security must be unprotected and auto-inherited", ErrUnsafeSecurityDescriptor)
 	}
 	return nil
 }

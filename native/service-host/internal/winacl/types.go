@@ -23,6 +23,10 @@ const (
 	ProfileManagedInstallationFile
 	ProfileManagedTrustedDirectory
 	ProfileManagedTrustedFile
+	ProfileManagedProductAnchorDirectory
+	ProfileManagedRoleDataBoundaryDirectory
+	ProfileInheritedRoleDataDirectory
+	ProfileInheritedRoleDataFile
 )
 
 // AccessClass is the exact access granted to one service SID on a managed file.
@@ -32,12 +36,14 @@ const (
 	AccessNone AccessClass = iota
 	AccessRead
 	AccessReadExecute
+	AccessModify
 )
 
 const (
 	localSystemSID           = "S-1-5-18"
 	builtinAdministratorsSID = "S-1-5-32-544"
 	creatorOwnerSID          = "S-1-3-0"
+	ownerRightsSID           = "S-1-3-4"
 	trustedInstallerSID      = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 )
 
@@ -75,8 +81,11 @@ const (
 	fileGenericExecute = readControl | synchronize | fileExecute | fileReadAttributes
 	fileAllAccess      = standardRightsRequired | synchronize | fileSpecificRights
 
-	managedDirectoryRead = fileGenericRead | fileGenericExecute
-	fileMutationAccess   = fileWriteData | fileAppendData | fileWriteEA | fileWriteAttributes |
+	managedDirectoryRead           = fileGenericRead | fileGenericExecute
+	managedDirectoryModify         = managedDirectoryRead | fileGenericWrite | deleteAccess | fileDeleteChild
+	managedBoundaryDirectoryModify = managedDirectoryModify &^ (deleteAccess | fileDeleteChild)
+	managedFileModify              = fileGenericRead | fileGenericWrite | deleteAccess
+	fileMutationAccess             = fileWriteData | fileAppendData | fileWriteEA | fileWriteAttributes |
 		deleteAccess | writeDACL | writeOwner
 	directoryMutationAccess = fileMutationAccess | fileDeleteChild
 	// Windows grants ordinary users WD, AD, WEA, and WA on a typical ProgramData
