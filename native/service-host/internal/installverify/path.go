@@ -8,6 +8,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 )
 
@@ -84,6 +85,28 @@ func parentAndLeaf(path string) (string, string, error) {
 	}
 	parent := parsed.drive + strings.Join(parsed.components[:len(parsed.components)-1], `\`)
 	return parent, parsed.components[len(parsed.components)-1], nil
+}
+
+// RoleFromBootstrapPath returns the fixed service role encoded by a canonical
+// absolute Windows bootstrap path. It applies the same case-insensitive path
+// identity policy as installation verification.
+//
+// The result is only a pre-read selector. It does not authorize the path or
+// process; Verify must independently prove the restricted service identity and
+// installation evidence before trusting bootstrap content.
+func RoleFromBootstrapPath(actualPath string) (config.Role, error) {
+	_, leaf, err := parentAndLeaf(actualPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: bootstrap path is not canonical: %v", ErrInvalidOptions, err)
+	}
+	switch {
+	case windowsPathEqual(leaf, releasemanifest.ControlBootstrapConfigurationPath):
+		return config.RoleControl, nil
+	case windowsPathEqual(leaf, releasemanifest.ExecutorBootstrapConfigurationPath):
+		return config.RoleExecutor, nil
+	default:
+		return "", fmt.Errorf("%w: bootstrap path does not name a fixed role configuration", ErrInvalidOptions)
+	}
 }
 
 func relativePath(root, child string) (string, error) {

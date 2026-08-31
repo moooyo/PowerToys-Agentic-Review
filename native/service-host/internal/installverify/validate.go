@@ -19,15 +19,11 @@ func normalizeOptions(options Options) (Options, error) {
 	if options.Role != config.RoleControl && options.Role != config.RoleExecutor {
 		return Options{}, verificationError(ErrorInput, "role must be control or executor", ErrInvalidOptions)
 	}
-	parent, leaf, err := parentAndLeaf(options.ActualBootstrapPath)
-	if err != nil || parent == "" {
-		return Options{}, verificationError(ErrorInput, "actual bootstrap path is invalid", errors.Join(ErrInvalidOptions, err))
+	selectedRole, err := RoleFromBootstrapPath(options.ActualBootstrapPath)
+	if err != nil {
+		return Options{}, verificationError(ErrorInput, "actual bootstrap path is invalid", err)
 	}
-	expectedLeaf := releasemanifest.ControlBootstrapConfigurationPath
-	if options.Role == config.RoleExecutor {
-		expectedLeaf = releasemanifest.ExecutorBootstrapConfigurationPath
-	}
-	if !strings.EqualFold(leaf, expectedLeaf) {
+	if options.Role != selectedRole {
 		return Options{}, verificationError(ErrorInput, "actual bootstrap path does not match the selected role", ErrInvalidOptions)
 	}
 	if options.Limits == (Limits{}) {
