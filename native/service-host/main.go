@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/platform"
 )
 
@@ -36,15 +35,11 @@ func run(arguments []string, standardOutput io.Writer, standardError io.Writer) 
 		return exitSuccess
 	}
 
-	configuration, err := config.Load(command.configPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: configuration rejected: %v\n", err)
-		return exitInvalidConfig
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := platform.NewHost().Run(ctx, configuration); err != nil {
+	if err := platform.NewHost().Run(ctx, platform.BootstrapOptions{
+		ActualBootstrapPath: command.configPath,
+	}); err != nil {
 		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: preflight failed: %v\n", err)
 		return exitPreflight
 	}
