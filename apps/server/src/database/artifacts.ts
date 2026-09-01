@@ -1168,12 +1168,20 @@ function createNewUploadResult(upload: ArtifactUploadRow): CreateArtifactUploadR
 function createUploadReplayResult(upload: ArtifactUploadRow): CreateArtifactUploadResult {
   const replay = {
     uploadId: upload.id,
-    replayed: true as const,
+    replayed: true,
     nextChunkIndex: upload.next_chunk_index,
     nextOffsetBytes: upload.received_bytes,
     maximumChunkBytes: maximumResultArtifactChunkBytes,
     maximumChunkCount: maximumResultArtifactChunks,
-  };
+  } satisfies Pick<
+    Extract<CreateArtifactUploadResult, { replayed: true }>,
+    | "uploadId"
+    | "replayed"
+    | "nextChunkIndex"
+    | "nextOffsetBytes"
+    | "maximumChunkBytes"
+    | "maximumChunkCount"
+  >;
   if (upload.status === "abandoned" || upload.status === "corrupt") {
     if (upload.termination_reason === null || upload.terminated_at === null) {
       throw new ArtifactUploadConflictError(
