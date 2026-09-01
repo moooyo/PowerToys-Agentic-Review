@@ -133,18 +133,29 @@ chunk upload, finalization, explicit termination, and reconciler cleanup. A sepa
 serializes storage-capacity admission. These are sufficient only because ADR 0002 permits one active
 Server; a multi-Server design requires a new cross-process coordination decision.
 
+The synchronous Linux filesystem kernel runs only inside one dedicated artifact-storage Worker or
+supervised helper process. It never runs on the Fastify event loop and never shares the SQLite
+Worker. The asynchronous parent-side client owns bounded data-only requests, rejects all pending
+work after a fatal error or exit, and applies an external watchdog that can terminate the isolated
+storage owner when a synchronous syscall does not return. A timed-out owner is not reused, and the
+Server retains its database ownership lock until the storage owner has exited or the Server process
+itself terminates.
+
 For each chunk the order is:
 
 ```text
 pure validation -> DB prepare -> durable staging write -> DB commit
 ```
 
-`DB prepare` rechecks the full active lease and returns the stable immutable prepare receipt. The
-Server then opens or creates the staging file, verifies its identity and committed prefix, writes
-exactly at the prepared offset, verifies the resulting length, synchronizes the file, and
-synchronizes the staging directory when file creation must become durable. Only then may
-`DB commit` mark the receipt committed and advance the monotonic cursor. The commit transaction
-again checks the complete lease fence and the exact prepare receipt.
+`DB prepare` rechecks the full active lease and returns the stable immutable prepare receipt plus the
+complete, bounded sequence of committed chunk receipts from index zero through the durable database
+cursor. The same transaction verifies that the receipt sequence is contiguous and ends exactly at
+the reported committed offset. No HTTP field or process-local cache may synthesize this prefix.
+The Server then opens or creates the staging file, verifies its identity and committed prefix,
+writes exactly at the prepared offset, verifies the resulting length, synchronizes the file, and
+synchronizes the staging directory when file creation must become durable. Only then may `DB commit`
+mark the receipt committed and advance the monotonic cursor. The commit transaction again checks the
+complete lease fence and the exact prepare receipt.
 
 An exact retry uses the original receipt. If the receipt is prepared, the Server makes the same byte
 range durable and retries the commit. If it is committed, the Server verifies that staging bytes
