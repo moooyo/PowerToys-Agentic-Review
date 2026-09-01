@@ -7,8 +7,8 @@ export interface HostControlSession<TRole extends ServiceHostPayloadRole = Servi
   readonly bootstrap: Readonly<ParsedRuntimeBootstrapV1>;
   readonly done: Promise<void>;
   armArwxShutdown(receipt: ArwxFinalFrameReceipt): Promise<Readonly<ArmArwxShutdownResultV1>>;
-  drain(): Promise<void>;
-  close(): Promise<void>;
+  drain(absoluteDeadline?: number): Promise<void>;
+  close(absoluteDeadline?: number): Promise<void>;
 }
 
 import type { ArmArwxShutdownResultV1 } from "./arwx-shutdown.js";

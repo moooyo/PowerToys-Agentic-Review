@@ -13,6 +13,7 @@ import {
   connectHostControl,
   HostControlClientError,
   HostControlRemoteError,
+  isControlHostControlClient,
 } from "./host-control-client.js";
 import {
   HOST_CONTROL_MAXIMUM_BODY_BYTES,
@@ -160,6 +161,17 @@ async function connect(
 }
 
 describe("HostControl client", () => {
+  it("nominally validates only clients created by the reviewed connector", async () => {
+    const { client } = await connect();
+
+    expect(isControlHostControlClient(client)).toBe(true);
+    expect(
+      isControlHostControlClient(Object.create(client) as ControlHostControlClient),
+    ).toBe(false);
+
+    await client.close();
+  });
+
   it("multiplexes concurrent requests and correlates out-of-order fragmented responses", async () => {
     const { client, host } = await connect();
     expect(client.bootstrap.bootstrap.role).toBe("control");
@@ -179,14 +191,24 @@ describe("HostControl client", () => {
 
   it("arms the exact final Drain frame and commits ARWX output only after the exact echo", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
-    const { client, host } = await connect({
+    let arming: Promise<unknown> | undefined;
+    let client!: ControlHostControlClient;
+    const connected = await connect({
       prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
-        handler: () => undefined,
+        handler: (_message, dispatch) => {
+          const receipt = dispatch.readFinalFrameReceipt();
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            arming = client.armArwxShutdown(receipt);
+            await arming;
+          });
+        },
         onStarted: (value) => {
           arwxContext = value;
         },
       }),
     });
+    client = connected.client;
+    const { host } = connected;
     const runtime = defined(arwxContext, "ARWX context");
     const receipt = await runtime.arwx.sendFinal(
       {
@@ -202,7 +224,7 @@ describe("HostControl client", () => {
       sequence: 1n,
     });
 
-    const arming = client.armArwxShutdown(receipt);
+    runtime.input.end(drainedFrame(1n));
     await waitForWrites(host, 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
@@ -218,7 +240,10 @@ describe("HostControl client", () => {
     expect(runtime.output.writableEnded).toBe(false);
     host.respond(success(request.requestId as string, { armed: true, ...payload }), 3);
 
-    await expect(arming).resolves.toEqual({ armed: true, ...payload });
+    await expect(defined(arming, "Arm operation")).resolves.toEqual({
+      armed: true,
+      ...payload,
+    });
     expect(runtime.output.writableEnded).toBe(true);
     await waitFor(() => host.clientEnded);
     expect(() => client.register(opaque({ workerNodeId: "node:1" }))).toThrowError(
@@ -232,29 +257,28 @@ describe("HostControl client", () => {
       }),
     ).toThrowError(expect.objectContaining({ code: "CHANNEL_STATE_INVALID" }));
 
-    runtime.input.end(
-      encodeLocalFrame({
-        minorVersion: 0,
-        messageType: LocalMessageType.Drained,
-        sequence: 1n,
-        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
-        payload: drainedPayload(),
-      }),
-    );
     await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
     await client.drain();
   });
 
   it("rejects close-only HostControl termination after Arm acknowledgement", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
-    const { client, host } = await connect({
+    let client!: ControlHostControlClient;
+    const connected = await connect({
       prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
-        handler: () => undefined,
+        handler: (_message, dispatch) => {
+          const receipt = dispatch.readFinalFrameReceipt();
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            await client.armArwxShutdown(receipt);
+          });
+        },
         onStarted: (value) => {
           arwxContext = value;
         },
       }),
     });
+    client = connected.client;
+    const { host } = connected;
     host.endReadableOnClientEnd = false;
     const runtime = defined(arwxContext, "ARWX context");
     const receipt = await runtime.arwx.sendFinal(
@@ -265,12 +289,11 @@ describe("HostControl client", () => {
       },
       performance.now() + 1_000,
     );
-    const arming = client.armArwxShutdown(receipt);
+    runtime.input.end(drainedFrame(1n));
     await waitForWrites(host, 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
     host.respond(success(request.requestId as string, { armed: true, ...payload }));
-    await expect(arming).resolves.toBeDefined();
     await waitFor(() => host.clientEnded);
     host.destroy();
 
@@ -310,14 +333,24 @@ describe("HostControl client", () => {
 
   it("fails closed without sending Arm while a business RPC is active", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
-    const { client, host } = await connect({
+    let arming: Promise<unknown> | undefined;
+    let client!: ControlHostControlClient;
+    const connected = await connect({
       prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
-        handler: () => undefined,
+        handler: (_message, dispatch) => {
+          const receipt = dispatch.readFinalFrameReceipt();
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            arming = client.armArwxShutdown(receipt);
+            await arming;
+          });
+        },
         onStarted: (value) => {
           arwxContext = value;
         },
       }),
     });
+    client = connected.client;
+    const { host } = connected;
     const registration = client.register(opaque({ workerNodeId: "node:1" }));
     await waitForWrites(host, 1);
     const runtime = defined(arwxContext, "ARWX context");
@@ -329,8 +362,11 @@ describe("HostControl client", () => {
       },
       performance.now() + 1_000,
     );
+    expect(receipt.localRole).toBe("control");
+    runtime.input.end(drainedFrame(1n));
+    await waitFor(() => arming !== undefined);
 
-    await expect(client.armArwxShutdown(receipt)).rejects.toMatchObject({
+    await expect(defined(arming, "Arm operation")).rejects.toMatchObject({
       code: "LIFECYCLE_STATE_INVALID",
     });
     await expect(registration).rejects.toMatchObject({ code: "LIFECYCLE_STATE_INVALID" });
@@ -341,14 +377,24 @@ describe("HostControl client", () => {
 
   it("uses the final-frame deadline for Arm timeout and never sends a Cancel", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
-    const { client, host } = await connect({
+    let arming: Promise<unknown> | undefined;
+    let client!: ControlHostControlClient;
+    const connected = await connect({
       prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
-        handler: () => undefined,
+        handler: (_message, dispatch) => {
+          const receipt = dispatch.readFinalFrameReceipt();
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            arming = client.armArwxShutdown(receipt);
+            await arming;
+          });
+        },
         onStarted: (value) => {
           arwxContext = value;
         },
       }),
     });
+    client = connected.client;
+    const { host } = connected;
     const runtime = defined(arwxContext, "ARWX context");
     const receipt = await runtime.arwx.sendFinal(
       {
@@ -358,8 +404,11 @@ describe("HostControl client", () => {
       },
       performance.now() + 100,
     );
+    expect(receipt.localRole).toBe("control");
+    runtime.input.end(drainedFrame(1n));
+    await waitFor(() => arming !== undefined);
 
-    await expect(client.armArwxShutdown(receipt)).rejects.toMatchObject({
+    await expect(defined(arming, "Arm operation")).rejects.toMatchObject({
       code: "LIFECYCLE_TIMEOUT",
     });
     expect(host.requests().map((request) => request.operation)).toEqual(["ArmArwxShutdown"]);
@@ -563,6 +612,15 @@ describe("HostControl client", () => {
     expect(host.clientEnded).toBe(true);
   });
 
+  it("does not restart the graceful budget when an absolute drain deadline expired", async () => {
+    const { client, host } = await connect({ closeTimeoutMs: 1_000 });
+
+    await expect(client.drain(performance.now() - 1)).rejects.toMatchObject({
+      code: "DRAIN_TIMEOUT",
+    });
+    expect(host.destroyed).toBe(true);
+  });
+
   it("fails drain and pending work when the peer closes early", async () => {
     const { client, host } = await connect();
     const request = client.register(opaque({ workerNodeId: "node:1" }));
@@ -701,6 +759,16 @@ function failure(requestId: string, code: string, retryable: boolean): Record<st
     requestId,
     type: "response",
   };
+}
+
+function drainedFrame(sequence: bigint): Buffer {
+  return encodeLocalFrame({
+    minorVersion: 0,
+    messageType: LocalMessageType.Drained,
+    sequence,
+    correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+    payload: drainedPayload(),
+  });
 }
 
 async function waitForWrites(host: FakeHostControl, count: number): Promise<void> {

@@ -202,13 +202,17 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     });
   }
 
-  public drain(): Promise<void> {
-    this.#drainPromise ??= this.#drain();
+  public drain(absoluteDeadline?: number): Promise<void> {
+    this.#drainPromise ??= this.#drain(
+      selectShutdownDeadline(absoluteDeadline, this.#shutdownDeadline, this.closeTimeoutMs),
+    );
     return this.#drainPromise;
   }
 
-  public close(): Promise<void> {
-    this.#closePromise ??= this.#close();
+  public close(absoluteDeadline?: number): Promise<void> {
+    this.#closePromise ??= this.#close(
+      selectShutdownDeadline(absoluteDeadline, this.#shutdownDeadline, this.closeTimeoutMs),
+    );
     return this.#closePromise;
   }
 
@@ -307,10 +311,13 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     }
   }
 
-  async #drain(): Promise<void> {
-    if (this.#state === "closed") return;
+  async #drain(deadline: number): Promise<void> {
+    if (this.#state === "closed") {
+      remainingShutdownMilliseconds(deadline);
+      return;
+    }
     if (this.#state === "failed") throw this.#terminalError;
-    if (this.#state === "closing") return this.close();
+    if (this.#state === "closing") return this.close(deadline);
     if (this.#state === "arming") {
       const error = executorError(
         "LIFECYCLE_STATE_INVALID",
@@ -320,7 +327,6 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       throw error;
     }
     this.#state = "draining";
-    const deadline = this.#shutdownDeadline ?? performance.now() + this.closeTimeoutMs;
     try {
       await this.#awaitDrainPhase(
         new Promise<void>((resolve, reject) => {
@@ -334,7 +340,6 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       );
       await this.#awaitDrainPhase(this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
-      if (this.#shutdownDeadline !== undefined) remainingShutdownMilliseconds(deadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
       const error = executorError("CLOSE_TIMEOUT", "Executor HostControl drain timed out.");
@@ -343,8 +348,11 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     }
   }
 
-  async #close(): Promise<void> {
-    if (this.#state === "closed") return;
+  async #close(deadline: number): Promise<void> {
+    if (this.#state === "closed") {
+      remainingShutdownMilliseconds(deadline);
+      return;
+    }
     if (this.#state === "draining") {
       this.#fail(
         executorError("CLIENT_CLOSED", "Executor HostControl drain was interrupted by close."),
@@ -362,14 +370,8 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
       // The close event or deadline remains authoritative.
     }
     try {
-      const timeout =
-        this.#shutdownDeadline === undefined
-          ? this.closeTimeoutMs
-          : remainingShutdownMilliseconds(this.#shutdownDeadline);
-      await withTimeout(this.#closed.promise, timeout);
-      if (this.#shutdownDeadline !== undefined) {
-        remainingShutdownMilliseconds(this.#shutdownDeadline);
-      }
+      await withTimeout(this.#closed.promise, remainingShutdownMilliseconds(deadline));
+      remainingShutdownMilliseconds(deadline);
     } catch {
       throw executorError("CLOSE_TIMEOUT", "Executor HostControl stream did not close in time.");
     }
@@ -396,12 +398,13 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
     }
   }
 
-  #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    const timeout =
-      this.#shutdownDeadline === undefined
-        ? remainingMilliseconds(deadline)
-        : remainingShutdownMilliseconds(deadline);
-    return withTimeout(Promise.race([phase, this.#failure.promise]), timeout);
+  async #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
+    const result = await withTimeout(
+      Promise.race([phase, this.#failure.promise]),
+      remainingShutdownMilliseconds(deadline),
+    );
+    remainingShutdownMilliseconds(deadline);
+    return result;
   }
 }
 
@@ -541,6 +544,21 @@ function executorError(
 
 function remainingMilliseconds(deadline: number): number {
   return Math.max(1, deadline - performance.now());
+}
+
+function selectShutdownDeadline(
+  requested: number | undefined,
+  protocolDeadline: number | undefined,
+  configuredTimeoutMs: number,
+): number {
+  if (requested !== undefined && !Number.isFinite(requested)) {
+    throw new TypeError("Executor HostControl shutdown deadline must be finite.");
+  }
+  return Math.min(
+    requested ?? Number.POSITIVE_INFINITY,
+    protocolDeadline ?? Number.POSITIVE_INFINITY,
+    performance.now() + configuredTimeoutMs,
+  );
 }
 
 function remainingShutdownMilliseconds(deadline: number): number {

@@ -106,15 +106,17 @@ describe("Executor HostControl session", () => {
     const host = new FakeExecutorHostControl();
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
-    const session = await connectExecutorHostControl({
+    let armResult: unknown;
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -122,6 +124,10 @@ describe("Executor HostControl session", () => {
             },
             performance.now() + 1_000,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            armResult = await session.armArwxShutdown(finalReceipt);
+          });
         },
       }),
       connector: async () => host,
@@ -144,7 +150,6 @@ describe("Executor HostControl session", () => {
       sequence: 1n,
     });
 
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
@@ -156,8 +161,8 @@ describe("Executor HostControl session", () => {
     });
     host.respond(success(request.requestId as string, { armed: true, ...payload }), 4);
 
-    await expect(arming).resolves.toEqual({ armed: true, ...payload });
     await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
+    expect(armResult).toEqual({ armed: true, ...payload });
     expect(runtime.output.writableEnded).toBe(true);
     expect(host.clientEnded).toBe(true);
     await session.drain();
@@ -168,15 +173,16 @@ describe("Executor HostControl session", () => {
     host.endReadableOnClientEnd = false;
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
-    const session = await connectExecutorHostControl({
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -184,6 +190,10 @@ describe("Executor HostControl session", () => {
             },
             performance.now() + 1_000,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            await session.armArwxShutdown(finalReceipt);
+          });
         },
       }),
       connector: async () => host,
@@ -200,12 +210,10 @@ describe("Executor HostControl session", () => {
       }),
     );
     await waitFor(() => receipt !== undefined);
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
     host.respond(success(request.requestId as string, { armed: true, ...payload }));
-    await expect(arming).resolves.toBeDefined();
     await waitFor(() => host.clientEnded);
     host.destroy();
 
@@ -219,16 +227,18 @@ describe("Executor HostControl session", () => {
     const host = new FakeExecutorHostControl();
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
+    let arming: Promise<unknown> | undefined;
     const absoluteDeadline = performance.now() + 1_000;
-    const session = await connectExecutorHostControl({
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -236,6 +246,11 @@ describe("Executor HostControl session", () => {
             },
             absoluteDeadline,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            arming = session.armArwxShutdown(finalReceipt);
+            await arming;
+          });
         },
       }),
       connector: async () => host,
@@ -252,7 +267,6 @@ describe("Executor HostControl session", () => {
       }),
     );
     await waitFor(() => receipt !== undefined);
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
@@ -262,7 +276,7 @@ describe("Executor HostControl session", () => {
     host.respond(success(request.requestId as string, { armed: true, ...payload }));
 
     const outcome = await Promise.race([
-      arming.then(
+      defined(arming, "Arm operation").then(
         () => "resolved" as const,
         () => "rejected" as const,
       ),
@@ -289,8 +303,8 @@ describe("Executor HostControl session", () => {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -373,6 +387,22 @@ describe("Executor HostControl session", () => {
     host.destroy();
 
     await expect(draining).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+  });
+
+  it("does not restart the graceful budget when an absolute drain deadline expired", async () => {
+    const host = new FakeExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+
+    await expect(session.drain(performance.now() - 1)).rejects.toMatchObject({
+      code: "CLOSE_TIMEOUT",
+    });
+    expect(host.destroyed).toBe(true);
   });
 
   it("keeps close authoritative when drain is requested concurrently", async () => {
