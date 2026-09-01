@@ -28,6 +28,7 @@ import {
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
 const protocolVersion = "1.0";
 const leaseTtlSeconds = 300;
+const artifactLeaseToken = "database-client-artifact-lease-token";
 
 const workerCapabilities = {
   operatingSystem: "windows",
@@ -626,6 +627,101 @@ const claimLease = async (
     leaseTtlSeconds,
   });
 
+const addArtifactModeLease = (
+  fixture: DatabaseFixture,
+  workerId: string,
+  workerNodeId: string,
+  workerInstanceId: string,
+  suffix: string,
+) => {
+  const now = new Date().toISOString();
+  const future = "2099-09-01T00:00:00.000Z";
+  const jobId = `job-artifact-${suffix}`;
+  const runAttemptId = `run-artifact-${suffix}`;
+  withFixtureDatabase(fixture, (database) => {
+    database
+      .prepare(`
+        INSERT INTO jobs (
+          id,
+          job_kind,
+          semantic_key,
+          concurrency_key,
+          status,
+          execution_json,
+          required_capabilities_json,
+          resource_revision,
+          attempt_count,
+          max_attempts,
+          lease_generation,
+          current_run_attempt_id,
+          next_attempt_at,
+          started_at,
+          created_at,
+          updated_at
+        ) VALUES (
+          ?, 'pull_request_review', ?, ?, 'running', '{}', '[]', ?, 1, 3, 1, ?, ?, ?, ?, ?
+        )
+      `)
+      .run(
+        jobId,
+        `artifact-${suffix}-semantic-key`,
+        `artifact-${suffix}-concurrency-key`,
+        sha256(`artifact-${suffix}-revision`),
+        runAttemptId,
+        now,
+        now,
+        now,
+        now,
+      );
+    database
+      .prepare(`
+        INSERT INTO run_attempts (
+          id,
+          job_id,
+          attempt_number,
+          worker_id,
+          worker_node_id,
+          worker_instance_id,
+          status,
+          lease_token_hash,
+          lease_generation,
+          lease_expires_at,
+          execution_deadline_at,
+          no_progress_timeout_ms,
+          no_progress_deadline_at,
+          last_heartbeat_at,
+          phase,
+          completion_mode,
+          started_at
+        ) VALUES (
+          ?, ?, 1, ?, ?, ?, 'running', ?, 1, ?, ?, 600000, ?, ?,
+          'uploading', 'result_artifact_v1', ?
+        )
+      `)
+      .run(
+        runAttemptId,
+        jobId,
+        workerId,
+        workerNodeId,
+        workerInstanceId,
+        sha256(artifactLeaseToken),
+        future,
+        future,
+        future,
+        now,
+        now,
+      );
+  });
+  return {
+    jobId,
+    runAttemptId,
+    workerNodeId,
+    workerInstanceId,
+    leaseToken: artifactLeaseToken,
+    leaseGeneration: 1,
+  } as const;
+};
+
 const scheduleAndClaimReview = async (
   fixture: DatabaseFixture,
   input: IngestSchedulingEventInput,
@@ -745,6 +841,21 @@ describe("DatabaseClient lease integration", () => {
           .get(claim.envelope.lease.runAttemptId),
       ).toEqual({ completion_mode: "inline_result_v1" });
     });
+    await expect(
+      fixture.client.request("probeArtifactUploadCreate", {
+        ...claim.envelope.lease,
+        clientArtifactId: artifactClientId(0),
+        purpose: "result",
+        name: "result.json",
+        mediaType: "application/json",
+        totalBytes: 2,
+        sha256: sha256("{}"),
+      }),
+    ).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "ARTIFACT_COMPLETION_MODE_MISMATCH",
+      message: "The run attempt does not permit result artifact operations.",
+    });
   });
 
   it("maps artifact create probes through the database Worker protocol", async () => {
@@ -754,17 +865,15 @@ describe("DatabaseClient lease integration", () => {
       "worker-artifact-probe",
       "instance-artifact-probe",
     );
-    const claim = await claimLease(
-      fixture.client,
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
       "worker-artifact-probe",
       "instance-artifact-probe",
-      worker.capabilitiesDigest,
+      "probe",
     );
-    if (claim.outcome !== "granted") {
-      throw new Error("Expected the artifact probe fixture to receive a lease.");
-    }
     const input = {
-      ...claim.envelope.lease,
+      ...artifactLease,
       clientArtifactId: artifactClientId(0),
       purpose: "result" as const,
       name: "result.json",
@@ -784,7 +893,7 @@ describe("DatabaseClient lease integration", () => {
     });
     const created = await fixture.client.request("createArtifactUpload", input);
     const chunk = {
-      ...claim.envelope.lease,
+      ...artifactLease,
       uploadId: created.uploadId,
       chunkIndex: 0,
       offsetBytes: 0,
@@ -821,21 +930,23 @@ describe("DatabaseClient lease integration", () => {
   });
 
   it("serializes the stable artifact upload quota error across the database protocol", async () => {
-    const { client } = await createFixture();
-    const worker = await registerWorker(client, "worker-artifact-quota", "instance-artifact-quota");
-    const claim = await claimLease(
-      client,
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
       "worker-artifact-quota",
       "instance-artifact-quota",
-      worker.capabilitiesDigest,
     );
-    if (claim.outcome !== "granted") {
-      throw new Error("Expected the artifact quota fixture to receive a lease.");
-    }
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
+      "worker-artifact-quota",
+      "instance-artifact-quota",
+      "quota",
+    );
 
     for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
-      const upload = await client.request("createArtifactUpload", {
-        ...claim.envelope.lease,
+      const upload = await fixture.client.request("createArtifactUpload", {
+        ...artifactLease,
         clientArtifactId: artifactClientId(ordinal),
         purpose: "result",
         name: `result-${ordinal}.json`,
@@ -843,8 +954,8 @@ describe("DatabaseClient lease integration", () => {
         totalBytes: 1,
         sha256: sha256(`artifact-${ordinal}`),
       });
-      await client.request("terminateArtifactUpload", {
-        ...claim.envelope.lease,
+      await fixture.client.request("terminateArtifactUpload", {
+        ...artifactLease,
         uploadId: upload.uploadId,
         state: "abandoned",
         reason: "client_abandoned",
@@ -852,8 +963,8 @@ describe("DatabaseClient lease integration", () => {
     }
 
     await expect(
-      client.request("createArtifactUpload", {
-        ...claim.envelope.lease,
+      fixture.client.request("createArtifactUpload", {
+        ...artifactLease,
         clientArtifactId: artifactClientId(maximumResultArtifactUploadIdentitiesPerAttempt),
         purpose: "result",
         name: "result-over-quota.json",

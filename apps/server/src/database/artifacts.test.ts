@@ -30,7 +30,11 @@ import {
   toResultArtifactChunkResponse,
   toTerminateResultArtifactUploadResponse,
 } from "../../dist/database/artifacts.js";
-import { ArtifactUploadQuotaExceededError } from "../../dist/database/errors.js";
+import {
+  ArtifactCompletionModeMismatchError,
+  ArtifactUploadQuotaExceededError,
+  LeaseLostError,
+} from "../../dist/database/errors.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
@@ -68,7 +72,9 @@ const fixtures: Fixture[] = [];
 
 const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 
-const openFixture = async (): Promise<Fixture> => {
+const openFixture = async (
+  completionMode: "inline_result_v1" | "result_artifact_v1" = "result_artifact_v1",
+): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "agentic-review-artifact-db-"));
   const databasePath = join(directory, "state.db");
   const database = new DatabaseSync(databasePath);
@@ -158,8 +164,9 @@ const openFixture = async (): Promise<Fixture> => {
         no_progress_deadline_at,
         last_heartbeat_at,
         phase,
+        completion_mode,
         started_at
-      ) VALUES (?, ?, 1, ?, ?, ?, 'running', ?, 1, ?, ?, 600000, ?, ?, 'uploading', ?)
+      ) VALUES (?, ?, 1, ?, ?, ?, 'running', ?, 1, ?, ?, 600000, ?, ?, 'uploading', ?, ?)
     `)
     .run(
       "run-artifact",
@@ -172,6 +179,7 @@ const openFixture = async (): Promise<Fixture> => {
       future,
       future,
       now,
+      completionMode,
       now,
     );
   const fixture = { database, databasePath, directory };
@@ -440,8 +448,8 @@ afterEach(async () => {
 });
 
 describe("result artifact database state machine", () => {
-  it("defaults completion to inline v1 and keeps the selected mode immutable", async () => {
-    const { database } = await openFixture();
+  it("keeps the selected completion mode immutable", async () => {
+    const { database } = await openFixture("inline_result_v1");
     expect(
       database
         .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
@@ -452,6 +460,210 @@ describe("result artifact database state machine", () => {
         .prepare("UPDATE run_attempts SET completion_mode = 'result_artifact_v1' WHERE id = ?")
         .run(identity.runAttemptId),
     ).toThrow(/completion mode is immutable/u);
+
+    const artifactFixture = await openFixture();
+    expect(() =>
+      artifactFixture.database
+        .prepare("UPDATE run_attempts SET completion_mode = 'inline_result_v1' WHERE id = ?")
+        .run(identity.runAttemptId),
+    ).toThrow(/completion mode is immutable/u);
+  });
+
+  it("requires artifact mode for every upload operation before state or replay access", async () => {
+    const { database } = await openFixture("inline_result_v1");
+    addArtifactModeAttempt(database);
+    const result = Buffer.from("{}", "utf8");
+    const terminatedCreateInput = {
+      ...artifactModeIdentity,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result" as const,
+      name: "terminated.json",
+      mediaType: "application/json" as const,
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    };
+    const terminatedUpload = createArtifactUpload(database, terminatedCreateInput);
+    const terminationInput = {
+      ...artifactModeIdentity,
+      uploadId: terminatedUpload.uploadId,
+      state: "abandoned" as const,
+      reason: "client_abandoned",
+    };
+    const terminated = terminateArtifactUpload(database, terminationInput);
+    expect(terminateArtifactUpload(database, terminationInput)).toEqual({
+      ...terminated,
+      replayed: true,
+    });
+
+    const createInput = {
+      ...artifactModeIdentity,
+      clientArtifactId: artifactClientId(1),
+      purpose: "result" as const,
+      name: "result.json",
+      mediaType: "application/json" as const,
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    };
+    const upload = createArtifactUpload(database, createInput);
+    expect(createArtifactUpload(database, createInput)).toEqual({ ...upload, replayed: true });
+    expect(probeArtifactUploadCreate(database, createInput)).toEqual({
+      disposition: "exact-replay",
+      result: { ...upload, replayed: true },
+    });
+    const chunkInput = {
+      ...artifactModeIdentity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: result.byteLength,
+      chunkSha256: createInput.sha256,
+    };
+    const preparedChunk = prepareArtifactChunk(database, chunkInput);
+    const committedChunk = commitArtifactChunk(database, {
+      ...chunkInput,
+      prepareId: preparedChunk.prepareId,
+    });
+    expect(prepareArtifactChunk(database, chunkInput)).toMatchObject({ replayed: true });
+    expect(
+      commitArtifactChunk(database, { ...chunkInput, prepareId: preparedChunk.prepareId }),
+    ).toEqual({ ...committedChunk, outcome: "replayed" });
+    const finalizeInput = {
+      ...artifactModeIdentity,
+      uploadId: chunkInput.uploadId,
+      chunkCount: 1,
+      totalBytes: result.byteLength,
+      sha256: createInput.sha256,
+    };
+    const preparedFinalize = prepareArtifactFinalize(database, finalizeInput);
+    const committedFinalize = commitArtifactFinalize(database, {
+      ...finalizeInput,
+      finalizationId: preparedFinalize.finalizationId,
+      storageObjectKey: preparedFinalize.storageObjectKey,
+    });
+    expect(prepareArtifactFinalize(database, finalizeInput)).toEqual({
+      ...preparedFinalize,
+      state: "committed",
+      replayed: true,
+    });
+    expect(
+      commitArtifactFinalize(database, {
+        ...finalizeInput,
+        finalizationId: preparedFinalize.finalizationId,
+        storageObjectKey: preparedFinalize.storageObjectKey,
+      }),
+    ).toEqual({ ...committedFinalize, replayed: true });
+
+    const asInlineLease = <T extends object>(input: T) => ({
+      ...input,
+      ...identity,
+    });
+    const artifactReplayOperations = [
+      ["probe create replay", () => probeArtifactUploadCreate(database, createInput)],
+      ["create replay", () => createArtifactUpload(database, createInput)],
+      ["prepare chunk replay", () => prepareArtifactChunk(database, chunkInput)],
+      [
+        "commit chunk replay",
+        () =>
+          commitArtifactChunk(database, {
+            ...chunkInput,
+            prepareId: preparedChunk.prepareId,
+          }),
+      ],
+      ["prepare finalize replay", () => prepareArtifactFinalize(database, finalizeInput)],
+      [
+        "commit finalize replay",
+        () =>
+          commitArtifactFinalize(database, {
+            ...finalizeInput,
+            finalizationId: preparedFinalize.finalizationId,
+            storageObjectKey: preparedFinalize.storageObjectKey,
+          }),
+      ],
+      ["terminate replay", () => terminateArtifactUpload(database, terminationInput)],
+    ] as const;
+    const operations = [
+      [
+        "probe create replay",
+        () => probeArtifactUploadCreate(database, asInlineLease(createInput)),
+      ],
+      ["create replay", () => createArtifactUpload(database, asInlineLease(createInput))],
+      ["prepare chunk replay", () => prepareArtifactChunk(database, asInlineLease(chunkInput))],
+      [
+        "commit chunk replay",
+        () =>
+          commitArtifactChunk(database, {
+            ...asInlineLease(chunkInput),
+            prepareId: preparedChunk.prepareId,
+          }),
+      ],
+      [
+        "prepare finalize replay",
+        () => prepareArtifactFinalize(database, asInlineLease(finalizeInput)),
+      ],
+      [
+        "commit finalize replay",
+        () =>
+          commitArtifactFinalize(database, {
+            ...asInlineLease(finalizeInput),
+            finalizationId: preparedFinalize.finalizationId,
+            storageObjectKey: preparedFinalize.storageObjectKey,
+          }),
+      ],
+      [
+        "terminate replay",
+        () => terminateArtifactUpload(database, asInlineLease(terminationInput)),
+      ],
+    ] as const;
+
+    const uploadCount = database.prepare("SELECT COUNT(*) AS count FROM artifact_uploads").get();
+    const chunkCount = database
+      .prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks")
+      .get();
+    const artifactCount = database.prepare("SELECT COUNT(*) AS count FROM run_artifacts").get();
+
+    for (const [operation, invoke] of operations) {
+      let thrown: unknown;
+      try {
+        invoke();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown, operation).toBeInstanceOf(ArtifactCompletionModeMismatchError);
+      expect(thrown, operation).toMatchObject({
+        code: "ARTIFACT_COMPLETION_MODE_MISMATCH",
+      });
+      expect((thrown as Error).message, operation).not.toMatch(
+        /inline_result_v1|result_artifact_v1/u,
+      );
+    }
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifact_uploads").get()).toEqual(
+      uploadCount,
+    );
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks").get()).toEqual(
+      chunkCount,
+    );
+    expect(database.prepare("SELECT COUNT(*) AS count FROM run_artifacts").get()).toEqual(
+      artifactCount,
+    );
+
+    database
+      .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+      .run("2000-01-01T00:00:00.000Z", identity.runAttemptId);
+    for (const [operation, invoke] of operations) {
+      expect(invoke, operation).toThrow(LeaseLostError);
+      try {
+        invoke();
+      } catch (error) {
+        expect(error, operation).toMatchObject({ code: "LEASE_LOST" });
+      }
+    }
+
+    database
+      .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+      .run("2000-01-01T00:00:00.000Z", artifactModeIdentity.runAttemptId);
+    for (const [operation, invoke] of artifactReplayOperations) {
+      expect(invoke, operation).toThrow(LeaseLostError);
+    }
   });
 
   it("upgrades v8 attempts as inline and backfills terminal cleanup intent", async () => {
@@ -569,7 +781,18 @@ describe("result artifact database state machine", () => {
         now,
         now,
       );
-    createAndTerminateUpload(database, 0, 1);
+    insertRawUpload(database, 0, 1);
+    database
+      .prepare(`
+        UPDATE artifact_uploads
+        SET
+          status = 'abandoned',
+          terminated_at = ?,
+          termination_reason = 'client_abandoned',
+          updated_at = ?
+        WHERE client_artifact_id = ?
+      `)
+      .run(now, now, artifactClientId(0));
     const terminalUpload = database
       .prepare("SELECT id FROM artifact_uploads WHERE client_artifact_id = ?")
       .get(artifactClientId(0)) as { readonly id: string };
@@ -580,6 +803,21 @@ describe("result artifact database state machine", () => {
         .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
         .get(identity.runAttemptId),
     ).toEqual({ completion_mode: "inline_result_v1" });
+    const legacyReplayInput = {
+      ...identity,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result" as const,
+      name: "raw-0.json",
+      mediaType: "application/json" as const,
+      totalBytes: 1,
+      sha256: sha256("raw-0-1"),
+    };
+    expect(() => createArtifactUpload(database, legacyReplayInput)).toThrow(
+      ArtifactCompletionModeMismatchError,
+    );
+    expect(() => probeArtifactUploadCreate(database, legacyReplayInput)).toThrow(
+      ArtifactCompletionModeMismatchError,
+    );
     expect(
       database
         .prepare(`

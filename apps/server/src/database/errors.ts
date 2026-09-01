@@ -71,6 +71,15 @@ export class ArtifactUploadQuotaExceededError extends Error {
   }
 }
 
+export class ArtifactCompletionModeMismatchError extends Error {
+  public readonly code = "ARTIFACT_COMPLETION_MODE_MISMATCH";
+
+  public constructor() {
+    super("The run attempt does not permit result artifact operations.");
+    this.name = "ArtifactCompletionModeMismatchError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 

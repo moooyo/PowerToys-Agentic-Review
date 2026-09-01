@@ -12,6 +12,7 @@ import {
   type TerminateResultArtifactUploadResponse,
 } from "@agentic-review/contracts";
 import {
+  ArtifactCompletionModeMismatchError,
   ArtifactUploadConflictError,
   ArtifactUploadQuotaExceededError,
   LeaseLostError,
@@ -204,6 +205,7 @@ interface ActiveLeaseRow {
   readonly worker_node_id: string;
   readonly worker_instance_id: string;
   readonly attempt_status: string;
+  readonly completion_mode: "inline_result_v1" | "result_artifact_v1";
   readonly lease_token_hash: string;
   readonly lease_generation: number;
   readonly lease_expires_at: string;
@@ -901,6 +903,7 @@ function requireActiveLease(
         attempt.worker_node_id,
         attempt.worker_instance_id,
         attempt.status AS attempt_status,
+        attempt.completion_mode,
         attempt.lease_token_hash,
         attempt.lease_generation,
         attempt.lease_expires_at,
@@ -932,6 +935,9 @@ function requireActiveLease(
     row.worker_superseded_at !== null
   ) {
     throw new LeaseLostError();
+  }
+  if (row.completion_mode !== "result_artifact_v1") {
+    throw new ArtifactCompletionModeMismatchError();
   }
   return row;
 }
