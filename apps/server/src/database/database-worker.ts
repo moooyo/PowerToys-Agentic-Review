@@ -37,6 +37,7 @@ import {
   type PrepareArtifactChunkInput,
   prepareArtifactFinalize,
   type PrepareArtifactFinalizeInput,
+  probeArtifactUploadCreate,
   terminateArtifactUpload,
   type TerminateArtifactUploadInput,
 } from "./artifacts.js";
@@ -1681,6 +1682,8 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return heartbeatLease(request.input as HeartbeatLeaseInput);
     case "createArtifactUpload":
       return createArtifactUpload(database, request.input as CreateArtifactUploadInput);
+    case "probeArtifactUploadCreate":
+      return probeArtifactUploadCreate(database, request.input as CreateArtifactUploadInput);
     case "prepareArtifactChunk":
       return prepareArtifactChunk(database, request.input as PrepareArtifactChunkInput);
     case "commitArtifactChunk":

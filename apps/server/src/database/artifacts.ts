@@ -19,6 +19,22 @@ import {
 
 export const maximumResultArtifactUploadIdentitiesPerAttempt = 8;
 export const maximumDeclaredResultArtifactBytesPerAttempt = 16 * 1024 * 1024;
+export const maximumArtifactCreateAccountingRows = 4_096;
+export const artifactCleanupLiabilityPageSql = `
+  WITH due_cleanup AS MATERIALIZED (
+    SELECT cleanup.upload_id
+    FROM artifact_upload_cleanup_journal AS cleanup
+      INDEXED BY ix_artifact_upload_cleanup_journal_due
+    WHERE cleanup.status IN ('pending', 'retry_waiting', 'failed')
+    ORDER BY cleanup.status, cleanup.next_attempt_at, cleanup.created_at, cleanup.upload_id
+    LIMIT ?
+  )
+  SELECT upload.expected_total_bytes
+  FROM due_cleanup
+  CROSS JOIN artifact_uploads AS upload
+  WHERE upload.id = due_cleanup.upload_id
+    AND upload.status IN ('committed', 'abandoned', 'corrupt')
+`;
 
 type ArtifactLeaseIdentity = Pick<
   CreateResultArtifactUploadRequest,
@@ -29,7 +45,38 @@ export type CreateArtifactUploadInput = CreateResultArtifactUploadRequest;
 
 export type CreateArtifactUploadResult = CreateResultArtifactUploadResponse;
 
+export interface ArtifactUploadExpectedByteSizeBucket {
+  readonly expectedTotalBytes: number;
+  readonly uploadCount: number;
+}
+
+export interface ArtifactUploadCreateAccounting {
+  /** Capacity admission must fail closed when a bounded aggregate cannot be represented exactly. */
+  readonly accountingCertain: boolean;
+  /** Counts active uploads plus terminal uploads whose staging cleanup remains unresolved. */
+  readonly liveUploadCount: number;
+  readonly liveUploadExpectedByteSizeBuckets: readonly ArtifactUploadExpectedByteSizeBucket[];
+  readonly cleanupBacklogEntries: number;
+}
+
+export type ProbeArtifactUploadCreateResult =
+  | {
+      readonly disposition: "exact-replay";
+      readonly result: CreateArtifactUploadResult;
+    }
+  | {
+      readonly disposition: "new";
+      readonly accounting: ArtifactUploadCreateAccounting;
+    };
+
 interface ArtifactChunkMetadata {
+  readonly chunkIndex: number;
+  readonly offsetBytes: number;
+  readonly chunkBytes: number;
+  readonly chunkSha256: string;
+}
+
+export interface ArtifactCommittedChunkReceipt {
   readonly chunkIndex: number;
   readonly offsetBytes: number;
   readonly chunkBytes: number;
@@ -47,6 +94,7 @@ export interface PrepareArtifactChunkResult extends ArtifactChunkMetadata {
   readonly replayed: boolean;
   readonly committedNextChunkIndex: number;
   readonly committedOffsetBytes: number;
+  readonly committedPrefix: readonly ArtifactCommittedChunkReceipt[];
   readonly preparedNextChunkIndex: number;
   readonly preparedNextOffsetBytes: number;
 }
@@ -200,6 +248,13 @@ interface ArtifactChunkRow {
   readonly status: "prepared" | "committed";
 }
 
+interface CommittedArtifactChunkRow {
+  readonly chunk_index: number;
+  readonly offset_bytes: number;
+  readonly chunk_bytes: number;
+  readonly chunk_sha256: string;
+}
+
 interface RunArtifactRow {
   readonly id: string;
   readonly upload_id: string;
@@ -238,6 +293,28 @@ const withImmediateTransaction = <T>(database: DatabaseSync, action: () => T): T
   }
 };
 
+export const probeArtifactUploadCreate = (
+  database: DatabaseSync,
+  input: CreateArtifactUploadInput,
+): ProbeArtifactUploadCreateResult =>
+  withImmediateTransaction(database, () => {
+    validateCreateInput(input);
+    const now = new Date().toISOString();
+    requireActiveLease(database, input, now);
+
+    const replay = resolveArtifactUploadCreateReplay(database, input);
+    if (replay !== undefined) {
+      return { disposition: "exact-replay", result: replay };
+    }
+
+    requireArtifactUploadQuota(database, input.runAttemptId, input.totalBytes);
+    requireNoLiveResultArtifactUpload(database, input.runAttemptId);
+    return {
+      disposition: "new",
+      accounting: readArtifactUploadCreateAccounting(database),
+    };
+  });
+
 export const createArtifactUpload = (
   database: DatabaseSync,
   input: CreateArtifactUploadInput,
@@ -247,31 +324,13 @@ export const createArtifactUpload = (
     const now = new Date().toISOString();
     requireActiveLease(database, input, now);
 
-    const existing = findUploadByClientId(database, input.runAttemptId, input.clientArtifactId);
-    if (existing !== undefined) {
-      requireUploadBinding(existing, input);
-      if (!matchesCreateMetadata(existing, input)) {
-        throw new ArtifactUploadConflictError();
-      }
-      return createUploadReplayResult(existing);
+    const replay = resolveArtifactUploadCreateReplay(database, input);
+    if (replay !== undefined) {
+      return replay;
     }
 
     requireArtifactUploadQuota(database, input.runAttemptId, input.totalBytes);
-
-    const liveResult = database
-      .prepare(`
-        SELECT id
-        FROM artifact_uploads
-        WHERE run_attempt_id = ?
-          AND purpose = 'result'
-          AND status IN ('receiving', 'finalizing', 'committed')
-      `)
-      .get(input.runAttemptId) as unknown as { readonly id: string } | undefined;
-    if (liveResult !== undefined) {
-      throw new ArtifactUploadConflictError(
-        "The run attempt already has a live result artifact upload.",
-      );
-    }
+    requireNoLiveResultArtifactUpload(database, input.runAttemptId);
 
     const uploadId = randomUUID();
     database
@@ -315,6 +374,101 @@ export const createArtifactUpload = (
     return createNewUploadResult(created);
   });
 
+function resolveArtifactUploadCreateReplay(
+  database: DatabaseSync,
+  input: CreateArtifactUploadInput,
+): CreateArtifactUploadResult | undefined {
+  const existing = findUploadByClientId(database, input.runAttemptId, input.clientArtifactId);
+  if (existing === undefined) {
+    return undefined;
+  }
+  requireUploadBinding(existing, input);
+  if (!matchesCreateMetadata(existing, input)) {
+    throw new ArtifactUploadConflictError();
+  }
+  return createUploadReplayResult(existing);
+}
+
+function requireNoLiveResultArtifactUpload(database: DatabaseSync, runAttemptId: string): void {
+  const liveResult = database
+    .prepare(`
+      SELECT id
+      FROM artifact_uploads
+      WHERE run_attempt_id = ?
+        AND purpose = 'result'
+        AND status IN ('receiving', 'finalizing', 'committed')
+    `)
+    .get(runAttemptId) as unknown as { readonly id: string } | undefined;
+  if (liveResult !== undefined) {
+    throw new ArtifactUploadConflictError(
+      "The run attempt already has a live result artifact upload.",
+    );
+  }
+}
+
+function readArtifactUploadCreateAccounting(
+  database: DatabaseSync,
+): ArtifactUploadCreateAccounting {
+  const activeRows = database
+    .prepare(`
+      SELECT upload.expected_total_bytes
+      FROM artifact_uploads AS upload INDEXED BY ix_artifact_uploads_recovery
+      WHERE upload.status IN ('receiving', 'finalizing')
+      ORDER BY upload.status, upload.updated_at
+      LIMIT ?
+    `)
+    .all(maximumArtifactCreateAccountingRows + 1) as unknown as readonly {
+    readonly expected_total_bytes: number;
+  }[];
+  let accountingCertain = activeRows.length <= maximumArtifactCreateAccountingRows;
+  const liabilityRows = activeRows.slice(0, maximumArtifactCreateAccountingRows);
+  let cleanupBacklogEntries = 0;
+  if (accountingCertain) {
+    const remainingRows = maximumArtifactCreateAccountingRows - liabilityRows.length;
+    const cleanupRows = database
+      .prepare(artifactCleanupLiabilityPageSql)
+      .all(remainingRows + 1) as unknown as readonly {
+      readonly expected_total_bytes: number;
+    }[];
+    cleanupBacklogEntries = cleanupRows.length;
+    if (cleanupRows.length > remainingRows) {
+      accountingCertain = false;
+    }
+    liabilityRows.push(...cleanupRows.slice(0, remainingRows));
+  }
+
+  const bucketCounts = new Map<number, number>();
+  for (const row of liabilityRows) {
+    if (
+      !Number.isSafeInteger(row.expected_total_bytes) ||
+      row.expected_total_bytes < 1 ||
+      row.expected_total_bytes > maximumResultArtifactBytes
+    ) {
+      throw new ArtifactUploadConflictError(
+        "Artifact capacity accounting contains an invalid expected byte size.",
+      );
+    }
+    bucketCounts.set(
+      row.expected_total_bytes,
+      (bucketCounts.get(row.expected_total_bytes) ?? 0) + 1,
+    );
+  }
+  const liveUploadExpectedByteSizeBuckets = Object.freeze(
+    [...bucketCounts.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([expectedTotalBytes, uploadCount]) =>
+        Object.freeze({ expectedTotalBytes, uploadCount }),
+      ),
+  );
+
+  return Object.freeze({
+    accountingCertain,
+    liveUploadCount: liabilityRows.length,
+    liveUploadExpectedByteSizeBuckets,
+    cleanupBacklogEntries,
+  });
+}
+
 function requireArtifactUploadQuota(
   database: DatabaseSync,
   runAttemptId: string,
@@ -354,6 +508,7 @@ export const prepareArtifactChunk = (
     requireActiveLease(database, input, now);
     const upload = requireUpload(database, input.uploadId);
     requireUploadBinding(upload, input);
+    const committedPrefix = readCommittedArtifactPrefix(database, upload);
 
     const existing = findChunk(database, input.uploadId, input.chunkIndex);
     if (existing !== undefined) {
@@ -362,9 +517,14 @@ export const prepareArtifactChunk = (
           "The artifact chunk index already has different immutable metadata.",
         );
       }
-      if (existing.status === "prepared" && upload.status !== "receiving") {
+      if (
+        existing.status === "prepared" &&
+        (upload.status !== "receiving" ||
+          existing.chunk_index !== upload.next_chunk_index ||
+          existing.offset_bytes !== upload.received_bytes)
+      ) {
         throw new ArtifactUploadConflictError(
-          "The prepared artifact chunk belongs to an upload that no longer receives bytes.",
+          "The prepared artifact chunk no longer follows the committed upload prefix.",
         );
       }
       if (
@@ -377,7 +537,10 @@ export const prepareArtifactChunk = (
           "The committed artifact chunk belongs to a terminated upload.",
         );
       }
-      return prepareChunkResult(upload, existing, true);
+      if (existing.status === "committed") {
+        requireCommittedReplayReceipt(committedPrefix, existing);
+      }
+      return prepareChunkResult(upload, existing, committedPrefix, true);
     }
 
     if (
@@ -423,7 +586,7 @@ export const prepareArtifactChunk = (
         now,
       );
     database.prepare("UPDATE artifact_uploads SET updated_at = ? WHERE id = ?").run(now, upload.id);
-    return prepareChunkResult(upload, receipt, false);
+    return prepareChunkResult(upload, receipt, committedPrefix, false);
   });
 
 export const commitArtifactChunk = (
@@ -865,6 +1028,80 @@ function findChunk(
     .get(uploadId, chunkIndex) as unknown as ArtifactChunkRow | undefined;
 }
 
+function readCommittedArtifactPrefix(
+  database: DatabaseSync,
+  upload: ArtifactUploadRow,
+): readonly ArtifactCommittedChunkReceipt[] {
+  const rows = database
+    .prepare(`
+      SELECT chunk_index, offset_bytes, chunk_bytes, chunk_sha256
+      FROM artifact_upload_chunks
+      WHERE upload_id = ? AND status = 'committed'
+      ORDER BY chunk_index
+      LIMIT 9
+    `)
+    .all(upload.id) as unknown as readonly CommittedArtifactChunkRow[];
+  if (rows.length !== upload.next_chunk_index) {
+    throw new ArtifactUploadConflictError(
+      "The committed artifact prefix count does not match the durable upload cursor.",
+    );
+  }
+
+  let expectedOffset = 0;
+  const committedPrefix = rows.map((row, expectedIndex): ArtifactCommittedChunkReceipt => {
+    if (
+      row.chunk_index !== expectedIndex ||
+      row.offset_bytes !== expectedOffset ||
+      !Number.isSafeInteger(row.chunk_bytes) ||
+      row.chunk_bytes < 1 ||
+      row.chunk_bytes > maximumResultArtifactChunkBytes ||
+      !sha256Pattern.test(row.chunk_sha256)
+    ) {
+      throw new ArtifactUploadConflictError(
+        "The committed artifact prefix is not contiguous immutable receipt state.",
+      );
+    }
+    const nextOffset = expectedOffset + row.chunk_bytes;
+    if (!Number.isSafeInteger(nextOffset) || nextOffset > upload.expected_total_bytes) {
+      throw new ArtifactUploadConflictError(
+        "The committed artifact prefix exceeds the declared artifact size.",
+      );
+    }
+    const receipt = Object.freeze({
+      chunkIndex: row.chunk_index,
+      offsetBytes: row.offset_bytes,
+      chunkBytes: row.chunk_bytes,
+      chunkSha256: row.chunk_sha256,
+    });
+    expectedOffset = nextOffset;
+    return receipt;
+  });
+  if (expectedOffset !== upload.received_bytes) {
+    throw new ArtifactUploadConflictError(
+      "The committed artifact prefix bytes do not match the durable upload cursor.",
+    );
+  }
+  return Object.freeze(committedPrefix);
+}
+
+function requireCommittedReplayReceipt(
+  committedPrefix: readonly ArtifactCommittedChunkReceipt[],
+  receipt: ArtifactChunkRow,
+): void {
+  const committed = committedPrefix[receipt.chunk_index];
+  if (
+    committed === undefined ||
+    committed.chunkIndex !== receipt.chunk_index ||
+    committed.offsetBytes !== receipt.offset_bytes ||
+    committed.chunkBytes !== receipt.chunk_bytes ||
+    committed.chunkSha256 !== receipt.chunk_sha256
+  ) {
+    throw new ArtifactUploadConflictError(
+      "The replayed artifact chunk is not present in the committed upload prefix.",
+    );
+  }
+}
+
 function requireRunArtifact(
   database: DatabaseSync,
   upload: ArtifactUploadRow,
@@ -956,6 +1193,7 @@ function createUploadReplayResult(upload: ArtifactUploadRow): CreateArtifactUplo
 function prepareChunkResult(
   upload: ArtifactUploadRow,
   receipt: ArtifactChunkRow,
+  committedPrefix: readonly ArtifactCommittedChunkReceipt[],
   replayed: boolean,
 ): PrepareArtifactChunkResult {
   return {
@@ -969,6 +1207,16 @@ function prepareChunkResult(
     chunkSha256: receipt.chunk_sha256,
     committedNextChunkIndex: upload.next_chunk_index,
     committedOffsetBytes: upload.received_bytes,
+    committedPrefix: Object.freeze(
+      committedPrefix.map((committed) =>
+        Object.freeze({
+          chunkIndex: committed.chunkIndex,
+          offsetBytes: committed.offsetBytes,
+          chunkBytes: committed.chunkBytes,
+          chunkSha256: committed.chunkSha256,
+        }),
+      ),
+    ),
     preparedNextChunkIndex: receipt.chunk_index + 1,
     preparedNextOffsetBytes: receipt.offset_bytes + receipt.chunk_bytes,
   };

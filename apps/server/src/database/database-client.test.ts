@@ -750,6 +750,79 @@ describe("DatabaseClient lease integration", () => {
     },
   );
 
+  it("maps artifact create probes through the database Worker protocol", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-artifact-probe",
+      "instance-artifact-probe",
+    );
+    const claim = await claimLease(
+      fixture.client,
+      "worker-artifact-probe",
+      "instance-artifact-probe",
+      worker.capabilitiesDigest,
+    );
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the artifact probe fixture to receive a lease.");
+    }
+    const input = {
+      ...claim.envelope.lease,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result" as const,
+      name: "result.json",
+      mediaType: "application/json" as const,
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    };
+
+    await expect(fixture.client.request("probeArtifactUploadCreate", input)).resolves.toEqual({
+      disposition: "new",
+      accounting: {
+        accountingCertain: true,
+        liveUploadCount: 0,
+        liveUploadExpectedByteSizeBuckets: [],
+        cleanupBacklogEntries: 0,
+      },
+    });
+    const created = await fixture.client.request("createArtifactUpload", input);
+    const chunk = {
+      ...claim.envelope.lease,
+      uploadId: created.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: 2,
+      chunkSha256: sha256("{}"),
+    };
+    const prepared = await fixture.client.request("prepareArtifactChunk", chunk);
+    expect(prepared.committedPrefix).toEqual([]);
+    await fixture.client.request("commitArtifactChunk", {
+      ...chunk,
+      prepareId: prepared.prepareId,
+    });
+    await expect(fixture.client.request("prepareArtifactChunk", chunk)).resolves.toMatchObject({
+      receiptState: "committed",
+      replayed: true,
+      committedPrefix: [
+        {
+          chunkIndex: 0,
+          offsetBytes: 0,
+          chunkBytes: 2,
+          chunkSha256: sha256("{}"),
+        },
+      ],
+    });
+    await expect(fixture.client.request("probeArtifactUploadCreate", input)).resolves.toEqual({
+      disposition: "exact-replay",
+      result: {
+        ...created,
+        replayed: true,
+        nextChunkIndex: 1,
+        nextOffsetBytes: 2,
+      },
+    });
+  });
+
   it("serializes the stable artifact upload quota error across the database protocol", async () => {
     const { client } = await createFixture();
     const worker = await registerWorker(

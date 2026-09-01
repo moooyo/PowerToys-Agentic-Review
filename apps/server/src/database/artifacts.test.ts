@@ -16,13 +16,16 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  artifactCleanupLiabilityPageSql,
   commitArtifactChunk,
   commitArtifactFinalize,
   createArtifactUpload,
+  maximumArtifactCreateAccountingRows,
   maximumDeclaredResultArtifactBytesPerAttempt,
   maximumResultArtifactUploadIdentitiesPerAttempt,
   prepareArtifactChunk,
   prepareArtifactFinalize,
+  probeArtifactUploadCreate,
   terminateArtifactUpload,
   toResultArtifactChunkResponse,
   toTerminateResultArtifactUploadResponse,
@@ -56,7 +59,8 @@ if (!FormatRegistry.Has("date-time")) {
 }
 
 interface Fixture {
-  readonly database: DatabaseSync;
+  database: DatabaseSync;
+  readonly databasePath: string;
   readonly directory: string;
 }
 
@@ -66,7 +70,8 @@ const sha256 = (value: string | Buffer): string => createHash("sha256").update(v
 
 const openFixture = async (): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "agentic-review-artifact-db-"));
-  const database = new DatabaseSync(join(directory, "state.db"));
+  const databasePath = join(directory, "state.db");
+  const database = new DatabaseSync(databasePath);
   database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
   runMigrations(database, migrationsDirectory);
   const now = "2026-09-01T00:00:00.000Z";
@@ -169,9 +174,17 @@ const openFixture = async (): Promise<Fixture> => {
       now,
       now,
     );
-  const fixture = { database, directory };
+  const fixture = { database, databasePath, directory };
   fixtures.push(fixture);
   return fixture;
+};
+
+const reopenFixtureDatabase = (fixture: Fixture): DatabaseSync => {
+  fixture.database.close();
+  const database = new DatabaseSync(fixture.databasePath);
+  database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
+  fixture.database = database;
+  return database;
 };
 
 const identity = {
@@ -325,6 +338,100 @@ const insertRawUpload = (database: DatabaseSync, ordinal: number, totalBytes: nu
     );
 };
 
+const insertSyntheticArtifactHistory = (
+  database: DatabaseSync,
+  count: number,
+  status: "receiving" | "abandoned",
+  cleanupStatus?: "pending" | "completed",
+): void => {
+  database.exec("PRAGMA foreign_keys = OFF; DROP TRIGGER tr_artifact_upload_insert_consistency;");
+  database
+    .prepare(`
+      WITH digits(value) AS (
+        VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+      ),
+      sequence(value) AS (
+        SELECT ones.value + 10 * tens.value + 100 * hundreds.value + 1000 * thousands.value + 1
+        FROM digits AS ones
+        CROSS JOIN digits AS tens
+        CROSS JOIN digits AS hundreds
+        CROSS JOIN digits AS thousands
+      )
+      INSERT INTO artifact_uploads (
+        id,
+        job_id,
+        run_attempt_id,
+        worker_node_id,
+        worker_instance_id,
+        lease_generation,
+        client_artifact_id,
+        purpose,
+        name,
+        media_type,
+        expected_total_bytes,
+        expected_sha256,
+        status,
+        terminated_at,
+        termination_reason,
+        created_at,
+        updated_at
+      )
+      SELECT
+        'synthetic-upload-' || value,
+        'synthetic-job-' || value,
+        'synthetic-run-' || value,
+        'synthetic-worker',
+        'synthetic-instance',
+        1,
+        printf('00000000-0000-4000-8000-%012d', value),
+        'result',
+        'synthetic-' || value || '.json',
+        'application/json',
+        value % 2 + 1,
+        printf('%064x', value),
+        ?,
+        CASE WHEN ? = 'abandoned' THEN '2026-09-01T00:01:00.000Z' ELSE NULL END,
+        CASE WHEN ? = 'abandoned' THEN 'synthetic_abandoned' ELSE NULL END,
+        '2026-09-01T00:00:00.000Z',
+        '2026-09-01T00:01:00.000Z'
+      FROM sequence
+      WHERE value <= ?
+    `)
+    .run(status, status, status, count);
+
+  if (cleanupStatus !== undefined) {
+    if (cleanupStatus === "completed") {
+      database.exec("DROP TRIGGER tr_artifact_upload_cleanup_insert_consistency");
+    }
+    database
+      .prepare(`
+        INSERT INTO artifact_upload_cleanup_journal (
+          upload_id,
+          terminal_status,
+          cleanup_scope,
+          status,
+          attempt_count,
+          created_at,
+          updated_at,
+          completed_at
+        )
+        SELECT
+          id,
+          'abandoned',
+          'staging_only_v1',
+          ?,
+          0,
+          '2026-09-01T00:01:00.000Z',
+          '2026-09-01T00:01:00.000Z',
+          CASE WHEN ? = 'completed' THEN '2026-09-01T00:01:00.000Z' ELSE NULL END
+        FROM artifact_uploads
+        WHERE id LIKE 'synthetic-upload-%'
+      `)
+      .run(cleanupStatus, cleanupStatus);
+  }
+  database.exec("PRAGMA foreign_keys = ON");
+};
+
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) {
     fixture.database.close();
@@ -356,8 +463,9 @@ describe("result artifact database state machine", () => {
         copyFile(join(migrationsDirectory, filename), join(versionEightDirectory, filename)),
       ),
     );
-    const database = new DatabaseSync(join(directory, "state.db"));
-    fixtures.push({ database, directory });
+    const databasePath = join(directory, "state.db");
+    const database = new DatabaseSync(databasePath);
+    fixtures.push({ database, databasePath, directory });
     database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
     expect(runMigrations(database, versionEightDirectory)).toBe(8);
 
@@ -580,6 +688,244 @@ describe("result artifact database state machine", () => {
     expect(() => createArtifactUpload(database, { ...input, name: "changed.json" })).toThrow(
       /different immutable state/u,
     );
+    expect(() =>
+      probeArtifactUploadCreate(database, { ...input, name: "changed.json" }),
+    ).toThrow(/different immutable state/u);
+  });
+
+  it("probes DB-authoritative create accounting without mutating upload identity", async () => {
+    const { database } = await openFixture();
+    const existing = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result",
+      name: "existing.json",
+      mediaType: "application/json",
+      totalBytes: 5,
+      sha256: sha256("existing"),
+    });
+    addArtifactModeAttempt(database);
+    const input = {
+      ...artifactModeIdentity,
+      clientArtifactId: artifactClientId(1),
+      purpose: "result" as const,
+      name: "probed.json",
+      mediaType: "application/json" as const,
+      totalBytes: 11,
+      sha256: sha256("probed"),
+    };
+    const before = database.prepare("SELECT COUNT(*) AS count FROM artifact_uploads").get();
+
+    expect(probeArtifactUploadCreate(database, input)).toEqual({
+      disposition: "new",
+      accounting: {
+        accountingCertain: true,
+        liveUploadCount: 1,
+        liveUploadExpectedByteSizeBuckets: [{ expectedTotalBytes: 5, uploadCount: 1 }],
+        cleanupBacklogEntries: 0,
+      },
+    });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifact_uploads").get()).toEqual(
+      before,
+    );
+
+    terminateArtifactUpload(database, {
+      ...identity,
+      uploadId: existing.uploadId,
+      state: "abandoned",
+      reason: "client_abandoned",
+    });
+    expect(probeArtifactUploadCreate(database, input)).toEqual({
+      disposition: "new",
+      accounting: {
+        accountingCertain: true,
+        liveUploadCount: 1,
+        liveUploadExpectedByteSizeBuckets: [{ expectedTotalBytes: 5, uploadCount: 1 }],
+        cleanupBacklogEntries: 1,
+      },
+    });
+
+    const created = createArtifactUpload(database, input);
+    expect(probeArtifactUploadCreate(database, input)).toEqual({
+      disposition: "exact-replay",
+      result: { ...created, replayed: true },
+    });
+  });
+
+  it("keeps create accounting bounded independently of large completed history", async () => {
+    const { database } = await openFixture();
+    insertSyntheticArtifactHistory(database, 5_000, "abandoned", "completed");
+    const input = {
+      ...identity,
+      clientArtifactId,
+      purpose: "result" as const,
+      name: "result.json",
+      mediaType: "application/json" as const,
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    };
+
+    expect(probeArtifactUploadCreate(database, input)).toEqual({
+      disposition: "new",
+      accounting: {
+        accountingCertain: true,
+        liveUploadCount: 0,
+        liveUploadExpectedByteSizeBuckets: [],
+        cleanupBacklogEntries: 0,
+      },
+    });
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM artifact_uploads WHERE id LIKE 'synthetic-%'")
+        .get(),
+    ).toEqual({ count: 5_000 });
+  });
+
+  it("materializes the bounded cleanup page before artifact primary-key lookups", async () => {
+    const { database } = await openFixture();
+    const plan = database
+      .prepare(`EXPLAIN QUERY PLAN ${artifactCleanupLiabilityPageSql}`)
+      .all(17) as unknown as readonly { readonly detail: string }[];
+    const details = plan.map((row) => row.detail);
+
+    expect(details.some((detail) => /MATERIALIZE due_cleanup/u.test(detail))).toBe(true);
+    expect(
+      details.some((detail) => detail.includes("ix_artifact_upload_cleanup_journal_due")),
+    ).toBe(true);
+    expect(details.some((detail) => /SEARCH upload USING INDEX/u.test(detail))).toBe(true);
+    expect(details.some((detail) => /SCAN upload/u.test(detail))).toBe(false);
+  });
+
+  it("saturates create accounting after a fixed active-liability row budget", async () => {
+    const { database } = await openFixture();
+    insertSyntheticArtifactHistory(
+      database,
+      maximumArtifactCreateAccountingRows + 1,
+      "receiving",
+    );
+    const probe = probeArtifactUploadCreate(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    });
+    if (probe.disposition !== "new") {
+      throw new Error("Expected a new create probe disposition.");
+    }
+    expect(probe.accounting).toMatchObject({
+      accountingCertain: false,
+      liveUploadCount: maximumArtifactCreateAccountingRows,
+      cleanupBacklogEntries: 0,
+    });
+    expect(probe.accounting.liveUploadExpectedByteSizeBuckets).toHaveLength(2);
+    expect(
+      probe.accounting.liveUploadExpectedByteSizeBuckets.reduce(
+        (total, bucket) => total + bucket.uploadCount,
+        0,
+      ),
+    ).toBe(maximumArtifactCreateAccountingRows);
+  });
+
+  it("saturates cleanup-backed liabilities within the remaining fixed row budget", async () => {
+    const { database } = await openFixture();
+    insertSyntheticArtifactHistory(
+      database,
+      maximumArtifactCreateAccountingRows + 1,
+      "abandoned",
+      "pending",
+    );
+    const probe = probeArtifactUploadCreate(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    });
+    if (probe.disposition !== "new") {
+      throw new Error("Expected a new create probe disposition.");
+    }
+    expect(probe.accounting).toMatchObject({
+      accountingCertain: false,
+      liveUploadCount: maximumArtifactCreateAccountingRows,
+      cleanupBacklogEntries: maximumArtifactCreateAccountingRows + 1,
+    });
+    expect(probe.accounting.liveUploadExpectedByteSizeBuckets).toHaveLength(2);
+    expect(
+      probe.accounting.liveUploadExpectedByteSizeBuckets.reduce(
+        (total, bucket) => total + bucket.uploadCount,
+        0,
+      ),
+    ).toBe(maximumArtifactCreateAccountingRows);
+  });
+
+  it("rechecks create authority after a probe observes concurrently changing state", async () => {
+    const { database } = await openFixture();
+    const probedInput = {
+      ...identity,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result" as const,
+      name: "probed.json",
+      mediaType: "application/json" as const,
+      totalBytes: 3,
+      sha256: sha256("probed"),
+    };
+    expect(probeArtifactUploadCreate(database, probedInput)).toMatchObject({
+      disposition: "new",
+    });
+
+    const competing = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId: artifactClientId(1),
+      purpose: "result",
+      name: "competing.json",
+      mediaType: "application/json",
+      totalBytes: 7,
+      sha256: sha256("competing"),
+    });
+    expect(() => createArtifactUpload(database, probedInput)).toThrow(
+      /already has a live result artifact upload/u,
+    );
+    expect(
+      database
+        .prepare("SELECT id, client_artifact_id FROM artifact_uploads WHERE run_attempt_id = ?")
+        .all(identity.runAttemptId),
+    ).toEqual([{ id: competing.uploadId, client_artifact_id: artifactClientId(1) }]);
+  });
+
+  it("returns an exact create replay before applying new-identity admission limits", async () => {
+    const { database } = await openFixture();
+    for (
+      let ordinal = 0;
+      ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
+      ordinal += 1
+    ) {
+      createAndTerminateUpload(database, ordinal, 1);
+    }
+    const replayInput = {
+      ...identity,
+      clientArtifactId: artifactClientId(7),
+      purpose: "result" as const,
+      name: "result-7.json",
+      mediaType: "application/json" as const,
+      totalBytes: 1,
+      sha256: sha256("artifact-7-1"),
+    };
+    const replay = probeArtifactUploadCreate(database, replayInput);
+    expect(replay).toMatchObject({ disposition: "exact-replay" });
+    expect(replay).not.toHaveProperty("accounting");
+    expect(() =>
+      probeArtifactUploadCreate(database, {
+        ...replayInput,
+        clientArtifactId: artifactClientId(8),
+        name: "result-8.json",
+        sha256: sha256("artifact-8-1"),
+      }),
+    ).toThrow(/upload identity quota/u);
   });
 
   it(
@@ -861,6 +1207,7 @@ describe("result artifact database state machine", () => {
 
     expect(prepared.replayed).toBe(false);
     expect(prepared.receiptState).toBe("prepared");
+    expect(prepared.committedPrefix).toEqual([]);
     expect(replay).toEqual({ ...prepared, replayed: true });
     expect(() =>
       commitArtifactChunk(database, {
@@ -935,6 +1282,148 @@ describe("result artifact database state machine", () => {
     });
   });
 
+  it("returns the full committed prefix for multi-chunk prepare and restart replay", async () => {
+    const fixture = await openFixture();
+    let database = fixture.database;
+    const result = Buffer.from("abcdefghijklmnop", "utf8");
+    const upload = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    });
+    const firstBytes = result.subarray(0, 4);
+    const firstChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: firstBytes.byteLength,
+      chunkSha256: sha256(firstBytes),
+    };
+    const firstPrepare = prepareArtifactChunk(database, firstChunk);
+    expect(firstPrepare.committedPrefix).toEqual([]);
+    commitArtifactChunk(database, { ...firstChunk, prepareId: firstPrepare.prepareId });
+
+    const secondBytes = result.subarray(4, 9);
+    const secondChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 1,
+      offsetBytes: firstBytes.byteLength,
+      chunkBytes: secondBytes.byteLength,
+      chunkSha256: sha256(secondBytes),
+    };
+    const firstCommittedReceipt = {
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: firstBytes.byteLength,
+      chunkSha256: sha256(firstBytes),
+    };
+    const secondPrepare = prepareArtifactChunk(database, secondChunk);
+    expect(secondPrepare.committedPrefix).toEqual([firstCommittedReceipt]);
+    commitArtifactChunk(database, { ...secondChunk, prepareId: secondPrepare.prepareId });
+
+    database = reopenFixtureDatabase(fixture);
+    const secondReplay = prepareArtifactChunk(database, secondChunk);
+    const committedPrefix = [
+      firstCommittedReceipt,
+      {
+        chunkIndex: 1,
+        offsetBytes: firstBytes.byteLength,
+        chunkBytes: secondBytes.byteLength,
+        chunkSha256: sha256(secondBytes),
+      },
+    ];
+    expect(secondReplay).toMatchObject({
+      receiptState: "committed",
+      replayed: true,
+      committedNextChunkIndex: 2,
+      committedOffsetBytes: firstBytes.byteLength + secondBytes.byteLength,
+      committedPrefix,
+    });
+
+    const thirdBytes = result.subarray(9);
+    const thirdPrepare = prepareArtifactChunk(database, {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 2,
+      offsetBytes: firstBytes.byteLength + secondBytes.byteLength,
+      chunkBytes: thirdBytes.byteLength,
+      chunkSha256: sha256(thirdBytes),
+    });
+    expect(thirdPrepare).toMatchObject({
+      receiptState: "prepared",
+      replayed: false,
+      committedPrefix,
+    });
+  });
+
+  it("fails closed when direct SQL damage makes the committed prefix discontinuous", async () => {
+    const { database } = await openFixture();
+    const result = Buffer.from("abcdefghijklmnop", "utf8");
+    const upload = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    });
+    const firstBytes = result.subarray(0, 4);
+    const firstChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: firstBytes.byteLength,
+      chunkSha256: sha256(firstBytes),
+    };
+    const firstPrepare = prepareArtifactChunk(database, firstChunk);
+    commitArtifactChunk(database, { ...firstChunk, prepareId: firstPrepare.prepareId });
+    const secondBytes = result.subarray(4, 9);
+    const secondChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 1,
+      offsetBytes: firstBytes.byteLength,
+      chunkBytes: secondBytes.byteLength,
+      chunkSha256: sha256(secondBytes),
+    };
+    const secondPrepare = prepareArtifactChunk(database, secondChunk);
+    commitArtifactChunk(database, { ...secondChunk, prepareId: secondPrepare.prepareId });
+
+    database.exec("DROP TRIGGER tr_artifact_chunk_receipt_update");
+    database
+      .prepare(`
+        UPDATE artifact_upload_chunks
+        SET offset_bytes = offset_bytes + 1
+        WHERE upload_id = ? AND chunk_index = 1
+      `)
+      .run(upload.uploadId);
+
+    const thirdBytes = result.subarray(9);
+    expect(() =>
+      prepareArtifactChunk(database, {
+        ...identity,
+        uploadId: upload.uploadId,
+        chunkIndex: 2,
+        offsetBytes: firstBytes.byteLength + secondBytes.byteLength,
+        chunkBytes: thirdBytes.byteLength,
+        chunkSha256: sha256(thirdBytes),
+      }),
+    ).toThrow(/committed artifact prefix is not contiguous/u);
+    expect(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks WHERE upload_id = ?")
+        .get(upload.uploadId),
+    ).toEqual({ count: 2 });
+  });
+
   it("prepares and commits finalization only after all chunk receipts are committed", async () => {
     const { database } = await openFixture();
     const result = Buffer.from('{"summary":"ok"}', "utf8");
@@ -969,6 +1458,19 @@ describe("result artifact database state machine", () => {
 
     const prepared = prepareArtifactFinalize(database, finalize);
     expect(prepareArtifactFinalize(database, finalize)).toEqual({ ...prepared, replayed: true });
+    const finalizingPrepareReplay = prepareArtifactChunk(database, chunk);
+    expect(finalizingPrepareReplay).toMatchObject({
+      receiptState: "committed",
+      replayed: true,
+      committedPrefix: [
+        {
+          chunkIndex: 0,
+          offsetBytes: 0,
+          chunkBytes: result.byteLength,
+          chunkSha256: sha256(result),
+        },
+      ],
+    });
     const finalizingChunkReplay = commitArtifactChunk(database, {
       ...chunk,
       prepareId: preparedChunk.prepareId,
@@ -999,6 +1501,12 @@ describe("result artifact database state machine", () => {
         storageObjectKey: prepared.storageObjectKey,
       }),
     ).toEqual({ ...committed, replayed: true });
+    const committedPrepareReplay = prepareArtifactChunk(database, chunk);
+    expect(committedPrepareReplay).toMatchObject({
+      receiptState: "committed",
+      replayed: true,
+      committedPrefix: finalizingPrepareReplay.committedPrefix,
+    });
     const committedChunkReplay = commitArtifactChunk(database, {
       ...chunk,
       prepareId: preparedChunk.prepareId,
@@ -1030,6 +1538,7 @@ describe("result artifact database state machine", () => {
       .run("2000-01-01T00:00:00.000Z", identity.runAttemptId);
 
     expect(() => createArtifactUpload(database, input)).toThrow(/lease is expired/u);
+    expect(() => probeArtifactUploadCreate(database, input)).toThrow(/lease is expired/u);
   });
 
   it("fences every worker and lease identity component", async () => {
@@ -1054,12 +1563,14 @@ describe("result artifact database state machine", () => {
       { ...input, leaseToken: "different-artifact-token".padEnd(32, "x") },
     ]) {
       expect(() => createArtifactUpload(database, changed)).toThrow(/lease is expired/u);
+      expect(() => probeArtifactUploadCreate(database, changed)).toThrow(/lease is expired/u);
     }
 
     database
       .prepare("UPDATE workers SET superseded_at = ? WHERE id = ?")
       .run("2026-09-01T00:01:00.000Z", "worker-row");
     expect(() => createArtifactUpload(database, input)).toThrow(/lease is expired/u);
+    expect(() => probeArtifactUploadCreate(database, input)).toThrow(/lease is expired/u);
   });
 
   it("keeps termination from creating or erasing finalization evidence", async () => {

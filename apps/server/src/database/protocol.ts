@@ -48,6 +48,7 @@ import type {
   PrepareArtifactChunkResult,
   PrepareArtifactFinalizeInput,
   PrepareArtifactFinalizeResult,
+  ProbeArtifactUploadCreateResult,
   TerminateArtifactUploadInput,
   TerminateArtifactUploadResult,
 } from "./artifacts.js";
@@ -224,6 +225,10 @@ export interface DatabaseOperationMap {
   readonly createArtifactUpload: {
     readonly input: CreateArtifactUploadInput;
     readonly output: CreateArtifactUploadResult;
+  };
+  readonly probeArtifactUploadCreate: {
+    readonly input: CreateArtifactUploadInput;
+    readonly output: ProbeArtifactUploadCreateResult;
   };
   readonly prepareArtifactChunk: {
     readonly input: PrepareArtifactChunkInput;
