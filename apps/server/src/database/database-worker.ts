@@ -26,6 +26,20 @@ import type {
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
+import {
+  commitArtifactChunk,
+  type CommitArtifactChunkInput,
+  commitArtifactFinalize,
+  type CommitArtifactFinalizeInput,
+  createArtifactUpload,
+  type CreateArtifactUploadInput,
+  prepareArtifactChunk,
+  type PrepareArtifactChunkInput,
+  prepareArtifactFinalize,
+  type PrepareArtifactFinalizeInput,
+  terminateArtifactUpload,
+  type TerminateArtifactUploadInput,
+} from "./artifacts.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
 import { adoptLegacyDatabase } from "./database-initialization.js";
 import { completeDatabaseShutdown } from "./database-shutdown.js";
@@ -1658,6 +1672,18 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return claimLease(request.input as ClaimLeaseInput);
     case "heartbeatLease":
       return heartbeatLease(request.input as HeartbeatLeaseInput);
+    case "createArtifactUpload":
+      return createArtifactUpload(database, request.input as CreateArtifactUploadInput);
+    case "prepareArtifactChunk":
+      return prepareArtifactChunk(database, request.input as PrepareArtifactChunkInput);
+    case "commitArtifactChunk":
+      return commitArtifactChunk(database, request.input as CommitArtifactChunkInput);
+    case "prepareArtifactFinalize":
+      return prepareArtifactFinalize(database, request.input as PrepareArtifactFinalizeInput);
+    case "commitArtifactFinalize":
+      return commitArtifactFinalize(database, request.input as CommitArtifactFinalizeInput);
+    case "terminateArtifactUpload":
+      return terminateArtifactUpload(database, request.input as TerminateArtifactUploadInput);
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":

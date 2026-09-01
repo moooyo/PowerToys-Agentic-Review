@@ -37,6 +37,20 @@ import type {
   CleanupExpiredOperatorAuthInput,
   CleanupExpiredOperatorAuthResult,
 } from "./operator-auth.js";
+import type {
+  CommitArtifactChunkInput,
+  CommitArtifactChunkResult,
+  CommitArtifactFinalizeInput,
+  CommitArtifactFinalizeResult,
+  CreateArtifactUploadInput,
+  CreateArtifactUploadResult,
+  PrepareArtifactChunkInput,
+  PrepareArtifactChunkResult,
+  PrepareArtifactFinalizeInput,
+  PrepareArtifactFinalizeResult,
+  TerminateArtifactUploadInput,
+  TerminateArtifactUploadResult,
+} from "./artifacts.js";
 
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
@@ -206,6 +220,30 @@ export interface DatabaseOperationMap {
   readonly heartbeatLease: {
     readonly input: HeartbeatLeaseInput;
     readonly output: HeartbeatLeaseResult;
+  };
+  readonly createArtifactUpload: {
+    readonly input: CreateArtifactUploadInput;
+    readonly output: CreateArtifactUploadResult;
+  };
+  readonly prepareArtifactChunk: {
+    readonly input: PrepareArtifactChunkInput;
+    readonly output: PrepareArtifactChunkResult;
+  };
+  readonly commitArtifactChunk: {
+    readonly input: CommitArtifactChunkInput;
+    readonly output: CommitArtifactChunkResult;
+  };
+  readonly prepareArtifactFinalize: {
+    readonly input: PrepareArtifactFinalizeInput;
+    readonly output: PrepareArtifactFinalizeResult;
+  };
+  readonly commitArtifactFinalize: {
+    readonly input: CommitArtifactFinalizeInput;
+    readonly output: CommitArtifactFinalizeResult;
+  };
+  readonly terminateArtifactUpload: {
+    readonly input: TerminateArtifactUploadInput;
+    readonly output: TerminateArtifactUploadResult;
   };
   readonly completeLease: {
     readonly input: LeaseCompletionInput;

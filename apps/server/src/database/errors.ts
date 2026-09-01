@@ -53,6 +53,15 @@ export class TerminalSubmissionConflictError extends Error {
   }
 }
 
+export class ArtifactUploadConflictError extends Error {
+  public readonly code = "ARTIFACT_UPLOAD_CONFLICT";
+
+  public constructor(message = "The artifact upload already has different immutable state.") {
+    super(message);
+    this.name = "ArtifactUploadConflictError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 
