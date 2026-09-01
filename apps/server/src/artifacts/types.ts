@@ -132,9 +132,8 @@ export interface PreparedArtifactChunk {
   readonly receiptState: "prepared" | "committed";
   readonly committedOffsetBytes: number;
   /**
-   * The DB adapter MUST query and supply every immutable committed receipt through
-   * committedOffsetBytes. PrepareArtifactChunkResult does not currently carry this projection, so
-   * artifact routes must not call the kernel until that adapter obligation is implemented.
+   * The DB adapter MUST map the complete committedPrefix returned by the fenced prepare operation.
+   * Routes must never reconstruct this authoritative receipt snapshot from request data or memory.
    */
   readonly committedPrefix: readonly ArtifactCommittedChunkReceipt[];
 }
@@ -223,6 +222,34 @@ export interface ArtifactCapacityAdmissionRequest {
   readonly requiredEntries?: number;
 }
 
+export interface ArtifactCapacityExpectedByteSizeBucket {
+  readonly expectedTotalBytes: number;
+  readonly uploadCount: number;
+}
+
+/**
+ * Pure data returned by the database admission probe. Only receiving and finalizing uploads are
+ * represented here; terminal uploads are represented by cleanupBacklogEntries and physical
+ * storage inventory. The storage Worker derives reservation bytes using its filesystem allocation
+ * unit, which must not be guessed by the parent process.
+ */
+export interface ArtifactCapacityEvaluationAccounting {
+  readonly accountingCertain: boolean;
+  readonly liveUploadCount: number;
+  readonly liveUploadExpectedByteSizeBuckets: readonly ArtifactCapacityExpectedByteSizeBucket[];
+  readonly cleanupBacklogEntries: number;
+}
+
+export interface ArtifactCapacityEvaluationInput {
+  /** RPC evaluation always uses the fixed per-upload entry reservation represented by DB counts. */
+  readonly request: { readonly expectedTotalBytes: number };
+  readonly accounting: ArtifactCapacityEvaluationAccounting;
+}
+
+/**
+ * This is an evaluation result, not a durable admission transaction. The parent-side coordinator
+ * MUST serialize database probe, Worker evaluation, and fenced database reservation creation.
+ */
 export interface ArtifactCapacityAdmission {
   readonly requiredBytes: bigint;
   readonly requiredEntries: number;

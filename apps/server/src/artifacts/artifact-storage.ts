@@ -5,9 +5,11 @@ import {
   maximumResultArtifactChunks,
 } from "@agentic-review/contracts";
 import {
+  deriveArtifactCapacityAccounting,
   evaluateArtifactCapacity,
   snapshotArtifactCapacityAccounting,
   snapshotArtifactCapacityAdmissionRequest,
+  snapshotArtifactCapacityEvaluationAccounting,
   snapshotArtifactCapacityLimits,
   snapshotArtifactFilesystemCapacity,
   snapshotArtifactStorageInventory,
@@ -18,7 +20,6 @@ import {
   ArtifactStorageIntegrityError,
 } from "./errors.js";
 import { KeyedFifo, SerialFifo } from "./fifo.js";
-import { LinuxArtifactStorageOperations } from "./linux-filesystem.js";
 import {
   artifactObjectKey,
   requireArtifactByteCount,
@@ -29,6 +30,7 @@ import {
 import type {
   ArtifactCapacityAdmission,
   ArtifactCapacityAdmissionRequest,
+  ArtifactCapacityEvaluationInput,
   ArtifactCapacityProbe,
   ArtifactCommittedChunkReceipt,
   ArtifactStorageDirectoryBinding,
@@ -82,10 +84,7 @@ export class ArtifactStorageKernel {
   readonly #inFlight = new Set<Promise<unknown>>();
   #state: "open" | "closing" | "closed" = "open";
 
-  constructor(
-    options: ArtifactStorageKernelOptions,
-    operations: ArtifactStorageOperations = new LinuxArtifactStorageOperations(),
-  ) {
+  constructor(options: ArtifactStorageKernelOptions, operations: ArtifactStorageOperations) {
     const capacity = snapshotArtifactCapacityLimits(options.capacity);
     const closeTimeoutMilliseconds =
       options.closeTimeoutMilliseconds ?? defaultCloseTimeoutMilliseconds;
@@ -135,6 +134,7 @@ export class ArtifactStorageKernel {
     );
   }
 
+  /** @internal Callback-based admission is test-only and must never cross the Worker RPC. */
   withCapacityAdmission<T>(
     request: ArtifactCapacityAdmissionRequest,
     probeCreate: () => Promise<ArtifactCapacityProbe<T>> | ArtifactCapacityProbe<T>,
@@ -154,10 +154,7 @@ export class ArtifactStorageKernel {
         }
         const accountingSnapshot = snapshotArtifactCapacityAccounting(probe.accounting);
         const inventory = snapshotArtifactStorageInventory(
-          this.#operations.inspectManagedLayout(
-            this.#layout,
-            this.#options.capacity.hardEntries,
-          ),
+          this.#operations.inspectManagedLayout(this.#layout, this.#options.capacity.hardEntries),
         );
         const filesystem = snapshotArtifactFilesystemCapacity(
           this.#operations.filesystemCapacity(this.#layout),
@@ -170,6 +167,36 @@ export class ArtifactStorageKernel {
           requestSnapshot,
         );
         return createDurableReservation(admission);
+      }),
+    );
+  }
+
+  evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
+    this.#requireOpen();
+    const requestSnapshot = snapshotArtifactCapacityAdmissionRequest(input.request);
+    const evaluationAccountingSnapshot = snapshotArtifactCapacityEvaluationAccounting(
+      input.accounting,
+    );
+    return this.#track(
+      this.#capacityFifo.run(() => {
+        const inventory = snapshotArtifactStorageInventory(
+          this.#operations.inspectManagedLayout(this.#layout, this.#options.capacity.hardEntries),
+        );
+        const filesystem = snapshotArtifactFilesystemCapacity(
+          this.#operations.filesystemCapacity(this.#layout),
+        );
+        const accountingSnapshot = deriveArtifactCapacityAccounting(
+          evaluationAccountingSnapshot,
+          filesystem,
+          this.#options.capacity.perUploadMetadataHeadroomBytes,
+        );
+        return evaluateArtifactCapacity(
+          this.#options.capacity,
+          accountingSnapshot,
+          inventory,
+          filesystem,
+          requestSnapshot,
+        );
       }),
     );
   }
@@ -321,11 +348,7 @@ export class ArtifactStorageKernel {
       input.sha256,
       false,
     );
-    const existing = this.#inspectExistingPublication(
-      shard.directory,
-      input,
-      existingTemporary,
-    );
+    const existing = this.#inspectExistingPublication(shard.directory, input, existingTemporary);
     if (existing.objectExists) {
       if (existing.temporary !== undefined) {
         this.#operations.syncDirectory(shard.directory);
@@ -427,9 +450,7 @@ export class ArtifactStorageKernel {
     input: PreparedArtifactFinalization,
     temporary: ReturnType<ArtifactStorageOperations["openPublicationTemporaryFile"]>,
   ): ExistingPublicationState {
-    const inspectObject = (
-      temporaryIdentity?: ArtifactStorageFileIdentity,
-    ): boolean => {
+    const inspectObject = (temporaryIdentity?: ArtifactStorageFileIdentity): boolean => {
       const object = this.#operations.openObjectFile(
         this.#layout,
         shard,

@@ -1,16 +1,21 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { ArtifactStorageKernel } from "../../dist/artifacts/artifact-storage.js";
 import {
   ArtifactEntryBudget,
+  visitBoundedArtifactEntries,
+} from "../../dist/artifacts/bounded-scan.js";
+import {
+  calculateArtifactReservationBytes,
+  deriveArtifactCapacityAccounting,
+  evaluateArtifactCapacity,
+} from "../../dist/artifacts/capacity.js";
+import {
   ArtifactStorageCapacityError,
   ArtifactStorageClosedError,
   ArtifactStorageCloseTimeoutError,
   ArtifactStorageIntegrityError,
-  ArtifactStorageKernel,
-  calculateArtifactReservationBytes,
-  evaluateArtifactCapacity,
-  visitBoundedArtifactEntries,
-} from "../../dist/artifacts/index.js";
+} from "../../dist/artifacts/errors.js";
 import type {
   ArtifactStorageDirectoryBinding,
   ArtifactStorageFileHandle,
@@ -79,13 +84,15 @@ class FakeArtifactStorageOperations implements ArtifactStorageOperations {
 
   inspectManagedLayout(_layout: ArtifactStorageLayout, maximumEntries: number) {
     this.inspectedMaximumEntries.push(maximumEntries);
-    return this.inventoryOverride ?? {
-      allocatedBytes: 0n,
-      entries: this.files.size,
-      immutableObjects: 0,
-      publicationTemporaries: 0,
-      stagingFiles: 0,
-    };
+    return (
+      this.inventoryOverride ?? {
+        allocatedBytes: 0n,
+        entries: this.files.size,
+        immutableObjects: 0,
+        publicationTemporaries: 0,
+        stagingFiles: 0,
+      }
+    );
   }
 
   filesystemCapacity(_layout: ArtifactStorageLayout) {
@@ -147,13 +154,7 @@ class FakeArtifactStorageOperations implements ArtifactStorageOperations {
       this.files.set(path, existing);
       this.racePublicationTemporaryOnCreate = false;
     }
-    return this.#open(
-      path,
-      "publication-temporary",
-      shard,
-      existing?.links !== 2,
-      createIfMissing,
-    );
+    return this.#open(path, "publication-temporary", shard, existing?.links !== 2, createIfMissing);
   }
 
   openObjectFile(
@@ -973,9 +974,7 @@ describe("ArtifactStorageKernel CAS publication", () => {
     await expect(
       kernel.cleanupUpload({
         uploadId,
-        publications: [
-          { finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 },
-        ],
+        publications: [{ finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 }],
       }),
     ).rejects.toThrow(/injected failure/u);
     expect(operations.hasPublicationTemporary(input.sha256)).toBe(false);
@@ -986,9 +985,7 @@ describe("ArtifactStorageKernel CAS publication", () => {
     await expect(
       kernel.cleanupUpload({
         uploadId,
-        publications: [
-          { finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 },
-        ],
+        publications: [{ finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 }],
       }),
     ).resolves.toEqual({ stagingRemoved: false, publicationTemporariesRemoved: 0 });
     expect(operations.events).toContain("sync-directory:shard:5");
@@ -1011,9 +1008,7 @@ describe("ArtifactStorageKernel CAS publication", () => {
     await expect(
       kernel.cleanupUpload({
         uploadId,
-        publications: [
-          { finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 },
-        ],
+        publications: [{ finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 }],
       }),
     ).rejects.toThrow(/object open failure/u);
     expect(operations.handles.size).toBe(0);
@@ -1022,9 +1017,7 @@ describe("ArtifactStorageKernel CAS publication", () => {
     await expect(
       kernel.cleanupUpload({
         uploadId,
-        publications: [
-          { finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 },
-        ],
+        publications: [{ finalizationId, totalBytes: bytes.byteLength, sha256: input.sha256 }],
       }),
     ).rejects.toThrow(/object read failure/u);
     expect(operations.handles.size).toBe(0);
@@ -1039,9 +1032,7 @@ describe("ArtifactStorageKernel CAS publication", () => {
     await expect(
       kernel.cleanupUpload({
         uploadId,
-        publications: [
-          { finalizationId, totalBytes: bytes.byteLength, sha256: sha256(bytes) },
-        ],
+        publications: [{ finalizationId, totalBytes: bytes.byteLength, sha256: sha256(bytes) }],
       }),
     ).resolves.toEqual({ stagingRemoved: false, publicationTemporariesRemoved: 0 });
     expect(operations.events).toContain("sync-directory:sha256-parent:1");
@@ -1071,16 +1062,67 @@ describe("artifact storage capacity admission", () => {
     stagingFiles: 1,
   } as const;
 
-  it("reads a direct reservation calculator allocation unit exactly once", () => {
+  it("reads direct reservation calculator filesystem fields exactly once", () => {
+    let availableByteReads = 0;
     let allocationUnitReads = 0;
     const filesystem = {
-      availableBytes: 10_000n,
+      get availableBytes() {
+        availableByteReads += 1;
+        return availableByteReads === 1 ? 10_000n : 0n;
+      },
       get allocationUnitBytes() {
         allocationUnitReads += 1;
         return allocationUnitReads === 1 ? 4_096n : 1n;
       },
     };
     expect(calculateArtifactReservationBytes(1_000, filesystem, 512n)).toBe(8_704n);
+    expect(availableByteReads).toBe(1);
+    expect(allocationUnitReads).toBe(1);
+  });
+
+  it("snapshots filesystem and inventory getters before capacity check and use", () => {
+    let allocatedByteReads = 0;
+    let entryReads = 0;
+    let availableByteReads = 0;
+    let allocationUnitReads = 0;
+    const admission = evaluateArtifactCapacity(
+      limits,
+      accounting,
+      {
+        get allocatedBytes() {
+          allocatedByteReads += 1;
+          return allocatedByteReads === 1 ? 2_000n : 99_999n;
+        },
+        get entries() {
+          entryReads += 1;
+          return entryReads === 1 ? 4 : 999;
+        },
+        immutableObjects: 1,
+        publicationTemporaries: 0,
+        stagingFiles: 1,
+      },
+      {
+        get availableBytes() {
+          availableByteReads += 1;
+          return availableByteReads === 1 ? 10_000n : 0n;
+        },
+        get allocationUnitBytes() {
+          allocationUnitReads += 1;
+          return allocationUnitReads === 1 ? 4_096n : 1n;
+        },
+      },
+      { expectedTotalBytes: 1_000 },
+    );
+    expect(admission).toMatchObject({
+      requiredBytes: 8_704n,
+      physicalAllocatedBytes: 2_000n,
+      physicalEntries: 4,
+      filesystemAvailableBytes: 10_000n,
+      filesystemAllocationUnitBytes: 4_096n,
+    });
+    expect(allocatedByteReads).toBe(1);
+    expect(entryReads).toBe(1);
+    expect(availableByteReads).toBe(1);
     expect(allocationUnitReads).toBe(1);
   });
 
@@ -1106,6 +1148,41 @@ describe("artifact storage capacity admission", () => {
       projectedChargedBytes: 10_704n,
       projectedChargedEntries: 8,
     });
+  });
+
+  it("derives every durable live-upload reservation from canonical database buckets", () => {
+    expect(
+      deriveArtifactCapacityAccounting(
+        {
+          accountingCertain: true,
+          liveUploadCount: 3,
+          liveUploadExpectedByteSizeBuckets: [
+            { expectedTotalBytes: 1_000, uploadCount: 2 },
+            { expectedTotalBytes: 4_097, uploadCount: 1 },
+          ],
+          cleanupBacklogEntries: 1,
+        },
+        { availableBytes: 100_000n, allocationUnitBytes: 4_096n },
+        512n,
+      ),
+    ).toEqual({
+      accountingCertain: true,
+      outstandingReservationBytes: 34_304n,
+      outstandingReservationEntries: 12,
+      cleanupBacklogEntries: 1,
+    });
+    expect(() =>
+      deriveArtifactCapacityAccounting(
+        {
+          accountingCertain: true,
+          liveUploadCount: 2,
+          liveUploadExpectedByteSizeBuckets: [{ expectedTotalBytes: 1_000, uploadCount: 1 }],
+          cleanupBacklogEntries: 0,
+        },
+        { availableBytes: 100_000n, allocationUnitBytes: 4_096n },
+        512n,
+      ),
+    ).toThrow(/do not match/u);
   });
 
   it("fails closed for uncertain accounting, backlog, hard limits, and emergency reserve", () => {
@@ -1263,20 +1340,53 @@ describe("artifact storage capacity admission", () => {
     };
 
     await expect(
-      kernel.withCapacityAdmission(
-        { expectedTotalBytes: 1_000 },
-        probeCreate,
-        persistReservation,
-      ),
+      kernel.withCapacityAdmission({ expectedTotalBytes: 1_000 }, probeCreate, persistReservation),
     ).resolves.toBe(1);
     await expect(
-      kernel.withCapacityAdmission(
-        { expectedTotalBytes: 1_000 },
-        probeCreate,
-        persistReservation,
-      ),
+      kernel.withCapacityAdmission({ expectedTotalBytes: 1_000 }, probeCreate, persistReservation),
     ).rejects.toBeInstanceOf(ArtifactStorageCapacityError);
     expect(durableCreates).toBe(1);
+    await kernel.close();
+  });
+
+  it("snapshots database-shaped evaluation input before waiting in the capacity FIFO", async () => {
+    const operations = new FakeArtifactStorageOperations();
+    const kernel = new ArtifactStorageKernel(kernelOptions(), operations);
+    const firstEntered = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const first = kernel.withCapacityAdmission(
+      { expectedTotalBytes: 1 },
+      () => ({ disposition: "new", accounting }),
+      async () => {
+        firstEntered.resolve();
+        await releaseFirst.promise;
+      },
+    );
+    await firstEntered.promise;
+
+    const request = { expectedTotalBytes: 1_000 };
+    const bucket = { expectedTotalBytes: 1_000, uploadCount: 1 };
+    const evaluationAccounting = {
+      accountingCertain: true,
+      liveUploadCount: 1,
+      liveUploadExpectedByteSizeBuckets: [bucket],
+      cleanupBacklogEntries: 0,
+    };
+    const evaluation = kernel.evaluateCapacity({ request, accounting: evaluationAccounting });
+    request.expectedTotalBytes = 0;
+    bucket.expectedTotalBytes = 0;
+    bucket.uploadCount = 999;
+    evaluationAccounting.liveUploadCount = 0;
+    evaluationAccounting.liveUploadExpectedByteSizeBuckets.length = 0;
+
+    releaseFirst.resolve();
+    await first;
+    await expect(evaluation).resolves.toMatchObject({
+      requiredBytes: 6_096n,
+      requiredEntries: 4,
+      outstandingReservationBytes: 6_096n,
+      outstandingReservationEntries: 4,
+    });
     await kernel.close();
   });
 
@@ -1371,20 +1481,29 @@ describe("artifact storage capacity admission", () => {
   it("snapshots operation inventory and filesystem capacity before evaluation", async () => {
     const operations = new FakeArtifactStorageOperations();
     let allocatedBytes = 5_000n;
+    let physicalEntries = 5;
     let inventoryReads = 0;
+    let inventoryEntryReads = 0;
     operations.inventoryOverride = {
       get allocatedBytes() {
         inventoryReads += 1;
         return allocatedBytes;
       },
-      entries: 0,
+      get entries() {
+        inventoryEntryReads += 1;
+        return physicalEntries;
+      },
       immutableObjects: 0,
       publicationTemporaries: 0,
       stagingFiles: 0,
     };
+    let availableByteReads = 0;
     let allocationUnitReads = 0;
     operations.filesystemCapacityOverride = {
-      availableBytes: 1_000_000n,
+      get availableBytes() {
+        availableByteReads += 1;
+        return availableByteReads === 1 ? 1_000_000n : 0n;
+      },
       get allocationUnitBytes() {
         allocationUnitReads += 1;
         return allocationUnitReads === 1 ? 4_096n : 1n;
@@ -1392,6 +1511,7 @@ describe("artifact storage capacity admission", () => {
     };
     operations.onFilesystemCapacity = () => {
       allocatedBytes = 0n;
+      physicalEntries = 0;
     };
     const options = kernelOptions();
     options.capacity.hardBytes = 13_000n;
@@ -1414,6 +1534,8 @@ describe("artifact storage capacity admission", () => {
       ),
     ).rejects.toThrow(/hard byte/u);
     expect(inventoryReads).toBe(1);
+    expect(inventoryEntryReads).toBe(1);
+    expect(availableByteReads).toBe(1);
     expect(allocationUnitReads).toBe(1);
     await kernel.close();
   });

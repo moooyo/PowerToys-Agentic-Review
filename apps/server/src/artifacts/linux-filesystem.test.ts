@@ -14,12 +14,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ArtifactStorageKernel } from "../../dist/artifacts/artifact-storage.js";
+import { ArtifactStorageIntegrityError } from "../../dist/artifacts/errors.js";
 import {
-  ArtifactStorageIntegrityError,
-  ArtifactStorageKernel,
   isSupportedArtifactFilesystemType,
+  LinuxArtifactStorageOperations,
   synchronizeArtifactDirectoryChain,
-} from "../../dist/artifacts/index.js";
+} from "../../dist/artifacts/linux-filesystem.js";
 import type { ArtifactStorageDirectoryBinding } from "../../dist/artifacts/types.js";
 
 const uploadId = "11111111-1111-4111-8111-111111111111";
@@ -81,7 +82,7 @@ describe("artifact filesystem policy", () => {
 describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", () => {
   it("creates private bound namespaces and immutable content-addressed objects", async () => {
     const root = await createArtifactRootPath();
-    const kernel = new ArtifactStorageKernel(options(root));
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
     const bytes = Buffer.from('{"result":"ok"}');
     const digest = sha256(bytes);
 
@@ -138,7 +139,7 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
 
   it("rejects symlink, hard-linked, and permissive staging files", async () => {
     const root = await createArtifactRootPath();
-    const kernel = new ArtifactStorageKernel(options(root));
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
     const bytes = Buffer.from("chunk");
     const target = join(dirname(root), "outside-target");
     const stagingPath = join(root, "staging", `${uploadId}.upload`);
@@ -166,7 +167,7 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
 
   it("detects managed-directory inode replacement after initialization", async () => {
     const root = await createArtifactRootPath();
-    const kernel = new ArtifactStorageKernel(options(root));
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
     const staging = join(root, "staging");
     await rename(staging, join(dirname(root), "staging-displaced"));
     await mkdir(staging, { mode: 0o700 });
@@ -179,7 +180,7 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
 
   it("resumes a matching partial staging range and rejects a changed prefix", async () => {
     const root = await createArtifactRootPath();
-    const kernel = new ArtifactStorageKernel(options(root));
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
     const stagingPath = join(root, "staging", `${uploadId}.upload`);
     const bytes = Buffer.from("chunk");
     await writeFile(stagingPath, bytes.subarray(0, 2), { mode: 0o600 });
@@ -209,7 +210,7 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
 
   it("never overwrites or trusts an existing corrupt CAS path or external hard link", async () => {
     const root = await createArtifactRootPath();
-    const kernel = new ArtifactStorageKernel(options(root));
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
     const bytes = Buffer.from('{"good":1}');
     const corrupt = Buffer.from('{"evil":1}');
     const digest = sha256(bytes);
@@ -248,7 +249,9 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
     const target = join(dirname(root), "target");
     await mkdir(target, { mode: 0o700 });
     await symlink(target, join(root, "staging"), "dir");
-    expect(() => new ArtifactStorageKernel(options(root))).toThrow(ArtifactStorageIntegrityError);
+    expect(
+      () => new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations()),
+    ).toThrow(ArtifactStorageIntegrityError);
   });
 });
 

@@ -1,43 +1,17 @@
-export { ArtifactStorageKernel } from "./artifact-storage.js";
-export { ArtifactEntryBudget, visitBoundedArtifactEntries } from "./bounded-scan.js";
-export {
-  calculateArtifactReservationBytes,
-  evaluateArtifactCapacity,
-  snapshotArtifactCapacityAccounting,
-  snapshotArtifactCapacityAdmissionRequest,
-  snapshotArtifactCapacityLimits,
-  snapshotArtifactFilesystemCapacity,
-  snapshotArtifactStorageInventory,
-  validateArtifactCapacityLimits,
-} from "./capacity.js";
-export {
-  ArtifactStorageCapacityError,
-  ArtifactStorageClosedError,
-  ArtifactStorageCloseTimeoutError,
-  ArtifactStorageIntegrityError,
-} from "./errors.js";
-export {
-  isSupportedArtifactFilesystemType,
-  LinuxArtifactStorageOperations,
-  synchronizeArtifactDirectoryChain,
-} from "./linux-filesystem.js";
-export {
-  artifactObjectKey,
-  artifactPublicationTemporaryFilename,
-  artifactStagingFilename,
-} from "./names.js";
+export { ArtifactStorageClient } from "./artifact-storage-client.js";
+export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
+export { ArtifactStorageClientError } from "./errors.js";
+export type { ArtifactStorageClientErrorCode } from "./errors.js";
+export type { ArtifactObjectReadInput } from "./worker-protocol.js";
 export type {
-  ArtifactCapacityAccounting,
   ArtifactCapacityAdmission,
-  ArtifactCapacityAdmissionRequest,
+  ArtifactCapacityEvaluationAccounting,
+  ArtifactCapacityEvaluationInput,
+  ArtifactCapacityExpectedByteSizeBucket,
   ArtifactCapacityLimits,
-  ArtifactCapacityProbe,
   ArtifactCommittedChunkReceipt,
-  ArtifactFilesystemCapacity,
   ArtifactPublicationCleanupTarget,
-  ArtifactStorageInventory,
   ArtifactStorageKernelOptions,
-  ArtifactStorageOperations,
   ArtifactUploadCleanupRequest,
   ArtifactUploadCleanupResult,
   DurableArtifactChunk,
