@@ -62,6 +62,15 @@ export class ArtifactUploadConflictError extends Error {
   }
 }
 
+export class ArtifactUploadQuotaExceededError extends Error {
+  public readonly code = "ARTIFACT_UPLOAD_QUOTA_EXCEEDED";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactUploadQuotaExceededError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 

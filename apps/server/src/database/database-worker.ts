@@ -143,6 +143,7 @@ interface HeartbeatRow {
 }
 
 interface TerminalAttemptRow extends HeartbeatRow {
+  readonly completion_mode: "inline_result_v1" | "result_artifact_v1";
   readonly result_digest: string | null;
   readonly result_json: string | null;
   readonly failure_code: string | null;
@@ -814,6 +815,7 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
           throw new Error("The selected job could not be leased atomically.");
         }
 
+        // Artifact completion is rollout-gated; normal claims intentionally use the DB inline default.
         database
           .prepare(`
           INSERT INTO run_attempts (
@@ -1105,6 +1107,7 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           attempt.worker_node_id,
           attempt.worker_instance_id,
           attempt.status,
+          attempt.completion_mode,
           attempt.lease_token_hash,
           attempt.lease_generation,
           attempt.lease_expires_at,
@@ -1154,6 +1157,9 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
     if (fence === undefined || !matchesTerminalLeaseIdentity(fence, input, tokenHash)) {
       throw new LeaseLostError();
+    }
+    if (fence.completion_mode !== "inline_result_v1") {
+      throw new TerminalSubmissionConflictError();
     }
 
     if (isTerminalAttemptState(fence.status) && fence.legacy_replay_id !== null) {
@@ -1345,6 +1351,7 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
           attempt.worker_node_id,
           attempt.worker_instance_id,
           attempt.status,
+          attempt.completion_mode,
           attempt.lease_token_hash,
           attempt.lease_generation,
           attempt.lease_expires_at,

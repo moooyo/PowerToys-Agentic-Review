@@ -16,6 +16,7 @@ import {
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
@@ -39,6 +40,8 @@ const workerCapabilities = {
 } satisfies WorkerCapabilities;
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+const artifactClientId = (ordinal: number): string =>
+  `10000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
@@ -715,6 +718,91 @@ describe("DatabaseClient lease integration", () => {
     if (granted?.outcome === "granted") {
       expect(["worker-a", "worker-b"]).toContain(granted.envelope.lease.workerNodeId);
     }
+  });
+
+  it(
+    "keeps artifact completion unreachable while normal claims intentionally default to inline v1",
+    async () => {
+      const fixture = await createFixture();
+      const worker = await registerWorker(
+        fixture.client,
+        "worker-inline-rollout-gate",
+        "instance-inline-rollout-gate",
+      );
+      const claim = await claimLease(
+        fixture.client,
+        "worker-inline-rollout-gate",
+        "instance-inline-rollout-gate",
+        worker.capabilitiesDigest,
+      );
+      if (claim.outcome !== "granted") {
+        throw new Error("Expected the inline rollout-gate fixture to receive a lease.");
+      }
+
+      expect(claim.envelope).not.toHaveProperty("completionMode");
+      withFixtureDatabase(fixture, (database) => {
+        expect(
+          database
+            .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
+            .get(claim.envelope.lease.runAttemptId),
+        ).toEqual({ completion_mode: "inline_result_v1" });
+      });
+    },
+  );
+
+  it("serializes the stable artifact upload quota error across the database protocol", async () => {
+    const { client } = await createFixture();
+    const worker = await registerWorker(
+      client,
+      "worker-artifact-quota",
+      "instance-artifact-quota",
+    );
+    const claim = await claimLease(
+      client,
+      "worker-artifact-quota",
+      "instance-artifact-quota",
+      worker.capabilitiesDigest,
+    );
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the artifact quota fixture to receive a lease.");
+    }
+
+    for (
+      let ordinal = 0;
+      ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
+      ordinal += 1
+    ) {
+      const upload = await client.request("createArtifactUpload", {
+        ...claim.envelope.lease,
+        clientArtifactId: artifactClientId(ordinal),
+        purpose: "result",
+        name: `result-${ordinal}.json`,
+        mediaType: "application/json",
+        totalBytes: 1,
+        sha256: sha256(`artifact-${ordinal}`),
+      });
+      await client.request("terminateArtifactUpload", {
+        ...claim.envelope.lease,
+        uploadId: upload.uploadId,
+        state: "abandoned",
+        reason: "client_abandoned",
+      });
+    }
+
+    await expect(
+      client.request("createArtifactUpload", {
+        ...claim.envelope.lease,
+        clientArtifactId: artifactClientId(maximumResultArtifactUploadIdentitiesPerAttempt),
+        purpose: "result",
+        name: "result-over-quota.json",
+        mediaType: "application/json",
+        totalBytes: 1,
+        sha256: sha256("artifact-over-quota"),
+      }),
+    ).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "ARTIFACT_UPLOAD_QUOTA_EXCEEDED",
+    });
   });
 
   it("dead-letters an oversized claim response before committing a lease", async () => {

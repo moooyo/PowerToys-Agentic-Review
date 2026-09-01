@@ -11,7 +11,14 @@ import {
   type ResultArtifactUploadState,
   type TerminateResultArtifactUploadResponse,
 } from "@agentic-review/contracts";
-import { ArtifactUploadConflictError, LeaseLostError } from "./errors.js";
+import {
+  ArtifactUploadConflictError,
+  ArtifactUploadQuotaExceededError,
+  LeaseLostError,
+} from "./errors.js";
+
+export const maximumResultArtifactUploadIdentitiesPerAttempt = 8;
+export const maximumDeclaredResultArtifactBytesPerAttempt = 16 * 1024 * 1024;
 
 type ArtifactLeaseIdentity = Pick<
   CreateResultArtifactUploadRequest,
@@ -249,6 +256,8 @@ export const createArtifactUpload = (
       return createUploadReplayResult(existing);
     }
 
+    requireArtifactUploadQuota(database, input.runAttemptId, input.totalBytes);
+
     const liveResult = database
       .prepare(`
         SELECT id
@@ -305,6 +314,35 @@ export const createArtifactUpload = (
     const created = requireUpload(database, uploadId);
     return createNewUploadResult(created);
   });
+
+function requireArtifactUploadQuota(
+  database: DatabaseSync,
+  runAttemptId: string,
+  requestedBytes: number,
+): void {
+  const usage = database
+    .prepare(`
+      SELECT
+        COUNT(*) AS upload_count,
+        COALESCE(SUM(expected_total_bytes), 0) AS declared_bytes
+      FROM artifact_uploads
+      WHERE run_attempt_id = ?
+    `)
+    .get(runAttemptId) as unknown as {
+    readonly upload_count: number;
+    readonly declared_bytes: number;
+  };
+  if (usage.declared_bytes > maximumDeclaredResultArtifactBytesPerAttempt - requestedBytes) {
+    throw new ArtifactUploadQuotaExceededError(
+      "The run attempt has exhausted its declared result artifact byte quota.",
+    );
+  }
+  if (usage.upload_count >= maximumResultArtifactUploadIdentitiesPerAttempt) {
+    throw new ArtifactUploadQuotaExceededError(
+      "The run attempt has exhausted its result artifact upload identity quota.",
+    );
+  }
+}
 
 export const prepareArtifactChunk = (
   database: DatabaseSync,
