@@ -989,7 +989,9 @@ export class ArtifactUploadCreateCoordinator {
         }
         return;
       }
-      this.#enterFatal("ARTIFACT_CREATE_DATABASE_FAILURE");
+      this.#enterFatal(
+        phase === "create" ? "ARTIFACT_CREATE_OUTCOME_UNKNOWN" : "ARTIFACT_CREATE_DATABASE_FAILURE",
+      );
       return;
     }
     this.#enterFatal(

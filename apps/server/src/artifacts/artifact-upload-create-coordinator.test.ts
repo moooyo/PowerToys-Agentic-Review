@@ -616,6 +616,39 @@ describe("ArtifactUploadCreateCoordinator deadlines and errors", () => {
     expect(JSON.stringify(fatalErrors[0])).not.toContain("/secret");
     await expect(coordinator.close()).rejects.toBe(fatalErrors[0]);
   });
+
+  it("maps unknown coded database errors according to durable-create uncertainty", async () => {
+    const probeFixture = fixture();
+    probeFixture.database.probe = () =>
+      Promise.reject(
+        new DatabaseRequestError("unknown probe failure at /secret/path", "FUTURE_DB_ERROR"),
+      );
+    await expect(
+      probeFixture.coordinator.createArtifactUpload(createInput()),
+    ).rejects.toMatchObject({
+      code: "ARTIFACT_CREATE_DATABASE_FAILURE",
+      retryable: false,
+      requiresFailStop: true,
+    });
+    expect(JSON.stringify(probeFixture.fatalErrors[0])).not.toContain("/secret");
+    await expect(probeFixture.coordinator.close()).rejects.toBe(probeFixture.fatalErrors[0]);
+
+    const createFixture = fixture();
+    createFixture.database.create = () =>
+      Promise.reject(
+        new DatabaseRequestError("unknown create failure at /secret/path", "FUTURE_DB_ERROR"),
+      );
+    await expect(
+      createFixture.coordinator.createArtifactUpload(createInput()),
+    ).rejects.toMatchObject({
+      code: "ARTIFACT_CREATE_OUTCOME_UNKNOWN",
+      retryable: false,
+      requiresFailStop: true,
+    });
+    expect(createFixture.database.createdInputs).toHaveLength(1);
+    expect(JSON.stringify(createFixture.fatalErrors[0])).not.toContain("/secret");
+    await expect(createFixture.coordinator.close()).rejects.toBe(createFixture.fatalErrors[0]);
+  });
 });
 
 describe("ArtifactUploadCreateCoordinator admission and owner lifecycle", () => {
