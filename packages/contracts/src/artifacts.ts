@@ -1,6 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 
-import { EntityIdSchema, Sha256Schema } from "./common.js";
+import { DateTimeSchema, EntityIdSchema, Sha256Schema } from "./common.js";
 import { LeaseIdentitySchema } from "./worker.js";
 
 export const maximumResultArtifactBytes = 2 * 1024 * 1024;
@@ -70,18 +70,56 @@ export type CreateResultArtifactUploadRequest = Static<
   typeof CreateResultArtifactUploadRequestSchema
 >;
 
-export const CreateResultArtifactUploadResponseSchema = Type.Object(
-  {
-    uploadId: EntityIdSchema,
-    state: ResultArtifactUploadStateSchema,
-    replayed: Type.Boolean(),
-    nextChunkIndex: Type.Integer({ minimum: 0, maximum: maximumResultArtifactChunks }),
-    nextOffsetBytes: Type.Integer({ minimum: 0, maximum: maximumResultArtifactBytes }),
-    maximumChunkBytes: Type.Literal(maximumResultArtifactChunkBytes),
-    maximumChunkCount: Type.Literal(maximumResultArtifactChunks),
-  },
-  { additionalProperties: false },
-);
+const createResultArtifactUploadResponseProperties = {
+  uploadId: EntityIdSchema,
+  maximumChunkBytes: Type.Literal(maximumResultArtifactChunkBytes),
+  maximumChunkCount: Type.Literal(maximumResultArtifactChunks),
+};
+
+const replayedResultArtifactUploadCursorProperties = {
+  ...createResultArtifactUploadResponseProperties,
+  nextChunkIndex: Type.Integer({ minimum: 0, maximum: maximumResultArtifactChunks }),
+  nextOffsetBytes: Type.Integer({ minimum: 0, maximum: maximumResultArtifactBytes }),
+};
+
+export const CreateResultArtifactUploadResponseSchema = Type.Union([
+  Type.Object(
+    {
+      ...createResultArtifactUploadResponseProperties,
+      state: Type.Literal("receiving"),
+      replayed: Type.Literal(false),
+      nextChunkIndex: Type.Literal(0),
+      nextOffsetBytes: Type.Literal(0),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...replayedResultArtifactUploadCursorProperties,
+      state: Type.Union([
+        Type.Literal("receiving"),
+        Type.Literal("finalizing"),
+        Type.Literal("committed"),
+      ]),
+      replayed: Type.Literal(true),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...replayedResultArtifactUploadCursorProperties,
+      state: Type.Union([Type.Literal("abandoned"), Type.Literal("corrupt")]),
+      replayed: Type.Literal(true),
+      reason: Type.String({
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[a-z][a-z0-9_]{0,127}$",
+      }),
+      terminatedAt: DateTimeSchema,
+    },
+    { additionalProperties: false },
+  ),
+]);
 export type CreateResultArtifactUploadResponse = Static<
   typeof CreateResultArtifactUploadResponseSchema
 >;
@@ -108,17 +146,35 @@ export const ResultArtifactChunkRequestSchema = Type.Composite(
 );
 export type ResultArtifactChunkRequest = Static<typeof ResultArtifactChunkRequestSchema>;
 
-export const ResultArtifactChunkResponseSchema = Type.Object(
-  {
-    uploadId: EntityIdSchema,
-    state: Type.Literal("receiving"),
-    chunkIndex: Type.Integer({ minimum: 0, maximum: maximumResultArtifactChunks - 1 }),
-    outcome: Type.Union([Type.Literal("accepted"), Type.Literal("replayed")]),
-    nextChunkIndex: Type.Integer({ minimum: 1, maximum: maximumResultArtifactChunks }),
-    nextOffsetBytes: Type.Integer({ minimum: 1, maximum: maximumResultArtifactBytes }),
-  },
-  { additionalProperties: false },
-);
+const resultArtifactChunkResponseProperties = {
+  uploadId: EntityIdSchema,
+  chunkIndex: Type.Integer({ minimum: 0, maximum: maximumResultArtifactChunks - 1 }),
+  nextChunkIndex: Type.Integer({ minimum: 1, maximum: maximumResultArtifactChunks }),
+  nextOffsetBytes: Type.Integer({ minimum: 1, maximum: maximumResultArtifactBytes }),
+};
+
+export const ResultArtifactChunkResponseSchema = Type.Union([
+  Type.Object(
+    {
+      ...resultArtifactChunkResponseProperties,
+      state: Type.Literal("receiving"),
+      outcome: Type.Literal("accepted"),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...resultArtifactChunkResponseProperties,
+      state: Type.Union([
+        Type.Literal("receiving"),
+        Type.Literal("finalizing"),
+        Type.Literal("committed"),
+      ]),
+      outcome: Type.Literal("replayed"),
+    },
+    { additionalProperties: false },
+  ),
+]);
 export type ResultArtifactChunkResponse = Static<typeof ResultArtifactChunkResponseSchema>;
 
 export const FinalizeResultArtifactUploadRequestSchema = Type.Composite(
@@ -166,4 +222,35 @@ export const FinalizeResultArtifactUploadResponseSchema = Type.Object(
 );
 export type FinalizeResultArtifactUploadResponse = Static<
   typeof FinalizeResultArtifactUploadResponseSchema
+>;
+
+export const TerminateResultArtifactUploadRequestSchema = Type.Composite(
+  [
+    LeaseIdentitySchema,
+    Type.Object(
+      {
+        state: Type.Literal("abandoned"),
+        reason: Type.Literal("client_abandoned"),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  { additionalProperties: false },
+);
+export type TerminateResultArtifactUploadRequest = Static<
+  typeof TerminateResultArtifactUploadRequestSchema
+>;
+
+export const TerminateResultArtifactUploadResponseSchema = Type.Object(
+  {
+    uploadId: EntityIdSchema,
+    state: Type.Literal("abandoned"),
+    reason: Type.Literal("client_abandoned"),
+    terminatedAt: DateTimeSchema,
+    replayed: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+export type TerminateResultArtifactUploadResponse = Static<
+  typeof TerminateResultArtifactUploadResponseSchema
 >;

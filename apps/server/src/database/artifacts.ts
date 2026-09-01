@@ -3,10 +3,13 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   type CommittedRunArtifact,
   type CreateResultArtifactUploadRequest,
+  type CreateResultArtifactUploadResponse,
   maximumResultArtifactBytes,
   maximumResultArtifactChunkBytes,
   maximumResultArtifactChunks,
+  type ResultArtifactChunkResponse,
   type ResultArtifactUploadState,
+  type TerminateResultArtifactUploadResponse,
 } from "@agentic-review/contracts";
 import { ArtifactUploadConflictError, LeaseLostError } from "./errors.js";
 
@@ -17,15 +20,7 @@ type ArtifactLeaseIdentity = Pick<
 
 export type CreateArtifactUploadInput = CreateResultArtifactUploadRequest;
 
-export interface CreateArtifactUploadResult {
-  readonly uploadId: string;
-  readonly state: ResultArtifactUploadState;
-  readonly replayed: boolean;
-  readonly nextChunkIndex: number;
-  readonly nextOffsetBytes: number;
-  readonly maximumChunkBytes: typeof maximumResultArtifactChunkBytes;
-  readonly maximumChunkCount: typeof maximumResultArtifactChunks;
-}
+export type CreateArtifactUploadResult = CreateResultArtifactUploadResponse;
 
 interface ArtifactChunkMetadata {
   readonly chunkIndex: number;
@@ -53,14 +48,38 @@ export interface CommitArtifactChunkInput extends PrepareArtifactChunkInput {
   readonly prepareId: string;
 }
 
-export interface CommitArtifactChunkResult {
+interface CommitArtifactChunkResultFields {
   readonly uploadId: string;
   readonly prepareId: string;
   readonly chunkIndex: number;
-  readonly outcome: "accepted" | "replayed";
   readonly nextChunkIndex: number;
   readonly nextOffsetBytes: number;
 }
+
+export type CommitArtifactChunkResult =
+  | (CommitArtifactChunkResultFields & {
+      readonly state: "receiving";
+      readonly outcome: "accepted";
+    })
+  | (CommitArtifactChunkResultFields & {
+      readonly state: "receiving" | "finalizing" | "committed";
+      readonly outcome: "replayed";
+    });
+
+export const toResultArtifactChunkResponse = (
+  result: CommitArtifactChunkResult,
+): ResultArtifactChunkResponse => {
+  const response = {
+    uploadId: result.uploadId,
+    chunkIndex: result.chunkIndex,
+    nextChunkIndex: result.nextChunkIndex,
+    nextOffsetBytes: result.nextOffsetBytes,
+  };
+  if (result.outcome === "accepted") {
+    return { ...response, state: "receiving", outcome: "accepted" };
+  }
+  return { ...response, state: result.state, outcome: "replayed" };
+};
 
 interface ArtifactFinalizeMetadata {
   readonly chunkCount: number;
@@ -107,6 +126,23 @@ export interface TerminateArtifactUploadResult {
   readonly terminatedAt: string;
   readonly replayed: boolean;
 }
+
+export const toTerminateResultArtifactUploadResponse = (
+  result: TerminateArtifactUploadResult,
+): TerminateResultArtifactUploadResponse => {
+  if (result.state !== "abandoned" || result.reason !== "client_abandoned") {
+    throw new TypeError(
+      "Only client-abandoned artifact upload terminations can be returned to a Worker.",
+    );
+  }
+  return {
+    uploadId: result.uploadId,
+    state: "abandoned",
+    reason: "client_abandoned",
+    terminatedAt: result.terminatedAt,
+    replayed: result.replayed,
+  };
+};
 
 interface ActiveLeaseRow {
   readonly job_id: string;
@@ -210,7 +246,7 @@ export const createArtifactUpload = (
       if (!matchesCreateMetadata(existing, input)) {
         throw new ArtifactUploadConflictError();
       }
-      return createUploadResult(existing, true);
+      return createUploadReplayResult(existing);
     }
 
     const liveResult = database
@@ -267,7 +303,7 @@ export const createArtifactUpload = (
       );
 
     const created = requireUpload(database, uploadId);
-    return createUploadResult(created, false);
+    return createNewUploadResult(created);
   });
 
 export const prepareArtifactChunk = (
@@ -385,7 +421,7 @@ export const commitArtifactChunk = (
           "The committed artifact chunk belongs to a terminated upload.",
         );
       }
-      return commitChunkResult(upload, receipt, true);
+      return commitChunkReplayResult(upload, receipt);
     }
     if (
       upload.status !== "receiving" ||
@@ -434,6 +470,7 @@ export const commitArtifactChunk = (
     return {
       uploadId: upload.id,
       prepareId: receipt.prepare_id,
+      state: "receiving",
       chunkIndex: receipt.chunk_index,
       outcome: "accepted",
       nextChunkIndex,
@@ -832,19 +869,50 @@ function requireRunArtifact(
   };
 }
 
-function createUploadResult(
-  upload: ArtifactUploadRow,
-  replayed: boolean,
-): CreateArtifactUploadResult {
+function createNewUploadResult(upload: ArtifactUploadRow): CreateArtifactUploadResult {
+  if (
+    upload.status !== "receiving" ||
+    upload.next_chunk_index !== 0 ||
+    upload.received_bytes !== 0
+  ) {
+    throw new ArtifactUploadConflictError(
+      "A newly created artifact upload has invalid initial state.",
+    );
+  }
   return {
     uploadId: upload.id,
-    state: upload.status,
-    replayed,
+    state: "receiving",
+    replayed: false,
+    nextChunkIndex: 0,
+    nextOffsetBytes: 0,
+    maximumChunkBytes: maximumResultArtifactChunkBytes,
+    maximumChunkCount: maximumResultArtifactChunks,
+  };
+}
+
+function createUploadReplayResult(upload: ArtifactUploadRow): CreateArtifactUploadResult {
+  const replay = {
+    uploadId: upload.id,
+    replayed: true as const,
     nextChunkIndex: upload.next_chunk_index,
     nextOffsetBytes: upload.received_bytes,
     maximumChunkBytes: maximumResultArtifactChunkBytes,
     maximumChunkCount: maximumResultArtifactChunks,
   };
+  if (upload.status === "abandoned" || upload.status === "corrupt") {
+    if (upload.termination_reason === null || upload.terminated_at === null) {
+      throw new ArtifactUploadConflictError(
+        "The terminal artifact upload has incomplete termination state.",
+      );
+    }
+    return {
+      ...replay,
+      state: upload.status,
+      reason: upload.termination_reason,
+      terminatedAt: upload.terminated_at,
+    };
+  }
+  return { ...replay, state: upload.status };
 }
 
 function prepareChunkResult(
@@ -868,11 +936,19 @@ function prepareChunkResult(
   };
 }
 
-function commitChunkResult(
+function commitChunkReplayResult(
   upload: ArtifactUploadRow,
   receipt: ArtifactChunkRow,
-  replayed: boolean,
 ): CommitArtifactChunkResult {
+  if (
+    upload.status !== "receiving" &&
+    upload.status !== "finalizing" &&
+    upload.status !== "committed"
+  ) {
+    throw new ArtifactUploadConflictError(
+      "The committed artifact chunk belongs to a terminated upload.",
+    );
+  }
   if (
     upload.next_chunk_index < receipt.chunk_index + 1 ||
     upload.received_bytes < receipt.offset_bytes + receipt.chunk_bytes
@@ -884,8 +960,9 @@ function commitChunkResult(
   return {
     uploadId: upload.id,
     prepareId: receipt.prepare_id,
+    state: upload.status,
     chunkIndex: receipt.chunk_index,
-    outcome: replayed ? "replayed" : "accepted",
+    outcome: "replayed",
     nextChunkIndex: upload.next_chunk_index,
     nextOffsetBytes: upload.received_bytes,
   };

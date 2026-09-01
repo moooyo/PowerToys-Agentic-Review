@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { isCanonicalResultArtifactChunkData } from "@agentic-review/contracts";
+import {
+  CreateResultArtifactUploadResponseSchema,
+  isCanonicalResultArtifactChunkData,
+  ResultArtifactChunkResponseSchema,
+  TerminateResultArtifactUploadRequestSchema,
+  TerminateResultArtifactUploadResponseSchema,
+} from "@agentic-review/contracts";
+import { FormatRegistry } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   commitArtifactChunk,
@@ -13,12 +21,23 @@ import {
   prepareArtifactChunk,
   prepareArtifactFinalize,
   terminateArtifactUpload,
+  toResultArtifactChunkResponse,
+  toTerminateResultArtifactUploadResponse,
 } from "../../dist/database/artifacts.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
 const leaseToken = "artifact-test-lease-token".padEnd(32, "x");
 const clientArtifactId = "12345678-1234-4123-8123-123456789abc";
+
+if (!FormatRegistry.Has("date-time")) {
+  FormatRegistry.Set(
+    "date-time",
+    (value) =>
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+      Number.isFinite(Date.parse(value)),
+  );
+}
 
 interface Fixture {
   readonly database: DatabaseSync;
@@ -164,6 +183,52 @@ describe("result artifact database state machine", () => {
     expect(isCanonicalResultArtifactChunkData("Zg==")).toBe(false);
   });
 
+  it("limits public artifact states and termination authority", () => {
+    const chunkResponse = {
+      uploadId: "upload-id",
+      state: "finalizing",
+      chunkIndex: 0,
+      outcome: "replayed",
+      nextChunkIndex: 1,
+      nextOffsetBytes: 2,
+    };
+    expect(Value.Check(ResultArtifactChunkResponseSchema, chunkResponse)).toBe(true);
+    expect(
+      Value.Check(ResultArtifactChunkResponseSchema, { ...chunkResponse, state: "committed" }),
+    ).toBe(true);
+    expect(
+      Value.Check(ResultArtifactChunkResponseSchema, {
+        ...chunkResponse,
+        state: "receiving",
+        outcome: "accepted",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(ResultArtifactChunkResponseSchema, {
+        ...chunkResponse,
+        state: "committed",
+        outcome: "accepted",
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(ResultArtifactChunkResponseSchema, { ...chunkResponse, state: "corrupt" }),
+    ).toBe(false);
+
+    const termination = {
+      ...identity,
+      state: "abandoned",
+      reason: "client_abandoned",
+    };
+    expect(Value.Check(TerminateResultArtifactUploadRequestSchema, termination)).toBe(true);
+    expect(
+      Value.Check(TerminateResultArtifactUploadRequestSchema, {
+        ...termination,
+        state: "corrupt",
+        reason: "staging_digest_mismatch",
+      }),
+    ).toBe(false);
+  });
+
   it("replays one create identity and rejects changed immutable metadata", async () => {
     const { database } = await openFixture();
     const result = Buffer.from('{"summary":"ok"}', "utf8");
@@ -182,6 +247,20 @@ describe("result artifact database state machine", () => {
 
     expect(created.replayed).toBe(false);
     expect(replay).toEqual({ ...created, replayed: true });
+    expect(Value.Check(CreateResultArtifactUploadResponseSchema, created)).toBe(true);
+    expect(Value.Check(CreateResultArtifactUploadResponseSchema, replay)).toBe(true);
+    expect(
+      Value.Check(CreateResultArtifactUploadResponseSchema, {
+        ...created,
+        nextChunkIndex: 1,
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(CreateResultArtifactUploadResponseSchema, {
+        ...created,
+        state: "finalizing",
+      }),
+    ).toBe(false);
     expect(
       database.prepare("SELECT COUNT(*) AS count FROM artifact_uploads").get() as { count: number },
     ).toEqual({ count: 1 });
@@ -232,11 +311,63 @@ describe("result artifact database state machine", () => {
       prepareId: prepared.prepareId,
     });
     expect(committed).toMatchObject({
+      state: "receiving",
       outcome: "accepted",
       nextChunkIndex: 1,
       nextOffsetBytes: firstBytes.byteLength,
     });
+    expect(Value.Check(ResultArtifactChunkResponseSchema, committed)).toBe(false);
+    const publicResponse = toResultArtifactChunkResponse(committed);
+    expect(Value.Check(ResultArtifactChunkResponseSchema, publicResponse)).toBe(true);
+    expect(publicResponse).not.toHaveProperty("prepareId");
     expect(committedReplay).toEqual({ ...committed, outcome: "replayed" });
+  });
+
+  it("returns the global upload cursor when an older committed chunk is replayed", async () => {
+    const { database } = await openFixture();
+    const result = Buffer.from('{"summary":"two chunks"}', "utf8");
+    const upload = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    });
+    const firstBytes = result.subarray(0, 5);
+    const firstChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: firstBytes.byteLength,
+      chunkSha256: sha256(firstBytes),
+    };
+    const firstReceipt = prepareArtifactChunk(database, firstChunk);
+    commitArtifactChunk(database, { ...firstChunk, prepareId: firstReceipt.prepareId });
+
+    const secondBytes = result.subarray(firstBytes.byteLength);
+    const secondChunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 1,
+      offsetBytes: firstBytes.byteLength,
+      chunkBytes: secondBytes.byteLength,
+      chunkSha256: sha256(secondBytes),
+    };
+    const secondReceipt = prepareArtifactChunk(database, secondChunk);
+    commitArtifactChunk(database, { ...secondChunk, prepareId: secondReceipt.prepareId });
+
+    expect(
+      commitArtifactChunk(database, { ...firstChunk, prepareId: firstReceipt.prepareId }),
+    ).toMatchObject({
+      state: "receiving",
+      outcome: "replayed",
+      chunkIndex: 0,
+      nextChunkIndex: 2,
+      nextOffsetBytes: result.byteLength,
+    });
   });
 
   it("prepares and commits finalization only after all chunk receipts are committed", async () => {
@@ -273,6 +404,14 @@ describe("result artifact database state machine", () => {
 
     const prepared = prepareArtifactFinalize(database, finalize);
     expect(prepareArtifactFinalize(database, finalize)).toEqual({ ...prepared, replayed: true });
+    const finalizingChunkReplay = commitArtifactChunk(database, {
+      ...chunk,
+      prepareId: preparedChunk.prepareId,
+    });
+    expect(finalizingChunkReplay).toMatchObject({ state: "finalizing", outcome: "replayed" });
+    const finalizingChunkResponse = toResultArtifactChunkResponse(finalizingChunkReplay);
+    expect(Value.Check(ResultArtifactChunkResponseSchema, finalizingChunkResponse)).toBe(true);
+    expect(finalizingChunkResponse).not.toHaveProperty("prepareId");
     const committed = commitArtifactFinalize(database, {
       ...finalize,
       finalizationId: prepared.finalizationId,
@@ -295,6 +434,14 @@ describe("result artifact database state machine", () => {
         storageObjectKey: prepared.storageObjectKey,
       }),
     ).toEqual({ ...committed, replayed: true });
+    const committedChunkReplay = commitArtifactChunk(database, {
+      ...chunk,
+      prepareId: preparedChunk.prepareId,
+    });
+    expect(committedChunkReplay).toMatchObject({ state: "committed", outcome: "replayed" });
+    const committedChunkResponse = toResultArtifactChunkResponse(committedChunkReplay);
+    expect(Value.Check(ResultArtifactChunkResponseSchema, committedChunkResponse)).toBe(true);
+    expect(committedChunkResponse).not.toHaveProperty("prepareId");
     expect(() => database.prepare("UPDATE run_artifacts SET name = 'changed.json'").run()).toThrow(
       /run artifacts are immutable/u,
     );
@@ -413,7 +560,7 @@ describe("result artifact database state machine", () => {
   it("terminates an active upload idempotently and rejects a changed disposition", async () => {
     const { database } = await openFixture();
     const result = Buffer.from("{}", "utf8");
-    const upload = createArtifactUpload(database, {
+    const createInput = {
       ...identity,
       clientArtifactId,
       purpose: "result",
@@ -421,7 +568,18 @@ describe("result artifact database state machine", () => {
       mediaType: "application/json",
       totalBytes: result.byteLength,
       sha256: sha256(result),
-    });
+    } as const;
+    const upload = createArtifactUpload(database, createInput);
+    const chunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: result.byteLength,
+      chunkSha256: sha256(result),
+    };
+    const chunkReceipt = prepareArtifactChunk(database, chunk);
+    commitArtifactChunk(database, { ...chunk, prepareId: chunkReceipt.prepareId });
     const termination = {
       ...identity,
       uploadId: upload.uploadId,
@@ -436,7 +594,51 @@ describe("result artifact database state machine", () => {
       reason: "client_abandoned",
       replayed: false,
     });
-    expect(terminateArtifactUpload(database, termination)).toEqual({ ...first, replayed: true });
+    const firstWithInternalField = { ...first, internalOnly: true };
+    expect(Value.Check(TerminateResultArtifactUploadResponseSchema, firstWithInternalField)).toBe(
+      false,
+    );
+    const firstResponse = toTerminateResultArtifactUploadResponse(firstWithInternalField);
+    expect(Value.Check(TerminateResultArtifactUploadResponseSchema, firstResponse)).toBe(true);
+    expect(firstResponse).not.toHaveProperty("internalOnly");
+    const terminationReplay = terminateArtifactUpload(database, termination);
+    expect(terminationReplay).toEqual({ ...first, replayed: true });
+    const replayResponse = toTerminateResultArtifactUploadResponse(terminationReplay);
+    expect(Value.Check(TerminateResultArtifactUploadResponseSchema, replayResponse)).toBe(true);
+    const createReplay = createArtifactUpload(database, createInput);
+    expect(createReplay).toMatchObject({
+      uploadId: upload.uploadId,
+      state: "abandoned",
+      replayed: true,
+      reason: first.reason,
+      terminatedAt: first.terminatedAt,
+    });
+    expect(Value.Check(CreateResultArtifactUploadResponseSchema, createReplay)).toBe(true);
+    expect(
+      Value.Check(CreateResultArtifactUploadResponseSchema, {
+        uploadId: createReplay.uploadId,
+        state: "abandoned",
+        replayed: true,
+        nextChunkIndex: createReplay.nextChunkIndex,
+        nextOffsetBytes: createReplay.nextOffsetBytes,
+        maximumChunkBytes: createReplay.maximumChunkBytes,
+        maximumChunkCount: createReplay.maximumChunkCount,
+      }),
+    ).toBe(false);
+    const invalidDateTimeResponse = toTerminateResultArtifactUploadResponse({
+      ...first,
+      terminatedAt: "not-a-date-time",
+    });
+    expect(
+      Value.Check(TerminateResultArtifactUploadResponseSchema, invalidDateTimeResponse),
+    ).toBe(false);
+    expect(() =>
+      toTerminateResultArtifactUploadResponse({ ...first, reason: "lease_expired" }),
+    ).toThrow(/client-abandoned/u);
+    expect(() => prepareArtifactChunk(database, chunk)).toThrow(/terminated upload/u);
+    expect(() =>
+      commitArtifactChunk(database, { ...chunk, prepareId: chunkReceipt.prepareId }),
+    ).toThrow(/terminated upload/u);
     expect(() =>
       terminateArtifactUpload(database, {
         ...termination,
@@ -477,14 +679,28 @@ describe("result artifact database state machine", () => {
       sha256: sha256(result),
     };
     const preparedFinalize = prepareArtifactFinalize(database, finalize);
-    expect(
-      terminateArtifactUpload(database, {
-        ...identity,
-        uploadId: upload.uploadId,
-        state: "corrupt",
-        reason: "published_object_missing",
-      }),
-    ).toMatchObject({ state: "corrupt", replayed: false });
+    const corruptTermination = terminateArtifactUpload(database, {
+      ...identity,
+      uploadId: upload.uploadId,
+      state: "corrupt",
+      reason: "published_object_missing",
+    });
+    expect(corruptTermination).toMatchObject({ state: "corrupt", replayed: false });
+    expect(() => toTerminateResultArtifactUploadResponse(corruptTermination)).toThrow(
+      /client-abandoned/u,
+    );
+    expect(() => prepareArtifactChunk(database, chunk)).toThrow(/terminated upload/u);
+    expect(() =>
+      commitArtifactChunk(database, { ...chunk, prepareId: preparedChunk.prepareId }),
+    ).toThrow(/terminated upload/u);
+    const corruptCreateReplay = createArtifactUpload(database, createInput);
+    expect(corruptCreateReplay).toMatchObject({
+      state: "corrupt",
+      replayed: true,
+      reason: corruptTermination.reason,
+      terminatedAt: corruptTermination.terminatedAt,
+    });
+    expect(Value.Check(CreateResultArtifactUploadResponseSchema, corruptCreateReplay)).toBe(true);
 
     const committedUpload = createArtifactUpload(database, {
       ...createInput,
