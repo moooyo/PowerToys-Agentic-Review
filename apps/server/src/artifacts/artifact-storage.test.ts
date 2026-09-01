@@ -17,10 +17,10 @@ import {
   ArtifactStorageIntegrityError,
 } from "../../dist/artifacts/errors.js";
 import type {
+  ArtifactFilesystemCapacity,
   ArtifactStorageDirectoryBinding,
   ArtifactStorageFileHandle,
   ArtifactStorageFileIdentity,
-  ArtifactFilesystemCapacity,
   ArtifactStorageInventory,
   ArtifactStorageLayout,
   ArtifactStorageOpenedFile,

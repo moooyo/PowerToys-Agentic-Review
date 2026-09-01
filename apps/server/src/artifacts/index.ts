@@ -1,8 +1,7 @@
-export { ArtifactStorageClient } from "./artifact-storage-client.js";
 export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
-export { ArtifactStorageClientError } from "./errors.js";
+export { ArtifactStorageClient } from "./artifact-storage-client.js";
 export type { ArtifactStorageClientErrorCode } from "./errors.js";
-export type { ArtifactObjectReadInput } from "./worker-protocol.js";
+export { ArtifactStorageClientError } from "./errors.js";
 export type {
   ArtifactCapacityAdmission,
   ArtifactCapacityEvaluationAccounting,
@@ -19,3 +18,4 @@ export type {
   PreparedArtifactFinalization,
   PublishedArtifactObject,
 } from "./types.js";
+export type { ArtifactObjectReadInput } from "./worker-protocol.js";

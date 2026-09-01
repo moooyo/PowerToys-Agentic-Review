@@ -5,13 +5,13 @@ import {
   ArtifactStorageCapacityError,
   ArtifactStorageIntegrityError,
 } from "../../dist/artifacts/errors.js";
+import type { PreparedArtifactChunk } from "../../dist/artifacts/types.js";
 import {
   artifactStorageProtocolVersion,
   normalizeArtifactStorageOperationInput,
   parseArtifactStorageWorkerRequest,
   serializeArtifactStorageError,
 } from "../../dist/artifacts/worker-protocol.js";
-import type { PreparedArtifactChunk } from "../../dist/artifacts/types.js";
 
 const uploadId = "11111111-1111-4111-8111-111111111111";
 const secondUploadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

@@ -1,22 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { ArtifactStorageKernel } from "./artifact-storage.js";
 import { LinuxArtifactStorageOperations } from "./linux-filesystem.js";
-import {
-  assertArtifactStorageResponseMatchesExpectation,
-  artifactStorageProtocolVersion,
-  createArtifactStorageResponseExpectation,
-  isFatalArtifactStorageOperationError,
-  normalizeArtifactStorageOperationOutput,
-  normalizeArtifactStorageWorkerData,
-  parseArtifactStorageWorkerRequest,
-  serializeArtifactStorageError,
-  serializeArtifactStorageFatalError,
-  type ArtifactStorageWorkerData,
-  type ArtifactStorageWorkerOperation,
-  type ArtifactStorageWorkerOperationMap,
-  type ArtifactStorageWorkerRequest,
-  type ArtifactStorageResponseExpectation,
-} from "./worker-protocol.js";
 import type {
   ArtifactCapacityAdmission,
   ArtifactStorageKernelOptions,
@@ -24,6 +8,22 @@ import type {
   DurableArtifactChunk,
   PublishedArtifactObject,
 } from "./types.js";
+import {
+  type ArtifactStorageResponseExpectation,
+  type ArtifactStorageWorkerData,
+  type ArtifactStorageWorkerOperation,
+  type ArtifactStorageWorkerOperationMap,
+  type ArtifactStorageWorkerRequest,
+  artifactStorageProtocolVersion,
+  assertArtifactStorageResponseMatchesExpectation,
+  createArtifactStorageResponseExpectation,
+  isFatalArtifactStorageOperationError,
+  normalizeArtifactStorageOperationOutput,
+  normalizeArtifactStorageWorkerData,
+  parseArtifactStorageWorkerRequest,
+  serializeArtifactStorageError,
+  serializeArtifactStorageFatalError,
+} from "./worker-protocol.js";
 
 interface ArtifactStorageWorkerPort {
   postMessage(value: unknown): void;

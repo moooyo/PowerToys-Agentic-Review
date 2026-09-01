@@ -1,21 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 import { ArtifactStorageClientError, type ArtifactStorageClientErrorCode } from "./errors.js";
-import {
-  assertArtifactStorageResponseMatchesExpectation,
-  artifactStorageProtocolVersion,
-  createArtifactStorageResponseExpectation,
-  isFatalArtifactStorageOperationError,
-  maximumArtifactStorageRequestId,
-  normalizeArtifactStorageOperationInput,
-  normalizeArtifactStorageWorkerData,
-  parseArtifactStorageWorkerMessage,
-  type ArtifactObjectReadInput,
-  type ArtifactStorageWorkerMessage,
-  type ArtifactStorageWorkerOperation,
-  type ArtifactStorageWorkerOperationMap,
-  type ArtifactStorageResponseExpectation,
-} from "./worker-protocol.js";
 import type {
   ArtifactCapacityAdmission,
   ArtifactCapacityEvaluationInput,
@@ -27,6 +12,21 @@ import type {
   PreparedArtifactFinalization,
   PublishedArtifactObject,
 } from "./types.js";
+import {
+  type ArtifactObjectReadInput,
+  type ArtifactStorageResponseExpectation,
+  type ArtifactStorageWorkerMessage,
+  type ArtifactStorageWorkerOperation,
+  type ArtifactStorageWorkerOperationMap,
+  artifactStorageProtocolVersion,
+  assertArtifactStorageResponseMatchesExpectation,
+  createArtifactStorageResponseExpectation,
+  isFatalArtifactStorageOperationError,
+  maximumArtifactStorageRequestId,
+  normalizeArtifactStorageOperationInput,
+  normalizeArtifactStorageWorkerData,
+  parseArtifactStorageWorkerMessage,
+} from "./worker-protocol.js";
 
 const maximumPendingOperations = 15;
 const maximumClientTimeoutMilliseconds = 600_000;

@@ -29,15 +29,6 @@ import type {
   OperatorSession,
 } from "../security/operator-auth.js";
 import type {
-  CommitGitHubPollingReconciliationInput,
-  CommitGitHubPollingReconciliationResult,
-  WriteGitHubPollingProjectionInput,
-} from "./github-polling-state.js";
-import type {
-  CleanupExpiredOperatorAuthInput,
-  CleanupExpiredOperatorAuthResult,
-} from "./operator-auth.js";
-import type {
   CommitArtifactChunkInput,
   CommitArtifactChunkResult,
   CommitArtifactFinalizeInput,
@@ -52,6 +43,15 @@ import type {
   TerminateArtifactUploadInput,
   TerminateArtifactUploadResult,
 } from "./artifacts.js";
+import type {
+  CommitGitHubPollingReconciliationInput,
+  CommitGitHubPollingReconciliationResult,
+  WriteGitHubPollingProjectionInput,
+} from "./github-polling-state.js";
+import type {
+  CleanupExpiredOperatorAuthInput,
+  CleanupExpiredOperatorAuthResult,
+} from "./operator-auth.js";
 
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;

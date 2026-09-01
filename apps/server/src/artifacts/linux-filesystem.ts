@@ -26,13 +26,13 @@ import {
   requireArtifactSha256,
 } from "./names.js";
 import type {
+  ArtifactFilesystemCapacity,
   ArtifactStorageDirectoryBinding,
   ArtifactStorageFileHandle,
   ArtifactStorageFileIdentity,
   ArtifactStorageFileKind,
-  ArtifactFilesystemCapacity,
-  ArtifactStorageLayout,
   ArtifactStorageInventory,
+  ArtifactStorageLayout,
   ArtifactStorageOpenedFile,
   ArtifactStorageOperations,
   ArtifactStorageShardDirectory,
@@ -52,10 +52,7 @@ const publicationTemporaryPattern = new RegExp(
 );
 const digestEntryPattern = /^[0-9a-f]{64}$/u;
 const shardEntryPattern = /^[0-9a-f]{2}$/u;
-const supportedLocalFilesystemTypes = new Set([
-  0x0000_ef53n,
-  0x5846_5342n,
-]);
+const supportedLocalFilesystemTypes = new Set([0x0000_ef53n, 0x5846_5342n]);
 
 const identityOf = (stats: BigIntStats): ArtifactStorageFileIdentity => ({
   device: stats.dev,
@@ -504,11 +501,7 @@ export class LinuxArtifactStorageOperations implements ArtifactStorageOperations
       if (!shardEntryPattern.test(shardName)) {
         throw integrity("Artifact digest namespace contains an unrecognized shard entry.");
       }
-      const shardPath = joinContainedArtifactPath(
-        layout.rootPath,
-        layout.sha256.path,
-        shardName,
-      );
+      const shardPath = joinContainedArtifactPath(layout.rootPath, layout.sha256.path, shardName);
       const shardStats = readEntry(shardPath);
       if (shardStats === undefined) {
         throw integrity(`Artifact object shard ${shardPath} disappeared during inspection.`);
@@ -937,10 +930,7 @@ export class LinuxArtifactStorageOperations implements ArtifactStorageOperations
       try {
         descriptor = openSync(
           path,
-          accessFlags |
-            constants.O_CREAT |
-            constants.O_EXCL |
-            constants.O_NOFOLLOW,
+          accessFlags | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
           Number(privateFileMode),
         );
         created = true;

@@ -688,9 +688,9 @@ describe("result artifact database state machine", () => {
     expect(() => createArtifactUpload(database, { ...input, name: "changed.json" })).toThrow(
       /different immutable state/u,
     );
-    expect(() =>
-      probeArtifactUploadCreate(database, { ...input, name: "changed.json" }),
-    ).toThrow(/different immutable state/u);
+    expect(() => probeArtifactUploadCreate(database, { ...input, name: "changed.json" })).toThrow(
+      /different immutable state/u,
+    );
   });
 
   it("probes DB-authoritative create accounting without mutating upload identity", async () => {
@@ -798,11 +798,7 @@ describe("result artifact database state machine", () => {
 
   it("saturates create accounting after a fixed active-liability row budget", async () => {
     const { database } = await openFixture();
-    insertSyntheticArtifactHistory(
-      database,
-      maximumArtifactCreateAccountingRows + 1,
-      "receiving",
-    );
+    insertSyntheticArtifactHistory(database, maximumArtifactCreateAccountingRows + 1, "receiving");
     const probe = probeArtifactUploadCreate(database, {
       ...identity,
       clientArtifactId,
@@ -899,11 +895,7 @@ describe("result artifact database state machine", () => {
 
   it("returns an exact create replay before applying new-identity admission limits", async () => {
     const { database } = await openFixture();
-    for (
-      let ordinal = 0;
-      ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
-      ordinal += 1
-    ) {
+    for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
       createAndTerminateUpload(database, ordinal, 1);
     }
     const replayInput = {
@@ -928,55 +920,53 @@ describe("result artifact database state machine", () => {
     ).toThrow(/upload identity quota/u);
   });
 
-  it(
-    "blocks INSERT OR REPLACE on the live-result partial unique without changing quota accounting",
-    async () => {
-      const { database } = await openFixture();
-      const result = Buffer.from("{}", "utf8");
-      const original = createArtifactUpload(database, {
-        ...identity,
-        clientArtifactId,
-        purpose: "result",
-        name: "result.json",
-        mediaType: "application/json",
-        totalBytes: result.byteLength,
-        sha256: sha256(result),
-      });
-      const readRows = () =>
-        database
-          .prepare(`
+  it("blocks INSERT OR REPLACE on the live-result partial unique without changing quota accounting", async () => {
+    const { database } = await openFixture();
+    const result = Buffer.from("{}", "utf8");
+    const original = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    });
+    const readRows = () =>
+      database
+        .prepare(`
             SELECT id, client_artifact_id, expected_total_bytes
             FROM artifact_uploads
             WHERE run_attempt_id = ?
             ORDER BY id
           `)
-          .all(identity.runAttemptId);
-      const readUsage = () =>
-        database
-          .prepare(`
+        .all(identity.runAttemptId);
+    const readUsage = () =>
+      database
+        .prepare(`
             SELECT COUNT(*) AS upload_count, SUM(expected_total_bytes) AS declared_bytes
             FROM artifact_uploads
             WHERE run_attempt_id = ?
           `)
-          .get(identity.runAttemptId);
-      const originalRows = readRows();
-      const originalUsage = readUsage();
-      expect(originalRows).toEqual([
-        {
-          id: original.uploadId,
-          client_artifact_id: clientArtifactId,
-          expected_total_bytes: result.byteLength,
-        },
-      ]);
-      expect(originalUsage).toEqual({
-        upload_count: 1,
-        declared_bytes: result.byteLength,
-      });
+        .get(identity.runAttemptId);
+    const originalRows = readRows();
+    const originalUsage = readUsage();
+    expect(originalRows).toEqual([
+      {
+        id: original.uploadId,
+        client_artifact_id: clientArtifactId,
+        expected_total_bytes: result.byteLength,
+      },
+    ]);
+    expect(originalUsage).toEqual({
+      upload_count: 1,
+      declared_bytes: result.byteLength,
+    });
 
-      const replacementBytes = result.byteLength + 17;
-      expect(() =>
-        database
-          .prepare(`
+    const replacementBytes = result.byteLength + 17;
+    expect(() =>
+      database
+        .prepare(`
             INSERT OR REPLACE INTO artifact_uploads (
               id,
               job_id,
@@ -995,65 +985,62 @@ describe("result artifact database state machine", () => {
               updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'result', ?, 'application/json', ?, ?, 'receiving', ?, ?)
           `)
-          .run(
-            "replacement-upload",
-            identity.jobId,
-            identity.runAttemptId,
-            identity.workerNodeId,
-            identity.workerInstanceId,
-            identity.leaseGeneration,
-            artifactClientId(1),
-            "replacement.json",
-            replacementBytes,
-            sha256("replacement"),
-            "2026-09-01T00:01:00.000Z",
-            "2026-09-01T00:01:00.000Z",
-          ),
-      ).toThrow(/identities and live results cannot be replaced/u);
+        .run(
+          "replacement-upload",
+          identity.jobId,
+          identity.runAttemptId,
+          identity.workerNodeId,
+          identity.workerInstanceId,
+          identity.leaseGeneration,
+          artifactClientId(1),
+          "replacement.json",
+          replacementBytes,
+          sha256("replacement"),
+          "2026-09-01T00:01:00.000Z",
+          "2026-09-01T00:01:00.000Z",
+        ),
+    ).toThrow(/identities and live results cannot be replaced/u);
 
-      expect(readRows()).toEqual(originalRows);
-      expect(readUsage()).toEqual(originalUsage);
-      expect(
-        database.prepare("SELECT id FROM artifact_uploads WHERE id = ?").get("replacement-upload"),
-      ).toBeUndefined();
-    },
-  );
+    expect(readRows()).toEqual(originalRows);
+    expect(readUsage()).toEqual(originalUsage);
+    expect(
+      database.prepare("SELECT id FROM artifact_uploads WHERE id = ?").get("replacement-upload"),
+    ).toBeUndefined();
+  });
 
-  it(
-    "blocks UPDATE OR REPLACE from deleting another attempt's upload or quota charge",
-    async () => {
-      const { database } = await openFixture();
-      addArtifactModeAttempt(database);
-      const victim = createArtifactUpload(database, {
-        ...identity,
-        clientArtifactId,
-        purpose: "result",
-        name: "victim.json",
-        mediaType: "application/json",
-        totalBytes: 2,
-        sha256: sha256("victim"),
-      });
-      const donor = createArtifactUpload(database, {
-        ...artifactModeIdentity,
-        clientArtifactId: artifactClientId(2),
-        purpose: "result",
-        name: "donor.json",
-        mediaType: "application/json",
-        totalBytes: 7,
-        sha256: sha256("donor"),
-      });
-      const readRows = () =>
-        database
-          .prepare(`
+  it("blocks UPDATE OR REPLACE from deleting another attempt's upload or quota charge", async () => {
+    const { database } = await openFixture();
+    addArtifactModeAttempt(database);
+    const victim = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "victim.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("victim"),
+    });
+    const donor = createArtifactUpload(database, {
+      ...artifactModeIdentity,
+      clientArtifactId: artifactClientId(2),
+      purpose: "result",
+      name: "donor.json",
+      mediaType: "application/json",
+      totalBytes: 7,
+      sha256: sha256("donor"),
+    });
+    const readRows = () =>
+      database
+        .prepare(`
             SELECT id, run_attempt_id, client_artifact_id, expected_total_bytes, status
             FROM artifact_uploads
             WHERE id IN (?, ?)
             ORDER BY run_attempt_id
           `)
-          .all(victim.uploadId, donor.uploadId);
-      const readUsage = () =>
-        database
-          .prepare(`
+        .all(victim.uploadId, donor.uploadId);
+    const readUsage = () =>
+      database
+        .prepare(`
             SELECT
               run_attempt_id,
               COUNT(*) AS upload_count,
@@ -1063,105 +1050,93 @@ describe("result artifact database state machine", () => {
             GROUP BY run_attempt_id
             ORDER BY run_attempt_id
           `)
-          .all(identity.runAttemptId, artifactModeIdentity.runAttemptId);
-      const originalRows = readRows();
-      const originalUsage = readUsage();
-      expect(originalRows).toEqual([
-        {
-          id: victim.uploadId,
-          run_attempt_id: identity.runAttemptId,
-          client_artifact_id: clientArtifactId,
-          expected_total_bytes: 2,
-          status: "receiving",
-        },
-        {
-          id: donor.uploadId,
-          run_attempt_id: artifactModeIdentity.runAttemptId,
-          client_artifact_id: artifactClientId(2),
-          expected_total_bytes: 7,
-          status: "receiving",
-        },
-      ]);
-      expect(originalUsage).toEqual([
-        {
-          run_attempt_id: identity.runAttemptId,
-          upload_count: 1,
-          declared_bytes: 2,
-        },
-        {
-          run_attempt_id: artifactModeIdentity.runAttemptId,
-          upload_count: 1,
-          declared_bytes: 7,
-        },
-      ]);
-      expect(
-        database.prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks").get(),
-      ).toEqual({ count: 0 });
+        .all(identity.runAttemptId, artifactModeIdentity.runAttemptId);
+    const originalRows = readRows();
+    const originalUsage = readUsage();
+    expect(originalRows).toEqual([
+      {
+        id: victim.uploadId,
+        run_attempt_id: identity.runAttemptId,
+        client_artifact_id: clientArtifactId,
+        expected_total_bytes: 2,
+        status: "receiving",
+      },
+      {
+        id: donor.uploadId,
+        run_attempt_id: artifactModeIdentity.runAttemptId,
+        client_artifact_id: artifactClientId(2),
+        expected_total_bytes: 7,
+        status: "receiving",
+      },
+    ]);
+    expect(originalUsage).toEqual([
+      {
+        run_attempt_id: identity.runAttemptId,
+        upload_count: 1,
+        declared_bytes: 2,
+      },
+      {
+        run_attempt_id: artifactModeIdentity.runAttemptId,
+        upload_count: 1,
+        declared_bytes: 7,
+      },
+    ]);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks").get()).toEqual({
+      count: 0,
+    });
 
-      expect(() =>
-        database
-          .prepare("UPDATE OR REPLACE artifact_uploads SET id = ? WHERE id = ?")
-          .run(victim.uploadId, donor.uploadId),
-      ).toThrow(/artifact upload primary keys are immutable/u);
+    expect(() =>
+      database
+        .prepare("UPDATE OR REPLACE artifact_uploads SET id = ? WHERE id = ?")
+        .run(victim.uploadId, donor.uploadId),
+    ).toThrow(/artifact upload primary keys are immutable/u);
 
-      expect(readRows()).toEqual(originalRows);
-      expect(readUsage()).toEqual(originalUsage);
-      expect(
-        database.prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks").get(),
-      ).toEqual({ count: 0 });
-    },
-  );
+    expect(readRows()).toEqual(originalRows);
+    expect(readUsage()).toEqual(originalUsage);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifact_upload_chunks").get()).toEqual({
+      count: 0,
+    });
+  });
 
-  it(
-    "charges terminal upload identities permanently and enforces the SQL identity ceiling",
-    async () => {
-      const { database } = await openFixture();
-      expect(maximumResultArtifactUploadIdentitiesPerAttempt).toBe(8);
-      for (
-        let ordinal = 0;
-        ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
-        ordinal += 1
-      ) {
-        createAndTerminateUpload(database, ordinal, 1);
-      }
+  it("charges terminal upload identities permanently and enforces the SQL identity ceiling", async () => {
+    const { database } = await openFixture();
+    expect(maximumResultArtifactUploadIdentitiesPerAttempt).toBe(8);
+    for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
+      createAndTerminateUpload(database, ordinal, 1);
+    }
 
-      const replay = createArtifactUpload(database, {
+    const replay = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId: artifactClientId(7),
+      purpose: "result",
+      name: "result-7.json",
+      mediaType: "application/json",
+      totalBytes: 1,
+      sha256: sha256("artifact-7-1"),
+    });
+    expect(replay).toMatchObject({ state: "abandoned", replayed: true });
+
+    const createNinth = () =>
+      createArtifactUpload(database, {
         ...identity,
-        clientArtifactId: artifactClientId(7),
+        clientArtifactId: artifactClientId(8),
         purpose: "result",
-        name: "result-7.json",
+        name: "result-8.json",
         mediaType: "application/json",
         totalBytes: 1,
-        sha256: sha256("artifact-7-1"),
+        sha256: sha256("artifact-8-1"),
       });
-      expect(replay).toMatchObject({ state: "abandoned", replayed: true });
-
-      const createNinth = () =>
-        createArtifactUpload(database, {
-          ...identity,
-          clientArtifactId: artifactClientId(8),
-          purpose: "result",
-          name: "result-8.json",
-          mediaType: "application/json",
-          totalBytes: 1,
-          sha256: sha256("artifact-8-1"),
-        });
-      expect(createNinth).toThrow(ArtifactUploadQuotaExceededError);
-      expect(createNinth).toThrow(/upload identity quota/u);
-      expect(() => insertRawUpload(database, 8, 1)).toThrow(/identity quota exceeded/u);
-    },
-  );
+    expect(createNinth).toThrow(ArtifactUploadQuotaExceededError);
+    expect(createNinth).toThrow(/upload identity quota/u);
+    expect(() => insertRawUpload(database, 8, 1)).toThrow(/identity quota exceeded/u);
+  });
 
   it("enforces the cumulative declared-byte ceiling in code and SQL", async () => {
     const { database } = await openFixture();
-    expect(
-      maximumResultArtifactBytes * maximumResultArtifactUploadIdentitiesPerAttempt,
-    ).toBe(maximumDeclaredResultArtifactBytesPerAttempt);
-    for (
-      let ordinal = 0;
-      ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
-      ordinal += 1
-    ) {
+    expect(maximumResultArtifactBytes * maximumResultArtifactUploadIdentitiesPerAttempt).toBe(
+      maximumDeclaredResultArtifactBytesPerAttempt,
+    );
+    for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
       createAndTerminateUpload(database, ordinal, maximumResultArtifactBytes);
     }
 
@@ -1705,9 +1680,9 @@ describe("result artifact database state machine", () => {
       ...first,
       terminatedAt: "not-a-date-time",
     });
-    expect(
-      Value.Check(TerminateResultArtifactUploadResponseSchema, invalidDateTimeResponse),
-    ).toBe(false);
+    expect(Value.Check(TerminateResultArtifactUploadResponseSchema, invalidDateTimeResponse)).toBe(
+      false,
+    );
     expect(() =>
       toTerminateResultArtifactUploadResponse({ ...first, reason: "lease_expired" }),
     ).toThrow(/client-abandoned/u);

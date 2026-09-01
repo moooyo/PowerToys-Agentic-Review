@@ -720,35 +720,32 @@ describe("DatabaseClient lease integration", () => {
     }
   });
 
-  it(
-    "keeps artifact completion unreachable while normal claims intentionally default to inline v1",
-    async () => {
-      const fixture = await createFixture();
-      const worker = await registerWorker(
-        fixture.client,
-        "worker-inline-rollout-gate",
-        "instance-inline-rollout-gate",
-      );
-      const claim = await claimLease(
-        fixture.client,
-        "worker-inline-rollout-gate",
-        "instance-inline-rollout-gate",
-        worker.capabilitiesDigest,
-      );
-      if (claim.outcome !== "granted") {
-        throw new Error("Expected the inline rollout-gate fixture to receive a lease.");
-      }
+  it("keeps artifact completion unreachable while normal claims intentionally default to inline v1", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-inline-rollout-gate",
+      "instance-inline-rollout-gate",
+    );
+    const claim = await claimLease(
+      fixture.client,
+      "worker-inline-rollout-gate",
+      "instance-inline-rollout-gate",
+      worker.capabilitiesDigest,
+    );
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the inline rollout-gate fixture to receive a lease.");
+    }
 
-      expect(claim.envelope).not.toHaveProperty("completionMode");
-      withFixtureDatabase(fixture, (database) => {
-        expect(
-          database
-            .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
-            .get(claim.envelope.lease.runAttemptId),
-        ).toEqual({ completion_mode: "inline_result_v1" });
-      });
-    },
-  );
+    expect(claim.envelope).not.toHaveProperty("completionMode");
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
+          .get(claim.envelope.lease.runAttemptId),
+      ).toEqual({ completion_mode: "inline_result_v1" });
+    });
+  });
 
   it("maps artifact create probes through the database Worker protocol", async () => {
     const fixture = await createFixture();
@@ -825,11 +822,7 @@ describe("DatabaseClient lease integration", () => {
 
   it("serializes the stable artifact upload quota error across the database protocol", async () => {
     const { client } = await createFixture();
-    const worker = await registerWorker(
-      client,
-      "worker-artifact-quota",
-      "instance-artifact-quota",
-    );
+    const worker = await registerWorker(client, "worker-artifact-quota", "instance-artifact-quota");
     const claim = await claimLease(
       client,
       "worker-artifact-quota",
@@ -840,11 +833,7 @@ describe("DatabaseClient lease integration", () => {
       throw new Error("Expected the artifact quota fixture to receive a lease.");
     }
 
-    for (
-      let ordinal = 0;
-      ordinal < maximumResultArtifactUploadIdentitiesPerAttempt;
-      ordinal += 1
-    ) {
+    for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
       const upload = await client.request("createArtifactUpload", {
         ...claim.envelope.lease,
         clientArtifactId: artifactClientId(ordinal),

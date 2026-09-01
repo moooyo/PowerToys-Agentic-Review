@@ -3,10 +3,10 @@ import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import {
-  attachArtifactStorageClientForTest,
-  ArtifactStorageClient,
+  type ArtifactStorageClient,
   type ArtifactStorageClientOptions,
   type ArtifactStorageWorkerTransport,
+  attachArtifactStorageClientForTest,
 } from "../../dist/artifacts/artifact-storage-client.js";
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import { artifactStorageProtocolVersion } from "../../dist/artifacts/worker-protocol.js";
