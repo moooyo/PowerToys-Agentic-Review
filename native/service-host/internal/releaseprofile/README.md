@@ -35,8 +35,9 @@ copy-returning accessors.
 
 The root release-tag bridge performs an init-time `Production` and `Validate` solely to make a
 missing or corrupt template fatal before `main`. It retains and exports no evidence. The production
-platform must independently call `Production` and consume that result as its sole release-template
-authority when preflight integration is added.
+Windows composition independently calls `Production` as its first authority-loading step and
+consumes that result as its sole release-template authority for installation verification and
+preflight.
 
 An ordinary build includes `compiled_unavailable.go`; `Production` returns `ErrUnavailable`. A
 release build must use the `agenticreview_release` build tag. With that tag, omitting the generated
@@ -144,7 +145,8 @@ external trusted build base.
 The bootstrap signer field is a cross-check, not the signer authority. Installation verification
 must use the signer pin from compiled `Evidence` for every Authenticode decision.
 
-There is not yet a production release pipeline in this repository. The existing
-`deploy/worker/install-worker.ps1` installs the older single-service skeleton, rejects execution,
-and does not create the split bundles, release template, schema-v2 runtime manifest, or signed
-ServiceHost package.
+There is not yet a production release pipeline in this repository. Consequently, the composed
+Windows runtime remains unavailable in ordinary builds because they intentionally contain no
+compiled release template. The existing `deploy/worker/install-worker.ps1` installs the older
+single-service skeleton, rejects execution, and does not create the split bundles, release template,
+schema-v2 runtime manifest, or signed ServiceHost package.

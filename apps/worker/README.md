@@ -22,11 +22,15 @@ Implemented boundaries:
 - Native Go ProcessHost source with Windows Job Object process-tree supervision.
 - Disposable exact-revision workspaces, static Codex execution, strict structured results,
   disk-budget enforcement, deferred cleanup, and immutable installation-manifest contracts.
+- Separate reviewed Control and Executor bundles with strict ServiceHost launch contracts,
+  HostControl bootstrap clients, and bounded ARWX standard-I/O channels.
 
-The default build still uses `PlaceholderJobExecutor` and advertises execution as disabled. This
-milestone rejects `WORKER_EXECUTION_ENABLED=true`; the reviewed executor is intentionally dormant
-until the separate Control/Executor bundles, production ServiceHost composition and Authenticode
-adapter, dual-service installer, and native Windows preflight described by ADR 0007 are complete.
+The legacy single-process build still uses `PlaceholderJobExecutor` and advertises execution as
+disabled. The reviewed Control and Executor bundles currently establish only their zero-execution
+ServiceHost foundations; they do not install business role supervisors or emit ARWX `Ready`. This
+milestone rejects `WORKER_EXECUTION_ENABLED=true` until the zero-slot shadow runtime, production
+release profile, dual-service installer and signing pipeline, and native Windows x64 and arm64
+preflight and attack-test evidence described by ADR 0007 are complete.
 
 ## Role bundle trust boundary
 
@@ -47,6 +51,11 @@ from the same committed bootstrap and ARWX channel can authorize shutdown, and t
 send either final frame or arm shutdown themselves. Before ServiceHost enables either payload, its
 fixed Node launch contract must include `--disallow-code-generation-from-strings` and `--no-addons`;
 neither flag replaces the operating system boundaries above.
+
+The ServiceHost role-local RPC server derives Claim authority only from the exact role configuration
+sealed into that committed bootstrap. Both current role configurations set
+`executionEnabled=false`, so Claim terminates the local RPC session with
+`OPERATION_NOT_ALLOWED` before dispatcher or request resources are acquired.
 
 ## Worker API
 

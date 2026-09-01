@@ -46,12 +46,15 @@ flowchart LR
     O[Operator] -->|OIDC HTTPS| S
     S --> DB[(SQLite)]
     S --> AS[Artifact Store]
-    W1[Windows Worker 1] -->|HTTPS mTLS| S
-    W2[Windows Worker 2] -->|HTTPS mTLS| S
-    WN[Windows Worker N] -->|HTTPS mTLS| S
-    W1 --> C1[Codex CLI]
-    W2 --> C2[Codex CLI]
-    WN --> CN[Codex CLI]
+    W1C[Worker 1 Control] -->|HTTPS mTLS| S
+    W2C[Worker 2 Control] -->|HTTPS mTLS| S
+    WNC[Worker N Control] -->|HTTPS mTLS| S
+    W1C <-->|Signed local grants| W1E[Worker 1 Executor]
+    W2C <-->|Signed local grants| W2E[Worker 2 Executor]
+    WNC <-->|Signed local grants| WNE[Worker N Executor]
+    W1E --> C1[Codex CLI]
+    W2E --> C2[Codex CLI]
+    WNE --> CN[Codex CLI]
     S -->|Checks, comments, reviews| GH
 ```
 
@@ -479,6 +482,12 @@ registration; the server can require a minimum compatible version.
 
 ## 20. Initial Delivery Plan
 
+Phase 1a is the completed authenticated read-only slice. Worker execution enablement and the
+remaining product data path proceed as separate ordered tracks: the Worker track moves from a
+TypeScript zero-slot shadow runtime to release and installation, then native Windows verification;
+the product track moves from result artifacts to immutable diff validation, publication drafts and
+approvals, the GitHub outbox, and Dashboard write actions.
+
 ### Phase 0: Foundation
 
 - Monorepo, contracts, domain state, configuration, and observability.
@@ -487,12 +496,28 @@ registration; the server can require a minimum compatible version.
 - Windows worker service skeleton and ProcessHost protocol boundary.
 - Ant Design Pro shell and core routes.
 
-### Phase 1: Read-Only Review
+### Phase 1a: Authenticated Read-Only Review
 
 - GitHub polling and optional webhook ingestion.
 - Actor authorization and request epochs.
-- Disposable checkout and Codex review-plan execution.
-- Findings, artifacts, job detail, and manual publication approval.
+- Static-review execution components and disposable exact-revision workspaces.
+- Immutable result projections and authenticated read-only Dashboard views.
+
+### Phase 1b: Review Product Data
+
+- Bounded result-artifact upload, storage, integrity, and retention.
+- Immutable server-side diff manifests and finding-location validation.
+- Immutable publication drafts, digest-bound approvals, and audit records.
+
+### Windows Zero-Slot Shadow Runtime
+
+- Install the TypeScript Control and Executor business supervisors behind their existing role
+  entrypoints and complete authenticated handshake, `Ready`, reconnect, drain, and preflight flows.
+- Keep `executionEnabled=false`, advertise zero slots, and reject Claim before dispatcher ownership.
+- Build the production release profile, signed package, and dual-service installer only after the
+  shadow runtime is complete.
+- Run the ADR 0007 native Windows x64 and arm64 verification and attack suite before enabling any
+  Claim authority.
 
 ### Phase 2: Validation and Publication
 
@@ -500,6 +525,7 @@ registration; the server can require a minimum compatible version.
 - Final review synthesis on any worker.
 - GitHub comments, reviews, and optional Check Runs through the outbox.
 - Remote-write reconciliation and failure recovery.
+- Dashboard approval, publication, retry, cancellation, and worker-drain actions.
 
 ### Phase 3: Hardening
 

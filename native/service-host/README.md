@@ -4,8 +4,7 @@
 Control and Executor services. It is a small Go adapter. Scheduling, leases, repository policy,
 prompt construction, result validation, and publication remain in TypeScript.
 
-This directory contains the fail-closed foundation and reviewed, unconnected Windows building
-blocks:
+This directory contains the fail-closed foundation and a composed Windows runtime candidate:
 
 - a strict canonical JSON configuration contract;
 - a canonical dual-root release manifest and typed config-to-manifest binding evidence;
@@ -26,14 +25,20 @@ blocks:
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
 - suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
   pre-resume process and primary-token DACLs, and stable WinSW wrapper observation;
-- platform interfaces and an explicit unavailable production platform factory; and
+- a per-launch HostControl endpoint with bounded overlapped-I/O ownership, cancellation,
+  completion publication, cleanup, and fatal-operation quarantine;
+- a sealed zero-execution Claim policy derived from the committed runtime bootstrap;
+- a Windows platform factory that composes the verified startup, relay, supervision, and cleanup
+  chain, plus an explicitly unavailable non-Windows factory; and
 - pure Go tests for those contracts.
 
-The same-handle SCM wrapper/launch adapter, ServiceHost and wrapper process/token DACL bootstrap
-with readback, concrete config/manifest composition, role-specific RPC dispatchers, and final
-platform orchestration are not implemented yet. Both the Windows and non-Windows production
-platform factories therefore return an error. This binary cannot launch a Worker payload and must
-not be used to enable production execution.
+The Windows factory now composes release authority, secure service bootstrap, current-image and
+installation verification, role-owned data roots, role credentials, preflight, peer verification,
+runtime bootstrap, guarded Node launch, HostControl, role-specific RPC, ARWX relay, lifecycle
+supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
+release profile and fail closed before using installed configuration. The current TypeScript role
+payloads also remain zero-execution foundations that emit no ARWX `Ready`, so this source must not
+be used to enable production execution. The non-Windows production factory remains unavailable.
 
 ## Command line
 
@@ -45,8 +50,8 @@ AgenticReview.ServiceHost.exe --version
 ```
 
 `--config=<path>` is also accepted. Positional arguments, single-dash options, repeated options,
-environment overrides, and child-process arguments are rejected. The eventual Windows adapter will
-construct the Node command line itself from the pinned executable and bundle fields.
+environment overrides, and child-process arguments are rejected. The Windows adapter constructs the
+Node command line itself from the pinned executable and bundle fields.
 
 ## Configuration
 
@@ -149,9 +154,11 @@ signer-pin rotation process must perform online code-signing revocation checks b
 release. Independently, the Server remains the live Worker revocation authority through mTLS and
 can deny a revoked Worker regardless of its locally pinned executable signature.
 
-The Windows build currently rejects every configuration before opening it because the secure reader
-and expected ACL policy have not yet been composed with manifest verification and the production
-platform factory. The ordinary `os.Open` reader exists only for non-Windows contract tests.
+The Windows platform factory is composed, but an ordinary build rejects startup while loading its
+release authority because `compiled_unavailable.go` contains no production release template. A
+release build must receive that template through the controlled release pipeline and build tag; no
+runtime configuration, installed manifest, or environment variable can substitute for it. The
+ordinary `os.Open` reader exists only for non-Windows contract tests.
 
 ## Framing and relay
 

@@ -1,11 +1,12 @@
 # Implementation Status
 
-Status date: 2026-08-31
+Status date: 2026-09-01
 
-The repository currently implements the Phase 0 control-plane foundation, the Phase 1 read-only
-GitHub ingestion and immutable-result vertical slices, the static-review execution components, and
-the first split-service protocol and native-host foundations described in `ARCHITECTURE.md`. It is
-intentionally fail-closed while production Windows composition and native runtime evidence remain
+The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
+authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
+execution components, and the split-service protocol and native Windows composition candidate
+described in `ARCHITECTURE.md`. It remains intentionally fail-closed while the TypeScript role
+business runtimes, release and installer pipeline, and native Windows runtime evidence are
 incomplete.
 
 ## Implemented
@@ -25,7 +26,8 @@ incomplete.
   fingerprint-to-worker-node binding.
 - Remote Windows worker control loop with mTLS, registration, long polling, bounded slots,
   heartbeat commands, monotonic lease watchdogs, drain, and shutdown behavior.
-- WinSW deployment templates and a least-privilege PowerShell installer skeleton.
+- Legacy WinSW deployment templates and a least-privilege, execution-disabled PowerShell installer
+  skeleton.
 - React and Ant Design Pro operations dashboard for work items, jobs, workers, approvals,
   publications, and system health.
 - GitHub webhook HMAC verification, action-specific actor/target normalization, delivery
@@ -82,7 +84,7 @@ incomplete.
   `AbortSignal` reason to the local transport.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
-  shutdown, and explicit unavailable Windows/non-Windows platform adapters.
+  shutdown, a composed Windows platform adapter, and an explicitly unavailable non-Windows adapter.
 - A schema-v2 dual-root release manifest shared by TypeScript and Go, with canonical cross-language
   digests, closed installation and trusted-configuration trees, separately hashed bootstrap
   configurations, strict role/root/content rules, and typed config-binding evidence.
@@ -115,36 +117,54 @@ incomplete.
   rather than caller-assembled prerequisite booleans or credential identity values.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
   before a lease is committed; oversized stored jobs are dead-lettered without creating an attempt.
+- A Windows ServiceHost composition path that connects compiled release authority, secure service
+  bootstrap, installation and role-data verification, role-specific credentials, preflight, peer
+  verification, runtime bootstrap, HostControl, guarded Node launch, role-local RPC, ARWX relay,
+  lifecycle supervision, and bounded cleanup.
+- HostControl I/O ownership that keeps overlapped operations, buffers, events, handles, and terminal
+  publication ordered through cancellation, ambiguous completion, shutdown, and quarantine paths.
+- Claim admission derived only from the role configuration sealed into the committed runtime
+  bootstrap. The current foundation configuration disables execution, so Claim is rejected with a
+  terminal `OPERATION_NOT_ALLOWED` response before dispatcher or request resources are acquired.
 
 ## Deliberately Disabled
 
 - `WORKER_EXECUTION_ENABLED=true` and the installer `-EnableExecution` option are rejected. The
-  execution components are implemented, but production enablement requires the ADR 0007 split
-  Control/Executor services, the Windows portion of `AgenticReview.ServiceHost.exe`, native
-  installation/workspace security adapters, and Windows preflight evidence.
+  native Windows ServiceHost composition is connected, but the Control and Executor TypeScript
+  payloads remain zero-execution foundations that emit no ARWX `Ready`. Production enablement also
+  requires a compiled release profile, split-service packaging and installation, signing, and native
+  Windows preflight and attack-test evidence.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
-  Dashboard therefore exposes the Phase 1 read-only surfaces only.
+  Dashboard therefore exposes the Phase 1a read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
-- The native ProcessHost and ServiceHost sources are present, but signed release binaries and
-  native Windows runtime verification are not part of this milestone. `platform.NewHost()` remains
-  deliberately unavailable until role-owned data-root evidence, final startup ordering, the
-  HostControl Node client, and the concrete Control/Executor process orchestration are connected.
+- The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
+  Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
+  selects the composed runtime. Ordinary builds still contain no compiled production release
+  profile and fail closed before using installed configuration; non-Windows builds remain
+  unavailable.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
 
 ## Next Milestone
 
-The next vertical slice should add role-owned data-root evidence, wire the reviewed primitives behind
-the Windows platform factory, build separate Control and Executor TypeScript bundles, implement the
-HostControl client and concrete local broker/run, and connect Server heartbeat outcomes to signed
-local renewals and synchronous stale fencing. It should first run in zero-slot shadow mode. The
-Control bundle must exclusively own Server lease tokens and fixed-origin mTLS; the Executor bundle
-must exclusively own Codex, Git, workspaces, and execution credentials. The slice must pass native
-Windows token, ACL, Named Pipe, Authenticode, sandbox, Job Object, disk, cancellation, and tamper
-tests before claims are enabled. Bounded artifact upload and immutable diff manifests should follow,
-then publication drafts, digest-bound approvals, GitHub outbox reconciliation, and Dashboard write
-actions. Dynamic validation remains a separate stronger-isolation milestone.
+The next Worker slice should install TypeScript Control and Executor business supervisors behind the
+existing role entrypoints and run them in zero-slot shadow mode. It must complete the authenticated
+local handshake, `Ready` attestation, reconnect, drain, and preflight lifecycle while keeping
+`executionEnabled=false`, advertising zero slots, and preserving the sealed HostControl Claim
+denial. Control must exclusively own Server lease tokens and fixed-origin mTLS; Executor must
+exclusively own Codex, Git, workspaces, and execution credentials.
+
+After that shadow runtime is complete, the release pipeline must compile the production release
+profile, produce signed role bundles and native binaries, and install the two services, identities,
+ACLs, keys, firewall policy, and machine-enforced Codex policy. Native Windows x64 and arm64 hosts
+must then pass the ADR 0007 installation, token, ACL, Named Pipe, Authenticode, sandbox, Job Object,
+disk, cancellation, tamper, restart, and attack tests before any Claim authority is enabled.
+
+The product data path can proceed in parallel in this order: bounded result-artifact upload and
+storage, immutable server-side diff manifests, publication drafts, digest-bound approvals, GitHub
+outbox reconciliation, and Dashboard write actions. Dynamic validation remains a separate
+stronger-isolation milestone.
 
 ## Verification Evidence
 
@@ -152,9 +172,11 @@ The Phase 1a, local-protocol, and fail-closed ServiceHost security-contract cand
 on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive
 checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0 was provided
 through Corepack. No test, build, validation suite, or runtime probe was run on the local Windows
-development machine.
+development machine. The TypeScript counts below are the historical 2026-08-31 snapshot; they have
+not been recomputed for the 2026-09-01 native-only commits.
 
-The following TypeScript commands completed successfully for the combined candidate on 2026-08-31:
+The following TypeScript commands completed successfully for the historical combined candidate on
+2026-08-31:
 
 ```text
 pnpm install --frozen-lockfile
@@ -197,7 +219,8 @@ GOOS=windows GOARCH=amd64 go vet ./...
 GOOS=windows GOARCH=arm64 go vet ./...
 ```
 
-The fail-closed ServiceHost foundation completed these checks with Go 1.26.7 on `test-env`:
+The 2026-08-31 fail-closed ServiceHost foundation completed these checks with Go 1.26.7 on
+`test-env`:
 
 ```text
 go test -count=1 ./...
@@ -210,6 +233,13 @@ GOOS=windows GOARCH=arm64 go test -c <each ServiceHost package>
 GOOS=windows GOARCH=amd64 go vet ./...
 GOOS=windows GOARCH=arm64 go vet ./...
 ```
+
+On 2026-09-01, the ServiceHost candidate through commit `2b8c7d6` completed a fresh remote Debian
+`test-env` Go unit, race, and vet matrix plus Windows amd64 and arm64 package cross-compilation and
+vet checks. That matrix covers the hardened HostControl ownership, sealed zero-execution Claim gate,
+and composed Windows platform source. The Windows checks compiled and analyzed Windows code; they
+did not execute it and are not native Windows runtime security evidence. No new TypeScript test
+count is claimed for this native-only candidate.
 
 Runtime smoke results:
 
@@ -237,8 +267,10 @@ Not yet verified:
   certificate store, secure configuration, peer verification, role-local RPC, and fixed-origin mTLS
   behavior has not been exercised on a native Windows test machine. The production Authenticode and
   installation-verification code has only fake-provider execution plus Windows cross-compilation;
-  real signed PE fixtures and Windows ABI checks remain release gates. Final platform composition is
-  still missing, so the real Codex executor remains disconnected from the production entrypoint.
+  real signed PE fixtures and Windows ABI checks remain release gates. The native platform
+  composition is connected, but the TypeScript role business supervisors still emit no ARWX
+  `Ready`, ordinary builds have no production release profile, and the real Codex executor remains
+  disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has
