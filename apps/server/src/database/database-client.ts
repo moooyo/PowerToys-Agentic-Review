@@ -1,4 +1,8 @@
 import { Worker } from "node:worker_threads";
+import {
+  type ArtifactUploadCreateDatabaseHandle,
+  registerArtifactUploadCreateDatabaseHandle,
+} from "../artifacts/artifact-upload-create-coordinator.js";
 import { DatabaseRequestError } from "./errors.js";
 import type {
   DatabaseOperation,
@@ -38,6 +42,7 @@ export class DatabaseClient {
   #nextRequestId = 1;
   #isReady = false;
   #isClosing = false;
+  #artifactUploadCreateHandleIssued = false;
   #terminalError: Error | undefined;
 
   private constructor(options: DatabaseWorkerOptions) {
@@ -80,17 +85,46 @@ export class DatabaseClient {
     }
   }
 
-  public request<TOperation extends DatabaseOperation>(
+  public request<TOperation extends Exclude<DatabaseOperation, "createArtifactUpload">>(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
+    if ((operation as DatabaseOperation) === "createArtifactUpload") {
+      return Promise.reject(
+        new DatabaseRequestError(
+          "Artifact upload creation requires capacity admission authority.",
+          "ARTIFACT_CREATE_ADMISSION_REQUIRED",
+        ),
+      ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
+    }
     if (this.#isClosing) {
       return Promise.reject(new Error("Database client is closing."));
     }
     return this.#send(operation, input);
   }
 
-  public async close(): Promise<void> {
+  /** Returns an opaque one-shot handle that only ArtifactUploadCreateCoordinator can consume. */
+  public createArtifactUploadCreateDatabaseHandle(): ArtifactUploadCreateDatabaseHandle {
+    if (this.#isClosing || this.#terminalError !== undefined) {
+      throw new Error("Database client is not available for artifact create adoption.");
+    }
+    if (this.#artifactUploadCreateHandleIssued) {
+      throw new Error("Database client artifact create handle was already issued.");
+    }
+    const handle = registerArtifactUploadCreateDatabaseHandle(this, {
+      probeArtifactUploadCreate: (input) => this.#send("probeArtifactUploadCreate", input),
+      createArtifactUpload: (input) => this.#send("createArtifactUpload", input),
+      close: () => this.#closeDatabaseOwner(),
+    });
+    this.#artifactUploadCreateHandleIssued = true;
+    return handle;
+  }
+
+  public close(): Promise<void> {
+    return this.#closeDatabaseOwner();
+  }
+
+  async #closeDatabaseOwner(): Promise<void> {
     if (this.#isClosing) {
       await this.#exited;
       return;

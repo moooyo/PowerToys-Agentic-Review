@@ -1,5 +1,16 @@
 export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
 export { ArtifactStorageClient } from "./artifact-storage-client.js";
+export type {
+  ArtifactUploadCreateCoordinatorErrorCode,
+  ArtifactUploadCreateCoordinatorOptions,
+  ArtifactUploadCreateDatabaseHandle,
+  ArtifactUploadCreateOwnerLock,
+  ArtifactUploadCreateStorageOwner,
+} from "./artifact-upload-create-coordinator.js";
+export {
+  ArtifactUploadCreateCoordinator,
+  ArtifactUploadCreateCoordinatorError,
+} from "./artifact-upload-create-coordinator.js";
 export type { ArtifactStorageClientErrorCode } from "./errors.js";
 export { ArtifactStorageClientError } from "./errors.js";
 export type {

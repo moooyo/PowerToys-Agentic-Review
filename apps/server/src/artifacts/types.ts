@@ -228,10 +228,10 @@ export interface ArtifactCapacityExpectedByteSizeBucket {
 }
 
 /**
- * Pure data returned by the database admission probe. Only receiving and finalizing uploads are
- * represented here; terminal uploads are represented by cleanupBacklogEntries and physical
- * storage inventory. The storage Worker derives reservation bytes using its filesystem allocation
- * unit, which must not be guessed by the parent process.
+ * Pure data returned by the database admission probe. The bounded buckets cover receiving and
+ * finalizing uploads plus terminal uploads whose cleanup liability remains unresolved. Physical
+ * inventory and cleanupBacklogEntries independently fail closed around materialized files and
+ * cleanup pressure. The Worker derives reservation bytes using its filesystem allocation unit.
  */
 export interface ArtifactCapacityEvaluationAccounting {
   readonly accountingCertain: boolean;

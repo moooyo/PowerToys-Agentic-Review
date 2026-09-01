@@ -16,6 +16,15 @@ import {
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  ArtifactUploadCreateCoordinator,
+  type ArtifactUploadCreateDatabaseHandle,
+} from "../../dist/artifacts/artifact-upload-create-coordinator.js";
+import type {
+  ArtifactCapacityAdmission,
+  ArtifactCapacityEvaluationInput,
+  ArtifactCapacityLimits,
+} from "../../dist/artifacts/types.js";
 import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
@@ -43,6 +52,63 @@ const workerCapabilities = {
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 const artifactClientId = (ordinal: number): string =>
   `10000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+
+const artifactStorageCapacity: ArtifactCapacityLimits = {
+  hardBytes: 1_000_000_000n,
+  hardEntries: 100_000,
+  emergencyReserveBytes: 1_000n,
+  perUploadMetadataHeadroomBytes: 0n,
+  cleanupBacklogHighWaterEntries: 4_096,
+};
+
+const capacityAdmission = (input: ArtifactCapacityEvaluationInput): ArtifactCapacityAdmission => {
+  const requiredBytes = BigInt(input.request.expectedTotalBytes) * 2n;
+  const outstandingReservationBytes = input.accounting.liveUploadExpectedByteSizeBuckets.reduce(
+    (total, bucket) => total + BigInt(bucket.expectedTotalBytes) * 2n * BigInt(bucket.uploadCount),
+    0n,
+  );
+  const outstandingReservationEntries = input.accounting.liveUploadCount * 4;
+  const filesystemAvailableBytes = 1_000_000_000n;
+  return {
+    requiredBytes,
+    requiredEntries: 4,
+    physicalAllocatedBytes: 0n,
+    physicalEntries: 0,
+    outstandingReservationBytes,
+    outstandingReservationEntries,
+    filesystemAvailableBytes,
+    filesystemAvailableAfterReservationsBytes:
+      filesystemAvailableBytes - outstandingReservationBytes,
+    filesystemAllocationUnitBytes: 1n,
+    projectedChargedBytes: outstandingReservationBytes + requiredBytes,
+    projectedChargedEntries: outstandingReservationEntries + 4,
+  };
+};
+
+const createArtifactCoordinator = (
+  client: DatabaseClient,
+  database: ArtifactUploadCreateDatabaseHandle = client.createArtifactUploadCreateDatabaseHandle(),
+): ArtifactUploadCreateCoordinator => {
+  const ownerExit = Promise.withResolvers<number>();
+  return ArtifactUploadCreateCoordinator.start({
+    database,
+    storage: {
+      ownerExit: ownerExit.promise,
+      evaluateCapacity: (input) => Promise.resolve(capacityAdmission(input)),
+      close: () => {
+        ownerExit.resolve(0);
+        return Promise.resolve();
+      },
+    },
+    storageCapacity: artifactStorageCapacity,
+    databaseOwnerLock: { close: () => Promise.resolve() },
+    requestTimeoutMilliseconds: 5_000,
+    closeTimeoutMilliseconds: 5_000,
+    storageJoinTimeoutMilliseconds: 5_000,
+    maximumPendingCreates: 16,
+    onFailStop: () => undefined,
+  });
+};
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
@@ -891,7 +957,20 @@ describe("DatabaseClient lease integration", () => {
         cleanupBacklogEntries: 0,
       },
     });
-    const created = await fixture.client.request("createArtifactUpload", input);
+    const bareCreate = Reflect.apply(fixture.client.request, fixture.client, [
+      "createArtifactUpload",
+      input,
+    ]) as Promise<unknown>;
+    await expect(bareCreate).rejects.toMatchObject({
+      code: "ARTIFACT_CREATE_ADMISSION_REQUIRED",
+    });
+    const databaseHandle = fixture.client.createArtifactUploadCreateDatabaseHandle();
+    expect(Reflect.ownKeys(databaseHandle)).toEqual([]);
+    expect(() => fixture.client.createArtifactUploadCreateDatabaseHandle()).toThrow(
+      /already issued/u,
+    );
+    const coordinator = createArtifactCoordinator(fixture.client, databaseHandle);
+    const created = await coordinator.createArtifactUpload(input);
     const chunk = {
       ...artifactLease,
       uploadId: created.uploadId,
@@ -927,6 +1006,7 @@ describe("DatabaseClient lease integration", () => {
         nextOffsetBytes: 2,
       },
     });
+    await coordinator.close();
   });
 
   it("serializes the stable artifact upload quota error across the database protocol", async () => {
@@ -943,9 +1023,10 @@ describe("DatabaseClient lease integration", () => {
       "instance-artifact-quota",
       "quota",
     );
+    const coordinator = createArtifactCoordinator(fixture.client);
 
     for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
-      const upload = await fixture.client.request("createArtifactUpload", {
+      const upload = await coordinator.createArtifactUpload({
         ...artifactLease,
         clientArtifactId: artifactClientId(ordinal),
         purpose: "result",
@@ -963,7 +1044,7 @@ describe("DatabaseClient lease integration", () => {
     }
 
     await expect(
-      fixture.client.request("createArtifactUpload", {
+      coordinator.createArtifactUpload({
         ...artifactLease,
         clientArtifactId: artifactClientId(maximumResultArtifactUploadIdentitiesPerAttempt),
         purpose: "result",
@@ -973,9 +1054,10 @@ describe("DatabaseClient lease integration", () => {
         sha256: sha256("artifact-over-quota"),
       }),
     ).rejects.toMatchObject({
-      name: "DatabaseRequestError",
-      code: "ARTIFACT_UPLOAD_QUOTA_EXCEEDED",
+      name: "ArtifactUploadCreateCoordinatorError",
+      code: "ARTIFACT_CREATE_QUOTA_EXCEEDED",
     });
+    await coordinator.close();
   });
 
   it("dead-letters an oversized claim response before committing a lease", async () => {
