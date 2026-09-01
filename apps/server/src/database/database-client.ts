@@ -13,12 +13,29 @@ import type {
 } from "./protocol.js";
 
 interface PendingRequest {
+  readonly operation: DatabaseOperation;
   readonly resolve: (value: unknown) => void;
   readonly reject: (reason: Error) => void;
 }
 
+export interface DatabaseWorkerTransport {
+  postMessage(value: unknown): void;
+  terminate(): Promise<number>;
+  on(event: "message", listener: (value: DatabaseWorkerMessage) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "exit", listener: (exitCode: number) => void): this;
+}
+
+const testTransportAttachment = Symbol("database-client-test-transport-attachment");
+
+const createShutdownExitError = (): DatabaseRequestError =>
+  new DatabaseRequestError(
+    "Database Worker exited before completing graceful shutdown.",
+    "DATABASE_WORKER_SHUTDOWN_INCOMPLETE",
+  );
+
 export const terminateWorkerAndWaitForExit = async (
-  worker: Pick<Worker, "terminate">,
+  worker: Pick<DatabaseWorkerTransport, "terminate">,
   exited: Promise<number>,
 ): Promise<unknown | undefined> => {
   let terminationError: unknown;
@@ -32,7 +49,7 @@ export const terminateWorkerAndWaitForExit = async (
 };
 
 export class DatabaseClient {
-  readonly #worker: Worker;
+  readonly #worker: DatabaseWorkerTransport;
   readonly #pending = new Map<number, PendingRequest>();
   readonly #ready: Promise<void>;
   readonly #exited: Promise<number>;
@@ -43,9 +60,16 @@ export class DatabaseClient {
   #isReady = false;
   #isClosing = false;
   #artifactUploadCreateHandleIssued = false;
+  #shutdownRequested = false;
+  #shutdownResponseReceived = false;
+  #shutdownAcknowledged = false;
   #terminalError: Error | undefined;
+  #closePromise: Promise<void> | undefined;
 
-  private constructor(options: DatabaseWorkerOptions) {
+  private constructor(
+    options: DatabaseWorkerOptions | undefined,
+    injectedWorker?: DatabaseWorkerTransport,
+  ) {
     this.#ready = new Promise<void>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -54,10 +78,17 @@ export class DatabaseClient {
       this.#resolveExited = resolve;
     });
 
-    const workerUrl = import.meta.url.endsWith(".ts")
-      ? new URL("./database-worker.ts", import.meta.url)
-      : new URL("./database-worker.js", import.meta.url);
-    this.#worker = new Worker(workerUrl, { workerData: options });
+    if (injectedWorker === undefined) {
+      if (options === undefined) {
+        throw new TypeError("Database Worker options are required.");
+      }
+      const workerUrl = import.meta.url.endsWith(".ts")
+        ? new URL("./database-worker.ts", import.meta.url)
+        : new URL("./database-worker.js", import.meta.url);
+      this.#worker = new Worker(workerUrl, { workerData: options }) as DatabaseWorkerTransport;
+    } else {
+      this.#worker = injectedWorker;
+    }
     this.#worker.on("message", (message: DatabaseWorkerMessage) => {
       this.#handleMessage(message);
     });
@@ -65,7 +96,16 @@ export class DatabaseClient {
       this.#fail(error);
     });
     this.#worker.on("exit", (exitCode) => {
-      if (!this.#isClosing && this.#isReady) {
+      if (
+        this.#isClosing &&
+        this.#terminalError === undefined &&
+        this.#shutdownRequested &&
+        (this.#pending.size > 0 ||
+          !this.#shutdownResponseReceived ||
+          (this.#shutdownAcknowledged && exitCode !== 0))
+      ) {
+        this.#fail(createShutdownExitError());
+      } else if (!this.#isClosing && this.#isReady) {
         this.#fail(new Error(`Database worker exited unexpectedly with code ${exitCode}.`));
       } else if (!this.#isClosing && !this.#isReady) {
         this.#fail(new Error("Database worker exited before becoming ready."));
@@ -83,6 +123,13 @@ export class DatabaseClient {
       await client.#terminateAfterFailedStartup();
       throw error;
     }
+  }
+
+  /** @internal Test-only transport attachment. */
+  static async [testTransportAttachment](worker: DatabaseWorkerTransport): Promise<DatabaseClient> {
+    const client = new DatabaseClient(undefined, worker);
+    await client.#ready;
+    return client;
   }
 
   public request<TOperation extends Exclude<DatabaseOperation, "createArtifactUpload">>(
@@ -114,14 +161,19 @@ export class DatabaseClient {
     const handle = registerArtifactUploadCreateDatabaseHandle(this, {
       probeArtifactUploadCreate: (input) => this.#send("probeArtifactUploadCreate", input),
       createArtifactUpload: (input) => this.#send("createArtifactUpload", input),
-      close: () => this.#closeDatabaseOwner(),
+      close: () => this.#startClose(),
     });
     this.#artifactUploadCreateHandleIssued = true;
     return handle;
   }
 
   public close(): Promise<void> {
-    return this.#closeDatabaseOwner();
+    return this.#startClose();
+  }
+
+  #startClose(): Promise<void> {
+    this.#closePromise ??= this.#closeDatabaseOwner();
+    return this.#closePromise;
   }
 
   async #closeDatabaseOwner(): Promise<void> {
@@ -132,6 +184,7 @@ export class DatabaseClient {
 
     this.#isClosing = true;
     if (this.#terminalError === undefined) {
+      this.#shutdownRequested = true;
       try {
         await this.#send("shutdown", {});
       } catch (error) {
@@ -147,6 +200,9 @@ export class DatabaseClient {
       }
     }
     await this.#exited;
+    if (this.#terminalError !== undefined) {
+      throw this.#terminalError;
+    }
   }
 
   async #send<TOperation extends DatabaseOperation>(
@@ -167,7 +223,7 @@ export class DatabaseClient {
       input,
     };
     const response = new Promise<unknown>((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      this.#pending.set(id, { operation, resolve, reject });
     });
     this.#worker.postMessage(request);
     return (await response) as DatabaseOperationMap[TOperation]["output"];
@@ -189,6 +245,10 @@ export class DatabaseClient {
       return;
     }
     this.#pending.delete(message.id);
+    if (pending.operation === "shutdown") {
+      this.#shutdownResponseReceived = true;
+      this.#shutdownAcknowledged = message.ok;
+    }
     if (message.ok) {
       pending.resolve(message.output);
       return;
@@ -214,3 +274,8 @@ export class DatabaseClient {
     await this.#exited;
   }
 }
+
+/** @internal Test-only helper; intentionally absent from public barrels. */
+export const attachDatabaseClientForTest = (
+  worker: DatabaseWorkerTransport,
+): Promise<DatabaseClient> => DatabaseClient[testTransportAttachment](worker);
