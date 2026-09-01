@@ -86,6 +86,122 @@ func TestServerOptionsEnforceRoleAndBounds(t *testing.T) {
 	}
 }
 
+func TestServerRejectsClaimWhenCommittedRoleConfigurationDisablesExecution(t *testing.T) {
+	var claimCalls atomic.Int32
+	dispatcher := &fakeControlDispatcher{claim: func(
+		context.Context,
+		json.RawMessage,
+	) (json.RawMessage, error) {
+		claimCalls.Add(1)
+		return json.RawMessage(`{"outcome":"unexpected"}`), nil
+	}}
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	channel := newServerTestChannel(inputReader, outputWriter)
+	options := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), channel)
+	server, err := NewServer(options, dispatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.operationPolicy.claimAllowed {
+		t.Fatal("foundation zero-execution bootstrap enabled Claim")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(context.Background(), channel, channel) }()
+	requestID := "claim:disabled"
+	if err := WriteFrame(
+		inputWriter,
+		callDocument(t, requestID, OperationClaim, map[string]any{"body": map[string]any{}}),
+		MaximumRequestFrameBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	responseDocument, err := ReadFrame(outputReader, MaximumCanonicalControlFrameBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseCanonicalJSON(responseDocument, MaximumCanonicalControlFrameBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := parsed.(map[string]any)
+	if response["requestId"] != requestID {
+		t.Fatalf("denial requestId = %#v, want %q", response["requestId"], requestID)
+	}
+	assertResponseErrorCode(t, response, "OPERATION_NOT_ALLOWED")
+	select {
+	case serveErr := <-done:
+		var protocolFailure *ProtocolError
+		if !errors.As(serveErr, &protocolFailure) ||
+			!errors.Is(serveErr, ErrOperationNotAllowed) ||
+			protocolFailure.Code != "OPERATION_NOT_ALLOWED" ||
+			protocolFailure.RequestID != requestID {
+			t.Fatalf("Serve denial = %T %v", serveErr, serveErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Claim denial did not make the session terminal")
+	}
+	if claimCalls.Load() != 0 {
+		t.Fatalf("disabled Claim invoked dispatcher %d times", claimCalls.Load())
+	}
+	_ = inputWriter.Close()
+	_ = channel.Close()
+	_ = outputReader.Close()
+}
+
+func TestServerClaimDenialPreservesResponseWriteFailure(t *testing.T) {
+	requestID := "claim:write-failure"
+	var input bytes.Buffer
+	if err := WriteFrame(
+		&input,
+		callDocument(t, requestID, OperationClaim, map[string]any{"body": map[string]any{}}),
+		MaximumRequestFrameBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeFailure := errors.New("response write failed")
+	channel := newServerTestChannel(
+		io.NopCloser(bytes.NewReader(input.Bytes())),
+		&errorWriteCloser{err: writeFailure},
+	)
+	options := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), channel)
+	server, err := NewServer(options, &fakeControlDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveErr := server.Serve(context.Background(), channel, channel)
+	if !errors.Is(serveErr, ErrOperationNotAllowed) || !errors.Is(serveErr, writeFailure) {
+		t.Fatalf("Serve denial write error = %v", serveErr)
+	}
+	var protocolFailure *ProtocolError
+	if !errors.As(serveErr, &protocolFailure) || protocolFailure.RequestID != requestID {
+		t.Fatalf("Serve denial lost correlated ProtocolError: %T %v", serveErr, serveErr)
+	}
+	_ = channel.Close()
+}
+
+func TestServerDispatchRejectsDisabledClaimBeforeDispatcher(t *testing.T) {
+	var claimCalls atomic.Int32
+	dispatcher := &fakeControlDispatcher{claim: func(
+		context.Context,
+		json.RawMessage,
+	) (json.RawMessage, error) {
+		claimCalls.Add(1)
+		return json.RawMessage(`{"outcome":"unexpected"}`), nil
+	}}
+	server := &Server{dispatcher: dispatcher}
+	if _, err := server.dispatch(context.Background(), CallRequest{
+		Operation: OperationClaim,
+		Body:      json.RawMessage(`{"availableSlots":1}`),
+	}); !errors.Is(err, ErrOperationNotAllowed) {
+		t.Fatalf("disabled Claim dispatch error = %v", err)
+	}
+	if claimCalls.Load() != 0 {
+		t.Fatalf("disabled direct Claim invoked dispatcher %d times", claimCalls.Load())
+	}
+}
+
 func TestServerCancelsOneConcurrentRequestWithoutStoppingAnother(t *testing.T) {
 	claimStarted := make(chan struct{})
 	releaseRegister := make(chan struct{})
@@ -100,7 +216,7 @@ func TestServerCancelsOneConcurrentRequestWithoutStoppingAnother(t *testing.T) {
 			return json.RawMessage(`{"registered":true}`), nil
 		},
 	}
-	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	harness := newClaimEnabledServerHarness(t, dispatcher, defaultServerOptions())
 	defer harness.close(t)
 
 	harness.send(t, callDocument(t, "claim:1", OperationClaim, map[string]any{"body": map[string]any{}}))
@@ -182,7 +298,7 @@ func TestServerKeepsClaimResponseOnDedicated16MiBPath(t *testing.T) {
 	}
 	options := defaultServerOptions()
 	options.IOTimeout = 10 * time.Second
-	harness := newServerHarness(t, dispatcher, options)
+	harness := newClaimEnabledServerHarness(t, dispatcher, options)
 	defer harness.close(t)
 
 	claimID := strings.Repeat("c", maximumIdentifierBytes)
@@ -268,7 +384,7 @@ func TestServerSerializesClaimDispatchThroughResponseWrite(t *testing.T) {
 			return json.RawMessage(`{"outcome":"no_work"}`), nil
 		},
 	}
-	harness := newServerHarness(t, dispatcher, defaultServerOptions())
+	harness := newClaimEnabledServerHarness(t, dispatcher, defaultServerOptions())
 	defer harness.close(t)
 	harness.send(t, callDocument(t, "claim:1", OperationClaim, map[string]any{"body": map[string]any{}}))
 	if call := <-started; call != 1 {
@@ -855,6 +971,18 @@ type borrowedEOFChannel struct {
 	closeCalls atomic.Int32
 }
 
+type errorWriteCloser struct {
+	err error
+}
+
+func (writer *errorWriteCloser) Write([]byte) (int, error) {
+	return 0, writer.err
+}
+
+func (*errorWriteCloser) Close() error {
+	return nil
+}
+
 func (*borrowedEOFChannel) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
@@ -932,6 +1060,32 @@ func newServerHarness(t *testing.T, dispatcher ControlDispatcher, options Server
 	outputReader, outputWriter := io.Pipe()
 	channel := newServerTestChannel(inputReader, outputWriter)
 	options = serverOptionsWithBootstrapForTest(t, options, channel)
+	return startServerHarness(t, dispatcher, options, channel, inputWriter, outputReader)
+}
+
+func newClaimEnabledServerHarness(
+	t *testing.T,
+	dispatcher ControlDispatcher,
+	options ServerOptions,
+) *serverHarness {
+	t.Helper()
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	channel := newServerTestChannel(inputReader, outputWriter)
+	options = serverOptionsWithBootstrapForTest(t, options, channel)
+	options.RuntimeBootstrap = permitClaimForServerTest(t, options.RuntimeBootstrap)
+	return startServerHarness(t, dispatcher, options, channel, inputWriter, outputReader)
+}
+
+func startServerHarness(
+	t *testing.T,
+	dispatcher ControlDispatcher,
+	options ServerOptions,
+	channel *serverTestChannel,
+	inputWriter *io.PipeWriter,
+	outputReader *io.PipeReader,
+) *serverHarness {
+	t.Helper()
 	server, err := NewServer(options, dispatcher)
 	if err != nil {
 		t.Fatalf("NewServer returned an error: %v", err)
@@ -939,6 +1093,24 @@ func newServerHarness(t *testing.T, dispatcher ControlDispatcher, options Server
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(context.Background(), channel, channel) }()
 	return &serverHarness{input: inputWriter, output: outputReader, done: done, channel: channel}
+}
+
+func permitClaimForServerTest(
+	t *testing.T,
+	committed CommittedRuntimeBootstrap,
+) CommittedRuntimeBootstrap {
+	t.Helper()
+	if committed.state == nil {
+		t.Fatal("test Claim permission requires committed bootstrap state")
+	}
+	committed.state.mu.Lock()
+	defer committed.state.mu.Unlock()
+	if committed.state.consumed || committed.state.bootstrap.Role != RoleControl ||
+		committed.state.operationPolicy.claimAllowed {
+		t.Fatal("test Claim permission requires fresh disabled Control state")
+	}
+	committed.state.operationPolicy.claimAllowed = true
+	return committed
 }
 
 func newServerTestChannel(input io.ReadCloser, output io.WriteCloser) *serverTestChannel {

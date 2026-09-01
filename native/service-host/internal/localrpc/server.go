@@ -48,9 +48,10 @@ type ServerOptions struct {
 }
 
 type Server struct {
-	options    ServerOptions
-	dispatcher ControlDispatcher
-	shutdown   *arwxShutdownGate
+	options         ServerOptions
+	dispatcher      ControlDispatcher
+	shutdown        *arwxShutdownGate
+	operationPolicy runtimeOperationPolicy
 }
 
 func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, error) {
@@ -75,7 +76,12 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 	if err != nil {
 		return nil, fmt.Errorf("%w: committed runtime bootstrap is invalid", ErrInvalidServerOptions)
 	}
-	return &Server{options: options, dispatcher: dispatcher, shutdown: shutdown}, nil
+	return &Server{
+		options:         options,
+		dispatcher:      dispatcher,
+		shutdown:        shutdown,
+		operationPolicy: shutdown.binding.operationPolicy,
+	}, nil
 }
 
 func isNilControlDispatcher(dispatcher ControlDispatcher) bool {
@@ -188,6 +194,23 @@ serveLoop:
 				message.RequestID(),
 				ErrArwxShutdownArmed,
 			)
+			break
+		}
+		if call, ok := message.(CallRequest); ok &&
+			call.Operation == OperationClaim && !s.operationPolicy.claimAllowed {
+			denied := protocolError(
+				"OPERATION_NOT_ALLOWED",
+				"Local RPC Claim is not enabled by the committed role configuration.",
+				call.ID,
+				ErrOperationNotAllowed,
+			)
+			writeErr := writer.writeError(call.ID, errorBody{
+				Code: denied.Code, Message: denied.Message, Retryable: false,
+			})
+			terminalError = denied
+			if writeErr != nil {
+				terminalError = errors.Join(denied, writeErr)
+			}
 			break
 		}
 		if err := state.reserveID(message.RequestID()); err != nil {
@@ -386,6 +409,9 @@ func (s *Server) armArwxShutdown(
 }
 
 func (s *Server) dispatch(ctx context.Context, request CallRequest) (json.RawMessage, error) {
+	if request.Operation == OperationClaim && !s.operationPolicy.claimAllowed {
+		return nil, ErrOperationNotAllowed
+	}
 	if s.dispatcher == nil {
 		return nil, ErrOperationNotAllowed
 	}

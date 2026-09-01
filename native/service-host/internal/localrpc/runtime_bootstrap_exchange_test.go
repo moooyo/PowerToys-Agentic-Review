@@ -50,8 +50,12 @@ func TestExchangeRuntimeBootstrapSendsCanonicalDocumentBeforeAcceptingAck(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pending.Commit(context.Background()); err != nil {
+	committed, err := pending.Commit(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if committed.state == nil || committed.state.operationPolicy.claimAllowed {
+		t.Fatal("foundation commit did not retain its zero-execution Claim policy")
 	}
 	writtenStream := bytes.NewReader(channel.output.Bytes())
 	written, err := ReadFrame(writtenStream, RuntimeBootstrapMaximumBytes)
@@ -94,6 +98,42 @@ func TestPendingRuntimeBootstrapCommitCopyRemainsSingleUse(t *testing.T) {
 	}
 	if _, err := copyOfPending.Commit(context.Background()); !errors.Is(err, ErrRuntimeBootstrapExchange) {
 		t.Fatalf("copied commit error = %v", err)
+	}
+}
+
+func TestRuntimeOperationPolicyRequiresExactFoundationRoleConfig(t *testing.T) {
+	for _, role := range []Role{RoleControl, RoleExecutor} {
+		t.Run(string(role), func(t *testing.T) {
+			bootstrap, err := newFoundationRuntimeBootstrap(
+				validFoundationRuntimeBootstrapOptions(role),
+				bytes.NewReader(make([]byte, 16)),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := deriveRuntimeOperationPolicy(bootstrap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.claimAllowed {
+				t.Fatalf("zero-execution %s foundation enabled Claim", role)
+			}
+		})
+	}
+
+	for _, roleConfig := range [][]byte{
+		[]byte(` { "executionEnabled" : false, "foundationVersion" : 1, "role" : "control" } `),
+		[]byte(`{"executionEnabled":true,"foundationVersion":1,"role":"control"}`),
+	} {
+		options := validRuntimeBootstrapOptions()
+		options.RoleConfigJSON = roleConfig
+		bootstrap, err := newRuntimeBootstrap(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deriveRuntimeOperationPolicy(bootstrap); !errors.Is(err, ErrRuntimeBootstrapBinding) {
+			t.Fatalf("non-foundation roleConfig %s returned %v", roleConfig, err)
+		}
 	}
 }
 

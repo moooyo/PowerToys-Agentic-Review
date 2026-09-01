@@ -9,6 +9,11 @@
 // fixed Worker API operations and signing of one caller-supplied 32-byte digest; routing, headers,
 // paths, commands, and key handles are never accepted from Node.
 //
+// Claim admission is derived only from the exact role configuration sealed into the committed
+// runtime bootstrap. The foundation role configurations are zero-execution configurations, so a
+// decoded Claim receives a correlated terminal OPERATION_NOT_ALLOWED response before requestId,
+// concurrency, timeout, claim serialization, or dispatcher ownership is reserved.
+//
 // An established session may remain idle at a frame boundary for its payload lifetime. Once the
 // first byte of a frame arrives, the complete prefix and payload share one nonrenewable I/O
 // deadline. After ArmArwxShutdownV1 is acknowledged, even the frame boundary is capped by the

@@ -42,11 +42,12 @@ type CommittedRuntimeBootstrap struct {
 }
 
 type committedRuntimeBootstrapState struct {
-	mu        sync.Mutex
-	channel   RuntimeBootstrapChannel
-	bootstrap RuntimeBootstrapV1
-	digest    [32]byte
-	consumed  bool
+	mu              sync.Mutex
+	channel         RuntimeBootstrapChannel
+	bootstrap       RuntimeBootstrapV1
+	digest          [32]byte
+	operationPolicy runtimeOperationPolicy
+	consumed        bool
 }
 
 type committedRuntimeBootstrapBinding struct {
@@ -56,6 +57,17 @@ type committedRuntimeBootstrapBinding struct {
 	bootstrapSHA256            [32]byte
 	maximumFrameBytes          int
 	maximumRemainingShutdownMS int
+	operationPolicy            runtimeOperationPolicy
+}
+
+type runtimeOperationPolicy struct {
+	claimAllowed bool
+}
+
+type foundationRoleConfig struct {
+	ExecutionEnabled  bool `json:"executionEnabled"`
+	FoundationVersion int  `json:"foundationVersion"`
+	Role              Role `json:"role"`
 }
 
 // BeginRuntimeBootstrapExchange sends one canonical bootstrap frame and validates exactly one
@@ -131,6 +143,10 @@ func (pending *PendingRuntimeBootstrapCommit) Commit(
 	if err != nil {
 		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, err)
 	}
+	operationPolicy, err := deriveRuntimeOperationPolicy(bootstrap)
+	if err != nil {
+		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, err)
+	}
 	commitDocument, err := EncodeRuntimeBootstrapCommit(document, role)
 	if err != nil {
 		return CommittedRuntimeBootstrap{}, errors.Join(ErrRuntimeBootstrapExchange, err)
@@ -144,10 +160,32 @@ func (pending *PendingRuntimeBootstrapCommit) Commit(
 	}
 	digest := sha256.Sum256(document)
 	return CommittedRuntimeBootstrap{state: &committedRuntimeBootstrapState{
-		channel:   channel,
-		bootstrap: bootstrap,
-		digest:    digest,
+		channel:         channel,
+		bootstrap:       bootstrap,
+		digest:          digest,
+		operationPolicy: operationPolicy,
 	}}, nil
+}
+
+func deriveRuntimeOperationPolicy(bootstrap RuntimeBootstrapV1) (runtimeOperationPolicy, error) {
+	expected, err := foundationRoleConfigJSON(bootstrap.Role)
+	if err != nil || !bytes.Equal(bootstrap.roleConfigJSON, []byte(expected)) {
+		return runtimeOperationPolicy{}, fmt.Errorf(
+			"%w: committed roleConfig does not match the exact foundation configuration",
+			ErrRuntimeBootstrapBinding,
+		)
+	}
+	var config foundationRoleConfig
+	if err := decodeExact(bootstrap.roleConfigJSON, &config); err != nil ||
+		config.FoundationVersion != 1 || config.Role != bootstrap.Role {
+		return runtimeOperationPolicy{}, fmt.Errorf(
+			"%w: committed roleConfig policy is invalid",
+			ErrRuntimeBootstrapBinding,
+		)
+	}
+	return runtimeOperationPolicy{
+		claimAllowed: bootstrap.Role == RoleControl && config.ExecutionEnabled,
+	}, nil
 }
 
 func consumeCommittedRuntimeBootstrap(
@@ -171,6 +209,7 @@ func consumeCommittedRuntimeBootstrap(
 		bootstrapSHA256:            state.digest,
 		maximumFrameBytes:          state.bootstrap.ARWX.MaximumFrameBytes,
 		maximumRemainingShutdownMS: state.bootstrap.Shutdown.GracefulTimeoutMS - state.bootstrap.Shutdown.ForceTerminationReserveMS,
+		operationPolicy:            state.operationPolicy,
 	}, nil
 }
 

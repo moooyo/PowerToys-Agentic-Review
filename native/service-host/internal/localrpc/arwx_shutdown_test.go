@@ -684,6 +684,11 @@ func committedRuntimeBootstrapForArmTest(
 	t.Helper()
 	options := validRuntimeBootstrapOptions()
 	options.Role = role
+	roleConfig, err := foundationRoleConfigJSON(role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.RoleConfigJSON = []byte(roleConfig)
 	bootstrap, err := newRuntimeBootstrap(options)
 	if err != nil {
 		t.Fatal(err)
