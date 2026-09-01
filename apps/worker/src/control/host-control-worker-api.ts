@@ -42,6 +42,76 @@ export interface LocalAuthorityDigestSigner {
 
 registerWorkerContractFormats();
 
+type ControlShadowRpcClient = Pick<
+  ControlHostControlClient,
+  "instanceHeartbeat" | "register" | "signLocalDigest"
+>;
+
+/** Exposes only the three HostControl operations needed by a zero-slot shadow. */
+export class HostControlShadowApi implements LocalAuthorityDigestSigner {
+  readonly #register: ControlShadowRpcClient["register"];
+  readonly #instanceHeartbeat: ControlShadowRpcClient["instanceHeartbeat"];
+  readonly #signLocalDigest: ControlShadowRpcClient["signLocalDigest"];
+
+  public constructor(client: ControlShadowRpcClient) {
+    this.#register = client.register.bind(client);
+    this.#instanceHeartbeat = client.instanceHeartbeat.bind(client);
+    this.#signLocalDigest = client.signLocalDigest.bind(client);
+  }
+
+  public async register(
+    request: WorkerRegistrationRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkerRegistrationResponse> {
+    const body = encodeRequest(
+      WorkerRegistrationRequestSchema,
+      request,
+      HOST_CONTROL_MAXIMUM_BODY_BYTES,
+      "registration request",
+    );
+    const response = await this.#call(() =>
+      this.#register(body, signal === undefined ? {} : { signal }),
+    );
+    return validateResponse(WorkerRegistrationResponseSchema, response, "registration response");
+  }
+
+  public async heartbeat(
+    workerInstanceId: string,
+    request: WorkerHeartbeatRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkerHeartbeatResponse> {
+    const body = encodeRequest(
+      WorkerHeartbeatRequestSchema,
+      request,
+      HOST_CONTROL_MAXIMUM_BODY_BYTES,
+      "heartbeat request",
+    );
+    assertRouteIdentity(
+      workerInstanceId,
+      request.workerInstanceId,
+      "Heartbeat route and body worker instance identities do not match.",
+    );
+    const response = await this.#call(() =>
+      this.#instanceHeartbeat(workerInstanceId, body, signal === undefined ? {} : { signal }),
+    );
+    return validateResponse(WorkerHeartbeatResponseSchema, response, "heartbeat response");
+  }
+
+  public async signLocalDigest(digestSha256: string, signal?: AbortSignal): Promise<string> {
+    return await this.#call(() =>
+      this.#signLocalDigest(digestSha256, signal === undefined ? {} : { signal }),
+    );
+  }
+
+  async #call<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw mapHostControlError(error);
+    }
+  }
+}
+
 /** Maps the fixed Control HostControl RPC surface to the existing Worker control-plane API. */
 export class HostControlWorkerApi implements WorkerApi, LocalAuthorityDigestSigner {
   public constructor(private readonly client: ControlHostControlClient) {}
@@ -159,21 +229,23 @@ export class HostControlWorkerApi implements WorkerApi, LocalAuthorityDigestSign
     try {
       return await operation();
     } catch (error) {
-      if (error instanceof HostControlRemoteError) {
-        throw mapRemoteError(error);
-      }
-      if (error instanceof HostControlClientError) {
-        if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_CANCELLED") {
-          throw new WorkerApiError(error.message, 408, error.code.toLowerCase());
-        }
-        if (error.code === "CONCURRENCY_LIMIT" || error.code === "OUTPUT_QUEUE_LIMIT_EXCEEDED") {
-          throw new WorkerApiError(error.message, 429, error.code.toLowerCase());
-        }
-        throw new ProtocolError("ServiceHost HostControl channel failed.");
-      }
-      throw new ProtocolError("ServiceHost HostControl operation failed.");
+      throw mapHostControlError(error);
     }
   }
+}
+
+function mapHostControlError(error: unknown): Error {
+  if (error instanceof HostControlRemoteError) return mapRemoteError(error);
+  if (error instanceof HostControlClientError) {
+    if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_CANCELLED") {
+      return new WorkerApiError(error.message, 408, error.code.toLowerCase());
+    }
+    if (error.code === "CONCURRENCY_LIMIT" || error.code === "OUTPUT_QUEUE_LIMIT_EXCEEDED") {
+      return new WorkerApiError(error.message, 429, error.code.toLowerCase());
+    }
+    return new ProtocolError("ServiceHost HostControl channel failed.");
+  }
+  return new ProtocolError("ServiceHost HostControl operation failed.");
 }
 
 function encodeRequest(

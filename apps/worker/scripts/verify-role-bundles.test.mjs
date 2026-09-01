@@ -19,6 +19,8 @@ import {
   verifyReviewedInputDigest,
 } from "./verify-role-bundles.mjs";
 
+const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+
 test("clean build removes polluted output before producing role artifacts", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "worker-role-build-"));
   const dist = resolve(root, "dist");
@@ -65,6 +67,7 @@ test("exact role graph requires positive bytes from critical implementations", (
     policy.entryPoint,
     "apps/worker/src/service-host/runtime-bootstrap.ts",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+    "packages/local-protocol/src/handshake.ts",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs",
   ]) {
     assert.throws(() =>
@@ -77,15 +80,108 @@ test("exact role graph requires positive bytes from critical implementations", (
   }
 });
 
+test("role policies include the exact shadow-runtime source additions", () => {
+  const control = new Set(roleBundlePolicyForTest.control.allowedInputs);
+  const executor = new Set(roleBundlePolicyForTest.executor.allowedInputs);
+  for (const input of [
+    "apps/worker/src/contracts-formats.ts",
+    "apps/worker/src/control/host-control-worker-api.ts",
+    "apps/worker/src/control/shadow-supervisor.ts",
+    "apps/worker/src/server-client/errors.ts",
+    "packages/contracts/src/common.ts",
+    "packages/contracts/src/index.ts",
+    "packages/contracts/src/states.ts",
+    "packages/contracts/src/worker.ts",
+  ]) {
+    assert.equal(control.has(input), true, `Control policy is missing ${input}`);
+    assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
+  }
+  assert.equal(executor.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), true);
+  assert.equal(control.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), false);
+  for (const input of executor) {
+    assert.doesNotMatch(
+      input,
+      /^(?:apps\/worker\/src\/(?:control|execution|server-client|workspaces?)\/|packages\/(?:codex|contracts)\/)/u,
+    );
+  }
+});
+
+test("shadow architecture remains zero execution and role separated", () => {
+  const controlMain = repositorySource("apps/worker/src/control-main.ts");
+  const executorMain = repositorySource("apps/worker/src/executor-main.ts");
+  const controlAdapter = repositorySource("apps/worker/src/control/host-control-worker-api.ts");
+  const controlRuntime = repositorySource("apps/worker/src/control/shadow-supervisor.ts");
+  const executorRuntime = repositorySource(
+    "apps/worker/src/service-host/executor-shadow-runtime.ts",
+  );
+  const runtimeBootstrap = repositorySource("apps/worker/src/service-host/runtime-bootstrap.ts");
+  const nativeBootstrap = repositorySource(
+    "native/service-host/internal/localrpc/runtime_bootstrap.go",
+  );
+
+  assert.match(controlMain, /installRuntime:\s*installControlZeroSlotShadowSupervisor/u);
+  assert.match(controlMain, /validateRuntimeSession:\s*isControlHostControlClient/u);
+  assert.match(executorMain, /installRuntime:\s*installExecutorShadowRuntime/u);
+  assert.match(executorMain, /validateRuntimeSession:\s*isExecutorHostControlSession/u);
+  assert.match(controlRuntime, /activation\.activated\.then\(/u);
+  assert.match(executorRuntime, /activation\.activated\.then\(/u);
+  assert.match(controlRuntime, /import \{ HostControlShadowApi \}/u);
+  assert.doesNotMatch(controlRuntime, /\bHostControlWorkerApi\b/u);
+
+  const controlRoleConfig = sourceSection(
+    runtimeBootstrap,
+    "export const ControlFoundationRoleConfigV2Schema",
+    "export const ExecutorFoundationRoleConfigV2Schema",
+  );
+  const executorRoleConfig = sourceSection(
+    runtimeBootstrap,
+    "export const ExecutorFoundationRoleConfigV2Schema",
+    "export type ControlFoundationRoleConfigV2",
+  );
+  for (const section of [controlRoleConfig, executorRoleConfig]) {
+    assert.match(section, /executionEnabled:\s*Type\.Literal\(false\)/u);
+    assert.doesNotMatch(section, /executionEnabled:\s*Type\.Literal\(true\)/u);
+  }
+  assert.equal((nativeBootstrap.match(/"executionEnabled":\s+false/gu) ?? []).length, 2);
+  assert.doesNotMatch(nativeBootstrap, /"executionEnabled":\s+true/u);
+
+  const ready = sourceSection(
+    executorRuntime,
+    "const readyCandidate: ReadyMessage = {",
+    "const ready = validateReadyAfterHandshakeProofV1",
+  );
+  assert.match(ready, /ready:\s*false/u);
+  assert.match(ready, /availableSlots:\s*0/u);
+  assert.match(ready, /reasonCode:\s*"EXECUTION_DISABLED"/u);
+  assert.doesNotMatch(ready, /ready:\s*true/u);
+  assert.equal((executorRuntime.match(/messageType:\s*LocalMessageType\.Ready/gu) ?? []).length, 1);
+
+  assert.doesNotMatch(controlRuntime, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
+  assert.doesNotMatch(
+    sourceSection(
+      controlAdapter,
+      "export class HostControlShadowApi",
+      "/** Maps the fixed Control HostControl RPC surface",
+    ),
+    /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu,
+  );
+  assert.doesNotMatch(executorRuntime, /\b(?:server|mTLS|lease|workspace|process|Codex|Git)\b/iu);
+  assert.doesNotMatch(
+    executorRuntime,
+    /from\s+["'][^"']*(?:server-client|execution|workspace|process-host|codex|git)[^"']*["']/iu,
+  );
+});
+
 test("both role policies require the reviewed bootstrap handshake closure", () => {
   const sharedBootstrapInputs = [
     "apps/worker/src/service-host/arwx-shutdown.ts",
     "apps/worker/src/service-host/opaque-json.ts",
     "apps/worker/src/service-host/runtime-bootstrap.ts",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+    "packages/local-protocol/src/handshake.ts",
   ];
   for (const role of ["control", "executor"]) {
-    const required = new Set(roleBundlePolicyForTest[role].requiredWorkerInputs);
+    const required = new Set(roleBundlePolicyForTest[role].requiredPositiveInputs);
     for (const input of sharedBootstrapInputs) assert.equal(required.has(input), true);
   }
   assert.equal(
@@ -129,6 +225,11 @@ test("reviewed role input digest rejects modified source bytes", () => {
 test("role TypeBox Value redirect accepts only exact importer and shim syntax", () => {
   assert.doesNotThrow(() =>
     verifyReviewedRoleTypeBoxValueImport('import { Value } from "@sinclair/typebox/value";'),
+  );
+  assert.doesNotThrow(() =>
+    verifyReviewedRoleTypeBoxValueImport(
+      repositorySource("apps/worker/src/control/host-control-worker-api.ts"),
+    ),
   );
   const target =
     "../../../../node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs";
@@ -254,3 +355,15 @@ test("TypeBox constructor exception is path, digest, count, and shape bound", ()
     assert.throws(() => validateReviewedTypeBoxConstructorShapeForTest(mutated));
   }
 });
+
+function repositorySource(path) {
+  return readFileSync(resolve(repositoryRoot, path), "utf8");
+}
+
+function sourceSection(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(start, -1, `Missing source marker: ${startMarker}`);
+  assert.notEqual(end, -1, `Missing source marker: ${endMarker}`);
+  return source.slice(start, end);
+}

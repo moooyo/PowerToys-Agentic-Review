@@ -1,9 +1,6 @@
 import process from "node:process";
 import type { Readable, Writable } from "node:stream";
-import {
-  ArwxStdioChannel,
-  ArwxStdioChannelError,
-} from "./arwx-stdio-channel.js";
+import { ArwxStdioChannel, ArwxStdioChannelError } from "./arwx-stdio-channel.js";
 import type { HostControlSession } from "./host-control-session.js";
 import {
   type HostControlPipeSelector,
@@ -66,6 +63,8 @@ export interface ServiceHostRoleRuntimeActivation<
   readonly bootstrap: Readonly<ParsedRuntimeBootstrapV1>;
   readonly hostControl: TSession;
   readonly arwx: ArwxStdioChannel;
+  /** Resolves only after the connector result passes the complete role-foundation validation. */
+  readonly activated: Promise<void>;
   readonly signal: AbortSignal;
 }
 
@@ -165,9 +164,11 @@ export async function openServiceHostRoleFoundation<
     );
   }
   const transportCancellation = new AbortController();
+  const runtimeActivation = new Deferred<void>();
   const cancelConnection = (): void => transportCancellation.abort();
   let hostControl: TSession | undefined;
   let promotedHostControl: HostControlSession<TRole> | undefined;
+  let runtimeSessionValidated = false;
   let arwxOwner: ArwxRuntimeOwner | undefined;
   let preparationStarted = false;
   let prepared:
@@ -219,23 +220,25 @@ export async function openServiceHostRoleFoundation<
           return createUnavailableRoleRuntime();
         }
         const validateRuntimeSession = dependencies.validateRuntimeSession;
-        if (
-          validateRuntimeSession === undefined ||
-          !validateRuntimeSession(promotedOwner)
-        ) {
+        if (validateRuntimeSession === undefined || !validateRuntimeSession(promotedOwner)) {
           throw startupError(
             "RUNTIME_BOOTSTRAP_UNAVAILABLE",
             "Promoted HostControl owner was not validated for the role runtime.",
           );
         }
-        return installRuntime({
-          role: expectedRole,
-          launch,
-          bootstrap: parsed,
-          hostControl: promotedOwner,
-          arwx,
-          signal,
-        });
+        runtimeSessionValidated = true;
+        return gateRoleRuntimeActivation(
+          installRuntime({
+            role: expectedRole,
+            launch,
+            bootstrap: parsed,
+            hostControl: promotedOwner,
+            arwx,
+            activated: runtimeActivation.promise,
+            signal,
+          }),
+          runtimeActivation.promise,
+        );
       },
     );
     arwxOwner = { arwx, dispatcherGate };
@@ -274,16 +277,13 @@ export async function openServiceHostRoleFoundation<
       transportCancellation.signal,
     );
   } catch (error) {
+    runtimeActivation.reject(error);
     const cleanupErrors: unknown[] = [];
     const absoluteDeadline =
       performance.now() + (arwxOwner?.arwx.configuredCloseTimeoutMs ?? 15_000);
     let cleanupAbort: ArwxStdioChannelError | undefined;
     if (arwxOwner !== undefined) {
-      cleanupAbort = await closeDispatcherRuntime(
-        arwxOwner,
-        cleanupErrors,
-        absoluteDeadline,
-      );
+      cleanupAbort = await closeDispatcherRuntime(arwxOwner, cleanupErrors, absoluteDeadline);
     }
     if (promotedHostControl !== undefined) {
       const promoted = promotedHostControl;
@@ -317,7 +317,7 @@ export async function openServiceHostRoleFoundation<
   const ready = prepared;
   if (
     ready === undefined ||
-    ready.arwx.state === "failed" ||
+    ready.arwx.state !== "open" ||
     promotedHostControl === undefined ||
     hostControl !== promotedHostControl ||
     hostControl.bootstrap !== ready.parsed ||
@@ -325,12 +325,16 @@ export async function openServiceHostRoleFoundation<
       role: expectedRole,
       parsed: ready.parsed,
       boundary: ready.boundary,
-    })
+    }) ||
+    transportCancellation.signal.aborted ||
+    dependencies.signal?.aborted === true ||
+    (dependencies.installRuntime !== undefined && !runtimeSessionValidated)
   ) {
     const primary = startupError(
       "ARWX_STDIO_INVALID",
       "ARWX stream failed during HostControl connection.",
     );
+    runtimeActivation.reject(primary);
     throw await rejectOpenedFoundation(primary, hostControl, arwxOwner, promotedHostControl);
   }
   if (hostControl.role !== expectedRole) {
@@ -338,8 +342,10 @@ export async function openServiceHostRoleFoundation<
       "RUNTIME_BOOTSTRAP_UNAVAILABLE",
       "HostControl role binding is invalid.",
     );
+    runtimeActivation.reject(primary);
     throw await rejectOpenedFoundation(primary, hostControl, arwxOwner, promotedHostControl);
   }
+  runtimeActivation.resolve(undefined);
   let removeRuntimeCancellation = (): void => undefined;
   const runtimeCancellation = new Promise<Readonly<ServiceHostRoleTerminal>>((resolve) => {
     const onAbort = (): void => resolve(fulfilledRoleTerminal("external"));
@@ -435,15 +441,10 @@ async function rejectOpenedFoundation<TRole extends ServiceHostPayloadRole>(
   promotedHostControl: HostControlSession<TRole> | undefined,
 ): Promise<unknown> {
   const cleanupErrors: unknown[] = [];
-  const absoluteDeadline =
-    performance.now() + (arwxOwner?.arwx.configuredCloseTimeoutMs ?? 15_000);
+  const absoluteDeadline = performance.now() + (arwxOwner?.arwx.configuredCloseTimeoutMs ?? 15_000);
   let cleanupAbort: ArwxStdioChannelError | undefined;
   if (arwxOwner !== undefined) {
-    cleanupAbort = await closeDispatcherRuntime(
-      arwxOwner,
-      cleanupErrors,
-      absoluteDeadline,
-    );
+    cleanupAbort = await closeDispatcherRuntime(arwxOwner, cleanupErrors, absoluteDeadline);
   }
   const sessions =
     promotedHostControl === undefined || promotedHostControl === hostControl
@@ -480,10 +481,7 @@ async function stopArwx(
   if (arwx.state === "open") {
     ownedAbort = arwx.abort();
   } else {
-    const drainOutcome = await settleBeforeDeadline(
-      arwx.drain(absoluteDeadline),
-      absoluteDeadline,
-    );
+    const drainOutcome = await settleBeforeDeadline(arwx.drain(absoluteDeadline), absoluteDeadline);
     if (
       !(
         ownedAbort !== undefined &&
@@ -503,12 +501,7 @@ async function stopArwx(
     appendRuntimeShutdownTimeout(cleanupErrors);
   } else if (dispatcherOutcome.kind === "rejected") {
     const { error } = dispatcherOutcome;
-    if (
-      !(
-        ownedAbort !== undefined &&
-        error === ownedAbort
-      )
-    ) {
+    if (!(ownedAbort !== undefined && error === ownedAbort)) {
       appendDistinctError(cleanupErrors, error);
     }
   }
@@ -604,10 +597,7 @@ async function settleBeforeDeadline(
     timer = setTimeout(() => resolve({ kind: "timeout" }), remaining);
   });
   try {
-    const outcome = await Promise.race([
-      observed,
-      timeout,
-    ]);
+    const outcome = await Promise.race([observed, timeout]);
     return outcome.kind === "fulfilled" && performance.now() >= absoluteDeadline
       ? { kind: "timeout" }
       : outcome;
@@ -678,6 +668,42 @@ function createUnavailableRoleRuntime(): RuntimeBootstrapArwxRuntimeOwner {
   });
 }
 
+function gateRoleRuntimeActivation(
+  runtime: RuntimeBootstrapArwxRuntimeOwner,
+  activated: Promise<void>,
+): RuntimeBootstrapArwxRuntimeOwner {
+  if (!isSynchronousRoleRuntimeOwner(runtime)) return runtime;
+  const handler = runtime.handler;
+  const done = runtime.done;
+  const close = runtime.close;
+  done.catch(() => undefined);
+  return Object.freeze({
+    handler: async (message, dispatch, signal) => {
+      await activated;
+      return await handler.call(runtime, message, dispatch, signal);
+    },
+    done: activated.then(() => done),
+    close: (absoluteDeadline?: number) => close.call(runtime, absoluteDeadline),
+  });
+}
+
+function isSynchronousRoleRuntimeOwner(value: unknown): value is RuntimeBootstrapArwxRuntimeOwner {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    const candidate = value as RuntimeBootstrapArwxRuntimeOwner & {
+      readonly then?: unknown;
+    };
+    return (
+      typeof candidate.then !== "function" &&
+      typeof candidate.handler === "function" &&
+      candidate.done instanceof Promise &&
+      typeof candidate.close === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isRoleBoundHostControlSession<TRole extends ServiceHostPayloadRole>(
   value: unknown,
   role: TRole,
@@ -700,4 +726,35 @@ function startupError(
   message: string,
 ): ServiceHostRoleStartupError {
   return new ServiceHostRoleStartupError(code, message);
+}
+
+class Deferred<T> {
+  public readonly promise: Promise<T>;
+  #settled = false;
+  readonly #resolve: (value: T | PromiseLike<T>) => void;
+  readonly #reject: (reason?: unknown) => void;
+
+  public constructor() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    this.promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    this.promise.catch(() => undefined);
+    this.#resolve = resolve;
+    this.#reject = reject;
+  }
+
+  public resolve(value: T): void {
+    if (this.#settled) return;
+    this.#settled = true;
+    this.#resolve(value);
+  }
+
+  public reject(reason: unknown): void {
+    if (this.#settled) return;
+    this.#settled = true;
+    this.#reject(reason);
+  }
 }

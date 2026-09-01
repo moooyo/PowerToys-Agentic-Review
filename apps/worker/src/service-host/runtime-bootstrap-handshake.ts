@@ -53,9 +53,7 @@ export type RuntimeBootstrapArwxDispatcherHandler = (
   signal: AbortSignal,
 ) => void | ArwxPostDispatchEffect | Promise<void | ArwxPostDispatchEffect>;
 
-export interface RuntimeBootstrapArwxDispatcherActivation<
-  TRole extends ServiceHostPayloadRole,
-> {
+export interface RuntimeBootstrapArwxDispatcherActivation<TRole extends ServiceHostPayloadRole> {
   readonly role: TRole;
   readonly parsed: Readonly<ParsedRuntimeBootstrapV1>;
   readonly boundary: RuntimeBootstrapReadyBoundary<TRole>;
@@ -69,9 +67,7 @@ export interface RuntimeBootstrapArwxRuntimeOwner {
   close(absoluteDeadline?: number): Promise<void>;
 }
 
-export type RuntimeBootstrapArwxDispatcherInstaller<
-  TRole extends ServiceHostPayloadRole,
-> = (
+export type RuntimeBootstrapArwxDispatcherInstaller<TRole extends ServiceHostPayloadRole> = (
   activation: Readonly<RuntimeBootstrapArwxDispatcherActivation<TRole>>,
 ) => RuntimeBootstrapArwxRuntimeOwner;
 
@@ -139,9 +135,7 @@ const dispatcherGateStates = new WeakMap<object, DispatcherGateState>();
 const acknowledgedBootstraps = new WeakSet<object>();
 
 /** Starts the fixed pre-ACK router and returns its role-bound activation authority. */
-export function prepareRuntimeBootstrapArwxDispatcher<
-  TRole extends ServiceHostPayloadRole,
->(
+export function prepareRuntimeBootstrapArwxDispatcher<TRole extends ServiceHostPayloadRole>(
   role: TRole,
   parsed: Readonly<ParsedRuntimeBootstrapV1>,
   arwx: ArwxStdioChannel,
@@ -182,8 +176,7 @@ export function prepareRuntimeBootstrapArwxDispatcher<
     done: receiveLoop.done,
     runtimeDone,
     quiesced: arwx.waitForQuiescence(),
-  }) as
-    RuntimeBootstrapArwxDispatcherGate<TRole>;
+  }) as RuntimeBootstrapArwxDispatcherGate<TRole>;
   const state: DispatcherGateState<TRole> = {
     role,
     parsed,
@@ -442,9 +435,10 @@ export async function performRuntimeBootstrapHandshake<
     const completed = Object.freeze({ role, parsed, boundary });
     const result = owner.promote(
       () => promote(completed),
-      (promotedOwner) =>
-        prepareBoundaryDispatcherActivation(boundState, completed, promotedOwner),
+      (promotedOwner) => prepareBoundaryDispatcherActivation(boundState, completed, promotedOwner),
+      activatePreparedDispatcherActivation,
       commitPreparedDispatcherActivation,
+      rollbackPreparedDispatcherActivation,
     );
     return result;
   } catch (error) {
@@ -552,14 +546,27 @@ function prepareBoundaryDispatcherActivation<TRole extends ServiceHostPayloadRol
   return { boundary: state, dispatcher, runtime };
 }
 
-function commitPreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+function activatePreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
   prepared: PreparedDispatcherActivation<TRole>,
 ): void {
   const { boundary, dispatcher, runtime } = prepared;
   dispatcher.handler = runtime.handler;
   boundary.committed = true;
   dispatcher.phase = "active";
+}
+
+function commitPreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  prepared: PreparedDispatcherActivation<TRole>,
+): void {
+  const { dispatcher, runtime } = prepared;
   dispatcher.runtimeReady.resolve(runtime);
+}
+
+function rollbackPreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  prepared: PreparedDispatcherActivation<TRole>,
+): void {
+  prepared.boundary.committed = false;
+  terminateDispatcherGateState(prepared.dispatcher);
 }
 
 function terminateDispatcherGateState(state: DispatcherGateState): void {
@@ -574,8 +581,7 @@ function terminateDispatcherGateState(state: DispatcherGateState): void {
 
 function startRuntimeClose(
   state: DispatcherGateState,
-  absoluteDeadline =
-    performance.now() +
+  absoluteDeadline = performance.now() +
     state.parsed.bootstrap.shutdown.gracefulTimeoutMs -
     state.parsed.bootstrap.shutdown.forceTerminationReserveMs,
 ): Promise<void> {
@@ -811,7 +817,9 @@ class RuntimeBootstrapStreamOwner {
   public promote<TResult, TActivation>(
     factory: () => TResult,
     prepareActivation: (result: TResult) => TActivation,
+    activate: (activation: TActivation) => void,
     commitActivation: (activation: TActivation) => void,
+    rollbackActivation: (activation: TActivation) => void,
   ): TResult {
     if (
       this.#terminalError !== undefined ||
@@ -827,6 +835,9 @@ class RuntimeBootstrapStreamOwner {
       );
     }
     this.stream.pause();
+    let activation!: TActivation;
+    let activationPrepared = false;
+    let activated = false;
     try {
       const result = factory();
       if (isPromiseLike(result)) {
@@ -842,7 +853,8 @@ class RuntimeBootstrapStreamOwner {
           handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap promotion failed.")
         );
       }
-      const activation = prepareActivation(result);
+      activation = prepareActivation(result);
+      activationPrepared = true;
       if (isPromiseLike(activation)) {
         void Promise.resolve(activation).catch(() => undefined);
         throw handshakeError(
@@ -857,11 +869,20 @@ class RuntimeBootstrapStreamOwner {
         );
       }
       this.#detach();
-      commitActivation(activation);
-      this.#promoted = true;
+      activate(activation);
+      activated = true;
       this.stream.resume();
+      if (this.stream.destroyed || this.stream.readableEnded) {
+        throw handshakeError(
+          "BOOTSTRAP_TRANSPORT_FAILED",
+          "Runtime bootstrap stream ended during final promotion.",
+        );
+      }
+      this.#promoted = true;
+      commitActivation(activation);
       return result;
     } catch (error) {
+      if (activated && activationPrepared) rollbackActivation(activation);
       this.abort();
       throw error;
     }

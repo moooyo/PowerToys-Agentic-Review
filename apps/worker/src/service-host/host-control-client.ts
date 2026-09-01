@@ -102,6 +102,7 @@ export interface ControlHostControlClient extends HostControlSession<"control"> 
     options?: HostControlCallOptions,
   ): Promise<unknown>;
   signLocalDigest(digestSha256: string, options?: HostControlCallOptions): Promise<string>;
+  waitForIdle(absoluteDeadline: number): Promise<void>;
   armArwxShutdown(receipt: ArwxFinalFrameReceipt): Promise<Readonly<ArmArwxShutdownResultV1>>;
 }
 
@@ -245,6 +246,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   readonly #seenRequestIds = new Set<string>();
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
+  readonly #writableHalfClosed = new Deferred<void>();
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
   readonly #pendingEmptyWaiters = new Set<() => void>();
   readonly #frameReservations = new Set<FrameReservation>();
@@ -404,6 +406,20 @@ class HostControlRpcClient implements ControlHostControlClient {
       const draining = this.drain();
       draining.catch(() => undefined);
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      try {
+        await this.#awaitDrainPhase(this.#writableHalfClosed.promise, details.absoluteDeadline);
+      } catch {
+        if (this.#terminalError === undefined) {
+          this.#fail(
+            clientError(
+              "LIFECYCLE_TIMEOUT",
+              "HostControl ARWX shutdown arm missed its final settlement deadline.",
+            ),
+          );
+        }
+        throw this.#terminalError;
+      }
+      if (this.#terminalError !== undefined) throw this.#terminalError;
       return result;
     } catch {
       failPreparedArmArwxShutdown(prepared);
@@ -424,6 +440,41 @@ class HostControlRpcClient implements ControlHostControlClient {
       ),
     );
     return this.#drainPromise;
+  }
+
+  public async waitForIdle(absoluteDeadline: number): Promise<void> {
+    if (!Number.isFinite(absoluteDeadline) || this.#state !== "open") {
+      throw clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl idle wait requires an open client and finite deadline.",
+      );
+    }
+    try {
+      await withDeadline(
+        Promise.race([this.#waitForPendingEmpty(), this.#failure.promise]),
+        remainingShutdownMilliseconds(absoluteDeadline),
+      );
+      remainingShutdownMilliseconds(absoluteDeadline);
+      await withDeadline(
+        Promise.race([this.#writeChain, this.#failure.promise]),
+        remainingShutdownMilliseconds(absoluteDeadline),
+      );
+      remainingShutdownMilliseconds(absoluteDeadline);
+    } catch {
+      if (this.#terminalError !== undefined) throw this.#terminalError;
+      throw clientError(
+        "LIFECYCLE_TIMEOUT",
+        "HostControl did not become idle before its shutdown deadline.",
+      );
+    }
+    if (
+      this.#activeCalls !== 0 ||
+      this.#pending.size !== 0 ||
+      this.#frameReservations.size !== 0 ||
+      this.#queuedWriteBytes !== 0
+    ) {
+      throw clientError("LIFECYCLE_STATE_INVALID", "HostControl idle ownership did not converge.");
+    }
   }
 
   public close(absoluteDeadline?: number): Promise<void> {
@@ -849,6 +900,7 @@ class HostControlRpcClient implements ControlHostControlClient {
       await this.#awaitDrainPhase(this.#waitForPendingEmpty(), deadline);
       await this.#awaitDrainPhase(this.#writeChain, deadline);
       await this.#awaitDrainPhase(this.#endWritable(), deadline);
+      this.#writableHalfClosed.resolve(undefined);
       await this.#awaitDrainPhase(this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
     } catch {

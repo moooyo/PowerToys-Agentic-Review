@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,215 @@ func TestRunRoleAwareControlCompletesOrderedShutdown(t *testing.T) {
 	}
 }
 
+func TestRunRoleAwarePairedRelaysCompleteControlInitiatedShutdown(t *testing.T) {
+	controlNode := newRoleTestEndpoint()
+	executorNode := newRoleTestEndpoint()
+	controlPipe, executorPipe := newPairedRolePipeEndpoints()
+	drain := roleTestFrame(shutdownMessageDrain, 1, nil)
+	drained := roleTestFrame(shutdownMessageDrained, 1, nil)
+	controlAuthorizer := newRoleTestAuthorizer(drain, time.Now().Add(time.Second))
+	executorAuthorizer := newRoleTestAuthorizer(drained, time.Now().Add(time.Second))
+	controlAuthorizer.mutateInput = true
+	executorAuthorizer.mutateInput = true
+
+	controlResult := runRoleTest(RoleControl, controlNode, controlPipe, controlAuthorizer, roleTestOptions())
+	executorResult := runRoleTest(RoleExecutor, executorNode, executorPipe, executorAuthorizer, roleTestOptions())
+	controlNode.reads <- roleTestRead{value: drain}
+
+	if got := receiveRoleFrame(t, executorNode.writes); !bytes.Equal(got, drain) {
+		t.Fatal("paired Executor did not receive Control Drain")
+	}
+	waitRoleTestSignal(t, executorNode.closeWriteStarted)
+	executorNode.reads <- roleTestRead{value: drained}
+	executorNode.reads <- roleTestRead{err: io.EOF}
+
+	if got := receiveRoleFrame(t, controlNode.writes); !bytes.Equal(got, drained) {
+		t.Fatal("paired Control did not receive Executor Drained")
+	}
+	waitRoleTestSignal(t, controlNode.closeWriteStarted)
+	controlNode.reads <- roleTestRead{err: io.EOF}
+
+	if err := receiveRoleError(t, controlResult); err != nil {
+		t.Fatalf("paired Control relay error = %v", err)
+	}
+	if err := receiveRoleError(t, executorResult); err != nil {
+		t.Fatalf("paired Executor relay error = %v", err)
+	}
+	if controlAuthorizer.callCount() != 1 || executorAuthorizer.callCount() != 1 {
+		t.Fatalf(
+			"paired authorization calls: control=%d executor=%d",
+			controlAuthorizer.callCount(),
+			executorAuthorizer.callCount(),
+		)
+	}
+	if controlNode.closeWriteCount() != 1 || executorNode.closeWriteCount() != 1 {
+		t.Fatalf(
+			"paired Node EOF calls: control=%d executor=%d",
+			controlNode.closeWriteCount(),
+			executorNode.closeWriteCount(),
+		)
+	}
+	if controlPipe.flushCount() != 1 || executorPipe.flushCount() != 0 {
+		t.Fatalf(
+			"paired flush calls: control=%d executor=%d",
+			controlPipe.flushCount(),
+			executorPipe.flushCount(),
+		)
+	}
+}
+
+func TestRunRoleAwarePairedRelaysFailClosedOnArmAndNodeEOFFailures(t *testing.T) {
+	tests := []struct {
+		name               string
+		authorizationError error
+		nodeEOFError       error
+		want               error
+	}{
+		{
+			name:               "Executor Arm authorization",
+			authorizationError: ErrUnauthorizedEOF,
+			want:               ErrUnauthorizedEOF,
+		},
+		{
+			name:         "Executor Node EOF",
+			nodeEOFError: io.ErrUnexpectedEOF,
+			want:         io.ErrUnexpectedEOF,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controlNode := newRoleTestEndpoint()
+			executorNode := newRoleTestEndpoint()
+			controlPipe, executorPipe := newPairedRolePipeEndpoints()
+			drain := roleTestFrame(shutdownMessageDrain, 1, nil)
+			drained := roleTestFrame(shutdownMessageDrained, 1, nil)
+			controlAuthorizer := newRoleTestAuthorizer(drain, time.Now().Add(time.Second))
+			executorAuthorizer := newRoleTestAuthorizer(drained, time.Now().Add(time.Second))
+			executorAuthorizer.err = test.authorizationError
+
+			controlResult := runRoleTest(
+				RoleControl, controlNode, controlPipe, controlAuthorizer, roleTestOptions(),
+			)
+			executorResult := runRoleTest(
+				RoleExecutor, executorNode, executorPipe, executorAuthorizer, roleTestOptions(),
+			)
+			controlNode.reads <- roleTestRead{value: drain}
+			if got := receiveRoleFrame(t, executorNode.writes); !bytes.Equal(got, drain) {
+				t.Fatal("paired Executor did not receive Control Drain")
+			}
+			if test.nodeEOFError != nil {
+				executorNode.reads <- roleTestRead{err: test.nodeEOFError}
+			} else {
+				executorNode.reads <- roleTestRead{value: drained}
+				executorNode.reads <- roleTestRead{err: io.EOF}
+			}
+
+			executorErr := receiveRoleError(t, executorResult)
+			if !errors.Is(executorErr, test.want) {
+				t.Fatalf("paired Executor relay error = %v, want %v", executorErr, test.want)
+			}
+			controlErr := receiveRoleError(t, controlResult)
+			if !errors.Is(controlErr, errPairedRolePipePeerClosed) {
+				t.Fatalf(
+					"paired Control relay error = %v, want peer-closed provenance",
+					controlErr,
+				)
+			}
+			assertNoRoleQueueOwnershipError(t, executorErr)
+			assertNoRoleQueueOwnershipError(t, controlErr)
+			waitRoleTestSignal(t, controlNode.closed)
+			waitRoleTestSignal(t, executorNode.closed)
+			waitRoleTestSignal(t, controlPipe.closed)
+			waitRoleTestSignal(t, executorPipe.closed)
+			select {
+			case frame := <-controlNode.writes:
+				t.Fatalf("failed paired shutdown delivered Drained to Control: %x", frame)
+			default:
+			}
+		})
+	}
+}
+
+func TestRunRoleAwarePairedRelaysRejectControlAuthorizationAfterDrained(t *testing.T) {
+	authorizationFailure := errors.New("Control authorization rejected")
+	tests := []struct {
+		name      string
+		configure func(*roleTestAuthorizer)
+		want      error
+	}{
+		{
+			name: "authorization rejection",
+			configure: func(authorizer *roleTestAuthorizer) {
+				authorizer.err = authorizationFailure
+			},
+			want: authorizationFailure,
+		},
+		{
+			name: "authorization deadline",
+			configure: func(authorizer *roleTestAuthorizer) {
+				authorizer.deadline = time.Now().Add(-time.Millisecond)
+			},
+			want: ErrShutdownTimeout,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controlNode := newRoleTestEndpoint()
+			executorNode := newRoleTestEndpoint()
+			controlPipe, executorPipe := newPairedRolePipeEndpoints()
+			drain := roleTestFrame(shutdownMessageDrain, 1, nil)
+			drained := roleTestFrame(shutdownMessageDrained, 1, nil)
+			controlAuthorizer := newRoleTestAuthorizer(drain, time.Now().Add(time.Second))
+			executorAuthorizer := newRoleTestAuthorizer(drained, time.Now().Add(time.Second))
+			test.configure(controlAuthorizer)
+
+			controlResult := runRoleTest(
+				RoleControl, controlNode, controlPipe, controlAuthorizer, roleTestOptions(),
+			)
+			executorResult := runRoleTest(
+				RoleExecutor, executorNode, executorPipe, executorAuthorizer, roleTestOptions(),
+			)
+			controlNode.reads <- roleTestRead{value: drain}
+			if got := receiveRoleFrame(t, executorNode.writes); !bytes.Equal(got, drain) {
+				t.Fatal("paired Executor did not receive Control Drain")
+			}
+			waitRoleTestSignal(t, executorNode.closeWriteStarted)
+			executorNode.reads <- roleTestRead{value: drained}
+			executorNode.reads <- roleTestRead{err: io.EOF}
+			if got := receiveRoleFrame(t, controlNode.writes); !bytes.Equal(got, drained) {
+				t.Fatal("paired Control did not receive Executor Drained")
+			}
+			waitRoleTestSignal(t, controlNode.closeWriteStarted)
+			controlNode.reads <- roleTestRead{err: io.EOF}
+
+			controlErr := receiveRoleError(t, controlResult)
+			if !errors.Is(controlErr, test.want) {
+				t.Fatalf("paired Control relay error = %v, want %v", controlErr, test.want)
+			}
+			executorErr := receiveRoleError(t, executorResult)
+			if !errors.Is(executorErr, errPairedRolePipePeerClosed) {
+				t.Fatalf(
+					"paired Executor relay error = %v, want peer-closed provenance",
+					executorErr,
+				)
+			}
+			if controlPipe.flushCount() != 0 || executorPipe.flushCount() != 0 {
+				t.Fatalf(
+					"failed paired authorization flushed pipes: control=%d executor=%d",
+					controlPipe.flushCount(),
+					executorPipe.flushCount(),
+				)
+			}
+			waitRoleTestSignal(t, controlPipe.closed)
+			waitRoleTestSignal(t, executorPipe.closed)
+			waitRoleTestSignal(t, controlNode.closed)
+			waitRoleTestSignal(t, executorNode.closed)
+			assertNoRoleQueueOwnershipError(t, controlErr)
+			assertNoRoleQueueOwnershipError(t, executorErr)
+		})
+	}
+}
+
 func TestRunRoleAwareExecutorWaitsForServerEOFAndNeverFlushes(t *testing.T) {
 	node := newRoleTestEndpoint()
 	pipe := newRoleTestEndpoint()
@@ -106,35 +316,45 @@ func TestRunRoleAwareExecutorWaitsForServerEOFAndNeverFlushes(t *testing.T) {
 	}
 }
 
-func TestRunRoleAwareExecutorWaitsForNodeCloseWriteBeforeAuthorizingDrained(t *testing.T) {
+func TestRunRoleAwareExecutorHoldsDrainedThroughCloseWriteAndAuthorization(t *testing.T) {
 	node := newRoleTestEndpoint()
 	pipe := newRoleTestEndpoint()
-	releaseCloseWrite := make(chan struct{})
-	node.closeWriteBlock = releaseCloseWrite
+	releaseAuthorization := make(chan struct{})
 	drained := roleTestFrame(shutdownMessageDrained, 1, nil)
 	authorizer := newRoleTestAuthorizer(drained, time.Now().Add(time.Second))
+	authorizer.block = releaseAuthorization
 	pipe.reads <- roleTestRead{value: roleTestFrame(shutdownMessageDrain, 1, nil)}
 	result := runRoleTest(RoleExecutor, node, pipe, authorizer, roleTestOptions())
 
 	_ = receiveRoleFrame(t, node.writes)
 	waitRoleTestSignal(t, node.closeWriteStarted)
 	node.reads <- roleTestRead{value: drained}
-	node.reads <- roleTestRead{err: io.EOF}
 	select {
 	case <-authorizer.started:
-		t.Fatal("Executor authorized Drained before Node CloseWrite completed")
+		t.Fatal("Executor authorized Drained before literal Node EOF")
 	case <-time.After(20 * time.Millisecond):
 	}
 	select {
 	case frame := <-pipe.writes:
-		t.Fatalf("Executor relayed Drained before Node CloseWrite completed: %x", frame)
-	default:
+		t.Fatalf("Executor relayed Drained before literal Node EOF: %x", frame)
+	case <-time.After(20 * time.Millisecond):
 	}
 
-	close(releaseCloseWrite)
+	node.reads <- roleTestRead{err: io.EOF}
 	waitRoleTestSignal(t, authorizer.started)
+	select {
+	case frame := <-pipe.writes:
+		t.Fatalf("Executor relayed Drained before authorization completed: %x", frame)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseAuthorization)
 	if got := receiveRoleFrame(t, pipe.writes); !bytes.Equal(got, drained) {
-		t.Fatal("Executor did not relay Drained after Node CloseWrite")
+		t.Fatal("Executor did not relay Drained after authorization")
+	}
+	select {
+	case frame := <-pipe.writes:
+		t.Fatalf("Executor relayed Drained more than once: %x", frame)
+	case <-time.After(20 * time.Millisecond):
 	}
 	pipe.reads <- roleTestRead{err: io.EOF}
 	if err := receiveRoleError(t, result); err != nil {
@@ -142,7 +362,7 @@ func TestRunRoleAwareExecutorWaitsForNodeCloseWriteBeforeAuthorizingDrained(t *t
 	}
 }
 
-func TestRunRoleAwareHoldsLocalFinalUntilLiteralAuthorizedEOF(t *testing.T) {
+func TestRunRoleAwareControlForwardsDrainBeforeLiteralAuthorizedEOF(t *testing.T) {
 	node := newRoleTestEndpoint()
 	pipe := newRoleTestEndpoint()
 	drain := roleTestFrame(shutdownMessageDrain, 1, nil)
@@ -151,21 +371,59 @@ func TestRunRoleAwareHoldsLocalFinalUntilLiteralAuthorizedEOF(t *testing.T) {
 	authorizer := newRoleTestAuthorizer(drain, time.Now().Add(time.Second))
 	authorizer.block = releaseAuthorization
 	node.reads <- roleTestRead{value: drain}
-	node.reads <- roleTestRead{err: io.EOF}
 
 	result := runRoleTest(RoleControl, node, pipe, authorizer, roleTestOptions())
+	if got := receiveRoleFrame(t, pipe.writes); !bytes.Equal(got, drain) {
+		t.Fatal("Control Drain was not forwarded before Node EOF")
+	}
+	select {
+	case <-authorizer.started:
+		t.Fatal("Control authorized EOF before Node emitted EOF")
+	case <-time.After(20 * time.Millisecond):
+	}
+	pipe.reads <- roleTestRead{value: drained}
+	if got := receiveRoleFrame(t, node.writes); !bytes.Equal(got, drained) {
+		t.Fatal("Executor Drained was not delivered before Control EOF")
+	}
+	node.reads <- roleTestRead{err: io.EOF}
 	waitRoleTestSignal(t, authorizer.started)
 	select {
-	case frame := <-pipe.writes:
-		t.Fatalf("final frame escaped before authorization: %x", frame)
+	case err := <-result:
+		t.Fatalf("Control completed before EOF authorization: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(releaseAuthorization)
-	if got := receiveRoleFrame(t, pipe.writes); !bytes.Equal(got, drain) {
-		t.Fatal("authorized Drain was not relayed")
+	if err := receiveRoleError(t, result); err != nil {
+		t.Fatalf("RunRoleAware error = %v", err)
 	}
+}
+
+func TestRunRoleAwareControlWaitsForDrainDeliveryBeforeAcceptingDrained(t *testing.T) {
+	node := newRoleTestEndpoint()
+	pipe := newRoleTestEndpoint()
+	releaseWrite := make(chan struct{})
+	pipe.writeBlock = releaseWrite
+	drain := roleTestFrame(shutdownMessageDrain, 1, nil)
+	drained := roleTestFrame(shutdownMessageDrained, 1, nil)
+	authorizer := newRoleTestAuthorizer(drain, time.Now().Add(time.Second))
+	node.reads <- roleTestRead{value: drain}
+
+	result := runRoleTest(RoleControl, node, pipe, authorizer, roleTestOptions())
+	waitRoleTestSignal(t, pipe.writeStarted)
 	pipe.reads <- roleTestRead{value: drained}
-	_ = receiveRoleFrame(t, node.writes)
+	select {
+	case frame := <-node.writes:
+		t.Fatalf("Control accepted Drained before Drain delivery: %x", frame)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseWrite)
+	if got := receiveRoleFrame(t, pipe.writes); !bytes.Equal(got, drain) {
+		t.Fatal("Control did not deliver its exact Drain")
+	}
+	if got := receiveRoleFrame(t, node.writes); !bytes.Equal(got, drained) {
+		t.Fatal("Control did not accept Drained after Drain delivery")
+	}
+	node.reads <- roleTestRead{err: io.EOF}
 	if err := receiveRoleError(t, result); err != nil {
 		t.Fatalf("RunRoleAware error = %v", err)
 	}
@@ -174,10 +432,11 @@ func TestRunRoleAwareHoldsLocalFinalUntilLiteralAuthorizedEOF(t *testing.T) {
 func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 	authorizationFailure := errors.New("authorization rejected")
 	tests := []struct {
-		name       string
-		reads      []roleTestRead
-		authorizer func(*roleTestAuthorizer)
-		want       error
+		name          string
+		reads         []roleTestRead
+		authorizer    func(*roleTestAuthorizer)
+		want          error
+		wantForwarded bool
 	}{
 		{
 			name:  "EOF before final",
@@ -197,7 +456,8 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 				{value: roleTestFrame(shutdownMessageDrain, 1, nil)},
 				{value: roleTestFrame(1, 2, nil)},
 			},
-			want: ErrShutdownProtocol,
+			want:          ErrShutdownProtocol,
+			wantForwarded: true,
 		},
 		{
 			name: "wrapped EOF",
@@ -205,7 +465,8 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 				{value: roleTestFrame(shutdownMessageDrain, 1, nil)},
 				{err: fmt.Errorf("wrapped: %w", io.EOF)},
 			},
-			want: io.EOF,
+			want:          io.EOF,
+			wantForwarded: true,
 		},
 		{
 			name: "bytes with EOF",
@@ -213,7 +474,8 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 				{value: roleTestFrame(shutdownMessageDrain, 1, nil)},
 				{value: []byte{1}, err: io.EOF},
 			},
-			want: io.EOF,
+			want:          io.EOF,
+			wantForwarded: true,
 		},
 		{
 			name: "sequence gap",
@@ -231,7 +493,8 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 			authorizer: func(authorizer *roleTestAuthorizer) {
 				authorizer.err = authorizationFailure
 			},
-			want: authorizationFailure,
+			want:          authorizationFailure,
+			wantForwarded: true,
 		},
 		{
 			name: "expired authorization result",
@@ -242,7 +505,8 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 			authorizer: func(authorizer *roleTestAuthorizer) {
 				authorizer.deadline = time.Now().Add(-time.Millisecond)
 			},
-			want: ErrShutdownTimeout,
+			want:          ErrShutdownTimeout,
+			wantForwarded: true,
 		},
 	}
 	for _, test := range tests {
@@ -264,10 +528,16 @@ func TestRunRoleAwareRejectsLocalEOFAndFinalFrameViolations(t *testing.T) {
 			if !errors.Is(err, test.want) {
 				t.Fatalf("RunRoleAware error = %v, want %v", err, test.want)
 			}
-			select {
-			case frame := <-pipe.writes:
-				t.Fatalf("invalid local final was relayed: %x", frame)
-			default:
+			if test.wantForwarded {
+				if frame := receiveRoleFrame(t, pipe.writes); !bytes.Equal(frame, final) {
+					t.Fatalf("Control forwarded frame = %x, want Drain", frame)
+				}
+			} else {
+				select {
+				case frame := <-pipe.writes:
+					t.Fatalf("invalid local frame was relayed: %x", frame)
+				default:
+				}
 			}
 			if test.name != "authorization failure" && test.name != "expired authorization result" &&
 				authorizer.callCount() != 0 {
@@ -367,10 +637,8 @@ func TestRunRoleAwareEnforcesHardAndAuthorizationDeadlines(t *testing.T) {
 		if !errors.Is(err, ErrShutdownTimeout) {
 			t.Fatalf("RunRoleAware error = %v, want shutdown timeout", err)
 		}
-		select {
-		case frame := <-pipe.writes:
-			t.Fatalf("timed-out final frame was relayed: %x", frame)
-		default:
+		if frame := receiveRoleFrame(t, pipe.writes); !bytes.Equal(frame, drain) {
+			t.Fatalf("Control forwarded frame = %x, want Drain", frame)
 		}
 	})
 
@@ -633,15 +901,19 @@ type roleTestRead struct {
 	err   error
 }
 
+var errPairedRolePipePeerClosed = errors.New("paired role pipe peer closed")
+
 type roleTestEndpoint struct {
 	reads             chan roleTestRead
 	writes            chan []byte
 	closed            chan struct{}
 	closeWriteStarted chan struct{}
 	flushStarted      chan struct{}
+	writeStarted      chan struct{}
 	closeOnce         sync.Once
 	closeWriteOnce    sync.Once
 	flushOnce         sync.Once
+	writeStartOnce    sync.Once
 
 	mu              sync.Mutex
 	closeCalls      int
@@ -651,6 +923,7 @@ type roleTestEndpoint struct {
 	closeWriteError error
 	flushError      error
 	writeError      error
+	writeBlock      <-chan struct{}
 	closeBlock      <-chan struct{}
 	closeWriteBlock <-chan struct{}
 	flushBlock      <-chan struct{}
@@ -659,6 +932,18 @@ type roleTestEndpoint struct {
 
 type plainRoleTestEndpoint struct {
 	inner *roleTestEndpoint
+}
+
+type pairedRolePipeEndpoint struct {
+	incoming   chan roleTestRead
+	closed     chan struct{}
+	peerClosed chan struct{}
+	peer       *pairedRolePipeEndpoint
+
+	mu         sync.Mutex
+	closeOnce  sync.Once
+	flushOnce  sync.Once
+	flushCalls int
 }
 
 func (endpoint *plainRoleTestEndpoint) ReadFrame(ctx context.Context) ([]byte, error) {
@@ -673,6 +958,107 @@ func (endpoint *plainRoleTestEndpoint) Close() error {
 	return endpoint.inner.Close()
 }
 
+func newPairedRolePipeEndpoints() (*pairedRolePipeEndpoint, *pairedRolePipeEndpoint) {
+	control := &pairedRolePipeEndpoint{
+		incoming:   make(chan roleTestRead, 16),
+		closed:     make(chan struct{}),
+		peerClosed: make(chan struct{}),
+	}
+	executor := &pairedRolePipeEndpoint{
+		incoming:   make(chan roleTestRead, 16),
+		closed:     make(chan struct{}),
+		peerClosed: make(chan struct{}),
+	}
+	control.peer = executor
+	executor.peer = control
+	return control, executor
+}
+
+func (endpoint *pairedRolePipeEndpoint) ReadFrame(ctx context.Context) ([]byte, error) {
+	read := func(result roleTestRead) ([]byte, error) {
+		return append([]byte(nil), result.value...), result.err
+	}
+	select {
+	case result := <-endpoint.incoming:
+		return read(result)
+	default:
+	}
+	select {
+	case result := <-endpoint.incoming:
+		return read(result)
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	case <-endpoint.closed:
+		return nil, io.ErrClosedPipe
+	case <-endpoint.peerClosed:
+		select {
+		case result := <-endpoint.incoming:
+			return read(result)
+		default:
+			return nil, errPairedRolePipePeerClosed
+		}
+	}
+}
+
+func (endpoint *pairedRolePipeEndpoint) WriteFrame(ctx context.Context, value []byte) error {
+	if endpoint.peer == nil {
+		return io.ErrClosedPipe
+	}
+	select {
+	case endpoint.peer.incoming <- roleTestRead{value: append([]byte(nil), value...)}:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-endpoint.closed:
+		return io.ErrClosedPipe
+	case <-endpoint.peer.closed:
+		return io.ErrClosedPipe
+	}
+}
+
+func (endpoint *pairedRolePipeEndpoint) FlushThenClose(ctx context.Context) error {
+	if endpoint.peer == nil {
+		return io.ErrClosedPipe
+	}
+	var flushErr error
+	called := false
+	endpoint.flushOnce.Do(func() {
+		called = true
+		endpoint.mu.Lock()
+		endpoint.flushCalls++
+		endpoint.mu.Unlock()
+		select {
+		case endpoint.peer.incoming <- roleTestRead{err: io.EOF}:
+		case <-ctx.Done():
+			flushErr = context.Cause(ctx)
+		case <-endpoint.closed:
+			flushErr = io.ErrClosedPipe
+		case <-endpoint.peer.closed:
+			flushErr = io.ErrClosedPipe
+		}
+	})
+	if !called && flushErr == nil {
+		return errors.New("paired pipe was flushed more than once")
+	}
+	return flushErr
+}
+
+func (endpoint *pairedRolePipeEndpoint) Close() error {
+	endpoint.closeOnce.Do(func() {
+		close(endpoint.closed)
+		if endpoint.peer != nil {
+			close(endpoint.peer.peerClosed)
+		}
+	})
+	return nil
+}
+
+func (endpoint *pairedRolePipeEndpoint) flushCount() int {
+	endpoint.mu.Lock()
+	defer endpoint.mu.Unlock()
+	return endpoint.flushCalls
+}
+
 func newRoleTestEndpoint() *roleTestEndpoint {
 	return &roleTestEndpoint{
 		reads:             make(chan roleTestRead, 16),
@@ -680,6 +1066,7 @@ func newRoleTestEndpoint() *roleTestEndpoint {
 		closed:            make(chan struct{}),
 		closeWriteStarted: make(chan struct{}),
 		flushStarted:      make(chan struct{}),
+		writeStarted:      make(chan struct{}),
 	}
 }
 
@@ -695,11 +1082,22 @@ func (endpoint *roleTestEndpoint) ReadFrame(ctx context.Context) ([]byte, error)
 }
 
 func (endpoint *roleTestEndpoint) WriteFrame(ctx context.Context, value []byte) error {
+	endpoint.writeStartOnce.Do(func() { close(endpoint.writeStarted) })
 	endpoint.mu.Lock()
 	writeError := endpoint.writeError
+	writeBlock := endpoint.writeBlock
 	endpoint.mu.Unlock()
 	if writeError != nil {
 		return writeError
+	}
+	if writeBlock != nil {
+		select {
+		case <-writeBlock:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-endpoint.closed:
+			return io.ErrClosedPipe
+		}
 	}
 	select {
 	case endpoint.writes <- append([]byte(nil), value...):
@@ -779,14 +1177,15 @@ func (endpoint *roleTestEndpoint) flushCount() int {
 }
 
 type roleTestAuthorizer struct {
-	mu       sync.Mutex
-	expected []byte
-	deadline time.Time
-	err      error
-	block    <-chan struct{}
-	started  chan struct{}
-	once     sync.Once
-	calls    int
+	mu          sync.Mutex
+	expected    []byte
+	deadline    time.Time
+	err         error
+	block       <-chan struct{}
+	mutateInput bool
+	started     chan struct{}
+	once        sync.Once
+	calls       int
 }
 
 func newRoleTestAuthorizer(expected []byte, deadline time.Time) *roleTestAuthorizer {
@@ -807,6 +1206,7 @@ func (authorizer *roleTestAuthorizer) AuthorizeArwxEOF(
 	deadline := authorizer.deadline
 	err := authorizer.err
 	block := authorizer.block
+	mutateInput := authorizer.mutateInput
 	authorizer.mu.Unlock()
 	authorizer.once.Do(func() { close(authorizer.started) })
 	if block != nil {
@@ -818,6 +1218,9 @@ func (authorizer *roleTestAuthorizer) AuthorizeArwxEOF(
 	}
 	if !bytes.Equal(finalFrame, expected) {
 		return time.Time{}, errors.New("unexpected final frame")
+	}
+	if mutateInput && len(finalFrame) != 0 {
+		finalFrame[0] ^= 0xff
 	}
 	if err != nil {
 		return time.Time{}, err
@@ -928,9 +1331,17 @@ func waitRoleTestSignal(t *testing.T, signal <-chan struct{}) {
 	}
 }
 
+func assertNoRoleQueueOwnershipError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && strings.Contains(err.Error(), "queue ownership remained") {
+		t.Fatalf("role-aware relay retained queue ownership: %v", err)
+	}
+}
+
 var (
 	_ NodeEndpoint        = (*roleTestEndpoint)(nil)
 	_ ControlPipeEndpoint = (*roleTestEndpoint)(nil)
+	_ ControlPipeEndpoint = (*pairedRolePipeEndpoint)(nil)
 	_ ArwxEOFAuthorizer   = (*roleTestAuthorizer)(nil)
 	_ Endpoint            = (*plainRoleTestEndpoint)(nil)
 )

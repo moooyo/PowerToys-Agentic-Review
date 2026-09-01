@@ -30,6 +30,7 @@ const allowedSharedInputs = new Set([
   "packages/local-protocol/src/capability.ts",
   "packages/local-protocol/src/canonical.ts",
   "packages/local-protocol/src/framing.ts",
+  "packages/local-protocol/src/handshake.ts",
   "packages/local-protocol/src/index.ts",
   "packages/local-protocol/src/messages.ts",
 ]);
@@ -38,6 +39,7 @@ const requiredPositiveSharedInputs = new Set([
   "packages/local-protocol/src/capability.ts",
   "packages/local-protocol/src/canonical.ts",
   "packages/local-protocol/src/framing.ts",
+  "packages/local-protocol/src/handshake.ts",
   "packages/local-protocol/src/messages.ts",
 ]);
 
@@ -179,6 +181,10 @@ const specifications = Object.freeze({
     outputs: new Set(["dist/control.mjs", "dist/control.mjs.map"]),
     requiredWorkerInputs: new Set([
       "apps/worker/src/control-main.ts",
+      "apps/worker/src/contracts-formats.ts",
+      "apps/worker/src/control/host-control-worker-api.ts",
+      "apps/worker/src/control/shadow-supervisor.ts",
+      "apps/worker/src/server-client/errors.ts",
       "apps/worker/src/service-host/arwx-shutdown.ts",
       "apps/worker/src/service-host/arwx-stdio-channel.ts",
       "apps/worker/src/service-host/host-control-client.ts",
@@ -188,7 +194,11 @@ const specifications = Object.freeze({
       "apps/worker/src/service-host/role-entrypoint.ts",
       "apps/worker/src/service-host/runtime-bootstrap.ts",
       "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+      "packages/contracts/src/common.ts",
+      "packages/contracts/src/states.ts",
+      "packages/contracts/src/worker.ts",
     ]),
+    allowedWorkerInputs: new Set(["packages/contracts/src/index.ts"]),
   },
   executor: {
     entryPoint: "apps/worker/src/executor-main.ts",
@@ -198,6 +208,7 @@ const specifications = Object.freeze({
       "apps/worker/src/service-host/arwx-shutdown.ts",
       "apps/worker/src/service-host/arwx-stdio-channel.ts",
       "apps/worker/src/service-host/executor-host-control-session.ts",
+      "apps/worker/src/service-host/executor-shadow-runtime.ts",
       "apps/worker/src/service-host/host-control-protocol.ts",
       "apps/worker/src/service-host/launch-contract.ts",
       "apps/worker/src/service-host/opaque-json.ts",
@@ -205,6 +216,7 @@ const specifications = Object.freeze({
       "apps/worker/src/service-host/runtime-bootstrap.ts",
       "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
     ]),
+    allowedWorkerInputs: new Set(),
   },
 });
 
@@ -254,6 +266,7 @@ export function verifyRoleBundle(role, metadata, outputFiles) {
 
   const allowedInputs = new Set([
     ...specification.requiredWorkerInputs,
+    ...specification.allowedWorkerInputs,
     ...allowedRoleBridgeInputs,
     ...allowedSharedInputs,
     ...allowedTypeBoxInputs,
@@ -309,6 +322,7 @@ export function verifyCanonicalRoleGraph(role, graph) {
   }
   const allowedInputs = new Set([
     ...specification.requiredWorkerInputs,
+    ...specification.allowedWorkerInputs,
     ...allowedRoleBridgeInputs,
     ...allowedSharedInputs,
     ...allowedTypeBoxInputs,
@@ -815,6 +829,7 @@ function loadReviewedInputDigests() {
   const expectedInputs = new Set([
     ...Object.values(specifications).flatMap((specification) => [
       ...specification.requiredWorkerInputs,
+      ...specification.allowedWorkerInputs,
     ]),
     ...allowedRoleBridgeInputs,
     ...allowedSharedInputs,
@@ -849,6 +864,7 @@ export const roleBundlePolicyForTest = Object.freeze(
         ]),
         allowedInputs: Object.freeze([
           ...specification.requiredWorkerInputs,
+          ...specification.allowedWorkerInputs,
           ...allowedRoleBridgeInputs,
           ...allowedSharedInputs,
           ...allowedTypeBoxInputs,

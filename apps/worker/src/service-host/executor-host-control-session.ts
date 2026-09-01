@@ -31,6 +31,7 @@ import {
 const defaultConnectTimeoutMs = 30_000;
 const defaultCloseTimeoutMs = 15_000;
 const maximumTimeoutMs = 10 * 60 * 1_000;
+const executorHostControlSessions = new WeakSet<object>();
 
 export type ExecutorHostControlConnector = (
   pipe: HostControlPipeSelector,
@@ -44,6 +45,17 @@ export interface ExecutorHostControlOptions {
   readonly connectTimeoutMs?: number;
   readonly closeTimeoutMs?: number;
   readonly connector?: ExecutorHostControlConnector;
+}
+
+export interface ExecutorHostControlSession extends HostControlSession<"executor"> {
+  readonly role: "executor";
+}
+
+/** Recognizes only sessions created by the reviewed Executor connector. */
+export function isExecutorHostControlSession(
+  session: HostControlSession<"executor">,
+): session is ExecutorHostControlSession {
+  return executorHostControlSessions.has(session);
 }
 
 export class ExecutorHostControlError extends Error {
@@ -68,7 +80,7 @@ export class ExecutorHostControlError extends Error {
 export async function connectExecutorHostControl(
   options: ExecutorHostControlOptions,
   signal?: AbortSignal,
-): Promise<HostControlSession<"executor">> {
+): Promise<ExecutorHostControlSession> {
   if (options.role !== "executor" || !isHostControlPipeSelector(options.pipe)) {
     throw new TypeError("Executor HostControl options are invalid.");
   }
@@ -89,7 +101,7 @@ export async function connectExecutorHostControl(
       "executor",
       options.prepareRuntimeBootstrap,
       absoluteDeadline,
-      (completed) => new ExecutorHostControlSession(stream, closeTimeoutMs, completed),
+      (completed) => new ExecutorHostControlSessionImpl(stream, closeTimeoutMs, completed),
       signal,
     );
   } catch (error) {
@@ -106,11 +118,12 @@ export async function connectExecutorHostControl(
   }
 }
 
-class ExecutorHostControlSession implements HostControlSession<"executor"> {
+class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
   public readonly role = "executor" as const;
   public readonly bootstrap: Readonly<ParsedRuntimeBootstrapV1>;
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
+  readonly #writableHalfClosed = new Deferred<void>();
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
   readonly #decoder = new HostControlFrameDecoder(HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES);
   readonly #runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"executor">>;
@@ -141,6 +154,7 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
   ) {
     this.#runtimeBootstrap = runtimeBootstrap;
     this.bootstrap = runtimeBootstrap.parsed;
+    executorHostControlSessions.add(this);
     void this.#done.then(undefined, () => undefined);
     stream.on("data", (chunk: Buffer | string) => {
       this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
@@ -302,9 +316,25 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
         const draining = this.drain();
         draining.catch(() => undefined);
         if (this.#terminalError !== undefined) throw this.#terminalError;
-        clearTimeout(pending.timeout);
-        this.#armPending = undefined;
-        pending.deferred.resolve(result);
+        void Promise.race([this.#writableHalfClosed.promise, this.#failure.promise]).then(
+          () => {
+            if (this.#terminalError !== undefined || this.#armPending !== pending) return;
+            const deadline = this.#shutdownDeadline;
+            if (deadline === undefined || performance.now() >= deadline) {
+              this.#fail(
+                executorError(
+                  "LIFECYCLE_TIMEOUT",
+                  "Executor ARWX shutdown arm missed its final settlement deadline.",
+                ),
+              );
+              return;
+            }
+            clearTimeout(pending.timeout);
+            this.#armPending = undefined;
+            pending.deferred.resolve(result);
+          },
+          () => undefined,
+        );
       }
     } catch {
       this.#fail(executorError("PROTOCOL_FAILURE", "Executor HostControl Arm response failed."));
@@ -338,6 +368,7 @@ class ExecutorHostControlSession implements HostControlSession<"executor"> {
         }),
         deadline,
       );
+      this.#writableHalfClosed.resolve(undefined);
       await this.#awaitDrainPhase(this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
     } catch {

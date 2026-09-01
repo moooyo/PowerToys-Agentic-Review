@@ -11,6 +11,7 @@ import { verifyRoleBundle } from "./verify-role-bundles.mjs";
 const workerRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const outputDirectory = resolve(workerRoot, "dist");
+const contractsSource = resolve(repositoryRoot, "packages/contracts/src/index.ts");
 const localProtocolSource = resolve(repositoryRoot, "packages/local-protocol/src/index.ts");
 const typeBoxEntry = fileURLToPath(import.meta.resolve("@sinclair/typebox"));
 const typeBoxRoot = realpathSync(resolve(dirname(typeBoxEntry), "../.."));
@@ -27,9 +28,13 @@ const typeBoxCheckModule = realpathSync(resolve(typeBoxRoot, "build/esm/value/ch
 const typeBoxValueCheckShim = realpathSync(
   resolve(workerRoot, "src/service-host/typebox-value-check.ts"),
 );
-const reviewedRoleTypeBoxValueImporters = new Set([
+const requiredReviewedRoleTypeBoxValueImporters = new Set([
   realpathSync(resolve(repositoryRoot, "packages/local-protocol/src/capability.ts")),
   realpathSync(resolve(repositoryRoot, "packages/local-protocol/src/messages.ts")),
+]);
+const reviewedRoleTypeBoxValueImporters = new Set([
+  ...requiredReviewedRoleTypeBoxValueImporters,
+  realpathSync(resolve(workerRoot, "src/control/host-control-worker-api.ts")),
 ]);
 
 if (
@@ -85,7 +90,7 @@ async function bundle(entryPoint, output, mode) {
     treeShaking: true,
     write: false,
     plugins: [
-      reviewedWorkspaceSources(),
+      reviewedWorkspaceSources(mode),
       ...(mode === "reviewed-role" ? [reviewedRoleTypeBoxValue()] : []),
       reviewedTypeBoxTreeShaking(),
     ],
@@ -113,7 +118,7 @@ function reviewedRoleTypeBoxValue() {
         return { path: typeBoxValueCheckShim };
       });
       buildContext.onEnd(() => {
-        const missing = [...reviewedRoleTypeBoxValueImporters].filter(
+        const missing = [...requiredReviewedRoleTypeBoxValueImporters].filter(
           (importer) => !seenImporters.has(importer),
         );
         if (missing.length === 0) return undefined;
@@ -213,10 +218,15 @@ function parseReviewedModule(source, typescript, description) {
   }
 }
 
-function reviewedWorkspaceSources() {
+function reviewedWorkspaceSources(mode) {
   return {
     name: "reviewed-workspace-sources",
     setup(buildContext) {
+      if (mode === "reviewed-role") {
+        buildContext.onResolve({ filter: /^@agentic-review\/contracts$/ }, () => ({
+          path: contractsSource,
+        }));
+      }
       buildContext.onResolve({ filter: /^@agentic-review\/local-protocol$/ }, () => ({
         path: localProtocolSource,
       }));

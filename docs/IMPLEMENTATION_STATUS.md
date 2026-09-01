@@ -1,13 +1,13 @@
 # Implementation Status
 
-Status date: 2026-09-01
+Status date: 2026-09-02
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
 execution components, and the split-service protocol and native Windows composition candidate
-described in `ARCHITECTURE.md`. It remains intentionally fail-closed while the TypeScript role
-business runtimes, release and installer pipeline, and native Windows runtime evidence are
-incomplete.
+described in `ARCHITECTURE.md`. Candidate zero-slot TypeScript role supervisors are now present but
+unverified. The repository remains intentionally fail-closed while execution-capable role
+runtimes, the release and installer pipeline, and native Windows runtime evidence are incomplete.
 
 ## Implemented
 
@@ -126,14 +126,35 @@ incomplete.
 - Claim admission derived only from the role configuration sealed into the committed runtime
   bootstrap. The current foundation configuration disables execution, so Claim is rejected with a
   terminal `OPERATION_NOT_ALLOWED` response before dispatcher or request resources are acquired.
+- A full role-activation barrier that keeps runtime handlers and startup side effects dormant until
+  the connector returns the exact promoted HostControl owner and passes bootstrap, role, and
+  nominal-session validation.
+- Candidate Control and Executor zero-slot supervisors. They perform the signed local handshake,
+  bind manifest, policy, preflight, node, session, nonce, and boot evidence, and permit Executor to
+  publish only `ready=false`, `availableSlots=0`, and `reasonCode=EXECUTION_DISABLED`.
+- A claim-free Control shadow adapter that exposes only registration, instance heartbeat, and local
+  digest signing. Control registers a maximum of one slot but continuously advertises zero
+  available slots and an empty active-lease set.
+- Candidate post-dispatch shadow shutdown choreography: Control sends final `Drain`, Executor sends
+  final `Drained`, and both role-local HostControl sessions arm and join their bounded transports.
+  The Control-only relay asymmetry and HostControl half-close latch are present, but the complete
+  choreography remains unverified. Pre-authorization forwarding lets a compromised Control payload
+  force a bounded Executor shutdown, but grants no Claim, lease, or execution authority; the native
+  attack matrix must explicitly cover this denial-of-service tradeoff.
 
 ## Deliberately Disabled
 
 - `WORKER_EXECUTION_ENABLED=true` and the installer `-EnableExecution` option are rejected. The
-  native Windows ServiceHost composition is connected, but the Control and Executor TypeScript
-  payloads remain zero-execution foundations that emit no ARWX `Ready`. Production enablement also
-  requires a compiled release profile, split-service packaging and installation, signing, and native
-  Windows preflight and attack-test evidence.
+  native Windows ServiceHost composition is connected, and the Control and Executor TypeScript
+  payloads now contain an unverified zero-slot supervisor candidate. Executor can emit only the
+  authenticated disabled `Ready` attestation; Control cannot claim and reports zero available
+  slots. Production enablement still requires a compiled release profile, split-service packaging
+  and installation, signing, and native Windows preflight and attack-test evidence.
+- The shadow candidate is not publishable because ServiceHost does not yet have a production
+  Go-to-Node shutdown-request bridge. External service cancellation currently reaches force
+  termination without first invoking Control runtime close while relay, HostControl, and Node stay
+  alive under the single graceful deadline. Go must not synthesize an ARWX business frame to fill
+  this gap.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1a read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
@@ -148,18 +169,24 @@ incomplete.
 
 ## Next Milestone
 
-The next Worker slice should install TypeScript Control and Executor business supervisors behind the
-existing role entrypoints and run them in zero-slot shadow mode. It must complete the authenticated
-local handshake, `Ready` attestation, reconnect, drain, and preflight lifecycle while keeping
-`executionEnabled=false`, advertising zero slots, and preserving the sealed HostControl Claim
-denial. Control must exclusively own Server lease tokens and fixed-origin mTLS; Executor must
-exclusively own Codex, Git, workspaces, and execution credentials.
+The next Worker step is a dedicated native lifecycle slice. It must add a single-use
+`ShutdownRequested` contract from Go ServiceHost to the Control Node payload, serialize it with
+HostControl responses, invoke Control runtime close without cancelling relay or HostControl, and
+hold one graceful deadline through both role relays, both HostControl sessions, Node exit, and the
+force-termination reserve. Failure or deadline expiry may then terminate the root Job; Go must not
+synthesize an ARWX business frame. After that bridge is reviewed, the candidate must run on
+`test-env` and through a paired native Windows x64 and arm64 matrix covering restart, reconnect,
+registration loss, heartbeat, drain, deadline, and failure behavior. That verification must keep
+`executionEnabled=false`, preserve the sealed HostControl Claim denial, and confirm that Control
+alone owns Server and mTLS authority while Executor has no Server, lease, workspace, ProcessHost,
+Codex, or Git capability in this shadow milestone.
 
-After that shadow runtime is complete, the release pipeline must compile the production release
-profile, produce signed role bundles and native binaries, and install the two services, identities,
-ACLs, keys, firewall policy, and machine-enforced Codex policy. Native Windows x64 and arm64 hosts
-must then pass the ADR 0007 installation, token, ACL, Named Pipe, Authenticode, sandbox, Job Object,
-disk, cancellation, tamper, restart, and attack tests before any Claim authority is enabled.
+After the shadow runtime is verified and any findings are closed, the release pipeline must compile
+the production release profile, produce signed role bundles and native binaries, and install the two
+services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy. Native Windows
+x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe, Authenticode,
+sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any Claim authority
+is enabled.
 
 The product data path can proceed in parallel in this order: bounded result-artifact upload and
 storage, immutable server-side diff manifests, publication drafts, digest-bound approvals, GitHub
@@ -168,12 +195,13 @@ stronger-isolation milestone.
 
 ## Verification Evidence
 
-The Phase 1a, local-protocol, and fail-closed ServiceHost security-contract candidate was verified
-on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive
-checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0 was provided
-through Corepack. No test, build, validation suite, or runtime probe was run on the local Windows
-development machine. The TypeScript counts below are the historical 2026-08-31 snapshot; they have
-not been recomputed for the 2026-09-01 native-only commits.
+The earlier Phase 1a, local-protocol, and fail-closed ServiceHost security-contract candidate was
+verified on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution.
+Its archive checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0
+was provided through Corepack. No test, build, validation suite, or runtime probe was run on the
+local Windows development machine. The TypeScript counts below are the historical 2026-08-31
+snapshot; they do not cover the 2026-09-02 zero-slot supervisors, full-activation barrier, or role
+bundle policy changes, which have not yet been verified.
 
 The following TypeScript commands completed successfully for the historical combined candidate on
 2026-08-31:
@@ -268,9 +296,12 @@ Not yet verified:
   behavior has not been exercised on a native Windows test machine. The production Authenticode and
   installation-verification code has only fake-provider execution plus Windows cross-compilation;
   real signed PE fixtures and Windows ABI checks remain release gates. The native platform
-  composition is connected, but the TypeScript role business supervisors still emit no ARWX
-  `Ready`, ordinary builds have no production release profile, and the real Codex executor remains
-  disconnected from the production entrypoint.
+  composition is connected, but the new TypeScript zero-slot supervisors have not been built or
+  exercised in the remote matrix or on native Windows. The native Control-only relay asymmetry and
+  Control HostControl half-close latch are also unverified, and the production shutdown-request
+  bridge is not implemented. Executor's candidate emits only the disabled ARWX `Ready`; ordinary
+  builds have no production release profile, Claim remains denied, and the real Codex executor
+  remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has

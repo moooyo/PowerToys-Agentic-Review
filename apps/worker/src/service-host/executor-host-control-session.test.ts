@@ -12,6 +12,7 @@ import type { ArwxFinalFrameReceipt } from "./arwx-stdio-channel.js";
 import {
   connectExecutorHostControl,
   ExecutorHostControlError,
+  isExecutorHostControlSession,
 } from "./executor-host-control-session.js";
 import {
   parseServiceHostLaunchContract,
@@ -96,6 +97,8 @@ describe("Executor HostControl session", () => {
 
     expect(session.role).toBe("executor");
     expect(session.bootstrap.bootstrap.role).toBe("executor");
+    expect(isExecutorHostControlSession(session)).toBe(true);
+    expect(isExecutorHostControlSession(Object.create(session))).toBe(false);
     expect("register" in session).toBe(false);
     expect("signLocalDigest" in session).toBe(false);
     await session.drain();

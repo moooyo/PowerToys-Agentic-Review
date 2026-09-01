@@ -361,12 +361,85 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
 
     await waitFor(() => dispatches === 1);
     expect(promoted).toBe(host);
-    terminateRuntimeBootstrapArwxDispatcher(
-      defined(runtime, "runtime context").receiveLoop,
-    );
+    terminateRuntimeBootstrapArwxDispatcher(defined(runtime, "runtime context").receiveLoop);
     defined(runtime, "runtime context").arwx.abort();
     await defined(runtime, "runtime context").receiveLoop.done.catch(() => undefined);
     host.destroy();
+  });
+
+  it("rolls back runtime activation when final stream promotion throws", async () => {
+    const host = new HandshakeHost("control");
+    const resume = host.resume.bind(host);
+    host.resume = (() => {
+      if (host.promoted) throw new Error("final promotion resume failed");
+      return resume();
+    }) as typeof host.resume;
+    let lifecycleSignal: AbortSignal | undefined;
+    let closeCalls = 0;
+
+    await expect(
+      performRuntimeBootstrapHandshake(
+        host,
+        "control",
+        createTestBootstrapPreparation("control", {
+          installer: (activation) => {
+            lifecycleSignal = activation.signal;
+            return {
+              handler: () => undefined,
+              done: Promise.resolve(),
+              close: async () => {
+                closeCalls += 1;
+              },
+            };
+          },
+        }),
+        performance.now() + 1_000,
+        () => host.installPromotedOwner(),
+      ),
+    ).rejects.toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+
+    await waitFor(() => closeCalls === 1);
+    expect(lifecycleSignal?.aborted).toBe(true);
+    expect(host.destroyed).toBe(true);
+  });
+
+  it("rolls back runtime activation when final promotion synchronously ends the stream", async () => {
+    const host = new HandshakeHost("control");
+    const resume = host.resume.bind(host);
+    host.resume = (() => {
+      if (host.promoted) {
+        host.destroy();
+        return host;
+      }
+      return resume();
+    }) as typeof host.resume;
+    let lifecycleSignal: AbortSignal | undefined;
+    let closeCalls = 0;
+
+    await expect(
+      performRuntimeBootstrapHandshake(
+        host,
+        "control",
+        createTestBootstrapPreparation("control", {
+          installer: (activation) => {
+            lifecycleSignal = activation.signal;
+            return {
+              handler: () => undefined,
+              done: Promise.resolve(),
+              close: async () => {
+                closeCalls += 1;
+              },
+            };
+          },
+        }),
+        performance.now() + 1_000,
+        () => host.installPromotedOwner(),
+      ),
+    ).rejects.toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+
+    await waitFor(() => closeCalls === 1);
+    expect(lifecycleSignal?.aborted).toBe(true);
+    expect(host.destroyed).toBe(true);
   });
 
   it("rejects a dispatcher gate bound to another parsed bootstrap", async () => {
@@ -384,11 +457,8 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
     expect(() =>
       prepareRuntimeBootstrapArwxDispatcher("executor", first, arwx, () => runtimeOwner()),
     ).toThrowError(expect.objectContaining({ code: "BOOTSTRAP_INVALID" }));
-    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher(
-      "control",
-      first,
-      arwx,
-      () => runtimeOwner(),
+    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher("control", first, arwx, () =>
+      runtimeOwner(),
     );
 
     expect(() =>
@@ -457,18 +527,10 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
         parsed.bootstrap.shutdown.gracefulTimeoutMs -
         parsed.bootstrap.shutdown.forceTerminationReserveMs,
     });
-    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher(
-      "control",
-      parsed,
-      arwx,
-      () => runtimeOwner(),
+    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher("control", parsed, arwx, () =>
+      runtimeOwner(),
     );
-    const boundary = createRuntimeBootstrapReadyBoundary(
-      "control",
-      parsed,
-      arwx,
-      dispatcherGate,
-    );
+    const boundary = createRuntimeBootstrapReadyBoundary("control", parsed, arwx, dispatcherGate);
     expect(boundary.role).toBe("control");
     expect(() =>
       createRuntimeBootstrapReadyBoundary("control", parsed, arwx, dispatcherGate),
@@ -489,11 +551,8 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
         parsed.bootstrap.shutdown.gracefulTimeoutMs -
         parsed.bootstrap.shutdown.forceTerminationReserveMs,
     });
-    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher(
-      "executor",
-      parsed,
-      arwx,
-      () => runtimeOwner(),
+    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher("executor", parsed, arwx, () =>
+      runtimeOwner(),
     );
 
     terminateRuntimeBootstrapArwxDispatcher(dispatcherGate);

@@ -110,6 +110,27 @@ class SlowHostControl extends FakeHostControl {
   }
 }
 
+class DelayedFinalHostControl extends FakeHostControl {
+  #finalCallback: ((error?: Error | null) => void) | undefined;
+
+  public get finalPending(): boolean {
+    return this.#finalCallback !== undefined;
+  }
+
+  public releaseFinal(error?: Error): void {
+    const callback = this.#finalCallback;
+    if (callback === undefined) throw new Error("No HostControl final callback is pending.");
+    this.#finalCallback = undefined;
+    callback(error);
+    if (error === undefined) queueMicrotask(() => this.push(null));
+  }
+
+  public override _final(callback: (error?: Error | null) => void): void {
+    this.clientEnded = true;
+    this.#finalCallback = callback;
+  }
+}
+
 const selector = `${SERVICE_HOST_CONTROL_PIPE_PREFIX}${"a".repeat(64)}`;
 const pipe = parseServiceHostLaunchContract(
   [
@@ -165,9 +186,9 @@ describe("HostControl client", () => {
     const { client } = await connect();
 
     expect(isControlHostControlClient(client)).toBe(true);
-    expect(
-      isControlHostControlClient(Object.create(client) as ControlHostControlClient),
-    ).toBe(false);
+    expect(isControlHostControlClient(Object.create(client) as ControlHostControlClient)).toBe(
+      false,
+    );
 
     await client.close();
   });
@@ -193,7 +214,9 @@ describe("HostControl client", () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
     let arming: Promise<unknown> | undefined;
     let client!: ControlHostControlClient;
+    const delayedHost = new DelayedFinalHostControl();
     const connected = await connect({
+      host: delayedHost,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
         handler: (_message, dispatch) => {
           const receipt = dispatch.readFinalFrameReceipt();
@@ -240,6 +263,10 @@ describe("HostControl client", () => {
     expect(runtime.output.writableEnded).toBe(false);
     host.respond(success(request.requestId as string, { armed: true, ...payload }), 3);
 
+    await waitFor(() => delayedHost.finalPending);
+    expect(await settlementByNextTurn(defined(arming, "Arm operation"))).toBe("pending");
+    delayedHost.releaseFinal();
+
     await expect(defined(arming, "Arm operation")).resolves.toEqual({
       armed: true,
       ...payload,
@@ -259,6 +286,50 @@ describe("HostControl client", () => {
 
     await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
     await client.drain();
+  });
+
+  it("rejects Arm when the HostControl writable half-close callback fails", async () => {
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    let arming: Promise<unknown> | undefined;
+    let client!: ControlHostControlClient;
+    const delayedHost = new DelayedFinalHostControl();
+    const connected = await connect({
+      host: delayedHost,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("control", {
+        handler: (_message, dispatch) => {
+          const receipt = dispatch.readFinalFrameReceipt();
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            arming = client.armArwxShutdown(receipt);
+            await arming;
+          });
+        },
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+      }),
+    });
+    client = connected.client;
+    const runtime = defined(arwxContext, "ARWX context");
+    await runtime.arwx.sendFinal(
+      {
+        messageType: LocalMessageType.Drain,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      },
+      performance.now() + 1_000,
+    );
+    runtime.input.end(drainedFrame(1n));
+    await waitForWrites(delayedHost, 1);
+    const request = defined(delayedHost.requests()[0], "Arm request");
+    const payload = request.payload as Record<string, unknown>;
+    delayedHost.respond(success(request.requestId as string, { armed: true, ...payload }));
+
+    await waitFor(() => delayedHost.finalPending);
+    expect(await settlementByNextTurn(defined(arming, "Arm operation"))).toBe("pending");
+    delayedHost.releaseFinal(new Error("HostControl final callback failed"));
+
+    await expect(defined(arming, "Arm operation")).rejects.toBeInstanceOf(Error);
+    await expect(runtime.receiveLoop.done).rejects.toBeInstanceOf(Error);
   });
 
   it("rejects close-only HostControl termination after Arm acknowledgement", async () => {
@@ -440,6 +511,48 @@ describe("HostControl client", () => {
     host.respond(success("cancel:2", { cancelled: true }));
     host.respond(failure("call:1", "REQUEST_CANCELLED", true));
     await waitForMicrotasks();
+    await client.close();
+  });
+
+  it("waits for cancelled request and write ownership to become idle", async () => {
+    const { client, host } = await connect();
+    const controller = new AbortController();
+    const request = client.register(opaque({ workerNodeId: "node:1" }), {
+      signal: controller.signal,
+    });
+    await waitForWrites(host, 1);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ code: "REQUEST_CANCELLED" });
+    await waitForWrites(host, 2);
+
+    let idleSettled = false;
+    const idle = client.waitForIdle(performance.now() + 1_000).then(() => {
+      idleSettled = true;
+    });
+    await waitForMicrotasks();
+    expect(idleSettled).toBe(false);
+
+    host.respond(success("cancel:2", { cancelled: true }));
+    await waitForMicrotasks();
+    expect(idleSettled).toBe(false);
+
+    host.respond(failure("call:1", "REQUEST_CANCELLED", true));
+    await expect(idle).resolves.toBeUndefined();
+    expect(idleSettled).toBe(true);
+    await client.close();
+  });
+
+  it("bounds waiting for HostControl ownership to become idle", async () => {
+    const { client, host } = await connect();
+    const request = client.register(opaque({ workerNodeId: "node:1" }));
+    await waitForWrites(host, 1);
+
+    await expect(client.waitForIdle(performance.now() + 5)).rejects.toMatchObject({
+      code: "LIFECYCLE_TIMEOUT",
+    });
+
+    host.respond(successOpaque("call:1", { registered: true }));
+    await expect(request).resolves.toEqual({ registered: true });
     await client.close();
   });
 
@@ -781,6 +894,18 @@ async function waitForWrites(host: FakeHostControl, count: number): Promise<void
 
 async function waitForMicrotasks(): Promise<void> {
   for (let index = 0; index < 5; index += 1) await Promise.resolve();
+}
+
+async function settlementByNextTurn(
+  promise: Promise<unknown>,
+): Promise<"pending" | "rejected" | "resolved"> {
+  return await Promise.race([
+    promise.then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    ),
+    new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+  ]);
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

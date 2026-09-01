@@ -21,7 +21,7 @@ import {
 } from "../service-host/opaque-json.js";
 import { parseRuntimeBootstrap } from "../service-host/runtime-bootstrap.js";
 import { bootstrapDocument } from "../service-host/runtime-bootstrap.test-helpers.js";
-import { HostControlWorkerApi } from "./host-control-worker-api.js";
+import { HostControlShadowApi, HostControlWorkerApi } from "./host-control-worker-api.js";
 
 const serverTime = "2026-08-31T00:00:00.000Z";
 
@@ -89,12 +89,29 @@ class FakeControlClient implements ControlHostControlClient {
     throw new Error("Worker API adapter does not arm ARWX shutdown.");
   }
 
+  public async waitForIdle(): Promise<void> {}
+
   public async drain(): Promise<void> {}
 
   public async close(): Promise<void> {}
 }
 
 describe("HostControlWorkerApi opaque Worker API boundary", () => {
+  it("exposes no claim or terminal methods from the zero-slot shadow adapter", async () => {
+    const client = new FakeControlClient();
+    const api = new HostControlShadowApi(client);
+
+    expect(api).not.toHaveProperty("claimLease");
+    expect(api).not.toHaveProperty("completeRun");
+    expect(api).not.toHaveProperty("failRun");
+    await expect(api.register(registrationRequest())).resolves.toEqual(validRegistrationResponse());
+    await expect(api.heartbeat("worker:instance", heartbeatRequest())).resolves.toEqual(
+      validHeartbeatResponse(),
+    );
+    await expect(api.signLocalDigest("a".repeat(64))).resolves.toBe("signature");
+    expect(client.calls.map((call) => call.operation)).toEqual(["Register", "InstanceHeartbeat"]);
+  });
+
   it("preserves a valid fractional completion in exact JSON.stringify bytes", async () => {
     const client = new FakeControlClient();
     const api = new HostControlWorkerApi(client);

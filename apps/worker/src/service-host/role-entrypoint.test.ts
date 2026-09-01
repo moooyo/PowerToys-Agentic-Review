@@ -18,9 +18,8 @@ import {
   SERVICE_HOST_CONTROL_PIPE_PREFIX,
   type ServiceHostPayloadRole,
 } from "./launch-contract.js";
-import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import { openServiceHostRoleFoundation, runServiceHostRoleEntrypoint } from "./role-entrypoint.js";
-import { type ParsedRuntimeBootstrapV1, parseRuntimeBootstrap } from "./runtime-bootstrap.js";
+import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
 import {
   bootstrapDocument,
   drainedPayload,
@@ -110,9 +109,7 @@ class FakeControlHostControlSession extends FakeHostControlSession<"control"> {
 class GracefulControlHostControlSession extends FakeHostControlSession<"control"> {
   public armCalls = 0;
 
-  public constructor(
-    private readonly completed: Readonly<CompletedRuntimeBootstrap<"control">>,
-  ) {
+  public constructor(private readonly completed: Readonly<CompletedRuntimeBootstrap<"control">>) {
     super("control", completed.parsed);
   }
 
@@ -130,9 +127,7 @@ class GracefulControlHostControlSession extends FakeHostControlSession<"control"
 class GracefulExecutorHostControlSession extends FakeHostControlSession<"executor"> {
   public armCalls = 0;
 
-  public constructor(
-    private readonly completed: Readonly<CompletedRuntimeBootstrap<"executor">>,
-  ) {
+  public constructor(private readonly completed: Readonly<CompletedRuntimeBootstrap<"executor">>) {
     super("executor", completed.parsed);
   }
 
@@ -343,17 +338,69 @@ describe("ServiceHost role entrypoint", () => {
         return runtimeOwner(() => undefined);
       },
       connect: async (options, signal) => {
-        promoted = await createFakeSession(
-          options,
-          signal,
-          (bootstrap) => new FakeHostControlSession("control", bootstrap),
-        );
-        return promoted;
+        return await createFakeSession(options, signal, (bootstrap) => {
+          promoted = new FakeHostControlSession("control", bootstrap);
+          return promoted;
+        });
       },
     }).catch((error: unknown) => error);
 
     expectPrimaryAndPriorAbort(failure, "BOOTSTRAP_TRANSPORT_FAILED");
     expect(installCalls).toBe(0);
+    expect(promoted?.closeCalls).toBe(1);
+  });
+
+  it.each([
+    {
+      name: "rejected Promise",
+      create: (failure: Error) => Promise.reject(failure),
+    },
+    {
+      name: "rejected thenable",
+      create: (failure: Error) => ({
+        then: (_resolve: (value: unknown) => void, reject: (error: unknown) => void) => {
+          reject(failure);
+        },
+      }),
+    },
+    {
+      name: "invalid object",
+      create: (_failure: Error) => ({
+        handler: () => undefined,
+        done: {},
+        close: async () => undefined,
+      }),
+    },
+  ])("does not wrap a $name role runtime owner into valid activation", async ({ create }) => {
+    const installerFailure = new Error("asynchronous installer failed");
+    let activated: Promise<void> | undefined;
+    let lifecycleSignal: AbortSignal | undefined;
+    let promoted: FakeHostControlSession<"control"> | undefined;
+    const failure = await openServiceHostRoleFoundation("control", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("control"),
+      input: new PassThrough(),
+      output: new PassThrough(),
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: (activation) => {
+        activated = activation.activated;
+        lifecycleSignal = activation.signal;
+        return create(installerFailure) as unknown as RuntimeBootstrapArwxRuntimeOwner;
+      },
+      connect: async (options, signal) => {
+        return await createFakeSession(options, signal, (bootstrap) => {
+          promoted = new FakeHostControlSession("control", bootstrap);
+          return promoted;
+        });
+      },
+    }).catch((error: unknown) => error);
+
+    const primary = failure instanceof AggregateError ? failure.errors[0] : failure;
+    expect(primary).toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    if (activated === undefined) throw new Error("Runtime activation was not exposed.");
+    await expect(activated).rejects.toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    expect(lifecycleSignal?.aborted).toBe(true);
     expect(promoted?.closeCalls).toBe(1);
   });
 
@@ -364,6 +411,7 @@ describe("ServiceHost role entrypoint", () => {
     let installations = 0;
     let dispatches = 0;
     let lifecycleSignal: AbortSignal | undefined;
+    let runtimeActivated: Promise<void> | undefined;
     const foundation = await openServiceHostRoleFoundation("executor", {
       platform: "win32",
       environment: { NODE_ENV: "production" },
@@ -377,6 +425,7 @@ describe("ServiceHost role entrypoint", () => {
         expect(activation.hostControl).toBe(host);
         expect(activation.bootstrap.bootstrap.role).toBe("executor");
         expect(activation.signal.aborted).toBe(false);
+        runtimeActivated = activation.activated;
         return runtimeOwner((_message, _dispatch, signal) => {
           lifecycleSignal = signal;
           dispatches += 1;
@@ -402,8 +451,64 @@ describe("ServiceHost role entrypoint", () => {
     await waitFor(() => dispatches === 1);
     expect(installations).toBe(1);
     expect(lifecycleSignal?.aborted).toBe(false);
+    if (runtimeActivated === undefined) throw new Error("Runtime activation was not exposed.");
+    await expect(runtimeActivated).resolves.toBeUndefined();
     await foundation.close();
     expect(lifecycleSignal?.aborted).toBe(true);
+  });
+
+  it("holds an early post-commit ARWX frame until full role activation", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const releaseConnector = createGate();
+    let host: FakeHostControlSession<"control"> | undefined;
+    let handshakeCompleted = false;
+    let activated: Promise<void> | undefined;
+    let dispatches = 0;
+    const opening = openServiceHostRoleFoundation("control", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("control"),
+      input,
+      output,
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: (activation) => {
+        activated = activation.activated;
+        return runtimeOwner(() => {
+          dispatches += 1;
+        });
+      },
+      connect: async (options, signal) => {
+        const transport = new FakeBootstrapTransport("control");
+        const result = await performRuntimeBootstrapHandshake(
+          transport,
+          "control",
+          options.prepareRuntimeBootstrap,
+          performance.now() + 1_000,
+          (completed) => {
+            host = new FakeHostControlSession("control", completed.parsed);
+            return host;
+          },
+          signal,
+        );
+        input.write(pingFrame());
+        handshakeCompleted = true;
+        await releaseConnector.promise;
+        return result;
+      },
+    });
+
+    await waitFor(() => handshakeCompleted && activated !== undefined);
+    if (activated === undefined) throw new Error("Runtime activation was not exposed.");
+    expect(await settlementByNextTurn(activated)).toBe("pending");
+    expect(dispatches).toBe(0);
+
+    releaseConnector.release();
+    const foundation = await opening;
+    await expect(activated).resolves.toBeUndefined();
+    await waitFor(() => dispatches === 1);
+    await foundation.close();
+    expect(host?.closed).toBe(true);
   });
 
   it("preserves the runtime owner receiver for a private-field handler", async () => {
@@ -518,8 +623,7 @@ describe("ServiceHost role entrypoint", () => {
   });
 
   it("accepts early Drained and input EOF but waits for both raw output callbacks", async () => {
-    const { foundation, input, output, readHost } =
-      await openDelayedControlShutdownFixture();
+    const { foundation, input, output, readHost } = await openDelayedControlShutdownFixture();
 
     const closing = foundation.close();
     await waitFor(() => output.writePending);
@@ -531,9 +635,7 @@ describe("ServiceHost role entrypoint", () => {
     expect(output.finalPending).toBe(false);
     expect(await settlementByNextTurn(closing)).toBe("pending");
     output.releaseWrite();
-    await waitFor(
-      () => readHost().armCalls === 1 && output.finalPending && input.readableEnded,
-    );
+    await waitFor(() => readHost().armCalls === 1 && output.finalPending && input.readableEnded);
     expect(await settlementByNextTurn(closing)).toBe("pending");
     output.releaseFinal();
 
@@ -544,8 +646,7 @@ describe("ServiceHost role entrypoint", () => {
   });
 
   it("waits for Control input EOF after the output final callback completes", async () => {
-    const { foundation, input, output, readHost } =
-      await openDelayedControlShutdownFixture();
+    const { foundation, input, output, readHost } = await openDelayedControlShutdownFixture();
 
     const closing = foundation.close();
     await waitFor(() => output.writePending);
@@ -990,6 +1091,8 @@ describe("ServiceHost role entrypoint", () => {
   it("rejects a connector that replaces the exact promoted HostControl owner", async () => {
     let promoted: FakeHostControlSession<"control"> | undefined;
     let replacement: FakeHostControlSession<"control"> | undefined;
+    let activated: Promise<void> | undefined;
+    let runtimeStarted = false;
     await expect(
       openServiceHostRoleFoundation("control", {
         platform: "win32",
@@ -998,7 +1101,16 @@ describe("ServiceHost role entrypoint", () => {
         input: new PassThrough(),
         output: new PassThrough(),
         validateRuntimeSession: isFakeHostControlSession,
-        installRuntime: () => runtimeOwner(() => undefined),
+        installRuntime: (activation) => {
+          activated = activation.activated;
+          void activation.activated.then(
+            () => {
+              runtimeStarted = true;
+            },
+            () => undefined,
+          );
+          return runtimeOwner(() => undefined);
+        },
         connect: async (options, signal) => {
           const exact = await createFakeSession(
             options,
@@ -1012,6 +1124,9 @@ describe("ServiceHost role entrypoint", () => {
       }),
     ).rejects.toMatchObject({ code: "ARWX_STDIO_INVALID" });
 
+    if (activated === undefined) throw new Error("Runtime activation was not exposed.");
+    await expect(activated).rejects.toMatchObject({ code: "ARWX_STDIO_INVALID" });
+    expect(runtimeStarted).toBe(false);
     expect(promoted?.closeCalls).toBe(1);
     expect(replacement?.closeCalls).toBe(1);
   });
@@ -1048,6 +1163,58 @@ describe("ServiceHost role entrypoint", () => {
 
     expectPrimaryAndPriorAbort(failure, "BOOTSTRAP_TRANSPORT_FAILED");
     expect(lifecycleSignal?.aborted).toBe(true);
+    expect(promoted?.closeCalls).toBe(1);
+  });
+
+  it("rejects full runtime activation when final HostControl promotion resume throws", async () => {
+    let activated: Promise<void> | undefined;
+    let runtimeStarted = false;
+    let promoted: FakeHostControlSession<"control"> | undefined;
+    const failure = await openServiceHostRoleFoundation("control", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("control"),
+      input: new PassThrough(),
+      output: new PassThrough(),
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: (activation) => {
+        activated = activation.activated;
+        void activation.activated.then(
+          () => {
+            runtimeStarted = true;
+          },
+          () => undefined,
+        );
+        return runtimeOwner(() => undefined);
+      },
+      connect: async (options, signal) => {
+        const transport = new FakeBootstrapTransport("control");
+        const resume = transport.resume.bind(transport);
+        let resumeCalls = 0;
+        transport.resume = (() => {
+          resumeCalls += 1;
+          if (resumeCalls === 2) throw new Error("final promotion resume failed");
+          return resume();
+        }) as typeof transport.resume;
+        return await performRuntimeBootstrapHandshake(
+          transport,
+          "control",
+          options.prepareRuntimeBootstrap,
+          performance.now() + 1_000,
+          (completed) => {
+            promoted = new FakeHostControlSession("control", completed.parsed);
+            return promoted;
+          },
+          signal,
+        );
+      },
+    }).catch((error: unknown) => error);
+
+    const primary = failure instanceof AggregateError ? failure.errors[0] : failure;
+    expect(primary).toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    if (activated === undefined) throw new Error("Runtime activation was not exposed.");
+    await expect(activated).rejects.toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    expect(runtimeStarted).toBe(false);
     expect(promoted?.closeCalls).toBe(1);
   });
 
@@ -1257,13 +1424,8 @@ describe("ServiceHost role entrypoint", () => {
 
   it("retains and settles the first ARWX owner when bootstrap preparation fails", async () => {
     const role = "control" as const;
-    const invalidValue = JSON.parse(bootstrapDocument(role).toString("utf8")) as Record<
-      string,
-      unknown
-    >;
-    invalidValue.roleConfig = encodeHostControlOpaqueJson({ unsupported: true }, 47 * 1_024);
-    const invalidBootstrap = Buffer.from(serializeCanonicalJson(invalidValue), "utf8");
     const input = new DelayedDestroyInput();
+    let preparedBootstrap: Readonly<ParsedRuntimeBootstrapV1> | undefined;
     let secondPreparationFailure: unknown;
 
     await expect(
@@ -1275,7 +1437,7 @@ describe("ServiceHost role entrypoint", () => {
         output: new PassThrough(),
         connect: async (options, signal) => {
           const transport = new FakeBootstrapTransport(role, {
-            bootstrap: invalidBootstrap,
+            bootstrap: bootstrapDocument(role),
             commit: null,
             fragments: 5,
           });
@@ -1283,16 +1445,23 @@ describe("ServiceHost role entrypoint", () => {
             return await performRuntimeBootstrapHandshake(
               transport,
               role,
-              options.prepareRuntimeBootstrap,
+              (parsed) => {
+                preparedBootstrap = parsed;
+                options.prepareRuntimeBootstrap(parsed);
+                throw new Error("Injected failure after ARWX owner preparation.");
+              },
               performance.now() + 1_000,
               (completed) => new FakeHostControlSession(role, completed.parsed),
               signal,
             );
           } catch (error) {
-            try {
-              options.prepareRuntimeBootstrap(parseRuntimeBootstrap(invalidBootstrap, role));
-            } catch (secondError) {
-              secondPreparationFailure = secondError;
+            const prepared = preparedBootstrap;
+            if (prepared !== undefined) {
+              try {
+                options.prepareRuntimeBootstrap(prepared);
+              } catch (secondError) {
+                secondPreparationFailure = secondError;
+              }
             }
             throw error;
           }
