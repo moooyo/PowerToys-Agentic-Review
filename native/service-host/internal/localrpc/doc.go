@@ -8,4 +8,12 @@
 // independent of the ARWX Control-Executor Named Pipe protocol. The control role exposes only
 // fixed Worker API operations and signing of one caller-supplied 32-byte digest; routing, headers,
 // paths, commands, and key handles are never accepted from Node.
+//
+// An established session may remain idle at a frame boundary for its payload lifetime. Once the
+// first byte of a frame arrives, the complete prefix and payload share one nonrenewable I/O
+// deadline. After ArmArwxShutdownV1 is acknowledged, even the frame boundary is capped by the
+// authorization deadline and only a literal zero-byte io.EOF is an orderly request-stream end.
+// Reads and serialized response writes use the context-aware bootstrap-bound channel directly;
+// no detached transport goroutine may continue consuming or publishing bytes after a deadline.
+// Server.Serve borrows that channel; the platform owner closes it after Serve has settled.
 package localrpc

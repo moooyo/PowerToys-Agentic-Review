@@ -10,10 +10,23 @@
 // canonical RuntimeBootstrapV1 document, validates the exact acknowledgement,
 // and then raises the limit through the retained Job handle. Any rejected
 // connection or bootstrap terminates the Node root Job before closing the pipe.
-// If post-transfer pipe cleanup fails, Accept returns the still-owning
-// Connection with the joined error. Its copies share the native owner state so
-// cleanup can be retried, or the ServiceHost process can exit without
-// discarding the unique handle owner.
+// If post-transfer pipe cleanup fails, Accept returns the shared Connection
+// state with the joined error. Disconnect failures can be retried before a raw
+// close begins. CloseHandle consumes its callable slot exactly once; a failed
+// close retains the detached owner for the process lifetime and makes every
+// Connection copy sticky-fatal.
+//
+// Connection.Read applies the configured I/O timeout. Connection.ReadContext
+// is bounded only by its caller context so the local RPC server can wait at a
+// frame boundary for the payload lifetime, then apply one nonrenewable timeout
+// after the first frame byte arrives. Context cancellation and Connection.Close
+// both request cancellation of the exact outstanding operation. Connect, read,
+// and write operations keep their OVERLAPPED values, events, and pointer-free
+// internal buffers pinned in heap owners until Windows proves terminal
+// completion. Reads copy into caller memory only after that proof. An operation
+// whose completion or handle ownership cannot be proved is retained for the
+// process lifetime, makes HostControl sticky-fatal, and prevents every later
+// native call from reusing a suspect numeric handle.
 //
 // Pure Node net.connect uses GENERIC_READ | GENERIC_WRITE on Windows. The own
 // service SID therefore receives exactly FILE_GENERIC_READ |

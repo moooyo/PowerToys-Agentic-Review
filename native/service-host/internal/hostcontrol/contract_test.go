@@ -70,7 +70,7 @@ func TestAcceptClaimsBeforeConnectionWorkAndRejectsClaimByNodeTermination(t *tes
 			name = function.Sel.Name
 		}
 		switch name {
-		case "beginAccept", "ClaimHostControlLaunch", "finish", "rejectAcceptFailure", "acceptConnected", "completeRuntimeBootstrap":
+		case "beginAccept", "ClaimHostControlLaunch", "finish", "rejectAcceptFailure", "acceptConnected", "completeRuntimeBootstrap", "rejectPostTransferAcceptFailure":
 			positions[name] = append(positions[name], call.Pos())
 		}
 		if name == "rejectAcceptFailure" && len(call.Args) == 5 {
@@ -95,10 +95,10 @@ func TestAcceptClaimsBeforeConnectionWorkAndRejectsClaimByNodeTermination(t *tes
 			t.Fatalf("Listener.Accept %s call count = %d, want 1", name, len(positions[name]))
 		}
 	}
-	if len(positions["rejectAcceptFailure"]) != 2 || len(claimRejectPositions) != 1 ||
+	if len(positions["rejectAcceptFailure"]) != 7 || len(claimRejectPositions) != 6 ||
 		len(connectionRejectPositions) != 1 {
 		t.Fatalf(
-			"Listener.Accept rejection calls = all:%d claim:%d connection:%d, want 2/1/1",
+			"Listener.Accept rejection calls = all:%d claim:%d connection:%d, want 7/6/1",
 			len(positions["rejectAcceptFailure"]),
 			len(claimRejectPositions),
 			len(connectionRejectPositions),
@@ -106,10 +106,27 @@ func TestAcceptClaimsBeforeConnectionWorkAndRejectsClaimByNodeTermination(t *tes
 	}
 	begin := positions["beginAccept"][0]
 	claim := positions["ClaimHostControlLaunch"][0]
-	claimReject := claimRejectPositions[0]
 	acceptConnected := positions["acceptConnected"][0]
 	connectionReject := connectionRejectPositions[0]
 	bootstrap := positions["completeRuntimeBootstrap"][0]
+	if len(positions["rejectPostTransferAcceptFailure"]) != 1 ||
+		positions["rejectPostTransferAcceptFailure"][0] < bootstrap {
+		t.Fatal("Listener.Accept no longer rejects post-transfer bootstrap failure through the Connection owner")
+	}
+	preClaimRejects := 0
+	claimFailureRejects := []token.Pos{}
+	for _, position := range claimRejectPositions {
+		if position < claim {
+			preClaimRejects++
+		}
+		if claim < position && position < acceptConnected {
+			claimFailureRejects = append(claimFailureRejects, position)
+		}
+	}
+	if preClaimRejects != 5 || len(claimFailureRejects) != 1 {
+		t.Fatalf("Listener.Accept pre-claim/claim-failure rejections = %d/%d, want 5/1", preClaimRejects, len(claimFailureRejects))
+	}
+	claimReject := claimFailureRejects[0]
 	finishBeforeReject := false
 	finishBeforeConnectionReject := false
 	for _, position := range positions["finish"] {

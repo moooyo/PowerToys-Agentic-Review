@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -373,33 +375,271 @@ func TestServerBoundsPartialInputAndBlockedOutput(t *testing.T) {
 		_ = inputWriter.Close()
 	})
 
-	t.Run("blocked close", func(t *testing.T) {
-		options := defaultServerOptions()
-		options.IOTimeout = 20 * time.Millisecond
+}
+
+func TestServerBorrowsBoundChannelWithoutClosingIt(t *testing.T) {
+	channel := &borrowedEOFChannel{}
+	options := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), channel)
+	server, err := NewServer(options, &fakeControlDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Serve(context.Background(), channel, channel); !errors.Is(err, ErrPeerClosed) {
+		t.Fatalf("Serve EOF error = %v, want ErrPeerClosed", err)
+	}
+	if channel.closeCalls.Load() != 0 {
+		t.Fatalf("Serve closed its borrowed channel %d times", channel.closeCalls.Load())
+	}
+	if err := channel.Close(); err != nil || channel.closeCalls.Load() != 1 {
+		t.Fatalf("caller Close = %v, calls=%d", err, channel.closeCalls.Load())
+	}
+}
+
+func TestServerAllowsFrameBoundaryIdleBeyondIOTimeout(t *testing.T) {
+	options := defaultServerOptions()
+	options.IOTimeout = 20 * time.Millisecond
+	harness := newServerHarness(t, &fakeControlDispatcher{}, options)
+
+	for index, requestID := range []string{"idle:1", "idle:2"} {
+		select {
+		case err := <-harness.done:
+			t.Fatalf("Serve stopped during frame-boundary idle %d: %v", index+1, err)
+		case <-time.After(4 * options.IOTimeout):
+		}
+		harness.send(t, callDocument(t, requestID, OperationRegister, map[string]any{
+			"body": map[string]any{},
+		}))
+		response := harness.readResponse(t, MaximumFrameBytes)
+		if response["requestId"] != requestID || response["outcome"] != "ok" {
+			t.Fatalf("response after frame-boundary idle = %#v", response)
+		}
+	}
+	harness.close(t)
+}
+
+func TestSessionFrameReaderBoundsPrefixAndPayloadAfterFirstByte(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{name: "length prefix", input: []byte{2}},
+		{name: "payload", input: []byte{2, 0, 0, 0, 'x'}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := bytes.NewReader(test.input)
+			channel := &contextReadFuncChannel{read: func(ctx context.Context, buffer []byte) (int, error) {
+				if source.Len() != 0 {
+					return source.Read(buffer)
+				}
+				<-ctx.Done()
+				return 0, context.Cause(ctx)
+			}}
+			reader := sessionFrameReader{channel: channel, partialTimeout: 25 * time.Millisecond}
+			started := time.Now()
+			if _, err := reader.readFrame(context.Background(), MaximumFrameBytes, time.Time{}); !errors.Is(err, ErrIOTimeout) {
+				t.Fatalf("partial %s error = %v, want ErrIOTimeout", test.name, err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("partial %s exceeded its bound: %v", test.name, elapsed)
+			}
+		})
+	}
+}
+
+func TestSessionFrameReaderUsesOneAbsoluteSlowDripDeadline(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := WriteFrame(&encoded, []byte("ok"), MaximumFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	source := bytes.NewReader(encoded.Bytes())
+	readCalls := 0
+	channel := &contextReadFuncChannel{read: func(ctx context.Context, buffer []byte) (int, error) {
+		readCalls++
+		if readCalls > 1 {
+			timer := time.NewTimer(15 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return 0, context.Cause(ctx)
+			case <-timer.C:
+			}
+		}
+		if source.Len() == 0 {
+			return 0, io.EOF
+		}
+		return source.Read(buffer[:1])
+	}}
+	reader := sessionFrameReader{channel: channel, partialTimeout: 40 * time.Millisecond}
+	if _, err := reader.readFrame(context.Background(), MaximumFrameBytes, time.Time{}); !errors.Is(err, ErrIOTimeout) {
+		t.Fatalf("slow-drip frame error = %v, want ErrIOTimeout", err)
+	}
+	if readCalls < 3 {
+		t.Fatalf("slow-drip frame made %d reads, want multiple partial reads", readCalls)
+	}
+}
+
+func TestSessionFrameReaderPreservesCoalescedFramesWithoutPrefetch(t *testing.T) {
+	first := []byte(`{"request":1}`)
+	second := []byte(`{"request":2}`)
+	var encoded bytes.Buffer
+	if err := WriteFrame(&encoded, first, MaximumFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	secondOffset := encoded.Len()
+	if err := WriteFrame(&encoded, second, MaximumFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	stream := bytes.Clone(encoded.Bytes())
+	source := bytes.NewReader(stream)
+	boundaryReadSizes := []int{}
+	channel := &contextReadFuncChannel{read: func(_ context.Context, buffer []byte) (int, error) {
+		offset := len(stream) - source.Len()
+		if offset == 0 || offset == secondOffset {
+			boundaryReadSizes = append(boundaryReadSizes, len(buffer))
+		}
+		return source.Read(buffer)
+	}}
+	reader := sessionFrameReader{channel: channel, partialTimeout: time.Second}
+	for index, want := range [][]byte{first, second} {
+		got, err := reader.readFrame(context.Background(), MaximumFrameBytes, time.Time{})
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("coalesced frame %d = (%q, %v), want %q", index+1, got, err, want)
+		}
+	}
+	if !reflect.DeepEqual(boundaryReadSizes, []int{1, 1}) {
+		t.Fatalf("coalesced frame boundary read sizes = %v, want [1 1]", boundaryReadSizes)
+	}
+}
+
+func TestSessionFrameReaderRequiresLiteralZeroByteEOF(t *testing.T) {
+	cleanupFailure := errors.New("cleanup failed")
+	tests := []struct {
+		name      string
+		count     int
+		err       error
+		wantClean bool
+	}{
+		{name: "literal", err: io.EOF, wantClean: true},
+		{name: "wrapped", err: fmt.Errorf("wrapped EOF: %w", io.EOF)},
+		{name: "joined", err: errors.Join(io.EOF, cleanupFailure)},
+		{name: "byte with EOF", count: 1, err: io.EOF},
+		{name: "no progress"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			channel := &contextReadFuncChannel{read: func(_ context.Context, buffer []byte) (int, error) {
+				if test.count == 1 {
+					buffer[0] = 1
+				}
+				return test.count, test.err
+			}}
+			reader := sessionFrameReader{channel: channel, partialTimeout: time.Second}
+			_, err := reader.readFrame(context.Background(), MaximumFrameBytes, time.Time{})
+			if test.wantClean {
+				if err != io.EOF {
+					t.Fatalf("literal EOF error = %T %v", err, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrPartialFrame) || errors.Is(err, io.EOF) {
+				t.Fatalf("mutated EOF error = %T %v, want non-EOF ErrPartialFrame", err, err)
+			}
+		})
+	}
+}
+
+func TestSessionFrameReaderDeadlineWinsConcurrentEOFOrFrameByte(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+		err   error
+	}{
+		{name: "EOF", err: io.EOF},
+		{name: "frame byte", count: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			channel := &contextReadFuncChannel{read: func(ctx context.Context, buffer []byte) (int, error) {
+				<-ctx.Done()
+				if test.count == 1 {
+					buffer[0] = 1
+				}
+				return test.count, test.err
+			}}
+			reader := sessionFrameReader{channel: channel, partialTimeout: time.Second}
+			_, err := reader.readFrame(
+				context.Background(),
+				MaximumFrameBytes,
+				time.Now().Add(20*time.Millisecond),
+			)
+			if !errors.Is(err, ErrIOTimeout) || errors.Is(err, io.EOF) {
+				t.Fatalf("deadline race error = %T %v, want non-EOF ErrIOTimeout", err, err)
+			}
+		})
+	}
+}
+
+func TestSessionFrameReaderCancellationAndCloseInterruptBoundaryIdle(t *testing.T) {
+	t.Run("caller cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		var active atomic.Int32
+		var once sync.Once
+		channel := &contextReadFuncChannel{read: func(ctx context.Context, _ []byte) (int, error) {
+			active.Add(1)
+			defer active.Add(-1)
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			return 0, context.Cause(ctx)
+		}}
+		reader := sessionFrameReader{channel: channel, partialTimeout: 20 * time.Millisecond}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := reader.readFrame(ctx, MaximumFrameBytes, time.Time{})
+			result <- err
+		}()
+		<-started
+		cause := errors.New("session cancelled")
+		cancel(cause)
+		select {
+		case err := <-result:
+			if !errors.Is(err, cause) {
+				t.Fatalf("cancelled frame error = %v, want caller cause", err)
+			}
+			if active.Load() != 0 {
+				t.Fatalf("cancelled frame retained %d active reads", active.Load())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("caller cancellation did not interrupt frame-boundary idle")
+		}
+	})
+
+	t.Run("channel close", func(t *testing.T) {
 		inputReader, inputWriter := io.Pipe()
-		output := newStubbornWriteCloser()
-		channel := newServerTestChannel(inputReader, output)
-		options = serverOptionsWithBootstrapForTest(t, options, channel)
+		outputReader, outputWriter := io.Pipe()
+		defer inputWriter.Close()
+		defer outputReader.Close()
+		channel := newServerTestChannel(inputReader, outputWriter)
+		options := serverOptionsWithBootstrapForTest(t, defaultServerOptions(), channel)
 		server, err := NewServer(options, &fakeControlDispatcher{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		done := make(chan error, 1)
-		go func() { done <- server.Serve(context.Background(), channel, channel) }()
-		request := callDocument(t, "register:1", OperationRegister, map[string]any{"body": map[string]any{}})
-		if err := WriteFrame(inputWriter, request, MaximumFrameBytes); err != nil {
+		result := make(chan error, 1)
+		go func() { result <- server.Serve(context.Background(), channel, channel) }()
+		<-channel.readStarted
+		if err := channel.Close(); err != nil {
 			t.Fatal(err)
 		}
 		select {
-		case err := <-done:
-			if !errors.Is(err, ErrIOTimeout) {
-				t.Fatalf("Serve error = %v, want ErrIOTimeout", err)
+		case err := <-result:
+			if err == nil {
+				t.Fatal("closed channel ended an unarmed session successfully")
 			}
 		case <-time.After(time.Second):
-			t.Fatal("blocking Close defeated the I/O timeout")
+			t.Fatal("channel Close did not interrupt frame-boundary idle")
 		}
-		close(output.release)
-		_ = inputWriter.Close()
 	})
 }
 
@@ -425,15 +665,29 @@ func TestConcurrencyReservationIncludesResponseWrite(t *testing.T) {
 	cancelThird(nil)
 }
 
+func TestSessionStateWaitForIdleUsesPublishedResponseBarrier(t *testing.T) {
+	state := newSessionState(10)
+	_, cancel, accepted := state.start(context.Background(), "request:1", 1, time.Second)
+	if !accepted {
+		t.Fatal("request did not start")
+	}
+	state.finishDispatch("request:1")
+	if state.waitForIdle(20 * time.Millisecond) {
+		t.Fatal("waitForIdle completed before response ownership was released")
+	}
+	state.complete()
+	cancel(nil)
+	if !state.waitForIdle(time.Second) {
+		t.Fatal("waitForIdle missed the published response-idle barrier")
+	}
+}
+
 func TestResponseWriterDoesNotStartWriteAfterBuildDeadline(t *testing.T) {
 	buildStarted := make(chan struct{})
 	releaseBuild := make(chan struct{})
 	buildFinished := make(chan struct{})
 	output := &signalingWriter{writes: make(chan []byte, 1)}
-	writer := &responseWriter{
-		context: context.Background(), output: output, timeout: 20 * time.Millisecond,
-		closeOutput: func() {},
-	}
+	writer := newResponseWriter(context.Background(), output, 20*time.Millisecond)
 	result := make(chan error, 1)
 	go func() {
 		result <- writer.buildAndWrite(MaximumCanonicalControlFrameBytes, func() ([]byte, error) {
@@ -444,15 +698,46 @@ func TestResponseWriterDoesNotStartWriteAfterBuildDeadline(t *testing.T) {
 		})
 	}()
 	<-buildStarted
+	<-time.After(2 * writer.timeout)
+	close(releaseBuild)
+	<-buildFinished
 	if err := <-result; !errors.Is(err, ErrIOTimeout) {
 		t.Fatalf("buildAndWrite error = %v", err)
 	}
-	close(releaseBuild)
-	<-buildFinished
 	select {
 	case written := <-output.writes:
 		t.Fatalf("writer started after its deadline: %q", written)
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestResponseWriterCancelsBlockedWriterAndQueuedWriterWithoutLateWrite(t *testing.T) {
+	firstStarted := make(chan struct{})
+	var calls atomic.Int32
+	channel := &contextWriteFuncChannel{write: func(ctx context.Context, _ []byte) (int, error) {
+		if calls.Add(1) != 1 {
+			return 0, errors.New("queued writer reached the channel")
+		}
+		close(firstStarted)
+		<-ctx.Done()
+		return 0, context.Cause(ctx)
+	}}
+	writer := newResponseWriter(context.Background(), channel, 30*time.Millisecond)
+	results := make(chan error, 2)
+	go func() { results <- writer.write([]byte(`{"first":true}`), MaximumFrameBytes) }()
+	<-firstStarted
+	go func() { results <- writer.write([]byte(`{"second":true}`), MaximumFrameBytes) }()
+	for range 2 {
+		if err := <-results; !errors.Is(err, ErrIOTimeout) {
+			t.Fatalf("serialized writer error = %v, want ErrIOTimeout", err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("channel write calls = %d, want 1", calls.Load())
+	}
+	time.Sleep(2 * writer.timeout)
+	if calls.Load() != 1 {
+		t.Fatal("queued writer performed a late write after cancellation")
 	}
 }
 
@@ -523,16 +808,34 @@ func defaultServerOptions() ServerOptions {
 }
 
 type serverHarness struct {
-	input  *io.PipeWriter
-	output *io.PipeReader
-	done   chan error
+	input   *io.PipeWriter
+	output  *io.PipeReader
+	done    chan error
+	channel *serverTestChannel
 }
 
 type serverTestChannel struct {
-	input     io.ReadCloser
-	output    io.WriteCloser
-	closeOnce sync.Once
-	closeErr  error
+	input         io.ReadCloser
+	output        io.WriteCloser
+	closeOnce     sync.Once
+	closeErr      error
+	readStartOnce sync.Once
+	readStarted   chan struct{}
+}
+
+type contextReadFuncChannel struct {
+	read func(context.Context, []byte) (int, error)
+}
+
+func (channel *contextReadFuncChannel) ReadContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	return channel.read(ctx, buffer)
+}
+
+func (*contextReadFuncChannel) WriteContext(_ context.Context, buffer []byte) (int, error) {
+	return len(buffer), nil
 }
 
 type blockingWriteCloser struct {
@@ -540,12 +843,48 @@ type blockingWriteCloser struct {
 	once   sync.Once
 }
 
-type stubbornWriteCloser struct {
-	release chan struct{}
-}
-
 type signalingWriter struct {
 	writes chan []byte
+}
+
+type contextWriteFuncChannel struct {
+	write func(context.Context, []byte) (int, error)
+}
+
+type borrowedEOFChannel struct {
+	closeCalls atomic.Int32
+}
+
+func (*borrowedEOFChannel) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (*borrowedEOFChannel) ReadContext(context.Context, []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (*borrowedEOFChannel) Write(buffer []byte) (int, error) {
+	return len(buffer), nil
+}
+
+func (*borrowedEOFChannel) WriteContext(_ context.Context, buffer []byte) (int, error) {
+	return len(buffer), nil
+}
+
+func (channel *borrowedEOFChannel) Close() error {
+	channel.closeCalls.Add(1)
+	return nil
+}
+
+func (*contextWriteFuncChannel) ReadContext(context.Context, []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (channel *contextWriteFuncChannel) WriteContext(
+	ctx context.Context,
+	buffer []byte,
+) (int, error) {
+	return channel.write(ctx, buffer)
 }
 
 func (w *signalingWriter) Write(value []byte) (int, error) {
@@ -553,18 +892,15 @@ func (w *signalingWriter) Write(value []byte) (int, error) {
 	return len(value), nil
 }
 
-func newStubbornWriteCloser() *stubbornWriteCloser {
-	return &stubbornWriteCloser{release: make(chan struct{})}
+func (*signalingWriter) ReadContext(context.Context, []byte) (int, error) {
+	return 0, io.EOF
 }
 
-func (w *stubbornWriteCloser) Write([]byte) (int, error) {
-	<-w.release
-	return 0, io.ErrClosedPipe
-}
-
-func (w *stubbornWriteCloser) Close() error {
-	<-w.release
-	return nil
+func (w *signalingWriter) WriteContext(ctx context.Context, value []byte) (int, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return 0, cause
+	}
+	return w.Write(value)
 }
 
 func newBlockingWriteCloser() *blockingWriteCloser {
@@ -574,6 +910,15 @@ func newBlockingWriteCloser() *blockingWriteCloser {
 func (w *blockingWriteCloser) Write([]byte) (int, error) {
 	<-w.closed
 	return 0, io.ErrClosedPipe
+}
+
+func (w *blockingWriteCloser) WriteContext(ctx context.Context, _ []byte) (int, error) {
+	select {
+	case <-ctx.Done():
+		return 0, context.Cause(ctx)
+	case <-w.closed:
+		return 0, io.ErrClosedPipe
+	}
 }
 
 func (w *blockingWriteCloser) Close() error {
@@ -593,11 +938,11 @@ func newServerHarness(t *testing.T, dispatcher ControlDispatcher, options Server
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(context.Background(), channel, channel) }()
-	return &serverHarness{input: inputWriter, output: outputReader, done: done}
+	return &serverHarness{input: inputWriter, output: outputReader, done: done, channel: channel}
 }
 
 func newServerTestChannel(input io.ReadCloser, output io.WriteCloser) *serverTestChannel {
-	return &serverTestChannel{input: input, output: output}
+	return &serverTestChannel{input: input, output: output, readStarted: make(chan struct{})}
 }
 
 func (channel *serverTestChannel) Read(buffer []byte) (int, error) {
@@ -618,14 +963,32 @@ func (channel *serverTestChannel) ReadContext(ctx context.Context, buffer []byte
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause
 	}
-	return channel.Read(buffer)
+	channel.readStartOnce.Do(func() { close(channel.readStarted) })
+	stopClose := context.AfterFunc(ctx, func() { _ = channel.Close() })
+	count, err := channel.Read(buffer)
+	stopClose()
+	if cause := context.Cause(ctx); cause != nil {
+		return count, errors.Join(cause, err)
+	}
+	return count, err
 }
 
 func (channel *serverTestChannel) WriteContext(ctx context.Context, buffer []byte) (int, error) {
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause
 	}
-	return channel.Write(buffer)
+	if contextual, ok := channel.output.(interface {
+		WriteContext(context.Context, []byte) (int, error)
+	}); ok {
+		return contextual.WriteContext(ctx, buffer)
+	}
+	stopClose := context.AfterFunc(ctx, func() { _ = channel.Close() })
+	count, err := channel.Write(buffer)
+	stopClose()
+	if cause := context.Cause(ctx); cause != nil {
+		return count, errors.Join(cause, err)
+	}
+	return count, err
 }
 
 func (channel *serverTestChannel) Close() error {
@@ -702,6 +1065,7 @@ func (h *serverHarness) close(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("server did not stop after input close")
 	}
+	_ = h.channel.Close()
 	_ = h.output.Close()
 }
 

@@ -13,8 +13,9 @@ import (
 
 var ErrRuntimeBootstrapExchange = errors.New("RuntimeBootstrapV1 exchange failed")
 
-// RuntimeBootstrapChannel is the bounded context-aware byte stream used only for the first
-// HostControl exchange. The same stream may be transferred to Server.Serve after this succeeds.
+// RuntimeBootstrapChannel is the context-aware byte stream used for the first HostControl
+// exchange and the subsequent local RPC session. Each method must return after its context is
+// cancelled and must stop using the supplied buffer before it returns.
 type RuntimeBootstrapChannel interface {
 	ReadContext(context.Context, []byte) (int, error)
 	WriteContext(context.Context, []byte) (int, error)

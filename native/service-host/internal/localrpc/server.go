@@ -91,9 +91,9 @@ func isNilControlDispatcher(dispatcher ControlDispatcher) bool {
 	}
 }
 
-// Serve owns the already-bootstrapped HostControl byte stream for one payload lifetime. Closing
-// either side cancels every active operation. Responses may complete out of order and are
-// correlated only by the session-unique requestId.
+// Serve borrows the already-bootstrapped HostControl byte stream for one payload lifetime. The
+// caller remains its owner and must close it after Serve returns. Responses may complete out of
+// order and are correlated only by the session-unique requestId.
 func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser) error {
 	if ctx == nil {
 		return errors.New("local RPC server context is required")
@@ -101,79 +101,57 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	if input == nil || output == nil {
 		return errors.New("local RPC input and output are required")
 	}
-	if err := s.shutdown.bindServeStreams(input, output); err != nil {
+	channel, err := s.shutdown.bindServeStreams(input, output)
+	if err != nil {
 		return err
 	}
+	frameReader := sessionFrameReader{channel: channel, partialTimeout: s.options.IOTimeout}
 
 	sessionContext, cancelSession := context.WithCancelCause(ctx)
 	defer cancelSession(nil)
-	var inputCloseOnce sync.Once
-	var outputCloseOnce sync.Once
-	// io.Closer does not promise that Close interrupts a concurrent synchronous pipe I/O or
-	// returns promptly. Initiate each close once without putting the configured I/O deadline
-	// behind an unbounded Close call. The ServiceHost process lifetime remains the final handle
-	// boundary if a platform endpoint cannot be cancelled.
-	closeInput := func() {
-		inputCloseOnce.Do(func() { go func() { _ = input.Close() }() })
-	}
-	closeOutput := func() {
-		outputCloseOnce.Do(func() { go func() { _ = output.Close() }() })
-	}
-
-	go func() {
-		<-sessionContext.Done()
-		closeInput()
-		closeOutput()
-	}()
 
 	state := newSessionState(s.options.MaximumRequestsPerSession)
 	claimGate := make(chan struct{}, 1)
-	writer := &responseWriter{
-		context: sessionContext, output: output, timeout: s.options.IOTimeout, closeOutput: closeOutput,
-	}
+	writer := newResponseWriter(sessionContext, channel, s.options.IOTimeout)
 	fatal := make(chan error, 1)
 	reportFatal := func(err error) {
 		select {
 		case fatal <- err:
 			cancelSession(err)
-			closeInput()
-			closeOutput()
 		default:
 		}
 	}
 
-	var handlers sync.WaitGroup
 	terminalError := error(nil)
 	orderlyArmedEOF := false
 
 serveLoop:
 	for terminalError == nil {
-		readTimeout := s.options.IOTimeout
+		boundaryDeadline := time.Time{}
 		if state.shutdownArmed() {
 			deadline, valid := s.shutdown.armedDeadline()
 			if !valid {
 				terminalError = ErrIOTimeout
 				break serveLoop
 			}
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
+			if !time.Now().Before(deadline) {
 				s.shutdown.failCurrentAuthorization()
 				terminalError = ErrIOTimeout
 				break serveLoop
 			}
-			if remaining < readTimeout {
-				readTimeout = remaining
-			}
+			boundaryDeadline = deadline
 		}
-		document, err := readFrameWithTimeout(
-			sessionContext, input, MaximumRequestFrameBytes, readTimeout, closeInput,
+		document, err := frameReader.readFrame(
+			sessionContext,
+			MaximumRequestFrameBytes,
+			boundaryDeadline,
 		)
 		if err != nil {
 			if fatalError := pollError(fatal); fatalError != nil {
 				terminalError = fatalError
 			} else if cause := context.Cause(sessionContext); cause != nil {
 				terminalError = cause
-			} else if errors.Is(err, io.EOF) {
+			} else if err == io.EOF {
 				if state.shutdownArmed() {
 					if _, valid := s.shutdown.armedDeadline(); valid {
 						orderlyArmedEOF = true
@@ -261,9 +239,7 @@ serveLoop:
 				}
 				continue
 			}
-			handlers.Add(1)
 			go func(request CallRequest) {
-				defer handlers.Done()
 				defer state.complete()
 				defer cancelRequest(nil)
 				releaseClaim, dispatchError := acquireClaim(requestContext, request.Operation, claimGate)
@@ -325,24 +301,16 @@ serveLoop:
 		s.shutdown.failCurrentAuthorization()
 	}
 	cancelSession(terminalError)
-	closeInput()
-	closeOutput()
-	if !waitForHandlers(&handlers, s.options.ShutdownTimeout) {
-		if s.shutdown != nil {
-			s.shutdown.failCurrentAuthorization()
-		}
+	if !state.waitForIdle(s.options.ShutdownTimeout) {
+		s.shutdown.failCurrentAuthorization()
 		return errors.Join(terminalError, ErrServerShutdownTimeout)
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		if s.shutdown != nil {
-			s.shutdown.failCurrentAuthorization()
-		}
+		s.shutdown.failCurrentAuthorization()
 		return cause
 	}
 	if fatalError := pollError(fatal); fatalError != nil {
-		if s.shutdown != nil {
-			s.shutdown.failCurrentAuthorization()
-		}
+		s.shutdown.failCurrentAuthorization()
 		return fatalError
 	}
 	if orderlyArmedEOF {
@@ -547,6 +515,30 @@ func (s *sessionState) shutdownArmed() bool {
 	return s.shutdownPhase == 2
 }
 
+func (s *sessionState) waitForIdle(timeout time.Duration) bool {
+	s.mu.Lock()
+	if s.inFlight == 0 {
+		s.mu.Unlock()
+		return true
+	}
+	idle := s.responseIdle
+	s.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		select {
+		case <-idle:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
 func newSessionState(maximumSeenIDs int) *sessionState {
 	responseIdle := make(chan struct{})
 	close(responseIdle)
@@ -626,11 +618,20 @@ func (s *sessionState) complete() {
 }
 
 type responseWriter struct {
-	mu          sync.Mutex
-	context     context.Context
-	output      io.Writer
-	timeout     time.Duration
-	closeOutput func()
+	gate    chan struct{}
+	context context.Context
+	output  RuntimeBootstrapChannel
+	timeout time.Duration
+}
+
+func newResponseWriter(
+	ctx context.Context,
+	output RuntimeBootstrapChannel,
+	timeout time.Duration,
+) *responseWriter {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &responseWriter{gate: gate, context: ctx, output: output, timeout: timeout}
 }
 
 func (w *responseWriter) writeWorkerAPISuccess(
@@ -671,101 +672,170 @@ func (w *responseWriter) write(document []byte, maximum int) error {
 func (w *responseWriter) writeUntil(document []byte, maximum int, deadline time.Time) error {
 	writeContext, cancelWrite := context.WithDeadlineCause(w.context, deadline, ErrIOTimeout)
 	defer cancelWrite()
-	done := make(chan error, 1)
-	go func() {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if cause := context.Cause(writeContext); cause != nil {
-			done <- cause
-			return
-		}
-		done <- WriteFrame(w.output, document, maximum)
-	}()
-	select {
-	case err := <-done:
-		return err
-	case <-writeContext.Done():
-		w.closeOutput()
-		return context.Cause(writeContext)
-	}
+	return w.writeContext(writeContext, document, maximum)
 }
 
 func (w *responseWriter) buildAndWrite(maximum int, build func() ([]byte, error)) error {
 	writeContext, cancelWrite := context.WithTimeoutCause(w.context, w.timeout, ErrIOTimeout)
 	defer cancelWrite()
-	done := make(chan error, 1)
-	go func() {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if cause := context.Cause(writeContext); cause != nil {
-			done <- cause
-			return
-		}
-		document, err := build()
-		if err != nil {
-			done <- err
-			return
-		}
-		if cause := context.Cause(writeContext); cause != nil {
-			done <- cause
-			return
-		}
-		done <- WriteFrame(w.output, document, maximum)
-	}()
-	select {
-	case err := <-done:
+	if err := acquireResponseWrite(writeContext, w.gate); err != nil {
 		return err
-	case <-writeContext.Done():
-		w.closeOutput()
-		return context.Cause(writeContext)
+	}
+	defer releaseResponseWrite(w.gate)
+	if cause := context.Cause(writeContext); cause != nil {
+		return cause
+	}
+	document, err := build()
+	if err != nil {
+		return err
+	}
+	if cause := context.Cause(writeContext); cause != nil {
+		return cause
+	}
+	err = WriteFrame(
+		runtimeBootstrapContextWriter{ctx: writeContext, channel: w.output},
+		document,
+		maximum,
+	)
+	if cause := context.Cause(writeContext); cause != nil {
+		return errors.Join(cause, err)
+	}
+	return err
+}
+
+func (w *responseWriter) writeContext(
+	ctx context.Context,
+	document []byte,
+	maximum int,
+) error {
+	if err := acquireResponseWrite(ctx, w.gate); err != nil {
+		return err
+	}
+	defer releaseResponseWrite(w.gate)
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	err := WriteFrame(
+		runtimeBootstrapContextWriter{ctx: ctx, channel: w.output},
+		document,
+		maximum,
+	)
+	if cause := context.Cause(ctx); cause != nil {
+		return errors.Join(cause, err)
+	}
+	return err
+}
+
+func acquireResponseWrite(ctx context.Context, gate chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-gate:
+		return nil
 	}
 }
 
-type frameReadResult struct {
-	document []byte
-	err      error
+func releaseResponseWrite(gate chan struct{}) {
+	gate <- struct{}{}
 }
 
-func readFrameWithTimeout(
+type sessionFrameReader struct {
+	channel        RuntimeBootstrapChannel
+	partialTimeout time.Duration
+}
+
+func (reader *sessionFrameReader) readFrame(
 	ctx context.Context,
-	input io.Reader,
 	maximum int,
-	timeout time.Duration,
-	closeInput func(),
+	boundaryDeadline time.Time,
 ) ([]byte, error) {
-	result := make(chan frameReadResult, 1)
-	go func() {
-		document, err := ReadFrame(input, maximum)
-		result <- frameReadResult{document: document, err: err}
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case value := <-result:
-		return value.document, value.err
-	case <-ctx.Done():
-		closeInput()
-		return nil, context.Cause(ctx)
-	case <-timer.C:
-		closeInput()
+	if ctx == nil {
+		return nil, errors.New("local RPC frame context is required")
+	}
+	if reader == nil || isNilRuntimeBootstrapChannel(reader.channel) {
+		return nil, errors.New("local RPC frame channel is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
+	}
+
+	boundaryContext := ctx
+	cancelBoundary := func() {}
+	if !boundaryDeadline.IsZero() {
+		if !time.Now().Before(boundaryDeadline) {
+			return nil, ErrIOTimeout
+		}
+		boundaryContext, cancelBoundary = context.WithDeadlineCause(
+			ctx,
+			boundaryDeadline,
+			ErrIOTimeout,
+		)
+	}
+	defer cancelBoundary()
+
+	firstByte := make([]byte, 1)
+	count, firstErr := reader.channel.ReadContext(boundaryContext, firstByte)
+	if count < 0 || count > len(firstByte) {
+		return nil, errors.New("local RPC frame reader returned an invalid byte count")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, joinFrameReadCause(cause, count, firstErr)
+	}
+	if cause := context.Cause(boundaryContext); cause != nil {
+		return nil, joinFrameReadCause(cause, count, firstErr)
+	}
+	if !boundaryDeadline.IsZero() && !time.Now().Before(boundaryDeadline) {
+		return nil, joinFrameReadCause(ErrIOTimeout, count, firstErr)
+	}
+	if count == 0 {
+		if firstErr == io.EOF {
+			return nil, io.EOF
+		}
+		return nil, firstByteReadError(count, firstErr)
+	}
+	if firstErr != nil {
+		return nil, firstByteReadError(count, firstErr)
+	}
+
+	now := time.Now()
+	frameDeadline := now.Add(reader.partialTimeout)
+	if !boundaryDeadline.IsZero() && boundaryDeadline.Before(frameDeadline) {
+		frameDeadline = boundaryDeadline
+	}
+	if !now.Before(frameDeadline) {
 		return nil, ErrIOTimeout
 	}
+	frameContext, cancelFrame := context.WithDeadlineCause(ctx, frameDeadline, ErrIOTimeout)
+	defer cancelFrame()
+	framedInput := io.MultiReader(
+		bytes.NewReader(firstByte),
+		runtimeBootstrapContextReader{ctx: frameContext, channel: reader.channel},
+	)
+	document, err := ReadFrame(framedInput, maximum)
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, errors.Join(cause, err)
+	}
+	if cause := context.Cause(frameContext); cause != nil {
+		return nil, errors.Join(cause, err)
+	}
+	if !time.Now().Before(frameDeadline) {
+		return nil, errors.Join(ErrIOTimeout, err)
+	}
+	return document, err
 }
 
-func waitForHandlers(handlers *sync.WaitGroup, timeout time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		handlers.Wait()
-		close(done)
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return true
-	case <-timer.C:
-		return false
+func joinFrameReadCause(cause error, count int, readErr error) error {
+	if readErr == nil || count == 0 && readErr == io.EOF {
+		return cause
 	}
+	return errors.Join(cause, firstByteReadError(count, readErr))
+}
+
+func firstByteReadError(count int, readErr error) error {
+	if readErr == nil {
+		return fmt.Errorf("%w: length prefix reader made no progress", ErrPartialFrame)
+	}
+	return fmt.Errorf("%w: length prefix after %d byte: %v", ErrPartialFrame, count, readErr)
 }
 
 func pollError(channel <-chan error) error {

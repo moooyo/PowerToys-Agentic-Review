@@ -89,19 +89,22 @@ func newArwxShutdownGate(
 	return &arwxShutdownGate{binding: binding}, nil
 }
 
-func (gate *arwxShutdownGate) bindServeStreams(input io.ReadCloser, output io.WriteCloser) error {
+func (gate *arwxShutdownGate) bindServeStreams(
+	input io.ReadCloser,
+	output io.WriteCloser,
+) (RuntimeBootstrapChannel, error) {
 	if gate == nil {
-		return ErrArwxShutdownUnavailable
+		return nil, ErrArwxShutdownUnavailable
 	}
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 	if gate.serveBound || !sameInterfaceInstance(gate.binding.channel, input) ||
 		!sameInterfaceInstance(gate.binding.channel, output) {
 		gate.attempted = true
-		return ErrArwxShutdownUnavailable
+		return nil, ErrArwxShutdownUnavailable
 	}
 	gate.serveBound = true
-	return nil
+	return gate.binding.channel, nil
 }
 
 func (gate *arwxShutdownGate) prepare(

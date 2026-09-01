@@ -137,6 +137,7 @@ func TestServerArmsBothRolesAndAcceptsOrderlyHostControlEOF(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			serverConn, clientConn := net.Pipe()
 			channel := &armRuntimeBootstrapChannel{Conn: serverConn}
+			defer channel.Close()
 			options := defaultServerOptions()
 			options.Role = test.role
 			options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, test.role)
@@ -425,6 +426,7 @@ func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesAuthorization(t *testing.
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	channel := &armRuntimeBootstrapChannel{Conn: serverConn}
+	defer channel.Close()
 	options := defaultServerOptions()
 	options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, RoleControl)
 	server, err := NewServer(options, &fakeControlDispatcher{})
@@ -460,6 +462,114 @@ func TestArmedSessionExpiresBeforePeerEOFAndInvalidatesAuthorization(t *testing.
 	}
 }
 
+func TestArmedSessionBoundaryWaitUsesAuthorizationDeadlineNotIOTimeout(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	channel := &armRuntimeBootstrapChannel{Conn: serverConn}
+	defer channel.Close()
+	options := defaultServerOptions()
+	options.IOTimeout = 20 * time.Millisecond
+	options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, RoleControl)
+	server, err := NewServer(options, &fakeControlDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := armArwxShutdownClaim(RoleControl)
+	claim.RemainingShutdownMS = 250
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(context.Background(), channel, channel) }()
+	if err := WriteFrame(clientConn, armRequestDocument(t, claim), MaximumArmArwxShutdownBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFrame(clientConn, MaximumArmArwxShutdownBytes); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-served:
+		t.Fatalf("armed session stopped at ordinary I/O timeout: %v", err)
+	case <-time.After(4 * options.IOTimeout):
+	}
+	if err := clientConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("armed session rejected EOF before authorization deadline: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("armed session did not accept EOF after extended boundary idle")
+	}
+}
+
+func TestArmedSessionPartialFrameUsesEarlierIOOrAuthorizationDeadline(t *testing.T) {
+	tests := []struct {
+		name        string
+		ioTimeout   time.Duration
+		remainingMS int
+		maximumWait time.Duration
+	}{
+		{name: "I/O deadline first", ioTimeout: 40 * time.Millisecond, remainingMS: 400, maximumWait: 250 * time.Millisecond},
+		{name: "authorization deadline first", ioTimeout: 500 * time.Millisecond, remainingMS: 80, maximumWait: 300 * time.Millisecond},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer clientConn.Close()
+			channel := &armRuntimeBootstrapChannel{Conn: serverConn}
+			defer channel.Close()
+			options := defaultServerOptions()
+			options.IOTimeout = test.ioTimeout
+			options.RuntimeBootstrap = committedRuntimeBootstrapForArmTest(t, channel, RoleControl)
+			server, err := NewServer(options, &fakeControlDispatcher{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim := armArwxShutdownClaim(RoleControl)
+			claim.RemainingShutdownMS = test.remainingMS
+			served := make(chan error, 1)
+			go func() { served <- server.Serve(context.Background(), channel, channel) }()
+			if err := WriteFrame(clientConn, armRequestDocument(t, claim), MaximumArmArwxShutdownBytes); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadFrame(clientConn, MaximumArmArwxShutdownBytes); err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			if _, err := clientConn.Write([]byte{1}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-served:
+				if !errors.Is(err, ErrIOTimeout) {
+					t.Fatalf("armed partial frame error = %v, want ErrIOTimeout", err)
+				}
+				if elapsed := time.Since(started); elapsed > test.maximumWait {
+					t.Fatalf("armed partial frame exceeded earlier deadline: %v", elapsed)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("armed partial frame did not stop at its earlier deadline")
+			}
+			if _, err := server.AuthorizeArwxEOF(
+				context.Background(),
+				make([]byte, claim.FinalFrameBytes),
+			); err == nil {
+				t.Fatal("timed-out armed partial frame left authorization usable")
+			}
+		})
+	}
+}
+
+func armRequestDocument(t *testing.T, claim ArmArwxShutdownV1) []byte {
+	t.Helper()
+	return callDocument(t, "shutdown:deadline", OperationArmArwxShutdown, map[string]any{
+		"bootstrapId": claim.BootstrapID, "shutdownId": claim.ShutdownID,
+		"remainingShutdownMs": claim.RemainingShutdownMS, "finalMessageType": claim.FinalMessageType,
+		"finalSequence": claim.FinalSequence, "finalCorrelationId": claim.FinalCorrelationID,
+		"finalFrameBytes": claim.FinalFrameBytes, "finalFrameSha256": claim.FinalFrameSHA256,
+	})
+}
+
 func arwxEOFServerForTest(
 	t *testing.T,
 	role Role,
@@ -482,7 +592,7 @@ func arwxEOFServerForTest(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := server.shutdown.bindServeStreams(channel, channel); err != nil {
+	if _, err := server.shutdown.bindServeStreams(channel, channel); err != nil {
 		t.Fatal(err)
 	}
 	const sequence = uint64(17)
@@ -548,7 +658,15 @@ func (channel *armRuntimeBootstrapChannel) ReadContext(ctx context.Context, buff
 	if cause := context.Cause(ctx); cause != nil {
 		return 0, cause
 	}
-	return channel.Read(buffer)
+	stopDeadline := context.AfterFunc(ctx, func() { _ = channel.SetReadDeadline(time.Now()) })
+	count, err := channel.Read(buffer)
+	if stopDeadline() {
+		_ = channel.SetReadDeadline(time.Time{})
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return count, errors.Join(cause, err)
+	}
+	return count, err
 }
 
 func (channel *armRuntimeBootstrapChannel) WriteContext(ctx context.Context, buffer []byte) (int, error) {
