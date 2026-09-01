@@ -38,13 +38,14 @@ type launchTarget struct {
 }
 
 type authoritySnapshot struct {
-	role            config.Role
-	configuration   config.Config
-	preflightDigest [32]byte
-	releaseDigest   [32]byte
-	root            preflight.VerifiedRoot
-	targets         []launchTarget
-	signerPin       string
+	role             config.Role
+	configuration    config.Config
+	preflightDigest  [32]byte
+	releaseDigest    [32]byte
+	bootstrapOptions localrpc.FoundationRuntimeBootstrapOptions
+	root             preflight.VerifiedRoot
+	targets          []launchTarget
+	signerPin        string
 }
 
 type directoryHandle interface {
@@ -168,6 +169,10 @@ func (guard *Guard) PreflightDigest() [32]byte {
 
 func cloneAuthority(value authoritySnapshot) authoritySnapshot {
 	value.configuration = cloneConfig(value.configuration)
+	value.bootstrapOptions.LocalAuthorityPublicKeySPKI = append(
+		[]byte(nil),
+		value.bootstrapOptions.LocalAuthorityPublicKeySPKI...,
+	)
 	value.root = cloneRoot(value.root)
 	value.targets = append([]launchTarget(nil), value.targets...)
 	for index := range value.targets {

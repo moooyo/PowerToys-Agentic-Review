@@ -712,6 +712,8 @@ func committedRuntimeBootstrapForDispatcherTest(
 		InstallationManifestSHA256:     strings.Repeat("2", 64),
 		PreflightSHA256:                strings.Repeat("3", 64),
 		NodeBundleSHA256:               strings.Repeat("4", 64),
+		LocalAuthorityKeyID:            strings.Repeat("5", 64),
+		ExecutorPolicySHA256:           strings.Repeat("6", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,

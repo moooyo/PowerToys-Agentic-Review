@@ -78,6 +78,120 @@ func TestEvidenceDigestAndRuntimePlanAreRoleLocal(t *testing.T) {
 	}
 }
 
+func TestRuntimePlanRejectsMutatedBootstrapTrustAndContent(t *testing.T) {
+	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
+		t.Run(string(role), func(t *testing.T) {
+			tests := []struct {
+				name   string
+				mutate func(*RuntimePlan)
+			}{
+				{
+					name: "local authority key identity",
+					mutate: func(plan *RuntimePlan) {
+						plan.bootstrapTrust.localAuthorityKeyID = strings.Repeat("f", 64)
+					},
+				},
+				{
+					name: "Executor policy identity",
+					mutate: func(plan *RuntimePlan) {
+						plan.bootstrapTrust.executorPolicySHA256 = strings.Repeat("e", 64)
+					},
+				},
+				{
+					name: "bootstrap authority policy",
+					mutate: func(plan *RuntimePlan) {
+						plan.bootstrapAuthority.options.ExecutorPolicySHA256 = strings.Repeat("d", 64)
+					},
+				},
+			}
+			if role == config.RoleControl {
+				tests = append(tests, struct {
+					name   string
+					mutate func(*RuntimePlan)
+				}{
+					name: "Control public key bytes",
+					mutate: func(plan *RuntimePlan) {
+						plan.bootstrapAuthority.options.LocalAuthorityPublicKeySPKI = []byte("forbidden")
+					},
+				})
+			} else {
+				tests = append(tests,
+					struct {
+						name   string
+						mutate func(*RuntimePlan)
+					}{
+						name: "Executor authority public key bytes",
+						mutate: func(plan *RuntimePlan) {
+							plan.bootstrapAuthority.options.LocalAuthorityPublicKeySPKI[0] ^= 0xff
+						},
+					},
+					struct {
+						name   string
+						mutate func(*RuntimePlan)
+					}{
+						name: "Executor runtime public key bytes",
+						mutate: func(plan *RuntimePlan) {
+							for index := range plan.runtimeContents {
+								if plan.runtimeContents[index].role == releasemanifest.RoleTrustedConfig {
+									plan.runtimeContents[index].data[0] ^= 0xff
+								}
+							}
+						},
+					},
+					struct {
+						name   string
+						mutate func(*RuntimePlan)
+					}{
+						name: "Executor runtime policy bytes",
+						mutate: func(plan *RuntimePlan) {
+							for index := range plan.runtimeContents {
+								if plan.runtimeContents[index].role == releasemanifest.RolePolicy {
+									plan.runtimeContents[index].data[0] ^= 0xff
+								}
+							}
+						},
+					},
+				)
+			}
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					fixture := newCompositionFixture(t, role)
+					evidence, err := composeSnapshots(fixture.input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					plan := evidence.RuntimePlanMustForTest(t)
+					test.mutate(&plan)
+					if err := plan.Validate(); !errors.Is(err, ErrInvalidEvidence) {
+						t.Fatalf("mutated RuntimePlan validation error = %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRuntimeBootstrapAuthorityCopiesDoNotAliasPublicKeyBytes(t *testing.T) {
+	fixture := newCompositionFixture(t, config.RoleExecutor)
+	evidence, err := composeSnapshots(fixture.input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := evidence.RuntimeBootstrapAuthority()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first.Copy()
+	first.options.LocalAuthorityPublicKeySPKI[0] ^= 0xff
+	if second.options.LocalAuthorityPublicKeySPKI[0] == first.options.LocalAuthorityPublicKeySPKI[0] {
+		t.Fatal("RuntimeBootstrapAuthority copies alias public-key storage")
+	}
+	plan := evidence.RuntimePlanMustForTest(t)
+	if !second.Matches(plan.RuntimeBootstrapAuthority()) {
+		t.Fatal("detached RuntimeBootstrapAuthority copy differs from its runtime plan")
+	}
+}
+
 func TestEvidenceAndRuntimePlanContentAccessorsAreCopyOnly(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
 	evidence, err := composeSnapshots(fixture.input)

@@ -219,12 +219,22 @@ func (e Evidence) runtimePlan() (RuntimePlan, error) {
 		return RuntimePlan{}, err
 	}
 	configuration := e.Configuration()
+	bootstrapTrust := runtimeBootstrapTrust{
+		localAuthorityKeyID:  e.control.Configuration.Control.LocalAuthorityPublicKeySHA256,
+		executorPolicySHA256: e.executor.Configuration.Executor.CodexPolicySHA256,
+	}
+	bootstrapAuthority, err := newRuntimeBootstrapAuthority(e, configuration)
+	if err != nil {
+		return RuntimePlan{}, err
+	}
 	plan := RuntimePlan{
 		role: e.role, configuration: configuration, releaseTemplateDigest: e.release.templateDigest,
 		preflightDigest: e.digest, dataRootDigest: e.dataRoot.digest,
 		node:            PinnedRuntimeFile{path: configuration.Node.ExecutablePath, sha256: configuration.Node.ExecutableSHA256},
 		bundle:          PinnedRuntimeFile{path: configuration.Node.BundlePath, sha256: configuration.Node.BundleSHA256},
 		runtimeContents: cloneRuntimeContents(e.contents), valid: true,
+		bootstrapTrust:     bootstrapTrust,
+		bootstrapAuthority: bootstrapAuthority,
 	}
 	if e.role == config.RoleExecutor {
 		processHost := PinnedRuntimeFile{
@@ -254,6 +264,12 @@ func (plan RuntimePlan) Validate() error {
 		plan.bundle.path != plan.configuration.Node.BundlePath ||
 		plan.bundle.sha256 != plan.configuration.Node.BundleSHA256 {
 		return invalidEvidenceError("runtime plan Node pins are inconsistent", nil)
+	}
+	if err := plan.validateRuntimeBootstrapTrust(); err != nil {
+		return invalidEvidenceError("runtime plan bootstrap trust is inconsistent", err)
+	}
+	if err := plan.bootstrapAuthority.validateFor(plan); err != nil {
+		return invalidEvidenceError("runtime plan bootstrap authority is inconsistent", err)
 	}
 	if plan.role == config.RoleControl {
 		if plan.processHost != nil || len(plan.runtimeContents) != 1 ||

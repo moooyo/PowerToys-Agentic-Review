@@ -535,7 +535,7 @@ func TestRejectedHostControlClaimTerminatesBeforeClosingListener(t *testing.T) {
 
 func hostControlBootstrapForTest(t *testing.T) (localrpc.LaunchRuntimeBootstrap, []byte) {
 	t.Helper()
-	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(localrpc.FoundationRuntimeBootstrapOptions{
+	options := localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           localrpc.RoleControl,
 		WorkerNodeID:                   "powertoys-node:01",
 		ReleaseID:                      "2026.08.31-test+1",
@@ -543,10 +543,13 @@ func hostControlBootstrapForTest(t *testing.T) (localrpc.LaunchRuntimeBootstrap,
 		InstallationManifestSHA256:     strings.Repeat("2", 64),
 		PreflightSHA256:                strings.Repeat("3", 64),
 		NodeBundleSHA256:               strings.Repeat("4", 64),
+		LocalAuthorityKeyID:            strings.Repeat("5", 64),
+		ExecutorPolicySHA256:           strings.Repeat("6", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,
-	})
+	}
+	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,21 +557,7 @@ func hostControlBootstrapForTest(t *testing.T) (localrpc.LaunchRuntimeBootstrap,
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := localrpc.BindRuntimeBootstrapToLaunch(
-		bootstrap,
-		localrpc.FoundationRuntimeBootstrapOptions{
-			Role:                           localrpc.RoleControl,
-			WorkerNodeID:                   "powertoys-node:01",
-			ReleaseID:                      "2026.08.31-test+1",
-			ReleaseTemplateSHA256:          strings.Repeat("1", 64),
-			InstallationManifestSHA256:     strings.Repeat("2", 64),
-			PreflightSHA256:                strings.Repeat("3", 64),
-			NodeBundleSHA256:               strings.Repeat("4", 64),
-			MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
-			TotalShutdownTimeoutMS:         120_000,
-			ForceTerminationReserveMS:      15_000,
-		},
-	)
+	bound, err := localrpc.BindRuntimeBootstrapToLaunch(bootstrap, options)
 	if err != nil {
 		t.Fatal(err)
 	}

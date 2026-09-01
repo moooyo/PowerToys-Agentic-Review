@@ -147,3 +147,11 @@ func cloneRuntimeContents(values []VerifiedRuntimeContent) []VerifiedRuntimeCont
 	}
 	return result
 }
+
+func cloneRuntimeBootstrapAuthority(value RuntimeBootstrapAuthority) RuntimeBootstrapAuthority {
+	value.options.LocalAuthorityPublicKeySPKI = append(
+		[]byte(nil),
+		value.options.LocalAuthorityPublicKeySPKI...,
+	)
+	return value
+}

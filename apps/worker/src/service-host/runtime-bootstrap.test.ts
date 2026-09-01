@@ -1,8 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
+import {
+  bootstrapDocument,
+  foundationRoleConfig,
+  testExecutorPolicySha256,
+  testLocalAuthorityKeyId,
+} from "./runtime-bootstrap.test-helpers.js";
 import {
   parseRuntimeBootstrap,
   parseRuntimeBootstrapCommit,
@@ -25,16 +31,13 @@ describe("RuntimeBootstrapV1", () => {
       role: "control",
       workerNodeId: "powertoys-node:01",
     });
-    expect(parsed.roleConfig).toEqual({
-      confidence: 0.8,
-      maximum: Number.MAX_VALUE,
-      minimum: Number.MIN_VALUE,
-    });
+    expect(parsed.roleConfig).toEqual(foundationRoleConfig("control"));
+    expect(parsed.localAuthorityPublicKey).toBeNull();
     expect(parsed.bootstrap.roleConfig).toEqual({
       base64Url:
-        "eyJjb25maWRlbmNlIjowLjgsIm1heGltdW0iOjEuNzk3NjkzMTM0ODYyMzE1N2UrMzA4LCJtaW5pbXVtIjo1ZS0zMjR9",
-      byteLength: 69,
-      sha256: "75740ca3678e2efea5c080c5950accbe75f3eeb673facefc373b9eb0ee802dba",
+        "eyJleGVjdXRpb25FbmFibGVkIjpmYWxzZSwiZXhlY3V0b3JQb2xpY3lTaGEyNTYiOiI2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2IiwiZm91bmRhdGlvblZlcnNpb24iOjIsImxvY2FsQXV0aG9yaXR5S2V5SWQiOiI1Y2QyNTJmYjBjZTg5MzI0MzZmYWY4Y2NkMTA0MDk4MWI4OWVlNGFkNmI5ZmU5ZTJhMmI3ZTcxYWFjYjI3Y2QzIiwibWF4aW11bVNsb3RzIjoxLCJyb2xlIjoiY29udHJvbCJ9",
+      byteLength: 261,
+      sha256: "c50978551cd0d98616fc5cdfaa041da4c45a6b3db99027aed05663ad8e81566b",
     });
 
     const digest = createHash("sha256").update(golden).digest("hex");
@@ -55,13 +58,103 @@ describe("RuntimeBootstrapV1", () => {
   });
 
   it("supports the exact executor role while binding the expected role", () => {
-    const executor = mutateGolden((value) => {
-      value.role = "executor";
+    const executor = bootstrapDocument("executor");
+    const parsed = parseRuntimeBootstrap(executor, "executor");
+    expect(parsed.bootstrap.role).toBe("executor");
+    expect(parsed.roleConfig).toEqual(foundationRoleConfig("executor"));
+    expect(parsed.localAuthorityPublicKey).toMatchObject({
+      type: "public",
+      asymmetricKeyType: "ec",
     });
-    expect(parseRuntimeBootstrap(executor, "executor").bootstrap.role).toBe("executor");
     expect(() => parseRuntimeBootstrap(executor, "control")).toThrowError(
       expect.objectContaining({ code: "ROLE_MISMATCH" }),
     );
+  });
+
+  it.each([
+    [
+      "Control public-key bytes",
+      "control" as const,
+      {
+        ...foundationRoleConfig("control"),
+        localAuthorityPublicKeySpki: {
+          base64Url: "AA",
+          byteLength: 1,
+          sha256: "0".repeat(64),
+        },
+      },
+    ],
+    [
+      "missing Executor public-key bytes",
+      "executor" as const,
+      Object.fromEntries(
+        Object.entries(foundationRoleConfig("executor")).filter(
+          ([key]) => key !== "localAuthorityPublicKeySpki",
+        ),
+      ),
+    ],
+    [
+      "wrong foundation version",
+      "control" as const,
+      { ...foundationRoleConfig("control"), foundationVersion: 1 },
+    ],
+    [
+      "enabled execution",
+      "executor" as const,
+      { ...foundationRoleConfig("executor"), executionEnabled: true },
+    ],
+    [
+      "nonfixed maximum slots",
+      "executor" as const,
+      { ...foundationRoleConfig("executor"), maximumSlots: 2 },
+    ],
+  ])("rejects %s in strict roleConfig v2", (_name, role, roleConfig) => {
+    expect(() => parseRuntimeBootstrap(roleConfigDocument(role, roleConfig), role)).toThrowError(
+      expect.objectContaining({ code: "INVALID_ROLE_CONFIG" }),
+    );
+  });
+
+  it("requires the Executor descriptor digest, keyId, and DER bytes to agree", () => {
+    const original = foundationRoleConfig("executor");
+    const descriptor = original.localAuthorityPublicKeySpki as Readonly<Record<string, unknown>>;
+    for (const roleConfig of [
+      { ...original, localAuthorityKeyId: "0".repeat(64) },
+      {
+        ...original,
+        localAuthorityPublicKeySpki: { ...descriptor, sha256: "0".repeat(64) },
+      },
+      {
+        ...original,
+        localAuthorityPublicKeySpki: { ...descriptor, byteLength: 90 },
+      },
+    ]) {
+      expect(() =>
+        parseRuntimeBootstrap(roleConfigDocument("executor", roleConfig), "executor"),
+      ).toThrowError(expect.objectContaining({ code: "INVALID_ROLE_CONFIG" }));
+    }
+  });
+
+  it("rejects non-DER and non-P-256 Executor public keys after exact descriptor validation", () => {
+    const nonDer = Buffer.from("not DER", "utf8");
+    const p384 = generateKeyPairSync("ec", { namedCurve: "secp384r1" }).publicKey.export({
+      format: "der",
+      type: "spki",
+    });
+    for (const bytes of [nonDer, Buffer.from(p384)]) {
+      const keyId = createHash("sha256").update(bytes).digest("hex");
+      const roleConfig = {
+        ...foundationRoleConfig("executor"),
+        localAuthorityKeyId: keyId,
+        localAuthorityPublicKeySpki: {
+          base64Url: bytes.toString("base64url"),
+          byteLength: bytes.byteLength,
+          sha256: keyId,
+        },
+      };
+      expect(() =>
+        parseRuntimeBootstrap(roleConfigDocument("executor", roleConfig), "executor"),
+      ).toThrowError(expect.objectContaining({ code: "INVALID_ROLE_CONFIG" }));
+    }
   });
 
   it.each([
@@ -90,8 +183,11 @@ describe("RuntimeBootstrapV1", () => {
   });
 
   it("binds ACKs to opaque roleConfig exact bytes, not only parsed semantics", () => {
-    const firstRoleConfig = Buffer.from('{"confidence":0.8}', "utf8");
-    const secondRoleConfig = Buffer.from(' { "confidence" : 0.8 } ', "utf8");
+    const firstRoleConfig = Buffer.from(JSON.stringify(foundationRoleConfig("control")), "utf8");
+    const secondRoleConfig = Buffer.from(
+      ` { "executionEnabled" : false, "executorPolicySha256" : "${testExecutorPolicySha256}", "foundationVersion" : 2, "localAuthorityKeyId" : "${testLocalAuthorityKeyId}", "maximumSlots" : 1, "role" : "control" } `,
+      "utf8",
+    );
     const firstDocument = mutateGolden((value) => {
       value.roleConfig = descriptorFor(firstRoleConfig);
     });
@@ -236,24 +332,6 @@ describe("RuntimeBootstrapV1", () => {
   });
 
   it("enforces the decoded roleConfig and aggregate envelope limits independently", () => {
-    const decodedLimitDescriptor = encodeHostControlOpaqueJson(
-      { padding: "x".repeat(RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES - 14) },
-      RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
-    );
-    const expanded = mutateGolden((value) => {
-      value.role = "executor";
-      value.workerNodeId = `n${"a".repeat(127)}`;
-      value.releaseId = `r${"a".repeat(127)}`;
-      nested(value, "arwx").maximumQueuedBytesPerDirection = 64 * 1_024 * 1_024;
-      nested(value, "shutdown").gracefulTimeoutMs = 300_000;
-      nested(value, "shutdown").forceTerminationReserveMs = 299_999;
-      value.roleConfig = decodedLimitDescriptor;
-    });
-    expect(expanded.byteLength).toBeLessThanOrEqual(RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
-    expect(parseRuntimeBootstrap(expanded, "executor").bootstrap.roleConfig.byteLength).toBe(
-      RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
-    );
-
     const forgedDecodedOversize = mutateGolden((value) => {
       nested(value, "roleConfig").byteLength = RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES + 1;
     });
@@ -262,17 +340,16 @@ describe("RuntimeBootstrapV1", () => {
       expect.objectContaining({ code: "INVALID_DOCUMENT" }),
     );
 
-    const fittingDescriptor = encodeHostControlOpaqueJson(
-      { padding: "x".repeat(47_000) },
-      RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
+    const unknownField = mutateGolden((value) => {
+      value.roleConfig = encodeHostControlOpaqueJson(
+        { ...foundationRoleConfig("control"), padding: "x".repeat(47_000) },
+        RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
+      );
+    });
+    expect(unknownField.byteLength).toBeLessThanOrEqual(RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
+    expect(() => parseRuntimeBootstrap(unknownField, "control")).toThrowError(
+      expect.objectContaining({ code: "INVALID_ROLE_CONFIG" }),
     );
-    const fitting = mutateGolden((value) => {
-      value.roleConfig = fittingDescriptor;
-    });
-    expect(fitting.byteLength).toBeLessThanOrEqual(RUNTIME_BOOTSTRAP_MAXIMUM_BYTES);
-    expect(parseRuntimeBootstrap(fitting, "control").roleConfig).toEqual({
-      padding: "x".repeat(47_000),
-    });
   });
 
   it("rejects an opaque array even though its decimal JSON is otherwise valid", () => {
@@ -320,6 +397,19 @@ function readSharedGolden(): Buffer {
 function mutateGolden(mutate: (value: MutableJsonObject) => void): Buffer {
   const value = JSON.parse(readSharedGolden().toString("utf8")) as MutableJsonObject;
   mutate(value);
+  return Buffer.from(serializeCanonicalJson(value), "utf8");
+}
+
+function roleConfigDocument(
+  role: "control" | "executor",
+  roleConfig: Readonly<Record<string, unknown>>,
+): Buffer {
+  const value = JSON.parse(readSharedGolden().toString("utf8")) as MutableJsonObject;
+  value.role = role;
+  value.roleConfig = encodeHostControlOpaqueJson(
+    roleConfig,
+    RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
+  );
   return Buffer.from(serializeCanonicalJson(value), "utf8");
 }
 

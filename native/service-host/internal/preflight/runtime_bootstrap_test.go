@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"regexp"
@@ -19,19 +20,16 @@ var testRuntimeBootstrapUUIDV4 = regexp.MustCompile(
 
 func TestRuntimePlanBuildsRoleBoundFoundationBootstrap(t *testing.T) {
 	tests := []struct {
-		role       config.Role
-		localRole  localrpc.Role
-		roleConfig []byte
+		role      config.Role
+		localRole localrpc.Role
 	}{
 		{
-			role:       config.RoleControl,
-			localRole:  localrpc.RoleControl,
-			roleConfig: []byte(`{"executionEnabled":false,"foundationVersion":1,"role":"control"}`),
+			role:      config.RoleControl,
+			localRole: localrpc.RoleControl,
 		},
 		{
-			role:       config.RoleExecutor,
-			localRole:  localrpc.RoleExecutor,
-			roleConfig: []byte(`{"executionEnabled":false,"foundationVersion":1,"role":"executor"}`),
+			role:      config.RoleExecutor,
+			localRole: localrpc.RoleExecutor,
 		},
 	}
 	for _, test := range tests {
@@ -78,11 +76,34 @@ func TestRuntimePlanBuildsRoleBoundFoundationBootstrap(t *testing.T) {
 					int(configuration.Limits.ForceTerminationReserveMilliseconds) {
 				t.Fatalf("bootstrap limits differ from finalized plan: %#v", bootstrap)
 			}
-			if !bytes.Equal(bootstrap.RoleConfigJSON(), test.roleConfig) {
-				t.Fatalf("roleConfig = %s, want %s", bootstrap.RoleConfigJSON(), test.roleConfig)
+			expectedRoleConfig := map[string]any{
+				"executionEnabled":     false,
+				"executorPolicySha256": fixture.executor.Executor.CodexPolicySHA256,
+				"foundationVersion":    2,
+				"localAuthorityKeyId":  fixture.control.Control.LocalAuthorityPublicKeySHA256,
+				"maximumSlots":         1,
+				"role":                 string(test.localRole),
 			}
-			roleConfigDigest := sha256.Sum256(test.roleConfig)
-			if bootstrap.RoleConfig.ByteLength != len(test.roleConfig) ||
+			if test.role == config.RoleExecutor {
+				publicKey := localSPKIFixtureBytes()
+				expectedRoleConfig["localAuthorityPublicKeySpki"] = map[string]any{
+					"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
+					"byteLength": len(publicKey),
+					"sha256":     fixture.control.Control.LocalAuthorityPublicKeySHA256,
+				}
+			}
+			expectedRoleConfigJSON, err := localrpc.MarshalCanonicalJSON(
+				expectedRoleConfig,
+				localrpc.RuntimeBootstrapRoleConfigMaximumBytes,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(bootstrap.RoleConfigJSON(), expectedRoleConfigJSON) {
+				t.Fatalf("roleConfig = %s, want %s", bootstrap.RoleConfigJSON(), expectedRoleConfigJSON)
+			}
+			roleConfigDigest := sha256.Sum256(expectedRoleConfigJSON)
+			if bootstrap.RoleConfig.ByteLength != len(expectedRoleConfigJSON) ||
 				bootstrap.RoleConfig.SHA256 != hex.EncodeToString(roleConfigDigest[:]) {
 				t.Fatalf("roleConfig descriptor = %#v", bootstrap.RoleConfig)
 			}

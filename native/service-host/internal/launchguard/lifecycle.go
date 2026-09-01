@@ -2,7 +2,6 @@ package launchguard
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
@@ -183,26 +182,9 @@ func (guard *Guard) LaunchNode(
 	if state.terminal != nil {
 		return nil, state.terminal
 	}
-	bootstrapRole, err := launchRuntimeBootstrapRole(state.authority.role)
-	if err != nil {
-		return nil, err
-	}
-	configuration := state.authority.configuration
-	bootstrapOptions := localrpc.FoundationRuntimeBootstrapOptions{
-		Role:                           bootstrapRole,
-		WorkerNodeID:                   configuration.WorkerNodeID,
-		ReleaseID:                      configuration.Installation.ReleaseID,
-		ReleaseTemplateSHA256:          hex.EncodeToString(state.authority.releaseDigest[:]),
-		InstallationManifestSHA256:     configuration.Installation.ManifestSHA256,
-		PreflightSHA256:                hex.EncodeToString(state.authority.preflightDigest[:]),
-		NodeBundleSHA256:               configuration.Node.BundleSHA256,
-		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
-		TotalShutdownTimeoutMS:         int(configuration.Limits.ShutdownTimeoutMilliseconds),
-		ForceTerminationReserveMS:      int(configuration.Limits.ForceTerminationReserveMilliseconds),
-	}
 	boundBootstrap, err := localrpc.BindRuntimeBootstrapToLaunch(
 		bootstrap,
-		bootstrapOptions,
+		cloneAuthority(state.authority).bootstrapOptions,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("bind RuntimeBootstrapV1 to guarded Node launch: %w", err)

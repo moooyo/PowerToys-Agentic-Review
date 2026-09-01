@@ -7,6 +7,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -372,6 +373,18 @@ type PinnedRuntimeFile struct {
 func (file PinnedRuntimeFile) Path() string   { return file.path }
 func (file PinnedRuntimeFile) SHA256() string { return file.sha256 }
 
+// RuntimeBootstrapAuthority is the copy-safe, opaque set of verified facts
+// used both to issue and to bind one fixed foundation bootstrap.
+type RuntimeBootstrapAuthority struct {
+	options localrpc.FoundationRuntimeBootstrapOptions
+	valid   bool
+}
+
+type runtimeBootstrapTrust struct {
+	localAuthorityKeyID  string
+	executorPolicySHA256 string
+}
+
 // RuntimePlan is the copy-only, role-local output consumed after data-root
 // final reinspection and closure. It contains no credential or native handle.
 type RuntimePlan struct {
@@ -384,6 +397,8 @@ type RuntimePlan struct {
 	bundle                PinnedRuntimeFile
 	processHost           *PinnedRuntimeFile
 	runtimeContents       []VerifiedRuntimeContent
+	bootstrapTrust        runtimeBootstrapTrust
+	bootstrapAuthority    RuntimeBootstrapAuthority
 	valid                 bool
 }
 
@@ -404,6 +419,9 @@ func (plan RuntimePlan) ProcessHost() (PinnedRuntimeFile, bool) {
 }
 func (plan RuntimePlan) RuntimeContents() []VerifiedRuntimeContent {
 	return cloneRuntimeContents(plan.runtimeContents)
+}
+func (plan RuntimePlan) RuntimeBootstrapAuthority() RuntimeBootstrapAuthority {
+	return cloneRuntimeBootstrapAuthority(plan.bootstrapAuthority)
 }
 
 func preflightError(code ErrorCode, message string, cause error) error {

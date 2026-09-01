@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,9 @@ const (
 	RuntimeBootstrapMinimumGracefulTimeoutMS       = 1_000
 	RuntimeBootstrapMaximumGracefulTimeoutMS       = 300_000
 	RuntimeBootstrapMinimumForceTerminationReserve = 1
+	foundationRoleConfigVersion                    = 2
+	foundationMaximumSlots                         = 1
+	foundationPublicKeyMaximumBytes                = 4 * 1024
 )
 
 var (
@@ -40,11 +44,6 @@ var (
 	runtimeBootstrapReleaseID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 )
 
-const (
-	controlFoundationRoleConfigJSON  = `{"executionEnabled":false,"foundationVersion":1,"role":"control"}`
-	executorFoundationRoleConfigJSON = `{"executionEnabled":false,"foundationVersion":1,"role":"executor"}`
-)
-
 // FoundationRuntimeBootstrapOptions contains only verified deployment facts. The bootstrap ID,
 // role configuration, and wire protocol fields are fixed by NewFoundationRuntimeBootstrap.
 type FoundationRuntimeBootstrapOptions struct {
@@ -55,6 +54,9 @@ type FoundationRuntimeBootstrapOptions struct {
 	InstallationManifestSHA256     string
 	PreflightSHA256                string
 	NodeBundleSHA256               string
+	LocalAuthorityKeyID            string
+	ExecutorPolicySHA256           string
+	LocalAuthorityPublicKeySPKI    []byte
 	MaximumQueuedBytesPerDirection int
 	TotalShutdownTimeoutMS         int
 	ForceTerminationReserveMS      int
@@ -168,7 +170,7 @@ func newFoundationRuntimeBootstrap(
 	options FoundationRuntimeBootstrapOptions,
 	random io.Reader,
 ) (RuntimeBootstrapV1, error) {
-	roleConfig, err := foundationRoleConfigJSON(options.Role)
+	roleConfig, err := foundationRoleConfigJSON(options)
 	if err != nil {
 		return RuntimeBootstrapV1{}, err
 	}
@@ -188,18 +190,56 @@ func newFoundationRuntimeBootstrap(
 		MaximumQueuedBytesPerDirection: options.MaximumQueuedBytesPerDirection,
 		GracefulTimeoutMS:              options.TotalShutdownTimeoutMS,
 		ForceTerminationReserveMS:      options.ForceTerminationReserveMS,
-		RoleConfigJSON:                 []byte(roleConfig),
+		RoleConfigJSON:                 roleConfig,
 	})
 }
 
-func foundationRoleConfigJSON(role Role) (string, error) {
-	switch role {
+func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
+	if !validRuntimeBootstrapRole(options.Role) ||
+		!validRuntimeBootstrapDigest(options.LocalAuthorityKeyID) ||
+		!validRuntimeBootstrapDigest(options.ExecutorPolicySHA256) {
+		return nil, fmt.Errorf("%w: foundation role configuration facts", ErrInvalidRuntimeBootstrap)
+	}
+	switch options.Role {
 	case RoleControl:
-		return controlFoundationRoleConfigJSON, nil
+		if len(options.LocalAuthorityPublicKeySPKI) != 0 {
+			return nil, fmt.Errorf("%w: Control foundation contains public-key bytes", ErrInvalidRuntimeBootstrap)
+		}
+		return MarshalCanonicalJSON(map[string]any{
+			"executionEnabled":     false,
+			"executorPolicySha256": options.ExecutorPolicySHA256,
+			"foundationVersion":    foundationRoleConfigVersion,
+			"localAuthorityKeyId":  options.LocalAuthorityKeyID,
+			"maximumSlots":         foundationMaximumSlots,
+			"role":                 string(options.Role),
+		}, RuntimeBootstrapRoleConfigMaximumBytes)
 	case RoleExecutor:
-		return executorFoundationRoleConfigJSON, nil
+		publicKey := bytes.Clone(options.LocalAuthorityPublicKeySPKI)
+		if len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes {
+			return nil, fmt.Errorf("%w: Executor foundation public key", ErrInvalidRuntimeBootstrap)
+		}
+		digest := sha256.Sum256(publicKey)
+		if subtle.ConstantTimeCompare(
+			[]byte(hex.EncodeToString(digest[:])),
+			[]byte(options.LocalAuthorityKeyID),
+		) != 1 {
+			return nil, fmt.Errorf("%w: Executor foundation public-key identity", ErrInvalidRuntimeBootstrap)
+		}
+		return MarshalCanonicalJSON(map[string]any{
+			"executionEnabled":     false,
+			"executorPolicySha256": options.ExecutorPolicySHA256,
+			"foundationVersion":    foundationRoleConfigVersion,
+			"localAuthorityKeyId":  options.LocalAuthorityKeyID,
+			"localAuthorityPublicKeySpki": map[string]any{
+				"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
+				"byteLength": len(publicKey),
+				"sha256":     options.LocalAuthorityKeyID,
+			},
+			"maximumSlots": foundationMaximumSlots,
+			"role":         string(options.Role),
+		}, RuntimeBootstrapRoleConfigMaximumBytes)
 	default:
-		return "", fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
+		return nil, fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
 	}
 }
 
@@ -302,7 +342,7 @@ func BindRuntimeBootstrapToLaunch(
 	if err != nil {
 		return LaunchRuntimeBootstrap{}, err
 	}
-	expectedRoleConfig, err := foundationRoleConfigJSON(expected.Role)
+	expectedRoleConfig, err := foundationRoleConfigJSON(expected)
 	if err != nil || value.Role != expected.Role || value.WorkerNodeID != expected.WorkerNodeID ||
 		value.ReleaseID != expected.ReleaseID ||
 		subtle.ConstantTimeCompare([]byte(value.ReleaseTemplateSHA256), []byte(expected.ReleaseTemplateSHA256)) != 1 ||
@@ -312,7 +352,7 @@ func BindRuntimeBootstrapToLaunch(
 		value.ARWX.MaximumQueuedBytesPerDirection != expected.MaximumQueuedBytesPerDirection ||
 		value.Shutdown.GracefulTimeoutMS != expected.TotalShutdownTimeoutMS ||
 		value.Shutdown.ForceTerminationReserveMS != expected.ForceTerminationReserveMS ||
-		!bytes.Equal(value.roleConfigJSON, []byte(expectedRoleConfig)) {
+		!bytes.Equal(value.roleConfigJSON, expectedRoleConfig) {
 		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: guarded launch facts", ErrRuntimeBootstrapBinding)
 	}
 	if !value.issuance.phase.CompareAndSwap(runtimeBootstrapIssued, runtimeBootstrapLaunchBound) {

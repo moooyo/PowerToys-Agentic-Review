@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -31,8 +32,12 @@ func TestRuntimeBootstrapMatchesSharedCrossLanguageGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeRuntimeBootstrap returned an error: %v", err)
 	}
+	expectedRoleConfig, err := foundationRoleConfigJSON(validFoundationRuntimeBootstrapOptions(RoleControl))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if decoded.Role != RoleControl || decoded.WorkerNodeID != "powertoys-node:01" ||
-		!bytes.Equal(decoded.RoleConfigJSON(), []byte(crossLanguageWorkerAPIBody)) {
+		!bytes.Equal(decoded.RoleConfigJSON(), expectedRoleConfig) {
 		t.Fatalf("decoded bootstrap = %#v, role config = %s", decoded, decoded.RoleConfigJSON())
 	}
 	roleConfig := decoded.RoleConfigJSON()
@@ -102,29 +107,28 @@ func TestFoundationRuntimeBootstrapFixesUUIDRoleConfigAndTotalShutdown(t *testin
 		role        Role
 		entropy     []byte
 		bootstrapID string
-		roleConfig  string
-		roleDigest  string
 	}{
 		{
 			name:        "control zero entropy",
 			role:        RoleControl,
 			entropy:     make([]byte, 16),
 			bootstrapID: "00000000-0000-4000-8000-000000000000",
-			roleConfig:  controlFoundationRoleConfigJSON,
-			roleDigest:  "9053420658d77ca392810a9e1a42deb2b232a6eb70dc92f4b35473203c564de2",
 		},
 		{
 			name:        "executor maximum entropy",
 			role:        RoleExecutor,
 			entropy:     bytes.Repeat([]byte{0xff}, 16),
 			bootstrapID: "ffffffff-ffff-4fff-bfff-ffffffffffff",
-			roleConfig:  executorFoundationRoleConfigJSON,
-			roleDigest:  "1a42461a4a41aab7da75c992bad85d19617b5bdbb1057eba36f63836695297e2",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			options := validFoundationRuntimeBootstrapOptions(test.role)
+			roleConfig, err := foundationRoleConfigJSON(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roleDigest := sha256.Sum256(roleConfig)
 			bootstrap, err := newFoundationRuntimeBootstrap(options, bytes.NewReader(test.entropy))
 			if err != nil {
 				t.Fatal(err)
@@ -132,9 +136,9 @@ func TestFoundationRuntimeBootstrapFixesUUIDRoleConfigAndTotalShutdown(t *testin
 			if bootstrap.BootstrapID != test.bootstrapID || bootstrap.Role != test.role {
 				t.Fatalf("bootstrap identity = (%q, %q)", bootstrap.BootstrapID, bootstrap.Role)
 			}
-			if string(bootstrap.RoleConfigJSON()) != test.roleConfig ||
-				bootstrap.RoleConfig.ByteLength != len(test.roleConfig) ||
-				bootstrap.RoleConfig.SHA256 != test.roleDigest {
+			if !bytes.Equal(bootstrap.RoleConfigJSON(), roleConfig) ||
+				bootstrap.RoleConfig.ByteLength != len(roleConfig) ||
+				bootstrap.RoleConfig.SHA256 != hex.EncodeToString(roleDigest[:]) {
 				t.Fatalf("roleConfig = (%s, %#v)", bootstrap.RoleConfigJSON(), bootstrap.RoleConfig)
 			}
 			if bootstrap.Shutdown.GracefulTimeoutMS != options.TotalShutdownTimeoutMS ||
@@ -178,6 +182,70 @@ func TestFoundationRuntimeBootstrapUsesPrivateEntropyAndFailsClosed(t *testing.T
 		runtimeBootstrapEntropyError{err: entropyFailure},
 	); !errors.Is(err, ErrInvalidRuntimeBootstrap) || !errors.Is(err, entropyFailure) {
 		t.Fatalf("entropy failure error = %v", err)
+	}
+}
+
+func TestFoundationRuntimeBootstrapRejectsUntrustedRoleFactsBeforeEntropy(t *testing.T) {
+	tests := []struct {
+		name   string
+		role   Role
+		mutate func(*FoundationRuntimeBootstrapOptions)
+	}{
+		{
+			name: "invalid local-authority key ID",
+			role: RoleControl,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.LocalAuthorityKeyID = "invalid"
+			},
+		},
+		{
+			name: "invalid Executor policy digest",
+			role: RoleControl,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.ExecutorPolicySHA256 = "invalid"
+			},
+		},
+		{
+			name: "Control public-key bytes",
+			role: RoleControl,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.LocalAuthorityPublicKeySPKI = []byte("forbidden")
+			},
+		},
+		{
+			name: "missing Executor public key",
+			role: RoleExecutor,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.LocalAuthorityPublicKeySPKI = nil
+			},
+		},
+		{
+			name: "mismatched Executor public key",
+			role: RoleExecutor,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.LocalAuthorityPublicKeySPKI[0] ^= 0xff
+			},
+		},
+		{
+			name: "oversized Executor public key",
+			role: RoleExecutor,
+			mutate: func(value *FoundationRuntimeBootstrapOptions) {
+				value.LocalAuthorityPublicKeySPKI = make([]byte, foundationPublicKeyMaximumBytes+1)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := validFoundationRuntimeBootstrapOptions(test.role)
+			test.mutate(&options)
+			entropy := &countingRuntimeBootstrapEntropy{}
+			if _, err := newFoundationRuntimeBootstrap(options, entropy); !errors.Is(err, ErrInvalidRuntimeBootstrap) {
+				t.Fatalf("invalid role facts error = %v", err)
+			}
+			if entropy.reads != 0 {
+				t.Fatalf("invalid role facts consumed entropy %d times", entropy.reads)
+			}
+		})
 	}
 }
 
@@ -253,6 +321,11 @@ func TestRuntimeBootstrapLaunchBindingMatchesEveryExpectedFact(t *testing.T) {
 		}},
 		{"preflight", func(value *FoundationRuntimeBootstrapOptions) { value.PreflightSHA256 = strings.Repeat("a", 64) }},
 		{"bundle", func(value *FoundationRuntimeBootstrapOptions) { value.NodeBundleSHA256 = strings.Repeat("a", 64) }},
+		{"local authority key", func(value *FoundationRuntimeBootstrapOptions) { value.LocalAuthorityKeyID = strings.Repeat("a", 64) }},
+		{"Executor policy", func(value *FoundationRuntimeBootstrapOptions) { value.ExecutorPolicySHA256 = strings.Repeat("a", 64) }},
+		{"Control public key bytes", func(value *FoundationRuntimeBootstrapOptions) {
+			value.LocalAuthorityPublicKeySPKI = []byte("forbidden")
+		}},
 		{"queue", func(value *FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
 		{"shutdown", func(value *FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},
 		{"reserve", func(value *FoundationRuntimeBootstrapOptions) { value.ForceTerminationReserveMS++ }},
@@ -677,6 +750,11 @@ func TestRuntimeBootstrapAckRejectsMutationAndNegativeAcknowledgement(t *testing
 }
 
 func validRuntimeBootstrapOptions() runtimeBootstrapOptions {
+	foundation := validFoundationRuntimeBootstrapOptions(RoleControl)
+	roleConfig, err := foundationRoleConfigJSON(foundation)
+	if err != nil {
+		panic(err)
+	}
 	return runtimeBootstrapOptions{
 		BootstrapID:                    "123e4567-e89b-42d3-a456-426614174000",
 		Role:                           RoleControl,
@@ -689,24 +767,38 @@ func validRuntimeBootstrapOptions() runtimeBootstrapOptions {
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		GracefulTimeoutMS:              120_000,
 		ForceTerminationReserveMS:      15_000,
-		RoleConfigJSON:                 []byte(crossLanguageWorkerAPIBody),
+		RoleConfigJSON:                 roleConfig,
 	}
 }
 
 func validFoundationRuntimeBootstrapOptions(role Role) FoundationRuntimeBootstrapOptions {
-	raw := validRuntimeBootstrapOptions()
-	return FoundationRuntimeBootstrapOptions{
-		Role:                           role,
-		WorkerNodeID:                   raw.WorkerNodeID,
-		ReleaseID:                      raw.ReleaseID,
-		ReleaseTemplateSHA256:          raw.ReleaseTemplateSHA256,
-		InstallationManifestSHA256:     raw.InstallationManifestSHA256,
-		PreflightSHA256:                raw.PreflightSHA256,
-		NodeBundleSHA256:               raw.NodeBundleSHA256,
-		MaximumQueuedBytesPerDirection: raw.MaximumQueuedBytesPerDirection,
-		TotalShutdownTimeoutMS:         raw.GracefulTimeoutMS,
-		ForceTerminationReserveMS:      raw.ForceTerminationReserveMS,
+	publicKey, err := hex.DecodeString(
+		"3059301306072a8648ce3d020106082a8648ce3d03010703420004" +
+			"6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296" +
+			"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+	)
+	if err != nil {
+		panic(err)
 	}
+	publicKeyDigest := sha256.Sum256(publicKey)
+	options := FoundationRuntimeBootstrapOptions{
+		Role:                           role,
+		WorkerNodeID:                   "powertoys-node:01",
+		ReleaseID:                      "2026.08.31-test+1",
+		ReleaseTemplateSHA256:          strings.Repeat("1", 64),
+		InstallationManifestSHA256:     strings.Repeat("2", 64),
+		PreflightSHA256:                strings.Repeat("3", 64),
+		NodeBundleSHA256:               strings.Repeat("4", 64),
+		LocalAuthorityKeyID:            hex.EncodeToString(publicKeyDigest[:]),
+		ExecutorPolicySHA256:           strings.Repeat("6", 64),
+		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
+		TotalShutdownTimeoutMS:         120_000,
+		ForceTerminationReserveMS:      15_000,
+	}
+	if role == RoleExecutor {
+		options.LocalAuthorityPublicKeySPKI = publicKey
+	}
+	return options
 }
 
 type countingRuntimeBootstrapEntropy struct {

@@ -176,6 +176,8 @@ func TestNodeLaunchSpecUsesOnlyForceTerminationReserve(t *testing.T) {
 	fixture := newGuardFixture(t, config.RoleControl)
 	fixture.authority.configuration.Limits.ShutdownTimeoutMilliseconds = 120_000
 	fixture.authority.configuration.Limits.ForceTerminationReserveMilliseconds = 7_000
+	fixture.authority.bootstrapOptions.TotalShutdownTimeoutMS = 120_000
+	fixture.authority.bootstrapOptions.ForceTerminationReserveMS = 7_000
 	guard, err := openWithDependencies(context.Background(), fixture.authority, fixture.deps)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +265,10 @@ func TestLaunchNodeRejectsEveryMismatchedBootstrapFactWithoutConsumingGuard(t *t
 		name   string
 		mutate func(*localrpc.FoundationRuntimeBootstrapOptions)
 	}{
-		{"role", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.Role = localrpc.RoleExecutor }},
+		{"role", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
+			value.Role = localrpc.RoleExecutor
+			value.LocalAuthorityPublicKeySPKI = append([]byte(nil), testLocalAuthorityPublicKeySPKI...)
+		}},
 		{"worker node", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.WorkerNodeID = "powertoys-node:02" }},
 		{"release", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.ReleaseID = "other-release" }},
 		{"release template", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
@@ -277,6 +282,12 @@ func TestLaunchNodeRejectsEveryMismatchedBootstrapFactWithoutConsumingGuard(t *t
 		}},
 		{"bundle", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
 			value.NodeBundleSHA256 = strings.Repeat("c", 64)
+		}},
+		{"local authority key", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
+			value.LocalAuthorityKeyID = strings.Repeat("c", 64)
+		}},
+		{"Executor policy", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
+			value.ExecutorPolicySHA256 = strings.Repeat("c", 64)
 		}},
 		{"queue", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
 		{"shutdown", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},

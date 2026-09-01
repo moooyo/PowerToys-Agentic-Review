@@ -1,6 +1,5 @@
 import type { Duplex } from "node:stream";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
-import { type Static, Type } from "@sinclair/typebox";
 import {
   type ArwxBootstrapReceiveLoopToken,
   type ArwxFinalFrameBinding,
@@ -13,6 +12,7 @@ import {
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
 import {
   type ParsedRuntimeBootstrapV1,
+  isParsedRuntimeBootstrapForRole,
   parseRuntimeBootstrap,
   parseRuntimeBootstrapCommit,
   RUNTIME_BOOTSTRAP_MAXIMUM_BYTES,
@@ -24,26 +24,6 @@ import { Value } from "./typebox-value-check.js";
 
 const maximumHandshakeTimeoutMs = 10 * 60 * 1_000;
 const framePrefixBytes = 4;
-
-const ControlFoundationRoleConfigSchema = Type.Object(
-  {
-    executionEnabled: Type.Literal(false),
-    foundationVersion: Type.Literal(1),
-    role: Type.Literal("control"),
-  },
-  { additionalProperties: false },
-);
-const ExecutorFoundationRoleConfigSchema = Type.Object(
-  {
-    executionEnabled: Type.Literal(false),
-    foundationVersion: Type.Literal(1),
-    role: Type.Literal("executor"),
-  },
-  { additionalProperties: false },
-);
-
-export type ControlFoundationRoleConfigV1 = Static<typeof ControlFoundationRoleConfigSchema>;
-export type ExecutorFoundationRoleConfigV1 = Static<typeof ExecutorFoundationRoleConfigSchema>;
 
 declare const runtimeBootstrapReadyBoundaryBrand: unique symbol;
 
@@ -111,7 +91,7 @@ export function createRuntimeBootstrapReadyBoundary<TRole extends ServiceHostPay
     arwx.configuredMaximumQueuedWriteBytes !==
       parsed.bootstrap.arwx.maximumQueuedBytesPerDirection ||
     arwx.configuredCloseTimeoutMs !== effectiveGracefulTimeoutMs ||
-    !validFoundationRoleConfig(role, parsed.roleConfig) ||
+    !isParsedRuntimeBootstrapForRole(parsed, role) ||
     guardDone === undefined
   ) {
     throw handshakeError(
@@ -275,16 +255,6 @@ export async function performRuntimeBootstrapHandshake<
     if (error instanceof RuntimeBootstrapHandshakeError) throw error;
     throw handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap transport failed.");
   }
-}
-
-function validFoundationRoleConfig(
-  role: ServiceHostPayloadRole,
-  value: Readonly<Record<string, unknown>>,
-): boolean {
-  return Value.Check(
-    role === "control" ? ControlFoundationRoleConfigSchema : ExecutorFoundationRoleConfigSchema,
-    value,
-  );
 }
 
 function assertHandshakeArguments<TRole extends ServiceHostPayloadRole>(

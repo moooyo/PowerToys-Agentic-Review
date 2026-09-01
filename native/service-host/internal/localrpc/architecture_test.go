@@ -17,17 +17,14 @@ import (
 	"unicode"
 )
 
-const (
-	expectedControlFoundationRoleConfig  = `{"executionEnabled":false,"foundationVersion":1,"role":"control"}`
-	expectedExecutorFoundationRoleConfig = `{"executionEnabled":false,"foundationVersion":1,"role":"executor"}`
-)
-
 type claimAuthorityScan struct {
 	problems                     []string
-	controlFoundationConfigs     []string
-	executorFoundationConfigs    []string
+	foundationVersions           []string
+	foundationSlotLimits         []string
+	foundationPublicKeyLimits    int
 	policyFields                 int
 	roleExecutionFields          int
+	roleSlotFields               int
 	policyInitializers           int
 	derivationCalls              int
 	foundationSelectors          int
@@ -84,19 +81,18 @@ func TestClaimAuthorityHasNoProductionSwitch(t *testing.T) {
 	for _, problem := range combined.problems {
 		t.Error(problem)
 	}
-	if len(combined.controlFoundationConfigs) != 1 ||
-		combined.controlFoundationConfigs[0] != expectedControlFoundationRoleConfig {
-		t.Errorf("Control foundation roleConfig definitions = %q, want one exact zero-execution value",
-			combined.controlFoundationConfigs)
+	if len(combined.foundationVersions) != 1 || combined.foundationVersions[0] != "2" {
+		t.Errorf("foundation roleConfig versions = %q, want one exact version 2 value",
+			combined.foundationVersions)
 	}
-	if len(combined.executorFoundationConfigs) != 1 ||
-		combined.executorFoundationConfigs[0] != expectedExecutorFoundationRoleConfig {
-		t.Errorf("Executor foundation roleConfig definitions = %q, want one exact zero-execution value",
-			combined.executorFoundationConfigs)
+	if len(combined.foundationSlotLimits) != 1 || combined.foundationSlotLimits[0] != "1" {
+		t.Errorf("foundation roleConfig slot limits = %q, want one exact slot value 1",
+			combined.foundationSlotLimits)
 	}
-	if combined.policyFields != 1 || combined.roleExecutionFields != 1 ||
+	if combined.foundationPublicKeyLimits != 1 ||
+		combined.policyFields != 1 || combined.roleExecutionFields != 1 || combined.roleSlotFields != 1 ||
 		combined.policyInitializers != 1 || combined.derivationCalls != 1 ||
-		combined.foundationSelectors != 1 || combined.foundationSelectorCalls != 3 ||
+		combined.foundationSelectors != 1 || combined.foundationSelectorCalls != 2 ||
 		combined.exactRoleConfigGuards != 1 ||
 		combined.exactRoleConfigSelections != 1 ||
 		combined.deriveConfigDeclarations != 1 || combined.exactRoleConfigDecodes != 1 ||
@@ -107,9 +103,11 @@ func TestClaimAuthorityHasNoProductionSwitch(t *testing.T) {
 		combined.dispatchSafelyCalls != 1 || combined.dispatchCalls != 1 ||
 		combined.operationPolicyBindings != 3 || combined.derivedPolicyAssignments != 1 {
 		t.Fatalf(
-			"Claim authority counts = policy-fields:%d role-fields:%d initializers:%d derivations:%d selectors:%d selector-calls:%d exact-guards:%d exact-selections:%d config-declarations:%d exact-decodes:%d commit-ordered:%d gates:%d denial-bodies:%d serve-ordered:%d defense-gates:%d defense-ordered:%d dispatcher-claim:%d dispatch-safely:%d dispatch:%d policy-bindings:%d derived-assignments:%d",
+			"Claim authority counts = public-key-limits:%d policy-fields:%d role-fields:%d role-slot-fields:%d initializers:%d derivations:%d selectors:%d selector-calls:%d exact-guards:%d exact-selections:%d config-declarations:%d exact-decodes:%d commit-ordered:%d gates:%d denial-bodies:%d serve-ordered:%d defense-gates:%d defense-ordered:%d dispatcher-claim:%d dispatch-safely:%d dispatch:%d policy-bindings:%d derived-assignments:%d",
+			combined.foundationPublicKeyLimits,
 			combined.policyFields,
 			combined.roleExecutionFields,
+			combined.roleSlotFields,
 			combined.policyInitializers,
 			combined.derivationCalls,
 			combined.foundationSelectors,
@@ -148,18 +146,95 @@ type ServerOptions struct { ExecutionEnabled bool }
 			wantProblem: "bare authority field",
 		},
 		{
-			name:     "role config enables execution",
-			filename: "internal/localrpc/runtime_bootstrap.go",
-			source: "package sample\nconst controlFoundationRoleConfigJSON = `" +
-				`{"executionEnabled":true,"foundationVersion":1,"role":"control"}` + "`\n",
-			wantProblem: "roleConfig literal enables execution",
+			name: "exported slot toggle",
+			source: `package sample
+type FoundationRuntimeBootstrapOptions struct { MaximumSlots int }
+`,
+			wantProblem: "bare authority field",
 		},
 		{
-			name:     "role config is mutable",
+			name:     "role config enables execution",
 			filename: "internal/localrpc/runtime_bootstrap.go",
-			source: "package sample\nvar controlFoundationRoleConfigJSON = `" +
-				`{"executionEnabled":false,"foundationVersion":1,"role":"control"}` + "`\n",
-			wantProblem: "foundation roleConfig must be declared const",
+			source: `package sample
+func foundationRoleConfigJSON() { value := map[string]any{"executionEnabled": true} }
+`,
+			wantProblem: "roleConfig value enables execution",
+		},
+		{
+			name:        "foundation slots are mutable",
+			filename:    "internal/localrpc/runtime_bootstrap.go",
+			source:      "package sample\nvar foundationMaximumSlots = 1\n",
+			wantProblem: "foundation authority constant must be declared const",
+		},
+		{
+			name:        "foundation public key limit changes",
+			filename:    "internal/localrpc/runtime_bootstrap.go",
+			source:      "package sample\nconst foundationPublicKeyMaximumBytes = 8 * 1024\n",
+			wantProblem: "foundation public-key limit must be exactly 4 * 1024",
+		},
+		{
+			name:     "foundation execution key overwritten",
+			filename: "internal/localrpc/runtime_bootstrap.go",
+			source: `package sample
+func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
+  if invalid { return nil, err }
+  value := map[string]any{"executionEnabled": false, "maximumSlots": foundationMaximumSlots}
+  value["executionEnabled"] = environmentEnabled
+  switch options.Role { case RoleControl: return MarshalCanonicalJSON(value, limit); case RoleExecutor: return MarshalCanonicalJSON(value, limit); default: return nil, err }
+}
+`,
+			wantProblem: "foundation roleConfig selector is not exact",
+		},
+		{
+			name:     "foundation selector returns success before validation",
+			filename: "internal/localrpc/runtime_bootstrap.go",
+			source: `package sample
+func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
+  if bypassValidation { return []byte("{}"), nil }
+  switch options.Role {
+  case RoleControl:
+    if len(options.LocalAuthorityPublicKeySPKI) != 0 {
+      return nil, fmt.Errorf("%w: Control foundation contains public-key bytes", ErrInvalidRuntimeBootstrap)
+    }
+    return MarshalCanonicalJSON(map[string]any{
+      "executionEnabled": false,
+      "executorPolicySha256": options.ExecutorPolicySHA256,
+      "foundationVersion": foundationRoleConfigVersion,
+      "localAuthorityKeyId": options.LocalAuthorityKeyID,
+      "maximumSlots": foundationMaximumSlots,
+      "role": string(options.Role),
+    }, RuntimeBootstrapRoleConfigMaximumBytes)
+  case RoleExecutor:
+    publicKey := bytes.Clone(options.LocalAuthorityPublicKeySPKI)
+    if len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes {
+      return nil, fmt.Errorf("%w: Executor foundation public key", ErrInvalidRuntimeBootstrap)
+    }
+    digest := sha256.Sum256(publicKey)
+    if subtle.ConstantTimeCompare(
+      []byte(hex.EncodeToString(digest[:])),
+      []byte(options.LocalAuthorityKeyID),
+    ) != 1 {
+      return nil, fmt.Errorf("%w: Executor foundation public-key identity", ErrInvalidRuntimeBootstrap)
+    }
+    return MarshalCanonicalJSON(map[string]any{
+      "executionEnabled": false,
+      "executorPolicySha256": options.ExecutorPolicySHA256,
+      "foundationVersion": foundationRoleConfigVersion,
+      "localAuthorityKeyId": options.LocalAuthorityKeyID,
+      "localAuthorityPublicKeySpki": map[string]any{
+        "base64Url": base64.RawURLEncoding.EncodeToString(publicKey),
+        "byteLength": len(publicKey),
+        "sha256": options.LocalAuthorityKeyID,
+      },
+      "maximumSlots": foundationMaximumSlots,
+      "role": string(options.Role),
+    }, RuntimeBootstrapRoleConfigMaximumBytes)
+  default:
+    return nil, fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
+  }
+}
+`,
+			wantProblem: "foundation roleConfig selector is not exact",
 		},
 		{
 			name: "policy literal true",
@@ -191,7 +266,7 @@ func (s *Server) Serve() {
   if call, ok := message.(CallRequest); ok && call.Operation == OperationClaim && !s.operationPolicy.claimAllowed && !s.options.Enabled {}
 }
 `,
-			wantProblem: "Claim gate condition differs from sealed policy",
+			wantProblem: "Claim gate is not a direct session-loop statement",
 		},
 		{
 			name: "forged Claim gate initializer",
@@ -200,7 +275,7 @@ func (s *Server) Serve() {
   if call, ok := forgedCall(message); ok && call.Operation == OperationClaim && !s.operationPolicy.claimAllowed {}
 }
 `,
-			wantProblem: "Claim gate initializer differs from exact type assertion",
+			wantProblem: "Claim gate is not a direct session-loop statement",
 		},
 		{
 			name: "environment wrapper inside Claim gate",
@@ -211,7 +286,7 @@ func (s *Server) Serve() {
   }
 }
 `,
-			wantProblem: "Claim gate denial body differs from terminal response contract",
+			wantProblem: "Claim gate is not a direct session-loop statement",
 		},
 		{
 			name:     "dynamic derivation config",
@@ -222,18 +297,127 @@ func deriveRuntimeOperationPolicy(bootstrap RuntimeBootstrapV1) runtimeOperation
   return runtimeOperationPolicy{claimAllowed: bootstrap.Role == RoleControl && config.ExecutionEnabled}
 }
 `,
-			wantProblem: "derivation config is assigned or redeclared",
+			wantProblem: "derivation differs from the exact committed roleConfig chain",
 		},
 		{
 			name:     "alternate role config source",
 			filename: "internal/localrpc/runtime_bootstrap_exchange.go",
 			source: `package sample
 func deriveRuntimeOperationPolicy(bootstrap RuntimeBootstrapV1) {
-  expected, err := loadRoleConfig(bootstrap.Role)
-  _, _ = expected, err
+	  config, err := loadRoleConfig(bootstrap.Role)
+	  _, _ = config, err
 }
 `,
-			wantProblem: "roleConfig selection is not exact foundation source",
+			wantProblem: "derivation differs from the exact committed roleConfig chain",
+		},
+		{
+			name:     "dead decoder execution guard",
+			filename: "internal/localrpc/runtime_bootstrap_exchange.go",
+			source: `package sample
+func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfig, error) {
+  var config foundationRoleConfig
+  if false { if config.ExecutionEnabled { return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap } }
+  return config, nil
+}
+`,
+			wantProblem: "decoder does not top-level dominate",
+		},
+		{
+			name:     "decoder replaces config after validation",
+			filename: "internal/localrpc/runtime_bootstrap_exchange.go",
+			source: `package sample
+func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfig, error) {
+  parsed, err := ParseCanonicalJSON(document, RuntimeBootstrapRoleConfigMaximumBytes)
+  if err != nil {
+    return foundationRoleConfig{}, err
+  }
+  expectedKeys := []string{
+    "executionEnabled", "executorPolicySha256", "foundationVersion",
+    "localAuthorityKeyId", "maximumSlots", "role",
+  }
+  if role == RoleExecutor {
+    expectedKeys = append(expectedKeys, "localAuthorityPublicKeySpki")
+  }
+  object, ok := exactRuntimeBootstrapObject(parsed, expectedKeys...)
+  if !ok || !runtimeBootstrapJSONNumber(object["foundationVersion"]) ||
+    !runtimeBootstrapJSONNumber(object["maximumSlots"]) {
+    return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+  }
+  if role == RoleExecutor {
+    descriptor, valid := exactRuntimeBootstrapObject(
+      object["localAuthorityPublicKeySpki"],
+      "base64Url", "byteLength", "sha256",
+    )
+    if !valid || !runtimeBootstrapJSONNumber(descriptor["byteLength"]) {
+      return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+    }
+  }
+  var config foundationRoleConfig
+  if err := decodeExact(document, &config); err != nil ||
+    config.ExecutionEnabled || config.FoundationVersion != foundationRoleConfigVersion ||
+    config.MaximumSlots != foundationMaximumSlots || config.Role != role ||
+    !validRuntimeBootstrapDigest(config.LocalAuthorityKeyID) ||
+    !validRuntimeBootstrapDigest(config.ExecutorPolicySHA256) {
+    return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+  }
+  if role == RoleExecutor {
+    if config.LocalAuthorityPublicKeySPKI == nil {
+      return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+    }
+    publicKey, err := base64.RawURLEncoding.DecodeString(
+      config.LocalAuthorityPublicKeySPKI.Base64URL,
+    )
+    digest := sha256.Sum256(publicKey)
+    if err != nil || len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes ||
+      len(publicKey) != config.LocalAuthorityPublicKeySPKI.ByteLength ||
+      base64.RawURLEncoding.EncodeToString(publicKey) != config.LocalAuthorityPublicKeySPKI.Base64URL ||
+      config.LocalAuthorityPublicKeySPKI.SHA256 != config.LocalAuthorityKeyID ||
+      hex.EncodeToString(digest[:]) != config.LocalAuthorityKeyID {
+      return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+    }
+  } else if config.LocalAuthorityPublicKeySPKI != nil {
+    return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+  }
+  config = rewrite(config)
+  return config, nil
+}
+`,
+			wantProblem: "decoder does not top-level dominate",
+		},
+		{
+			name:     "wrapped Serve Claim gate",
+			filename: "internal/localrpc/server.go",
+			source: `package sample
+func (s *Server) Serve() {
+  for {
+    if enabled {
+      if call, ok := message.(CallRequest); ok && call.Operation == OperationClaim && !s.operationPolicy.claimAllowed {
+        denied := protocolError("OPERATION_NOT_ALLOWED", "Local RPC Claim is not enabled by the committed role configuration.", call.ID, ErrOperationNotAllowed)
+        writeErr := writer.writeError(call.ID, errorBody{Code: denied.Code, Message: denied.Message, Retryable: false})
+        terminalError = denied
+        if writeErr != nil { terminalError = errors.Join(denied, writeErr) }
+        break
+      }
+    }
+  }
+}
+`,
+			wantProblem: "Claim gate is not a direct session-loop statement",
+		},
+		{
+			name:     "wrapped dispatch defense",
+			filename: "internal/localrpc/server.go",
+			source: `package sample
+func (s *Server) dispatch(ctx context.Context, request CallRequest) (json.RawMessage, error) {
+  if enabled {
+    if request.Operation == OperationClaim && !s.operationPolicy.claimAllowed { return nil, ErrOperationNotAllowed }
+  }
+  body := json.RawMessage(bytes.Clone(request.Body))
+  switch request.Operation { case OperationClaim: return s.dispatcher.Claim(ctx, body) }
+  return nil, nil
+}
+`,
+			wantProblem: "dispatch Claim defense is not the first top-level statement",
 		},
 		{
 			name:     "commit publishes before derivation",
@@ -256,7 +440,7 @@ func (s *Server) dispatch(ctx context.Context, request CallRequest) {
   if request.Operation == OperationClaim && !s.operationPolicy.claimAllowed { return }
 }
 `,
-			wantProblem: "dispatch Claim defense is incomplete or out of order",
+			wantProblem: "dispatch Claim defense is not the first top-level statement",
 		},
 		{
 			name: "dispatch method-value alias",
@@ -891,7 +1075,10 @@ func analyzeClaimAuthoritySource(filename string, contents []byte) (claimAuthori
 				break
 			}
 			scan.claimGates++
-			if !isExactServeClaimGateInitializer(typed.Init) {
+			if !isDirectServeClaimGate(filename, typed, parents) {
+				scan.addProblem(filename, fileSet, typed,
+					"Claim gate is not a direct session-loop statement")
+			} else if !isExactServeClaimGateInitializer(typed.Init) {
 				scan.addProblem(filename, fileSet, typed,
 					"Claim gate initializer differs from exact type assertion")
 			} else if !claimAuthorityExpressionMatches(
@@ -941,17 +1128,24 @@ func (scan *claimAuthorityScan) inspectFunction(
 		}
 	}
 	if function.Name.Name == "deriveRuntimeOperationPolicy" {
-		scan.inspectDerivationConfig(filename, fileSet, function)
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			condition, ok := node.(*ast.IfStmt)
-			if ok && claimAuthorityExpressionMatches(
-				condition.Cond,
-				"err != nil || !bytes.Equal(bootstrap.roleConfigJSON, []byte(expected))",
-			) {
-				scan.exactRoleConfigGuards++
-			}
-			return true
-		})
+		if filename == "internal/localrpc/runtime_bootstrap_exchange.go" &&
+			isExactRuntimeOperationPolicyDerivation(function) {
+			scan.exactRoleConfigGuards++
+			scan.exactRoleConfigSelections++
+			scan.deriveConfigDeclarations++
+		} else {
+			scan.addProblem(filename, fileSet, function,
+				"runtime operation policy derivation differs from the exact committed roleConfig chain")
+		}
+	}
+	if function.Name.Name == "decodeFoundationRoleConfig" {
+		if filename == "internal/localrpc/runtime_bootstrap_exchange.go" &&
+			isExactFoundationRoleConfigDecoder(function) {
+			scan.exactRoleConfigDecodes++
+		} else {
+			scan.addProblem(filename, fileSet, function,
+				"foundation roleConfig decoder does not top-level dominate its success return")
+		}
 	}
 	if filename == "internal/localrpc/server.go" && function.Name.Name == "Serve" {
 		scan.inspectServeOrder(filename, fileSet, function, parents)
@@ -962,6 +1156,127 @@ func (scan *claimAuthorityScan) inspectFunction(
 	if filename == "internal/localrpc/server.go" && function.Name.Name == "dispatch" {
 		scan.inspectDispatchDefense(filename, fileSet, function)
 	}
+}
+
+func isExactFoundationRoleConfigDecoder(function *ast.FuncDecl) bool {
+	return claimAuthorityFunctionMatches(function, `func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfig, error) {
+		parsed, err := ParseCanonicalJSON(document, RuntimeBootstrapRoleConfigMaximumBytes)
+		if err != nil {
+			return foundationRoleConfig{}, err
+		}
+		expectedKeys := []string{
+			"executionEnabled", "executorPolicySha256", "foundationVersion",
+			"localAuthorityKeyId", "maximumSlots", "role",
+		}
+		if role == RoleExecutor {
+			expectedKeys = append(expectedKeys, "localAuthorityPublicKeySpki")
+		}
+		object, ok := exactRuntimeBootstrapObject(parsed, expectedKeys...)
+		if !ok || !runtimeBootstrapJSONNumber(object["foundationVersion"]) ||
+			!runtimeBootstrapJSONNumber(object["maximumSlots"]) {
+			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+		}
+		if role == RoleExecutor {
+			descriptor, valid := exactRuntimeBootstrapObject(
+				object["localAuthorityPublicKeySpki"],
+				"base64Url", "byteLength", "sha256",
+			)
+			if !valid || !runtimeBootstrapJSONNumber(descriptor["byteLength"]) {
+				return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+			}
+		}
+		var config foundationRoleConfig
+		if err := decodeExact(document, &config); err != nil ||
+			config.ExecutionEnabled || config.FoundationVersion != foundationRoleConfigVersion ||
+			config.MaximumSlots != foundationMaximumSlots || config.Role != role ||
+			!validRuntimeBootstrapDigest(config.LocalAuthorityKeyID) ||
+			!validRuntimeBootstrapDigest(config.ExecutorPolicySHA256) {
+			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+		}
+		if role == RoleExecutor {
+			if config.LocalAuthorityPublicKeySPKI == nil {
+				return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+			}
+			publicKey, err := base64.RawURLEncoding.DecodeString(
+				config.LocalAuthorityPublicKeySPKI.Base64URL,
+			)
+			digest := sha256.Sum256(publicKey)
+			if err != nil || len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes ||
+				len(publicKey) != config.LocalAuthorityPublicKeySPKI.ByteLength ||
+				base64.RawURLEncoding.EncodeToString(publicKey) != config.LocalAuthorityPublicKeySPKI.Base64URL ||
+				config.LocalAuthorityPublicKeySPKI.SHA256 != config.LocalAuthorityKeyID ||
+				hex.EncodeToString(digest[:]) != config.LocalAuthorityKeyID {
+				return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+			}
+		} else if config.LocalAuthorityPublicKeySPKI != nil {
+			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
+		}
+		return config, nil
+	}`)
+}
+
+func isExactRuntimeOperationPolicyDerivation(function *ast.FuncDecl) bool {
+	if function.Recv != nil || function.Body == nil || function.Type.Params == nil ||
+		function.Type.Results == nil || len(function.Type.Params.List) != 1 ||
+		len(function.Type.Results.List) != 2 {
+		return false
+	}
+	return claimAuthorityBlockMatches(function.Body, `{
+		config, err := decodeFoundationRoleConfig(bootstrap.Role, bootstrap.roleConfigJSON)
+		if err != nil {
+			return runtimeOperationPolicy{}, fmt.Errorf(
+				"%w: committed roleConfig policy is invalid",
+				errors.Join(ErrRuntimeBootstrapBinding, err),
+			)
+		}
+		return runtimeOperationPolicy{
+			claimAllowed: bootstrap.Role == RoleControl && config.ExecutionEnabled,
+		}, nil
+	}`)
+}
+
+func claimAuthorityBlockMatches(body *ast.BlockStmt, expected string) bool {
+	parsed, err := parser.ParseFile(
+		token.NewFileSet(),
+		"expected.go",
+		"package expected\nfunc check() "+expected,
+		0,
+	)
+	if err != nil || len(parsed.Decls) != 1 {
+		panic("invalid expected Claim authority block")
+	}
+	function, ok := parsed.Decls[0].(*ast.FuncDecl)
+	if !ok || function.Body == nil {
+		panic("invalid expected Claim authority function")
+	}
+	actualDocument, err := renderClaimAuthorityNode(body)
+	if err != nil {
+		return false
+	}
+	expectedDocument, err := renderClaimAuthorityNode(function.Body)
+	return err == nil && actualDocument == expectedDocument
+}
+
+func claimAuthorityFunctionMatches(function *ast.FuncDecl, expected string) bool {
+	parsed, err := parser.ParseFile(
+		token.NewFileSet(),
+		"expected.go",
+		"package expected\n"+expected,
+		0,
+	)
+	if err != nil || len(parsed.Decls) != 1 {
+		panic("invalid expected Claim authority function")
+	}
+	expectedFunction, ok := parsed.Decls[0].(*ast.FuncDecl)
+	if !ok {
+		panic("invalid expected Claim authority declaration")
+	}
+	actualDocument, err := renderClaimAuthorityNode(function)
+	if err != nil {
+		return false
+	}
+	expectedDocument, err := renderClaimAuthorityNode(expectedFunction)
+	return err == nil && actualDocument == expectedDocument
 }
 
 func (scan *claimAuthorityScan) inspectProductionAuthorityIdentifier(
@@ -999,7 +1314,7 @@ func (scan *claimAuthorityScan) inspectProductionAuthorityIdentifier(
 	allowed := filename == "internal/localrpc/runtime_bootstrap.go" &&
 		(owner == "newFoundationRuntimeBootstrap" || owner == "BindRuntimeBootstrapToLaunch") ||
 		filename == "internal/localrpc/runtime_bootstrap_exchange.go" &&
-			owner == "deriveRuntimeOperationPolicy"
+			owner == "decodeFoundationRoleConfig"
 	if !allowed {
 		scan.addProblem(filename, fileSet, identifier,
 			"foundationRoleConfigJSON is called outside its fixed authority chain")
@@ -1053,6 +1368,11 @@ func (scan *claimAuthorityScan) inspectDispatchDefense(
 	fileSet *token.FileSet,
 	function *ast.FuncDecl,
 ) {
+	if !isDirectDispatchDefense(function) {
+		scan.addProblem(filename, fileSet, function,
+			"dispatch Claim defense is not the first top-level statement")
+		return
+	}
 	positions := map[string]token.Pos{}
 	ast.Inspect(function.Body, func(node ast.Node) bool {
 		switch typed := node.(type) {
@@ -1102,6 +1422,63 @@ func (scan *claimAuthorityScan) inspectDispatchDefense(
 	scan.orderedDispatchDefenses++
 }
 
+func isDirectDispatchDefense(function *ast.FuncDecl) bool {
+	if function.Body == nil || len(function.Body.List) < 4 {
+		return false
+	}
+	return claimAuthorityStatementMatches(
+		function.Body.List[0],
+		"if request.Operation == OperationClaim && !s.operationPolicy.claimAllowed { return nil, ErrOperationNotAllowed }",
+	) && claimAuthorityStatementMatches(
+		function.Body.List[2],
+		"body := json.RawMessage(bytes.Clone(request.Body))",
+	)
+}
+
+func isDirectServeClaimGate(
+	filename string,
+	gate *ast.IfStmt,
+	parents map[ast.Node]ast.Node,
+) bool {
+	if filename != "internal/localrpc/server.go" || gate == nil {
+		return false
+	}
+	body, ok := parents[gate].(*ast.BlockStmt)
+	if !ok {
+		return false
+	}
+	loop, ok := parents[body].(*ast.ForStmt)
+	if !ok || loop.Body != body {
+		return false
+	}
+	gateIndex := -1
+	decodeIndex := -1
+	reserveIndex := -1
+	for index, statement := range body.List {
+		if statement == gate {
+			gateIndex = index
+		}
+		ast.Inspect(statement, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch calledFunctionName(call.Fun) {
+			case "DecodeMessage":
+				if decodeIndex < 0 {
+					decodeIndex = index
+				}
+			case "reserveID":
+				if reserveIndex < 0 {
+					reserveIndex = index
+				}
+			}
+			return true
+		})
+	}
+	return decodeIndex >= 0 && decodeIndex < gateIndex && gateIndex < reserveIndex
+}
+
 func (scan *claimAuthorityScan) inspectDerivationConfig(
 	filename string,
 	fileSet *token.FileSet,
@@ -1116,42 +1493,12 @@ func (scan *claimAuthorityScan) inspectDerivationConfig(
 	}
 	ast.Inspect(function.Body, func(node ast.Node) bool {
 		switch typed := node.(type) {
-		case *ast.DeclStmt:
-			if isExactDerivationConfigDeclaration(typed) {
-				scan.deriveConfigDeclarations++
-				break
-			}
-			if declarationContainsName(typed.Decl, "config") {
-				scan.addProblem(filename, fileSet, typed, "derivation config is assigned or redeclared")
-			}
-			if declarationContainsName(typed.Decl, "expected") {
-				scan.addProblem(filename, fileSet, typed, "roleConfig selection is not exact foundation source")
-			}
 		case *ast.AssignStmt:
-			if assignmentContainsName(typed, "expected") {
-				if isExactRoleConfigSelection(typed) {
-					scan.exactRoleConfigSelections++
-				} else {
-					scan.addProblem(filename, fileSet, typed, "roleConfig selection is not exact foundation source")
-				}
-			}
-			for _, target := range typed.Lhs {
-				identifier, ok := target.(*ast.Ident)
-				if ok && identifier.Name == "config" {
-					scan.addProblem(filename, fileSet, target, "derivation config is assigned or redeclared")
-				}
-			}
-		case *ast.CallExpr:
-			if calledFunctionName(typed.Fun) != "decodeExact" {
-				break
-			}
-			if claimAuthorityExpressionMatches(
-				typed,
-				"decodeExact(bootstrap.roleConfigJSON, &config)",
-			) {
-				scan.exactRoleConfigDecodes++
-			} else {
-				scan.addProblem(filename, fileSet, typed, "derivation does not decode exact committed roleConfig bytes")
+			if isExactRoleConfigSelection(typed) {
+				scan.exactRoleConfigSelections++
+				scan.deriveConfigDeclarations++
+			} else if assignmentContainsName(typed, "config") {
+				scan.addProblem(filename, fileSet, typed, "derivation config is assigned or redeclared")
 			}
 		}
 		return true
@@ -1165,24 +1512,38 @@ func (scan *claimAuthorityScan) inspectValueSpec(
 	specification *ast.ValueSpec,
 ) {
 	for index, name := range specification.Names {
-		if isAuthorityToggleName(name.Name) {
+		if isAuthorityToggleName(name.Name) && name.Name != "foundationMaximumSlots" {
 			scan.addProblem(filename, fileSet, name, "declares a bare authority value")
 		}
-		if name.Name != "controlFoundationRoleConfigJSON" &&
-			name.Name != "executorFoundationRoleConfigJSON" {
+		if name.Name == "foundationPublicKeyMaximumBytes" {
+			valueIndex := index
+			if len(specification.Values) == 1 {
+				valueIndex = 0
+			}
+			if declarationToken != token.CONST || valueIndex >= len(specification.Values) ||
+				!claimAuthorityNodeMatches(specification.Values[valueIndex], "4 * 1024") {
+				scan.addProblem(filename, fileSet, name,
+					"foundation public-key limit must be exactly 4 * 1024")
+			} else {
+				scan.foundationPublicKeyLimits++
+			}
+			continue
+		}
+		if name.Name != "foundationRoleConfigVersion" &&
+			name.Name != "foundationMaximumSlots" {
 			continue
 		}
 		if declarationToken != token.CONST {
-			scan.addProblem(filename, fileSet, name, "foundation roleConfig must be declared const")
+			scan.addProblem(filename, fileSet, name, "foundation authority constant must be declared const")
 		}
 		value, ok := stringValueAt(specification.Values, index)
 		if !ok {
-			scan.addProblem(filename, fileSet, name, "foundation roleConfig is not one fixed string literal")
+			scan.addProblem(filename, fileSet, name, "foundation authority constant is not one fixed literal")
 		}
-		if name.Name == "controlFoundationRoleConfigJSON" {
-			scan.controlFoundationConfigs = append(scan.controlFoundationConfigs, value)
+		if name.Name == "foundationRoleConfigVersion" {
+			scan.foundationVersions = append(scan.foundationVersions, value)
 		} else {
-			scan.executorFoundationConfigs = append(scan.executorFoundationConfigs, value)
+			scan.foundationSlotLimits = append(scan.foundationSlotLimits, value)
 		}
 	}
 }
@@ -1254,6 +1615,9 @@ func (scan *claimAuthorityScan) inspectTypeSpec(
 			case specification.Name.Name == "foundationRoleConfig" &&
 				name.Name == "ExecutionEnabled" && isBool && fieldType.Name == "bool":
 				scan.roleExecutionFields++
+			case specification.Name.Name == "foundationRoleConfig" &&
+				name.Name == "MaximumSlots" && isBool && fieldType.Name == "int":
+				scan.roleSlotFields++
 			default:
 				scan.addProblem(filename, fileSet, name, "declares a bare authority field")
 			}
@@ -1397,20 +1761,152 @@ func (scan *claimAuthorityScan) inspectServeOrder(
 }
 
 func isExactFoundationRoleSelector(function *ast.FuncDecl) bool {
-	if function.Body == nil || len(function.Body.List) != 1 {
+	return claimAuthorityFunctionMatches(function, `func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
+		if !validRuntimeBootstrapRole(options.Role) ||
+			!validRuntimeBootstrapDigest(options.LocalAuthorityKeyID) ||
+			!validRuntimeBootstrapDigest(options.ExecutorPolicySHA256) {
+			return nil, fmt.Errorf("%w: foundation role configuration facts", ErrInvalidRuntimeBootstrap)
+		}
+		switch options.Role {
+		case RoleControl:
+			if len(options.LocalAuthorityPublicKeySPKI) != 0 {
+				return nil, fmt.Errorf("%w: Control foundation contains public-key bytes", ErrInvalidRuntimeBootstrap)
+			}
+			return MarshalCanonicalJSON(map[string]any{
+				"executionEnabled":     false,
+				"executorPolicySha256": options.ExecutorPolicySHA256,
+				"foundationVersion":    foundationRoleConfigVersion,
+				"localAuthorityKeyId":  options.LocalAuthorityKeyID,
+				"maximumSlots":         foundationMaximumSlots,
+				"role":                 string(options.Role),
+			}, RuntimeBootstrapRoleConfigMaximumBytes)
+		case RoleExecutor:
+			publicKey := bytes.Clone(options.LocalAuthorityPublicKeySPKI)
+			if len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes {
+				return nil, fmt.Errorf("%w: Executor foundation public key", ErrInvalidRuntimeBootstrap)
+			}
+			digest := sha256.Sum256(publicKey)
+			if subtle.ConstantTimeCompare(
+				[]byte(hex.EncodeToString(digest[:])),
+				[]byte(options.LocalAuthorityKeyID),
+			) != 1 {
+				return nil, fmt.Errorf("%w: Executor foundation public-key identity", ErrInvalidRuntimeBootstrap)
+			}
+			return MarshalCanonicalJSON(map[string]any{
+				"executionEnabled":     false,
+				"executorPolicySha256": options.ExecutorPolicySHA256,
+				"foundationVersion":    foundationRoleConfigVersion,
+				"localAuthorityKeyId":  options.LocalAuthorityKeyID,
+				"localAuthorityPublicKeySpki": map[string]any{
+					"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
+					"byteLength": len(publicKey),
+					"sha256":     options.LocalAuthorityKeyID,
+				},
+				"maximumSlots": foundationMaximumSlots,
+				"role":         string(options.Role),
+			}, RuntimeBootstrapRoleConfigMaximumBytes)
+		default:
+			return nil, fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
+		}
+	}`)
+}
+
+func foundationRoleConfigReturnMatches(statement ast.Stmt, executor bool) bool {
+	result, ok := statement.(*ast.ReturnStmt)
+	if !ok || len(result.Results) != 1 {
 		return false
 	}
-	selection, ok := function.Body.List[0].(*ast.SwitchStmt)
-	if !ok || selection.Init != nil {
+	call, ok := result.Results[0].(*ast.CallExpr)
+	if !ok || !claimAuthorityNodeMatches(call.Fun, "MarshalCanonicalJSON") || len(call.Args) != 2 ||
+		!claimAuthorityNodeMatches(call.Args[1], "RuntimeBootstrapRoleConfigMaximumBytes") {
 		return false
 	}
-	role, ok := selection.Tag.(*ast.Ident)
-	if !ok || role.Name != "role" || len(selection.Body.List) != 3 {
+	literal, ok := call.Args[0].(*ast.CompositeLit)
+	if !ok || !claimAuthorityNodeMatches(literal.Type, "map[string]any") {
 		return false
 	}
-	return exactFoundationRoleCase(selection.Body.List[0], "RoleControl", "controlFoundationRoleConfigJSON") &&
-		exactFoundationRoleCase(selection.Body.List[1], "RoleExecutor", "executorFoundationRoleConfigJSON") &&
-		exactFoundationDefaultCase(selection.Body.List[2])
+	expected := map[string]string{
+		"executionEnabled":     "false",
+		"executorPolicySha256": "options.ExecutorPolicySHA256",
+		"foundationVersion":    "foundationRoleConfigVersion",
+		"localAuthorityKeyId":  "options.LocalAuthorityKeyID",
+		"maximumSlots":         "foundationMaximumSlots",
+		"role":                 "string(options.Role)",
+	}
+	if executor {
+		expected["localAuthorityPublicKeySpki"] = "descriptor"
+	}
+	if len(literal.Elts) != len(expected) {
+		return false
+	}
+	for _, element := range literal.Elts {
+		entry, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			return false
+		}
+		key, ok := stringValueAt([]ast.Expr{entry.Key}, 0)
+		want, exists := expected[key]
+		if !ok || !exists {
+			return false
+		}
+		if want == "descriptor" {
+			if !foundationPublicKeyDescriptorMatches(entry.Value) {
+				return false
+			}
+		} else if !claimAuthorityNodeMatches(entry.Value, want) {
+			return false
+		}
+		delete(expected, key)
+	}
+	return len(expected) == 0
+}
+
+func foundationPublicKeyDescriptorMatches(expression ast.Expr) bool {
+	literal, ok := expression.(*ast.CompositeLit)
+	if !ok || !claimAuthorityNodeMatches(literal.Type, "map[string]any") || len(literal.Elts) != 3 {
+		return false
+	}
+	expected := map[string]string{
+		"base64Url":  "base64.RawURLEncoding.EncodeToString(publicKey)",
+		"byteLength": "len(publicKey)",
+		"sha256":     "options.LocalAuthorityKeyID",
+	}
+	for _, element := range literal.Elts {
+		entry, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			return false
+		}
+		key, ok := stringValueAt([]ast.Expr{entry.Key}, 0)
+		want, exists := expected[key]
+		if !ok || !exists || !claimAuthorityNodeMatches(entry.Value, want) {
+			return false
+		}
+		delete(expected, key)
+	}
+	return len(expected) == 0
+}
+
+func foundationRoleConfigHasCriticalWrite(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		assignment, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, target := range assignment.Lhs {
+			index, ok := target.(*ast.IndexExpr)
+			if !ok {
+				continue
+			}
+			key, ok := stringValueAt([]ast.Expr{index.Index}, 0)
+			if ok && (key == "executionEnabled" || key == "maximumSlots") {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func exactFoundationRoleCase(statement ast.Stmt, roleName, configName string) bool {
@@ -1658,13 +2154,14 @@ func isExactRoleConfigSelection(assignment *ast.AssignStmt) bool {
 	expected, expectedOK := assignment.Lhs[0].(*ast.Ident)
 	errName, errOK := assignment.Lhs[1].(*ast.Ident)
 	call, callOK := assignment.Rhs[0].(*ast.CallExpr)
-	if !expectedOK || !errOK || !callOK || expected.Name != "expected" || errName.Name != "err" ||
-		len(call.Args) != 1 {
+	if !expectedOK || !errOK || !callOK || expected.Name != "config" || errName.Name != "err" ||
+		len(call.Args) != 2 {
 		return false
 	}
 	function, functionOK := call.Fun.(*ast.Ident)
-	return functionOK && function.Name == "foundationRoleConfigJSON" &&
-		claimAuthorityNodeMatches(call.Args[0], "bootstrap.Role")
+	return functionOK && function.Name == "decodeFoundationRoleConfig" &&
+		claimAuthorityNodeMatches(call.Args[0], "bootstrap.Role") &&
+		claimAuthorityNodeMatches(call.Args[1], "bootstrap.roleConfigJSON")
 }
 
 func assignmentContainsName(assignment *ast.AssignStmt, expected string) bool {
@@ -1693,7 +2190,10 @@ func isAuthorityToggleName(name string) bool {
 	executionToggle := strings.Contains(normalized, "execution") &&
 		(strings.Contains(normalized, "allow") || strings.Contains(normalized, "enable") ||
 			strings.Contains(normalized, "permit") || strings.Contains(normalized, "active"))
-	return claimToggle || executionToggle
+	slotToggle := strings.Contains(normalized, "slot") &&
+		(strings.Contains(normalized, "max") || strings.Contains(normalized, "allow") ||
+			strings.Contains(normalized, "enable") || strings.Contains(normalized, "permit"))
+	return claimToggle || executionToggle || slotToggle
 }
 
 func isLocalRPCProductionFile(filename string) bool {
@@ -1762,7 +2262,13 @@ func stringValueAt(values []ast.Expr, index int) (string, bool) {
 		return "", false
 	}
 	literal, ok := values[valueIndex].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
+	if !ok {
+		return "", false
+	}
+	if literal.Kind == token.INT {
+		return literal.Value, true
+	}
+	if literal.Kind != token.STRING {
 		return "", false
 	}
 	value, err := strconv.Unquote(literal.Value)
@@ -1833,10 +2339,12 @@ func (scan *claimAuthorityScan) addProblem(
 
 func (scan *claimAuthorityScan) merge(other claimAuthorityScan) {
 	scan.problems = append(scan.problems, other.problems...)
-	scan.controlFoundationConfigs = append(scan.controlFoundationConfigs, other.controlFoundationConfigs...)
-	scan.executorFoundationConfigs = append(scan.executorFoundationConfigs, other.executorFoundationConfigs...)
+	scan.foundationVersions = append(scan.foundationVersions, other.foundationVersions...)
+	scan.foundationSlotLimits = append(scan.foundationSlotLimits, other.foundationSlotLimits...)
+	scan.foundationPublicKeyLimits += other.foundationPublicKeyLimits
 	scan.policyFields += other.policyFields
 	scan.roleExecutionFields += other.roleExecutionFields
+	scan.roleSlotFields += other.roleSlotFields
 	scan.policyInitializers += other.policyInitializers
 	scan.derivationCalls += other.derivationCalls
 	scan.foundationSelectors += other.foundationSelectors

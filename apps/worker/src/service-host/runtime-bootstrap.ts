@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, type KeyObject } from "node:crypto";
 import {
   type DeepReadonly,
   deepFreezeJson,
@@ -30,6 +30,8 @@ const releaseIdPattern = `^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}${absoluteEndPattern
 const sha256Pattern = `^[a-f0-9]{64}${absoluteEndPattern}`;
 const base64UrlPattern = `^[A-Za-z0-9_-]+${absoluteEndPattern}`;
 
+const RUNTIME_BOOTSTRAP_PUBLIC_KEY_MAXIMUM_BYTES = 4 * 1_024;
+
 const Sha256Schema = Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 const RoleConfigDescriptorSchema = Type.Object(
   {
@@ -46,6 +48,57 @@ const RoleConfigDescriptorSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+
+const PublicKeyDescriptorSchema = Type.Object(
+  {
+    base64Url: Type.String({
+      minLength: 2,
+      maxLength: Math.ceil((RUNTIME_BOOTSTRAP_PUBLIC_KEY_MAXIMUM_BYTES * 4) / 3),
+      pattern: base64UrlPattern,
+    }),
+    byteLength: Type.Integer({
+      minimum: 1,
+      maximum: RUNTIME_BOOTSTRAP_PUBLIC_KEY_MAXIMUM_BYTES,
+    }),
+    sha256: Sha256Schema,
+  },
+  { additionalProperties: false },
+);
+
+export const ControlFoundationRoleConfigV2Schema = Type.Object(
+  {
+    executionEnabled: Type.Literal(false),
+    executorPolicySha256: Sha256Schema,
+    foundationVersion: Type.Literal(2),
+    localAuthorityKeyId: Sha256Schema,
+    maximumSlots: Type.Literal(1),
+    role: Type.Literal("control"),
+  },
+  { additionalProperties: false },
+);
+
+export const ExecutorFoundationRoleConfigV2Schema = Type.Object(
+  {
+    executionEnabled: Type.Literal(false),
+    executorPolicySha256: Sha256Schema,
+    foundationVersion: Type.Literal(2),
+    localAuthorityKeyId: Sha256Schema,
+    localAuthorityPublicKeySpki: PublicKeyDescriptorSchema,
+    maximumSlots: Type.Literal(1),
+    role: Type.Literal("executor"),
+  },
+  { additionalProperties: false },
+);
+
+export type ControlFoundationRoleConfigV2 = Static<
+  typeof ControlFoundationRoleConfigV2Schema
+>;
+export type ExecutorFoundationRoleConfigV2 = Static<
+  typeof ExecutorFoundationRoleConfigV2Schema
+>;
+export type FoundationRoleConfigV2 =
+  | ControlFoundationRoleConfigV2
+  | ExecutorFoundationRoleConfigV2;
 
 export const RuntimeBootstrapV1Schema = Type.Object(
   {
@@ -124,7 +177,8 @@ export type RuntimeBootstrapCommitV1 = Static<typeof RuntimeBootstrapCommitV1Sch
 
 export interface ParsedRuntimeBootstrapV1 {
   readonly bootstrap: DeepReadonly<RuntimeBootstrapV1>;
-  readonly roleConfig: DeepReadonly<Record<string, unknown>>;
+  readonly roleConfig: DeepReadonly<FoundationRoleConfigV2>;
+  readonly localAuthorityPublicKey: KeyObject | null;
   readonly bootstrapSha256: string;
 }
 
@@ -190,17 +244,34 @@ export function parseRuntimeBootstrap(
       "RuntimeBootstrapV1 roleConfig is not a valid exact JSON descriptor.",
     );
   }
-  if (!isRecord(roleConfig)) {
-    throw bootstrapError("INVALID_ROLE_CONFIG", "RuntimeBootstrapV1 roleConfig must be an object.");
-  }
+  const validatedRoleConfig = validateFoundationRoleConfig(roleConfig, expectedRole);
+  const localAuthorityPublicKey =
+    validatedRoleConfig.role === "executor"
+      ? parseExecutorLocalAuthorityPublicKey(validatedRoleConfig)
+      : null;
 
   const parsed = Object.freeze({
     bootstrap: deepFreezeJson(bootstrap),
-    roleConfig: deepFreezeJson(roleConfig),
+    roleConfig: deepFreezeJson(validatedRoleConfig),
+    localAuthorityPublicKey,
     bootstrapSha256: createHash("sha256").update(snapshot).digest("hex"),
   }) satisfies Readonly<ParsedRuntimeBootstrapV1>;
   parsedBootstraps.add(parsed);
   return parsed;
+}
+
+export function isParsedRuntimeBootstrapForRole(
+  parsed: Readonly<ParsedRuntimeBootstrapV1>,
+  role: ServiceHostPayloadRole,
+): boolean {
+  return (
+    parsedBootstraps.has(parsed) &&
+    parsed.bootstrap.role === role &&
+    parsed.roleConfig.role === role &&
+    (role === "control"
+      ? parsed.localAuthorityPublicKey === null
+      : parsed.localAuthorityPublicKey?.type === "public")
+  );
 }
 
 /** Validates the post-activation commit against the parser-issued bootstrap identity. */
@@ -253,8 +324,71 @@ function assertRole(value: ServiceHostPayloadRole): void {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+function validateFoundationRoleConfig(
+  value: unknown,
+  role: ServiceHostPayloadRole,
+): DeepReadonly<FoundationRoleConfigV2> {
+  const schema =
+    role === "control"
+      ? ControlFoundationRoleConfigV2Schema
+      : ExecutorFoundationRoleConfigV2Schema;
+  if (!Value.Check(schema, value)) {
+    throw bootstrapError(
+      "INVALID_ROLE_CONFIG",
+      "RuntimeBootstrapV1 roleConfig does not match the strict foundation schema.",
+    );
+  }
+  return deepFreezeJson(value as FoundationRoleConfigV2);
+}
+
+function parseExecutorLocalAuthorityPublicKey(
+  roleConfig: DeepReadonly<ExecutorFoundationRoleConfigV2>,
+): KeyObject {
+  const descriptor = roleConfig.localAuthorityPublicKeySpki;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(descriptor.base64Url, "base64url");
+  } catch {
+    throw bootstrapError(
+      "INVALID_ROLE_CONFIG",
+      "RuntimeBootstrapV1 local-authority public key is not canonical base64url.",
+    );
+  }
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (
+    bytes.byteLength !== descriptor.byteLength ||
+    bytes.toString("base64url") !== descriptor.base64Url ||
+    digest !== descriptor.sha256 ||
+    digest !== roleConfig.localAuthorityKeyId
+  ) {
+    throw bootstrapError(
+      "INVALID_ROLE_CONFIG",
+      "RuntimeBootstrapV1 local-authority public key descriptor is inconsistent.",
+    );
+  }
+  let publicKey: KeyObject;
+  try {
+    publicKey = createPublicKey({ key: bytes, format: "der", type: "spki" });
+  } catch {
+    throw bootstrapError(
+      "INVALID_ROLE_CONFIG",
+      "RuntimeBootstrapV1 local-authority public key is not DER SPKI.",
+    );
+  }
+  const exported = publicKey.export({ format: "der", type: "spki" });
+  if (
+    publicKey.type !== "public" ||
+    publicKey.asymmetricKeyType !== "ec" ||
+    (publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1" &&
+      publicKey.asymmetricKeyDetails?.namedCurve !== "P-256") ||
+    !Buffer.from(exported).equals(bytes)
+  ) {
+    throw bootstrapError(
+      "INVALID_ROLE_CONFIG",
+      "RuntimeBootstrapV1 local-authority public key must be canonical P-256 SPKI.",
+    );
+  }
+  return publicKey;
 }
 
 function bootstrapError(

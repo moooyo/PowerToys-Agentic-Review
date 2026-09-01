@@ -32,7 +32,7 @@ func captureAuthority(
 func validateAuthoritySnapshot(value authoritySnapshot) error {
 	if value.role != config.RoleControl && value.role != config.RoleExecutor ||
 		value.configuration.Role != value.role || value.preflightDigest == ([32]byte{}) ||
-		value.releaseDigest == ([32]byte{}) ||
+		value.releaseDigest == ([32]byte{}) || !validBootstrapOptions(value) ||
 		value.root.Root != releasemanifest.RootInstallation || value.root.Path == "" ||
 		len(value.root.Ancestors) == 0 || !validSHA256(value.signerPin) {
 		return authorityError("captured launch authority is empty or inconsistent", nil)
@@ -109,6 +109,18 @@ func captureAuthorityOnce(
 	if !reflect.DeepEqual(configuration, plan.Configuration()) || configuration.Role != evidence.Role() {
 		return authoritySnapshot{}, authorityError("runtime plan configuration differs from preflight evidence", nil)
 	}
+	evidenceBootstrapAuthority, err := evidence.RuntimeBootstrapAuthority()
+	if err != nil {
+		return authoritySnapshot{}, authorityError("derive preflight bootstrap authority", err)
+	}
+	planBootstrapAuthority := plan.RuntimeBootstrapAuthority()
+	if !evidenceBootstrapAuthority.Matches(planBootstrapAuthority) {
+		return authoritySnapshot{}, authorityError("runtime plan bootstrap authority differs from preflight evidence", nil)
+	}
+	bootstrapOptions, err := planBootstrapAuthority.FoundationOptionsForLaunch()
+	if err != nil {
+		return authoritySnapshot{}, authorityError("copy runtime bootstrap launch facts", err)
+	}
 
 	root, err := selectInstallationRoot(evidence.Roots())
 	if err != nil {
@@ -125,8 +137,40 @@ func captureAuthorityOnce(
 	return authoritySnapshot{
 		role: configuration.Role, configuration: cloneConfig(configuration),
 		preflightDigest: digest, releaseDigest: plan.ReleaseTemplateDigest(),
-		root: cloneRoot(root), targets: targets, signerPin: signerPin,
+		bootstrapOptions: bootstrapOptions,
+		root:             cloneRoot(root), targets: targets, signerPin: signerPin,
 	}, nil
+}
+
+func validBootstrapOptions(value authoritySnapshot) bool {
+	options := value.bootstrapOptions
+	expectedRole, err := launchRuntimeBootstrapRole(value.role)
+	if err != nil || options.Role != expectedRole ||
+		options.WorkerNodeID != value.configuration.WorkerNodeID ||
+		options.ReleaseID != value.configuration.Installation.ReleaseID ||
+		options.PreflightSHA256 != fmt.Sprintf("%x", value.preflightDigest) ||
+		options.ReleaseTemplateSHA256 != fmt.Sprintf("%x", value.releaseDigest) ||
+		options.InstallationManifestSHA256 != value.configuration.Installation.ManifestSHA256 ||
+		options.NodeBundleSHA256 != value.configuration.Node.BundleSHA256 ||
+		!validSHA256(options.LocalAuthorityKeyID) || !validSHA256(options.ExecutorPolicySHA256) ||
+		options.MaximumQueuedBytesPerDirection != int(value.configuration.Limits.MaximumQueuedBytesPerDirection) ||
+		options.TotalShutdownTimeoutMS != int(value.configuration.Limits.ShutdownTimeoutMilliseconds) ||
+		options.ForceTerminationReserveMS != int(value.configuration.Limits.ForceTerminationReserveMilliseconds) {
+		return false
+	}
+	if value.role == config.RoleControl {
+		return value.configuration.Control != nil &&
+			options.LocalAuthorityKeyID == value.configuration.Control.LocalAuthorityPublicKeySHA256 &&
+			len(options.LocalAuthorityPublicKeySPKI) == 0
+	}
+	if value.configuration.Executor == nil ||
+		options.LocalAuthorityKeyID != value.configuration.Executor.LocalAuthorityPublicKeySHA256 ||
+		options.ExecutorPolicySHA256 != value.configuration.Executor.CodexPolicySHA256 ||
+		len(options.LocalAuthorityPublicKeySPKI) == 0 {
+		return false
+	}
+	digest := sha256.Sum256(options.LocalAuthorityPublicKeySPKI)
+	return fmt.Sprintf("%x", digest) == options.LocalAuthorityKeyID
 }
 
 func selectInstallationRoot(values []preflight.VerifiedRoot) (preflight.VerifiedRoot, error) {
