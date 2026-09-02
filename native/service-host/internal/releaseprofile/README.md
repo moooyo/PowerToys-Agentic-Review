@@ -57,6 +57,7 @@ C:/trusted-release-tools/servicehostrelease.exe \
   -template C:/release-input/release-template.json \
   -expected-sha256-file C:/release-input/release-template.sha256 \
   -output C:/release-output/AgenticReview.ServiceHost.exe \
+  -receipt-output C:/release-output/AgenticReview.ServiceHost.build-receipt.json \
   -arch amd64 \
   -go-tool C:/trusted-go/bin/go.exe \
   -go-tool-sha256-file C:/release-input/go.exe.sha256 \
@@ -96,8 +97,13 @@ revalidates the generated source, overlay, launchers, template inputs, and modul
 both the retained compiler output and retained published output as bounded PE32+ images, requires
 the requested AMD64 or ARM64 machine and executable characteristic, checks header and section
 bounds, and compares source-before-copy, copy-stream, source-after-copy, and retained-output
-SHA-256 values. Publication uses exclusive creation outside the repository. Private files are
-removed on handled return paths; crash or force-termination cleanup belongs to the CI job.
+SHA-256 values. Publication uses exclusive creation outside the repository. The driver also emits
+a canonical build receipt binding the source commit and tree, release-template digest, target
+architecture, unsigned output SHA-256 and size, and a signing-invariant SHA-256. The invariant
+normalizes only the PE checksum and certificate-table directory and excludes exactly one terminal
+WIN_CERTIFICATE table, so final verification can prove that signing did not replace the built
+image. Private files are removed on handled return paths; crash or force-termination cleanup
+belongs to the CI job.
 
 On Windows, the private build directory and pre-provisioned output directory use a protected DACL
 containing only the release-builder SID, `SYSTEM`, and local Administrators. The approved
@@ -127,20 +133,61 @@ read-only toolchain policy must verify that complete closure before invoking thi
 Likewise, retained leaf-directory handles, full snapshot revalidation, and output file identity
 checks detect changes at their verification points, but they do not resist an administrator or
 hostile build host that can replace trusted ancestors and restore them between observations. The
-signing stage must rehash the published output and bind that digest to the release inventory before
-signing. Local Administrators, `SYSTEM`, root, the CI platform, and the release-signing service
+signing stage must approve the exact build-receipt digest, verify the receipt's unsigned hash
+against the published output, and preserve its signing invariant while signing. Local
+Administrators, `SYSTEM`, root, the CI platform, and the release-signing service
 remain outside this driver's threat boundary. Ancestor ACLs and ownership are enforced by that
 external trusted build base.
 
 ## Release ordering
 
-1. Build and sign every non-ServiceHost dependency.
-2. Inventory those final bytes and generate the canonical release template.
-3. Run the controlled `servicehostrelease` driver and sign its output.
-4. Hash the final signed ServiceHost.
-5. Generate the complete runtime manifest with that self hash, then generate the two bootstrap
-   configurations that pin the runtime manifest digest and repeat the compiled signer pin.
-6. Verify the complete staged tree from zero and sign the outer installer or package.
+The first reviewed package-assembly slice lives in `internal/releasepackage`. It constructs and
+reparses a canonical prepare receipt only when given the same opaque reviewed-closure evidence. The
+closure document fixes the package profile, review-policy identity and version, and every
+non-ServiceHost identity. The package calls the type-safe
+`releaseprofile.BuildTemplate` API and then requires every mutable release input again before it
+will add opaque, externally verified signed-ServiceHost evidence and emit a runtime manifest. Its
+outer descriptor is node-specific and fixes RoleConfig foundation version 2 with execution
+authority disabled. It does not inspect files, verify Authenticode, sign an artifact, or install a
+service; those remain mandatory trusted pipeline stages.
+
+Production evidence loaders traverse from a retained volume-root handle, open every component
+relative to its retained parent, keep all ancestors through the verification commit, and fail the
+process closed if handle cleanup remains unresolved. Closure and ServiceHost build-receipt
+authority each require a separate exact 64-byte digest file in an administrator-sealed hierarchy.
+Each loader locks its OS thread before opening a path, rejects every thread impersonation token,
+and snapshots a retained primary process token. Administrators membership, including deny-only
+membership, and high-risk privileges are forbidden even when disabled. All file, access-token, and
+primary-token handles close before the result is committed against the process-global cleanup
+epoch and `winfile`'s rejected-handle quarantine. An unresolved close in either domain invalidates
+every in-flight and future commit, including Finalize.
+Every managed ancestor and approval file has an exact three-principal DACL: SYSTEM and local
+Administrators have full control, while the dedicated reader SID has read/execute on directories
+and read-only access on the digest file. Other trustees, masks, inherited ACEs, and a reader that
+can write, delete, or change ownership or DACLs are rejected.
+
+`VerifiedServiceHostEvidence` can be minted only from the prepared release, the independently
+approved controlled-build receipt, and one final signed ServiceHost. The same retained file handle
+is used for a bounded read, PE32+ architecture validation, Authenticode verification, and a second
+SHA-256 pass. The approved receipt's signing invariant must match the signed image, and the leaf
+signer must match the prepared signer pin. Detached metadata, caller-supplied verifiers, and
+self-computed receipt digests are not accepted. Exactly one terminal WIN_CERTIFICATE is allowed,
+and every alignment-padding byte after its declared length must be zero. The schema-v2 outer
+descriptor binds the approved build-receipt digest. A later
+`VerifyFinalizedPackage` boundary must reverify the descriptor, manifest, package bytes, signer,
+and every receipt binding before installation or publication.
+
+1. Build and sign every non-ServiceHost dependency for one target node and architecture.
+2. Parse the independently approved reviewed closure, inventory those final bytes, and generate the
+   canonical release template and prepare receipt.
+3. Run the controlled `servicehostrelease` driver, independently approve its build-receipt digest,
+   and sign the receipt-bound output.
+4. Verify and hash the final signed ServiceHost against the approved build receipt.
+5. Reinspect the dependency inventory, finalize the complete runtime manifest with that self hash,
+   and emit the zero-authority outer package descriptor.
+6. Generate the two bootstrap configurations that pin the runtime manifest digest and repeat the
+   compiled signer pin.
+7. Verify the complete staged tree from zero and sign the outer installer or package.
 
 The bootstrap signer field is a cross-check, not the signer authority. Installation verification
 must use the signer pin from compiled `Evidence` for every Authenticode decision.

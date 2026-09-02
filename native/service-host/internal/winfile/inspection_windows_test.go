@@ -128,6 +128,9 @@ func TestWindowsFileCloseRetainsHandleForRetry(t *testing.T) {
 	if _, err := file.HashSHA256(HashOptions{MaximumBytes: 1}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("HashSHA256 after failed Close returned %v", err)
 	}
+	if _, err := file.ReadAt(make([]byte, 1), 0); !errors.Is(err, ErrClosed) {
+		t.Fatalf("ReadAt after failed Close returned %v", err)
+	}
 	if _, err := file.VerifyAuthenticode(&recordingAuthenticodeVerifier{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("VerifyAuthenticode after failed Close returned %v", err)
 	}

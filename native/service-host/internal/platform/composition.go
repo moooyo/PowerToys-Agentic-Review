@@ -7,18 +7,20 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
-	errInvalidComposition  = errors.New("invalid ServiceHost composition")
-	errUnexpectedComponent = errors.New("supervised ServiceHost component exited unexpectedly")
-	errOrderlyRuntimeStop  = errors.New("orderly ServiceHost runtime stop")
-	errHostCleanupFatal    = errors.New("ServiceHost cleanup failed; the process must exit")
-	errNodeOwnerRetained   = errors.New("Node process owner must be retained until ServiceHost exits")
-	errNodeTerminateFirst  = errors.New("Node process must be terminated before its handles are closed")
-	errNodeWaitActive      = errors.New("Node process already has an active lifecycle wait")
-	errNodeWaitUnavailable = errors.New("Node process lifecycle wait is no longer available")
-	errNodeTerminateWait   = errors.New("Node process wait canceled for termination")
+	errInvalidComposition      = errors.New("invalid ServiceHost composition")
+	errUnexpectedComponent     = errors.New("supervised ServiceHost component exited unexpectedly")
+	errOrderlyRuntimeStop      = errors.New("orderly ServiceHost runtime stop")
+	errHostCleanupFatal        = errors.New("ServiceHost cleanup failed; the process must exit")
+	errNodeOwnerRetained       = errors.New("Node process owner must be retained until ServiceHost exits")
+	errNodeTerminateFirst      = errors.New("Node process must be terminated before its handles are closed")
+	errNodeWaitActive          = errors.New("Node process already has an active lifecycle wait")
+	errNodeWaitUnavailable     = errors.New("Node process lifecycle wait is no longer available")
+	errNodeTerminateWait       = errors.New("Node process wait canceled for termination")
+	errGracefulShutdownTimeout = errors.New("ServiceHost graceful shutdown deadline expired")
 )
 
 type compositionBuilder interface {
@@ -75,7 +77,9 @@ func runComposition(
 	if isNilCompositionValue(ctx) || isNilCompositionValue(builder) {
 		return fmt.Errorf("%w: context and builder are required", errInvalidComposition)
 	}
-	lifetime, cancelLifetime := context.WithCancelCause(ctx)
+	setupContext, cancelSetup := context.WithCancelCause(ctx)
+	defer cancelSetup(nil)
+	lifetime, cancelLifetime := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer cancelLifetime(nil)
 
 	var cleanupOnce sync.Once
@@ -85,6 +89,7 @@ func runComposition(
 		if cancelCause == nil {
 			cancelCause = errOrderlyRuntimeStop
 		}
+		cancelSetup(cancelCause)
 		cancelLifetime(cancelCause)
 		cleanupOnce.Do(func() {
 			if err := builder.cleanup(); err != nil {
@@ -115,10 +120,14 @@ func runComposition(
 		{name: "build role runtime", run: builder.buildRoleRuntime},
 	}
 	for _, step := range steps {
-		if cause := context.Cause(lifetime); cause != nil {
+		if cause := context.Cause(setupContext); cause != nil {
 			return finish(cause)
 		}
-		if err := step.run(lifetime); err != nil {
+		stepContext := setupContext
+		if step.name == "take Node standard I/O" {
+			stepContext = lifetime
+		}
+		if err := step.run(stepContext); err != nil {
 			return finish(fmt.Errorf("%s: %w", step.name, err))
 		}
 	}
@@ -347,14 +356,18 @@ func (owner *nodeShutdownOwner) retainAfterExternalShutdownAttempt(cause error) 
 }
 
 type runtimeSupervision struct {
-	node            *nodeShutdownOwner
-	serveLocalRPC   func(context.Context) error
-	runRelay        func(context.Context) error
-	waitOwnWrapper  func(context.Context) error
-	waitPeerWrapper func(context.Context) error
-	waitPeerHost    func(context.Context) error
-	waitStderr      func(context.Context) error
-	onResult        func(supervisedTaskKind)
+	node                 *nodeShutdownOwner
+	stopContext          context.Context
+	shutdownTimeout      time.Duration
+	requestNodeShutdown  func(context.Context, time.Time, time.Time) error
+	readShutdownDeadline func() (time.Time, bool)
+	serveLocalRPC        func(context.Context) error
+	runRelay             func(context.Context) error
+	waitOwnWrapper       func(context.Context) error
+	waitPeerWrapper      func(context.Context) error
+	waitPeerHost         func(context.Context) error
+	waitStderr           func(context.Context) error
+	onResult             func(supervisedTaskKind)
 }
 
 type supervisedTaskKind uint8
@@ -385,13 +398,17 @@ type supervisedResult struct {
 }
 
 type supervisionOutcome struct {
-	primary          error
-	secondary        []error
-	localRPCClean    bool
-	relayClean       bool
-	gracefulProgress bool
-	shutdownStarted  bool
-	cancelCause      error
+	primary            error
+	secondary          []error
+	localRPCClean      bool
+	relayClean         bool
+	nodeClean          bool
+	nodeBarrier        bool
+	gracefulProgress   bool
+	gracefulRequested  bool
+	shutdownStarted    bool
+	terminationStarted bool
+	cancelCause        error
 }
 
 func (outcome *supervisionOutcome) add(err error) {
@@ -473,22 +490,43 @@ func superviseRuntime(
 	}
 
 	remaining := len(tasks)
-	outcome := supervisionOutcome{}
+	outcome := supervisionOutcome{nodeBarrier: runtime.readShutdownDeadline != nil}
 	contextDone := ctx.Done()
+	stopContext := runtime.stopContext
+	if stopContext == nil {
+		stopContext = ctx
+	}
+	stopDone := stopContext.Done()
+	var shutdownDeadline time.Time
+	var shutdownTimer *time.Timer
+	var shutdownTimerDone <-chan time.Time
+	notificationResult := make(chan error, 1)
+	notificationPending := false
 	notifyResult := func(kind supervisedTaskKind) {
 		if runtime.onResult != nil {
 			runtime.onResult(kind)
 		}
 	}
-	startShutdown := func(cause error) {
-		if outcome.shutdownStarted {
+	forceShutdown := func(cause error) {
+		if outcome.terminationStarted {
 			return
 		}
 		if cause == nil {
 			cause = errOrderlyRuntimeStop
 		}
 		outcome.shutdownStarted = true
+		outcome.terminationStarted = true
 		shutdownStarted.Store(true)
+		if shutdownTimer != nil {
+			if !shutdownTimer.Stop() {
+				select {
+				case <-shutdownTimer.C:
+				default:
+				}
+			}
+			shutdownTimer = nil
+			shutdownTimerDone = nil
+		}
 		cancel(cause)
 		actualCause := context.Cause(ctx)
 		if actualCause == nil {
@@ -499,21 +537,139 @@ func superviseRuntime(
 			outcome.add(fmt.Errorf("runtime context: %w", actualCause))
 		}
 		contextDone = nil
+		stopDone = nil
 		if err := runtime.node.Terminate(); err != nil {
 			outcome.add(fmt.Errorf("terminate Node root Job: %w", err))
 		}
 	}
+	tightenShutdownTimer := func(deadline time.Time) error {
+		if deadline.IsZero() || !time.Now().Before(deadline) {
+			return errGracefulShutdownTimeout
+		}
+		if !shutdownDeadline.IsZero() && !deadline.Before(shutdownDeadline) {
+			return nil
+		}
+		if shutdownTimer != nil && !shutdownTimer.Stop() {
+			select {
+			case <-shutdownTimer.C:
+			default:
+			}
+		}
+		shutdownDeadline = deadline
+		shutdownTimer = time.NewTimer(time.Until(shutdownDeadline))
+		shutdownTimerDone = shutdownTimer.C
+		return nil
+	}
+	beginGracefulShutdown := func(cause error) {
+		if outcome.shutdownStarted {
+			return
+		}
+		if cause == nil {
+			cause = errOrderlyRuntimeStop
+		}
+		if runtime.shutdownTimeout <= 0 || runtime.shutdownTimeout > 5*time.Minute {
+			forceShutdown(cause)
+			return
+		}
+		outcome.shutdownStarted = true
+		outcome.gracefulRequested = true
+		shutdownStarted.Store(true)
+		stopDone = nil
+		now := time.Now()
+		requestedAt := now.Add(-time.Duration(now.Nanosecond() % int(time.Millisecond)))
+		shutdownDeadline = requestedAt.Add(runtime.shutdownTimeout)
+		shutdownTimer = time.NewTimer(time.Until(shutdownDeadline))
+		shutdownTimerDone = shutdownTimer.C
+		armAlreadyCommitted := false
+		if runtime.readShutdownDeadline != nil {
+			if deadline, valid := runtime.readShutdownDeadline(); valid {
+				armAlreadyCommitted = true
+				if err := tightenShutdownTimer(deadline); err != nil {
+					outcome.add(err)
+					forceShutdown(err)
+					return
+				}
+			}
+		}
+		if runtime.requestNodeShutdown == nil || armAlreadyCommitted {
+			return
+		}
+		notificationPending = true
+		go func() {
+			notificationContext, cancelNotification := context.WithDeadlineCause(
+				ctx,
+				shutdownDeadline,
+				errGracefulShutdownTimeout,
+			)
+			defer cancelNotification()
+			notificationResult <- runtime.requestNodeShutdown(
+				notificationContext,
+				requestedAt,
+				shutdownDeadline,
+			)
+		}()
+	}
+	beginProtocolGrace := func(deadline time.Time) error {
+		if outcome.gracefulRequested {
+			return nil
+		}
+		outcome.shutdownStarted = true
+		outcome.gracefulRequested = true
+		shutdownStarted.Store(true)
+		return tightenShutdownTimer(deadline)
+	}
 
-	for remaining != 0 {
+	for remaining != 0 || notificationPending {
 		select {
+		case <-stopDone:
+			stopDone = nil
+			cause := context.Cause(stopContext)
+			outcome.add(cause)
+			beginGracefulShutdown(cause)
 		case <-contextDone:
 			cause := context.Cause(ctx)
 			outcome.add(cause)
-			startShutdown(cause)
+			forceShutdown(cause)
+		case notificationErr := <-notificationResult:
+			if !notificationPending {
+				continue
+			}
+			notificationPending = false
+			if notificationErr != nil {
+				terminal := fmt.Errorf("notify Node shutdown: %w", notificationErr)
+				outcome.add(terminal)
+				if !outcome.terminationStarted && runtime.readShutdownDeadline != nil {
+					if deadline, valid := runtime.readShutdownDeadline(); valid {
+						if err := tightenShutdownTimer(deadline); err != nil {
+							outcome.add(err)
+							forceShutdown(err)
+						}
+					}
+					continue
+				}
+				forceShutdown(terminal)
+			}
+		case <-shutdownTimerDone:
+			if stopDone != nil {
+				stopCause := context.Cause(stopContext)
+				if stopCause != nil {
+					stopDone = nil
+					outcome.add(stopCause)
+				}
+			}
+			terminal := errGracefulShutdownTimeout
+			outcome.add(terminal)
+			forceShutdown(terminal)
 		case result := <-results:
+			if !outcome.shutdownStarted {
+				if stopCause := context.Cause(stopContext); stopCause != nil {
+					outcome.add(stopCause)
+					beginGracefulShutdown(stopCause)
+				}
+			}
 			remaining--
 			if result.err != nil {
-				if outcome.shutdownStarted &&
+				if outcome.terminationStarted && outcome.cancelCause != nil &&
 					expectedSupervisionCancellation(result.err, outcome.cancelCause) {
 					notifyResult(result.task.kind)
 					continue
@@ -521,23 +677,38 @@ func superviseRuntime(
 				if cause := context.Cause(ctx); cause != nil &&
 					expectedSupervisionCancellation(result.err, cause) {
 					outcome.add(cause)
-					startShutdown(cause)
+					forceShutdown(cause)
 					notifyResult(result.task.kind)
 					continue
 				}
 				terminal := fmt.Errorf("%s: %w", result.task.name, result.err)
 				outcome.add(terminal)
-				startShutdown(terminal)
+				forceShutdown(terminal)
 				notifyResult(result.task.kind)
 				continue
 			}
 
 			terminal, jointClean := outcome.observeClean(result)
+			if terminal == nil && outcome.nodeBarrier && outcome.localRPCClean && outcome.relayClean {
+				deadline, valid := runtime.readShutdownDeadline()
+				if valid {
+					if err := tightenShutdownTimer(deadline); err != nil {
+						terminal = err
+					}
+				} else if !outcome.gracefulRequested {
+					terminal = fmt.Errorf("%w: armed shutdown deadline is unavailable", errInvalidComposition)
+				}
+				if terminal == nil && !outcome.gracefulRequested {
+					if err := beginProtocolGrace(deadline); err != nil {
+						terminal = err
+					}
+				}
+			}
 			if terminal != nil {
 				outcome.add(terminal)
-				startShutdown(terminal)
+				forceShutdown(terminal)
 			} else if jointClean {
-				startShutdown(errOrderlyRuntimeStop)
+				forceShutdown(errOrderlyRuntimeStop)
 			}
 			notifyResult(result.task.kind)
 		}
@@ -548,21 +719,23 @@ func superviseRuntime(
 func (outcome *supervisionOutcome) observeClean(result supervisedResult) (error, bool) {
 	switch result.task.kind {
 	case supervisedLocalRPC:
-		if result.afterShutdown {
+		if result.afterShutdown && !outcome.gracefulRequested {
 			return nil, false
 		}
 		outcome.localRPCClean = true
 		outcome.gracefulProgress = true
-		return nil, outcome.relayClean
+		return nil, outcome.relayClean &&
+			(!outcome.gracefulRequested && !outcome.nodeBarrier || outcome.nodeClean)
 	case supervisedRelay:
-		if result.afterShutdown {
+		if result.afterShutdown && !outcome.gracefulRequested {
 			return nil, false
 		}
 		outcome.relayClean = true
 		outcome.gracefulProgress = true
-		return nil, outcome.localRPCClean
+		return nil, outcome.localRPCClean &&
+			(!outcome.gracefulRequested && !outcome.nodeBarrier || outcome.nodeClean)
 	case supervisedNode:
-		if result.afterShutdown {
+		if result.afterShutdown && (!outcome.gracefulRequested || outcome.terminationStarted) {
 			return nil, false
 		}
 		if result.exitCode != 0 {
@@ -571,6 +744,15 @@ func (outcome *supervisionOutcome) observeClean(result supervisedResult) (error,
 				errUnexpectedComponent,
 				result.exitCode,
 			), false
+		}
+		if outcome.gracefulRequested {
+			outcome.nodeClean = true
+			outcome.gracefulProgress = true
+			return nil, outcome.localRPCClean && outcome.relayClean
+		}
+		if outcome.nodeBarrier {
+			outcome.nodeClean = true
+			return nil, outcome.localRPCClean && outcome.relayClean
 		}
 		if outcome.gracefulProgress || result.gracefulAtCompletion {
 			return nil, false

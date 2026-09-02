@@ -349,6 +349,41 @@ func TestEveryHighRiskPrivilegeMustBeAbsent(t *testing.T) {
 	}
 }
 
+func TestReleaseProcessTokenRejectsAdministrativeAndHighRiskCapabilities(t *testing.T) {
+	valid := TokenEvidence{
+		TokenID:          LUID{LowPart: 1},
+		AuthenticationID: LUID{LowPart: 2},
+		ModifiedID:       LUID{LowPart: 3},
+		Type:             tokenPrimaryType,
+		User:             SIDEntry{SID: "S-1-5-21-100-200-300-1001"},
+		Groups:           []SIDEntry{{SID: worldSID, Attributes: groupEnabled}},
+		Privileges: []PrivilegeEvidence{{
+			Name: "SeChangeNotifyPrivilege", LUID: LUID{LowPart: 4}, Attributes: privilegeEnabled,
+		}},
+	}
+	if err := validateReleaseProcessTokenEvidence(valid); err != nil {
+		t.Fatalf("valid release process token was rejected: %v", err)
+	}
+
+	administrator := valid
+	administrator.Groups = append([]SIDEntry(nil), valid.Groups...)
+	administrator.Groups = append(administrator.Groups, SIDEntry{
+		SID: builtinAdministratorsSID, Attributes: groupUseForDenyOnly,
+	})
+	if err := validateReleaseProcessTokenEvidence(administrator); !errors.Is(err, ErrAdministrativeToken) {
+		t.Fatalf("deny-only Administrators membership returned %v", err)
+	}
+
+	privileged := valid
+	privileged.Privileges = append([]PrivilegeEvidence(nil), valid.Privileges...)
+	privileged.Privileges = append(privileged.Privileges, PrivilegeEvidence{
+		Name: "SeImpersonatePrivilege", LUID: LUID{LowPart: 5}, Attributes: 0,
+	})
+	if err := validateReleaseProcessTokenEvidence(privileged); !errors.Is(err, ErrForbiddenPrivilege) {
+		t.Fatalf("disabled high-risk privilege returned %v", err)
+	}
+}
+
 func TestMalformedTokenEvidenceFailsClosed(t *testing.T) {
 	options := validOptions()
 	tests := []struct {

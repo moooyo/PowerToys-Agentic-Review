@@ -12,6 +12,7 @@ import type { ArwxFinalFrameReceipt } from "./arwx-stdio-channel.js";
 import {
   connectExecutorHostControl,
   ExecutorHostControlError,
+  isExecutorHostControlSession,
 } from "./executor-host-control-session.js";
 import {
   parseServiceHostLaunchContract,
@@ -73,6 +74,33 @@ class FakeExecutorHostControl extends Duplex {
   }
 }
 
+class DelayedFinalExecutorHostControl extends FakeExecutorHostControl {
+  #finalCallback: ((error?: Error | null) => void) | undefined;
+
+  public get finalPending(): boolean {
+    return this.#finalCallback !== undefined;
+  }
+
+  public releaseFinal(error?: Error): void {
+    const callback = this.#finalCallback;
+    if (callback === undefined) {
+      throw new Error("No Executor HostControl final callback is pending.");
+    }
+    this.#finalCallback = undefined;
+    callback(error);
+    if (error === undefined) queueMicrotask(() => this.push(null));
+  }
+
+  public override _final(callback: (error?: Error | null) => void): void {
+    this.clientEnded = true;
+    this.#finalCallback = callback;
+  }
+
+  public override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    setImmediate(() => callback(error));
+  }
+}
+
 const selector = `${SERVICE_HOST_CONTROL_PIPE_PREFIX}${"b".repeat(64)}`;
 const pipe = parseServiceHostLaunchContract(
   [
@@ -96,6 +124,8 @@ describe("Executor HostControl session", () => {
 
     expect(session.role).toBe("executor");
     expect(session.bootstrap.bootstrap.role).toBe("executor");
+    expect(isExecutorHostControlSession(session)).toBe(true);
+    expect(isExecutorHostControlSession(Object.create(session))).toBe(false);
     expect("register" in session).toBe(false);
     expect("signLocalDigest" in session).toBe(false);
     await session.drain();
@@ -106,15 +136,17 @@ describe("Executor HostControl session", () => {
     const host = new FakeExecutorHostControl();
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
-    const session = await connectExecutorHostControl({
+    let armResult: unknown;
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -122,6 +154,10 @@ describe("Executor HostControl session", () => {
             },
             performance.now() + 1_000,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            armResult = await session.armArwxShutdown(finalReceipt);
+          });
         },
       }),
       connector: async () => host,
@@ -144,7 +180,6 @@ describe("Executor HostControl session", () => {
       sequence: 1n,
     });
 
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
@@ -156,27 +191,28 @@ describe("Executor HostControl session", () => {
     });
     host.respond(success(request.requestId as string, { armed: true, ...payload }), 4);
 
-    await expect(arming).resolves.toEqual({ armed: true, ...payload });
     await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
+    expect(armResult).toEqual({ armed: true, ...payload });
     expect(runtime.output.writableEnded).toBe(true);
     expect(host.clientEnded).toBe(true);
     await session.drain();
   });
 
-  it("rejects close-only HostControl termination after Executor Arm acknowledgement", async () => {
-    const host = new FakeExecutorHostControl();
-    host.endReadableOnClientEnd = false;
+  it("rejects Arm when the Executor HostControl writable half-close callback fails", async () => {
+    const host = new DelayedFinalExecutorHostControl();
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
-    const session = await connectExecutorHostControl({
+    let arming: Promise<unknown> | undefined;
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -184,6 +220,11 @@ describe("Executor HostControl session", () => {
             },
             performance.now() + 1_000,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            arming = session.armArwxShutdown(finalReceipt);
+            await arming;
+          });
         },
       }),
       connector: async () => host,
@@ -200,12 +241,136 @@ describe("Executor HostControl session", () => {
       }),
     );
     await waitFor(() => receipt !== undefined);
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
     host.respond(success(request.requestId as string, { armed: true, ...payload }));
-    await expect(arming).resolves.toBeDefined();
+
+    await waitFor(() => host.finalPending);
+    const armFailure = expect(defined(arming, "Arm operation")).rejects.toMatchObject({
+      code: "PROTOCOL_FAILURE",
+    });
+    const sessionFailure = expect(session.done).rejects.toMatchObject({
+      code: "PROTOCOL_FAILURE",
+    });
+    const receiveFailure = expect(runtime.receiveLoop.done).rejects.toBeInstanceOf(Error);
+    const hostClosed = new Promise<void>((resolve) => host.once("close", () => resolve()));
+    host.releaseFinal(new Error("Executor HostControl final callback failed"));
+
+    await Promise.all([armFailure, sessionFailure, receiveFailure, hostClosed]);
+  });
+
+  it("accepts EOF before a successful writable callback and settles before close", async () => {
+    const host = new DelayedFinalExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    const settlements: string[] = [];
+    const draining = session.drain().then(() => settlements.push("drain"));
+    const done = session.done.then(() => settlements.push("done"));
+    await waitFor(() => host.finalPending);
+    host.push(null);
+    await waitFor(() => host.readableEnded);
+    host.once("finish", () => host.emit("close"));
+
+    host.releaseFinal();
+
+    await Promise.all([draining, done]);
+    expect([...settlements].sort()).toEqual(["done", "drain"]);
+  });
+
+  it.each(["success", "error"] as const)(
+    "rejects drain when EOF and close precede a late Executor final callback %s",
+    async (lateOutcome) => {
+      const host = new DelayedFinalExecutorHostControl();
+      const session = await connectExecutorHostControl({
+        role: "executor",
+        pipe,
+        prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+        connector: async () => host,
+        closeTimeoutMs: 1_000,
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const draining = session.drain();
+        const drainFailure = expect(draining).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+        const doneFailure = expect(session.done).rejects.toMatchObject({
+          code: "PROTOCOL_FAILURE",
+        });
+        await waitFor(() => host.finalPending);
+        host.push(null);
+        await waitFor(() => host.readableEnded);
+
+        host.emit("close");
+
+        await Promise.all([drainFailure, doneFailure]);
+        expect(host.finalPending).toBe(true);
+        host.releaseFinal(
+          lateOutcome === "error" ? new Error("late Executor final failure") : undefined,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.removeListener("unhandledRejection", onUnhandled);
+        host.destroy();
+      }
+    },
+  );
+
+  it("rejects close-only HostControl termination after Executor Arm acknowledgement", async () => {
+    const host = new FakeExecutorHostControl();
+    host.endReadableOnClientEnd = false;
+    let arwxContext: TestBootstrapArwxContext | undefined;
+    let receipt: ArwxFinalFrameReceipt | undefined;
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
+        onStarted: (value) => {
+          arwxContext = value;
+        },
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
+            {
+              messageType: LocalMessageType.Drained,
+              correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+              payload: drainedPayload(),
+            },
+            performance.now() + 1_000,
+          );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            await session.armArwxShutdown(finalReceipt);
+          });
+        },
+      }),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    const runtime = defined(arwxContext, "ARWX context");
+    runtime.input.end(
+      encodeLocalFrame({
+        minorVersion: 0,
+        messageType: LocalMessageType.Drain,
+        sequence: 1n,
+        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+        payload: drainPayload(),
+      }),
+    );
+    await waitFor(() => receipt !== undefined);
+    await waitFor(() => host.writes.length === 1);
+    const request = defined(host.requests()[0], "Arm request");
+    const payload = request.payload as Record<string, unknown>;
+    host.respond(success(request.requestId as string, { armed: true, ...payload }));
     await waitFor(() => host.clientEnded);
     host.destroy();
 
@@ -219,16 +384,18 @@ describe("Executor HostControl session", () => {
     const host = new FakeExecutorHostControl();
     let arwxContext: TestBootstrapArwxContext | undefined;
     let receipt: ArwxFinalFrameReceipt | undefined;
+    let arming: Promise<unknown> | undefined;
     const absoluteDeadline = performance.now() + 1_000;
-    const session = await connectExecutorHostControl({
+    let session!: Awaited<ReturnType<typeof connectExecutorHostControl>>;
+    session = await connectExecutorHostControl({
       role: "executor",
       pipe,
       prepareRuntimeBootstrap: createTestBootstrapPreparation("executor", {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -236,6 +403,11 @@ describe("Executor HostControl session", () => {
             },
             absoluteDeadline,
           );
+          const finalReceipt = receipt;
+          return dispatch.createPostDispatchFinalFrameEffect(finalReceipt, async () => {
+            arming = session.armArwxShutdown(finalReceipt);
+            await arming;
+          });
         },
       }),
       connector: async () => host,
@@ -252,25 +424,28 @@ describe("Executor HostControl session", () => {
       }),
     );
     await waitFor(() => receipt !== undefined);
-    const arming = session.armArwxShutdown(defined(receipt, "final frame receipt"));
     await waitFor(() => host.writes.length === 1);
     const request = defined(host.requests()[0], "Arm request");
     const payload = request.payload as Record<string, unknown>;
     const now = vi.spyOn(performance, "now");
     for (let call = 0; call < 4; call += 1) now.mockReturnValueOnce(absoluteDeadline - 2);
     now.mockReturnValue(absoluteDeadline - 0.5);
+    const armOutcome = defined(arming, "Arm operation").then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    const doneFailure = expect(session.done).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
+    const receiveLoopSettlement = runtime.receiveLoop.done.catch(() => undefined);
     host.respond(success(request.requestId as string, { armed: true, ...payload }));
+    const drainFailure = expect(session.drain()).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
 
     const outcome = await Promise.race([
-      arming.then(
-        () => "resolved" as const,
-        () => "rejected" as const,
-      ),
+      armOutcome,
       new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 100)),
     ]);
     now.mockRestore();
     expect(outcome).toBe("rejected");
-    await runtime.receiveLoop.done.catch(() => undefined);
+    await Promise.all([doneFailure, drainFailure, receiveLoopSettlement]);
     await session.close().catch(() => undefined);
   });
 
@@ -289,8 +464,8 @@ describe("Executor HostControl session", () => {
         onStarted: (value) => {
           arwxContext = value;
         },
-        handler: async () => {
-          receipt = await defined(arwxContext, "ARWX context").arwx.sendFinal(
+        handler: async (_message, dispatch) => {
+          receipt = await dispatch.sendFinal(
             {
               messageType: LocalMessageType.Drained,
               correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -343,6 +518,39 @@ describe("Executor HostControl session", () => {
     expect(host.destroyed).toBe(true);
   });
 
+  it("treats ShutdownRequested as a Control-only protocol violation", async () => {
+    const host = new FakeExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    const duration =
+      session.bootstrap.bootstrap.shutdown.gracefulTimeoutMs -
+      session.bootstrap.bootstrap.shutdown.forceTerminationReserveMs;
+    const requestedAtUnixMs = Date.now();
+    const failed = expect(session.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    host.respond(
+      {
+        bootstrapId: session.bootstrap.bootstrap.bootstrapId,
+        notification: "ShutdownRequested",
+        protocolVersion: "1.0",
+        reasonCode: "SERVICE_STOP",
+        requestedAtUnixMs,
+        role: "executor",
+        shutdownDeadlineUnixMs: requestedAtUnixMs + duration,
+        type: "notification",
+      },
+      5,
+    );
+
+    await failed;
+    expect(host.destroyed).toBe(true);
+    await session.close();
+  });
+
   it("exposes unexpected readable EOF through the session done promise", async () => {
     const host = new FakeExecutorHostControl();
     const session = await connectExecutorHostControl({
@@ -373,6 +581,57 @@ describe("Executor HostControl session", () => {
     host.destroy();
 
     await expect(draining).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+  });
+
+  it("does not restart the graceful budget when an absolute drain deadline expired", async () => {
+    const host = new FakeExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+
+    const doneFailure = expect(session.done).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
+    const drainFailure = expect(session.drain(performance.now() - 1)).rejects.toMatchObject({
+      code: "CLOSE_TIMEOUT",
+    });
+    await Promise.all([doneFailure, drainFailure]);
+    expect(host.destroyed).toBe(true);
+  });
+
+  it("does not start a rejectable writable phase after the drain deadline expired", async () => {
+    const host = new DelayedFinalExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const doneFailure = expect(session.done).rejects.toMatchObject({ code: "CLOSE_TIMEOUT" });
+      const drainFailure = expect(session.drain(performance.now() - 1)).rejects.toMatchObject({
+        code: "CLOSE_TIMEOUT",
+      });
+
+      await Promise.all([doneFailure, drainFailure]);
+      if (host.finalPending) {
+        host.releaseFinal(new Error("late final callback after expired deadline"));
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(host.clientEnded).toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
+      host.destroy();
+    }
   });
 
   it("keeps close authoritative when drain is requested concurrently", async () => {
@@ -449,15 +708,16 @@ describe("Executor HostControl session", () => {
       },
       controller.signal,
     );
-    await waitFor(() => connectorCancellation !== undefined);
-    controller.abort(new Error("credential=must-not-cross"));
-
-    await expect(connecting).rejects.toEqual(
+    const connectionFailure = expect(connecting).rejects.toEqual(
       expect.objectContaining({
         code: "CONNECT_CANCELLED",
         message: expect.not.stringContaining("must-not-cross"),
       }),
     );
+    await waitFor(() => connectorCancellation !== undefined);
+    controller.abort(new Error("credential=must-not-cross"));
+
+    await connectionFailure;
     expect(connectorCancellation?.aborted).toBe(true);
     resolveConnection?.(lateHost);
     await waitFor(() => lateHost.destroyed);

@@ -51,6 +51,7 @@ type Server struct {
 	options         ServerOptions
 	dispatcher      ControlDispatcher
 	shutdown        *arwxShutdownGate
+	notifications   *shutdownNotificationController
 	operationPolicy runtimeOperationPolicy
 }
 
@@ -80,8 +81,41 @@ func NewServer(options ServerOptions, dispatcher ControlDispatcher) (*Server, er
 		options:         options,
 		dispatcher:      dispatcher,
 		shutdown:        shutdown,
+		notifications:   newShutdownNotificationController(shutdown.binding, shutdown),
 		operationPolicy: shutdown.binding.operationPolicy,
 	}, nil
+}
+
+// RequestShutdown sends the sole ServiceHost-originated notification for this committed
+// HostControl session. The caller supplies one absolute deadline shared by supervision,
+// HostControl, and both role-aware relays.
+func (s *Server) RequestShutdown(
+	ctx context.Context,
+	requestedAt time.Time,
+	deadline time.Time,
+) error {
+	if s == nil || s.notifications == nil {
+		return ErrShutdownNotificationUnavailable
+	}
+	return s.notifications.request(ctx, requestedAt, deadline)
+}
+
+// WaitUntilShutdownNotificationReady waits for Serve to publish its sole writer without
+// weakening RequestShutdown's immediate rejection for unbound direct callers.
+func (s *Server) WaitUntilShutdownNotificationReady(ctx context.Context) error {
+	if s == nil || s.notifications == nil {
+		return ErrShutdownNotificationUnavailable
+	}
+	return s.notifications.waitUntilBound(ctx)
+}
+
+// ArmedShutdownDeadline returns the exact deadline committed by ArmArwxShutdownV1.
+// It does not create or consume shutdown authority.
+func (s *Server) ArmedShutdownDeadline() (time.Time, bool) {
+	if s == nil || s.shutdown == nil {
+		return time.Time{}, false
+	}
+	return s.shutdown.committedDeadline()
 }
 
 func isNilControlDispatcher(dispatcher ControlDispatcher) bool {
@@ -119,6 +153,10 @@ func (s *Server) Serve(ctx context.Context, input io.ReadCloser, output io.Write
 	state := newSessionState(s.options.MaximumRequestsPerSession)
 	claimGate := make(chan struct{}, 1)
 	writer := newResponseWriter(sessionContext, channel, s.options.IOTimeout)
+	if err := s.notifications.bind(writer, state); err != nil {
+		return err
+	}
+	defer s.notifications.end()
 	fatal := make(chan error, 1)
 	reportFatal := func(err error) {
 		select {
@@ -226,6 +264,18 @@ serveLoop:
 			terminalError = protocolError(code, messageText, message.RequestID(), err)
 			break
 		}
+		if state.shutdownRequested() {
+			if call, ok := message.(CallRequest); !ok || call.Operation != OperationArmArwxShutdown {
+				if _, cancel := message.(CancelRequest); !cancel {
+					if err := writer.writeError(message.RequestID(), errorBody{
+						Code: "SHUTDOWN_REQUESTED", Message: "The ServiceHost session is shutting down.", Retryable: false,
+					}); err != nil {
+						reportFatal(err)
+					}
+					continue
+				}
+			}
+		}
 
 		switch typed := message.(type) {
 		case CancelRequest:
@@ -255,6 +305,14 @@ serveLoop:
 				s.requestTimeout(typed.Operation),
 			)
 			if !accepted {
+				if state.shutdownRequested() {
+					if err := writer.writeError(typed.ID, errorBody{
+						Code: "SHUTDOWN_REQUESTED", Message: "The ServiceHost session is shutting down.", Retryable: false,
+					}); err != nil {
+						reportFatal(err)
+					}
+					continue
+				}
 				if err := writer.writeError(typed.ID, errorBody{
 					Code: "CONCURRENCY_LIMIT", Message: "The local RPC concurrency limit is reached.", Retryable: true,
 				}); err != nil {
@@ -324,7 +382,7 @@ serveLoop:
 		s.shutdown.failCurrentAuthorization()
 	}
 	cancelSession(terminalError)
-	if !state.waitForIdle(s.options.ShutdownTimeout) {
+	if !state.waitForIdle(ctx, s.shutdownJoinTimeout()) {
 		s.shutdown.failCurrentAuthorization()
 		return errors.Join(terminalError, ErrServerShutdownTimeout)
 	}
@@ -344,6 +402,25 @@ serveLoop:
 		return ErrIOTimeout
 	}
 	return terminalError
+}
+
+func (s *Server) shutdownJoinTimeout() time.Duration {
+	if s == nil || s.shutdown == nil {
+		return 0
+	}
+	maximum := s.options.ShutdownTimeout
+	deadline, valid := s.shutdown.lifecycleDeadline()
+	if !valid {
+		return maximum
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < maximum {
+		return remaining
+	}
+	return maximum
 }
 
 // AuthorizeArwxEOF consumes the sole prepared shutdown authorization and validates the exact
@@ -477,6 +554,19 @@ type sessionState struct {
 	responseIdle   chan struct{}
 	maximumSeenIDs int
 	shutdownPhase  uint8
+	shutdownNotice bool
+}
+
+func (s *sessionState) markShutdownRequested() {
+	s.mu.Lock()
+	s.shutdownNotice = true
+	s.mu.Unlock()
+}
+
+func (s *sessionState) shutdownRequested() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdownNotice
 }
 
 func (s *sessionState) beginShutdownArm(ctx context.Context, deadline time.Time) error {
@@ -541,7 +631,10 @@ func (s *sessionState) shutdownArmed() bool {
 	return s.shutdownPhase == 2
 }
 
-func (s *sessionState) waitForIdle(timeout time.Duration) bool {
+func (s *sessionState) waitForIdle(ctx context.Context, timeout time.Duration) bool {
+	if ctx == nil {
+		return false
+	}
 	s.mu.Lock()
 	if s.inFlight == 0 {
 		s.mu.Unlock()
@@ -555,6 +648,8 @@ func (s *sessionState) waitForIdle(timeout time.Duration) bool {
 	select {
 	case <-idle:
 		return true
+	case <-ctx.Done():
+		return false
 	case <-timer.C:
 		select {
 		case <-idle:
@@ -595,7 +690,7 @@ func (s *sessionState) start(
 ) (context.Context, context.CancelCauseFunc, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.inFlight >= maximumConcurrent {
+	if s.shutdownNotice || s.inFlight >= maximumConcurrent {
 		return nil, nil, false
 	}
 	cancellable, cancel := context.WithCancelCause(parent)
@@ -699,6 +794,53 @@ func (w *responseWriter) writeUntil(document []byte, maximum int, deadline time.
 	writeContext, cancelWrite := context.WithDeadlineCause(w.context, deadline, ErrIOTimeout)
 	defer cancelWrite()
 	return w.writeContext(writeContext, document, maximum)
+}
+
+func (w *responseWriter) writeShutdownNotification(
+	ctx context.Context,
+	document []byte,
+	deadline time.Time,
+	linearize func() error,
+) error {
+	if ctx == nil || linearize == nil || deadline.IsZero() || !time.Now().Before(deadline) {
+		return ErrShutdownNotificationInvalid
+	}
+	writeBase, cancelBase := context.WithCancelCause(ctx)
+	stopSessionCancellation := context.AfterFunc(w.context, func() {
+		cause := context.Cause(w.context)
+		if cause == nil {
+			cause = ErrShutdownNotificationUnavailable
+		}
+		cancelBase(cause)
+	})
+	if cause := context.Cause(w.context); cause != nil {
+		cancelBase(cause)
+	}
+	defer func() {
+		stopSessionCancellation()
+		cancelBase(nil)
+	}()
+	writeContext, cancelWrite := context.WithDeadlineCause(writeBase, deadline, ErrIOTimeout)
+	defer cancelWrite()
+	if err := acquireResponseWrite(writeContext, w.gate); err != nil {
+		return err
+	}
+	defer releaseResponseWrite(w.gate)
+	if cause := context.Cause(writeContext); cause != nil {
+		return cause
+	}
+	if err := linearize(); err != nil {
+		return err
+	}
+	err := WriteFrame(
+		runtimeBootstrapContextWriter{ctx: writeContext, channel: w.output},
+		document,
+		MaximumCanonicalControlFrameBytes,
+	)
+	if cause := context.Cause(writeContext); cause != nil {
+		return errors.Join(cause, err)
+	}
+	return err
 }
 
 func (w *responseWriter) buildAndWrite(maximum int, build func() ([]byte, error)) error {

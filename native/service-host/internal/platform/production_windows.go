@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
@@ -62,6 +63,7 @@ type windowsComposition struct {
 	rpcServer      *localrpc.Server
 
 	lifetime           context.Context
+	serviceStop        context.Context
 	supervisionStarted bool
 }
 
@@ -81,7 +83,7 @@ func (composition *windowsComposition) selectRole(
 	}
 	composition.options = options
 	composition.role = role
-	composition.lifetime = ctx
+	composition.serviceStop = ctx
 	return nil
 }
 
@@ -279,6 +281,7 @@ func (composition *windowsComposition) takeNodeStandardIO(ctx context.Context) e
 		return errors.New("guarded Node process is unavailable")
 	}
 	owner, err := composition.node.TakeStandardIO()
+	composition.lifetime = ctx
 	composition.nodeIO = owner
 	if err != nil {
 		return err
@@ -378,7 +381,8 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 	if composition.node == nil || composition.nodeOwner == nil ||
 		composition.nodeEndpoint == nil || composition.stderr == nil ||
 		composition.hostConnection == nil || composition.peerPipe == nil || composition.peerSession == nil ||
-		composition.serviceBootstrap == nil || composition.rpcServer == nil {
+		composition.serviceBootstrap == nil || composition.rpcServer == nil ||
+		composition.lifetime == nil || composition.serviceStop == nil {
 		return runtimeSupervision{}, errInvalidComposition
 	}
 	configuration := composition.runtimePlan.Configuration()
@@ -391,8 +395,11 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 		return runtimeSupervision{}, err
 	}
 	composition.supervisionStarted = true
-	return runtimeSupervision{
-		node: composition.nodeOwner,
+	runtime := runtimeSupervision{
+		node:                 composition.nodeOwner,
+		stopContext:          composition.serviceStop,
+		shutdownTimeout:      shutdownTimeout,
+		readShutdownDeadline: composition.rpcServer.ArmedShutdownDeadline,
 		serveLocalRPC: func(ctx context.Context) error {
 			return composition.rpcServer.Serve(ctx, composition.hostConnection, composition.hostConnection)
 		},
@@ -413,7 +420,20 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 		waitPeerWrapper: composition.peerSession.WaitWrapper,
 		waitPeerHost:    composition.peerSession.WaitPeer,
 		waitStderr:      func(context.Context) error { return composition.stderr.Wait() },
-	}, nil
+	}
+	if composition.role == config.RoleControl {
+		runtime.requestNodeShutdown = func(
+			ctx context.Context,
+			requestedAt time.Time,
+			deadline time.Time,
+		) error {
+			if err := composition.rpcServer.WaitUntilShutdownNotificationReady(ctx); err != nil {
+				return err
+			}
+			return composition.rpcServer.RequestShutdown(ctx, requestedAt, deadline)
+		}
+	}
+	return runtime, nil
 }
 
 func (composition *windowsComposition) cleanup() error {

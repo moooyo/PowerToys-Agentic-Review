@@ -28,6 +28,9 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - a per-launch HostControl endpoint with bounded overlapped-I/O ownership, cancellation,
   completion publication, cleanup, and fatal-operation quarantine;
 - a sealed zero-execution Claim policy derived from the committed runtime bootstrap;
+- a Control-only, bootstrap-bound `ShutdownRequested` notification serialized through the sole
+  HostControl writer, with one absolute graceful deadline and forced termination only after that
+  deadline or an earlier terminal failure;
 - a Windows platform factory that composes the verified startup, relay, supervision, and cleanup
   chain, plus an explicitly unavailable non-Windows factory; and
 - pure Go tests for those contracts.
@@ -37,8 +40,10 @@ installation verification, role-owned data roots, role credentials, preflight, p
 runtime bootstrap, guarded Node launch, HostControl, role-specific RPC, ARWX relay, lifecycle
 supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
 release profile and fail closed before using installed configuration. The current TypeScript role
-payloads also remain zero-execution foundations that emit no ARWX `Ready`, so this source must not
-be used to enable production execution. The non-Windows production factory remains unavailable.
+payloads remain zero-execution foundations: Executor can emit only the authenticated disabled
+`Ready` state (`ready=false`, `availableSlots=0`, `reasonCode=EXECUTION_DISABLED`), and Control never
+claims work. This source must not be used to enable production execution. The non-Windows production
+factory remains unavailable.
 
 ## Command line
 
@@ -95,6 +100,10 @@ termination reserve must also match exactly across the pair.
 HostControl use `shutdownTimeoutMilliseconds - forceTerminationReserveMilliseconds` as their
 graceful interval; the Node root-Job launcher receives only the reserve for forced termination.
 These intervals are sequential parts of one configured deadline, not two copies of the total.
+The Control ServiceHost sends the original Unix-millisecond deadline once over HostControl. Control
+maps it to a monotonic deadline without extending the local configured budget and copies the same
+Unix deadline into `Drain`; Executor applies the same non-extending mapping. Executor HostControl
+rejects `ShutdownRequested`, and native code never fabricates `Drain` or `Drained`.
 
 The immutable manifest, executables, Node payloads, and ProcessHost are strict descendants of
 `installation.root`. Administrator-managed CA material, the local-authority public key, and the
@@ -207,3 +216,7 @@ Remove-Item Env:GOOS, Env:GOARCH
 
 Cross-compilation is not Windows security evidence. Production enablement still requires native
 Windows x64 and arm64 token, DACL, Named Pipe, Job Object, process-tree, tamper, and failure tests.
+The shutdown bridge has passed the Linux `test-env` source, bundle, activation, and lifecycle
+matrices, but remains only a candidate until actual signed dual-role material, a production
+installer, physical installation evidence, and the paired native Windows service-stop and
+forced-termination matrix are complete.

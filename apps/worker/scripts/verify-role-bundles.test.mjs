@@ -18,6 +18,12 @@ import {
   verifyCanonicalRoleGraph,
   verifyReviewedInputDigest,
 } from "./verify-role-bundles.mjs";
+import {
+  verifyDormantExecutorAttemptReducer,
+  verifyZeroExecutionProductionArchitecture,
+} from "./verify-zero-execution-architecture.mjs";
+
+const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 test("clean build removes polluted output before producing role artifacts", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "worker-role-build-"));
@@ -65,6 +71,7 @@ test("exact role graph requires positive bytes from critical implementations", (
     policy.entryPoint,
     "apps/worker/src/service-host/runtime-bootstrap.ts",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+    "packages/local-protocol/src/handshake.ts",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs",
   ]) {
     assert.throws(() =>
@@ -77,15 +84,538 @@ test("exact role graph requires positive bytes from critical implementations", (
   }
 });
 
+test("role policies include the exact shadow-runtime source additions", () => {
+  const control = new Set(roleBundlePolicyForTest.control.allowedInputs);
+  const executor = new Set(roleBundlePolicyForTest.executor.allowedInputs);
+  for (const input of [
+    "apps/worker/src/contracts-formats.ts",
+    "apps/worker/src/control/host-control-api-common.ts",
+    "apps/worker/src/control/host-control-shadow-api.ts",
+    "apps/worker/src/control/shadow-supervisor.ts",
+    "apps/worker/src/server-client/errors.ts",
+    "packages/contracts/src/common.ts",
+    "packages/contracts/src/states.ts",
+    "packages/contracts/src/worker.ts",
+  ]) {
+    assert.equal(control.has(input), true, `Control policy is missing ${input}`);
+    assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
+  }
+  assert.equal(executor.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), true);
+  assert.equal(control.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), false);
+  assert.equal(control.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  assert.equal(executor.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  assert.equal(control.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
+  assert.equal(executor.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
+  for (const input of [
+    "packages/contracts/src/index.ts",
+    "packages/contracts/src/github.ts",
+    "packages/contracts/src/scheduling.ts",
+    "packages/contracts/src/dashboard.ts",
+    "packages/contracts/src/job-envelope.ts",
+  ]) {
+    assert.equal(control.has(input), false, `Control policy unexpectedly includes ${input}`);
+    assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
+  }
+  for (const input of executor) {
+    assert.doesNotMatch(
+      input,
+      /^(?:apps\/worker\/src\/(?:control|execution|server-client|workspaces?)\/|packages\/(?:codex|contracts)\/)/u,
+    );
+  }
+});
+
+test("shadow architecture remains zero execution and role separated", () => {
+  const controlMain = repositorySource("apps/worker/src/control-main.ts");
+  const executorMain = repositorySource("apps/worker/src/executor-main.ts");
+  const controlAdapter = repositorySource("apps/worker/src/control/host-control-shadow-api.ts");
+  const controlAdapterCommon = repositorySource(
+    "apps/worker/src/control/host-control-api-common.ts",
+  );
+  const controlRuntime = repositorySource("apps/worker/src/control/shadow-supervisor.ts");
+  const executorRuntime = repositorySource(
+    "apps/worker/src/service-host/executor-shadow-runtime.ts",
+  );
+  const runtimeBootstrap = repositorySource("apps/worker/src/service-host/runtime-bootstrap.ts");
+  const nativeBootstrap = repositorySource(
+    "native/service-host/internal/localrpc/runtime_bootstrap.go",
+  );
+
+  assert.match(controlMain, /installRuntime:\s*installControlZeroSlotShadowSupervisor/u);
+  assert.match(controlMain, /validateRuntimeSession:\s*isControlHostControlClient/u);
+  assert.match(executorMain, /installRuntime:\s*installExecutorShadowRuntime/u);
+  assert.match(executorMain, /validateRuntimeSession:\s*isExecutorHostControlSession/u);
+  assert.match(controlRuntime, /activation\.activated\.then\(/u);
+  assert.match(executorRuntime, /activation\.activated\.then\(/u);
+  assert.match(controlRuntime, /import \{ HostControlShadowApi \}/u);
+  assert.match(controlRuntime, /from "\.\/host-control-shadow-api\.js"/u);
+  assert.doesNotMatch(controlRuntime, /\bHostControlWorkerApi\b/u);
+  assert.doesNotMatch(controlAdapterCommon, /@agentic-review\/contracts/u);
+
+  const controlRoleConfig = sourceSection(
+    runtimeBootstrap,
+    "export const ControlFoundationRoleConfigV2Schema",
+    "export const ExecutorFoundationRoleConfigV2Schema",
+  );
+  const executorRoleConfig = sourceSection(
+    runtimeBootstrap,
+    "export const ExecutorFoundationRoleConfigV2Schema",
+    "export type ControlFoundationRoleConfigV2",
+  );
+  for (const section of [controlRoleConfig, executorRoleConfig]) {
+    assert.match(section, /executionEnabled:\s*Type\.Literal\(false\)/u);
+    assert.doesNotMatch(section, /executionEnabled:\s*Type\.Literal\(true\)/u);
+  }
+  assert.equal((nativeBootstrap.match(/"executionEnabled":\s+false/gu) ?? []).length, 2);
+  assert.doesNotMatch(nativeBootstrap, /"executionEnabled":\s+true/u);
+
+  const ready = sourceSection(
+    executorRuntime,
+    "const readyCandidate: ReadyMessage = {",
+    "const ready = validateReadyAfterHandshakeProofV1",
+  );
+  assert.match(ready, /ready:\s*false/u);
+  assert.match(ready, /availableSlots:\s*0/u);
+  assert.match(ready, /reasonCode:\s*"EXECUTION_DISABLED"/u);
+  assert.doesNotMatch(ready, /ready:\s*true/u);
+  assert.equal((executorRuntime.match(/messageType:\s*LocalMessageType\.Ready/gu) ?? []).length, 1);
+
+  assert.doesNotMatch(controlRuntime, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
+  assert.doesNotMatch(controlAdapter, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
+  assert.doesNotMatch(executorRuntime, /\b(?:server|mTLS|lease|workspace|process|Codex|Git)\b/iu);
+  assert.doesNotMatch(
+    executorRuntime,
+    /from\s+["'][^"']*(?:server-client|execution|workspace|process-host|codex|git)[^"']*["']/iu,
+  );
+});
+
+test("production role entrypoints and reachable imports remain zero execution", () => {
+  assert.doesNotThrow(() => verifyZeroExecutionProductionArchitecture());
+
+  const controlMainPath = "apps/worker/src/control-main.ts";
+  const executorMainPath = "apps/worker/src/executor-main.ts";
+  const roleEntrypointPath = "apps/worker/src/service-host/role-entrypoint.ts";
+  const contractsWorkerPath = "packages/contracts/src/worker.ts";
+  const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
+  const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
+  const controlMain = repositorySource(controlMainPath);
+  const executorMain = repositorySource(executorMainPath);
+  const roleEntrypoint = repositorySource(roleEntrypointPath);
+  const contractsWorker = repositorySource(contractsWorkerPath);
+  const localProtocolIndex = repositorySource(localProtocolIndexPath);
+  const dormantReducer = repositorySource(dormantReducerPath);
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        '"./control/shadow-supervisor.js"',
+        '"./execution/job-executor.js"',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: `${controlMain}\nprocess.exitCode = 0;\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "connect: async (options, signal) => {",
+        "connect: async (options, signal) => { return undefined;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        'if (options.role !== "control") throw new Error("Control connector received another role.");',
+        'if (options.role !== "control") throw new Error("Control connector received another role."); else return await connectHostControl(options, signal);',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "return await connectExecutorHostControl(options, signal);",
+        "return await connectExecutorHostControl(options, undefined);",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        "return await connectHostControl(options, signal);",
+        "await connectHostControl(options, signal);\n    return await connectHostControl(options, signal);",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "installRuntime: installExecutorShadowRuntime",
+        "installRuntime: installExecutionRuntime",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        '"./service-host/executor-shadow-runtime.js"',
+        '"./execution/executor-attempt-reducer.js"',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "../execution/job-executor.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "../execution/executor-attempt-reducer.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "@agentic-review/worker/execution";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport Forbidden = require("../execution/job-executor.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst load = require; load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst load = process.getBuiltinModule("node:module").createRequire(import.meta.url); load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst runtimeProcess = Reflect.get(global, "process"); const load = runtimeProcess["get" + "BuiltinModule"]("node:module").createRequire(import.meta.url); load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [contractsWorkerPath]: `${contractsWorker}\nexport * from "../../../apps/worker/src/execution/job-executor.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [localProtocolIndexPath]: `${localProtocolIndex}\nexport * from "../../../apps/worker/src/execution/executor-attempt-reducer.js";\n`,
+    }),
+  );
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [dormantReducerPath]: `${dormantReducer}\nconst scopeDrift = true;\n`,
+      }),
+    /review the complete file and update its pinned SHA-256/u,
+  );
+  assert.doesNotThrow(() =>
+    verifyZeroExecutionProductionArchitecture({
+      "apps/worker/src/execution/job-executor.ts": "this unconnected source is not parsed",
+    }),
+  );
+});
+
+test("dormant Executor attempt reducer remains import-free and synchronous", () => {
+  const reducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
+  const source = repositorySource(reducerPath);
+  assert.doesNotThrow(() => verifyDormantExecutorAttemptReducer(source));
+
+  for (const mutation of [
+    `${source}\nimport "node:fs";\n`,
+    `${source}\nvoid import("node:fs");\n`,
+    `${source}\nconst observedAt = Date.now();\n`,
+    `${source}\nconst pending = Promise.resolve();\n`,
+    `${source}\nexport let mutableState = 0;\n`,
+    `${source}\nexport const deferred = { run() {} };\n`,
+    `${source}\nconst mutableState = { count: 0 }; function advance() { mutableState.count += 1; }\n`,
+    `${source}\nexport enum HiddenState { Active }\n`,
+    `${source}\nexport class HiddenState { static state = {}; static { sideEffect(); } }\n`,
+    `${source}\nsideEffect();\n`,
+    replaceRequired(
+      source,
+      "  const identity = snapshotIdentity(identityValue);",
+      "  const deferredEffect = () => undefined;\n  deferredEffect();\n  const identity = snapshotIdentity(identityValue);",
+    ),
+    replaceRequired(
+      source,
+      "export class ExecutorAttemptReducerError extends Error {",
+      "export class ExecutorAttemptReducerError extends Error { static state = {};",
+    ),
+    `${source}\nasync function runLater() {}\n`,
+    `${source}\ntype DeferredEffect = () => void;\n`,
+    `${source}\nconst loader = new Function("return process");\n`,
+    `${source}\nconst builtin = global["process"]["getBuiltinModule"]("fs");\n`,
+    `${source}\nconst loader = ({}).constructor.constructor("return process");\n`,
+    `${source}\nconst runtimeProcess = Reflect.get(global, "process"); const load = runtimeProcess["get" + "BuiltinModule"]("node:module").createRequire(import.meta.url);\n`,
+  ]) {
+    assert.throws(() => verifyDormantExecutorAttemptReducer(mutation));
+  }
+});
+
+test("reviewed production and dormant source digests fence equivalent syntax drift", () => {
+  const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
+  const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
+  const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
+  const executorSource = repositorySource(executorPath);
+  const controlSource = repositorySource(controlPath);
+  const dormantReducerSource = repositorySource(dormantReducerPath);
+  const crlf = (source) => source.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+  assert.doesNotThrow(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: crlf(executorSource),
+      [controlPath]: crlf(controlSource),
+      [dormantReducerPath]: crlf(dormantReducerSource),
+    }),
+  );
+
+  for (const mutation of [`\uFEFF${executorSource}`, `${executorSource}\r`]) {
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: mutation }));
+  }
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [controlPath]: `${controlSource}\nconst reviewedScopeDrift = true;\n`,
+      }),
+    /review the complete file and update its pinned SHA-256/u,
+  );
+
+  let controlBypass = replaceRequired(
+    controlSource,
+    "if (message.messageType === LocalMessageType.HelloAck) {",
+    "if (message.messageType === LocalMessageType.HelloAck || message.messageType === 3) {",
+  );
+  controlBypass = replaceRequired(
+    controlBypass,
+    "        await this.#acceptHelloAck(message.payload as unknown as HelloAckMessage);",
+    `        if (message.messageType === 3) {
+          const bypassReady = message.payload as unknown as ReadyMessage;
+          this.#readyMessage = bypassReady;
+          this.#phase = "ready";
+          this.#ready.resolve(bypassReady);
+          return;
+        }
+        await this.#acceptHelloAck(message.payload as unknown as HelloAckMessage);`,
+  );
+  assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: controlBypass }));
+
+  let executorBypass = replaceRequired(
+    executorSource,
+    "  #settled = false;",
+    "  #settled = false;\n  readonly #alternateSend: (message: unknown) => Promise<void>;",
+  );
+  executorBypass = replaceRequired(
+    executorBypass,
+    "    this.#arwx = activation.arwx;",
+    "    this.#arwx = activation.arwx;\n    this.#alternateSend = activation.arwx.send.bind(activation.arwx);",
+  );
+  executorBypass = replaceRequired(
+    executorBypass,
+    '    this.#phase = "ready_disabled";',
+    `    await this.#alternateSend({
+      messageType: 3,
+      correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+      payload: ready,
+    });
+    this.#phase = "ready_disabled";`,
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({ [executorPath]: executorBypass }),
+  );
+});
+
+test("disabled Ready remains proof-bound and cannot advertise capacity", () => {
+  const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
+  const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
+  const source = repositorySource(executorPath);
+  const controlSource = repositorySource(controlPath);
+  for (const [before, after] of [
+    ["ready: false", "ready: true"],
+    ["availableSlots: 0", "availableSlots: 1"],
+    ['reasonCode: "EXECUTION_DISABLED"', 'reasonCode: "READY"'],
+    [
+      "validateReadyAfterHandshakeProofV1(readyCandidate, verified)",
+      "validateReadyAfterHandshakeProofV1(readyCandidate, proof)",
+    ],
+    ["verified = verifyControlProofMessageV1(", "verified = validateLocalMessagePayload("],
+    ["messageType: LocalMessageType.Ready,", 'messageType: LocalMessageType["Ready"],'],
+    [
+      "const ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);",
+      "let ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);\n    ready = readyCandidate;",
+    ],
+    [
+      "const readyCandidate: ReadyMessage = {",
+      "return;\n    const readyCandidate: ReadyMessage = {",
+    ],
+    [
+      "await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
+      "if (false) {\n      await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
+    ],
+  ]) {
+    let mutated = replaceRequired(source, before, after);
+    if (after.startsWith("if (false)")) {
+      mutated = replaceRequired(
+        mutated,
+        "      payload: ready,\n    });",
+        "      payload: ready,\n    });\n    }",
+      );
+    }
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: mutated }));
+  }
+
+  for (const [imported, alias, fake] of [
+    [
+      "verifyControlProofMessageV1",
+      "importedVerifyControlProofMessageV1",
+      "const verifyControlProofMessageV1 = (proof: unknown): never => proof as never;",
+    ],
+    [
+      "validateReadyAfterHandshakeProofV1",
+      "importedValidateReadyAfterHandshakeProofV1",
+      "const validateReadyAfterHandshakeProofV1 = (ready: unknown): never => ready as never;",
+    ],
+  ]) {
+    let fakeBinding = replaceRequired(source, `  ${imported},`, `  ${imported} as ${alias},`);
+    fakeBinding = replaceRequired(
+      fakeBinding,
+      "const nonceBytes = 32;",
+      `${fake}\nconst nonceBytes = 32;`,
+    );
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: fakeBinding }));
+  }
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "return await this.#handleControlProof(message);",
+        "return;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: `${source}\nconst extraReadyPath = { messageType: LocalMessageType.Ready };\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "const nonceBytes = 32;",
+        "const AlternateLocalMessageType = LocalMessageType;\nconst nonceBytes = 32;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "const drain = normalizePayload<DrainMessage>(message);",
+        `const drain = normalizePayload<DrainMessage>(message);
+    await this.#arwx.send({
+      messageType: 3 as never,
+      correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+      payload: drain,
+    });`,
+      ),
+    }),
+  );
+
+  const controlMutations = [
+    replaceRequired(controlSource, "ready.ready !== false", "ready.ready === false"),
+    replaceRequired(
+      controlSource,
+      "  const proof = context.proof;\n  if (",
+      "  const proof = context.proof;\n  return Object.freeze({ ...ready });\n  if (",
+    ),
+    replaceRequired(
+      controlSource,
+      "  const proof = context.proof;",
+      "  let proof = context.proof;",
+    ),
+    replaceRequired(
+      controlSource,
+      "const ready = validateControlReady(readyValue, signedHandshake);",
+      "const ready = Object.freeze({ ...readyValue });",
+    ),
+    replaceRequired(
+      controlSource,
+      "this.#acceptReady(message.payload as unknown as ReadyMessage);",
+      "this.#readyMessage = message.payload as unknown as ReadyMessage;",
+    ),
+    replaceRequired(
+      controlSource,
+      "message.messageType === LocalMessageType.Ready",
+      'message.messageType === LocalMessageType["Ready"]',
+    ),
+    replaceRequired(
+      controlSource,
+      'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
+      'const AlternateLocalMessageType = LocalMessageType;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
+    ),
+    replaceRequired(
+      controlSource,
+      "      if (message.messageType === LocalMessageType.Ready) {",
+      `      if (message.messageType === 3) {
+        this.#readyMessage = message.payload as unknown as ReadyMessage;
+        return;
+      }
+      if (message.messageType === LocalMessageType.Ready) {`,
+    ),
+    `${controlSource}\nvalidateControlReady = ((ready: Readonly<ReadyMessage>) => ready) as typeof validateControlReady;\n`,
+    `${controlSource}\nconst extraReadyReceivePath = { messageType: LocalMessageType.Ready };\n`,
+  ];
+  let fakeControlBinding = replaceRequired(
+    controlSource,
+    "  LocalMessageType,",
+    "  LocalMessageType as ImportedLocalMessageType,",
+  );
+  fakeControlBinding = replaceRequired(
+    fakeControlBinding,
+    'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
+    'const LocalMessageType = { Ready: "Ready" } as const;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
+  );
+  controlMutations.push(fakeControlBinding);
+  let deadCodeControl = replaceRequired(
+    controlSource,
+    "  if (\n    ready.protocolMajor",
+    "  if (\n    false && (\n      ready.protocolMajor",
+  );
+  deadCodeControl = replaceRequired(
+    deadCodeControl,
+    "    ready.reasonCode !== executionDisabledReason\n  ) {",
+    "      ready.reasonCode !== executionDisabledReason\n    )\n  ) {",
+  );
+  controlMutations.push(deadCodeControl);
+  for (const mutation of controlMutations) {
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: mutation }));
+  }
+});
+
 test("both role policies require the reviewed bootstrap handshake closure", () => {
   const sharedBootstrapInputs = [
     "apps/worker/src/service-host/arwx-shutdown.ts",
     "apps/worker/src/service-host/opaque-json.ts",
     "apps/worker/src/service-host/runtime-bootstrap.ts",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts",
+    "packages/local-protocol/src/handshake.ts",
   ];
   for (const role of ["control", "executor"]) {
-    const required = new Set(roleBundlePolicyForTest[role].requiredWorkerInputs);
+    const required = new Set(roleBundlePolicyForTest[role].requiredPositiveInputs);
     for (const input of sharedBootstrapInputs) assert.equal(required.has(input), true);
   }
   assert.equal(
@@ -129,6 +659,11 @@ test("reviewed role input digest rejects modified source bytes", () => {
 test("role TypeBox Value redirect accepts only exact importer and shim syntax", () => {
   assert.doesNotThrow(() =>
     verifyReviewedRoleTypeBoxValueImport('import { Value } from "@sinclair/typebox/value";'),
+  );
+  assert.doesNotThrow(() =>
+    verifyReviewedRoleTypeBoxValueImport(
+      repositorySource("apps/worker/src/control/host-control-api-common.ts"),
+    ),
   );
   const target =
     "../../../../node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs";
@@ -254,3 +789,21 @@ test("TypeBox constructor exception is path, digest, count, and shape bound", ()
     assert.throws(() => validateReviewedTypeBoxConstructorShapeForTest(mutated));
   }
 });
+
+function repositorySource(path) {
+  return readFileSync(resolve(repositoryRoot, path), "utf8");
+}
+
+function sourceSection(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(start, -1, `Missing source marker: ${startMarker}`);
+  assert.notEqual(end, -1, `Missing source marker: ${endMarker}`);
+  return source.slice(start, end);
+}
+
+function replaceRequired(source, before, after) {
+  const changed = source.replace(before, after);
+  assert.notEqual(changed, source, `Missing architecture mutation target: ${before}`);
+  return changed;
+}

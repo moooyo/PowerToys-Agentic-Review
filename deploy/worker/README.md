@@ -50,11 +50,12 @@ Run an elevated PowerShell session:
 
 Execution is disabled, and this installer explicitly rejects `-EnableExecution`. The native Windows
 ServiceHost composition and split role bundle foundations now exist, but the role business
-supervisors still emit no ARWX `Ready`. A replacement production installer must compile and sign the
-release profile, package the Control and Executor bundles plus native binaries, create both service
-identities and protected data roots, provision non-exportable keys, apply service and filesystem
-ACLs and firewall policy, and install machine-enforced Codex policy. Native Windows x64 and arm64
-verification under ADR 0007 remains mandatory before Claim authority can be enabled.
+supervisors permit only an authenticated disabled ARWX `Ready` state with zero available slots and
+`EXECUTION_DISABLED`. A replacement production installer must compile and sign the release profile,
+package the Control and Executor bundles plus native binaries, create both service identities and
+protected data roots, provision non-exportable keys, apply service and filesystem ACLs and firewall
+policy, and install machine-enforced Codex policy. Native Windows x64 and arm64 verification under
+ADR 0007 remains mandatory before Claim authority can be enabled.
 
 This legacy installer uses the virtual service account `NT SERVICE\AgenticReview.Worker`, removes
 inherited access from its secret directory, and grants that account only the filesystem permissions

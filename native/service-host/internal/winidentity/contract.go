@@ -277,9 +277,41 @@ func validateTokenEvidence(options Options, token TokenEvidence) error {
 		return err
 	}
 
-	seenPrivilegeNames := make(map[string]struct{}, len(token.Privileges))
-	seenPrivilegeLUIDs := make(map[LUID]struct{}, len(token.Privileges))
-	for _, privilege := range token.Privileges {
+	return validateReleaseTokenPrivileges(token.Privileges)
+}
+
+func validateReleaseProcessTokenEvidence(token TokenEvidence) error {
+	if token.Type != tokenPrimaryType {
+		return fmt.Errorf("%w: release token type is %d, want primary", ErrUnsafeToken, token.Type)
+	}
+	if token.User.SID == "" || token.User.Attributes != 0 {
+		return fmt.Errorf("%w: release token user SID is empty or attributes are nonzero", ErrUnsafeToken)
+	}
+	if token.User.SID == builtinAdministratorsSID {
+		return fmt.Errorf("%w: Administrators SID is the release token user", ErrAdministrativeToken)
+	}
+	if identity, forbidden := forbiddenTokenUserSIDs[token.User.SID]; forbidden {
+		return fmt.Errorf("%w: release token user is %s", ErrBuiltInServiceIdentity, identity)
+	}
+	groups, err := indexSIDEntries("release token groups", token.Groups)
+	if err != nil {
+		return err
+	}
+	if _, present := groups[builtinAdministratorsSID]; present {
+		return fmt.Errorf("%w: Administrators SID is present in the release token", ErrAdministrativeToken)
+	}
+	for sid, identity := range forbiddenTokenUserSIDs {
+		if _, present := groups[sid]; present {
+			return fmt.Errorf("%w: %s SID is present in the release token", ErrBuiltInServiceIdentity, identity)
+		}
+	}
+	return validateReleaseTokenPrivileges(token.Privileges)
+}
+
+func validateReleaseTokenPrivileges(privileges []PrivilegeEvidence) error {
+	seenPrivilegeNames := make(map[string]struct{}, len(privileges))
+	seenPrivilegeLUIDs := make(map[LUID]struct{}, len(privileges))
+	for _, privilege := range privileges {
 		if privilege.Name == "" || privilege.Attributes&^privilegeValidAttributes != 0 {
 			return fmt.Errorf("%w: privilege name or attributes are invalid", ErrUnsafeToken)
 		}

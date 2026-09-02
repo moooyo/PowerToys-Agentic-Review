@@ -25,11 +25,13 @@ import {
   type HostControlJsonObject,
   type HostControlOperation,
   HostControlProtocolError,
-  parseHostControlResponse,
+  type ParsedHostControlResponse,
+  type ParsedHostControlShutdownRequested,
+  parseHostControlInbound,
   validHostControlEntityId,
   validP256LowSSignature,
 } from "./host-control-protocol.js";
-import type { HostControlSession } from "./host-control-session.js";
+import type { HostControlSession, HostControlShutdownRequest } from "./host-control-session.js";
 import { type HostControlPipeSelector, isHostControlPipeSelector } from "./launch-contract.js";
 import {
   decodeHostControlOpaqueJson,
@@ -58,6 +60,7 @@ const defaultRequestTimeoutMs = 60_000;
 const defaultClaimTimeoutMs = 90_000;
 const defaultCancellationGraceMs = 10_000;
 const defaultCloseTimeoutMs = 15_000;
+const controlHostControlClients = new WeakSet<object>();
 
 const sessionFatalErrorCodes = new Set([
   "INVALID_FRAME",
@@ -101,7 +104,15 @@ export interface ControlHostControlClient extends HostControlSession<"control"> 
     options?: HostControlCallOptions,
   ): Promise<unknown>;
   signLocalDigest(digestSha256: string, options?: HostControlCallOptions): Promise<string>;
+  waitForIdle(absoluteDeadline: number): Promise<void>;
   armArwxShutdown(receipt: ArwxFinalFrameReceipt): Promise<Readonly<ArmArwxShutdownResultV1>>;
+}
+
+/** Recognizes only clients created by this reviewed Control connector. */
+export function isControlHostControlClient(
+  session: HostControlSession<"control">,
+): session is ControlHostControlClient {
+  return controlHostControlClients.has(session);
 }
 
 export type HostControlConnector = (
@@ -237,7 +248,9 @@ class HostControlRpcClient implements ControlHostControlClient {
   readonly #seenRequestIds = new Set<string>();
   readonly #closed = new Deferred<void>();
   readonly #failure = new Deferred<never>();
+  readonly #writableHalfClosed = new Deferred<void>();
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
+  readonly #shutdownRequested = new Deferred<Readonly<HostControlShutdownRequest<"control">>>();
   readonly #pendingEmptyWaiters = new Set<() => void>();
   readonly #frameReservations = new Set<FrameReservation>();
   readonly #runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"control">>;
@@ -247,13 +260,21 @@ class HostControlRpcClient implements ControlHostControlClient {
   #queuedWriteBytes = 0;
   #terminalError: HostControlClientError | undefined;
   #writableEndStarted = false;
+  #writableHalfCloseObserved = false;
+  #transportCloseObserved = false;
   #readableEndObserved = false;
+  #armOperation: Promise<Readonly<ArmArwxShutdownResultV1>> | undefined;
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
   #shutdownDeadline: number | undefined;
+  #shutdownNotificationReceived = false;
 
   public get done(): Promise<void> {
     return this.#done;
+  }
+
+  public get shutdownRequested(): Promise<Readonly<HostControlShutdownRequest<"control">>> {
+    return this.#shutdownRequested.promise;
   }
 
   public constructor(
@@ -265,6 +286,7 @@ class HostControlRpcClient implements ControlHostControlClient {
     this.#options = options;
     this.#runtimeBootstrap = runtimeBootstrap;
     this.bootstrap = runtimeBootstrap.parsed;
+    controlHostControlClients.add(this);
     void this.#done.then(undefined, () => undefined);
     stream.on("data", (chunk: Buffer | string) => {
       this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
@@ -342,12 +364,44 @@ class HostControlRpcClient implements ControlHostControlClient {
     return body.signatureP1363;
   }
 
-  public async armArwxShutdown(
+  public armArwxShutdown(
+    receipt: ArwxFinalFrameReceipt,
+  ): Promise<Readonly<ArmArwxShutdownResultV1>> {
+    const operation = this.#runArmArwxShutdown(receipt);
+    if (this.#armOperation === undefined) {
+      this.#armOperation = operation;
+      void operation.then(
+        () => this.#settleArmOperation(operation),
+        () => this.#settleArmOperation(operation),
+      );
+    }
+    return operation;
+  }
+
+  async #runArmArwxShutdown(
     receipt: ArwxFinalFrameReceipt,
   ): Promise<Readonly<ArmArwxShutdownResultV1>> {
     const shutdownDeadline = readArmArwxShutdownDeadline(this.#runtimeBootstrap, receipt);
-    if (shutdownDeadline !== undefined) this.#shutdownDeadline = shutdownDeadline;
-    this.#assertAccepting();
+    if (
+      shutdownDeadline !== undefined &&
+      this.#shutdownDeadline !== undefined &&
+      shutdownDeadline > this.#shutdownDeadline
+    ) {
+      failArwxFinalFrameReceipt(receipt);
+      const error = clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl ARWX receipt would extend the ServiceHost shutdown deadline.",
+      );
+      this.#fail(error);
+      throw error;
+    }
+    if (shutdownDeadline !== undefined) {
+      this.#shutdownDeadline = Math.min(
+        this.#shutdownDeadline ?? Number.POSITIVE_INFINITY,
+        shutdownDeadline,
+      );
+    }
+    this.#assertAccepting(true);
     if (
       this.#activeCalls !== 0 ||
       this.#pending.size !== 0 ||
@@ -374,7 +428,10 @@ class HostControlRpcClient implements ControlHostControlClient {
       throw error;
     }
     const details = readPreparedArmArwxShutdown(prepared);
-    this.#shutdownDeadline = details.absoluteDeadline;
+    this.#shutdownDeadline = Math.min(
+      this.#shutdownDeadline ?? Number.POSITIVE_INFINITY,
+      details.absoluteDeadline,
+    );
     let response: unknown;
     try {
       const pending = this.#call(
@@ -395,6 +452,23 @@ class HostControlRpcClient implements ControlHostControlClient {
       const draining = this.drain();
       draining.catch(() => undefined);
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      try {
+        await this.#awaitDrainPhase(
+          () => this.#writableHalfClosed.promise,
+          details.absoluteDeadline,
+        );
+      } catch {
+        if (this.#terminalError === undefined) {
+          this.#fail(
+            clientError(
+              "LIFECYCLE_TIMEOUT",
+              "HostControl ARWX shutdown arm missed its final settlement deadline.",
+            ),
+          );
+        }
+        throw this.#terminalError;
+      }
+      if (this.#terminalError !== undefined) throw this.#terminalError;
       return result;
     } catch {
       failPreparedArmArwxShutdown(prepared);
@@ -406,13 +480,59 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
   }
 
-  public drain(): Promise<void> {
-    this.#drainPromise ??= this.#drain();
+  public drain(absoluteDeadline?: number): Promise<void> {
+    this.#drainPromise ??= this.#drain(
+      selectShutdownDeadline(
+        absoluteDeadline,
+        this.#shutdownDeadline,
+        this.#options.closeTimeoutMs,
+      ),
+    );
     return this.#drainPromise;
   }
 
-  public close(): Promise<void> {
-    this.#closePromise ??= this.#close();
+  public async waitForIdle(absoluteDeadline: number): Promise<void> {
+    if (!Number.isFinite(absoluteDeadline) || this.#state !== "open") {
+      throw clientError(
+        "LIFECYCLE_STATE_INVALID",
+        "HostControl idle wait requires an open client and finite deadline.",
+      );
+    }
+    try {
+      const pendingTimeoutMs = remainingShutdownMilliseconds(absoluteDeadline);
+      await withDeadline(
+        Promise.race([this.#waitForPendingEmpty(), this.#failure.promise]),
+        pendingTimeoutMs,
+      );
+      remainingShutdownMilliseconds(absoluteDeadline);
+      const writeTimeoutMs = remainingShutdownMilliseconds(absoluteDeadline);
+      await withDeadline(Promise.race([this.#writeChain, this.#failure.promise]), writeTimeoutMs);
+      remainingShutdownMilliseconds(absoluteDeadline);
+    } catch {
+      if (this.#terminalError !== undefined) throw this.#terminalError;
+      throw clientError(
+        "LIFECYCLE_TIMEOUT",
+        "HostControl did not become idle before its shutdown deadline.",
+      );
+    }
+    if (
+      this.#activeCalls !== 0 ||
+      this.#pending.size !== 0 ||
+      this.#frameReservations.size !== 0 ||
+      this.#queuedWriteBytes !== 0
+    ) {
+      throw clientError("LIFECYCLE_STATE_INVALID", "HostControl idle ownership did not converge.");
+    }
+  }
+
+  public close(absoluteDeadline?: number): Promise<void> {
+    this.#closePromise ??= this.#close(
+      selectShutdownDeadline(
+        absoluteDeadline,
+        this.#shutdownDeadline,
+        this.#options.closeTimeoutMs,
+      ),
+    );
     return this.#closePromise;
   }
 
@@ -424,13 +544,20 @@ class HostControlRpcClient implements ControlHostControlClient {
     absoluteDeadline?: number,
   ): Promise<unknown> {
     this.#assertControlOperation();
-    this.#assertAccepting();
+    this.#assertAccepting(operation === "ArmArwxShutdown");
     if (signal?.aborted) {
       throw clientError("REQUEST_CANCELLED", "HostControl request was cancelled.");
     }
     if (this.#activeCalls >= this.#options.maximumConcurrentRequests) {
       throw clientError("CONCURRENCY_LIMIT", "HostControl concurrent request limit is reached.");
     }
+
+    const timeoutMs =
+      absoluteDeadline === undefined
+        ? operation === "Claim"
+          ? this.#options.claimTimeoutMs
+          : this.#options.requestTimeoutMs
+        : remainingShutdownMilliseconds(absoluteDeadline);
 
     const requestId = this.#allocateRequestId("call");
     let frame: Buffer;
@@ -463,12 +590,6 @@ class HostControlRpcClient implements ControlHostControlClient {
     };
     this.#pending.set(requestId, pending);
     this.#activeCalls += 1;
-    const timeoutMs =
-      absoluteDeadline === undefined
-        ? operation === "Claim"
-          ? this.#options.claimTimeoutMs
-          : this.#options.requestTimeoutMs
-        : remainingShutdownMilliseconds(absoluteDeadline);
     pending.timeout = setTimeout(() => {
       if (operation === "ArmArwxShutdown") {
         this.#fail(clientError("LIFECYCLE_TIMEOUT", "HostControl ARWX shutdown arm timed out."));
@@ -541,11 +662,53 @@ class HostControlRpcClient implements ControlHostControlClient {
     if (this.#state === "closed" || this.#state === "failed") return;
     try {
       for (const document of this.#decoder.push(chunk)) {
-        this.#handleResponse(document);
+        this.#handleInbound(document);
       }
     } catch {
       this.#fail(clientError("PROTOCOL_FAILURE", "HostControl response framing is invalid."));
     }
+  }
+
+  #handleInbound(document: Buffer): void {
+    const inbound = parseHostControlInbound(document);
+    if (inbound.type === "notification") {
+      this.#handleShutdownRequested(inbound);
+      return;
+    }
+    this.#handleResponse(inbound, document.byteLength);
+  }
+
+  #handleShutdownRequested(notification: ParsedHostControlShutdownRequested): void {
+    const expectedDuration =
+      this.bootstrap.bootstrap.shutdown.gracefulTimeoutMs -
+      this.bootstrap.bootstrap.shutdown.forceTerminationReserveMs;
+    const nowMonotonic = performance.now();
+    const nowUnix = Date.now();
+    const transportedDeadline = nowMonotonic + (notification.shutdownDeadlineUnixMs - nowUnix);
+    const absoluteDeadline = Math.min(transportedDeadline, nowMonotonic + expectedDuration);
+    if (
+      this.#state !== "open" ||
+      this.#shutdownNotificationReceived ||
+      notification.role !== "control" ||
+      notification.bootstrapId !== this.bootstrap.bootstrap.bootstrapId ||
+      notification.reasonCode !== "SERVICE_STOP" ||
+      notification.shutdownDeadlineUnixMs - notification.requestedAtUnixMs !== expectedDuration ||
+      notification.shutdownDeadlineUnixMs <= nowUnix ||
+      absoluteDeadline <= nowMonotonic
+    ) {
+      throw new HostControlProtocolError(
+        "ShutdownRequestedV1 does not bind the active Control session.",
+      );
+    }
+    this.#shutdownNotificationReceived = true;
+    const boundedDeadline = Math.min(
+      this.#shutdownDeadline ?? Number.POSITIVE_INFINITY,
+      absoluteDeadline,
+    );
+    this.#shutdownDeadline = boundedDeadline;
+    this.#shutdownRequested.resolve(
+      Object.freeze({ ...notification, role: "control", absoluteDeadline: boundedDeadline }),
+    );
   }
 
   #onEnd(): void {
@@ -577,6 +740,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   }
 
   #onClose(): void {
+    this.#transportCloseObserved = true;
     if (
       this.#shutdownDeadline !== undefined &&
       (this.#state === "armed" || this.#state === "draining") &&
@@ -604,21 +768,21 @@ class HostControlRpcClient implements ControlHostControlClient {
     if (
       this.#state === "open" ||
       this.#state === "arming" ||
-      (this.#state === "draining" && (this.#pending.size !== 0 || !this.#writableEndStarted))
+      ((this.#state === "armed" || this.#state === "draining") &&
+        !this.#writableHalfCloseObserved) ||
+      (this.#state === "draining" && this.#pending.size !== 0)
     ) {
       this.#fail(clientError("PROTOCOL_FAILURE", "HostControl peer closed unexpectedly."), false);
     }
-    if (this.#state !== "failed") this.#state = "closed";
-    this.#closed.resolve(undefined);
+    this.#tryFinalizeClose();
   }
 
-  #handleResponse(document: Buffer): void {
-    const response = parseHostControlResponse(document);
+  #handleResponse(response: ParsedHostControlResponse, documentBytes: number): void {
     const pending = this.#pending.get(response.requestId);
     if (pending === undefined) {
       throw new HostControlProtocolError("HostControl response has unknown correlation.");
     }
-    if (document.byteLength > pending.responseMaximumBytes) {
+    if (documentBytes > pending.responseMaximumBytes) {
       throw new HostControlProtocolError("HostControl response exceeds its operation limit.");
     }
     if (response.outcome === "error" && sessionFatalErrorCodes.has(response.error.code)) {
@@ -757,8 +921,8 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
   }
 
-  #assertAccepting(): void {
-    if (this.#state !== "open") {
+  #assertAccepting(allowShutdownArm = false): void {
+    if (this.#state !== "open" || (this.#shutdownNotificationReceived && !allowShutdownArm)) {
       throw (
         this.#terminalError ??
         clientError("CLIENT_CLOSED", "HostControl client is not accepting requests.")
@@ -771,8 +935,10 @@ class HostControlRpcClient implements ControlHostControlClient {
     this.#state = "failed";
     this.#terminalError = error;
     this.#failure.reject(error);
+    this.#shutdownRequested.reject(error);
     this.#rejectAll(error);
     for (const reservation of [...this.#frameReservations]) this.#releaseFrame(reservation);
+    this.#tryFinalizeClose();
     if (destroy) {
       try {
         this.#stream.destroy();
@@ -800,18 +966,37 @@ class HostControlRpcClient implements ControlHostControlClient {
   #endWritable(): Promise<void> {
     this.#writableEndStarted = true;
     return new Promise<void>((resolve, reject) => {
-      try {
-        this.#stream.end(resolve);
-      } catch (error) {
+      const rejectHalfClose = (): void => {
+        const error = clientError(
+          "PROTOCOL_FAILURE",
+          "HostControl writable half-close callback failed.",
+        );
+        this.#fail(error);
         reject(error);
+      };
+      try {
+        this.#stream.end((error?: Error | null) => {
+          if (error !== undefined && error !== null) {
+            rejectHalfClose();
+            return;
+          }
+          this.#writableHalfCloseObserved = true;
+          this.#writableHalfClosed.resolve(undefined);
+          resolve();
+        });
+      } catch {
+        rejectHalfClose();
       }
     });
   }
 
-  async #drain(): Promise<void> {
-    if (this.#state === "closed") return;
+  async #drain(deadline: number): Promise<void> {
+    if (this.#state === "closed") {
+      remainingShutdownMilliseconds(deadline);
+      return;
+    }
     if (this.#state === "failed") throw this.#terminalError;
-    if (this.#state === "closing") return this.close();
+    if (this.#state === "closing") return this.close(deadline);
     if (this.#state === "arming") {
       const error = clientError(
         "LIFECYCLE_STATE_INVALID",
@@ -821,14 +1006,12 @@ class HostControlRpcClient implements ControlHostControlClient {
       throw error;
     }
     this.#state = "draining";
-    const deadline = this.#shutdownDeadline ?? performance.now() + this.#options.closeTimeoutMs;
     try {
-      await this.#awaitDrainPhase(this.#waitForPendingEmpty(), deadline);
-      await this.#awaitDrainPhase(this.#writeChain, deadline);
-      await this.#awaitDrainPhase(this.#endWritable(), deadline);
-      await this.#awaitDrainPhase(this.#closed.promise, deadline);
+      await this.#awaitDrainPhase(() => this.#waitForPendingEmpty(), deadline);
+      await this.#awaitDrainPhase(() => this.#writeChain, deadline);
+      await this.#awaitDrainPhase(() => this.#endWritable(), deadline);
+      await this.#awaitDrainPhase(() => this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
-      if (this.#shutdownDeadline !== undefined) remainingShutdownMilliseconds(deadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
       const error = clientError("DRAIN_TIMEOUT", "HostControl drain did not finish in time.");
@@ -837,8 +1020,11 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
   }
 
-  async #close(): Promise<void> {
-    if (this.#state === "closed") return;
+  async #close(deadline: number): Promise<void> {
+    if (this.#state === "closed") {
+      remainingShutdownMilliseconds(deadline);
+      return;
+    }
     if (this.#state === "draining") {
       this.#fail(clientError("CLIENT_CLOSED", "HostControl drain was interrupted by close."));
     } else if (this.#state !== "failed") {
@@ -851,25 +1037,47 @@ class HostControlRpcClient implements ControlHostControlClient {
       // The close event or deadline below remains authoritative.
     }
     try {
-      const timeout =
-        this.#shutdownDeadline === undefined
-          ? this.#options.closeTimeoutMs
-          : remainingShutdownMilliseconds(this.#shutdownDeadline);
-      await withDeadline(this.#closed.promise, timeout);
-      if (this.#shutdownDeadline !== undefined) {
-        remainingShutdownMilliseconds(this.#shutdownDeadline);
-      }
+      await withDeadline(this.#closed.promise, remainingShutdownMilliseconds(deadline));
+      remainingShutdownMilliseconds(deadline);
     } catch {
       throw clientError("CLOSE_TIMEOUT", "HostControl stream did not close in time.");
     }
   }
 
-  #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    const timeout =
-      this.#shutdownDeadline === undefined
-        ? remainingMilliseconds(deadline)
-        : remainingShutdownMilliseconds(deadline);
-    return withDeadline(Promise.race([phase, this.#failure.promise]), timeout);
+  async #awaitDrainPhase<T>(createPhase: () => Promise<T>, deadline: number): Promise<T> {
+    const timeoutMs = remainingShutdownMilliseconds(deadline);
+    const phase = createPhase();
+    const result = await withDeadline(Promise.race([phase, this.#failure.promise]), timeoutMs);
+    remainingShutdownMilliseconds(deadline);
+    return result;
+  }
+
+  #settleArmOperation(operation: Promise<Readonly<ArmArwxShutdownResultV1>>): void {
+    if (this.#armOperation !== operation) return;
+    this.#armOperation = undefined;
+    this.#tryFinalizeClose();
+  }
+
+  #tryFinalizeClose(): void {
+    if (!this.#transportCloseObserved) return;
+    if (this.#state === "failed") {
+      this.#closed.resolve(undefined);
+      return;
+    }
+    if (this.#armOperation !== undefined) return;
+    if (
+      this.#state !== "closing" &&
+      (!this.#readableEndObserved ||
+        !this.#writableHalfCloseObserved ||
+        this.#activeCalls !== 0 ||
+        this.#pending.size !== 0 ||
+        this.#frameReservations.size !== 0 ||
+        (this.#state !== "armed" && this.#state !== "draining"))
+    ) {
+      return;
+    }
+    this.#state = "closed";
+    this.#closed.resolve(undefined);
   }
 }
 
@@ -1063,6 +1271,21 @@ function boundedTimeout(value: number): number {
 
 function remainingMilliseconds(deadline: number): number {
   return Math.max(1, deadline - performance.now());
+}
+
+function selectShutdownDeadline(
+  requested: number | undefined,
+  protocolDeadline: number | undefined,
+  configuredTimeoutMs: number,
+): number {
+  if (requested !== undefined && !Number.isFinite(requested)) {
+    throw new TypeError("HostControl shutdown deadline must be finite.");
+  }
+  return Math.min(
+    requested ?? Number.POSITIVE_INFINITY,
+    protocolDeadline ?? Number.POSITIVE_INFINITY,
+    performance.now() + configuredTimeoutMs,
+  );
 }
 
 function remainingShutdownMilliseconds(deadline: number): number {

@@ -43,6 +43,11 @@ func (*File) ReadAll(uint64) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
+// ReadAt fails closed outside Windows.
+func (*File) ReadAt([]byte, int64) (int, error) {
+	return 0, ErrUnsupportedPlatform
+}
+
 // HashSHA256 fails closed outside Windows.
 func (*File) HashSHA256(HashOptions) (HashResult, error) {
 	return HashResult{}, ErrUnsupportedPlatform

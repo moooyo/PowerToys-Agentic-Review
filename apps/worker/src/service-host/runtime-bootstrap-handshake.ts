@@ -2,17 +2,21 @@ import type { Duplex } from "node:stream";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import {
   type ArwxBootstrapReceiveLoopToken,
+  type ArwxDispatchScope,
   type ArwxFinalFrameBinding,
   type ArwxFinalFrameReceipt,
+  type ArwxInboundMessage,
+  type ArwxInboundMessageHandlerResult,
   type ArwxStdioChannel,
+  type ArwxStdioChannelError,
   consumeArwxBootstrapReceiveLoopToken,
   consumeArwxFinalFrameReceipt,
   readArwxFinalFrameReceiptDeadline,
 } from "./arwx-stdio-channel.js";
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
 import {
-  type ParsedRuntimeBootstrapV1,
   isParsedRuntimeBootstrapForRole,
+  type ParsedRuntimeBootstrapV1,
   parseRuntimeBootstrap,
   parseRuntimeBootstrapCommit,
   RUNTIME_BOOTSTRAP_MAXIMUM_BYTES,
@@ -44,6 +48,54 @@ export interface CompletedRuntimeBootstrap<TRole extends ServiceHostPayloadRole>
   readonly boundary: RuntimeBootstrapReadyBoundary<TRole>;
 }
 
+export type RuntimeBootstrapArwxDispatcherHandler = (
+  message: Readonly<ArwxInboundMessage>,
+  dispatch: Readonly<ArwxDispatchScope>,
+  signal: AbortSignal,
+) => ArwxInboundMessageHandlerResult | Promise<ArwxInboundMessageHandlerResult>;
+
+export interface RuntimeBootstrapArwxDispatcherActivation<TRole extends ServiceHostPayloadRole> {
+  readonly role: TRole;
+  readonly parsed: Readonly<ParsedRuntimeBootstrapV1>;
+  readonly boundary: RuntimeBootstrapReadyBoundary<TRole>;
+  readonly promotedOwner: unknown;
+  readonly signal: AbortSignal;
+}
+
+export interface RuntimeBootstrapArwxRuntimeOwner {
+  readonly handler: RuntimeBootstrapArwxDispatcherHandler;
+  readonly done: Promise<void>;
+  close(absoluteDeadline?: number): Promise<void>;
+}
+
+export type RuntimeBootstrapArwxDispatcherInstaller<TRole extends ServiceHostPayloadRole> = (
+  activation: Readonly<RuntimeBootstrapArwxDispatcherActivation<TRole>>,
+) => RuntimeBootstrapArwxRuntimeOwner;
+
+export type RuntimeBootstrapArwxDispatcherTerminal =
+  | {
+      readonly source: "arwx" | "runtime";
+      readonly outcome: "fulfilled";
+    }
+  | {
+      readonly source: "arwx" | "runtime";
+      readonly outcome: "rejected";
+      readonly error: unknown;
+    };
+
+declare const runtimeBootstrapArwxDispatcherGateBrand: unique symbol;
+
+export interface RuntimeBootstrapArwxDispatcherGate<
+  TRole extends ServiceHostPayloadRole = ServiceHostPayloadRole,
+> {
+  readonly role: TRole;
+  readonly done: Promise<void>;
+  readonly runtimeDone: Promise<void>;
+  readonly quiesced: Promise<void>;
+  readonly terminal: Promise<Readonly<RuntimeBootstrapArwxDispatcherTerminal>>;
+  readonly [runtimeBootstrapArwxDispatcherGateBrand]: true;
+}
+
 export class RuntimeBootstrapHandshakeError extends Error {
   public constructor(
     public readonly code:
@@ -63,27 +115,282 @@ interface BoundaryState<TRole extends ServiceHostPayloadRole = ServiceHostPayloa
   readonly role: TRole;
   readonly parsed: Readonly<ParsedRuntimeBootstrapV1>;
   readonly arwx: ArwxStdioChannel;
+  readonly dispatcherGate: RuntimeBootstrapArwxDispatcherGate<TRole>;
   readonly guardDone: Promise<void>;
   acknowledged: boolean;
   committed: boolean;
   shutdownAttempted: boolean;
 }
 
+interface DispatcherGateState<TRole extends ServiceHostPayloadRole = ServiceHostPayloadRole> {
+  readonly role: TRole;
+  readonly parsed: Readonly<ParsedRuntimeBootstrapV1>;
+  readonly arwx: ArwxStdioChannel;
+  readonly installer: RuntimeBootstrapArwxDispatcherInstaller<TRole>;
+  readonly cancellation: AbortController;
+  readonly receiveLoopToken: ArwxBootstrapReceiveLoopToken;
+  readonly runtimeReady: Deferred<RuntimeBootstrapArwxRuntimeOwner | undefined>;
+  readonly terminal: Deferred<Readonly<RuntimeBootstrapArwxDispatcherTerminal>>;
+  awaitingRuntimeAfterCleanArwx: boolean;
+  pendingArwxFailure: ArwxStdioChannelError | undefined;
+  runtimeDeadlineFailure: RuntimeBootstrapHandshakeError | undefined;
+  runtimeFulfillmentPending: boolean;
+  terminalOutcome: Readonly<RuntimeBootstrapArwxDispatcherTerminal> | undefined;
+  terminalObserver:
+    | ((source: RuntimeBootstrapArwxDispatcherTerminal["source"]) => void)
+    | undefined;
+  terminalObserverRegistered: boolean;
+  terminalSource: RuntimeBootstrapArwxDispatcherTerminal["source"] | undefined;
+  boundary: RuntimeBootstrapReadyBoundary<TRole> | undefined;
+  handler: RuntimeBootstrapArwxDispatcherHandler | undefined;
+  runtime: RuntimeBootstrapArwxRuntimeOwner | undefined;
+  runtimeClosePromise: Promise<void> | undefined;
+  runtimeSettlementTimer: NodeJS.Timeout | undefined;
+  shutdownDeadline: number | undefined;
+  phase: "prepared" | "active" | "terminal";
+}
+
+interface PreparedDispatcherActivation<TRole extends ServiceHostPayloadRole> {
+  readonly boundary: BoundaryState<TRole>;
+  readonly dispatcher: DispatcherGateState<TRole>;
+  readonly runtime: RuntimeBootstrapArwxRuntimeOwner;
+}
+
 const boundaryStates = new WeakMap<object, BoundaryState>();
+// Paired generic accessors preserve the exact role parameter for each opaque gate key.
+const dispatcherGateStates = new WeakMap<object, unknown>();
 const acknowledgedBootstraps = new WeakSet<object>();
 
-/** Issues a role-bound capability only after the configured ARWX receive loop is running. */
+function setDispatcherGateState<TRole extends ServiceHostPayloadRole>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+  state: DispatcherGateState<TRole>,
+): void {
+  dispatcherGateStates.set(gate, state);
+}
+
+function getDispatcherGateState<TRole extends ServiceHostPayloadRole>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+): DispatcherGateState<TRole> | undefined {
+  return dispatcherGateStates.get(gate) as DispatcherGateState<TRole> | undefined;
+}
+
+/** Starts the fixed pre-ACK router and returns its role-bound activation authority. */
+export function prepareRuntimeBootstrapArwxDispatcher<TRole extends ServiceHostPayloadRole>(
+  role: TRole,
+  parsed: Readonly<ParsedRuntimeBootstrapV1>,
+  arwx: ArwxStdioChannel,
+  installer: RuntimeBootstrapArwxDispatcherInstaller<TRole>,
+): RuntimeBootstrapArwxDispatcherGate<TRole> {
+  if (
+    parsed.bootstrap.role !== role ||
+    arwx.localRole !== role ||
+    arwx.state !== "open" ||
+    arwx.receiveLoopStarted ||
+    !isParsedRuntimeBootstrapForRole(parsed, role) ||
+    typeof installer !== "function"
+  ) {
+    throw handshakeError(
+      "BOOTSTRAP_INVALID",
+      "Runtime bootstrap dispatcher prerequisites are not satisfied.",
+    );
+  }
+
+  let gate!: RuntimeBootstrapArwxDispatcherGate<TRole>;
+  let earlyArwxTerminal: ArwxStdioChannelError | undefined;
+  const receiveLoop = arwx.startRuntimeBootstrapReceiveLoop(
+    async (message, dispatch, channelSignal) => {
+      const revoke = (): void => terminateRuntimeBootstrapArwxDispatcher(gate);
+      if (channelSignal.aborted) revoke();
+      else channelSignal.addEventListener("abort", revoke, { once: true });
+      try {
+        return await dispatchRuntimeBootstrapArwxMessage(gate, message, dispatch);
+      } finally {
+        channelSignal.removeEventListener("abort", revoke);
+      }
+    },
+    (error) => {
+      const state = getDispatcherGateState(gate);
+      if (state === undefined) {
+        earlyArwxTerminal = error;
+        return;
+      }
+      reserveArwxTerminalFailure(state, error);
+    },
+  );
+  const runtimeReady = new Deferred<RuntimeBootstrapArwxRuntimeOwner | undefined>();
+  let runtimeBound = false;
+  const runtimeDone = runtimeReady.promise.then((runtime) => {
+    if (runtime === undefined) return;
+    runtimeBound = true;
+    return runtime.done;
+  });
+  runtimeDone.catch(() => undefined);
+  const terminal = new Deferred<Readonly<RuntimeBootstrapArwxDispatcherTerminal>>();
+  gate = Object.freeze({
+    role,
+    done: receiveLoop.done,
+    runtimeDone,
+    quiesced: arwx.waitForQuiescence(),
+    terminal: terminal.promise,
+  }) as RuntimeBootstrapArwxDispatcherGate<TRole>;
+  const state: DispatcherGateState<TRole> = {
+    role,
+    parsed,
+    arwx,
+    installer,
+    cancellation: new AbortController(),
+    receiveLoopToken: receiveLoop.token,
+    runtimeReady,
+    terminal,
+    awaitingRuntimeAfterCleanArwx: false,
+    pendingArwxFailure: undefined,
+    runtimeDeadlineFailure: undefined,
+    runtimeFulfillmentPending: false,
+    terminalOutcome: undefined,
+    terminalObserver: undefined,
+    terminalObserverRegistered: false,
+    terminalSource: undefined,
+    boundary: undefined,
+    handler: undefined,
+    runtime: undefined,
+    runtimeClosePromise: undefined,
+    runtimeSettlementTimer: undefined,
+    shutdownDeadline: undefined,
+    phase: "prepared",
+  };
+  setDispatcherGateState(gate, state);
+  if (earlyArwxTerminal !== undefined) {
+    reserveArwxTerminalFailure(state, earlyArwxTerminal);
+  }
+  void receiveLoop.done.then(
+    () => {
+      if (state.terminalOutcome !== undefined) return;
+      if (state.runtime !== undefined) {
+        if (!reserveDispatcherTerminal(state, "runtime")) return;
+        state.awaitingRuntimeAfterCleanArwx = true;
+        if (state.runtimeFulfillmentPending) {
+          if (publishRuntimeTerminal(state, { outcome: "fulfilled" })) {
+            terminateDispatcherGateState(state, state.shutdownDeadline);
+          }
+          return;
+        }
+        waitForRuntimeAfterCleanArwx(state);
+        return;
+      }
+      publishDispatcherTerminal(state, state.terminalSource ?? "arwx", {
+        outcome: "fulfilled",
+      });
+      sealDispatcherGateState(state);
+    },
+    (error: unknown) => {
+      const source = state.runtimeFulfillmentPending ? "runtime" : (state.terminalSource ?? "arwx");
+      publishDispatcherTerminal(state, source, {
+        outcome: "rejected",
+        error: state.pendingArwxFailure ?? error,
+      });
+      terminateDispatcherGateState(state);
+    },
+  );
+  void runtimeDone.then(
+    () => {
+      if (!runtimeBound) return;
+      if (!reserveDispatcherTerminal(state, "runtime")) return;
+      if (state.arwx.hasActivePostDispatchWork) {
+        state.runtimeFulfillmentPending = true;
+        return;
+      }
+      if (state.arwx.hasActiveNonPostDispatchWork) {
+        if (state.runtimeClosePromise !== undefined) {
+          if (publishRuntimeTerminal(state, { outcome: "fulfilled" })) {
+            terminateDispatcherGateState(state, state.shutdownDeadline);
+          }
+          return;
+        }
+        const error = handshakeError(
+          "BOOTSTRAP_TRANSPORT_FAILED",
+          "Runtime completed while non-post-dispatch ARWX work was still active.",
+        );
+        publishRuntimeTerminal(state, { outcome: "rejected", error });
+        terminateDispatcherGateState(state);
+        state.arwx.abort();
+        return;
+      }
+      publishRuntimeTerminal(state, { outcome: "fulfilled" });
+      terminateDispatcherGateState(state);
+    },
+    (error: unknown) => {
+      if (!runtimeBound) return;
+      if (!publishRuntimeTerminal(state, { outcome: "rejected", error })) return;
+      terminateDispatcherGateState(state);
+    },
+  );
+  return gate;
+}
+
+/** Irreversibly revokes a prepared or active dispatcher without forwarding a caller reason. */
+export function terminateRuntimeBootstrapArwxDispatcher<TRole extends ServiceHostPayloadRole>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+): void {
+  const state = getDispatcherGateState(gate);
+  if (state !== undefined) terminateDispatcherGateState(state);
+}
+
+/** Installs the sole synchronous observer for the gate's first terminal reservation. */
+export function observeRuntimeBootstrapArwxDispatcherTerminalReservation<
+  TRole extends ServiceHostPayloadRole,
+>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+  observer: (source: RuntimeBootstrapArwxDispatcherTerminal["source"]) => void,
+): void {
+  const state = getDispatcherGateState(gate);
+  if (state === undefined || state.terminalObserverRegistered || typeof observer !== "function") {
+    throw handshakeError(
+      "BOOTSTRAP_INVALID",
+      "Runtime bootstrap terminal observer is unavailable.",
+    );
+  }
+  state.terminalObserverRegistered = true;
+  const source = state.terminalSource;
+  if (source !== undefined) {
+    notifyDispatcherTerminalObserver(observer, source);
+    return;
+  }
+  state.terminalObserver = observer;
+}
+
+/** Starts and joins the installed runtime's graceful close while its dispatcher remains live. */
+export function closeRuntimeBootstrapArwxDispatcher<TRole extends ServiceHostPayloadRole>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+  absoluteDeadline?: number,
+): Promise<void> {
+  const state = getDispatcherGateState(gate);
+  if (state === undefined) return Promise.resolve();
+  return startRuntimeClose(state, absoluteDeadline);
+}
+
+/** Issues a role-bound capability only after the fixed ARWX dispatcher gate is running. */
 export function createRuntimeBootstrapReadyBoundary<TRole extends ServiceHostPayloadRole>(
   role: TRole,
   parsed: Readonly<ParsedRuntimeBootstrapV1>,
   arwx: ArwxStdioChannel,
-  receiveLoopToken: ArwxBootstrapReceiveLoopToken,
+  dispatcherGate: RuntimeBootstrapArwxDispatcherGate<TRole>,
 ): RuntimeBootstrapReadyBoundary<TRole> {
+  const dispatcher = getDispatcherGateState(dispatcherGate);
   const effectiveGracefulTimeoutMs =
     parsed.bootstrap.shutdown.gracefulTimeoutMs -
     parsed.bootstrap.shutdown.forceTerminationReserveMs;
-  const guardDone = consumeArwxBootstrapReceiveLoopToken(receiveLoopToken, arwx, role);
+  const guardDone =
+    dispatcher === undefined
+      ? undefined
+      : consumeArwxBootstrapReceiveLoopToken(dispatcher.receiveLoopToken, arwx, role);
   if (
+    dispatcher === undefined ||
+    dispatcher.phase !== "prepared" ||
+    dispatcher.boundary !== undefined ||
+    dispatcher.role !== role ||
+    dispatcher.parsed !== parsed ||
+    dispatcher.arwx !== arwx ||
+    dispatcherGate.role !== role ||
     parsed.bootstrap.role !== role ||
     arwx.localRole !== role ||
     arwx.state !== "open" ||
@@ -94,16 +401,19 @@ export function createRuntimeBootstrapReadyBoundary<TRole extends ServiceHostPay
     !isParsedRuntimeBootstrapForRole(parsed, role) ||
     guardDone === undefined
   ) {
+    if (dispatcher !== undefined) terminateDispatcherGateState(dispatcher);
     throw handshakeError(
       "BOOTSTRAP_INVALID",
       "Runtime bootstrap readiness prerequisites are not satisfied.",
     );
   }
   const boundary = Object.freeze({ role }) as RuntimeBootstrapReadyBoundary<TRole>;
+  dispatcher.boundary = boundary;
   boundaryStates.set(boundary, {
     role,
     parsed,
     arwx,
+    dispatcherGate,
     guardDone,
     acknowledged: false,
     committed: false,
@@ -116,8 +426,11 @@ export function isCompletedRuntimeBootstrap(
   completed: Readonly<CompletedRuntimeBootstrap<ServiceHostPayloadRole>>,
 ): boolean {
   const state = boundaryStates.get(completed.boundary);
+  const dispatcher = state === undefined ? undefined : getDispatcherGateState(state.dispatcherGate);
   return (
     state?.committed === true &&
+    dispatcher?.phase === "active" &&
+    dispatcher.boundary === completed.boundary &&
     state.parsed === completed.parsed &&
     state.role === completed.role &&
     state.arwx.state === "open" &&
@@ -157,8 +470,10 @@ export function consumeCompletedRuntimeBootstrapForArwxShutdown<
   receipt: ArwxFinalFrameReceipt,
 ): Readonly<RuntimeBootstrapArwxShutdownBinding> | undefined {
   const state = boundaryStates.get(completed.boundary);
+  const dispatcher = state === undefined ? undefined : getDispatcherGateState(state.dispatcherGate);
   if (
     state === undefined ||
+    dispatcher === undefined ||
     state.shutdownAttempted ||
     state.committed !== true ||
     state.parsed !== completed.parsed ||
@@ -175,13 +490,14 @@ export function consumeCompletedRuntimeBootstrapForArwxShutdown<
   ) {
     return undefined;
   }
+  dispatcher.shutdownDeadline = finalFrame.absoluteDeadline;
   return Object.freeze({
     ...finalFrame,
     bootstrapId: state.parsed.bootstrap.bootstrapId,
   });
 }
 
-/** Completes Bootstrap -> ReadyAck -> Commit while retaining exclusive ownership of the stream. */
+/** Completes Bootstrap -> ReadyAck -> Commit -> dispatcher activation under one stream owner. */
 export async function performRuntimeBootstrapHandshake<
   TRole extends ServiceHostPayloadRole,
   TResult,
@@ -212,8 +528,15 @@ export async function performRuntimeBootstrapHandshake<
       throw handshakeError("BOOTSTRAP_INVALID", "Runtime bootstrap preparation failed.");
     }
     const state = boundaryStates.get(boundary);
+    const dispatcher =
+      state === undefined ? undefined : getDispatcherGateState(state.dispatcherGate);
     if (
       state === undefined ||
+      dispatcher === undefined ||
+      dispatcher.phase !== "prepared" ||
+      dispatcher.boundary !== boundary ||
+      dispatcher.parsed !== parsed ||
+      dispatcher.arwx !== state.arwx ||
       state.acknowledged ||
       state.committed ||
       acknowledgedBootstraps.has(parsed) ||
@@ -224,10 +547,11 @@ export async function performRuntimeBootstrapHandshake<
     ) {
       throw handshakeError("BOOTSTRAP_INVALID", "Runtime bootstrap readiness boundary is invalid.");
     }
-    readyState = state as BoundaryState<TRole>;
+    const boundState = state as BoundaryState<TRole>;
+    readyState = boundState;
     acknowledgedBootstraps.add(parsed);
-    state.acknowledged = true;
-    owner.watchGuard(state.guardDone);
+    boundState.acknowledged = true;
+    owner.watchGuard(boundState.guardDone);
     await owner.writeFrame(encodeRuntimeBootstrapReadyAck(parsed));
 
     const commitDocument = await owner.readFrame("commit");
@@ -239,22 +563,361 @@ export async function performRuntimeBootstrapHandshake<
         "RuntimeBootstrapCommitV1 validation failed.",
       );
     }
-    if (state.arwx.state !== "open" || !state.arwx.receiveLoopStarted) {
+    if (boundState.arwx.state !== "open" || !boundState.arwx.receiveLoopStarted) {
       throw handshakeError(
         "BOOTSTRAP_COMMIT_INVALID",
         "ARWX receive loop stopped before runtime bootstrap commit.",
       );
     }
     const completed = Object.freeze({ role, parsed, boundary });
-    const result = owner.promote(() => promote(completed));
-    state.committed = true;
+    const result = owner.promote(
+      () => promote(completed),
+      (promotedOwner) => prepareBoundaryDispatcherActivation(boundState, completed, promotedOwner),
+      activatePreparedDispatcherActivation,
+      commitPreparedDispatcherActivation,
+      rollbackPreparedDispatcherActivation,
+    );
     return result;
   } catch (error) {
+    if (readyState !== undefined) {
+      terminateRuntimeBootstrapArwxDispatcher(readyState.dispatcherGate);
+    }
     readyState?.arwx.abort();
     owner.abort();
     if (error instanceof RuntimeBootstrapHandshakeError) throw error;
     throw handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap transport failed.");
   }
+}
+
+async function dispatchRuntimeBootstrapArwxMessage<TRole extends ServiceHostPayloadRole>(
+  gate: RuntimeBootstrapArwxDispatcherGate<TRole>,
+  message: Readonly<ArwxInboundMessage>,
+  dispatch: Readonly<ArwxDispatchScope>,
+): Promise<ArwxInboundMessageHandlerResult> {
+  const state = getDispatcherGateState(gate);
+  if (
+    state === undefined ||
+    state.phase !== "active" ||
+    state.handler === undefined ||
+    state.boundary === undefined ||
+    boundaryStates.get(state.boundary)?.committed !== true
+  ) {
+    if (state !== undefined) terminateDispatcherGateState(state);
+    throw handshakeError(
+      "BOOTSTRAP_TRANSPORT_FAILED",
+      "ARWX business message arrived before its runtime dispatcher was activated.",
+    );
+  }
+  try {
+    return await state.handler(message, dispatch, state.cancellation.signal);
+  } catch (error) {
+    publishDispatcherTerminal(state, "runtime", { outcome: "rejected", error });
+    terminateDispatcherGateState(state);
+    throw error;
+  }
+}
+
+function prepareBoundaryDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  state: BoundaryState<TRole>,
+  completed: Readonly<CompletedRuntimeBootstrap<TRole>>,
+  promotedOwner: unknown,
+): PreparedDispatcherActivation<TRole> {
+  const dispatcher = getDispatcherGateState(state.dispatcherGate);
+  if (
+    state.committed ||
+    dispatcher === undefined ||
+    dispatcher.phase !== "prepared" ||
+    dispatcher.boundary !== completed.boundary ||
+    dispatcher.role !== completed.role ||
+    dispatcher.parsed !== completed.parsed ||
+    dispatcher.arwx !== state.arwx ||
+    dispatcher.arwx.state !== "open" ||
+    !dispatcher.arwx.receiveLoopStarted ||
+    dispatcher.cancellation.signal.aborted
+  ) {
+    if (dispatcher !== undefined) terminateDispatcherGateState(dispatcher);
+    throw handshakeError(
+      "BOOTSTRAP_COMMIT_INVALID",
+      "Runtime bootstrap dispatcher activation binding is invalid.",
+    );
+  }
+
+  let candidate: unknown;
+  try {
+    candidate = dispatcher.installer({
+      role: completed.role,
+      parsed: completed.parsed,
+      boundary: completed.boundary,
+      promotedOwner,
+      signal: dispatcher.cancellation.signal,
+    });
+  } catch {
+    terminateDispatcherGateState(dispatcher);
+    throw handshakeError(
+      "BOOTSTRAP_TRANSPORT_FAILED",
+      "Runtime bootstrap dispatcher installation failed.",
+    );
+  }
+  if (isAsyncRuntimeOwnerAndObserved(candidate) || !isRuntimeOwner(candidate)) {
+    terminateDispatcherGateState(dispatcher);
+    throw handshakeError(
+      "BOOTSTRAP_TRANSPORT_FAILED",
+      "Runtime bootstrap dispatcher installation did not return a synchronous runtime owner.",
+    );
+  }
+  const runtime = snapshotRuntimeOwner(candidate);
+  runtime.done.catch(() => undefined);
+  dispatcher.runtime = runtime;
+  if (
+    dispatcher.arwx.state !== "open" ||
+    !dispatcher.arwx.receiveLoopStarted ||
+    dispatcher.cancellation.signal.aborted
+  ) {
+    terminateDispatcherGateState(dispatcher);
+    throw handshakeError(
+      "BOOTSTRAP_TRANSPORT_FAILED",
+      "Runtime bootstrap dispatcher installation changed its activation boundary.",
+    );
+  }
+  return { boundary: state, dispatcher, runtime };
+}
+
+function activatePreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  prepared: PreparedDispatcherActivation<TRole>,
+): void {
+  const { boundary, dispatcher, runtime } = prepared;
+  dispatcher.handler = runtime.handler;
+  boundary.committed = true;
+  dispatcher.phase = "active";
+}
+
+function commitPreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  prepared: PreparedDispatcherActivation<TRole>,
+): void {
+  const { dispatcher, runtime } = prepared;
+  dispatcher.runtimeReady.resolve(runtime);
+}
+
+function rollbackPreparedDispatcherActivation<TRole extends ServiceHostPayloadRole>(
+  prepared: PreparedDispatcherActivation<TRole>,
+): void {
+  prepared.boundary.committed = false;
+  terminateDispatcherGateState(prepared.dispatcher);
+}
+
+function reserveDispatcherTerminal<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  source: RuntimeBootstrapArwxDispatcherTerminal["source"],
+): boolean {
+  if (state.terminalSource === undefined) {
+    state.terminalSource = source;
+    const observer = state.terminalObserver;
+    state.terminalObserver = undefined;
+    if (observer !== undefined) notifyDispatcherTerminalObserver(observer, source);
+  }
+  return state.terminalSource === source;
+}
+
+function reserveArwxTerminalFailure<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  error: ArwxStdioChannelError,
+): void {
+  state.pendingArwxFailure ??= error;
+  if (state.terminalSource === undefined) reserveDispatcherTerminal(state, "arwx");
+}
+
+function publishDispatcherTerminal<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  source: RuntimeBootstrapArwxDispatcherTerminal["source"],
+  outcome:
+    | { readonly outcome: "fulfilled" }
+    | { readonly outcome: "rejected"; readonly error: unknown },
+): boolean {
+  if (!reserveDispatcherTerminal(state, source)) return false;
+  if (state.terminalOutcome !== undefined) return false;
+  if (state.runtimeSettlementTimer !== undefined) {
+    clearTimeout(state.runtimeSettlementTimer);
+    state.runtimeSettlementTimer = undefined;
+  }
+  if (source === "runtime") state.runtimeFulfillmentPending = false;
+  if (source === "runtime") state.awaitingRuntimeAfterCleanArwx = false;
+  const terminal = Object.freeze({ source, ...outcome });
+  state.terminalOutcome = terminal;
+  state.terminal.resolve(terminal);
+  return true;
+}
+
+function publishRuntimeTerminal<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  outcome:
+    | { readonly outcome: "fulfilled" }
+    | { readonly outcome: "rejected"; readonly error: unknown },
+): boolean {
+  let checkedOutcome = outcome;
+  if (state.awaitingRuntimeAfterCleanArwx) {
+    const deadline = state.shutdownDeadline;
+    if (deadline === undefined || performance.now() >= deadline) {
+      state.runtimeDeadlineFailure ??= handshakeError(
+        "BOOTSTRAP_TRANSPORT_FAILED",
+        "Runtime did not settle before the ARWX shutdown deadline.",
+      );
+      checkedOutcome = { outcome: "rejected", error: state.runtimeDeadlineFailure };
+    }
+  }
+  return publishDispatcherTerminal(state, "runtime", checkedOutcome);
+}
+
+function waitForRuntimeAfterCleanArwx<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+): void {
+  if (state.runtimeSettlementTimer !== undefined || state.terminalOutcome !== undefined) return;
+  const deadline = state.shutdownDeadline;
+  const settleRuntime = (
+    outcome:
+      | { readonly outcome: "fulfilled" }
+      | { readonly outcome: "rejected"; readonly error: unknown },
+  ): void => {
+    if (!publishRuntimeTerminal(state, outcome)) return;
+    terminateDispatcherGateState(state, deadline);
+  };
+  if (deadline === undefined) {
+    settleRuntime({ outcome: "fulfilled" });
+    return;
+  }
+  const waitUntilDeadline = (): void => {
+    const remaining = deadline - performance.now();
+    if (remaining > 0) {
+      state.runtimeSettlementTimer = setTimeout(waitUntilDeadline, Math.max(1, remaining));
+      state.runtimeSettlementTimer.unref();
+      return;
+    }
+    state.runtimeSettlementTimer = undefined;
+    settleRuntime({ outcome: "fulfilled" });
+  };
+  waitUntilDeadline();
+  if (state.terminalOutcome !== undefined) return;
+  const closing = sealDispatcherGateState(state, deadline);
+  void closing.then(
+    () => settleRuntime({ outcome: "fulfilled" }),
+    (error: unknown) => settleRuntime({ outcome: "rejected", error }),
+  );
+}
+
+function notifyDispatcherTerminalObserver(
+  observer: (source: RuntimeBootstrapArwxDispatcherTerminal["source"]) => void,
+  source: RuntimeBootstrapArwxDispatcherTerminal["source"],
+): void {
+  try {
+    observer(source);
+  } catch {
+    // Terminal authority remains committed even if its sole observer fails.
+  }
+}
+
+function terminateDispatcherGateState<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  absoluteDeadline?: number,
+): Promise<void> {
+  if (state.phase !== "terminal") {
+    state.phase = "terminal";
+    state.handler = undefined;
+  }
+  state.cancellation.abort();
+  state.runtimeReady.resolve(state.runtime);
+  if (state.runtime === undefined && state.terminalOutcome === undefined) {
+    publishDispatcherTerminal(state, "arwx", {
+      outcome: "rejected",
+      error: handshakeError(
+        "BOOTSTRAP_TRANSPORT_FAILED",
+        "Runtime bootstrap dispatcher terminated before runtime activation.",
+      ),
+    });
+  }
+  const closing = startRuntimeClose(state, absoluteDeadline);
+  closing.catch(() => undefined);
+  return closing;
+}
+
+function sealDispatcherGateState<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  absoluteDeadline?: number,
+): Promise<void> {
+  if (state.phase !== "terminal") {
+    state.phase = "terminal";
+    state.handler = undefined;
+  }
+  state.runtimeReady.resolve(state.runtime);
+  const closing = startRuntimeClose(state, absoluteDeadline);
+  closing.catch(() => undefined);
+  return closing;
+}
+
+function startRuntimeClose<TRole extends ServiceHostPayloadRole>(
+  state: DispatcherGateState<TRole>,
+  absoluteDeadline = performance.now() +
+    state.parsed.bootstrap.shutdown.gracefulTimeoutMs -
+    state.parsed.bootstrap.shutdown.forceTerminationReserveMs,
+): Promise<void> {
+  const runtime = state.runtime;
+  if (runtime === undefined) return Promise.resolve();
+  state.runtimeClosePromise ??= Promise.resolve()
+    .then(() => runtime.close(absoluteDeadline))
+    .then(() => runtime.done);
+  state.runtimeClosePromise.catch(() => undefined);
+  return state.runtimeClosePromise;
+}
+
+function isRuntimeOwner(value: unknown): value is RuntimeBootstrapArwxRuntimeOwner {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<RuntimeBootstrapArwxRuntimeOwner>;
+  return (
+    typeof candidate.handler === "function" &&
+    candidate.done instanceof Promise &&
+    typeof candidate.close === "function"
+  );
+}
+
+function snapshotRuntimeOwner(
+  runtime: RuntimeBootstrapArwxRuntimeOwner,
+): RuntimeBootstrapArwxRuntimeOwner {
+  const handler = runtime.handler;
+  const done = runtime.done;
+  const close = runtime.close;
+  const boundHandler: RuntimeBootstrapArwxDispatcherHandler = (message, dispatch, signal) =>
+    handler.call(runtime, message, dispatch, signal);
+  return Object.freeze({
+    handler: boundHandler,
+    done,
+    close: (absoluteDeadline?: number) => close.call(runtime, absoluteDeadline),
+  });
+}
+
+function isAsyncRuntimeOwnerAndObserved(value: unknown): boolean {
+  try {
+    if (!isPromiseLike(value)) return false;
+    const observed = Promise.resolve(value).then(
+      (candidate) => {
+        try {
+          if (isRuntimeOwner(candidate)) bestEffortCloseAsyncRuntimeOwner(candidate);
+        } catch {
+          // The asynchronous installer result is already rejected as activation authority.
+        }
+      },
+      () => undefined,
+    );
+    observed.catch(() => undefined);
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function bestEffortCloseAsyncRuntimeOwner(runtime: RuntimeBootstrapArwxRuntimeOwner): void {
+  const snapshot = snapshotRuntimeOwner(runtime);
+  snapshot.done.catch(() => undefined);
+  const close = Promise.resolve().then(() => snapshot.close());
+  close.catch(() => undefined);
+  void Promise.allSettled([close, snapshot.done]);
 }
 
 function assertHandshakeArguments<TRole extends ServiceHostPayloadRole>(
@@ -327,6 +990,7 @@ class RuntimeBootstrapStreamOwner {
   readonly #chunks: Buffer[] = [];
   #bufferedBytes = 0;
   #pendingRead: PendingFrameRead | undefined;
+  #detached = false;
   #promoted = false;
   #terminalError: RuntimeBootstrapHandshakeError | undefined;
   readonly #deadlineTimer: NodeJS.Timeout;
@@ -345,21 +1009,33 @@ class RuntimeBootstrapStreamOwner {
       this.#fail(handshakeError("BOOTSTRAP_TIMEOUT", "Runtime bootstrap handshake timed out."));
     }, remaining);
     this.#deadlineTimer.unref();
-    stream.on("data", this.#onData);
-    stream.once("end", this.#onEnd);
-    stream.once("error", this.#onError);
-    stream.once("close", this.#onClose);
-    signal?.addEventListener("abort", this.#onAbort, { once: true });
-    if (signal?.aborted) {
-      this.#fail(
-        handshakeError("BOOTSTRAP_CANCELLED", "Runtime bootstrap handshake was cancelled."),
+    try {
+      stream.on("data", this.#onData);
+      stream.once("end", this.#onEnd);
+      stream.once("error", this.#onError);
+      stream.once("close", this.#onClose);
+      signal?.addEventListener("abort", this.#onAbort, { once: true });
+      if (signal?.aborted) {
+        this.#fail(
+          handshakeError("BOOTSTRAP_CANCELLED", "Runtime bootstrap handshake was cancelled."),
+        );
+      } else if (stream.destroyed || stream.readableEnded) {
+        this.#fail(
+          handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap stream is not readable."),
+        );
+      } else {
+        stream.resume();
+      }
+    } catch {
+      const failure = handshakeError(
+        "BOOTSTRAP_TRANSPORT_FAILED",
+        "Runtime bootstrap stream initialization failed.",
       );
-    } else if (stream.destroyed || stream.readableEnded) {
-      this.#fail(
-        handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap stream is not readable."),
-      );
-    } else {
-      stream.resume();
+      this.#fail(failure);
+      const terminal = this.#terminalError ?? failure;
+      this.#detach();
+      destroyHandshakeStream(stream);
+      throw terminal;
     }
   }
 
@@ -426,7 +1102,13 @@ class RuntimeBootstrapStreamOwner {
     );
   }
 
-  public promote<TResult>(factory: () => TResult): TResult {
+  public promote<TResult, TActivation>(
+    factory: () => TResult,
+    prepareActivation: (result: TResult) => TActivation,
+    activate: (activation: TActivation) => void,
+    commitActivation: (activation: TActivation) => void,
+    rollbackActivation: (activation: TActivation) => void,
+  ): TResult {
     if (
       this.#terminalError !== undefined ||
       this.#promoted ||
@@ -441,6 +1123,9 @@ class RuntimeBootstrapStreamOwner {
       );
     }
     this.stream.pause();
+    let activation!: TActivation;
+    let activationPrepared = false;
+    let activated = false;
     try {
       const result = factory();
       if (isPromiseLike(result)) {
@@ -456,11 +1141,36 @@ class RuntimeBootstrapStreamOwner {
           handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap promotion failed.")
         );
       }
+      activation = prepareActivation(result);
+      activationPrepared = true;
+      if (isPromiseLike(activation)) {
+        void Promise.resolve(activation).catch(() => undefined);
+        throw handshakeError(
+          "BOOTSTRAP_TRANSPORT_FAILED",
+          "Runtime bootstrap dispatcher activation preparation must be synchronous.",
+        );
+      }
+      if (this.#terminalError !== undefined || this.stream.destroyed || this.stream.readableEnded) {
+        throw (
+          this.#terminalError ??
+          handshakeError("BOOTSTRAP_TRANSPORT_FAILED", "Runtime bootstrap promotion failed.")
+        );
+      }
       this.#detach();
-      this.#promoted = true;
+      activate(activation);
+      activated = true;
       this.stream.resume();
+      if (this.stream.destroyed || this.stream.readableEnded) {
+        throw handshakeError(
+          "BOOTSTRAP_TRANSPORT_FAILED",
+          "Runtime bootstrap stream ended during final promotion.",
+        );
+      }
+      this.#promoted = true;
+      commitActivation(activation);
       return result;
     } catch (error) {
+      if (activated && activationPrepared) rollbackActivation(activation);
       this.abort();
       throw error;
     }
@@ -560,7 +1270,11 @@ class RuntimeBootstrapStreamOwner {
   #fail(error: RuntimeBootstrapHandshakeError): void {
     if (this.#promoted || this.#terminalError !== undefined) return;
     this.#terminalError = error;
-    this.stream.pause();
+    try {
+      this.stream.pause();
+    } catch {
+      // The canonical bootstrap failure remains authoritative.
+    }
     const pending = this.#pendingRead;
     this.#pendingRead = undefined;
     pending?.reject(error);
@@ -568,12 +1282,14 @@ class RuntimeBootstrapStreamOwner {
   }
 
   #detach(): void {
-    clearTimeout(this.#deadlineTimer);
-    this.signal?.removeEventListener("abort", this.#onAbort);
-    this.stream.removeListener("data", this.#onData);
-    this.stream.removeListener("end", this.#onEnd);
-    this.stream.removeListener("error", this.#onError);
-    this.stream.removeListener("close", this.#onClose);
+    if (this.#detached) return;
+    this.#detached = true;
+    bestEffortHandshakeCleanup(() => clearTimeout(this.#deadlineTimer));
+    bestEffortHandshakeCleanup(() => this.signal?.removeEventListener("abort", this.#onAbort));
+    bestEffortHandshakeCleanup(() => this.stream.removeListener("data", this.#onData));
+    bestEffortHandshakeCleanup(() => this.stream.removeListener("end", this.#onEnd));
+    bestEffortHandshakeCleanup(() => this.stream.removeListener("error", this.#onError));
+    bestEffortHandshakeCleanup(() => this.stream.removeListener("close", this.#onClose));
   }
 }
 
@@ -590,6 +1306,14 @@ function destroyHandshakeStream(stream: Duplex): void {
     stream.destroy();
   } catch {
     // The handshake cannot retain a stream after its startup deadline.
+  }
+}
+
+function bestEffortHandshakeCleanup(operation: () => void): void {
+  try {
+    operation();
+  } catch {
+    // Cleanup failures must not replace the canonical handshake outcome.
   }
 }
 

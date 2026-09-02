@@ -781,6 +781,25 @@ func TestConcurrencyReservationIncludesResponseWrite(t *testing.T) {
 	cancelThird(nil)
 }
 
+func TestSessionStateStartAtomicallyRejectsPostNotificationCalls(t *testing.T) {
+	state := newSessionState(10)
+	state.markShutdownRequested()
+	requestContext, cancel, accepted := state.start(
+		context.Background(),
+		"request:after-notification",
+		1,
+		time.Second,
+	)
+	if accepted || requestContext != nil || cancel != nil {
+		t.Fatalf(
+			"post-notification start = (%v, %v, %t), want rejected",
+			requestContext,
+			cancel,
+			accepted,
+		)
+	}
+}
+
 func TestSessionStateWaitForIdleUsesPublishedResponseBarrier(t *testing.T) {
 	state := newSessionState(10)
 	_, cancel, accepted := state.start(context.Background(), "request:1", 1, time.Second)
@@ -788,14 +807,62 @@ func TestSessionStateWaitForIdleUsesPublishedResponseBarrier(t *testing.T) {
 		t.Fatal("request did not start")
 	}
 	state.finishDispatch("request:1")
-	if state.waitForIdle(20 * time.Millisecond) {
+	if state.waitForIdle(context.Background(), 20*time.Millisecond) {
 		t.Fatal("waitForIdle completed before response ownership was released")
 	}
 	state.complete()
 	cancel(nil)
-	if !state.waitForIdle(time.Second) {
+	if !state.waitForIdle(context.Background(), time.Second) {
 		t.Fatal("waitForIdle missed the published response-idle barrier")
 	}
+}
+
+func TestSessionStateWaitForIdleStopsOnParentRuntimeCancellation(t *testing.T) {
+	state := newSessionState(10)
+	_, cancelRequest, accepted := state.start(
+		context.Background(),
+		"request:1",
+		1,
+		time.Second,
+	)
+	if !accepted {
+		t.Fatal("request did not start")
+	}
+	defer cancelRequest(nil)
+	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
+	cancelRuntime(errors.New("force deadline expired"))
+	if state.waitForIdle(runtimeContext, time.Second) {
+		t.Fatal("parent runtime cancellation did not interrupt handler join")
+	}
+	state.finishDispatch("request:1")
+	state.complete()
+}
+
+func TestServerShutdownJoinTimeoutUsesExistingLifecycleDeadline(t *testing.T) {
+	server := &Server{
+		options:  ServerOptions{ShutdownTimeout: 10 * time.Second},
+		shutdown: &arwxShutdownGate{requestedDeadline: time.Now().Add(time.Second)},
+	}
+	remaining := server.shutdownJoinTimeout()
+	if remaining <= 0 || remaining > time.Second {
+		t.Fatalf("bounded shutdown join timeout = %v", remaining)
+	}
+	server.shutdown.requestedDeadline = time.Now().Add(-time.Millisecond)
+	if remaining := server.shutdownJoinTimeout(); remaining != 0 {
+		t.Fatalf("expired shutdown join timeout = %v, want 0", remaining)
+	}
+
+	state := newSessionState(10)
+	_, cancel, accepted := state.start(context.Background(), "request:1", 1, time.Second)
+	if !accepted {
+		t.Fatal("test request did not start")
+	}
+	defer cancel(nil)
+	if state.waitForIdle(context.Background(), server.shutdownJoinTimeout()) {
+		t.Fatal("expired lifecycle deadline restarted handler shutdown wait")
+	}
+	state.finishDispatch("request:1")
+	state.complete()
 }
 
 func TestResponseWriterDoesNotStartWriteAfterBuildDeadline(t *testing.T) {
@@ -924,6 +991,7 @@ func defaultServerOptions() ServerOptions {
 }
 
 type serverHarness struct {
+	server  *Server
 	input   *io.PipeWriter
 	output  *io.PipeReader
 	done    chan error
@@ -1092,7 +1160,9 @@ func startServerHarness(
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(context.Background(), channel, channel) }()
-	return &serverHarness{input: inputWriter, output: outputReader, done: done, channel: channel}
+	return &serverHarness{
+		server: server, input: inputWriter, output: outputReader, done: done, channel: channel,
+	}
 }
 
 func permitClaimForServerTest(

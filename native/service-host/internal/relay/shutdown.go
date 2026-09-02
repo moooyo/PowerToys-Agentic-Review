@@ -62,7 +62,9 @@ type ControlPipeEndpoint interface {
 
 // RunRoleAware relays one verified Node session and one verified inter-service
 // pipe session. Unlike Run, it permits only the role-specific Drain/Drained
-// sequence to end cleanly. Every other termination is abortive.
+// sequence to end cleanly. Control Drain is delivered before its authorized
+// EOF; Executor Drained remains held until its authorized EOF. Every other
+// termination is abortive.
 func RunRoleAware(
 	ctx context.Context,
 	role Role,
@@ -316,6 +318,7 @@ func readRoleLocal(
 	defer workers.Done()
 	sequence := newFrameSequence()
 	var heldFinal []byte
+	finalForwarded := false
 	for {
 		value, err := endpoint.ReadFrame(ctx)
 		if err != nil {
@@ -337,7 +340,10 @@ func readRoleLocal(
 					return
 				}
 			}
-			deadline, err := authorizer.AuthorizeArwxEOF(ctx, heldFinal)
+			deadline, err := authorizer.AuthorizeArwxEOF(
+				ctx,
+				append([]byte(nil), heldFinal...),
+			)
 			if err != nil {
 				fail(errors.Join(ErrUnauthorizedEOF, err))
 				return
@@ -346,8 +352,15 @@ func readRoleLocal(
 				fail(err)
 				return
 			}
-			if err := queue.Enqueue(ctx, heldFinal); err != nil {
-				fail(normalizeContextError(ctx, fmt.Errorf("queue authorized final frame for inter-service pipe: %w", err)))
+			if role == RoleExecutor {
+				if err := queue.Enqueue(ctx, heldFinal); err != nil {
+					fail(normalizeContextError(ctx, fmt.Errorf("queue authorized final frame for inter-service pipe: %w", err)))
+					return
+				}
+				finalForwarded = true
+			}
+			if !finalForwarded {
+				fail(fmt.Errorf("%w: local final frame was not forwarded", ErrShutdownProtocol))
 				return
 			}
 			heldFinal = nil
@@ -385,6 +398,19 @@ func readRoleLocal(
 			}
 			heldFinal = append([]byte(nil), value...)
 			close(signals.localFinalObserved)
+			if role == RoleControl {
+				// Drain must reach Executor before Control can receive Drained. Keep heldFinal
+				// separate because queue ownership transfers after a successful enqueue.
+				if err := queue.Enqueue(ctx, append([]byte(nil), value...)); err != nil {
+					fail(normalizeContextError(ctx, fmt.Errorf("queue Control Drain for inter-service pipe: %w", err)))
+					return
+				}
+				if err := waitRoleSignal(ctx, signals.localFinalDelivered); err != nil {
+					fail(normalizeContextError(ctx, fmt.Errorf("deliver Control Drain to inter-service pipe: %w", err)))
+					return
+				}
+				finalForwarded = true
+			}
 			continue
 		}
 		if err := queue.Enqueue(ctx, value); err != nil {
@@ -465,7 +491,7 @@ func readRolePipe(
 		peerFinalSeen = true
 		close(signals.peerFinalObserved)
 		if role == RoleControl {
-			if err := waitRoleSignal(ctx, signals.localDirectionDrained); err != nil {
+			if err := waitRoleSignal(ctx, signals.localFinalDelivered); err != nil {
 				fail(normalizeContextError(ctx, fmt.Errorf("wait for Drain delivery: %w", err)))
 				return
 			}

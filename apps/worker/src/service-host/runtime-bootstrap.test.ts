@@ -4,18 +4,18 @@ import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
-  bootstrapDocument,
-  foundationRoleConfig,
-  testExecutorPolicySha256,
-  testLocalAuthorityKeyId,
-} from "./runtime-bootstrap.test-helpers.js";
-import {
   parseRuntimeBootstrap,
   parseRuntimeBootstrapCommit,
   RUNTIME_BOOTSTRAP_MAXIMUM_BYTES,
   RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
   RuntimeBootstrapError,
 } from "./runtime-bootstrap.js";
+import {
+  bootstrapDocument,
+  foundationRoleConfig,
+  testExecutorPolicySha256,
+  testLocalAuthorityKeyId,
+} from "./runtime-bootstrap.test-helpers.js";
 
 type MutableJsonObject = Record<string, unknown>;
 
@@ -35,7 +35,7 @@ describe("RuntimeBootstrapV1", () => {
     expect(parsed.localAuthorityPublicKey).toBeNull();
     expect(parsed.bootstrap.roleConfig).toEqual({
       base64Url:
-        "eyJleGVjdXRpb25FbmFibGVkIjpmYWxzZSwiZXhlY3V0b3JQb2xpY3lTaGEyNTYiOiI2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2IiwiZm91bmRhdGlvblZlcnNpb24iOjIsImxvY2FsQXV0aG9yaXR5S2V5SWQiOiI1Y2QyNTJmYjBjZTg5MzI0MzZmYWY4Y2NkMTA0MDk4MWI4OWVlNGFkNmI5ZmU5ZTJhMmI3ZTcxYWFjYjI3Y2QzIiwibWF4aW11bVNsb3RzIjoxLCJyb2xlIjoiY29udHJvbCJ9",
+        "eyJleGVjdXRpb25FbmFibGVkIjpmYWxzZSwiZXhlY3V0b3JQb2xpY3lTaGEyNTYiOiI2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2IiwiZm91bmRhdGlvblZlcnNpb24iOjIsImxvY2FsQXV0aG9yaXR5S2V5SWQiOiI1Y2QyNTJmYjBjZTg5MzI0MzZmYWY4Y2NkMTA0MDk4MWI4OWVlNGFkNmI5ZmU5ZTJhMmI3ZTcxYWFjYjI3Y2QzIiwibWF4aW11bVNsb3RzIjoxLCJyb2xlIjoiY29udHJvbCJ9",
       byteLength: 261,
       sha256: "c50978551cd0d98616fc5cdfaa041da4c45a6b3db99027aed05663ad8e81566b",
     });
@@ -379,6 +379,7 @@ describe("RuntimeBootstrapV1", () => {
 });
 
 function readSharedGolden(): Buffer {
+  // Biome must not reformat this wire fixture: Go and TypeScript bind its exact canonical bytes.
   const path = new URL(
     "../../../../native/service-host/internal/localrpc/testdata/runtime_bootstrap_v1.json",
     import.meta.url,

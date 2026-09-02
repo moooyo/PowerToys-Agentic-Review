@@ -2,16 +2,18 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { type Duplex, PassThrough } from "node:stream";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
-import {
-  type ArwxBootstrapReceiveLoop,
-  type ArwxInboundMessage,
-  ArwxStdioChannel,
-} from "./arwx-stdio-channel.js";
+import { ArwxStdioChannel } from "./arwx-stdio-channel.js";
 import type { ServiceHostPayloadRole } from "./launch-contract.js";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
   createRuntimeBootstrapReadyBoundary,
+  prepareRuntimeBootstrapArwxDispatcher,
+  type RuntimeBootstrapArwxDispatcherGate,
+  type RuntimeBootstrapArwxDispatcherHandler,
+  type RuntimeBootstrapArwxDispatcherInstaller,
+  type RuntimeBootstrapArwxRuntimeOwner,
   type RuntimeBootstrapPreparation,
+  terminateRuntimeBootstrapArwxDispatcher,
 } from "./runtime-bootstrap-handshake.js";
 
 interface BootstrapHostState {
@@ -91,7 +93,9 @@ export function bootstrapTestAck(stream: Duplex): Buffer | undefined {
 export function createTestBootstrapPreparation<TRole extends ServiceHostPayloadRole>(
   role: TRole,
   options: {
-    readonly handler?: (message: Readonly<ArwxInboundMessage>) => void | Promise<void>;
+    readonly handler?: RuntimeBootstrapArwxDispatcherHandler;
+    readonly installer?: RuntimeBootstrapArwxDispatcherInstaller<TRole>;
+    readonly onInstalled?: () => void;
     readonly onStarted?: (value: TestBootstrapArwxContext) => void;
   } = {},
 ): RuntimeBootstrapPreparation<TRole> {
@@ -107,16 +111,26 @@ export function createTestBootstrapPreparation<TRole extends ServiceHostPayloadR
         parsed.bootstrap.shutdown.gracefulTimeoutMs -
         parsed.bootstrap.shutdown.forceTerminationReserveMs,
     });
-    const receiveLoop = arwx.startRuntimeBootstrapReceiveLoop(
-      options.handler ??
-        (() => {
-          throw new Error("Test bootstrap guard rejects business messages.");
-        }),
+    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher(
+      role,
+      parsed,
+      arwx,
+      (activation) => {
+        options.onInstalled?.();
+        if (options.installer !== undefined) return options.installer(activation);
+        return createTestRuntimeOwner(
+          options.handler ??
+            (() => {
+              throw new Error("Test bootstrap dispatcher rejects business messages.");
+            }),
+        );
+      },
     );
-    options.onStarted?.({ arwx, input, output, receiveLoop });
+    options.onStarted?.({ arwx, input, output, receiveLoop: dispatcherGate });
     try {
-      return createRuntimeBootstrapReadyBoundary(role, parsed, arwx, receiveLoop.token);
+      return createRuntimeBootstrapReadyBoundary(role, parsed, arwx, dispatcherGate);
     } catch (error) {
+      terminateRuntimeBootstrapArwxDispatcher(dispatcherGate);
       arwx.abort();
       throw error;
     }
@@ -127,7 +141,25 @@ export interface TestBootstrapArwxContext {
   readonly arwx: ArwxStdioChannel;
   readonly input: PassThrough;
   readonly output: PassThrough;
-  readonly receiveLoop: Readonly<ArwxBootstrapReceiveLoop>;
+  readonly receiveLoop: RuntimeBootstrapArwxDispatcherGate;
+}
+
+function createTestRuntimeOwner(
+  handler: RuntimeBootstrapArwxDispatcherHandler,
+): RuntimeBootstrapArwxRuntimeOwner {
+  let resolveDone!: () => void;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  let closePromise: Promise<void> | undefined;
+  return Object.freeze({
+    handler,
+    done,
+    close(): Promise<void> {
+      closePromise ??= Promise.resolve().then(resolveDone);
+      return closePromise;
+    },
+  });
 }
 
 export function drainPayload(): Readonly<Record<string, unknown>> {
@@ -140,6 +172,7 @@ export function drainPayload(): Readonly<Record<string, unknown>> {
     sessionId: "fedcba98-7654-4210-aedc-ba9876543210",
     reasonCode: "SERVICE_STOP",
     requestedAtUnixMs: 1_700_000_000_000,
+    shutdownDeadlineUnixMs: 1_700_000_015_000,
   });
 }
 
