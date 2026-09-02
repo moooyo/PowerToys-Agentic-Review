@@ -1,4 +1,4 @@
-import { PassThrough, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import {
   decodeLocalFrame,
   encodeLocalFrame,
@@ -149,6 +149,90 @@ describe("ARWX standard-I/O channel", () => {
     expect(channel.state).toBe("failed");
   });
 
+  it.each(["control", "executor"] as const)(
+    "rejects %s drain when the output final callback reports an error",
+    async (role) => {
+      const input = new PassThrough();
+      const output = new DelayedFinalFailingWritable();
+      const channel = new ArwxStdioChannel({ localRole: role, input, output });
+      const running = channel.run(async (_message, dispatch) => {
+        const receipt =
+          role === "control"
+            ? dispatch.readFinalFrameReceipt()
+            : await dispatch.sendFinal(
+                {
+                  messageType: LocalMessageType.Drained,
+                  correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+                  payload: drainedPayload(),
+                },
+                performance.now() + 1_000,
+              );
+        return dispatch.createPostDispatchFinalFrameEffect(receipt, () => {
+          expect(consumeArwxFinalFrameReceipt(receipt, channel, role)).toBeDefined();
+          expect(commitArwxFinalFrameReceipt(receipt)).toBe(true);
+        });
+      });
+      const runningFailure = expect(running).rejects.toMatchObject({
+        code: "OUTPUT_FAILED",
+        message: "ARWX standard output finalization failed.",
+      });
+
+      if (role === "control") {
+        await channel.sendFinal(
+          {
+            messageType: LocalMessageType.Drain,
+            correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+            payload: drainPayload(),
+          },
+          performance.now() + 1_000,
+        );
+        input.end(drainedFrame(1n));
+      } else {
+        input.end(drainFrame(1n));
+      }
+      await waitFor(() => output.finalPending);
+      const draining = channel.drain();
+      const drainFailure = expect(draining).rejects.toMatchObject({
+        code: "OUTPUT_FAILED",
+        message: "ARWX standard output finalization failed.",
+      });
+      expect(await settlementByNextTurn(running)).toBe("pending");
+      expect(await settlementByNextTurn(draining)).toBe("pending");
+
+      output.failFinal();
+      expect(channel.state).toBe("failed");
+
+      await Promise.all([runningFailure, drainFailure]);
+      await expect(channel.waitForQuiescence()).resolves.toBeUndefined();
+      expect(channel.state).toBe("failed");
+      expect(output.writableFinished).toBe(false);
+    },
+  );
+
+  it("commits OUTPUT_FAILED when output.end throws synchronously", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.end = (() => {
+      throw new Error("injected synchronous output finalization failure");
+    }) as typeof output.end;
+    const channel = new ArwxStdioChannel({ localRole: "control", input, output });
+    const running = channel.run(() => undefined);
+    const runningFailure = expect(running).rejects.toMatchObject({
+      code: "OUTPUT_FAILED",
+      message: "ARWX standard output finalization failed.",
+    });
+    const draining = channel.drain();
+    const drainFailure = expect(draining).rejects.toMatchObject({
+      code: "OUTPUT_FAILED",
+      message: "ARWX standard output finalization failed.",
+    });
+
+    input.end();
+
+    await Promise.all([runningFailure, drainFailure]);
+    expect(channel.state).toBe("failed");
+  });
+
   it("issues a final receipt only after the write and rejects every later send", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
@@ -185,8 +269,7 @@ describe("ARWX standard-I/O channel", () => {
       const receipt = dispatch.readFinalFrameReceipt();
       scopedReceipt = receipt;
       return dispatch.createPostDispatchFinalFrameEffect(receipt, () => {
-        receiptConsumed =
-          consumeArwxFinalFrameReceipt(receipt, channel, "control") !== undefined;
+        receiptConsumed = consumeArwxFinalFrameReceipt(receipt, channel, "control") !== undefined;
         expect(commitArwxFinalFrameReceipt(receipt)).toBe(true);
       });
     });
@@ -205,7 +288,8 @@ describe("ARWX standard-I/O channel", () => {
 
     output.releaseNextWrite();
     const publicReceipt = await sending;
-    await Promise.all([running, channel.drain()]);
+    await running;
+    await channel.drain();
     expect(scopedReceipt).toBe(publicReceipt);
     expect(receiptConsumed).toBe(true);
     expect(channel.state).toBe("closed");
@@ -267,8 +351,7 @@ describe("ARWX standard-I/O channel", () => {
       const effect = dispatch.createPostDispatchFinalFrameEffect(receipt, () => {
         effectCalls += 1;
         events.push("effect:start");
-        receiptConsumed =
-          consumeArwxFinalFrameReceipt(receipt, channel, "executor") !== undefined;
+        receiptConsumed = consumeArwxFinalFrameReceipt(receipt, channel, "executor") !== undefined;
         expect(commitArwxFinalFrameReceipt(receipt)).toBe(true);
         events.push("effect:end");
       });
@@ -370,13 +453,15 @@ describe("ARWX standard-I/O channel", () => {
         },
         performance.now() + 1_000,
       );
+      void finalWrite.catch(() => undefined);
       throw new Error("injected synchronous dispatch failure");
     });
+    const runningFailure = expect(running).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
 
     input.write(drainFrame(1n));
     await waitFor(() => finalWrite !== undefined);
 
-    await expect(running).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
+    await runningFailure;
     await expect(definedPromise(finalWrite)).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
     expect(await settlementByNextTurn(channel.waitForQuiescence())).toBe("pending");
     output.releaseNextWrite();
@@ -454,6 +539,7 @@ describe("ARWX standard-I/O channel", () => {
     const running = channel.run((_message, dispatch) => {
       capturedScope = dispatch;
     });
+    const runningFailure = expect(running).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
     input.write(drainFrame(1n));
     await waitFor(() => capturedScope !== undefined);
 
@@ -467,7 +553,7 @@ describe("ARWX standard-I/O channel", () => {
         performance.now() + 1_000,
       ),
     ).rejects.toMatchObject({ code: "SHUTDOWN_STATE_INVALID" });
-    await expect(running).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
+    await runningFailure;
     expect(outputBytes).toBe(0);
   });
 
@@ -745,6 +831,29 @@ describe("ARWX standard-I/O channel", () => {
     await expect(channel.waitForQuiescence()).resolves.toBeUndefined();
   });
 
+  it("settles bootstrap done from definitive failure before a stuck input iterator exits", async () => {
+    const input = new NonTerminatingDestroyReadable();
+    const output = new PassThrough();
+    let terminalObservations = 0;
+    const channel = new ArwxStdioChannel({ localRole: "control", input, output });
+    const receiveLoop = channel.startRuntimeBootstrapReceiveLoop(
+      () => undefined,
+      () => {
+        terminalObservations += 1;
+      },
+    );
+    const doneFailure = expect(receiveLoop.done).rejects.toMatchObject({ code: "ABORTED" });
+
+    channel.abort();
+
+    await doneFailure;
+    expect(terminalObservations).toBe(1);
+    expect(input.destroyCalls).toBe(1);
+    expect(await settlementByNextTurn(channel.waitForQuiescence())).toBe("pending");
+    input.finish();
+    await expect(channel.waitForQuiescence()).resolves.toBeUndefined();
+  });
+
   it("lets an active business dispatch settle before entering drain", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
@@ -937,12 +1046,54 @@ class DelayedCallbackWritable extends Writable {
   }
 }
 
+class DelayedFinalFailingWritable extends Writable {
+  #finalCallback: ((error?: Error | null) => void) | undefined;
+
+  public get finalPending(): boolean {
+    return this.#finalCallback !== undefined;
+  }
+
+  public failFinal(): void {
+    const callback = this.#finalCallback;
+    if (callback === undefined) throw new Error("Expected a pending output final callback.");
+    this.#finalCallback = undefined;
+    callback(new Error("injected output final failure"));
+  }
+
+  public override _write(
+    _chunk: Buffer | string,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    callback();
+  }
+
+  public override _final(callback: (error?: Error | null) => void): void {
+    this.#finalCallback = callback;
+  }
+}
+
 class ThrowingDestroyPassThrough extends PassThrough {
   public destroyCalls = 0;
 
   public override destroy(_error?: Error): this {
     this.destroyCalls += 1;
     throw new Error("injected destroy failure");
+  }
+}
+
+class NonTerminatingDestroyReadable extends Readable {
+  public destroyCalls = 0;
+
+  public override _read(): void {}
+
+  public override destroy(_error?: Error): this {
+    this.destroyCalls += 1;
+    return this;
+  }
+
+  public finish(): void {
+    super.destroy();
   }
 }
 

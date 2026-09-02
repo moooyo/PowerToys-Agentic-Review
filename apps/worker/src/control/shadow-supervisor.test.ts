@@ -6,23 +6,23 @@ import type {
   WorkerRegistrationResponse,
 } from "@agentic-review/contracts";
 import {
+  type DecodedLocalFrame,
   encodeLocalFrame,
+  type HelloAckMessage,
+  type HelloMessage,
   IncrementalLocalFrameDecoder,
   LOCAL_PROTOCOL_NIL_CORRELATION_ID,
   LocalMessageType,
-  type DecodedLocalFrame,
-  type HelloAckMessage,
-  type HelloMessage,
   type ReadyMessage,
 } from "@agentic-review/local-protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkerApiError } from "../server-client/errors.js";
 import type { ArmArwxShutdownResultV1 } from "../service-host/arwx-shutdown.js";
 import {
+  type ArwxFinalFrameReceipt,
   ArwxStdioChannel,
   commitArwxFinalFrameReceipt,
   consumeArwxFinalFrameReceipt,
-  type ArwxFinalFrameReceipt,
 } from "../service-host/arwx-stdio-channel.js";
 import type { ControlHostControlClient } from "../service-host/host-control-client.js";
 import { parseRuntimeBootstrap } from "../service-host/runtime-bootstrap.js";
@@ -226,7 +226,9 @@ async function createHarness(
       sleep: overrides.sleep ?? ((_milliseconds, signal) => waitForAbort(signal)),
     },
   );
+  owner.done.catch(() => undefined);
   const running = arwx.run(owner.handler);
+  running.catch(() => undefined);
   let inboundSequence = 1n;
   return {
     api,
@@ -271,7 +273,8 @@ describe("Control zero-slot shadow supervisor", () => {
       () => harness.api.registrations.length === 1 && harness.api.heartbeats.length === 1,
     );
 
-    const registration = harness.api.registrations[0]!;
+    const registration = harness.api.registrations[0];
+    if (registration === undefined) throw new Error("Expected one shadow registration request.");
     expect(registration).toMatchObject({
       protocolVersion: "1.0",
       workerNodeId: hello.workerNodeId,
@@ -524,6 +527,37 @@ describe("Control zero-slot shadow supervisor", () => {
 
     await expect(closing).resolves.toBeUndefined();
     await expect(harness.running).resolves.toBeUndefined();
+  });
+
+  it("does not start a shutdown phase after its deadline has expired", async () => {
+    const harness = await createHarness();
+    await completeHandshake(harness);
+    harness.client.waitForIdleHandler = async () => {
+      throw new Error("late idle rejection must remain unreachable");
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    const now = vi.spyOn(performance, "now");
+    now.mockReturnValueOnce(0);
+    now.mockReturnValue(10);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const closing = harness.owner.close(10);
+      const closeFailure = expect(closing).rejects.toBeInstanceOf(Error);
+
+      await closeFailure;
+      await nextTurn();
+      expect(harness.client.idleWaits).toBe(0);
+      expect(hasOutbound(harness, LocalMessageType.Drain)).toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      now.mockRestore();
+      process.removeListener("unhandledRejection", onUnhandled);
+      harness.arwx.abort();
+      await harness.running.catch(() => undefined);
+    }
   });
 
   it("fails closed on upgrade-required server rejection", async () => {

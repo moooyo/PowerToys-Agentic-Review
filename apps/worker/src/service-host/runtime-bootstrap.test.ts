@@ -4,18 +4,18 @@ import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
-  bootstrapDocument,
-  foundationRoleConfig,
-  testExecutorPolicySha256,
-  testLocalAuthorityKeyId,
-} from "./runtime-bootstrap.test-helpers.js";
-import {
   parseRuntimeBootstrap,
   parseRuntimeBootstrapCommit,
   RUNTIME_BOOTSTRAP_MAXIMUM_BYTES,
   RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
   RuntimeBootstrapError,
 } from "./runtime-bootstrap.js";
+import {
+  bootstrapDocument,
+  foundationRoleConfig,
+  testExecutorPolicySha256,
+  testLocalAuthorityKeyId,
+} from "./runtime-bootstrap.test-helpers.js";
 
 type MutableJsonObject = Record<string, unknown>;
 

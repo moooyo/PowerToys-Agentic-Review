@@ -28,8 +28,8 @@ import {
   installBootstrapTestHost,
 } from "./runtime-bootstrap.test-helpers.js";
 import {
-  performRuntimeBootstrapHandshake,
   type CompletedRuntimeBootstrap,
+  performRuntimeBootstrapHandshake,
   type RuntimeBootstrapArwxDispatcherHandler,
   type RuntimeBootstrapArwxRuntimeOwner,
   type RuntimeBootstrapPreparation,
@@ -358,6 +358,7 @@ describe("ServiceHost role entrypoint", () => {
     {
       name: "rejected thenable",
       create: (failure: Error) => ({
+        // biome-ignore lint/suspicious/noThenProperty: This fixture intentionally models a rejected thenable.
         then: (_resolve: (value: unknown) => void, reject: (error: unknown) => void) => {
           reject(failure);
         },
@@ -779,6 +780,10 @@ describe("ServiceHost role entrypoint", () => {
     await expect(
       Promise.all([controlFoundation.close(), executorFoundation.close()]),
     ).resolves.toEqual([undefined, undefined]);
+    await expect(Promise.all([controlFoundation.done, executorFoundation.done])).resolves.toEqual([
+      { source: "runtime", outcome: "fulfilled" },
+      { source: "runtime", outcome: "fulfilled" },
+    ]);
 
     expect(controlFoundation.arwx.state).toBe("closed");
     expect(executorFoundation.arwx.state).toBe("closed");
@@ -825,6 +830,201 @@ describe("ServiceHost role entrypoint", () => {
     expect(await settlementByNextTurn(closing)).toBe("pending");
     handlerGate.release();
     await expect(closing).rejects.toMatchObject({ code: "INPUT_FAILED" });
+  });
+
+  it("keeps ARWX authority when post-dispatch cancellation settles runtime and HostControl", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const effectGate = createGate();
+    let effectStarted = false;
+    let host: FakeHostControlSession<"executor"> | undefined;
+    let resolveRuntime!: () => void;
+    const runtimeDone = new Promise<void>((resolve) => {
+      resolveRuntime = resolve;
+    });
+    const foundation = await openServiceHostRoleFoundation("executor", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("executor"),
+      input,
+      output,
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: (activation) => {
+        activation.signal.addEventListener(
+          "abort",
+          () => {
+            resolveRuntime();
+            void activation.hostControl.close();
+          },
+          { once: true },
+        );
+        return {
+          done: runtimeDone,
+          close: async () => undefined,
+          handler: async (_message, dispatch) => {
+            const receipt = await dispatch.sendFinal(
+              {
+                messageType: LocalMessageType.Drained,
+                correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+                payload: drainedPayload(),
+              },
+              performance.now() + 1_000,
+            );
+            return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+              effectStarted = true;
+              await effectGate.promise;
+            });
+          },
+        };
+      },
+      connect: async (options, signal) => {
+        host = await createFakeSession(
+          options,
+          signal,
+          (bootstrap) => new FakeHostControlSession("executor", bootstrap),
+        );
+        return host;
+      },
+    });
+    input.write(drainFrame(1n));
+    await waitFor(() => effectStarted);
+
+    input.destroy(new Error("ARWX failed during post-dispatch"));
+    const terminal = await foundation.done;
+    expect(terminal).toMatchObject({
+      source: "arwx",
+      outcome: "rejected",
+      error: { code: "INPUT_FAILED" },
+    });
+    expect(host?.closed).toBe(true);
+    const closing = foundation.close();
+    const closingFailure = closing.then(
+      () => ({ kind: "fulfilled" }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+    effectGate.release();
+
+    const closeOutcome = await closingFailure;
+    expect(closeOutcome.kind).toBe("rejected");
+    if (closeOutcome.kind !== "rejected") throw new Error("Expected cleanup rejection.");
+    if (terminal.outcome !== "rejected") throw new Error("Expected ARWX terminal rejection.");
+    expect(closeOutcome.error).toBe(terminal.error);
+  });
+
+  it("fails closed when runtime completion races an active non-final handler", async () => {
+    const input = new PassThrough();
+    const handlerGate = createGate();
+    let handlerStarted = false;
+    let resolveRuntime!: () => void;
+    const runtimeDone = new Promise<void>((resolve) => {
+      resolveRuntime = resolve;
+    });
+    const foundation = await openServiceHostRoleFoundation("executor", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("executor"),
+      input,
+      output: new PassThrough(),
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: () => ({
+        done: runtimeDone,
+        close: async () => undefined,
+        handler: () => {
+          handlerStarted = true;
+          return handlerGate.promise;
+        },
+      }),
+      connect: async (options, signal) =>
+        await createFakeSession(
+          options,
+          signal,
+          (bootstrap) => new FakeHostControlSession("executor", bootstrap),
+        ),
+    });
+    input.write(pingFrame());
+    await waitFor(() => handlerStarted);
+
+    resolveRuntime();
+    const terminal = await foundation.done;
+    expect(terminal).toMatchObject({
+      source: "runtime",
+      outcome: "rejected",
+      error: {
+        code: "BOOTSTRAP_TRANSPORT_FAILED",
+        message: "Runtime completed while non-post-dispatch ARWX work was still active.",
+      },
+    });
+    const closing = foundation.close();
+    const closingObserved = closing.then(
+      () => undefined,
+      () => undefined,
+    );
+    handlerGate.release();
+    await closingObserved;
+  });
+
+  it("upgrades provisional runtime fulfillment when its post-dispatch effect fails", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const effectGate = createGate();
+    let effectStarted = false;
+    let resolveRuntime!: () => void;
+    const runtimeDone = new Promise<void>((resolve) => {
+      resolveRuntime = resolve;
+    });
+    const foundation = await openServiceHostRoleFoundation("executor", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("executor"),
+      input,
+      output,
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: () => ({
+        done: runtimeDone,
+        close: async () => undefined,
+        handler: async (_message, dispatch) => {
+          const receipt = await dispatch.sendFinal(
+            {
+              messageType: LocalMessageType.Drained,
+              correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+              payload: drainedPayload(),
+            },
+            performance.now() + 1_000,
+          );
+          return dispatch.createPostDispatchFinalFrameEffect(receipt, async () => {
+            resolveRuntime();
+            effectStarted = true;
+            await effectGate.promise;
+            throw new Error("injected post-dispatch failure");
+          });
+        },
+      }),
+      connect: async (options, signal) =>
+        await createFakeSession(
+          options,
+          signal,
+          (bootstrap) => new FakeHostControlSession("executor", bootstrap),
+        ),
+    });
+    input.write(drainFrame(1n));
+    await waitFor(() => effectStarted);
+    expect(await settlementByNextTurn(foundation.done)).toBe("pending");
+
+    effectGate.release();
+
+    await expect(foundation.done).resolves.toMatchObject({
+      source: "runtime",
+      outcome: "rejected",
+      error: { code: "DISPATCH_FAILED" },
+    });
+    const closing = foundation.close();
+    const closingObserved = closing.then(
+      () => undefined,
+      () => undefined,
+    );
+    await closingObserved;
   });
 
   it("bounds cleanup when a zero-message runtime owner ignores close", async () => {
@@ -1167,7 +1367,11 @@ describe("ServiceHost role entrypoint", () => {
   });
 
   it("rejects full runtime activation when final HostControl promotion resume throws", async () => {
-    let activated: Promise<void> | undefined;
+    let activationOutcome:
+      | Promise<
+          { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly error: unknown }
+        >
+      | undefined;
     let runtimeStarted = false;
     let promoted: FakeHostControlSession<"control"> | undefined;
     const failure = await openServiceHostRoleFoundation("control", {
@@ -1178,22 +1382,20 @@ describe("ServiceHost role entrypoint", () => {
       output: new PassThrough(),
       validateRuntimeSession: isFakeHostControlSession,
       installRuntime: (activation) => {
-        activated = activation.activated;
-        void activation.activated.then(
+        activationOutcome = activation.activated.then(
           () => {
             runtimeStarted = true;
+            return { kind: "fulfilled" } as const;
           },
-          () => undefined,
+          (error: unknown) => ({ kind: "rejected", error }) as const,
         );
         return runtimeOwner(() => undefined);
       },
       connect: async (options, signal) => {
         const transport = new FakeBootstrapTransport("control");
         const resume = transport.resume.bind(transport);
-        let resumeCalls = 0;
         transport.resume = (() => {
-          resumeCalls += 1;
-          if (resumeCalls === 2) throw new Error("final promotion resume failed");
+          if (promoted !== undefined) throw new Error("final promotion resume failed");
           return resume();
         }) as typeof transport.resume;
         return await performRuntimeBootstrapHandshake(
@@ -1212,8 +1414,11 @@ describe("ServiceHost role entrypoint", () => {
 
     const primary = failure instanceof AggregateError ? failure.errors[0] : failure;
     expect(primary).toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
-    if (activated === undefined) throw new Error("Runtime activation was not exposed.");
-    await expect(activated).rejects.toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    if (activationOutcome === undefined) throw new Error("Runtime activation was not exposed.");
+    const activation = await activationOutcome;
+    expect(activation.kind).toBe("rejected");
+    if (activation.kind !== "rejected") throw new Error("Expected activation rejection.");
+    expect(activation.error).toBe(primary);
     expect(runtimeStarted).toBe(false);
     expect(promoted?.closeCalls).toBe(1);
   });
@@ -1292,10 +1497,17 @@ describe("ServiceHost role entrypoint", () => {
     expect(host?.closed).toBe(true);
   });
 
-  it("returns success for a pre-aborted external signal after a connector completes", async () => {
+  it("rejects a late connector result after external cancellation wins startup", async () => {
     const controller = new AbortController();
     controller.abort(new Error("already stopped"));
     let host: FakeHostControlSession<"control"> | undefined;
+    let lifecycleSignal: AbortSignal | undefined;
+    let activationOutcome:
+      | Promise<
+          { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly error: unknown }
+        >
+      | undefined;
+    let runtimeStarted = false;
     const running = runServiceHostRoleEntrypoint("control", {
       platform: "win32",
       environment: { NODE_ENV: "production" },
@@ -1303,6 +1515,18 @@ describe("ServiceHost role entrypoint", () => {
       input: new PassThrough(),
       output: new PassThrough(),
       signal: controller.signal,
+      validateRuntimeSession: isFakeHostControlSession,
+      installRuntime: (activation) => {
+        lifecycleSignal = activation.signal;
+        activationOutcome = activation.activated.then(
+          () => {
+            runtimeStarted = true;
+            return { kind: "fulfilled" } as const;
+          },
+          (error: unknown) => ({ kind: "rejected", error }) as const,
+        );
+        return runtimeOwner(() => undefined);
+      },
       connect: async (options) => {
         host = await createFakeSession(
           options,
@@ -1312,9 +1536,26 @@ describe("ServiceHost role entrypoint", () => {
         return host;
       },
     });
+    const runningOutcome = running.then(
+      () => ({ kind: "fulfilled" }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
 
-    await expect(running).resolves.toBeUndefined();
+    const outcome = await runningOutcome;
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind !== "rejected") throw new Error("Expected startup rejection.");
+    const primary =
+      outcome.error instanceof AggregateError ? outcome.error.errors[0] : outcome.error;
+    expect(primary).toMatchObject({ code: "ARWX_STDIO_INVALID" });
+    if (activationOutcome === undefined) throw new Error("Runtime activation was not exposed.");
+    const activation = await activationOutcome;
+    expect(activation.kind).toBe("rejected");
+    if (activation.kind !== "rejected") throw new Error("Expected activation rejection.");
+    expect(activation.error).toBe(primary);
+    expect(runtimeStarted).toBe(false);
+    expect(lifecycleSignal?.aborted).toBe(true);
     expect(host?.closed).toBe(true);
+    expect(host?.closeCalls).toBe(1);
   });
 
   it("returns success after an installed runtime completes orderly", async () => {
@@ -1701,6 +1942,16 @@ function pingFrame(): Buffer {
       probeId: "8".repeat(64),
       sentAtUnixMs: 1_700_000_000_000,
     },
+  });
+}
+
+function drainFrame(sequence: bigint): Buffer {
+  return encodeLocalFrame({
+    minorVersion: 0,
+    messageType: LocalMessageType.Drain,
+    sequence,
+    correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+    payload: drainPayload(),
   });
 }
 

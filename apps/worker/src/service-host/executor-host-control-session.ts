@@ -130,6 +130,8 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
   #terminalError: ExecutorHostControlError | undefined;
   #state: "open" | "arming" | "armed" | "draining" | "closing" | "closed" | "failed" = "open";
   #readableEndObserved = false;
+  #writableHalfCloseObserved = false;
+  #transportCloseObserved = false;
   #armPending:
     | {
         readonly id: string;
@@ -192,6 +194,7 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
       }
     });
     stream.once("close", () => {
+      this.#transportCloseObserved = true;
       if (
         this.#shutdownDeadline !== undefined &&
         (this.#state === "armed" || this.#state === "draining") &&
@@ -211,8 +214,19 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
           false,
         );
       }
-      if (this.#state !== "failed") this.#state = "closed";
-      this.#closed.resolve(undefined);
+      if (
+        (this.#state === "armed" || this.#state === "draining") &&
+        !this.#writableHalfCloseObserved
+      ) {
+        this.#fail(
+          executorError(
+            "PROTOCOL_FAILURE",
+            "Executor HostControl closed before writable shutdown authority settled.",
+          ),
+          false,
+        );
+      }
+      this.#tryFinalizeClose();
     });
   }
 
@@ -332,6 +346,7 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
             clearTimeout(pending.timeout);
             this.#armPending = undefined;
             pending.deferred.resolve(result);
+            this.#tryFinalizeClose();
           },
           () => undefined,
         );
@@ -339,6 +354,32 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
     } catch {
       this.#fail(executorError("PROTOCOL_FAILURE", "Executor HostControl Arm response failed."));
     }
+  }
+
+  #endWritable(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const rejectHalfClose = (): void => {
+        const error = executorError(
+          "PROTOCOL_FAILURE",
+          "Executor HostControl writable half-close callback failed.",
+        );
+        this.#fail(error);
+        reject(error);
+      };
+      try {
+        this.stream.end((error?: Error | null) => {
+          if (error !== undefined && error !== null) {
+            rejectHalfClose();
+            return;
+          }
+          this.#writableHalfCloseObserved = true;
+          this.#writableHalfClosed.resolve(undefined);
+          resolve();
+        });
+      } catch {
+        rejectHalfClose();
+      }
+    });
   }
 
   async #drain(deadline: number): Promise<void> {
@@ -358,18 +399,8 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
     }
     this.#state = "draining";
     try {
-      await this.#awaitDrainPhase(
-        new Promise<void>((resolve, reject) => {
-          try {
-            this.stream.end(resolve);
-          } catch (error) {
-            reject(error);
-          }
-        }),
-        deadline,
-      );
-      this.#writableHalfClosed.resolve(undefined);
-      await this.#awaitDrainPhase(this.#closed.promise, deadline);
+      await this.#awaitDrainPhase(() => this.#endWritable(), deadline);
+      await this.#awaitDrainPhase(() => this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
@@ -420,6 +451,7 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
       pending.deferred.reject(error);
     }
     this.#failure.reject(error);
+    this.#tryFinalizeClose();
     if (destroy) {
       try {
         this.stream.destroy();
@@ -429,13 +461,31 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
     }
   }
 
-  async #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    const result = await withTimeout(
-      Promise.race([phase, this.#failure.promise]),
-      remainingShutdownMilliseconds(deadline),
-    );
+  async #awaitDrainPhase<T>(createPhase: () => Promise<T>, deadline: number): Promise<T> {
+    const timeoutMs = remainingShutdownMilliseconds(deadline);
+    const phase = createPhase();
+    const result = await withTimeout(Promise.race([phase, this.#failure.promise]), timeoutMs);
     remainingShutdownMilliseconds(deadline);
     return result;
+  }
+
+  #tryFinalizeClose(): void {
+    if (!this.#transportCloseObserved) return;
+    if (this.#state === "failed") {
+      this.#closed.resolve(undefined);
+      return;
+    }
+    if (this.#armPending !== undefined) return;
+    if (
+      this.#state !== "closing" &&
+      (!this.#readableEndObserved ||
+        !this.#writableHalfCloseObserved ||
+        (this.#state !== "armed" && this.#state !== "draining"))
+    ) {
+      return;
+    }
+    this.#state = "closed";
+    this.#closed.resolve(undefined);
   }
 }
 

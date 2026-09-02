@@ -1,6 +1,6 @@
 import process from "node:process";
 import type { Readable, Writable } from "node:stream";
-import { ArwxStdioChannel, ArwxStdioChannelError } from "./arwx-stdio-channel.js";
+import { ArwxStdioChannel, type ArwxStdioChannelError } from "./arwx-stdio-channel.js";
 import type { HostControlSession } from "./host-control-session.js";
 import {
   type HostControlPipeSelector,
@@ -13,6 +13,7 @@ import {
   closeRuntimeBootstrapArwxDispatcher,
   createRuntimeBootstrapReadyBoundary,
   isCompletedRuntimeBootstrap,
+  observeRuntimeBootstrapArwxDispatcherTerminalReservation,
   prepareRuntimeBootstrapArwxDispatcher,
   type RuntimeBootstrapArwxDispatcherGate,
   type RuntimeBootstrapArwxRuntimeOwner,
@@ -346,22 +347,27 @@ export async function openServiceHostRoleFoundation<
     throw await rejectOpenedFoundation(primary, hostControl, arwxOwner, promotedHostControl);
   }
   runtimeActivation.resolve(undefined);
+  const terminalArbiter = createRoleTerminalArbiter();
+  observeRuntimeBootstrapArwxDispatcherTerminalReservation(ready.dispatcherGate, (source) =>
+    terminalArbiter.reserve(source),
+  );
+  void ready.dispatcherGate.terminal.then((terminal) => terminalArbiter.settle(terminal));
+  void hostControl.done.then(
+    () => undefined,
+    (error: unknown) =>
+      terminalArbiter.settle(Object.freeze({ source: "host-control", outcome: "rejected", error })),
+  );
   let removeRuntimeCancellation = (): void => undefined;
-  const runtimeCancellation = new Promise<Readonly<ServiceHostRoleTerminal>>((resolve) => {
-    const onAbort = (): void => resolve(fulfilledRoleTerminal("external"));
-    if (dependencies.signal?.aborted) {
-      resolve(fulfilledRoleTerminal("external"));
-      return;
-    }
+  const onAbort = (): void => {
+    terminalArbiter.settle(fulfilledRoleTerminal("external"));
+  };
+  if (dependencies.signal?.aborted) {
+    onAbort();
+  } else {
     dependencies.signal?.addEventListener("abort", onAbort, { once: true });
     removeRuntimeCancellation = () => dependencies.signal?.removeEventListener("abort", onAbort);
-  });
-  const done = Promise.race([
-    observeRoleTerminal("host-control", hostControl.done),
-    observeRoleTerminal("arwx", ready.dispatcherGate.done),
-    observeRoleTerminal("runtime", ready.dispatcherGate.runtimeDone),
-    runtimeCancellation,
-  ]);
+  }
+  const done = terminalArbiter.done;
   let closePromise: Promise<void> | undefined;
   return Object.freeze({
     launch,
@@ -606,14 +612,28 @@ async function settleBeforeDeadline(
   }
 }
 
-function observeRoleTerminal(
-  source: "host-control" | "arwx" | "runtime",
-  promise: Promise<void>,
-): Promise<Readonly<ServiceHostRoleTerminal>> {
-  return promise.then(
-    () => fulfilledRoleTerminal(source),
-    (error: unknown) => Object.freeze({ source, outcome: "rejected", error }),
-  );
+function createRoleTerminalArbiter(): Readonly<{
+  readonly done: Promise<Readonly<ServiceHostRoleTerminal>>;
+  reserve(source: ServiceHostRoleTerminal["source"]): boolean;
+  settle(terminal: Readonly<ServiceHostRoleTerminal>): boolean;
+}> {
+  const terminal = new Deferred<Readonly<ServiceHostRoleTerminal>>();
+  let winner: ServiceHostRoleTerminal["source"] | undefined;
+  let settled = false;
+  const reserve = (source: ServiceHostRoleTerminal["source"]): boolean => {
+    winner ??= source;
+    return winner === source;
+  };
+  return Object.freeze({
+    done: terminal.promise,
+    reserve,
+    settle(outcome: Readonly<ServiceHostRoleTerminal>): boolean {
+      if (!reserve(outcome.source) || settled) return false;
+      settled = true;
+      terminal.resolve(outcome);
+      return true;
+    },
+  });
 }
 
 function fulfilledRoleTerminal(
@@ -677,12 +697,19 @@ function gateRoleRuntimeActivation(
   const done = runtime.done;
   const close = runtime.close;
   done.catch(() => undefined);
+  const gatedDone = activated.then(() => done);
+  gatedDone.catch(() => undefined);
+  const guardedHandler: RuntimeBootstrapArwxRuntimeOwner["handler"] = async (
+    message,
+    dispatch,
+    signal,
+  ) => {
+    await activated;
+    return await handler.call(runtime, message, dispatch, signal);
+  };
   return Object.freeze({
-    handler: async (message, dispatch, signal) => {
-      await activated;
-      return await handler.call(runtime, message, dispatch, signal);
-    },
-    done: activated.then(() => done),
+    handler: guardedHandler,
+    done: gatedDone,
     close: (absoluteDeadline?: number) => close.call(runtime, absoluteDeadline),
   });
 }

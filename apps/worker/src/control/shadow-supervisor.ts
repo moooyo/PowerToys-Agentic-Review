@@ -8,29 +8,30 @@ import type {
   WorkerState,
 } from "@agentic-review/contracts";
 import {
+  type ControlProofMessage,
   createControlProofMessageV1,
   createHandshakeTranscriptSigningDigest,
   createHandshakeTranscriptV1,
   createSignedHandshakeProofV1,
-  LOCAL_PROTOCOL_NIL_CORRELATION_ID,
-  LocalMessageType,
-  type ControlProofMessage,
   type DeepReadonly,
   type DrainedMessage,
   type HelloAckMessage,
   type HelloMessage,
+  LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+  LocalMessageType,
   type ReadyMessage,
 } from "@agentic-review/local-protocol";
 import { WorkerApiError } from "../server-client/errors.js";
 import type {
   ArwxDispatchScope,
   ArwxInboundMessage,
+  ArwxInboundMessageHandlerResult,
   ArwxPostDispatchEffect,
 } from "../service-host/arwx-stdio-channel.js";
 import type { ControlHostControlClient } from "../service-host/host-control-client.js";
 import type { ServiceHostRoleRuntimeActivation } from "../service-host/role-entrypoint.js";
 import type { RuntimeBootstrapArwxRuntimeOwner } from "../service-host/runtime-bootstrap-handshake.js";
-import { HostControlShadowApi } from "./host-control-worker-api.js";
+import { HostControlShadowApi } from "./host-control-shadow-api.js";
 
 const executionDisabledReason = "EXECUTION_DISABLED" as const;
 const serviceStopReason = "SERVICE_STOP" as const;
@@ -121,9 +122,10 @@ export function installControlZeroSlotShadowSupervisor(
   );
   const done = initialized.promise.then((supervisor) => supervisor.done);
   done.catch(() => undefined);
+  const handler: RuntimeBootstrapArwxRuntimeOwner["handler"] = async (message, dispatch, signal) =>
+    await (await initialized.promise).handle(message, dispatch, signal);
   return Object.freeze({
-    handler: async (message, dispatch, signal) =>
-      await (await initialized.promise).handle(message, dispatch, signal),
+    handler,
     done,
     close: async (absoluteDeadline?: number) => {
       const supervisor = await initialized.promise;
@@ -254,7 +256,7 @@ class ControlZeroSlotShadowSupervisor {
     message: Readonly<ArwxInboundMessage>,
     dispatch: Readonly<ArwxDispatchScope>,
     signal: AbortSignal,
-  ): Promise<void | ArwxPostDispatchEffect> {
+  ): Promise<ArwxInboundMessageHandlerResult> {
     if (signal.aborted || this.#lifecycleSignal.aborted || this.#phase === "failed") {
       throw shadowError(
         "CONTROL_SHADOW_SHUTDOWN_INVALID",
@@ -278,7 +280,9 @@ class ControlZeroSlotShadowSupervisor {
         "Control received an ARWX message outside the zero-slot shadow protocol.",
       );
     } catch (error) {
-      this.#fail(error);
+      // The active ARWX dispatch owns the transport failure. Let its rejected handler
+      // commit DISPATCH_FAILED instead of racing it with a synthetic ABORTED terminal.
+      this.#fail(error, false);
       throw error;
     }
   }
@@ -651,13 +655,15 @@ class ControlZeroSlotShadowSupervisor {
     let ownershipFailure: { readonly error: unknown } | undefined;
     const running = this.#runPromise;
     try {
-      if (running !== undefined) await waitBeforeDeadline(running, deadline, this.#postArmSignal);
+      if (running !== undefined) {
+        await waitBeforeDeadline(() => running, deadline, this.#postArmSignal);
+      }
     } catch (error) {
       runFailure = { error };
     }
     try {
       await waitBeforeDeadline(
-        this.#hostLifecycle.waitForIdle(deadline),
+        () => this.#hostLifecycle.waitForIdle(deadline),
         deadline,
         this.#postArmSignal,
       );
@@ -688,23 +694,28 @@ class ControlZeroSlotShadowSupervisor {
     const ready = this.#requireReady();
     this.#phase = "closing";
     await waitBeforeDeadline(
-      this.#arwx.sendFinal(
-        {
-          messageType: LocalMessageType.Drain,
-          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
-          payload: sessionPayload(ready, {
-            reasonCode: serviceStopReason,
-            requestedAtUnixMs: boundedUnixMilliseconds(this.#nowUnixMs()),
-          }),
-        },
-        absoluteDeadline,
-      ),
+      () =>
+        this.#arwx.sendFinal(
+          {
+            messageType: LocalMessageType.Drain,
+            correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+            payload: sessionPayload(ready, {
+              reasonCode: serviceStopReason,
+              requestedAtUnixMs: boundedUnixMilliseconds(this.#nowUnixMs()),
+            }),
+          },
+          absoluteDeadline,
+        ),
       absoluteDeadline,
       this.#lifecycleSignal,
     );
-    await waitBeforeDeadline(this.#shutdownArmed.promise, absoluteDeadline, this.#lifecycleSignal);
     await waitBeforeDeadline(
-      this.#arwx.drain(absoluteDeadline),
+      () => this.#shutdownArmed.promise,
+      absoluteDeadline,
+      this.#lifecycleSignal,
+    );
+    await waitBeforeDeadline(
+      () => this.#arwx.drain(absoluteDeadline),
       absoluteDeadline,
       this.#postArmSignal,
     );
@@ -730,7 +741,7 @@ class ControlZeroSlotShadowSupervisor {
     while (this.#activeServerOperations.size !== 0) {
       const active = [...this.#activeServerOperations];
       await waitBeforeDeadline(
-        Promise.allSettled(active).then(() => undefined),
+        () => Promise.allSettled(active).then(() => undefined),
         absoluteDeadline,
         this.#postArmSignal,
       );
@@ -741,14 +752,14 @@ class ControlZeroSlotShadowSupervisor {
     if (this.#phase !== "failed") this.#completion.resolve(undefined);
   }
 
-  #fail(error: unknown): void {
+  #fail(error: unknown, abortArwx = true): void {
     if (this.#phase === "failed" || this.#phase === "closed") return;
     this.#phase = "failed";
     this.#serverCancellation.abort();
     this.#ready.reject(error);
     this.#shutdownArmed.reject(error);
     this.#completion.reject(error);
-    this.#arwx.abort();
+    if (abortArwx) this.#arwx.abort();
   }
 }
 
@@ -941,7 +952,7 @@ async function callBounded<T>(
 }
 
 async function waitBeforeDeadline<T>(
-  promise: Promise<T>,
+  createPromise: () => Promise<T>,
   absoluteDeadline: number,
   signal: AbortSignal,
 ): Promise<T> {
@@ -954,6 +965,7 @@ async function waitBeforeDeadline<T>(
   const stopped = new Promise<never>((_resolve, reject) => {
     rejectStopped = reject;
   });
+  stopped.catch(() => undefined);
   const stop = (): void => {
     rejectStopped(
       shadowError(
@@ -963,6 +975,13 @@ async function waitBeforeDeadline<T>(
     );
   };
   signal.addEventListener("abort", stop, { once: true });
+  if (signal.aborted) {
+    signal.removeEventListener("abort", stop);
+    throw shadowError(
+      "CONTROL_SHADOW_SHUTDOWN_INVALID",
+      "Control shadow shutdown authority was revoked.",
+    );
+  }
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(
       () => reject(shadowError("CONTROL_SHADOW_TIMEOUT", "Control shadow shutdown timed out.")),
@@ -971,6 +990,7 @@ async function waitBeforeDeadline<T>(
     timer.unref();
   });
   try {
+    const promise = createPromise();
     const value = await Promise.race([promise, timeout, stopped]);
     if (performance.now() >= absoluteDeadline) {
       throw shadowError("CONTROL_SHADOW_TIMEOUT", "Control shadow shutdown deadline expired.");

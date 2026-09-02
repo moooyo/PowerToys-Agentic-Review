@@ -21,7 +21,8 @@ import {
 } from "../service-host/opaque-json.js";
 import { parseRuntimeBootstrap } from "../service-host/runtime-bootstrap.js";
 import { bootstrapDocument } from "../service-host/runtime-bootstrap.test-helpers.js";
-import { HostControlShadowApi, HostControlWorkerApi } from "./host-control-worker-api.js";
+import { HostControlShadowApi } from "./host-control-shadow-api.js";
+import { HostControlWorkerApi } from "./host-control-worker-api.js";
 
 const serverTime = "2026-08-31T00:00:00.000Z";
 
@@ -99,7 +100,11 @@ class FakeControlClient implements ControlHostControlClient {
 describe("HostControlWorkerApi opaque Worker API boundary", () => {
   it("exposes no claim or terminal methods from the zero-slot shadow adapter", async () => {
     const client = new FakeControlClient();
-    const api = new HostControlShadowApi(client);
+    const api = new HostControlShadowApi({
+      register: client.register.bind(client),
+      instanceHeartbeat: client.instanceHeartbeat.bind(client),
+      signLocalDigest: client.signLocalDigest.bind(client),
+    });
 
     expect(api).not.toHaveProperty("claimLease");
     expect(api).not.toHaveProperty("completeRun");

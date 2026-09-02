@@ -85,11 +85,11 @@ test("role policies include the exact shadow-runtime source additions", () => {
   const executor = new Set(roleBundlePolicyForTest.executor.allowedInputs);
   for (const input of [
     "apps/worker/src/contracts-formats.ts",
-    "apps/worker/src/control/host-control-worker-api.ts",
+    "apps/worker/src/control/host-control-api-common.ts",
+    "apps/worker/src/control/host-control-shadow-api.ts",
     "apps/worker/src/control/shadow-supervisor.ts",
     "apps/worker/src/server-client/errors.ts",
     "packages/contracts/src/common.ts",
-    "packages/contracts/src/index.ts",
     "packages/contracts/src/states.ts",
     "packages/contracts/src/worker.ts",
   ]) {
@@ -98,6 +98,18 @@ test("role policies include the exact shadow-runtime source additions", () => {
   }
   assert.equal(executor.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), true);
   assert.equal(control.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), false);
+  assert.equal(control.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  assert.equal(executor.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  for (const input of [
+    "packages/contracts/src/index.ts",
+    "packages/contracts/src/github.ts",
+    "packages/contracts/src/scheduling.ts",
+    "packages/contracts/src/dashboard.ts",
+    "packages/contracts/src/job-envelope.ts",
+  ]) {
+    assert.equal(control.has(input), false, `Control policy unexpectedly includes ${input}`);
+    assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
+  }
   for (const input of executor) {
     assert.doesNotMatch(
       input,
@@ -109,7 +121,10 @@ test("role policies include the exact shadow-runtime source additions", () => {
 test("shadow architecture remains zero execution and role separated", () => {
   const controlMain = repositorySource("apps/worker/src/control-main.ts");
   const executorMain = repositorySource("apps/worker/src/executor-main.ts");
-  const controlAdapter = repositorySource("apps/worker/src/control/host-control-worker-api.ts");
+  const controlAdapter = repositorySource("apps/worker/src/control/host-control-shadow-api.ts");
+  const controlAdapterCommon = repositorySource(
+    "apps/worker/src/control/host-control-api-common.ts",
+  );
   const controlRuntime = repositorySource("apps/worker/src/control/shadow-supervisor.ts");
   const executorRuntime = repositorySource(
     "apps/worker/src/service-host/executor-shadow-runtime.ts",
@@ -126,7 +141,9 @@ test("shadow architecture remains zero execution and role separated", () => {
   assert.match(controlRuntime, /activation\.activated\.then\(/u);
   assert.match(executorRuntime, /activation\.activated\.then\(/u);
   assert.match(controlRuntime, /import \{ HostControlShadowApi \}/u);
+  assert.match(controlRuntime, /from "\.\/host-control-shadow-api\.js"/u);
   assert.doesNotMatch(controlRuntime, /\bHostControlWorkerApi\b/u);
+  assert.doesNotMatch(controlAdapterCommon, /@agentic-review\/contracts/u);
 
   const controlRoleConfig = sourceSection(
     runtimeBootstrap,
@@ -157,14 +174,7 @@ test("shadow architecture remains zero execution and role separated", () => {
   assert.equal((executorRuntime.match(/messageType:\s*LocalMessageType\.Ready/gu) ?? []).length, 1);
 
   assert.doesNotMatch(controlRuntime, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
-  assert.doesNotMatch(
-    sourceSection(
-      controlAdapter,
-      "export class HostControlShadowApi",
-      "/** Maps the fixed Control HostControl RPC surface",
-    ),
-    /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu,
-  );
+  assert.doesNotMatch(controlAdapter, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
   assert.doesNotMatch(executorRuntime, /\b(?:server|mTLS|lease|workspace|process|Codex|Git)\b/iu);
   assert.doesNotMatch(
     executorRuntime,
@@ -228,7 +238,7 @@ test("role TypeBox Value redirect accepts only exact importer and shim syntax", 
   );
   assert.doesNotThrow(() =>
     verifyReviewedRoleTypeBoxValueImport(
-      repositorySource("apps/worker/src/control/host-control-worker-api.ts"),
+      repositorySource("apps/worker/src/control/host-control-api-common.ts"),
     ),
   );
   const target =

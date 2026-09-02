@@ -3,8 +3,8 @@ import {
   type ControlProofMessage,
   createHandshakeTranscriptV1,
   type DeepReadonly,
-  type DrainMessage,
   type DrainedMessage,
+  type DrainMessage,
   type HelloAckMessage,
   type HelloMessage,
   LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -18,6 +18,7 @@ import type {
   ArwxDispatchScope,
   ArwxFinalFrameReceipt,
   ArwxInboundMessage,
+  ArwxInboundMessageHandlerResult,
   ArwxPostDispatchEffect,
 } from "./arwx-stdio-channel.js";
 import type { ExecutorHostControlSession } from "./executor-host-control-session.js";
@@ -91,11 +92,16 @@ export function installExecutorShadowRuntime(
   });
   const done = initialization.then((installed) => installed.done);
   done.catch(() => undefined);
+  const handler: RuntimeBootstrapArwxRuntimeOwner["handler"] = async (
+    message,
+    dispatch,
+    signal,
+  ) => {
+    const installed = supervisor ?? (await initialization);
+    return await installed.handle(message, dispatch, signal);
+  };
   return Object.freeze({
-    handler: async (message, dispatch, signal) => {
-      const installed = supervisor ?? (await initialization);
-      return await installed.handle(message, dispatch, signal);
-    },
+    handler,
     done,
     close: (absoluteDeadline?: number) => {
       const installed = supervisor;
@@ -177,7 +183,7 @@ class ExecutorShadowSupervisor {
     message: Readonly<ArwxInboundMessage>,
     dispatch: Readonly<ArwxDispatchScope>,
     signal: AbortSignal,
-  ): Promise<void | ArwxPostDispatchEffect> {
+  ): Promise<ArwxInboundMessageHandlerResult> {
     try {
       if (signal.aborted || this.#lifecycleSignal.aborted) {
         throw runtimeError("RUNTIME_CANCELLED", "Executor shadow runtime was cancelled.");

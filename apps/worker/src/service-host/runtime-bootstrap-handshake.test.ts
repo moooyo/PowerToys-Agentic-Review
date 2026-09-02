@@ -5,7 +5,8 @@ import {
   LocalMessageType,
   serializeCanonicalJson,
 } from "@agentic-review/local-protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { commitPreparedArmArwxShutdown, prepareArmArwxShutdown } from "./arwx-shutdown.js";
 import { ArwxStdioChannel } from "./arwx-stdio-channel.js";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import { parseRuntimeBootstrap } from "./runtime-bootstrap.js";
@@ -14,6 +15,8 @@ import {
   bootstrapTestAck,
   commitDocument,
   createTestBootstrapPreparation,
+  drainedPayload,
+  drainPayload,
   handleBootstrapTestWrite,
   installBootstrapTestHost,
   type TestBootstrapArwxContext,
@@ -170,6 +173,90 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
     expect(host.destroyed).toBe(true);
   });
 
+  it("canonicalizes a stream failure during receive initialization", async () => {
+    const host = new HandshakeHost("control");
+    host.resume = (() => {
+      throw new Error("initial resume failed");
+    }) as typeof host.resume;
+    const opening = performRuntimeBootstrapHandshake(
+      host,
+      "control",
+      createTestBootstrapPreparation("control"),
+      performance.now() + 1_000,
+      () => host.installPromotedOwner(),
+    );
+    const observed = opening.then(
+      () => ({ kind: "fulfilled" }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    const outcome = await observed;
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind !== "rejected") throw new Error("Expected bootstrap rejection.");
+    expect(outcome.error).toMatchObject({ code: "BOOTSTRAP_TRANSPORT_FAILED" });
+    expect(host.destroyed).toBe(true);
+  });
+
+  it("preserves the canonical initialization failure across hostile cleanup hooks", async () => {
+    const host = new HandshakeHost("control");
+    const removals: string[] = [];
+    let pauseCalls = 0;
+    let destroyCalls = 0;
+    let signalRemoveCalls = 0;
+    host.on = ((eventName: string | symbol) => {
+      if (eventName === "data") throw new Error("injected listener attachment failure");
+      return host;
+    }) as typeof host.on;
+    host.pause = (() => {
+      pauseCalls += 1;
+      throw new Error("injected pause failure");
+    }) as typeof host.pause;
+    host.removeListener = ((eventName: string | symbol) => {
+      removals.push(String(eventName));
+      throw new Error("injected listener removal failure");
+    }) as typeof host.removeListener;
+    host.destroy = (() => {
+      destroyCalls += 1;
+      throw new Error("injected destroy failure");
+    }) as typeof host.destroy;
+    const signal = {
+      aborted: false,
+      addEventListener: () => undefined,
+      dispatchEvent: () => false,
+      onabort: null,
+      reason: undefined,
+      removeEventListener: () => {
+        signalRemoveCalls += 1;
+        throw new Error("injected signal removal failure");
+      },
+      throwIfAborted: () => undefined,
+    } as AbortSignal;
+    const opening = performRuntimeBootstrapHandshake(
+      host,
+      "control",
+      createTestBootstrapPreparation("control"),
+      performance.now() + 1_000,
+      () => host.installPromotedOwner(),
+      signal,
+    );
+    const observed = opening.then(
+      () => ({ kind: "fulfilled" }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    const outcome = await observed;
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind !== "rejected") throw new Error("Expected bootstrap rejection.");
+    expect(outcome.error).toMatchObject({
+      code: "BOOTSTRAP_TRANSPORT_FAILED",
+      message: "Runtime bootstrap stream initialization failed.",
+    });
+    expect(pauseCalls).toBe(1);
+    expect(signalRemoveCalls).toBe(1);
+    expect(removals).toEqual(["data", "end", "error", "close"]);
+    expect(destroyCalls).toBe(1);
+  });
+
   it("does not commit a retained completion capability when promotion fails", async () => {
     const host = new HandshakeHost("executor");
     let retained: Readonly<CompletedRuntimeBootstrap<"executor">> | undefined;
@@ -224,6 +311,7 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
     {
       name: "thenable",
       create: () => ({
+        // biome-ignore lint/suspicious/noThenProperty: This fixture intentionally models a rejected thenable.
         then: (_resolve: (value: unknown) => void, reject: (error: unknown) => void) => {
           reject(new Error("thenable installer failed"));
         },
@@ -542,10 +630,13 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
 
   it("settles runtime completion when a dispatcher is terminated before activation", async () => {
     const parsed = parseRuntimeBootstrap(bootstrapDocument("executor"), "executor");
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
     const arwx = new ArwxStdioChannel({
       localRole: "executor",
-      input: new PassThrough(),
-      output: new PassThrough(),
+      input,
+      output,
       maximumQueuedWriteBytes: parsed.bootstrap.arwx.maximumQueuedBytesPerDirection,
       closeTimeoutMs:
         parsed.bootstrap.shutdown.gracefulTimeoutMs -
@@ -558,9 +649,171 @@ describe("RuntimeBootstrapV1 HostControl handshake", () => {
     terminateRuntimeBootstrapArwxDispatcher(dispatcherGate);
 
     await expect(dispatcherGate.runtimeDone).resolves.toBeUndefined();
+    await expect(dispatcherGate.terminal).resolves.toMatchObject({
+      source: "arwx",
+      outcome: "rejected",
+      error: { code: "BOOTSTRAP_TRANSPORT_FAILED" },
+    });
     arwx.abort();
     await dispatcherGate.done.catch(() => undefined);
     await expect(dispatcherGate.quiesced).resolves.toBeUndefined();
+  });
+
+  it("publishes clean ARWX completion for a prepared gate without a runtime", async () => {
+    const parsed = parseRuntimeBootstrap(bootstrapDocument("control"), "control");
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const arwx = new ArwxStdioChannel({
+      localRole: "control",
+      input,
+      output,
+      maximumQueuedWriteBytes: parsed.bootstrap.arwx.maximumQueuedBytesPerDirection,
+      closeTimeoutMs:
+        parsed.bootstrap.shutdown.gracefulTimeoutMs -
+        parsed.bootstrap.shutdown.forceTerminationReserveMs,
+    });
+    const dispatcherGate = prepareRuntimeBootstrapArwxDispatcher("control", parsed, arwx, () =>
+      runtimeOwner(),
+    );
+
+    const draining = arwx.drain();
+    input.end();
+
+    await expect(dispatcherGate.done).resolves.toBeUndefined();
+    await expect(draining).resolves.toBeUndefined();
+    await expect(dispatcherGate.terminal).resolves.toEqual({
+      source: "arwx",
+      outcome: "fulfilled",
+    });
+  });
+
+  it.each([
+    { name: "Control rejection", role: "control" as const, outcome: "rejected" as const },
+    { name: "Executor rejection", role: "executor" as const, outcome: "rejected" as const },
+    { name: "pending runtime", role: "control" as const, outcome: "pending" as const },
+    { name: "late runtime rejection", role: "control" as const, outcome: "late-rejected" as const },
+    {
+      name: "late runtime fulfillment",
+      role: "executor" as const,
+      outcome: "late-fulfilled" as const,
+    },
+  ])("keeps runtime authority after clean ARWX completion for $name", async ({ role, outcome }) => {
+    const host = new HandshakeHost(role);
+    const runtimeFailure = new Error(`${role} runtime failed after clean ARWX completion`);
+    let resolveRuntime!: () => void;
+    let rejectRuntime!: (error: unknown) => void;
+    const runtimeDone = new Promise<void>((resolve, reject) => {
+      resolveRuntime = resolve;
+      rejectRuntime = reject;
+    });
+    runtimeDone.catch(() => undefined);
+    let context: TestBootstrapArwxContext | undefined;
+    let lifecycleSignal: AbortSignal | undefined;
+    let shutdownDeadline = Number.NaN;
+    await performRuntimeBootstrapHandshake(
+      host,
+      role,
+      createTestBootstrapPreparation(role, {
+        onStarted: (value) => {
+          context = value;
+        },
+        installer: (activation) => {
+          lifecycleSignal = activation.signal;
+          return {
+            done: runtimeDone,
+            close: async () => undefined,
+            handler: async (_message, dispatch) => {
+              const receipt =
+                role === "control"
+                  ? dispatch.readFinalFrameReceipt()
+                  : await dispatch.sendFinal(
+                      {
+                        messageType: LocalMessageType.Drained,
+                        correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+                        payload: drainedPayload(),
+                      },
+                      shutdownDeadline,
+                    );
+              return dispatch.createPostDispatchFinalFrameEffect(receipt, () => {
+                const prepared = prepareArmArwxShutdown(
+                  {
+                    role: activation.role,
+                    parsed: activation.parsed,
+                    boundary: activation.boundary,
+                  },
+                  receipt,
+                );
+                commitPreparedArmArwxShutdown(prepared);
+              });
+            },
+          };
+        },
+      }),
+      performance.now() + 1_000,
+      () => host.installPromotedOwner(),
+    );
+    const runtime = defined(context, "runtime context");
+    runtime.output.resume();
+    shutdownDeadline = performance.now() + (outcome === "pending" ? 500 : 1_000);
+    if (role === "control") {
+      await runtime.arwx.sendFinal(
+        {
+          messageType: LocalMessageType.Drain,
+          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+          payload: drainPayload(),
+        },
+        shutdownDeadline,
+      );
+      runtime.input.end(shutdownFrame(LocalMessageType.Drained));
+    } else {
+      runtime.input.end(shutdownFrame(LocalMessageType.Drain));
+    }
+
+    await expect(runtime.receiveLoop.done).resolves.toBeUndefined();
+    expect(lifecycleSignal?.aborted).toBe(false);
+    if (outcome === "rejected") {
+      let terminalSettled = false;
+      void runtime.receiveLoop.terminal.then(() => {
+        terminalSettled = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(terminalSettled).toBe(false);
+      rejectRuntime(runtimeFailure);
+      await expect(runtime.receiveLoop.terminal).resolves.toEqual({
+        source: "runtime",
+        outcome: "rejected",
+        error: runtimeFailure,
+      });
+    } else if (outcome === "pending") {
+      await expect(runtime.receiveLoop.terminal).resolves.toMatchObject({
+        source: "runtime",
+        outcome: "rejected",
+        error: {
+          code: "BOOTSTRAP_TRANSPORT_FAILED",
+          message: "Runtime did not settle before the ARWX shutdown deadline.",
+        },
+      });
+      expect(lifecycleSignal?.aborted).toBe(true);
+    } else {
+      const now = vi.spyOn(performance, "now").mockReturnValue(shutdownDeadline);
+      try {
+        if (outcome === "late-rejected") rejectRuntime(runtimeFailure);
+        else resolveRuntime();
+        await expect(runtime.receiveLoop.terminal).resolves.toMatchObject({
+          source: "runtime",
+          outcome: "rejected",
+          error: {
+            code: "BOOTSTRAP_TRANSPORT_FAILED",
+            message: "Runtime did not settle before the ARWX shutdown deadline.",
+          },
+        });
+        expect(lifecycleSignal?.aborted).toBe(true);
+      } finally {
+        now.mockRestore();
+      }
+    }
+    host.destroy();
   });
 });
 
@@ -589,6 +842,18 @@ function pingFrame(): Buffer {
       probeId: "8".repeat(64),
       sentAtUnixMs: 1_700_000_000_000,
     },
+  });
+}
+
+function shutdownFrame(
+  messageType: typeof LocalMessageType.Drain | typeof LocalMessageType.Drained,
+): Buffer {
+  return encodeLocalFrame({
+    minorVersion: 0,
+    messageType,
+    sequence: 1n,
+    correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+    payload: messageType === LocalMessageType.Drain ? drainPayload() : drainedPayload(),
   });
 }
 

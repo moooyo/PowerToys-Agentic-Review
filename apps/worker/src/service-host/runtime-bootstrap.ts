@@ -90,15 +90,9 @@ export const ExecutorFoundationRoleConfigV2Schema = Type.Object(
   { additionalProperties: false },
 );
 
-export type ControlFoundationRoleConfigV2 = Static<
-  typeof ControlFoundationRoleConfigV2Schema
->;
-export type ExecutorFoundationRoleConfigV2 = Static<
-  typeof ExecutorFoundationRoleConfigV2Schema
->;
-export type FoundationRoleConfigV2 =
-  | ControlFoundationRoleConfigV2
-  | ExecutorFoundationRoleConfigV2;
+export type ControlFoundationRoleConfigV2 = Static<typeof ControlFoundationRoleConfigV2Schema>;
+export type ExecutorFoundationRoleConfigV2 = Static<typeof ExecutorFoundationRoleConfigV2Schema>;
+export type FoundationRoleConfigV2 = ControlFoundationRoleConfigV2 | ExecutorFoundationRoleConfigV2;
 
 export const RuntimeBootstrapV1Schema = Type.Object(
   {
@@ -329,9 +323,7 @@ function validateFoundationRoleConfig(
   role: ServiceHostPayloadRole,
 ): DeepReadonly<FoundationRoleConfigV2> {
   const schema =
-    role === "control"
-      ? ControlFoundationRoleConfigV2Schema
-      : ExecutorFoundationRoleConfigV2Schema;
+    role === "control" ? ControlFoundationRoleConfigV2Schema : ExecutorFoundationRoleConfigV2Schema;
   if (!Value.Check(schema, value)) {
     throw bootstrapError(
       "INVALID_ROLE_CONFIG",

@@ -147,6 +147,7 @@ async function connect(
     readonly maximumRequestIds?: number;
     readonly maximumQueuedWriteBytes?: number;
     readonly requestTimeoutMs?: number;
+    readonly closeTimeoutMs?: number;
     readonly host?: FakeHostControl;
     readonly prepareRuntimeBootstrap?: RuntimeBootstrapPreparation<"control">;
   } = {},
@@ -176,7 +177,7 @@ async function connect(
     requestTimeoutMs: options.requestTimeoutMs ?? 1_000,
     claimTimeoutMs: 1_000,
     cancellationGraceMs: 1_000,
-    closeTimeoutMs: 1_000,
+    closeTimeoutMs: options.closeTimeoutMs ?? 1_000,
   });
   return { client, host };
 }
@@ -233,7 +234,7 @@ describe("HostControl client", () => {
     client = connected.client;
     const { host } = connected;
     const runtime = defined(arwxContext, "ARWX context");
-    const receipt = await runtime.arwx.sendFinal(
+    await runtime.arwx.sendFinal(
       {
         messageType: LocalMessageType.Drain,
         correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -265,12 +266,20 @@ describe("HostControl client", () => {
 
     await waitFor(() => delayedHost.finalPending);
     expect(await settlementByNextTurn(defined(arming, "Arm operation"))).toBe("pending");
+    const settlements: string[] = [];
+    const armSettlement = defined(arming, "Arm operation").then(() => settlements.push("arm"));
+    const doneSettlement = client.done.then(() => settlements.push("done"));
+    delayedHost.push(null);
+    await waitFor(() => delayedHost.readableEnded);
+    delayedHost.once("finish", () => delayedHost.emit("close"));
     delayedHost.releaseFinal();
 
     await expect(defined(arming, "Arm operation")).resolves.toEqual({
       armed: true,
       ...payload,
     });
+    await Promise.all([armSettlement, doneSettlement]);
+    expect(settlements).toEqual(["arm", "done"]);
     expect(runtime.output.writableEnded).toBe(true);
     await waitFor(() => host.clientEnded);
     expect(() => client.register(opaque({ workerNodeId: "node:1" }))).toThrowError(
@@ -326,11 +335,50 @@ describe("HostControl client", () => {
 
     await waitFor(() => delayedHost.finalPending);
     expect(await settlementByNextTurn(defined(arming, "Arm operation"))).toBe("pending");
+    const armFailure = expect(defined(arming, "Arm operation")).rejects.toMatchObject({
+      code: "PROTOCOL_FAILURE",
+    });
+    const receiveFailure = expect(runtime.receiveLoop.done).rejects.toBeInstanceOf(Error);
     delayedHost.releaseFinal(new Error("HostControl final callback failed"));
 
-    await expect(defined(arming, "Arm operation")).rejects.toBeInstanceOf(Error);
-    await expect(runtime.receiveLoop.done).rejects.toBeInstanceOf(Error);
+    await Promise.all([armFailure, receiveFailure]);
   });
+
+  it.each(["success", "error"] as const)(
+    "rejects drain when EOF and close precede a late final callback %s",
+    async (lateOutcome) => {
+      const host = new DelayedFinalHostControl();
+      const { client } = await connect({ host });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const draining = client.drain();
+        const drainFailure = expect(draining).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+        const doneFailure = expect(client.done).rejects.toMatchObject({
+          code: "PROTOCOL_FAILURE",
+        });
+        await waitFor(() => host.finalPending);
+        host.push(null);
+        await waitFor(() => host.readableEnded);
+
+        host.emit("close");
+
+        await Promise.all([drainFailure, doneFailure]);
+        expect(host.finalPending).toBe(true);
+        host.releaseFinal(
+          lateOutcome === "error" ? new Error("late HostControl final failure") : undefined,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.removeListener("unhandledRejection", onUnhandled);
+        host.destroy();
+      }
+    },
+  );
 
   it("rejects close-only HostControl termination after Arm acknowledgement", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
@@ -352,7 +400,7 @@ describe("HostControl client", () => {
     const { host } = connected;
     host.endReadableOnClientEnd = false;
     const runtime = defined(arwxContext, "ARWX context");
-    const receipt = await runtime.arwx.sendFinal(
+    await runtime.arwx.sendFinal(
       {
         messageType: LocalMessageType.Drain,
         correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,

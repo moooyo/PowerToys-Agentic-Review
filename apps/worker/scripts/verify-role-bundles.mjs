@@ -182,7 +182,8 @@ const specifications = Object.freeze({
     requiredWorkerInputs: new Set([
       "apps/worker/src/control-main.ts",
       "apps/worker/src/contracts-formats.ts",
-      "apps/worker/src/control/host-control-worker-api.ts",
+      "apps/worker/src/control/host-control-api-common.ts",
+      "apps/worker/src/control/host-control-shadow-api.ts",
       "apps/worker/src/control/shadow-supervisor.ts",
       "apps/worker/src/server-client/errors.ts",
       "apps/worker/src/service-host/arwx-shutdown.ts",
@@ -198,7 +199,7 @@ const specifications = Object.freeze({
       "packages/contracts/src/states.ts",
       "packages/contracts/src/worker.ts",
     ]),
-    allowedWorkerInputs: new Set(["packages/contracts/src/index.ts"]),
+    allowedWorkerInputs: new Set(),
   },
   executor: {
     entryPoint: "apps/worker/src/executor-main.ts",

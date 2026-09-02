@@ -257,7 +257,10 @@ class HostControlRpcClient implements ControlHostControlClient {
   #queuedWriteBytes = 0;
   #terminalError: HostControlClientError | undefined;
   #writableEndStarted = false;
+  #writableHalfCloseObserved = false;
+  #transportCloseObserved = false;
   #readableEndObserved = false;
+  #armOperation: Promise<Readonly<ArmArwxShutdownResultV1>> | undefined;
   #drainPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
   #shutdownDeadline: number | undefined;
@@ -353,7 +356,21 @@ class HostControlRpcClient implements ControlHostControlClient {
     return body.signatureP1363;
   }
 
-  public async armArwxShutdown(
+  public armArwxShutdown(
+    receipt: ArwxFinalFrameReceipt,
+  ): Promise<Readonly<ArmArwxShutdownResultV1>> {
+    const operation = this.#runArmArwxShutdown(receipt);
+    if (this.#armOperation === undefined) {
+      this.#armOperation = operation;
+      void operation.then(
+        () => this.#settleArmOperation(operation),
+        () => this.#settleArmOperation(operation),
+      );
+    }
+    return operation;
+  }
+
+  async #runArmArwxShutdown(
     receipt: ArwxFinalFrameReceipt,
   ): Promise<Readonly<ArmArwxShutdownResultV1>> {
     const shutdownDeadline = readArmArwxShutdownDeadline(this.#runtimeBootstrap, receipt);
@@ -407,7 +424,10 @@ class HostControlRpcClient implements ControlHostControlClient {
       draining.catch(() => undefined);
       if (this.#terminalError !== undefined) throw this.#terminalError;
       try {
-        await this.#awaitDrainPhase(this.#writableHalfClosed.promise, details.absoluteDeadline);
+        await this.#awaitDrainPhase(
+          () => this.#writableHalfClosed.promise,
+          details.absoluteDeadline,
+        );
       } catch {
         if (this.#terminalError === undefined) {
           this.#fail(
@@ -450,15 +470,14 @@ class HostControlRpcClient implements ControlHostControlClient {
       );
     }
     try {
+      const pendingTimeoutMs = remainingShutdownMilliseconds(absoluteDeadline);
       await withDeadline(
         Promise.race([this.#waitForPendingEmpty(), this.#failure.promise]),
-        remainingShutdownMilliseconds(absoluteDeadline),
+        pendingTimeoutMs,
       );
       remainingShutdownMilliseconds(absoluteDeadline);
-      await withDeadline(
-        Promise.race([this.#writeChain, this.#failure.promise]),
-        remainingShutdownMilliseconds(absoluteDeadline),
-      );
+      const writeTimeoutMs = remainingShutdownMilliseconds(absoluteDeadline);
+      await withDeadline(Promise.race([this.#writeChain, this.#failure.promise]), writeTimeoutMs);
       remainingShutdownMilliseconds(absoluteDeadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
@@ -504,6 +523,13 @@ class HostControlRpcClient implements ControlHostControlClient {
       throw clientError("CONCURRENCY_LIMIT", "HostControl concurrent request limit is reached.");
     }
 
+    const timeoutMs =
+      absoluteDeadline === undefined
+        ? operation === "Claim"
+          ? this.#options.claimTimeoutMs
+          : this.#options.requestTimeoutMs
+        : remainingShutdownMilliseconds(absoluteDeadline);
+
     const requestId = this.#allocateRequestId("call");
     let frame: Buffer;
     try {
@@ -535,12 +561,6 @@ class HostControlRpcClient implements ControlHostControlClient {
     };
     this.#pending.set(requestId, pending);
     this.#activeCalls += 1;
-    const timeoutMs =
-      absoluteDeadline === undefined
-        ? operation === "Claim"
-          ? this.#options.claimTimeoutMs
-          : this.#options.requestTimeoutMs
-        : remainingShutdownMilliseconds(absoluteDeadline);
     pending.timeout = setTimeout(() => {
       if (operation === "ArmArwxShutdown") {
         this.#fail(clientError("LIFECYCLE_TIMEOUT", "HostControl ARWX shutdown arm timed out."));
@@ -649,6 +669,7 @@ class HostControlRpcClient implements ControlHostControlClient {
   }
 
   #onClose(): void {
+    this.#transportCloseObserved = true;
     if (
       this.#shutdownDeadline !== undefined &&
       (this.#state === "armed" || this.#state === "draining") &&
@@ -676,12 +697,13 @@ class HostControlRpcClient implements ControlHostControlClient {
     if (
       this.#state === "open" ||
       this.#state === "arming" ||
-      (this.#state === "draining" && (this.#pending.size !== 0 || !this.#writableEndStarted))
+      ((this.#state === "armed" || this.#state === "draining") &&
+        !this.#writableHalfCloseObserved) ||
+      (this.#state === "draining" && this.#pending.size !== 0)
     ) {
       this.#fail(clientError("PROTOCOL_FAILURE", "HostControl peer closed unexpectedly."), false);
     }
-    if (this.#state !== "failed") this.#state = "closed";
-    this.#closed.resolve(undefined);
+    this.#tryFinalizeClose();
   }
 
   #handleResponse(document: Buffer): void {
@@ -845,6 +867,7 @@ class HostControlRpcClient implements ControlHostControlClient {
     this.#failure.reject(error);
     this.#rejectAll(error);
     for (const reservation of [...this.#frameReservations]) this.#releaseFrame(reservation);
+    this.#tryFinalizeClose();
     if (destroy) {
       try {
         this.#stream.destroy();
@@ -872,10 +895,26 @@ class HostControlRpcClient implements ControlHostControlClient {
   #endWritable(): Promise<void> {
     this.#writableEndStarted = true;
     return new Promise<void>((resolve, reject) => {
-      try {
-        this.#stream.end(resolve);
-      } catch (error) {
+      const rejectHalfClose = (): void => {
+        const error = clientError(
+          "PROTOCOL_FAILURE",
+          "HostControl writable half-close callback failed.",
+        );
+        this.#fail(error);
         reject(error);
+      };
+      try {
+        this.#stream.end((error?: Error | null) => {
+          if (error !== undefined && error !== null) {
+            rejectHalfClose();
+            return;
+          }
+          this.#writableHalfCloseObserved = true;
+          this.#writableHalfClosed.resolve(undefined);
+          resolve();
+        });
+      } catch {
+        rejectHalfClose();
       }
     });
   }
@@ -897,11 +936,10 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
     this.#state = "draining";
     try {
-      await this.#awaitDrainPhase(this.#waitForPendingEmpty(), deadline);
-      await this.#awaitDrainPhase(this.#writeChain, deadline);
-      await this.#awaitDrainPhase(this.#endWritable(), deadline);
-      this.#writableHalfClosed.resolve(undefined);
-      await this.#awaitDrainPhase(this.#closed.promise, deadline);
+      await this.#awaitDrainPhase(() => this.#waitForPendingEmpty(), deadline);
+      await this.#awaitDrainPhase(() => this.#writeChain, deadline);
+      await this.#awaitDrainPhase(() => this.#endWritable(), deadline);
+      await this.#awaitDrainPhase(() => this.#closed.promise, deadline);
       if (this.#terminalError !== undefined) throw this.#terminalError;
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
@@ -935,13 +973,40 @@ class HostControlRpcClient implements ControlHostControlClient {
     }
   }
 
-  async #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    const result = await withDeadline(
-      Promise.race([phase, this.#failure.promise]),
-      remainingShutdownMilliseconds(deadline),
-    );
+  async #awaitDrainPhase<T>(createPhase: () => Promise<T>, deadline: number): Promise<T> {
+    const timeoutMs = remainingShutdownMilliseconds(deadline);
+    const phase = createPhase();
+    const result = await withDeadline(Promise.race([phase, this.#failure.promise]), timeoutMs);
     remainingShutdownMilliseconds(deadline);
     return result;
+  }
+
+  #settleArmOperation(operation: Promise<Readonly<ArmArwxShutdownResultV1>>): void {
+    if (this.#armOperation !== operation) return;
+    this.#armOperation = undefined;
+    this.#tryFinalizeClose();
+  }
+
+  #tryFinalizeClose(): void {
+    if (!this.#transportCloseObserved) return;
+    if (this.#state === "failed") {
+      this.#closed.resolve(undefined);
+      return;
+    }
+    if (this.#armOperation !== undefined) return;
+    if (
+      this.#state !== "closing" &&
+      (!this.#readableEndObserved ||
+        !this.#writableHalfCloseObserved ||
+        this.#activeCalls !== 0 ||
+        this.#pending.size !== 0 ||
+        this.#frameReservations.size !== 0 ||
+        (this.#state !== "armed" && this.#state !== "draining"))
+    ) {
+      return;
+    }
+    this.#state = "closed";
+    this.#closed.resolve(undefined);
   }
 }
 

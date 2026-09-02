@@ -1,18 +1,18 @@
 import { generateKeyPairSync, type KeyObject, sign as nodeSign } from "node:crypto";
 import { PassThrough } from "node:stream";
 import {
+  type CancelAttemptMessage,
+  type ControlProofMessage,
   createControlProofMessageV1,
   createHandshakeTranscriptSigningBytes,
   createHandshakeTranscriptV1,
   createSignedHandshakeProofV1,
+  type DrainMessage,
   deriveCapabilityKeyId,
   encodeLocalFrame,
-  IncrementalLocalFrameDecoder,
-  type CancelAttemptMessage,
-  type ControlProofMessage,
-  type DrainMessage,
   type HelloAckMessage,
   type HelloMessage,
+  IncrementalLocalFrameDecoder,
   LOCAL_PROTOCOL_NIL_CORRELATION_ID,
   LocalMessageType,
   serializeCanonicalJson,
@@ -21,11 +21,11 @@ import {
 import { describe, expect, it } from "vitest";
 import type { ArmArwxShutdownResultV1 } from "./arwx-shutdown.js";
 import {
+  type ArwxFinalFrameReceipt,
+  type ArwxInboundMessage,
   ArwxStdioChannel,
   commitArwxFinalFrameReceipt,
   consumeArwxFinalFrameReceipt,
-  type ArwxFinalFrameReceipt,
-  type ArwxInboundMessage,
 } from "./arwx-stdio-channel.js";
 import type { ExecutorHostControlSession } from "./executor-host-control-session.js";
 import { installExecutorShadowRuntime } from "./executor-shadow-runtime.js";
@@ -35,9 +35,9 @@ import {
 } from "./launch-contract.js";
 import { encodeHostControlOpaqueJson } from "./opaque-json.js";
 import {
+  type ParsedRuntimeBootstrapV1,
   parseRuntimeBootstrap,
   RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
-  type ParsedRuntimeBootstrapV1,
 } from "./runtime-bootstrap.js";
 import { bootstrapDocument, foundationRoleConfig } from "./runtime-bootstrap.test-helpers.js";
 import type { RuntimeBootstrapArwxRuntimeOwner } from "./runtime-bootstrap-handshake.js";

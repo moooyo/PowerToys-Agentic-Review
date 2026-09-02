@@ -11,7 +11,7 @@ import { verifyRoleBundle } from "./verify-role-bundles.mjs";
 const workerRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const outputDirectory = resolve(workerRoot, "dist");
-const contractsSource = resolve(repositoryRoot, "packages/contracts/src/index.ts");
+const contractsSource = resolve(repositoryRoot, "packages/contracts/src/worker.ts");
 const localProtocolSource = resolve(repositoryRoot, "packages/local-protocol/src/index.ts");
 const typeBoxEntry = fileURLToPath(import.meta.resolve("@sinclair/typebox"));
 const typeBoxRoot = realpathSync(resolve(dirname(typeBoxEntry), "../.."));
@@ -34,7 +34,7 @@ const requiredReviewedRoleTypeBoxValueImporters = new Set([
 ]);
 const reviewedRoleTypeBoxValueImporters = new Set([
   ...requiredReviewedRoleTypeBoxValueImporters,
-  realpathSync(resolve(workerRoot, "src/control/host-control-worker-api.ts")),
+  realpathSync(resolve(workerRoot, "src/control/host-control-api-common.ts")),
 ]);
 
 if (

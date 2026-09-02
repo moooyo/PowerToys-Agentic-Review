@@ -17,6 +17,7 @@ export const SERVICE_HOST_ARWX_MAXIMUM_QUEUED_WRITE_BYTES = 4 * 1_024 * 1_024;
 
 export type ArwxPeerRole = "control" | "executor";
 export type ArwxStdioChannelState = "open" | "draining" | "closed" | "failed";
+export type ArwxTerminalObserver = (error: ArwxStdioChannelError) => void;
 
 export interface ArwxOutboundMessage {
   readonly messageType: LocalMessageTypeId;
@@ -39,6 +40,9 @@ export interface ArwxPostDispatchEffect {
   readonly [arwxPostDispatchEffectBrand]: true;
 }
 
+// biome-ignore lint/suspicious/noConfusingVoidType: Void preserves Promise<void> handler compatibility.
+export type ArwxInboundMessageHandlerResult = void | ArwxPostDispatchEffect;
+
 export interface ArwxDispatchScope {
   readonly localRole: ArwxPeerRole;
   /** Returns the final receipt bound to this exact peer-final dispatch. */
@@ -60,7 +64,7 @@ export type ArwxInboundMessageHandler = (
   message: Readonly<ArwxInboundMessage>,
   dispatch: Readonly<ArwxDispatchScope>,
   signal: AbortSignal,
-) => void | ArwxPostDispatchEffect | Promise<void | ArwxPostDispatchEffect>;
+) => ArwxInboundMessageHandlerResult | Promise<ArwxInboundMessageHandlerResult>;
 
 export interface ArwxStdioChannelOptions {
   readonly localRole: ArwxPeerRole;
@@ -217,11 +221,12 @@ export class ArwxStdioChannel {
   #outputFinished = false;
   #activeDispatch: ArwxDispatchState | undefined;
   #activeDispatchRun: Promise<void> | undefined;
-  #activeHandlerRun: Promise<void | ArwxPostDispatchEffect> | undefined;
+  #activeHandlerRun: Promise<ArwxInboundMessageHandlerResult> | undefined;
   #activeFinalWrite: Promise<ArwxFinalFrameReceipt> | undefined;
   #activePostDispatchEffect: ArwxPostDispatchEffectState | undefined;
   #activePostDispatchRun: Promise<void> | undefined;
   #controlFinalReceiptReady: Promise<ArwxFinalFrameReceipt> | undefined;
+  #terminalObserver: ArwxTerminalObserver | undefined;
   #terminalError: ArwxStdioChannelError | undefined;
   #drainPromise: Promise<void> | undefined;
   #drainRequested = false;
@@ -289,6 +294,22 @@ export class ArwxStdioChannel {
     return this.#closeTimeoutMs;
   }
 
+  public get hasActivePostDispatchWork(): boolean {
+    return (
+      this.#activePostDispatchEffect !== undefined || this.#activePostDispatchRun !== undefined
+    );
+  }
+
+  public get hasActiveNonPostDispatchWork(): boolean {
+    return (
+      !this.hasActivePostDispatchWork &&
+      (this.#activeDispatch !== undefined ||
+        this.#activeDispatchRun !== undefined ||
+        this.#activeHandlerRun !== undefined ||
+        this.#activeFinalWrite !== undefined)
+    );
+  }
+
   /** Resolves only after the receive loop and every started dispatch-owned task are quiescent. */
   public waitForQuiescence(): Promise<void> {
     return this.#runStarted ? this.#quiesced.promise : Promise.resolve();
@@ -297,6 +318,7 @@ export class ArwxStdioChannel {
   /** Starts one pre-commit receiver and issues a channel-bound, single-use readiness token. */
   public startRuntimeBootstrapReceiveLoop(
     handler: ArwxInboundMessageHandler,
+    terminalObserver: ArwxTerminalObserver,
   ): Readonly<ArwxBootstrapReceiveLoop> {
     if (this.#runStarted || this.#state !== "open") {
       throw arwxError(
@@ -307,7 +329,13 @@ export class ArwxStdioChannel {
     if (typeof handler !== "function") {
       throw new TypeError("ARWX runtime bootstrap receive handler is required.");
     }
-    const done = this.run(handler);
+    if (typeof terminalObserver !== "function") {
+      throw new TypeError("ARWX runtime bootstrap terminal observer must be a function.");
+    }
+    this.#terminalObserver = terminalObserver;
+    const running = this.run(handler);
+    running.catch(() => undefined);
+    const done = Promise.race([running, this.#failure.promise]);
     done.catch(() => undefined);
     const token = Object.freeze({ localRole: this.localRole }) as ArwxBootstrapReceiveLoopToken;
     arwxBootstrapReceiveLoopStates.set(token, {
@@ -392,9 +420,9 @@ export class ArwxStdioChannel {
           this.#activeDispatch = dispatch;
           this.#lifecycle.activeDispatches += 1;
           try {
-            let result: void | ArwxPostDispatchEffect;
+            let result: ArwxInboundMessageHandlerResult;
             try {
-              let handling: Promise<void | ArwxPostDispatchEffect>;
+              let handling: Promise<ArwxInboundMessageHandlerResult>;
               try {
                 handling = Promise.resolve(
                   handler(message, scope, this.#handlerCancellation.signal),
@@ -459,9 +487,10 @@ export class ArwxStdioChannel {
         }
         if (this.#lifecycle.armPhase !== "armed") {
           try {
+            const timeoutMs = remainingShutdownMilliseconds(deadline);
             await withTimeout(
               Promise.race([this.#shutdownArmCommitted.promise, this.#failure.promise]),
-              remainingShutdownMilliseconds(deadline),
+              timeoutMs,
             );
             remainingShutdownMilliseconds(deadline);
           } catch {
@@ -588,12 +617,11 @@ export class ArwxStdioChannel {
       throw error;
     }
     this.#lifecycle.absoluteShutdownDeadline = absoluteShutdownDeadline;
-    const queued = this.#queueOutbound(message, true);
+    let queued: QueuedWrite & { readonly sequence: bigint };
     try {
-      await withTimeout(
-        Promise.race([queued.deferred.promise, this.#failure.promise]),
-        remainingShutdownMilliseconds(absoluteShutdownDeadline),
-      );
+      const timeoutMs = remainingShutdownMilliseconds(absoluteShutdownDeadline);
+      queued = this.#queueOutbound(message, true);
+      await withTimeout(Promise.race([queued.deferred.promise, this.#failure.promise]), timeoutMs);
       remainingShutdownMilliseconds(absoluteShutdownDeadline);
     } catch {
       if (this.#terminalError !== undefined) throw this.#terminalError;
@@ -659,10 +687,7 @@ export class ArwxStdioChannel {
     }
   }
 
-  #bindControlFinalReceipt(
-    receipt: ArwxFinalFrameReceipt,
-    dispatch: ArwxDispatchState,
-  ): void {
+  #bindControlFinalReceipt(receipt: ArwxFinalFrameReceipt, dispatch: ArwxDispatchState): void {
     const state = arwxFinalFrameReceiptStates.get(receipt);
     if (
       this.localRole !== "control" ||
@@ -864,9 +889,7 @@ export class ArwxStdioChannel {
     return error;
   }
 
-  #trackHandlerRun(
-    running: Promise<void | ArwxPostDispatchEffect>,
-  ): void {
+  #trackHandlerRun(running: Promise<ArwxInboundMessageHandlerResult>): void {
     if (this.#activeHandlerRun !== undefined) {
       throw arwxError("DISPATCH_FAILED", "ARWX handler ownership overlapped another dispatch.");
     }
@@ -878,9 +901,7 @@ export class ArwxStdioChannel {
     void running.then(release, release);
   }
 
-  #trackFinalWrite(
-    running: Promise<ArwxFinalFrameReceipt>,
-  ): Promise<ArwxFinalFrameReceipt> {
+  #trackFinalWrite(running: Promise<ArwxFinalFrameReceipt>): Promise<ArwxFinalFrameReceipt> {
     if (this.#activeFinalWrite !== undefined) {
       const error = arwxError("SHUTDOWN_STATE_INVALID", "ARWX final writes cannot overlap.");
       this.#fail(error);
@@ -980,7 +1001,9 @@ export class ArwxStdioChannel {
     state.phase = "running";
     this.#activePostDispatchEffect = state;
     let running: Promise<void>;
+    let timeoutMs: number;
     try {
+      timeoutMs = remainingShutdownMilliseconds(receiptState.absoluteDeadline);
       running = Promise.resolve(state.run(state.cancellation.signal));
     } catch {
       state.phase = "failed";
@@ -992,10 +1015,7 @@ export class ArwxStdioChannel {
     }
     this.#trackPostDispatchRun(running);
     try {
-      await withTimeout(
-        Promise.race([running, this.#failure.promise]),
-        remainingShutdownMilliseconds(receiptState.absoluteDeadline),
-      );
+      await withTimeout(Promise.race([running, this.#failure.promise]), timeoutMs);
       remainingShutdownMilliseconds(receiptState.absoluteDeadline);
     } catch {
       state.phase = "failed";
@@ -1010,7 +1030,7 @@ export class ArwxStdioChannel {
       this.#terminalError !== undefined ||
       !receiptState.consumed ||
       receiptState.lifecycle.armPhase !== "armed" ||
-      this.#state !== "draining"
+      this.state !== "draining"
     ) {
       state.phase = "failed";
       state.cancellation.abort();
@@ -1089,14 +1109,14 @@ export class ArwxStdioChannel {
     try {
       if (this.#state === "open") {
         if (this.#activeDispatchRun !== undefined) {
-          await this.#awaitDrainPhase(this.#waitForActiveDispatchRun(), deadline);
+          await this.#awaitDrainPhase(() => this.#waitForActiveDispatchRun(), deadline);
         }
         if (this.#terminalError !== undefined) throw this.#terminalError;
         this.#state = "draining";
       }
-      await this.#awaitDrainPhase(this.#waitForWrites(), deadline);
-      await this.#awaitDrainPhase(this.#finishOutput(), deadline);
-      await this.#awaitDrainPhase(this.#runDone.promise, deadline);
+      await this.#awaitDrainPhase(() => this.#waitForWrites(), deadline);
+      await this.#awaitDrainPhase(() => this.#finishOutput(), deadline);
+      await this.#awaitDrainPhase(() => this.#runDone.promise, deadline);
       if (!this.#inputFinished || !this.#outputFinished) {
         throw arwxError("UNEXPECTED_EOF", "ARWX channel did not finish both stream directions.");
       }
@@ -1143,10 +1163,19 @@ export class ArwxStdioChannel {
       const releaseCallback = this.#acquireOutputCallback();
       let callbackSettled = false;
       try {
-        this.#output.end(() => {
+        this.#output.end((error?: Error | null) => {
           if (callbackSettled) return;
           callbackSettled = true;
           try {
+            if (error !== undefined && error !== null) {
+              const failure = arwxError(
+                "OUTPUT_FAILED",
+                "ARWX standard output finalization failed.",
+              );
+              this.#fail(failure);
+              reject(this.#terminalError ?? failure);
+              return;
+            }
             this.#outputFinished = true;
             this.#outputDone.resolve(undefined);
             resolve();
@@ -1154,10 +1183,15 @@ export class ArwxStdioChannel {
             releaseCallback();
           }
         });
-      } catch (error) {
+      } catch {
         callbackSettled = true;
-        releaseCallback();
-        reject(error);
+        const failure = arwxError("OUTPUT_FAILED", "ARWX standard output finalization failed.");
+        try {
+          this.#fail(failure);
+          reject(this.#terminalError ?? failure);
+        } finally {
+          releaseCallback();
+        }
       }
     });
   }
@@ -1186,13 +1220,22 @@ export class ArwxStdioChannel {
     if (this.#state === "failed" || this.#state === "closed") return;
     this.#state = "failed";
     this.#terminalError = error;
-    this.#handlerCancellation.abort();
-    this.#activePostDispatchEffect?.cancellation.abort();
+    const observer = this.#terminalObserver;
+    this.#terminalObserver = undefined;
+    if (observer !== undefined) {
+      try {
+        observer(error);
+      } catch {
+        // Terminal observation cannot replace the channel's first failure.
+      }
+    }
     this.#failure.reject(error);
     for (const queued of this.#writes.splice(0)) queued.deferred.reject(error);
     this.#queuedWriteBytes = 0;
     this.#runDone.reject(error);
     this.#outputDone.reject(error);
+    this.#handlerCancellation.abort();
+    this.#activePostDispatchEffect?.cancellation.abort();
     try {
       this.#input.destroy();
     } catch {
@@ -1205,11 +1248,10 @@ export class ArwxStdioChannel {
     }
   }
 
-  async #awaitDrainPhase<T>(phase: Promise<T>, deadline: number): Promise<T> {
-    const result = await withTimeout(
-      Promise.race([phase, this.#failure.promise]),
-      remainingShutdownMilliseconds(deadline),
-    );
+  async #awaitDrainPhase<T>(createPhase: () => Promise<T>, deadline: number): Promise<T> {
+    const timeoutMs = remainingShutdownMilliseconds(deadline);
+    const phase = createPhase();
+    const result = await withTimeout(Promise.race([phase, this.#failure.promise]), timeoutMs);
     remainingShutdownMilliseconds(deadline);
     return result;
   }
