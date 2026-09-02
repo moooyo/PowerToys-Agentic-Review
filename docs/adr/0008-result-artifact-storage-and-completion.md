@@ -320,6 +320,19 @@ types, or identity mismatches make storage unhealthy rather than inviting broad 
 state is durable or derivable from a bounded scan; historical terminal rows are not rescanned
 without limit on every interval.
 
+Migration `0011_artifact_namespace_cleanup.sql` provides only the database foundation for that
+future scan. A page classification, durable cleanup-intent update, and cursor advance share one
+transaction; the database Worker exposes no independent cursor-advance operation. Observations bind
+the target and parent inode identities, file ctime, ownership and mode, and any linked immutable
+object peer. This foundation does not scan or unlink files. Filesystem session authority and
+handle-bound cleanup verification remain a separate enablement step.
+
+Namespace cleanup health reads are independently bounded for each status. Saturated pending,
+retry-waiting, failed, or due counts are operational saturation: capacity admission becomes
+uncertain and the reconciler fail-stops. Saturated completed or superseded counts are historical
+saturation only. Historical counters are capped for display without disabling admission or a
+healthy reconciliation pass.
+
 ### Capacity admission
 
 New create operations pass a Server-wide capacity gate before the database creates a new upload.

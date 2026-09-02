@@ -4,6 +4,7 @@ import {
   type ArtifactCleanupRetryErrorCode,
   type ArtifactCleanupWorkItem,
   type ArtifactHealthAccounting,
+  type ArtifactReconciliationDatabaseOperation,
   maximumArtifactCleanupRetryDelaySeconds,
   maximumArtifactReconciliationBatchSize,
 } from "../database/artifacts.js";
@@ -28,6 +29,9 @@ import {
 } from "./worker-protocol.js";
 
 const maximumCoordinatorMilliseconds = 600_000;
+const artifactReconciliationDatabaseHandleBrand: unique symbol = Symbol(
+  "artifact-reconciliation-database-handle",
+);
 const authorityClosureReasons = new Set([
   "attempt_inactive",
   "job_inactive",
@@ -52,11 +56,20 @@ type ArtifactCleanupDatabaseRequest = <TOperation extends ArtifactCleanupDatabas
   input: DatabaseOperationMap[TOperation]["input"],
 ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
 
+type ArtifactReconciliationDatabaseRequest = <
+  TOperation extends ArtifactReconciliationDatabaseOperation,
+>(
+  operation: TOperation,
+  input: DatabaseOperationMap[TOperation]["input"],
+) => Promise<DatabaseOperationMap[TOperation]["output"]>;
+
 type FatalWaiter = (error: ArtifactReconciliationCoordinatorError) => void;
 
 export type ArtifactReconciliationCoordinatorErrorCode =
   | "ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT"
   | "ARTIFACT_RECONCILIATION_DATABASE_FAILURE"
+  | "ARTIFACT_RECONCILIATION_HEALTH_SATURATED"
+  | "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED"
   | "ARTIFACT_RECONCILIATION_OWNER_EXIT"
   | "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE"
   | "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN";
@@ -67,6 +80,10 @@ const errorMessages: Readonly<Record<ArtifactReconciliationCoordinatorErrorCode,
       "Artifact reconciliation did not quiesce before its shutdown deadline.",
     ARTIFACT_RECONCILIATION_DATABASE_FAILURE:
       "Artifact reconciliation database state is unavailable or uncertain.",
+    ARTIFACT_RECONCILIATION_HEALTH_SATURATED:
+      "Artifact namespace cleanup health exceeded its bounded accounting limit.",
+    ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED:
+      "Artifact namespace cleanup exhausted its durable retry budget.",
     ARTIFACT_RECONCILIATION_OWNER_EXIT:
       "Artifact reconciliation storage owner exited unexpectedly.",
     ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE:
@@ -85,11 +102,12 @@ export class ArtifactReconciliationCoordinatorError extends Error {
   }
 }
 
-export interface ArtifactReconciliationDatabaseOwner {
-  request<TOperation extends ArtifactCleanupDatabaseOperation>(
-    operation: TOperation,
-    input: DatabaseOperationMap[TOperation]["input"],
-  ): Promise<DatabaseOperationMap[TOperation]["output"]>;
+interface ArtifactReconciliationDatabaseOwner {
+  readonly request: ArtifactReconciliationDatabaseRequest;
+}
+
+export interface ArtifactReconciliationDatabaseHandle {
+  readonly [artifactReconciliationDatabaseHandleBrand]: true;
 }
 
 export interface ArtifactReconciliationStorageOwner {
@@ -98,7 +116,8 @@ export interface ArtifactReconciliationStorageOwner {
 }
 
 export interface ArtifactReconciliationCoordinatorOptions {
-  readonly database: ArtifactReconciliationDatabaseOwner;
+  /** Opaque one-shot handle minted by DatabaseClient. */
+  readonly database: ArtifactReconciliationDatabaseHandle;
   readonly storage: ArtifactReconciliationStorageOwner;
   readonly batchSize: number;
   readonly intervalMilliseconds: number;
@@ -108,6 +127,59 @@ export interface ArtifactReconciliationCoordinatorOptions {
   readonly maximumRetryDelaySeconds: number;
   readonly onFailStop: (error: ArtifactReconciliationCoordinatorError) => void | Promise<void>;
 }
+
+interface ArtifactReconciliationDatabaseHandleRecord {
+  readonly owner: ArtifactReconciliationDatabaseOwner;
+}
+
+const databaseHandleRecords = new WeakMap<object, ArtifactReconciliationDatabaseHandleRecord>();
+
+/** @internal Imported only by DatabaseClient and the isolated fake-owner testing adapter. */
+export const registerArtifactReconciliationDatabaseHandle = (
+  owner: ArtifactReconciliationDatabaseOwner,
+): ArtifactReconciliationDatabaseHandle => {
+  const request = owner.request;
+  if (typeof request !== "function") {
+    throw new TypeError("Artifact reconciliation database owner binding is invalid.");
+  }
+  const handle = Object.freeze(Object.create(null)) as ArtifactReconciliationDatabaseHandle;
+  databaseHandleRecords.set(handle, {
+    owner: Object.freeze({
+      request: (<TOperation extends ArtifactReconciliationDatabaseOperation>(
+        operation: TOperation,
+        input: DatabaseOperationMap[TOperation]["input"],
+      ): Promise<DatabaseOperationMap[TOperation]["output"]> =>
+        Reflect.apply(request, owner, [operation, input]) as Promise<
+          DatabaseOperationMap[TOperation]["output"]
+        >) as ArtifactReconciliationDatabaseRequest,
+    }),
+  });
+  return handle;
+};
+
+const consumeDatabaseHandle = (
+  handle: ArtifactReconciliationDatabaseHandle,
+): {
+  readonly record: ArtifactReconciliationDatabaseHandleRecord;
+  readonly restore: () => void;
+} => {
+  if (typeof handle !== "object" || handle === null) {
+    throw new TypeError("Artifact reconciliation database handle is invalid.");
+  }
+  const record = databaseHandleRecords.get(handle);
+  if (record === undefined) {
+    throw new TypeError("Artifact reconciliation database handle was already consumed or forged.");
+  }
+  databaseHandleRecords.delete(handle);
+  return {
+    record,
+    restore: () => {
+      if (!databaseHandleRecords.has(handle)) {
+        databaseHandleRecords.set(handle, record);
+      }
+    },
+  };
+};
 
 interface ArtifactReconciliationPassResult {
   readonly continueImmediately: boolean;
@@ -313,7 +385,7 @@ const snapshotCleanupPage = (
 
 const snapshotHealth = (value: unknown): ArtifactHealthAccounting => {
   const record = requireRecord(value, "Artifact health accounting");
-  requireExactKeys(record, ["activeUploads", "cleanup", "capacity"]);
+  requireExactKeys(record, ["activeUploads", "cleanup", "namespaceCleanup", "capacity"]);
   const active = requireRecord(record.activeUploads, "Active artifact uploads");
   requireExactKeys(active, ["receiving", "finalizing"]);
   const cleanup = requireRecord(record.cleanup, "Artifact cleanup health");
@@ -325,6 +397,21 @@ const snapshotHealth = (value: unknown): ArtifactHealthAccounting => {
     "failed",
     "invalidRetryIdentity",
     "oldestOutstandingAt",
+  ]);
+  const namespaceCleanup = requireRecord(
+    record.namespaceCleanup,
+    "Artifact namespace cleanup health",
+  );
+  requireExactKeys(namespaceCleanup, [
+    "pending",
+    "retryWaiting",
+    "due",
+    "completed",
+    "failed",
+    "superseded",
+    "oldestOutstandingAt",
+    "operationalSaturated",
+    "historicalSaturated",
   ]);
   const capacity = requireRecord(record.capacity, "Artifact capacity health");
   requireExactKeys(capacity, [
@@ -412,6 +499,53 @@ const snapshotHealth = (value: unknown): ArtifactHealthAccounting => {
           ? null
           : requireCanonicalDateTime(cleanup.oldestOutstandingAt, "Oldest artifact cleanup time"),
     }),
+    namespaceCleanup: Object.freeze({
+      pending: requireNonnegativeInteger(
+        namespaceCleanup.pending,
+        Number.MAX_SAFE_INTEGER,
+        "Pending artifact namespace cleanup count",
+      ),
+      retryWaiting: requireNonnegativeInteger(
+        namespaceCleanup.retryWaiting,
+        Number.MAX_SAFE_INTEGER,
+        "Retrying artifact namespace cleanup count",
+      ),
+      due: requireNonnegativeInteger(
+        namespaceCleanup.due,
+        Number.MAX_SAFE_INTEGER,
+        "Due artifact namespace cleanup count",
+      ),
+      completed: requireNonnegativeInteger(
+        namespaceCleanup.completed,
+        Number.MAX_SAFE_INTEGER,
+        "Completed artifact namespace cleanup count",
+      ),
+      failed: requireNonnegativeInteger(
+        namespaceCleanup.failed,
+        Number.MAX_SAFE_INTEGER,
+        "Failed artifact namespace cleanup count",
+      ),
+      superseded: requireNonnegativeInteger(
+        namespaceCleanup.superseded,
+        Number.MAX_SAFE_INTEGER,
+        "Superseded artifact namespace cleanup count",
+      ),
+      oldestOutstandingAt:
+        namespaceCleanup.oldestOutstandingAt === null
+          ? null
+          : requireCanonicalDateTime(
+              namespaceCleanup.oldestOutstandingAt,
+              "Oldest artifact namespace cleanup time",
+            ),
+      operationalSaturated: requireBoolean(
+        namespaceCleanup.operationalSaturated,
+        "Artifact namespace cleanup operational health saturation",
+      ),
+      historicalSaturated: requireBoolean(
+        namespaceCleanup.historicalSaturated,
+        "Artifact namespace cleanup historical health saturation",
+      ),
+    }),
     capacity: normalizedCapacity,
   });
 };
@@ -442,8 +576,10 @@ export class ArtifactReconciliationCoordinator {
   #firstPassSettled = false;
   #ownerExitObserved = false;
 
-  private constructor(options: ArtifactReconciliationCoordinatorOptions) {
-    const database = options.database;
+  private constructor(
+    options: ArtifactReconciliationCoordinatorOptions,
+    database: ArtifactReconciliationDatabaseOwner,
+  ) {
     const storage = options.storage;
     const batchSize = options.batchSize;
     const intervalMilliseconds = options.intervalMilliseconds;
@@ -530,7 +666,14 @@ export class ArtifactReconciliationCoordinator {
   static start(
     options: ArtifactReconciliationCoordinatorOptions,
   ): ArtifactReconciliationCoordinator {
-    return new ArtifactReconciliationCoordinator(options);
+    const databaseHandle = options.database;
+    const consumedDatabase = consumeDatabaseHandle(databaseHandle);
+    try {
+      return new ArtifactReconciliationCoordinator(options, consumedDatabase.record.owner);
+    } catch (error) {
+      consumedDatabase.restore();
+      throw error;
+    }
   }
 
   get fatal(): Promise<ArtifactReconciliationCoordinatorError> {
@@ -630,6 +773,12 @@ export class ArtifactReconciliationCoordinator {
       );
     } catch (error) {
       throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    if (health.namespaceCleanup.failed > 0) {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED");
+    }
+    if (health.namespaceCleanup.operationalSaturated) {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_HEALTH_SATURATED");
     }
     return Object.freeze({
       continueImmediately: terminalized.hasMore || cleanupPage.hasMore,

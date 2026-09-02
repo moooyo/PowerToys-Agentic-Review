@@ -1,9 +1,14 @@
 import { Worker } from "node:worker_threads";
 import {
+  type ArtifactReconciliationDatabaseHandle,
+  registerArtifactReconciliationDatabaseHandle,
+} from "../artifacts/artifact-reconciliation-coordinator.js";
+import {
   type ArtifactUploadCreateDatabaseHandle,
   registerArtifactUploadCreateDatabaseHandle,
 } from "../artifacts/artifact-upload-create-coordinator.js";
 import {
+  type ArtifactReconciliationDatabaseOperation,
   isArtifactReconciliationDatabaseOperation,
   snapshotArtifactReconciliationDatabaseInput,
 } from "./artifacts.js";
@@ -64,6 +69,7 @@ export class DatabaseClient {
   #isReady = false;
   #isClosing = false;
   #artifactUploadCreateHandleIssued = false;
+  #artifactReconciliationHandleIssued = false;
   #shutdownRequested = false;
   #shutdownResponseReceived = false;
   #shutdownAcknowledged = false;
@@ -136,7 +142,12 @@ export class DatabaseClient {
     return client;
   }
 
-  public request<TOperation extends Exclude<DatabaseOperation, "createArtifactUpload">>(
+  public request<
+    TOperation extends Exclude<
+      DatabaseOperation,
+      "createArtifactUpload" | ArtifactReconciliationDatabaseOperation
+    >,
+  >(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
@@ -148,24 +159,18 @@ export class DatabaseClient {
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
+    if (isArtifactReconciliationDatabaseOperation(operation)) {
+      return Promise.reject(
+        new DatabaseRequestError(
+          "Artifact reconciliation requires coordinator authority.",
+          "ARTIFACT_RECONCILIATION_AUTHORITY_REQUIRED",
+        ),
+      ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
+    }
     if (this.#isClosing) {
       return Promise.reject(new Error("Database client is closing."));
     }
-    let inputSnapshot: unknown = input;
-    if (isArtifactReconciliationDatabaseOperation(operation)) {
-      try {
-        inputSnapshot = snapshotArtifactReconciliationDatabaseInput(operation, input);
-      } catch (error) {
-        const code =
-          error instanceof Error && "code" in error && typeof error.code === "string"
-            ? error.code
-            : "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
-        return Promise.reject(
-          new DatabaseRequestError("The artifact reconciliation request is invalid.", code),
-        );
-      }
-    }
-    return this.#send(operation, inputSnapshot as DatabaseOperationMap[TOperation]["input"]);
+    return this.#send(operation, input);
   }
 
   /** Returns an opaque one-shot handle that only ArtifactUploadCreateCoordinator can consume. */
@@ -182,6 +187,29 @@ export class DatabaseClient {
       close: () => this.#startClose(),
     });
     this.#artifactUploadCreateHandleIssued = true;
+    return handle;
+  }
+
+  /** Returns an opaque one-shot handle that only ArtifactReconciliationCoordinator can consume. */
+  public createArtifactReconciliationDatabaseHandle(): ArtifactReconciliationDatabaseHandle {
+    if (this.#isClosing || this.#terminalError !== undefined) {
+      throw new Error("Database client is not available for artifact reconciliation adoption.");
+    }
+    if (this.#artifactReconciliationHandleIssued) {
+      throw new Error("Database client artifact reconciliation handle was already issued.");
+    }
+    const handle = registerArtifactReconciliationDatabaseHandle({
+      request: (<TOperation extends ArtifactReconciliationDatabaseOperation>(
+        operation: TOperation,
+        input: DatabaseOperationMap[TOperation]["input"],
+      ) => this.#requestArtifactReconciliation(operation, input)) as <
+        TOperation extends ArtifactReconciliationDatabaseOperation,
+      >(
+        operation: TOperation,
+        input: DatabaseOperationMap[TOperation]["input"],
+      ) => Promise<DatabaseOperationMap[TOperation]["output"]>,
+    });
+    this.#artifactReconciliationHandleIssued = true;
     return handle;
   }
 
@@ -245,6 +273,31 @@ export class DatabaseClient {
     });
     this.#worker.postMessage(request);
     return (await response) as DatabaseOperationMap[TOperation]["output"];
+  }
+
+  #requestArtifactReconciliation<TOperation extends ArtifactReconciliationDatabaseOperation>(
+    operation: TOperation,
+    input: DatabaseOperationMap[TOperation]["input"],
+  ): Promise<DatabaseOperationMap[TOperation]["output"]> {
+    if (this.#isClosing || this.#terminalError !== undefined) {
+      return Promise.reject(new Error("Database client is not available for reconciliation."));
+    }
+    let inputSnapshot: Readonly<Record<string, unknown>>;
+    try {
+      inputSnapshot = snapshotArtifactReconciliationDatabaseInput(operation, input);
+    } catch (error) {
+      const code =
+        error instanceof Error && "code" in error && typeof error.code === "string"
+          ? error.code
+          : "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
+      return Promise.reject(
+        new DatabaseRequestError("The artifact reconciliation request is invalid.", code),
+      );
+    }
+    return this.#send(
+      operation,
+      inputSnapshot as unknown as DatabaseOperationMap[TOperation]["input"],
+    );
   }
 
   #handleMessage(message: DatabaseWorkerMessage): void {

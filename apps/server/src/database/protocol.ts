@@ -29,19 +29,24 @@ import type {
   OperatorSession,
 } from "../security/operator-auth.js";
 import type {
-  AdvanceArtifactReconciliationCursorInput,
   ArtifactHealthAccounting,
   ArtifactReconciliationCursor,
+  ClassifyArtifactNamespacePageInput,
+  ClassifyArtifactNamespacePageResult,
   CommitArtifactChunkInput,
   CommitArtifactChunkResult,
   CommitArtifactFinalizeInput,
   CommitArtifactFinalizeResult,
   CompleteArtifactCleanupInput,
   CompleteArtifactCleanupResult,
+  CompleteArtifactNamespaceCleanupInput,
+  CompleteArtifactNamespaceCleanupResult,
   CreateArtifactUploadInput,
   CreateArtifactUploadResult,
   ListDueArtifactCleanupsInput,
   ListDueArtifactCleanupsResult,
+  ListDueArtifactNamespaceCleanupsInput,
+  ListDueArtifactNamespaceCleanupsResult,
   PrepareArtifactChunkInput,
   PrepareArtifactChunkResult,
   PrepareArtifactFinalizeInput,
@@ -49,6 +54,8 @@ import type {
   ProbeArtifactUploadCreateResult,
   RecordArtifactCleanupFailureInput,
   RecordArtifactCleanupFailureResult,
+  RecordArtifactNamespaceCleanupFailureInput,
+  RecordArtifactNamespaceCleanupFailureResult,
   TerminalizeInactiveArtifactUploadsInput,
   TerminalizeInactiveArtifactUploadsResult,
   TerminateArtifactUploadInput,
@@ -277,16 +284,28 @@ export interface DatabaseOperationMap {
     readonly input: RecordArtifactCleanupFailureInput;
     readonly output: RecordArtifactCleanupFailureResult;
   };
+  readonly classifyArtifactNamespacePageAndAdvanceCursor: {
+    readonly input: ClassifyArtifactNamespacePageInput;
+    readonly output: ClassifyArtifactNamespacePageResult;
+  };
+  readonly listDueArtifactNamespaceCleanups: {
+    readonly input: ListDueArtifactNamespaceCleanupsInput;
+    readonly output: ListDueArtifactNamespaceCleanupsResult;
+  };
+  readonly completeArtifactNamespaceCleanup: {
+    readonly input: CompleteArtifactNamespaceCleanupInput;
+    readonly output: CompleteArtifactNamespaceCleanupResult;
+  };
+  readonly recordArtifactNamespaceCleanupFailure: {
+    readonly input: RecordArtifactNamespaceCleanupFailureInput;
+    readonly output: RecordArtifactNamespaceCleanupFailureResult;
+  };
   readonly readArtifactHealthAccounting: {
     readonly input: Record<string, never>;
     readonly output: ArtifactHealthAccounting;
   };
   readonly readArtifactReconciliationCursor: {
     readonly input: Record<string, never>;
-    readonly output: ArtifactReconciliationCursor;
-  };
-  readonly advanceArtifactReconciliationCursor: {
-    readonly input: AdvanceArtifactReconciliationCursorInput;
     readonly output: ArtifactReconciliationCursor;
   };
   readonly completeLease: {

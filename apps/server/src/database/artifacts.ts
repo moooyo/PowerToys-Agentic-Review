@@ -25,8 +25,10 @@ export const maximumResultArtifactUploadIdentitiesPerAttempt = 8;
 export const maximumDeclaredResultArtifactBytesPerAttempt = 16 * 1024 * 1024;
 export const maximumArtifactCreateAccountingRows = 4_096;
 export const maximumArtifactReconciliationBatchSize = 1_024;
+export const maximumArtifactNamespacePageSize = 256;
+export const maximumArtifactNamespaceHealthRows = 4_096;
 export const maximumArtifactCleanupRetryDelaySeconds = 86_400;
-export const artifactReconciliationCursorName = "managed_namespace_v1" as const;
+export const artifactReconciliationCursorName = "managed_namespace_v2" as const;
 const maximumArtifactReconciliationCursorKeyLength = 256;
 export const artifactCleanupLiabilityPageSql = `
   WITH due_cleanup AS MATERIALIZED (
@@ -68,6 +70,34 @@ export const artifactDueCleanupPageSql = `
     )
   ORDER BY COALESCE(cleanup.next_attempt_at, cleanup.created_at), cleanup.upload_id
   LIMIT ?
+`;
+export const artifactNamespaceHealthStatusPageSql = `
+  SELECT 1 AS present
+  FROM artifact_namespace_cleanup_journal
+    INDEXED BY ix_artifact_namespace_cleanup_health_status
+  WHERE status = ?
+  ORDER BY entry_key, observation_sha256
+  LIMIT ?
+`;
+export const artifactNamespaceHealthDuePageSql = `
+  SELECT 1 AS present
+  FROM artifact_namespace_cleanup_journal
+    INDEXED BY ix_artifact_namespace_cleanup_due
+  WHERE status IN ('pending', 'retry_waiting')
+    AND (
+      status = 'pending'
+      OR (status = 'retry_waiting' AND next_attempt_at <= ?)
+    )
+  ORDER BY COALESCE(next_attempt_at, created_at), entry_key, observation_sha256
+  LIMIT ?
+`;
+export const artifactNamespaceHealthOldestOutstandingSql = `
+  SELECT created_at
+  FROM artifact_namespace_cleanup_journal
+    INDEXED BY ix_artifact_namespace_cleanup_outstanding_created
+  WHERE status IN ('pending', 'retry_waiting', 'failed')
+  ORDER BY created_at, entry_key, observation_sha256
+  LIMIT 1
 `;
 
 type ArtifactLeaseIdentity = Pick<
@@ -190,6 +220,17 @@ export interface ArtifactHealthAccounting {
     readonly invalidRetryIdentity: number;
     readonly oldestOutstandingAt: string | null;
   };
+  readonly namespaceCleanup: {
+    readonly pending: number;
+    readonly retryWaiting: number;
+    readonly due: number;
+    readonly completed: number;
+    readonly failed: number;
+    readonly superseded: number;
+    readonly oldestOutstandingAt: string | null;
+    readonly operationalSaturated: boolean;
+    readonly historicalSaturated: boolean;
+  };
   readonly capacity: ArtifactUploadCreateAccounting;
 }
 
@@ -201,11 +242,109 @@ export interface ArtifactReconciliationCursor {
   readonly lastCompletedAt: string | null;
 }
 
-export interface AdvanceArtifactReconciliationCursorInput {
+export type ArtifactNamespaceObservationKind = "staging" | "publication-temporary";
+
+export interface ArtifactNamespaceObservationIdentity {
+  readonly entryKey: string;
+  readonly kind: ArtifactNamespaceObservationKind;
+  readonly uploadId: string;
+  readonly finalizationId: string | null;
+  readonly linkedObjectSha256: string | null;
+  readonly observedBytes: number;
+  readonly expectedLinkCount: 1 | 2;
+  readonly fileDevice: string;
+  readonly fileInode: string;
+  readonly fileCtimeNs: string;
+  readonly fileMode: string;
+  readonly fileUid: string;
+  readonly parentDevice: string;
+  readonly parentInode: string;
+  readonly parentMode: string;
+  readonly parentUid: string;
+  readonly linkedObjectDevice: string | null;
+  readonly linkedObjectInode: string | null;
+  readonly linkedObjectCtimeNs: string | null;
+}
+
+export interface ArtifactNamespaceObservation extends ArtifactNamespaceObservationIdentity {
+  readonly observationSha256: string;
+}
+
+export interface ClassifyArtifactNamespacePageInput {
   readonly expectedSweepGeneration: number;
   readonly expectedAfterKey: string | null;
-  readonly nextAfterKey: string | null;
+  readonly observations: readonly ArtifactNamespaceObservation[];
   readonly completedSweep: boolean;
+}
+
+export type ArtifactNamespaceCleanupReason =
+  | "orphan"
+  | "completed_residual"
+  | "stale_identity_mismatch";
+
+export interface ArtifactNamespaceClassification {
+  readonly entryKey: string;
+  readonly observationSha256: string;
+  readonly disposition:
+    | "active_reference"
+    | "upload_cleanup_covered"
+    | "cleanup_intent_created"
+    | "cleanup_intent_replayed";
+  readonly reason: ArtifactNamespaceCleanupReason | null;
+  readonly supersededPriorIntent: boolean;
+}
+
+export interface ClassifyArtifactNamespacePageResult {
+  readonly classifications: readonly ArtifactNamespaceClassification[];
+  readonly cursor: ArtifactReconciliationCursor;
+}
+
+export interface ListDueArtifactNamespaceCleanupsInput {
+  readonly batchSize: number;
+}
+
+export interface ArtifactNamespaceCleanupWorkItem extends ArtifactNamespaceObservation {
+  readonly reason: ArtifactNamespaceCleanupReason;
+  readonly observedSweepGeneration: number;
+  readonly expectedAttemptCount: number;
+  readonly lastRetryDelaySeconds: number | null;
+}
+
+export interface ListDueArtifactNamespaceCleanupsResult {
+  readonly items: readonly ArtifactNamespaceCleanupWorkItem[];
+  readonly hasMore: boolean;
+}
+
+export interface CompleteArtifactNamespaceCleanupInput {
+  readonly entryKey: string;
+  readonly observationSha256: string;
+  readonly expectedAttemptCount: number;
+}
+
+export interface CompleteArtifactNamespaceCleanupResult {
+  readonly entryKey: string;
+  readonly observationSha256: string;
+  readonly status: "completed";
+  readonly attemptCount: number;
+  readonly completedAt: string;
+  readonly replayed: boolean;
+}
+
+export interface RecordArtifactNamespaceCleanupFailureInput
+  extends CompleteArtifactNamespaceCleanupInput {
+  readonly errorCode: ArtifactCleanupRetryErrorCode;
+  readonly retryDelaySeconds: number;
+}
+
+export interface RecordArtifactNamespaceCleanupFailureResult {
+  readonly entryKey: string;
+  readonly observationSha256: string;
+  readonly status: "retry_waiting" | "failed";
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string | null;
+  readonly errorCode: ArtifactCleanupRetryErrorCode;
+  readonly retryDelaySeconds: number;
+  readonly replayed: boolean;
 }
 
 export type ProbeArtifactUploadCreateResult =
@@ -473,11 +612,55 @@ interface ArtifactReconciliationCursorRow {
   readonly last_completed_at: string | null;
 }
 
+interface ArtifactNamespaceUploadRow {
+  readonly id: string;
+  readonly status: string;
+  readonly expected_total_bytes: number;
+  readonly received_bytes: number;
+  readonly finalization_id: string | null;
+  readonly final_total_bytes: number | null;
+  readonly final_sha256: string | null;
+}
+
+interface ArtifactNamespaceCleanupRow {
+  readonly entry_key: string;
+  readonly observation_sha256: string;
+  readonly kind: string;
+  readonly linked_object_sha256: string | null;
+  readonly observed_bytes: number;
+  readonly expected_link_count: number;
+  readonly file_device: string;
+  readonly file_inode: string;
+  readonly file_ctime_ns: string;
+  readonly file_mode: string;
+  readonly file_uid: string;
+  readonly parent_device: string;
+  readonly parent_inode: string;
+  readonly parent_mode: string;
+  readonly parent_uid: string;
+  readonly linked_object_device: string | null;
+  readonly linked_object_inode: string | null;
+  readonly linked_object_ctime_ns: string | null;
+  readonly reason: string;
+  readonly status: string;
+  readonly attempt_count: number;
+  readonly next_attempt_at: string | null;
+  readonly last_error_code: string | null;
+  readonly last_error_message: string | null;
+  readonly last_retry_delay_seconds: number | null;
+  readonly observed_sweep_generation: number;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly completed_at: string | null;
+  readonly superseded_at: string | null;
+}
+
 const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 const artifactNamePattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
 const reconciliationCursorKeyPattern = /^[A-Za-z0-9._/-]{1,256}$/u;
+const canonicalUnsignedDecimalPattern = /^(?:0|[1-9][0-9]{0,39})$/u;
 const cleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCode, string>> = Object.freeze(
   {
     storage_busy: "Artifact staging cleanup is temporarily busy.",
@@ -485,6 +668,21 @@ const cleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCode, strin
     storage_timeout: "Artifact staging cleanup exceeded its bounded deadline.",
     storage_unavailable: "Artifact staging cleanup owner is unavailable.",
   },
+);
+const namespaceCleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCode, string>> =
+  Object.freeze({
+    storage_busy: "Artifact namespace cleanup is temporarily busy.",
+    storage_io_failure: "Artifact namespace cleanup encountered a storage I/O failure.",
+    storage_timeout: "Artifact namespace cleanup exceeded its bounded deadline.",
+    storage_unavailable: "Artifact namespace cleanup owner is unavailable.",
+  });
+const artifactNamespaceStagingKeyPattern = new RegExp(
+  `^staging/(${uuidV4Pattern.source.slice(1, -1)})\\.upload$`,
+  "u",
+);
+const artifactNamespaceTemporaryKeyPattern = new RegExp(
+  `^objects/sha256/([0-9a-f]{2})/\\.publish-(${uuidV4Pattern.source.slice(1, -1)})-(${uuidV4Pattern.source.slice(1, -1)})\\.tmp$`,
+  "u",
 );
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
@@ -595,15 +793,353 @@ const snapshotExpectedCleanupAttempt = (value: unknown): number => {
 const expectedCleanupStatus = (attemptCount: number): "pending" | "retry_waiting" =>
   attemptCount === 0 ? "pending" : "retry_waiting";
 
+interface ParsedArtifactNamespaceEntryKey {
+  readonly entryKey: string;
+  readonly kind: ArtifactNamespaceObservationKind;
+  readonly uploadId: string;
+  readonly finalizationId: string | null;
+  readonly shard: string | null;
+}
+
+const parseArtifactNamespaceEntryKey = (
+  value: unknown,
+  expectedKind?: ArtifactNamespaceObservationKind,
+): ParsedArtifactNamespaceEntryKey => {
+  if (typeof value !== "string") {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const staging = artifactNamespaceStagingKeyPattern.exec(value);
+  if (staging !== null) {
+    const uploadId = staging[1];
+    if (uploadId === undefined || (expectedKind !== undefined && expectedKind !== "staging")) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    return Object.freeze({
+      entryKey: value,
+      kind: "staging" as const,
+      uploadId,
+      finalizationId: null,
+      shard: null,
+    });
+  }
+  const temporary = artifactNamespaceTemporaryKeyPattern.exec(value);
+  if (temporary !== null) {
+    const shard = temporary[1];
+    const uploadId = temporary[2];
+    const finalizationId = temporary[3];
+    if (
+      shard === undefined ||
+      uploadId === undefined ||
+      finalizationId === undefined ||
+      (expectedKind !== undefined && expectedKind !== "publication-temporary")
+    ) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    return Object.freeze({
+      entryKey: value,
+      kind: "publication-temporary" as const,
+      uploadId,
+      finalizationId,
+      shard,
+    });
+  }
+  throw new ArtifactReconciliationInvalidRequestError();
+};
+
+const snapshotArtifactNamespaceSweepGeneration = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return value as number;
+};
+
+const snapshotArtifactNamespaceObservationIdentity = (
+  value: unknown,
+): ArtifactNamespaceObservationIdentity => {
+  const snapshot = snapshotExactInput(value, [
+    "entryKey",
+    "kind",
+    "uploadId",
+    "finalizationId",
+    "linkedObjectSha256",
+    "observedBytes",
+    "expectedLinkCount",
+    "fileDevice",
+    "fileInode",
+    "fileCtimeNs",
+    "fileMode",
+    "fileUid",
+    "parentDevice",
+    "parentInode",
+    "parentMode",
+    "parentUid",
+    "linkedObjectDevice",
+    "linkedObjectInode",
+    "linkedObjectCtimeNs",
+  ]);
+  if (snapshot.kind !== "staging" && snapshot.kind !== "publication-temporary") {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const kind = snapshot.kind;
+  const parsed = parseArtifactNamespaceEntryKey(snapshot.entryKey, kind);
+  if (snapshot.uploadId !== parsed.uploadId || snapshot.finalizationId !== parsed.finalizationId) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const linkedObjectSha256 =
+    snapshot.linkedObjectSha256 === null
+      ? null
+      : typeof snapshot.linkedObjectSha256 === "string" &&
+          sha256Pattern.test(snapshot.linkedObjectSha256)
+        ? snapshot.linkedObjectSha256
+        : (() => {
+            throw new ArtifactReconciliationInvalidRequestError();
+          })();
+  const requireIdentityNumber = (identityValue: unknown): string => {
+    if (typeof identityValue !== "string" || !canonicalUnsignedDecimalPattern.test(identityValue)) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    return identityValue;
+  };
+  const optionalIdentityNumber = (identityValue: unknown): string | null =>
+    identityValue === null ? null : requireIdentityNumber(identityValue);
+  const fileDevice = requireIdentityNumber(snapshot.fileDevice);
+  const fileInode = requireIdentityNumber(snapshot.fileInode);
+  const fileCtimeNs = requireIdentityNumber(snapshot.fileCtimeNs);
+  const fileMode = requireIdentityNumber(snapshot.fileMode);
+  const fileUid = requireIdentityNumber(snapshot.fileUid);
+  const parentDevice = requireIdentityNumber(snapshot.parentDevice);
+  const parentInode = requireIdentityNumber(snapshot.parentInode);
+  const parentMode = requireIdentityNumber(snapshot.parentMode);
+  const parentUid = requireIdentityNumber(snapshot.parentUid);
+  const linkedObjectDevice = optionalIdentityNumber(snapshot.linkedObjectDevice);
+  const linkedObjectInode = optionalIdentityNumber(snapshot.linkedObjectInode);
+  const linkedObjectCtimeNs = optionalIdentityNumber(snapshot.linkedObjectCtimeNs);
+  const hasLinkedIdentity =
+    linkedObjectDevice !== null && linkedObjectInode !== null && linkedObjectCtimeNs !== null;
+  const hasPartialLinkedIdentity =
+    (linkedObjectDevice === null ? 0 : 1) +
+      (linkedObjectInode === null ? 0 : 1) +
+      (linkedObjectCtimeNs === null ? 0 : 1) >
+      0 && !hasLinkedIdentity;
+  if (
+    !Number.isSafeInteger(snapshot.observedBytes) ||
+    (snapshot.observedBytes as number) < 0 ||
+    (snapshot.observedBytes as number) > maximumResultArtifactBytes ||
+    fileDevice !== parentDevice ||
+    (snapshot.expectedLinkCount !== 1 && snapshot.expectedLinkCount !== 2) ||
+    (kind === "staging" &&
+      (snapshot.finalizationId !== null ||
+        linkedObjectSha256 !== null ||
+        hasLinkedIdentity ||
+        hasPartialLinkedIdentity ||
+        snapshot.expectedLinkCount !== 1)) ||
+    (kind === "publication-temporary" &&
+      (hasPartialLinkedIdentity ||
+        (snapshot.expectedLinkCount === 1 && (linkedObjectSha256 !== null || hasLinkedIdentity)) ||
+        (snapshot.expectedLinkCount === 2 &&
+          (linkedObjectSha256 === null ||
+            !hasLinkedIdentity ||
+            linkedObjectDevice !== fileDevice ||
+            linkedObjectInode !== fileInode ||
+            linkedObjectCtimeNs !== fileCtimeNs ||
+            linkedObjectSha256.slice(0, 2) !== parsed.shard))))
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return Object.freeze({
+    entryKey: parsed.entryKey,
+    kind,
+    uploadId: parsed.uploadId,
+    finalizationId: parsed.finalizationId,
+    linkedObjectSha256,
+    observedBytes: snapshot.observedBytes as number,
+    expectedLinkCount: snapshot.expectedLinkCount as 1 | 2,
+    fileDevice,
+    fileInode,
+    fileCtimeNs,
+    fileMode,
+    fileUid,
+    parentDevice,
+    parentInode,
+    parentMode,
+    parentUid,
+    linkedObjectDevice,
+    linkedObjectInode,
+    linkedObjectCtimeNs,
+  });
+};
+
+export const calculateArtifactNamespaceObservationSha256 = (
+  value: ArtifactNamespaceObservationIdentity,
+): string => {
+  const observation = snapshotArtifactNamespaceObservationIdentity(value);
+  return sha256(
+    JSON.stringify([
+      "artifact_namespace_observation_v1",
+      observation.entryKey,
+      observation.kind,
+      observation.uploadId,
+      observation.finalizationId,
+      observation.linkedObjectSha256,
+      observation.observedBytes,
+      observation.expectedLinkCount,
+      observation.fileDevice,
+      observation.fileInode,
+      observation.fileCtimeNs,
+      observation.fileMode,
+      observation.fileUid,
+      observation.parentDevice,
+      observation.parentInode,
+      observation.parentMode,
+      observation.parentUid,
+      observation.linkedObjectDevice,
+      observation.linkedObjectInode,
+      observation.linkedObjectCtimeNs,
+    ]),
+  );
+};
+
+const snapshotArtifactNamespaceObservation = (value: unknown): ArtifactNamespaceObservation => {
+  const snapshot = snapshotExactInput(value, [
+    "entryKey",
+    "observationSha256",
+    "kind",
+    "uploadId",
+    "finalizationId",
+    "linkedObjectSha256",
+    "observedBytes",
+    "expectedLinkCount",
+    "fileDevice",
+    "fileInode",
+    "fileCtimeNs",
+    "fileMode",
+    "fileUid",
+    "parentDevice",
+    "parentInode",
+    "parentMode",
+    "parentUid",
+    "linkedObjectDevice",
+    "linkedObjectInode",
+    "linkedObjectCtimeNs",
+  ]);
+  const identity = snapshotArtifactNamespaceObservationIdentity({
+    entryKey: snapshot.entryKey,
+    kind: snapshot.kind,
+    uploadId: snapshot.uploadId,
+    finalizationId: snapshot.finalizationId,
+    linkedObjectSha256: snapshot.linkedObjectSha256,
+    observedBytes: snapshot.observedBytes,
+    expectedLinkCount: snapshot.expectedLinkCount,
+    fileDevice: snapshot.fileDevice,
+    fileInode: snapshot.fileInode,
+    fileCtimeNs: snapshot.fileCtimeNs,
+    fileMode: snapshot.fileMode,
+    fileUid: snapshot.fileUid,
+    parentDevice: snapshot.parentDevice,
+    parentInode: snapshot.parentInode,
+    parentMode: snapshot.parentMode,
+    parentUid: snapshot.parentUid,
+    linkedObjectDevice: snapshot.linkedObjectDevice,
+    linkedObjectInode: snapshot.linkedObjectInode,
+    linkedObjectCtimeNs: snapshot.linkedObjectCtimeNs,
+  });
+  if (
+    typeof snapshot.observationSha256 !== "string" ||
+    !securelyMatchesSha256(
+      snapshot.observationSha256,
+      calculateArtifactNamespaceObservationSha256(identity),
+    )
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return Object.freeze({ ...identity, observationSha256: snapshot.observationSha256 });
+};
+
+const snapshotArtifactNamespaceObservations = (
+  value: unknown,
+): readonly ArtifactNamespaceObservation[] => {
+  if (!Array.isArray(value) || value.length > maximumArtifactNamespacePageSize) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const allowedKeys = new Set([
+    "length",
+    ...Array.from({ length: value.length }, (_, index) => String(index)),
+  ]);
+  if (
+    Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !allowedKeys.has(key))
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const observations: ArtifactNamespaceObservation[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[index];
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      !descriptor.enumerable ||
+      !("value" in descriptor)
+    ) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    observations.push(snapshotArtifactNamespaceObservation(descriptor.value));
+  }
+  return Object.freeze(observations);
+};
+
+const snapshotClassifyArtifactNamespacePageInput = (
+  value: unknown,
+): ClassifyArtifactNamespacePageInput => {
+  const snapshot = snapshotExactInput(value, [
+    "expectedSweepGeneration",
+    "expectedAfterKey",
+    "observations",
+    "completedSweep",
+  ]);
+  const expectedSweepGeneration = snapshotArtifactNamespaceSweepGeneration(
+    snapshot.expectedSweepGeneration,
+  );
+  const expectedAfterKey =
+    snapshot.expectedAfterKey === null
+      ? null
+      : parseArtifactNamespaceEntryKey(snapshot.expectedAfterKey).entryKey;
+  const observations = snapshotArtifactNamespaceObservations(snapshot.observations);
+  const completedSweep = snapshot.completedSweep;
+  if (
+    typeof completedSweep !== "boolean" ||
+    (!completedSweep && observations.length === 0) ||
+    (completedSweep && expectedSweepGeneration === Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  let priorKey = expectedAfterKey;
+  for (const observation of observations) {
+    if (priorKey !== null && observation.entryKey <= priorKey) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    priorKey = observation.entryKey;
+  }
+  return Object.freeze({
+    expectedSweepGeneration,
+    expectedAfterKey,
+    observations,
+    completedSweep,
+  });
+};
+
 /** Internal Server authority only; Worker-facing routes must never dispatch these operations. */
 export type ArtifactReconciliationDatabaseOperation =
   | "terminalizeInactiveArtifactUploads"
   | "listDueArtifactCleanups"
   | "completeArtifactCleanup"
   | "recordArtifactCleanupFailure"
+  | "classifyArtifactNamespacePageAndAdvanceCursor"
+  | "listDueArtifactNamespaceCleanups"
+  | "completeArtifactNamespaceCleanup"
+  | "recordArtifactNamespaceCleanupFailure"
   | "readArtifactHealthAccounting"
-  | "readArtifactReconciliationCursor"
-  | "advanceArtifactReconciliationCursor";
+  | "readArtifactReconciliationCursor";
 
 export const isArtifactReconciliationDatabaseOperation = (
   operation: string,
@@ -613,9 +1149,12 @@ export const isArtifactReconciliationDatabaseOperation = (
     case "listDueArtifactCleanups":
     case "completeArtifactCleanup":
     case "recordArtifactCleanupFailure":
+    case "classifyArtifactNamespacePageAndAdvanceCursor":
+    case "listDueArtifactNamespaceCleanups":
+    case "completeArtifactNamespaceCleanup":
+    case "recordArtifactNamespaceCleanupFailure":
     case "readArtifactHealthAccounting":
     case "readArtifactReconciliationCursor":
-    case "advanceArtifactReconciliationCursor":
       return true;
     default:
       return false;
@@ -629,6 +1168,7 @@ export const snapshotArtifactReconciliationDatabaseInput = (
   switch (operation) {
     case "terminalizeInactiveArtifactUploads":
     case "listDueArtifactCleanups":
+    case "listDueArtifactNamespaceCleanups":
       return snapshotExactInput(value, ["batchSize"]);
     case "completeArtifactCleanup":
       return snapshotExactInput(value, ["uploadId", "expectedAttemptCount"]);
@@ -639,16 +1179,25 @@ export const snapshotArtifactReconciliationDatabaseInput = (
         "errorCode",
         "retryDelaySeconds",
       ]);
+    case "classifyArtifactNamespacePageAndAdvanceCursor":
+      return snapshotClassifyArtifactNamespacePageInput(value) as unknown as Readonly<
+        Record<string, unknown>
+      >;
+    case "completeArtifactNamespaceCleanup":
+      return snapshotArtifactNamespaceCleanupMutationIdentity(value) as unknown as Readonly<
+        Record<string, unknown>
+      >;
+    case "recordArtifactNamespaceCleanupFailure":
+      return snapshotExactInput(value, [
+        "entryKey",
+        "observationSha256",
+        "expectedAttemptCount",
+        "errorCode",
+        "retryDelaySeconds",
+      ]);
     case "readArtifactHealthAccounting":
     case "readArtifactReconciliationCursor":
       return snapshotExactInput(value, []);
-    case "advanceArtifactReconciliationCursor":
-      return snapshotExactInput(value, [
-        "expectedSweepGeneration",
-        "expectedAfterKey",
-        "nextAfterKey",
-        "completedSweep",
-      ]);
     default:
       throw new ArtifactReconciliationInvalidRequestError();
   }
@@ -809,6 +1358,8 @@ function readArtifactUploadCreateAccounting(
     readonly expected_total_bytes: number;
   }[];
   let accountingCertain = activeRows.length <= maximumArtifactCreateAccountingRows;
+  const initialNamespaceSweepCompleted =
+    readReconciliationCursor(database).lastCompletedAt !== null;
   const liabilityRows = activeRows.slice(0, maximumArtifactCreateAccountingRows);
   let cleanupBacklogEntries = 0;
   if (accountingCertain) {
@@ -823,6 +1374,40 @@ function readArtifactUploadCreateAccounting(
       accountingCertain = false;
     }
     liabilityRows.push(...cleanupRows.slice(0, remainingRows));
+  }
+  const namespaceCleanupRows = database
+    .prepare(`
+      SELECT status
+      FROM artifact_namespace_cleanup_journal
+        INDEXED BY ux_artifact_namespace_cleanup_unresolved_entry
+      WHERE status IN ('pending', 'retry_waiting', 'failed')
+      ORDER BY entry_key
+      LIMIT ?
+    `)
+    .all(maximumArtifactCreateAccountingRows + 1) as unknown as readonly {
+    readonly status: "pending" | "retry_waiting" | "failed";
+  }[];
+  const failedNamespaceCleanup = database
+    .prepare(`
+      SELECT 1 AS present
+      FROM artifact_namespace_cleanup_journal
+        INDEXED BY ix_artifact_namespace_cleanup_health_status
+      WHERE status = 'failed'
+      LIMIT 1
+    `)
+    .get();
+  if (
+    namespaceCleanupRows.length > maximumArtifactCreateAccountingRows ||
+    failedNamespaceCleanup !== undefined
+  ) {
+    accountingCertain = false;
+  }
+  cleanupBacklogEntries += Math.min(
+    namespaceCleanupRows.length,
+    maximumArtifactCreateAccountingRows,
+  );
+  if (!initialNamespaceSweepCompleted) {
+    accountingCertain = false;
   }
 
   const bucketCounts = new Map<number, number>();
@@ -1531,6 +2116,66 @@ export const recordArtifactCleanupFailure = (
   });
 };
 
+const artifactNamespaceHealthStatuses = [
+  "pending",
+  "retry_waiting",
+  "completed",
+  "failed",
+  "superseded",
+] as const;
+
+function readBoundedArtifactNamespaceHealth(
+  database: DatabaseSync,
+  now: string,
+): {
+  readonly pending: number;
+  readonly retry_waiting: number;
+  readonly due: number;
+  readonly completed: number;
+  readonly failed: number;
+  readonly superseded: number;
+  readonly oldest_outstanding_at: string | null;
+  readonly operational_saturated: boolean;
+  readonly historical_saturated: boolean;
+} {
+  const counts = new Map<(typeof artifactNamespaceHealthStatuses)[number], number>();
+  let operationalSaturated = false;
+  let historicalSaturated = false;
+  for (const status of artifactNamespaceHealthStatuses) {
+    const rows = database
+      .prepare(artifactNamespaceHealthStatusPageSql)
+      .all(status, maximumArtifactNamespaceHealthRows + 1);
+    if (rows.length > maximumArtifactNamespaceHealthRows) {
+      if (status === "completed" || status === "superseded") {
+        historicalSaturated = true;
+      } else {
+        operationalSaturated = true;
+      }
+    }
+    counts.set(status, Math.min(rows.length, maximumArtifactNamespaceHealthRows));
+  }
+  const dueRows = database
+    .prepare(artifactNamespaceHealthDuePageSql)
+    .all(now, maximumArtifactNamespaceHealthRows + 1);
+  if (dueRows.length > maximumArtifactNamespaceHealthRows) {
+    operationalSaturated = true;
+  }
+  const oldest = database.prepare(artifactNamespaceHealthOldestOutstandingSql).get() as unknown as
+    | { readonly created_at: string }
+    | undefined;
+  return {
+    pending: counts.get("pending") ?? 0,
+    retry_waiting: counts.get("retry_waiting") ?? 0,
+    due: Math.min(dueRows.length, maximumArtifactNamespaceHealthRows),
+    completed: counts.get("completed") ?? 0,
+    failed: counts.get("failed") ?? 0,
+    superseded: counts.get("superseded") ?? 0,
+    oldest_outstanding_at: oldest?.created_at ?? null,
+    operational_saturated: operationalSaturated,
+    historical_saturated: historicalSaturated,
+  };
+}
+
 export const readArtifactHealthAccounting = (
   database: DatabaseSync,
   input: Record<string, never>,
@@ -1583,6 +2228,11 @@ export const readArtifactHealthAccounting = (
       readonly invalid_retry_identity: number;
       readonly oldest_outstanding_at: string | null;
     };
+    const namespaceCleanup = readBoundedArtifactNamespaceHealth(database, now);
+    const capacity = readArtifactUploadCreateAccounting(database);
+    const boundedCapacity = namespaceCleanup.operational_saturated
+      ? Object.freeze({ ...capacity, accountingCertain: false })
+      : capacity;
     return Object.freeze({
       activeUploads: Object.freeze({
         receiving: requireReconciliationCount(active.receiving),
@@ -1600,7 +2250,21 @@ export const readArtifactHealthAccounting = (
             ? null
             : requireCanonicalDateTime(cleanup.oldest_outstanding_at),
       }),
-      capacity: readArtifactUploadCreateAccounting(database),
+      namespaceCleanup: Object.freeze({
+        pending: requireReconciliationCount(namespaceCleanup.pending),
+        retryWaiting: requireReconciliationCount(namespaceCleanup.retry_waiting),
+        due: requireReconciliationCount(namespaceCleanup.due),
+        completed: requireReconciliationCount(namespaceCleanup.completed),
+        failed: requireReconciliationCount(namespaceCleanup.failed),
+        superseded: requireReconciliationCount(namespaceCleanup.superseded),
+        oldestOutstandingAt:
+          namespaceCleanup.oldest_outstanding_at === null
+            ? null
+            : requireCanonicalDateTime(namespaceCleanup.oldest_outstanding_at),
+        operationalSaturated: namespaceCleanup.operational_saturated,
+        historicalSaturated: namespaceCleanup.historical_saturated,
+      }),
+      capacity: boundedCapacity,
     });
   });
 };
@@ -1613,56 +2277,38 @@ export const readArtifactReconciliationCursor = (
   return withArtifactReconciliationTransaction(database, () => readReconciliationCursor(database));
 };
 
-export const advanceArtifactReconciliationCursor = (
+export const classifyArtifactNamespacePageAndAdvanceCursor = (
   database: DatabaseSync,
-  input: AdvanceArtifactReconciliationCursorInput,
-): ArtifactReconciliationCursor => {
-  const snapshot = snapshotExactInput(input, [
-    "expectedSweepGeneration",
-    "expectedAfterKey",
-    "nextAfterKey",
-    "completedSweep",
-  ]);
-  const expectedSweepGeneration = snapshot.expectedSweepGeneration;
-  if (!Number.isSafeInteger(expectedSweepGeneration) || (expectedSweepGeneration as number) < 0) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const expectedAfterKey =
-    snapshot.expectedAfterKey === null
-      ? null
-      : requireReconciliationCursorKey(snapshot.expectedAfterKey);
-  const nextAfterKey =
-    snapshot.nextAfterKey === null ? null : requireReconciliationCursorKey(snapshot.nextAfterKey);
-  const completedSweep = snapshot.completedSweep;
-  if (
-    typeof completedSweep !== "boolean" ||
-    (completedSweep && nextAfterKey !== null) ||
-    (!completedSweep && nextAfterKey === null) ||
-    (!completedSweep &&
-      expectedAfterKey !== null &&
-      nextAfterKey !== null &&
-      nextAfterKey <= expectedAfterKey)
-  ) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  if (completedSweep && expectedSweepGeneration === Number.MAX_SAFE_INTEGER) {
-    throw new ArtifactReconciliationStateError();
-  }
+  input: ClassifyArtifactNamespacePageInput,
+): ClassifyArtifactNamespacePageResult => {
+  const snapshot = snapshotClassifyArtifactNamespacePageInput(input);
+  const { expectedSweepGeneration, expectedAfterKey, observations, completedSweep } = snapshot;
+
   return withArtifactReconciliationTransaction(database, () => {
-    const current = readReconciliationCursor(database);
+    const cursor = readReconciliationCursor(database);
     if (
-      current.sweepGeneration !== expectedSweepGeneration ||
-      current.afterKey !== expectedAfterKey
+      cursor.sweepGeneration !== expectedSweepGeneration ||
+      cursor.afterKey !== expectedAfterKey
     ) {
       throw new ArtifactReconciliationConflictError();
     }
     const now = new Date().toISOString();
-    const nextGeneration = completedSweep
-      ? (expectedSweepGeneration as number) + 1
-      : (expectedSweepGeneration as number);
+    const classifications = observations.map((observation) =>
+      classifyAndJournalArtifactNamespaceObservation(
+        database,
+        observation,
+        expectedSweepGeneration,
+        now,
+      ),
+    );
+    const nextAfterKey = completedSweep ? null : (observations.at(-1)?.entryKey ?? null);
+    if (!completedSweep && nextAfterKey === null) {
+      throw new ArtifactReconciliationInvalidRequestError();
+    }
+    const nextGeneration = completedSweep ? expectedSweepGeneration + 1 : expectedSweepGeneration;
     const update = database
       .prepare(`
-        UPDATE artifact_reconciliation_cursors
+        UPDATE artifact_namespace_reconciliation_cursors
         SET
           sweep_generation = ?,
           after_key = ?,
@@ -1683,9 +2329,707 @@ export const advanceArtifactReconciliationCursor = (
     if (Number(update.changes) !== 1) {
       throw new ArtifactReconciliationConflictError();
     }
-    return readReconciliationCursor(database);
+    return Object.freeze({
+      classifications: Object.freeze(classifications),
+      cursor: readReconciliationCursor(database),
+    });
   });
 };
+
+export const listDueArtifactNamespaceCleanups = (
+  database: DatabaseSync,
+  input: ListDueArtifactNamespaceCleanupsInput,
+): ListDueArtifactNamespaceCleanupsResult => {
+  const batchSize = snapshotReconciliationBatchSize(input);
+  return withArtifactReconciliationTransaction(database, () => {
+    const now = new Date().toISOString();
+    const rows = database
+      .prepare(`
+        SELECT *
+        FROM artifact_namespace_cleanup_journal
+          INDEXED BY ix_artifact_namespace_cleanup_due
+        WHERE status IN ('pending', 'retry_waiting')
+          AND (
+            status = 'pending'
+            OR (status = 'retry_waiting' AND next_attempt_at <= ?)
+          )
+        ORDER BY COALESCE(next_attempt_at, created_at), entry_key, observation_sha256
+        LIMIT ?
+      `)
+      .all(now, batchSize + 1) as unknown as readonly ArtifactNamespaceCleanupRow[];
+    return Object.freeze({
+      items: Object.freeze(
+        rows.slice(0, batchSize).map((row) => snapshotArtifactNamespaceCleanupWorkItem(row, now)),
+      ),
+      hasMore: rows.length > batchSize,
+    });
+  });
+};
+
+export const completeArtifactNamespaceCleanup = (
+  database: DatabaseSync,
+  input: CompleteArtifactNamespaceCleanupInput,
+): CompleteArtifactNamespaceCleanupResult => {
+  const identity = snapshotArtifactNamespaceCleanupMutationIdentity(input);
+  return withArtifactReconciliationTransaction(database, () => {
+    const existing = requireArtifactNamespaceCleanupRow(
+      database,
+      identity.entryKey,
+      identity.observationSha256,
+    );
+    if (
+      existing.status === "completed" &&
+      existing.attempt_count === identity.expectedAttemptCount &&
+      existing.completed_at !== null
+    ) {
+      return Object.freeze({
+        entryKey: identity.entryKey,
+        observationSha256: identity.observationSha256,
+        status: "completed" as const,
+        attemptCount: identity.expectedAttemptCount,
+        completedAt: requireCanonicalDateTime(existing.completed_at),
+        replayed: true,
+      });
+    }
+    if (
+      existing.status !== expectedCleanupStatus(identity.expectedAttemptCount) ||
+      existing.attempt_count !== identity.expectedAttemptCount
+    ) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    const now = new Date().toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_namespace_cleanup_journal
+        SET status = 'completed', next_attempt_at = NULL,
+            updated_at = ?, completed_at = ?, superseded_at = NULL
+        WHERE entry_key = ? AND observation_sha256 = ?
+          AND status = ? AND attempt_count = ?
+      `)
+      .run(
+        now,
+        now,
+        identity.entryKey,
+        identity.observationSha256,
+        expectedCleanupStatus(identity.expectedAttemptCount),
+        identity.expectedAttemptCount,
+      );
+    if (Number(update.changes) !== 1) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    return Object.freeze({
+      entryKey: identity.entryKey,
+      observationSha256: identity.observationSha256,
+      status: "completed" as const,
+      attemptCount: identity.expectedAttemptCount,
+      completedAt: now,
+      replayed: false,
+    });
+  });
+};
+
+export const recordArtifactNamespaceCleanupFailure = (
+  database: DatabaseSync,
+  input: RecordArtifactNamespaceCleanupFailureInput,
+): RecordArtifactNamespaceCleanupFailureResult => {
+  const snapshot = snapshotExactInput(input, [
+    "entryKey",
+    "observationSha256",
+    "expectedAttemptCount",
+    "errorCode",
+    "retryDelaySeconds",
+  ]);
+  const identity = snapshotArtifactNamespaceCleanupMutationIdentity({
+    entryKey: snapshot.entryKey,
+    observationSha256: snapshot.observationSha256,
+    expectedAttemptCount: snapshot.expectedAttemptCount,
+  });
+  const errorCode = snapshot.errorCode;
+  const retryDelaySeconds = snapshot.retryDelaySeconds;
+  if (
+    typeof errorCode !== "string" ||
+    !Object.hasOwn(namespaceCleanupRetryMessages, errorCode) ||
+    !Number.isSafeInteger(retryDelaySeconds) ||
+    (retryDelaySeconds as number) < 1 ||
+    (retryDelaySeconds as number) > maximumArtifactCleanupRetryDelaySeconds
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const canonicalErrorCode = errorCode as ArtifactCleanupRetryErrorCode;
+  const canonicalRetryDelaySeconds = retryDelaySeconds as number;
+  return withArtifactReconciliationTransaction(database, () => {
+    const existing = requireArtifactNamespaceCleanupRow(
+      database,
+      identity.entryKey,
+      identity.observationSha256,
+    );
+    const nextAttemptCount = identity.expectedAttemptCount + 1;
+    const nextStatus = nextAttemptCount === 8 ? "failed" : "retry_waiting";
+    if (
+      existing.status === nextStatus &&
+      existing.attempt_count === nextAttemptCount &&
+      existing.last_error_code === canonicalErrorCode &&
+      existing.last_error_message === namespaceCleanupRetryMessages[canonicalErrorCode] &&
+      existing.last_retry_delay_seconds === canonicalRetryDelaySeconds
+    ) {
+      return namespaceCleanupFailureResult(
+        existing,
+        canonicalErrorCode,
+        canonicalRetryDelaySeconds,
+        true,
+      );
+    }
+    if (
+      existing.status !== expectedCleanupStatus(identity.expectedAttemptCount) ||
+      existing.attempt_count !== identity.expectedAttemptCount
+    ) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    const nextAttemptAt =
+      nextStatus === "failed"
+        ? null
+        : new Date(nowDate.getTime() + canonicalRetryDelaySeconds * 1_000).toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_namespace_cleanup_journal
+        SET status = ?, attempt_count = ?, next_attempt_at = ?,
+            last_error_code = ?, last_error_message = ?, last_retry_delay_seconds = ?,
+            updated_at = ?, completed_at = NULL, superseded_at = NULL
+        WHERE entry_key = ? AND observation_sha256 = ?
+          AND status = ? AND attempt_count = ?
+      `)
+      .run(
+        nextStatus,
+        nextAttemptCount,
+        nextAttemptAt,
+        canonicalErrorCode,
+        namespaceCleanupRetryMessages[canonicalErrorCode],
+        canonicalRetryDelaySeconds,
+        now,
+        identity.entryKey,
+        identity.observationSha256,
+        expectedCleanupStatus(identity.expectedAttemptCount),
+        identity.expectedAttemptCount,
+      );
+    if (Number(update.changes) !== 1) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    return Object.freeze({
+      entryKey: identity.entryKey,
+      observationSha256: identity.observationSha256,
+      status: nextStatus,
+      attemptCount: nextAttemptCount,
+      nextAttemptAt,
+      errorCode: canonicalErrorCode,
+      retryDelaySeconds: canonicalRetryDelaySeconds,
+      replayed: false,
+    });
+  });
+};
+
+type ArtifactNamespaceReferenceDisposition =
+  | { readonly disposition: "active_reference" | "upload_cleanup_covered" }
+  | { readonly reason: ArtifactNamespaceCleanupReason };
+
+function classifyAndJournalArtifactNamespaceObservation(
+  database: DatabaseSync,
+  observation: ArtifactNamespaceObservation,
+  sweepGeneration: number,
+  now: string,
+): ArtifactNamespaceClassification {
+  const reference = classifyArtifactNamespaceReference(database, observation);
+  const unresolved = readUnresolvedArtifactNamespaceCleanup(database, observation.entryKey);
+  if ("disposition" in reference) {
+    if (unresolved !== undefined) {
+      throw new ArtifactReconciliationStateError();
+    }
+    return Object.freeze({
+      entryKey: observation.entryKey,
+      observationSha256: observation.observationSha256,
+      disposition: reference.disposition,
+      reason: null,
+      supersededPriorIntent: false,
+    });
+  }
+
+  if (unresolved?.observation_sha256 === observation.observationSha256) {
+    if (
+      !artifactNamespaceObservationMatchesRow(observation, unresolved) ||
+      unresolved.reason !== reference.reason
+    ) {
+      throw new ArtifactReconciliationStateError();
+    }
+    return Object.freeze({
+      entryKey: observation.entryKey,
+      observationSha256: observation.observationSha256,
+      disposition: "cleanup_intent_replayed" as const,
+      reason: reference.reason,
+      supersededPriorIntent: false,
+    });
+  }
+
+  const supersededPriorIntent =
+    unresolved === undefined ? false : supersedeArtifactNamespaceCleanup(database, unresolved, now);
+  const existingIdentity = readArtifactNamespaceCleanup(
+    database,
+    observation.entryKey,
+    observation.observationSha256,
+  );
+  if (existingIdentity !== undefined) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const insert = database
+    .prepare(`
+      INSERT INTO artifact_namespace_cleanup_journal (
+        entry_key,
+        observation_sha256,
+        kind,
+        linked_object_sha256,
+        observed_bytes,
+        expected_link_count,
+        file_device,
+        file_inode,
+        file_ctime_ns,
+        file_mode,
+        file_uid,
+        parent_device,
+        parent_inode,
+        parent_mode,
+        parent_uid,
+        linked_object_device,
+        linked_object_inode,
+        linked_object_ctime_ns,
+        reason,
+        status,
+        attempt_count,
+        observed_sweep_generation,
+        created_at,
+        updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, 'pending', 0, ?, ?, ?
+      )
+    `)
+    .run(
+      observation.entryKey,
+      observation.observationSha256,
+      observation.kind,
+      observation.linkedObjectSha256,
+      observation.observedBytes,
+      observation.expectedLinkCount,
+      observation.fileDevice,
+      observation.fileInode,
+      observation.fileCtimeNs,
+      observation.fileMode,
+      observation.fileUid,
+      observation.parentDevice,
+      observation.parentInode,
+      observation.parentMode,
+      observation.parentUid,
+      observation.linkedObjectDevice,
+      observation.linkedObjectInode,
+      observation.linkedObjectCtimeNs,
+      reference.reason,
+      sweepGeneration,
+      now,
+      now,
+    );
+  if (Number(insert.changes) !== 1) {
+    throw new ArtifactReconciliationConflictError();
+  }
+  return Object.freeze({
+    entryKey: observation.entryKey,
+    observationSha256: observation.observationSha256,
+    disposition: "cleanup_intent_created" as const,
+    reason: reference.reason,
+    supersededPriorIntent,
+  });
+}
+
+function classifyArtifactNamespaceReference(
+  database: DatabaseSync,
+  observation: ArtifactNamespaceObservation,
+): ArtifactNamespaceReferenceDisposition {
+  const upload = database
+    .prepare(`
+      SELECT id, status, expected_total_bytes, received_bytes,
+             finalization_id, final_total_bytes, final_sha256
+      FROM artifact_uploads
+      WHERE id = ?
+    `)
+    .get(observation.uploadId) as unknown as ArtifactNamespaceUploadRow | undefined;
+  if (upload === undefined) {
+    return { reason: "orphan" };
+  }
+  if (upload.id !== observation.uploadId) {
+    throw new ArtifactReconciliationStateError();
+  }
+
+  const terminal =
+    upload.status === "committed" || upload.status === "abandoned" || upload.status === "corrupt";
+  if (terminal) {
+    if (
+      observation.kind === "publication-temporary" &&
+      !artifactNamespaceTemporaryIdentityMatchesUpload(observation, upload)
+    ) {
+      return { reason: "stale_identity_mismatch" };
+    }
+    let cleanup: ArtifactCleanupJournalRow;
+    try {
+      cleanup = requireArtifactCleanupJournal(database, upload.id);
+    } catch {
+      throw new ArtifactReconciliationStateError();
+    }
+    if (
+      cleanup.status === "pending" ||
+      cleanup.status === "retry_waiting" ||
+      cleanup.status === "failed"
+    ) {
+      return { disposition: "upload_cleanup_covered" };
+    }
+    if (cleanup.status === "completed") {
+      return { reason: "completed_residual" };
+    }
+    throw new ArtifactReconciliationStateError();
+  }
+
+  if (observation.kind === "staging") {
+    if (
+      (upload.status === "receiving" &&
+        Number.isSafeInteger(upload.received_bytes) &&
+        Number.isSafeInteger(upload.expected_total_bytes) &&
+        observation.observedBytes >= upload.received_bytes &&
+        observation.observedBytes <= upload.expected_total_bytes) ||
+      (upload.status === "finalizing" &&
+        Number.isSafeInteger(upload.final_total_bytes) &&
+        observation.observedBytes === upload.final_total_bytes)
+    ) {
+      return { disposition: "active_reference" };
+    }
+    throw new ArtifactReconciliationStateError();
+  }
+
+  if (
+    upload.status === "finalizing" &&
+    artifactNamespaceTemporaryIdentityMatchesUpload(observation, upload) &&
+    Number.isSafeInteger(upload.final_total_bytes) &&
+    ((observation.expectedLinkCount === 1 &&
+      observation.observedBytes <= (upload.final_total_bytes as number)) ||
+      (observation.expectedLinkCount === 2 &&
+        observation.observedBytes === upload.final_total_bytes &&
+        observation.linkedObjectSha256 === upload.final_sha256))
+  ) {
+    return { disposition: "active_reference" };
+  }
+  throw new ArtifactReconciliationStateError();
+}
+
+function artifactNamespaceTemporaryIdentityMatchesUpload(
+  observation: ArtifactNamespaceObservation,
+  upload: ArtifactNamespaceUploadRow,
+): boolean {
+  const parsed = parseArtifactNamespaceEntryKey(observation.entryKey, "publication-temporary");
+  return (
+    upload.finalization_id !== null &&
+    upload.final_sha256 !== null &&
+    observation.finalizationId === upload.finalization_id &&
+    parsed.shard === upload.final_sha256.slice(0, 2)
+  );
+}
+
+function readUnresolvedArtifactNamespaceCleanup(
+  database: DatabaseSync,
+  entryKey: string,
+): ArtifactNamespaceCleanupRow | undefined {
+  const row = database
+    .prepare(`
+      SELECT * FROM artifact_namespace_cleanup_journal
+      WHERE entry_key = ? AND status IN ('pending', 'retry_waiting', 'failed')
+    `)
+    .get(entryKey) as unknown as ArtifactNamespaceCleanupRow | undefined;
+  return row === undefined ? undefined : validateArtifactNamespaceCleanupRow(row);
+}
+
+function supersedeArtifactNamespaceCleanup(
+  database: DatabaseSync,
+  row: ArtifactNamespaceCleanupRow,
+  now: string,
+): true {
+  const update = database
+    .prepare(`
+      UPDATE artifact_namespace_cleanup_journal
+      SET status = 'superseded', next_attempt_at = NULL,
+          updated_at = ?, completed_at = NULL, superseded_at = ?
+      WHERE entry_key = ? AND observation_sha256 = ?
+        AND status IN ('pending', 'retry_waiting', 'failed')
+    `)
+    .run(now, now, row.entry_key, row.observation_sha256);
+  if (Number(update.changes) !== 1) {
+    throw new ArtifactReconciliationConflictError();
+  }
+  return true;
+}
+
+function readArtifactNamespaceCleanup(
+  database: DatabaseSync,
+  entryKey: string,
+  observationSha256: string,
+): ArtifactNamespaceCleanupRow | undefined {
+  const row = database
+    .prepare(`
+      SELECT * FROM artifact_namespace_cleanup_journal
+      WHERE entry_key = ? AND observation_sha256 = ?
+    `)
+    .get(entryKey, observationSha256) as unknown as ArtifactNamespaceCleanupRow | undefined;
+  return row === undefined ? undefined : validateArtifactNamespaceCleanupRow(row);
+}
+
+function requireArtifactNamespaceCleanupRow(
+  database: DatabaseSync,
+  entryKey: string,
+  observationSha256: string,
+): ArtifactNamespaceCleanupRow {
+  const row = readArtifactNamespaceCleanup(database, entryKey, observationSha256);
+  if (row === undefined) {
+    throw new ArtifactReconciliationConflictError();
+  }
+  return row;
+}
+
+function validateArtifactNamespaceCleanupRow(
+  row: ArtifactNamespaceCleanupRow,
+): ArtifactNamespaceCleanupRow {
+  let parsed: ParsedArtifactNamespaceEntryKey;
+  try {
+    parsed = parseArtifactNamespaceEntryKey(row.entry_key);
+  } catch {
+    throw new ArtifactReconciliationStateError();
+  }
+  const knownReason =
+    row.reason === "orphan" ||
+    row.reason === "completed_residual" ||
+    row.reason === "stale_identity_mismatch";
+  const knownError =
+    typeof row.last_error_code === "string" &&
+    Object.hasOwn(namespaceCleanupRetryMessages, row.last_error_code) &&
+    row.last_error_message ===
+      namespaceCleanupRetryMessages[row.last_error_code as ArtifactCleanupRetryErrorCode] &&
+    Number.isSafeInteger(row.last_retry_delay_seconds) &&
+    (row.last_retry_delay_seconds as number) >= 1 &&
+    (row.last_retry_delay_seconds as number) <= maximumArtifactCleanupRetryDelaySeconds;
+  const noError =
+    row.last_error_code === null &&
+    row.last_error_message === null &&
+    row.last_retry_delay_seconds === null;
+  const validState =
+    (row.status === "pending" &&
+      row.attempt_count === 0 &&
+      row.next_attempt_at === null &&
+      noError &&
+      row.completed_at === null &&
+      row.superseded_at === null) ||
+    (row.status === "retry_waiting" &&
+      row.attempt_count >= 1 &&
+      row.attempt_count <= 7 &&
+      row.next_attempt_at !== null &&
+      knownError &&
+      row.completed_at === null &&
+      row.superseded_at === null) ||
+    (row.status === "completed" &&
+      row.attempt_count >= 0 &&
+      row.attempt_count <= 7 &&
+      row.next_attempt_at === null &&
+      (row.attempt_count === 0 ? noError : knownError) &&
+      row.completed_at !== null &&
+      row.superseded_at === null) ||
+    (row.status === "failed" &&
+      row.attempt_count === 8 &&
+      row.next_attempt_at === null &&
+      knownError &&
+      row.completed_at === null &&
+      row.superseded_at === null) ||
+    (row.status === "superseded" &&
+      row.attempt_count >= 0 &&
+      row.attempt_count <= 8 &&
+      row.next_attempt_at === null &&
+      (row.attempt_count === 0 ? noError : knownError) &&
+      row.completed_at === null &&
+      row.superseded_at !== null);
+  if (
+    !sha256Pattern.test(row.observation_sha256) ||
+    row.kind !== parsed.kind ||
+    !knownReason ||
+    !Number.isSafeInteger(row.observed_bytes) ||
+    row.observed_bytes < 0 ||
+    row.observed_bytes > maximumResultArtifactBytes ||
+    (row.expected_link_count !== 1 && row.expected_link_count !== 2) ||
+    !Number.isSafeInteger(row.observed_sweep_generation) ||
+    row.observed_sweep_generation < 0 ||
+    !Number.isSafeInteger(row.attempt_count) ||
+    !validState
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const identity: ArtifactNamespaceObservationIdentity = {
+    entryKey: row.entry_key,
+    kind: parsed.kind,
+    uploadId: parsed.uploadId,
+    finalizationId: parsed.finalizationId,
+    linkedObjectSha256: row.linked_object_sha256,
+    observedBytes: row.observed_bytes,
+    expectedLinkCount: row.expected_link_count as 1 | 2,
+    fileDevice: row.file_device,
+    fileInode: row.file_inode,
+    fileCtimeNs: row.file_ctime_ns,
+    fileMode: row.file_mode,
+    fileUid: row.file_uid,
+    parentDevice: row.parent_device,
+    parentInode: row.parent_inode,
+    parentMode: row.parent_mode,
+    parentUid: row.parent_uid,
+    linkedObjectDevice: row.linked_object_device,
+    linkedObjectInode: row.linked_object_inode,
+    linkedObjectCtimeNs: row.linked_object_ctime_ns,
+  };
+  try {
+    if (
+      !securelyMatchesSha256(
+        row.observation_sha256,
+        calculateArtifactNamespaceObservationSha256(identity),
+      )
+    ) {
+      throw new ArtifactReconciliationStateError();
+    }
+  } catch (error) {
+    if (error instanceof ArtifactReconciliationStateError) {
+      throw error;
+    }
+    throw new ArtifactReconciliationStateError();
+  }
+  requireCanonicalDateTime(row.created_at);
+  requireCanonicalDateTime(row.updated_at);
+  if (row.next_attempt_at !== null) {
+    requireCanonicalDateTime(row.next_attempt_at);
+  }
+  if (row.completed_at !== null) {
+    requireCanonicalDateTime(row.completed_at);
+  }
+  if (row.superseded_at !== null) {
+    requireCanonicalDateTime(row.superseded_at);
+  }
+  return row;
+}
+
+function artifactNamespaceObservationMatchesRow(
+  observation: ArtifactNamespaceObservation,
+  row: ArtifactNamespaceCleanupRow,
+): boolean {
+  return (
+    row.entry_key === observation.entryKey &&
+    row.observation_sha256 === observation.observationSha256 &&
+    row.kind === observation.kind &&
+    row.linked_object_sha256 === observation.linkedObjectSha256 &&
+    row.observed_bytes === observation.observedBytes &&
+    row.expected_link_count === observation.expectedLinkCount &&
+    row.file_device === observation.fileDevice &&
+    row.file_inode === observation.fileInode &&
+    row.file_ctime_ns === observation.fileCtimeNs &&
+    row.file_mode === observation.fileMode &&
+    row.file_uid === observation.fileUid &&
+    row.parent_device === observation.parentDevice &&
+    row.parent_inode === observation.parentInode &&
+    row.parent_mode === observation.parentMode &&
+    row.parent_uid === observation.parentUid &&
+    row.linked_object_device === observation.linkedObjectDevice &&
+    row.linked_object_inode === observation.linkedObjectInode &&
+    row.linked_object_ctime_ns === observation.linkedObjectCtimeNs
+  );
+}
+
+function snapshotArtifactNamespaceCleanupMutationIdentity(
+  value: unknown,
+): CompleteArtifactNamespaceCleanupInput {
+  const snapshot = snapshotExactInput(value, [
+    "entryKey",
+    "observationSha256",
+    "expectedAttemptCount",
+  ]);
+  const entryKey = parseArtifactNamespaceEntryKey(snapshot.entryKey).entryKey;
+  if (
+    typeof snapshot.observationSha256 !== "string" ||
+    !sha256Pattern.test(snapshot.observationSha256)
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return Object.freeze({
+    entryKey,
+    observationSha256: snapshot.observationSha256,
+    expectedAttemptCount: snapshotExpectedCleanupAttempt(snapshot.expectedAttemptCount),
+  });
+}
+
+function snapshotArtifactNamespaceCleanupWorkItem(
+  row: ArtifactNamespaceCleanupRow,
+  now: string,
+): ArtifactNamespaceCleanupWorkItem {
+  validateArtifactNamespaceCleanupRow(row);
+  if (
+    (row.status !== "pending" && row.status !== "retry_waiting") ||
+    (row.status === "retry_waiting" &&
+      (row.next_attempt_at === null || requireCanonicalDateTime(row.next_attempt_at) > now))
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const parsed = parseArtifactNamespaceEntryKey(row.entry_key);
+  return Object.freeze({
+    entryKey: row.entry_key,
+    observationSha256: row.observation_sha256,
+    kind: parsed.kind,
+    uploadId: parsed.uploadId,
+    finalizationId: parsed.finalizationId,
+    linkedObjectSha256: row.linked_object_sha256,
+    observedBytes: row.observed_bytes,
+    expectedLinkCount: row.expected_link_count as 1 | 2,
+    fileDevice: row.file_device,
+    fileInode: row.file_inode,
+    fileCtimeNs: row.file_ctime_ns,
+    fileMode: row.file_mode,
+    fileUid: row.file_uid,
+    parentDevice: row.parent_device,
+    parentInode: row.parent_inode,
+    parentMode: row.parent_mode,
+    parentUid: row.parent_uid,
+    linkedObjectDevice: row.linked_object_device,
+    linkedObjectInode: row.linked_object_inode,
+    linkedObjectCtimeNs: row.linked_object_ctime_ns,
+    reason: row.reason as ArtifactNamespaceCleanupReason,
+    observedSweepGeneration: row.observed_sweep_generation,
+    expectedAttemptCount: row.attempt_count,
+    lastRetryDelaySeconds: row.last_retry_delay_seconds,
+  });
+}
+
+function namespaceCleanupFailureResult(
+  row: ArtifactNamespaceCleanupRow,
+  errorCode: ArtifactCleanupRetryErrorCode,
+  retryDelaySeconds: number,
+  replayed: boolean,
+): RecordArtifactNamespaceCleanupFailureResult {
+  return Object.freeze({
+    entryKey: row.entry_key,
+    observationSha256: row.observation_sha256,
+    status: row.status as "retry_waiting" | "failed",
+    attemptCount: row.attempt_count,
+    nextAttemptAt:
+      row.next_attempt_at === null ? null : requireCanonicalDateTime(row.next_attempt_at),
+    errorCode,
+    retryDelaySeconds,
+    replayed,
+  });
+}
 
 function classifyInactiveArtifactUpload(
   row: InactiveArtifactUploadRow,
@@ -1872,7 +3216,7 @@ function readReconciliationCursor(database: DatabaseSync): ArtifactReconciliatio
   const row = database
     .prepare(`
       SELECT name, sweep_generation, after_key, updated_at, last_completed_at
-      FROM artifact_reconciliation_cursors
+      FROM artifact_namespace_reconciliation_cursors
       WHERE name = ?
     `)
     .get(artifactReconciliationCursorName) as unknown as

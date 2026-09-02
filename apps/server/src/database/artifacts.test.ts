@@ -16,16 +16,21 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  advanceArtifactReconciliationCursor,
   artifactCleanupLiabilityPageSql,
   artifactDueCleanupPageSql,
   artifactReconciliationCursorName,
+  calculateArtifactNamespaceObservationSha256,
+  classifyArtifactNamespacePageAndAdvanceCursor,
   commitArtifactChunk,
   commitArtifactFinalize,
   completeArtifactCleanup,
+  completeArtifactNamespaceCleanup,
   createArtifactUpload,
   listDueArtifactCleanups,
+  listDueArtifactNamespaceCleanups,
   maximumArtifactCreateAccountingRows,
+  maximumArtifactNamespaceHealthRows,
+  maximumArtifactNamespacePageSize,
   maximumArtifactReconciliationBatchSize,
   maximumDeclaredResultArtifactBytesPerAttempt,
   maximumResultArtifactUploadIdentitiesPerAttempt,
@@ -35,6 +40,7 @@ import {
   readArtifactHealthAccounting,
   readArtifactReconciliationCursor,
   recordArtifactCleanupFailure,
+  recordArtifactNamespaceCleanupFailure,
   terminalizeInactiveArtifactUploads,
   terminateArtifactUpload,
   toResultArtifactChunkResponse,
@@ -44,6 +50,7 @@ import {
   ArtifactCompletionModeMismatchError,
   ArtifactReconciliationConflictError,
   ArtifactReconciliationInvalidRequestError,
+  ArtifactReconciliationStateError,
   ArtifactUploadQuotaExceededError,
   LeaseLostError,
 } from "../../dist/database/errors.js";
@@ -59,6 +66,11 @@ const versionEightMigrationFilenames = [
   "0006_immutable_review_results.sql",
   "0007_operator_login_claim.sql",
   "0008_result_artifacts.sql",
+] as const;
+const versionTenMigrationFilenames = [
+  ...versionEightMigrationFilenames,
+  "0009_artifact_completion_foundation.sql",
+  "0010_artifact_reconciliation.sql",
 ] as const;
 const leaseToken = "artifact-test-lease-token".padEnd(32, "x");
 const clientArtifactId = "12345678-1234-4123-8123-123456789abc";
@@ -330,6 +342,105 @@ const createLiveUpload = (database: DatabaseSync, ordinal = 0) =>
     totalBytes: 2,
     sha256: sha256(`reconciliation-${ordinal}`),
   });
+
+const namespaceStagingObservation = (
+  uploadId: string,
+  _sweepGeneration: number,
+  observedBytes = 1,
+  fileInode = "2",
+) => {
+  const identity = {
+    entryKey: `staging/${uploadId}.upload`,
+    kind: "staging" as const,
+    uploadId,
+    finalizationId: null,
+    linkedObjectSha256: null,
+    observedBytes,
+    expectedLinkCount: 1 as const,
+    fileDevice: "1",
+    fileInode,
+    fileCtimeNs: "3",
+    fileMode: "384",
+    fileUid: "1000",
+    parentDevice: "1",
+    parentInode: "4",
+    parentMode: "448",
+    parentUid: "1000",
+    linkedObjectDevice: null,
+    linkedObjectInode: null,
+    linkedObjectCtimeNs: null,
+  };
+  return {
+    ...identity,
+    observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+  };
+};
+
+const namespaceTemporaryObservation = (
+  uploadId: string,
+  finalizationId: string,
+  objectSha256: string,
+  _sweepGeneration: number,
+  observedBytes = 1,
+) => {
+  const identity = {
+    entryKey:
+      `objects/sha256/${objectSha256.slice(0, 2)}/.publish-` + `${uploadId}-${finalizationId}.tmp`,
+    kind: "publication-temporary" as const,
+    uploadId,
+    finalizationId,
+    linkedObjectSha256: null,
+    observedBytes,
+    expectedLinkCount: 1 as const,
+    fileDevice: "1",
+    fileInode: "12",
+    fileCtimeNs: "13",
+    fileMode: "384",
+    fileUid: "1000",
+    parentDevice: "1",
+    parentInode: "14",
+    parentMode: "448",
+    parentUid: "1000",
+    linkedObjectDevice: null,
+    linkedObjectInode: null,
+    linkedObjectCtimeNs: null,
+  };
+  return {
+    ...identity,
+    observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+  };
+};
+
+const insertNamespaceCollisionUpload = (
+  database: DatabaseSync,
+  uploadId: string,
+  ordinal: number,
+  totalBytes: number,
+  digest: string,
+): void => {
+  const now = "2026-09-01T00:00:00.000Z";
+  database
+    .prepare(`
+      INSERT INTO artifact_uploads (
+        id, job_id, run_attempt_id, worker_node_id, worker_instance_id,
+        lease_generation, client_artifact_id, purpose, name, media_type,
+        expected_total_bytes, expected_sha256, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, 'result', ?, 'application/json', ?, ?, 'receiving', ?, ?)
+    `)
+    .run(
+      uploadId,
+      identity.jobId,
+      identity.runAttemptId,
+      identity.workerNodeId,
+      identity.workerInstanceId,
+      artifactClientId(ordinal),
+      `namespace-${ordinal}.json`,
+      totalBytes,
+      digest,
+      now,
+      now,
+    );
+};
 
 const insertRawUpload = (database: DatabaseSync, ordinal: number, totalBytes: number): void => {
   const now = "2026-09-01T00:00:00.000Z";
@@ -820,12 +931,27 @@ describe("result artifact database state machine", () => {
       .prepare("SELECT id FROM artifact_uploads WHERE client_artifact_id = ?")
       .get(artifactClientId(0)) as { readonly id: string };
 
-    expect(runMigrations(database, migrationsDirectory)).toBe(10);
+    expect(runMigrations(database, migrationsDirectory)).toBe(11);
     expect(
       database
         .prepare(`
           SELECT name, sweep_generation, after_key, last_completed_at
           FROM artifact_reconciliation_cursors
+        `)
+        .all(),
+    ).toEqual([
+      {
+        name: "managed_namespace_v1",
+        sweep_generation: 0,
+        after_key: null,
+        last_completed_at: null,
+      },
+    ]);
+    expect(
+      database
+        .prepare(`
+          SELECT name, sweep_generation, after_key, last_completed_at
+          FROM artifact_namespace_reconciliation_cursors
         `)
         .all(),
     ).toEqual([
@@ -871,6 +997,86 @@ describe("result artifact database state machine", () => {
       attempt_count: 0,
     });
   });
+
+  for (const legacyCursor of [
+    {
+      label: "a completed v1 sweep",
+      sweepGeneration: 7,
+      afterKey: null,
+      lastCompletedAt: "2026-09-01T00:00:00.000Z",
+    },
+    {
+      label: "a mid-sweep v1 cursor outside the v2 entry grammar",
+      sweepGeneration: 9,
+      afterKey: "legacy/cursor",
+      lastCompletedAt: null,
+    },
+  ] as const) {
+    it(`starts an independent v2 namespace proof after ${legacyCursor.label}`, async () => {
+      const directory = await mkdtemp(join(tmpdir(), "agentic-review-artifact-v10-cursor-"));
+      const versionTenDirectory = join(directory, "migrations-v10");
+      await mkdir(versionTenDirectory);
+      await Promise.all(
+        versionTenMigrationFilenames.map((filename) =>
+          copyFile(join(migrationsDirectory, filename), join(versionTenDirectory, filename)),
+        ),
+      );
+      const databasePath = join(directory, "state.db");
+      const database = new DatabaseSync(databasePath);
+      fixtures.push({ database, databasePath, directory });
+      database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
+      expect(runMigrations(database, versionTenDirectory)).toBe(10);
+
+      const updatedAt = "2026-09-01T00:00:01.000Z";
+      database
+        .prepare(`
+          UPDATE artifact_reconciliation_cursors
+          SET sweep_generation = ?, after_key = ?, updated_at = ?, last_completed_at = ?
+          WHERE name = 'managed_namespace_v1'
+        `)
+        .run(
+          legacyCursor.sweepGeneration,
+          legacyCursor.afterKey,
+          updatedAt,
+          legacyCursor.lastCompletedAt,
+        );
+
+      expect(runMigrations(database, migrationsDirectory)).toBe(11);
+      expect(
+        database
+          .prepare(`
+            SELECT sweep_generation, after_key, updated_at, last_completed_at
+            FROM artifact_reconciliation_cursors
+            WHERE name = 'managed_namespace_v1'
+          `)
+          .get(),
+      ).toEqual({
+        sweep_generation: legacyCursor.sweepGeneration,
+        after_key: legacyCursor.afterKey,
+        updated_at: updatedAt,
+        last_completed_at: legacyCursor.lastCompletedAt,
+      });
+      expect(readArtifactReconciliationCursor(database, {})).toMatchObject({
+        name: artifactReconciliationCursorName,
+        sweepGeneration: 0,
+        afterKey: null,
+        lastCompletedAt: null,
+      });
+      expect(readArtifactHealthAccounting(database, {}).capacity.accountingCertain).toBe(false);
+
+      const completed = classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [],
+        completedSweep: true,
+      });
+      expect(completed.cursor).toMatchObject({
+        sweepGeneration: 1,
+        afterKey: null,
+        lastCompletedAt: expect.any(String),
+      });
+    });
+  }
 
   it("distinguishes canonical base64url chunks from non-zero trailing pad bits", () => {
     expect(isCanonicalResultArtifactChunkData("Zg")).toBe(true);
@@ -995,7 +1201,7 @@ describe("result artifact database state machine", () => {
     expect(probeArtifactUploadCreate(database, input)).toEqual({
       disposition: "new",
       accounting: {
-        accountingCertain: true,
+        accountingCertain: false,
         liveUploadCount: 1,
         liveUploadExpectedByteSizeBuckets: [{ expectedTotalBytes: 5, uploadCount: 1 }],
         cleanupBacklogEntries: 0,
@@ -1014,7 +1220,7 @@ describe("result artifact database state machine", () => {
     expect(probeArtifactUploadCreate(database, input)).toEqual({
       disposition: "new",
       accounting: {
-        accountingCertain: true,
+        accountingCertain: false,
         liveUploadCount: 1,
         liveUploadExpectedByteSizeBuckets: [{ expectedTotalBytes: 5, uploadCount: 1 }],
         cleanupBacklogEntries: 1,
@@ -1044,7 +1250,7 @@ describe("result artifact database state machine", () => {
     expect(probeArtifactUploadCreate(database, input)).toEqual({
       disposition: "new",
       accounting: {
-        accountingCertain: true,
+        accountingCertain: false,
         liveUploadCount: 0,
         liveUploadExpectedByteSizeBuckets: [],
         cleanupBacklogEntries: 0,
@@ -2724,54 +2930,597 @@ describe("result artifact database state machine", () => {
         failed: 1,
         invalidRetryIdentity: 0,
       },
-      capacity: { accountingCertain: true, liveUploadCount: 1, cleanupBacklogEntries: 1 },
+      capacity: { accountingCertain: false, liveUploadCount: 1, cleanupBacklogEntries: 1 },
+    });
+  });
+});
+
+describe("artifact namespace cleanup foundation", () => {
+  it("keeps capacity accounting uncertain until the first namespace sweep completes", async () => {
+    const { database } = await openFixture();
+    const input = {
+      ...identity,
+      clientArtifactId: artifactClientId(7),
+      purpose: "result" as const,
+      name: "namespace-gate.json",
+      mediaType: "application/json" as const,
+      totalBytes: 1,
+      sha256: sha256("namespace-gate"),
+    };
+    expect(probeArtifactUploadCreate(database, input)).toMatchObject({
+      disposition: "new",
+      accounting: { accountingCertain: false },
+    });
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [],
+      completedSweep: true,
+    });
+    expect(probeArtifactUploadCreate(database, input)).toMatchObject({
+      disposition: "new",
+      accounting: { accountingCertain: true },
     });
   });
 
-  it("advances the durable namespace cursor only by compare-and-swap", async () => {
-    const fixture = await openFixture();
-    const { database } = fixture;
-    const initial = readArtifactReconciliationCursor(database, {});
-    expect(initial).toMatchObject({
-      name: artifactReconciliationCursorName,
+  it("classifies an orphan page and advances the cursor in the same transaction", async () => {
+    const { database } = await openFixture();
+    const observation = namespaceStagingObservation("70000000-0000-4000-8000-000000000001", 0);
+
+    const result = classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [observation],
+      completedSweep: false,
+    });
+
+    expect(result).toMatchObject({
+      classifications: [
+        {
+          entryKey: observation.entryKey,
+          disposition: "cleanup_intent_created",
+          reason: "orphan",
+          supersededPriorIntent: false,
+        },
+      ],
+      cursor: { sweepGeneration: 0, afterKey: observation.entryKey },
+    });
+    expect(listDueArtifactNamespaceCleanups(database, { batchSize: 8 }).items).toEqual([
+      expect.objectContaining({
+        entryKey: observation.entryKey,
+        observationSha256: observation.observationSha256,
+        fileInode: "2",
+        parentInode: "4",
+        reason: "orphan",
+        expectedAttemptCount: 0,
+      }),
+    ]);
+
+    expect(() =>
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [observation],
+        completedSweep: true,
+      }),
+    ).toThrow(ArtifactReconciliationConflictError);
+    expect(
+      database.prepare("SELECT COUNT(*) AS count FROM artifact_namespace_cleanup_journal").get(),
+    ).toEqual({ count: 1 });
+    expect(() =>
+      database
+        .prepare(`
+          UPDATE artifact_namespace_cleanup_journal
+          SET status = 'completed',
+              attempt_count = 0,
+              next_attempt_at = NULL,
+              completed_at = '9999-12-31T23:59:59.999Z',
+              updated_at = '9999-12-31T23:59:59.999Z',
+              file_inode = '999',
+              reason = 'completed_residual'
+          WHERE entry_key = ? AND observation_sha256 = ?
+        `)
+        .run(observation.entryKey, observation.observationSha256),
+    ).toThrow(/identity is immutable/u);
+    expect(
+      database
+        .prepare(`
+          SELECT status, attempt_count, file_inode, reason
+          FROM artifact_namespace_cleanup_journal
+          WHERE entry_key = ? AND observation_sha256 = ?
+        `)
+        .get(observation.entryKey, observation.observationSha256),
+    ).toEqual({
+      status: "pending",
+      attempt_count: 0,
+      file_inode: "2",
+      reason: "orphan",
+    });
+    expect(() =>
+      database
+        .prepare(`
+          DELETE FROM artifact_namespace_cleanup_journal
+          WHERE entry_key = ? AND observation_sha256 = ?
+        `)
+        .run(observation.entryKey, observation.observationSha256),
+    ).toThrow(/records are immutable/u);
+  });
+
+  it("distinguishes active, upload-covered, and completed-residual observations", async () => {
+    const { database } = await openFixture();
+    const upload = createLiveUpload(database);
+    const active = namespaceStagingObservation(upload.uploadId, 0, 1);
+    expect(
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [active],
+        completedSweep: true,
+      }).classifications,
+    ).toEqual([expect.objectContaining({ disposition: "active_reference", reason: null })]);
+
+    terminateArtifactUpload(database, {
+      ...identity,
+      uploadId: upload.uploadId,
+      state: "abandoned",
+      reason: "client_abandoned",
+    });
+    const covered = namespaceStagingObservation(upload.uploadId, 1, 1);
+    expect(
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 1,
+        expectedAfterKey: null,
+        observations: [covered],
+        completedSweep: true,
+      }).classifications,
+    ).toEqual([expect.objectContaining({ disposition: "upload_cleanup_covered", reason: null })]);
+    completeArtifactCleanup(database, { uploadId: upload.uploadId, expectedAttemptCount: 0 });
+
+    const residual = namespaceStagingObservation(upload.uploadId, 2, 1);
+    expect(
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 2,
+        expectedAfterKey: null,
+        observations: [residual],
+        completedSweep: true,
+      }).classifications,
+    ).toEqual([
+      expect.objectContaining({
+        disposition: "cleanup_intent_created",
+        reason: "completed_residual",
+      }),
+    ]);
+  });
+
+  it("rolls back the page instead of minting cleanup authority for an active mismatch", async () => {
+    const { database } = await openFixture();
+    const upload = createLiveUpload(database);
+    const mismatched = namespaceStagingObservation(upload.uploadId, 0, 3);
+
+    expect(() =>
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [mismatched],
+        completedSweep: true,
+      }),
+    ).toThrow(ArtifactReconciliationStateError);
+    expect(
+      database.prepare("SELECT COUNT(*) AS count FROM artifact_namespace_cleanup_journal").get(),
+    ).toEqual({ count: 0 });
+    expect(readArtifactReconciliationCursor(database, {})).toMatchObject({
       sweepGeneration: 0,
       afterKey: null,
       lastCompletedAt: null,
     });
-    const page = advanceArtifactReconciliationCursor(database, {
-      expectedSweepGeneration: 0,
-      expectedAfterKey: null,
-      nextAfterKey: "staging/12345678-1234-4123-8123-123456789abc.upload",
-      completedSweep: false,
-    });
-    expect(page).toMatchObject({ sweepGeneration: 0, afterKey: expect.any(String) });
+  });
+
+  it("rolls back earlier page classifications when a later observation is contradictory", async () => {
+    const { database } = await openFixture();
+    const activeUpload = createLiveUpload(database);
+    const orphanTemporary = namespaceTemporaryObservation(
+      "70000000-0000-4000-8000-000000000010",
+      "70000000-0000-4000-8000-000000000011",
+      sha256("orphan-temporary"),
+      0,
+    );
+    const activeMismatch = namespaceStagingObservation(activeUpload.uploadId, 0, 3);
+
     expect(() =>
-      advanceArtifactReconciliationCursor(database, {
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
         expectedSweepGeneration: 0,
         expectedAfterKey: null,
-        nextAfterKey: "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload",
-        completedSweep: false,
+        observations: [orphanTemporary, activeMismatch],
+        completedSweep: true,
       }),
-    ).toThrow(ArtifactReconciliationConflictError);
-    const completed = advanceArtifactReconciliationCursor(database, {
-      expectedSweepGeneration: page.sweepGeneration,
-      expectedAfterKey: page.afterKey,
-      nextAfterKey: null,
+    ).toThrow(ArtifactReconciliationStateError);
+    expect(
+      database.prepare("SELECT COUNT(*) AS count FROM artifact_namespace_cleanup_journal").get(),
+    ).toEqual({ count: 0 });
+    expect(readArtifactReconciliationCursor(database, {})).toMatchObject({
+      sweepGeneration: 0,
+      afterKey: null,
+    });
+  });
+
+  it("supersedes changed inode identity without binding parent directory ctime", async () => {
+    const { database } = await openFixture();
+    const uploadId = "70000000-0000-4000-8000-000000000002";
+    const first = namespaceStagingObservation(uploadId, 0, 1, "20");
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [first],
       completedSweep: true,
     });
-    expect(completed).toMatchObject({
-      sweepGeneration: 1,
-      afterKey: null,
-      lastCompletedAt: expect.any(String),
+    const replacement = namespaceStagingObservation(uploadId, 1, 1, "21");
+    const second = classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 1,
+      expectedAfterKey: null,
+      observations: [replacement],
+      completedSweep: true,
     });
-    expect(readArtifactReconciliationCursor(reopenFixtureDatabase(fixture), {})).toEqual(completed);
+
+    expect(second.classifications).toEqual([
+      expect.objectContaining({
+        disposition: "cleanup_intent_created",
+        supersededPriorIntent: true,
+      }),
+    ]);
+    expect(
+      database
+        .prepare(`
+          SELECT observation_sha256, status
+          FROM artifact_namespace_cleanup_journal
+          WHERE entry_key = ?
+          ORDER BY observed_sweep_generation
+        `)
+        .all(first.entryKey),
+    ).toEqual([
+      { observation_sha256: first.observationSha256, status: "superseded" },
+      { observation_sha256: replacement.observationSha256, status: "pending" },
+    ]);
+    const { observationSha256: _observationSha256, ...replacementIdentity } = replacement;
+    expect(
+      calculateArtifactNamespaceObservationSha256({
+        ...replacementIdentity,
+        parentMode: "493",
+      }),
+    ).not.toBe(replacement.observationSha256);
+  });
+
+  it("replays stable physical identity across sweeps without resetting retry state", async () => {
+    const { database } = await openFixture();
+    const observation = namespaceStagingObservation("70000000-0000-4000-8000-000000000012", 0);
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [observation],
+      completedSweep: true,
+    });
+    recordArtifactNamespaceCleanupFailure(database, {
+      entryKey: observation.entryKey,
+      observationSha256: observation.observationSha256,
+      expectedAttemptCount: 0,
+      errorCode: "storage_busy",
+      retryDelaySeconds: 30,
+    });
+
+    const replay = classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 1,
+      expectedAfterKey: null,
+      observations: [observation],
+      completedSweep: true,
+    });
+    expect(replay.classifications).toEqual([
+      expect.objectContaining({
+        disposition: "cleanup_intent_replayed",
+        supersededPriorIntent: false,
+      }),
+    ]);
+    expect(
+      database
+        .prepare(`
+          SELECT status, attempt_count, last_retry_delay_seconds, observed_sweep_generation
+          FROM artifact_namespace_cleanup_journal
+          WHERE entry_key = ? AND observation_sha256 = ?
+        `)
+        .get(observation.entryKey, observation.observationSha256),
+    ).toEqual({
+      status: "retry_waiting",
+      attempt_count: 1,
+      last_retry_delay_seconds: 30,
+      observed_sweep_generation: 0,
+    });
+  });
+
+  it("fail-stops instead of superseding an intent that contradicts an active reference", async () => {
+    const { database } = await openFixture();
+    const uploadId = "70000000-0000-4000-8000-000000000013";
+    const observation = namespaceStagingObservation(uploadId, 0, 1);
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [observation],
+      completedSweep: true,
+    });
+    database.exec("DROP TRIGGER tr_artifact_upload_namespace_staging_collision");
+    insertNamespaceCollisionUpload(database, uploadId, 7, 1, sha256("active-contradiction"));
+
     expect(() =>
-      advanceArtifactReconciliationCursor(fixture.database, {
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
         expectedSweepGeneration: 1,
         expectedAfterKey: null,
-        nextAfterKey: "../escape",
-        completedSweep: false,
+        observations: [observation],
+        completedSweep: true,
+      }),
+    ).toThrow(ArtifactReconciliationStateError);
+    expect(
+      database
+        .prepare(`
+          SELECT status, attempt_count
+          FROM artifact_namespace_cleanup_journal
+          WHERE entry_key = ? AND observation_sha256 = ?
+        `)
+        .get(observation.entryKey, observation.observationSha256),
+    ).toEqual({ status: "pending", attempt_count: 0 });
+    expect(readArtifactReconciliationCursor(database, {})).toMatchObject({
+      sweepGeneration: 1,
+      afterKey: null,
+    });
+  });
+
+  it("completes exact cleanup replays and makes the eighth failure terminal", async () => {
+    const { database } = await openFixture();
+    const completedObservation = namespaceStagingObservation(
+      "70000000-0000-4000-8000-000000000003",
+      0,
+    );
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [completedObservation],
+      completedSweep: true,
+    });
+    const completed = completeArtifactNamespaceCleanup(database, {
+      entryKey: completedObservation.entryKey,
+      observationSha256: completedObservation.observationSha256,
+      expectedAttemptCount: 0,
+    });
+    expect(completed).toMatchObject({ status: "completed", replayed: false });
+    expect(
+      completeArtifactNamespaceCleanup(database, {
+        entryKey: completedObservation.entryKey,
+        observationSha256: completedObservation.observationSha256,
+        expectedAttemptCount: 0,
+      }),
+    ).toEqual({ ...completed, replayed: true });
+
+    const failedObservation = namespaceStagingObservation(
+      "70000000-0000-4000-8000-000000000004",
+      1,
+    );
+    classifyArtifactNamespacePageAndAdvanceCursor(database, {
+      expectedSweepGeneration: 1,
+      expectedAfterKey: null,
+      observations: [failedObservation],
+      completedSweep: true,
+    });
+    for (let expectedAttemptCount = 0; expectedAttemptCount < 8; expectedAttemptCount += 1) {
+      const input = {
+        entryKey: failedObservation.entryKey,
+        observationSha256: failedObservation.observationSha256,
+        expectedAttemptCount,
+        errorCode: "storage_io_failure" as const,
+        retryDelaySeconds: 30,
+      };
+      const failure = recordArtifactNamespaceCleanupFailure(database, input);
+      expect(failure).toMatchObject({
+        status: expectedAttemptCount === 7 ? "failed" : "retry_waiting",
+        attemptCount: expectedAttemptCount + 1,
+        replayed: false,
+      });
+      expect(recordArtifactNamespaceCleanupFailure(database, input)).toEqual({
+        ...failure,
+        replayed: true,
+      });
+    }
+    expect(listDueArtifactNamespaceCleanups(database, { batchSize: 8 }).items).toEqual([]);
+    expect(readArtifactHealthAccounting(database, {})).toMatchObject({
+      namespaceCleanup: {
+        pending: 0,
+        retryWaiting: 0,
+        completed: 1,
+        failed: 1,
+        superseded: 0,
+        operationalSaturated: false,
+        historicalSaturated: false,
+      },
+      capacity: {
+        accountingCertain: false,
+        liveUploadCount: 0,
+        liveUploadExpectedByteSizeBuckets: [],
+        cleanupBacklogEntries: 1,
+      },
+    });
+  });
+
+  it("blocks staging and publication-temporary identities with unresolved intents", async () => {
+    const stagingFixture = await openFixture();
+    const stagingUploadId = "70000000-0000-4000-8000-000000000005";
+    const staging = namespaceStagingObservation(stagingUploadId, 0);
+    classifyArtifactNamespacePageAndAdvanceCursor(stagingFixture.database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [staging],
+      completedSweep: true,
+    });
+    expect(() =>
+      insertNamespaceCollisionUpload(
+        stagingFixture.database,
+        stagingUploadId,
+        5,
+        1,
+        sha256("staging-collision"),
+      ),
+    ).toThrow(/staging identity has unresolved namespace cleanup/u);
+
+    const temporaryFixture = await openFixture();
+    const temporaryUploadId = "70000000-0000-4000-8000-000000000006";
+    const finalizationId = "70000000-0000-4000-8000-000000000007";
+    const digest = sha256("x");
+    const temporary = namespaceTemporaryObservation(temporaryUploadId, finalizationId, digest, 0);
+    classifyArtifactNamespacePageAndAdvanceCursor(temporaryFixture.database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      observations: [temporary],
+      completedSweep: true,
+    });
+    insertNamespaceCollisionUpload(temporaryFixture.database, temporaryUploadId, 6, 1, digest);
+    const now = "2026-09-01T00:00:00.000Z";
+    temporaryFixture.database
+      .prepare(`
+        INSERT INTO artifact_upload_chunks (
+          upload_id, chunk_index, prepare_id, offset_bytes, chunk_bytes,
+          chunk_sha256, status, prepared_at
+        ) VALUES (?, 0, ?, 0, 1, ?, 'prepared', ?)
+      `)
+      .run(temporaryUploadId, "70000000-0000-4000-8000-000000000008", digest, now);
+    temporaryFixture.database
+      .prepare(`
+        UPDATE artifact_upload_chunks
+        SET status = 'committed', committed_at = ?
+        WHERE upload_id = ? AND chunk_index = 0
+      `)
+      .run(now, temporaryUploadId);
+    temporaryFixture.database
+      .prepare(`
+        UPDATE artifact_uploads
+        SET next_chunk_index = 1, received_bytes = 1, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(now, temporaryUploadId);
+    expect(() =>
+      temporaryFixture.database
+        .prepare(`
+          UPDATE artifact_uploads
+          SET status = 'finalizing', finalization_id = ?, final_chunk_count = 1,
+              final_total_bytes = 1, final_sha256 = ?, finalizing_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(finalizationId, digest, now, now, temporaryUploadId),
+    ).toThrow(/finalization identity has unresolved namespace cleanup/u);
+  });
+
+  it("bounds operational and historical namespace health independently", async () => {
+    const { database } = await openFixture();
+    const observations = Array.from(
+      { length: maximumArtifactNamespaceHealthRows + 1 },
+      (_, ordinal) =>
+        namespaceStagingObservation(
+          `71000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`,
+          0,
+        ),
+    );
+    let afterKey: string | null = null;
+    for (let offset = 0; offset < observations.length; offset += maximumArtifactNamespacePageSize) {
+      const page = observations.slice(offset, offset + maximumArtifactNamespacePageSize);
+      const completedSweep = offset + page.length === observations.length;
+      const result = classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: afterKey,
+        observations: page,
+        completedSweep,
+      });
+      afterKey = result.cursor.afterKey;
+    }
+
+    expect(readArtifactHealthAccounting(database, {})).toMatchObject({
+      namespaceCleanup: {
+        pending: maximumArtifactNamespaceHealthRows,
+        due: maximumArtifactNamespaceHealthRows,
+        completed: 0,
+        operationalSaturated: true,
+        historicalSaturated: false,
+      },
+      capacity: {
+        accountingCertain: false,
+        cleanupBacklogEntries: maximumArtifactNamespaceHealthRows,
+      },
+    });
+
+    const completedAt = "9999-12-31T23:59:59.999Z";
+    const completion = database
+      .prepare(`
+        UPDATE artifact_namespace_cleanup_journal
+        SET status = 'completed', completed_at = ?, updated_at = ?
+        WHERE status = 'pending'
+      `)
+      .run(completedAt, completedAt);
+    expect(Number(completion.changes)).toBe(maximumArtifactNamespaceHealthRows + 1);
+    expect(readArtifactHealthAccounting(database, {})).toMatchObject({
+      namespaceCleanup: {
+        pending: 0,
+        due: 0,
+        completed: maximumArtifactNamespaceHealthRows,
+        operationalSaturated: false,
+        historicalSaturated: true,
+      },
+      capacity: {
+        accountingCertain: true,
+        cleanupBacklogEntries: 0,
+      },
+    });
+  });
+
+  it("rejects accessor observations and immutable-object pages before cursor mutation", async () => {
+    const { database } = await openFixture();
+    let getterCalls = 0;
+    const observations: unknown[] = [];
+    Object.defineProperty(observations, 0, {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return namespaceStagingObservation("70000000-0000-4000-8000-000000000009", 0);
+      },
+    });
+    expect(() =>
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: observations as never,
+        completedSweep: true,
       }),
     ).toThrow(ArtifactReconciliationInvalidRequestError);
+    expect(getterCalls).toBe(0);
+    expect(() =>
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [
+          namespaceStagingObservation("70000000-0000-4000-8000-000000000020", 0),
+          namespaceStagingObservation("70000000-0000-4000-8000-000000000019", 0),
+        ],
+        completedSweep: true,
+      }),
+    ).toThrow(ArtifactReconciliationInvalidRequestError);
+    expect(() =>
+      classifyArtifactNamespacePageAndAdvanceCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [
+          {
+            ...namespaceStagingObservation("70000000-0000-4000-8000-000000000009", 0),
+            entryKey: `objects/sha256/${"a".repeat(64).slice(0, 2)}/${"a".repeat(64)}`,
+            kind: "immutable-object" as never,
+          },
+        ],
+        completedSweep: true,
+      }),
+    ).toThrow(ArtifactReconciliationInvalidRequestError);
+    expect(readArtifactReconciliationCursor(database, {})).toMatchObject({
+      sweepGeneration: 0,
+      afterKey: null,
+    });
   });
 });

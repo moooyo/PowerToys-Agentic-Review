@@ -1,7 +1,7 @@
 export type {
   ArtifactReconciliationCoordinatorErrorCode,
   ArtifactReconciliationCoordinatorOptions,
-  ArtifactReconciliationDatabaseOwner,
+  ArtifactReconciliationDatabaseHandle,
   ArtifactReconciliationStorageOwner,
 } from "./artifact-reconciliation-coordinator.js";
 export {

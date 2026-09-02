@@ -2,11 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   ArtifactReconciliationCoordinator,
   ArtifactReconciliationCoordinatorError,
-  type ArtifactReconciliationDatabaseOwner,
+  type ArtifactReconciliationDatabaseHandle,
   type ArtifactReconciliationStorageOwner,
 } from "../../dist/artifacts/artifact-reconciliation-coordinator.js";
+import {
+  attachArtifactReconciliationDatabaseForTest,
+  type FakeArtifactReconciliationDatabaseOwner,
+} from "../../dist/artifacts/artifact-reconciliation-coordinator.testing.js";
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
-import type { ArtifactCleanupWorkItem } from "../../dist/database/artifacts.js";
+import type {
+  ArtifactCleanupWorkItem,
+  ArtifactReconciliationDatabaseOperation,
+} from "../../dist/database/artifacts.js";
 import type { DatabaseOperationMap } from "../../dist/database/protocol.js";
 
 type CleanupDatabaseOperation =
@@ -30,6 +37,17 @@ const emptyHealth = () => ({
     invalidRetryIdentity: 0,
     oldestOutstandingAt: null,
   },
+  namespaceCleanup: {
+    pending: 0,
+    retryWaiting: 0,
+    due: 0,
+    completed: 0,
+    failed: 0,
+    superseded: 0,
+    oldestOutstandingAt: null,
+    operationalSaturated: false,
+    historicalSaturated: false,
+  },
   capacity: {
     accountingCertain: true,
     liveUploadCount: 0,
@@ -50,22 +68,23 @@ const cleanupItem = (
   publications: [],
 });
 
-class FakeDatabase implements ArtifactReconciliationDatabaseOwner {
+class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
   readonly events: string[] = [];
   readonly inputs: unknown[] = [];
   items: ArtifactCleanupWorkItem[] = [];
   terminalHasMore = false;
   cleanupHasMore = false;
   completeError: Error | undefined;
+  health = emptyHealth();
   onRequest: ((operation: CleanupDatabaseOperation) => void) | undefined;
 
-  async request<TOperation extends CleanupDatabaseOperation>(
+  async request<TOperation extends ArtifactReconciliationDatabaseOperation>(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
     this.events.push(`db:${operation}`);
     this.inputs.push(input);
-    this.onRequest?.(operation);
+    this.onRequest?.(operation as CleanupDatabaseOperation);
     let result: unknown;
     switch (operation) {
       case "terminalizeInactiveArtifactUploads":
@@ -105,7 +124,7 @@ class FakeDatabase implements ArtifactReconciliationDatabaseOwner {
         break;
       }
       case "readArtifactHealthAccounting":
-        result = emptyHealth();
+        result = this.health;
         break;
       default:
         throw new Error(`Unexpected database operation ${operation}.`);
@@ -135,8 +154,8 @@ class FakeStorage implements ArtifactReconciliationStorageOwner {
   }
 }
 
-const options = (
-  database: ArtifactReconciliationDatabaseOwner,
+const optionsWithHandle = (
+  database: ArtifactReconciliationDatabaseHandle,
   storage: ArtifactReconciliationStorageOwner,
   onFailStop: (error: Error) => void = () => undefined,
 ) => ({
@@ -150,6 +169,12 @@ const options = (
   maximumRetryDelaySeconds: 300,
   onFailStop,
 });
+
+const options = (
+  database: FakeArtifactReconciliationDatabaseOwner,
+  storage: ArtifactReconciliationStorageOwner,
+  onFailStop: (error: Error) => void = () => undefined,
+) => optionsWithHandle(attachArtifactReconciliationDatabaseForTest(database), storage, onFailStop);
 
 describe("ArtifactReconciliationCoordinator", () => {
   it("runs immediately, completes ENOENT-equivalent cleanup, and freezes health", async () => {
@@ -170,6 +195,27 @@ describe("ArtifactReconciliationCoordinator", () => {
     expect(coordinator.health).toEqual(emptyHealth());
     expect(Object.isFrozen(coordinator.health)).toBe(true);
     expect(Object.isFrozen(coordinator.health?.cleanup)).toBe(true);
+    await coordinator.close();
+  });
+
+  it("consumes its opaque database handle exactly once and rejects forged handles", async () => {
+    const database = new FakeDatabase();
+    const storage = new FakeStorage();
+    const handle = attachArtifactReconciliationDatabaseForTest(database);
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+    const coordinator = ArtifactReconciliationCoordinator.start(optionsWithHandle(handle, storage));
+    expect(() =>
+      ArtifactReconciliationCoordinator.start(optionsWithHandle(handle, new FakeStorage())),
+    ).toThrow(/already consumed or forged/u);
+    expect(() =>
+      ArtifactReconciliationCoordinator.start(
+        optionsWithHandle(
+          Object.freeze(Object.create(null)) as ArtifactReconciliationDatabaseHandle,
+          new FakeStorage(),
+        ),
+      ),
+    ).toThrow(/already consumed or forged/u);
+    await coordinator.firstPass;
     await coordinator.close();
   });
 
@@ -198,6 +244,82 @@ describe("ArtifactReconciliationCoordinator", () => {
       retryDelaySeconds: 300,
     });
     await coordinator.close();
+  });
+
+  it("fail-stops when durable namespace cleanup has exhausted its retry budget", async () => {
+    const database = new FakeDatabase();
+    database.health = {
+      ...emptyHealth(),
+      namespaceCleanup: {
+        ...emptyHealth().namespaceCleanup,
+        failed: 1,
+      },
+      capacity: {
+        ...emptyHealth().capacity,
+        accountingCertain: false,
+        cleanupBacklogEntries: 1,
+      },
+    };
+    const failures: Error[] = [];
+    const coordinator = ArtifactReconciliationCoordinator.start(
+      options(database, new FakeStorage(), (error) => failures.push(error)),
+    );
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED",
+      requiresFailStop: true,
+    });
+    expect(failures).toHaveLength(1);
+  });
+
+  it("keeps running when only bounded historical namespace counts are saturated", async () => {
+    const database = new FakeDatabase();
+    database.health = {
+      ...emptyHealth(),
+      namespaceCleanup: {
+        ...emptyHealth().namespaceCleanup,
+        completed: 4_096,
+        historicalSaturated: true,
+      },
+    };
+    const coordinator = ArtifactReconciliationCoordinator.start(
+      options(database, new FakeStorage()),
+    );
+
+    await expect(coordinator.firstPass).resolves.toBeUndefined();
+    expect(coordinator.health?.namespaceCleanup).toMatchObject({
+      completed: 4_096,
+      operationalSaturated: false,
+      historicalSaturated: true,
+    });
+    await coordinator.close();
+  });
+
+  it("fail-stops when operational namespace health accounting saturates", async () => {
+    const database = new FakeDatabase();
+    database.health = {
+      ...emptyHealth(),
+      namespaceCleanup: {
+        ...emptyHealth().namespaceCleanup,
+        pending: 4_096,
+        operationalSaturated: true,
+      },
+      capacity: {
+        ...emptyHealth().capacity,
+        accountingCertain: false,
+        cleanupBacklogEntries: 4_096,
+      },
+    };
+    const failures: Error[] = [];
+    const coordinator = ArtifactReconciliationCoordinator.start(
+      options(database, new FakeStorage(), (error) => failures.push(error)),
+    );
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_HEALTH_SATURATED",
+      requiresFailStop: true,
+    });
+    expect(failures).toHaveLength(1);
   });
 
   it("fail-stops an already-dispatched cleanup and never writes retry state", async () => {
@@ -416,7 +538,7 @@ describe("ArtifactReconciliationCoordinator", () => {
         reads.set(name, (reads.get(name) ?? 0) + 1);
         return value;
       };
-    const database = Object.create(null) as ArtifactReconciliationDatabaseOwner;
+    const database = Object.create(null) as FakeArtifactReconciliationDatabaseOwner;
     Object.defineProperty(database, "request", {
       enumerable: true,
       get: once(

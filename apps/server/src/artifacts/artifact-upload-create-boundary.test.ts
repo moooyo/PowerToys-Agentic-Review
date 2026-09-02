@@ -42,6 +42,52 @@ describe("artifact upload create composition boundary", () => {
     expect(barrel).not.toContain("attachArtifactUploadCreateDatabaseForTest");
   });
 
+  it("keeps reconciliation registrars and testing adapters out of the public barrel", async () => {
+    const barrelSource = await readFile(join(sourceRoot, "artifacts", "index.ts"), "utf8");
+    const barrelRuntime = await import("../../dist/artifacts/index.js");
+    const internalExports = [
+      "registerArtifactReconciliationDatabaseHandle",
+      "attachArtifactReconciliationDatabaseForTest",
+      "consumeArtifactReconciliationDatabaseHandleForTest",
+    ] as const;
+
+    for (const exportName of internalExports) {
+      expect(barrelSource).not.toContain(exportName);
+      expect(Object.hasOwn(barrelRuntime, exportName)).toBe(false);
+    }
+    expect(barrelSource).not.toContain("artifact-reconciliation-coordinator.testing");
+  });
+
+  it("limits the reconciliation handle registrar to DatabaseClient and fake-owner tests", async () => {
+    const reference = "registerArtifactReconciliationDatabaseHandle";
+    const references: string[] = [];
+    for (const path of await listTypeScriptFiles(sourceRoot)) {
+      if ((await readFile(path, "utf8")).includes(reference)) {
+        references.push(relative(sourceRoot, path).replaceAll("\\", "/"));
+      }
+    }
+    expect(references.sort()).toEqual([
+      "artifacts/artifact-reconciliation-coordinator.testing.ts",
+      "artifacts/artifact-reconciliation-coordinator.ts",
+      "artifacts/artifact-upload-create-boundary.test.ts",
+      "database/database-client.ts",
+    ]);
+  });
+
+  it("limits the reconciliation fake-owner attachment to its unit test", async () => {
+    const reference = "artifact-reconciliation-coordinator.testing.js";
+    const references: string[] = [];
+    for (const path of await listTypeScriptFiles(sourceRoot)) {
+      if ((await readFile(path, "utf8")).includes(reference)) {
+        references.push(relative(sourceRoot, path).replaceAll("\\", "/"));
+      }
+    }
+    expect(references.sort()).toEqual([
+      "artifacts/artifact-reconciliation-coordinator.test.ts",
+      "artifacts/artifact-upload-create-boundary.test.ts",
+    ]);
+  });
+
   it("limits the fake-owner attachment module to its unit test", async () => {
     const reference = "artifact-upload-create-coordinator.testing.js";
     const references: string[] = [];

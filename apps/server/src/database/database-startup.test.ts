@@ -106,7 +106,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(10);
+      expect(readSchemaVersion(migratedDatabase)).toBe(11);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );
@@ -120,7 +120,7 @@ describe("DatabaseClient startup", () => {
   });
 
   it.skipIf(process.platform === "win32")(
-    "backs up an initialized v7 database before applying migrations through v10",
+    "backs up an initialized v7 database before applying migrations through v11",
     async () => {
       const directory = await createTemporaryDirectory();
       const versionSevenDirectory = await createMigrationPrefixDirectory(directory, 7);
@@ -142,14 +142,14 @@ describe("DatabaseClient startup", () => {
       const backupFiles = await readdir(backupDirectory);
       expect(backupFiles).toHaveLength(1);
       const backupFilename = backupFiles[0] as string;
-      expect(backupFilename).toContain(".v7-to-v10.");
+      expect(backupFilename).toContain(".v7-to-v11.");
 
       const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
       const backupDatabase = new DatabaseSync(join(backupDirectory, backupFilename), {
         readOnly: true,
       });
       try {
-        expect(readSchemaVersion(migratedDatabase)).toBe(10);
+        expect(readSchemaVersion(migratedDatabase)).toBe(11);
         expect(readSchemaVersion(backupDatabase)).toBe(7);
       } finally {
         migratedDatabase.close();

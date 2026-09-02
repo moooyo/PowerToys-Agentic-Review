@@ -16,6 +16,7 @@ import {
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { ArtifactReconciliationCoordinator } from "../../dist/artifacts/artifact-reconciliation-coordinator.js";
 import {
   ArtifactUploadCreateCoordinator,
   type ArtifactUploadCreateDatabaseHandle,
@@ -25,7 +26,10 @@ import type {
   ArtifactCapacityEvaluationInput,
   ArtifactCapacityLimits,
 } from "../../dist/artifacts/types.js";
-import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
+import {
+  type ArtifactReconciliationDatabaseOperation,
+  maximumResultArtifactUploadIdentitiesPerAttempt,
+} from "../../dist/database/artifacts.js";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
@@ -52,6 +56,28 @@ const workerCapabilities = {
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 const artifactClientId = (ordinal: number): string =>
   `10000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+
+const artifactReconciliationDatabaseOperations = [
+  "terminalizeInactiveArtifactUploads",
+  "listDueArtifactCleanups",
+  "completeArtifactCleanup",
+  "recordArtifactCleanupFailure",
+  "classifyArtifactNamespacePageAndAdvanceCursor",
+  "listDueArtifactNamespaceCleanups",
+  "completeArtifactNamespaceCleanup",
+  "recordArtifactNamespaceCleanupFailure",
+  "readArtifactHealthAccounting",
+  "readArtifactReconciliationCursor",
+] as const satisfies readonly ArtifactReconciliationDatabaseOperation[];
+
+const exhaustiveArtifactReconciliationDatabaseOperations: [
+  Exclude<
+    ArtifactReconciliationDatabaseOperation,
+    (typeof artifactReconciliationDatabaseOperations)[number]
+  >,
+] extends [never]
+  ? typeof artifactReconciliationDatabaseOperations
+  : never = artifactReconciliationDatabaseOperations;
 
 const artifactStorageCapacity: ArtifactCapacityLimits = {
   hardBytes: 1_000_000_000n,
@@ -109,6 +135,25 @@ const createArtifactCoordinator = (
     onFailStop: () => undefined,
   });
 };
+
+const createArtifactReconciliationCoordinator = (
+  client: DatabaseClient,
+): ArtifactReconciliationCoordinator =>
+  ArtifactReconciliationCoordinator.start({
+    database: client.createArtifactReconciliationDatabaseHandle(),
+    storage: {
+      ownerExit: new Promise<number>(() => undefined),
+      cleanupUpload: () =>
+        Promise.resolve({ stagingRemoved: false, publicationTemporariesRemoved: 0 }),
+    },
+    batchSize: 8,
+    intervalMilliseconds: 60_000,
+    passTimeoutMilliseconds: 5_000,
+    closeTimeoutMilliseconds: 5_000,
+    initialRetryDelaySeconds: 30,
+    maximumRetryDelaySeconds: 300,
+    onFailStop: () => undefined,
+  });
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
@@ -643,6 +688,28 @@ const withFixtureDatabase = <T>(
   }
 };
 
+const seedCompletedNamespaceSweepForTest = (fixture: DatabaseFixture): void => {
+  withFixtureDatabase(fixture, (database) => {
+    const completedAt = new Date().toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_namespace_reconciliation_cursors
+        SET sweep_generation = 1,
+            after_key = NULL,
+            updated_at = ?,
+            last_completed_at = ?
+        WHERE name = 'managed_namespace_v2'
+          AND sweep_generation = 0
+          AND after_key IS NULL
+          AND last_completed_at IS NULL
+      `)
+      .run(completedAt, completedAt);
+    if (Number(update.changes) !== 1) {
+      throw new Error("Expected the namespace sweep test fixture to be incomplete.");
+    }
+  });
+};
+
 const setWorkerState = (
   fixture: DatabaseFixture,
   workerNodeId: string,
@@ -951,12 +1018,19 @@ describe("DatabaseClient lease integration", () => {
     await expect(fixture.client.request("probeArtifactUploadCreate", input)).resolves.toEqual({
       disposition: "new",
       accounting: {
-        accountingCertain: true,
+        accountingCertain: false,
         liveUploadCount: 0,
         liveUploadExpectedByteSizeBuckets: [],
         cleanupBacklogEntries: 0,
       },
     });
+    seedCompletedNamespaceSweepForTest(fixture);
+    await expect(fixture.client.request("probeArtifactUploadCreate", input)).resolves.toMatchObject(
+      {
+        disposition: "new",
+        accounting: { accountingCertain: true },
+      },
+    );
     const bareCreate = Reflect.apply(fixture.client.request, fixture.client, [
       "createArtifactUpload",
       input,
@@ -1009,51 +1083,33 @@ describe("DatabaseClient lease integration", () => {
     await coordinator.close();
   });
 
-  it("maps artifact reconciliation cursor CAS through a read-once client snapshot", async () => {
+  it("rejects ordinary reconciliation requests and issues one opaque handle", async () => {
     const fixture = await createFixture();
-    const initial = await fixture.client.request("readArtifactReconciliationCursor", {});
-    expect(initial).toMatchObject({ sweepGeneration: 0, afterKey: null });
-
-    const input = {
-      expectedSweepGeneration: initial.sweepGeneration,
-      expectedAfterKey: initial.afterKey,
-      nextAfterKey: "staging/10000000-0000-4000-8000-000000000000.upload" as string | null,
-      completedSweep: false,
-    };
-    const advanced = fixture.client.request("advanceArtifactReconciliationCursor", input);
-    input.nextAfterKey = "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload";
-    await expect(advanced).resolves.toMatchObject({
-      sweepGeneration: 0,
-      afterKey: "staging/10000000-0000-4000-8000-000000000000.upload",
-    });
-    await expect(
-      fixture.client.request("advanceArtifactReconciliationCursor", {
-        expectedSweepGeneration: 0,
-        expectedAfterKey: null,
-        nextAfterKey: "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload",
-        completedSweep: false,
-      }),
-    ).rejects.toMatchObject({
-      name: "DatabaseRequestError",
-      code: "ARTIFACT_RECONCILIATION_CONFLICT",
-    });
-
     let getterCalls = 0;
-    const accessor = Object.create(null) as { batchSize: number };
-    Object.defineProperty(accessor, "batchSize", {
-      enumerable: true,
-      get() {
-        getterCalls += 1;
-        return 1;
-      },
-    });
-    await expect(fixture.client.request("listDueArtifactCleanups", accessor)).rejects.toMatchObject(
-      {
+    for (const operation of exhaustiveArtifactReconciliationDatabaseOperations) {
+      const accessor = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(accessor, "value", {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return 1;
+        },
+      });
+      const bareRequest = Reflect.apply(fixture.client.request, fixture.client, [
+        operation,
+        accessor,
+      ]) as Promise<unknown>;
+      await expect(bareRequest).rejects.toMatchObject({
         name: "DatabaseRequestError",
-        code: "ARTIFACT_RECONCILIATION_INVALID_REQUEST",
-      },
-    );
+        code: "ARTIFACT_RECONCILIATION_AUTHORITY_REQUIRED",
+      });
+    }
     expect(getterCalls).toBe(0);
+    const handle = fixture.client.createArtifactReconciliationDatabaseHandle();
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+    expect(() => fixture.client.createArtifactReconciliationDatabaseHandle()).toThrow(
+      /already issued/u,
+    );
   });
 
   it("round-trips Server-authoritative artifact cleanup operations through the database Worker", async () => {
@@ -1070,8 +1126,9 @@ describe("DatabaseClient lease integration", () => {
       "instance-artifact-reconcile",
       "reconcile",
     );
+    seedCompletedNamespaceSweepForTest(fixture);
     const coordinator = createArtifactCoordinator(fixture.client);
-    const upload = await coordinator.createArtifactUpload({
+    await coordinator.createArtifactUpload({
       ...artifactLease,
       clientArtifactId: artifactClientId(0),
       purpose: "result",
@@ -1086,50 +1143,13 @@ describe("DatabaseClient lease integration", () => {
         .run("2000-01-01T00:00:00.000Z", artifactLease.runAttemptId);
     });
 
-    await expect(
-      fixture.client.request("terminalizeInactiveArtifactUploads", { batchSize: 8 }),
-    ).resolves.toMatchObject({
-      terminalized: [{ uploadId: upload.uploadId, reason: "lease_expired" }],
-      hasMore: false,
+    const reconciliation = createArtifactReconciliationCoordinator(fixture.client);
+    await reconciliation.firstPass;
+    expect(reconciliation.health).toMatchObject({
+      cleanup: { completed: 1, failed: 0 },
+      capacity: { liveUploadCount: 0, cleanupBacklogEntries: 0 },
     });
-    const due = await fixture.client.request("listDueArtifactCleanups", { batchSize: 8 });
-    expect(due.items).toEqual([
-      expect.objectContaining({ uploadId: upload.uploadId, expectedAttemptCount: 0 }),
-    ]);
-    const failure = await fixture.client.request("recordArtifactCleanupFailure", {
-      uploadId: upload.uploadId,
-      expectedAttemptCount: 0,
-      errorCode: "storage_busy",
-      retryDelaySeconds: 30,
-    });
-    expect(failure).toMatchObject({
-      status: "retry_waiting",
-      attemptCount: 1,
-      retryDelaySeconds: 30,
-    });
-    await expect(
-      fixture.client.request("recordArtifactCleanupFailure", {
-        uploadId: upload.uploadId,
-        expectedAttemptCount: 0,
-        errorCode: "storage_busy",
-        retryDelaySeconds: 31,
-      }),
-    ).rejects.toMatchObject({
-      name: "DatabaseRequestError",
-      code: "ARTIFACT_RECONCILIATION_CONFLICT",
-    });
-    await expect(
-      fixture.client.request("completeArtifactCleanup", {
-        uploadId: upload.uploadId,
-        expectedAttemptCount: 1,
-      }),
-    ).resolves.toMatchObject({ status: "completed", attemptCount: 1 });
-    await expect(fixture.client.request("readArtifactHealthAccounting", {})).resolves.toMatchObject(
-      {
-        cleanup: { completed: 1, failed: 0 },
-        capacity: { liveUploadCount: 0, cleanupBacklogEntries: 0 },
-      },
-    );
+    await reconciliation.close();
     await coordinator.close();
   });
 
@@ -1147,6 +1167,7 @@ describe("DatabaseClient lease integration", () => {
       "instance-artifact-quota",
       "quota",
     );
+    seedCompletedNamespaceSweepForTest(fixture);
     const coordinator = createArtifactCoordinator(fixture.client);
 
     for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {

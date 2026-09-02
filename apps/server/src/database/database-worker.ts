@@ -27,27 +27,33 @@ import type {
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
 import {
-  type AdvanceArtifactReconciliationCursorInput,
-  advanceArtifactReconciliationCursor,
+  type ClassifyArtifactNamespacePageInput,
   type CommitArtifactChunkInput,
   type CommitArtifactFinalizeInput,
   type CompleteArtifactCleanupInput,
+  type CompleteArtifactNamespaceCleanupInput,
   type CreateArtifactUploadInput,
+  classifyArtifactNamespacePageAndAdvanceCursor,
   commitArtifactChunk,
   commitArtifactFinalize,
   completeArtifactCleanup,
+  completeArtifactNamespaceCleanup,
   createArtifactUpload,
   type ListDueArtifactCleanupsInput,
+  type ListDueArtifactNamespaceCleanupsInput,
   listDueArtifactCleanups,
+  listDueArtifactNamespaceCleanups,
   type PrepareArtifactChunkInput,
   type PrepareArtifactFinalizeInput,
   prepareArtifactChunk,
   prepareArtifactFinalize,
   probeArtifactUploadCreate,
   type RecordArtifactCleanupFailureInput,
+  type RecordArtifactNamespaceCleanupFailureInput,
   readArtifactHealthAccounting,
   readArtifactReconciliationCursor,
   recordArtifactCleanupFailure,
+  recordArtifactNamespaceCleanupFailure,
   type TerminalizeInactiveArtifactUploadsInput,
   type TerminateArtifactUploadInput,
   terminalizeInactiveArtifactUploads,
@@ -1720,15 +1726,30 @@ const handleRequest = (request: DatabaseRequest): unknown => {
         database,
         request.input as RecordArtifactCleanupFailureInput,
       );
+    case "classifyArtifactNamespacePageAndAdvanceCursor":
+      return classifyArtifactNamespacePageAndAdvanceCursor(
+        database,
+        request.input as ClassifyArtifactNamespacePageInput,
+      );
+    case "listDueArtifactNamespaceCleanups":
+      return listDueArtifactNamespaceCleanups(
+        database,
+        request.input as ListDueArtifactNamespaceCleanupsInput,
+      );
+    case "completeArtifactNamespaceCleanup":
+      return completeArtifactNamespaceCleanup(
+        database,
+        request.input as CompleteArtifactNamespaceCleanupInput,
+      );
+    case "recordArtifactNamespaceCleanupFailure":
+      return recordArtifactNamespaceCleanupFailure(
+        database,
+        request.input as RecordArtifactNamespaceCleanupFailureInput,
+      );
     case "readArtifactHealthAccounting":
       return readArtifactHealthAccounting(database, request.input as Record<string, never>);
     case "readArtifactReconciliationCursor":
       return readArtifactReconciliationCursor(database, request.input as Record<string, never>);
-    case "advanceArtifactReconciliationCursor":
-      return advanceArtifactReconciliationCursor(
-        database,
-        request.input as AdvanceArtifactReconciliationCursorInput,
-      );
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":
