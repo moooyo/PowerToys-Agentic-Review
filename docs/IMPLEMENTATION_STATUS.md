@@ -178,11 +178,14 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
   roles, missing or duplicate slots, and architecture-field misuse.
-- A dormant split-installer transaction-journal contract. ADR 0015 freezes the fixed namespace,
-  protected single-writer model, bounded canonical records, journal-first inactive materialization,
-  per-effect write-ahead intents, deterministic root-action plans, candidate and rollback policy
-  cursors, commit roll-forward, and failed-closed recovery matrix. No journal store, reducer,
-  filesystem mutation, SCM adapter, readiness boundary, or installer consumes it yet.
+- A dormant split-installer transaction-journal contract and pure data-model slice. ADR 0015 freezes
+  the fixed namespace, protected single-writer model, journal-first inactive materialization,
+  per-effect write-ahead intents, deterministic root-action plans, policy cursors, commit
+  roll-forward, and failed-closed matrix. `installtransaction` now provides the exact typed records,
+  closed pending-action union, fixed path derivation, strict bounded canonical codec, complete
+  single-record validation, and non-authorizing next-intent derivation. No production code consumes
+  it, and no observation reducer, journal store, filesystem mutation, SCM adapter, readiness
+  boundary, or installer is implemented.
 
 ## Deliberately Disabled
 
@@ -234,7 +237,7 @@ the production release profile, produce signed role bundles and native binaries,
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
 Server binding receipt authority, privileged enrollment writer and live evidence, destination
-evidence, the ADR 0015 journal codec/reducer and Windows durable store, the production Go installer,
+evidence, the ADR 0015 observation reducer and Windows durable store, the production Go installer,
 an exact SCM policy and adapter, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
@@ -313,6 +316,14 @@ platform vet. Independent reviews found no remaining P0-P2 issues in the enrollm
 profile, or ADR 0015 state and recovery model. No validation ran on the local Windows machine. The
 Windows enrollment reader still returns `ErrUnavailable`; these results are contract and
 cross-compilation evidence, not enrollment, installation, signing, or native runtime evidence.
+
+On 2026-09-02, the dormant `installtransaction` model completed the full ServiceHost matrix on
+`test-env` with Go 1.26.7: all-package unit, race, and vet suites, followed by Windows amd64 and
+arm64 all-package test compilation, builds, and cross-platform vet. The exact package also passed
+focused unit, race, and vet runs. Independent review found no remaining P0-P2 issues. No validation
+ran on the local Windows machine. This proves the pure codec, validation, path, and next-intent
+contracts only; it is not Windows journal durability, filesystem mutation, SCM, readiness, or
+installer runtime evidence.
 
 The 2026-09-02 ADR 0013 and split WinSW input snapshot was transferred to `test-env` as a four-file
 archive. Its local and remote SHA-256 was
