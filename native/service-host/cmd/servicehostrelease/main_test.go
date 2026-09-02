@@ -19,9 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peimage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile/generator"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicehostreceipt"
 )
 
 func TestControlledReleaseBuildUsesFixedOverlayCommand(t *testing.T) {
@@ -57,6 +59,34 @@ func TestControlledReleaseBuildUsesFixedOverlayCommand(t *testing.T) {
 	}
 	if !bytes.Equal(output, minimalPE64(t, "amd64")) {
 		t.Fatal("published output differs from the expected PE32+ image")
+	}
+	receiptDocument, err := os.ReadFile(fixture.receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := servicehostreceipt.Parse(receiptDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedTemplateDigest, err := os.ReadFile(fixture.expectedDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ReleaseID != "worker-test-1" || receipt.TargetArchitecture != "amd64" ||
+		receipt.Source.Commit != strings.Repeat("a", 40) || receipt.Source.Tree != strings.Repeat("b", 40) ||
+		receipt.CompiledReleaseTemplateSHA256 != string(expectedTemplateDigest) {
+		t.Fatalf("unexpected controlled build receipt: %#v", receipt)
+	}
+	outputDigest := sha256.Sum256(output)
+	invariant, signed, err := peimage.SigningInvariantSHA256(
+		bytes.NewReader(output),
+		int64(len(output)),
+		fixture.architecture,
+	)
+	if err != nil || signed || receipt.UnsignedSHA256 != fmt.Sprintf("%x", outputDigest) ||
+		receipt.UnsignedSize != fmt.Sprintf("%d", len(output)) ||
+		receipt.SigningInvariantSHA256 != fmt.Sprintf("%x", invariant) {
+		t.Fatalf("build receipt does not bind unsigned output: receipt=%#v signed=%t err=%v", receipt, signed, err)
 	}
 	if _, err := os.Lstat(fixture.runner.temporaryDirectory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("secure build directory was not removed: %v", err)
@@ -122,6 +152,7 @@ func TestControlledReleaseBuildHonorsParentCancellation(t *testing.T) {
 		"-template", fixture.template,
 		"-expected-sha256-file", fixture.expectedDigest,
 		"-output", fixture.output,
+		"-receipt-output", fixture.receipt,
 		"-arch", fixture.architecture,
 		"-go-tool", fixture.goTool,
 		"-go-tool-sha256-file", fixture.goToolDigest,
@@ -493,6 +524,7 @@ type buildFixture struct {
 	moduleCache    string
 	buildRoot      string
 	output         string
+	receipt        string
 	architecture   string
 	runner         *fakeCommandRunner
 	dependencies   buildDependencies
@@ -562,8 +594,10 @@ func newBuildFixture(t *testing.T) *buildFixture {
 		template: template, expectedDigest: expectedDigest,
 		goTool: goTool, goToolDigest: goToolDigest,
 		gitTool: gitTool, gitToolDigest: gitToolDigest, moduleCache: moduleCache,
-		buildRoot: buildRoot,
-		output:    filepath.Join(outputDirectory, serviceHostOutputName), architecture: "amd64", runner: runner,
+		buildRoot:    buildRoot,
+		output:       filepath.Join(outputDirectory, serviceHostOutputName),
+		receipt:      filepath.Join(outputDirectory, serviceHostReceiptName),
+		architecture: "amd64", runner: runner,
 	}
 	fixture.dependencies = buildDependencies{
 		getwd:      func() (string, error) { return module, nil },
@@ -588,6 +622,7 @@ func (fixture *buildFixture) run() error {
 		"-template", fixture.template,
 		"-expected-sha256-file", fixture.expectedDigest,
 		"-output", fixture.output,
+		"-receipt-output", fixture.receipt,
 		"-arch", fixture.architecture,
 		"-go-tool", fixture.goTool,
 		"-go-tool-sha256-file", fixture.goToolDigest,

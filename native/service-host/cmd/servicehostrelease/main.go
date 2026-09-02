@@ -7,8 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"debug/pe"
-	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,18 +18,21 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peimage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile/generator"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicehostreceipt"
 )
 
 const (
 	serviceHostModulePath     = "native/service-host"
 	serviceHostOutputName     = "AgenticReview.ServiceHost.exe"
+	serviceHostReceiptName    = "AgenticReview.ServiceHost.build-receipt.json"
 	expectedDigestBytes       = int64(sha256.Size * 2)
 	maximumToolBytes          = int64(512 * 1024 * 1024)
 	totalBuildTimeout         = 20 * time.Minute
@@ -45,6 +47,7 @@ type buildOptions struct {
 	templatePath       string
 	expectedDigestPath string
 	outputPath         string
+	receiptOutputPath  string
 	architecture       string
 	goToolPath         string
 	goToolDigestPath   string
@@ -173,6 +176,7 @@ func run(ctx context.Context, arguments []string, dependencies buildDependencies
 	flags.StringVar(&options.templatePath, "template", "", "absolute canonical release-template input")
 	flags.StringVar(&options.expectedDigestPath, "expected-sha256-file", "", "absolute file containing the approved template SHA-256")
 	flags.StringVar(&options.outputPath, "output", "", "absolute output path outside the repository")
+	flags.StringVar(&options.receiptOutputPath, "receipt-output", "", "absolute canonical build-receipt output")
 	flags.StringVar(&options.architecture, "arch", "", "Windows architecture: amd64 or arm64")
 	flags.StringVar(&options.goToolPath, "go-tool", "", "absolute read-only Go executable")
 	flags.StringVar(&options.goToolDigestPath, "go-tool-sha256-file", "", "absolute file containing the approved Go executable SHA-256")
@@ -184,7 +188,7 @@ func run(ctx context.Context, arguments []string, dependencies buildDependencies
 		return err
 	}
 	if flags.NArg() != 0 || options.templatePath == "" || options.expectedDigestPath == "" ||
-		options.outputPath == "" || options.architecture == "" || options.goToolPath == "" ||
+		options.outputPath == "" || options.receiptOutputPath == "" || options.architecture == "" || options.goToolPath == "" ||
 		options.goToolDigestPath == "" || options.gitToolPath == "" ||
 		options.gitToolDigestPath == "" || options.moduleCachePath == "" || options.buildRootPath == "" {
 		return errors.New("all release template, toolchain, module-cache, output, and architecture flags are required; positional arguments are not accepted")
@@ -376,6 +380,26 @@ func buildRelease(ctx context.Context, options buildOptions, dependencies buildD
 	if err != nil {
 		return err
 	}
+	receiptPath, receiptParent, err := resolveReceiptOutput(options.receiptOutputPath, repositoryPath)
+	if err != nil {
+		return err
+	}
+	if !samePath(outputParent, receiptParent) || samePath(outputPath, receiptPath) {
+		return errors.New("release binary and build receipt must be distinct outputs in one directory")
+	}
+	publishedBinary := false
+	publishedReceipt := false
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if publishedReceipt {
+			resultErr = errors.Join(resultErr, removePublishedOutput(receiptPath))
+		}
+		if publishedBinary {
+			resultErr = errors.Join(resultErr, removePublishedOutput(outputPath))
+		}
+	}()
 	outputAnchor, err := openDirectoryAnchor(outputParent, "release output directory")
 	if err != nil {
 		return err
@@ -556,7 +580,44 @@ func buildRelease(ctx context.Context, options buildOptions, dependencies buildD
 	if err := outputAnchor.Verify(); err != nil {
 		return err
 	}
-	if err := publishBinary(ctx, temporaryOutput, outputPath, options.architecture); err != nil {
+	var unsigned unsignedServiceHostInspection
+	if err := publishBinary(ctx, temporaryOutput, outputPath, options.architecture, &unsigned); err != nil {
+		return err
+	}
+	publishedBinary = true
+	releaseID, err := releaseIDFromTemplate(templateDocument)
+	if err != nil {
+		return err
+	}
+	receiptDocument, err := servicehostreceipt.MarshalCanonical(servicehostreceipt.Receipt{
+		CompiledReleaseTemplateSHA256: expectedDigest,
+		PackageProfile:                servicehostreceipt.PackageProfile,
+		ReleaseID:                     releaseID,
+		SchemaVersion:                 servicehostreceipt.SchemaVersion,
+		SigningInvariantSHA256:        hex.EncodeToString(unsigned.signingInvariantSHA256[:]),
+		Source: servicehostreceipt.Source{
+			Commit: sourceIdentity.commit,
+			Tree:   sourceIdentity.tree,
+		},
+		TargetArchitecture: options.architecture,
+		UnsignedSHA256:     hex.EncodeToString(unsigned.sha256[:]),
+		UnsignedSize:       strconv.FormatUint(unsigned.size, 10),
+	})
+	if err != nil {
+		return fmt.Errorf("build canonical ServiceHost receipt: %w", err)
+	}
+	if err := generator.WriteExclusiveRegular(receiptPath, receiptDocument, 0o400); err != nil {
+		return fmt.Errorf("publish ServiceHost build receipt: %w", err)
+	}
+	publishedReceipt = true
+	if err := generator.CheckExactRegular(
+		receiptPath,
+		receiptDocument,
+		int64(servicehostreceipt.MaximumDocumentBytes),
+	); err != nil {
+		return fmt.Errorf("verify published ServiceHost build receipt: %w", err)
+	}
+	if err := verifyUnsignedServiceHostReceipt(ctx, outputPath, options.architecture, unsigned); err != nil {
 		return err
 	}
 	if err := syncDirectory(outputParent); err != nil {
@@ -564,6 +625,13 @@ func buildRelease(ctx context.Context, options buildOptions, dependencies buildD
 	}
 	if err := outputAnchor.Verify(); err != nil {
 		return err
+	}
+	if err := generator.CheckExactRegular(
+		receiptPath,
+		receiptDocument,
+		int64(servicehostreceipt.MaximumDocumentBytes),
+	); err != nil {
+		return fmt.Errorf("reverify published ServiceHost build receipt: %w", err)
 	}
 	return nil
 }
@@ -786,6 +854,34 @@ func resolveOutput(path string, repositoryPath string) (string, string, error) {
 		return "", "", errors.New("release output must resolve outside the Git repository")
 	}
 	if err := requireAbsent(resolved, "release output"); err != nil {
+		return "", "", err
+	}
+	return resolved, parent, nil
+}
+
+func resolveReceiptOutput(path string, repositoryPath string) (string, string, error) {
+	if !filepath.IsAbs(path) {
+		return "", "", errors.New("build receipt output must be an absolute path")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve build receipt output: %w", err)
+	}
+	if filepath.Base(absolute) != serviceHostReceiptName {
+		return "", "", fmt.Errorf("build receipt output file name must be %s", serviceHostReceiptName)
+	}
+	parent, err := resolveExistingDirectory(filepath.Dir(absolute), "release output directory")
+	if err != nil {
+		return "", "", err
+	}
+	if err := validatePublishDirectory(parent); err != nil {
+		return "", "", err
+	}
+	resolved := filepath.Join(parent, filepath.Base(absolute))
+	if pathWithin(repositoryPath, resolved) {
+		return "", "", errors.New("build receipt output must resolve outside the Git repository")
+	}
+	if err := requireAbsent(resolved, "build receipt output"); err != nil {
 		return "", "", err
 	}
 	return resolved, parent, nil
@@ -1223,7 +1319,112 @@ func verifyGeneratedSource(
 	return nil
 }
 
-func publishBinary(ctx context.Context, sourcePath, outputPath, architecture string) (err error) {
+type unsignedServiceHostInspection struct {
+	sha256                 [sha256.Size]byte
+	signingInvariantSHA256 [sha256.Size]byte
+	size                   uint64
+}
+
+func inspectUnsignedServiceHost(
+	ctx context.Context,
+	path string,
+	architecture string,
+) (result unsignedServiceHostInspection, resultErr error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 ||
+		pathInfo.Size() <= 0 || uint64(pathInfo.Size()) > releaseprofile.MaximumServiceHostBytes {
+		return result, errors.New("published ServiceHost is not a bounded regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return result, fmt.Errorf("open published ServiceHost: %w", err)
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			result = unsignedServiceHostInspection{}
+			resultErr = errors.Join(resultErr, fmt.Errorf("close published ServiceHost: %w", closeErr))
+		}
+	}()
+	openedInfo, err := file.Stat()
+	if err != nil || !os.SameFile(pathInfo, openedInfo) || openedInfo.Size() != pathInfo.Size() {
+		return result, errors.New("published ServiceHost changed while opening")
+	}
+	digest, err := hashRetainedFile(ctx, file, openedInfo.Size())
+	if err != nil {
+		return result, fmt.Errorf("hash published ServiceHost: %w", err)
+	}
+	invariant, signed, err := peimage.SigningInvariantSHA256(file, openedInfo.Size(), architecture)
+	if err != nil {
+		return result, fmt.Errorf("derive published ServiceHost signing invariant: %w", err)
+	}
+	if signed {
+		return result, errors.New("controlled build output is already Authenticode signed")
+	}
+	postDigest, err := hashRetainedFile(ctx, file, openedInfo.Size())
+	if err != nil || postDigest != digest {
+		return result, errors.New("published ServiceHost changed while deriving its receipt")
+	}
+	finalInfo, err := file.Stat()
+	if err != nil || !os.SameFile(openedInfo, finalInfo) || finalInfo.Size() != openedInfo.Size() {
+		return result, errors.New("published ServiceHost identity changed while deriving its receipt")
+	}
+	finalPathInfo, err := os.Lstat(path)
+	if err != nil || !finalPathInfo.Mode().IsRegular() || finalPathInfo.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(finalInfo, finalPathInfo) || finalPathInfo.Size() != openedInfo.Size() {
+		return result, errors.New("published ServiceHost path changed while deriving its receipt")
+	}
+	return unsignedServiceHostInspection{
+		sha256: digest, signingInvariantSHA256: invariant, size: uint64(openedInfo.Size()),
+	}, nil
+}
+
+func verifyUnsignedServiceHostReceipt(
+	ctx context.Context,
+	path string,
+	architecture string,
+	expected unsignedServiceHostInspection,
+) error {
+	current, err := inspectUnsignedServiceHost(ctx, path, architecture)
+	if err != nil {
+		return fmt.Errorf("reinspect published ServiceHost for receipt binding: %w", err)
+	}
+	if current != expected {
+		return errors.New("published ServiceHost differs from its build receipt")
+	}
+	return nil
+}
+
+func releaseIDFromTemplate(document []byte) (string, error) {
+	if err := releaseprofile.ValidateDocument(document); err != nil {
+		return "", fmt.Errorf("validate release template for build receipt: %w", err)
+	}
+	var identity struct {
+		ReleaseID string `json:"releaseId"`
+	}
+	if err := json.Unmarshal(document, &identity); err != nil || identity.ReleaseID == "" {
+		return "", errors.New("release template omits a valid release ID")
+	}
+	return identity.ReleaseID, nil
+}
+
+func removePublishedOutput(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove incomplete release output: %w", err)
+	}
+	return nil
+}
+
+func publishBinary(
+	ctx context.Context,
+	sourcePath string,
+	outputPath string,
+	architecture string,
+	receipt *unsignedServiceHostInspection,
+) (err error) {
+	if receipt == nil {
+		return errors.New("unsigned ServiceHost receipt destination is required")
+	}
+	*receipt = unsignedServiceHostInspection{}
 	sourceInfo, err := os.Lstat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("inspect built ServiceHost: %w", err)
@@ -1253,6 +1454,17 @@ func publishBinary(ctx context.Context, sourcePath, outputPath, architecture str
 	}
 	if err := validatePEImage(source, sourceInfo.Size(), architecture); err != nil {
 		return fmt.Errorf("validate built ServiceHost PE image: %w", err)
+	}
+	sourceInvariant, sourceSigned, err := peimage.SigningInvariantSHA256(
+		source,
+		sourceInfo.Size(),
+		architecture,
+	)
+	if err != nil {
+		return fmt.Errorf("derive built ServiceHost signing invariant: %w", err)
+	}
+	if sourceSigned {
+		return errors.New("controlled compiler output is already Authenticode signed")
 	}
 	sourcePreDigest, err := hashRetainedFile(ctx, source, sourceInfo.Size())
 	if err != nil {
@@ -1329,6 +1541,17 @@ func publishBinary(ctx context.Context, sourcePath, outputPath, architecture str
 	if err := validatePEImage(output, outputInfo.Size(), architecture); err != nil {
 		return fmt.Errorf("validate retained release output PE image: %w", err)
 	}
+	outputInvariant, outputSigned, err := peimage.SigningInvariantSHA256(
+		output,
+		outputInfo.Size(),
+		architecture,
+	)
+	if err != nil {
+		return fmt.Errorf("derive retained release output signing invariant: %w", err)
+	}
+	if outputSigned || outputInvariant != sourceInvariant {
+		return errors.New("release output signing invariant differs from unsigned compiler output")
+	}
 	outputDigest, err := hashRetainedFile(ctx, output, outputInfo.Size())
 	if err != nil {
 		return fmt.Errorf("rehash retained release output: %w", err)
@@ -1357,6 +1580,11 @@ func publishBinary(ctx context.Context, sourcePath, outputPath, architecture str
 		return fmt.Errorf("close retained built ServiceHost: %w", err)
 	}
 	sourceClosed = true
+	*receipt = unsignedServiceHostInspection{
+		sha256:                 sourcePreDigest,
+		signingInvariantSHA256: sourceInvariant,
+		size:                   uint64(sourceInfo.Size()),
+	}
 	complete = true
 	return nil
 }
@@ -1396,133 +1624,12 @@ func retainedFileHasByteAt(file *os.File, offset int64) (bool, error) {
 	return false, err
 }
 
-type peFileRange struct {
-	start uint64
-	end   uint64
-}
-
 func validatePEImage(reader io.ReaderAt, size int64, architecture string) error {
-	if size <= 0 || uint64(size) > releaseprofile.MaximumServiceHostBytes {
-		return errors.New("PE image size is outside the supported range")
-	}
-	total := uint64(size)
-	bounded := io.NewSectionReader(reader, 0, size)
-	var dosHeader [64]byte
-	if _, err := bounded.ReadAt(dosHeader[:], 0); err != nil {
-		return fmt.Errorf("read DOS header: %w", err)
-	}
-	if dosHeader[0] != 'M' || dosHeader[1] != 'Z' {
-		return errors.New("PE image omits the DOS signature")
-	}
-	peOffset := uint64(binary.LittleEndian.Uint32(dosHeader[0x3c:]))
-	if peOffset < uint64(len(dosHeader)) || !checkedFileRange(peOffset, 4+20, total) {
-		return errors.New("PE signature or COFF header is outside the image")
-	}
-	var signature [4]byte
-	if _, err := bounded.ReadAt(signature[:], int64(peOffset)); err != nil || signature != [4]byte{'P', 'E', 0, 0} {
-		return errors.New("PE image has an invalid PE signature")
-	}
-	var coffHeader [20]byte
-	if _, err := bounded.ReadAt(coffHeader[:], int64(peOffset+4)); err != nil {
-		return fmt.Errorf("read COFF header: %w", err)
-	}
-	machine := binary.LittleEndian.Uint16(coffHeader[0:2])
-	sectionCount := binary.LittleEndian.Uint16(coffHeader[2:4])
-	optionalHeaderSize := binary.LittleEndian.Uint16(coffHeader[16:18])
-	characteristics := binary.LittleEndian.Uint16(coffHeader[18:20])
-	expectedMachine, err := expectedPEMachine(architecture)
-	if err != nil {
-		return err
-	}
-	if machine != expectedMachine {
-		return fmt.Errorf("PE machine %#x does not match %s", machine, architecture)
-	}
-	if characteristics&0x0002 == 0 {
-		return errors.New("PE image does not have the executable-image characteristic")
-	}
-	if sectionCount == 0 || optionalHeaderSize < 112 {
-		return errors.New("PE image has no sections or an undersized PE32+ optional header")
-	}
-	optionalHeaderOffset := peOffset + 4 + 20
-	sectionTableOffset := optionalHeaderOffset + uint64(optionalHeaderSize)
-	sectionTableBytes := uint64(sectionCount) * 40
-	if !checkedFileRange(optionalHeaderOffset, uint64(optionalHeaderSize), total) ||
-		!checkedFileRange(sectionTableOffset, sectionTableBytes, total) {
-		return errors.New("PE optional header or section table is outside the image")
-	}
-	image, err := pe.NewFile(bounded)
-	if err != nil {
-		return fmt.Errorf("parse PE image: %w", err)
-	}
-	defer image.Close()
-	optionalHeader, ok := image.OptionalHeader.(*pe.OptionalHeader64)
-	if !ok || optionalHeader == nil || optionalHeader.Magic != 0x20b {
-		return errors.New("PE image is not PE32+")
-	}
-	if image.Machine != expectedMachine || image.NumberOfSections != sectionCount ||
-		image.SizeOfOptionalHeader != optionalHeaderSize || image.Characteristics != characteristics {
-		return errors.New("parsed PE header differs from the retained header bytes")
-	}
-	sectionTableEnd := sectionTableOffset + sectionTableBytes
-	if uint64(optionalHeader.SizeOfHeaders) < sectionTableEnd || uint64(optionalHeader.SizeOfHeaders) > total {
-		return errors.New("PE SizeOfHeaders does not bound the retained headers")
-	}
-	if len(image.Sections) != int(sectionCount) {
-		return errors.New("parsed PE section count is inconsistent")
-	}
-	rawRanges := make([]peFileRange, 0, len(image.Sections))
-	for _, section := range image.Sections {
-		if section == nil {
-			return errors.New("PE image contains a nil section")
-		}
-		offset := uint64(section.Offset)
-		length := uint64(section.Size)
-		if length == 0 {
-			if offset > total {
-				return fmt.Errorf("PE section %q has an out-of-range empty offset", section.Name)
-			}
-		} else {
-			if offset < uint64(optionalHeader.SizeOfHeaders) || !checkedFileRange(offset, length, total) {
-				return fmt.Errorf("PE section %q raw data is outside the image", section.Name)
-			}
-			rawRanges = append(rawRanges, peFileRange{start: offset, end: offset + length})
-		}
-		if !checkedFileRange(
-			uint64(section.PointerToRelocations),
-			uint64(section.NumberOfRelocations)*10,
-			total,
-		) || !checkedFileRange(
-			uint64(section.PointerToLineNumbers),
-			uint64(section.NumberOfLineNumbers)*6,
-			total,
-		) {
-			return fmt.Errorf("PE section %q relocation or line table is outside the image", section.Name)
-		}
-	}
-	sort.Slice(rawRanges, func(left, right int) bool {
-		return rawRanges[left].start < rawRanges[right].start
-	})
-	for index := 1; index < len(rawRanges); index++ {
-		if rawRanges[index].start < rawRanges[index-1].end {
-			return errors.New("PE raw sections overlap")
-		}
-	}
-	return nil
+	return peimage.ValidateServiceHost(reader, size, architecture)
 }
 
 func expectedPEMachine(architecture string) (uint16, error) {
-	switch architecture {
-	case "amd64":
-		return pe.IMAGE_FILE_MACHINE_AMD64, nil
-	case "arm64":
-		return pe.IMAGE_FILE_MACHINE_ARM64, nil
-	default:
-		return 0, fmt.Errorf("unsupported PE architecture %q", architecture)
-	}
-}
-
-func checkedFileRange(offset, length, total uint64) bool {
-	return offset <= total && length <= total-offset
+	return peimage.ExpectedMachine(architecture)
 }
 
 func syncDirectory(path string) error {

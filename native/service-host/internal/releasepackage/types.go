@@ -1,6 +1,5 @@
-// Package releasepackage defines the canonical, two-phase, node-specific Worker release
-// package contract. It binds externally observed artifact metadata but does not sign files or
-// establish Authenticode trust.
+// Package releasepackage defines the canonical, node-specific Worker release contract and the
+// Windows evidence boundaries that bind independently approved build lineage to signed bytes.
 package releasepackage
 
 import (
@@ -16,7 +15,7 @@ const (
 	ReviewedClosurePolicyID        = "role-config-v2-package-files"
 	ReviewedClosurePolicyVersion   = uint32(1)
 	PrepareReceiptSchemaVersion    = uint32(1)
-	PackageDescriptorSchemaVersion = uint32(1)
+	PackageDescriptorSchemaVersion = uint32(2)
 	PackageProfile                 = "role-config-v2-node-specific"
 	FoundationVersion              = uint32(2)
 	MaximumCanonicalDocumentBytes  = releasemanifest.MaximumDocumentBytes
@@ -26,8 +25,13 @@ const (
 )
 
 var (
-	ErrInvalid  = errors.New("invalid Worker release package input")
-	ErrMismatch = errors.New("Worker release package phase mismatch")
+	ErrInvalid                      = errors.New("invalid Worker release package input")
+	ErrMismatch                     = errors.New("Worker release package phase mismatch")
+	ErrUnsupportedPlatform          = errors.New("Worker release evidence verification requires Windows")
+	ErrReviewedClosureVerification  = errors.New("reviewed closure approval verification failed")
+	ErrServiceHostBuildVerification = errors.New("ServiceHost build receipt verification failed")
+	ErrServiceHostVerification      = errors.New("ServiceHost artifact verification failed")
+	ErrReleaseCleanupFatal          = errors.New("release evidence handle cleanup is unresolved; process must exit")
 )
 
 type TargetArchitecture string
@@ -64,10 +68,16 @@ type reviewedClosureState struct {
 	value    reviewedClosureDocument
 }
 
-// ReviewedClosureEvidence is an opaque, canonical dependency-identity closure. This slice exposes
-// no production constructor; a future handle-bound independent approval reader must mint it.
+// ReviewedClosureEvidence is an opaque, canonical dependency-identity closure. Production code
+// can mint it only through LoadReviewedClosure's independent approval-file verification.
 type ReviewedClosureEvidence struct {
 	state *reviewedClosureState
+}
+
+// ServiceHostBuildEvidence is an opaque, independently approved receipt from the controlled
+// ServiceHost builder. Receipt bytes or a caller-computed digest cannot mint this value.
+type ServiceHostBuildEvidence struct {
+	state *serviceHostBuildState
 }
 
 // NodeSpecificSPKI binds the per-node local-authority public key deliberately retained in this
@@ -89,9 +99,7 @@ type PrepareRequest struct {
 	Dependencies                               []releaseprofile.Dependency
 }
 
-// UntrustedServiceHostMetadata contains facts that a future handle-bound PE and Authenticode
-// verifier must establish. This type is never accepted directly by Finalize.
-type UntrustedServiceHostMetadata struct {
+type serviceHostMetadata struct {
 	ReleaseID                                    string             `json:"releaseId"`
 	TargetArchitecture                           TargetArchitecture `json:"targetArchitecture"`
 	Source                                       SourceReceipt      `json:"source"`
@@ -101,12 +109,8 @@ type UntrustedServiceHostMetadata struct {
 	Size                                         string             `json:"size"`
 }
 
-type verifiedServiceHostState struct {
-	metadata UntrustedServiceHostMetadata
-}
-
-// VerifiedServiceHostEvidence is opaque output reserved for the future handle-bound PE and
-// Authenticode verifier. This slice deliberately exposes no production constructor.
+// VerifiedServiceHostEvidence is opaque output from VerifyServiceHost. Its zero value is invalid,
+// and detached metadata cannot be converted into evidence.
 type VerifiedServiceHostEvidence struct {
 	state *verifiedServiceHostState
 }
@@ -120,6 +124,7 @@ type FinalizeRequest struct {
 	AuthenticodeLeafSignerCertificateDERSHA256 string
 	NodeSpecificSPKI                           NodeSpecificSPKI
 	Dependencies                               []releaseprofile.Dependency
+	ServiceHostBuild                           ServiceHostBuildEvidence
 	ServiceHost                                VerifiedServiceHostEvidence
 }
 
@@ -140,6 +145,7 @@ type PackageDescriptor struct {
 	RuntimeManifestSHA256                      string               `json:"runtimeManifestSha256"`
 	SchemaVersion                              uint32               `json:"schemaVersion"`
 	ServiceHost                                releasemanifest.File `json:"serviceHost"`
+	ServiceHostBuildReceiptSHA256              string               `json:"serviceHostBuildReceiptSha256"`
 	Source                                     SourceReceipt        `json:"source"`
 	TargetArchitecture                         TargetArchitecture   `json:"targetArchitecture"`
 }

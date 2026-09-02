@@ -4,14 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
 // Finalize revalidates all phase inputs, adds externally verified signed ServiceHost metadata,
 // and emits the canonical schema-v2 runtime manifest and zero-authority outer descriptor.
 func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelease, error) {
+	operation, err := beginReleaseEvidenceOperation()
+	if err != nil {
+		return FinalizedRelease{}, err
+	}
 	state, err := validatePrepared(prepared)
 	if err != nil {
 		return FinalizedRelease{}, err
@@ -42,7 +48,16 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 	if err := requireNodeSpecificSPKI(current, request.NodeSpecificSPKI); err != nil {
 		return FinalizedRelease{}, err
 	}
-	serviceHostMetadata, err := validateVerifiedServiceHost(request.ServiceHost, state.receipt)
+	serviceHostBuild, err := validateServiceHostBuild(request.ServiceHostBuild)
+	if err != nil || !buildReceiptMatchesPrepared(serviceHostBuild, state) {
+		return FinalizedRelease{}, fmt.Errorf("%w: ServiceHost build receipt differs from prepare receipt", ErrMismatch)
+	}
+	serviceHostMetadata, err := validateVerifiedServiceHost(
+		request.ServiceHost,
+		serviceHostBuild,
+		state.receipt,
+		state.receiptSHA256,
+	)
 	if err != nil {
 		return FinalizedRelease{}, err
 	}
@@ -85,6 +100,7 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 		RuntimeManifestSHA256:                      hex.EncodeToString(manifestDigest[:]),
 		SchemaVersion:                              PackageDescriptorSchemaVersion,
 		ServiceHost:                                serviceHost,
+		ServiceHostBuildReceiptSHA256:              hex.EncodeToString(serviceHostBuild.sha256[:]),
 		Source:                                     state.receipt.Source,
 		TargetArchitecture:                         state.receipt.TargetArchitecture,
 	}
@@ -96,13 +112,17 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 		return FinalizedRelease{}, err
 	}
 	descriptorDigest := sha256.Sum256(descriptorDocument)
-	return FinalizedRelease{state: &finalizedState{
+	result := FinalizedRelease{state: &finalizedState{
 		manifestDocument:   append([]byte(nil), manifestDocument...),
 		manifestSHA256:     manifestDigest,
 		descriptorDocument: append([]byte(nil), descriptorDocument...),
 		descriptorSHA256:   descriptorDigest,
 		descriptor:         cloneDescriptor(descriptor),
-	}}, nil
+	}}
+	if err := operation.commit(); err != nil {
+		return FinalizedRelease{}, err
+	}
+	return result, nil
 }
 
 // parsePackageDescriptor validates descriptor syntax emitted inside this package. It deliberately
@@ -123,6 +143,7 @@ func parsePackageDescriptor(document []byte) (PackageDescriptor, error) {
 		descriptor.ReviewedClosurePolicyVersion != ReviewedClosurePolicyVersion ||
 		!validSHA256(descriptor.ReviewedClosureSHA256) ||
 		validateNodeSpecificSPKI(descriptor.NodeSpecificSPKI) != nil ||
+		!validSHA256(descriptor.ServiceHostBuildReceiptSHA256) ||
 		descriptor.ServiceHost.Root != releasemanifest.RootInstallation ||
 		descriptor.ServiceHost.Path != releaseprofile.ServiceHostRelativePath ||
 		descriptor.ServiceHost.Role != releasemanifest.RoleServiceHost ||
@@ -134,22 +155,34 @@ func parsePackageDescriptor(document []byte) (PackageDescriptor, error) {
 
 func validateVerifiedServiceHost(
 	evidence VerifiedServiceHostEvidence,
+	build *serviceHostBuildState,
 	receipt prepareReceiptDocument,
-) (UntrustedServiceHostMetadata, error) {
+	receiptSHA256 [sha256.Size]byte,
+) (serviceHostMetadata, error) {
 	if evidence.state == nil {
-		return UntrustedServiceHostMetadata{}, fmt.Errorf("%w: verified ServiceHost evidence is absent", ErrInvalid)
+		return serviceHostMetadata{}, fmt.Errorf("%w: verified ServiceHost evidence is absent", ErrInvalid)
 	}
 	value := evidence.state.metadata
 	if value.ReleaseID != receipt.ReleaseID || value.TargetArchitecture != receipt.TargetArchitecture ||
 		value.Source != receipt.Source || value.CompiledReleaseTemplateSHA256 != receipt.CompiledReleaseTemplateSHA256 ||
 		value.VerifiedAuthenticodeLeafCertificateDERSHA256 != receipt.AuthenticodeLeafSignerCertificateDERSHA256 {
-		return UntrustedServiceHostMetadata{}, fmt.Errorf(
+		return serviceHostMetadata{}, fmt.Errorf(
 			"%w: verified ServiceHost metadata differs from prepare receipt",
 			ErrMismatch,
 		)
 	}
+	if build == nil || evidence.state.preparedReceiptSHA256 != receiptSHA256 ||
+		evidence.state.buildReceiptSHA256 != build.sha256 ||
+		evidence.state.fileIdentity == (winfile.FileIdentity{}) || evidence.state.size == 0 ||
+		evidence.state.metadata.SHA256 != hex.EncodeToString(evidence.state.digest[:]) ||
+		evidence.state.metadata.Size != strconv.FormatUint(evidence.state.size, 10) ||
+		!validAuthenticodeEvidence(evidence.state.authenticode, receipt.AuthenticodeLeafSignerCertificateDERSHA256) ||
+		evidence.state.metadata.VerifiedAuthenticodeLeafCertificateDERSHA256 !=
+			evidence.state.authenticode.VerifiedLeafSignerCertificateDERSHA256 {
+		return serviceHostMetadata{}, fmt.Errorf("%w: verified ServiceHost evidence is inconsistent", ErrInvalid)
+	}
 	if !validSHA256(value.SHA256) || !validServiceHostSize(value.Size) {
-		return UntrustedServiceHostMetadata{}, fmt.Errorf(
+		return serviceHostMetadata{}, fmt.Errorf(
 			"%w: verified ServiceHost digest or size is invalid",
 			ErrInvalid,
 		)

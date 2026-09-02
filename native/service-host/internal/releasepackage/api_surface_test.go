@@ -13,11 +13,16 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
-func TestReviewedClosureEvidenceHasNoExportedMintingSurface(t *testing.T) {
-	evidenceType := reflect.TypeOf(releasepackage.ReviewedClosureEvidence{})
-	for index := 0; index < evidenceType.NumField(); index++ {
-		if evidenceType.Field(index).IsExported() {
-			t.Fatalf("ReviewedClosureEvidence field %q is exported", evidenceType.Field(index).Name)
+func TestReleaseEvidenceHasOnlyVerifiedExportedMintingSurfaces(t *testing.T) {
+	for _, evidenceType := range []reflect.Type{
+		reflect.TypeOf(releasepackage.ReviewedClosureEvidence{}),
+		reflect.TypeOf(releasepackage.ServiceHostBuildEvidence{}),
+		reflect.TypeOf(releasepackage.VerifiedServiceHostEvidence{}),
+	} {
+		for index := 0; index < evidenceType.NumField(); index++ {
+			if evidenceType.Field(index).IsExported() {
+				t.Fatalf("%s field %q is exported", evidenceType.Name(), evidenceType.Field(index).Name)
+			}
 		}
 	}
 
@@ -38,6 +43,12 @@ func TestReviewedClosureEvidenceHasNoExportedMintingSurface(t *testing.T) {
 	if !ok {
 		t.Fatal("cannot locate releasepackage production syntax tree")
 	}
+	allowed := map[string]string{
+		"ReviewedClosureEvidence":     "LoadReviewedClosure",
+		"ServiceHostBuildEvidence":    "LoadServiceHostBuildReceipt",
+		"VerifiedServiceHostEvidence": "VerifyServiceHost",
+	}
+	seen := make(map[string]bool, len(allowed))
 	for fileName, file := range production.Files {
 		if strings.HasSuffix(fileName, "_test.go") {
 			continue
@@ -47,12 +58,66 @@ func TestReviewedClosureEvidenceHasNoExportedMintingSurface(t *testing.T) {
 			if !ok || !ast.IsExported(function.Name.Name) {
 				continue
 			}
-			if function.Name.Name == "ParseReviewedClosure" ||
-				fieldListNamesType(function.Type.Results, "ReviewedClosureEvidence") {
-				t.Fatalf("production API %s can mint ReviewedClosureEvidence", function.Name.Name)
+			for evidence, approvedFunction := range allowed {
+				if !fieldListNamesType(function.Type.Results, evidence) {
+					continue
+				}
+				if function.Recv != nil || function.Name.Name != approvedFunction {
+					t.Fatalf("production API %s can mint %s", function.Name.Name, evidence)
+				}
+				seen[evidence] = true
+			}
+			if function.Name.Name == "VerifyServiceHost" &&
+				(fieldListNamesType(function.Type.Params, "UntrustedServiceHostMetadata") ||
+					fieldListNamesType(function.Type.Params, "serviceHostMetadata") ||
+					fieldListNamesType(function.Type.Params, "Evidence") ||
+					fieldListNamesType(function.Type.Params, "Verifier")) {
+				t.Fatalf("VerifyServiceHost accepts a detached metadata or verifier bypass")
+			}
+			switch function.Name.Name {
+			case "LoadReviewedClosure", "LoadServiceHostBuildReceipt":
+				if function.Recv != nil || !fieldListHasExactIdentifierTypes(
+					function.Type.Params,
+					[]string{"string", "string"},
+				) {
+					t.Fatalf("%s accepts an authority input other than two paths", function.Name.Name)
+				}
+			case "VerifyServiceHost":
+				if function.Recv != nil || !fieldListHasExactIdentifierTypes(
+					function.Type.Params,
+					[]string{"PreparedRelease", "ServiceHostBuildEvidence", "string"},
+				) {
+					t.Fatal("VerifyServiceHost accepts a non-opaque verification input")
+				}
 			}
 		}
 	}
+	for evidence := range allowed {
+		if !seen[evidence] {
+			t.Fatalf("verified production minter for %s is absent", evidence)
+		}
+	}
+}
+
+func fieldListHasExactIdentifierTypes(fields *ast.FieldList, expected []string) bool {
+	if fields == nil {
+		return len(expected) == 0
+	}
+	actual := make([]string, 0, len(expected))
+	for _, field := range fields.List {
+		identifier, ok := field.Type.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		count := len(field.Names)
+		if count == 0 {
+			count = 1
+		}
+		for index := 0; index < count; index++ {
+			actual = append(actual, identifier.Name)
+		}
+	}
+	return reflect.DeepEqual(actual, expected)
 }
 
 func fieldListNamesType(fields *ast.FieldList, target string) bool {

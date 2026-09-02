@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicehostreceipt"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
 func TestPrepareIsDeterministicCanonicalAndRoundTrips(t *testing.T) {
@@ -86,6 +90,7 @@ func TestFinalizeBuildsCanonicalManifestAndZeroAuthorityDescriptor(t *testing.T)
 		descriptor.PackageProfile != PackageProfile || descriptor.RuntimeManifestSHA256 != hexDigest(finalized.ManifestSHA256()) ||
 		descriptor.CompiledReleaseTemplateSHA256 != hexDigest(prepared.CompiledTemplateSHA256()) ||
 		descriptor.NodeSpecificSPKI != request.NodeSpecificSPKI ||
+		descriptor.ServiceHostBuildReceiptSHA256 != hexDigest(request.ServiceHostBuild.state.sha256) ||
 		descriptor.ReviewedClosureSHA256 != hexDigest(prepared.state.closure.SHA256()) {
 		t.Fatalf("unexpected package descriptor: %#v", descriptor)
 	}
@@ -112,27 +117,27 @@ func TestFinalizeRejectsMixedPhaseContextAndServiceHost(t *testing.T) {
 		}},
 		{name: "SPKI", mutate: func(value *FinalizeRequest) { value.NodeSpecificSPKI.SHA256 = strings.Repeat("1", 64) }},
 		{name: "ServiceHost release", mutate: func(value *FinalizeRequest) {
-			mutateVerifiedServiceHost(value, func(metadata *UntrustedServiceHostMetadata) {
+			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.ReleaseID = "other-release"
 			})
 		}},
 		{name: "ServiceHost architecture", mutate: func(value *FinalizeRequest) {
-			mutateVerifiedServiceHost(value, func(metadata *UntrustedServiceHostMetadata) {
+			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.TargetArchitecture = ArchitectureARM64
 			})
 		}},
 		{name: "ServiceHost source", mutate: func(value *FinalizeRequest) {
-			mutateVerifiedServiceHost(value, func(metadata *UntrustedServiceHostMetadata) {
+			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.Source.Tree = strings.Repeat("f", 40)
 			})
 		}},
 		{name: "ServiceHost template", mutate: func(value *FinalizeRequest) {
-			mutateVerifiedServiceHost(value, func(metadata *UntrustedServiceHostMetadata) {
+			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.CompiledReleaseTemplateSHA256 = strings.Repeat("1", 64)
 			})
 		}},
 		{name: "ServiceHost signer", mutate: func(value *FinalizeRequest) {
-			mutateVerifiedServiceHost(value, func(metadata *UntrustedServiceHostMetadata) {
+			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.VerifiedAuthenticodeLeafCertificateDERSHA256 = strings.Repeat("1", 64)
 			})
 		}},
@@ -161,6 +166,26 @@ func TestFinalizeRejectsUnverifiedServiceHostMetadata(t *testing.T) {
 	request.ServiceHost = VerifiedServiceHostEvidence{}
 	if _, err := Finalize(prepared, request); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Finalize returned %v, want ErrInvalid", err)
+	}
+}
+
+func TestFinalizeRejectsAbsentOrMixedServiceHostBuildReceipt(t *testing.T) {
+	prepared, request := validFinalization(t)
+	baseline := request.ServiceHostBuild
+	request.ServiceHostBuild = ServiceHostBuildEvidence{}
+	if _, err := Finalize(prepared, request); !errors.Is(err, ErrMismatch) {
+		t.Fatalf("Finalize without build receipt returned %v, want ErrMismatch", err)
+	}
+	request.ServiceHostBuild = cloneBuildEvidence(baseline)
+	request.ServiceHostBuild.state.receipt.Source.Tree = strings.Repeat("f", 40)
+	document, err := servicehostreceipt.MarshalCanonical(request.ServiceHostBuild.state.receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ServiceHostBuild.state.document = document
+	request.ServiceHostBuild.state.sha256 = sha256.Sum256(document)
+	if _, err := Finalize(prepared, request); !errors.Is(err, ErrMismatch) {
+		t.Fatalf("Finalize with mixed build receipt returned %v, want ErrMismatch", err)
 	}
 }
 
@@ -349,6 +374,16 @@ func validFinalization(t *testing.T) (PreparedRelease, FinalizeRequest) {
 		t.Fatal(err)
 	}
 	templateDigest := hexDigest(prepared.CompiledTemplateSHA256())
+	build := validServiceHostBuild(t, prepared)
+	metadata := serviceHostMetadata{
+		ReleaseID:                     prepare.ReleaseID,
+		TargetArchitecture:            prepare.TargetArchitecture,
+		Source:                        prepare.Source,
+		CompiledReleaseTemplateSHA256: templateDigest,
+		VerifiedAuthenticodeLeafCertificateDERSHA256: prepare.AuthenticodeLeafSignerCertificateDERSHA256,
+		SHA256: strings.Repeat("f", 64),
+		Size:   "4096",
+	}
 	return prepared, FinalizeRequest{
 		ReleaseID:          prepare.ReleaseID,
 		TargetArchitecture: prepare.TargetArchitecture,
@@ -356,15 +391,8 @@ func validFinalization(t *testing.T) (PreparedRelease, FinalizeRequest) {
 		AuthenticodeLeafSignerCertificateDERSHA256: prepare.AuthenticodeLeafSignerCertificateDERSHA256,
 		NodeSpecificSPKI: prepare.NodeSpecificSPKI,
 		Dependencies:     cloneDependencies(prepare.Dependencies),
-		ServiceHost: verifiedServiceHostFixture(UntrustedServiceHostMetadata{
-			ReleaseID:                     prepare.ReleaseID,
-			TargetArchitecture:            prepare.TargetArchitecture,
-			Source:                        prepare.Source,
-			CompiledReleaseTemplateSHA256: templateDigest,
-			VerifiedAuthenticodeLeafCertificateDERSHA256: prepare.AuthenticodeLeafSignerCertificateDERSHA256,
-			SHA256: strings.Repeat("f", 64),
-			Size:   "4096",
-		}),
+		ServiceHostBuild: build,
+		ServiceHost:      verifiedServiceHostFixture(t, prepared, build, metadata),
 	}
 }
 
@@ -420,17 +448,91 @@ func reviewedClosureDocumentForTest(
 	return document
 }
 
-func verifiedServiceHostFixture(metadata UntrustedServiceHostMetadata) VerifiedServiceHostEvidence {
-	return VerifiedServiceHostEvidence{state: &verifiedServiceHostState{metadata: metadata}}
+func validServiceHostBuild(t *testing.T, prepared PreparedRelease) ServiceHostBuildEvidence {
+	t.Helper()
+	receipt := servicehostreceipt.Receipt{
+		CompiledReleaseTemplateSHA256: hexDigest(prepared.CompiledTemplateSHA256()),
+		PackageProfile:                servicehostreceipt.PackageProfile,
+		ReleaseID:                     prepared.state.receipt.ReleaseID,
+		SchemaVersion:                 servicehostreceipt.SchemaVersion,
+		SigningInvariantSHA256:        strings.Repeat("1", 64),
+		Source: servicehostreceipt.Source{
+			Commit: prepared.state.receipt.Source.Commit,
+			Tree:   prepared.state.receipt.Source.Tree,
+		},
+		TargetArchitecture: string(prepared.state.receipt.TargetArchitecture),
+		UnsignedSHA256:     strings.Repeat("2", 64),
+		UnsignedSize:       "4096",
+	}
+	document, err := servicehostreceipt.MarshalCanonical(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(document)
+	return ServiceHostBuildEvidence{state: &serviceHostBuildState{
+		document: document,
+		sha256:   digest,
+		receipt:  receipt,
+	}}
+}
+
+func verifiedServiceHostFixture(
+	t *testing.T,
+	prepared PreparedRelease,
+	build ServiceHostBuildEvidence,
+	metadata serviceHostMetadata,
+) VerifiedServiceHostEvidence {
+	t.Helper()
+	digestBytes, err := hex.DecodeString(metadata.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], digestBytes)
+	size, err := strconv.ParseUint(metadata.Size, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := validAuthenticodeFixture(metadata.VerifiedAuthenticodeLeafCertificateDERSHA256)
+	return VerifiedServiceHostEvidence{state: &verifiedServiceHostState{
+		metadata:              metadata,
+		preparedReceiptSHA256: prepared.state.receiptSHA256,
+		buildReceiptSHA256:    build.state.sha256,
+		fileIdentity: winfile.FileIdentity{
+			VolumeSerialNumber: 1,
+			FileID:             [16]byte{1},
+		},
+		digest:       digest,
+		size:         size,
+		authenticode: signature,
+	}}
 }
 
 func mutateVerifiedServiceHost(
 	request *FinalizeRequest,
-	mutate func(*UntrustedServiceHostMetadata),
+	mutate func(*serviceHostMetadata),
 ) {
+	state := *request.ServiceHost.state
 	metadata := request.ServiceHost.state.metadata
 	mutate(&metadata)
-	request.ServiceHost = verifiedServiceHostFixture(metadata)
+	state.metadata = metadata
+	request.ServiceHost = VerifiedServiceHostEvidence{state: &state}
+}
+
+func validAuthenticodeFixture(signer string) authenticode.Evidence {
+	return authenticode.Evidence{
+		Trusted:                                true,
+		SignatureKind:                          authenticode.SignatureKindEmbedded,
+		SignatureCount:                         1,
+		VerifiedSignatureIndex:                 0,
+		RevocationPolicy:                       authenticode.RevocationPolicyRuntimeCacheOnlyNoCheck,
+		DigestPolicy:                           authenticode.DigestPolicySHA256Only,
+		StrongSignaturePolicy:                  authenticode.StrongSignaturePolicyWindowsOSCurrent,
+		SignerDigestAlgorithmOID:               authenticode.SHA256ObjectIdentifier,
+		FileDigestAlgorithmOID:                 authenticode.SHA256ObjectIdentifier,
+		SignerIdentity:                         "test signer",
+		VerifiedLeafSignerCertificateDERSHA256: signer,
+	}
 }
 
 func addCanonicalDependency(
@@ -501,5 +603,5 @@ const (
 	reviewedClosureGoldenSHA256   = "498f33fee92ab2c5a7943fc6a368b50c11fe5bccaf150c89b65f4de75be50ea8"
 	prepareReceiptGoldenSHA256    = "d595e22fd53a2c4c915f9fc09c3110ce6d96c0ec179b24c99e0eed9fc461fb07"
 	runtimeManifestGoldenSHA256   = "d6f6c351691716c1c23bc25fac6ae7f2efcb6914e1161292668df4b9574a8769"
-	packageDescriptorGoldenSHA256 = "b69737432311417f6b19a06a4b7bba90e7c543d10d70cd4f7c91c12a0a2359f8"
+	packageDescriptorGoldenSHA256 = "7d0d4e93bd6a591cc3547056ab0c2ed0a6b21f0aa81184498db466f93ab67c54"
 )

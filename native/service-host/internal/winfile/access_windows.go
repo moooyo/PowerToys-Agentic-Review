@@ -18,9 +18,10 @@ var (
 )
 
 type stableAccessTokenState struct {
-	mu     sync.Mutex
-	token  windows.Token
-	closed bool
+	mu         sync.Mutex
+	token      windows.Token
+	closeToken func(windows.Token) error
+	closed     bool
 }
 
 type nativeGenericMapping struct {
@@ -81,23 +82,28 @@ func (token *StableAccessToken) CheckAccess(
 	return checkAccessWithToken(token.state.token, security, desiredAccess, mapping)
 }
 
-// Close permanently releases the owned token handle. It is idempotent.
+// Close permanently prevents token use and releases the owned handle. A failed native close
+// retains the handle so a later Close can retry it.
 func (token *StableAccessToken) Close() error {
 	if token == nil || token.state == nil {
 		return nil
 	}
 	token.state.mu.Lock()
 	defer token.state.mu.Unlock()
-	if token.state.closed || token.state.token == 0 {
+	if token.state.token == 0 {
 		token.state.closed = true
 		return nil
 	}
 	token.state.closed = true
 	handle := token.state.token
-	token.state.token = 0
-	if err := handle.Close(); err != nil {
+	closeToken := token.state.closeToken
+	if closeToken == nil {
+		closeToken = windows.Token.Close
+	}
+	if err := closeToken(handle); err != nil {
 		return fmt.Errorf("close stable access token: %w", err)
 	}
+	token.state.token = 0
 	return nil
 }
 

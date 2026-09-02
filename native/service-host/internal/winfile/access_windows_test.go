@@ -24,6 +24,32 @@ func TestAccessCheckWindowsConstantsAndLayout(t *testing.T) {
 	}
 }
 
+func TestStableAccessTokenCloseRetainsHandleForRetry(t *testing.T) {
+	attempts := 0
+	token := &StableAccessToken{state: &stableAccessTokenState{
+		token: windows.Token(123),
+		closeToken: func(value windows.Token) error {
+			attempts++
+			if value != windows.Token(123) {
+				t.Fatalf("close token = %d", value)
+			}
+			if attempts == 1 {
+				return errors.New("injected close failure")
+			}
+			return nil
+		},
+	}}
+	if err := token.Close(); err == nil || token.state.token != windows.Token(123) || !token.state.closed {
+		t.Fatalf("first Close returned %v with state %+v", err, token.state)
+	}
+	if _, err := token.Duplicate(); !errors.Is(err, ErrAccessTokenClosed) {
+		t.Fatalf("Duplicate after failed Close returned %v", err)
+	}
+	if err := token.Close(); err != nil || token.state.token != 0 || attempts != 2 {
+		t.Fatalf("retry Close returned %v with state %+v attempts=%d", err, token.state, attempts)
+	}
+}
+
 func TestStableAccessTokenOwnsIndependentDuplicate(t *testing.T) {
 	var source windows.Token
 	if err := windows.OpenProcessToken(
