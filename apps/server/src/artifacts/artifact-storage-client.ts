@@ -1,5 +1,7 @@
+import { type SpawnOptions, spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
-import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import { ArtifactStorageClientError, type ArtifactStorageClientErrorCode } from "./errors.js";
 import type {
   ArtifactCapacityAdmission,
@@ -18,6 +20,7 @@ import {
   type ArtifactStorageWorkerMessage,
   type ArtifactStorageWorkerOperation,
   type ArtifactStorageWorkerOperationMap,
+  artifactStorageProcessEntryArgument,
   artifactStorageProtocolVersion,
   assertArtifactStorageResponseMatchesExpectation,
   createArtifactStorageResponseExpectation,
@@ -31,7 +34,39 @@ import {
 const maximumPendingOperations = 15;
 const maximumClientTimeoutMilliseconds = 600_000;
 const testTransportAttachment = Symbol("artifact-storage-test-transport-attachment");
+const testSpawnerAttachment = Symbol("artifact-storage-test-spawner-attachment");
 const systemMonotonicNow = (): number => performance.now();
+
+const defaultProcessSpawner: ArtifactStorageProcessSpawner = (executable, args, options) =>
+  spawn(executable, [...args], options) as unknown as ArtifactStorageProcessTransport;
+
+const artifactStorageProcessEntryPath = (): string =>
+  fileURLToPath(
+    import.meta.url.endsWith(".ts")
+      ? new URL("./artifact-storage-process.ts", import.meta.url)
+      : new URL("./artifact-storage-process.js", import.meta.url),
+  );
+
+const createArtifactStorageProcess = (
+  spawner: ArtifactStorageProcessSpawner,
+): ArtifactStorageProcessTransport => {
+  const environment = Object.freeze(Object.create(null)) as NodeJS.ProcessEnv;
+  const entryPath = artifactStorageProcessEntryPath();
+  return spawner(
+    process.execPath,
+    Object.freeze([entryPath, artifactStorageProcessEntryArgument]),
+    {
+      cwd: dirname(entryPath),
+      shell: false,
+      detached: false,
+      windowsHide: true,
+      windowsVerbatimArguments: false,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      serialization: "advanced",
+      env: environment,
+    },
+  );
+};
 
 export interface ArtifactStorageClientOptions {
   readonly storage: ArtifactStorageKernelOptions;
@@ -41,14 +76,23 @@ export interface ArtifactStorageClientOptions {
   readonly exitTimeoutMilliseconds: number;
 }
 
-export interface ArtifactStorageWorkerTransport {
-  postMessage(value: unknown): void;
-  terminate(): Promise<number>;
+export interface ArtifactStorageProcessTransport {
+  send(value: unknown, callback: (error: Error | null) => void): boolean;
+  kill(signal: "SIGKILL"): boolean;
   on(event: "message", listener: (value: unknown) => void): this;
-  on(event: "messageerror", listener: (error: Error) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
-  on(event: "exit", listener: (exitCode: number) => void): this;
+  on(
+    event: "exit" | "close",
+    listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
+  on(event: "disconnect", listener: () => void): this;
 }
+
+type ArtifactStorageProcessSpawner = (
+  executable: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ArtifactStorageProcessTransport;
 
 interface PendingRequest {
   readonly operation: ArtifactStorageWorkerOperation;
@@ -104,12 +148,13 @@ const remainingMilliseconds = (deadline: number, now: number): number =>
   Math.max(1, Math.ceil(deadline - now));
 
 export class ArtifactStorageClient {
-  readonly #worker: ArtifactStorageWorkerTransport;
+  readonly #owner: ArtifactStorageProcessTransport;
   readonly #options: ArtifactStorageClientSnapshot;
   readonly #now: () => number;
   readonly #startupDeadline: number;
   readonly #ready = Promise.withResolvers<void>();
   readonly #exited = Promise.withResolvers<number>();
+  readonly #closed = Promise.withResolvers<number>();
   readonly #terminalSignal = Promise.withResolvers<ArtifactStorageClientError>();
   readonly #pending = new Map<number, PendingRequest>();
   // Caller getters can reenter while an input is normalized, so those slots count toward the cap.
@@ -122,34 +167,34 @@ export class ArtifactStorageClient {
   #shutdownDeadline: number | undefined;
   #closePromise: Promise<void> | undefined;
   #terminationPromise: Promise<void> | undefined;
+  #ownerExitObserved = false;
+  #ownerCloseObserved = false;
+  #ownerExitCode: number | undefined;
+  #killAttempted = false;
 
   private constructor(
     options: ArtifactStorageClientSnapshot,
-    worker: ArtifactStorageWorkerTransport,
+    owner: ArtifactStorageProcessTransport,
     startupDeadline: number,
     now: () => number,
   ) {
     this.#options = options;
-    this.#worker = worker;
+    this.#owner = owner;
     this.#now = now;
     this.#startupDeadline = startupDeadline;
-    worker.on("message", (message) => this.#handleMessage(message));
-    worker.on("messageerror", () => {
-      this.#enterTerminal(
-        "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker emitted an unreadable message.",
-      );
+    owner.on("message", (message) => this.#handleMessage(message));
+    owner.on("error", () => {
+      this.#enterTerminal("ARTIFACT_STORAGE_CLIENT_TERMINAL", "Artifact storage owner failed.");
     });
-    worker.on("error", () => {
-      this.#enterTerminal("ARTIFACT_STORAGE_CLIENT_TERMINAL", "Artifact storage Worker failed.");
-    });
-    worker.on("exit", (exitCode) => this.#handleExit(exitCode));
+    owner.on("exit", (exitCode, signal) => this.#handleOwnerExit(exitCode, signal, false));
+    owner.on("close", (exitCode, signal) => this.#handleOwnerExit(exitCode, signal, true));
+    owner.on("disconnect", () => this.#handleDisconnect());
 
     this.#startupTimer = setTimeout(
       () => {
         this.#enterTerminal(
           "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-          "Artifact storage Worker startup timed out.",
+          "Artifact storage owner startup timed out.",
         );
       },
       remainingMilliseconds(startupDeadline, this.#now()),
@@ -158,12 +203,24 @@ export class ArtifactStorageClient {
     if (this.#now() >= startupDeadline) {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker startup timed out.",
+        "Artifact storage owner startup timed out.",
       );
     }
+    this.#sendMessage({
+      type: "initialize",
+      protocolVersion: artifactStorageProtocolVersion,
+      storage: this.#options.storage,
+    });
   }
 
   static async create(options: ArtifactStorageClientOptions): Promise<ArtifactStorageClient> {
+    return ArtifactStorageClient.#createWithSpawner(options, defaultProcessSpawner);
+  }
+
+  static async #createWithSpawner(
+    options: ArtifactStorageClientOptions,
+    spawner: ArtifactStorageProcessSpawner,
+  ): Promise<ArtifactStorageClient> {
     const startedAt = systemMonotonicNow();
     let startupTimeoutMilliseconds: number;
     try {
@@ -181,7 +238,7 @@ export class ArtifactStorageClient {
     if (systemMonotonicNow() >= startupDeadline) {
       throw new ArtifactStorageClientError(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker startup timed out during timeout validation.",
+        "Artifact storage owner startup timed out during timeout validation.",
       );
     }
     let snapshot: ArtifactStorageClientSnapshot;
@@ -191,7 +248,7 @@ export class ArtifactStorageClient {
       if (systemMonotonicNow() >= startupDeadline) {
         throw new ArtifactStorageClientError(
           "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-          "Artifact storage Worker startup timed out during configuration validation.",
+          "Artifact storage owner startup timed out during configuration validation.",
         );
       }
       throw new ArtifactStorageClientError(
@@ -202,39 +259,39 @@ export class ArtifactStorageClient {
     if (systemMonotonicNow() >= startupDeadline) {
       throw new ArtifactStorageClientError(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker startup timed out before owner creation.",
+        "Artifact storage owner startup timed out before owner creation.",
       );
     }
-    const workerUrl = import.meta.url.endsWith(".ts")
-      ? new URL("./artifact-storage-worker.ts", import.meta.url)
-      : new URL("./artifact-storage-worker.js", import.meta.url);
-    let worker: ArtifactStorageWorkerTransport;
+    let owner: ArtifactStorageProcessTransport;
     try {
-      worker = new Worker(workerUrl, {
-        workerData: {
-          protocolVersion: artifactStorageProtocolVersion,
-          storage: snapshot.storage,
-        },
-      }) as ArtifactStorageWorkerTransport;
+      owner = createArtifactStorageProcess(spawner);
     } catch {
       if (systemMonotonicNow() >= startupDeadline) {
         throw new ArtifactStorageClientError(
           "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-          "Artifact storage Worker startup timed out during owner creation.",
+          "Artifact storage owner startup timed out during process creation.",
         );
       }
       throw new ArtifactStorageClientError(
         "ARTIFACT_STORAGE_CLIENT_TERMINAL",
-        "Artifact storage Worker could not be started.",
+        "Artifact storage owner process could not be started.",
       );
     }
-    return ArtifactStorageClient.#attach(snapshot, worker, startupDeadline);
+    return ArtifactStorageClient.#attach(snapshot, owner, startupDeadline);
+  }
+
+  /** @internal Accessible only through the deep-module test helper below. */
+  static async [testSpawnerAttachment](
+    options: ArtifactStorageClientOptions,
+    spawner: ArtifactStorageProcessSpawner,
+  ): Promise<ArtifactStorageClient> {
+    return ArtifactStorageClient.#createWithSpawner(options, spawner);
   }
 
   /** @internal Accessible only through the deep-module test helper below. */
   static async [testTransportAttachment](
     options: ArtifactStorageClientOptions,
-    worker: ArtifactStorageWorkerTransport,
+    owner: ArtifactStorageProcessTransport,
     initialRequestId: number,
     now: () => number,
   ): Promise<ArtifactStorageClient> {
@@ -246,7 +303,7 @@ export class ArtifactStorageClient {
     const snapshot = snapshotClientOptions(options, startupTimeoutMilliseconds);
     return ArtifactStorageClient.#attach(
       snapshot,
-      worker,
+      owner,
       startedAt + startupTimeoutMilliseconds,
       initialRequestId,
       now,
@@ -255,12 +312,12 @@ export class ArtifactStorageClient {
 
   static async #attach(
     options: ArtifactStorageClientSnapshot,
-    worker: ArtifactStorageWorkerTransport,
+    owner: ArtifactStorageProcessTransport,
     startupDeadline: number,
     initialRequestId = 1,
     now: () => number = systemMonotonicNow,
   ): Promise<ArtifactStorageClient> {
-    const client = new ArtifactStorageClient(options, worker, startupDeadline, now);
+    const client = new ArtifactStorageClient(options, owner, startupDeadline, now);
     if (
       !Number.isSafeInteger(initialRequestId) ||
       initialRequestId < 1 ||
@@ -334,7 +391,7 @@ export class ArtifactStorageClient {
             reject(
               new ArtifactStorageClientError(
                 "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-                "Artifact storage Worker exit join timed out.",
+                "Artifact storage owner exit join timed out.",
                 false,
                 this.#exited.promise,
               ),
@@ -443,20 +500,13 @@ export class ArtifactStorageClient {
       );
       return response as Promise<ArtifactStorageWorkerOperationMap[TOperation]["output"]>;
     }
-    try {
-      this.#worker.postMessage({
-        type: "request",
-        protocolVersion: artifactStorageProtocolVersion,
-        id,
-        operation,
-        input: normalizedInput,
-      });
-    } catch {
-      this.#enterTerminal(
-        "ARTIFACT_STORAGE_CLIENT_TERMINAL",
-        "Artifact storage request could not be sent.",
-      );
-    }
+    this.#sendMessage({
+      type: "request",
+      protocolVersion: artifactStorageProtocolVersion,
+      id,
+      operation,
+      input: normalizedInput,
+    });
     if (this.#now() >= deadline && this.#pending.has(id)) {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
@@ -464,6 +514,27 @@ export class ArtifactStorageClient {
       );
     }
     return response as Promise<ArtifactStorageWorkerOperationMap[TOperation]["output"]>;
+  }
+
+  #sendMessage(value: unknown): void {
+    if (this.#state === "terminal" || this.#state === "closed") {
+      return;
+    }
+    try {
+      this.#owner.send(value, (error) => {
+        if (error !== null && !this.#ownerExitObserved && this.#state !== "closed") {
+          this.#enterTerminal(
+            "ARTIFACT_STORAGE_CLIENT_TERMINAL",
+            "Artifact storage IPC message could not be sent.",
+          );
+        }
+      });
+    } catch {
+      this.#enterTerminal(
+        "ARTIFACT_STORAGE_CLIENT_TERMINAL",
+        "Artifact storage IPC message could not be sent.",
+      );
+    }
   }
 
   #requestAdmissionError(
@@ -529,10 +600,10 @@ export class ArtifactStorageClient {
     if (this.#now() >= deadline) {
       throw this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker shutdown timed out after acknowledgement.",
+        "Artifact storage owner shutdown timed out after acknowledgement.",
       );
     }
-    const exitCode = await this.#waitForExit(deadline);
+    const exitCode = await this.#waitForOwnerClose(deadline);
     if (this.#terminalError !== undefined) {
       throw this.#terminalError;
     }
@@ -542,7 +613,7 @@ export class ArtifactStorageClient {
     ) {
       throw this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker did not drain accepted work before shutdown.",
+        "Artifact storage owner did not drain accepted work before shutdown.",
         false,
         false,
       );
@@ -550,24 +621,24 @@ export class ArtifactStorageClient {
     if (exitCode !== 0) {
       throw this.#enterTerminal(
         "ARTIFACT_STORAGE_WORKER_EXIT",
-        "Artifact storage Worker did not complete graceful shutdown.",
+        "Artifact storage owner did not complete graceful shutdown.",
         false,
       );
     }
     this.#state = "closed";
   }
 
-  async #waitForExit(deadline: number): Promise<number> {
+  async #waitForOwnerClose(deadline: number): Promise<number> {
     if (this.#now() >= deadline) {
       throw this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker shutdown timed out before exit.",
+        "Artifact storage owner shutdown timed out before exit.",
       );
     }
     let timer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([
-        this.#exited.promise,
+        this.#closed.promise,
         this.#terminalSignal.promise.then((error): never => {
           throw error;
         }),
@@ -576,7 +647,7 @@ export class ArtifactStorageClient {
             () => {
               const error = this.#enterTerminal(
                 "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-                "Artifact storage Worker shutdown timed out.",
+                "Artifact storage owner shutdown timed out.",
               );
               reject(error);
             },
@@ -602,7 +673,7 @@ export class ArtifactStorageClient {
     } catch {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker violated its message protocol.",
+        "Artifact storage owner violated its message protocol.",
       );
       return;
     }
@@ -611,14 +682,14 @@ export class ArtifactStorageClient {
       if (this.#state !== "starting") {
         this.#enterTerminal(
           "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-          "Artifact storage Worker sent an unexpected ready message.",
+          "Artifact storage owner sent an unexpected ready message.",
         );
         return;
       }
       if (this.#now() >= this.#startupDeadline) {
         this.#enterTerminal(
           "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-          "Artifact storage Worker startup timed out.",
+          "Artifact storage owner startup timed out.",
         );
         return;
       }
@@ -638,7 +709,7 @@ export class ArtifactStorageClient {
     if (this.#state === "starting") {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker responded before becoming ready.",
+        "Artifact storage owner responded before becoming ready.",
       );
       return;
     }
@@ -647,7 +718,7 @@ export class ArtifactStorageClient {
     if (pending === undefined || pending.operation !== message.operation) {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker returned an unknown response correlation.",
+        "Artifact storage owner returned an unknown response correlation.",
       );
       return;
     }
@@ -662,7 +733,7 @@ export class ArtifactStorageClient {
       if (isFatalArtifactStorageOperationError(message.operation, message.error)) {
         this.#enterTerminal(
           "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-          "Artifact storage Worker returned a fatal error as a normal response.",
+          "Artifact storage owner returned a fatal error as a normal response.",
         );
         return;
       }
@@ -682,7 +753,7 @@ export class ArtifactStorageClient {
     ) {
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker acknowledged shutdown before all accepted work completed.",
+        "Artifact storage owner acknowledged shutdown before all accepted work completed.",
       );
       return;
     }
@@ -703,7 +774,7 @@ export class ArtifactStorageClient {
       }
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-        "Artifact storage Worker returned a result that does not match its request.",
+        "Artifact storage owner returned a result that does not match its request.",
       );
       return;
     }
@@ -721,12 +792,41 @@ export class ArtifactStorageClient {
     pending.resolve(message.output);
   }
 
-  #handleExit(exitCode: number): void {
-    this.#exited.resolve(exitCode);
+  #handleOwnerExit(
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+    channelClosed: boolean,
+  ): void {
+    const normalizedExitCode =
+      signal === null && exitCode !== null && Number.isSafeInteger(exitCode) && exitCode >= 0
+        ? exitCode
+        : 1;
+    if (!this.#ownerExitObserved) {
+      this.#ownerExitObserved = true;
+      this.#ownerExitCode = normalizedExitCode;
+      this.#exited.resolve(normalizedExitCode);
+    }
+    if (!channelClosed) {
+      return;
+    }
+    if (this.#ownerCloseObserved) {
+      return;
+    }
+    this.#ownerCloseObserved = true;
+    this.#closed.resolve(normalizedExitCode);
     if (this.#state === "terminal" || this.#state === "closed") {
       return;
     }
-    if (this.#state === "closing" && exitCode === 0) {
+    if (this.#ownerExitCode !== normalizedExitCode) {
+      this.#enterTerminal(
+        "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
+        "Artifact storage owner reported inconsistent exit status.",
+        false,
+        false,
+      );
+      return;
+    }
+    if (this.#state === "closing" && normalizedExitCode === 0) {
       if (
         !this.#shutdownAcknowledged ||
         this.#pending.size !== 0 ||
@@ -734,7 +834,7 @@ export class ArtifactStorageClient {
       ) {
         this.#enterTerminal(
           "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
-          "Artifact storage Worker exited before completing its shutdown protocol.",
+          "Artifact storage owner exited before completing its shutdown protocol.",
           false,
           false,
         );
@@ -746,7 +846,7 @@ export class ArtifactStorageClient {
       }
       this.#enterTerminal(
         "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-        "Artifact storage Worker exited after its shutdown deadline.",
+        "Artifact storage owner exited after its shutdown deadline.",
         false,
         false,
       );
@@ -754,9 +854,24 @@ export class ArtifactStorageClient {
     }
     this.#enterTerminal(
       "ARTIFACT_STORAGE_WORKER_EXIT",
-      "Artifact storage Worker exited without a graceful shutdown acknowledgement.",
+      "Artifact storage owner exited without a graceful shutdown acknowledgement.",
       false,
       false,
+    );
+  }
+
+  #handleDisconnect(): void {
+    if (
+      this.#ownerExitObserved ||
+      this.#state === "terminal" ||
+      this.#state === "closed" ||
+      this.#state === "closing"
+    ) {
+      return;
+    }
+    this.#enterTerminal(
+      "ARTIFACT_STORAGE_CLIENT_TERMINAL",
+      "Artifact storage owner IPC disconnected before shutdown completed.",
     );
   }
 
@@ -771,7 +886,7 @@ export class ArtifactStorageClient {
     code: ArtifactStorageClientErrorCode,
     message: string,
     retryable = false,
-    terminate = true,
+    kill = true,
   ): ArtifactStorageClientError {
     if (this.#terminalError !== undefined) {
       return this.#terminalError;
@@ -786,20 +901,26 @@ export class ArtifactStorageClient {
       this.#removePending(id, pending);
       pending.reject(error);
     }
-    if (terminate) {
+    if (kill) {
       this.#attemptTerminate();
     }
     return error;
   }
 
   #attemptTerminate(): void {
-    this.#terminationPromise ??= (async () => {
+    if (this.#killAttempted || this.#ownerExitObserved) {
+      return;
+    }
+    this.#killAttempted = true;
+    this.#terminationPromise = new Promise<void>((resolve) => {
       try {
-        await this.#worker.terminate();
+        this.#owner.kill("SIGKILL");
       } catch {
         // joinExit() provides the bounded, canonical result when termination itself fails.
+      } finally {
+        resolve();
       }
-    })();
+    });
   }
 
   #clearStartupTimer(): void {
@@ -813,8 +934,14 @@ export class ArtifactStorageClient {
 /** @internal Test-only helper; intentionally absent from the public artifact barrel. */
 export const attachArtifactStorageClientForTest = (
   options: ArtifactStorageClientOptions,
-  worker: ArtifactStorageWorkerTransport,
+  owner: ArtifactStorageProcessTransport,
   initialRequestId = 1,
   now: () => number = systemMonotonicNow,
 ): Promise<ArtifactStorageClient> =>
-  ArtifactStorageClient[testTransportAttachment](options, worker, initialRequestId, now);
+  ArtifactStorageClient[testTransportAttachment](options, owner, initialRequestId, now);
+
+/** @internal Test-only helper; intentionally absent from the public artifact barrel. */
+export const createArtifactStorageClientWithSpawnerForTest = (
+  options: ArtifactStorageClientOptions,
+  spawner: ArtifactStorageProcessSpawner,
+): Promise<ArtifactStorageClient> => ArtifactStorageClient[testSpawnerAttachment](options, spawner);

@@ -133,13 +133,20 @@ chunk upload, finalization, explicit termination, and reconciler cleanup. A sepa
 serializes storage-capacity admission. These are sufficient only because ADR 0002 permits one active
 Server; a multi-Server design requires a new cross-process coordination decision.
 
-The synchronous Linux filesystem kernel runs only inside one dedicated artifact-storage Worker or
-supervised helper process. It never runs on the Fastify event loop and never shares the SQLite
-Worker. The asynchronous parent-side client owns bounded data-only requests, rejects all pending
-work after a fatal error or exit, and applies an external watchdog that can terminate the isolated
-storage owner when a synchronous syscall does not return. A timed-out owner is not reused, and the
-Server retains its database ownership lock until the storage owner has exited or the Server process
-itself terminates.
+The synchronous Linux filesystem kernel runs only inside one dedicated artifact-storage child
+process. It never runs on the Fastify event loop and never shares the SQLite Worker. The
+asynchronous parent-side client owns bounded data-only requests, rejects all pending work after a
+fatal error or exit, and applies an external watchdog that sends one `SIGKILL` to the isolated
+storage owner when a synchronous syscall does not return. A timed-out owner is not reused. Only a
+real child `exit` or `close` event proves owner absence; an IPC disconnect, shutdown acknowledgement,
+or successful `kill()` call does not. The Server retains its database ownership lock until absence
+is proven. Production deployment must run the Server under systemd with
+`KillMode=control-group`, or under an equivalent container PID namespace and cgroup supervisor that
+kills every storage child when the Server main process terminates. A bare `node` launch is not a
+supported production topology: if the parent dies while the child is blocked in a synchronous
+syscall, JavaScript cannot process the IPC disconnect and `detached: false` does not prevent an
+orphan. This deployment-supervision proof is a production enablement gate that must be verified
+before the retention and operations runbook phase and before artifact completion is enabled.
 
 For each chunk the order is:
 

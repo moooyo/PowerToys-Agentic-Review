@@ -70,8 +70,8 @@ interface ExistingPublicationState {
 }
 
 /**
- * This kernel contains synchronous filesystem calls and MUST run inside a dedicated storage Worker
- * or process. Fastify and the SQLite Worker communicate with it through an asynchronous adapter;
+ * This kernel contains synchronous filesystem calls and MUST run inside the dedicated storage
+ * owner process. Fastify and the SQLite Worker communicate with it through an asynchronous adapter;
  * that adapter also owns the hard process watchdog for a blocked syscall.
  */
 export class ArtifactStorageKernel {

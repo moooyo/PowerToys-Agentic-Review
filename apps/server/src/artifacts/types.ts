@@ -45,7 +45,7 @@ export interface ArtifactStorageShardDirectory {
 }
 
 /**
- * Production callers MUST run these synchronous operations inside a dedicated storage Worker or
+ * Production callers MUST run these synchronous operations inside the dedicated storage owner
  * process. Fastify request handlers and the SQLite Worker must not invoke them directly. The
  * adapter owns the external hard watchdog because JavaScript cannot time out a blocked syscall.
  */
