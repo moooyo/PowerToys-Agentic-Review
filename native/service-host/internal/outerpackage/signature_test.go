@@ -238,4 +238,4 @@ func encodeP1363(r, s *big.Int) string {
 
 func cloneEnvelope(value SignatureEnvelope) SignatureEnvelope { return value }
 
-const signingDigestGoldenSHA256 = "59a87e737d059bf0e494e586caf79a27c7c96963d48a713602ee443c9b8927dc"
+const signingDigestGoldenSHA256 = "78d20854c371e7aac5101d190cb17e8adbc6e0218e8117f37bc6891820dcb67a"

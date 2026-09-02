@@ -232,6 +232,11 @@ AgenticReview.Worker.Executor.exe
 AgenticReview.Worker.Executor.xml
 ```
 
+These are closed slots in the `role-config-v2-node-specific` release profile. Canonical release
+preparation and outer package parsing reject alternate paths or casing, role or root substitution,
+omission, and duplication. The two wrapper payloads are architecture-bound PE files; the two XML
+payloads carry no target-architecture field.
+
 Each wrapper launches the signed, manifest-pinned `AgenticReview.ServiceHost.exe` as its direct
 child and passes only one absolute `--config` selector. ServiceHost, not WinSW, verifies and launches
 the corresponding `app\control.mjs` or `app\executor.mjs` bundle. WinSW configuration never launches
@@ -290,11 +295,12 @@ Windows verification matrix from ADR 0007. This ADR supplies no migration switch
 
 ## Deferred Decisions
 
-- the trusted enrollment evidence schema, secure storage, certificate issuance, Server binding
-  publication, rotation, revocation, and interrupted-enrollment recovery;
+- ADR 0014 freezes the generation-one enrollment record and fail-closed evidence boundary; the
+  dedicated reader identity, handle-bound reader, certificate issuance, Server receipt authority,
+  rotation, revocation, writer journal, and interrupted-enrollment recovery remain deferred;
 - the production Go installer API and destination-verification evidence type;
-- the durable journal encoding, write-through and directory-flush primitives, and exact crash
-  recovery algorithm;
+- ADR 0015 freezes the transaction record, action plans, and crash-recovery state model; its codec,
+  reducer, protected Windows store, write-through and directory-flush primitives remain deferred;
 - the pinned WinSW build, verified virtual-account installation behavior, service SDDL, and native
   recovery-policy validation;
 - the authenticated installer-facing observation of Control's disabled readiness result; and

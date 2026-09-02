@@ -159,6 +159,21 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   same-basename wrapper/config payloads, demand-start and no-recovery maintenance fencing, complete
   pair replacement, destination re-verification, and recoverable post-commit SCM policy activation.
   The XML launches only the signed ServiceHost and is not an installer or installation evidence.
+- A canonical generation-one trusted enrollment record contract. ADR 0014 fixes the record and
+  Server-receipt paths, service and physical-root profile identifiers, internal key-separation
+  checks, create-once recovery semantics, and the separation between ordinary parsed `Record` data
+  and opaque `RecordEvidence`. Both platform readers remain fail-closed: the dedicated Windows
+  reader identity, handle-bound reader, Server receipt authority, and live native evidence are not
+  implemented, and no release or installer code consumes this contract.
+- A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
+  paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
+  construction, admission, and staged verification reject alternate paths or casing, wrong roots or
+  roles, missing or duplicate slots, and architecture-field misuse.
+- A dormant split-installer transaction-journal contract. ADR 0015 freezes the fixed namespace,
+  protected single-writer model, bounded canonical records, journal-first inactive materialization,
+  per-effect write-ahead intents, deterministic root-action plans, candidate and rollback policy
+  cursors, commit roll-forward, and failed-closed recovery matrix. No journal store, reducer,
+  filesystem mutation, SCM adapter, readiness boundary, or installer consumes it yet.
 
 ## Deliberately Disabled
 
@@ -203,11 +218,13 @@ Codex, or Git capability in this shadow milestone.
 After the shadow runtime is verified and any findings are closed, the release pipeline must compile
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
-ADR 0013 transaction. The repository still needs trusted enrollment evidence, destination evidence,
-the production Go installer and journal, authenticated installer readiness, and a pinned WinSW
-release. Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL,
-Named Pipe, Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests
-before any Claim authority is enabled.
+ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
+Server binding receipt authority, privileged enrollment writer and live evidence, destination
+evidence, the ADR 0015 journal codec/reducer and Windows durable store, the production Go installer,
+an exact SCM policy and adapter, authenticated installer readiness, and a pinned WinSW release.
+Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
+Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
+Claim authority is enabled.
 
 The product data path can proceed in parallel in this order: bounded result-artifact upload and
 storage, immutable server-side diff manifests, publication drafts, digest-bound approvals, GitHub
@@ -215,6 +232,14 @@ outbox reconciliation, and Dashboard write actions. Dynamic validation remains a
 stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-02, the generation-one enrollment-record contract and exact WinSW package slots completed
+a fresh ServiceHost matrix on `test-env` with Go 1.26.7: full unit tests, race tests, and `go vet`,
+followed by all-package Windows amd64 and arm64 builds, test-binary cross-compilation, and cross-
+platform vet. Independent reviews found no remaining P0-P2 issues in the enrollment contract, WinSW
+profile, or ADR 0015 state and recovery model. No validation ran on the local Windows machine. The
+Windows enrollment reader still returns `ErrUnavailable`; these results are contract and
+cross-compilation evidence, not enrollment, installation, signing, or native runtime evidence.
 
 The 2026-09-02 ADR 0013 and split WinSW input snapshot was transferred to `test-env` as a four-file
 archive. Its local and remote SHA-256 was

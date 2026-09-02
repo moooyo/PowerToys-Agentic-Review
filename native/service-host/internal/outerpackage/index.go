@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
 type specialPayloadRule struct {
@@ -153,6 +154,9 @@ func normalizeIndex(value Index) (Index, error) {
 		if specialCounts[role] != 1 {
 			return Index{}, fmt.Errorf("%w: fixed package payload closure is incomplete", ErrInvalid)
 		}
+	}
+	if err := releasepackage.ValidateRuntimeManifestProfile(runtimeFiles); err != nil {
+		return Index{}, fmt.Errorf("%w: runtime payload closure violates the release profile", ErrInvalid)
 	}
 	if nodeSPKIMatches != 1 {
 		return Index{}, fmt.Errorf("%w: node-specific SPKI payload binding is absent", ErrInvalid)
