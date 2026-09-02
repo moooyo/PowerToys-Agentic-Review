@@ -224,6 +224,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   effect authority, and no production consumer, journal path, store, filesystem operation, registry
   operation, SCM adapter, or native call is present. Protected durable storage and native SCM
   composition remain separate later reviews.
+- A proposed source-only cross-version protected-store contract. ADR 0021 would permanently reuse
+  the physical `writer-v1.lock` and `active-head-v1.json` paths, define the one-way strict v2 head
+  migration and bounded append-only hash-linked entry namespace, and close entry-before-head
+  publication and conservative crash recovery. It defines only future capability semantics; there
+  is no Go store, filesystem operation, migration, permit issuer, production consumer, or native
+  Windows evidence.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
@@ -320,7 +326,7 @@ the production release profile, produce signed role bundles and native binaries,
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
 Server binding receipt authority, privileged enrollment writer and live evidence, destination
-evidence, the cross-version protected transaction store and opaque-evidence composition, the
+evidence, the ADR 0021 protected-store implementation and opaque-evidence composition, the
 production Go installer, production-capable SCM schema and native adapter, a complete final
 recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
