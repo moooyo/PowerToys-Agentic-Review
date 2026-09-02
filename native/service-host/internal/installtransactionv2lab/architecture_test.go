@@ -19,9 +19,11 @@ import (
 
 const labImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installtransactionv2lab"
 
-func TestInstallTransactionV2LabHasNoProductionConsumer(t *testing.T) {
+func TestInstallTransactionV2LabHasOnlyReviewedDormantStoreConsumer(t *testing.T) {
 	root := serviceHostRoot(t)
 	labDirectory := filepath.Join(root, "internal", "installtransactionv2lab")
+	allowedConsumer := filepath.Join(root, "internal", "installstorev2lab", "canonical.go")
+	foundAllowedConsumer := 0
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -39,8 +41,14 @@ func TestInstallTransactionV2LabHasNoProductionConsumer(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if value == labImportPath || strings.HasPrefix(value, labImportPath+"/") {
-				t.Errorf("production source %s imports dormant installtransactionv2lab", path)
+			if sensitiveImportAlias(value, labImportPath) {
+				if value != labImportPath {
+					t.Errorf("noncanonical dormant lab import %q in %s", value, path)
+				} else if !strings.EqualFold(filepath.Clean(path), filepath.Clean(allowedConsumer)) {
+					t.Errorf("unreviewed production source %s imports dormant installtransactionv2lab", path)
+				} else {
+					foundAllowedConsumer++
+				}
 			}
 		}
 		return nil
@@ -48,6 +56,32 @@ func TestInstallTransactionV2LabHasNoProductionConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if foundAllowedConsumer != 1 {
+		t.Fatalf("reviewed dormant store importer count = %d, want 1", foundAllowedConsumer)
+	}
+}
+
+func TestDormantImporterGuardRecognizesButRejectsCaseAliases(t *testing.T) {
+	for _, value := range []string{
+		strings.ToUpper(labImportPath),
+		labImportPath + "/subpath",
+		strings.ToUpper(labImportPath) + "/subpath",
+	} {
+		if !sensitiveImportAlias(value, labImportPath) {
+			t.Errorf("guard failed to recognize sensitive import alias %q", value)
+		}
+		if value == labImportPath {
+			t.Errorf("alias fixture unexpectedly equals the canonical import")
+		}
+	}
+}
+
+func sensitiveImportAlias(value, canonical string) bool {
+	if strings.EqualFold(value, canonical) {
+		return true
+	}
+	return len(value) > len(canonical) && value[len(canonical)] == '/' &&
+		strings.EqualFold(value[:len(canonical)], canonical)
 }
 
 func TestLabProductionFileSetAndHashesRemainExact(t *testing.T) {

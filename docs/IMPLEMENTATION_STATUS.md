@@ -221,15 +221,18 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   SCM plan stops before ordinal 1 at a state-derived checkpoint containing the exact ordered missing
   prerequisites. The schema has no `COMMITTED`, `ROLLED_BACK`, or `applied` value;
   `FAILED_CLOSED` is its only terminal phase. The package-private reducer and observations carry no
-  effect authority, and no production consumer, journal path, store, filesystem operation, registry
-  operation, SCM adapter, or native call is present. Protected durable storage and native SCM
-  composition remain separate later reviews.
-- A proposed source-only cross-version protected-store contract. ADR 0021 would permanently reuse
-  the physical `writer-v1.lock` and `active-head-v1.json` paths, define the one-way strict v2 head
-  migration and bounded append-only hash-linked entry namespace, and close entry-before-head
-  publication and conservative crash recovery. It defines only future capability semantics; there
-  is no Go store, filesystem operation, migration, permit issuer, production consumer, or native
-  Windows evidence.
+  effect authority and has no runtime consumer, filesystem operation, registry operation, SCM
+  adapter, or native call. Its only non-test importer is the source-only ADR 0021 store contract;
+  protected native storage and native SCM composition remain separate later reviews.
+- A source-only dormant cross-version protected-store v2 lab. ADR 0021 permanently reuses the
+  physical `writer-v1.lock` and `active-head-v1.json` paths, defines the one-way strict v2 head
+  migration and bounded append-only hash-linked entry namespace, and closes entry-before-head
+  publication and conservative crash recovery. `internal/installstorev2lab` implements strict
+  ordinary Head, Predecessor, v1 inventory, and Entry codecs, fixed path/sequence derivation,
+  package-private A-E/V residue and crash-transition models, opaque zero-value-invalid capability
+  shapes, and lifecycle stubs that always return `ErrUnavailable`. It is the sole non-test importer
+  of the ADR 0020 lab and has no production consumer. There is no filesystem operation, migration,
+  permit issuer, native adapter, available store, or native Windows evidence.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,

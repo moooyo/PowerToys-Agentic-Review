@@ -5,8 +5,11 @@
 Accepted as a source-only, dormant, blocked contract on 2026-09-03.
 
 This decision does not activate an installer, a journal writer, filesystem mutation, registry
-mutation, SCM mutation, service start or stop, Claim, or execution. No production package imports
-the lab package. The only successful terminal state in this contract is absent: `COMMITTED`,
+mutation, SCM mutation, service start or stop, Claim, or execution. The source-only
+`internal/installstorev2lab` contract package is the sole reviewed non-test importer of this lab
+package; it validates the complete nested document without widening this API and is itself excluded
+from every production graph. Any second non-test importer is forbidden. The only successful
+terminal state in this contract is absent: `COMMITTED`,
 `ROLLED_BACK`, and activation `applied` are not members of the schema. `FAILED_CLOSED` is the only
 terminal phase.
 
@@ -37,10 +40,11 @@ The work is split into three independently reviewed slices.
 
 1. Slice A is this decision. It defines `internal/installtransactionv2lab`: exact ordinary data,
    canonical encoding, validation, fixed plan tables, package-private observations, and a pure
-   reducer. It has no path constants, store, platform imports, or production consumer.
-2. Slice B will define the protected durable store only after a separate decision freezes the
-   single cross-version writer lock, single authoritative head, record publication layout, and
-   rollback-binary migration inventory.
+   reducer. It has no path constants, platform imports, or runtime consumer. Its sole non-test
+   consumer is the source-only Slice B contract package named above.
+2. Slice B is ADR 0021 and the source-only `internal/installstorev2lab` contract package. It freezes
+   the single cross-version writer lock, single authoritative head, record publication layout, and
+   rollback-binary migration inventory while leaving every platform lifecycle operation unavailable.
 3. Slice C will define a native SCM adapter only after supported Windows x64 and arm64 evidence
    closes the remaining ABI and readback gates. It will consume an opaque process-local durable
    intent permit, not a deserialized action.
