@@ -205,6 +205,16 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   apply responses after the dispatch is fenced, and ambiguity remains sticky until a valid replay
   succeeds. The public state contains no raw lease token or chunk bytes. No production entrypoint,
   supervisor, barrel, or role bundle consumes this module.
+- A split-service SCM policy contract. ADR 0016 fixes both service records, virtual accounts,
+  restricted service SID type, one-privilege requirement, protected service-object rights,
+  bootstrap query rights, minimal native handle masks, disabled-create then secured demand-start/
+  no-recovery pre-start target, full-field maintenance read-back contract, Control-then-Executor
+  stop order, and Executor-then-Control start order. It also proves that SCM effects require a new
+  transaction-journal schema v2 rather than being hidden behind ADR 0015's v1 policy actions. The
+  final delayed-start and restart schedule, failure-action clear ABI, preferred-node behavior,
+  protected-DACL publication, preshutdown value, intermediate create-DACL evidence, pinned WinSW
+  behavior, schema v2, native adapter, and Windows evidence remain explicit production commit and
+  rollback blockers.
 
 ## Deliberately Disabled
 
@@ -268,8 +278,8 @@ services, identities, ACLs, keys, firewall policy, and machine-enforced Codex po
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
 Server binding receipt authority, privileged enrollment writer and live evidence, destination
 evidence, the ADR 0015 Windows durable store and opaque-evidence composition, the production Go
-installer, an exact SCM policy and adapter, authenticated installer readiness, and a pinned WinSW
-release.
+installer, the ADR 0016 transaction-schema-v2 SCM actions and native adapter, a complete final
+recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
 Claim authority is enabled.

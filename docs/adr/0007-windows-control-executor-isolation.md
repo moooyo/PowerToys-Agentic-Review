@@ -518,8 +518,12 @@ restricted service SIDs.
 | Inter-service Named Pipe endpoint | Server owner | Connect/read/write | Full control |
 | Per-launch Control HostControl endpoint | Connect/read/write | Deny | Full control |
 | Per-launch Executor HostControl endpoint | Deny | Connect/read/write | Full control |
-| Executor service object | Query/start/stop only | Query own status | Full control |
-| Control service object | Query own status | Query status only | Full control |
+| Executor service object | Query config/status/start/stop only | Query own config/status | Full control |
+| Control service object | Query own config/status | Query config/status only | Full control |
+
+ADR 0016 refines these service-object query rights to match the native own/peer identity preflight
+and freezes their exact SDDL and numeric masks. It adds no mutation right and preserves Control's
+existing start/stop-only kill switch over Executor.
 
 Control outbound access is limited to the configured Agentic Review Server plus required DNS and
 certificate-revocation infrastructure. Executor outbound access is limited to anonymous reads from
