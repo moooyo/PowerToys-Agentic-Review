@@ -10,10 +10,10 @@ root, or a partial legacy installation fails closed. Legacy-to-split migration r
 ADR and is not inferred from the upgrade procedure below. A previously committed split pair may use
 the split-to-split upgrade path.
 
-The design authority is ADR 0013 together with ADR 0007 and ADRs 0009 through 0012. The XML files
-only describe how the two WinSW wrappers launch ServiceHost. They do not provision services,
-accounts, restricted service SIDs, ACLs, keys, certificates, firewall rules, machine policy, or
-physical roots.
+The design authority is ADR 0013 together with ADR 0007, ADRs 0009 through 0012, the ADR 0015
+transaction model, and the ADR 0016 SCM policy contract. The XML files only describe how the two
+WinSW wrappers launch ServiceHost. They do not provision services, accounts, restricted service
+SIDs, ACLs, keys, certificates, firewall rules, machine policy, or physical roots.
 
 ## Source files
 
@@ -93,14 +93,16 @@ The future privileged Go installer must:
 4. for an upgrade, drain Control and wait for authenticated `Drained`; for an initial install,
    prove that no legacy or split Worker installation exists;
 5. durably set each existing split service to demand-start with all failure actions disabled, then
-   stop Control and Executor and prove both process trees absent; on a clean install, record their
-   verified absence and later create them directly with that fenced policy;
+   stop Control and Executor and prove both process trees absent; on a clean install, persist the
+   verified absence as the maintenance fence without creating a service;
 6. journal and place or swap all three complete physical roots without junctions or in-place file
    replacement;
 7. reopen and fully reverify all three exact signed destination roots;
-8. while demand-start and no-recovery remain enforced, explicitly start Executor, require its
-   installer activation readiness, explicitly start Control, and require a fresh authenticated
-   disabled Executor `Ready` attestation;
+8. on a clean install, create each service disabled, journal and apply its protected security and
+   remaining configuration independently, and move the fully configured pair to demand-start only
+   in Executor-before-Control order; then, while demand-start and no-recovery remain enforced,
+   explicitly start Executor, require its installer activation readiness, explicitly start Control,
+   and require a fresh authenticated disabled Executor `Ready` attestation;
 9. commit the package with activation policy durably marked `PENDING`; and
 10. idempotently restore the reviewed automatic-start and failure-recovery policy, verify it through
     SCM, and durably mark activation policy `APPLIED`.
@@ -130,7 +132,9 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 ## Deferred production work
 
 The repository still lacks the trusted enrollment evidence boundary, production split installer,
-destination-verification evidence, durable transaction journal, pinned WinSW release validation,
-service-object SDDL, authenticated installer-facing readiness observation, archive/extractor, and
-native Windows verification evidence. Legacy-to-split migration is separately deferred. Those items
-must be designed and reviewed before these inputs can become a supported installation path.
+destination-verification evidence, transaction-journal schema v2 and its durable Windows store,
+the native SCM adapter, the complete final recovery and preshutdown policy, pinned WinSW release
+validation, native proof of the disabled-create intermediate DACL and failure-action clearing,
+authenticated installer-facing readiness observation, archive/extractor, and native Windows
+verification evidence. Legacy-to-split migration is separately deferred. Those items must be
+designed and reviewed before these inputs can become a supported installation path.
