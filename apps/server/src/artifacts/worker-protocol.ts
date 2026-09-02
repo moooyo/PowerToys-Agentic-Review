@@ -5,6 +5,22 @@ import {
   maximumResultArtifactChunks,
 } from "@agentic-review/contracts";
 import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  type ArtifactNamespaceScanPageInput,
+  type ArtifactNamespaceScanPageResult,
+  type CloseArtifactNamespaceScanInput,
+  type CloseArtifactNamespaceScanResult,
+  parseArtifactNamespaceEntryKey,
+  requireArtifactNamespaceObservationSha256,
+  requireArtifactNamespaceScanSessionId,
+  snapshotArtifactNamespaceObservation,
+  snapshotArtifactNamespaceObservations,
+  snapshotArtifactNamespaceScanPageInput,
+  snapshotArtifactNamespaceSweepGeneration,
+  snapshotCloseArtifactNamespaceScanInput,
+} from "./artifact-namespace-contract.js";
+import {
   artifactCapacityEntriesPerUpload,
   calculateArtifactReservationBytes,
   deriveArtifactCapacityAccounting,
@@ -83,6 +99,18 @@ export interface ArtifactStorageWorkerOperationMap {
   readonly cleanupUpload: {
     readonly input: ArtifactUploadCleanupRequest;
     readonly output: ArtifactUploadCleanupResult;
+  };
+  readonly scanNamespacePage: {
+    readonly input: ArtifactNamespaceScanPageInput;
+    readonly output: ArtifactNamespaceScanPageResult;
+  };
+  readonly closeNamespaceScan: {
+    readonly input: CloseArtifactNamespaceScanInput;
+    readonly output: CloseArtifactNamespaceScanResult;
+  };
+  readonly cleanupNamespaceEntry: {
+    readonly input: ArtifactNamespaceObservation;
+    readonly output: ArtifactNamespaceCleanupResult;
   };
   readonly evaluateCapacity: {
     readonly input: ArtifactCapacityEvaluationInput;
@@ -167,6 +195,24 @@ export type ArtifactStorageResponseExpectation =
   | { readonly operation: "readObject"; readonly totalBytes: number; readonly sha256: string }
   | { readonly operation: "cleanupUpload"; readonly maximumPublicationRemovals: number }
   | {
+      readonly operation: "scanNamespacePage";
+      readonly scanSessionId: string;
+      readonly sweepGeneration: number;
+      readonly expectedAfterKey: string | null;
+      readonly maximumEntries: number;
+    }
+  | {
+      readonly operation: "closeNamespaceScan";
+      readonly scanSessionId: string;
+      readonly sweepGeneration: number;
+      readonly expectedAfterKey: string | null;
+    }
+  | {
+      readonly operation: "cleanupNamespaceEntry";
+      readonly entryKey: string;
+      readonly observationSha256: string;
+    }
+  | {
       readonly operation: "evaluateCapacity";
       readonly expectedTotalBytes: number;
       readonly accounting: ArtifactCapacityEvaluationAccounting;
@@ -178,6 +224,9 @@ const workerOperations = new Set<ArtifactStorageWorkerOperation>([
   "finalizeArtifact",
   "readObject",
   "cleanupUpload",
+  "scanNamespacePage",
+  "closeNamespaceScan",
+  "cleanupNamespaceEntry",
   "evaluateCapacity",
   "shutdown",
 ]);
@@ -600,6 +649,15 @@ export const normalizeArtifactStorageOperationInput = <
     case "cleanupUpload":
       normalized = normalizeCleanup(value);
       break;
+    case "scanNamespacePage":
+      normalized = snapshotArtifactNamespaceScanPageInput(value);
+      break;
+    case "closeNamespaceScan":
+      normalized = snapshotCloseArtifactNamespaceScanInput(value);
+      break;
+    case "cleanupNamespaceEntry":
+      normalized = snapshotArtifactNamespaceObservation(value);
+      break;
     case "evaluateCapacity":
       normalized = normalizeCapacityEvaluation(value);
       break;
@@ -657,6 +715,22 @@ export const createArtifactStorageResponseExpectation = <
         maximumPublicationRemovals: cleanup.publications?.length ?? 0,
       });
     }
+    case "scanNamespacePage": {
+      const scan = input as ArtifactStorageWorkerOperationMap["scanNamespacePage"]["input"];
+      return Object.freeze({ operation: "scanNamespacePage" as const, ...scan });
+    }
+    case "closeNamespaceScan": {
+      const scan = input as ArtifactStorageWorkerOperationMap["closeNamespaceScan"]["input"];
+      return Object.freeze({ operation: "closeNamespaceScan" as const, ...scan });
+    }
+    case "cleanupNamespaceEntry": {
+      const cleanup = input as ArtifactStorageWorkerOperationMap["cleanupNamespaceEntry"]["input"];
+      return Object.freeze({
+        operation: "cleanupNamespaceEntry" as const,
+        entryKey: cleanup.entryKey,
+        observationSha256: cleanup.observationSha256,
+      });
+    }
     case "evaluateCapacity": {
       const evaluation = input as ArtifactStorageWorkerOperationMap["evaluateCapacity"]["input"];
       return Object.freeze({
@@ -691,6 +765,43 @@ export const assertArtifactStorageResponseMatchesExpectation = (
         chunk.replayed !== expectation.replayed
       ) {
         throw new TypeError("Artifact storage durable chunk does not match its request.");
+      }
+      return;
+    }
+    case "scanNamespacePage": {
+      const page = output as ArtifactNamespaceScanPageResult;
+      if (
+        page.scanSessionId !== expectation.scanSessionId ||
+        page.sweepGeneration !== expectation.sweepGeneration ||
+        page.expectedAfterKey !== expectation.expectedAfterKey ||
+        page.observations.length > expectation.maximumEntries ||
+        (!page.completedSweep && page.observations.length !== expectation.maximumEntries) ||
+        (page.completedSweep && page.nextAfterKey !== null) ||
+        (!page.completedSweep && page.nextAfterKey !== (page.observations.at(-1)?.entryKey ?? null))
+      ) {
+        throw new TypeError("Artifact namespace scan page does not match its request.");
+      }
+      return;
+    }
+    case "closeNamespaceScan": {
+      const closed = output as CloseArtifactNamespaceScanResult;
+      if (
+        closed.scanSessionId !== expectation.scanSessionId ||
+        closed.sweepGeneration !== expectation.sweepGeneration ||
+        closed.expectedAfterKey !== expectation.expectedAfterKey ||
+        closed.closed !== true
+      ) {
+        throw new TypeError("Artifact namespace scan closure does not match its request.");
+      }
+      return;
+    }
+    case "cleanupNamespaceEntry": {
+      const cleanup = output as ArtifactNamespaceCleanupResult;
+      if (
+        cleanup.entryKey !== expectation.entryKey ||
+        cleanup.observationSha256 !== expectation.observationSha256
+      ) {
+        throw new TypeError("Artifact namespace cleanup result does not match its request.");
       }
       return;
     }
@@ -1050,6 +1161,84 @@ const normalizeCapacityAdmission = (value: unknown): ArtifactCapacityAdmission =
   return admission;
 };
 
+const normalizeNamespaceScanPage = (value: unknown): ArtifactNamespaceScanPageResult => {
+  const record = requireRecord(value, "Artifact namespace scan page");
+  requireExactKeys(record, [
+    "scanSessionId",
+    "sweepGeneration",
+    "expectedAfterKey",
+    "observations",
+    "completedSweep",
+    "nextAfterKey",
+  ]);
+  const expectedAfterKey =
+    record.expectedAfterKey === null
+      ? null
+      : parseArtifactNamespaceEntryKey(record.expectedAfterKey).entryKey;
+  const nextAfterKey =
+    record.nextAfterKey === null
+      ? null
+      : parseArtifactNamespaceEntryKey(record.nextAfterKey).entryKey;
+  const observations = snapshotArtifactNamespaceObservations(record.observations);
+  const completedSweep = requireBoolean(
+    record.completedSweep,
+    "Artifact namespace scan completion",
+  );
+  let priorKey = expectedAfterKey;
+  for (const observation of observations) {
+    if (priorKey !== null && observation.entryKey <= priorKey) {
+      throw new TypeError("Artifact namespace scan entries must be strictly increasing.");
+    }
+    priorKey = observation.entryKey;
+  }
+  if (
+    (completedSweep && nextAfterKey !== null) ||
+    (!completedSweep &&
+      (observations.length < 1 || nextAfterKey !== (observations.at(-1)?.entryKey ?? null)))
+  ) {
+    throw new TypeError("Artifact namespace scan cursor is inconsistent.");
+  }
+  return Object.freeze({
+    scanSessionId: requireArtifactNamespaceScanSessionId(record.scanSessionId),
+    sweepGeneration: snapshotArtifactNamespaceSweepGeneration(record.sweepGeneration),
+    expectedAfterKey,
+    observations,
+    completedSweep,
+    nextAfterKey,
+  });
+};
+
+const normalizeNamespaceScanClosure = (value: unknown): CloseArtifactNamespaceScanResult => {
+  const record = requireRecord(value, "Artifact namespace scan closure");
+  requireExactKeys(record, ["scanSessionId", "sweepGeneration", "expectedAfterKey", "closed"]);
+  if (record.closed !== true) {
+    throw new TypeError("Artifact namespace scan closure is invalid.");
+  }
+  const input = snapshotCloseArtifactNamespaceScanInput({
+    scanSessionId: record.scanSessionId,
+    sweepGeneration: record.sweepGeneration,
+    expectedAfterKey: record.expectedAfterKey,
+  });
+  return Object.freeze({ ...input, closed: true });
+};
+
+const normalizeNamespaceCleanupResult = (value: unknown): ArtifactNamespaceCleanupResult => {
+  const record = requireRecord(value, "Artifact namespace cleanup result");
+  requireExactKeys(record, ["entryKey", "observationSha256", "outcome"]);
+  if (
+    record.outcome !== "removed" &&
+    record.outcome !== "already_absent" &&
+    record.outcome !== "identity_changed"
+  ) {
+    throw new TypeError("Artifact namespace cleanup outcome is unsupported.");
+  }
+  return Object.freeze({
+    entryKey: parseArtifactNamespaceEntryKey(record.entryKey).entryKey,
+    observationSha256: requireArtifactNamespaceObservationSha256(record.observationSha256),
+    outcome: record.outcome,
+  });
+};
+
 export const normalizeArtifactStorageOperationOutput = <
   TOperation extends ArtifactStorageWorkerOperation,
 >(
@@ -1074,6 +1263,15 @@ export const normalizeArtifactStorageOperationOutput = <
     }
     case "cleanupUpload":
       normalized = normalizeCleanupOutput(value);
+      break;
+    case "scanNamespacePage":
+      normalized = normalizeNamespaceScanPage(value);
+      break;
+    case "closeNamespaceScan":
+      normalized = normalizeNamespaceScanClosure(value);
+      break;
+    case "cleanupNamespaceEntry":
+      normalized = normalizeNamespaceCleanupResult(value);
       break;
     case "evaluateCapacity":
       normalized = normalizeCapacityAdmission(value);

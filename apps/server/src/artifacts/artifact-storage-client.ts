@@ -2,6 +2,14 @@ import { type SpawnOptions, spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import type {
+  ArtifactNamespaceCleanupResult,
+  ArtifactNamespaceObservation,
+  ArtifactNamespaceScanPageInput,
+  ArtifactNamespaceScanPageResult,
+  CloseArtifactNamespaceScanInput,
+  CloseArtifactNamespaceScanResult,
+} from "./artifact-namespace-contract.js";
 import { ArtifactStorageClientError, type ArtifactStorageClientErrorCode } from "./errors.js";
 import type {
   ArtifactCapacityAdmission,
@@ -357,6 +365,24 @@ export class ArtifactStorageClient {
 
   cleanupUpload(input: ArtifactUploadCleanupRequest): Promise<ArtifactUploadCleanupResult> {
     return this.#request("cleanupUpload", input);
+  }
+
+  scanNamespacePage(
+    input: ArtifactNamespaceScanPageInput,
+  ): Promise<ArtifactNamespaceScanPageResult> {
+    return this.#request("scanNamespacePage", input);
+  }
+
+  closeNamespaceScan(
+    input: CloseArtifactNamespaceScanInput,
+  ): Promise<CloseArtifactNamespaceScanResult> {
+    return this.#request("closeNamespaceScan", input);
+  }
+
+  cleanupNamespaceEntry(
+    input: ArtifactNamespaceObservation,
+  ): Promise<ArtifactNamespaceCleanupResult> {
+    return this.#request("cleanupNamespaceEntry", input);
   }
 
   evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {

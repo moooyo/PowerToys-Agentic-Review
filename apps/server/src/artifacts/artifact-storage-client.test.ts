@@ -4,6 +4,10 @@ import { dirname, isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import {
+  type ArtifactNamespaceObservation,
+  calculateArtifactNamespaceObservationSha256,
+} from "../../dist/artifacts/artifact-namespace-contract.js";
+import {
   type ArtifactStorageClient,
   type ArtifactStorageClientOptions,
   type ArtifactStorageProcessTransport,
@@ -122,6 +126,35 @@ const blockFor = (milliseconds: number): void => {
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
+const namespaceObservation = (ordinal: number): ArtifactNamespaceObservation => {
+  const namespaceUploadId = `70000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+  const identity = {
+    entryKey: `staging/${namespaceUploadId}.upload`,
+    kind: "staging" as const,
+    uploadId: namespaceUploadId,
+    finalizationId: null,
+    linkedObjectSha256: null,
+    observedBytes: 1,
+    expectedLinkCount: 1 as const,
+    fileDevice: "1",
+    fileInode: String(ordinal + 2),
+    fileCtimeNs: String(ordinal + 3),
+    fileMode: "384",
+    fileUid: "1000",
+    parentDevice: "1",
+    parentInode: "4",
+    parentMode: "448",
+    parentUid: "1000",
+    linkedObjectDevice: null,
+    linkedObjectInode: null,
+    linkedObjectCtimeNs: null,
+  };
+  return {
+    ...identity,
+    observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+  };
+};
+
 const chunkInput = (bytes = Buffer.from("chunk")) => ({
   uploadId,
   prepareId,
@@ -156,6 +189,65 @@ const shutdownGracefully = async (
 };
 
 describe("ArtifactStorageClient protocol and lifecycle", () => {
+  it("round-trips namespace scan closure and rejects a completed oversized page", async () => {
+    const worker = new FakeArtifactWorker();
+    const client = await attach(worker);
+    const scanSessionId = "80000000-0000-4000-8000-000000000001";
+    const observation = namespaceObservation(1);
+    const scan = client.scanNamespacePage({
+      scanSessionId,
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 1,
+    });
+    worker.message(
+      success(1, "scanNamespacePage", {
+        scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        observations: [observation],
+        completedSweep: false,
+        nextAfterKey: observation.entryKey,
+      }),
+    );
+    await expect(scan).resolves.toMatchObject({ completedSweep: false });
+    const closingScan = client.closeNamespaceScan({
+      scanSessionId,
+      sweepGeneration: 0,
+      expectedAfterKey: observation.entryKey,
+    });
+    worker.message(
+      success(2, "closeNamespaceScan", {
+        scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: observation.entryKey,
+        closed: true,
+      }),
+    );
+    await expect(closingScan).resolves.toMatchObject({ closed: true });
+
+    const oversized = client.scanNamespacePage({
+      scanSessionId: "80000000-0000-4000-8000-000000000002",
+      sweepGeneration: 1,
+      expectedAfterKey: null,
+      maximumEntries: 1,
+    });
+    worker.message(
+      success(3, "scanNamespacePage", {
+        scanSessionId: "80000000-0000-4000-8000-000000000002",
+        sweepGeneration: 1,
+        expectedAfterKey: null,
+        observations: [namespaceObservation(2), namespaceObservation(3)],
+        completedSweep: true,
+        nextAfterKey: null,
+      }),
+    );
+    await expect(oversized).rejects.toMatchObject({
+      code: "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
+    });
+    await expect(client.ownerExit).resolves.toBe(1);
+  });
+
   it("spawns one fixed hardened process and initializes it only over IPC", async () => {
     const worker = new FakeArtifactWorker();
     let executable: string | undefined;

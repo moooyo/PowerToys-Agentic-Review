@@ -58,6 +58,19 @@ describe("artifact upload create composition boundary", () => {
     expect(barrelSource).not.toContain("artifact-reconciliation-coordinator.testing");
   });
 
+  it("keeps the shared namespace contract independent from SQLite and database adapters", async () => {
+    const contract = await readFile(
+      join(sourceRoot, "artifacts", "artifact-namespace-contract.ts"),
+      "utf8",
+    );
+    expect(contract).not.toContain("node:sqlite");
+    expect(contract).not.toContain("../database/");
+    for (const file of ["artifact-storage.ts", "linux-filesystem.ts", "worker-protocol.ts"]) {
+      const source = await readFile(join(sourceRoot, "artifacts", file), "utf8");
+      expect(source).not.toContain("../database/artifacts");
+    }
+  });
+
   it("limits the reconciliation handle registrar to DatabaseClient and fake-owner tests", async () => {
     const reference = "registerArtifactReconciliationDatabaseHandle";
     const references: string[] = [];

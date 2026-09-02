@@ -1,3 +1,8 @@
+import type {
+  ArtifactNamespaceCleanupResult,
+  ArtifactNamespaceScanPageResult,
+  CloseArtifactNamespaceScanResult,
+} from "./artifact-namespace-contract.js";
 import { ArtifactStorageKernel } from "./artifact-storage.js";
 import { LinuxArtifactStorageOperations } from "./linux-filesystem.js";
 import type {
@@ -43,6 +48,15 @@ interface ArtifactStorageProcessKernel {
   cleanupUpload(
     input: ArtifactStorageWorkerOperationMap["cleanupUpload"]["input"],
   ): Promise<ArtifactUploadCleanupResult>;
+  scanNamespacePage(
+    input: ArtifactStorageWorkerOperationMap["scanNamespacePage"]["input"],
+  ): Promise<ArtifactNamespaceScanPageResult>;
+  closeNamespaceScan(
+    input: ArtifactStorageWorkerOperationMap["closeNamespaceScan"]["input"],
+  ): Promise<CloseArtifactNamespaceScanResult>;
+  cleanupNamespaceEntry(
+    input: ArtifactStorageWorkerOperationMap["cleanupNamespaceEntry"]["input"],
+  ): Promise<ArtifactNamespaceCleanupResult>;
   evaluateCapacity(
     input: ArtifactStorageWorkerOperationMap["evaluateCapacity"]["input"],
   ): Promise<ArtifactCapacityAdmission>;
@@ -66,6 +80,12 @@ const dispatchOperation = (
       return kernel.readObject(request.input).then((bytes) => ({ bytes: new Uint8Array(bytes) }));
     case "cleanupUpload":
       return kernel.cleanupUpload(request.input);
+    case "scanNamespacePage":
+      return kernel.scanNamespacePage(request.input);
+    case "closeNamespaceScan":
+      return kernel.closeNamespaceScan(request.input);
+    case "cleanupNamespaceEntry":
+      return kernel.cleanupNamespaceEntry(request.input);
     case "evaluateCapacity":
       return kernel.evaluateCapacity(request.input);
     default:

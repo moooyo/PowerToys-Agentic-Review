@@ -1,4 +1,20 @@
 export type {
+  ArtifactNamespaceCleanupResult,
+  ArtifactNamespaceObservation,
+  ArtifactNamespaceObservationIdentity,
+  ArtifactNamespaceObservationKind,
+  ArtifactNamespaceScanPageInput,
+  ArtifactNamespaceScanPageResult,
+  CloseArtifactNamespaceScanInput,
+  CloseArtifactNamespaceScanResult,
+} from "./artifact-namespace-contract.js";
+export {
+  calculateArtifactNamespaceObservationSha256,
+  maximumArtifactNamespaceManifestEntries,
+  maximumArtifactNamespacePageSize,
+  parseArtifactNamespaceEntryKey,
+} from "./artifact-namespace-contract.js";
+export type {
   ArtifactReconciliationCoordinatorErrorCode,
   ArtifactReconciliationCoordinatorOptions,
   ArtifactReconciliationDatabaseHandle,

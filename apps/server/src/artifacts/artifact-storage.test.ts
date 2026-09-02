@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  calculateArtifactNamespaceObservationSha256,
+  maximumArtifactNamespaceManifestEntries,
+} from "../../dist/artifacts/artifact-namespace-contract.js";
 import { ArtifactStorageKernel } from "../../dist/artifacts/artifact-storage.js";
 import {
   ArtifactEntryBudget,
@@ -57,6 +63,12 @@ class FakeArtifactStorageOperations implements ArtifactStorageOperations {
   filesystemBytes = 1_000_000_000n;
   filesystemCapacityOverride: ArtifactFilesystemCapacity | undefined;
   inventoryOverride: ArtifactStorageInventory | undefined;
+  namespaceManifest: readonly ArtifactNamespaceObservation[] = [];
+  readonly namespaceScanLimits: {
+    readonly maximumManifestEntries: number;
+    readonly maximumTraversalEntries: number;
+  }[] = [];
+  namespaceCleanupOutcome: ArtifactNamespaceCleanupResult["outcome"] = "identity_changed";
   onFilesystemCapacity: (() => void) | undefined;
   onInitialize: (() => void) | undefined;
   failAt: string | undefined;
@@ -93,6 +105,26 @@ class FakeArtifactStorageOperations implements ArtifactStorageOperations {
         stagingFiles: 0,
       }
     );
+  }
+
+  scanArtifactNamespace(
+    _layout: ArtifactStorageLayout,
+    maximumManifestEntries: number,
+    maximumTraversalEntries: number,
+  ): readonly ArtifactNamespaceObservation[] {
+    this.namespaceScanLimits.push({ maximumManifestEntries, maximumTraversalEntries });
+    return this.namespaceManifest;
+  }
+
+  cleanupArtifactNamespaceEntry(
+    _layout: ArtifactStorageLayout,
+    observation: ArtifactNamespaceObservation,
+  ): ArtifactNamespaceCleanupResult {
+    return {
+      entryKey: observation.entryKey,
+      observationSha256: observation.observationSha256,
+      outcome: this.namespaceCleanupOutcome,
+    };
   }
 
   filesystemCapacity(_layout: ArtifactStorageLayout) {
@@ -434,6 +466,35 @@ class FakeArtifactStorageOperations implements ArtifactStorageOperations {
 
 const sha256 = (bytes: string | Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
+const namespaceObservation = (ordinal: number): ArtifactNamespaceObservation => {
+  const upload = `70000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+  const identity = {
+    entryKey: `staging/${upload}.upload`,
+    kind: "staging" as const,
+    uploadId: upload,
+    finalizationId: null,
+    linkedObjectSha256: null,
+    observedBytes: ordinal,
+    expectedLinkCount: 1 as const,
+    fileDevice: "1",
+    fileInode: String(ordinal + 10),
+    fileCtimeNs: String(ordinal + 20),
+    fileMode: "384",
+    fileUid: "1000",
+    parentDevice: "1",
+    parentInode: "2",
+    parentMode: "448",
+    parentUid: "1000",
+    linkedObjectDevice: null,
+    linkedObjectInode: null,
+    linkedObjectCtimeNs: null,
+  };
+  return {
+    ...identity,
+    observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+  };
+};
+
 const kernelOptions = (closeTimeoutMilliseconds = 1_000) => ({
   rootPath: "/artifact",
   closeTimeoutMilliseconds,
@@ -474,6 +535,136 @@ const finalization = (bytes: Buffer): PreparedArtifactFinalization => ({
   finalizationId,
   totalBytes: bytes.byteLength,
   sha256: sha256(bytes),
+});
+
+describe("ArtifactStorageKernel namespace scan sessions", () => {
+  it("rejects an oversized manifest instead of reporting a truncated completed sweep", async () => {
+    const operations = new FakeArtifactStorageOperations();
+    operations.namespaceManifest = Array<ArtifactNamespaceObservation>(
+      maximumArtifactNamespaceManifestEntries + 1,
+    ).fill(namespaceObservation(1));
+    const kernel = new ArtifactStorageKernel(kernelOptions(), operations);
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId: "80000000-0000-4000-8000-000000000010",
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        maximumEntries: 8,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+    await kernel.close();
+  });
+
+  it("paginates one immutable manifest and rejects replay, skipping, and concurrent scanners", async () => {
+    const operations = new FakeArtifactStorageOperations();
+    operations.namespaceManifest = Array.from({ length: 5 }, (_, index) =>
+      namespaceObservation(index),
+    );
+    const kernel = new ArtifactStorageKernel(kernelOptions(), operations);
+    const scanSessionId = "80000000-0000-4000-8000-000000000001";
+    const firstOperation = kernel.scanNamespacePage({
+      scanSessionId,
+      sweepGeneration: 3,
+      expectedAfterKey: null,
+      maximumEntries: 2,
+    });
+    expect(() =>
+      kernel.scanNamespacePage({
+        scanSessionId: "80000000-0000-4000-8000-000000000005",
+        sweepGeneration: 3,
+        expectedAfterKey: null,
+        maximumEntries: 2,
+      }),
+    ).toThrow(ArtifactStorageIntegrityError);
+    const first = await firstOperation;
+    expect(operations.namespaceScanLimits[0]).toEqual({
+      maximumManifestEntries: maximumArtifactNamespaceManifestEntries,
+      maximumTraversalEntries: kernelOptions().capacity.hardEntries,
+    });
+    expect(first).toMatchObject({
+      completedSweep: false,
+      nextAfterKey: first.observations[1]?.entryKey,
+    });
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId,
+        sweepGeneration: 3,
+        expectedAfterKey: null,
+        maximumEntries: 2,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId,
+        sweepGeneration: 3,
+        expectedAfterKey: operations.namespaceManifest[3]?.entryKey ?? null,
+        maximumEntries: 2,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId: "80000000-0000-4000-8000-000000000002",
+        sweepGeneration: 3,
+        expectedAfterKey: first.nextAfterKey,
+        maximumEntries: 2,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+    const second = await kernel.scanNamespacePage({
+      scanSessionId,
+      sweepGeneration: 3,
+      expectedAfterKey: first.nextAfterKey,
+      maximumEntries: 2,
+    });
+    const final = await kernel.scanNamespacePage({
+      scanSessionId,
+      sweepGeneration: 3,
+      expectedAfterKey: second.nextAfterKey,
+      maximumEntries: 2,
+    });
+    expect(final).toMatchObject({ completedSweep: true, nextAfterKey: null });
+    expect(final.observations).toEqual([operations.namespaceManifest[4]]);
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId,
+        sweepGeneration: 3,
+        expectedAfterKey: null,
+        maximumEntries: 2,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+
+    const resumed = await kernel.scanNamespacePage({
+      scanSessionId: "80000000-0000-4000-8000-000000000003",
+      sweepGeneration: 3,
+      expectedAfterKey: operations.namespaceManifest[2]?.entryKey ?? null,
+      maximumEntries: 2,
+    });
+    expect(resumed).toMatchObject({ completedSweep: true });
+    expect(resumed.observations).toEqual(operations.namespaceManifest.slice(3));
+
+    const closeSessionId = "80000000-0000-4000-8000-000000000004";
+    const open = await kernel.scanNamespacePage({
+      scanSessionId: closeSessionId,
+      sweepGeneration: 4,
+      expectedAfterKey: null,
+      maximumEntries: 1,
+    });
+    await expect(
+      kernel.closeNamespaceScan({
+        scanSessionId: closeSessionId,
+        sweepGeneration: 4,
+        expectedAfterKey: open.nextAfterKey,
+      }),
+    ).resolves.toMatchObject({ closed: true });
+    await expect(
+      kernel.scanNamespacePage({
+        scanSessionId: closeSessionId,
+        sweepGeneration: 4,
+        expectedAfterKey: open.nextAfterKey,
+        maximumEntries: 1,
+      }),
+    ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+    await kernel.close();
+  });
 });
 
 describe("bounded artifact directory scanning", () => {

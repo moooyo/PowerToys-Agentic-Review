@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { unlinkSync } from "node:fs";
 import {
   chmod,
   link,
@@ -14,6 +15,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  type ArtifactNamespaceObservation,
+  calculateArtifactNamespaceObservationSha256,
+} from "../../dist/artifacts/artifact-namespace-contract.js";
 import { ArtifactStorageKernel } from "../../dist/artifacts/artifact-storage.js";
 import { ArtifactStorageIntegrityError } from "../../dist/artifacts/errors.js";
 import {
@@ -24,8 +29,10 @@ import {
 import type { ArtifactStorageDirectoryBinding } from "../../dist/artifacts/types.js";
 
 const uploadId = "11111111-1111-4111-8111-111111111111";
+const secondUploadId = "44444444-4444-4444-8444-444444444444";
 const prepareId = "22222222-2222-4222-8222-222222222222";
 const finalizationId = "33333333-3333-4333-8333-333333333333";
+const secondFinalizationId = "55555555-5555-4555-8555-555555555555";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -252,6 +259,300 @@ describe.skipIf(process.platform !== "linux")("LinuxArtifactStorageOperations", 
     expect(
       () => new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations()),
     ).toThrow(ArtifactStorageIntegrityError);
+  });
+
+  it("scans and identity-binds staging cleanup without deleting replacements", async () => {
+    const root = await createArtifactRootPath();
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
+    const stagingPath = join(root, "staging", `${uploadId}.upload`);
+    await writeFile(stagingPath, Buffer.from("first"), { mode: 0o600 });
+    await chmod(stagingPath, 0o600);
+    const scanned = await kernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000001",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    expect(scanned).toMatchObject({ completedSweep: true, nextAfterKey: null });
+    expect(scanned.observations).toHaveLength(1);
+    const observation = scanned.observations[0] as ArtifactNamespaceObservation;
+
+    await writeFile(stagingPath, Buffer.from("replacement"), { mode: 0o600 });
+    await expect(kernel.cleanupNamespaceEntry(observation)).resolves.toMatchObject({
+      outcome: "identity_changed",
+    });
+    await expect(readFile(stagingPath)).resolves.toEqual(Buffer.from("replacement"));
+
+    const replacementScan = await kernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000002",
+      sweepGeneration: 1,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    const replacement = replacementScan.observations[0] as ArtifactNamespaceObservation;
+    await expect(kernel.cleanupNamespaceEntry(replacement)).resolves.toMatchObject({
+      outcome: "removed",
+    });
+    await expect(lstat(stagingPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(kernel.cleanupNamespaceEntry(replacement)).resolves.toMatchObject({
+      outcome: "already_absent",
+    });
+    await kernel.close();
+  });
+
+  it("revalidates root, objects, and sha256 namespace closure for every new scan", async () => {
+    for (const location of ["root", "objects", "sha256"] as const) {
+      const root = await createArtifactRootPath();
+      const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
+      const parent =
+        location === "root"
+          ? root
+          : location === "objects"
+            ? join(root, "objects")
+            : join(root, "objects", "sha256");
+      await writeFile(join(parent, "unexpected"), Buffer.from("unexpected"), { mode: 0o600 });
+      await expect(
+        kernel.scanNamespacePage({
+          scanSessionId:
+            location === "root"
+              ? "90000000-0000-4000-8000-000000000004"
+              : location === "objects"
+                ? "90000000-0000-4000-8000-000000000005"
+                : "90000000-0000-4000-8000-000000000006",
+          sweepGeneration: 0,
+          expectedAfterKey: null,
+          maximumEntries: 8,
+        }),
+      ).rejects.toBeInstanceOf(ArtifactStorageIntegrityError);
+      await kernel.close();
+    }
+  });
+
+  it("refuses symlink, mode, link-count, and parent identity changes during cleanup", async () => {
+    for (const mutation of ["symlink", "mode", "nlink", "parent"] as const) {
+      const root = await createArtifactRootPath();
+      const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
+      const staging = join(root, "staging");
+      const stagingPath = join(staging, `${uploadId}.upload`);
+      await writeFile(stagingPath, Buffer.from("stable"), { mode: 0o600 });
+      await chmod(stagingPath, 0o600);
+      const page = await kernel.scanNamespacePage({
+        scanSessionId:
+          mutation === "symlink"
+            ? "90000000-0000-4000-8000-000000000010"
+            : mutation === "mode"
+              ? "90000000-0000-4000-8000-000000000011"
+              : mutation === "nlink"
+                ? "90000000-0000-4000-8000-000000000012"
+                : "90000000-0000-4000-8000-000000000013",
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        maximumEntries: 8,
+      });
+      const observation = page.observations[0] as ArtifactNamespaceObservation;
+      if (mutation === "symlink") {
+        const outside = join(dirname(root), "namespace-outside");
+        await writeFile(outside, Buffer.from("outside"), { mode: 0o600 });
+        await rm(stagingPath);
+        await symlink(outside, stagingPath, "file");
+      } else if (mutation === "mode") {
+        await chmod(stagingPath, 0o640);
+      } else if (mutation === "nlink") {
+        await link(stagingPath, join(dirname(root), "namespace-external-link"));
+      } else {
+        const displaced = join(dirname(root), "namespace-staging-displaced");
+        await rename(staging, displaced);
+        await mkdir(staging, { mode: 0o700 });
+        await chmod(staging, 0o700);
+        await writeFile(stagingPath, Buffer.from("replacement"), { mode: 0o600 });
+      }
+      await expect(kernel.cleanupNamespaceEntry(observation)).resolves.toMatchObject({
+        outcome: "identity_changed",
+      });
+      await expect(lstat(stagingPath)).resolves.toBeDefined();
+      await kernel.close();
+    }
+  });
+
+  it("removes only publication temporaries and preserves a linked immutable object", async () => {
+    const root = await createArtifactRootPath();
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
+    const bytes = Buffer.from("linked-object");
+    const digest = sha256(bytes);
+    const shard = join(root, "objects", "sha256", digest.slice(0, 2));
+    await mkdir(shard, { mode: 0o700 });
+    await chmod(shard, 0o700);
+    const objectPath = join(shard, digest);
+    const temporaryPath = join(shard, `.publish-${uploadId}-${finalizationId}.tmp`);
+    const unlinkedTemporaryPath = join(
+      shard,
+      `.publish-${secondUploadId}-${secondFinalizationId}.tmp`,
+    );
+    await writeFile(objectPath, bytes, { mode: 0o600 });
+    await chmod(objectPath, 0o600);
+    await link(objectPath, temporaryPath);
+    await writeFile(unlinkedTemporaryPath, Buffer.from("partial"), { mode: 0o600 });
+    await chmod(unlinkedTemporaryPath, 0o600);
+
+    const page = await kernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000020",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    expect(page.observations).toHaveLength(2);
+    const unlinkedObservation = page.observations.find(
+      (entry) => entry.expectedLinkCount === 1,
+    ) as ArtifactNamespaceObservation;
+    await expect(kernel.cleanupNamespaceEntry(unlinkedObservation)).resolves.toMatchObject({
+      outcome: "removed",
+    });
+    await expect(lstat(unlinkedTemporaryPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const observation = page.observations.find(
+      (entry) => entry.expectedLinkCount === 2,
+    ) as ArtifactNamespaceObservation;
+    expect(observation).toMatchObject({
+      kind: "publication-temporary",
+      linkedObjectSha256: digest,
+      expectedLinkCount: 2,
+    });
+    await expect(kernel.cleanupNamespaceEntry(observation)).resolves.toMatchObject({
+      outcome: "removed",
+    });
+    await expect(lstat(temporaryPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(objectPath)).nlink).toBe(1);
+    await expect(readFile(objectPath)).resolves.toEqual(bytes);
+    await kernel.close();
+  });
+
+  it("does not delete when persisted file identity fields are changed", async () => {
+    const root = await createArtifactRootPath();
+    const kernel = new ArtifactStorageKernel(options(root), new LinuxArtifactStorageOperations());
+    const stagingPath = join(root, "staging", `${uploadId}.upload`);
+    await writeFile(stagingPath, Buffer.from("uid"), { mode: 0o600 });
+    const page = await kernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000030",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    const observation = page.observations[0] as ArtifactNamespaceObservation;
+    const { observationSha256: _observationSha256, ...identity } = observation;
+    const changedIdentities = [
+      { ...identity, fileUid: String(Number(identity.fileUid) + 1) },
+      { ...identity, fileInode: String(BigInt(identity.fileInode) + 1n) },
+      { ...identity, fileCtimeNs: String(BigInt(identity.fileCtimeNs) + 1n) },
+      { ...identity, observedBytes: identity.observedBytes + 1 },
+    ];
+    for (const changedIdentity of changedIdentities) {
+      await expect(
+        kernel.cleanupNamespaceEntry({
+          ...changedIdentity,
+          observationSha256: calculateArtifactNamespaceObservationSha256(changedIdentity),
+        }),
+      ).resolves.toMatchObject({ outcome: "identity_changed" });
+    }
+    await expect(readFile(stagingPath)).resolves.toEqual(Buffer.from("uid"));
+    await kernel.close();
+  });
+
+  it("surfaces unknown namespace unlink and fsync outcomes as fatal operation errors", async () => {
+    for (const failurePoint of ["unlink", "fsync"] as const) {
+      const root = await createArtifactRootPath();
+      const failure = Object.assign(new Error(`injected namespace ${failurePoint} failure`), {
+        code: "EIO",
+      });
+      const operations = new LinuxArtifactStorageOperations(
+        failurePoint === "unlink"
+          ? {
+              unlink: () => {
+                throw failure;
+              },
+            }
+          : {
+              syncDirectoryDescriptor: () => {
+                throw failure;
+              },
+            },
+      );
+      const kernel = new ArtifactStorageKernel(options(root), operations);
+      const stagingPath = join(root, "staging", `${uploadId}.upload`);
+      await writeFile(stagingPath, Buffer.from("fatal-outcome"), { mode: 0o600 });
+      const page = await kernel.scanNamespacePage({
+        scanSessionId:
+          failurePoint === "unlink"
+            ? "90000000-0000-4000-8000-000000000040"
+            : "90000000-0000-4000-8000-000000000041",
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        maximumEntries: 8,
+      });
+      const observation = page.observations[0];
+      if (observation === undefined) {
+        throw new Error("Expected a namespace observation for failure injection.");
+      }
+      await expect(kernel.cleanupNamespaceEntry(observation)).rejects.toBe(failure);
+      if (failurePoint === "unlink") {
+        await expect(readFile(stagingPath)).resolves.toEqual(Buffer.from("fatal-outcome"));
+      } else {
+        await expect(lstat(stagingPath)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      await kernel.close();
+    }
+  });
+
+  it("fsyncs descriptor-bound parents for both forms of already-absent cleanup", async () => {
+    const absentRoot = await createArtifactRootPath();
+    const absentFsyncFailure = Object.assign(new Error("injected absent fsync failure"), {
+      code: "EIO",
+    });
+    const absentKernel = new ArtifactStorageKernel(
+      options(absentRoot),
+      new LinuxArtifactStorageOperations({
+        syncDirectoryDescriptor: () => {
+          throw absentFsyncFailure;
+        },
+      }),
+    );
+    const absentPath = join(absentRoot, "staging", `${uploadId}.upload`);
+    await writeFile(absentPath, Buffer.from("absent"), { mode: 0o600 });
+    const absentPage = await absentKernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000050",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    await rm(absentPath);
+    await expect(
+      absentKernel.cleanupNamespaceEntry(
+        absentPage.observations[0] as ArtifactNamespaceObservation,
+      ),
+    ).rejects.toBe(absentFsyncFailure);
+    await absentKernel.close();
+
+    const racedRoot = await createArtifactRootPath();
+    const racedKernel = new ArtifactStorageKernel(
+      options(racedRoot),
+      new LinuxArtifactStorageOperations({
+        unlink: (path) => {
+          unlinkSync(path);
+          throw Object.assign(new Error("injected post-unlink ENOENT"), { code: "ENOENT" });
+        },
+      }),
+    );
+    const racedPath = join(racedRoot, "staging", `${uploadId}.upload`);
+    await writeFile(racedPath, Buffer.from("raced"), { mode: 0o600 });
+    const racedPage = await racedKernel.scanNamespacePage({
+      scanSessionId: "90000000-0000-4000-8000-000000000051",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    await expect(
+      racedKernel.cleanupNamespaceEntry(racedPage.observations[0] as ArtifactNamespaceObservation),
+    ).resolves.toMatchObject({ outcome: "already_absent" });
+    await expect(lstat(racedPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await racedKernel.close();
   });
 });
 

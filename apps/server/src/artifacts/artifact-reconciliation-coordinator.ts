@@ -1,14 +1,29 @@
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { maximumResultArtifactBytes, maximumResultArtifactChunks } from "@agentic-review/contracts";
 import {
   type ArtifactCleanupRetryErrorCode,
   type ArtifactCleanupWorkItem,
   type ArtifactHealthAccounting,
+  type ArtifactNamespaceCleanupWorkItem,
   type ArtifactReconciliationDatabaseOperation,
+  artifactReconciliationCursorName,
   maximumArtifactCleanupRetryDelaySeconds,
   maximumArtifactReconciliationBatchSize,
 } from "../database/artifacts.js";
 import type { DatabaseOperationMap } from "../database/protocol.js";
+import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  type ArtifactNamespaceScanPageInput,
+  type ArtifactNamespaceScanPageResult,
+  type CloseArtifactNamespaceScanInput,
+  type CloseArtifactNamespaceScanResult,
+  maximumArtifactNamespacePageSize,
+  parseArtifactNamespaceEntryKey,
+  snapshotArtifactNamespaceObservation,
+  snapshotArtifactNamespaceSweepGeneration,
+} from "./artifact-namespace-contract.js";
 import {
   maximumArtifactCapacityLiveUploads,
   snapshotArtifactCapacityEvaluationAccounting,
@@ -45,10 +60,15 @@ const authorityClosureReasons = new Set([
 ]);
 
 type ArtifactCleanupDatabaseOperation =
+  | "classifyArtifactNamespacePageAndAdvanceCursor"
   | "completeArtifactCleanup"
+  | "completeArtifactNamespaceCleanup"
   | "listDueArtifactCleanups"
+  | "listDueArtifactNamespaceCleanups"
   | "readArtifactHealthAccounting"
+  | "readArtifactReconciliationCursor"
   | "recordArtifactCleanupFailure"
+  | "recordArtifactNamespaceCleanupFailure"
   | "terminalizeInactiveArtifactUploads";
 
 type ArtifactCleanupDatabaseRequest = <TOperation extends ArtifactCleanupDatabaseOperation>(
@@ -113,6 +133,15 @@ export interface ArtifactReconciliationDatabaseHandle {
 export interface ArtifactReconciliationStorageOwner {
   readonly ownerExit: Promise<number>;
   cleanupUpload(input: ArtifactUploadCleanupRequest): Promise<ArtifactUploadCleanupResult>;
+  scanNamespacePage(
+    input: ArtifactNamespaceScanPageInput,
+  ): Promise<ArtifactNamespaceScanPageResult>;
+  closeNamespaceScan(
+    input: CloseArtifactNamespaceScanInput,
+  ): Promise<CloseArtifactNamespaceScanResult>;
+  cleanupNamespaceEntry(
+    input: ArtifactNamespaceObservation,
+  ): Promise<ArtifactNamespaceCleanupResult>;
 }
 
 export interface ArtifactReconciliationCoordinatorOptions {
@@ -183,6 +212,7 @@ const consumeDatabaseHandle = (
 
 interface ArtifactReconciliationPassResult {
   readonly continueImmediately: boolean;
+  readonly sweepCompleted: boolean;
   readonly health: ArtifactHealthAccounting;
 }
 
@@ -383,6 +413,189 @@ const snapshotCleanupPage = (
   return Object.freeze({ items: Object.freeze(items), hasMore });
 };
 
+interface ArtifactNamespaceCursorSnapshot {
+  readonly sweepGeneration: number;
+  readonly afterKey: string | null;
+  readonly updatedAt: string;
+  readonly lastCompletedAt: string | null;
+}
+
+const snapshotNamespaceCursor = (value: unknown): ArtifactNamespaceCursorSnapshot => {
+  const record = requireRecord(value, "Artifact namespace cursor");
+  requireExactKeys(record, ["name", "sweepGeneration", "afterKey", "updatedAt", "lastCompletedAt"]);
+  if (record.name !== artifactReconciliationCursorName) {
+    throw new TypeError("Artifact namespace cursor identity is invalid.");
+  }
+  const afterKey =
+    record.afterKey === null ? null : parseArtifactNamespaceEntryKey(record.afterKey).entryKey;
+  return Object.freeze({
+    sweepGeneration: snapshotArtifactNamespaceSweepGeneration(record.sweepGeneration),
+    afterKey,
+    updatedAt: requireCanonicalDateTime(record.updatedAt, "Artifact namespace cursor time"),
+    lastCompletedAt:
+      record.lastCompletedAt === null
+        ? null
+        : requireCanonicalDateTime(
+            record.lastCompletedAt,
+            "Artifact namespace last completed time",
+          ),
+  });
+};
+
+const namespaceObservationKeys = [
+  "entryKey",
+  "observationSha256",
+  "kind",
+  "uploadId",
+  "finalizationId",
+  "linkedObjectSha256",
+  "observedBytes",
+  "expectedLinkCount",
+  "fileDevice",
+  "fileInode",
+  "fileCtimeNs",
+  "fileMode",
+  "fileUid",
+  "parentDevice",
+  "parentInode",
+  "parentMode",
+  "parentUid",
+  "linkedObjectDevice",
+  "linkedObjectInode",
+  "linkedObjectCtimeNs",
+] as const;
+
+const snapshotNamespaceCleanupWorkItem = (value: unknown): ArtifactNamespaceCleanupWorkItem => {
+  const record = requireRecord(value, "Artifact namespace cleanup work item");
+  requireExactKeys(record, [
+    ...namespaceObservationKeys,
+    "reason",
+    "observedSweepGeneration",
+    "expectedAttemptCount",
+    "lastRetryDelaySeconds",
+  ]);
+  const observationData: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of namespaceObservationKeys) {
+    observationData[key] = record[key];
+  }
+  const observation = snapshotArtifactNamespaceObservation(observationData);
+  if (
+    record.reason !== "orphan" &&
+    record.reason !== "completed_residual" &&
+    record.reason !== "stale_identity_mismatch"
+  ) {
+    throw new TypeError("Artifact namespace cleanup reason is unsupported.");
+  }
+  const expectedAttemptCount = requireNonnegativeInteger(
+    record.expectedAttemptCount,
+    7,
+    "Artifact namespace cleanup attempt count",
+  );
+  const lastRetryDelaySeconds =
+    record.lastRetryDelaySeconds === null
+      ? null
+      : requirePositiveInteger(
+          record.lastRetryDelaySeconds,
+          maximumArtifactCleanupRetryDelaySeconds,
+          "Artifact namespace cleanup retry identity",
+        );
+  if ((expectedAttemptCount === 0) !== (lastRetryDelaySeconds === null)) {
+    throw new TypeError("Artifact namespace cleanup retry identity is inconsistent.");
+  }
+  return Object.freeze({
+    ...observation,
+    reason: record.reason,
+    observedSweepGeneration: snapshotArtifactNamespaceSweepGeneration(
+      record.observedSweepGeneration,
+    ),
+    expectedAttemptCount,
+    lastRetryDelaySeconds,
+  });
+};
+
+const snapshotNamespaceCleanupPage = (
+  value: unknown,
+  batchSize: number,
+): { readonly items: readonly ArtifactNamespaceCleanupWorkItem[]; readonly hasMore: boolean } => {
+  const record = requireRecord(value, "Artifact namespace cleanup page");
+  requireExactKeys(record, ["items", "hasMore"]);
+  const identities = new Set<string>();
+  const items = requireDenseArray(
+    record.items,
+    batchSize,
+    "Artifact namespace cleanup work page",
+  ).map((entry) => {
+    const item = snapshotNamespaceCleanupWorkItem(entry);
+    const identity = `${item.entryKey}:${item.observationSha256}`;
+    if (identities.has(identity)) {
+      throw new TypeError("Artifact namespace cleanup page contains duplicate work.");
+    }
+    identities.add(identity);
+    return item;
+  });
+  const hasMore = requireBoolean(record.hasMore, "Artifact namespace cleanup continuation");
+  if (hasMore && items.length !== batchSize) {
+    throw new TypeError("Artifact namespace cleanup continuation requires a full page.");
+  }
+  return Object.freeze({ items: Object.freeze(items), hasMore });
+};
+
+const assertNamespaceClassificationResult = (
+  value: unknown,
+  page: ArtifactNamespaceScanPageResult,
+): ArtifactNamespaceCursorSnapshot => {
+  const record = requireRecord(value, "Artifact namespace classification result");
+  requireExactKeys(record, ["classifications", "cursor"]);
+  const classifications = requireDenseArray(
+    record.classifications,
+    page.observations.length,
+    "Artifact namespace classifications",
+  );
+  if (classifications.length !== page.observations.length) {
+    throw new TypeError("Artifact namespace classification count is inconsistent.");
+  }
+  for (const [index, value] of classifications.entries()) {
+    const classification = requireRecord(value, "Artifact namespace classification");
+    requireExactKeys(classification, [
+      "entryKey",
+      "observationSha256",
+      "disposition",
+      "reason",
+      "supersededPriorIntent",
+    ]);
+    const observation = page.observations[index];
+    const disposition = classification.disposition;
+    const cleanupReason =
+      classification.reason === "orphan" ||
+      classification.reason === "completed_residual" ||
+      classification.reason === "stale_identity_mismatch";
+    const referenceDisposition =
+      disposition === "active_reference" || disposition === "upload_cleanup_covered";
+    const cleanupDisposition =
+      disposition === "cleanup_intent_created" || disposition === "cleanup_intent_replayed";
+    if (
+      observation === undefined ||
+      classification.entryKey !== observation.entryKey ||
+      classification.observationSha256 !== observation.observationSha256 ||
+      typeof classification.supersededPriorIntent !== "boolean" ||
+      (referenceDisposition &&
+        (classification.reason !== null || classification.supersededPriorIntent)) ||
+      (cleanupDisposition &&
+        (!cleanupReason ||
+          (disposition === "cleanup_intent_replayed" && classification.supersededPriorIntent))) ||
+      (!referenceDisposition && !cleanupDisposition)
+    ) {
+      throw new TypeError("Artifact namespace classification identity is inconsistent.");
+    }
+  }
+  const cursor = snapshotNamespaceCursor(record.cursor);
+  const expectedGeneration = page.completedSweep ? page.sweepGeneration + 1 : page.sweepGeneration;
+  if (cursor.sweepGeneration !== expectedGeneration || cursor.afterKey !== page.nextAfterKey) {
+    throw new TypeError("Artifact namespace classification cursor is inconsistent.");
+  }
+  return cursor;
+};
+
 const snapshotHealth = (value: unknown): ArtifactHealthAccounting => {
   const record = requireRecord(value, "Artifact health accounting");
   requireExactKeys(record, ["activeUploads", "cleanup", "namespaceCleanup", "capacity"]);
@@ -555,7 +768,17 @@ export class ArtifactReconciliationCoordinator {
   readonly #cleanupUpload: (
     input: ArtifactUploadCleanupRequest,
   ) => Promise<ArtifactUploadCleanupResult>;
+  readonly #scanNamespacePage: (
+    input: ArtifactNamespaceScanPageInput,
+  ) => Promise<ArtifactNamespaceScanPageResult>;
+  readonly #closeNamespaceScan: (
+    input: CloseArtifactNamespaceScanInput,
+  ) => Promise<CloseArtifactNamespaceScanResult>;
+  readonly #cleanupNamespaceEntry: (
+    input: ArtifactNamespaceObservation,
+  ) => Promise<ArtifactNamespaceCleanupResult>;
   readonly #batchSize: number;
+  readonly #namespaceBatchSize: number;
   readonly #intervalMilliseconds: number;
   readonly #passTimeoutMilliseconds: number;
   readonly #closeTimeoutMilliseconds: number;
@@ -564,6 +787,7 @@ export class ArtifactReconciliationCoordinator {
   readonly #onFailStop: (error: ArtifactReconciliationCoordinatorError) => void | Promise<void>;
   readonly #fatalSignal = Promise.withResolvers<ArtifactReconciliationCoordinatorError>();
   readonly #firstPass = Promise.withResolvers<void>();
+  readonly #firstSweep = Promise.withResolvers<void>();
   readonly #fatalWaiters = new Set<FatalWaiter>();
   #state: "open" | "closing" | "closed" | "fatal" = "open";
   #startupTimer: NodeJS.Timeout | undefined;
@@ -574,7 +798,11 @@ export class ArtifactReconciliationCoordinator {
   #closePromise: Promise<void> | undefined;
   #health: ArtifactHealthAccounting | undefined;
   #firstPassSettled = false;
+  #firstSweepSettled = false;
   #ownerExitObserved = false;
+  #namespaceScanSessionId: string | undefined;
+  #namespaceScanGeneration: number | undefined;
+  #namespaceScanAfterKey: string | null | undefined;
 
   private constructor(
     options: ArtifactReconciliationCoordinatorOptions,
@@ -598,10 +826,16 @@ export class ArtifactReconciliationCoordinator {
     }
     const requestDatabase = database.request;
     const cleanupUpload = storage.cleanupUpload;
+    const scanNamespacePage = storage.scanNamespacePage;
+    const closeNamespaceScan = storage.closeNamespaceScan;
+    const cleanupNamespaceEntry = storage.cleanupNamespaceEntry;
     const ownerExit = storage.ownerExit;
     if (
       typeof requestDatabase !== "function" ||
       typeof cleanupUpload !== "function" ||
+      typeof scanNamespacePage !== "function" ||
+      typeof closeNamespaceScan !== "function" ||
+      typeof cleanupNamespaceEntry !== "function" ||
       !(ownerExit instanceof Promise) ||
       typeof onFailStop !== "function"
     ) {
@@ -617,11 +851,24 @@ export class ArtifactReconciliationCoordinator {
       >) as ArtifactCleanupDatabaseRequest;
     this.#cleanupUpload = (input) =>
       Reflect.apply(cleanupUpload, storage, [input]) as Promise<ArtifactUploadCleanupResult>;
+    this.#scanNamespacePage = (input) =>
+      Reflect.apply(scanNamespacePage, storage, [
+        input,
+      ]) as Promise<ArtifactNamespaceScanPageResult>;
+    this.#closeNamespaceScan = (input) =>
+      Reflect.apply(closeNamespaceScan, storage, [
+        input,
+      ]) as Promise<CloseArtifactNamespaceScanResult>;
+    this.#cleanupNamespaceEntry = (input) =>
+      Reflect.apply(cleanupNamespaceEntry, storage, [
+        input,
+      ]) as Promise<ArtifactNamespaceCleanupResult>;
     this.#batchSize = requirePositiveInteger(
       batchSize,
       maximumArtifactReconciliationBatchSize,
       "Artifact reconciliation batch size",
     );
+    this.#namespaceBatchSize = Math.min(this.#batchSize, maximumArtifactNamespacePageSize);
     this.#intervalMilliseconds = requirePositiveInteger(
       intervalMilliseconds,
       maximumCoordinatorMilliseconds,
@@ -652,6 +899,7 @@ export class ArtifactReconciliationCoordinator {
     }
     this.#onFailStop = onFailStop;
     void this.#firstPass.promise.catch(() => undefined);
+    void this.#firstSweep.promise.catch(() => undefined);
     void Reflect.apply(Promise.prototype.then, ownerExit, [
       () => this.#observeOwnerExit(),
       () => this.#observeOwnerExit(),
@@ -684,6 +932,10 @@ export class ArtifactReconciliationCoordinator {
     return this.#firstPass.promise;
   }
 
+  get firstSweep(): Promise<void> {
+    return this.#firstSweep.promise;
+  }
+
   get health(): ArtifactHealthAccounting | undefined {
     return this.#health;
   }
@@ -707,6 +959,9 @@ export class ArtifactReconciliationCoordinator {
     void pass.then(
       (result) => {
         this.#health = result.health;
+        if (result.sweepCompleted) {
+          this.#settleFirstSweep();
+        }
         this.#settleFirstPass();
         this.#currentPass = undefined;
         if (this.#state === "open") {
@@ -766,6 +1021,27 @@ export class ArtifactReconciliationCoordinator {
       await this.#cleanup(item, deadline);
     }
 
+    const namespaceScan = await this.#reconcileNamespacePage(deadline);
+    let namespaceCleanupPage: {
+      readonly items: readonly ArtifactNamespaceCleanupWorkItem[];
+      readonly hasMore: boolean;
+    };
+    try {
+      namespaceCleanupPage = snapshotNamespaceCleanupPage(
+        await this.#databaseRequest(
+          "listDueArtifactNamespaceCleanups",
+          { batchSize: this.#batchSize },
+          deadline,
+        ),
+        this.#batchSize,
+      );
+    } catch (error) {
+      throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    for (const item of namespaceCleanupPage.items) {
+      await this.#cleanupNamespace(item, deadline);
+    }
+
     let health: ArtifactHealthAccounting;
     try {
       health = snapshotHealth(
@@ -781,9 +1057,217 @@ export class ArtifactReconciliationCoordinator {
       throw this.#enterFatal("ARTIFACT_RECONCILIATION_HEALTH_SATURATED");
     }
     return Object.freeze({
-      continueImmediately: terminalized.hasMore || cleanupPage.hasMore,
+      continueImmediately:
+        terminalized.hasMore ||
+        cleanupPage.hasMore ||
+        namespaceScan.hasMore ||
+        namespaceCleanupPage.hasMore,
+      sweepCompleted: namespaceScan.sweepCompleted,
       health,
     });
+  }
+
+  async #reconcileNamespacePage(
+    deadline: number,
+  ): Promise<{ readonly hasMore: boolean; readonly sweepCompleted: boolean }> {
+    let cursor: ArtifactNamespaceCursorSnapshot;
+    try {
+      cursor = snapshotNamespaceCursor(
+        await this.#databaseRequest("readArtifactReconciliationCursor", {}, deadline),
+      );
+    } catch (error) {
+      throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    if (this.#namespaceScanSessionId === undefined) {
+      this.#namespaceScanSessionId = randomUUID();
+      this.#namespaceScanGeneration = cursor.sweepGeneration;
+      this.#namespaceScanAfterKey = cursor.afterKey;
+    } else if (
+      this.#namespaceScanGeneration !== cursor.sweepGeneration ||
+      this.#namespaceScanAfterKey !== cursor.afterKey
+    ) {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    const input = normalizeArtifactStorageOperationInput("scanNamespacePage", {
+      scanSessionId: this.#namespaceScanSessionId,
+      sweepGeneration: cursor.sweepGeneration,
+      expectedAfterKey: cursor.afterKey,
+      maximumEntries: this.#namespaceBatchSize,
+    });
+    const expectation = createArtifactStorageResponseExpectation("scanNamespacePage", input);
+    let rawPage: ArtifactNamespaceScanPageResult;
+    try {
+      rawPage = await this.#awaitBeforeDeadline(
+        () => this.#scanNamespacePage(input),
+        deadline,
+        "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
+      );
+    } catch (error) {
+      throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN");
+    }
+    let page: ArtifactNamespaceScanPageResult;
+    try {
+      page = normalizeArtifactStorageOperationOutput("scanNamespacePage", rawPage);
+      assertArtifactStorageResponseMatchesExpectation(expectation, "scanNamespacePage", page);
+    } catch {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    let nextCursor: ArtifactNamespaceCursorSnapshot;
+    try {
+      const classification = await this.#databaseRequest(
+        "classifyArtifactNamespacePageAndAdvanceCursor",
+        {
+          expectedSweepGeneration: page.sweepGeneration,
+          expectedAfterKey: page.expectedAfterKey,
+          observations: page.observations,
+          completedSweep: page.completedSweep,
+        },
+        deadline,
+      );
+      nextCursor = assertNamespaceClassificationResult(classification, page);
+    } catch (error) {
+      throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    if (page.completedSweep) {
+      this.#namespaceScanSessionId = undefined;
+      this.#namespaceScanGeneration = undefined;
+      this.#namespaceScanAfterKey = undefined;
+    } else {
+      this.#namespaceScanAfterKey = nextCursor.afterKey;
+    }
+    return Object.freeze({
+      hasMore: !page.completedSweep,
+      sweepCompleted: page.completedSweep,
+    });
+  }
+
+  async #cleanupNamespace(item: ArtifactNamespaceCleanupWorkItem, deadline: number): Promise<void> {
+    const rawObservation: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of namespaceObservationKeys) {
+      rawObservation[key] = item[key];
+    }
+    const input = normalizeArtifactStorageOperationInput("cleanupNamespaceEntry", rawObservation);
+    const expectation = createArtifactStorageResponseExpectation("cleanupNamespaceEntry", input);
+    let rawResult: ArtifactNamespaceCleanupResult;
+    try {
+      rawResult = await this.#awaitBeforeDeadline(
+        () => this.#cleanupNamespaceEntry(input),
+        deadline,
+        "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
+      );
+    } catch (error) {
+      const retryCode = this.#safeUndispatchedRetryCode(error);
+      if (retryCode === undefined) {
+        throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN");
+      }
+      await this.#recordNamespaceCleanupFailure(item, retryCode, deadline);
+      return;
+    }
+    let result: ArtifactNamespaceCleanupResult;
+    try {
+      result = normalizeArtifactStorageOperationOutput("cleanupNamespaceEntry", rawResult);
+      assertArtifactStorageResponseMatchesExpectation(expectation, "cleanupNamespaceEntry", result);
+    } catch {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+    if (result.outcome === "identity_changed") {
+      await this.#recordNamespaceCleanupFailure(item, "storage_busy", deadline);
+      return;
+    }
+    const completed = await this.#databaseRequest(
+      "completeArtifactNamespaceCleanup",
+      {
+        entryKey: item.entryKey,
+        observationSha256: item.observationSha256,
+        expectedAttemptCount: item.expectedAttemptCount,
+      },
+      deadline,
+    );
+    try {
+      const record = requireRecord(completed, "Artifact namespace cleanup completion");
+      requireExactKeys(record, [
+        "entryKey",
+        "observationSha256",
+        "status",
+        "attemptCount",
+        "completedAt",
+        "replayed",
+      ]);
+      if (
+        record.entryKey !== item.entryKey ||
+        record.observationSha256 !== item.observationSha256 ||
+        record.status !== "completed" ||
+        record.attemptCount !== item.expectedAttemptCount ||
+        typeof record.replayed !== "boolean"
+      ) {
+        throw new TypeError("Artifact namespace cleanup completion is inconsistent.");
+      }
+      requireCanonicalDateTime(record.completedAt, "Artifact namespace cleanup completion time");
+    } catch {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+  }
+
+  async #recordNamespaceCleanupFailure(
+    item: ArtifactNamespaceCleanupWorkItem,
+    errorCode: ArtifactCleanupRetryErrorCode,
+    deadline: number,
+  ): Promise<void> {
+    const retryDelaySeconds = this.#nextNamespaceRetryDelay(item);
+    const failure = await this.#databaseRequest(
+      "recordArtifactNamespaceCleanupFailure",
+      {
+        entryKey: item.entryKey,
+        observationSha256: item.observationSha256,
+        expectedAttemptCount: item.expectedAttemptCount,
+        errorCode,
+        retryDelaySeconds,
+      },
+      deadline,
+    );
+    try {
+      const record = requireRecord(failure, "Artifact namespace cleanup failure result");
+      requireExactKeys(record, [
+        "entryKey",
+        "observationSha256",
+        "status",
+        "attemptCount",
+        "nextAttemptAt",
+        "errorCode",
+        "retryDelaySeconds",
+        "replayed",
+      ]);
+      const attemptCount = item.expectedAttemptCount + 1;
+      const failed = attemptCount === 8;
+      if (
+        record.entryKey !== item.entryKey ||
+        record.observationSha256 !== item.observationSha256 ||
+        record.status !== (failed ? "failed" : "retry_waiting") ||
+        record.attemptCount !== attemptCount ||
+        record.errorCode !== errorCode ||
+        record.retryDelaySeconds !== retryDelaySeconds ||
+        typeof record.replayed !== "boolean" ||
+        (failed && record.nextAttemptAt !== null) ||
+        (!failed && record.nextAttemptAt === null)
+      ) {
+        throw new TypeError("Artifact namespace cleanup failure result is inconsistent.");
+      }
+      if (!failed) {
+        requireCanonicalDateTime(
+          record.nextAttemptAt,
+          "Artifact namespace cleanup next attempt time",
+        );
+      }
+    } catch {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+  }
+
+  #nextNamespaceRetryDelay(item: ArtifactNamespaceCleanupWorkItem): number {
+    const prior = item.lastRetryDelaySeconds;
+    return prior === null
+      ? this.#initialRetryDelaySeconds
+      : Math.min(this.#maximumRetryDelaySeconds, prior * 2);
   }
 
   async #cleanup(item: ArtifactCleanupWorkItem, deadline: number): Promise<void> {
@@ -1025,6 +1509,38 @@ export class ArtifactReconciliationCoordinator {
       }
     }
 
+    if (
+      this.#namespaceScanSessionId !== undefined &&
+      this.#namespaceScanGeneration !== undefined &&
+      this.#namespaceScanAfterKey !== undefined
+    ) {
+      const input = normalizeArtifactStorageOperationInput("closeNamespaceScan", {
+        scanSessionId: this.#namespaceScanSessionId,
+        sweepGeneration: this.#namespaceScanGeneration,
+        expectedAfterKey: this.#namespaceScanAfterKey,
+      });
+      const expectation = createArtifactStorageResponseExpectation("closeNamespaceScan", input);
+      let rawClosed: CloseArtifactNamespaceScanResult;
+      try {
+        rawClosed = await this.#awaitBeforeDeadline(
+          () => this.#closeNamespaceScan(input),
+          deadline,
+          "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
+        );
+      } catch (error) {
+        throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN");
+      }
+      try {
+        const closed = normalizeArtifactStorageOperationOutput("closeNamespaceScan", rawClosed);
+        assertArtifactStorageResponseMatchesExpectation(expectation, "closeNamespaceScan", closed);
+        this.#namespaceScanSessionId = undefined;
+        this.#namespaceScanGeneration = undefined;
+        this.#namespaceScanAfterKey = undefined;
+      } catch {
+        throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+      }
+    }
+
     await this.#awaitNextTurn(deadline);
     if (this.#fatalError !== undefined) {
       throw this.#fatalError;
@@ -1038,6 +1554,7 @@ export class ArtifactReconciliationCoordinator {
     // This assignment is the close linearization point; later owner exit belongs to owner teardown.
     this.#state = "closed";
     this.#settleFirstPass();
+    this.#rejectFirstSweep(new Error("Artifact reconciliation closed before its first sweep."));
   }
 
   #observeOwnerExit(): void {
@@ -1067,6 +1584,7 @@ export class ArtifactReconciliationCoordinator {
     }
     this.#fatalSignal.resolve(error);
     this.#rejectFirstPass(error);
+    this.#rejectFirstSweep(error);
     for (const reject of [...this.#fatalWaiters]) {
       reject(error);
     }
@@ -1102,6 +1620,20 @@ export class ArtifactReconciliationCoordinator {
     if (!this.#firstPassSettled) {
       this.#firstPassSettled = true;
       this.#firstPass.reject(error);
+    }
+  }
+
+  #settleFirstSweep(): void {
+    if (!this.#firstSweepSettled) {
+      this.#firstSweepSettled = true;
+      this.#firstSweep.resolve();
+    }
+  }
+
+  #rejectFirstSweep(error: unknown): void {
+    if (!this.#firstSweepSettled) {
+      this.#firstSweepSettled = true;
+      this.#firstSweep.reject(error);
     }
   }
 }

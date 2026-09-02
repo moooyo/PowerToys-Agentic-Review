@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import {
   chmodSync,
@@ -17,6 +18,13 @@ import {
   writeSync,
 } from "node:fs";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { maximumResultArtifactBytes } from "@agentic-review/contracts";
+import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  calculateArtifactNamespaceObservationSha256,
+  parseArtifactNamespaceEntryKey,
+} from "./artifact-namespace-contract.js";
 import { ArtifactEntryBudget, visitBoundedArtifactEntries } from "./bounded-scan.js";
 import { ArtifactStorageIntegrityError } from "./errors.js";
 import {
@@ -44,15 +52,10 @@ const permissionBits = 0o7777n;
 const groupOrOtherWriteBits = 0o022n;
 const stickyBit = 0o1000n;
 const otherWriteBit = 0o002n;
-const lowerUuidV4 = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-const stagingEntryPattern = new RegExp(`^${lowerUuidV4}\\.upload$`, "u");
-const publicationTemporaryPattern = new RegExp(
-  `^\\.publish-${lowerUuidV4}-${lowerUuidV4}\\.tmp$`,
-  "u",
-);
 const digestEntryPattern = /^[0-9a-f]{64}$/u;
 const shardEntryPattern = /^[0-9a-f]{2}$/u;
 const supportedLocalFilesystemTypes = new Set([0x0000_ef53n, 0x5846_5342n]);
+const procSelfFileDescriptorRoot = "/proc/self/fd";
 
 const identityOf = (stats: BigIntStats): ArtifactStorageFileIdentity => ({
   device: stats.dev,
@@ -63,6 +66,69 @@ const identitiesMatch = (
   left: ArtifactStorageFileIdentity,
   right: ArtifactStorageFileIdentity,
 ): boolean => left.device === right.device && left.inode === right.inode;
+
+const canonicalStatNumber = (value: bigint): string => value.toString(10);
+
+const ctimeNanoseconds = (stats: BigIntStats): bigint => stats.ctimeNs;
+
+const fileStatsMatchObservation = (
+  stats: BigIntStats,
+  observation: ArtifactNamespaceObservation,
+  expectedLinkCount = observation.expectedLinkCount,
+): boolean =>
+  stats.isFile() &&
+  !stats.isSymbolicLink() &&
+  canonicalStatNumber(stats.dev) === observation.fileDevice &&
+  canonicalStatNumber(stats.ino) === observation.fileInode &&
+  canonicalStatNumber(ctimeNanoseconds(stats)) === observation.fileCtimeNs &&
+  canonicalStatNumber(stats.mode & permissionBits) === observation.fileMode &&
+  canonicalStatNumber(stats.uid) === observation.fileUid &&
+  stats.size === BigInt(observation.observedBytes) &&
+  stats.nlink === BigInt(expectedLinkCount);
+
+const parentStatsMatchObservation = (
+  stats: BigIntStats,
+  observation: ArtifactNamespaceObservation,
+): boolean =>
+  stats.isDirectory() &&
+  !stats.isSymbolicLink() &&
+  canonicalStatNumber(stats.dev) === observation.parentDevice &&
+  canonicalStatNumber(stats.ino) === observation.parentInode &&
+  canonicalStatNumber(stats.mode & permissionBits) === observation.parentMode &&
+  canonicalStatNumber(stats.uid) === observation.parentUid;
+
+const readDescriptorSha256 = (descriptor: number, expectedBytes: number): string => {
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let offset = 0;
+  while (offset < expectedBytes) {
+    const bytesRead = readSync(
+      descriptor,
+      buffer,
+      0,
+      Math.min(buffer.byteLength, expectedBytes - offset),
+      offset,
+    );
+    if (bytesRead < 1) {
+      throw integrity("Artifact namespace file ended during digest verification.");
+    }
+    hash.update(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  return hash.digest("hex");
+};
+
+const isManagedNamespaceKey = (
+  entryKey: string,
+  kind: "staging" | "publication-temporary",
+): boolean => {
+  try {
+    parseArtifactNamespaceEntryKey(entryKey, kind);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const hasCode = (error: unknown, code: string): boolean =>
   error instanceof Error && "code" in error && error.code === code;
@@ -344,7 +410,25 @@ const visitBoundDirectoryEntries = (
   assertBoundDirectory(binding);
 };
 
+export interface LinuxArtifactNamespaceMutationOverrides {
+  readonly unlink?: (path: string) => void;
+  readonly syncDirectoryDescriptor?: (descriptor: number) => void;
+}
+
 export class LinuxArtifactStorageOperations implements ArtifactStorageOperations {
+  readonly #unlinkNamespaceEntry: (path: string) => void;
+  readonly #syncNamespaceDirectoryDescriptor: (descriptor: number) => void;
+
+  constructor(overrides: LinuxArtifactNamespaceMutationOverrides = {}) {
+    const unlink = overrides.unlink ?? unlinkSync;
+    const syncDirectoryDescriptor = overrides.syncDirectoryDescriptor ?? fsyncSync;
+    if (typeof unlink !== "function" || typeof syncDirectoryDescriptor !== "function") {
+      throw new TypeError("Artifact namespace mutation overrides must be functions.");
+    }
+    this.#unlinkNamespaceEntry = unlink;
+    this.#syncNamespaceDirectoryDescriptor = syncDirectoryDescriptor;
+  }
+
   initialize(rootPath: string): ArtifactStorageLayout {
     currentEffectiveUserId();
     if (!isAbsolute(rootPath)) {
@@ -488,7 +572,7 @@ export class LinuxArtifactStorageOperations implements ArtifactStorageOperations
     }
 
     visitBoundDirectoryEntries(layout.staging, budget, (name) => {
-      if (!stagingEntryPattern.test(name)) {
+      if (!isManagedNamespaceKey(`staging/${name}`, "staging")) {
         throw integrity("Artifact staging namespace contains an unrecognized entry.");
       }
       const path = joinContainedArtifactPath(layout.rootPath, layout.staging.path, name);
@@ -519,7 +603,9 @@ export class LinuxArtifactStorageOperations implements ArtifactStorageOperations
         if (digestEntryPattern.test(name) && name.startsWith(shardName)) {
           kind = "object";
           immutableObjects += 1;
-        } else if (publicationTemporaryPattern.test(name)) {
+        } else if (
+          isManagedNamespaceKey(`objects/sha256/${shardName}/${name}`, "publication-temporary")
+        ) {
           kind = "temporary";
           publicationTemporaries += 1;
         } else {
@@ -558,6 +644,376 @@ export class LinuxArtifactStorageOperations implements ArtifactStorageOperations
       publicationTemporaries,
       stagingFiles,
     };
+  }
+
+  scanArtifactNamespace(
+    layout: ArtifactStorageLayout,
+    maximumManifestEntries: number,
+    maximumTraversalEntries: number,
+  ): readonly ArtifactNamespaceObservation[] {
+    const budget = new ArtifactEntryBudget(maximumTraversalEntries);
+    this.#assertLayout(layout);
+    const observations: ArtifactNamespaceObservation[] = [];
+    const observationFromStats = (
+      entryKey: string,
+      stats: BigIntStats,
+      parent: ArtifactStorageDirectoryBinding,
+      linkedObjectSha256: string | null,
+    ): ArtifactNamespaceObservation => {
+      if (stats.size > BigInt(maximumResultArtifactBytes)) {
+        throw integrity("Artifact namespace file exceeds the result artifact byte limit.");
+      }
+      const parsed = parseArtifactNamespaceEntryKey(entryKey);
+      const linked = linkedObjectSha256 === null ? null : canonicalStatNumber(stats.dev);
+      const identity = {
+        entryKey: parsed.entryKey,
+        kind: parsed.kind,
+        uploadId: parsed.uploadId,
+        finalizationId: parsed.finalizationId,
+        linkedObjectSha256,
+        observedBytes: Number(stats.size),
+        expectedLinkCount: Number(stats.nlink) as 1 | 2,
+        fileDevice: canonicalStatNumber(stats.dev),
+        fileInode: canonicalStatNumber(stats.ino),
+        fileCtimeNs: canonicalStatNumber(ctimeNanoseconds(stats)),
+        fileMode: canonicalStatNumber(stats.mode & permissionBits),
+        fileUid: canonicalStatNumber(stats.uid),
+        parentDevice: canonicalStatNumber(parent.device),
+        parentInode: canonicalStatNumber(parent.identity.inode),
+        parentMode: canonicalStatNumber(parent.mode),
+        parentUid: canonicalStatNumber(parent.userId),
+        linkedObjectDevice: linked,
+        linkedObjectInode: linked === null ? null : canonicalStatNumber(stats.ino),
+        linkedObjectCtimeNs: linked === null ? null : canonicalStatNumber(ctimeNanoseconds(stats)),
+      };
+      return Object.freeze({
+        ...identity,
+        observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+      });
+    };
+    const recordObservation = (observation: ArtifactNamespaceObservation): void => {
+      if (observations.length >= maximumManifestEntries) {
+        throw integrity("Artifact namespace manifest exceeds its bounded entry limit.");
+      }
+      observations.push(observation);
+    };
+
+    let sawStaging = false;
+    let sawObjects = false;
+    visitBoundDirectoryEntries(layout.root, budget, (name) => {
+      if (name === "staging") {
+        sawStaging = true;
+      } else if (name === "objects") {
+        sawObjects = true;
+      } else {
+        throw integrity("Artifact storage root contains an unrecognized namespace entry.");
+      }
+    });
+    if (!sawStaging || !sawObjects) {
+      throw integrity("Artifact storage root is missing a managed namespace.");
+    }
+    let sawSha256 = false;
+    visitBoundDirectoryEntries(layout.objects, budget, (name) => {
+      if (name !== "sha256") {
+        throw integrity("Artifact object namespace contains an unrecognized entry.");
+      }
+      sawSha256 = true;
+    });
+    if (!sawSha256) {
+      throw integrity("Artifact object namespace is missing its digest directory.");
+    }
+
+    visitBoundDirectoryEntries(layout.staging, budget, (name) => {
+      if (!isManagedNamespaceKey(`staging/${name}`, "staging")) {
+        throw integrity("Artifact staging namespace contains an unrecognized entry.");
+      }
+      const path = joinContainedArtifactPath(layout.rootPath, layout.staging.path, name);
+      const stats = this.#assertPathFile(path, layout.staging, undefined, [1n]);
+      recordObservation(observationFromStats(`staging/${name}`, stats, layout.staging, null));
+    });
+
+    visitBoundDirectoryEntries(layout.sha256, budget, (shardName) => {
+      if (!shardEntryPattern.test(shardName)) {
+        throw integrity("Artifact digest namespace contains an unrecognized shard entry.");
+      }
+      const shardPath = joinContainedArtifactPath(layout.rootPath, layout.sha256.path, shardName);
+      const shardStats = readEntry(shardPath);
+      if (shardStats === undefined) {
+        throw integrity("Artifact object shard disappeared during namespace scan.");
+      }
+      assertPrivateDirectoryStats(shardPath, shardStats, layout.root.device);
+      const shard = bindDirectory(shardPath, shardStats, true);
+      const linkedEntries = new Map<
+        string,
+        {
+          readonly name: string;
+          readonly kind: "object" | "temporary";
+          readonly stats: BigIntStats;
+        }[]
+      >();
+      visitBoundDirectoryEntries(shard, budget, (name) => {
+        const kind =
+          digestEntryPattern.test(name) && name.startsWith(shardName)
+            ? "object"
+            : isManagedNamespaceKey(`objects/sha256/${shardName}/${name}`, "publication-temporary")
+              ? "temporary"
+              : undefined;
+        if (kind === undefined) {
+          throw integrity("Artifact object shard contains an unrecognized namespace entry.");
+        }
+        const path = joinContainedArtifactPath(layout.rootPath, shard.path, name);
+        const stats = this.#assertPathFile(path, shard, undefined, [1n, 2n]);
+        const key = `${stats.dev}:${stats.ino}`;
+        const group = linkedEntries.get(key) ?? [];
+        group.push({ name, kind, stats });
+        linkedEntries.set(key, group);
+      });
+
+      for (const group of linkedEntries.values()) {
+        const temporary = group.find((entry) => entry.kind === "temporary");
+        const object = group.find((entry) => entry.kind === "object");
+        if (group.some((entry) => entry.stats.nlink === 2n)) {
+          if (
+            group.length !== 2 ||
+            temporary === undefined ||
+            object === undefined ||
+            group.some((entry) => entry.stats.nlink !== 2n)
+          ) {
+            throw integrity("Artifact namespace scan found a malformed hard-link pair.");
+          }
+          if (object.stats.size > BigInt(maximumResultArtifactBytes)) {
+            throw integrity("Artifact linked object exceeds the result artifact byte limit.");
+          }
+        }
+        if (temporary !== undefined) {
+          const entryKey = `objects/sha256/${shardName}/${temporary.name}`;
+          recordObservation(
+            observationFromStats(entryKey, temporary.stats, shard, object?.name ?? null),
+          );
+        }
+      }
+    });
+    observations.sort((left, right) =>
+      left.entryKey < right.entryKey ? -1 : left.entryKey > right.entryKey ? 1 : 0,
+    );
+    for (let index = 1; index < observations.length; index += 1) {
+      if (observations[index - 1]?.entryKey === observations[index]?.entryKey) {
+        throw integrity("Artifact namespace scan produced a duplicate managed key.");
+      }
+    }
+    this.#assertLayout(layout);
+    return Object.freeze(observations);
+  }
+
+  cleanupArtifactNamespaceEntry(
+    layout: ArtifactStorageLayout,
+    observation: ArtifactNamespaceObservation,
+  ): ArtifactNamespaceCleanupResult {
+    const parsed = parseArtifactNamespaceEntryKey(observation.entryKey, observation.kind);
+    for (const ancestor of layout.ancestors) {
+      assertBoundDirectory(ancestor);
+    }
+    assertBoundDirectory(layout.root);
+    if (parsed.kind === "publication-temporary") {
+      assertBoundDirectory(layout.objects);
+      assertBoundDirectory(layout.sha256);
+    }
+    const parentPath =
+      parsed.kind === "staging"
+        ? layout.staging.path
+        : joinContainedArtifactPath(layout.rootPath, layout.sha256.path, parsed.shard as string);
+    let parentDescriptor: number;
+    try {
+      parentDescriptor = openSync(
+        parentPath,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+    } catch (error) {
+      if (hasCode(error, "ENOENT") || hasCode(error, "ELOOP") || hasCode(error, "ENOTDIR")) {
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "identity_changed",
+        });
+      }
+      throw error;
+    }
+
+    let targetDescriptor: number | undefined;
+    let peerDescriptor: number | undefined;
+    try {
+      const parentStats = fstatSync(parentDescriptor, { bigint: true });
+      const currentUserId = canonicalStatNumber(currentEffectiveUserId());
+      if (
+        observation.fileMode !== canonicalStatNumber(privateFileMode) ||
+        observation.parentMode !== canonicalStatNumber(privateDirectoryMode) ||
+        observation.fileUid !== currentUserId ||
+        observation.parentUid !== currentUserId ||
+        !parentStatsMatchObservation(parentStats, observation)
+      ) {
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "identity_changed",
+        });
+      }
+      const durableAbsent = (): ArtifactNamespaceCleanupResult => {
+        this.#syncNamespaceDirectoryDescriptor(parentDescriptor);
+        if (
+          !parentStatsMatchObservation(fstatSync(parentDescriptor, { bigint: true }), observation)
+        ) {
+          return Object.freeze({
+            entryKey: observation.entryKey,
+            observationSha256: observation.observationSha256,
+            outcome: "identity_changed",
+          });
+        }
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "already_absent",
+        });
+      };
+      const targetName =
+        parsed.kind === "staging"
+          ? artifactStagingFilename(parsed.uploadId)
+          : artifactPublicationTemporaryFilename(parsed.uploadId, parsed.finalizationId as string);
+      const descriptorParentPath = join(procSelfFileDescriptorRoot, String(parentDescriptor));
+      const targetPath = joinContainedArtifactPath(
+        descriptorParentPath,
+        descriptorParentPath,
+        targetName,
+      );
+      const initialTargetStats = readEntry(targetPath);
+      if (initialTargetStats === undefined) {
+        return durableAbsent();
+      }
+      if (!fileStatsMatchObservation(initialTargetStats, observation)) {
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "identity_changed",
+        });
+      }
+      try {
+        targetDescriptor = openSync(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch (error) {
+        if (hasCode(error, "ENOENT") || hasCode(error, "ELOOP")) {
+          return Object.freeze({
+            entryKey: observation.entryKey,
+            observationSha256: observation.observationSha256,
+            outcome: "identity_changed",
+          });
+        }
+        throw error;
+      }
+      if (!fileStatsMatchObservation(fstatSync(targetDescriptor, { bigint: true }), observation)) {
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "identity_changed",
+        });
+      }
+
+      let peerPath: string | undefined;
+      if (observation.expectedLinkCount === 2) {
+        if (observation.linkedObjectSha256 === null) {
+          throw integrity("Artifact linked namespace cleanup lacks an immutable object key.");
+        }
+        peerPath = joinContainedArtifactPath(
+          descriptorParentPath,
+          descriptorParentPath,
+          observation.linkedObjectSha256,
+        );
+        try {
+          peerDescriptor = openSync(peerPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        } catch (error) {
+          if (hasCode(error, "ENOENT") || hasCode(error, "ELOOP")) {
+            return Object.freeze({
+              entryKey: observation.entryKey,
+              observationSha256: observation.observationSha256,
+              outcome: "identity_changed",
+            });
+          }
+          throw error;
+        }
+        const peerStats = fstatSync(peerDescriptor, { bigint: true });
+        if (
+          !fileStatsMatchObservation(peerStats, observation) ||
+          canonicalStatNumber(peerStats.dev) !== observation.linkedObjectDevice ||
+          canonicalStatNumber(peerStats.ino) !== observation.linkedObjectInode ||
+          canonicalStatNumber(ctimeNanoseconds(peerStats)) !== observation.linkedObjectCtimeNs ||
+          readDescriptorSha256(peerDescriptor, observation.observedBytes) !==
+            observation.linkedObjectSha256
+        ) {
+          return Object.freeze({
+            entryKey: observation.entryKey,
+            observationSha256: observation.observationSha256,
+            outcome: "identity_changed",
+          });
+        }
+      }
+
+      const finalTargetStats = readEntry(targetPath);
+      const finalPeerStats = peerPath === undefined ? undefined : readEntry(peerPath);
+      if (
+        finalTargetStats === undefined ||
+        !fileStatsMatchObservation(finalTargetStats, observation) ||
+        !fileStatsMatchObservation(fstatSync(targetDescriptor, { bigint: true }), observation) ||
+        (peerPath !== undefined &&
+          (finalPeerStats === undefined ||
+            !fileStatsMatchObservation(finalPeerStats, observation))) ||
+        !parentStatsMatchObservation(fstatSync(parentDescriptor, { bigint: true }), observation)
+      ) {
+        return Object.freeze({
+          entryKey: observation.entryKey,
+          observationSha256: observation.observationSha256,
+          outcome: "identity_changed",
+        });
+      }
+      try {
+        this.#unlinkNamespaceEntry(targetPath);
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) {
+          return durableAbsent();
+        }
+        throw error;
+      }
+      if (readEntry(targetPath) !== undefined) {
+        throw integrity("Artifact namespace target survived unlink.");
+      }
+      if (peerDescriptor !== undefined) {
+        const peerStats = fstatSync(peerDescriptor, { bigint: true });
+        if (
+          !peerStats.isFile() ||
+          peerStats.isSymbolicLink() ||
+          canonicalStatNumber(peerStats.dev) !== observation.linkedObjectDevice ||
+          canonicalStatNumber(peerStats.ino) !== observation.linkedObjectInode ||
+          canonicalStatNumber(peerStats.mode & permissionBits) !== observation.fileMode ||
+          canonicalStatNumber(peerStats.uid) !== observation.fileUid ||
+          peerStats.size !== BigInt(observation.observedBytes) ||
+          peerStats.nlink !== 1n ||
+          readDescriptorSha256(peerDescriptor, observation.observedBytes) !==
+            observation.linkedObjectSha256
+        ) {
+          throw integrity("Artifact immutable object changed after temporary unlink.");
+        }
+      }
+      this.#syncNamespaceDirectoryDescriptor(parentDescriptor);
+      return Object.freeze({
+        entryKey: observation.entryKey,
+        observationSha256: observation.observationSha256,
+        outcome: "removed",
+      });
+    } finally {
+      if (peerDescriptor !== undefined) {
+        closeSync(peerDescriptor);
+      }
+      if (targetDescriptor !== undefined) {
+        closeSync(targetDescriptor);
+      }
+      closeSync(parentDescriptor);
+    }
   }
 
   filesystemCapacity(layout: ArtifactStorageLayout): ArtifactFilesystemCapacity {

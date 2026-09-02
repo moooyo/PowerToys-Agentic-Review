@@ -117,6 +117,63 @@ describe("artifact storage public boundary", () => {
 });
 
 describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process integration", () => {
+  it("scans and identity-cleans a staging entry through the owner process", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "agentic-review-artifact-namespace-worker-"));
+    await chmod(parent, 0o700);
+    temporaryDirectories.push(parent);
+    const client = await ArtifactStorageClient.create({
+      storage: {
+        rootPath: join(parent, "storage"),
+        capacity: {
+          hardBytes: 100_000_000n,
+          hardEntries: 1_000,
+          emergencyReserveBytes: 10_000n,
+          perUploadMetadataHeadroomBytes: 4_096n,
+          cleanupBacklogHighWaterEntries: 100,
+        },
+        closeTimeoutMilliseconds: 5_000,
+      },
+      startupTimeoutMilliseconds: 5_000,
+      requestTimeoutMilliseconds: 5_000,
+      shutdownTimeoutMilliseconds: 5_000,
+      exitTimeoutMilliseconds: 5_000,
+    });
+    clients.push(client);
+    const bytes = Buffer.from("namespace-process-owned");
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    await client.writePreparedChunk({
+      uploadId,
+      prepareId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkSha256: digest,
+      bytes,
+      receiptState: "prepared",
+      committedOffsetBytes: 0,
+      committedPrefix: [],
+    });
+    const page = await client.scanNamespacePage({
+      scanSessionId: "80000000-0000-4000-8000-000000000001",
+      sweepGeneration: 0,
+      expectedAfterKey: null,
+      maximumEntries: 8,
+    });
+    expect(page).toMatchObject({ completedSweep: true });
+    expect(page.observations).toHaveLength(1);
+    const observation = page.observations[0];
+    if (observation === undefined) {
+      throw new Error("Expected one namespace observation.");
+    }
+    await expect(client.cleanupNamespaceEntry(observation)).resolves.toMatchObject({
+      outcome: "removed",
+    });
+    await expect(client.cleanupNamespaceEntry(observation)).resolves.toMatchObject({
+      outcome: "already_absent",
+    });
+    await client.close();
+    expect(await client.ownerExit).toBe(0);
+  });
+
   it("owns the kernel for write, finalize, read, capacity, cleanup, and shutdown", async () => {
     const parent = await mkdtemp(join(tmpdir(), "agentic-review-artifact-worker-"));
     await chmod(parent, 0o700);

@@ -145,6 +145,22 @@ const createArtifactReconciliationCoordinator = (
       ownerExit: new Promise<number>(() => undefined),
       cleanupUpload: () =>
         Promise.resolve({ stagingRemoved: false, publicationTemporariesRemoved: 0 }),
+      scanNamespacePage: (input) =>
+        Promise.resolve({
+          scanSessionId: input.scanSessionId,
+          sweepGeneration: input.sweepGeneration,
+          expectedAfterKey: input.expectedAfterKey,
+          observations: [],
+          completedSweep: true,
+          nextAfterKey: null,
+        }),
+      closeNamespaceScan: (input) => Promise.resolve({ ...input, closed: true }),
+      cleanupNamespaceEntry: (input) =>
+        Promise.resolve({
+          entryKey: input.entryKey,
+          observationSha256: input.observationSha256,
+          outcome: "identity_changed",
+        }),
     },
     batchSize: 8,
     intervalMilliseconds: 60_000,

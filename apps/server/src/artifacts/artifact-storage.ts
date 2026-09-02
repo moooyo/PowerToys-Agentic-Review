@@ -5,6 +5,18 @@ import {
   maximumResultArtifactChunks,
 } from "@agentic-review/contracts";
 import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  type ArtifactNamespaceScanPageInput,
+  type ArtifactNamespaceScanPageResult,
+  type CloseArtifactNamespaceScanInput,
+  type CloseArtifactNamespaceScanResult,
+  maximumArtifactNamespaceManifestEntries,
+  snapshotArtifactNamespaceObservation,
+  snapshotArtifactNamespaceScanPageInput,
+  snapshotCloseArtifactNamespaceScanInput,
+} from "./artifact-namespace-contract.js";
+import {
   deriveArtifactCapacityAccounting,
   evaluateArtifactCapacity,
   snapshotArtifactCapacityAccounting,
@@ -81,7 +93,20 @@ export class ArtifactStorageKernel {
   readonly #uploadFifo = new KeyedFifo();
   readonly #objectFifo = new KeyedFifo();
   readonly #capacityFifo = new SerialFifo();
+  readonly #namespaceFifo = new SerialFifo();
   readonly #inFlight = new Set<Promise<unknown>>();
+  #namespaceScan:
+    | {
+        readonly scanSessionId: string;
+        readonly sweepGeneration: number;
+        readonly maximumEntries: number;
+        readonly manifest: readonly ArtifactNamespaceObservation[];
+        afterKey: string | null;
+        nextIndex: number;
+      }
+    | undefined;
+  #lastClosedNamespaceScanSessionId: string | undefined;
+  #namespaceOperationAccepted = false;
   #state: "open" | "closing" | "closed" = "open";
 
   constructor(options: ArtifactStorageKernelOptions, operations: ArtifactStorageOperations) {
@@ -131,6 +156,32 @@ export class ArtifactStorageKernel {
     const validated = validateCleanupRequest(input);
     return this.#track(
       this.#uploadFifo.run(validated.uploadId, () => this.#cleanupUpload(validated)),
+    );
+  }
+
+  scanNamespacePage(
+    input: ArtifactNamespaceScanPageInput,
+  ): Promise<ArtifactNamespaceScanPageResult> {
+    this.#requireOpen();
+    const snapshot = snapshotArtifactNamespaceScanPageInput(input);
+    return this.#acceptNamespaceOperation(() => this.#scanNamespacePage(snapshot));
+  }
+
+  closeNamespaceScan(
+    input: CloseArtifactNamespaceScanInput,
+  ): Promise<CloseArtifactNamespaceScanResult> {
+    this.#requireOpen();
+    const snapshot = snapshotCloseArtifactNamespaceScanInput(input);
+    return this.#acceptNamespaceOperation(() => this.#closeNamespaceScan(snapshot));
+  }
+
+  cleanupNamespaceEntry(
+    input: ArtifactNamespaceObservation,
+  ): Promise<ArtifactNamespaceCleanupResult> {
+    this.#requireOpen();
+    const observation = snapshotArtifactNamespaceObservation(input);
+    return this.#acceptNamespaceOperation(() =>
+      this.#operations.cleanupArtifactNamespaceEntry(this.#layout, observation),
     );
   }
 
@@ -229,7 +280,135 @@ export class ArtifactStorageKernel {
     if (this.#inFlight.size !== 0) {
       throw new ArtifactStorageCloseTimeoutError(timeoutMilliseconds);
     }
+    this.#namespaceScan = undefined;
     this.#state = "closed";
+  }
+
+  #scanNamespacePage(input: ArtifactNamespaceScanPageInput): ArtifactNamespaceScanPageResult {
+    let scan = this.#namespaceScan;
+    if (scan === undefined) {
+      if (this.#lastClosedNamespaceScanSessionId === input.scanSessionId) {
+        throw new ArtifactStorageIntegrityError(
+          "Artifact namespace scan session cannot be replayed after closure.",
+        );
+      }
+      const rawManifest = this.#operations.scanArtifactNamespace(
+        this.#layout,
+        maximumArtifactNamespaceManifestEntries,
+        this.#options.capacity.hardEntries,
+      );
+      if (
+        !Array.isArray(rawManifest) ||
+        rawManifest.length > maximumArtifactNamespaceManifestEntries
+      ) {
+        throw new ArtifactStorageIntegrityError(
+          "Artifact namespace scan manifest exceeds its bounded entry limit.",
+        );
+      }
+      const manifest = rawManifest.map((entry) => snapshotArtifactNamespaceObservation(entry));
+      let priorKey: string | null = null;
+      for (const observation of manifest) {
+        if (priorKey !== null && observation.entryKey <= priorKey) {
+          throw new ArtifactStorageIntegrityError(
+            "Artifact namespace scan manifest must be strictly increasing.",
+          );
+        }
+        priorKey = observation.entryKey;
+      }
+      scan = {
+        scanSessionId: input.scanSessionId,
+        sweepGeneration: input.sweepGeneration,
+        maximumEntries: input.maximumEntries,
+        manifest: Object.freeze(manifest),
+        afterKey: input.expectedAfterKey,
+        nextIndex: this.#namespaceManifestUpperBound(manifest, input.expectedAfterKey),
+      };
+      this.#namespaceScan = scan;
+    } else if (
+      scan.scanSessionId !== input.scanSessionId ||
+      scan.sweepGeneration !== input.sweepGeneration ||
+      scan.maximumEntries !== input.maximumEntries ||
+      scan.afterKey !== input.expectedAfterKey
+    ) {
+      throw new ArtifactStorageIntegrityError(
+        "Artifact namespace scan session cursor or identity changed unexpectedly.",
+      );
+    }
+
+    const startIndex = scan.nextIndex;
+    const remaining = scan.manifest.length - startIndex;
+    const completedSweep = remaining <= input.maximumEntries;
+    const observations = Object.freeze(
+      scan.manifest.slice(startIndex, startIndex + input.maximumEntries),
+    );
+    if (!completedSweep && observations.length !== input.maximumEntries) {
+      throw new ArtifactStorageIntegrityError(
+        "Artifact namespace non-final scan page must be full.",
+      );
+    }
+    const nextAfterKey = completedSweep ? null : (observations.at(-1)?.entryKey ?? null);
+    if (!completedSweep && nextAfterKey === null) {
+      throw new ArtifactStorageIntegrityError("Artifact namespace scan made no cursor progress.");
+    }
+    const result = Object.freeze({
+      scanSessionId: input.scanSessionId,
+      sweepGeneration: input.sweepGeneration,
+      expectedAfterKey: input.expectedAfterKey,
+      observations,
+      completedSweep,
+      nextAfterKey,
+    });
+    if (completedSweep) {
+      this.#namespaceScan = undefined;
+      this.#lastClosedNamespaceScanSessionId = input.scanSessionId;
+    } else {
+      scan.afterKey = nextAfterKey;
+      scan.nextIndex += observations.length;
+    }
+    return result;
+  }
+
+  #closeNamespaceScan(input: CloseArtifactNamespaceScanInput): CloseArtifactNamespaceScanResult {
+    const scan = this.#namespaceScan;
+    if (
+      scan === undefined ||
+      scan.scanSessionId !== input.scanSessionId ||
+      scan.sweepGeneration !== input.sweepGeneration ||
+      scan.afterKey !== input.expectedAfterKey
+    ) {
+      throw new ArtifactStorageIntegrityError(
+        "Artifact namespace scan closure does not match the active session.",
+      );
+    }
+    this.#namespaceScan = undefined;
+    this.#lastClosedNamespaceScanSessionId = input.scanSessionId;
+    return Object.freeze({ ...input, closed: true });
+  }
+
+  #namespaceManifestUpperBound(
+    manifest: readonly ArtifactNamespaceObservation[],
+    afterKey: string | null,
+  ): number {
+    if (afterKey === null) {
+      return 0;
+    }
+    let lower = 0;
+    let upper = manifest.length;
+    while (lower < upper) {
+      const middle = lower + Math.floor((upper - lower) / 2);
+      const entry = manifest[middle];
+      if (entry === undefined) {
+        throw new ArtifactStorageIntegrityError(
+          "Artifact namespace manifest binary search lost its entry.",
+        );
+      }
+      if (entry.entryKey <= afterKey) {
+        lower = middle + 1;
+      } else {
+        upper = middle;
+      }
+    }
+    return lower;
   }
 
   #writePreparedChunk(input: PreparedArtifactChunk): DurableArtifactChunk {
@@ -813,6 +992,31 @@ export class ArtifactStorageKernel {
       () => this.#inFlight.delete(operation),
     );
     return operation;
+  }
+
+  #acceptNamespaceOperation<T>(action: () => T): Promise<T> {
+    if (this.#namespaceOperationAccepted) {
+      throw new ArtifactStorageIntegrityError(
+        "Artifact namespace owner accepts only one operation at a time.",
+      );
+    }
+    this.#namespaceOperationAccepted = true;
+    let operation: Promise<T>;
+    try {
+      operation = this.#namespaceFifo.run(action);
+    } catch (error) {
+      this.#namespaceOperationAccepted = false;
+      throw error;
+    }
+    void operation.then(
+      () => {
+        this.#namespaceOperationAccepted = false;
+      },
+      () => {
+        this.#namespaceOperationAccepted = false;
+      },
+    );
+    return this.#track(operation);
   }
 
   #requireOpen(): void {

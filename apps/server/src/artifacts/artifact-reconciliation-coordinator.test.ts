@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  type ArtifactNamespaceCleanupResult,
+  type ArtifactNamespaceObservation,
+  type ArtifactNamespaceScanPageInput,
+  type ArtifactNamespaceScanPageResult,
+  type CloseArtifactNamespaceScanInput,
+  type CloseArtifactNamespaceScanResult,
+  calculateArtifactNamespaceObservationSha256,
+} from "../../dist/artifacts/artifact-namespace-contract.js";
+import {
   ArtifactReconciliationCoordinator,
   ArtifactReconciliationCoordinatorError,
   type ArtifactReconciliationDatabaseHandle,
@@ -12,15 +21,21 @@ import {
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import type {
   ArtifactCleanupWorkItem,
+  ArtifactNamespaceCleanupWorkItem,
   ArtifactReconciliationDatabaseOperation,
 } from "../../dist/database/artifacts.js";
 import type { DatabaseOperationMap } from "../../dist/database/protocol.js";
 
 type CleanupDatabaseOperation =
+  | "classifyArtifactNamespacePageAndAdvanceCursor"
   | "completeArtifactCleanup"
+  | "completeArtifactNamespaceCleanup"
   | "listDueArtifactCleanups"
+  | "listDueArtifactNamespaceCleanups"
   | "readArtifactHealthAccounting"
+  | "readArtifactReconciliationCursor"
   | "recordArtifactCleanupFailure"
+  | "recordArtifactNamespaceCleanupFailure"
   | "terminalizeInactiveArtifactUploads";
 
 const uploadId = "11111111-1111-4111-8111-111111111111";
@@ -68,13 +83,49 @@ const cleanupItem = (
   publications: [],
 });
 
+const namespaceObservation = (ordinal = 1): ArtifactNamespaceObservation => {
+  const namespaceUploadId = `70000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+  const identity = {
+    entryKey: `staging/${namespaceUploadId}.upload`,
+    kind: "staging" as const,
+    uploadId: namespaceUploadId,
+    finalizationId: null,
+    linkedObjectSha256: null,
+    observedBytes: 1,
+    expectedLinkCount: 1 as const,
+    fileDevice: "1",
+    fileInode: "2",
+    fileCtimeNs: "3",
+    fileMode: "384",
+    fileUid: "1000",
+    parentDevice: "1",
+    parentInode: "4",
+    parentMode: "448",
+    parentUid: "1000",
+    linkedObjectDevice: null,
+    linkedObjectInode: null,
+    linkedObjectCtimeNs: null,
+  };
+  return {
+    ...identity,
+    observationSha256: calculateArtifactNamespaceObservationSha256(identity),
+  };
+};
+
 class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
   readonly events: string[] = [];
   readonly inputs: unknown[] = [];
   items: ArtifactCleanupWorkItem[] = [];
   terminalHasMore = false;
   cleanupHasMore = false;
+  namespaceItems: ArtifactNamespaceCleanupWorkItem[] = [];
+  namespaceAfterKey: string | null = null;
+  namespaceSweepGeneration = 0;
   completeError: Error | undefined;
+  namespaceCompleteError: Error | undefined;
+  namespaceClassificationError: Error | undefined;
+  classificationOverride: ((input: unknown, result: unknown) => unknown) | undefined;
+  exposeClassifiedNamespaceCleanup = false;
   health = emptyHealth();
   onRequest: ((operation: CleanupDatabaseOperation) => void) | undefined;
 
@@ -126,6 +177,90 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
       case "readArtifactHealthAccounting":
         result = this.health;
         break;
+      case "readArtifactReconciliationCursor":
+        result = {
+          name: "managed_namespace_v2",
+          sweepGeneration: this.namespaceSweepGeneration,
+          afterKey: this.namespaceAfterKey,
+          updatedAt: timestamp,
+          lastCompletedAt: this.namespaceSweepGeneration === 0 ? null : timestamp,
+        };
+        break;
+      case "classifyArtifactNamespacePageAndAdvanceCursor": {
+        if (this.namespaceClassificationError !== undefined) {
+          throw this.namespaceClassificationError;
+        }
+        const page =
+          input as DatabaseOperationMap["classifyArtifactNamespacePageAndAdvanceCursor"]["input"];
+        this.namespaceSweepGeneration += page.completedSweep ? 1 : 0;
+        this.namespaceAfterKey = page.completedSweep
+          ? null
+          : (page.observations.at(-1)?.entryKey ?? null);
+        const classificationResult = {
+          classifications: page.observations.map((observation) => ({
+            entryKey: observation.entryKey,
+            observationSha256: observation.observationSha256,
+            disposition: "cleanup_intent_created",
+            reason: "orphan",
+            supersededPriorIntent: false,
+          })),
+          cursor: {
+            name: "managed_namespace_v2",
+            sweepGeneration: this.namespaceSweepGeneration,
+            afterKey: this.namespaceAfterKey,
+            updatedAt: timestamp,
+            lastCompletedAt: page.completedSweep ? timestamp : null,
+          },
+        };
+        if (this.exposeClassifiedNamespaceCleanup && page.observations.length > 0) {
+          this.namespaceItems = page.observations.map((observation) => ({
+            ...observation,
+            reason: "orphan" as const,
+            observedSweepGeneration: page.expectedSweepGeneration,
+            expectedAttemptCount: 0,
+            lastRetryDelaySeconds: null,
+          }));
+        }
+        result = this.classificationOverride?.(input, classificationResult) ?? classificationResult;
+        break;
+      }
+      case "listDueArtifactNamespaceCleanups":
+        result = { items: this.namespaceItems, hasMore: false };
+        break;
+      case "completeArtifactNamespaceCleanup": {
+        if (this.namespaceCompleteError !== undefined) {
+          throw this.namespaceCompleteError;
+        }
+        const completion =
+          input as DatabaseOperationMap["completeArtifactNamespaceCleanup"]["input"];
+        result = {
+          entryKey: completion.entryKey,
+          observationSha256: completion.observationSha256,
+          status: "completed",
+          attemptCount: completion.expectedAttemptCount,
+          completedAt: timestamp,
+          replayed: false,
+        };
+        this.namespaceItems = [];
+        break;
+      }
+      case "recordArtifactNamespaceCleanupFailure": {
+        const failure =
+          input as DatabaseOperationMap["recordArtifactNamespaceCleanupFailure"]["input"];
+        const attemptCount = failure.expectedAttemptCount + 1;
+        result = {
+          entryKey: failure.entryKey,
+          observationSha256: failure.observationSha256,
+          status: attemptCount === 8 ? "failed" : "retry_waiting",
+          attemptCount,
+          nextAttemptAt: attemptCount === 8 ? null : timestamp,
+          errorCode: failure.errorCode,
+          retryDelaySeconds: failure.retryDelaySeconds,
+          replayed: false,
+        };
+        this.namespaceItems = [];
+        break;
+      }
       default:
         throw new Error(`Unexpected database operation ${operation}.`);
     }
@@ -142,6 +277,12 @@ class FakeStorage implements ArtifactReconciliationStorageOwner {
     stagingRemoved: boolean;
     publicationTemporariesRemoved: number;
   }> = () => Promise.resolve({ stagingRemoved: false, publicationTemporariesRemoved: 0 });
+  namespacePages: readonly ArtifactNamespaceObservation[][] = [[]];
+  namespacePageIndex = 0;
+  namespaceCleanupResult: (
+    input: ArtifactNamespaceObservation,
+  ) => Promise<ArtifactNamespaceCleanupResult> = () =>
+    Promise.reject(new Error("Namespace cleanup was not configured."));
 
   constructor(ownerExit?: Promise<number>) {
     this.ownerExit = ownerExit ?? this.ownerExitSignal.promise;
@@ -151,6 +292,37 @@ class FakeStorage implements ArtifactReconciliationStorageOwner {
     this.events.push("storage:cleanup");
     this.cleanupStarted.resolve();
     return this.cleanupResult();
+  }
+
+  scanNamespacePage(
+    input: ArtifactNamespaceScanPageInput,
+  ): Promise<ArtifactNamespaceScanPageResult> {
+    this.events.push("storage:scan-namespace");
+    const observations = this.namespacePages[this.namespacePageIndex] ?? [];
+    this.namespacePageIndex += 1;
+    const completedSweep = this.namespacePageIndex >= this.namespacePages.length;
+    return Promise.resolve({
+      scanSessionId: input.scanSessionId,
+      sweepGeneration: input.sweepGeneration,
+      expectedAfterKey: input.expectedAfterKey,
+      observations,
+      completedSweep,
+      nextAfterKey: completedSweep ? null : (observations.at(-1)?.entryKey ?? null),
+    });
+  }
+
+  closeNamespaceScan(
+    input: CloseArtifactNamespaceScanInput,
+  ): Promise<CloseArtifactNamespaceScanResult> {
+    this.events.push("storage:close-namespace-scan");
+    return Promise.resolve({ ...input, closed: true });
+  }
+
+  cleanupNamespaceEntry(
+    input: ArtifactNamespaceObservation,
+  ): Promise<ArtifactNamespaceCleanupResult> {
+    this.events.push("storage:cleanup-namespace");
+    return this.namespaceCleanupResult(input);
   }
 }
 
@@ -183,16 +355,20 @@ describe("ArtifactReconciliationCoordinator", () => {
     const storage = new FakeStorage();
     const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
 
+    await coordinator.firstSweep;
+    expect(coordinator.health).toEqual(emptyHealth());
     await coordinator.firstPass;
 
     expect(database.events).toEqual([
       "db:terminalizeInactiveArtifactUploads",
       "db:listDueArtifactCleanups",
       "db:completeArtifactCleanup",
+      "db:readArtifactReconciliationCursor",
+      "db:classifyArtifactNamespacePageAndAdvanceCursor",
+      "db:listDueArtifactNamespaceCleanups",
       "db:readArtifactHealthAccounting",
     ]);
-    expect(storage.events).toEqual(["storage:cleanup"]);
-    expect(coordinator.health).toEqual(emptyHealth());
+    expect(storage.events).toEqual(["storage:cleanup", "storage:scan-namespace"]);
     expect(Object.isFrozen(coordinator.health)).toBe(true);
     expect(Object.isFrozen(coordinator.health?.cleanup)).toBe(true);
     await coordinator.close();
@@ -216,6 +392,7 @@ describe("ArtifactReconciliationCoordinator", () => {
       ),
     ).toThrow(/already consumed or forged/u);
     await coordinator.firstPass;
+    await coordinator.firstSweep;
     await coordinator.close();
   });
 
@@ -269,6 +446,9 @@ describe("ArtifactReconciliationCoordinator", () => {
       code: "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED",
       requiresFailStop: true,
     });
+    await expect(coordinator.firstSweep).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED",
+    });
     expect(failures).toHaveLength(1);
   });
 
@@ -287,6 +467,7 @@ describe("ArtifactReconciliationCoordinator", () => {
     );
 
     await expect(coordinator.firstPass).resolves.toBeUndefined();
+    await expect(coordinator.firstSweep).resolves.toBeUndefined();
     expect(coordinator.health?.namespaceCleanup).toMatchObject({
       completed: 4_096,
       operationalSaturated: false,
@@ -319,7 +500,141 @@ describe("ArtifactReconciliationCoordinator", () => {
       code: "ARTIFACT_RECONCILIATION_HEALTH_SATURATED",
       requiresFailStop: true,
     });
+    await expect(coordinator.firstSweep).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_HEALTH_SATURATED",
+    });
     expect(failures).toHaveLength(1);
+  });
+
+  it("rejects a tampered namespace classification before dispatching unlink", async () => {
+    const database = new FakeDatabase();
+    database.classificationOverride = (_input, value) => {
+      const result = value as { readonly cursor: unknown };
+      const observation = namespaceObservation();
+      return {
+        classifications: [
+          {
+            entryKey: observation.entryKey,
+            observationSha256: observation.observationSha256,
+            disposition: "forged_cleanup_authority",
+            reason: "orphan",
+            supersededPriorIntent: false,
+          },
+        ],
+        cursor: result.cursor,
+      };
+    };
+    const storage = new FakeStorage();
+    storage.namespacePages = [[namespaceObservation()]];
+    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE",
+    });
+    expect(storage.events).not.toContain("storage:cleanup-namespace");
+  });
+
+  it("does not unlink when namespace page classification loses its database CAS", async () => {
+    const database = new FakeDatabase();
+    database.namespaceClassificationError = new Error("injected namespace cursor CAS conflict");
+    const storage = new FakeStorage();
+    storage.namespacePages = [[namespaceObservation()]];
+    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_DATABASE_FAILURE",
+    });
+    expect(storage.events).not.toContain("storage:cleanup-namespace");
+  });
+
+  it("persists identity-changed namespace cleanup as retry without completing it", async () => {
+    const database = new FakeDatabase();
+    database.exposeClassifiedNamespaceCleanup = true;
+    const observation = namespaceObservation();
+    const storage = new FakeStorage();
+    storage.namespacePages = [[observation]];
+    storage.namespaceCleanupResult = (input) =>
+      Promise.resolve({
+        entryKey: input.entryKey,
+        observationSha256: input.observationSha256,
+        outcome: "identity_changed",
+      });
+    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+
+    await coordinator.firstPass;
+    await coordinator.firstSweep;
+    expect(database.events).toContain("db:recordArtifactNamespaceCleanupFailure");
+    expect(database.events).not.toContain("db:completeArtifactNamespaceCleanup");
+    await coordinator.close();
+  });
+
+  it("fail-stops an unknown namespace unlink outcome without writing DB state", async () => {
+    const database = new FakeDatabase();
+    database.exposeClassifiedNamespaceCleanup = true;
+    const storage = new FakeStorage();
+    storage.namespacePages = [[namespaceObservation()]];
+    storage.namespaceCleanupResult = () =>
+      Promise.reject(
+        new ArtifactStorageClientError(
+          "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
+          "Artifact namespace cleanup response timed out.",
+        ),
+      );
+    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
+    });
+    expect(database.events).not.toContain("db:recordArtifactNamespaceCleanupFailure");
+    expect(database.events).not.toContain("db:completeArtifactNamespaceCleanup");
+  });
+
+  it("closes an active multi-page namespace session during coordinator shutdown", async () => {
+    const database = new FakeDatabase();
+    const storage = new FakeStorage();
+    storage.namespacePages = [
+      Array.from({ length: 8 }, (_, index) => namespaceObservation(index + 1)),
+      [],
+    ];
+    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+
+    await coordinator.firstPass;
+    const firstSweep = coordinator.firstSweep;
+    await coordinator.close();
+    await expect(firstSweep).rejects.toThrow(/closed before its first sweep/u);
+    expect(storage.events).toContain("storage:close-namespace-scan");
+  });
+
+  it("replays an unlink after a lost DB completion response as already absent", async () => {
+    const database = new FakeDatabase();
+    database.exposeClassifiedNamespaceCleanup = true;
+    database.namespaceCompleteError = new Error("injected namespace completion response loss");
+    const observation = namespaceObservation();
+    const firstStorage = new FakeStorage();
+    firstStorage.namespacePages = [[observation]];
+    firstStorage.namespaceCleanupResult = (input) =>
+      Promise.resolve({
+        entryKey: input.entryKey,
+        observationSha256: input.observationSha256,
+        outcome: "removed",
+      });
+    const first = ArtifactReconciliationCoordinator.start(options(database, firstStorage));
+    await expect(first.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_DATABASE_FAILURE",
+    });
+
+    database.namespaceCompleteError = undefined;
+    const replayStorage = new FakeStorage();
+    replayStorage.namespaceCleanupResult = (input) =>
+      Promise.resolve({
+        entryKey: input.entryKey,
+        observationSha256: input.observationSha256,
+        outcome: "already_absent",
+      });
+    const replay = ArtifactReconciliationCoordinator.start(options(database, replayStorage));
+    await replay.firstPass;
+    expect(database.events).toContain("db:completeArtifactNamespaceCleanup");
+    await replay.close();
   });
 
   it("fail-stops an already-dispatched cleanup and never writes retry state", async () => {
@@ -422,6 +737,9 @@ describe("ArtifactReconciliationCoordinator", () => {
     expect(database.events).toEqual([
       "db:terminalizeInactiveArtifactUploads",
       "db:listDueArtifactCleanups",
+      "db:readArtifactReconciliationCursor",
+      "db:classifyArtifactNamespacePageAndAdvanceCursor",
+      "db:listDueArtifactNamespaceCleanups",
       "db:readArtifactHealthAccounting",
     ]);
   });
@@ -557,6 +875,24 @@ describe("ArtifactReconciliationCoordinator", () => {
         enumerable: true,
         get: once("storage.cleanupUpload", () => storageTarget.cleanupUpload()),
       },
+      scanNamespacePage: {
+        enumerable: true,
+        get: once("storage.scanNamespacePage", (input: ArtifactNamespaceScanPageInput) =>
+          storageTarget.scanNamespacePage(input),
+        ),
+      },
+      closeNamespaceScan: {
+        enumerable: true,
+        get: once("storage.closeNamespaceScan", (input: CloseArtifactNamespaceScanInput) =>
+          storageTarget.closeNamespaceScan(input),
+        ),
+      },
+      cleanupNamespaceEntry: {
+        enumerable: true,
+        get: once("storage.cleanupNamespaceEntry", (input: ArtifactNamespaceObservation) =>
+          storageTarget.cleanupNamespaceEntry(input),
+        ),
+      },
     });
     const raw = Object.create(null) as Record<string, unknown>;
     for (const [name, value] of Object.entries(options(database, storage))) {
@@ -581,6 +917,9 @@ describe("ArtifactReconciliationCoordinator", () => {
       "options.onFailStop": 1,
       "database.request": 1,
       "storage.cleanupUpload": 1,
+      "storage.scanNamespacePage": 1,
+      "storage.closeNamespaceScan": 1,
+      "storage.cleanupNamespaceEntry": 1,
       "storage.ownerExit": 1,
     });
   });

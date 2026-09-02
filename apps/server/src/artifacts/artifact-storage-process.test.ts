@@ -127,6 +127,38 @@ class FakeWorkerKernel {
       : Promise.reject(this.cleanupError);
   }
 
+  scanNamespacePage(input: unknown): Promise<unknown> {
+    this.calls.push({ operation: "scanNamespacePage", input });
+    const scan = input as {
+      readonly scanSessionId: string;
+      readonly sweepGeneration: number;
+      readonly expectedAfterKey: string | null;
+    };
+    return Promise.resolve({
+      scanSessionId: scan.scanSessionId,
+      sweepGeneration: scan.sweepGeneration,
+      expectedAfterKey: scan.expectedAfterKey,
+      observations: [],
+      completedSweep: true,
+      nextAfterKey: null,
+    });
+  }
+
+  closeNamespaceScan(input: unknown): Promise<unknown> {
+    this.calls.push({ operation: "closeNamespaceScan", input });
+    return Promise.resolve({ ...(input as object), closed: true });
+  }
+
+  cleanupNamespaceEntry(input: unknown): Promise<unknown> {
+    this.calls.push({ operation: "cleanupNamespaceEntry", input });
+    const observation = input as { readonly entryKey: string; readonly observationSha256: string };
+    return Promise.resolve({
+      entryKey: observation.entryKey,
+      observationSha256: observation.observationSha256,
+      outcome: "identity_changed",
+    });
+  }
+
   evaluateCapacity(input: unknown): Promise<unknown> {
     this.calls.push({ operation: "evaluateCapacity", input });
     if (this.capacityResult !== undefined) {
@@ -272,6 +304,60 @@ describe("runArtifactStorageProcess", () => {
     });
     expect(kernel.closeCalls).toBe(1);
     expect(port.exitCodes).toEqual([1]);
+  });
+
+  it("dispatches a bounded namespace scan without accepting caller paths", async () => {
+    const port = new FakeWorkerPort();
+    const kernel = new FakeWorkerKernel();
+    startProcess(port, kernel);
+    const scanSessionId = "80000000-0000-4000-8000-000000000001";
+    port.message(
+      request(1, "scanNamespacePage", {
+        scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        maximumEntries: 8,
+      }),
+    );
+    await flush();
+    expect(kernel.calls).toContainEqual({
+      operation: "scanNamespacePage",
+      input: { scanSessionId, sweepGeneration: 0, expectedAfterKey: null, maximumEntries: 8 },
+    });
+    expect(port.posted).toContainEqual(
+      expect.objectContaining({
+        type: "response",
+        operation: "scanNamespacePage",
+        ok: true,
+        output: expect.objectContaining({ completedSweep: true, observations: [] }),
+      }),
+    );
+
+    port.message(
+      request(2, "closeNamespaceScan", {
+        scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+      }),
+    );
+    await flush();
+    expect(kernel.calls).toContainEqual({
+      operation: "closeNamespaceScan",
+      input: { scanSessionId, sweepGeneration: 0, expectedAfterKey: null },
+    });
+
+    port.message(
+      request(3, "scanNamespacePage", {
+        scanSessionId: "80000000-0000-4000-8000-000000000002",
+        sweepGeneration: 0,
+        expectedAfterKey: null,
+        maximumEntries: 8,
+        path: "/tmp/forged",
+      }),
+    );
+    await port.closed.promise;
+    expect(port.posted.at(-1)).toMatchObject({ type: "fatal" });
+    expect(kernel.closeCalls).toBe(1);
   });
 
   it("fails closed when the parent disconnects without shutdown", async () => {

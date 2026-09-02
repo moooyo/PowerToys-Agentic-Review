@@ -320,12 +320,26 @@ types, or identity mismatches make storage unhealthy rather than inviting broad 
 state is durable or derivable from a bounded scan; historical terminal rows are not rescanned
 without limit on every interval.
 
-Migration `0011_artifact_namespace_cleanup.sql` provides only the database foundation for that
-future scan. A page classification, durable cleanup-intent update, and cursor advance share one
+Migration `0011_artifact_namespace_cleanup.sql` provides the durable database foundation for that
+scan. A page classification, durable cleanup-intent update, and cursor advance share one
 transaction; the database Worker exposes no independent cursor-advance operation. Observations bind
 the target and parent inode identities, file ctime, ownership and mode, and any linked immutable
-object peer. This foundation does not scan or unlink files. Filesystem session authority and
-handle-bound cleanup verification remain a separate enablement step.
+object peer. The dedicated storage owner builds one bounded immutable manifest per scan session and
+revalidates the full observation before deleting only a staging or publication-temporary name.
+Filesystem traversal remains bounded by the configured storage `hardEntries`; immutable CAS objects
+are inspected for namespace integrity but do not consume the separate 65,536-entry cleanup-manifest
+limit. Exceeding either explicit bound is fatal rather than being reported as a completed sweep.
+
+The Linux implementation anchors child lookup below an open directory descriptor through
+`/proc/self/fd`. Node currently exposes neither `openat2` nor an inode-conditional `unlinkat`, so
+this design does not claim `openat2` path-resolution guarantees against a hostile process running
+with the same effective user ID. The storage root remains private to the Server user, every lookup
+uses server-derived grammar and no-follow opens, and identity is revalidated immediately before
+unlink. An unknown unlink or directory-fsync outcome terminates the storage owner.
+
+Artifact HTTP routes and artifact-mode completion remain disabled in this slice. Before enabling
+writes, composition must place upload mutation and namespace scan/cleanup under one shared mutation
+gate so a live writer cannot race reconciliation authority inside the storage owner.
 
 Namespace cleanup health reads are independently bounded for each status. Saturated pending,
 retry-waiting, failed, or due counts are operational saturation: capacity admission becomes

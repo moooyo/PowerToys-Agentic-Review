@@ -12,6 +12,17 @@ import {
   type TerminateResultArtifactUploadResponse,
 } from "@agentic-review/contracts";
 import {
+  type ArtifactNamespaceObservation,
+  type ArtifactNamespaceObservationIdentity,
+  type ArtifactNamespaceObservationKind,
+  calculateArtifactNamespaceObservationSha256,
+  maximumArtifactNamespacePageSize,
+  type ParsedArtifactNamespaceEntryKey,
+  parseArtifactNamespaceEntryKey,
+  snapshotArtifactNamespaceObservations,
+  snapshotArtifactNamespaceSweepGeneration,
+} from "../artifacts/artifact-namespace-contract.js";
+import {
   ArtifactCompletionModeMismatchError,
   ArtifactReconciliationConflictError,
   ArtifactReconciliationInvalidRequestError,
@@ -25,11 +36,15 @@ export const maximumResultArtifactUploadIdentitiesPerAttempt = 8;
 export const maximumDeclaredResultArtifactBytesPerAttempt = 16 * 1024 * 1024;
 export const maximumArtifactCreateAccountingRows = 4_096;
 export const maximumArtifactReconciliationBatchSize = 1_024;
-export const maximumArtifactNamespacePageSize = 256;
 export const maximumArtifactNamespaceHealthRows = 4_096;
 export const maximumArtifactCleanupRetryDelaySeconds = 86_400;
 export const artifactReconciliationCursorName = "managed_namespace_v2" as const;
-const maximumArtifactReconciliationCursorKeyLength = 256;
+export type {
+  ArtifactNamespaceObservation,
+  ArtifactNamespaceObservationIdentity,
+  ArtifactNamespaceObservationKind,
+};
+export { calculateArtifactNamespaceObservationSha256, maximumArtifactNamespacePageSize };
 export const artifactCleanupLiabilityPageSql = `
   WITH due_cleanup AS MATERIALIZED (
     SELECT cleanup.upload_id
@@ -240,34 +255,6 @@ export interface ArtifactReconciliationCursor {
   readonly afterKey: string | null;
   readonly updatedAt: string;
   readonly lastCompletedAt: string | null;
-}
-
-export type ArtifactNamespaceObservationKind = "staging" | "publication-temporary";
-
-export interface ArtifactNamespaceObservationIdentity {
-  readonly entryKey: string;
-  readonly kind: ArtifactNamespaceObservationKind;
-  readonly uploadId: string;
-  readonly finalizationId: string | null;
-  readonly linkedObjectSha256: string | null;
-  readonly observedBytes: number;
-  readonly expectedLinkCount: 1 | 2;
-  readonly fileDevice: string;
-  readonly fileInode: string;
-  readonly fileCtimeNs: string;
-  readonly fileMode: string;
-  readonly fileUid: string;
-  readonly parentDevice: string;
-  readonly parentInode: string;
-  readonly parentMode: string;
-  readonly parentUid: string;
-  readonly linkedObjectDevice: string | null;
-  readonly linkedObjectInode: string | null;
-  readonly linkedObjectCtimeNs: string | null;
-}
-
-export interface ArtifactNamespaceObservation extends ArtifactNamespaceObservationIdentity {
-  readonly observationSha256: string;
 }
 
 export interface ClassifyArtifactNamespacePageInput {
@@ -659,8 +646,6 @@ const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 const artifactNamePattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
-const reconciliationCursorKeyPattern = /^[A-Za-z0-9._/-]{1,256}$/u;
-const canonicalUnsignedDecimalPattern = /^(?:0|[1-9][0-9]{0,39})$/u;
 const cleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCode, string>> = Object.freeze(
   {
     storage_busy: "Artifact staging cleanup is temporarily busy.",
@@ -676,15 +661,6 @@ const namespaceCleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCo
     storage_timeout: "Artifact namespace cleanup exceeded its bounded deadline.",
     storage_unavailable: "Artifact namespace cleanup owner is unavailable.",
   });
-const artifactNamespaceStagingKeyPattern = new RegExp(
-  `^staging/(${uuidV4Pattern.source.slice(1, -1)})\\.upload$`,
-  "u",
-);
-const artifactNamespaceTemporaryKeyPattern = new RegExp(
-  `^objects/sha256/([0-9a-f]{2})/\\.publish-(${uuidV4Pattern.source.slice(1, -1)})-(${uuidV4Pattern.source.slice(1, -1)})\\.tmp$`,
-  "u",
-);
-
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
 const securelyMatchesSha256 = (actual: string, expected: string): boolean =>
@@ -768,19 +744,11 @@ const requireReconciliationCount = (value: unknown): number => {
 };
 
 const requireReconciliationCursorKey = (value: unknown): string => {
-  if (
-    typeof value !== "string" ||
-    value.length > maximumArtifactReconciliationCursorKeyLength ||
-    Buffer.byteLength(value, "utf8") !== value.length ||
-    !reconciliationCursorKeyPattern.test(value) ||
-    value.startsWith("/") ||
-    value.endsWith("/") ||
-    value.includes("//") ||
-    value.split("/").some((segment) => segment === "." || segment === "..")
-  ) {
+  try {
+    return parseArtifactNamespaceEntryKey(value).entryKey;
+  } catch {
     throw new ArtifactReconciliationInvalidRequestError();
   }
-  return value;
 };
 
 const snapshotExpectedCleanupAttempt = (value: unknown): number => {
@@ -793,301 +761,6 @@ const snapshotExpectedCleanupAttempt = (value: unknown): number => {
 const expectedCleanupStatus = (attemptCount: number): "pending" | "retry_waiting" =>
   attemptCount === 0 ? "pending" : "retry_waiting";
 
-interface ParsedArtifactNamespaceEntryKey {
-  readonly entryKey: string;
-  readonly kind: ArtifactNamespaceObservationKind;
-  readonly uploadId: string;
-  readonly finalizationId: string | null;
-  readonly shard: string | null;
-}
-
-const parseArtifactNamespaceEntryKey = (
-  value: unknown,
-  expectedKind?: ArtifactNamespaceObservationKind,
-): ParsedArtifactNamespaceEntryKey => {
-  if (typeof value !== "string") {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const staging = artifactNamespaceStagingKeyPattern.exec(value);
-  if (staging !== null) {
-    const uploadId = staging[1];
-    if (uploadId === undefined || (expectedKind !== undefined && expectedKind !== "staging")) {
-      throw new ArtifactReconciliationInvalidRequestError();
-    }
-    return Object.freeze({
-      entryKey: value,
-      kind: "staging" as const,
-      uploadId,
-      finalizationId: null,
-      shard: null,
-    });
-  }
-  const temporary = artifactNamespaceTemporaryKeyPattern.exec(value);
-  if (temporary !== null) {
-    const shard = temporary[1];
-    const uploadId = temporary[2];
-    const finalizationId = temporary[3];
-    if (
-      shard === undefined ||
-      uploadId === undefined ||
-      finalizationId === undefined ||
-      (expectedKind !== undefined && expectedKind !== "publication-temporary")
-    ) {
-      throw new ArtifactReconciliationInvalidRequestError();
-    }
-    return Object.freeze({
-      entryKey: value,
-      kind: "publication-temporary" as const,
-      uploadId,
-      finalizationId,
-      shard,
-    });
-  }
-  throw new ArtifactReconciliationInvalidRequestError();
-};
-
-const snapshotArtifactNamespaceSweepGeneration = (value: unknown): number => {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  return value as number;
-};
-
-const snapshotArtifactNamespaceObservationIdentity = (
-  value: unknown,
-): ArtifactNamespaceObservationIdentity => {
-  const snapshot = snapshotExactInput(value, [
-    "entryKey",
-    "kind",
-    "uploadId",
-    "finalizationId",
-    "linkedObjectSha256",
-    "observedBytes",
-    "expectedLinkCount",
-    "fileDevice",
-    "fileInode",
-    "fileCtimeNs",
-    "fileMode",
-    "fileUid",
-    "parentDevice",
-    "parentInode",
-    "parentMode",
-    "parentUid",
-    "linkedObjectDevice",
-    "linkedObjectInode",
-    "linkedObjectCtimeNs",
-  ]);
-  if (snapshot.kind !== "staging" && snapshot.kind !== "publication-temporary") {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const kind = snapshot.kind;
-  const parsed = parseArtifactNamespaceEntryKey(snapshot.entryKey, kind);
-  if (snapshot.uploadId !== parsed.uploadId || snapshot.finalizationId !== parsed.finalizationId) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const linkedObjectSha256 =
-    snapshot.linkedObjectSha256 === null
-      ? null
-      : typeof snapshot.linkedObjectSha256 === "string" &&
-          sha256Pattern.test(snapshot.linkedObjectSha256)
-        ? snapshot.linkedObjectSha256
-        : (() => {
-            throw new ArtifactReconciliationInvalidRequestError();
-          })();
-  const requireIdentityNumber = (identityValue: unknown): string => {
-    if (typeof identityValue !== "string" || !canonicalUnsignedDecimalPattern.test(identityValue)) {
-      throw new ArtifactReconciliationInvalidRequestError();
-    }
-    return identityValue;
-  };
-  const optionalIdentityNumber = (identityValue: unknown): string | null =>
-    identityValue === null ? null : requireIdentityNumber(identityValue);
-  const fileDevice = requireIdentityNumber(snapshot.fileDevice);
-  const fileInode = requireIdentityNumber(snapshot.fileInode);
-  const fileCtimeNs = requireIdentityNumber(snapshot.fileCtimeNs);
-  const fileMode = requireIdentityNumber(snapshot.fileMode);
-  const fileUid = requireIdentityNumber(snapshot.fileUid);
-  const parentDevice = requireIdentityNumber(snapshot.parentDevice);
-  const parentInode = requireIdentityNumber(snapshot.parentInode);
-  const parentMode = requireIdentityNumber(snapshot.parentMode);
-  const parentUid = requireIdentityNumber(snapshot.parentUid);
-  const linkedObjectDevice = optionalIdentityNumber(snapshot.linkedObjectDevice);
-  const linkedObjectInode = optionalIdentityNumber(snapshot.linkedObjectInode);
-  const linkedObjectCtimeNs = optionalIdentityNumber(snapshot.linkedObjectCtimeNs);
-  const hasLinkedIdentity =
-    linkedObjectDevice !== null && linkedObjectInode !== null && linkedObjectCtimeNs !== null;
-  const hasPartialLinkedIdentity =
-    (linkedObjectDevice === null ? 0 : 1) +
-      (linkedObjectInode === null ? 0 : 1) +
-      (linkedObjectCtimeNs === null ? 0 : 1) >
-      0 && !hasLinkedIdentity;
-  if (
-    !Number.isSafeInteger(snapshot.observedBytes) ||
-    (snapshot.observedBytes as number) < 0 ||
-    (snapshot.observedBytes as number) > maximumResultArtifactBytes ||
-    fileDevice !== parentDevice ||
-    (snapshot.expectedLinkCount !== 1 && snapshot.expectedLinkCount !== 2) ||
-    (kind === "staging" &&
-      (snapshot.finalizationId !== null ||
-        linkedObjectSha256 !== null ||
-        hasLinkedIdentity ||
-        hasPartialLinkedIdentity ||
-        snapshot.expectedLinkCount !== 1)) ||
-    (kind === "publication-temporary" &&
-      (hasPartialLinkedIdentity ||
-        (snapshot.expectedLinkCount === 1 && (linkedObjectSha256 !== null || hasLinkedIdentity)) ||
-        (snapshot.expectedLinkCount === 2 &&
-          (linkedObjectSha256 === null ||
-            !hasLinkedIdentity ||
-            linkedObjectDevice !== fileDevice ||
-            linkedObjectInode !== fileInode ||
-            linkedObjectCtimeNs !== fileCtimeNs ||
-            linkedObjectSha256.slice(0, 2) !== parsed.shard))))
-  ) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  return Object.freeze({
-    entryKey: parsed.entryKey,
-    kind,
-    uploadId: parsed.uploadId,
-    finalizationId: parsed.finalizationId,
-    linkedObjectSha256,
-    observedBytes: snapshot.observedBytes as number,
-    expectedLinkCount: snapshot.expectedLinkCount as 1 | 2,
-    fileDevice,
-    fileInode,
-    fileCtimeNs,
-    fileMode,
-    fileUid,
-    parentDevice,
-    parentInode,
-    parentMode,
-    parentUid,
-    linkedObjectDevice,
-    linkedObjectInode,
-    linkedObjectCtimeNs,
-  });
-};
-
-export const calculateArtifactNamespaceObservationSha256 = (
-  value: ArtifactNamespaceObservationIdentity,
-): string => {
-  const observation = snapshotArtifactNamespaceObservationIdentity(value);
-  return sha256(
-    JSON.stringify([
-      "artifact_namespace_observation_v1",
-      observation.entryKey,
-      observation.kind,
-      observation.uploadId,
-      observation.finalizationId,
-      observation.linkedObjectSha256,
-      observation.observedBytes,
-      observation.expectedLinkCount,
-      observation.fileDevice,
-      observation.fileInode,
-      observation.fileCtimeNs,
-      observation.fileMode,
-      observation.fileUid,
-      observation.parentDevice,
-      observation.parentInode,
-      observation.parentMode,
-      observation.parentUid,
-      observation.linkedObjectDevice,
-      observation.linkedObjectInode,
-      observation.linkedObjectCtimeNs,
-    ]),
-  );
-};
-
-const snapshotArtifactNamespaceObservation = (value: unknown): ArtifactNamespaceObservation => {
-  const snapshot = snapshotExactInput(value, [
-    "entryKey",
-    "observationSha256",
-    "kind",
-    "uploadId",
-    "finalizationId",
-    "linkedObjectSha256",
-    "observedBytes",
-    "expectedLinkCount",
-    "fileDevice",
-    "fileInode",
-    "fileCtimeNs",
-    "fileMode",
-    "fileUid",
-    "parentDevice",
-    "parentInode",
-    "parentMode",
-    "parentUid",
-    "linkedObjectDevice",
-    "linkedObjectInode",
-    "linkedObjectCtimeNs",
-  ]);
-  const identity = snapshotArtifactNamespaceObservationIdentity({
-    entryKey: snapshot.entryKey,
-    kind: snapshot.kind,
-    uploadId: snapshot.uploadId,
-    finalizationId: snapshot.finalizationId,
-    linkedObjectSha256: snapshot.linkedObjectSha256,
-    observedBytes: snapshot.observedBytes,
-    expectedLinkCount: snapshot.expectedLinkCount,
-    fileDevice: snapshot.fileDevice,
-    fileInode: snapshot.fileInode,
-    fileCtimeNs: snapshot.fileCtimeNs,
-    fileMode: snapshot.fileMode,
-    fileUid: snapshot.fileUid,
-    parentDevice: snapshot.parentDevice,
-    parentInode: snapshot.parentInode,
-    parentMode: snapshot.parentMode,
-    parentUid: snapshot.parentUid,
-    linkedObjectDevice: snapshot.linkedObjectDevice,
-    linkedObjectInode: snapshot.linkedObjectInode,
-    linkedObjectCtimeNs: snapshot.linkedObjectCtimeNs,
-  });
-  if (
-    typeof snapshot.observationSha256 !== "string" ||
-    !securelyMatchesSha256(
-      snapshot.observationSha256,
-      calculateArtifactNamespaceObservationSha256(identity),
-    )
-  ) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  return Object.freeze({ ...identity, observationSha256: snapshot.observationSha256 });
-};
-
-const snapshotArtifactNamespaceObservations = (
-  value: unknown,
-): readonly ArtifactNamespaceObservation[] => {
-  if (!Array.isArray(value) || value.length > maximumArtifactNamespacePageSize) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const allowedKeys = new Set([
-    "length",
-    ...Array.from({ length: value.length }, (_, index) => String(index)),
-  ]);
-  if (
-    Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !allowedKeys.has(key))
-  ) {
-    throw new ArtifactReconciliationInvalidRequestError();
-  }
-  const observations: ArtifactNamespaceObservation[] = [];
-  for (let index = 0; index < value.length; index += 1) {
-    const descriptor = descriptors[index];
-    if (
-      descriptor === undefined ||
-      descriptor.get !== undefined ||
-      descriptor.set !== undefined ||
-      !descriptor.enumerable ||
-      !("value" in descriptor)
-    ) {
-      throw new ArtifactReconciliationInvalidRequestError();
-    }
-    observations.push(snapshotArtifactNamespaceObservation(descriptor.value));
-  }
-  return Object.freeze(observations);
-};
-
 const snapshotClassifyArtifactNamespacePageInput = (
   value: unknown,
 ): ClassifyArtifactNamespacePageInput => {
@@ -1097,14 +770,21 @@ const snapshotClassifyArtifactNamespacePageInput = (
     "observations",
     "completedSweep",
   ]);
-  const expectedSweepGeneration = snapshotArtifactNamespaceSweepGeneration(
-    snapshot.expectedSweepGeneration,
-  );
-  const expectedAfterKey =
-    snapshot.expectedAfterKey === null
-      ? null
-      : parseArtifactNamespaceEntryKey(snapshot.expectedAfterKey).entryKey;
-  const observations = snapshotArtifactNamespaceObservations(snapshot.observations);
+  let expectedSweepGeneration: number;
+  let expectedAfterKey: string | null;
+  let observations: readonly ArtifactNamespaceObservation[];
+  try {
+    expectedSweepGeneration = snapshotArtifactNamespaceSweepGeneration(
+      snapshot.expectedSweepGeneration,
+    );
+    expectedAfterKey =
+      snapshot.expectedAfterKey === null
+        ? null
+        : parseArtifactNamespaceEntryKey(snapshot.expectedAfterKey).entryKey;
+    observations = snapshotArtifactNamespaceObservations(snapshot.observations);
+  } catch {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
   const completedSweep = snapshot.completedSweep;
   if (
     typeof completedSweep !== "boolean" ||
@@ -2957,7 +2637,12 @@ function snapshotArtifactNamespaceCleanupMutationIdentity(
     "observationSha256",
     "expectedAttemptCount",
   ]);
-  const entryKey = parseArtifactNamespaceEntryKey(snapshot.entryKey).entryKey;
+  let entryKey: string;
+  try {
+    entryKey = parseArtifactNamespaceEntryKey(snapshot.entryKey).entryKey;
+  } catch {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
   if (
     typeof snapshot.observationSha256 !== "string" ||
     !sha256Pattern.test(snapshot.observationSha256)

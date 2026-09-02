@@ -1,3 +1,8 @@
+import type {
+  ArtifactNamespaceCleanupResult,
+  ArtifactNamespaceObservation,
+} from "./artifact-namespace-contract.js";
+
 export interface ArtifactStorageFileIdentity {
   readonly device: bigint;
   readonly inode: bigint;
@@ -55,6 +60,15 @@ export interface ArtifactStorageOperations {
     layout: ArtifactStorageLayout,
     maximumEntries: number,
   ): ArtifactStorageInventory;
+  scanArtifactNamespace(
+    layout: ArtifactStorageLayout,
+    maximumManifestEntries: number,
+    maximumTraversalEntries: number,
+  ): readonly ArtifactNamespaceObservation[];
+  cleanupArtifactNamespaceEntry(
+    layout: ArtifactStorageLayout,
+    observation: ArtifactNamespaceObservation,
+  ): ArtifactNamespaceCleanupResult;
   filesystemCapacity(layout: ArtifactStorageLayout): ArtifactFilesystemCapacity;
   getObjectShardDirectory(
     layout: ArtifactStorageLayout,
