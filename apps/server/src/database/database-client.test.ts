@@ -16,6 +16,7 @@ import {
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildApp } from "../../dist/app.js";
 import {
   ArtifactTransactionCoordinator,
   type ArtifactTransactionDatabaseHandle,
@@ -31,6 +32,7 @@ import type {
   PreparedArtifactChunk,
   PreparedArtifactFinalization,
 } from "../../dist/artifacts/types.js";
+import type { ServerConfig } from "../../dist/config.js";
 import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
@@ -138,12 +140,18 @@ class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOw
   readonly ownerExit = this.exit.promise;
   readonly terminal = Promise.withResolvers<Error>();
   readonly terminalFailure = this.terminal.promise;
+  capacityEvaluationCount = 0;
+  chunkWriteCount = 0;
+  finalizationCount = 0;
+  objectReadCount = 0;
 
   evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
+    this.capacityEvaluationCount += 1;
     return Promise.resolve(capacityAdmission(input));
   }
 
   writePreparedChunk(input: PreparedArtifactChunk) {
+    this.chunkWriteCount += 1;
     return Promise.resolve({
       uploadId: input.uploadId,
       prepareId: input.prepareId,
@@ -153,6 +161,7 @@ class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOw
   }
 
   finalizeArtifact(input: PreparedArtifactFinalization) {
+    this.finalizationCount += 1;
     return Promise.resolve({
       ...input,
       storageObjectKey: `sha256/${input.sha256.slice(0, 2)}/${input.sha256}`,
@@ -161,6 +170,7 @@ class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOw
   }
 
   readObject(): Promise<Buffer> {
+    this.objectReadCount += 1;
     return Promise.reject(new Error("Fake artifact object reads are not configured."));
   }
 
@@ -207,8 +217,8 @@ const createArtifactCoordinator = async (
   client: DatabaseClient,
   database: ArtifactTransactionDatabaseHandle = client.createArtifactTransactionDatabaseHandle(),
   reconciliationIntervalMilliseconds = 60_000,
+  storage = new FakeArtifactTransactionStorage(),
 ): Promise<ArtifactTransactionCoordinator> => {
-  const storage = new FakeArtifactTransactionStorage();
   const coordinator = await ArtifactTransactionCoordinator.create({
     database,
     storage: attachArtifactTransactionStorageForTest(storage),
@@ -1026,7 +1036,7 @@ describe("DatabaseClient lease integration", () => {
     }
   });
 
-  it("keeps artifact completion unreachable while normal claims intentionally default to inline v1", async () => {
+  it("keeps every live artifact route mutation-free for a normal inline claim", async () => {
     const fixture = await createFixture();
     const worker = await registerWorker(
       fixture.client,
@@ -1052,23 +1062,144 @@ describe("DatabaseClient lease integration", () => {
       ).toEqual({ completion_mode: "inline_result_v1" });
     });
     seedCompletedNamespaceSweepForTest(fixture);
-    const coordinator = await createArtifactCoordinator(fixture.client);
-    await expect(
-      coordinator.createArtifactUpload({
-        ...claim.envelope.lease,
-        clientArtifactId: artifactClientId(0),
-        purpose: "result",
-        name: "result.json",
-        mediaType: "application/json",
-        totalBytes: 2,
-        sha256: sha256("{}"),
-      }),
-    ).rejects.toMatchObject({
-      name: "ArtifactTransactionCoordinatorError",
-      code: "ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH",
-      message: "The run attempt does not permit result artifact operations.",
-    });
-    await coordinator.close();
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const shutdown = new AbortController();
+    const config = {
+      host: "127.0.0.1",
+      port: 0,
+      databasePath: fixture.databasePath,
+      migrationsDirectory,
+      artifactStorage: {
+        rootPath: join(fixture.directory, "unused-artifacts"),
+        capacity: artifactStorageCapacity,
+      },
+      protocolVersion,
+      heartbeatIntervalSeconds: 20,
+      leaseTtlSeconds,
+      leaseReaperIntervalSeconds: 300,
+      operatorAuthCleanupIntervalSeconds: 300,
+      operatorAuthCleanupBatchSize: 100,
+      retryDelaySeconds: 1,
+      workerOfflineAfterSeconds: 90,
+      maxLongPollSeconds: 30,
+      allowInsecureWorkerAuth: true,
+      tls: undefined,
+      workerCertificateBindings: {},
+      github: undefined,
+      operatorAuth: undefined,
+      dashboardDirectory: undefined,
+    } satisfies ServerConfig;
+    let app: ReturnType<typeof buildApp> | undefined;
+    const content = Buffer.from("{}", "utf8");
+    const contentSha256 = sha256("{}");
+    const uploadId = "20000000-0000-4000-8000-000000000001";
+    const lease = claim.envelope.lease;
+    const readArtifactCounts = () =>
+      withFixtureDatabase(fixture, (database) => {
+        const count = (table: "artifact_uploads" | "artifact_upload_chunks" | "run_artifacts") =>
+          (
+            database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
+              readonly count: number;
+            }
+          ).count;
+        return Object.freeze({
+          uploads: count("artifact_uploads"),
+          chunks: count("artifact_upload_chunks"),
+          artifacts: count("run_artifacts"),
+        });
+      });
+    const readStorageMutationCounts = () =>
+      Object.freeze({
+        capacityEvaluations: storage.capacityEvaluationCount,
+        chunkWrites: storage.chunkWriteCount,
+        finalizations: storage.finalizationCount,
+        objectReads: storage.objectReadCount,
+      });
+    const databaseBefore = readArtifactCounts();
+    const storageBefore = readStorageMutationCounts();
+    const requests = [
+      {
+        method: "POST",
+        url: `/api/v1/worker/runs/${lease.runAttemptId}/artifacts`,
+        payload: {
+          ...lease,
+          clientArtifactId: artifactClientId(0),
+          purpose: "result",
+          name: "result.json",
+          mediaType: "application/json",
+          totalBytes: content.byteLength,
+          sha256: contentSha256,
+        },
+      },
+      {
+        method: "PUT",
+        url: `/api/v1/worker/artifact-uploads/${uploadId}/chunks/0`,
+        payload: {
+          ...lease,
+          chunkIndex: 0,
+          offsetBytes: 0,
+          chunkBytes: content.byteLength,
+          chunkSha256: contentSha256,
+          data: content.toString("base64url"),
+        },
+      },
+      {
+        method: "POST",
+        url: `/api/v1/worker/artifact-uploads/${uploadId}/complete`,
+        payload: {
+          ...lease,
+          chunkCount: 1,
+          totalBytes: content.byteLength,
+          sha256: contentSha256,
+        },
+      },
+      {
+        method: "POST",
+        url: `/api/v1/worker/artifact-uploads/${uploadId}/terminate`,
+        payload: {
+          ...lease,
+          state: "abandoned",
+          reason: "client_abandoned",
+        },
+      },
+    ] as const;
+
+    try {
+      app = buildApp({
+        config,
+        database: fixture.client,
+        shutdownSignal: shutdown.signal,
+        artifactReadiness: { read: () => ({ ready: true }) },
+        artifactTransactions: coordinator,
+        serverAdmission: { read: () => true },
+      });
+      expect(databaseBefore).toEqual({ uploads: 0, chunks: 0, artifacts: 0 });
+      expect(storageBefore).toEqual({
+        capacityEvaluations: 0,
+        chunkWrites: 0,
+        finalizations: 0,
+        objectReads: 0,
+      });
+      for (const request of requests) {
+        const response = await app.inject(request);
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({
+          code: "artifact_completion_mode_mismatch",
+          message: "The run attempt does not permit result artifact operations.",
+          retryable: false,
+        });
+      }
+      expect(readArtifactCounts()).toEqual(databaseBefore);
+      expect(readStorageMutationCounts()).toEqual(storageBefore);
+    } finally {
+      shutdown.abort(new Error("Inline artifact route integration test completed."));
+      try {
+        await app?.close();
+      } finally {
+        await coordinator.close();
+      }
+    }
   });
 
   it("maps artifact mutations through the single transaction authority", async () => {

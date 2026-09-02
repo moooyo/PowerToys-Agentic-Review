@@ -102,6 +102,28 @@ export type ArtifactTransactionDatabaseOperation =
   | "probeArtifactUploadCreate"
   | "terminateArtifactUpload";
 
+export interface ArtifactTransactionPort {
+  readonly createArtifactUpload: (
+    input: CreateResultArtifactUploadRequest,
+    signal?: AbortSignal,
+  ) => Promise<CreateResultArtifactUploadResponse>;
+  readonly putArtifactChunk: (
+    uploadId: string,
+    input: ResultArtifactChunkRequest,
+    signal?: AbortSignal,
+  ) => Promise<ResultArtifactChunkResponse>;
+  readonly finalizeArtifactUpload: (
+    uploadId: string,
+    input: FinalizeResultArtifactUploadRequest,
+    signal?: AbortSignal,
+  ) => Promise<FinalizeResultArtifactUploadResponse>;
+  readonly terminateArtifactUpload: (
+    uploadId: string,
+    input: TerminateResultArtifactUploadRequest,
+    signal?: AbortSignal,
+  ) => Promise<TerminateResultArtifactUploadResponse>;
+}
+
 export const isArtifactTransactionDatabaseOperation = (
   operation: string,
 ): operation is ArtifactTransactionDatabaseOperation => {
@@ -970,10 +992,7 @@ const closeFailedConstruction = async (
   return errors;
 };
 
-/**
- * Owns every artifact database/filesystem transaction and the shared mutation gate. Production
- * composition is intentionally absent until the Worker HTTP surface is separately reviewed.
- */
+/** Owns every artifact database/filesystem transaction and the shared mutation gate. */
 export class ArtifactTransactionCoordinator {
   readonly #database: ArtifactTransactionDatabaseOwner;
   readonly #storage: ArtifactTransactionStorageOwner;

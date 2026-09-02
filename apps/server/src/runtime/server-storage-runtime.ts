@@ -2,6 +2,7 @@ import {
   ArtifactStorageClient,
   ArtifactTransactionCoordinator,
   type ArtifactTransactionCoordinatorError,
+  type ArtifactTransactionPort,
 } from "../artifacts/index.js";
 import type { ArtifactRuntimeConfig } from "../config.js";
 import { DatabaseClient } from "../database/database-client.js";
@@ -31,6 +32,7 @@ export interface ServerStorageRuntime {
   readonly artifactReadiness: {
     read(): Readonly<{ readonly ready: boolean }>;
   };
+  readonly artifactTransactions: ArtifactTransactionPort;
   close(): Promise<void>;
 }
 
@@ -250,11 +252,22 @@ const createServerStorageRuntimeFromSnapshot = async (
 
     const activeCoordinator = coordinator;
     const activeDatabase = database;
+    const artifactTransactions = Object.freeze({
+      createArtifactUpload: (input, signal) =>
+        activeCoordinator.createArtifactUpload(input, signal),
+      putArtifactChunk: (uploadId, input, signal) =>
+        activeCoordinator.putArtifactChunk(uploadId, input, signal),
+      finalizeArtifactUpload: (uploadId, input, signal) =>
+        activeCoordinator.finalizeArtifactUpload(uploadId, input, signal),
+      terminateArtifactUpload: (uploadId, input, signal) =>
+        activeCoordinator.terminateArtifactUpload(uploadId, input, signal),
+    } satisfies ArtifactTransactionPort);
     return Object.freeze({
       database: activeDatabase,
       artifactReadiness: Object.freeze({
         read: () => Object.freeze({ ready: activeCoordinator.readiness.ready }),
       }),
+      artifactTransactions,
       close: () => activeCoordinator.close(),
     });
   } catch (error) {

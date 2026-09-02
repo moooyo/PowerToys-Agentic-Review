@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { type AppDependencies, buildApp } from "../../dist/app.js";
+import {
+  ArtifactTransactionCoordinatorError,
+  type ArtifactTransactionPort,
+} from "../../dist/artifacts/index.js";
 import type { ServerConfig } from "../../dist/config.js";
 import type { DatabaseClient } from "../../dist/database/database-client.js";
 import { type ArtifactReadinessProbe, registerHealthRoutes } from "../../dist/routes/health.js";
@@ -282,6 +286,73 @@ const workerRegistrationPayload = {
   },
 } as const;
 
+const artifactRouteDefinitions = [
+  {
+    method: "POST",
+    pattern: "/api/v1/worker/runs/:runAttemptId/artifacts",
+    url: `/api/v1/worker/runs/${leaseIdentity.runAttemptId}/artifacts`,
+    payload: {
+      ...leaseIdentity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: content.byteLength,
+      sha256: contentSha256,
+    },
+  },
+  {
+    method: "PUT",
+    pattern: "/api/v1/worker/artifact-uploads/:uploadId/chunks/:chunkIndex",
+    url: `/api/v1/worker/artifact-uploads/${uploadId}/chunks/0`,
+    payload: {
+      ...leaseIdentity,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: content.byteLength,
+      chunkSha256: contentSha256,
+      data: content.toString("base64url"),
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/v1/worker/artifact-uploads/:uploadId/complete",
+    url: `/api/v1/worker/artifact-uploads/${uploadId}/complete`,
+    payload: {
+      ...leaseIdentity,
+      chunkCount: 1,
+      totalBytes: content.byteLength,
+      sha256: contentSha256,
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/v1/worker/artifact-uploads/:uploadId/terminate",
+    url: `/api/v1/worker/artifact-uploads/${uploadId}/terminate`,
+    payload: {
+      ...leaseIdentity,
+      state: "abandoned",
+      reason: "client_abandoned",
+    },
+  },
+] as const;
+
+const createBuildAppArtifactTransactions = (): ArtifactTransactionPort =>
+  Object.freeze({
+    createArtifactUpload: vi.fn(async () => {
+      throw new Error("Unexpected artifact upload create.");
+    }),
+    putArtifactChunk: vi.fn(async () => {
+      throw new Error("Unexpected artifact chunk upload.");
+    }),
+    finalizeArtifactUpload: vi.fn(async () => {
+      throw new Error("Unexpected artifact finalization.");
+    }),
+    terminateArtifactUpload: vi.fn(async () => {
+      throw new Error("Unexpected artifact termination.");
+    }),
+  });
+
 const createBuildAppDatabaseRequest = (): ReturnType<typeof vi.fn> =>
   vi.fn(async (operation: string) => {
     switch (operation) {
@@ -309,12 +380,14 @@ const createBuildAppDependencies = (
   artifactReadiness: ArtifactReadinessProbe = { read: () => ({ ready: true }) },
   serverAdmission: AppDependencies["serverAdmission"] = { read: () => true },
   request: ReturnType<typeof vi.fn> = createBuildAppDatabaseRequest(),
+  artifactTransactions: ArtifactTransactionPort = createBuildAppArtifactTransactions(),
 ): AppDependencies => {
   return {
     config,
     database: { request } as unknown as DatabaseClient,
     shutdownSignal: new AbortController().signal,
     artifactReadiness,
+    artifactTransactions,
     serverAdmission,
   };
 };
@@ -386,79 +459,85 @@ describe("buildApp artifact readiness", () => {
 });
 
 describe("production route inventory", () => {
-  it("keeps every artifact route absent with valid development Worker authentication", async () => {
+  it("registers every artifact route through the production application root", async () => {
     const app = buildApp(createBuildAppDependencies());
-    const routeDefinitions = [
-      {
-        method: "POST",
-        pattern: "/api/v1/worker/runs/:runAttemptId/artifacts",
-        url: `/api/v1/worker/runs/${leaseIdentity.runAttemptId}/artifacts`,
-        payload: {
-          ...leaseIdentity,
-          clientArtifactId,
-          purpose: "result",
-          name: "result.json",
-          mediaType: "application/json",
-          totalBytes: content.byteLength,
-          sha256: contentSha256,
-        },
-      },
-      {
-        method: "PUT",
-        pattern: "/api/v1/worker/artifact-uploads/:uploadId/chunks/:chunkIndex",
-        url: `/api/v1/worker/artifact-uploads/${uploadId}/chunks/0`,
-        payload: {
-          ...leaseIdentity,
-          chunkIndex: 0,
-          offsetBytes: 0,
-          chunkBytes: content.byteLength,
-          chunkSha256: contentSha256,
-          data: content.toString("base64url"),
-        },
-      },
-      {
-        method: "POST",
-        pattern: "/api/v1/worker/artifact-uploads/:uploadId/complete",
-        url: `/api/v1/worker/artifact-uploads/${uploadId}/complete`,
-        payload: {
-          ...leaseIdentity,
-          chunkCount: 1,
-          totalBytes: content.byteLength,
-          sha256: contentSha256,
-        },
-      },
-      {
-        method: "POST",
-        pattern: "/api/v1/worker/artifact-uploads/:uploadId/terminate",
-        url: `/api/v1/worker/artifact-uploads/${uploadId}/terminate`,
-        payload: {
-          ...leaseIdentity,
-          state: "abandoned",
-          reason: "client_abandoned",
-        },
-      },
-    ] as const;
 
     try {
       await app.ready();
-      const registration = await app.inject({
-        method: "POST",
-        url: "/api/v1/worker/instances",
-        payload: workerRegistrationPayload,
-      });
-      expect(registration.statusCode).toBe(200);
-
       const inventory = app.printRoutes();
-      expect(inventory).not.toContain("artifact-uploads");
-      for (const route of routeDefinitions) {
-        expect(app.hasRoute({ method: route.method, url: route.pattern })).toBe(false);
+      expect(inventory).toContain("artifact-uploads");
+      for (const route of artifactRouteDefinitions) {
+        expect(app.hasRoute({ method: route.method, url: route.pattern })).toBe(true);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns the strict coarse response and admits no artifact call while admission is closed", async () => {
+    const transactions = createBuildAppArtifactTransactions();
+    const app = buildApp(
+      createBuildAppDependencies(
+        { read: () => ({ ready: true }) },
+        { read: () => false },
+        createBuildAppDatabaseRequest(),
+        transactions,
+      ),
+    );
+
+    try {
+      for (const route of artifactRouteDefinitions) {
         const response = await app.inject({
           method: route.method,
           url: route.url,
           payload: route.payload,
         });
-        expect(response.statusCode).toBe(404);
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toEqual({
+          status: "not_ready",
+          serverTime: expect.any(String),
+        });
       }
+      expect(transactions.createArtifactUpload).not.toHaveBeenCalled();
+      expect(transactions.putArtifactChunk).not.toHaveBeenCalled();
+      expect(transactions.finalizeArtifactUpload).not.toHaveBeenCalled();
+      expect(transactions.terminateArtifactUpload).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps the live production route closed to inline completion attempts", async () => {
+    const transactions = createBuildAppArtifactTransactions();
+    const createArtifactUpload = vi.fn(async () => {
+      throw new ArtifactTransactionCoordinatorError(
+        "ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH",
+      );
+    });
+    const app = buildApp(
+      createBuildAppDependencies(
+        { read: () => ({ ready: true }) },
+        { read: () => true },
+        createBuildAppDatabaseRequest(),
+        Object.freeze({ ...transactions, createArtifactUpload }),
+      ),
+    );
+
+    try {
+      const route = artifactRouteDefinitions[0];
+      const response = await app.inject({
+        method: route.method,
+        url: route.url,
+        payload: route.payload,
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        code: "artifact_completion_mode_mismatch",
+        message: "The run attempt does not permit result artifact operations.",
+        retryable: false,
+      });
+      expect(createArtifactUpload).toHaveBeenCalledOnce();
     } finally {
       await app.close();
     }

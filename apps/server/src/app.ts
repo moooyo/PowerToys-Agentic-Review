@@ -1,5 +1,6 @@
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { ArtifactTransactionPort } from "./artifacts/index.js";
 import { startLeaseReaper } from "./background/lease-reaper.js";
 import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
 import type { ServerConfig } from "./config.js";
@@ -17,6 +18,7 @@ import {
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
 import { type ArtifactReadinessProbe, registerHealthRoutes } from "./routes/health.js";
+import { registerWorkerArtifactRoutes } from "./routes/worker-artifacts.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
 
 export interface AppDependencies {
@@ -24,6 +26,7 @@ export interface AppDependencies {
   readonly database: DatabaseClient;
   readonly shutdownSignal: AbortSignal;
   readonly artifactReadiness: ArtifactReadinessProbe;
+  readonly artifactTransactions: ArtifactTransactionPort;
   readonly serverAdmission: {
     read(): boolean;
   };
@@ -170,6 +173,11 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     dependencies.shutdownSignal,
   );
   registerWorkerRoutes(app, dependencies);
+  registerWorkerArtifactRoutes(app, {
+    config: dependencies.config,
+    transactions: dependencies.artifactTransactions,
+    shutdownSignal: dependencies.shutdownSignal,
+  });
 
   const operatorAuth = dependencies.operatorAuth;
   if (operatorAuth !== undefined) {
