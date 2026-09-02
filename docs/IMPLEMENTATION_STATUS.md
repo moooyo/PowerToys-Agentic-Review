@@ -188,6 +188,14 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   single-record validation, and non-authorizing next-intent derivation. No production code consumes
   it, and no observation reducer, journal store, filesystem mutation, SCM adapter, readiness
   boundary, or installer is implemented.
+- A source-only, dormant Control result-artifact upload session. It binds one authenticated local
+  attempt context to one private Server lease, accepts only the five result lifecycle facts, and
+  drives a frozen `create`/`put`/`finalize`/`terminate` port with stable application identities,
+  exact frozen request replay, bounded backoff, lease and hard deadlines, shutdown fencing, and
+  explicit definitive, ambiguous, or lease-revoked failures. Late ignored-abort settlements cannot
+  apply responses after the dispatch is fenced, and ambiguity remains sticky until a valid replay
+  succeeds. The public state contains no raw lease token or chunk bytes. No production entrypoint,
+  supervisor, barrel, or role bundle consumes this module.
 
 ## Deliberately Disabled
 
@@ -219,6 +227,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   completion mode, and the database fence rejects artifact requests before capacity or filesystem
   mutation. Artifact-mode claim selection and artifact-backed completion still require separate
   review.
+- The dormant Worker Control upload session has no HostControl or HTTPS adapter and no production
+  consumer. It neither changes the version-one ARWX envelope nor submits artifact-backed run
+  completion. Its four-method API depends on explicit operation-outcome classification and does not
+  use the legacy `WorkerApiError` HTTP-status retry inference. Production wiring remains forbidden
+  until the fixed-origin HostControl transport and completion protocol complete separate review.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release

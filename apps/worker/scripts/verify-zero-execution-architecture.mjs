@@ -12,7 +12,9 @@ const contractsSourceRoot = "packages/contracts/src/";
 const localProtocolSourceRoot = "packages/local-protocol/src/";
 const executorRuntimePath = `${workerSourceRoot}service-host/executor-shadow-runtime.ts`;
 const controlRuntimePath = `${workerSourceRoot}control/shadow-supervisor.ts`;
+const legacyEntrypointPath = `${workerSourceRoot}main.ts`;
 const dormantExecutorAttemptReducerPath = `${executionSourceRoot}executor-attempt-reducer.ts`;
+const dormantResultArtifactUploadSessionPath = `${workerSourceRoot}control/result-artifact-upload-session.ts`;
 const reviewedProductionSourceSha256 = Object.freeze({
   [executorRuntimePath]: "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
   [controlRuntimePath]: "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
@@ -107,6 +109,13 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
   const dormantReducerSource = readSource(dormantExecutorAttemptReducerPath);
   verifyReviewedDormantExecutionSource(dormantExecutorAttemptReducerPath, dormantReducerSource);
   verifyDormantExecutorAttemptReducer(dormantReducerSource);
+  for (const entrypoint of [
+    legacyEntrypointPath,
+    entrypointPolicies.control.path,
+    entrypointPolicies.executor.path,
+  ]) {
+    verifyDormantUploadSessionExclusion(entrypoint, readSource);
+  }
   for (const [role, policy] of Object.entries(entrypointPolicies)) {
     verifyEntrypoint(role, policy, readSource(policy.path));
     verifyProductionImportGraph(policy.path, readSource);
@@ -116,6 +125,43 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
   verifyReviewedProductionSource(executorRuntimePath, executorSource);
   verifyReviewedProductionSource(controlRuntimePath, controlSource);
   verifyAuthenticatedDisabledReady(executorSource, controlSource);
+}
+
+function verifyDormantUploadSessionExclusion(entrypoint, readSource) {
+  const pending = [entrypoint];
+  const visited = new Set();
+  while (pending.length !== 0) {
+    const sourcePath = pending.pop();
+    if (sourcePath === undefined || visited.has(sourcePath)) continue;
+    if (sourcePath === dormantResultArtifactUploadSessionPath) {
+      throw new Error(
+        `Production import graph reaches dormant result artifact upload source: ${sourcePath}`,
+      );
+    }
+    visited.add(sourcePath);
+    const source = readSource(sourcePath);
+    scanRuntimeLoaderSyntax(source, sourcePath);
+    const sourceFile = parseTypeScript(source, sourcePath);
+    const runtimeLoads = collectSyntax(sourceFile.program, (node) =>
+      node.type === "ImportExpression" ||
+      (node.type === "CallExpression" &&
+        (node.callee?.type === "Import" || isIdentifier(node.callee, "require")))
+        ? node
+        : undefined,
+    );
+    if (runtimeLoads.length !== 0) {
+      throw new Error(`Production import graph contains a runtime loader at ${sourcePath}.`);
+    }
+    for (const specifier of staticModuleSpecifiers(sourceFile.program)) {
+      if (!specifier.startsWith(".")) {
+        const redirect = firstPartySourceRedirects.get(specifier);
+        if (redirect !== undefined) pending.push(redirect);
+        continue;
+      }
+      const target = resolveTypeScriptImport(sourcePath, specifier);
+      if (target !== undefined) pending.push(target);
+    }
+  }
 }
 
 function verifyReviewedDormantExecutionSource(sourcePath, source) {
