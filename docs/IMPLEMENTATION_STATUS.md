@@ -231,6 +231,20 @@ validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
+On 2026-09-02, integration commit `edd92c0` combined the RoleConfig v2 zero-slot shadow branch and
+the dark artifact-storage branch without source conflicts; only this status document required a
+union of their independent evidence sections. The exact merged source completed the full
+TypeScript matrix on `test-env` with Node.js 24.20.0 and pnpm 11.24.0. It passed 86 Codex tests, 84
+local-protocol tests, 21 domain tests, 813 Worker tests plus 15 role-bundle and zero-execution
+architecture tests, and 693 Server tests in 45 files. The Dashboard, Worker, Server, and shared
+packages built successfully, and Biome checked 284 files.
+
+The same merged source completed ServiceHost and ProcessHost Go 1.26.7 unit, race, and vet suites.
+Every package compiled as Windows amd64 and arm64 test binaries, both architectures passed cross-
+platform `go build` and `go vet`, and no validation ran on the local Windows development machine.
+This merge gate proves source compatibility and preserves zero execution; it is not signed-package,
+installer, or native Windows runtime evidence.
+
 On 2026-09-02, the artifact storage owner was changed from an OS child process to a dedicated Node
 Worker Thread and verified on the remote Debian `test-env` host with Node.js 24.20.0 and pnpm
 11.24.0. No validation ran on the local Windows development machine. The exact candidate completed:
