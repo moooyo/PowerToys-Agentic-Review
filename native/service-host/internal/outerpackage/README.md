@@ -23,6 +23,15 @@ has the indexed Control and Executor bootstrap files. Those three files are inte
 from the runtime manifest. Every remaining installation or trusted-configuration entry must match
 the runtime manifest closure and its closed role policy.
 
+The `role-config-v2-node-specific` release profile owns four exact WinSW payload slots in the
+installation root: `AgenticReview.Worker.Control.exe` and
+`AgenticReview.Worker.Executor.exe` are the two `service-wrapper` payloads, while
+`AgenticReview.Worker.Control.xml` and `AgenticReview.Worker.Executor.xml` are the two
+`service-config` payloads. The release-profile validator rejects alternate casing, paths, roots,
+roles, omissions, and duplicates. Outer index normalization invokes that same validator after
+reconstructing the runtime manifest files. Wrapper payloads carry the index target architecture;
+configuration payloads never carry one.
+
 `BuildIndex` obtains one `releasepackage.AssemblySnapshot`. The snapshot revalidates and clones all
 six finalized documents inside the release and native-handle cleanup commit gates. The builder does
 not reconstruct reviewed metadata from caller-provided fields. `BuildOptions`, including bootstrap
