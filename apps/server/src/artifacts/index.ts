@@ -1,3 +1,13 @@
+export type {
+  ArtifactReconciliationCoordinatorErrorCode,
+  ArtifactReconciliationCoordinatorOptions,
+  ArtifactReconciliationDatabaseOwner,
+  ArtifactReconciliationStorageOwner,
+} from "./artifact-reconciliation-coordinator.js";
+export {
+  ArtifactReconciliationCoordinator,
+  ArtifactReconciliationCoordinatorError,
+} from "./artifact-reconciliation-coordinator.js";
 export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
 export { ArtifactStorageClient } from "./artifact-storage-client.js";
 export type {
