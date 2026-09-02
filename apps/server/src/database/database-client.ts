@@ -141,6 +141,8 @@ export class DatabaseClient {
         "readArtifactReconciliationCursor",
         snapshotArtifactReconciliationDatabaseInput("readArtifactReconciliationCursor", input),
       ),
+    prepareArtifactCompletion: (input) => this.#send("prepareArtifactCompletion", input),
+    commitArtifactCompletion: (input) => this.#send("commitArtifactCompletion", input),
   } satisfies ArtifactTransactionDatabaseDispatchers);
 
   private constructor(

@@ -111,6 +111,7 @@ const start = async (): Promise<void> => {
       shutdownSignal: lifecycle.signal,
       artifactReadiness: storageRuntime.artifactReadiness,
       artifactTransactions: storageRuntime.artifactTransactions,
+      artifactCompletion: storageRuntime.artifactCompletion,
       serverAdmission: lifecycle.admission,
       ...(githubIngestion === undefined ? {} : { githubIngestion }),
       ...(operatorAuth === undefined ? {} : { operatorAuth }),

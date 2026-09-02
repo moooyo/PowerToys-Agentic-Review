@@ -277,6 +277,15 @@ size and digest, parses one JSON value, validates it against the job's authorita
 canonicalizes it with the pinned algorithm version, and computes `resultDigest`. A Worker-supplied
 digest is only a claim and must match the Server computation.
 
+The JSON reader accepts insignificant whitespace and object-member ordering because the raw object
+digest and canonical result digest intentionally protect different representations. It rejects a
+UTF-8 BOM, trailing second values, comments, trailing commas, duplicate object-member names after
+escape decoding, non-finite or unsafe integer values, and unpaired UTF-16 surrogates. Duplicate
+members are not interpreted with `JSON.parse` last-wins behavior. A structured JSON syntax tree is
+validated with explicit depth and node-count ceilings before the resulting value is passed to the
+pinned canonicalizer. Parser exceptions and either ceiling produce a stable non-fatal invalid-result
+response and no completion write; malformed result bytes cannot request whole-Server fail-stop.
+
 ### Completion mode binding and downgrade prevention
 
 The Server, not the Worker request, selects one versioned completion mode during the atomic claim:
@@ -362,13 +371,14 @@ with the same effective user ID. The storage root remains private to the Server 
 uses server-derived grammar and no-follow opens, and identity is revalidated immediately before
 unlink. An unknown unlink or directory-fsync outcome terminates the storage owner.
 
-Artifact HTTP routes and artifact-mode completion remain disabled in this slice. The internal
-transaction foundation now places create, chunk, finalization, termination, and reconciliation
-under one cancellable, bounded Server-process mutation gate. A writer holds the gate from before its
-database prepare through its filesystem durability phase and final database commit or definitive
-failure. A reconciliation pass holds the same gate while a filesystem manifest session is active,
-through every page classification and the session's final or explicit close. Upload and namespace
-cleanup cannot run between pages of that manifest.
+Artifact HTTP routes and artifact-backed completion are implemented, while artifact-mode claim
+selection remains disabled. The internal transaction foundation places create, chunk, finalization,
+termination, completion, and reconciliation under one cancellable, bounded Server-process mutation
+gate. A writer holds the gate from before its database prepare through its filesystem durability or
+verified-read phase and final database commit or definitive failure. A reconciliation pass holds the
+same gate while a filesystem manifest session is active, through every page classification and the
+session's final or explicit close. Upload and namespace cleanup cannot run between pages of that
+manifest.
 
 One manifest session has an independent page bound and one fixed page size. The page size and the
 effective page count are chosen so their product never exceeds the namespace cleanup batch that the
@@ -400,14 +410,16 @@ no failed namespace cleanup, and no operational namespace-health saturation. Fat
 transitions synchronously disable admission. `main.ts` now composes this internal foundation before
 the Server becomes ready, and `app.ts` binds coarse readiness and process-wide admission to the same
 lifecycle. The runtime exposes the database, a narrow readiness probe, one frozen four-method
-artifact transaction port, and ordered close. The port exposes create, chunk, finalize, and terminate
-only; it cannot close the coordinator or observe its readiness, fatal signal, or ownership handles.
-The separate boolean readiness probe remains the application's only artifact health view. `app.ts` is
-the sole production registrar for the four Worker artifact routes and receives the port only for
-mutations. Artifact-mode claim selection and artifact-backed completion remain disabled: every
-production claim still persists `inline_result_v1`, uses the version-one envelope without a
-completion-mode field, and is rejected by the artifact transaction fence before capacity or
-filesystem mutation.
+artifact transaction port, one separate frozen single-method artifact-completion port, and ordered
+close. Neither port can read arbitrary objects, close the coordinator, or observe readiness, fatal
+signals, or ownership handles. The separate boolean readiness probe remains the application's only
+artifact health view. `app.ts` is the sole production registrar for the Worker artifact and terminal
+routes. Artifact completion uses a strict request union with no caller-provided mode selector, a
+read-only fenced database prepare, a verified immutable-object read, strict UTF-8/JSON and
+authoritative result validation, and one final fenced transaction that creates the immutable binding
+and terminal projection together. Artifact-mode claim selection remains disabled: every production
+claim still persists `inline_result_v1` and uses the version-one envelope without a completion-mode
+field, so the artifact upload and completion forms remain unreachable in production.
 
 Namespace cleanup health reads are independently bounded for each status. Saturated pending,
 retry-waiting, failed, or due counts are operational saturation: capacity admission becomes

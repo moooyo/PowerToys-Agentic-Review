@@ -159,13 +159,14 @@ proves artifact Worker exit, closes SQLite, and releases the owner lock. A fatal
 protocol, or unknown-outcome condition follows the same ordered drain and then exits the complete
 Server with a nonzero status.
 
-For artifact mutations, `ServerStorageRuntime` exposes Fastify only to a frozen four-method
-transaction port. The application registers the create, chunk, finalize, and terminate routes while
-receiving artifact health only through a separate boolean readiness probe. The transaction port
-carries no coordinator shutdown, fatal, or owner capabilities. These routes are live, but claim
-selection remains default-off:
-production claims still bind `inline_result_v1` and the artifact fence rejects them before capacity
-admission or filesystem mutation. A later reviewed rollout must version the claim envelope and
+For artifact operations, `ServerStorageRuntime` exposes Fastify only to two frozen narrow ports: a
+four-method create/chunk/finalize/terminate transaction port and a separate single-method completion
+port. The application registers those artifact routes and the shared run-completion route while
+receiving artifact health only through a separate boolean readiness probe. Neither port carries
+arbitrary object-read, coordinator shutdown, fatal, or owner capabilities. These routes are live,
+but claim selection remains default-off: production claims still bind `inline_result_v1` and the
+database prepare rejects artifact upload or completion before capacity admission, filesystem
+mutation, or immutable-object reads. A later reviewed rollout must version the claim envelope and
 atomically persist `result_artifact_v1`; route availability alone grants no artifact mode.
 
 The database thread applies:

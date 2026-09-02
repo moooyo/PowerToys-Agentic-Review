@@ -26,6 +26,24 @@ export class ResultDigestMismatchError extends Error {
   }
 }
 
+export class ArtifactResultEncodingInvalidError extends Error {
+  public readonly code = "ARTIFACT_RESULT_ENCODING_INVALID";
+
+  public constructor() {
+    super("The result artifact is not strict UTF-8 text.");
+    this.name = "ArtifactResultEncodingInvalidError";
+  }
+}
+
+export class ArtifactResultJsonInvalidError extends Error {
+  public readonly code = "ARTIFACT_RESULT_JSON_INVALID";
+
+  public constructor() {
+    super("The result artifact does not contain exactly one JSON value.");
+    this.name = "ArtifactResultJsonInvalidError";
+  }
+}
+
 export class ReviewResultInvalidError extends Error {
   public readonly code = "REVIEW_RESULT_INVALID";
 
@@ -77,6 +95,15 @@ export class ArtifactCompletionModeMismatchError extends Error {
   public constructor() {
     super("The run attempt does not permit result artifact operations.");
     this.name = "ArtifactCompletionModeMismatchError";
+  }
+}
+
+export class ArtifactCompletionStateInvalidError extends Error {
+  public readonly code = "ARTIFACT_COMPLETION_STATE_INVALID";
+
+  public constructor() {
+    super("The durable artifact completion state is inconsistent.");
+    this.name = "ArtifactCompletionStateInvalidError";
   }
 }
 

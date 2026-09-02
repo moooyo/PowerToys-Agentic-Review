@@ -80,6 +80,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   manifest contract that requires native NTFS, DACL, reparse-point, and handle-identity evidence.
 - Server-side authoritative result validation and immutable SQLite projections for pull-request
   findings and issue triage, committed atomically with the successful run and job transition.
+- Server-only artifact-backed completion behind the durable attempt mode. The strict terminal
+  request union has no caller mode selector; completion performs a read-only fenced database
+  prepare, a bounded verified CAS read, strict UTF-8/JSON/schema and canonical-digest validation,
+  and a final fenced transaction that commits the immutable artifact binding, result projection,
+  attempt, and job together. Exact terminal replay rebuilds the stored response through the strict
+  public schema and does not reread storage.
 - A production identity-boundary decision that represents one logical Worker as separate Control
   and Executor Windows services connected by signed short-lived capabilities over a protected
   Named Pipe.
@@ -216,9 +222,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   The storage Worker, coordinator, reconciler, readiness ownership, close order, and whole-Server
   fail-stop remain owned by the storage runtime and lifecycle. Route availability does not enable the
   data path: production claims still persist `inline_result_v1`, version-one envelopes expose no
-  completion mode, and the database fence rejects artifact requests before capacity or filesystem
-  mutation. Artifact-mode claim selection and artifact-backed completion still require separate
-  review.
+  completion mode, and the database fence rejects artifact requests before capacity, filesystem
+  mutation, or artifact-backed completion. The Server completion slice is present but default-off
+  and unreachable until a future versioned claim envelope and rollout policy select
+  `result_artifact_v1`.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release
@@ -249,11 +256,11 @@ Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, tok
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
 Claim authority is enabled.
 
-The product data path can proceed in parallel by adding the Worker Control upload client and
-connecting artifact-backed completion while keeping claim selection default-off. Immutable
-server-side diff manifests, publication drafts, digest-bound approvals, GitHub outbox reconciliation,
-and Dashboard write actions follow. Dynamic validation remains a separate stronger-isolation
-milestone.
+The product data path can proceed in parallel by adding the Worker Control upload client while
+keeping claim selection default-off, then introducing a versioned claim envelope and rollout policy
+before any artifact-mode canary. Immutable server-side diff manifests, publication drafts,
+digest-bound approvals, GitHub outbox reconciliation, and Dashboard write actions follow. Dynamic
+validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 

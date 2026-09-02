@@ -218,6 +218,42 @@ const chunkValidationErrors: Readonly<
 const coordinatorErrors: Readonly<
   Record<ArtifactTransactionCoordinatorError["code"], PublicErrorDefinition>
 > = Object.freeze({
+  ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH: {
+    status: 400,
+    code: "result_digest_mismatch",
+    message: "The result artifact does not match the submitted canonical digest.",
+    retryable: false,
+  },
+  ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID: {
+    status: 400,
+    code: "artifact_result_encoding_invalid",
+    message: "The result artifact is not strict UTF-8 text.",
+    retryable: false,
+  },
+  ARTIFACT_COMPLETION_RESULT_INVALID: {
+    status: 400,
+    code: "review_result_invalid",
+    message: "The result artifact does not match its authoritative result contract.",
+    retryable: false,
+  },
+  ARTIFACT_COMPLETION_RESULT_JSON_INVALID: {
+    status: 400,
+    code: "artifact_result_json_invalid",
+    message: "The result artifact does not contain exactly one JSON value.",
+    retryable: false,
+  },
+  ARTIFACT_COMPLETION_STORED_TEMPLATE_INVALID: {
+    status: 400,
+    code: "stored_execution_template_invalid",
+    message: "The stored execution template is invalid.",
+    retryable: false,
+  },
+  ARTIFACT_COMPLETION_TERMINAL_CONFLICT: {
+    status: 409,
+    code: "terminal_submission_conflict",
+    message: "The run attempt already has a different terminal submission.",
+    retryable: false,
+  },
   ARTIFACT_TRANSACTION_BUSY: {
     status: 429,
     code: "artifact_transaction_busy",

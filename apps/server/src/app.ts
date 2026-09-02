@@ -1,6 +1,6 @@
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { ArtifactTransactionPort } from "./artifacts/index.js";
+import type { ArtifactCompletionPort, ArtifactTransactionPort } from "./artifacts/index.js";
 import { startLeaseReaper } from "./background/lease-reaper.js";
 import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
 import type { ServerConfig } from "./config.js";
@@ -27,6 +27,7 @@ export interface AppDependencies {
   readonly shutdownSignal: AbortSignal;
   readonly artifactReadiness: ArtifactReadinessProbe;
   readonly artifactTransactions: ArtifactTransactionPort;
+  readonly artifactCompletion: ArtifactCompletionPort;
   readonly serverAdmission: {
     read(): boolean;
   };
@@ -82,6 +83,18 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
       return reply.code(413).send({
         code: "request_body_too_large",
         message: "The request body exceeds the configured limit.",
+        retryable: false,
+      });
+    }
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
+        error.code === "FST_ERR_CTP_EMPTY_JSON_BODY")
+    ) {
+      return reply.code(400).send({
+        code: "request_validation_failed",
+        message: "The request body is not valid JSON.",
         retryable: false,
       });
     }
@@ -172,7 +185,12 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     dependencies.artifactReadiness,
     dependencies.shutdownSignal,
   );
-  registerWorkerRoutes(app, dependencies);
+  registerWorkerRoutes(app, {
+    config: dependencies.config,
+    database: dependencies.database,
+    artifactCompletion: dependencies.artifactCompletion,
+    shutdownSignal: dependencies.shutdownSignal,
+  });
   registerWorkerArtifactRoutes(app, {
     config: dependencies.config,
     transactions: dependencies.artifactTransactions,

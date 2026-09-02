@@ -24,6 +24,7 @@ import {
   registerArtifactTransactionOwnerLockHandle,
   registerArtifactTransactionStorageHandle,
 } from "../../dist/artifacts/artifact-transaction-coordinator.js";
+import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import type {
   ArtifactCapacityAdmission,
   ArtifactCapacityEvaluationInput,
@@ -78,7 +79,9 @@ const artifactTransactionDatabaseOperations = [
   "probeArtifactUploadCreate",
   "createArtifactUpload",
   "prepareArtifactChunk",
+  "prepareArtifactCompletion",
   "commitArtifactChunk",
+  "commitArtifactCompletion",
   "prepareArtifactFinalize",
   "commitArtifactFinalize",
   "terminateArtifactUpload",
@@ -144,6 +147,9 @@ class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOw
   chunkWriteCount = 0;
   finalizationCount = 0;
   objectReadCount = 0;
+  objectBytes: Buffer | undefined;
+  objectReadError: Error | undefined;
+  objectRead: (() => Promise<Buffer>) | undefined;
 
   evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
     this.capacityEvaluationCount += 1;
@@ -171,6 +177,15 @@ class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOw
 
   readObject(): Promise<Buffer> {
     this.objectReadCount += 1;
+    if (this.objectReadError !== undefined) {
+      return Promise.reject(this.objectReadError);
+    }
+    if (this.objectRead !== undefined) {
+      return this.objectRead();
+    }
+    if (this.objectBytes !== undefined) {
+      return Promise.resolve(Buffer.from(this.objectBytes));
+    }
     return Promise.reject(new Error("Fake artifact object reads are not configured."));
   }
 
@@ -218,6 +233,7 @@ const createArtifactCoordinator = async (
   database: ArtifactTransactionDatabaseHandle = client.createArtifactTransactionDatabaseHandle(),
   reconciliationIntervalMilliseconds = 60_000,
   storage = new FakeArtifactTransactionStorage(),
+  onFailStop: (error: Error) => void = () => undefined,
 ): Promise<ArtifactTransactionCoordinator> => {
   const coordinator = await ArtifactTransactionCoordinator.create({
     database,
@@ -236,7 +252,7 @@ const createArtifactCoordinator = async (
     reconciliationPassTimeoutMilliseconds: 5_000,
     reconciliationInitialRetryDelaySeconds: 30,
     reconciliationMaximumRetryDelaySeconds: 300,
-    onFailStop: () => undefined,
+    onFailStop,
   });
   await coordinator.ready;
   return coordinator;
@@ -966,6 +982,90 @@ const scheduleAndClaimReview = async (
   return claim;
 };
 
+const enableArtifactCompletionForAttempt = (
+  fixture: DatabaseFixture,
+  runAttemptId: string,
+): void => {
+  withFixtureDatabase(fixture, (database) => {
+    database.exec("DROP TRIGGER tr_run_attempt_completion_mode_immutable");
+    const update = database
+      .prepare(`
+        UPDATE run_attempts
+        SET completion_mode = 'result_artifact_v1'
+        WHERE id = ? AND status IN ('leased', 'running')
+      `)
+      .run(runAttemptId);
+    if (Number(update.changes) !== 1) {
+      throw new Error("Expected one active run attempt to enter artifact completion mode.");
+    }
+  });
+};
+
+const publishResultArtifact = async (
+  coordinator: ArtifactTransactionCoordinator,
+  lease: {
+    readonly jobId: string;
+    readonly runAttemptId: string;
+    readonly workerNodeId: string;
+    readonly workerInstanceId: string;
+    readonly leaseToken: string;
+    readonly leaseGeneration: number;
+  },
+  bytes: Buffer,
+) => {
+  const rawDigest = createHash("sha256").update(bytes).digest("hex");
+  const created = await coordinator.createArtifactUpload({
+    ...lease,
+    clientArtifactId: artifactClientId(7),
+    purpose: "result",
+    name: "result.json",
+    mediaType: "application/json",
+    totalBytes: bytes.byteLength,
+    sha256: rawDigest,
+  });
+  await coordinator.putArtifactChunk(created.uploadId, {
+    ...lease,
+    chunkIndex: 0,
+    offsetBytes: 0,
+    chunkBytes: bytes.byteLength,
+    chunkSha256: rawDigest,
+    data: bytes.toString("base64url"),
+  });
+  const finalized = await coordinator.finalizeArtifactUpload(created.uploadId, {
+    ...lease,
+    chunkCount: 1,
+    totalBytes: bytes.byteLength,
+    sha256: rawDigest,
+  });
+  return finalized.artifact;
+};
+
+const serverConfigFor = (fixture: DatabaseFixture): ServerConfig => ({
+  host: "127.0.0.1",
+  port: 0,
+  databasePath: fixture.databasePath,
+  migrationsDirectory,
+  artifactStorage: {
+    rootPath: join(fixture.directory, "unused-artifacts"),
+    capacity: artifactStorageCapacity,
+  },
+  protocolVersion,
+  heartbeatIntervalSeconds: 20,
+  leaseTtlSeconds,
+  leaseReaperIntervalSeconds: 300,
+  operatorAuthCleanupIntervalSeconds: 300,
+  operatorAuthCleanupBatchSize: 100,
+  retryDelaySeconds: 1,
+  workerOfflineAfterSeconds: 90,
+  maxLongPollSeconds: 30,
+  allowInsecureWorkerAuth: true,
+  tls: undefined,
+  workerCertificateBindings: {},
+  github: undefined,
+  operatorAuth: undefined,
+  dashboardDirectory: undefined,
+});
+
 const assertUncommittedReviewCompletion = (
   fixture: DatabaseFixture,
   runAttemptId: string,
@@ -1097,7 +1197,13 @@ describe("DatabaseClient lease integration", () => {
     const lease = claim.envelope.lease;
     const readArtifactCounts = () =>
       withFixtureDatabase(fixture, (database) => {
-        const count = (table: "artifact_uploads" | "artifact_upload_chunks" | "run_artifacts") =>
+        const count = (
+          table:
+            | "artifact_uploads"
+            | "artifact_upload_chunks"
+            | "run_artifacts"
+            | "artifact_completion_bindings",
+        ) =>
           (
             database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
               readonly count: number;
@@ -1107,6 +1213,7 @@ describe("DatabaseClient lease integration", () => {
           uploads: count("artifact_uploads"),
           chunks: count("artifact_upload_chunks"),
           artifacts: count("run_artifacts"),
+          completions: count("artifact_completion_bindings"),
         });
       });
     const readStorageMutationCounts = () =>
@@ -1163,6 +1270,15 @@ describe("DatabaseClient lease integration", () => {
           reason: "client_abandoned",
         },
       },
+      {
+        method: "POST",
+        url: `/api/v1/worker/runs/${lease.runAttemptId}/complete`,
+        payload: {
+          ...lease,
+          artifactId: "artifact-id",
+          resultDigest: contentSha256,
+        },
+      },
     ] as const;
 
     try {
@@ -1172,9 +1288,12 @@ describe("DatabaseClient lease integration", () => {
         shutdownSignal: shutdown.signal,
         artifactReadiness: { read: () => ({ ready: true }) },
         artifactTransactions: coordinator,
+        artifactCompletion: Object.freeze({
+          completeArtifactRun: (input, signal) => coordinator.completeArtifactRun(input, signal),
+        }),
         serverAdmission: { read: () => true },
       });
-      expect(databaseBefore).toEqual({ uploads: 0, chunks: 0, artifacts: 0 });
+      expect(databaseBefore).toEqual({ uploads: 0, chunks: 0, artifacts: 0, completions: 0 });
       expect(storageBefore).toEqual({
         capacityEvaluations: 0,
         chunkWrites: 0,
@@ -1261,6 +1380,527 @@ describe("DatabaseClient lease integration", () => {
       nextOffsetBytes: 2,
     });
     await coordinator.close();
+  });
+
+  it("completes a review from a verified artifact and replays without rereading storage", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-success"),
+      "artifact-completion-success",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Artifact-backed review completed.");
+    const canonicalResultJson = canonicalJson(result);
+    const resultDigest = sha256(canonicalResultJson);
+    const artifactBytes = Buffer.from(JSON.stringify(result, null, 2), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectBytes = artifactBytes;
+    expect(artifact.sha256).not.toBe(resultDigest);
+
+    const submission = {
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest,
+    };
+    const shutdown = new AbortController();
+    const app = buildApp({
+      config: serverConfigFor(fixture),
+      database: fixture.client,
+      shutdownSignal: shutdown.signal,
+      artifactReadiness: { read: () => ({ ready: true }) },
+      artifactTransactions: coordinator,
+      artifactCompletion: Object.freeze({
+        completeArtifactRun: (input, signal) => coordinator.completeArtifactRun(input, signal),
+      }),
+      serverAdmission: { read: () => true },
+    });
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/worker/runs/${submission.runAttemptId}/complete`,
+      payload: submission,
+    });
+    expect(firstResponse.statusCode).toBe(200);
+    const terminal = firstResponse.json();
+    expect(terminal).toEqual({
+      jobId: claim.envelope.lease.jobId,
+      runAttemptId: claim.envelope.lease.runAttemptId,
+      jobState: "succeeded",
+      runState: "succeeded",
+    });
+    expect(storage.objectReadCount).toBe(1);
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", submission.runAttemptId);
+    });
+    const replayResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/worker/runs/${submission.runAttemptId}/complete`,
+      payload: submission,
+    });
+    expect(replayResponse.statusCode).toBe(200);
+    expect(replayResponse.json()).toEqual(terminal);
+    expect(storage.objectReadCount).toBe(1);
+    const conflictResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/worker/runs/${submission.runAttemptId}/complete`,
+      payload: { ...submission, resultDigest: "0".repeat(64) },
+    });
+    expect(conflictResponse.statusCode).toBe(409);
+    expect(conflictResponse.json()).toMatchObject({
+      code: "terminal_submission_conflict",
+      retryable: false,
+    });
+    const tokenConflictResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/worker/runs/${submission.runAttemptId}/complete`,
+      payload: { ...submission, leaseToken: "z".repeat(32) },
+    });
+    expect(tokenConflictResponse.statusCode).toBe(409);
+    expect(tokenConflictResponse.json()).toMatchObject({
+      code: "terminal_submission_conflict",
+      retryable: false,
+    });
+
+    withFixtureDatabase(fixture, (database) => {
+      const state = database
+        .prepare(`
+          SELECT
+            attempt.status AS attempt_status,
+            attempt.result_digest,
+            attempt.result_json,
+            attempt.ended_at,
+            job.status AS job_status,
+            job.current_run_attempt_id,
+            job.completed_at,
+            binding.artifact_id,
+            binding.artifact_sha256,
+            binding.result_digest AS binding_result_digest,
+            binding.canonicalization_version,
+            binding.terminal_response_json,
+            binding.completed_at AS binding_completed_at
+          FROM run_attempts AS attempt
+          JOIN jobs AS job ON job.id = attempt.job_id
+          JOIN artifact_completion_bindings AS binding
+            ON binding.run_attempt_id = attempt.id
+          WHERE attempt.id = ?
+        `)
+        .get(claim.envelope.lease.runAttemptId) as Record<string, unknown>;
+      expect(state).toMatchObject({
+        attempt_status: "succeeded",
+        result_digest: resultDigest,
+        result_json: canonicalResultJson,
+        job_status: "succeeded",
+        current_run_attempt_id: null,
+        artifact_id: artifact.artifactId,
+        artifact_sha256: artifact.sha256,
+        binding_result_digest: resultDigest,
+        canonicalization_version: 1,
+        terminal_response_json: JSON.stringify(terminal),
+      });
+      expect(state.ended_at).toBe(state.binding_completed_at);
+      expect(state.completed_at).toBe(state.binding_completed_at);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM review_results").get()).toEqual({
+        count: 1,
+      });
+    });
+    shutdown.abort(new Error("Artifact completion route test completed."));
+    await app.close();
+    await coordinator.close();
+  });
+
+  it.each([
+    { kind: "encoding", expectedCode: "ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID" },
+    { kind: "json", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "bom", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "trailing", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "unsafe-number", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "unpaired-surrogate", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "duplicate-member", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "depth", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "width", expectedCode: "ARTIFACT_COMPLETION_RESULT_JSON_INVALID" },
+    { kind: "schema", expectedCode: "ARTIFACT_COMPLETION_RESULT_INVALID" },
+    { kind: "digest", expectedCode: "ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH" },
+  ] as const)(
+    "keeps artifact completion zero-write after $kind validation failure",
+    async ({ kind, expectedCode }) => {
+      const fixture = await createFixture(false);
+      const claim = await scheduleAndClaimReview(
+        fixture,
+        makeRequestOpenedInput(`delivery-artifact-completion-${kind}`),
+        `artifact-completion-${kind}`,
+      );
+      enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+      seedCompletedNamespaceSweepForTest(fixture);
+      const storage = new FakeArtifactTransactionStorage();
+      const coordinator = await createArtifactCoordinator(
+        fixture.client,
+        undefined,
+        60_000,
+        storage,
+      );
+      const validResult = validPrReviewResult(`Artifact ${kind} validation.`);
+      const value = kind === "schema" ? {} : validResult;
+      let artifactBytes: Buffer;
+      switch (kind) {
+        case "encoding":
+          artifactBytes = Buffer.from([0xff]);
+          break;
+        case "json":
+          artifactBytes = Buffer.from("{", "utf8");
+          break;
+        case "bom":
+          artifactBytes = Buffer.concat([
+            Buffer.from([0xef, 0xbb, 0xbf]),
+            Buffer.from(JSON.stringify(validResult), "utf8"),
+          ]);
+          break;
+        case "trailing":
+          artifactBytes = Buffer.from(`${JSON.stringify(validResult)} {}`, "utf8");
+          break;
+        case "unsafe-number":
+          artifactBytes = Buffer.from("9007199254740993", "utf8");
+          break;
+        case "unpaired-surrogate":
+          artifactBytes = Buffer.from('"\\ud800"', "utf8");
+          break;
+        case "duplicate-member":
+          artifactBytes = Buffer.from(
+            '{"schemaVersion":"PrReviewPlanV1","schemaVersion":"PrReviewPlanV1"}',
+            "utf8",
+          );
+          break;
+        case "depth":
+          artifactBytes = Buffer.from(`${"[".repeat(130)}null${"]".repeat(130)}`, "utf8");
+          break;
+        case "width":
+          artifactBytes = Buffer.from(`[${"0,".repeat(65_536)}0]`, "utf8");
+          break;
+        default:
+          artifactBytes = Buffer.from(JSON.stringify(value), "utf8");
+      }
+      const artifact = await publishResultArtifact(
+        coordinator,
+        claim.envelope.lease,
+        artifactBytes,
+      );
+      storage.objectBytes = artifactBytes;
+      const claimedDigest = kind === "schema" ? sha256(canonicalJson(value)) : "0".repeat(64);
+
+      await expect(
+        coordinator.completeArtifactRun({
+          ...claim.envelope.lease,
+          artifactId: artifact.artifactId,
+          resultDigest: claimedDigest,
+        }),
+      ).rejects.toMatchObject({ code: expectedCode, requiresFailStop: false });
+      assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+      withFixtureDatabase(fixture, (database) => {
+        expect(
+          database.prepare("SELECT COUNT(*) AS count FROM artifact_completion_bindings").get(),
+        ).toEqual({ count: 0 });
+      });
+      expect(storage.objectReadCount).toBe(1);
+      await coordinator.close();
+    },
+  );
+
+  it("rejects a lost lease before reading artifact storage or writing terminal state", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-lease-lost"),
+      "artifact-completion-lease-lost",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Expired artifact completion.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectBytes = artifactBytes;
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
+    });
+
+    await expect(
+      coordinator.completeArtifactRun({
+        ...claim.envelope.lease,
+        artifactId: artifact.artifactId,
+        resultDigest: sha256(canonicalJson(result)),
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_LEASE_LOST" });
+    expect(storage.objectReadCount).toBe(0);
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+    await coordinator.close();
+  });
+
+  it("rechecks a revoked lease after the verified storage read before final commit", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-revoked-during-read"),
+      "artifact-completion-revoked-during-read",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Lease revoked during artifact read.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    const read = Promise.withResolvers<Buffer>();
+    storage.objectRead = () => read.promise;
+    const completion = coordinator.completeArtifactRun({
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest: sha256(canonicalJson(result)),
+    });
+    void completion.catch(() => undefined);
+    await vi.waitFor(() => expect(storage.objectReadCount).toBe(1));
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
+    });
+    read.resolve(artifactBytes);
+
+    await expect(completion).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_LEASE_LOST" });
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database.prepare("SELECT COUNT(*) AS count FROM artifact_completion_bindings").get(),
+      ).toEqual({ count: 0 });
+    });
+    await coordinator.close();
+  });
+
+  it("lets a competing terminal failure win while artifact completion is reading", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-terminal-race"),
+      "artifact-completion-terminal-race",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Terminal failure wins the race.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    const read = Promise.withResolvers<Buffer>();
+    storage.objectRead = () => read.promise;
+    const completion = coordinator.completeArtifactRun({
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest: sha256(canonicalJson(result)),
+    });
+    void completion.catch(() => undefined);
+    await vi.waitFor(() => expect(storage.objectReadCount).toBe(1));
+    await fixture.client.request("failLease", {
+      ...claim.envelope.lease,
+      failureCode: "execution_failed",
+      failureMessage: "A terminal failure committed while the object was being read.",
+      retryable: false,
+      retryDelaySeconds: 1,
+    });
+    read.resolve(artifactBytes);
+
+    await expect(completion).rejects.toMatchObject({
+      code: "ARTIFACT_COMPLETION_TERMINAL_CONFLICT",
+    });
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare(`
+            SELECT
+              attempt.status AS attempt_status,
+              job.status AS job_status,
+              (SELECT COUNT(*) FROM artifact_completion_bindings) AS binding_count,
+              (SELECT COUNT(*) FROM review_results) AS review_result_count
+            FROM run_attempts AS attempt
+            JOIN jobs AS job ON job.id = attempt.job_id
+            WHERE attempt.id = ?
+          `)
+          .get(claim.envelope.lease.runAttemptId),
+      ).toEqual({
+        attempt_status: "failed",
+        job_status: "failed",
+        binding_count: 0,
+        review_result_count: 0,
+      });
+    });
+    await coordinator.close();
+  });
+
+  it("fails stop on immutable object integrity loss without committing completion", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-integrity"),
+      "artifact-completion-integrity",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const failStops: Error[] = [];
+    const coordinator = await createArtifactCoordinator(
+      fixture.client,
+      undefined,
+      60_000,
+      storage,
+      (error) => failStops.push(error),
+    );
+    const result = validPrReviewResult("Integrity failure remains uncommitted.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectReadError = new ArtifactStorageClientError(
+      "ARTIFACT_STORAGE_INTEGRITY",
+      "The immutable object failed verification.",
+    );
+
+    await expect(
+      coordinator.completeArtifactRun({
+        ...claim.envelope.lease,
+        artifactId: artifact.artifactId,
+        resultDigest: sha256(canonicalJson(result)),
+      }),
+    ).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY",
+      requiresFailStop: true,
+    });
+    expect(failStops).toHaveLength(1);
+    assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
+    await coordinator.close().catch(() => undefined);
+  });
+
+  it("fails stop instead of replaying noncanonical terminal binding JSON", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-corrupt-replay"),
+      "artifact-completion-corrupt-replay",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Replay state must stay canonical.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectBytes = artifactBytes;
+    const submission = {
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest: sha256(canonicalJson(result)),
+    };
+    await coordinator.completeArtifactRun(submission);
+    const readsAfterCommit = storage.objectReadCount;
+    withFixtureDatabase(fixture, (database) => {
+      database.exec("DROP TRIGGER tr_artifact_completion_bindings_immutable_update");
+      database
+        .prepare(`
+          UPDATE artifact_completion_bindings
+          SET terminal_response_json = ' ' || terminal_response_json
+          WHERE run_attempt_id = ?
+        `)
+        .run(claim.envelope.lease.runAttemptId);
+    });
+
+    await expect(coordinator.completeArtifactRun(submission)).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_PROTOCOL_FAILURE",
+      requiresFailStop: true,
+    });
+    expect(storage.objectReadCount).toBe(readsAfterCommit);
+    await coordinator.close().catch(() => undefined);
+  });
+
+  it("fails stop instead of replaying consistently corrupted canonical result JSON", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-corrupt-result-replay"),
+      "artifact-completion-corrupt-result-replay",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Canonical replay state must remain digest-bound.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectBytes = artifactBytes;
+    const submission = {
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest: sha256(canonicalJson(result)),
+    };
+    await coordinator.completeArtifactRun(submission);
+    const readsAfterCommit = storage.objectReadCount;
+    withFixtureDatabase(fixture, (database) => {
+      database.exec("DROP TRIGGER tr_run_attempt_artifact_completion_immutable");
+      database.exec("DROP TRIGGER tr_run_attempt_completed_review_identity_immutable");
+      database.exec("DROP TRIGGER tr_review_results_immutable_update");
+      database
+        .prepare("UPDATE run_attempts SET result_json = ' ' || result_json WHERE id = ?")
+        .run(claim.envelope.lease.runAttemptId);
+      database
+        .prepare(
+          "UPDATE review_results SET result_json = ' ' || result_json WHERE run_attempt_id = ?",
+        )
+        .run(claim.envelope.lease.runAttemptId);
+    });
+
+    await expect(coordinator.completeArtifactRun(submission)).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_PROTOCOL_FAILURE",
+      requiresFailStop: true,
+    });
+    expect(storage.objectReadCount).toBe(readsAfterCommit);
+    await coordinator.close().catch(() => undefined);
+  });
+
+  it("fails stop when a terminal binding loses its immutable artifact referent", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-artifact-completion-missing-terminal-artifact"),
+      "artifact-completion-missing-terminal-artifact",
+    );
+    enableArtifactCompletionForAttempt(fixture, claim.envelope.lease.runAttemptId);
+    seedCompletedNamespaceSweepForTest(fixture);
+    const storage = new FakeArtifactTransactionStorage();
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 60_000, storage);
+    const result = validPrReviewResult("Terminal replay requires its immutable artifact.");
+    const artifactBytes = Buffer.from(JSON.stringify(result), "utf8");
+    const artifact = await publishResultArtifact(coordinator, claim.envelope.lease, artifactBytes);
+    storage.objectBytes = artifactBytes;
+    const submission = {
+      ...claim.envelope.lease,
+      artifactId: artifact.artifactId,
+      resultDigest: sha256(canonicalJson(result)),
+    };
+    await coordinator.completeArtifactRun(submission);
+    const readsAfterCommit = storage.objectReadCount;
+    withFixtureDatabase(fixture, (database) => {
+      database.exec("PRAGMA foreign_keys = OFF");
+      database.exec("DROP TRIGGER tr_run_artifacts_immutable_delete");
+      database.prepare("DELETE FROM run_artifacts WHERE id = ?").run(artifact.artifactId);
+    });
+
+    await expect(coordinator.completeArtifactRun(submission)).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_PROTOCOL_FAILURE",
+      requiresFailStop: true,
+    });
+    expect(storage.objectReadCount).toBe(readsAfterCommit);
+    await coordinator.close().catch(() => undefined);
   });
 
   it("rejects every ordinary artifact request and issues one opaque transaction handle", async () => {

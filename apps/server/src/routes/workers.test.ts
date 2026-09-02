@@ -2,8 +2,12 @@ import {
   maximumRunCompletionRequestBytes,
   maximumRunCompletionResultUtf8Bytes,
 } from "@agentic-review/contracts";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { describe, expect, it, vi } from "vitest";
+import {
+  type ArtifactCompletionPort,
+  ArtifactTransactionCoordinatorError,
+} from "../../dist/artifacts/index.js";
 import type { ServerConfig } from "../../dist/config.js";
 import type { DatabaseClient } from "../../dist/database/database-client.js";
 import { DatabaseRequestError } from "../../dist/database/errors.js";
@@ -58,6 +62,7 @@ const createApp = (
 ): {
   readonly app: FastifyInstance;
   readonly request: ReturnType<typeof vi.fn>;
+  readonly completeArtifactRun: ReturnType<typeof vi.fn>;
 } => {
   const request = vi.fn(async (operation: string) => {
     if (operation === "completeLease" || operation === "failLease") {
@@ -65,13 +70,19 @@ const createApp = (
     }
     throw new Error(`Unexpected database operation: ${operation}`);
   });
+  const completeArtifactRun = vi.fn(async () => {
+    throw new Error("Unexpected artifact-backed completion.");
+  });
   const app = Fastify({ logger: false });
   registerWorkerRoutes(app, {
     config,
     database: { request } as unknown as DatabaseClient,
+    artifactCompletion: {
+      completeArtifactRun,
+    } satisfies ArtifactCompletionPort,
     shutdownSignal: new AbortController().signal,
   });
-  return { app, request };
+  return { app, request, completeArtifactRun };
 };
 
 describe("Worker terminal routes", () => {
@@ -145,6 +156,35 @@ describe("Worker terminal routes", () => {
     }
   });
 
+  it.each([{ mode: "result_artifact_v1" }, { artifactId: "artifact-id" }])(
+    "rejects the unknown failure field $mode$artifactId before database dispatch",
+    async (extra) => {
+      const { app, request, completeArtifactRun } = createApp();
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/v1/worker/runs/run-attempt-id/fail",
+          payload: {
+            ...leaseIdentity,
+            code: "execution_failed",
+            message: "The execution failed.",
+            retryable: false,
+            ...extra,
+          },
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          code: "request_validation_failed",
+          retryable: false,
+        });
+        expect(request).not.toHaveBeenCalled();
+        expect(completeArtifactRun).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it("rejects an oversized result within the bounded completion request", async () => {
     const { app, request } = createApp();
     try {
@@ -214,6 +254,224 @@ describe("Worker terminal routes", () => {
 
       expect(response.statusCode).toBe(413);
       expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("routes the strict artifact completion form through the narrow completion port", async () => {
+    const { app, request, completeArtifactRun } = createApp();
+    completeArtifactRun.mockResolvedValue({
+      jobId: leaseIdentity.jobId,
+      runAttemptId: leaseIdentity.runAttemptId,
+      jobState: "succeeded",
+      runState: "succeeded",
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: {
+          ...leaseIdentity,
+          artifactId: "artifact-id",
+          resultDigest: "a".repeat(64),
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        jobId: leaseIdentity.jobId,
+        runAttemptId: leaseIdentity.runAttemptId,
+        jobState: "succeeded",
+        runState: "succeeded",
+      });
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).toHaveBeenCalledWith(
+        {
+          ...leaseIdentity,
+          artifactId: "artifact-id",
+          resultDigest: "a".repeat(64),
+        },
+        expect.any(AbortSignal),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    { extra: { result: {} }, description: "both inline and artifact payloads" },
+    { extra: { mode: "result_artifact_v1" }, description: "a caller-selected mode" },
+    { extra: { artifactId: undefined }, description: "neither completion form" },
+  ])("rejects $description as an invalid completion union", async ({ extra }) => {
+    const { app, request, completeArtifactRun } = createApp();
+    const payload = {
+      ...leaseIdentity,
+      artifactId: "artifact-id",
+      resultDigest: "a".repeat(64),
+      ...extra,
+    };
+    if ("artifactId" in extra && extra.artifactId === undefined) {
+      delete (payload as { artifactId?: unknown }).artifactId;
+    }
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["/api/v1/worker/runs/another-attempt/complete", { resultDigest: "a".repeat(64), result: {} }],
+    [
+      "/api/v1/worker/runs/another-attempt/fail",
+      { code: "failed", message: "The run failed.", retryable: false },
+    ],
+  ] as const)("rejects a path/body run attempt mismatch for %s", async (path, terminal) => {
+    const { app, request, completeArtifactRun } = createApp();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: path,
+        payload: { ...leaseIdentity, ...terminal },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: "run_attempt_mismatch", retryable: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["ARTIFACT_COMPLETION_TERMINAL_CONFLICT", 409, "terminal_submission_conflict"],
+    ["ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH", 409, "artifact_completion_mode_mismatch"],
+    ["ARTIFACT_TRANSACTION_LEASE_LOST", 409, "lease_lost"],
+    ["ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH", 400, "result_digest_mismatch"],
+    ["ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID", 422, "artifact_result_encoding_invalid"],
+    ["ARTIFACT_COMPLETION_RESULT_JSON_INVALID", 422, "artifact_result_json_invalid"],
+    ["ARTIFACT_COMPLETION_RESULT_INVALID", 422, "review_result_invalid"],
+    ["ARTIFACT_TRANSACTION_STORAGE_INTEGRITY", 503, "artifact_storage_integrity"],
+  ] as const)("maps %s to its stable public error", async (code, status, publicCode) => {
+    const { app, request, completeArtifactRun } = createApp();
+    completeArtifactRun.mockRejectedValue(new ArtifactTransactionCoordinatorError(code));
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: {
+          ...leaseIdentity,
+          artifactId: "artifact-id",
+          resultDigest: "a".repeat(64),
+        },
+      });
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ code: publicCode, retryable: false });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects an unauthenticated terminal body before its content parser runs", async () => {
+    const secureConfig: ServerConfig = {
+      ...config,
+      allowInsecureWorkerAuth: false,
+      tls: {},
+      workerCertificateBindings: { ["A".repeat(64)]: leaseIdentity.workerNodeId },
+    };
+    const request = vi.fn(async () => {
+      throw new Error("Unexpected database request.");
+    });
+    const completeArtifactRun = vi.fn(async () => {
+      throw new Error("Unexpected artifact completion.");
+    });
+    const app = Fastify({ logger: false });
+    app.removeContentTypeParser("application/json");
+    const parser = vi.fn(
+      (
+        _request: FastifyRequest,
+        body: string,
+        done: (error: Error | null, value?: unknown) => void,
+      ) => done(null, JSON.parse(body)),
+    );
+    app.addContentTypeParser("application/json", { parseAs: "string" }, parser);
+    registerWorkerRoutes(app, {
+      config: secureConfig,
+      database: { request } as unknown as DatabaseClient,
+      artifactCompletion: { completeArtifactRun },
+      shutdownSignal: new AbortController().signal,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        headers: { "content-type": "application/json" },
+        payload: JSON.stringify({
+          ...leaseIdentity,
+          resultDigest: "a".repeat(64),
+          result: { value: "x".repeat(400_000) },
+        }),
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ code: "worker_mtls_required", retryable: false });
+      expect(parser).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects unauthenticated malformed terminal JSON before parsing", async () => {
+    const secureConfig: ServerConfig = {
+      ...config,
+      allowInsecureWorkerAuth: false,
+      tls: {},
+      workerCertificateBindings: { ["A".repeat(64)]: leaseIdentity.workerNodeId },
+    };
+    const request = vi.fn(async () => {
+      throw new Error("Unexpected database request.");
+    });
+    const completeArtifactRun = vi.fn(async () => {
+      throw new Error("Unexpected artifact completion.");
+    });
+    const app = Fastify({ logger: false });
+    app.removeContentTypeParser("application/json");
+    const parser = vi.fn(
+      (
+        _request: FastifyRequest,
+        body: string,
+        done: (error: Error | null, value?: unknown) => void,
+      ) => done(null, JSON.parse(body)),
+    );
+    app.addContentTypeParser("application/json", { parseAs: "string" }, parser);
+    registerWorkerRoutes(app, {
+      config: secureConfig,
+      database: { request } as unknown as DatabaseClient,
+      artifactCompletion: { completeArtifactRun },
+      shutdownSignal: new AbortController().signal,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        headers: { "content-type": "application/json" },
+        payload: "{",
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ code: "worker_mtls_required", retryable: false });
+      expect(parser).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }

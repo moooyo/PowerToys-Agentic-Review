@@ -77,6 +77,7 @@ describe.skipIf(process.platform !== "linux")("ServerStorageRuntime", () => {
       "database",
       "artifactReadiness",
       "artifactTransactions",
+      "artifactCompletion",
       "close",
     ]);
     expect(Object.isFrozen(runtime.artifactTransactions)).toBe(true);
@@ -90,6 +91,12 @@ describe.skipIf(process.platform !== "linux")("ServerStorageRuntime", () => {
     expect(runtime.artifactTransactions).not.toHaveProperty("ready");
     expect(runtime.artifactTransactions).not.toHaveProperty("readiness");
     expect(runtime.artifactTransactions).not.toHaveProperty("fatal");
+    expect(Object.isFrozen(runtime.artifactCompletion)).toBe(true);
+    expect(Reflect.ownKeys(runtime.artifactCompletion)).toEqual(["completeArtifactRun"]);
+    expect(runtime.artifactCompletion).not.toHaveProperty("readObject");
+    expect(runtime.artifactCompletion).not.toHaveProperty("close");
+    expect(runtime.artifactCompletion).not.toHaveProperty("readiness");
+    expect(runtime.artifactCompletion).not.toHaveProperty("fatal");
     expect(runtime.artifactReadiness.read()).toEqual({ ready: true });
     await expect(stat(orphanPath)).rejects.toMatchObject({ code: "ENOENT" });
     const layoutEntries = await readdir(rootPath, { recursive: true, withFileTypes: true });

@@ -1,4 +1,5 @@
 import type {
+  ArtifactRunCompletionSubmission,
   DashboardJobListQuery,
   DashboardJobListResponse,
   DashboardSystemRead,
@@ -28,6 +29,10 @@ import type {
   FindOperatorSessionInput,
   OperatorSession,
 } from "../security/operator-auth.js";
+import type {
+  CommitArtifactCompletionInput,
+  PrepareArtifactCompletionResult,
+} from "./artifact-completion.js";
 import type {
   ArtifactHealthAccounting,
   ArtifactReconciliationCursor,
@@ -307,6 +312,14 @@ export interface DatabaseOperationMap {
   readonly readArtifactReconciliationCursor: {
     readonly input: Record<string, never>;
     readonly output: ArtifactReconciliationCursor;
+  };
+  readonly prepareArtifactCompletion: {
+    readonly input: ArtifactRunCompletionSubmission;
+    readonly output: PrepareArtifactCompletionResult;
+  };
+  readonly commitArtifactCompletion: {
+    readonly input: CommitArtifactCompletionInput;
+    readonly output: LeaseTerminalResult;
   };
   readonly completeLease: {
     readonly input: LeaseCompletionInput;

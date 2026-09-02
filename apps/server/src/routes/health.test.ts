@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { type AppDependencies, buildApp } from "../../dist/app.js";
 import {
+  type ArtifactCompletionPort,
   ArtifactTransactionCoordinatorError,
   type ArtifactTransactionPort,
 } from "../../dist/artifacts/index.js";
@@ -353,6 +354,13 @@ const createBuildAppArtifactTransactions = (): ArtifactTransactionPort =>
     }),
   });
 
+const createBuildAppArtifactCompletion = (): ArtifactCompletionPort =>
+  Object.freeze({
+    completeArtifactRun: vi.fn(async () => {
+      throw new Error("Unexpected artifact-backed completion.");
+    }),
+  });
+
 const createBuildAppDatabaseRequest = (): ReturnType<typeof vi.fn> =>
   vi.fn(async (operation: string) => {
     switch (operation) {
@@ -381,6 +389,7 @@ const createBuildAppDependencies = (
   serverAdmission: AppDependencies["serverAdmission"] = { read: () => true },
   request: ReturnType<typeof vi.fn> = createBuildAppDatabaseRequest(),
   artifactTransactions: ArtifactTransactionPort = createBuildAppArtifactTransactions(),
+  artifactCompletion: ArtifactCompletionPort = createBuildAppArtifactCompletion(),
 ): AppDependencies => {
   return {
     config,
@@ -388,11 +397,57 @@ const createBuildAppDependencies = (
     shutdownSignal: new AbortController().signal,
     artifactReadiness,
     artifactTransactions,
+    artifactCompletion,
     serverAdmission,
   };
 };
 
 describe("buildApp artifact readiness", () => {
+  it.each([
+    { path: "/api/v1/worker/runs/run-attempt-id/complete", payload: "{" },
+    { path: "/api/v1/worker/runs/run-attempt-id/complete", payload: "" },
+    { path: "/api/v1/worker/runs/run-attempt-id/fail", payload: "{" },
+    { path: "/api/v1/worker/runs/run-attempt-id/fail", payload: "" },
+  ])("maps malformed terminal JSON at $path to a zero-dispatch 400", async ({ path, payload }) => {
+    const databaseRequest = createBuildAppDatabaseRequest();
+    const completeArtifactRun = vi.fn(async () => {
+      throw new Error("Unexpected artifact completion.");
+    });
+    const artifactTransactions = createBuildAppArtifactTransactions();
+    const app = buildApp(
+      createBuildAppDependencies(
+        { read: () => ({ ready: true }) },
+        { read: () => true },
+        databaseRequest,
+        artifactTransactions,
+        { completeArtifactRun },
+      ),
+    );
+    databaseRequest.mockClear();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: path,
+        headers: { "content-type": "application/json" },
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        code: "request_validation_failed",
+        message: "The request body is not valid JSON.",
+        retryable: false,
+      });
+      expect(databaseRequest).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
+      expect(artifactTransactions.createArtifactUpload).not.toHaveBeenCalled();
+      expect(artifactTransactions.putArtifactChunk).not.toHaveBeenCalled();
+      expect(artifactTransactions.finalizeArtifactUpload).not.toHaveBeenCalled();
+      expect(artifactTransactions.terminateArtifactUpload).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("passes the narrow artifact probe through buildApp readiness", async () => {
     const app = buildApp(createBuildAppDependencies({ read: () => ({ ready: false }) }));
 
