@@ -194,6 +194,102 @@ func (file *File) ReadAll(maximumBytes uint64) ([]byte, error) {
 	return data, nil
 }
 
+// ReadAt implements a stable retained-handle ReaderAt without exposing the native handle. Every
+// call verifies the file identity, metadata, and stream set before and after reading.
+func (file *File) ReadAt(buffer []byte, offset int64) (int, error) {
+	if file == nil {
+		return 0, ErrClosed
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("%w: negative read offset", ErrInvalidOptions)
+	}
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	const maximumOffset = int64(^uint64(0) >> 1)
+	if uint64(len(buffer)) > uint64(maximumOffset-offset) {
+		return 0, fmt.Errorf("%w: positional read range overflows", ErrInvalidOptions)
+	}
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.closed || file.handle == 0 {
+		return 0, ErrClosed
+	}
+	before, err := querySnapshot(file.handle, ObjectKindFile)
+	if err != nil {
+		return 0, fmt.Errorf("inspect file before positional read: %w", err)
+	}
+	if err := compareSnapshots(file.baseline, before); err != nil {
+		return 0, fmt.Errorf("verify file before positional read: %w", err)
+	}
+	beforeAuxiliary, err := queryObjectAuxiliarySnapshot(
+		file.handle,
+		ObjectKindFile,
+		uint64(before.standard.EndOfFile),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inspect file streams before positional read: %w", err)
+	}
+	if err := compareObjectAuxiliarySnapshots(file.auxiliary, beforeAuxiliary); err != nil {
+		return 0, fmt.Errorf("verify file streams before positional read: %w", err)
+	}
+	highOffset := int32(uint32(uint64(offset) >> 32))
+	if _, err := windows.SetFilePointer(
+		file.handle,
+		int32(uint32(uint64(offset))),
+		&highOffset,
+		windows.FILE_BEGIN,
+	); err != nil {
+		return 0, fmt.Errorf("seek retained file handle: %w", err)
+	}
+	read := 0
+	var readErr error
+	for read < len(buffer) {
+		chunk := buffer[read:]
+		if len(chunk) > streamingHashBufferBytes {
+			chunk = chunk[:streamingHashBufferBytes]
+		}
+		var count uint32
+		err := windows.ReadFile(file.handle, chunk, &count, nil)
+		if count > uint32(len(chunk)) {
+			readErr = errors.New("positional read returned an invalid byte count")
+			break
+		}
+		read += int(count)
+		if errors.Is(err, windows.ERROR_HANDLE_EOF) || err == nil && count == 0 {
+			readErr = io.EOF
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
+		}
+	}
+	after, inspectErr := querySnapshot(file.handle, ObjectKindFile)
+	if inspectErr == nil {
+		inspectErr = compareSnapshots(before, after)
+	}
+	var afterAuxiliary objectAuxiliarySnapshot
+	var auxiliaryErr error
+	if inspectErr == nil {
+		afterAuxiliary, auxiliaryErr = queryObjectAuxiliarySnapshot(
+			file.handle,
+			ObjectKindFile,
+			uint64(after.standard.EndOfFile),
+		)
+		if auxiliaryErr == nil {
+			auxiliaryErr = compareObjectAuxiliarySnapshots(beforeAuxiliary, afterAuxiliary)
+		}
+	}
+	if inspectErr != nil || auxiliaryErr != nil {
+		return read, errors.Join(readErr, inspectErr, auxiliaryErr)
+	}
+	if read < len(buffer) && readErr == nil {
+		readErr = io.EOF
+	}
+	return read, readErr
+}
+
 // HashSHA256 streams the exact expected byte count from offset zero and checks
 // the retained file's identity, metadata, and stream set before and after.
 func (file *File) HashSHA256(options HashOptions) (HashResult, error) {

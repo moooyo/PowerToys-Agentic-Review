@@ -21,6 +21,9 @@ func TestNonWindowsOperationsFailClosed(t *testing.T) {
 		t.Fatalf("InspectDirectory returned the wrong error: %v", err)
 	}
 	file := &File{}
+	if _, err := file.ReadAt(make([]byte, 1), 0); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("ReadAt returned the wrong error: %v", err)
+	}
 	if _, err := file.HashSHA256(HashOptions{MaximumBytes: 1}); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("HashSHA256 returned the wrong error: %v", err)
 	}

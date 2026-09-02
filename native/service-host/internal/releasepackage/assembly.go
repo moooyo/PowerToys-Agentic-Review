@@ -32,6 +32,49 @@ func (finalized FinalizedRelease) SnapshotForAssembly() (AssemblySnapshot, error
 	return snapshot, nil
 }
 
+// InspectFinalizedDocuments validates the canonical document set and all of its internal digest,
+// source, architecture, closure, template, build-receipt, manifest, and descriptor bindings. It
+// returns ordinary data only and does not recreate any opaque production evidence.
+func InspectFinalizedDocuments(documents FinalizedDocuments) (FinalizedDocumentFacts, error) {
+	descriptor, err := parsePackageDescriptor(documents.PackageDescriptor)
+	if err != nil {
+		return FinalizedDocumentFacts{}, fmt.Errorf("%w: finalized package descriptor is invalid", ErrInvalid)
+	}
+	state := &finalizedState{
+		reviewedClosureDocument:         append([]byte(nil), documents.ReviewedClosure...),
+		reviewedClosureSHA256:           sha256.Sum256(documents.ReviewedClosure),
+		prepareReceiptDocument:          append([]byte(nil), documents.PrepareReceipt...),
+		prepareReceiptSHA256:            sha256.Sum256(documents.PrepareReceipt),
+		compiledTemplateDocument:        append([]byte(nil), documents.CompiledTemplate...),
+		compiledTemplateSHA256:          sha256.Sum256(documents.CompiledTemplate),
+		serviceHostBuildReceiptDocument: append([]byte(nil), documents.ServiceHostBuildReceipt...),
+		serviceHostBuildReceiptSHA256:   sha256.Sum256(documents.ServiceHostBuildReceipt),
+		manifestDocument:                append([]byte(nil), documents.RuntimeManifest...),
+		manifestSHA256:                  sha256.Sum256(documents.RuntimeManifest),
+		descriptorDocument:              append([]byte(nil), documents.PackageDescriptor...),
+		descriptorSHA256:                sha256.Sum256(documents.PackageDescriptor),
+		descriptor:                      descriptor,
+	}
+	validated, err := validatedFinalizedState(state)
+	if err != nil {
+		return FinalizedDocumentFacts{}, err
+	}
+	manifest, err := releasemanifest.Parse(validated.manifestDocument)
+	if err != nil {
+		return FinalizedDocumentFacts{}, fmt.Errorf("%w: finalized runtime manifest is invalid", ErrInvalid)
+	}
+	build, err := servicehostreceipt.Parse(validated.serviceHostBuildReceiptDocument)
+	if err != nil {
+		return FinalizedDocumentFacts{}, fmt.Errorf("%w: finalized ServiceHost build receipt is invalid", ErrInvalid)
+	}
+	manifest.Files = append([]releasemanifest.File(nil), manifest.Files...)
+	return FinalizedDocumentFacts{
+		Descriptor:       cloneDescriptor(validated.descriptor),
+		Manifest:         manifest,
+		ServiceHostBuild: build,
+	}, nil
+}
+
 func validatedFinalizedState(state *finalizedState) (*finalizedState, error) {
 	if state == nil {
 		return nil, fmt.Errorf("%w: finalized release is absent", ErrInvalid)

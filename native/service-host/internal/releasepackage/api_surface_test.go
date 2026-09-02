@@ -14,6 +14,12 @@ import (
 )
 
 func TestReleaseEvidenceHasOnlyVerifiedExportedMintingSurfaces(t *testing.T) {
+	factsType := reflect.TypeOf(releasepackage.FinalizedDocumentFacts{})
+	for index := 0; index < factsType.NumField(); index++ {
+		if strings.Contains(factsType.Field(index).Type.String(), "Evidence") {
+			t.Fatalf("FinalizedDocumentFacts field %s exposes evidence", factsType.Field(index).Name)
+		}
+	}
 	finalizedMethods := map[string]bool{
 		"Descriptor":          false,
 		"DescriptorDocument":  false,

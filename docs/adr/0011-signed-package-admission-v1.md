@@ -67,8 +67,8 @@ Only a later installer boundary may mint installation evidence after that work c
   release, root, key, credential, policy, runtime, or manifest selection.
 - The default build cannot admit packages, and this slice does not connect admission to an
   installer or any runtime launch path.
-- An architecture test rejects every current production import of `outeradmission`; only a future
-  handle-bound package verifier may deliberately replace that dormant boundary.
+- An architecture test permits only the handle-bound `stagedpackage` verifier to import
+  `outeradmission`; all installation and runtime paths remain disconnected.
 - Claim remains denied by the committed RoleConfig v2 foundation.
 
 ## Non-Goals

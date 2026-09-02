@@ -164,6 +164,43 @@ func TestAssemblySnapshotRejectsCorruptedFinalizedState(t *testing.T) {
 	}
 }
 
+func TestInspectFinalizedDocumentsReturnsOnlyConsistentDetachedFacts(t *testing.T) {
+	prepared, request := validFinalization(t)
+	finalized, err := Finalize(prepared, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := finalized.SnapshotForAssembly()
+	if err != nil {
+		t.Fatal(err)
+	}
+	documents := FinalizedDocuments{
+		ReviewedClosure:         snapshot.ReviewedClosureDocument(),
+		PrepareReceipt:          snapshot.PrepareReceiptDocument(),
+		CompiledTemplate:        snapshot.CompiledTemplateDocument(),
+		ServiceHostBuildReceipt: snapshot.ServiceHostBuildReceiptDocument(),
+		RuntimeManifest:         snapshot.ManifestDocument(),
+		PackageDescriptor:       snapshot.DescriptorDocument(),
+	}
+	facts, err := InspectFinalizedDocuments(documents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Descriptor != finalized.Descriptor() || facts.Manifest.ReleaseID != request.ReleaseID ||
+		facts.ServiceHostBuild.ReleaseID != request.ReleaseID {
+		t.Fatalf("unexpected finalized document facts: %#v", facts)
+	}
+	facts.Manifest.Files[0].Path = "mutated"
+	again, err := InspectFinalizedDocuments(documents)
+	if err != nil || again.Manifest.Files[0].Path == "mutated" {
+		t.Fatal("InspectFinalizedDocuments returned aliased facts")
+	}
+	documents.PrepareReceipt[0] ^= 0xff
+	if _, err := InspectFinalizedDocuments(documents); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("corrupted finalized documents returned %v, want ErrInvalid", err)
+	}
+}
+
 func TestFinalizeRejectsMixedPhaseContextAndServiceHost(t *testing.T) {
 	prepared, baseline := validFinalization(t)
 	tests := []struct {

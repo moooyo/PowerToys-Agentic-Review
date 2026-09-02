@@ -35,9 +35,10 @@ physical placement remain signed logical data or indexed selectors until a later
 package verifier reads and validates every staged payload. The plan cannot authorize filesystem
 writes, CNG or certificate changes, SCM operations, service launch, or Claim.
 
-No current production package imports `outeradmission`; an architecture test freezes that dormant
-state. The first permitted consumer is the future handle-bound package verifier, not the existing
-platform, preflight, installverify, or launch path.
+Only `stagedpackage` imports `outeradmission` in production, and an architecture test freezes that
+boundary. The staged verifier supplies exact retained-handle byte snapshots and still produces no
+installation or execution authority. Existing platform, preflight, installverify, and launch paths
+remain disconnected.
 
 The pair check also repeats `config`'s case-insensitive lexical data-root non-overlap rule. That is
 only a schema-level consistency check. It does not prove NTFS object separation, canonical final

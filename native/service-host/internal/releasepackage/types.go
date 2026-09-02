@@ -8,6 +8,7 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicehostreceipt"
 )
 
 const (
@@ -208,4 +209,23 @@ type FinalizedRelease struct {
 // installation or execution authority.
 type AssemblySnapshot struct {
 	state *finalizedState
+}
+
+// FinalizedDocuments is an ordinary set of package documents supplied to pure validation. It is
+// not reviewed-closure, build, ServiceHost, installation, or execution evidence.
+type FinalizedDocuments struct {
+	ReviewedClosure         []byte
+	PrepareReceipt          []byte
+	CompiledTemplate        []byte
+	ServiceHostBuildReceipt []byte
+	RuntimeManifest         []byte
+	PackageDescriptor       []byte
+}
+
+// FinalizedDocumentFacts contains detached, non-authorizing facts parsed from one internally
+// consistent FinalizedDocuments set.
+type FinalizedDocumentFacts struct {
+	Descriptor       PackageDescriptor
+	Manifest         releasemanifest.Manifest
+	ServiceHostBuild servicehostreceipt.Receipt
 }

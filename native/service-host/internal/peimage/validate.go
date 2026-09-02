@@ -30,7 +30,24 @@ type fileRange struct {
 
 // ValidateServiceHost requires a bounded executable PE32+ image for the selected architecture.
 func ValidateServiceHost(reader io.ReaderAt, size int64, architecture string) error {
-	if reader == nil || size <= 0 || uint64(size) > releaseprofile.MaximumServiceHostBytes {
+	return ValidatePortableExecutable(
+		reader,
+		size,
+		architecture,
+		releaseprofile.MaximumServiceHostBytes,
+	)
+}
+
+// ValidatePortableExecutable requires a bounded executable PE32+ image for the selected
+// architecture. maximumBytes is a caller-selected data limit, not authority evidence.
+func ValidatePortableExecutable(
+	reader io.ReaderAt,
+	size int64,
+	architecture string,
+	maximumBytes uint64,
+) error {
+	if reader == nil || maximumBytes == 0 || maximumBytes > uint64(^uint64(0)>>1) ||
+		size <= 0 || uint64(size) > maximumBytes {
 		return errors.New("PE image size is outside the supported range")
 	}
 	total := uint64(size)

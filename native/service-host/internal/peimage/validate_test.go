@@ -115,6 +115,26 @@ func TestValidateServiceHostRequiresArchitectureAndSecurityDirectory(t *testing.
 	}
 }
 
+func TestValidatePortableExecutableUsesCallerDataLimit(t *testing.T) {
+	image := minimalPE64(t, "amd64")
+	if err := ValidatePortableExecutable(
+		bytes.NewReader(image),
+		int64(len(image)),
+		"amd64",
+		uint64(len(image)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePortableExecutable(
+		bytes.NewReader(image),
+		int64(len(image)),
+		"amd64",
+		uint64(len(image)-1),
+	); err == nil {
+		t.Fatal("portable PE validation ignored its caller data limit")
+	}
+}
+
 func addSingleCertificateTable(unsigned []byte) []byte {
 	result := append([]byte(nil), unsigned...)
 	const certificateSize = 16
