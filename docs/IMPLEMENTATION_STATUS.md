@@ -213,8 +213,17 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   transaction-journal schema v2 rather than being hidden behind ADR 0015's v1 policy actions. The
   final delayed-start and restart schedule, failure-action clear ABI, preferred-node behavior,
   protected-DACL publication, preshutdown value, intermediate create-DACL evidence, pinned WinSW
-  behavior, schema v2, native adapter, and Windows evidence remain explicit production commit and
-  rollback blockers.
+  behavior, schema-v2 production composition, native adapter, and Windows evidence remain explicit
+  production commit and rollback blockers.
+- A source-only, dormant installer transaction schema-v2 lab. ADR 0020 independently restates the
+  v1 filesystem action shapes, fixes the ADR 0016 maintenance, stop, disabled-create/configure, and
+  Executor-before-Control start ordinals, and adds an explicit service-configured checkpoint. Every
+  SCM plan stops before ordinal 1 at a state-derived checkpoint containing the exact ordered missing
+  prerequisites. The schema has no `COMMITTED`, `ROLLED_BACK`, or `applied` value;
+  `FAILED_CLOSED` is its only terminal phase. The package-private reducer and observations carry no
+  effect authority, and no production consumer, journal path, store, filesystem operation, registry
+  operation, SCM adapter, or native call is present. Protected durable storage and native SCM
+  composition remain separate later reviews.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
@@ -311,8 +320,8 @@ the production release profile, produce signed role bundles and native binaries,
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
 Server binding receipt authority, privileged enrollment writer and live evidence, destination
-evidence, the ADR 0015 Windows durable store and opaque-evidence composition, the production Go
-installer, the ADR 0016 transaction-schema-v2 SCM actions and native adapter, a complete final
+evidence, the cross-version protected transaction store and opaque-evidence composition, the
+production Go installer, production-capable SCM schema and native adapter, a complete final
 recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
