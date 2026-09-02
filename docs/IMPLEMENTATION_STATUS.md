@@ -262,6 +262,14 @@ platform `go build` and `go vet`, and no validation ran on the local Windows dev
 This merge gate proves source compatibility and preserves zero execution; it is not signed-package,
 installer, or native Windows runtime evidence.
 
+After pre-installer trust contracts were merged at `f4ca0ce`, the exact combined source repeated the
+full TypeScript typecheck, test, build, and lint matrix with the same passing counts. The first test
+attempt correctly returned `ARTIFACT_STORAGE_CAPACITY` when the shared `test-env` root filesystem
+reported zero available blocks after repeated cross-builds. Removing only this task's generated test
+binaries and Go build cache restored 1.5 GiB of available space; the real storage-Worker integration
+then passed five consecutive focused runs and the complete 693-test Server suite. This was an
+observed fail-closed capacity condition, not a waived test failure.
+
 On 2026-09-02, the artifact storage owner was changed from an OS child process to a dedicated Node
 Worker Thread and verified on the remote Debian `test-env` host with Node.js 24.20.0 and pnpm
 11.24.0. No validation ran on the local Windows development machine. The exact candidate completed:
