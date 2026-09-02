@@ -134,13 +134,34 @@ external trusted build base.
 
 ## Release ordering
 
-1. Build and sign every non-ServiceHost dependency.
-2. Inventory those final bytes and generate the canonical release template.
+The first reviewed package-assembly slice lives in `internal/releasepackage`. It constructs and
+reparses a canonical prepare receipt only when given the same opaque reviewed-closure evidence. The
+closure document fixes the package profile, review-policy identity and version, and every
+non-ServiceHost identity. The package calls the type-safe
+`releaseprofile.BuildTemplate` API and then requires every mutable release input again before it
+will add opaque, externally verified signed-ServiceHost evidence and emit a runtime manifest. Its
+outer descriptor is node-specific and fixes RoleConfig foundation version 2 with execution
+authority disabled. It does not inspect files, verify Authenticode, sign an artifact, or install a
+service; those remain mandatory trusted pipeline stages.
+
+This slice intentionally exposes no production constructor for either
+`ReviewedClosureEvidence` or `VerifiedServiceHostEvidence`, and no public descriptor parser that
+could be mistaken for complete package verification. The next slice must add a handle-bound
+independent approval reader for the closure document and separately approved digest, plus a
+handle-bound stable-file, PE-architecture, and Authenticode verifier. A later
+`VerifyFinalizedPackage` boundary must reverify the descriptor, manifest, package bytes, signer,
+and every receipt binding before installation or publication.
+
+1. Build and sign every non-ServiceHost dependency for one target node and architecture.
+2. Parse the independently approved reviewed closure, inventory those final bytes, and generate the
+   canonical release template and prepare receipt.
 3. Run the controlled `servicehostrelease` driver and sign its output.
 4. Hash the final signed ServiceHost.
-5. Generate the complete runtime manifest with that self hash, then generate the two bootstrap
-   configurations that pin the runtime manifest digest and repeat the compiled signer pin.
-6. Verify the complete staged tree from zero and sign the outer installer or package.
+5. Reinspect the dependency inventory, finalize the complete runtime manifest with that self hash,
+   and emit the zero-authority outer package descriptor.
+6. Generate the two bootstrap configurations that pin the runtime manifest digest and repeat the
+   compiled signer pin.
+7. Verify the complete staged tree from zero and sign the outer installer or package.
 
 The bootstrap signer field is a cross-check, not the signer authority. Installation verification
 must use the signer pin from compiled `Evidence` for every Authenticode decision.
