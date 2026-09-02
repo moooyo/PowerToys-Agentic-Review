@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import {
+  type ArtifactRunCompletionSubmission,
   type DashboardJobListQuery,
   type DashboardWorkerListQuery,
   type DashboardWorkItemListQuery,
@@ -26,6 +27,11 @@ import type {
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
+import {
+  type CommitArtifactCompletionInput,
+  commitArtifactCompletion,
+  prepareArtifactCompletion,
+} from "./artifact-completion.js";
 import {
   type ClassifyArtifactNamespacePageInput,
   type CommitArtifactChunkInput,
@@ -1750,6 +1756,10 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return readArtifactHealthAccounting(database, request.input as Record<string, never>);
     case "readArtifactReconciliationCursor":
       return readArtifactReconciliationCursor(database, request.input as Record<string, never>);
+    case "prepareArtifactCompletion":
+      return prepareArtifactCompletion(database, request.input as ArtifactRunCompletionSubmission);
+    case "commitArtifactCompletion":
+      return commitArtifactCompletion(database, request.input as CommitArtifactCompletionInput);
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":

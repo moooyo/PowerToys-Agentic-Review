@@ -32,6 +32,7 @@ describe("production server composition", () => {
       "lifecycle.adoptStorageRuntime(storageRuntime);",
       "artifactReadiness: storageRuntime.artifactReadiness",
       "artifactTransactions: storageRuntime.artifactTransactions",
+      "artifactCompletion: storageRuntime.artifactCompletion",
       "serverAdmission: lifecycle.admission",
       "lifecycle.adoptApplication(app);",
       'lifecycle.trackBackground("github-polling", pollingCompletion);',

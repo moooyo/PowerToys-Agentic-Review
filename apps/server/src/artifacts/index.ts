@@ -26,6 +26,7 @@ export {
 export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
 export { ArtifactStorageClient } from "./artifact-storage-client.js";
 export type {
+  ArtifactCompletionPort,
   ArtifactTransactionCoordinatorErrorCode,
   ArtifactTransactionCoordinatorOptions,
   ArtifactTransactionDatabaseHandle,
@@ -37,6 +38,7 @@ export type {
 export {
   ArtifactTransactionCoordinator,
   ArtifactTransactionCoordinatorError,
+  ArtifactTransactionCoordinatorError as ArtifactServiceError,
 } from "./artifact-transaction-coordinator.js";
 export type { ArtifactStorageClientErrorCode } from "./errors.js";
 export { ArtifactStorageClientError } from "./errors.js";

@@ -1,4 +1,5 @@
 import {
+  type ArtifactCompletionPort,
   ArtifactStorageClient,
   ArtifactTransactionCoordinator,
   type ArtifactTransactionCoordinatorError,
@@ -33,6 +34,7 @@ export interface ServerStorageRuntime {
     read(): Readonly<{ readonly ready: boolean }>;
   };
   readonly artifactTransactions: ArtifactTransactionPort;
+  readonly artifactCompletion: ArtifactCompletionPort;
   close(): Promise<void>;
 }
 
@@ -262,12 +264,16 @@ const createServerStorageRuntimeFromSnapshot = async (
       terminateArtifactUpload: (uploadId, input, signal) =>
         activeCoordinator.terminateArtifactUpload(uploadId, input, signal),
     } satisfies ArtifactTransactionPort);
+    const artifactCompletion = Object.freeze({
+      completeArtifactRun: (input, signal) => activeCoordinator.completeArtifactRun(input, signal),
+    } satisfies ArtifactCompletionPort);
     return Object.freeze({
       database: activeDatabase,
       artifactReadiness: Object.freeze({
         read: () => Object.freeze({ ready: activeCoordinator.readiness.ready }),
       }),
       artifactTransactions,
+      artifactCompletion,
       close: () => activeCoordinator.close(),
     });
   } catch (error) {

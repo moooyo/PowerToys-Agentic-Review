@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
+  type ArtifactRunCompletionSubmission,
+  ArtifactRunCompletionSubmissionSchema,
   type CreateResultArtifactUploadRequest,
   CreateResultArtifactUploadRequestSchema,
   type CreateResultArtifactUploadResponse,
@@ -14,11 +16,17 @@ import {
   type ResultArtifactChunkRequest,
   type ResultArtifactChunkResponse,
   ResultArtifactChunkResponseSchema,
+  type RunTerminalResponse,
+  RunTerminalResponseSchema,
   type TerminateResultArtifactUploadRequest,
   TerminateResultArtifactUploadRequestSchema,
   type TerminateResultArtifactUploadResponse,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
+import type {
+  CommitArtifactCompletionInput,
+  PrepareArtifactCompletionResult,
+} from "../database/artifact-completion.js";
 import type {
   ArtifactHealthAccounting,
   ArtifactReconciliationDatabaseOperation,
@@ -36,8 +44,16 @@ import {
   toResultArtifactChunkResponse,
   toTerminateResultArtifactUploadResponse,
 } from "../database/artifacts.js";
-import { DatabaseRequestError } from "../database/errors.js";
+import {
+  ArtifactResultEncodingInvalidError,
+  ArtifactResultJsonInvalidError,
+  DatabaseRequestError,
+  ResultDigestMismatchError,
+  ReviewResultInvalidError,
+  StoredExecutionTemplateInvalidError,
+} from "../database/errors.js";
 import type { DatabaseOperationMap } from "../database/protocol.js";
+import { validateArtifactReviewCompletion } from "../database/review-results.js";
 import {
   snapshotResultArtifactChunkTransport,
   type ValidatedResultArtifactChunkTransport,
@@ -95,9 +111,11 @@ const maximumCoordinatorMilliseconds = 600_000;
 export type ArtifactTransactionDatabaseOperation =
   | ArtifactReconciliationDatabaseOperation
   | "commitArtifactChunk"
+  | "commitArtifactCompletion"
   | "commitArtifactFinalize"
   | "createArtifactUpload"
   | "prepareArtifactChunk"
+  | "prepareArtifactCompletion"
   | "prepareArtifactFinalize"
   | "probeArtifactUploadCreate"
   | "terminateArtifactUpload";
@@ -124,14 +142,23 @@ export interface ArtifactTransactionPort {
   ) => Promise<TerminateResultArtifactUploadResponse>;
 }
 
+export interface ArtifactCompletionPort {
+  readonly completeArtifactRun: (
+    input: ArtifactRunCompletionSubmission,
+    signal?: AbortSignal,
+  ) => Promise<RunTerminalResponse>;
+}
+
 export const isArtifactTransactionDatabaseOperation = (
   operation: string,
 ): operation is ArtifactTransactionDatabaseOperation => {
   switch (operation) {
     case "commitArtifactChunk":
+    case "commitArtifactCompletion":
     case "commitArtifactFinalize":
     case "createArtifactUpload":
     case "prepareArtifactChunk":
+    case "prepareArtifactCompletion":
     case "prepareArtifactFinalize":
     case "probeArtifactUploadCreate":
     case "terminateArtifactUpload":
@@ -450,6 +477,12 @@ interface ArtifactTransactionCoordinatorSnapshot
 }
 
 export type ArtifactTransactionCoordinatorErrorCode =
+  | "ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH"
+  | "ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID"
+  | "ARTIFACT_COMPLETION_RESULT_INVALID"
+  | "ARTIFACT_COMPLETION_RESULT_JSON_INVALID"
+  | "ARTIFACT_COMPLETION_STORED_TEMPLATE_INVALID"
+  | "ARTIFACT_COMPLETION_TERMINAL_CONFLICT"
   | "ARTIFACT_TRANSACTION_BUSY"
   | "ARTIFACT_TRANSACTION_CANCELLED"
   | "ARTIFACT_TRANSACTION_CAPACITY"
@@ -476,6 +509,36 @@ interface ErrorDefinition {
 
 const errorDefinitions: Readonly<Record<ArtifactTransactionCoordinatorErrorCode, ErrorDefinition>> =
   Object.freeze({
+    ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH: {
+      message: "The result artifact does not match the submitted canonical digest.",
+      retryable: false,
+      requiresFailStop: false,
+    },
+    ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID: {
+      message: "The result artifact is not strict UTF-8 text.",
+      retryable: false,
+      requiresFailStop: false,
+    },
+    ARTIFACT_COMPLETION_RESULT_INVALID: {
+      message: "The result artifact does not match its authoritative result contract.",
+      retryable: false,
+      requiresFailStop: false,
+    },
+    ARTIFACT_COMPLETION_RESULT_JSON_INVALID: {
+      message: "The result artifact does not contain exactly one JSON value.",
+      retryable: false,
+      requiresFailStop: false,
+    },
+    ARTIFACT_COMPLETION_STORED_TEMPLATE_INVALID: {
+      message: "The stored execution template is invalid.",
+      retryable: false,
+      requiresFailStop: false,
+    },
+    ARTIFACT_COMPLETION_TERMINAL_CONFLICT: {
+      message: "The run attempt already has a different terminal submission.",
+      retryable: false,
+      requiresFailStop: false,
+    },
     ARTIFACT_TRANSACTION_BUSY: {
       message: "Artifact transaction admission is busy.",
       retryable: true,
@@ -777,6 +840,40 @@ const terminateRequestKeys = [
   "reason",
 ] as const;
 
+const artifactCompletionRequestKeys = [
+  "jobId",
+  "runAttemptId",
+  "workerNodeId",
+  "workerInstanceId",
+  "leaseToken",
+  "leaseGeneration",
+  "artifactId",
+  "resultDigest",
+] as const;
+
+const preparedArtifactCompletionKeys = ["disposition", "artifact", "reviewContext"] as const;
+const replayedArtifactCompletionKeys = ["disposition", "response"] as const;
+const preparedArtifactCompletionMetadataKeys = [
+  "artifactId",
+  "totalBytes",
+  "sha256",
+  "storageObjectKey",
+] as const;
+const reviewCompletionContextKeys = [
+  "jobId",
+  "runAttemptId",
+  "jobKind",
+  "workItemId",
+  "workItemResourceKind",
+  "resourceRevision",
+  "revisionId",
+  "revisionResourceKind",
+  "revisionBaseSha",
+  "revisionHeadSha",
+  "executionJson",
+  "executionDigest",
+] as const;
+
 const preparedChunkKeys = [
   "uploadId",
   "prepareId",
@@ -905,6 +1002,98 @@ const snapshotTerminateRequest = (value: unknown): TerminateResultArtifactUpload
     throw new TypeError("Artifact termination request is invalid.");
   }
   return Object.freeze({ ...snapshot }) as unknown as TerminateResultArtifactUploadRequest;
+};
+
+const snapshotArtifactCompletionRequest = (value: unknown): ArtifactRunCompletionSubmission => {
+  const snapshot = snapshotPlainObject(value, artifactCompletionRequestKeys);
+  if (!Value.Check(ArtifactRunCompletionSubmissionSchema, snapshot)) {
+    throw new TypeError("Artifact completion request is invalid.");
+  }
+  return Object.freeze({ ...snapshot }) as unknown as ArtifactRunCompletionSubmission;
+};
+
+const snapshotRunTerminalResponse = (
+  value: unknown,
+  input: ArtifactRunCompletionSubmission,
+): RunTerminalResponse => {
+  const snapshot = snapshotPlainObject(value, ["jobId", "runAttemptId", "jobState", "runState"]);
+  if (
+    !Value.Check(RunTerminalResponseSchema, snapshot) ||
+    snapshot.jobId !== input.jobId ||
+    snapshot.runAttemptId !== input.runAttemptId ||
+    snapshot.jobState !== "succeeded" ||
+    snapshot.runState !== "succeeded"
+  ) {
+    throw new TypeError("Artifact completion response is invalid.");
+  }
+  return Object.freeze({ ...snapshot }) as unknown as RunTerminalResponse;
+};
+
+const snapshotPreparedArtifactCompletion = (
+  value: unknown,
+  input: ArtifactRunCompletionSubmission,
+): PrepareArtifactCompletionResult => {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !("disposition" in value)
+  ) {
+    throw new TypeError("Artifact completion preparation is invalid.");
+  }
+  if ((value as { readonly disposition?: unknown }).disposition === "replayed") {
+    const replay = snapshotPlainObject(value, replayedArtifactCompletionKeys);
+    return Object.freeze({
+      disposition: "replayed",
+      response: snapshotRunTerminalResponse(replay.response, input),
+    });
+  }
+  const prepared = snapshotPlainObject(value, preparedArtifactCompletionKeys);
+  if (prepared.disposition !== "prepared") {
+    throw new TypeError("Artifact completion preparation disposition is invalid.");
+  }
+  const artifact = snapshotPlainObject(prepared.artifact, preparedArtifactCompletionMetadataKeys);
+  if (
+    artifact.artifactId !== input.artifactId ||
+    !Number.isSafeInteger(artifact.totalBytes) ||
+    (artifact.totalBytes as number) < 1 ||
+    (artifact.totalBytes as number) > maximumResultArtifactBytes ||
+    typeof artifact.sha256 !== "string"
+  ) {
+    throw new TypeError("Prepared artifact completion metadata is invalid.");
+  }
+  const sha256 = requireArtifactSha256(artifact.sha256);
+  if (artifact.storageObjectKey !== `sha256/${sha256.slice(0, 2)}/${sha256}`) {
+    throw new TypeError("Prepared artifact completion object key is invalid.");
+  }
+  const context = snapshotPlainObject(prepared.reviewContext, reviewCompletionContextKeys);
+  if (
+    context.jobId !== input.jobId ||
+    context.runAttemptId !== input.runAttemptId ||
+    (context.jobKind !== "issue_triage" && context.jobKind !== "pull_request_review") ||
+    typeof context.workItemId !== "string" ||
+    (context.workItemResourceKind !== "issue" && context.workItemResourceKind !== "pull_request") ||
+    typeof context.resourceRevision !== "string" ||
+    typeof context.revisionId !== "string" ||
+    (context.revisionResourceKind !== "issue" && context.revisionResourceKind !== "pull_request") ||
+    (context.revisionBaseSha !== null && typeof context.revisionBaseSha !== "string") ||
+    (context.revisionHeadSha !== null && typeof context.revisionHeadSha !== "string") ||
+    typeof context.executionJson !== "string" ||
+    typeof context.executionDigest !== "string"
+  ) {
+    throw new TypeError("Prepared artifact completion review context is invalid.");
+  }
+  requireArtifactSha256(context.executionDigest);
+  return Object.freeze({
+    disposition: "prepared",
+    artifact: Object.freeze({
+      artifactId: input.artifactId,
+      totalBytes: artifact.totalBytes as number,
+      sha256,
+      storageObjectKey: artifact.storageObjectKey as string,
+    }),
+    reviewContext: Object.freeze({ ...context }),
+  }) as unknown as PrepareArtifactCompletionResult;
 };
 
 const healthyForAdmission = (health: ArtifactHealthAccounting | undefined): boolean =>
@@ -1265,6 +1454,19 @@ export class ArtifactTransactionCoordinator {
     );
   }
 
+  completeArtifactRun(
+    inputValue: ArtifactRunCompletionSubmission,
+    signal?: AbortSignal,
+  ): Promise<RunTerminalResponse> {
+    let input: ArtifactRunCompletionSubmission;
+    try {
+      input = snapshotArtifactCompletionRequest(inputValue);
+    } catch (error) {
+      return Promise.reject(coordinatorError("ARTIFACT_TRANSACTION_INVALID_REQUEST", error));
+    }
+    return this.#runTransaction(signal, (deadline) => this.#completeArtifactRun(input, deadline));
+  }
+
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       if (this.#state === "starting" || this.#state === "open") this.#state = "closing";
@@ -1392,6 +1594,54 @@ export class ArtifactTransactionCoordinator {
       deadline,
     );
     return this.#snapshotTerminationResponse(result, uploadId);
+  }
+
+  async #completeArtifactRun(
+    input: ArtifactRunCompletionSubmission,
+    deadline: number,
+  ): Promise<RunTerminalResponse> {
+    let prepared: PrepareArtifactCompletionResult;
+    try {
+      prepared = snapshotPreparedArtifactCompletion(
+        await this.#databaseStage("prepareArtifactCompletion", input, deadline),
+        input,
+      );
+    } catch (error) {
+      if (error instanceof ArtifactTransactionCoordinatorError) throw error;
+      throw this.#enterFatal("ARTIFACT_TRANSACTION_PROTOCOL_FAILURE", error);
+    }
+    if (prepared.disposition === "replayed") {
+      return prepared.response;
+    }
+
+    const bytes = await this.#readVerifiedObject(
+      { totalBytes: prepared.artifact.totalBytes, sha256: prepared.artifact.sha256 },
+      deadline,
+    );
+    let validated: ReturnType<typeof validateArtifactReviewCompletion>;
+    try {
+      validated = validateArtifactReviewCompletion(
+        prepared.reviewContext,
+        input.resultDigest,
+        bytes,
+      );
+    } catch (error) {
+      throw this.#mapArtifactCompletionValidationError(error);
+    }
+    const commitInput: CommitArtifactCompletionInput = {
+      ...input,
+      artifactSha256: prepared.artifact.sha256,
+      artifactTotalBytes: prepared.artifact.totalBytes,
+      storageObjectKey: prepared.artifact.storageObjectKey,
+      canonicalizationVersion: 1,
+      canonicalResultJson: validated.canonicalResultJson,
+    };
+    const committed = await this.#databaseStage("commitArtifactCompletion", commitInput, deadline);
+    try {
+      return snapshotRunTerminalResponse(committed, input);
+    } catch (error) {
+      throw this.#enterFatal("ARTIFACT_TRANSACTION_PROTOCOL_FAILURE", error);
+    }
   }
 
   #snapshotPreparedChunk(
@@ -1841,9 +2091,35 @@ export class ArtifactTransactionCoordinator {
         return coordinatorError("ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH", error);
       case "ARTIFACT_UPLOAD_QUOTA_EXCEEDED":
         return coordinatorError("ARTIFACT_TRANSACTION_QUOTA_EXCEEDED", error);
+      case "TERMINAL_SUBMISSION_CONFLICT":
+        return coordinatorError("ARTIFACT_COMPLETION_TERMINAL_CONFLICT", error);
+      case "ARTIFACT_COMPLETION_STATE_INVALID":
+      case "RESULT_DIGEST_MISMATCH":
+      case "REVIEW_RESULT_INVALID":
+      case "STORED_EXECUTION_TEMPLATE_INVALID":
+        return this.#enterFatal("ARTIFACT_TRANSACTION_PROTOCOL_FAILURE", error);
       default:
         return this.#enterFatal("ARTIFACT_TRANSACTION_DATABASE_OUTCOME_UNKNOWN", error);
     }
+  }
+
+  #mapArtifactCompletionValidationError(error: unknown): ArtifactTransactionCoordinatorError {
+    if (error instanceof ArtifactResultEncodingInvalidError) {
+      return coordinatorError("ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID", error);
+    }
+    if (error instanceof ArtifactResultJsonInvalidError) {
+      return coordinatorError("ARTIFACT_COMPLETION_RESULT_JSON_INVALID", error);
+    }
+    if (error instanceof ResultDigestMismatchError) {
+      return coordinatorError("ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH", error);
+    }
+    if (error instanceof ReviewResultInvalidError) {
+      return coordinatorError("ARTIFACT_COMPLETION_RESULT_INVALID", error);
+    }
+    if (error instanceof StoredExecutionTemplateInvalidError) {
+      return coordinatorError("ARTIFACT_COMPLETION_STORED_TEMPLATE_INVALID", error);
+    }
+    return this.#enterFatal("ARTIFACT_TRANSACTION_PROTOCOL_FAILURE", error);
   }
 
   #mapCreateError(error: unknown): ArtifactTransactionCoordinatorError {
