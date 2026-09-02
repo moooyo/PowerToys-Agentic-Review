@@ -191,9 +191,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   per-effect write-ahead intents, deterministic root-action plans, policy cursors, commit
   roll-forward, and failed-closed matrix. `installtransaction` now provides the exact typed records,
   closed pending-action union, fixed path derivation, strict bounded canonical codec, complete
-  single-record validation, and non-authorizing next-intent derivation. No production code consumes
-  it, and no observation reducer, journal store, filesystem mutation, SCM adapter, readiness
-  boundary, or installer is implemented.
+  single-record validation, non-authorizing next-intent derivation, and a package-private source-only
+  observation reducer. The reducer handles exact pending create, populate, and rename observations;
+  preserves immutable transaction bindings; advances sequences without wraparound; and withholds
+  every phase, SCM-policy, policy-action, and rollback-root evidence gate. No production code
+  consumes it, and no journal store, filesystem mutation, SCM adapter, readiness boundary, or
+  installer is implemented.
 - A source-only, dormant Control result-artifact upload session. It binds one authenticated local
   attempt context to one private Server lease, accepts only the five result lifecycle facts, and
   drives a frozen `create`/`put`/`finalize`/`terminate` port with stable application identities,
@@ -264,8 +267,9 @@ the production release profile, produce signed role bundles and native binaries,
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
 Server binding receipt authority, privileged enrollment writer and live evidence, destination
-evidence, the ADR 0015 observation reducer and Windows durable store, the production Go installer,
-an exact SCM policy and adapter, authenticated installer readiness, and a pinned WinSW release.
+evidence, the ADR 0015 Windows durable store and opaque-evidence composition, the production Go
+installer, an exact SCM policy and adapter, authenticated installer readiness, and a pinned WinSW
+release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
 Claim authority is enabled.
@@ -277,6 +281,17 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-02, the source-only package-private installer observation reducer completed the full
+ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled
+the focused `installtransaction` test binary for Windows amd64 and arm64, and both architectures
+completed all-package builds and cross-platform vet. The reducer remains unexported and has no
+production consumer; every idle phase, pending SCM policy action, policy-plan continuation, and
+final rollback-root verification returns an external-evidence requirement without publishing a
+successor record. No validation ran on the local Windows machine. These checks prove pure reduction,
+binding, overflow, and source-compatibility behavior only; they are not journal durability,
+filesystem mutation, destination verification, SCM, readiness, or native Windows runtime evidence.
+An independent final static review found no remaining P0-P2 issues in this reducer slice.
 
 On 2026-09-02, integration commits `c34d377` and `1f64c20` combined the live fenced artifact
 routes and dormant installer-transaction model. The exact merged source completed the full
