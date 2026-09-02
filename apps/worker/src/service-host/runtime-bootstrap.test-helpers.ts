@@ -172,6 +172,7 @@ export function drainPayload(): Readonly<Record<string, unknown>> {
     sessionId: "fedcba98-7654-4210-aedc-ba9876543210",
     reasonCode: "SERVICE_STOP",
     requestedAtUnixMs: 1_700_000_000_000,
+    shutdownDeadlineUnixMs: 1_700_000_015_000,
   });
 }
 

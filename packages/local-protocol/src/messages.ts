@@ -490,6 +490,7 @@ export const DrainMessageSchema = Type.Object(
     ...SessionProperties,
     reasonCode: Type.String({ minLength: 1, maxLength: 128, pattern: codePattern }),
     requestedAtUnixMs: SafeNonNegativeIntegerSchema,
+    shutdownDeadlineUnixMs: SafeNonNegativeIntegerSchema,
   },
   { additionalProperties: false },
 );

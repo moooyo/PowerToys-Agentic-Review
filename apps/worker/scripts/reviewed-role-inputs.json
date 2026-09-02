@@ -5,18 +5,18 @@
     "apps/worker/src/contracts-formats.ts": "79f344eedc6695723f6c3b1b8722bc6af222678c03fc630e3de71f3389d8475f",
     "apps/worker/src/control/host-control-api-common.ts": "a873df170e4868141932b6c56858685413d30daaebc682cec936c05d5b4fca5a",
     "apps/worker/src/control/host-control-shadow-api.ts": "918da39cafd1a71a971b676a64aa63a1842af180122778642ca520827437c594",
-    "apps/worker/src/control/shadow-supervisor.ts": "9e4f1e3d95887bef707c9cfeef2e8149fe9f7e00d7afe433f1358b2c1366a5b5",
+    "apps/worker/src/control/shadow-supervisor.ts": "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
     "apps/worker/src/executor-main.ts": "6b375b5d7e909b0530fd749f664c9d17537809176ec0584f0b5f7c09ba598e59",
     "apps/worker/src/server-client/errors.ts": "d6291449b45fb901819646947ff41310f44acf8db9c9541cf8cf709f770c036a",
     "apps/worker/src/service-host/arwx-shutdown.ts": "e8c45aff45074f539e24b5439407bf89ee96e97a67d3a8171120fc814983eec3",
     "apps/worker/src/service-host/arwx-stdio-channel.ts": "0cbee6d4f8f6f349eae598fc0507d5e02649b326bb5968ddad2f119e47f20ce2",
-    "apps/worker/src/service-host/executor-host-control-session.ts": "10db90191a7c0239b97c6780f87d1136fdd43d7acd2e579ba53b119e1a2bade9",
-    "apps/worker/src/service-host/executor-shadow-runtime.ts": "62915dc90ff854ee120868beb4600264243840487ccebb0b4232a212cdcd0b24",
-    "apps/worker/src/service-host/host-control-client.ts": "d3e75bfae32db5c9599e2d71eb8c1da3aebccd16751b2e96f900e9636522390c",
-    "apps/worker/src/service-host/host-control-protocol.ts": "7feff2b2daaba1b745c231ce8a569913cb4a51d70b8ea958613d49401687f364",
+    "apps/worker/src/service-host/executor-host-control-session.ts": "b4f31105875a79d4e175a6d0b6773c7b4417148f87e71ff4603374f7a5546adc",
+    "apps/worker/src/service-host/executor-shadow-runtime.ts": "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
+    "apps/worker/src/service-host/host-control-client.ts": "9484fc0346b491178c222b196a1cf9d5ed990c3694d21b768bc672d4f577e469",
+    "apps/worker/src/service-host/host-control-protocol.ts": "0397d2b3c0028415a1763adf7a42a2c4a0cbfac13e0d3880a97be924d88b9374",
     "apps/worker/src/service-host/launch-contract.ts": "ff99e6b91ac906824cf70d41e92eefba572ae4400a41ab85957fcdf93fc0fc22",
     "apps/worker/src/service-host/opaque-json.ts": "b316d0b67e2c2236ea6f7be4d1a7af2b3e3673edaf10f895f601d2a002048828",
-    "apps/worker/src/service-host/role-entrypoint.ts": "5a267daddd2f7e6c756bdaea2caabbfbe5f29b83725e3db3dac7785146a5f17a",
+    "apps/worker/src/service-host/role-entrypoint.ts": "fbedbdccd3dee84e7df14bb366db626e2840dce6f729ddb6d46d7e112e90e271",
     "apps/worker/src/service-host/runtime-bootstrap-handshake.ts": "5ecb61d16937249deac6e4d08d33b379125cce83f7c6417be52e447399429501",
     "apps/worker/src/service-host/runtime-bootstrap.ts": "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
     "apps/worker/src/service-host/typebox-value-check.ts": "57c3e570c043b577ef15072391a586e2000ef641ad0f9d4afac2f8e04dcaf33e",
@@ -149,6 +149,6 @@
     "packages/local-protocol/src/framing.ts": "a2d1e79c9f3bb1ac564d8225e0f091f691f38b09d84b1187078bd1511ff00d18",
     "packages/local-protocol/src/handshake.ts": "42f902d044b4f65e5f5172363eee8f051a47698913c783a9c0e217fdc6aee2bb",
     "packages/local-protocol/src/index.ts": "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
-    "packages/local-protocol/src/messages.ts": "0b342d775c0e76be7be4af6ef5cdc480a87dd5c8477223b24da8c4c17d0e448f"
+    "packages/local-protocol/src/messages.ts": "5c69fda0dc87a7d348a0877f355cf029842896706352db4172fcca6fe730e3cb"
   }
 }

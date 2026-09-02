@@ -36,6 +36,7 @@ class FakeControlClient implements ControlHostControlClient {
   public readonly role = "control" as const;
   public readonly bootstrap = parseRuntimeBootstrap(bootstrapDocument("control"), "control");
   public readonly done = new Promise<void>(() => undefined);
+  public readonly shutdownRequested = new Promise<never>(() => undefined);
   public readonly calls: RecordedCall[] = [];
   public registrationResponse: unknown = validRegistrationResponse();
   public claimResponse: unknown = { outcome: "no_work", serverTime };

@@ -141,6 +141,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   choreography remains unverified. Pre-authorization forwarding lets a compromised Control payload
   force a bounded Executor shutdown, but grants no Claim, lease, or execution authority; the native
   attack matrix must explicitly cover this denial-of-service tradeoff.
+- A candidate Control-only `ShutdownRequested` HostControl notification from Go to Node. It is
+  single-use, bootstrap- and role-bound, serialized with local RPC responses, and carries one Unix
+  millisecond deadline that Node maps to a non-extending monotonic deadline. Service cancellation
+  keeps Node, HostControl, ARWX standard I/O, and both relays alive until the graceful barrier or
+  that deadline; Executor rejects the notification and can shut down only from authenticated
+  Control `Drain`.
 
 ## Deliberately Disabled
 
@@ -150,11 +156,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   authenticated disabled `Ready` attestation; Control cannot claim and reports zero available
   slots. Production enablement still requires a compiled release profile, split-service packaging
   and installation, signing, and native Windows preflight and attack-test evidence.
-- The shadow candidate is not publishable because ServiceHost does not yet have a production
-  Go-to-Node shutdown-request bridge. External service cancellation currently reaches force
-  termination without first invoking Control runtime close while relay, HostControl, and Node stay
-  alive under the single graceful deadline. Go must not synthesize an ARWX business frame to fill
-  this gap.
+- The shadow candidate remains unpublishable. The Go-to-Node shutdown-request bridge is present as
+  an unverified candidate, but it has not passed the full remote matrix or paired native Windows
+  x64 and arm64 service-stop, deadline, partial-frame, race, and forced-termination matrix. Go does
+  not synthesize ARWX business frames; Executor shutdown remains subordinate to authenticated
+  Control `Drain`.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1a read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
@@ -169,14 +175,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 
 ## Next Milestone
 
-The next Worker step is a dedicated native lifecycle slice. It must add a single-use
-`ShutdownRequested` contract from Go ServiceHost to the Control Node payload, serialize it with
-HostControl responses, invoke Control runtime close without cancelling relay or HostControl, and
-hold one graceful deadline through both role relays, both HostControl sessions, Node exit, and the
-force-termination reserve. Failure or deadline expiry may then terminate the root Job; Go must not
-synthesize an ARWX business frame. After that bridge is reviewed, the candidate must run on
-`test-env` and through a paired native Windows x64 and arm64 matrix covering restart, reconnect,
-registration loss, heartbeat, drain, deadline, and failure behavior. That verification must keep
+The next Worker step is verification and release integration for the native lifecycle candidate.
+The `ShutdownRequested` bridge must run on `test-env` and through a paired native Windows x64 and
+arm64 matrix covering restart, reconnect, registration loss, heartbeat, drain, deadline, and
+failure behavior. That verification must keep
 `executionEnabled=false`, preserve the sealed HostControl Claim denial, and confirm that Control
 alone owns Server and mTLS authority while Executor has no Server, lease, workspace, ProcessHost,
 Codex, or Git capability in this shadow milestone.
@@ -298,9 +300,9 @@ Not yet verified:
   real signed PE fixtures and Windows ABI checks remain release gates. The native platform
   composition is connected, but the new TypeScript zero-slot supervisors have not been built or
   exercised in the remote matrix or on native Windows. The native Control-only relay asymmetry and
-  Control HostControl half-close latch are also unverified, and the production shutdown-request
-  bridge is not implemented. Executor's candidate emits only the disabled ARWX `Ready`; ordinary
-  builds have no production release profile, Claim remains denied, and the real Codex executor
+  Control HostControl half-close latch and the new shutdown-request bridge are also unverified.
+  Executor's candidate emits only the disabled ARWX `Ready`; ordinary builds have no production
+  release profile, Claim remains denied, and the real Codex executor
   remains disconnected from the production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.

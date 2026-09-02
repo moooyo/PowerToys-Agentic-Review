@@ -10,8 +10,10 @@ import {
   HOST_CONTROL_MAXIMUM_FRAME_BYTES,
   HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES,
   HOST_CONTROL_MAXIMUM_RUN_COMPLETION_BODY_BYTES,
+  HOST_CONTROL_MAXIMUM_SHUTDOWN_NOTIFICATION_BYTES,
   HostControlFrameDecoder,
   HostControlProtocolError,
+  parseHostControlInbound,
   parseHostControlResponse,
   validP256LowSSignature,
 } from "./host-control-protocol.js";
@@ -26,6 +28,7 @@ describe("HostControl role-local RPC protocol", () => {
     expect(HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES).toBe(2_818_535);
     expect(HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES).toBe(16_777_216);
     expect(HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES).toBe(22_369_945);
+    expect(HOST_CONTROL_MAXIMUM_SHUTDOWN_NOTIFICATION_BYTES).toBe(1_024);
   });
 
   it("encodes canonical calls and transport cancellation with exact shapes", () => {
@@ -176,6 +179,37 @@ describe("HostControl role-local RPC protocol", () => {
       outcome: "error",
       error: { code: "UPSTREAM_UNAVAILABLE", retryable: true },
     });
+  });
+
+  it("parses only the exact one-way ShutdownRequestedV1 shape", () => {
+    const notification = {
+      bootstrapId: "123e4567-e89b-42d3-a456-426614174000",
+      notification: "ShutdownRequested",
+      protocolVersion: "1.0",
+      reasonCode: "SERVICE_STOP",
+      requestedAtUnixMs: 1_700_000_000_000,
+      role: "control",
+      shutdownDeadlineUnixMs: 1_700_000_015_000,
+      type: "notification",
+    };
+    const document = documentFromFrame(responseFrame(notification));
+    expect(document.toString("utf8")).toBe(
+      '{"bootstrapId":"123e4567-e89b-42d3-a456-426614174000","notification":"ShutdownRequested","protocolVersion":"1.0","reasonCode":"SERVICE_STOP","requestedAtUnixMs":1700000000000,"role":"control","shutdownDeadlineUnixMs":1700000015000,"type":"notification"}',
+    );
+    expect(parseHostControlInbound(document)).toEqual(notification);
+    expect(() => parseHostControlResponse(document)).toThrow(HostControlProtocolError);
+
+    for (const invalid of [
+      { ...notification, role: "executor", extra: true },
+      { ...notification, protocolVersion: "1.1" },
+      { ...notification, notification: "Terminate" },
+      { ...notification, shutdownDeadlineUnixMs: notification.requestedAtUnixMs },
+      { ...notification, bootstrapId: "00000000-0000-0000-0000-000000000000" },
+    ]) {
+      expect(() => parseHostControlInbound(documentFromFrame(responseFrame(invalid)))).toThrow(
+        HostControlProtocolError,
+      );
+    }
   });
 
   it("requires canonical P1363 low-S signing responses", () => {

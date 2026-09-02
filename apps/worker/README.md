@@ -61,10 +61,13 @@ retaining an immutable copy for later HostControl authorization; Executor `Drain
 until its authorized EOF. A compromised Control payload can therefore force a bounded Executor
 shutdown, but this path grants no Claim, lease, or execution authority; the native attack matrix
 must cover that denial-of-service tradeoff before any execution-enabled release. This choreography
-has not been verified. In addition, the production
-ServiceHost still lacks the Go-to-Node shutdown-request bridge needed to invoke Control runtime
-close while relay, HostControl, and Node remain alive under one graceful deadline. The candidate is
-not publishable until that bridge and the remote/native shutdown matrix are complete. The
+has not been verified. The candidate now includes a Control-only, single-use `ShutdownRequested`
+HostControl notification bound to the committed bootstrap. Go serializes it with responses and
+keeps relay, HostControl, ARWX standard I/O, and Node alive under one absolute deadline while
+Control initiates runtime close. Executor treats that notification as a protocol failure and
+remains driven only by authenticated Control `Drain`; Go never synthesizes an ARWX business frame.
+The candidate is not publishable until the remote matrix, signed dual-role package and installer,
+and paired native Windows x64 and arm64 shutdown matrix are complete. The
 role-local `shutdownId` does not claim cross-role transaction identity. Before ServiceHost enables
 either payload, its fixed Node launch contract must include `--disallow-code-generation-from-strings`
 and `--no-addons`; neither flag replaces the operating system boundaries above.

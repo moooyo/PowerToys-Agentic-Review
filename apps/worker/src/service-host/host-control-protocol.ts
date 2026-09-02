@@ -15,6 +15,7 @@ export const HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES = 2_818_535;
 export const HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES = 16 * 1_024 * 1_024;
 export const HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES = 22_369_945;
 export const HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES = 1_024;
+export const HOST_CONTROL_MAXIMUM_SHUTDOWN_NOTIFICATION_BYTES = 1_024;
 
 const framePrefixBytes = 4;
 
@@ -31,12 +32,14 @@ export type HostControlJsonObject = Readonly<Record<string, unknown>>;
 export type HostControlResponseBody = DeepReadonly<Record<string, unknown>>;
 
 export interface ParsedHostControlSuccessResponse {
+  readonly type: "response";
   readonly outcome: "ok";
   readonly requestId: string;
   readonly body: HostControlResponseBody;
 }
 
 export interface ParsedHostControlErrorResponse {
+  readonly type: "response";
   readonly outcome: "error";
   readonly requestId: string;
   readonly error: HostControlRemoteError;
@@ -45,6 +48,21 @@ export interface ParsedHostControlErrorResponse {
 export type ParsedHostControlResponse =
   | ParsedHostControlSuccessResponse
   | ParsedHostControlErrorResponse;
+
+export interface ParsedHostControlShutdownRequested {
+  readonly protocolVersion: "1.0";
+  readonly type: "notification";
+  readonly notification: "ShutdownRequested";
+  readonly bootstrapId: string;
+  readonly role: "control" | "executor";
+  readonly reasonCode: "SERVICE_STOP";
+  readonly requestedAtUnixMs: number;
+  readonly shutdownDeadlineUnixMs: number;
+}
+
+export type ParsedHostControlInbound =
+  | ParsedHostControlResponse
+  | ParsedHostControlShutdownRequested;
 
 export class HostControlProtocolError extends Error {
   public constructor(message: string) {
@@ -111,18 +129,60 @@ export function encodeHostControlCancel(requestId: string, targetRequestId: stri
 }
 
 export function parseHostControlResponse(document: Uint8Array): ParsedHostControlResponse {
+  const inbound = parseHostControlInbound(document);
+  if (inbound.type !== "response") {
+    throw new HostControlProtocolError("HostControl response shape is invalid.");
+  }
+  return inbound;
+}
+
+export function parseHostControlInbound(document: Uint8Array): ParsedHostControlInbound {
   let value: unknown;
   try {
     value = parseCanonicalJson(document, HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES);
   } catch {
     throw new HostControlProtocolError("HostControl response is not canonical JSON.");
   }
-  if (
-    !isRecord(value) ||
-    value.protocolVersion !== HOST_CONTROL_PROTOCOL_VERSION ||
-    value.type !== "response"
-  ) {
-    throw new HostControlProtocolError("HostControl response shape is invalid.");
+  if (!isRecord(value) || value.protocolVersion !== HOST_CONTROL_PROTOCOL_VERSION) {
+    throw new HostControlProtocolError("HostControl inbound message shape is invalid.");
+  }
+  if (value.type === "notification") {
+    if (
+      document.byteLength > HOST_CONTROL_MAXIMUM_SHUTDOWN_NOTIFICATION_BYTES ||
+      !hasExactKeys(value, [
+        "bootstrapId",
+        "notification",
+        "protocolVersion",
+        "reasonCode",
+        "requestedAtUnixMs",
+        "role",
+        "shutdownDeadlineUnixMs",
+        "type",
+      ]) ||
+      value.notification !== "ShutdownRequested" ||
+      !isUuidV4(value.bootstrapId) ||
+      (value.role !== "control" && value.role !== "executor") ||
+      value.reasonCode !== "SERVICE_STOP" ||
+      !Number.isSafeInteger(value.requestedAtUnixMs) ||
+      (value.requestedAtUnixMs as number) < 1 ||
+      !Number.isSafeInteger(value.shutdownDeadlineUnixMs) ||
+      (value.shutdownDeadlineUnixMs as number) <= (value.requestedAtUnixMs as number)
+    ) {
+      throw new HostControlProtocolError("ShutdownRequestedV1 notification shape is invalid.");
+    }
+    return Object.freeze({
+      protocolVersion: HOST_CONTROL_PROTOCOL_VERSION,
+      type: "notification",
+      notification: "ShutdownRequested",
+      bootstrapId: value.bootstrapId,
+      role: value.role,
+      reasonCode: "SERVICE_STOP",
+      requestedAtUnixMs: value.requestedAtUnixMs as number,
+      shutdownDeadlineUnixMs: value.shutdownDeadlineUnixMs as number,
+    });
+  }
+  if (value.type !== "response") {
+    throw new HostControlProtocolError("HostControl inbound message type is invalid.");
   }
   const requestId = value.requestId;
   if (!validEntityId(requestId)) {
@@ -136,6 +196,7 @@ export function parseHostControlResponse(document: Uint8Array): ParsedHostContro
       throw new HostControlProtocolError("HostControl success response shape is invalid.");
     }
     return {
+      type: "response",
       outcome: "ok",
       requestId,
       body: deepFreezeJson(value.body) as HostControlResponseBody,
@@ -165,6 +226,7 @@ export function parseHostControlResponse(document: Uint8Array): ParsedHostContro
     throw new HostControlProtocolError("HostControl error response shape is invalid.");
   }
   return {
+    type: "response",
     outcome: "error",
     requestId,
     error: new HostControlRemoteError(error.code, error.message, error.retryable),

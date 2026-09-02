@@ -16,9 +16,9 @@ import {
   encodeHostControlCall,
   HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES,
   HostControlFrameDecoder,
-  parseHostControlResponse,
+  parseHostControlInbound,
 } from "./host-control-protocol.js";
-import type { HostControlSession } from "./host-control-session.js";
+import type { HostControlSession, HostControlShutdownRequest } from "./host-control-session.js";
 import { type HostControlPipeSelector, isHostControlPipeSelector } from "./launch-contract.js";
 import type { ParsedRuntimeBootstrapV1 } from "./runtime-bootstrap.js";
 import {
@@ -125,6 +125,7 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
   readonly #failure = new Deferred<never>();
   readonly #writableHalfClosed = new Deferred<void>();
   readonly #done = Promise.race([this.#closed.promise, this.#failure.promise]);
+  readonly #shutdownRequested = new Deferred<Readonly<HostControlShutdownRequest<"executor">>>();
   readonly #decoder = new HostControlFrameDecoder(HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES);
   readonly #runtimeBootstrap: Readonly<CompletedRuntimeBootstrap<"executor">>;
   #terminalError: ExecutorHostControlError | undefined;
@@ -147,6 +148,10 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
 
   public get done(): Promise<void> {
     return this.#done;
+  }
+
+  public get shutdownRequested(): Promise<Readonly<HostControlShutdownRequest<"executor">>> {
+    return this.#shutdownRequested.promise;
   }
 
   public constructor(
@@ -312,11 +317,15 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
     }
     try {
       for (const document of this.#decoder.push(chunk)) {
+        const inbound = parseHostControlInbound(document);
+        if (inbound.type === "notification") {
+          throw new Error("Executor HostControl received a Control-only notification.");
+        }
         const pending = this.#armPending;
         if (this.#state !== "arming" || pending === undefined) {
           throw new Error("Executor HostControl received an unsolicited response.");
         }
-        const response = parseHostControlResponse(document);
+        const response = inbound;
         if (response.requestId !== pending.id || response.outcome !== "ok") {
           throw new Error("Executor HostControl Arm response is invalid.");
         }
@@ -451,6 +460,7 @@ class ExecutorHostControlSessionImpl implements ExecutorHostControlSession {
       pending.deferred.reject(error);
     }
     this.#failure.reject(error);
+    this.#shutdownRequested.reject(error);
     this.#tryFinalizeClose();
     if (destroy) {
       try {

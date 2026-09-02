@@ -13,7 +13,7 @@ import {
   readPreparedArmArwxShutdown,
 } from "./arwx-shutdown.js";
 import type { ArwxFinalFrameReceipt } from "./arwx-stdio-channel.js";
-import type { HostControlSession } from "./host-control-session.js";
+import type { HostControlSession, HostControlShutdownRequest } from "./host-control-session.js";
 import {
   SERVICE_HOST_CONTROL_PIPE_PREFIX,
   type ServiceHostPayloadRole,
@@ -55,8 +55,10 @@ class FakeHostControlSession<TRole extends ServiceHostPayloadRole>
   public drainRejectsUndefined = false;
   public drainHook: ((absoluteDeadline: number | undefined) => void) | undefined;
   public readonly done: Promise<void>;
+  public readonly shutdownRequested: Promise<Readonly<HostControlShutdownRequest<TRole>>>;
   readonly #resolveDone: () => void;
   readonly #rejectDone: (error: unknown) => void;
+  readonly #resolveShutdownRequested: (value: Readonly<HostControlShutdownRequest<TRole>>) => void;
 
   public constructor(
     public readonly role: TRole,
@@ -64,13 +66,18 @@ class FakeHostControlSession<TRole extends ServiceHostPayloadRole>
   ) {
     let resolveDone!: () => void;
     let rejectDone!: (error: unknown) => void;
+    let resolveShutdownRequested!: (value: Readonly<HostControlShutdownRequest<TRole>>) => void;
     this.done = new Promise<void>((resolve, reject) => {
       resolveDone = resolve;
       rejectDone = reject;
     });
     this.done.catch(() => undefined);
+    this.shutdownRequested = new Promise((resolve) => {
+      resolveShutdownRequested = resolve;
+    });
     this.#resolveDone = resolveDone;
     this.#rejectDone = rejectDone;
+    this.#resolveShutdownRequested = resolveShutdownRequested;
   }
 
   public async drain(absoluteDeadline?: number): Promise<void> {
@@ -93,6 +100,10 @@ class FakeHostControlSession<TRole extends ServiceHostPayloadRole>
 
   public fail(error: unknown): void {
     this.#rejectDone(error);
+  }
+
+  public requestShutdown(value: Readonly<HostControlShutdownRequest<TRole>>): void {
+    this.#resolveShutdownRequested(value);
   }
 
   public async armArwxShutdown(
@@ -321,6 +332,62 @@ describe("ServiceHost role entrypoint", () => {
 
     expect(foundation.hostControl.controlOnlyMarker).toBe(true);
     await foundation.close();
+  });
+
+  it("uses the Control shutdown notification deadline for runtime and transport cleanup", async () => {
+    let host: FakeControlHostControlSession | undefined;
+    let runtimeCloseDeadline: number | undefined;
+    let resolveRuntime!: () => void;
+    const runtimeDone = new Promise<void>((resolve) => {
+      resolveRuntime = resolve;
+    });
+    const foundation = await openServiceHostRoleFoundation("control", {
+      platform: "win32",
+      environment: { NODE_ENV: "production" },
+      argumentsList: argumentsFor("control"),
+      input: new PassThrough(),
+      output: new PassThrough(),
+      validateRuntimeSession: isFakeControlHostControlSession,
+      installRuntime: () => ({
+        handler: () => undefined,
+        done: runtimeDone,
+        close: async (absoluteDeadline) => {
+          runtimeCloseDeadline = absoluteDeadline;
+          resolveRuntime();
+        },
+      }),
+      connect: async (options, signal) => {
+        return await createFakeSession(options, signal, (bootstrap) => {
+          host = new FakeControlHostControlSession("control", bootstrap);
+          return host;
+        });
+      },
+    });
+    const connectedHost = defined(host, "Control HostControl fixture");
+    const duration = foundation.arwx.configuredCloseTimeoutMs;
+    const requestedAtUnixMs = Date.now();
+    const absoluteDeadline = performance.now() + duration;
+    connectedHost.requestShutdown(
+      Object.freeze({
+        protocolVersion: "1.0",
+        type: "notification",
+        notification: "ShutdownRequested",
+        bootstrapId: connectedHost.bootstrap.bootstrap.bootstrapId,
+        role: "control",
+        reasonCode: "SERVICE_STOP",
+        requestedAtUnixMs,
+        shutdownDeadlineUnixMs: requestedAtUnixMs + duration,
+        absoluteDeadline,
+      }),
+    );
+
+    await expect(foundation.done).resolves.toEqual({
+      source: "external",
+      outcome: "fulfilled",
+    });
+    await foundation.close();
+    expect(runtimeCloseDeadline).toBe(absoluteDeadline);
+    expect(connectedHost.drainDeadlines).toEqual([absoluteDeadline]);
   });
 
   it("rejects runtime installation without an explicit promoted-session validator", async () => {
@@ -777,11 +844,31 @@ describe("ServiceHost role entrypoint", () => {
       controlOpening,
       executorOpening,
     ]);
+    const pairedControlHost = defined(controlHost, "paired Control HostControl");
+    const requestedAtUnixMs = Date.now();
+    const absoluteDeadline = performance.now() + controlFoundation.arwx.configuredCloseTimeoutMs;
+    pairedControlHost.requestShutdown(
+      Object.freeze({
+        protocolVersion: "1.0",
+        type: "notification",
+        notification: "ShutdownRequested",
+        bootstrapId: pairedControlHost.bootstrap.bootstrap.bootstrapId,
+        role: "control",
+        reasonCode: "SERVICE_STOP",
+        requestedAtUnixMs,
+        shutdownDeadlineUnixMs: requestedAtUnixMs + controlFoundation.arwx.configuredCloseTimeoutMs,
+        absoluteDeadline,
+      }),
+    );
+    await expect(controlFoundation.done).resolves.toEqual({
+      source: "external",
+      outcome: "fulfilled",
+    });
     await expect(
       Promise.all([controlFoundation.close(), executorFoundation.close()]),
     ).resolves.toEqual([undefined, undefined]);
     await expect(Promise.all([controlFoundation.done, executorFoundation.done])).resolves.toEqual([
-      { source: "runtime", outcome: "fulfilled" },
+      { source: "external", outcome: "fulfilled" },
       { source: "runtime", outcome: "fulfilled" },
     ]);
 
@@ -2032,6 +2119,13 @@ function createGate(): { readonly promise: Promise<void>; release(): void } {
     release = resolve;
   });
   return Object.freeze({ promise, release });
+}
+
+function defined<T>(value: T | undefined, name: string): T {
+  if (value === undefined) {
+    throw new Error(`${name} is unavailable.`);
+  }
+  return value;
 }
 
 async function settlementByNextTurn(

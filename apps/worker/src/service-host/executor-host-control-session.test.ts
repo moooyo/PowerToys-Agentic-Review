@@ -518,6 +518,39 @@ describe("Executor HostControl session", () => {
     expect(host.destroyed).toBe(true);
   });
 
+  it("treats ShutdownRequested as a Control-only protocol violation", async () => {
+    const host = new FakeExecutorHostControl();
+    const session = await connectExecutorHostControl({
+      role: "executor",
+      pipe,
+      prepareRuntimeBootstrap: createTestBootstrapPreparation("executor"),
+      connector: async () => host,
+      closeTimeoutMs: 1_000,
+    });
+    const duration =
+      session.bootstrap.bootstrap.shutdown.gracefulTimeoutMs -
+      session.bootstrap.bootstrap.shutdown.forceTerminationReserveMs;
+    const requestedAtUnixMs = Date.now();
+    const failed = expect(session.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    host.respond(
+      {
+        bootstrapId: session.bootstrap.bootstrap.bootstrapId,
+        notification: "ShutdownRequested",
+        protocolVersion: "1.0",
+        reasonCode: "SERVICE_STOP",
+        requestedAtUnixMs,
+        role: "executor",
+        shutdownDeadlineUnixMs: requestedAtUnixMs + duration,
+        type: "notification",
+      },
+      5,
+    );
+
+    await failed;
+    expect(host.destroyed).toBe(true);
+    await session.close();
+  });
+
   it("exposes unexpected readable EOF through the session done promise", async () => {
     const host = new FakeExecutorHostControl();
     const session = await connectExecutorHostControl({

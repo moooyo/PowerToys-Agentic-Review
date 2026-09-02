@@ -381,10 +381,22 @@ class ExecutorShadowSupervisor {
     this.#assertSession(drain);
     this.#phase = "draining";
     const now = this.#options.nowMonotonicMs();
+    const nowUnixMs = readUnixTime(this.#options.nowUnixMs);
+    if (!Number.isFinite(now)) {
+      throw runtimeError("SHUTDOWN_FAILED", "Executor shadow monotonic clock is invalid.");
+    }
+    const transportedDeadline = now + (drain.shutdownDeadlineUnixMs - nowUnixMs);
     const deadline = Math.min(
       this.#shutdownDeadline ?? Number.POSITIVE_INFINITY,
       now + this.#arwx.configuredCloseTimeoutMs,
+      transportedDeadline,
     );
+    if (drain.shutdownDeadlineUnixMs <= nowUnixMs || deadline <= now) {
+      throw runtimeError(
+        "SHUTDOWN_FAILED",
+        "Executor shadow Drain deadline is expired or invalid.",
+      );
+    }
     this.#activeShutdownDeadline = deadline;
     let receipt: ArwxFinalFrameReceipt;
     try {

@@ -28,6 +28,9 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - a per-launch HostControl endpoint with bounded overlapped-I/O ownership, cancellation,
   completion publication, cleanup, and fatal-operation quarantine;
 - a sealed zero-execution Claim policy derived from the committed runtime bootstrap;
+- a Control-only, bootstrap-bound `ShutdownRequested` notification serialized through the sole
+  HostControl writer, with one absolute graceful deadline and forced termination only after that
+  deadline or an earlier terminal failure;
 - a Windows platform factory that composes the verified startup, relay, supervision, and cleanup
   chain, plus an explicitly unavailable non-Windows factory; and
 - pure Go tests for those contracts.
@@ -95,6 +98,10 @@ termination reserve must also match exactly across the pair.
 HostControl use `shutdownTimeoutMilliseconds - forceTerminationReserveMilliseconds` as their
 graceful interval; the Node root-Job launcher receives only the reserve for forced termination.
 These intervals are sequential parts of one configured deadline, not two copies of the total.
+The Control ServiceHost sends the original Unix-millisecond deadline once over HostControl. Control
+maps it to a monotonic deadline without extending the local configured budget and copies the same
+Unix deadline into `Drain`; Executor applies the same non-extending mapping. Executor HostControl
+rejects `ShutdownRequested`, and native code never fabricates `Drain` or `Drained`.
 
 The immutable manifest, executables, Node payloads, and ProcessHost are strict descendants of
 `installation.root`. Administrator-managed CA material, the local-authority public key, and the
@@ -207,3 +214,5 @@ Remove-Item Env:GOOS, Env:GOARCH
 
 Cross-compilation is not Windows security evidence. Production enablement still requires native
 Windows x64 and arm64 token, DACL, Named Pipe, Job Object, process-tree, tamper, and failure tests.
+The shutdown bridge is also only a source candidate until the signed dual-role package, installer,
+remote verification, and paired native Windows service-stop and forced-termination matrix pass.

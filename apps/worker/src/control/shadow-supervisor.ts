@@ -173,6 +173,9 @@ class ControlZeroSlotShadowSupervisor {
   #externalCloseRequested = false;
   #drainedObserved = false;
   #shutdownArmCommitted = false;
+  #serviceShutdownRequest:
+    | Readonly<{ requestedAtUnixMs: number; shutdownDeadlineUnixMs: number }>
+    | undefined;
 
   public constructor(
     activation: Readonly<ControlActivation>,
@@ -197,6 +200,15 @@ class ControlZeroSlotShadowSupervisor {
       armArwxShutdown: activation.hostControl.armArwxShutdown.bind(activation.hostControl),
       waitForIdle: activation.hostControl.waitForIdle.bind(activation.hostControl),
     });
+    void activation.hostControl.shutdownRequested.then(
+      (request) => {
+        this.#serviceShutdownRequest = Object.freeze({
+          requestedAtUnixMs: request.requestedAtUnixMs,
+          shutdownDeadlineUnixMs: request.shutdownDeadlineUnixMs,
+        });
+      },
+      () => undefined,
+    );
     this.#architecture = normalizeArchitecture(dependencies.architecture ?? process.arch);
     this.#api = freezeServerApi(
       dependencies.serverApi ?? createDefaultServerApi(activation.hostControl),
@@ -692,6 +704,7 @@ class ControlZeroSlotShadowSupervisor {
       );
     }
     const ready = this.#requireReady();
+    const serviceShutdown = this.#serviceShutdownRequest;
     this.#phase = "closing";
     await waitBeforeDeadline(
       () =>
@@ -701,7 +714,11 @@ class ControlZeroSlotShadowSupervisor {
             correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
             payload: sessionPayload(ready, {
               reasonCode: serviceStopReason,
-              requestedAtUnixMs: boundedUnixMilliseconds(this.#nowUnixMs()),
+              requestedAtUnixMs:
+                serviceShutdown?.requestedAtUnixMs ?? boundedUnixMilliseconds(this.#nowUnixMs()),
+              shutdownDeadlineUnixMs:
+                serviceShutdown?.shutdownDeadlineUnixMs ??
+                monotonicDeadlineToUnixMilliseconds(absoluteDeadline),
             }),
           },
           absoluteDeadline,
@@ -761,6 +778,17 @@ class ControlZeroSlotShadowSupervisor {
     this.#completion.reject(error);
     if (abortArwx) this.#arwx.abort();
   }
+}
+
+function monotonicDeadlineToUnixMilliseconds(absoluteDeadline: number): number {
+  const remaining = Math.floor(absoluteDeadline - performance.now());
+  if (remaining < 1) {
+    throw shadowError(
+      "CONTROL_SHADOW_TIMEOUT",
+      "Control shadow shutdown deadline expired before Drain publication.",
+    );
+  }
+  return boundedUnixMilliseconds(Date.now() + remaining);
 }
 
 function validateControlReady(

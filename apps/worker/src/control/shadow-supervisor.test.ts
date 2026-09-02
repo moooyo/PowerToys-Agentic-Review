@@ -25,6 +25,7 @@ import {
   consumeArwxFinalFrameReceipt,
 } from "../service-host/arwx-stdio-channel.js";
 import type { ControlHostControlClient } from "../service-host/host-control-client.js";
+import type { HostControlShutdownRequest } from "../service-host/host-control-session.js";
 import { parseRuntimeBootstrap } from "../service-host/runtime-bootstrap.js";
 import { bootstrapDocument } from "../service-host/runtime-bootstrap.test-helpers.js";
 import {
@@ -79,6 +80,10 @@ class FakeServerApi implements ControlShadowServerApi {
 class FakeControlClient implements ControlHostControlClient {
   public readonly role = "control" as const;
   public readonly done = new Promise<void>(() => undefined);
+  public readonly shutdownRequested: Promise<Readonly<HostControlShutdownRequest<"control">>>;
+  readonly #resolveShutdownRequested: (
+    value: Readonly<HostControlShutdownRequest<"control">>,
+  ) => void;
   public claimCalls = 0;
   public completeCalls = 0;
   public failCalls = 0;
@@ -89,7 +94,17 @@ class FakeControlClient implements ControlHostControlClient {
   public constructor(
     public readonly bootstrap: ReturnType<typeof parseRuntimeBootstrap>,
     private readonly arwx: ArwxStdioChannel,
-  ) {}
+  ) {
+    let resolveShutdownRequested!: (value: Readonly<HostControlShutdownRequest<"control">>) => void;
+    this.shutdownRequested = new Promise((resolve) => {
+      resolveShutdownRequested = resolve;
+    });
+    this.#resolveShutdownRequested = resolveShutdownRequested;
+  }
+
+  public requestShutdown(value: Readonly<HostControlShutdownRequest<"control">>): void {
+    this.#resolveShutdownRequested(value);
+  }
 
   public async register(): Promise<never> {
     throw new Error("Raw HostControl registration should be behind the server facade.");
@@ -525,6 +540,36 @@ describe("Control zero-slot shadow supervisor", () => {
     harness.send(LocalMessageType.Drained, drainedMessage(harness));
     harness.input.end();
 
+    await expect(closing).resolves.toBeUndefined();
+    await expect(harness.running).resolves.toBeUndefined();
+  });
+
+  it("copies the original ServiceHost Unix deadline into Control Drain", async () => {
+    const harness = await createHarness();
+    await completeHandshake(harness);
+    const requestedAtUnixMs = 1_700_000_000_000;
+    const shutdownDeadlineUnixMs = 1_700_000_001_000;
+    const absoluteDeadline = performance.now() + 1_000;
+    harness.client.requestShutdown(
+      Object.freeze({
+        protocolVersion: "1.0",
+        type: "notification",
+        notification: "ShutdownRequested",
+        bootstrapId: harness.client.bootstrap.bootstrap.bootstrapId,
+        role: "control",
+        reasonCode: "SERVICE_STOP",
+        requestedAtUnixMs,
+        shutdownDeadlineUnixMs,
+        absoluteDeadline,
+      }),
+    );
+
+    const closing = harness.owner.close(absoluteDeadline);
+    await waitFor(() => hasOutbound(harness, LocalMessageType.Drain));
+    const drain = harness.frames.find((frame) => frame.messageType === LocalMessageType.Drain);
+    expect(drain?.payload).toMatchObject({ requestedAtUnixMs, shutdownDeadlineUnixMs });
+    harness.send(LocalMessageType.Drained, drainedMessage(harness));
+    harness.input.end();
     await expect(closing).resolves.toBeUndefined();
     await expect(harness.running).resolves.toBeUndefined();
   });

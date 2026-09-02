@@ -70,12 +70,13 @@ type arwxShutdownAuthorizationState struct {
 }
 
 type arwxShutdownGate struct {
-	mu            sync.Mutex
-	binding       committedRuntimeBootstrapBinding
-	serveBound    bool
-	attempted     bool
-	eofAttempted  bool
-	authorization *arwxShutdownAuthorizationState
+	mu                sync.Mutex
+	binding           committedRuntimeBootstrapBinding
+	serveBound        bool
+	attempted         bool
+	eofAttempted      bool
+	requestedDeadline time.Time
+	authorization     *arwxShutdownAuthorizationState
 }
 
 func newArwxShutdownGate(
@@ -123,6 +124,9 @@ func (gate *arwxShutdownGate) prepare(
 	if err := validateArmArwxShutdownClaim(claim, gate.binding); err != nil {
 		return ArmArwxShutdownResultV1{}, nil, err
 	}
+	if !gate.requestedDeadline.IsZero() && gate.requestedDeadline.Before(deadline) {
+		deadline = gate.requestedDeadline
+	}
 	if !time.Now().Before(deadline) {
 		return ArmArwxShutdownResultV1{}, nil, ErrIOTimeout
 	}
@@ -134,6 +138,19 @@ func (gate *arwxShutdownGate) prepare(
 	}
 	gate.authorization = state
 	return armArwxShutdownResult(claim), state, nil
+}
+
+func (gate *arwxShutdownGate) setRequestedDeadline(deadline time.Time) error {
+	if gate == nil || deadline.IsZero() || !time.Now().Before(deadline) {
+		return ErrShutdownNotificationInvalid
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if !gate.serveBound || gate.attempted || !gate.requestedDeadline.IsZero() {
+		return ErrShutdownNotificationUnavailable
+	}
+	gate.requestedDeadline = deadline
+	return nil
 }
 
 func (gate *arwxShutdownGate) authorizeEOF(
@@ -252,6 +269,44 @@ func (gate *arwxShutdownGate) armedDeadline() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return authorization.deadline, true
+}
+
+func (gate *arwxShutdownGate) committedDeadline() (time.Time, bool) {
+	if gate == nil {
+		return time.Time{}, false
+	}
+	gate.mu.Lock()
+	authorization := gate.authorization
+	gate.mu.Unlock()
+	if authorization == nil {
+		return time.Time{}, false
+	}
+	authorization.mu.Lock()
+	defer authorization.mu.Unlock()
+	if !authorization.acknowledged || authorization.failed {
+		return time.Time{}, false
+	}
+	return authorization.deadline, true
+}
+
+func (gate *arwxShutdownGate) lifecycleDeadline() (time.Time, bool) {
+	if gate == nil {
+		return time.Time{}, false
+	}
+	gate.mu.Lock()
+	requested := gate.requestedDeadline
+	authorization := gate.authorization
+	gate.mu.Unlock()
+	deadline := requested
+	if authorization != nil {
+		authorization.mu.Lock()
+		armed := authorization.deadline
+		authorization.mu.Unlock()
+		if deadline.IsZero() || !armed.IsZero() && armed.Before(deadline) {
+			deadline = armed
+		}
+	}
+	return deadline, !deadline.IsZero()
 }
 
 func (gate *arwxShutdownGate) failCurrentAuthorization() {

@@ -433,6 +433,22 @@ describe("Executor zero-slot shadow runtime", () => {
     await expect(expired.running).rejects.toBeDefined();
     expect(expired.outputFrames).toHaveLength(2);
     expect(expired.host.armCalls).toBe(0);
+
+    const lateDrain = createHarness();
+    const third = await authenticate(lateDrain);
+    sendControl(
+      lateDrain,
+      LocalMessageType.Drain,
+      {
+        ...drainMessage(third.helloAck),
+        shutdownDeadlineUnixMs: 1_700_000_000_000,
+      },
+      3n,
+    );
+    await expect(lateDrain.runtime.done).rejects.toMatchObject({ code: "SHUTDOWN_FAILED" });
+    await expect(lateDrain.running).rejects.toBeDefined();
+    expect(lateDrain.outputFrames).toHaveLength(2);
+    expect(lateDrain.host.armCalls).toBe(0);
   });
 
   it("fails closed when external close tightens an in-flight Drain deadline", async () => {
@@ -606,6 +622,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
 class FakeExecutorHostControl implements ExecutorHostControlSession {
   public readonly role = "executor" as const;
   public readonly done = new Promise<void>(() => undefined);
+  public readonly shutdownRequested = new Promise<never>(() => undefined);
   public armCalls = 0;
   public closeCalls = 0;
   public receiptConsumed = false;
@@ -751,6 +768,7 @@ function drainMessage(helloAck: HelloAckMessage): DrainMessage {
     sessionId: helloAck.sessionId,
     reasonCode: "SERVICE_STOP",
     requestedAtUnixMs: 1_700_000_000_000,
+    shutdownDeadlineUnixMs: 1_700_000_015_000,
   };
 }
 

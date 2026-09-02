@@ -30,7 +30,7 @@ export interface ServiceHostRoleFoundation<
   readonly hostControl: TSession;
   readonly arwx: ArwxStdioChannel;
   readonly done: Promise<Readonly<ServiceHostRoleTerminal>>;
-  close(): Promise<void>;
+  close(absoluteDeadline?: number): Promise<void>;
 }
 
 export type ServiceHostRoleTerminal =
@@ -348,6 +348,7 @@ export async function openServiceHostRoleFoundation<
   }
   runtimeActivation.resolve(undefined);
   const terminalArbiter = createRoleTerminalArbiter();
+  let serviceShutdownDeadline: number | undefined;
   observeRuntimeBootstrapArwxDispatcherTerminalReservation(ready.dispatcherGate, (source) =>
     terminalArbiter.reserve(source),
   );
@@ -357,6 +358,15 @@ export async function openServiceHostRoleFoundation<
     (error: unknown) =>
       terminalArbiter.settle(Object.freeze({ source: "host-control", outcome: "rejected", error })),
   );
+  if (expectedRole === "control") {
+    void hostControl.shutdownRequested.then(
+      (request) => {
+        serviceShutdownDeadline = request.absoluteDeadline;
+        terminalArbiter.settle(fulfilledRoleTerminal("external"));
+      },
+      () => undefined,
+    );
+  }
   let removeRuntimeCancellation = (): void => undefined;
   const onAbort = (): void => {
     terminalArbiter.settle(fulfilledRoleTerminal("external"));
@@ -374,11 +384,18 @@ export async function openServiceHostRoleFoundation<
     hostControl,
     arwx: ready.arwx,
     done,
-    close(): Promise<void> {
+    close(requestedDeadline?: number): Promise<void> {
       closePromise ??= (async () => {
         removeRuntimeCancellation();
         const cleanupErrors: unknown[] = [];
-        const arwxDeadline = performance.now() + ready.arwx.configuredCloseTimeoutMs;
+        if (requestedDeadline !== undefined && !Number.isFinite(requestedDeadline)) {
+          throw new TypeError("ServiceHost role shutdown deadline must be finite.");
+        }
+        const arwxDeadline = Math.min(
+          performance.now() + ready.arwx.configuredCloseTimeoutMs,
+          requestedDeadline ?? Number.POSITIVE_INFINITY,
+          serviceShutdownDeadline ?? Number.POSITIVE_INFINITY,
+        );
         const cleanupAbort = await closeDispatcherRuntime(
           { arwx: ready.arwx, dispatcherGate: ready.dispatcherGate },
           cleanupErrors,
@@ -742,6 +759,7 @@ function isRoleBoundHostControlSession<TRole extends ServiceHostPayloadRole>(
     candidate.role === role &&
     candidate.bootstrap === bootstrap &&
     candidate.done instanceof Promise &&
+    candidate.shutdownRequested instanceof Promise &&
     typeof candidate.armArwxShutdown === "function" &&
     typeof candidate.drain === "function" &&
     typeof candidate.close === "function"

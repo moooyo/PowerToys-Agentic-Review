@@ -211,6 +211,90 @@ describe("HostControl client", () => {
     await client.close();
   });
 
+  it("accepts one session-bound shutdown notification between pending responses", async () => {
+    const { client, host } = await connect();
+    const registration = client.register(opaque({ workerNodeId: "node:1" }));
+    await waitForWrites(host, 1);
+
+    const notification = shutdownNotification(client);
+    host.pushRaw(
+      Buffer.concat([
+        hostControlFrame(notification),
+        hostControlFrame(successOpaque("call:1", { registered: true })),
+      ]),
+    );
+    await expect(client.shutdownRequested).resolves.toMatchObject({
+      ...notification,
+      absoluteDeadline: expect.any(Number),
+    });
+    await expect(registration).resolves.toEqual({ registered: true });
+    let postNotificationError: unknown;
+    try {
+      client.register(opaque({ workerNodeId: "node:2" }));
+    } catch (error) {
+      postNotificationError = error;
+    }
+    expect(postNotificationError).toMatchObject({ code: "CLIENT_CLOSED" });
+
+    await client.close();
+  });
+
+  it.each([
+    {
+      name: "duplicate",
+      mutate: (value: Record<string, unknown>) => value,
+      sendFirst: true,
+    },
+    {
+      name: "wrong bootstrap",
+      mutate: (value: Record<string, unknown>) => ({
+        ...value,
+        bootstrapId: "00112233-4455-4677-8899-aabbccddeeff",
+      }),
+      sendFirst: false,
+    },
+    {
+      name: "wrong role",
+      mutate: (value: Record<string, unknown>) => ({ ...value, role: "executor" }),
+      sendFirst: false,
+    },
+    {
+      name: "late deadline",
+      mutate: (value: Record<string, unknown>) => {
+        const duration =
+          (value.shutdownDeadlineUnixMs as number) - (value.requestedAtUnixMs as number);
+        return {
+          ...value,
+          requestedAtUnixMs: Date.now() - duration - 1,
+          shutdownDeadlineUnixMs: Date.now() - 1,
+        };
+      },
+      sendFirst: false,
+    },
+    {
+      name: "extended duration",
+      mutate: (value: Record<string, unknown>) => ({
+        ...value,
+        shutdownDeadlineUnixMs: (value.shutdownDeadlineUnixMs as number) + 1,
+      }),
+      sendFirst: false,
+    },
+  ])("fails closed for a $name shutdown notification", async ({ mutate, sendFirst }) => {
+    const { client, host } = await connect();
+    const notification = shutdownNotification(client);
+    if (sendFirst) {
+      host.respond(notification);
+      await expect(client.shutdownRequested).resolves.toMatchObject({
+        notification: "ShutdownRequested",
+      });
+    }
+    const failed = expect(client.done).rejects.toMatchObject({ code: "PROTOCOL_FAILURE" });
+    host.respond(mutate(notification));
+    await failed;
+    expect(host.destroyed).toBe(true);
+    await client.close();
+  });
+
   it("arms the exact final Drain frame and commits ARWX output only after the exact echo", async () => {
     let arwxContext: TestBootstrapArwxContext | undefined;
     let arming: Promise<unknown> | undefined;
@@ -920,6 +1004,31 @@ function failure(requestId: string, code: string, retryable: boolean): Record<st
     requestId,
     type: "response",
   };
+}
+
+function shutdownNotification(client: ControlHostControlClient): Record<string, unknown> {
+  const duration =
+    client.bootstrap.bootstrap.shutdown.gracefulTimeoutMs -
+    client.bootstrap.bootstrap.shutdown.forceTerminationReserveMs;
+  const requestedAtUnixMs = Date.now();
+  return {
+    bootstrapId: client.bootstrap.bootstrap.bootstrapId,
+    notification: "ShutdownRequested",
+    protocolVersion: "1.0",
+    reasonCode: "SERVICE_STOP",
+    requestedAtUnixMs,
+    role: "control",
+    shutdownDeadlineUnixMs: requestedAtUnixMs + duration,
+    type: "notification",
+  };
+}
+
+function hostControlFrame(value: Record<string, unknown>): Buffer {
+  const document = Buffer.from(serializeCanonicalJson(value), "utf8");
+  const frame = Buffer.alloc(4 + document.byteLength);
+  frame.writeUInt32LE(document.byteLength, 0);
+  document.copy(frame, 4);
+  return frame;
 }
 
 function drainedFrame(sequence: bigint): Buffer {
