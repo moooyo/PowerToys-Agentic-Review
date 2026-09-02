@@ -2,13 +2,16 @@
 
 ## Status
 
-Proposed as a source-only, dormant storage contract on 2026-09-03.
+Accepted as a source-only, dormant storage contract on 2026-09-03.
 
 This decision freezes canonical documents, namespace ownership, migration preconditions,
-publication ordering, and conservative crash recovery. It does not implement a Go package, open a
-file, change an ACL, replace a head, migrate an installed node, mutate a product root or service,
-or grant installer, Claim, or execution authority. The exact Windows APIs and their native evidence
-remain release blockers.
+publication ordering, and conservative crash recovery. The source-only
+`internal/installstorev2lab` package implements the ordinary canonical codecs, fixed path and
+sequence derivation, package-private residue and crash-transition models, opaque zero-value-invalid
+capability shapes, and lifecycle stubs that always return `ErrUnavailable`. It does not open a file,
+change an ACL, replace a head, migrate an installed node, mint a permit, mutate a product root or
+service, or grant installer, Claim, or execution authority. The exact Windows APIs and their native
+evidence remain release blockers.
 
 ## Context
 
@@ -33,8 +36,10 @@ ownership files would weaken that fail-closed property.
 ### Dormant boundary
 
 This ADR is the Slice B contract anticipated by ADR 0020. It does not remove
-`durable-store-unavailable` from any ADR 0020 blocked checkpoint. No implementation, production
-consumer, platform adapter, transition bridge, or durable intent issuer exists in this slice.
+`durable-store-unavailable` from any ADR 0020 blocked checkpoint. Only source-level codecs, pure
+models, opaque invalid-by-default types, and unavailable lifecycle stubs exist. No production
+consumer, platform adapter, transition bridge, I/O implementation, or durable intent issuer exists
+in this slice.
 
 ADR 0020's `TransactionDocumentV2`, `TransactionRecordV2`, digest domain, 96 KiB maximum, closed
 phase graph, and blocked semantics remain byte-for-byte unchanged. This ADR wraps that complete
@@ -171,6 +176,11 @@ caller input. Sequence zero, more or fewer than 20 digits, a sign, whitespace, a
 or a value above unsigned 64-bit maximum is invalid. The unpadded record value remains the exact
 ADR 0020 `DecimalUint64` and has no leading zero.
 
+Because this entry version admits only one v2 transaction with at most 4,096 entries, the v2 head,
+entry binding, and path derivation additionally reject a v2 record sequence above 4,096. The legacy
+`recordSequence` values retained in `PredecessorV2` and `V1InventoryEntryV2` remain canonical positive
+unsigned 64-bit decimals and do not inherit the v2-entry count ceiling.
+
 Schema-v1 transaction directories remain immutable inventory after migration. A reconciled v1
 directory contains its one canonical `record-v1.json` and no temporary sibling. A schema-v2
 transaction directory contains only `wal-v2`, and that directory contains only the admitted entry
@@ -188,8 +198,8 @@ exclusive crash-residue shapes is admissible for semantic classification by `Rec
 | A | one staging shape `(a)` through `(d)` | no head temporary and no canonical candidate |
 | B | one current-tail `N+1` entry temporary | no head temporary |
 | C | one exact final direct successor or canonical migration genesis | optionally one fixed head temporary from the same publication |
-| D | valid head-selected new tail and no entry-side residue | optionally one fixed head temporary cleanup residue |
-| E | no entry-side residue | one fixed head temporary |
+| D | sealed expected-v2 only: one strict authoritative v2 head and selected tail, with no entry-side residue | no head temporary; recovery only reflashes, reopens, reverifies, and describes the authoritative tail |
+| E | one strict authoritative v1 or v2 head and selected record or tail, with no entry-side residue | exactly one fixed head temporary; recovery cleans it and then reclassifies from the authoritative final head |
 | V | expected-v1 only: one physically trusted bounded `record-v1.json.tmp` in the head-selected v1 transaction, with no v2 or staging residue | no head temporary |
 
 Two entry-side residues, two head temporaries, staging plus a canonical candidate, a head temporary
@@ -200,9 +210,11 @@ may be empty, partial, or noncanonical and never participates in authority. Cros
 entry, or residue bound fails closed. No automatic retention, compaction, archival, or garbage
 collection is defined.
 
-Recovery reads at most 806,354,944 aggregate admitted document bytes (769 MiB), including all 4,096
-allowed legacy records, one allowed v1 record temporary, all 4,096 allowed v2 entries, and every
-admitted bounded v2 temporary or head. It retains at most 64 native
+Recovery reads at most 806,354,944 aggregate admitted filesystem-document bytes (769 MiB), including
+all 4,096 allowed legacy records, one allowed v1 record temporary, all 4,096 allowed v2 entries, and
+every admitted bounded v2 temporary or head. The derived canonical inventory array has its own 1 MiB
+encoding ceiling and counts against the live working-set limit, not the filesystem-read total. It
+retains at most 64 native
 handles simultaneously, and has a compiled hard deadline of 10 minutes covering enumeration,
 reopen, hashing, parsing, and verification. It performs a single streaming pass, retains at most
 three 128 KiB document buffers simultaneously, and has a 16 MiB total live working-set ceiling for
@@ -224,6 +236,7 @@ The size ceilings include the complete encoded document:
 ```text
 HeadDocumentV2          1 KiB
 PredecessorDocumentV2   2 KiB
+V1InventoryEntryV2[]    1 MiB
 EntryDocumentV2       128 KiB
 TransactionDocumentV2  96 KiB  (unchanged from ADR 0020)
 ```
@@ -726,12 +739,14 @@ everything and fails closed. Once in staging, cleanup follows the staging leaf-t
 cleanup cut can create an empty canonical UUID directory. It does not adopt the entry or replace the
 v1 head. Migration may be retried later only from a newly reverified clean v1 inventory.
 
-When sealed expected state is v2 and the final physical head contains a valid `HeadDocumentV2`
-selecting the new entry, recovery
-does not roll the head back. It reopens and reverifies the complete chain, flushes the selected entry
-file and `wal-v2` directory, flushes the head file and `Transactions` directory, reopens the final
-head and selected entry, and adopts the new tail only after identities, ACLs, bytes, and mutual
-bindings remain exact. A removable fixed temporary may then be cleaned by the rule above.
+When sealed expected state is v2 and the final physical head contains a valid `HeadDocumentV2`,
+recovery does not depend on an in-memory label that calls its selected entry old or new and does not
+roll the head back. With no temporary residue this is Shape D. It reopens and reverifies the
+complete chain, flushes the selected entry file and `wal-v2` directory, flushes the head file and
+`Transactions` directory, reopens the final head and selected entry, and adopts the new tail only
+after identities, ACLs, bytes, and mutual bindings remain exact. A removable fixed head temporary
+is instead Shape E: it is cleaned by the rule above and recovery restarts classification from the
+authoritative final head rather than adopting a remembered publication result.
 
 The following conditions always fail closed out of band without selecting an older entry:
 
@@ -842,9 +857,11 @@ never authoritative, no v2 permit can have been minted, deletion is followed by 
 re-enumeration, and its content is never used to infer a head, record, version, or sequence. This
 ADR does not alter any v1 canonical schema, digest, action, reducer, or final record file.
 
-ADR 0020 remains permanently blocked and has no store consumer. A future implementation of this ADR
-must initially be source-only and unreachable from production. Production activation requires all
-of the following as separate reviewed work:
+ADR 0020 remains permanently blocked. `internal/installstorev2lab` is its sole reviewed non-test
+importer and uses `MarshalRecord` and `ParseRecord` only to preserve the complete nested canonical
+document. The store lab is itself unreachable from production, and any second non-test importer of
+either lab is rejected by architecture guards. Production activation requires all of the following
+as separate reviewed work:
 
 - a new production-capable transaction record schema/profile;
 - a sealed transition bridge that is the only constructor of `PreparedSuccessor`;
