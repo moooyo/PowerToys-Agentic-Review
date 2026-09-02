@@ -7,6 +7,7 @@ import { scanRuntimeLoaderSyntax } from "./verify-role-bundles.mjs";
 
 const repositoryRoot = realpathSync(fileURLToPath(new URL("../../..", import.meta.url)));
 const workerSourceRoot = "apps/worker/src/";
+const serverSourceRoot = "apps/server/src/";
 const executionSourceRoot = `${workerSourceRoot}execution/`;
 const contractsSourceRoot = "packages/contracts/src/";
 const localProtocolSourceRoot = "packages/local-protocol/src/";
@@ -19,13 +20,79 @@ const dormantArtifactHostControlV2ApiPath = `${workerSourceRoot}control/artifact
 const dormantArtifactHostControlV2ProtocolPath = `${workerSourceRoot}service-host/artifact-host-control-v2-protocol.ts`;
 const dormantArwxMinorOnePath = `${localProtocolSourceRoot}minor-1.ts`;
 const dormantJobExecutionEnvelopeV2Path = `${contractsSourceRoot}job-envelope-v2.ts`;
+const dormantRoleConfigV3LabPath = `${workerSourceRoot}service-host/role-config-v3-lab.ts`;
+const dormantRuntimeBootstrapV2LabPath = `${workerSourceRoot}service-host/runtime-bootstrap-v2-lab.ts`;
+const pinnedServerClaimProducerPath = `${serverSourceRoot}database/database-worker.ts`;
 const dormantProductionExcludedPaths = new Set([
   dormantResultArtifactUploadSessionPath,
   dormantArtifactHostControlV2ApiPath,
   dormantArtifactHostControlV2ProtocolPath,
   dormantArwxMinorOnePath,
   dormantJobExecutionEnvelopeV2Path,
+  dormantRoleConfigV3LabPath,
+  dormantRuntimeBootstrapV2LabPath,
 ]);
+const reviewedDormantLabExports = Object.freeze({
+  [dormantRoleConfigV3LabPath]: Object.freeze(
+    [
+      "class:RoleConfigV3LabError",
+      "type:ControlRoleConfigV3Lab",
+      "type:ExecutorRoleConfigV3Lab",
+      "type:ParsedRoleConfigV3Lab",
+      "type:RoleConfigV3Lab",
+      "type:RoleConfigV3LabRole",
+      "value:ControlRoleConfigV3LabSchema",
+      "value:ExecutorRoleConfigV3LabSchema",
+      "value:ROLE_CONFIG_V3_LAB_ARWX_PROTOCOL_MAJOR",
+      "value:ROLE_CONFIG_V3_LAB_ARWX_PROTOCOL_MINOR",
+      "value:ROLE_CONFIG_V3_LAB_COMPLETION_MODE",
+      "value:ROLE_CONFIG_V3_LAB_DISABLED_REASON_CODE",
+      "value:ROLE_CONFIG_V3_LAB_FOUNDATION_VERSION",
+      "value:ROLE_CONFIG_V3_LAB_HOST_CONTROL_OPERATIONS",
+      "value:ROLE_CONFIG_V3_LAB_HOST_CONTROL_PROTOCOL_VERSION",
+      "value:ROLE_CONFIG_V3_LAB_JOB_ENVELOPE_VERSION",
+      "value:ROLE_CONFIG_V3_LAB_MAXIMUM_BYTES",
+      "value:ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES",
+      "value:ROLE_CONFIG_V3_LAB_PROFILE",
+      "value:ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES",
+      "value:ROLE_CONFIG_V3_LAB_REQUIRED_RUNTIME_BOOTSTRAP_VERSION",
+      "value:ROLE_CONFIG_V3_LAB_REQUIRED_WORKER_API_VERSION",
+      "value:RoleConfigV3LabArwxSelectionSchema",
+      "value:RoleConfigV3LabHostControlSelectionSchema",
+      "value:createControlRoleConfigV3Lab",
+      "value:createExecutorRoleConfigV3Lab",
+      "value:isParsedRoleConfigV3Lab",
+      "value:parseRoleConfigV3Lab",
+    ].sort(),
+  ),
+  [dormantRuntimeBootstrapV2LabPath]: Object.freeze(
+    [
+      "class:RuntimeBootstrapV2LabError",
+      "type:ParsedRuntimeBootstrapV2Lab",
+      "type:RuntimeBootstrapV2Lab",
+      "type:RuntimeBootstrapV2LabDisabledReadinessProjection",
+      "type:RuntimeBootstrapV2LabFacts",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_ARWX_MAXIMUM_FRAME_BYTES",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_ARWX_MAXIMUM_QUEUED_BYTES",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_ARWX_MINIMUM_QUEUED_BYTES",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_ARWX_PROTOCOL_MAJOR",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_ARWX_PROTOCOL_MINOR",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_HOST_CONTROL_RPC_PROTOCOL_VERSION",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_MAXIMUM_BYTES",
+      "value:RUNTIME_BOOTSTRAP_V2_LAB_VERSION",
+      "value:RuntimeBootstrapV2LabDisabledReadinessProjectionSchema",
+      "value:RuntimeBootstrapV2LabSchema",
+      "value:createRuntimeBootstrapV2Lab",
+      "value:isParsedRuntimeBootstrapV2Lab",
+      "value:parseRuntimeBootstrapV2Lab",
+    ].sort(),
+  ),
+});
+const reviewedDormantLabSourceSha256 = Object.freeze({
+  [dormantRoleConfigV3LabPath]: "ce19cb3fc149d3ea1dc836472d9059bdad7b3c66195f9f1ae25dbd48067e75d5",
+  [dormantRuntimeBootstrapV2LabPath]:
+    "212517121f3a9ef23a6a1da28b0e11f4d58367861678a686192aeade9751c4e0",
+});
 const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
   [`${contractsSourceRoot}index.ts`]:
     "b5ec1e3a50525a2228979cf5b73afb423c804822c94f4dede91117e3d8f7944b",
@@ -62,6 +129,16 @@ const reviewedRootBarrelExports = Object.freeze({
 const reviewedProductionSourceSha256 = Object.freeze({
   [executorRuntimePath]: "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
   [controlRuntimePath]: "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
+  [`${workerSourceRoot}service-host/runtime-bootstrap.ts`]:
+    "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
+  [`${contractsSourceRoot}worker.ts`]:
+    "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
+  [`${workerSourceRoot}control/host-control-worker-api.ts`]:
+    "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
+  [`${workerSourceRoot}execution/trusted-installation-manifest.ts`]:
+    "e09f1c8e12dcd883261584dbc2b3f575a6098f6c327522e8caf0f3b2b4fa1928",
+  [pinnedServerClaimProducerPath]:
+    "52c0c988f0cdd1946ecc1fa29eaecabf84e77578649404966fc0750e95421d6c",
 });
 const reviewedDormantExecutionSourceSha256 = Object.freeze({
   [dormantExecutorAttemptReducerPath]:
@@ -74,6 +151,8 @@ const firstPartySourceRedirects = new Map([
   ["@agentic-review/contracts/job-envelope-v2", dormantJobExecutionEnvelopeV2Path],
   ["@agentic-review/local-protocol", `${localProtocolSourceRoot}index.ts`],
   ["@agentic-review/local-protocol/minor-1", dormantArwxMinorOnePath],
+  ["@agentic-review/worker/role-config-v3-lab", dormantRoleConfigV3LabPath],
+  ["@agentic-review/worker/runtime-bootstrap-v2-lab", dormantRuntimeBootstrapV2LabPath],
 ]);
 const allowedProductionModuleSpecifiers = new Set([
   "@sinclair/typebox",
@@ -153,6 +232,7 @@ const entrypointPolicies = Object.freeze({
 export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) {
   const readSource = productionSourceReader(sourceOverrides);
   verifyDormantVersionFoundations(readSource);
+  verifyDormantLabAPISurfaces(readSource);
   const dormantReducerSource = readSource(dormantExecutorAttemptReducerPath);
   verifyReviewedDormantExecutionSource(dormantExecutorAttemptReducerPath, dormantReducerSource);
   verifyDormantExecutorAttemptReducer(dormantReducerSource);
@@ -167,11 +247,96 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
     verifyEntrypoint(role, policy, readSource(policy.path));
     verifyProductionImportGraph(policy.path, readSource);
   }
+  for (const [sourcePath] of Object.entries(reviewedProductionSourceSha256)) {
+    verifyReviewedProductionSource(sourcePath, readSource(sourcePath));
+  }
   const executorSource = readSource(executorRuntimePath);
   const controlSource = readSource(controlRuntimePath);
-  verifyReviewedProductionSource(executorRuntimePath, executorSource);
-  verifyReviewedProductionSource(controlRuntimePath, controlSource);
   verifyAuthenticatedDisabledReady(executorSource, controlSource);
+}
+
+export function verifyDormantLabAPISurfaceForTest(sourcePath, source) {
+  if (!Object.hasOwn(reviewedDormantLabExports, sourcePath) || typeof source !== "string") {
+    throw new TypeError("Dormant lab API review requires an exact source path and text.");
+  }
+  verifyDormantLabAPISurface(sourcePath, source);
+}
+
+export function verifyDormantLabSourceForTest(sourcePath, source) {
+  if (!Object.hasOwn(reviewedDormantLabSourceSha256, sourcePath) || typeof source !== "string") {
+    throw new TypeError("Dormant lab source review requires an exact source path and text.");
+  }
+  verifyReviewedDormantLabSource(sourcePath, source);
+}
+
+function verifyDormantLabAPISurfaces(readSource) {
+  for (const sourcePath of Object.keys(reviewedDormantLabExports)) {
+    const source = readSource(sourcePath);
+    verifyReviewedDormantLabSource(sourcePath, source);
+    verifyDormantLabAPISurface(sourcePath, source);
+  }
+}
+
+function verifyReviewedDormantLabSource(sourcePath, source) {
+  const normalized = source.replaceAll("\r\n", "\n");
+  if (normalized.includes("\r") || normalized.includes("\uFEFF")) {
+    throw new Error(`${sourcePath} is outside its reviewed dormant lab source form.`);
+  }
+  const actual = createHash("sha256").update(normalized, "utf8").digest("hex");
+  if (actual !== reviewedDormantLabSourceSha256[sourcePath]) {
+    throw new Error(`${sourcePath} differs from its reviewed dormant lab source.`);
+  }
+}
+
+function verifyDormantLabAPISurface(sourcePath, source) {
+  const sourceFile = parseTypeScript(source, sourcePath);
+  const actual = [];
+  for (const statement of sourceFile.program.body) {
+    if (statement.type !== "ExportNamedDeclaration") {
+      if (statement.type.includes("Export")) {
+        throw new Error(`${sourcePath} contains an unreviewed dormant lab export form.`);
+      }
+      continue;
+    }
+    if (
+      statement.source !== null ||
+      statement.specifiers.length !== 0 ||
+      statement.declaration === null
+    ) {
+      throw new Error(`${sourcePath} contains an unreviewed dormant lab export form.`);
+    }
+    const declaration = statement.declaration;
+    if (declaration.type === "VariableDeclaration" && declaration.kind === "const") {
+      for (const binding of declaration.declarations) {
+        if (binding.id.type !== "Identifier") {
+          throw new Error(`${sourcePath} contains a non-identifier exported constant.`);
+        }
+        actual.push(`value:${binding.id.name}`);
+      }
+      continue;
+    }
+    if (declaration.type === "FunctionDeclaration" && declaration.id !== null) {
+      actual.push(`value:${declaration.id.name}`);
+      continue;
+    }
+    if (declaration.type === "ClassDeclaration" && declaration.id !== null) {
+      actual.push(`class:${declaration.id.name}`);
+      continue;
+    }
+    if (
+      (declaration.type === "TSTypeAliasDeclaration" ||
+        declaration.type === "TSInterfaceDeclaration") &&
+      declaration.id !== null
+    ) {
+      actual.push(`type:${declaration.id.name}`);
+      continue;
+    }
+    throw new Error(`${sourcePath} contains an unreviewed dormant lab declaration.`);
+  }
+  actual.sort();
+  if (JSON.stringify(actual) !== JSON.stringify(reviewedDormantLabExports[sourcePath])) {
+    throw new Error(`${sourcePath} exports an unreviewed dormant lab API surface.`);
+  }
 }
 
 function verifyDormantVersionFoundations(readSource) {
@@ -1525,12 +1690,12 @@ function productionSourceReader(overrides) {
     throw new TypeError("Zero-execution source overrides must be an object.");
   }
   for (const [path, source] of Object.entries(overrides)) {
-    if (!canonicalRepositorySource(path) || typeof source !== "string") {
+    if (!canonicalPinSource(path) || typeof source !== "string") {
       throw new TypeError("Zero-execution source override is invalid.");
     }
   }
   return (path) => {
-    if (!canonicalRepositorySource(path)) {
+    if (!canonicalPinSource(path)) {
       throw new Error(`Zero-execution architecture requested a noncanonical source: ${path}`);
     }
     if (Object.hasOwn(overrides, path)) return overrides[path];
@@ -1559,6 +1724,10 @@ function canonicalRepositorySource(path) {
     !path.includes("\\") &&
     posix.normalize(path) === path
   );
+}
+
+function canonicalPinSource(path) {
+  return path === pinnedServerClaimProducerPath || canonicalRepositorySource(path);
 }
 
 function resolveTypeScriptImport(importer, specifier) {

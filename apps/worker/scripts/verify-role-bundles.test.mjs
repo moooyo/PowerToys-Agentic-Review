@@ -22,6 +22,8 @@ import {
 } from "./verify-role-bundles.mjs";
 import {
   verifyDormantExecutorAttemptReducer,
+  verifyDormantLabAPISurfaceForTest,
+  verifyDormantLabSourceForTest,
   verifyDormantSourceExclusionForTest,
   verifyZeroExecutionProductionArchitecture,
 } from "./verify-zero-execution-architecture.mjs";
@@ -59,6 +61,18 @@ const reviewedRootBarrelExports = Object.freeze({
     "./messages.js",
     "./replay.js",
   ]),
+});
+const dormantRoleConfigV3ProductionPins = Object.freeze({
+  "apps/server/src/database/database-worker.ts":
+    "52c0c988f0cdd1946ecc1fa29eaecabf84e77578649404966fc0750e95421d6c",
+  "apps/worker/src/control/host-control-worker-api.ts":
+    "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
+  "apps/worker/src/execution/trusted-installation-manifest.ts":
+    "e09f1c8e12dcd883261584dbc2b3f575a6098f6c327522e8caf0f3b2b4fa1928",
+  "apps/worker/src/service-host/runtime-bootstrap.ts":
+    "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
+  "packages/contracts/src/worker.ts":
+    "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
 });
 
 test("clean build removes polluted output before producing role artifacts", async () => {
@@ -147,6 +161,8 @@ test("role policies include the exact shadow-runtime source additions", () => {
     "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts",
     "packages/contracts/src/job-envelope-v2.ts",
     "packages/local-protocol/src/minor-1.ts",
+    "apps/worker/src/service-host/role-config-v3-lab.ts",
+    "apps/worker/src/service-host/runtime-bootstrap-v2-lab.ts",
   ]) {
     assert.equal(control.has(input), false, `Control policy unexpectedly includes ${input}`);
     assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
@@ -178,6 +194,76 @@ test("dormant version foundations leave the production v0 and v1 contracts byte-
   }
   for (const [path, expected] of Object.entries(reviewedRootBarrelExports)) {
     assert.deepEqual(staticExportSources(repositorySource(path), path), expected);
+  }
+});
+
+test("dormant RoleConfig v3 leaves production bootstrap and Claim sources byte-exact", () => {
+  for (const [path, expected] of Object.entries(dormantRoleConfigV3ProductionPins)) {
+    const normalized = repositorySource(path).replaceAll("\r\n", "\n");
+    assert.equal(createHash("sha256").update(normalized, "utf8").digest("hex"), expected);
+  }
+});
+
+test("dormant RoleConfig v3 lab exports only the reviewed data API", () => {
+  for (const path of [
+    "apps/worker/src/service-host/role-config-v3-lab.ts",
+    "apps/worker/src/service-host/runtime-bootstrap-v2-lab.ts",
+  ]) {
+    const source = repositorySource(path);
+    assert.doesNotThrow(() => verifyDormantLabSourceForTest(path, source));
+    assert.doesNotThrow(() => verifyDormantLabAPISurfaceForTest(path, source));
+    assert.throws(
+      () =>
+        verifyDormantLabAPISurfaceForTest(
+          path,
+          `${source}\nexport function createClaimAuthority() { return true; }\n`,
+        ),
+      /exports an unreviewed dormant lab API surface/u,
+    );
+    assert.throws(
+      () =>
+        verifyDormantLabAPISurfaceForTest(
+          path,
+          `${source}\nexport interface LaunchPolicyAuthority {}\n`,
+        ),
+      /exports an unreviewed dormant lab API surface/u,
+    );
+    for (const mutation of [
+      `${source}\nexport default createControlRoleConfigV3Lab;\n`,
+      `${source}\nexport * from "node:fs";\n`,
+      `${source}\nexport = createControlRoleConfigV3Lab;\n`,
+      `${source}\nexport { readFileSync } from "node:fs";\n`,
+    ]) {
+      assert.throws(() => verifyDormantLabAPISurfaceForTest(path, mutation));
+    }
+    const interiorMutations = path.endsWith("role-config-v3-lab.ts")
+      ? [
+          source.replace(
+            "export class RoleConfigV3LabError extends Error {",
+            "export class RoleConfigV3LabError extends Error { static createClaim() { return true; }",
+          ),
+          source.replace(
+            "export interface ParsedRoleConfigV3Lab {",
+            "export interface ParsedRoleConfigV3Lab { readonly launchPolicy: true;",
+          ),
+        ]
+      : [
+          source.replace(
+            "export class RuntimeBootstrapV2LabError extends Error {",
+            "export class RuntimeBootstrapV2LabError extends Error { static createClaim() { return true; }",
+          ),
+          source.replace(
+            "export interface ParsedRuntimeBootstrapV2Lab {",
+            "export interface ParsedRuntimeBootstrapV2Lab { readonly launchPolicy: true;",
+          ),
+        ];
+    for (const mutation of interiorMutations) {
+      assert.notEqual(mutation, source);
+      assert.throws(
+        () => verifyDormantLabSourceForTest(path, mutation),
+        /differs from its reviewed dormant lab source/u,
+      );
+    }
   }
 });
 
@@ -261,6 +347,9 @@ test("production role entrypoints and reachable imports remain zero execution", 
     "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts";
   const dormantArwxMinorOnePath = "packages/local-protocol/src/minor-1.ts";
   const dormantJobEnvelopeV2Path = "packages/contracts/src/job-envelope-v2.ts";
+  const dormantRoleConfigV3LabPath = "apps/worker/src/service-host/role-config-v3-lab.ts";
+  const dormantRuntimeBootstrapV2LabPath =
+    "apps/worker/src/service-host/runtime-bootstrap-v2-lab.ts";
   const controlMain = repositorySource(controlMainPath);
   const executorMain = repositorySource(executorMainPath);
   const roleEntrypoint = repositorySource(roleEntrypointPath);
@@ -273,6 +362,8 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const dormantArtifactV2Protocol = repositorySource(dormantArtifactV2ProtocolPath);
   const dormantArwxMinorOne = repositorySource(dormantArwxMinorOnePath);
   const dormantJobEnvelopeV2 = repositorySource(dormantJobEnvelopeV2Path);
+  const dormantRoleConfigV3Lab = repositorySource(dormantRoleConfigV3LabPath);
+  const dormantRuntimeBootstrapV2Lab = repositorySource(dormantRuntimeBootstrapV2LabPath);
   assert.match(dormantUploadSession, /export class ResultArtifactUploadSession/u);
   for (const source of [
     controlMain,
@@ -283,13 +374,15 @@ test("production role entrypoints and reachable imports remain zero execution", 
   ]) {
     assert.doesNotMatch(
       source,
-      /result-artifact-upload-session|artifact-host-control-v2|job-envelope-v2|minor-1/u,
+      /result-artifact-upload-session|artifact-host-control-v2|job-envelope-v2|minor-1|role-config-v3-lab|runtime-bootstrap-v2-lab/u,
     );
   }
   assert.match(dormantArtifactV2Api, /export class ArtifactHostControlV2Api/u);
   assert.match(dormantArtifactV2Protocol, /export function encodeArtifactHostControlV2Call/u);
   assert.match(dormantArwxMinorOne, /export const LOCAL_PROTOCOL_MINOR_1_VERSION = 1/u);
   assert.match(dormantJobEnvelopeV2, /export const JobExecutionEnvelopeV2Schema/u);
+  assert.match(dormantRoleConfigV3Lab, /export const ControlRoleConfigV3LabSchema/u);
+  assert.match(dormantRuntimeBootstrapV2Lab, /export const RuntimeBootstrapV2LabSchema/u);
   const legacyWorkerServicePath = "apps/worker/src/worker-service.ts";
   const legacyWorkerService = repositorySource(legacyWorkerServicePath);
   assert.throws(
@@ -464,10 +557,13 @@ test("production role entrypoints and reachable imports remain zero execution", 
       }),
     /review the complete file and update its pinned SHA-256/u,
   );
-  assert.doesNotThrow(() =>
-    verifyZeroExecutionProductionArchitecture({
-      "apps/worker/src/control/host-control-worker-api.ts": "this unconnected source is not parsed",
-    }),
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        "apps/worker/src/control/host-control-worker-api.ts":
+          "this unconnected source is not parsed",
+      }),
+    /differs from its reviewed zero-execution source/u,
   );
 });
 
@@ -477,16 +573,19 @@ test("every production entrypoint rejects dormant v2 and minor-one imports throu
       entrypoint: "apps/worker/src/main.ts",
       injectionPath: "apps/worker/src/worker-service.ts",
       rootPrefix: "../../../",
+      serverSpecifier: "../../server/src/database/database-worker.js",
     },
     {
       entrypoint: "apps/worker/src/control-main.ts",
       injectionPath: "apps/worker/src/control/shadow-supervisor.ts",
       rootPrefix: "../../../../",
+      serverSpecifier: "../../../server/src/database/database-worker.js",
     },
     {
       entrypoint: "apps/worker/src/executor-main.ts",
       injectionPath: "apps/worker/src/service-host/executor-shadow-runtime.ts",
       rootPrefix: "../../../../",
+      serverSpecifier: "../../../server/src/database/database-worker.js",
     },
   ];
   const dormantModules = [
@@ -501,6 +600,18 @@ test("every production entrypoint rejects dormant v2 and minor-one imports throu
       bare: "@agentic-review/contracts/job-envelope-v2",
       barrelPath: "packages/contracts/src/index.ts",
       barrelExport: "./job-envelope-v2.js",
+    },
+    {
+      path: "apps/worker/src/service-host/role-config-v3-lab.ts",
+      bare: "@agentic-review/worker/role-config-v3-lab",
+      barrelPath: "apps/worker/src/service-host/runtime-bootstrap.ts",
+      barrelExport: "./role-config-v3-lab.js",
+    },
+    {
+      path: "apps/worker/src/service-host/runtime-bootstrap-v2-lab.ts",
+      bare: "@agentic-review/worker/runtime-bootstrap-v2-lab",
+      barrelPath: "apps/worker/src/service-host/runtime-bootstrap.ts",
+      barrelExport: "./runtime-bootstrap-v2-lab.js",
     },
   ];
 
@@ -538,6 +649,13 @@ test("every production entrypoint rejects dormant v2 and minor-one imports throu
         /Production import graph reaches dormant source/u,
       );
     }
+    assert.throws(
+      () =>
+        verifyDormantSourceExclusionForTest(target.entrypoint, {
+          [target.injectionPath]: `${injectionSource}\nimport "${target.serverSpecifier}";\n`,
+        }),
+      /Production relative import escapes reviewed source/u,
+    );
   }
 });
 

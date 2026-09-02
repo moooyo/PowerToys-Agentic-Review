@@ -231,6 +231,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   `resultDigest` on `Complete`, and binds envelope version two to `result_artifact_v1`. The new
   modules reuse the production framing and version-one envelope constraints without changing their
   source, barrels, Claim schemas, producers, role bundles, or runtime consumers.
+- A source-only RoleConfig v3 disabled-execution lab and data-only RuntimeBootstrapV2 lab contract.
+  ADR 0019 fixes Control and Executor schemas to zero advertised slots and no execution authority,
+  binds the exact dormant HostControl 2.0, ARWX 1.1, Job envelope v2, and artifact completion target,
+  and carries the complete activation-blocker tuple. Go and TypeScript share canonical Control and
+  Executor RoleConfig and bootstrap goldens. Neither implementation has an acknowledgement, commit,
+  exchange, channel, Claim constructor, production import, or role-bundle export.
 
 ## Deliberately Disabled
 
@@ -275,6 +281,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   fixed to ARWX 1.0 and envelope v1. There is no minor fallback, Claim selection, RoleConfig v3,
   RuntimeBootstrap selection, enabled slot, or runtime consumer. Activation requires an atomic
   matching signed-package upgrade and native mixed-version rejection evidence.
+- The RoleConfig v3 and RuntimeBootstrapV2 lab contracts remain permanently blocked under the
+  `disabled-execution-lab-v1` profile. Their `protocolVersion = "2.0"` selects only the dormant local
+  HostControl RPC2 target; it does not assert Worker API 1.1 or ARWX 1.1 readiness. The derived
+  `DisabledReadinessProjection` is not an ARWX Ready message and grants no Ready or Claim authority.
+  Production RoleConfig v2, RuntimeBootstrapV1, RPC1, Claim derivation, entrypoints, bundles, and
+  release manifests remain source- and graph-pinned.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release
