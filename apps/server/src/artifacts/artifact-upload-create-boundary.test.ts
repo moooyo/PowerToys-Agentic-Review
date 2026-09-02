@@ -246,4 +246,34 @@ describe("artifact transaction composition boundary", () => {
       expect(source).not.toContain("artifact-transaction-coordinator");
     }
   });
+
+  it("keeps the reviewed Worker artifact adapter unreachable from production roots", async () => {
+    for (const relativePath of ["app.ts", "config.ts", "main.ts", "routes/workers.ts"]) {
+      const source = await readFile(join(sourceRoot, relativePath), "utf8");
+      expect(source).not.toContain("worker-artifacts");
+      expect(source).not.toContain("registerWorkerArtifactRoutes");
+    }
+
+    const adapter = await readFile(join(sourceRoot, "routes", "worker-artifacts.ts"), "utf8");
+    expect(adapter).toContain("createWorkerAuthenticationHooks");
+    expect(adapter).toContain("onRequest: authenticateWorker.onRequest");
+    expect(adapter).toContain("preValidation: [authenticateWorker.preValidation");
+    expect(adapter).not.toContain("DatabaseClient");
+    expect(adapter).not.toContain("ArtifactStorageClient.create(");
+    expect(adapter).not.toContain("request.raw");
+    expect(adapter).not.toContain("ArtifactTransactionCoordinator.create(");
+
+    const productionReferences: string[] = [];
+    for (const path of await listTypeScriptFiles(sourceRoot)) {
+      const relativePath = relative(sourceRoot, path).replaceAll("\\", "/");
+      if (relativePath.endsWith(".test.ts") || relativePath.endsWith(".testing.ts")) {
+        continue;
+      }
+      const source = await readFile(path, "utf8");
+      if (source.includes("worker-artifacts") || source.includes("registerWorkerArtifactRoutes")) {
+        productionReferences.push(relativePath);
+      }
+    }
+    expect(productionReferences).toEqual(["routes/worker-artifacts.ts"]);
+  });
 });

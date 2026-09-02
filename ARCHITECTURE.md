@@ -242,9 +242,10 @@ POST /api/v1/worker/instances
 PUT  /api/v1/worker/instances/{instanceId}/heartbeat
 POST /api/v1/worker/leases/claim
 POST /api/v1/worker/runs/{runId}/events:batch
-POST /api/v1/worker/runs/{runId}/artifacts
+POST /api/v1/worker/runs/{runAttemptId}/artifacts
 PUT  /api/v1/worker/artifact-uploads/{uploadId}/chunks/{chunkIndex}
 POST /api/v1/worker/artifact-uploads/{uploadId}/complete
+POST /api/v1/worker/artifact-uploads/{uploadId}/terminate
 POST /api/v1/worker/runs/{runId}/complete
 POST /api/v1/worker/runs/{runId}/fail
 POST /api/v1/worker/runs/{runId}/release
@@ -324,9 +325,12 @@ Workers upload logs and artifacts through bounded, checksummed, resumable sessio
 completed file has a SHA-256 digest. The server validates declared sizes, content types, per-file
 limits, per-job quotas, and lease ownership.
 
-An artifact submitted after lease loss may be retained for diagnosis but cannot affect job state,
-approval, or publication. Workers keep local artifacts until the server acknowledges finalization,
-then remove the disposable workspace according to retention policy.
+Artifact operations are accepted only while the exact lease remains active. A submission after
+lease loss is rejected; reconciliation removes any uncommitted staging bytes without creating a
+`run_artifacts` record or allowing the data to participate in completion, approval, or publication.
+Any future diagnostic retention path must use a separately designed quarantine namespace and must
+remain isolated from result artifacts. Workers keep local artifacts until the server acknowledges
+finalization, then remove the disposable workspace according to retention policy.
 
 ## 14. Approval and GitHub Publication
 

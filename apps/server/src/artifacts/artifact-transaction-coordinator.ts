@@ -442,6 +442,7 @@ export type ArtifactTransactionCoordinatorErrorCode =
   | "ARTIFACT_TRANSACTION_PROTOCOL_FAILURE"
   | "ARTIFACT_TRANSACTION_QUOTA_EXCEEDED"
   | "ARTIFACT_TRANSACTION_RECONCILIATION_FAILURE"
+  | "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY"
   | "ARTIFACT_TRANSACTION_STORAGE_OUTCOME_UNKNOWN"
   | "ARTIFACT_TRANSACTION_TIMEOUT";
 
@@ -520,6 +521,11 @@ const errorDefinitions: Readonly<Record<ArtifactTransactionCoordinatorErrorCode,
     },
     ARTIFACT_TRANSACTION_RECONCILIATION_FAILURE: {
       message: "Artifact reconciliation failed.",
+      retryable: false,
+      requiresFailStop: true,
+    },
+    ARTIFACT_TRANSACTION_STORAGE_INTEGRITY: {
+      message: "Artifact storage integrity validation failed.",
       retryable: false,
       requiresFailStop: true,
     },
@@ -1713,6 +1719,13 @@ export class ArtifactTransactionCoordinator {
       if (
         owner === "storage" &&
         error instanceof ArtifactStorageClientError &&
+        error.code === "ARTIFACT_STORAGE_INTEGRITY"
+      ) {
+        throw this.#enterFatal("ARTIFACT_TRANSACTION_STORAGE_INTEGRITY");
+      }
+      if (
+        owner === "storage" &&
+        error instanceof ArtifactStorageClientError &&
         error.code === "ARTIFACT_STORAGE_CLIENT_BUSY" &&
         error.retryable
       ) {
@@ -1740,6 +1753,8 @@ export class ArtifactTransactionCoordinator {
     }
     let timer: NodeJS.Timeout | undefined;
     const interrupted = Promise.withResolvers<never>();
+    // A synchronous fatal transition can reject this before Promise.race observes it.
+    void interrupted.promise.catch(() => undefined);
     const rejectFatal: FatalWaiter = interrupted.reject;
     this.#fatalWaiters.add(rejectFatal);
     try {
@@ -1753,6 +1768,13 @@ export class ArtifactTransactionCoordinator {
       try {
         operation = action();
       } catch (error) {
+        if (
+          owner === "storage" &&
+          error instanceof ArtifactStorageClientError &&
+          error.code === "ARTIFACT_STORAGE_INTEGRITY"
+        ) {
+          throw this.#enterFatal("ARTIFACT_TRANSACTION_STORAGE_INTEGRITY");
+        }
         throw this.#enterFatal(
           owner === "database"
             ? "ARTIFACT_TRANSACTION_DATABASE_OUTCOME_UNKNOWN"
@@ -1837,6 +1859,8 @@ export class ArtifactTransactionCoordinator {
         return this.#enterFatal("ARTIFACT_TRANSACTION_DATABASE_OUTCOME_UNKNOWN", error);
       case "ARTIFACT_CREATE_STORAGE_FAILURE":
         return this.#enterFatal("ARTIFACT_TRANSACTION_STORAGE_OUTCOME_UNKNOWN", error);
+      case "ARTIFACT_CREATE_STORAGE_INTEGRITY":
+        return this.#enterFatal("ARTIFACT_TRANSACTION_STORAGE_INTEGRITY");
       case "ARTIFACT_CREATE_PROTOCOL_FAILURE":
         return this.#enterFatal("ARTIFACT_TRANSACTION_PROTOCOL_FAILURE", error);
     }
@@ -1855,6 +1879,14 @@ export class ArtifactTransactionCoordinator {
 
   #observeOwnerFailure(owner: "database" | "storage", error: unknown): void {
     if (this.#state === "closing" || this.#state === "closed") {
+      return;
+    }
+    if (
+      owner === "storage" &&
+      error instanceof ArtifactStorageClientError &&
+      error.code === "ARTIFACT_STORAGE_INTEGRITY"
+    ) {
+      this.#enterFatal("ARTIFACT_TRANSACTION_STORAGE_INTEGRITY");
       return;
     }
     this.#enterFatal(

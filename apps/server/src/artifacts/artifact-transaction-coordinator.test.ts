@@ -27,6 +27,7 @@ import {
   ArtifactUploadCreateCoordinator,
   registerArtifactUploadCreateDatabaseHandle,
 } from "../../dist/artifacts/artifact-upload-create-coordinator.js";
+import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import type {
   ArtifactCapacityAdmission,
   ArtifactCapacityEvaluationInput,
@@ -496,6 +497,9 @@ class FakeStorage implements FakeArtifactTransactionStorageOwner {
   readonly terminalFailure = this.terminal.promise;
   readonly events: string[];
   objectBytes = Buffer.from(artifactBytes);
+  capacityHandler:
+    | ((input: ArtifactCapacityEvaluationInput) => Promise<ArtifactCapacityAdmission>)
+    | undefined;
   scanHandler: ScanHandler | undefined;
   writeHandler: ((input: PreparedArtifactChunk) => Promise<DurableArtifactChunk>) | undefined;
   scanCount = 0;
@@ -506,6 +510,9 @@ class FakeStorage implements FakeArtifactTransactionStorageOwner {
 
   evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
     this.events.push("storage:evaluateCapacity");
+    if (this.capacityHandler !== undefined) {
+      return this.capacityHandler(input);
+    }
     return Promise.resolve(capacityAdmission(input));
   }
 
@@ -909,6 +916,167 @@ describe("ArtifactTransactionCoordinator", () => {
       "db:commitArtifactChunk",
     ]);
     await coordinator.close();
+  });
+
+  it("maps create storage integrity to one path-free fail-stop error", async () => {
+    const harness = createHarness();
+    const failures: Error[] = [];
+    harness.storage.capacityHandler = () =>
+      Promise.reject(
+        new ArtifactStorageClientError(
+          "ARTIFACT_STORAGE_INTEGRITY",
+          "create integrity failure at /private/create-path",
+        ),
+      );
+    const coordinator = await startReadyCoordinator(harness, {
+      onFailStop: (error) => {
+        failures.push(error);
+      },
+    });
+
+    await expect(coordinator.createArtifactUpload(createRequest)).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY",
+      message: "Artifact storage integrity validation failed.",
+      retryable: false,
+      requiresFailStop: true,
+    });
+    const fatal = await coordinator.fatal;
+    expect(failures).toEqual([fatal]);
+    expect(fatal).not.toHaveProperty("cause");
+    expect(String(fatal)).not.toContain("/private/create-path");
+    expect(JSON.stringify(fatal)).not.toContain("/private/create-path");
+    expect(
+      harness.database.inputs.some(({ operation }) => operation === "createArtifactUpload"),
+    ).toBe(false);
+    await expect(coordinator.createArtifactUpload(createRequest)).rejects.toBe(fatal);
+    await expect(coordinator.close()).rejects.toBe(fatal);
+  });
+
+  it.each([
+    { delivery: "throw", name: "synchronous throw without an unhandled waiter rejection" },
+    { delivery: "reject", name: "asynchronous rejection" },
+  ] as const)(
+    "maps a direct storage integrity $name to one path-free fail-stop error",
+    async ({ delivery }) => {
+      const harness = createHarness();
+      const failures: Error[] = [];
+      const storageError = new ArtifactStorageClientError(
+        "ARTIFACT_STORAGE_INTEGRITY",
+        "chunk integrity failure at /private/chunk-path",
+      );
+      harness.storage.writeHandler = () => {
+        if (delivery === "throw") {
+          throw storageError;
+        }
+        return Promise.reject(storageError);
+      };
+      const coordinator = await startReadyCoordinator(harness, {
+        onFailStop: (error) => {
+          failures.push(error);
+        },
+      });
+
+      await expect(coordinator.putArtifactChunk(uploadId, chunkRequest)).rejects.toMatchObject({
+        code: "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY",
+        message: "Artifact storage integrity validation failed.",
+        retryable: false,
+        requiresFailStop: true,
+      });
+      const fatal = await coordinator.fatal;
+      expect(failures).toEqual([fatal]);
+      expect(fatal).not.toHaveProperty("cause");
+      expect(String(fatal)).not.toContain("/private/chunk-path");
+      expect(JSON.stringify(fatal)).not.toContain("/private/chunk-path");
+      expect(harness.events).not.toContain("db:commitArtifactChunk");
+      await expect(coordinator.terminateArtifactUpload(uploadId, terminateRequest)).rejects.toBe(
+        fatal,
+      );
+      await expect(coordinator.close()).rejects.toBe(fatal);
+    },
+  );
+
+  it("maps an idle storage integrity terminal signal to a path-free fail-stop error", async () => {
+    const harness = createHarness();
+    const failures: Error[] = [];
+    const coordinator = await startReadyCoordinator(harness, {
+      onFailStop: (error) => {
+        failures.push(error);
+      },
+    });
+
+    harness.storage.terminal.resolve(
+      new ArtifactStorageClientError(
+        "ARTIFACT_STORAGE_INTEGRITY",
+        "idle integrity failure at /private/idle-path",
+      ),
+    );
+
+    const fatal = await coordinator.fatal;
+    expect(fatal).toMatchObject({
+      code: "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY",
+      message: "Artifact storage integrity validation failed.",
+      retryable: false,
+      requiresFailStop: true,
+    });
+    expect(failures).toEqual([fatal]);
+    expect(fatal).not.toHaveProperty("cause");
+    expect(String(fatal)).not.toContain("/private/idle-path");
+    await expect(coordinator.createArtifactUpload(createRequest)).rejects.toBe(fatal);
+    await expect(coordinator.close()).rejects.toBe(fatal);
+  });
+
+  it("keeps terminal storage integrity as first fatal while a storage operation is pending", async () => {
+    const harness = createHarness();
+    const writeEntered = Promise.withResolvers<void>();
+    const pendingWrite = Promise.withResolvers<DurableArtifactChunk>();
+    const failures: Error[] = [];
+    const storageError = new ArtifactStorageClientError(
+      "ARTIFACT_STORAGE_INTEGRITY",
+      "pending integrity failure at /private/pending-path",
+    );
+    harness.storage.writeHandler = () => {
+      writeEntered.resolve();
+      return pendingWrite.promise;
+    };
+    const coordinator = await startReadyCoordinator(harness, {
+      onFailStop: (error) => {
+        failures.push(error);
+      },
+    });
+
+    const request = coordinator.putArtifactChunk(uploadId, chunkRequest);
+    const requestFailure = request.catch((error: unknown) => error);
+    await writeEntered.promise;
+    harness.storage.terminal.resolve(storageError);
+    const fatal = await coordinator.fatal;
+    pendingWrite.reject(storageError);
+
+    expect(await requestFailure).toBe(fatal);
+    expect(fatal).toMatchObject({
+      code: "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY",
+      requiresFailStop: true,
+    });
+    expect(failures).toEqual([fatal]);
+    expect(fatal).not.toHaveProperty("cause");
+    expect(harness.events).not.toContain("db:commitArtifactChunk");
+    await expect(coordinator.close()).rejects.toBe(fatal);
+  });
+
+  it("does not trust a forged storage integrity terminal code", async () => {
+    const harness = createHarness();
+    const coordinator = await startReadyCoordinator(harness);
+
+    harness.storage.terminal.resolve(
+      Object.assign(new Error("forged storage integrity"), {
+        code: "ARTIFACT_STORAGE_INTEGRITY",
+      }),
+    );
+
+    await expect(coordinator.fatal).resolves.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_STORAGE_OUTCOME_UNKNOWN",
+      requiresFailStop: true,
+    });
+    await coordinator.close().catch(() => undefined);
   });
 
   it.each([

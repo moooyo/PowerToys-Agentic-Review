@@ -455,7 +455,7 @@ describe("ArtifactUploadCreateCoordinator deadlines and errors", () => {
     await expect(coordinator.close()).rejects.toBe(fatalErrors[0]);
   });
 
-  it("maps storage owner failure to one path-free fail-stop error", async () => {
+  it("maps storage integrity failure to one path-free fail-stop error", async () => {
     const { coordinator, storage, fatalErrors } = fixture();
     storage.evaluate = () =>
       Promise.reject(
@@ -467,13 +467,14 @@ describe("ArtifactUploadCreateCoordinator deadlines and errors", () => {
       );
 
     await expect(coordinator.createArtifactUpload(createInput())).rejects.toMatchObject({
-      code: "ARTIFACT_CREATE_STORAGE_FAILURE",
-      message: "Artifact upload storage owner failed.",
+      code: "ARTIFACT_CREATE_STORAGE_INTEGRITY",
+      message: "Artifact upload storage integrity validation failed.",
       retryable: false,
       requiresFailStop: true,
     });
     expect(fatalErrors).toHaveLength(1);
     expect(JSON.stringify(fatalErrors[0])).not.toContain("/secret");
+    await expect(coordinator.createArtifactUpload(createInput(2))).rejects.toBe(fatalErrors[0]);
     await expect(coordinator.close()).rejects.toBe(fatalErrors[0]);
   });
 
@@ -558,9 +559,10 @@ describe("ArtifactUploadCreateCoordinator deadlines and errors", () => {
     await flush();
     expect(fatalErrors).toHaveLength(1);
     expect(fatalErrors[0]).toMatchObject({
-      code: "ARTIFACT_CREATE_STORAGE_FAILURE",
+      code: "ARTIFACT_CREATE_STORAGE_INTEGRITY",
       requiresFailStop: true,
     });
+    expect(JSON.stringify(fatalErrors[0])).not.toContain("/secret/path");
     expect(database.createdInputs).toHaveLength(0);
     await expect(coordinator.close()).rejects.toBe(fatalErrors[0]);
   });

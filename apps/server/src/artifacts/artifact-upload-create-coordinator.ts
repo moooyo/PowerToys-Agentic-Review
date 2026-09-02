@@ -66,6 +66,7 @@ export type ArtifactUploadCreateCoordinatorErrorCode =
   | "ARTIFACT_CREATE_PROTOCOL_FAILURE"
   | "ARTIFACT_CREATE_QUOTA_EXCEEDED"
   | "ARTIFACT_CREATE_STORAGE_FAILURE"
+  | "ARTIFACT_CREATE_STORAGE_INTEGRITY"
   | "ARTIFACT_CREATE_TIMEOUT";
 
 interface CoordinatorErrorDefinition {
@@ -144,6 +145,11 @@ const coordinatorErrorCatalog: Readonly<
   },
   ARTIFACT_CREATE_STORAGE_FAILURE: {
     message: "Artifact upload storage owner failed.",
+    retryable: false,
+    requiresFailStop: true,
+  },
+  ARTIFACT_CREATE_STORAGE_INTEGRITY: {
+    message: "Artifact upload storage integrity validation failed.",
     retryable: false,
     requiresFailStop: true,
   },
@@ -1028,6 +1034,13 @@ export class ArtifactUploadCreateCoordinator {
       if (!task.settled) {
         this.#rejectTask(task, createCoordinatorError("ARTIFACT_CREATE_CAPACITY"));
       }
+      return;
+    }
+    if (
+      error instanceof ArtifactStorageClientError &&
+      error.code === "ARTIFACT_STORAGE_INTEGRITY"
+    ) {
+      this.#enterFatal("ARTIFACT_CREATE_STORAGE_INTEGRITY");
       return;
     }
     if (

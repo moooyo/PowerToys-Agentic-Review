@@ -136,7 +136,10 @@ incomplete.
   Windows preflight and attack-test evidence.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1a read-only surfaces only.
-- Bounded artifact upload and artifact storage are not implemented yet.
+- The bounded Worker result-artifact HTTP adapter is implemented with pre-parse transport
+  authentication, strict route/body identity binding, public response allowlists, and stable error
+  mapping. It is intentionally not registered by `app.ts` or composed by `main.ts`; artifact
+  storage remains externally unreachable until the production supervision and lifecycle slice.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release

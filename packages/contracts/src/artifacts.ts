@@ -6,6 +6,9 @@ import { LeaseIdentitySchema } from "./worker.js";
 export const maximumResultArtifactBytes = 2 * 1024 * 1024;
 export const maximumResultArtifactChunkBytes = 256 * 1024;
 export const maximumResultArtifactChunks = 8;
+export const maximumResultArtifactControlRequestBytes = 16 * 1024;
+export const maximumResultArtifactChunkRequestBytes =
+  Math.ceil((maximumResultArtifactChunkBytes * 4) / 3) + maximumResultArtifactControlRequestBytes;
 
 const uuidV4Pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 const artifactNamePattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$";
