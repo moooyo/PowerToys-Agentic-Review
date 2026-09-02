@@ -18,6 +18,7 @@ import {
   verifyCanonicalRoleGraph,
   verifyReviewedInputDigest,
 } from "./verify-role-bundles.mjs";
+import { verifyZeroExecutionProductionArchitecture } from "./verify-zero-execution-architecture.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
@@ -180,6 +181,346 @@ test("shadow architecture remains zero execution and role separated", () => {
     executorRuntime,
     /from\s+["'][^"']*(?:server-client|execution|workspace|process-host|codex|git)[^"']*["']/iu,
   );
+});
+
+test("production role entrypoints and reachable imports remain zero execution", () => {
+  assert.doesNotThrow(() => verifyZeroExecutionProductionArchitecture());
+
+  const controlMainPath = "apps/worker/src/control-main.ts";
+  const executorMainPath = "apps/worker/src/executor-main.ts";
+  const roleEntrypointPath = "apps/worker/src/service-host/role-entrypoint.ts";
+  const contractsWorkerPath = "packages/contracts/src/worker.ts";
+  const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
+  const controlMain = repositorySource(controlMainPath);
+  const executorMain = repositorySource(executorMainPath);
+  const roleEntrypoint = repositorySource(roleEntrypointPath);
+  const contractsWorker = repositorySource(contractsWorkerPath);
+  const localProtocolIndex = repositorySource(localProtocolIndexPath);
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        '"./control/shadow-supervisor.js"',
+        '"./execution/job-executor.js"',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: `${controlMain}\nprocess.exitCode = 0;\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "connect: async (options, signal) => {",
+        "connect: async (options, signal) => { return undefined;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        'if (options.role !== "control") throw new Error("Control connector received another role.");',
+        'if (options.role !== "control") throw new Error("Control connector received another role."); else return await connectHostControl(options, signal);',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "return await connectExecutorHostControl(options, signal);",
+        "return await connectExecutorHostControl(options, undefined);",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [controlMainPath]: replaceRequired(
+        controlMain,
+        "return await connectHostControl(options, signal);",
+        "await connectHostControl(options, signal);\n    return await connectHostControl(options, signal);",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        "installRuntime: installExecutorShadowRuntime",
+        "installRuntime: installExecutionRuntime",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "../execution/job-executor.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "@agentic-review/worker/execution";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport Forbidden = require("../execution/job-executor.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [contractsWorkerPath]: `${contractsWorker}\nexport * from "../../../apps/worker/src/execution/job-executor.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [localProtocolIndexPath]: `${localProtocolIndex}\nexport * from "../../../apps/worker/src/execution/job-executor.js";\n`,
+    }),
+  );
+  assert.doesNotThrow(() =>
+    verifyZeroExecutionProductionArchitecture({
+      "apps/worker/src/execution/job-executor.ts": "this unconnected source is not parsed",
+    }),
+  );
+});
+
+test("reviewed production runtime source digests fence equivalent syntax drift", () => {
+  const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
+  const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
+  const executorSource = repositorySource(executorPath);
+  const controlSource = repositorySource(controlPath);
+  const crlf = (source) => source.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+  assert.doesNotThrow(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: crlf(executorSource),
+      [controlPath]: crlf(controlSource),
+    }),
+  );
+
+  for (const mutation of [`\uFEFF${executorSource}`, `${executorSource}\r`]) {
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: mutation }));
+  }
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [controlPath]: `${controlSource}\nconst reviewedScopeDrift = true;\n`,
+      }),
+    /review the complete file and update its pinned SHA-256/u,
+  );
+
+  let controlBypass = replaceRequired(
+    controlSource,
+    "if (message.messageType === LocalMessageType.HelloAck) {",
+    "if (message.messageType === LocalMessageType.HelloAck || message.messageType === 3) {",
+  );
+  controlBypass = replaceRequired(
+    controlBypass,
+    "        await this.#acceptHelloAck(message.payload as unknown as HelloAckMessage);",
+    `        if (message.messageType === 3) {
+          const bypassReady = message.payload as unknown as ReadyMessage;
+          this.#readyMessage = bypassReady;
+          this.#phase = "ready";
+          this.#ready.resolve(bypassReady);
+          return;
+        }
+        await this.#acceptHelloAck(message.payload as unknown as HelloAckMessage);`,
+  );
+  assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: controlBypass }));
+
+  let executorBypass = replaceRequired(
+    executorSource,
+    "  #settled = false;",
+    "  #settled = false;\n  readonly #alternateSend: (message: unknown) => Promise<void>;",
+  );
+  executorBypass = replaceRequired(
+    executorBypass,
+    "    this.#arwx = activation.arwx;",
+    "    this.#arwx = activation.arwx;\n    this.#alternateSend = activation.arwx.send.bind(activation.arwx);",
+  );
+  executorBypass = replaceRequired(
+    executorBypass,
+    '    this.#phase = "ready_disabled";',
+    `    await this.#alternateSend({
+      messageType: 3,
+      correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+      payload: ready,
+    });
+    this.#phase = "ready_disabled";`,
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({ [executorPath]: executorBypass }),
+  );
+});
+
+test("disabled Ready remains proof-bound and cannot advertise capacity", () => {
+  const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
+  const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
+  const source = repositorySource(executorPath);
+  const controlSource = repositorySource(controlPath);
+  for (const [before, after] of [
+    ["ready: false", "ready: true"],
+    ["availableSlots: 0", "availableSlots: 1"],
+    ['reasonCode: "EXECUTION_DISABLED"', 'reasonCode: "READY"'],
+    [
+      "validateReadyAfterHandshakeProofV1(readyCandidate, verified)",
+      "validateReadyAfterHandshakeProofV1(readyCandidate, proof)",
+    ],
+    ["verified = verifyControlProofMessageV1(", "verified = validateLocalMessagePayload("],
+    ["messageType: LocalMessageType.Ready,", 'messageType: LocalMessageType["Ready"],'],
+    [
+      "const ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);",
+      "let ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);\n    ready = readyCandidate;",
+    ],
+    [
+      "const readyCandidate: ReadyMessage = {",
+      "return;\n    const readyCandidate: ReadyMessage = {",
+    ],
+    [
+      "await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
+      "if (false) {\n      await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
+    ],
+  ]) {
+    let mutated = replaceRequired(source, before, after);
+    if (after.startsWith("if (false)")) {
+      mutated = replaceRequired(
+        mutated,
+        "      payload: ready,\n    });",
+        "      payload: ready,\n    });\n    }",
+      );
+    }
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: mutated }));
+  }
+
+  for (const [imported, alias, fake] of [
+    [
+      "verifyControlProofMessageV1",
+      "importedVerifyControlProofMessageV1",
+      "const verifyControlProofMessageV1 = (proof: unknown): never => proof as never;",
+    ],
+    [
+      "validateReadyAfterHandshakeProofV1",
+      "importedValidateReadyAfterHandshakeProofV1",
+      "const validateReadyAfterHandshakeProofV1 = (ready: unknown): never => ready as never;",
+    ],
+  ]) {
+    let fakeBinding = replaceRequired(source, `  ${imported},`, `  ${imported} as ${alias},`);
+    fakeBinding = replaceRequired(
+      fakeBinding,
+      "const nonceBytes = 32;",
+      `${fake}\nconst nonceBytes = 32;`,
+    );
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: fakeBinding }));
+  }
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "return await this.#handleControlProof(message);",
+        "return;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: `${source}\nconst extraReadyPath = { messageType: LocalMessageType.Ready };\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "const nonceBytes = 32;",
+        "const AlternateLocalMessageType = LocalMessageType;\nconst nonceBytes = 32;",
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [executorPath]: replaceRequired(
+        source,
+        "const drain = normalizePayload<DrainMessage>(message);",
+        `const drain = normalizePayload<DrainMessage>(message);
+    await this.#arwx.send({
+      messageType: 3 as never,
+      correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
+      payload: drain,
+    });`,
+      ),
+    }),
+  );
+
+  const controlMutations = [
+    replaceRequired(controlSource, "ready.ready !== false", "ready.ready === false"),
+    replaceRequired(
+      controlSource,
+      "  const proof = context.proof;\n  if (",
+      "  const proof = context.proof;\n  return Object.freeze({ ...ready });\n  if (",
+    ),
+    replaceRequired(
+      controlSource,
+      "  const proof = context.proof;",
+      "  let proof = context.proof;",
+    ),
+    replaceRequired(
+      controlSource,
+      "const ready = validateControlReady(readyValue, signedHandshake);",
+      "const ready = Object.freeze({ ...readyValue });",
+    ),
+    replaceRequired(
+      controlSource,
+      "this.#acceptReady(message.payload as unknown as ReadyMessage);",
+      "this.#readyMessage = message.payload as unknown as ReadyMessage;",
+    ),
+    replaceRequired(
+      controlSource,
+      "message.messageType === LocalMessageType.Ready",
+      'message.messageType === LocalMessageType["Ready"]',
+    ),
+    replaceRequired(
+      controlSource,
+      'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
+      'const AlternateLocalMessageType = LocalMessageType;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
+    ),
+    replaceRequired(
+      controlSource,
+      "      if (message.messageType === LocalMessageType.Ready) {",
+      `      if (message.messageType === 3) {
+        this.#readyMessage = message.payload as unknown as ReadyMessage;
+        return;
+      }
+      if (message.messageType === LocalMessageType.Ready) {`,
+    ),
+    `${controlSource}\nvalidateControlReady = ((ready: Readonly<ReadyMessage>) => ready) as typeof validateControlReady;\n`,
+    `${controlSource}\nconst extraReadyReceivePath = { messageType: LocalMessageType.Ready };\n`,
+  ];
+  let fakeControlBinding = replaceRequired(
+    controlSource,
+    "  LocalMessageType,",
+    "  LocalMessageType as ImportedLocalMessageType,",
+  );
+  fakeControlBinding = replaceRequired(
+    fakeControlBinding,
+    'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
+    'const LocalMessageType = { Ready: "Ready" } as const;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
+  );
+  controlMutations.push(fakeControlBinding);
+  let deadCodeControl = replaceRequired(
+    controlSource,
+    "  if (\n    ready.protocolMajor",
+    "  if (\n    false && (\n      ready.protocolMajor",
+  );
+  deadCodeControl = replaceRequired(
+    deadCodeControl,
+    "    ready.reasonCode !== executionDisabledReason\n  ) {",
+    "      ready.reasonCode !== executionDisabledReason\n    )\n  ) {",
+  );
+  controlMutations.push(deadCodeControl);
+  for (const mutation of controlMutations) {
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: mutation }));
+  }
 });
 
 test("both role policies require the reviewed bootstrap handshake closure", () => {
@@ -376,4 +717,10 @@ function sourceSection(source, startMarker, endMarker) {
   assert.notEqual(start, -1, `Missing source marker: ${startMarker}`);
   assert.notEqual(end, -1, `Missing source marker: ${endMarker}`);
   return source.slice(start, end);
+}
+
+function replaceRequired(source, before, after) {
+  const changed = source.replace(before, after);
+  assert.notEqual(changed, source, `Missing architecture mutation target: ${before}`);
+  return changed;
 }

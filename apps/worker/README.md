@@ -26,16 +26,24 @@ Implemented boundaries:
   HostControl bootstrap clients, and bounded ARWX standard-I/O channels.
 - Candidate zero-slot Control and Executor supervisors with a signed local handshake, disabled
   `Ready` attestation, one-slot maximum registration with zero advertised availability, and a
-  bounded graceful-drain choreography that still requires remote and native verification.
+  bounded graceful-drain choreography that still requires native Windows verification.
 
 The legacy single-process build still uses `PlaceholderJobExecutor` and advertises execution as
 disabled. The reviewed Control and Executor bundles now install candidate zero-slot supervisors.
 After the authenticated local handshake, Executor can emit only `ready=false`, `availableSlots=0`,
 and `reasonCode=EXECUTION_DISABLED`; Control registers with a one-slot maximum but advertises zero
-available slots and never claims work. This candidate has not been verified yet. The milestone
+available slots and never claims work. The source and reviewed role bundles have passed the remote
+Linux test, typecheck, build, and lint gates; they have not passed native Windows verification. A
+static production-reachability guard fixes both main-module import lists and runtime installer
+targets, and rejects any path from those entrypoints into `apps/worker/src/execution`. The milestone
 continues to reject `WORKER_EXECUTION_ENABLED=true` until the production release profile,
 dual-service installer and signing pipeline, and native Windows x64 and arm64 preflight and
 attack-test evidence described by ADR 0007 are complete.
+
+The architecture guard also pins the LF-normalized SHA-256 of the complete candidate Control and
+Executor runtime sources. This is an accidental scope-drift and review fence: any source change must
+be reviewed as a whole before its pinned digest is updated with the guard tests. It is not a defense
+against a malicious repository author who can change the runtime, guard, and digest in one patch.
 
 ## Role bundle trust boundary
 
@@ -60,14 +68,15 @@ The Control-only native relay path can forward the validated `Drain` before Cont
 retaining an immutable copy for later HostControl authorization; Executor `Drained` remains held
 until its authorized EOF. A compromised Control payload can therefore force a bounded Executor
 shutdown, but this path grants no Claim, lease, or execution authority; the native attack matrix
-must cover that denial-of-service tradeoff before any execution-enabled release. This choreography
-has not been verified. The candidate now includes a Control-only, single-use `ShutdownRequested`
-HostControl notification bound to the committed bootstrap. Go serializes it with responses and
-keeps relay, HostControl, ARWX standard I/O, and Node alive under one absolute deadline while
-Control initiates runtime close. Executor treats that notification as a protocol failure and
-remains driven only by authenticated Control `Drain`; Go never synthesizes an ARWX business frame.
-The candidate is not publishable until the remote matrix, signed dual-role package and installer,
-and paired native Windows x64 and arm64 shutdown matrix are complete. The
+must cover that denial-of-service tradeoff before any execution-enabled release. The Linux
+`test-env` source, bundle, activation, and lifecycle matrices have passed. The candidate includes a
+Control-only, single-use `ShutdownRequested` HostControl notification bound to the committed
+bootstrap. Go serializes it with responses and keeps relay, HostControl, ARWX standard I/O, and Node
+alive under one absolute deadline while Control initiates runtime close. Executor treats that
+notification as a protocol failure and remains driven only by authenticated Control `Drain`; Go
+never synthesizes an ARWX business frame. The candidate is not publishable until an actual signed
+dual-role package, a production installer, physical installation evidence, and the paired native
+Windows x64 and arm64 shutdown and attack matrices are complete. The
 role-local `shutdownId` does not claim cross-role transaction identity. Before ServiceHost enables
 either payload, its fixed Node launch contract must include `--disallow-code-generation-from-strings`
 and `--no-addons`; neither flag replaces the operating system boundaries above.

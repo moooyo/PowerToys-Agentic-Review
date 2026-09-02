@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "@babel/parser";
 import { build } from "esbuild";
 import { verifyRoleBundle } from "./verify-role-bundles.mjs";
+import { verifyZeroExecutionProductionArchitecture } from "./verify-zero-execution-architecture.mjs";
 
 const workerRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -45,6 +46,7 @@ if (
 }
 
 async function buildWorkerBundles() {
+  verifyZeroExecutionProductionArchitecture();
   await cleanOutputDirectory(outputDirectory, workerRoot);
   await typecheckWorker();
 

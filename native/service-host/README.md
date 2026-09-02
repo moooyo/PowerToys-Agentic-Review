@@ -40,8 +40,10 @@ installation verification, role-owned data roots, role credentials, preflight, p
 runtime bootstrap, guarded Node launch, HostControl, role-specific RPC, ARWX relay, lifecycle
 supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
 release profile and fail closed before using installed configuration. The current TypeScript role
-payloads also remain zero-execution foundations that emit no ARWX `Ready`, so this source must not
-be used to enable production execution. The non-Windows production factory remains unavailable.
+payloads remain zero-execution foundations: Executor can emit only the authenticated disabled
+`Ready` state (`ready=false`, `availableSlots=0`, `reasonCode=EXECUTION_DISABLED`), and Control never
+claims work. This source must not be used to enable production execution. The non-Windows production
+factory remains unavailable.
 
 ## Command line
 
@@ -214,5 +216,7 @@ Remove-Item Env:GOOS, Env:GOARCH
 
 Cross-compilation is not Windows security evidence. Production enablement still requires native
 Windows x64 and arm64 token, DACL, Named Pipe, Job Object, process-tree, tamper, and failure tests.
-The shutdown bridge is also only a source candidate until the signed dual-role package, installer,
-remote verification, and paired native Windows service-stop and forced-termination matrix pass.
+The shutdown bridge has passed the Linux `test-env` source, bundle, activation, and lifecycle
+matrices, but remains only a candidate until actual signed dual-role material, a production
+installer, physical installation evidence, and the paired native Windows service-stop and
+forced-termination matrix are complete.

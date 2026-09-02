@@ -5,8 +5,9 @@ Status date: 2026-09-02
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
 execution components, and the split-service protocol and native Windows composition candidate
-described in `ARCHITECTURE.md`. Candidate zero-slot TypeScript role supervisors are now present but
-unverified. The repository remains intentionally fail-closed while execution-capable role
+described in `ARCHITECTURE.md`. Candidate zero-slot TypeScript role supervisors are now present and
+have passed remote Linux source and bundle verification. They have not passed native Windows
+verification. The repository remains intentionally fail-closed while execution-capable role
 runtimes, the release and installer pipeline, and native Windows runtime evidence are incomplete.
 
 ## Implemented
@@ -152,15 +153,17 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 
 - `WORKER_EXECUTION_ENABLED=true` and the installer `-EnableExecution` option are rejected. The
   native Windows ServiceHost composition is connected, and the Control and Executor TypeScript
-  payloads now contain an unverified zero-slot supervisor candidate. Executor can emit only the
+  payloads contain a remotely verified zero-slot supervisor candidate. Executor can emit only the
   authenticated disabled `Ready` attestation; Control cannot claim and reports zero available
-  slots. Production enablement still requires a compiled release profile, split-service packaging
-  and installation, signing, and native Windows preflight and attack-test evidence.
-- The shadow candidate remains unpublishable. The Go-to-Node shutdown-request bridge is present as
-  an unverified candidate, but it has not passed the full remote matrix or paired native Windows
-  x64 and arm64 service-stop, deadline, partial-frame, race, and forced-termination matrix. Go does
-  not synthesize ARWX business frames; Executor shutdown remains subordinate to authenticated
-  Control `Drain`.
+  slots. A static guard locks both production entrypoints to those supervisors and rejects any
+  production import path into the dormant execution modules. Production enablement still requires a
+  compiled release profile, split-service packaging and installation, signing, and native Windows
+  preflight and attack-test evidence.
+- The shadow candidate remains unpublishable. The Go-to-Node shutdown-request bridge and zero-slot
+  activation and lifecycle choreography have passed the Linux `test-env` matrices, but not the
+  paired native Windows x64 and arm64 service-stop, deadline, partial-frame, race, and
+  forced-termination matrix. Go does not synthesize ARWX business frames; Executor shutdown remains
+  subordinate to authenticated Control `Drain`.
 - Approval persistence, publication, and GitHub writes are not implemented. The production
   Dashboard therefore exposes the Phase 1a read-only surfaces only.
 - Bounded artifact upload and artifact storage are not implemented yet.
@@ -175,10 +178,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 
 ## Next Milestone
 
-The next Worker step is verification and release integration for the native lifecycle candidate.
-The `ShutdownRequested` bridge must run on `test-env` and through a paired native Windows x64 and
-arm64 matrix covering restart, reconnect, registration loss, heartbeat, drain, deadline, and
-failure behavior. That verification must keep
+The next Worker step is release integration and native verification for the lifecycle candidate.
+The `ShutdownRequested` bridge must run through a paired native Windows x64 and arm64 matrix
+covering restart, reconnect, registration loss, heartbeat, drain, deadline, and failure behavior.
+That verification must keep
 `executionEnabled=false`, preserve the sealed HostControl Claim denial, and confirm that Control
 alone owns Server and mTLS authority while Executor has no Server, lease, workspace, ProcessHost,
 Codex, or Git capability in this shadow milestone.
@@ -202,8 +205,11 @@ verified on the remote Debian `test-env` host with the official Node.js 24.20.0 
 Its archive checksum was validated against the Node.js release `SHASUMS256.txt`, and pnpm 11.24.0
 was provided through Corepack. No test, build, validation suite, or runtime probe was run on the
 local Windows development machine. The TypeScript counts below are the historical 2026-08-31
-snapshot; they do not cover the 2026-09-02 zero-slot supervisors, full-activation barrier, or role
-bundle policy changes, which have not yet been verified.
+snapshot. The 2026-09-02 zero-slot supervisors, full-activation barrier, bundle policy, entrypoint
+architecture guard, and lifecycle changes have since passed exact-source Linux `test-env` focused,
+Worker, typecheck, build, and lint matrices. Those remote results are not native Windows evidence and
+do not make the candidate publishable without actual signed material, a production installer, and
+physical installation evidence.
 
 The following TypeScript commands completed successfully for the historical combined candidate on
 2026-08-31:
@@ -298,9 +304,10 @@ Not yet verified:
   behavior has not been exercised on a native Windows test machine. The production Authenticode and
   installation-verification code has only fake-provider execution plus Windows cross-compilation;
   real signed PE fixtures and Windows ABI checks remain release gates. The native platform
-  composition is connected, but the new TypeScript zero-slot supervisors have not been built or
-  exercised in the remote matrix or on native Windows. The native Control-only relay asymmetry and
-  Control HostControl half-close latch and the new shutdown-request bridge are also unverified.
+  composition is connected, and the TypeScript zero-slot supervisors have passed the remote Linux
+  source and bundle matrix but have not been exercised on native Windows. The native Control-only
+  relay asymmetry, Control HostControl half-close latch, and shutdown-request bridge also lack native
+  Windows verification.
   Executor's candidate emits only the disabled ARWX `Ready`; ordinary builds have no production
   release profile, Claim remains denied, and the real Codex executor
   remains disconnected from the production entrypoint.
