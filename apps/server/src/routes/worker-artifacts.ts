@@ -25,6 +25,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   ArtifactChunkTransportValidationError,
   ArtifactTransactionCoordinatorError,
+  type ArtifactTransactionPort,
 } from "../artifacts/index.js";
 import type { ServerConfig } from "../config.js";
 import {
@@ -32,27 +33,7 @@ import {
   getAuthenticatedWorkerIdentity,
 } from "../security/worker-identity.js";
 
-export interface WorkerArtifactTransactions {
-  createArtifactUpload(
-    input: CreateResultArtifactUploadRequest,
-    signal?: AbortSignal,
-  ): Promise<CreateResultArtifactUploadResponse>;
-  putArtifactChunk(
-    uploadId: string,
-    input: ResultArtifactChunkRequest,
-    signal?: AbortSignal,
-  ): Promise<ResultArtifactChunkResponse>;
-  finalizeArtifactUpload(
-    uploadId: string,
-    input: FinalizeResultArtifactUploadRequest,
-    signal?: AbortSignal,
-  ): Promise<FinalizeResultArtifactUploadResponse>;
-  terminateArtifactUpload(
-    uploadId: string,
-    input: TerminateResultArtifactUploadRequest,
-    signal?: AbortSignal,
-  ): Promise<TerminateResultArtifactUploadResponse>;
-}
+export type WorkerArtifactTransactions = ArtifactTransactionPort;
 
 export interface WorkerArtifactRouteDependencies {
   readonly config: ServerConfig;
@@ -102,6 +83,18 @@ const finalizeResponseSchema = inlineSchema(FinalizeResultArtifactUploadResponse
 const terminateRequestSchema = inlineSchema(TerminateResultArtifactUploadRequestSchema);
 const terminateResponseSchema = inlineSchema(TerminateResultArtifactUploadResponseSchema);
 const publicErrorSchema = inlineSchema(ErrorDetailsSchema);
+const serviceUnavailableResponseSchema = inlineSchema(
+  Type.Union([
+    ErrorDetailsSchema,
+    Type.Object(
+      {
+        status: Type.Literal("not_ready"),
+        serverTime: Type.String({ format: "date-time" }),
+      },
+      { additionalProperties: false },
+    ),
+  ]),
+);
 
 const routeEntityIdSchema = Type.String({
   minLength: 1,
@@ -139,7 +132,7 @@ const errorResponses = {
   409: publicErrorSchema,
   413: publicErrorSchema,
   429: publicErrorSchema,
-  503: publicErrorSchema,
+  503: serviceUnavailableResponseSchema,
   507: publicErrorSchema,
 } as const;
 

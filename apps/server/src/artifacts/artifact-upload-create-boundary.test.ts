@@ -357,6 +357,7 @@ describe("artifact transaction composition boundary", () => {
     expect(runtime).toContain(
       "await awaitInitialSweep(coordinator.ready, initialSweepTimeoutMilliseconds)",
     );
+    expect(runtime).toContain("artifactTransactions: ArtifactTransactionPort");
     expect(runtime).not.toContain("registerWorkerArtifactRoutes");
 
     const testingHook = "createServerStorageRuntimeWithInitialSweepTimeoutForTest";
@@ -382,12 +383,16 @@ describe("artifact transaction composition boundary", () => {
     }
   });
 
-  it("keeps the reviewed Worker artifact adapter unreachable from production roots", async () => {
-    for (const relativePath of ["app.ts", "config.ts", "main.ts", "routes/workers.ts"]) {
+  it("keeps the reviewed Worker artifact adapter reachable only through the application root", async () => {
+    for (const relativePath of ["config.ts", "main.ts", "routes/workers.ts"]) {
       const source = await readFile(join(sourceRoot, relativePath), "utf8");
       expect(source).not.toContain("worker-artifacts");
       expect(source).not.toContain("registerWorkerArtifactRoutes");
     }
+
+    const application = await readFile(join(sourceRoot, "app.ts"), "utf8");
+    expect(application).toContain('from "./routes/worker-artifacts.js"');
+    expect(application.split("registerWorkerArtifactRoutes(")).toHaveLength(2);
 
     const adapter = await readFile(join(sourceRoot, "routes", "worker-artifacts.ts"), "utf8");
     expect(adapter).toContain("createWorkerAuthenticationHooks");
@@ -409,6 +414,6 @@ describe("artifact transaction composition boundary", () => {
         productionReferences.push(relativePath);
       }
     }
-    expect(productionReferences).toEqual(["routes/worker-artifacts.ts"]);
+    expect(productionReferences.sort()).toEqual(["app.ts", "routes/worker-artifacts.ts"]);
   });
 });

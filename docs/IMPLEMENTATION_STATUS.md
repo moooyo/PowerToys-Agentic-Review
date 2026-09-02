@@ -21,11 +21,13 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   filesystem operations off the Fastify event loop and the SQLite Worker, accepts only normalized
   data-only protocol messages, propagates terminal failures, and retains database-owner authority
   until a real storage Worker exit is observed during orderly shutdown.
-- A composed dark artifact runtime in the production Server. Configuration enforces disjoint private
+- A composed artifact runtime in the production Server. Configuration enforces disjoint private
   database and artifact trees plus bounded byte and entry capacity; readiness waits for the first
   reconciliation sweep; one process lifecycle synchronously closes admission and drains Fastify and
   background database work before proving artifact Worker exit, closing SQLite, and releasing the
-  owner lock. Fatal artifact failures log only a stable code and terminate the complete Server.
+  owner lock. Fatal artifact failures log only a stable code and terminate the complete Server. A
+  separate boolean probe supplies artifact health; the frozen four-method transaction port carries no
+  coordinator close, fatal, or owner capability.
 - A process-lifetime SQLite owner lock, lock-time migration rechecks, verified pre-migration
   online backups, atomic backup publication, and incomplete-backup cleanup.
 - Atomic job claim, lease generation and token fencing, worker and attempt heartbeats, hard and
@@ -206,10 +208,14 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   Dashboard therefore exposes the Phase 1a read-only surfaces only.
 - The bounded Worker result-artifact HTTP adapter is implemented with pre-parse transport
   authentication, strict route/body identity binding, public response allowlists, and stable error
-  mapping. The storage Worker, transaction coordinator, reconciler, readiness, and whole-Server
-  fail-stop are now composed by `main.ts`, but the adapter is intentionally not registered by
-  `app.ts`; artifact transactions remain externally unreachable. Route activation and
-  artifact-backed completion require separate review before artifact-mode claims can be enabled.
+  mapping. `app.ts` is its sole production registrar; for artifact mutations it receives only the
+  frozen transaction port from `main.ts`, while a separate boolean probe supplies artifact health.
+  The storage Worker, coordinator, reconciler, readiness ownership, close order, and whole-Server
+  fail-stop remain owned by the storage runtime and lifecycle. Route availability does not enable the
+  data path: production claims still persist `inline_result_v1`, version-one envelopes expose no
+  completion mode, and the database fence rejects artifact requests before capacity or filesystem
+  mutation. Artifact-mode claim selection and artifact-backed completion still require separate
+  review.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release
@@ -240,11 +246,11 @@ Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, tok
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
 Claim authority is enabled.
 
-The product data path can proceed in parallel by activating the reviewed result-artifact HTTP
-adapter, adding the Worker Control upload client, and connecting artifact-backed completion while
-keeping claim selection default-off. Immutable server-side diff manifests, publication drafts,
-digest-bound approvals, GitHub outbox reconciliation, and Dashboard write actions follow. Dynamic
-validation remains a separate stronger-isolation milestone.
+The product data path can proceed in parallel by adding the Worker Control upload client and
+connecting artifact-backed completion while keeping claim selection default-off. Immutable
+server-side diff manifests, publication drafts, digest-bound approvals, GitHub outbox reconciliation,
+and Dashboard write actions follow. Dynamic validation remains a separate stronger-isolation
+milestone.
 
 ## Verification Evidence
 

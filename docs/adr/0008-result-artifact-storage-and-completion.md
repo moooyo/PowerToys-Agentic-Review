@@ -399,9 +399,15 @@ namespace sweep, certain capacity accounting, no exhausted or invalid upload-cle
 no failed namespace cleanup, and no operational namespace-health saturation. Fatal and closing
 transitions synchronously disable admission. `main.ts` now composes this internal foundation before
 the Server becomes ready, and `app.ts` binds coarse readiness and process-wide admission to the same
-lifecycle. The runtime exposes only the database, a narrow readiness probe, and ordered close;
-artifact transaction methods remain unreachable. Worker artifact routes, artifact-mode claim
-selection, and artifact-backed completion remain disabled pending separately reviewed activation.
+lifecycle. The runtime exposes the database, a narrow readiness probe, one frozen four-method
+artifact transaction port, and ordered close. The port exposes create, chunk, finalize, and terminate
+only; it cannot close the coordinator or observe its readiness, fatal signal, or ownership handles.
+The separate boolean readiness probe remains the application's only artifact health view. `app.ts` is
+the sole production registrar for the four Worker artifact routes and receives the port only for
+mutations. Artifact-mode claim selection and artifact-backed completion remain disabled: every
+production claim still persists `inline_result_v1`, uses the version-one envelope without a
+completion-mode field, and is rejected by the artifact transaction fence before capacity or
+filesystem mutation.
 
 Namespace cleanup health reads are independently bounded for each status. Saturated pending,
 retry-waiting, failed, or due counts are operational saturation: capacity admission becomes

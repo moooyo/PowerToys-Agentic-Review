@@ -110,6 +110,7 @@ const start = async (): Promise<void> => {
       database,
       shutdownSignal: lifecycle.signal,
       artifactReadiness: storageRuntime.artifactReadiness,
+      artifactTransactions: storageRuntime.artifactTransactions,
       serverAdmission: lifecycle.admission,
       ...(githubIngestion === undefined ? {} : { githubIngestion }),
       ...(operatorAuth === undefined ? {} : { operatorAuth }),

@@ -31,6 +31,7 @@ describe("production server composition", () => {
       "lifecycle.onArtifactFailStop(error);",
       "lifecycle.adoptStorageRuntime(storageRuntime);",
       "artifactReadiness: storageRuntime.artifactReadiness",
+      "artifactTransactions: storageRuntime.artifactTransactions",
       "serverAdmission: lifecycle.admission",
       "lifecycle.adoptApplication(app);",
       'lifecycle.trackBackground("github-polling", pollingCompletion);',

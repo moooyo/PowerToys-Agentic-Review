@@ -30,6 +30,7 @@ export type {
   ArtifactTransactionCoordinatorOptions,
   ArtifactTransactionDatabaseHandle,
   ArtifactTransactionOwnerLockHandle,
+  ArtifactTransactionPort,
   ArtifactTransactionReadiness,
   ArtifactTransactionStorageHandle,
 } from "./artifact-transaction-coordinator.js";
