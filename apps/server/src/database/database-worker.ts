@@ -27,18 +27,30 @@ import type {
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
 import {
+  type AdvanceArtifactReconciliationCursorInput,
+  advanceArtifactReconciliationCursor,
   type CommitArtifactChunkInput,
   type CommitArtifactFinalizeInput,
+  type CompleteArtifactCleanupInput,
   type CreateArtifactUploadInput,
   commitArtifactChunk,
   commitArtifactFinalize,
+  completeArtifactCleanup,
   createArtifactUpload,
+  type ListDueArtifactCleanupsInput,
+  listDueArtifactCleanups,
   type PrepareArtifactChunkInput,
   type PrepareArtifactFinalizeInput,
   prepareArtifactChunk,
   prepareArtifactFinalize,
   probeArtifactUploadCreate,
+  type RecordArtifactCleanupFailureInput,
+  readArtifactHealthAccounting,
+  readArtifactReconciliationCursor,
+  recordArtifactCleanupFailure,
+  type TerminalizeInactiveArtifactUploadsInput,
   type TerminateArtifactUploadInput,
+  terminalizeInactiveArtifactUploads,
   terminateArtifactUpload,
 } from "./artifacts.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
@@ -1694,6 +1706,29 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return commitArtifactFinalize(database, request.input as CommitArtifactFinalizeInput);
     case "terminateArtifactUpload":
       return terminateArtifactUpload(database, request.input as TerminateArtifactUploadInput);
+    case "terminalizeInactiveArtifactUploads":
+      return terminalizeInactiveArtifactUploads(
+        database,
+        request.input as TerminalizeInactiveArtifactUploadsInput,
+      );
+    case "listDueArtifactCleanups":
+      return listDueArtifactCleanups(database, request.input as ListDueArtifactCleanupsInput);
+    case "completeArtifactCleanup":
+      return completeArtifactCleanup(database, request.input as CompleteArtifactCleanupInput);
+    case "recordArtifactCleanupFailure":
+      return recordArtifactCleanupFailure(
+        database,
+        request.input as RecordArtifactCleanupFailureInput,
+      );
+    case "readArtifactHealthAccounting":
+      return readArtifactHealthAccounting(database, request.input as Record<string, never>);
+    case "readArtifactReconciliationCursor":
+      return readArtifactReconciliationCursor(database, request.input as Record<string, never>);
+    case "advanceArtifactReconciliationCursor":
+      return advanceArtifactReconciliationCursor(
+        database,
+        request.input as AdvanceArtifactReconciliationCursorInput,
+      );
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":

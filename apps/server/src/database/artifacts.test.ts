@@ -16,22 +16,34 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  advanceArtifactReconciliationCursor,
   artifactCleanupLiabilityPageSql,
+  artifactDueCleanupPageSql,
+  artifactReconciliationCursorName,
   commitArtifactChunk,
   commitArtifactFinalize,
+  completeArtifactCleanup,
   createArtifactUpload,
+  listDueArtifactCleanups,
   maximumArtifactCreateAccountingRows,
+  maximumArtifactReconciliationBatchSize,
   maximumDeclaredResultArtifactBytesPerAttempt,
   maximumResultArtifactUploadIdentitiesPerAttempt,
   prepareArtifactChunk,
   prepareArtifactFinalize,
   probeArtifactUploadCreate,
+  readArtifactHealthAccounting,
+  readArtifactReconciliationCursor,
+  recordArtifactCleanupFailure,
+  terminalizeInactiveArtifactUploads,
   terminateArtifactUpload,
   toResultArtifactChunkResponse,
   toTerminateResultArtifactUploadResponse,
 } from "../../dist/database/artifacts.js";
 import {
   ArtifactCompletionModeMismatchError,
+  ArtifactReconciliationConflictError,
+  ArtifactReconciliationInvalidRequestError,
   ArtifactUploadQuotaExceededError,
   LeaseLostError,
 } from "../../dist/database/errors.js";
@@ -307,6 +319,17 @@ const createAndTerminateUpload = (
     reason: "client_abandoned",
   });
 };
+
+const createLiveUpload = (database: DatabaseSync, ordinal = 0) =>
+  createArtifactUpload(database, {
+    ...identity,
+    clientArtifactId: artifactClientId(ordinal),
+    purpose: "result",
+    name: `reconciliation-${ordinal}.json`,
+    mediaType: "application/json",
+    totalBytes: 2,
+    sha256: sha256(`reconciliation-${ordinal}`),
+  });
 
 const insertRawUpload = (database: DatabaseSync, ordinal: number, totalBytes: number): void => {
   const now = "2026-09-01T00:00:00.000Z";
@@ -797,7 +820,22 @@ describe("result artifact database state machine", () => {
       .prepare("SELECT id FROM artifact_uploads WHERE client_artifact_id = ?")
       .get(artifactClientId(0)) as { readonly id: string };
 
-    expect(runMigrations(database, migrationsDirectory)).toBe(9);
+    expect(runMigrations(database, migrationsDirectory)).toBe(10);
+    expect(
+      database
+        .prepare(`
+          SELECT name, sweep_generation, after_key, last_completed_at
+          FROM artifact_reconciliation_cursors
+        `)
+        .all(),
+    ).toEqual([
+      {
+        name: artifactReconciliationCursorName,
+        sweep_generation: 0,
+        after_key: null,
+        last_completed_at: null,
+      },
+    ]);
     expect(
       database
         .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
@@ -1032,6 +1070,18 @@ describe("result artifact database state machine", () => {
     ).toBe(true);
     expect(details.some((detail) => /SEARCH upload USING INDEX/u.test(detail))).toBe(true);
     expect(details.some((detail) => /SCAN upload/u.test(detail))).toBe(false);
+  });
+
+  it("uses the fair due-cleanup expression index", async () => {
+    const { database } = await openFixture();
+    const plan = database
+      .prepare(`EXPLAIN QUERY PLAN ${artifactDueCleanupPageSql}`)
+      .all("2099-01-01T00:00:00.000Z", 17) as unknown as readonly {
+      readonly detail: string;
+    }[];
+    expect(
+      plan.some((row) => row.detail.includes("ix_artifact_upload_cleanup_journal_due_v2")),
+    ).toBe(true);
   });
 
   it("saturates create accounting after a fixed active-liability row budget", async () => {
@@ -2219,6 +2269,21 @@ describe("result artifact database state machine", () => {
     });
 
     const retryAt = "2026-09-01T00:01:00.000Z";
+    expect(() =>
+      database
+        .prepare(`
+          UPDATE artifact_upload_cleanup_journal
+          SET
+            status = 'retry_waiting',
+            attempt_count = 1,
+            next_attempt_at = ?,
+            last_error_code = 'staging_busy',
+            last_error_message = 'The staging object is still busy.',
+            updated_at = ?
+          WHERE upload_id = ?
+        `)
+        .run(retryAt, retryAt, firstUpload.id),
+    ).toThrow(/retry delay identity is inconsistent/u);
     database
       .prepare(`
         UPDATE artifact_upload_cleanup_journal
@@ -2228,6 +2293,7 @@ describe("result artifact database state machine", () => {
           next_attempt_at = ?,
           last_error_code = 'staging_busy',
           last_error_message = 'The staging object is still busy.',
+          last_retry_delay_seconds = 30,
           updated_at = ?
         WHERE upload_id = ?
       `)
@@ -2272,6 +2338,7 @@ describe("result artifact database state machine", () => {
             next_attempt_at = ?,
             last_error_code = 'staging_busy',
             last_error_message = 'The staging object is still busy.',
+            last_retry_delay_seconds = 30,
             updated_at = ?
           WHERE upload_id = ?
         `)
@@ -2295,5 +2362,416 @@ describe("result artifact database state machine", () => {
         .prepare("DELETE FROM artifact_upload_cleanup_journal WHERE upload_id = ?")
         .run(secondUpload.id),
     ).toThrow(/cleanup records are immutable/u);
+  });
+
+  it.each([
+    {
+      name: "inactive attempt",
+      reason: "attempt_inactive",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE run_attempts SET status = 'expired' WHERE id = ?")
+          .run(identity.runAttemptId),
+    },
+    {
+      name: "inactive job",
+      reason: "job_inactive",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE jobs SET status = 'cancel_requested' WHERE id = ?")
+          .run(identity.jobId),
+    },
+    {
+      name: "non-current attempt",
+      reason: "attempt_not_current",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE jobs SET current_run_attempt_id = NULL WHERE id = ?")
+          .run(identity.jobId),
+    },
+    {
+      name: "inactive artifact completion mode",
+      reason: "completion_mode_inactive",
+      mutate: (database: DatabaseSync) => {
+        database.exec("DROP TRIGGER tr_run_attempt_completion_mode_immutable");
+        return database
+          .prepare("UPDATE run_attempts SET completion_mode = 'inline_result_v1' WHERE id = ?")
+          .run(identity.runAttemptId);
+      },
+    },
+    {
+      name: "expired lease",
+      reason: "lease_expired",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+          .run("2000-01-01T00:00:00.000Z", identity.runAttemptId),
+    },
+    {
+      name: "expired execution deadline",
+      reason: "execution_deadline_expired",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE run_attempts SET execution_deadline_at = ? WHERE id = ?")
+          .run("2000-01-01T00:00:00.000Z", identity.runAttemptId),
+    },
+    {
+      name: "expired progress deadline",
+      reason: "no_progress_deadline_expired",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE run_attempts SET no_progress_deadline_at = ? WHERE id = ?")
+          .run("2000-01-01T00:00:00.000Z", identity.runAttemptId),
+    },
+    {
+      name: "superseded worker",
+      reason: "worker_superseded",
+      mutate: (database: DatabaseSync) =>
+        database
+          .prepare("UPDATE workers SET superseded_at = ? WHERE id = 'worker-row'")
+          .run("2026-09-01T00:01:00.000Z"),
+    },
+  ])("terminalizes a live upload after $name without Worker lease authority", async (testCase) => {
+    const { database } = await openFixture();
+    const upload = createLiveUpload(database);
+    testCase.mutate(database);
+
+    const result = terminalizeInactiveArtifactUploads(database, { batchSize: 1 });
+    expect(result).toMatchObject({
+      hasMore: false,
+      terminalized: [
+        {
+          uploadId: upload.uploadId,
+          state: "abandoned",
+          reason: testCase.reason,
+        },
+      ],
+    });
+    expect(terminalizeInactiveArtifactUploads(database, { batchSize: 1 })).toEqual({
+      terminalized: [],
+      hasMore: false,
+    });
+    expect(
+      database
+        .prepare(`
+          SELECT terminal_status, status, attempt_count
+          FROM artifact_upload_cleanup_journal
+          WHERE upload_id = ?
+        `)
+        .get(upload.uploadId),
+    ).toEqual({ terminal_status: "abandoned", status: "pending", attempt_count: 0 });
+  });
+
+  it("leaves active authority untouched and marks damaged upload fencing corrupt", async () => {
+    const activeFixture = await openFixture();
+    const activeUpload = createLiveUpload(activeFixture.database);
+    expect(terminalizeInactiveArtifactUploads(activeFixture.database, { batchSize: 1 })).toEqual({
+      terminalized: [],
+      hasMore: false,
+    });
+    expect(
+      activeFixture.database
+        .prepare("SELECT status FROM artifact_uploads WHERE id = ?")
+        .get(activeUpload.uploadId),
+    ).toEqual({ status: "receiving" });
+
+    const damagedFixture = await openFixture();
+    const damagedUpload = createLiveUpload(damagedFixture.database);
+    damagedFixture.database.exec("DROP TRIGGER tr_artifact_upload_identity_immutable");
+    damagedFixture.database
+      .prepare("UPDATE artifact_uploads SET worker_instance_id = 'damaged-instance' WHERE id = ?")
+      .run(damagedUpload.uploadId);
+    expect(
+      terminalizeInactiveArtifactUploads(damagedFixture.database, { batchSize: 1 }),
+    ).toMatchObject({
+      terminalized: [
+        {
+          uploadId: damagedUpload.uploadId,
+          state: "corrupt",
+          reason: "metadata_fence_mismatch",
+        },
+      ],
+    });
+  });
+
+  it("bounds authority recovery and reports a continuation without skipping rows", async () => {
+    const { database } = await openFixture();
+    addArtifactModeAttempt(database);
+    const first = createLiveUpload(database, 0);
+    const second = createArtifactUpload(database, {
+      ...artifactModeIdentity,
+      clientArtifactId: artifactClientId(1),
+      purpose: "result",
+      name: "reconciliation-1.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("reconciliation-1"),
+    });
+    database.prepare("UPDATE run_attempts SET lease_expires_at = '2000-01-01T00:00:00.000Z'").run();
+
+    const firstBatch = terminalizeInactiveArtifactUploads(database, { batchSize: 1 });
+    expect(firstBatch).toMatchObject({
+      hasMore: true,
+      terminalized: [{ reason: "lease_expired" }],
+    });
+    const secondBatch = terminalizeInactiveArtifactUploads(database, { batchSize: 1 });
+    expect(secondBatch).toMatchObject({
+      hasMore: false,
+      terminalized: [{ reason: "lease_expired" }],
+    });
+    expect(
+      new Set(
+        [...firstBatch.terminalized, ...secondBatch.terminalized].map((item) => item.uploadId),
+      ),
+    ).toEqual(new Set([first.uploadId, second.uploadId]));
+  });
+
+  it("rejects accessor and oversized reconciliation batch inputs before reading values", async () => {
+    const { database } = await openFixture();
+    let getterCalls = 0;
+    const accessorInput = Object.create(null) as { batchSize: number };
+    Object.defineProperty(accessorInput, "batchSize", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 1;
+      },
+    });
+
+    expect(() => terminalizeInactiveArtifactUploads(database, accessorInput)).toThrow(
+      ArtifactReconciliationInvalidRequestError,
+    );
+    expect(getterCalls).toBe(0);
+    expect(() =>
+      listDueArtifactCleanups(database, {
+        batchSize: maximumArtifactReconciliationBatchSize + 1,
+      }),
+    ).toThrow(ArtifactReconciliationInvalidRequestError);
+  });
+
+  it("lists due cleanup fairly and commits success with an exact CAS", async () => {
+    const { database } = await openFixture();
+    createAndTerminateUpload(database, 0, 1);
+    createAndTerminateUpload(database, 1, 1);
+    const uploads = database
+      .prepare(`
+        SELECT id, client_artifact_id
+        FROM artifact_uploads
+        ORDER BY client_artifact_id
+      `)
+      .all() as unknown as readonly {
+      readonly id: string;
+      readonly client_artifact_id: string;
+    }[];
+    const first = uploads[0];
+    const second = uploads[1];
+    if (first === undefined || second === undefined) {
+      throw new Error("Expected two artifact cleanup fixtures.");
+    }
+    database
+      .prepare(`
+        UPDATE artifact_upload_cleanup_journal
+        SET
+          status = 'retry_waiting',
+          attempt_count = 1,
+          next_attempt_at = '2000-01-01T00:00:00.000Z',
+          last_error_code = 'storage_busy',
+          last_error_message = 'Artifact staging cleanup is temporarily busy.',
+          last_retry_delay_seconds = 30,
+          updated_at = '2000-01-01T00:00:00.000Z'
+        WHERE upload_id = ?
+      `)
+      .run(second.id);
+
+    const due = listDueArtifactCleanups(database, { batchSize: 2 });
+    expect(due.items.map((item) => item.uploadId)).toEqual([second.id, first.id]);
+    expect(due.items[0]).toMatchObject({
+      expectedAttemptCount: 1,
+      lastRetryDelaySeconds: 30,
+      publications: [],
+    });
+    const completed = completeArtifactCleanup(database, {
+      uploadId: second.id,
+      expectedAttemptCount: 1,
+    });
+    expect(completed).toMatchObject({ status: "completed", attemptCount: 1, replayed: false });
+    expect(
+      completeArtifactCleanup(database, {
+        uploadId: second.id,
+        expectedAttemptCount: 1,
+      }),
+    ).toEqual({ ...completed, replayed: true });
+    expect(() =>
+      completeArtifactCleanup(database, {
+        uploadId: first.id,
+        expectedAttemptCount: 1,
+      }),
+    ).toThrow(ArtifactReconciliationConflictError);
+  });
+
+  it("preserves finalization evidence in Server-authoritative cleanup work", async () => {
+    const { database } = await openFixture();
+    const bytes = Buffer.from("{}", "utf8");
+    const digest = sha256(bytes);
+    const upload = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: bytes.byteLength,
+      sha256: digest,
+    });
+    const chunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: bytes.byteLength,
+      chunkSha256: digest,
+    };
+    const preparedChunk = prepareArtifactChunk(database, chunk);
+    commitArtifactChunk(database, { ...chunk, prepareId: preparedChunk.prepareId });
+    const preparedFinalize = prepareArtifactFinalize(database, {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkCount: 1,
+      totalBytes: bytes.byteLength,
+      sha256: digest,
+    });
+    database
+      .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+      .run("2000-01-01T00:00:00.000Z", identity.runAttemptId);
+
+    terminalizeInactiveArtifactUploads(database, { batchSize: 1 });
+    expect(listDueArtifactCleanups(database, { batchSize: 1 }).items).toEqual([
+      {
+        uploadId: upload.uploadId,
+        terminalStatus: "abandoned",
+        cleanupScope: "staging_only_v1",
+        expectedAttemptCount: 0,
+        lastRetryDelaySeconds: null,
+        publications: [
+          {
+            finalizationId: preparedFinalize.finalizationId,
+            totalBytes: bytes.byteLength,
+            sha256: digest,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("records bounded cleanup failures and makes the eighth failure terminal", async () => {
+    const { database } = await openFixture();
+    createAndTerminateUpload(database, 0, 2);
+    const upload = database
+      .prepare("SELECT id FROM artifact_uploads WHERE client_artifact_id = ?")
+      .get(artifactClientId(0)) as { readonly id: string };
+
+    for (let expectedAttemptCount = 0; expectedAttemptCount < 8; expectedAttemptCount += 1) {
+      const failure = recordArtifactCleanupFailure(database, {
+        uploadId: upload.id,
+        expectedAttemptCount,
+        errorCode: "storage_io_failure",
+        retryDelaySeconds: 30,
+      });
+      expect(failure).toMatchObject({
+        attemptCount: expectedAttemptCount + 1,
+        status: expectedAttemptCount === 7 ? "failed" : "retry_waiting",
+        errorCode: "storage_io_failure",
+        retryDelaySeconds: 30,
+        replayed: false,
+      });
+      expect(
+        recordArtifactCleanupFailure(database, {
+          uploadId: upload.id,
+          expectedAttemptCount,
+          errorCode: "storage_io_failure",
+          retryDelaySeconds: 30,
+        }),
+      ).toEqual({ ...failure, replayed: true });
+      if (expectedAttemptCount === 0) {
+        expect(() =>
+          recordArtifactCleanupFailure(database, {
+            uploadId: upload.id,
+            expectedAttemptCount,
+            errorCode: "storage_timeout",
+            retryDelaySeconds: 30,
+          }),
+        ).toThrow(ArtifactReconciliationConflictError);
+      }
+      if (expectedAttemptCount === 0 || expectedAttemptCount === 7) {
+        expect(() =>
+          recordArtifactCleanupFailure(database, {
+            uploadId: upload.id,
+            expectedAttemptCount,
+            errorCode: "storage_io_failure",
+            retryDelaySeconds: 31,
+          }),
+        ).toThrow(ArtifactReconciliationConflictError);
+      }
+    }
+
+    expect(listDueArtifactCleanups(database, { batchSize: 8 }).items).toEqual([]);
+    const health = readArtifactHealthAccounting(database, {});
+    expect(health).toMatchObject({
+      activeUploads: { receiving: 0, finalizing: 0 },
+      cleanup: {
+        pending: 0,
+        retryWaiting: 0,
+        completed: 0,
+        failed: 1,
+        invalidRetryIdentity: 0,
+      },
+      capacity: { accountingCertain: true, liveUploadCount: 1, cleanupBacklogEntries: 1 },
+    });
+  });
+
+  it("advances the durable namespace cursor only by compare-and-swap", async () => {
+    const fixture = await openFixture();
+    const { database } = fixture;
+    const initial = readArtifactReconciliationCursor(database, {});
+    expect(initial).toMatchObject({
+      name: artifactReconciliationCursorName,
+      sweepGeneration: 0,
+      afterKey: null,
+      lastCompletedAt: null,
+    });
+    const page = advanceArtifactReconciliationCursor(database, {
+      expectedSweepGeneration: 0,
+      expectedAfterKey: null,
+      nextAfterKey: "staging/12345678-1234-4123-8123-123456789abc.upload",
+      completedSweep: false,
+    });
+    expect(page).toMatchObject({ sweepGeneration: 0, afterKey: expect.any(String) });
+    expect(() =>
+      advanceArtifactReconciliationCursor(database, {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        nextAfterKey: "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload",
+        completedSweep: false,
+      }),
+    ).toThrow(ArtifactReconciliationConflictError);
+    const completed = advanceArtifactReconciliationCursor(database, {
+      expectedSweepGeneration: page.sweepGeneration,
+      expectedAfterKey: page.afterKey,
+      nextAfterKey: null,
+      completedSweep: true,
+    });
+    expect(completed).toMatchObject({
+      sweepGeneration: 1,
+      afterKey: null,
+      lastCompletedAt: expect.any(String),
+    });
+    expect(readArtifactReconciliationCursor(reopenFixtureDatabase(fixture), {})).toEqual(completed);
+    expect(() =>
+      advanceArtifactReconciliationCursor(fixture.database, {
+        expectedSweepGeneration: 1,
+        expectedAfterKey: null,
+        nextAfterKey: "../escape",
+        completedSweep: false,
+      }),
+    ).toThrow(ArtifactReconciliationInvalidRequestError);
   });
 });

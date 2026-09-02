@@ -3,6 +3,10 @@ import {
   type ArtifactUploadCreateDatabaseHandle,
   registerArtifactUploadCreateDatabaseHandle,
 } from "../artifacts/artifact-upload-create-coordinator.js";
+import {
+  isArtifactReconciliationDatabaseOperation,
+  snapshotArtifactReconciliationDatabaseInput,
+} from "./artifacts.js";
 import { DatabaseRequestError } from "./errors.js";
 import type {
   DatabaseOperation,
@@ -147,7 +151,21 @@ export class DatabaseClient {
     if (this.#isClosing) {
       return Promise.reject(new Error("Database client is closing."));
     }
-    return this.#send(operation, input);
+    let inputSnapshot: unknown = input;
+    if (isArtifactReconciliationDatabaseOperation(operation)) {
+      try {
+        inputSnapshot = snapshotArtifactReconciliationDatabaseInput(operation, input);
+      } catch (error) {
+        const code =
+          error instanceof Error && "code" in error && typeof error.code === "string"
+            ? error.code
+            : "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
+        return Promise.reject(
+          new DatabaseRequestError("The artifact reconciliation request is invalid.", code),
+        );
+      }
+    }
+    return this.#send(operation, inputSnapshot as DatabaseOperationMap[TOperation]["input"]);
   }
 
   /** Returns an opaque one-shot handle that only ArtifactUploadCreateCoordinator can consume. */

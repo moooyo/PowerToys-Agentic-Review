@@ -111,14 +111,14 @@ describe("database migrations and backups", () => {
     try {
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
         currentVersion: 0,
-        targetVersion: 9,
-        pendingVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        targetVersion: 10,
+        pendingVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
       });
 
-      expect(runMigrations(database, migrationsDirectory)).toBe(9);
+      expect(runMigrations(database, migrationsDirectory)).toBe(10);
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
-        currentVersion: 9,
-        targetVersion: 9,
+        currentVersion: 10,
+        targetVersion: 10,
         pendingVersions: [],
       });
     } finally {
@@ -146,7 +146,7 @@ describe("database migrations and backups", () => {
         database,
         databasePath,
         currentVersion: 7,
-        targetVersion: 9,
+        targetVersion: 10,
       });
       const backupDatabase = new DatabaseSync(backupPath, { readOnly: true });
       try {

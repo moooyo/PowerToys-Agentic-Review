@@ -80,6 +80,33 @@ export class ArtifactCompletionModeMismatchError extends Error {
   }
 }
 
+export class ArtifactReconciliationInvalidRequestError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
+
+  public constructor() {
+    super("The artifact reconciliation request is invalid.");
+    this.name = "ArtifactReconciliationInvalidRequestError";
+  }
+}
+
+export class ArtifactReconciliationConflictError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_CONFLICT";
+
+  public constructor() {
+    super("The artifact reconciliation state changed before the operation could commit.");
+    this.name = "ArtifactReconciliationConflictError";
+  }
+}
+
+export class ArtifactReconciliationStateError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_STATE_INVALID";
+
+  public constructor() {
+    super("The durable artifact reconciliation state is invalid.");
+    this.name = "ArtifactReconciliationStateError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 

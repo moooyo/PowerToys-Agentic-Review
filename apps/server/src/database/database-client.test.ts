@@ -1009,6 +1009,130 @@ describe("DatabaseClient lease integration", () => {
     await coordinator.close();
   });
 
+  it("maps artifact reconciliation cursor CAS through a read-once client snapshot", async () => {
+    const fixture = await createFixture();
+    const initial = await fixture.client.request("readArtifactReconciliationCursor", {});
+    expect(initial).toMatchObject({ sweepGeneration: 0, afterKey: null });
+
+    const input = {
+      expectedSweepGeneration: initial.sweepGeneration,
+      expectedAfterKey: initial.afterKey,
+      nextAfterKey: "staging/10000000-0000-4000-8000-000000000000.upload" as string | null,
+      completedSweep: false,
+    };
+    const advanced = fixture.client.request("advanceArtifactReconciliationCursor", input);
+    input.nextAfterKey = "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload";
+    await expect(advanced).resolves.toMatchObject({
+      sweepGeneration: 0,
+      afterKey: "staging/10000000-0000-4000-8000-000000000000.upload",
+    });
+    await expect(
+      fixture.client.request("advanceArtifactReconciliationCursor", {
+        expectedSweepGeneration: 0,
+        expectedAfterKey: null,
+        nextAfterKey: "staging/ffffffff-ffff-4fff-8fff-ffffffffffff.upload",
+        completedSweep: false,
+      }),
+    ).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "ARTIFACT_RECONCILIATION_CONFLICT",
+    });
+
+    let getterCalls = 0;
+    const accessor = Object.create(null) as { batchSize: number };
+    Object.defineProperty(accessor, "batchSize", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 1;
+      },
+    });
+    await expect(fixture.client.request("listDueArtifactCleanups", accessor)).rejects.toMatchObject(
+      {
+        name: "DatabaseRequestError",
+        code: "ARTIFACT_RECONCILIATION_INVALID_REQUEST",
+      },
+    );
+    expect(getterCalls).toBe(0);
+  });
+
+  it("round-trips Server-authoritative artifact cleanup operations through the database Worker", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-artifact-reconcile",
+      "instance-artifact-reconcile",
+    );
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
+      "worker-artifact-reconcile",
+      "instance-artifact-reconcile",
+      "reconcile",
+    );
+    const coordinator = createArtifactCoordinator(fixture.client);
+    const upload = await coordinator.createArtifactUpload({
+      ...artifactLease,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    });
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", artifactLease.runAttemptId);
+    });
+
+    await expect(
+      fixture.client.request("terminalizeInactiveArtifactUploads", { batchSize: 8 }),
+    ).resolves.toMatchObject({
+      terminalized: [{ uploadId: upload.uploadId, reason: "lease_expired" }],
+      hasMore: false,
+    });
+    const due = await fixture.client.request("listDueArtifactCleanups", { batchSize: 8 });
+    expect(due.items).toEqual([
+      expect.objectContaining({ uploadId: upload.uploadId, expectedAttemptCount: 0 }),
+    ]);
+    const failure = await fixture.client.request("recordArtifactCleanupFailure", {
+      uploadId: upload.uploadId,
+      expectedAttemptCount: 0,
+      errorCode: "storage_busy",
+      retryDelaySeconds: 30,
+    });
+    expect(failure).toMatchObject({
+      status: "retry_waiting",
+      attemptCount: 1,
+      retryDelaySeconds: 30,
+    });
+    await expect(
+      fixture.client.request("recordArtifactCleanupFailure", {
+        uploadId: upload.uploadId,
+        expectedAttemptCount: 0,
+        errorCode: "storage_busy",
+        retryDelaySeconds: 31,
+      }),
+    ).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "ARTIFACT_RECONCILIATION_CONFLICT",
+    });
+    await expect(
+      fixture.client.request("completeArtifactCleanup", {
+        uploadId: upload.uploadId,
+        expectedAttemptCount: 1,
+      }),
+    ).resolves.toMatchObject({ status: "completed", attemptCount: 1 });
+    await expect(fixture.client.request("readArtifactHealthAccounting", {})).resolves.toMatchObject(
+      {
+        cleanup: { completed: 1, failed: 0 },
+        capacity: { liveUploadCount: 0, cleanupBacklogEntries: 0 },
+      },
+    );
+    await coordinator.close();
+  });
+
   it("serializes the stable artifact upload quota error across the database protocol", async () => {
     const fixture = await createFixture();
     const worker = await registerWorker(

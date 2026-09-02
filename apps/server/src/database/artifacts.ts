@@ -13,6 +13,9 @@ import {
 } from "@agentic-review/contracts";
 import {
   ArtifactCompletionModeMismatchError,
+  ArtifactReconciliationConflictError,
+  ArtifactReconciliationInvalidRequestError,
+  ArtifactReconciliationStateError,
   ArtifactUploadConflictError,
   ArtifactUploadQuotaExceededError,
   LeaseLostError,
@@ -21,6 +24,10 @@ import {
 export const maximumResultArtifactUploadIdentitiesPerAttempt = 8;
 export const maximumDeclaredResultArtifactBytesPerAttempt = 16 * 1024 * 1024;
 export const maximumArtifactCreateAccountingRows = 4_096;
+export const maximumArtifactReconciliationBatchSize = 1_024;
+export const maximumArtifactCleanupRetryDelaySeconds = 86_400;
+export const artifactReconciliationCursorName = "managed_namespace_v1" as const;
+const maximumArtifactReconciliationCursorKeyLength = 256;
 export const artifactCleanupLiabilityPageSql = `
   WITH due_cleanup AS MATERIALIZED (
     SELECT cleanup.upload_id
@@ -35,6 +42,32 @@ export const artifactCleanupLiabilityPageSql = `
   CROSS JOIN artifact_uploads AS upload
   WHERE upload.id = due_cleanup.upload_id
     AND upload.status IN ('committed', 'abandoned', 'corrupt')
+`;
+export const artifactDueCleanupPageSql = `
+  SELECT
+    cleanup.upload_id,
+    cleanup.terminal_status AS journal_terminal_status,
+    cleanup.cleanup_scope,
+    cleanup.status AS cleanup_status,
+    cleanup.attempt_count,
+    cleanup.next_attempt_at,
+    cleanup.last_error_code,
+    cleanup.last_error_message,
+    cleanup.last_retry_delay_seconds,
+    upload.status AS upload_status,
+    upload.finalization_id,
+    upload.final_total_bytes,
+    upload.final_sha256
+  FROM artifact_upload_cleanup_journal AS cleanup
+    INDEXED BY ix_artifact_upload_cleanup_journal_due_v2
+  JOIN artifact_uploads AS upload ON upload.id = cleanup.upload_id
+  WHERE cleanup.status IN ('pending', 'retry_waiting')
+    AND (
+      cleanup.status = 'pending'
+      OR (cleanup.status = 'retry_waiting' AND cleanup.next_attempt_at <= ?)
+    )
+  ORDER BY COALESCE(cleanup.next_attempt_at, cleanup.created_at), cleanup.upload_id
+  LIMIT ?
 `;
 
 type ArtifactLeaseIdentity = Pick<
@@ -58,6 +91,121 @@ export interface ArtifactUploadCreateAccounting {
   readonly liveUploadCount: number;
   readonly liveUploadExpectedByteSizeBuckets: readonly ArtifactUploadExpectedByteSizeBucket[];
   readonly cleanupBacklogEntries: number;
+}
+
+export type ArtifactUploadAuthorityClosureReason =
+  | "attempt_inactive"
+  | "job_inactive"
+  | "attempt_not_current"
+  | "lease_expired"
+  | "execution_deadline_expired"
+  | "no_progress_deadline_expired"
+  | "worker_superseded"
+  | "completion_mode_inactive"
+  | "metadata_fence_mismatch";
+
+export interface TerminalizeInactiveArtifactUploadsInput {
+  readonly batchSize: number;
+}
+
+export interface TerminalizedInactiveArtifactUpload {
+  readonly uploadId: string;
+  readonly state: "abandoned" | "corrupt";
+  readonly reason: ArtifactUploadAuthorityClosureReason;
+  readonly terminatedAt: string;
+}
+
+export interface TerminalizeInactiveArtifactUploadsResult {
+  readonly terminalized: readonly TerminalizedInactiveArtifactUpload[];
+  readonly hasMore: boolean;
+}
+
+export type ArtifactCleanupRetryErrorCode =
+  | "storage_busy"
+  | "storage_io_failure"
+  | "storage_timeout"
+  | "storage_unavailable";
+
+export interface ListDueArtifactCleanupsInput {
+  readonly batchSize: number;
+}
+
+export interface ArtifactCleanupWorkItem {
+  readonly uploadId: string;
+  readonly terminalStatus: "committed" | "abandoned" | "corrupt";
+  readonly cleanupScope: "staging_only_v1";
+  readonly expectedAttemptCount: number;
+  readonly lastRetryDelaySeconds: number | null;
+  readonly publications: readonly {
+    readonly finalizationId: string;
+    readonly totalBytes: number;
+    readonly sha256: string;
+  }[];
+}
+
+export interface ListDueArtifactCleanupsResult {
+  readonly items: readonly ArtifactCleanupWorkItem[];
+  readonly hasMore: boolean;
+}
+
+export interface CompleteArtifactCleanupInput {
+  readonly uploadId: string;
+  readonly expectedAttemptCount: number;
+}
+
+export interface CompleteArtifactCleanupResult {
+  readonly uploadId: string;
+  readonly status: "completed";
+  readonly attemptCount: number;
+  readonly completedAt: string;
+  readonly replayed: boolean;
+}
+
+export interface RecordArtifactCleanupFailureInput extends CompleteArtifactCleanupInput {
+  readonly errorCode: ArtifactCleanupRetryErrorCode;
+  readonly retryDelaySeconds: number;
+}
+
+export interface RecordArtifactCleanupFailureResult {
+  readonly uploadId: string;
+  readonly status: "retry_waiting" | "failed";
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string | null;
+  readonly errorCode: ArtifactCleanupRetryErrorCode;
+  readonly retryDelaySeconds: number;
+  readonly replayed: boolean;
+}
+
+export interface ArtifactHealthAccounting {
+  readonly activeUploads: {
+    readonly receiving: number;
+    readonly finalizing: number;
+  };
+  readonly cleanup: {
+    readonly pending: number;
+    readonly retryWaiting: number;
+    readonly due: number;
+    readonly completed: number;
+    readonly failed: number;
+    readonly invalidRetryIdentity: number;
+    readonly oldestOutstandingAt: string | null;
+  };
+  readonly capacity: ArtifactUploadCreateAccounting;
+}
+
+export interface ArtifactReconciliationCursor {
+  readonly name: typeof artifactReconciliationCursorName;
+  readonly sweepGeneration: number;
+  readonly afterKey: string | null;
+  readonly updatedAt: string;
+  readonly lastCompletedAt: string | null;
+}
+
+export interface AdvanceArtifactReconciliationCursorInput {
+  readonly expectedSweepGeneration: number;
+  readonly expectedAfterKey: string | null;
+  readonly nextAfterKey: string | null;
+  readonly completedSweep: boolean;
 }
 
 export type ProbeArtifactUploadCreateResult =
@@ -271,10 +419,73 @@ interface RunArtifactRow {
   readonly storage_object_key: string;
 }
 
+interface InactiveArtifactUploadRow {
+  readonly id: string;
+  readonly upload_run_attempt_id: string;
+  readonly upload_worker_node_id: string;
+  readonly upload_worker_instance_id: string;
+  readonly upload_lease_generation: number;
+  readonly attempt_worker_node_id: string;
+  readonly attempt_worker_instance_id: string;
+  readonly attempt_lease_generation: number;
+  readonly attempt_status: string;
+  readonly completion_mode: string;
+  readonly lease_expires_at: string;
+  readonly execution_deadline_at: string;
+  readonly no_progress_deadline_at: string;
+  readonly job_status: string;
+  readonly current_run_attempt_id: string | null;
+  readonly worker_superseded_at: string | null;
+}
+
+interface ArtifactCleanupWorkRow {
+  readonly upload_id: string;
+  readonly journal_terminal_status: string;
+  readonly cleanup_scope: string;
+  readonly cleanup_status: string;
+  readonly attempt_count: number;
+  readonly next_attempt_at: string | null;
+  readonly last_error_code: string | null;
+  readonly last_error_message: string | null;
+  readonly last_retry_delay_seconds: number | null;
+  readonly upload_status: string;
+  readonly finalization_id: string | null;
+  readonly final_total_bytes: number | null;
+  readonly final_sha256: string | null;
+}
+
+interface ArtifactCleanupJournalRow {
+  readonly upload_id: string;
+  readonly status: string;
+  readonly attempt_count: number;
+  readonly next_attempt_at: string | null;
+  readonly last_error_code: string | null;
+  readonly last_error_message: string | null;
+  readonly last_retry_delay_seconds: number | null;
+  readonly completed_at: string | null;
+}
+
+interface ArtifactReconciliationCursorRow {
+  readonly name: string;
+  readonly sweep_generation: number;
+  readonly after_key: string | null;
+  readonly updated_at: string;
+  readonly last_completed_at: string | null;
+}
+
 const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 const artifactNamePattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
+const reconciliationCursorKeyPattern = /^[A-Za-z0-9._/-]{1,256}$/u;
+const cleanupRetryMessages: Readonly<Record<ArtifactCleanupRetryErrorCode, string>> = Object.freeze(
+  {
+    storage_busy: "Artifact staging cleanup is temporarily busy.",
+    storage_io_failure: "Artifact staging cleanup encountered a storage I/O failure.",
+    storage_timeout: "Artifact staging cleanup exceeded its bounded deadline.",
+    storage_unavailable: "Artifact staging cleanup owner is unavailable.",
+  },
+);
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -282,6 +493,166 @@ const securelyMatchesSha256 = (actual: string, expected: string): boolean =>
   sha256Pattern.test(actual) &&
   sha256Pattern.test(expected) &&
   timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
+
+const snapshotExactInput = (
+  value: unknown,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, unknown>> => {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new TypeError();
+    }
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError();
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length !== expectedKeys.length ||
+      keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+    ) {
+      throw new TypeError();
+    }
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of expectedKeys) {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.get !== undefined ||
+        descriptor.set !== undefined ||
+        descriptor.enumerable !== true ||
+        !("value" in descriptor)
+      ) {
+        throw new TypeError();
+      }
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+};
+
+const snapshotEmptyReconciliationInput = (value: unknown): void => {
+  snapshotExactInput(value, []);
+};
+
+const snapshotReconciliationBatchSize = (value: unknown): number => {
+  const snapshot = snapshotExactInput(value, ["batchSize"]);
+  const batchSize = snapshot.batchSize;
+  if (
+    !Number.isSafeInteger(batchSize) ||
+    (batchSize as number) < 1 ||
+    (batchSize as number) > maximumArtifactReconciliationBatchSize
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return batchSize as number;
+};
+
+const requireCanonicalDateTime = (value: unknown): string => {
+  if (typeof value !== "string" || value.length < 1 || value.length > 64) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value;
+};
+
+const requireReconciliationCount = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value as number;
+};
+
+const requireReconciliationCursorKey = (value: unknown): string => {
+  if (
+    typeof value !== "string" ||
+    value.length > maximumArtifactReconciliationCursorKeyLength ||
+    Buffer.byteLength(value, "utf8") !== value.length ||
+    !reconciliationCursorKeyPattern.test(value) ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.includes("//") ||
+    value.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return value;
+};
+
+const snapshotExpectedCleanupAttempt = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 7) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return value as number;
+};
+
+const expectedCleanupStatus = (attemptCount: number): "pending" | "retry_waiting" =>
+  attemptCount === 0 ? "pending" : "retry_waiting";
+
+/** Internal Server authority only; Worker-facing routes must never dispatch these operations. */
+export type ArtifactReconciliationDatabaseOperation =
+  | "terminalizeInactiveArtifactUploads"
+  | "listDueArtifactCleanups"
+  | "completeArtifactCleanup"
+  | "recordArtifactCleanupFailure"
+  | "readArtifactHealthAccounting"
+  | "readArtifactReconciliationCursor"
+  | "advanceArtifactReconciliationCursor";
+
+export const isArtifactReconciliationDatabaseOperation = (
+  operation: string,
+): operation is ArtifactReconciliationDatabaseOperation => {
+  switch (operation) {
+    case "terminalizeInactiveArtifactUploads":
+    case "listDueArtifactCleanups":
+    case "completeArtifactCleanup":
+    case "recordArtifactCleanupFailure":
+    case "readArtifactHealthAccounting":
+    case "readArtifactReconciliationCursor":
+    case "advanceArtifactReconciliationCursor":
+      return true;
+    default:
+      return false;
+  }
+};
+
+export const snapshotArtifactReconciliationDatabaseInput = (
+  operation: ArtifactReconciliationDatabaseOperation,
+  value: unknown,
+): Readonly<Record<string, unknown>> => {
+  switch (operation) {
+    case "terminalizeInactiveArtifactUploads":
+    case "listDueArtifactCleanups":
+      return snapshotExactInput(value, ["batchSize"]);
+    case "completeArtifactCleanup":
+      return snapshotExactInput(value, ["uploadId", "expectedAttemptCount"]);
+    case "recordArtifactCleanupFailure":
+      return snapshotExactInput(value, [
+        "uploadId",
+        "expectedAttemptCount",
+        "errorCode",
+        "retryDelaySeconds",
+      ]);
+    case "readArtifactHealthAccounting":
+    case "readArtifactReconciliationCursor":
+      return snapshotExactInput(value, []);
+    case "advanceArtifactReconciliationCursor":
+      return snapshotExactInput(value, [
+        "expectedSweepGeneration",
+        "expectedAfterKey",
+        "nextAfterKey",
+        "completedSweep",
+      ]);
+    default:
+      throw new ArtifactReconciliationInvalidRequestError();
+  }
+};
 
 const withImmediateTransaction = <T>(database: DatabaseSync, action: () => T): T => {
   database.exec("BEGIN IMMEDIATE");
@@ -292,6 +663,21 @@ const withImmediateTransaction = <T>(database: DatabaseSync, action: () => T): T
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
+  }
+};
+
+const withArtifactReconciliationTransaction = <T>(database: DatabaseSync, action: () => T): T => {
+  try {
+    return withImmediateTransaction(database, action);
+  } catch (error) {
+    if (
+      error instanceof ArtifactReconciliationInvalidRequestError ||
+      error instanceof ArtifactReconciliationConflictError ||
+      error instanceof ArtifactReconciliationStateError
+    ) {
+      throw error;
+    }
+    throw new ArtifactReconciliationStateError();
   }
 };
 
@@ -889,6 +1275,675 @@ export const terminateArtifactUpload = (
       replayed: false,
     };
   });
+
+/** Closes artifact authority without presenting or manufacturing a Worker lease token. */
+export const terminalizeInactiveArtifactUploads = (
+  database: DatabaseSync,
+  input: TerminalizeInactiveArtifactUploadsInput,
+): TerminalizeInactiveArtifactUploadsResult => {
+  const batchSize = snapshotReconciliationBatchSize(input);
+  return withArtifactReconciliationTransaction(database, () => {
+    const now = new Date().toISOString();
+    const rows = database
+      .prepare(`
+        SELECT
+          upload.id,
+          upload.run_attempt_id AS upload_run_attempt_id,
+          upload.worker_node_id AS upload_worker_node_id,
+          upload.worker_instance_id AS upload_worker_instance_id,
+          upload.lease_generation AS upload_lease_generation,
+          attempt.worker_node_id AS attempt_worker_node_id,
+          attempt.worker_instance_id AS attempt_worker_instance_id,
+          attempt.lease_generation AS attempt_lease_generation,
+          attempt.status AS attempt_status,
+          attempt.completion_mode,
+          attempt.lease_expires_at,
+          attempt.execution_deadline_at,
+          attempt.no_progress_deadline_at,
+          job.status AS job_status,
+          job.current_run_attempt_id,
+          worker.superseded_at AS worker_superseded_at
+        FROM artifact_uploads AS upload INDEXED BY ix_artifact_uploads_reconciliation_v1
+        JOIN run_attempts AS attempt
+          ON attempt.id = upload.run_attempt_id AND attempt.job_id = upload.job_id
+        JOIN jobs AS job ON job.id = upload.job_id
+        JOIN workers AS worker ON worker.id = attempt.worker_id
+        WHERE upload.status IN ('receiving', 'finalizing')
+          AND (
+            upload.worker_node_id <> attempt.worker_node_id
+            OR upload.worker_instance_id <> attempt.worker_instance_id
+            OR upload.lease_generation <> attempt.lease_generation
+            OR attempt.status NOT IN ('leased', 'running')
+            OR attempt.completion_mode <> 'result_artifact_v1'
+            OR job.status NOT IN ('leased', 'running')
+            OR job.current_run_attempt_id IS NULL
+            OR job.current_run_attempt_id <> upload.run_attempt_id
+            OR attempt.lease_expires_at <= ?
+            OR attempt.execution_deadline_at <= ?
+            OR attempt.no_progress_deadline_at <= ?
+            OR worker.superseded_at IS NOT NULL
+          )
+        ORDER BY upload.updated_at, upload.id
+        LIMIT ?
+      `)
+      .all(now, now, now, batchSize + 1) as unknown as readonly InactiveArtifactUploadRow[];
+    const selected = rows.slice(0, batchSize);
+    const terminalized = selected.map((row): TerminalizedInactiveArtifactUpload => {
+      const disposition = classifyInactiveArtifactUpload(row, now);
+      const update = database
+        .prepare(`
+          UPDATE artifact_uploads
+          SET
+            status = ?,
+            terminated_at = ?,
+            termination_reason = ?,
+            updated_at = ?
+          WHERE id = ? AND status IN ('receiving', 'finalizing')
+        `)
+        .run(disposition.state, now, disposition.reason, now, row.id);
+      if (Number(update.changes) !== 1) {
+        throw new ArtifactReconciliationConflictError();
+      }
+      return Object.freeze({
+        uploadId: row.id,
+        state: disposition.state,
+        reason: disposition.reason,
+        terminatedAt: now,
+      });
+    });
+    return Object.freeze({
+      terminalized: Object.freeze(terminalized),
+      hasMore: rows.length > batchSize,
+    });
+  });
+};
+
+export const listDueArtifactCleanups = (
+  database: DatabaseSync,
+  input: ListDueArtifactCleanupsInput,
+): ListDueArtifactCleanupsResult => {
+  const batchSize = snapshotReconciliationBatchSize(input);
+  return withArtifactReconciliationTransaction(database, () => {
+    const now = new Date().toISOString();
+    const rows = database
+      .prepare(artifactDueCleanupPageSql)
+      .all(now, batchSize + 1) as unknown as readonly ArtifactCleanupWorkRow[];
+    return Object.freeze({
+      items: Object.freeze(
+        rows.slice(0, batchSize).map((row) => snapshotCleanupWorkItem(row, now)),
+      ),
+      hasMore: rows.length > batchSize,
+    });
+  });
+};
+
+export const completeArtifactCleanup = (
+  database: DatabaseSync,
+  input: CompleteArtifactCleanupInput,
+): CompleteArtifactCleanupResult => {
+  const snapshot = snapshotExactInput(input, ["uploadId", "expectedAttemptCount"]);
+  const uploadId = requireReconciliationUploadId(snapshot.uploadId);
+  const expectedAttemptCount = snapshotExpectedCleanupAttempt(snapshot.expectedAttemptCount);
+  return withArtifactReconciliationTransaction(database, () => {
+    const existing = requireArtifactCleanupJournal(database, uploadId);
+    if (
+      existing.status === "completed" &&
+      existing.attempt_count === expectedAttemptCount &&
+      existing.completed_at !== null
+    ) {
+      return Object.freeze({
+        uploadId,
+        status: "completed" as const,
+        attemptCount: expectedAttemptCount,
+        completedAt: requireCanonicalDateTime(existing.completed_at),
+        replayed: true,
+      });
+    }
+    if (
+      existing.status !== expectedCleanupStatus(expectedAttemptCount) ||
+      existing.attempt_count !== expectedAttemptCount
+    ) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    const now = new Date().toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_upload_cleanup_journal
+        SET
+          status = 'completed',
+          next_attempt_at = NULL,
+          updated_at = ?,
+          completed_at = ?
+        WHERE upload_id = ? AND status = ? AND attempt_count = ?
+      `)
+      .run(now, now, uploadId, expectedCleanupStatus(expectedAttemptCount), expectedAttemptCount);
+    if (Number(update.changes) !== 1) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    return Object.freeze({
+      uploadId,
+      status: "completed" as const,
+      attemptCount: expectedAttemptCount,
+      completedAt: now,
+      replayed: false,
+    });
+  });
+};
+
+export const recordArtifactCleanupFailure = (
+  database: DatabaseSync,
+  input: RecordArtifactCleanupFailureInput,
+): RecordArtifactCleanupFailureResult => {
+  const snapshot = snapshotExactInput(input, [
+    "uploadId",
+    "expectedAttemptCount",
+    "errorCode",
+    "retryDelaySeconds",
+  ]);
+  const uploadId = requireReconciliationUploadId(snapshot.uploadId);
+  const expectedAttemptCount = snapshotExpectedCleanupAttempt(snapshot.expectedAttemptCount);
+  const errorCode = snapshot.errorCode;
+  if (typeof errorCode !== "string" || !Object.hasOwn(cleanupRetryMessages, errorCode)) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const retryDelaySeconds = snapshot.retryDelaySeconds;
+  if (
+    !Number.isSafeInteger(retryDelaySeconds) ||
+    (retryDelaySeconds as number) < 1 ||
+    (retryDelaySeconds as number) > maximumArtifactCleanupRetryDelaySeconds
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const canonicalRetryDelaySeconds = retryDelaySeconds as number;
+  const canonicalErrorCode = errorCode as ArtifactCleanupRetryErrorCode;
+  return withArtifactReconciliationTransaction(database, () => {
+    const existing = requireArtifactCleanupJournal(database, uploadId);
+    const nextAttemptCount = expectedAttemptCount + 1;
+    const nextStatus = nextAttemptCount === 8 ? "failed" : "retry_waiting";
+    if (
+      existing.attempt_count === nextAttemptCount &&
+      existing.status === nextStatus &&
+      existing.last_error_code === canonicalErrorCode &&
+      existing.last_error_message === cleanupRetryMessages[canonicalErrorCode] &&
+      existing.last_retry_delay_seconds === canonicalRetryDelaySeconds
+    ) {
+      return Object.freeze({
+        uploadId,
+        status: nextStatus,
+        attemptCount: nextAttemptCount,
+        nextAttemptAt:
+          nextStatus === "failed" ? null : requireCanonicalDateTime(existing.next_attempt_at),
+        errorCode: canonicalErrorCode,
+        retryDelaySeconds: canonicalRetryDelaySeconds,
+        replayed: true,
+      });
+    }
+    if (
+      existing.status !== expectedCleanupStatus(expectedAttemptCount) ||
+      existing.attempt_count !== expectedAttemptCount
+    ) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+    const nextAttemptAt =
+      nextStatus === "failed"
+        ? null
+        : new Date(nowDate.getTime() + canonicalRetryDelaySeconds * 1_000).toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_upload_cleanup_journal
+        SET
+          status = ?,
+          attempt_count = ?,
+          next_attempt_at = ?,
+          last_error_code = ?,
+          last_error_message = ?,
+          last_retry_delay_seconds = ?,
+          updated_at = ?,
+          completed_at = NULL
+        WHERE upload_id = ? AND status = ? AND attempt_count = ?
+      `)
+      .run(
+        nextStatus,
+        nextAttemptCount,
+        nextAttemptAt,
+        canonicalErrorCode,
+        cleanupRetryMessages[canonicalErrorCode],
+        canonicalRetryDelaySeconds,
+        now,
+        uploadId,
+        expectedCleanupStatus(expectedAttemptCount),
+        expectedAttemptCount,
+      );
+    if (Number(update.changes) !== 1) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    return Object.freeze({
+      uploadId,
+      status: nextStatus,
+      attemptCount: nextAttemptCount,
+      nextAttemptAt,
+      errorCode: canonicalErrorCode,
+      retryDelaySeconds: canonicalRetryDelaySeconds,
+      replayed: false,
+    });
+  });
+};
+
+export const readArtifactHealthAccounting = (
+  database: DatabaseSync,
+  input: Record<string, never>,
+): ArtifactHealthAccounting => {
+  snapshotEmptyReconciliationInput(input);
+  return withArtifactReconciliationTransaction(database, () => {
+    const now = new Date().toISOString();
+    const active = database
+      .prepare(`
+        SELECT
+          COALESCE(SUM(CASE WHEN status = 'receiving' THEN 1 ELSE 0 END), 0) AS receiving,
+          COALESCE(SUM(CASE WHEN status = 'finalizing' THEN 1 ELSE 0 END), 0) AS finalizing
+        FROM artifact_uploads
+      `)
+      .get() as unknown as { readonly receiving: number; readonly finalizing: number };
+    const cleanup = database
+      .prepare(`
+        SELECT
+          COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+          COALESCE(SUM(CASE WHEN status = 'retry_waiting' THEN 1 ELSE 0 END), 0)
+            AS retry_waiting,
+          COALESCE(SUM(CASE
+            WHEN status = 'pending'
+              OR (status = 'retry_waiting' AND next_attempt_at <= ?)
+            THEN 1 ELSE 0 END), 0) AS due,
+          COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+          COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+          COALESCE(SUM(CASE
+            WHEN (status = 'pending' AND last_retry_delay_seconds IS NOT NULL)
+              OR (status IN ('retry_waiting', 'failed')
+                AND last_retry_delay_seconds IS NULL)
+              OR (status = 'completed'
+                AND (
+                  (attempt_count = 0 AND last_retry_delay_seconds IS NOT NULL)
+                  OR (attempt_count > 0 AND last_retry_delay_seconds IS NULL)
+                ))
+            THEN 1 ELSE 0 END), 0) AS invalid_retry_identity,
+          MIN(CASE
+            WHEN status IN ('pending', 'retry_waiting', 'failed') THEN created_at
+            ELSE NULL
+          END) AS oldest_outstanding_at
+        FROM artifact_upload_cleanup_journal
+      `)
+      .get(now) as unknown as {
+      readonly pending: number;
+      readonly retry_waiting: number;
+      readonly due: number;
+      readonly completed: number;
+      readonly failed: number;
+      readonly invalid_retry_identity: number;
+      readonly oldest_outstanding_at: string | null;
+    };
+    return Object.freeze({
+      activeUploads: Object.freeze({
+        receiving: requireReconciliationCount(active.receiving),
+        finalizing: requireReconciliationCount(active.finalizing),
+      }),
+      cleanup: Object.freeze({
+        pending: requireReconciliationCount(cleanup.pending),
+        retryWaiting: requireReconciliationCount(cleanup.retry_waiting),
+        due: requireReconciliationCount(cleanup.due),
+        completed: requireReconciliationCount(cleanup.completed),
+        failed: requireReconciliationCount(cleanup.failed),
+        invalidRetryIdentity: requireReconciliationCount(cleanup.invalid_retry_identity),
+        oldestOutstandingAt:
+          cleanup.oldest_outstanding_at === null
+            ? null
+            : requireCanonicalDateTime(cleanup.oldest_outstanding_at),
+      }),
+      capacity: readArtifactUploadCreateAccounting(database),
+    });
+  });
+};
+
+export const readArtifactReconciliationCursor = (
+  database: DatabaseSync,
+  input: Record<string, never>,
+): ArtifactReconciliationCursor => {
+  snapshotEmptyReconciliationInput(input);
+  return withArtifactReconciliationTransaction(database, () => readReconciliationCursor(database));
+};
+
+export const advanceArtifactReconciliationCursor = (
+  database: DatabaseSync,
+  input: AdvanceArtifactReconciliationCursorInput,
+): ArtifactReconciliationCursor => {
+  const snapshot = snapshotExactInput(input, [
+    "expectedSweepGeneration",
+    "expectedAfterKey",
+    "nextAfterKey",
+    "completedSweep",
+  ]);
+  const expectedSweepGeneration = snapshot.expectedSweepGeneration;
+  if (!Number.isSafeInteger(expectedSweepGeneration) || (expectedSweepGeneration as number) < 0) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  const expectedAfterKey =
+    snapshot.expectedAfterKey === null
+      ? null
+      : requireReconciliationCursorKey(snapshot.expectedAfterKey);
+  const nextAfterKey =
+    snapshot.nextAfterKey === null ? null : requireReconciliationCursorKey(snapshot.nextAfterKey);
+  const completedSweep = snapshot.completedSweep;
+  if (
+    typeof completedSweep !== "boolean" ||
+    (completedSweep && nextAfterKey !== null) ||
+    (!completedSweep && nextAfterKey === null) ||
+    (!completedSweep &&
+      expectedAfterKey !== null &&
+      nextAfterKey !== null &&
+      nextAfterKey <= expectedAfterKey)
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  if (completedSweep && expectedSweepGeneration === Number.MAX_SAFE_INTEGER) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return withArtifactReconciliationTransaction(database, () => {
+    const current = readReconciliationCursor(database);
+    if (
+      current.sweepGeneration !== expectedSweepGeneration ||
+      current.afterKey !== expectedAfterKey
+    ) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    const now = new Date().toISOString();
+    const nextGeneration = completedSweep
+      ? (expectedSweepGeneration as number) + 1
+      : (expectedSweepGeneration as number);
+    const update = database
+      .prepare(`
+        UPDATE artifact_reconciliation_cursors
+        SET
+          sweep_generation = ?,
+          after_key = ?,
+          updated_at = ?,
+          last_completed_at = CASE WHEN ? THEN ? ELSE last_completed_at END
+        WHERE name = ? AND sweep_generation = ? AND after_key IS ?
+      `)
+      .run(
+        nextGeneration,
+        nextAfterKey,
+        now,
+        completedSweep ? 1 : 0,
+        now,
+        artifactReconciliationCursorName,
+        expectedSweepGeneration,
+        expectedAfterKey,
+      );
+    if (Number(update.changes) !== 1) {
+      throw new ArtifactReconciliationConflictError();
+    }
+    return readReconciliationCursor(database);
+  });
+};
+
+function classifyInactiveArtifactUpload(
+  row: InactiveArtifactUploadRow,
+  now: string,
+): {
+  readonly state: "abandoned" | "corrupt";
+  readonly reason: ArtifactUploadAuthorityClosureReason;
+} {
+  requireReconciliationStateUploadId(row.id);
+  if (
+    row.upload_worker_node_id !== row.attempt_worker_node_id ||
+    row.upload_worker_instance_id !== row.attempt_worker_instance_id ||
+    row.upload_lease_generation !== row.attempt_lease_generation
+  ) {
+    return { state: "corrupt", reason: "metadata_fence_mismatch" };
+  }
+  if (row.attempt_status !== "leased" && row.attempt_status !== "running") {
+    return { state: "abandoned", reason: "attempt_inactive" };
+  }
+  if (row.job_status !== "leased" && row.job_status !== "running") {
+    return { state: "abandoned", reason: "job_inactive" };
+  }
+  if (row.current_run_attempt_id !== row.upload_run_attempt_id) {
+    return { state: "abandoned", reason: "attempt_not_current" };
+  }
+  if (row.completion_mode !== "result_artifact_v1") {
+    return { state: "abandoned", reason: "completion_mode_inactive" };
+  }
+  if (requireCanonicalDateTime(row.lease_expires_at) <= now) {
+    return { state: "abandoned", reason: "lease_expired" };
+  }
+  if (requireCanonicalDateTime(row.execution_deadline_at) <= now) {
+    return { state: "abandoned", reason: "execution_deadline_expired" };
+  }
+  if (requireCanonicalDateTime(row.no_progress_deadline_at) <= now) {
+    return { state: "abandoned", reason: "no_progress_deadline_expired" };
+  }
+  if (row.worker_superseded_at !== null) {
+    requireCanonicalDateTime(row.worker_superseded_at);
+    return { state: "abandoned", reason: "worker_superseded" };
+  }
+  throw new ArtifactReconciliationStateError();
+}
+
+function snapshotCleanupWorkItem(
+  row: ArtifactCleanupWorkRow,
+  now: string,
+): ArtifactCleanupWorkItem {
+  const uploadId = requireReconciliationStateUploadId(row.upload_id);
+  if (
+    (row.journal_terminal_status !== "committed" &&
+      row.journal_terminal_status !== "abandoned" &&
+      row.journal_terminal_status !== "corrupt") ||
+    row.upload_status !== row.journal_terminal_status ||
+    row.cleanup_scope !== "staging_only_v1" ||
+    (row.cleanup_status !== "pending" && row.cleanup_status !== "retry_waiting") ||
+    !Number.isSafeInteger(row.attempt_count) ||
+    (row.cleanup_status === "pending" &&
+      (row.attempt_count !== 0 ||
+        row.next_attempt_at !== null ||
+        row.last_error_code !== null ||
+        row.last_error_message !== null ||
+        row.last_retry_delay_seconds !== null)) ||
+    (row.cleanup_status === "retry_waiting" &&
+      (row.attempt_count < 1 ||
+        row.attempt_count > 7 ||
+        row.next_attempt_at === null ||
+        requireCanonicalDateTime(row.next_attempt_at) > now ||
+        typeof row.last_error_code !== "string" ||
+        !Object.hasOwn(cleanupRetryMessages, row.last_error_code) ||
+        row.last_error_message !==
+          cleanupRetryMessages[row.last_error_code as ArtifactCleanupRetryErrorCode] ||
+        !Number.isSafeInteger(row.last_retry_delay_seconds) ||
+        (row.last_retry_delay_seconds as number) < 1 ||
+        (row.last_retry_delay_seconds as number) > maximumArtifactCleanupRetryDelaySeconds))
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const hasFinalization = row.finalization_id !== null;
+  if (
+    hasFinalization !== (row.final_total_bytes !== null) ||
+    hasFinalization !== (row.final_sha256 !== null) ||
+    (row.journal_terminal_status === "committed" && !hasFinalization)
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const publications = hasFinalization
+    ? [
+        Object.freeze({
+          finalizationId: requireReconciliationUuid(row.finalization_id),
+          totalBytes: requireReconciliationArtifactBytes(row.final_total_bytes),
+          sha256: requireReconciliationSha256(row.final_sha256),
+        }),
+      ]
+    : [];
+  return Object.freeze({
+    uploadId,
+    terminalStatus: row.journal_terminal_status,
+    cleanupScope: "staging_only_v1",
+    expectedAttemptCount: row.attempt_count,
+    lastRetryDelaySeconds: row.last_retry_delay_seconds,
+    publications: Object.freeze(publications),
+  });
+}
+
+function requireArtifactCleanupJournal(
+  database: DatabaseSync,
+  uploadId: string,
+): ArtifactCleanupJournalRow {
+  const row = database
+    .prepare(`
+      SELECT
+        upload_id,
+        status,
+        attempt_count,
+        next_attempt_at,
+        last_error_code,
+        last_error_message,
+        last_retry_delay_seconds,
+        completed_at
+      FROM artifact_upload_cleanup_journal
+      WHERE upload_id = ?
+    `)
+    .get(uploadId) as unknown as ArtifactCleanupJournalRow | undefined;
+  if (row === undefined) {
+    throw new ArtifactReconciliationConflictError();
+  }
+  requireReconciliationStateUploadId(row.upload_id);
+  if (!Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0 || row.attempt_count > 8) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const hasKnownError =
+    typeof row.last_error_code === "string" &&
+    Object.hasOwn(cleanupRetryMessages, row.last_error_code) &&
+    row.last_error_message ===
+      cleanupRetryMessages[row.last_error_code as ArtifactCleanupRetryErrorCode];
+  const hasKnownRetryDelay =
+    Number.isSafeInteger(row.last_retry_delay_seconds) &&
+    (row.last_retry_delay_seconds as number) >= 1 &&
+    (row.last_retry_delay_seconds as number) <= maximumArtifactCleanupRetryDelaySeconds;
+  const valid =
+    (row.status === "pending" &&
+      row.attempt_count === 0 &&
+      row.next_attempt_at === null &&
+      row.last_error_code === null &&
+      row.last_error_message === null &&
+      row.last_retry_delay_seconds === null &&
+      row.completed_at === null) ||
+    (row.status === "retry_waiting" &&
+      row.attempt_count >= 1 &&
+      row.attempt_count <= 7 &&
+      row.next_attempt_at !== null &&
+      hasKnownError &&
+      hasKnownRetryDelay &&
+      row.completed_at === null) ||
+    (row.status === "completed" &&
+      row.attempt_count <= 7 &&
+      row.next_attempt_at === null &&
+      row.completed_at !== null &&
+      ((row.attempt_count === 0 &&
+        row.last_error_code === null &&
+        row.last_error_message === null &&
+        row.last_retry_delay_seconds === null) ||
+        (row.attempt_count >= 1 && hasKnownError && hasKnownRetryDelay))) ||
+    (row.status === "failed" &&
+      row.attempt_count === 8 &&
+      row.next_attempt_at === null &&
+      hasKnownError &&
+      hasKnownRetryDelay &&
+      row.completed_at === null);
+  if (!valid) {
+    throw new ArtifactReconciliationStateError();
+  }
+  if (row.next_attempt_at !== null) {
+    requireCanonicalDateTime(row.next_attempt_at);
+  }
+  if (row.completed_at !== null) {
+    requireCanonicalDateTime(row.completed_at);
+  }
+  return row;
+}
+
+function readReconciliationCursor(database: DatabaseSync): ArtifactReconciliationCursor {
+  const row = database
+    .prepare(`
+      SELECT name, sweep_generation, after_key, updated_at, last_completed_at
+      FROM artifact_reconciliation_cursors
+      WHERE name = ?
+    `)
+    .get(artifactReconciliationCursorName) as unknown as
+    | ArtifactReconciliationCursorRow
+    | undefined;
+  if (
+    row === undefined ||
+    row.name !== artifactReconciliationCursorName ||
+    !Number.isSafeInteger(row.sweep_generation) ||
+    row.sweep_generation < 0
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  const afterKey =
+    row.after_key === null
+      ? null
+      : (() => {
+          try {
+            return requireReconciliationCursorKey(row.after_key);
+          } catch {
+            throw new ArtifactReconciliationStateError();
+          }
+        })();
+  return Object.freeze({
+    name: artifactReconciliationCursorName,
+    sweepGeneration: row.sweep_generation,
+    afterKey,
+    updatedAt: requireCanonicalDateTime(row.updated_at),
+    lastCompletedAt:
+      row.last_completed_at === null ? null : requireCanonicalDateTime(row.last_completed_at),
+  });
+}
+
+function requireReconciliationUploadId(value: unknown): string {
+  if (typeof value !== "string" || !entityIdPattern.test(value)) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return value;
+}
+
+function requireReconciliationStateUploadId(value: unknown): string {
+  if (typeof value !== "string" || !entityIdPattern.test(value)) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value;
+}
+
+function requireReconciliationUuid(value: unknown): string {
+  if (typeof value !== "string" || !uuidV4Pattern.test(value)) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value;
+}
+
+function requireReconciliationSha256(value: unknown): string {
+  if (typeof value !== "string" || !sha256Pattern.test(value)) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value;
+}
+
+function requireReconciliationArtifactBytes(value: unknown): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    (value as number) < 1 ||
+    (value as number) > maximumResultArtifactBytes
+  ) {
+    throw new ArtifactReconciliationStateError();
+  }
+  return value as number;
+}
 
 function requireActiveLease(
   database: DatabaseSync,

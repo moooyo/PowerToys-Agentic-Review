@@ -29,17 +29,28 @@ import type {
   OperatorSession,
 } from "../security/operator-auth.js";
 import type {
+  AdvanceArtifactReconciliationCursorInput,
+  ArtifactHealthAccounting,
+  ArtifactReconciliationCursor,
   CommitArtifactChunkInput,
   CommitArtifactChunkResult,
   CommitArtifactFinalizeInput,
   CommitArtifactFinalizeResult,
+  CompleteArtifactCleanupInput,
+  CompleteArtifactCleanupResult,
   CreateArtifactUploadInput,
   CreateArtifactUploadResult,
+  ListDueArtifactCleanupsInput,
+  ListDueArtifactCleanupsResult,
   PrepareArtifactChunkInput,
   PrepareArtifactChunkResult,
   PrepareArtifactFinalizeInput,
   PrepareArtifactFinalizeResult,
   ProbeArtifactUploadCreateResult,
+  RecordArtifactCleanupFailureInput,
+  RecordArtifactCleanupFailureResult,
+  TerminalizeInactiveArtifactUploadsInput,
+  TerminalizeInactiveArtifactUploadsResult,
   TerminateArtifactUploadInput,
   TerminateArtifactUploadResult,
 } from "./artifacts.js";
@@ -249,6 +260,34 @@ export interface DatabaseOperationMap {
   readonly terminateArtifactUpload: {
     readonly input: TerminateArtifactUploadInput;
     readonly output: TerminateArtifactUploadResult;
+  };
+  readonly terminalizeInactiveArtifactUploads: {
+    readonly input: TerminalizeInactiveArtifactUploadsInput;
+    readonly output: TerminalizeInactiveArtifactUploadsResult;
+  };
+  readonly listDueArtifactCleanups: {
+    readonly input: ListDueArtifactCleanupsInput;
+    readonly output: ListDueArtifactCleanupsResult;
+  };
+  readonly completeArtifactCleanup: {
+    readonly input: CompleteArtifactCleanupInput;
+    readonly output: CompleteArtifactCleanupResult;
+  };
+  readonly recordArtifactCleanupFailure: {
+    readonly input: RecordArtifactCleanupFailureInput;
+    readonly output: RecordArtifactCleanupFailureResult;
+  };
+  readonly readArtifactHealthAccounting: {
+    readonly input: Record<string, never>;
+    readonly output: ArtifactHealthAccounting;
+  };
+  readonly readArtifactReconciliationCursor: {
+    readonly input: Record<string, never>;
+    readonly output: ArtifactReconciliationCursor;
+  };
+  readonly advanceArtifactReconciliationCursor: {
+    readonly input: AdvanceArtifactReconciliationCursorInput;
+    readonly output: ArtifactReconciliationCursor;
   };
   readonly completeLease: {
     readonly input: LeaseCompletionInput;
