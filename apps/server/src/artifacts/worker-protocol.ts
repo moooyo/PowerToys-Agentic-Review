@@ -57,7 +57,6 @@ import type {
 
 export const artifactStorageProtocolVersion = 1;
 export const maximumArtifactStorageRequestId = 2_147_483_647;
-export const artifactStorageProcessEntryArgument = "--artifact-storage-owner-v1";
 
 export type ArtifactStorageWireErrorCode =
   | "ARTIFACT_STORAGE_CAPACITY"
@@ -167,12 +166,6 @@ export type ArtifactStorageWorkerMessage =
     };
 
 export interface ArtifactStorageWorkerData {
-  readonly protocolVersion: typeof artifactStorageProtocolVersion;
-  readonly storage: ArtifactStorageKernelOptions;
-}
-
-export interface ArtifactStorageProcessInitialize {
-  readonly type: "initialize";
   readonly protocolVersion: typeof artifactStorageProtocolVersion;
   readonly storage: ArtifactStorageKernelOptions;
 }
@@ -358,21 +351,6 @@ export const normalizeArtifactStorageWorkerData = (value: unknown): ArtifactStor
       ...(closeTimeoutMilliseconds === undefined ? {} : { closeTimeoutMilliseconds }),
     }),
   });
-};
-
-export const parseArtifactStorageProcessInitialize = (
-  value: unknown,
-): ArtifactStorageProcessInitialize => {
-  const record = requireRecord(value, "Artifact storage process initialization");
-  requireExactKeys(record, ["type", "protocolVersion", "storage"]);
-  if (record.type !== "initialize") {
-    throw new TypeError("Artifact storage process initialization envelope is invalid.");
-  }
-  const data = normalizeArtifactStorageWorkerData({
-    protocolVersion: record.protocolVersion,
-    storage: record.storage,
-  });
-  return Object.freeze({ type: "initialize", ...data });
 };
 
 const normalizeCommittedPrefix = (value: unknown): PreparedArtifactChunk["committedPrefix"] => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { runArtifactStorageProcess } from "../../dist/artifacts/artifact-storage-process.js";
+import { runArtifactStorageWorker } from "../../dist/artifacts/artifact-storage-worker.js";
 import {
   ArtifactStorageCapacityError,
   ArtifactStorageIntegrityError,
@@ -20,17 +20,12 @@ const prepareId = "22222222-2222-4222-8222-222222222222";
 class FakeWorkerPort {
   readonly posted: unknown[] = [];
   readonly listeners = new Map<string, (value: unknown) => void>();
-  readonly exitCodes: number[] = [];
   readonly closed = Promise.withResolvers<void>();
   readonly postedWaiters = new Set<{ readonly count: number; readonly resolve: () => void }>();
-  readonly sendCallbacks: ((error: Error | null) => void)[] = [];
-  connected = true;
   closeCalls = 0;
   postError: Error | undefined;
-  deferSendCallback = false;
-  sendReturnValue = true;
 
-  send(value: unknown, callback: (error: Error | null) => void): boolean {
+  postMessage(value: unknown): void {
     if (this.postError !== undefined) {
       throw this.postError;
     }
@@ -41,33 +36,32 @@ class FakeWorkerPort {
         waiter.resolve();
       }
     }
-    if (this.deferSendCallback) {
-      this.sendCallbacks.push(callback);
-    } else {
-      callback(null);
-    }
-    return this.sendReturnValue;
   }
 
   on(event: "message", listener: (value: unknown) => void): this;
-  on(event: "disconnect", listener: () => void): this;
-  on(event: "message" | "disconnect", listener: ((value: unknown) => void) | (() => void)): this {
+  on(event: "messageerror", listener: (error: Error) => void): this;
+  on(
+    event: "message" | "messageerror",
+    listener: ((value: unknown) => void) | ((error: Error) => void),
+  ): this {
     this.listeners.set(event, listener as (value: unknown) => void);
     return this;
   }
 
-  disconnect(): void {
-    if (!this.connected) {
+  close(): void {
+    if (this.closeCalls > 0) {
       return;
     }
-    this.connected = false;
     this.closeCalls += 1;
     this.closed.resolve();
-    this.listeners.get("disconnect")?.(undefined);
   }
 
   message(value: unknown): void {
     this.listeners.get("message")?.(value);
+  }
+
+  messageError(error: Error): void {
+    this.listeners.get("messageerror")?.(error);
   }
 
   waitForPostedCount(count: number): Promise<void> {
@@ -77,14 +71,6 @@ class FakeWorkerPort {
     const waiter = Promise.withResolvers<void>();
     this.postedWaiters.add({ count, resolve: waiter.resolve });
     return waiter.promise;
-  }
-
-  completeSend(error: Error | null = null): void {
-    const callback = this.sendCallbacks.shift();
-    if (callback === undefined) {
-      throw new Error("No artifact storage process send callback is pending.");
-    }
-    callback(error);
   }
 }
 
@@ -183,7 +169,6 @@ class FakeWorkerKernel {
 }
 
 const workerData = {
-  type: "initialize",
   protocolVersion: artifactStorageProtocolVersion,
   storage: {
     rootPath: "/artifact",
@@ -198,13 +183,8 @@ const workerData = {
   },
 };
 
-const startProcess = (port: FakeWorkerPort, kernel: FakeWorkerKernel): void => {
-  runArtifactStorageProcess(
-    port,
-    () => kernel as never,
-    (exitCode) => port.exitCodes.push(exitCode),
-  );
-  port.message(workerData);
+const startWorker = (port: FakeWorkerPort, kernel: FakeWorkerKernel): void => {
+  runArtifactStorageWorker(port, workerData, () => kernel as never);
 };
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
@@ -236,7 +216,7 @@ const flush = async (): Promise<void> => {
   }
 };
 
-describe("artifact storage process protocol", () => {
+describe("artifact storage Worker protocol", () => {
   it("copies chunk views at both normalization boundaries", () => {
     const source = Buffer.from("chunk");
     const first = normalizeArtifactStorageOperationInput("writePreparedChunk", chunkInput(source));
@@ -287,11 +267,11 @@ describe("artifact storage process protocol", () => {
   });
 });
 
-describe("runArtifactStorageProcess", () => {
-  it("accepts exactly one initialization envelope before any request", async () => {
+describe("runArtifactStorageWorker", () => {
+  it("accepts initialization only through Worker data", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     expect(port.posted).toEqual([
       { type: "ready", protocolVersion: artifactStorageProtocolVersion },
     ]);
@@ -303,13 +283,13 @@ describe("runArtifactStorageProcess", () => {
       error: { code: "ARTIFACT_STORAGE_INVALID_REQUEST" },
     });
     expect(kernel.closeCalls).toBe(1);
-    expect(port.exitCodes).toEqual([1]);
+    expect(port.closeCalls).toBe(1);
   });
 
   it("dispatches a bounded namespace scan without accepting caller paths", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     const scanSessionId = "80000000-0000-4000-8000-000000000001";
     port.message(
       request(1, "scanNamespacePage", {
@@ -360,65 +340,38 @@ describe("runArtifactStorageProcess", () => {
     expect(kernel.closeCalls).toBe(1);
   });
 
-  it("fails closed when the parent disconnects without shutdown", async () => {
+  it("fails closed when a request cannot be cloned", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
-    port.disconnect();
-    await flush();
+    startWorker(port, kernel);
+    port.messageError(new Error("injected clone failure"));
+    await port.closed.promise;
+    expect(port.posted.at(-1)).toMatchObject({
+      type: "fatal",
+      error: { code: "ARTIFACT_STORAGE_INVALID_REQUEST" },
+    });
     expect(kernel.closeCalls).toBe(1);
-    expect(port.exitCodes).toEqual([1]);
-  });
-
-  it("treats IPC backpressure as nonfatal and waits for every send callback", async () => {
-    const port = new FakeWorkerPort();
-    const kernel = new FakeWorkerKernel();
-    port.deferSendCallback = true;
-    port.sendReturnValue = false;
-    startProcess(port, kernel);
-    expect(port.posted[0]).toMatchObject({ type: "ready" });
-    expect(port.closeCalls).toBe(0);
-    port.completeSend();
-
-    port.message(request(1, "cleanupUpload", { uploadId }));
-    await flush();
-    expect(port.posted[1]).toMatchObject({ type: "response", id: 1, ok: true });
-    port.completeSend();
-    await flush();
-
-    port.message(request(2, "shutdown", {}));
-    await flush();
-    expect(port.posted[2]).toMatchObject({ type: "response", id: 2, operation: "shutdown" });
-    expect(port.closeCalls).toBe(0);
-    port.completeSend();
-    await flush();
     expect(port.closeCalls).toBe(1);
-    expect(port.exitCodes).toEqual([0]);
   });
 
-  it("fails closed when the shutdown acknowledgement send callback rejects", async () => {
+  it("fails closed when the shutdown acknowledgement cannot be posted", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
-    port.deferSendCallback = true;
+    startWorker(port, kernel);
+    port.postError = new Error("injected shutdown post failure");
     port.message(request(1, "shutdown", {}));
-    await flush();
-    expect(port.posted[1]).toMatchObject({ type: "response", operation: "shutdown" });
-    port.completeSend(new Error("injected shutdown send callback failure"));
-    await flush();
-    expect(port.posted[2]).toMatchObject({ type: "fatal" });
-    expect(port.closeCalls).toBe(0);
-    port.completeSend();
-    await flush();
+    await port.closed.promise;
+    expect(port.posted).toEqual([
+      { type: "ready", protocolVersion: artifactStorageProtocolVersion },
+    ]);
     expect(kernel.closeCalls).toBe(1);
     expect(port.closeCalls).toBe(1);
-    expect(port.exitCodes).toEqual([1]);
   });
 
   it("becomes ready only after creating the kernel and revalidates copied bytes", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     expect(port.posted[0]).toEqual({
       type: "ready",
       protocolVersion: artifactStorageProtocolVersion,
@@ -443,7 +396,7 @@ describe("runArtifactStorageProcess", () => {
       durableOffsetBytes: 5,
       replayed: false,
     });
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     port.message(request(1, "writePreparedChunk", chunkInput()));
     await port.closed.promise;
     expect(port.posted[1]).toMatchObject({
@@ -461,7 +414,7 @@ describe("runArtifactStorageProcess", () => {
     ]) {
       const port = new FakeWorkerPort();
       const kernel = new FakeWorkerKernel();
-      startProcess(port, kernel);
+      startWorker(port, kernel);
       port.message(forged);
       await flush();
       expect(port.posted[1]).toMatchObject({
@@ -478,7 +431,7 @@ describe("runArtifactStorageProcess", () => {
     const kernel = new FakeWorkerKernel();
     const deferred = Promise.withResolvers<unknown>();
     kernel.chunkResult = deferred.promise;
-    startProcess(port, kernel);
+    startWorker(port, kernel);
 
     port.message(request(1, "writePreparedChunk", chunkInput()));
     port.message(request(2, "shutdown", {}));
@@ -511,11 +464,11 @@ describe("runArtifactStorageProcess", () => {
     expect(port.closeCalls).toBe(1);
   });
 
-  it("returns capacity rejection without terminating the process", async () => {
+  it("returns capacity rejection without terminating the Worker", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
     kernel.capacityError = new ArtifactStorageCapacityError("injected /secret capacity");
-    startProcess(port, kernel);
+    startWorker(port, kernel);
 
     port.message(
       request(1, "evaluateCapacity", {
@@ -570,7 +523,7 @@ describe("runArtifactStorageProcess", () => {
       projectedChargedBytes: 1n,
       projectedChargedEntries: 4,
     });
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     port.message(
       request(1, "evaluateCapacity", {
         request: { expectedTotalBytes: 1_000 },
@@ -597,7 +550,7 @@ describe("runArtifactStorageProcess", () => {
     kernel.cleanupError = new ArtifactStorageIntegrityError(
       "injected failure at /secret/artifacts/staging",
     );
-    startProcess(port, kernel);
+    startWorker(port, kernel);
 
     port.message(request(1, "cleanupUpload", { uploadId }));
     await port.closed.promise;
@@ -621,7 +574,7 @@ describe("runArtifactStorageProcess", () => {
     kernel.cleanupError = Object.assign(new Error("ENOSPC at /secret/path"), {
       code: "ENOSPC",
     });
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     port.message(request(1, "cleanupUpload", { uploadId }));
     await flush();
     expect(port.posted[1]).toEqual({
@@ -639,15 +592,10 @@ describe("runArtifactStorageProcess", () => {
   it("rejects invalid startup data before constructing a kernel", async () => {
     const port = new FakeWorkerPort();
     let factoryCalls = 0;
-    runArtifactStorageProcess(
-      port,
-      () => {
-        factoryCalls += 1;
-        return new FakeWorkerKernel() as never;
-      },
-      (exitCode) => port.exitCodes.push(exitCode),
-    );
-    port.message({ ...workerData, protocolVersion: 99 });
+    runArtifactStorageWorker(port, { ...workerData, protocolVersion: 99 }, () => {
+      factoryCalls += 1;
+      return new FakeWorkerKernel() as never;
+    });
     await flush();
     expect(factoryCalls).toBe(0);
     expect(port.posted).toEqual([
@@ -662,24 +610,23 @@ describe("runArtifactStorageProcess", () => {
       },
     ]);
     expect(port.closeCalls).toBe(1);
-    expect(port.exitCodes).toEqual([1]);
   });
 
   it("closes a constructed kernel when the ready message cannot be posted", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
     port.postError = new Error("injected ready post failure at /secret/path");
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     await flush();
     expect(port.posted).toHaveLength(0);
     expect(kernel.closeCalls).toBe(1);
     expect(port.closeCalls).toBe(1);
   });
 
-  it("treats a non-data IPC message as fatal", async () => {
+  it("treats a non-data request as fatal", async () => {
     const port = new FakeWorkerPort();
     const kernel = new FakeWorkerKernel();
-    startProcess(port, kernel);
+    startWorker(port, kernel);
     port.message(new Date());
     await flush();
     expect(port.posted[1]).toMatchObject({

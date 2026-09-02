@@ -83,8 +83,9 @@ interface ExistingPublicationState {
 
 /**
  * This kernel contains synchronous filesystem calls and MUST run inside the dedicated storage
- * owner process. Fastify and the SQLite Worker communicate with it through an asynchronous adapter;
- * that adapter also owns the hard process watchdog for a blocked syscall.
+ * Worker Thread. Fastify and the SQLite Worker communicate with it through an asynchronous adapter;
+ * a client timeout requests Worker termination and the top-level supervisor owns whole-Server
+ * fail-stop when the Worker cannot prove exit.
  */
 export class ArtifactStorageKernel {
   readonly #operations: ArtifactStorageOperations;

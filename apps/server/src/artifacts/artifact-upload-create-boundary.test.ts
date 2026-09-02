@@ -20,6 +20,57 @@ const listTypeScriptFiles = async (directory: string): Promise<string[]> => {
 };
 
 describe("artifact transaction composition boundary", () => {
+  it("keeps the artifact storage owner on the dedicated Worker Thread transport", async () => {
+    const productionSources = await Promise.all(
+      (await listTypeScriptFiles(sourceRoot))
+        .filter((path) => !path.endsWith(".test.ts") && !path.endsWith(".testing.ts"))
+        .map(async (path) => ({
+          path: relative(sourceRoot, path).replaceAll("\\", "/"),
+          source: await readFile(path, "utf8"),
+        })),
+    );
+    const references = (needle: string): string[] =>
+      productionSources
+        .filter(({ source }) => source.includes(needle))
+        .map(({ path }) => path)
+        .sort();
+    const workerOnly = ["artifacts/artifact-storage-worker.ts"];
+    expect(references('from "./artifact-storage.js"')).toEqual(workerOnly);
+    expect(references('from "./linux-filesystem.js"')).toEqual(workerOnly);
+    expect(references("new ArtifactStorageKernel(")).toEqual(workerOnly);
+    expect(references("new LinuxArtifactStorageOperations(")).toEqual(workerOnly);
+    expect(references("runArtifactStorageWorker(")).toEqual(workerOnly);
+    expect(references('new URL("./artifact-storage-worker')).toEqual([
+      "artifacts/artifact-storage-client.ts",
+    ]);
+    expect(references("new Worker(filename, options)")).toEqual([
+      "artifacts/artifact-storage-client.ts",
+    ]);
+    expect(references("artifact-storage-process")).toEqual([]);
+
+    const client = await readFile(
+      join(sourceRoot, "artifacts", "artifact-storage-client.ts"),
+      "utf8",
+    );
+    const worker = await readFile(
+      join(sourceRoot, "artifacts", "artifact-storage-worker.ts"),
+      "utf8",
+    );
+    expect(client).toContain('from "node:worker_threads"');
+    expect(client).toContain("trackUnmanagedFds: true");
+    expect(worker).toContain('from "node:worker_threads"');
+    for (const source of [client, worker]) {
+      expect(source).not.toContain('from "node:child_process"');
+      expect(source).not.toContain("SIGKILL");
+    }
+
+    const compiledArtifacts = await readdir(join(sourceRoot, "..", "dist", "artifacts"));
+    expect(compiledArtifacts).toContain("artifact-storage-worker.js");
+    expect(
+      compiledArtifacts.filter((path) => path.startsWith("artifact-storage-process.")),
+    ).toEqual([]);
+  });
+
   it("limits the internal handle registrar to DatabaseClient and fake-owner tests", async () => {
     const reference = "registerArtifactUploadCreateDatabaseHandle";
     const references: string[] = [];

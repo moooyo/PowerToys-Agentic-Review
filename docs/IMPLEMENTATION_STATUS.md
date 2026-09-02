@@ -1,6 +1,6 @@
 # Implementation Status
 
-Status date: 2026-09-01
+Status date: 2026-09-02
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
@@ -16,6 +16,10 @@ incomplete.
   submissions.
 - Pure domain state-transition and lease-fencing helpers with focused unit tests.
 - Fastify server with a dedicated `node:sqlite` Worker Thread and immutable SQL migrations.
+- A separate dedicated `node:worker_threads` artifact-storage owner that keeps synchronous Linux
+  filesystem operations off the Fastify event loop and the SQLite Worker, accepts only normalized
+  data-only protocol messages, propagates terminal failures, and retains database-owner authority
+  until a real storage Worker exit is observed during orderly shutdown.
 - A process-lifetime SQLite owner lock, lock-time migration rechecks, verified pre-migration
   online backups, atomic backup publication, and incomplete-backup cleanup.
 - Atomic job claim, lease generation and token fencing, worker and attempt heartbeats, hard and
@@ -139,7 +143,9 @@ incomplete.
 - The bounded Worker result-artifact HTTP adapter is implemented with pre-parse transport
   authentication, strict route/body identity binding, public response allowlists, and stable error
   mapping. It is intentionally not registered by `app.ts` or composed by `main.ts`; artifact
-  storage remains externally unreachable until the production supervision and lifecycle slice.
+  storage remains externally unreachable. Production composition must bind the storage Worker,
+  transaction coordinator, reconciler, readiness, whole-Server fail-stop, and route adapter before
+  artifact-mode claims can be enabled.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release
@@ -164,12 +170,35 @@ ACLs, keys, firewall policy, and machine-enforced Codex policy. Native Windows x
 must then pass the ADR 0007 installation, token, ACL, Named Pipe, Authenticode, sandbox, Job Object,
 disk, cancellation, tamper, restart, and attack tests before any Claim authority is enabled.
 
-The product data path can proceed in parallel in this order: bounded result-artifact upload and
-storage, immutable server-side diff manifests, publication drafts, digest-bound approvals, GitHub
-outbox reconciliation, and Dashboard write actions. Dynamic validation remains a separate
+The product data path can proceed in parallel by composing the existing dark result-artifact
+storage, reconciliation, and HTTP foundations with artifact-backed completion. Immutable
+server-side diff manifests, publication drafts, digest-bound approvals, GitHub outbox
+reconciliation, and Dashboard write actions follow. Dynamic validation remains a separate
 stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-02, the artifact storage owner was changed from an OS child process to a dedicated Node
+Worker Thread and verified on the remote Debian `test-env` host with Node.js 24.20.0 and pnpm
+11.24.0. No validation ran on the local Windows development machine. The exact candidate completed:
+
+```text
+pnpm install --frozen-lockfile --prefer-offline
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm lint
+```
+
+The final run passed 86 Codex tests, 84 local-protocol tests, 21 domain tests, 651 Worker tests plus
+9 role-bundle verifier tests, and 650 Server tests in 40 files. Biome checked 265 files. The real
+Linux Worker integration proved normal storage operations, shutdown, forced termination of an
+`Atomics.wait` stall, a real nonzero Worker exit, and cleanup of a deliberately unclosed
+`openSync` descriptor through `trackUnmanagedFds: true`. It does not claim D-state coverage. The
+local and remote nine-file code manifests matched at SHA-256
+`76f9b70f685fc9a3d440000a37302179aefc434032c933e3564d54c4807f6e62`; the three former
+`artifact-storage-process` source and test files were absent on both sides. Independent final
+review reported no P0-P2 findings for this transition.
 
 The Phase 1a, local-protocol, and fail-closed ServiceHost security-contract candidate was verified
 on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution. Its archive

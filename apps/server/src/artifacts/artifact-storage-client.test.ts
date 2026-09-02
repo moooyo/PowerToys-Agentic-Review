@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { dirname, isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import {
@@ -10,9 +9,9 @@ import {
 import {
   type ArtifactStorageClient,
   type ArtifactStorageClientOptions,
-  type ArtifactStorageProcessTransport,
+  type ArtifactStorageWorkerTransport,
   attachArtifactStorageClientForTest,
-  createArtifactStorageClientWithSpawnerForTest,
+  createArtifactStorageClientWithFactoryForTest,
 } from "../../dist/artifacts/artifact-storage-client.js";
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import { artifactStorageProtocolVersion } from "../../dist/artifacts/worker-protocol.js";
@@ -22,57 +21,30 @@ const secondUploadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const prepareId = "22222222-2222-4222-8222-222222222222";
 
 class FakeArtifactWorker extends EventEmitter {
-  readonly initializations: unknown[] = [];
   readonly posted: unknown[] = [];
-  readonly sendCallbacks: ((error: Error | null) => void)[] = [];
   terminateCalls = 0;
   throwOnPost = false;
-  deferSendCallback = false;
-  sendReturnValue = true;
-  killReturnValue = true;
   autoExitOnTerminate = true;
   terminateError: Error | undefined;
   onPost: ((message: unknown) => void) | undefined;
 
-  send(message: unknown, callback: (error: Error | null) => void): boolean {
+  postMessage(message: unknown): void {
     if (this.throwOnPost) {
       throw new Error("injected post failure");
     }
-    if ((message as { readonly type?: unknown }).type === "initialize") {
-      this.initializations.push(message);
-    } else {
-      this.posted.push(message);
-      this.onPost?.(message);
-    }
-    if (this.deferSendCallback) {
-      this.sendCallbacks.push(callback);
-    } else {
-      callback(null);
-    }
-    return this.sendReturnValue;
+    this.posted.push(message);
+    this.onPost?.(message);
   }
 
-  kill(signal: "SIGKILL"): boolean {
-    expect(signal).toBe("SIGKILL");
+  terminate(): Promise<number> {
     this.terminateCalls += 1;
     if (this.terminateError !== undefined) {
-      throw this.terminateError;
+      return Promise.reject(this.terminateError);
     }
     if (this.autoExitOnTerminate) {
-      queueMicrotask(() => {
-        this.emit("exit", null, "SIGKILL");
-        this.emit("close", null, "SIGKILL");
-      });
+      queueMicrotask(() => this.emit("exit", 1));
     }
-    return this.killReturnValue;
-  }
-
-  completeSend(error: Error | null = null): void {
-    const callback = this.sendCallbacks.shift();
-    if (callback === undefined) {
-      throw new Error("No artifact storage send callback is pending.");
-    }
-    callback(error);
+    return Promise.resolve(1);
   }
 
   ready(): void {
@@ -110,7 +82,7 @@ const attach = async (
 ): Promise<ArtifactStorageClient> => {
   const connecting = attachArtifactStorageClientForTest(
     options,
-    worker as unknown as ArtifactStorageProcessTransport,
+    worker as unknown as ArtifactStorageWorkerTransport,
     initialRequestId,
   );
   worker.ready();
@@ -183,8 +155,7 @@ const shutdownGracefully = async (
   const closing = client.close();
   const request = worker.posted.at(-1) as { readonly id: number };
   worker.message(success(request.id, "shutdown", { closed: true }));
-  worker.emit("exit", 0, null);
-  worker.emit("close", 0, null);
+  worker.emit("exit", 0);
   await closing;
 };
 
@@ -248,95 +219,75 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await expect(client.ownerExit).resolves.toBe(1);
   });
 
-  it("spawns one fixed hardened process and initializes it only over IPC", async () => {
+  it("creates one dedicated Worker with normalized data", async () => {
     const worker = new FakeArtifactWorker();
-    let executable: string | undefined;
-    let args: readonly string[] | undefined;
-    let spawnOptions: Record<string, unknown> | undefined;
-    const connecting = createArtifactStorageClientWithSpawnerForTest(
+    let filename: URL | undefined;
+    let workerOptions: Record<string, unknown> | undefined;
+    const connecting = createArtifactStorageClientWithFactoryForTest(
       clientOptions(),
-      (capturedExecutable, capturedArgs, capturedOptions) => {
-        executable = capturedExecutable;
-        args = capturedArgs;
-        spawnOptions = capturedOptions as unknown as Record<string, unknown>;
-        return worker as unknown as ArtifactStorageProcessTransport;
+      (capturedFilename, capturedOptions) => {
+        filename = capturedFilename;
+        workerOptions = capturedOptions as unknown as Record<string, unknown>;
+        return worker as unknown as ArtifactStorageWorkerTransport;
       },
     );
     worker.ready();
     const client = await connecting;
 
-    expect(executable).toBe(process.execPath);
-    expect(args).toHaveLength(2);
-    expect(args?.[0]).toMatch(/artifact-storage-process\.js$/u);
-    expect(isAbsolute(args?.[0] ?? "")).toBe(true);
-    expect(args?.[1]).toBe("--artifact-storage-owner-v1");
-    expect(Object.isFrozen(args)).toBe(true);
-    expect(spawnOptions).toMatchObject({
-      shell: false,
-      detached: false,
-      windowsHide: true,
-      windowsVerbatimArguments: false,
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
-      serialization: "advanced",
-    });
-    expect(Object.keys(spawnOptions?.env as object)).toEqual([]);
-    expect(Object.getPrototypeOf(spawnOptions?.env as object)).toBeNull();
-    expect(Object.isFrozen(spawnOptions?.env)).toBe(true);
-    expect(spawnOptions?.env).not.toHaveProperty("NODE_OPTIONS");
-    expect(spawnOptions?.cwd).toBe(dirname(args?.[0] ?? ""));
-    expect(worker.initializations).toEqual([
-      expect.objectContaining({
-        type: "initialize",
+    expect(filename).toBeInstanceOf(URL);
+    expect(filename?.pathname).toMatch(/artifact-storage-worker\.js$/u);
+    expect(workerOptions).toEqual({
+      trackUnmanagedFds: true,
+      workerData: expect.objectContaining({
         protocolVersion: artifactStorageProtocolVersion,
+        storage: expect.objectContaining({ rootPath: "/artifact" }),
       }),
-    ]);
+    });
     await shutdownGracefully(client, worker);
-    expect(worker.initializations).toHaveLength(1);
   });
 
-  it("reports a synchronous spawn failure without manufacturing exit proof", async () => {
-    let spawnCalls = 0;
+  it("reports a synchronous Worker construction failure without manufacturing exit proof", async () => {
+    let factoryCalls = 0;
     await expect(
-      createArtifactStorageClientWithSpawnerForTest(clientOptions(), () => {
-        spawnCalls += 1;
-        throw new Error("injected spawn failure");
+      createArtifactStorageClientWithFactoryForTest(clientOptions(), () => {
+        factoryCalls += 1;
+        throw new Error("injected Worker construction failure");
       }),
     ).rejects.toMatchObject({
       code: "ARTIFACT_STORAGE_CLIENT_TERMINAL",
       ownerExit: undefined,
     });
-    expect(spawnCalls).toBe(1);
+    expect(factoryCalls).toBe(1);
   });
 
-  it("does not treat IPC disconnect or a SIGKILL request as owner-exit proof", async () => {
+  it("does not treat terminate completion as Worker-exit proof", async () => {
     const worker = new FakeArtifactWorker();
     worker.autoExitOnTerminate = false;
-    worker.killReturnValue = false;
     const client = await attach(worker);
     let exitProven = false;
     void client.ownerExit.then(() => {
       exitProven = true;
     });
 
-    worker.emit("disconnect");
+    worker.emit("messageerror", new Error("injected clone failure"));
     await expect(client.cleanupUpload({ uploadId })).rejects.toMatchObject({
-      code: "ARTIFACT_STORAGE_CLIENT_TERMINAL",
+      code: "ARTIFACT_STORAGE_CLIENT_PROTOCOL",
     });
     await client.terminationAttempt;
     await Promise.resolve();
     expect(worker.terminateCalls).toBe(1);
     expect(exitProven).toBe(false);
 
-    worker.emit("close", null, "SIGKILL");
+    worker.emit("exit", 1);
     await expect(client.ownerExit).resolves.toBe(1);
-    worker.emit("exit", 0, null);
+    worker.emit("exit", 0);
     await expect(client.ownerExit).resolves.toBe(1);
   });
 
-  it("accepts close as process-absence proof but freezes protocol state afterwards", async () => {
+  it("accepts only Worker exit as owner-absence proof and freezes protocol state", async () => {
     const worker = new FakeArtifactWorker();
     const client = await attach(worker);
-    worker.emit("close", 7, null);
+    worker.emit("exit", 7);
     await expect(client.ownerExit).resolves.toBe(7);
     worker.message({ type: "ready", protocolVersion: artifactStorageProtocolVersion });
     await expect(client.cleanupUpload({ uploadId })).rejects.toMatchObject({
@@ -345,51 +296,11 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     expect(worker.terminateCalls).toBe(0);
   });
 
-  it("treats IPC backpressure as nonfatal until the send callback settles", async () => {
-    const worker = new FakeArtifactWorker();
-    const client = await attach(worker);
-    worker.deferSendCallback = true;
-    worker.sendReturnValue = false;
-
-    const cleanup = client.cleanupUpload({ uploadId });
-    expect(worker.posted).toHaveLength(1);
-    expect(worker.terminateCalls).toBe(0);
-    worker.completeSend();
-    worker.message(
-      success(1, "cleanupUpload", {
-        stagingRemoved: false,
-        publicationTemporariesRemoved: 0,
-      }),
-    );
-    await expect(cleanup).resolves.toMatchObject({ stagingRemoved: false });
-
-    worker.deferSendCallback = false;
-    worker.sendReturnValue = true;
-    await shutdownGracefully(client, worker);
-  });
-
-  it("terminalizes an asynchronous IPC send callback failure with one SIGKILL", async () => {
-    const worker = new FakeArtifactWorker();
-    const client = await attach(worker);
-    worker.deferSendCallback = true;
-    const cleanup = client.cleanupUpload({ uploadId });
-
-    worker.completeSend(new Error("injected asynchronous IPC failure"));
-    await expect(cleanup).rejects.toMatchObject({
-      code: "ARTIFACT_STORAGE_CLIENT_TERMINAL",
-    });
-    worker.emit("disconnect");
-    worker.emit("error", new Error("late process error"));
-    expect(worker.terminateCalls).toBe(1);
-    await client.ownerExit;
-    expect(worker.terminateCalls).toBe(1);
-  });
-
   it("rejects a response sent before the Worker becomes ready", async () => {
     const worker = new FakeArtifactWorker();
     const connecting = attachArtifactStorageClientForTest(
       clientOptions(),
-      worker as unknown as ArtifactStorageProcessTransport,
+      worker as unknown as ArtifactStorageWorkerTransport,
     );
     worker.message(
       success(1, "cleanupUpload", {
@@ -572,7 +483,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     expect(worker.posted).toHaveLength(2);
   });
 
-  it("enforces the request deadline across synchronous validation before IPC send", async () => {
+  it("enforces the request deadline across synchronous validation before postMessage", async () => {
     const worker = new FakeArtifactWorker();
     const client = await attach(worker, clientOptions({ requestTimeoutMilliseconds: 1 }));
     const input = chunkInput();
@@ -612,8 +523,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     expect(worker.posted).toHaveLength(1);
     expect(worker.posted[0]).toMatchObject({ id: 1, operation: "shutdown" });
     worker.message(success(1, "shutdown", { closed: true }));
-    worker.emit("exit", 0, null);
-    worker.emit("close", 0, null);
+    worker.emit("exit", 0);
     if (closing === undefined) {
       throw new Error("The reentrant shutdown was not started.");
     }
@@ -722,7 +632,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
       const message = untrustedMessage as { readonly id: number; readonly operation: string };
       if (message.operation === "shutdown") {
         worker.message(success(message.id, "shutdown", { closed: true }));
-        worker.emit("exit", 0, null);
+        worker.emit("exit", 0);
       }
     };
     const input = chunkInput();
@@ -829,8 +739,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await expect(recursive).resolves.toMatchObject({ stagingRemoved: false });
     const closing = client.close();
     worker.message(success(2_147_483_647, "shutdown", { closed: true }));
-    worker.emit("exit", 0, null);
-    worker.emit("close", 0, null);
+    worker.emit("exit", 0);
     await expect(closing).resolves.toBeUndefined();
   });
 
@@ -847,7 +756,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     const worker = new FakeArtifactWorker();
     const connecting = attachArtifactStorageClientForTest(
       clientOptions({ requestTimeoutMilliseconds: 1_000 }),
-      worker as unknown as ArtifactStorageProcessTransport,
+      worker as unknown as ArtifactStorageWorkerTransport,
       1,
       now,
     );
@@ -866,7 +775,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await client.ownerExit;
   });
 
-  it("terminalizes synchronous IPC send failure without leaking pending work", async () => {
+  it("terminalizes synchronous postMessage failure without leaking pending work", async () => {
     const worker = new FakeArtifactWorker();
     const client = await attach(worker);
     worker.throwOnPost = true;
@@ -1034,8 +943,8 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await client.ownerExit;
   });
 
-  it("terminalizes fatal, duplicate ready, error, disconnect, and premature exit", async () => {
-    for (const trigger of ["fatal", "ready", "error", "disconnect", "exit"] as const) {
+  it("terminalizes fatal, duplicate ready, error, messageerror, and premature exit", async () => {
+    for (const trigger of ["fatal", "ready", "error", "messageerror", "exit"] as const) {
       const worker = new FakeArtifactWorker();
       const client = await attach(worker);
       if (trigger === "fatal") {
@@ -1052,11 +961,10 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
         worker.ready();
       } else if (trigger === "error") {
         worker.emit("error", new Error("injected Worker error at /secret/path"));
-      } else if (trigger === "disconnect") {
-        worker.emit("disconnect");
+      } else if (trigger === "messageerror") {
+        worker.emit("messageerror", new Error("injected Worker message error"));
       } else {
-        worker.emit("exit", 0, null);
-        worker.emit("close", 0, null);
+        worker.emit("exit", 0);
       }
       await expect(client.cleanupUpload({ uploadId })).rejects.toBeInstanceOf(
         ArtifactStorageClientError,
@@ -1074,7 +982,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     try {
       await attachArtifactStorageClientForTest(
         clientOptions({ startupTimeoutMilliseconds: 5, exitTimeoutMilliseconds: 100 }),
-        worker as unknown as ArtifactStorageProcessTransport,
+        worker as unknown as ArtifactStorageWorkerTransport,
       );
     } catch (error) {
       thrown = error;
@@ -1096,7 +1004,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     });
     const connecting = attachArtifactStorageClientForTest(
       options,
-      worker as unknown as ArtifactStorageProcessTransport,
+      worker as unknown as ArtifactStorageWorkerTransport,
     );
     worker.ready();
     await expect(connecting).rejects.toMatchObject({
@@ -1106,7 +1014,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await (await connecting.catch((error: ArtifactStorageClientError) => error)).ownerExit;
   });
 
-  it("does not expose a raw SIGKILL failure", async () => {
+  it("does not expose a raw termination failure", async () => {
     const worker = new FakeArtifactWorker();
     worker.autoExitOnTerminate = false;
     worker.terminateError = new Error("injected terminate failure at /secret/path");
@@ -1123,7 +1031,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await expect(client.terminationAttempt).resolves.toBeUndefined();
     await expect(client.joinExit(5)).rejects.toMatchObject({
       code: "ARTIFACT_STORAGE_CLIENT_TIMEOUT",
-      message: "Artifact storage owner exit join timed out.",
+      message: "Artifact storage Worker exit join timed out.",
     });
   });
 
@@ -1138,17 +1046,45 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     });
     const shutdown = worker.posted[0] as { readonly id: number };
     worker.message(success(shutdown.id, "shutdown", { closed: true }));
-    worker.emit("exit", 0, null);
-    worker.emit("close", 0, null);
+    worker.emit("exit", 0);
     await expect(firstClose).resolves.toBeUndefined();
     expect(worker.terminateCalls).toBe(0);
 
     const premature = new FakeArtifactWorker();
     const secondClient = await attach(premature);
     const closing = secondClient.close();
-    premature.emit("exit", 0, null);
-    premature.emit("close", 0, null);
+    premature.emit("exit", 0);
     await expect(closing).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_CLIENT_PROTOCOL" });
+  });
+
+  it("waits for Worker exit after a valid shutdown acknowledgement", async () => {
+    const worker = new FakeArtifactWorker();
+    const client = await attach(worker);
+    const closing = client.close();
+    const shutdown = worker.posted[0] as { readonly id: number };
+    let settled = false;
+    void closing.finally(() => {
+      settled = true;
+    });
+
+    worker.message(success(shutdown.id, "shutdown", { closed: true }));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    worker.emit("exit", 0);
+    await expect(closing).resolves.toBeUndefined();
+  });
+
+  it("rejects acknowledged shutdown when the Worker exits nonzero", async () => {
+    const worker = new FakeArtifactWorker();
+    const client = await attach(worker);
+    const closing = client.close();
+    const shutdown = worker.posted[0] as { readonly id: number };
+    worker.message(success(shutdown.id, "shutdown", { closed: true }));
+    worker.emit("exit", 1);
+
+    await expect(closing).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_WORKER_EXIT" });
+    await expect(client.ownerExit).resolves.toBe(1);
+    expect(worker.terminateCalls).toBe(0);
   });
 
   it("revokes unconsumed storage authority on close while disabling raw mutations", async () => {
@@ -1176,56 +1112,6 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await shutdownGracefully(client, worker);
   });
 
-  it("accepts shutdown acknowledgement delivered after exit but before IPC close", async () => {
-    const worker = new FakeArtifactWorker();
-    const client = await attach(worker);
-    const closing = client.close();
-    const shutdown = worker.posted[0] as { readonly id: number };
-    let closeSettled = false;
-    void closing.then(
-      () => {
-        closeSettled = true;
-      },
-      () => {
-        closeSettled = true;
-      },
-    );
-
-    worker.emit("exit", 0, null);
-    await expect(client.ownerExit).resolves.toBe(0);
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-    worker.message(success(shutdown.id, "shutdown", { closed: true }));
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-    worker.emit("close", 0, null);
-
-    await expect(closing).resolves.toBeUndefined();
-    expect(worker.terminateCalls).toBe(0);
-  });
-
-  it("preserves a fatal delivered after exit without signaling a potentially reused PID", async () => {
-    const worker = new FakeArtifactWorker();
-    const client = await attach(worker);
-    const cleanup = client.cleanupUpload({ uploadId });
-    worker.emit("exit", 1, null);
-    worker.message({
-      type: "fatal",
-      protocolVersion: artifactStorageProtocolVersion,
-      error: {
-        code: "ARTIFACT_STORAGE_INTEGRITY",
-        message: "Artifact storage integrity validation failed.",
-        retryable: false,
-      },
-    });
-
-    await expect(cleanup).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_INTEGRITY" });
-    expect(worker.terminateCalls).toBe(0);
-    worker.emit("close", 1, null);
-    await expect(client.ownerExit).resolves.toBe(1);
-    expect(worker.terminateCalls).toBe(0);
-  });
-
   it("reserves the final bounded request ID for graceful shutdown", async () => {
     const worker = new FakeArtifactWorker();
     const client = await attach(worker, clientOptions(), 2_147_483_647);
@@ -1239,8 +1125,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
       operation: "shutdown",
     });
     worker.message(success(2_147_483_647, "shutdown", { closed: true }));
-    worker.emit("exit", 0, null);
-    worker.emit("close", 0, null);
+    worker.emit("exit", 0);
     await expect(closing).resolves.toBeUndefined();
   });
 
@@ -1285,7 +1170,7 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     expect(worker.posted).toHaveLength(2);
 
     worker.message(success(2, "shutdown", { closed: true }));
-    worker.emit("exit", 0, null);
+    worker.emit("exit", 0);
     const settled = await Promise.allSettled([work, closing]);
     expect(settled.every((entry) => entry.status === "rejected")).toBe(true);
     expect((settled[0] as PromiseRejectedResult).reason).toBe(

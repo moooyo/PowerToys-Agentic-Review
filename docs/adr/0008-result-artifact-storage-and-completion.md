@@ -133,20 +133,37 @@ chunk upload, finalization, explicit termination, and reconciler cleanup. A sepa
 serializes storage-capacity admission. These are sufficient only because ADR 0002 permits one active
 Server; a multi-Server design requires a new cross-process coordination decision.
 
-The synchronous Linux filesystem kernel runs only inside one dedicated artifact-storage child
-process. It never runs on the Fastify event loop and never shares the SQLite Worker. The
-asynchronous parent-side client owns bounded data-only requests, rejects all pending work after a
-fatal error or exit, and applies an external watchdog that sends one `SIGKILL` to the isolated
-storage owner when a synchronous syscall does not return. A timed-out owner is not reused. Only a
-real child `exit` or `close` event proves owner absence; an IPC disconnect, shutdown acknowledgement,
-or successful `kill()` call does not. The Server retains its database ownership lock until absence
-is proven. Production deployment must run the Server under systemd with
-`KillMode=control-group`, or under an equivalent container PID namespace and cgroup supervisor that
-kills every storage child when the Server main process terminates. A bare `node` launch is not a
-supported production topology: if the parent dies while the child is blocked in a synchronous
-syscall, JavaScript cannot process the IPC disconnect and `detached: false` does not prevent an
-orphan. This deployment-supervision proof is a production enablement gate that must be verified
-before the retention and operations runbook phase and before artifact completion is enabled.
+The synchronous Linux filesystem kernel runs only inside one dedicated Node Worker Thread. It never
+runs on the Fastify event loop and never shares the SQLite Worker. The asynchronous parent-side
+client owns bounded data-only requests and rejects all pending work after a fatal protocol, runtime,
+timeout, or Worker-exit condition. The client synchronously enters its terminal state, closes its
+artifact admission, rejects pending requests, and settles its terminal-failure signal before it
+requests `worker.terminate()`. The transaction coordinator observes that signal through a Promise
+reaction bound during construction and then enters fail-stop; coordinator propagation is
+asynchronous. A timed-out storage Worker is never reused. Only the real Worker `exit` event proves
+owner absence; a closed message port, shutdown acknowledgement, or request to
+`worker.terminate()` alone does not. The transaction coordinator retains the database ownership
+lock until that exit is observed during an orderly shutdown.
+
+The Worker is created with `trackUnmanagedFds: true`. The storage kernel uses only Node's reviewed
+`node:fs` descriptor operations and receives no transferred descriptors or native-addon handles.
+The pinned Node runtime must be integration-tested to prove that a raw descriptor deliberately left
+open by the Worker is absent from the process descriptor table after forced Worker exit. That proof
+does not cover an uninterruptible Linux D-state syscall, which remains a whole-Server and host
+failure rather than a bounded-recovery claim.
+
+The artifact-storage Worker shares the Server process lifetime, so this design introduces no
+child-process or artifact-specific cgroup contract. A storage failure whose outcome is fatal or
+indeterminate triggers whole-Server fail-stop. If the storage Worker does not exit within its
+bounded termination window, the composed Server must stop coordinating further shutdown work and
+terminate as a whole; the external process supervisor may start a replacement only after the old
+Server process has exited. Production enablement therefore requires a composed lifecycle proof over
+the real Server: client admission becomes unavailable synchronously, the bound coordinator reaction
+propagates fail-stop, queued and active artifact mutations settle or fail within their bounds, the
+storage Worker exits before SQLite closes and the owner lock is released during orderly shutdown,
+and every fatal storage path terminates the complete Server.
+It does not require a child-specific systemd unit, cgroup cleanup proof, or installed-profile
+verifier.
 
 For each chunk the order is:
 

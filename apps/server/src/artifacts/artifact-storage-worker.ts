@@ -1,3 +1,4 @@
+import { parentPort, workerData } from "node:worker_threads";
 import type {
   ArtifactNamespaceCleanupResult,
   ArtifactNamespaceScanPageResult,
@@ -14,30 +15,29 @@ import type {
 } from "./types.js";
 import {
   type ArtifactStorageResponseExpectation,
+  type ArtifactStorageWorkerData,
   type ArtifactStorageWorkerOperation,
   type ArtifactStorageWorkerOperationMap,
   type ArtifactStorageWorkerRequest,
-  artifactStorageProcessEntryArgument,
   artifactStorageProtocolVersion,
   assertArtifactStorageResponseMatchesExpectation,
   createArtifactStorageResponseExpectation,
   isFatalArtifactStorageOperationError,
   normalizeArtifactStorageOperationOutput,
-  parseArtifactStorageProcessInitialize,
+  normalizeArtifactStorageWorkerData,
   parseArtifactStorageWorkerRequest,
   serializeArtifactStorageError,
   serializeArtifactStorageFatalError,
 } from "./worker-protocol.js";
 
-interface ArtifactStorageProcessPort {
-  readonly connected: boolean;
-  send(value: unknown, callback: (error: Error | null) => void): boolean;
-  disconnect(): void;
+interface ArtifactStorageWorkerPort {
+  postMessage(value: unknown): void;
   on(event: "message", listener: (value: unknown) => void): this;
-  on(event: "disconnect", listener: () => void): this;
+  on(event: "messageerror", listener: (error: Error) => void): this;
+  close(): void;
 }
 
-interface ArtifactStorageProcessKernel {
+interface ArtifactStorageWorkerKernel {
   writePreparedChunk(
     input: ArtifactStorageWorkerOperationMap["writePreparedChunk"]["input"],
   ): Promise<DurableArtifactChunk>;
@@ -65,10 +65,10 @@ interface ArtifactStorageProcessKernel {
 
 type ArtifactStorageKernelFactory = (
   options: ArtifactStorageKernelOptions,
-) => ArtifactStorageProcessKernel;
+) => ArtifactStorageWorkerKernel;
 
 const dispatchOperation = (
-  kernel: ArtifactStorageProcessKernel,
+  kernel: ArtifactStorageWorkerKernel,
   request: Exclude<ArtifactStorageWorkerRequest, { readonly operation: "shutdown" }>,
 ): Promise<unknown> => {
   switch (request.operation) {
@@ -93,55 +93,29 @@ const dispatchOperation = (
   }
 };
 
-const sendMessage = (port: ArtifactStorageProcessPort, value: unknown): Promise<void> =>
-  new Promise<void>((resolve, reject) => {
-    let callbackCalled = false;
-    const callback = (error: Error | null): void => {
-      if (callbackCalled) {
-        return;
-      }
-      callbackCalled = true;
-      if (error === null) {
-        resolve();
-      } else {
-        reject(error);
-      }
-    };
-    try {
-      port.send(value, callback);
-    } catch (error) {
-      callback(error instanceof Error ? error : new Error("Artifact storage IPC send failed."));
-    }
-  });
-
-export const runArtifactStorageProcess = (
-  port: ArtifactStorageProcessPort,
+export const runArtifactStorageWorker = (
+  port: ArtifactStorageWorkerPort,
+  untrustedWorkerData: unknown,
   createKernel: ArtifactStorageKernelFactory = (options) =>
     new ArtifactStorageKernel(options, new LinuxArtifactStorageOperations()),
-  setExitCode: (exitCode: number) => void = (exitCode) => {
-    process.exitCode = exitCode;
-  },
 ): void => {
-  let state: "uninitialized" | "initializing" | "open" | "closing" | "fatal" = "uninitialized";
-  let kernel: ArtifactStorageProcessKernel | undefined;
-  let capacity: ArtifactStorageKernelOptions["capacity"] | undefined;
+  let data: ArtifactStorageWorkerData;
+  let kernel: ArtifactStorageWorkerKernel | undefined;
+  let state: "initializing" | "open" | "closing" | "fatal" = "initializing";
   let lastRequestId = 0;
   let closePromise: Promise<void> | undefined;
   let portClosed = false;
   const activeRequests = new Set<Promise<void>>();
 
-  const closePort = (exitCode: number): void => {
+  const closePort = (): void => {
     if (portClosed) {
       return;
     }
     portClosed = true;
-    setExitCode(exitCode);
-    if (port.connected) {
-      try {
-        port.disconnect();
-      } catch {
-        // OS process exit remains the parent-side proof even if IPC teardown throws.
-      }
+    try {
+      port.close();
+    } catch {
+      // The Worker exit event remains the parent-side proof even if channel closure throws.
     }
   };
 
@@ -155,18 +129,41 @@ export const runArtifactStorageProcess = (
       return;
     }
     state = "fatal";
-    const fatalSend = port.connected
-      ? sendMessage(port, {
+    if (!portClosed) {
+      try {
+        port.postMessage({
           type: "fatal",
           protocolVersion: artifactStorageProtocolVersion,
           error: serializeArtifactStorageFatalError(error),
-        }).catch(() => undefined)
-      : Promise.resolve();
-    void Promise.allSettled([fatalSend, closeKernel()]).then(() => closePort(1));
+        });
+      } catch {
+        // The owner still closes when its protocol channel is already unusable.
+      }
+    }
+    void closeKernel().then(closePort, closePort);
   };
 
-  const handleRequest = (untrustedRequest: unknown): void => {
-    if (state !== "open" || kernel === undefined || capacity === undefined) {
+  try {
+    data = normalizeArtifactStorageWorkerData(untrustedWorkerData);
+    kernel = createKernel(data.storage);
+    if (kernel === undefined) {
+      throw new TypeError("Artifact storage kernel factory returned no owner.");
+    }
+    port.postMessage({ type: "ready", protocolVersion: artifactStorageProtocolVersion });
+    state = "open";
+  } catch (error) {
+    failFatal(error);
+    return;
+  }
+
+  const activeKernel = kernel;
+  const capacity = data.storage.capacity;
+
+  port.on("messageerror", () => {
+    failFatal(new TypeError("Artifact storage request could not be cloned."));
+  });
+  port.on("message", (untrustedRequest) => {
+    if (state !== "open") {
       failFatal(new TypeError("Artifact storage received a request outside its open state."));
       return;
     }
@@ -200,7 +197,7 @@ export const runArtifactStorageProcess = (
             output,
             capacity,
           );
-          return sendMessage(port, {
+          port.postMessage({
             type: "response",
             protocolVersion: artifactStorageProtocolVersion,
             id: request.id,
@@ -208,11 +205,7 @@ export const runArtifactStorageProcess = (
             ok: true,
             output,
           });
-        })
-        .then(() => {
-          if (state === "closing") {
-            closePort(0);
-          }
+          closePort();
         })
         .catch(failFatal);
       return;
@@ -221,11 +214,11 @@ export const runArtifactStorageProcess = (
     let operation: Promise<void>;
     try {
       const result = dispatchOperation(
-        kernel,
+        activeKernel,
         request as Exclude<ArtifactStorageWorkerRequest, { readonly operation: "shutdown" }>,
       );
       operation = result
-        .then(async (untrustedOutput) => {
+        .then((untrustedOutput) => {
           if (state === "fatal") {
             return;
           }
@@ -240,7 +233,7 @@ export const runArtifactStorageProcess = (
             output,
             capacity,
           );
-          await sendMessage(port, {
+          port.postMessage({
             type: "response",
             protocolVersion: artifactStorageProtocolVersion,
             id: request.id,
@@ -249,7 +242,7 @@ export const runArtifactStorageProcess = (
             output,
           });
         })
-        .catch(async (error: unknown) => {
+        .catch((error: unknown) => {
           if (state === "fatal") {
             return;
           }
@@ -257,7 +250,7 @@ export const runArtifactStorageProcess = (
           if (isFatalArtifactStorageOperationError(request.operation, serialized)) {
             throw error;
           }
-          await sendMessage(port, {
+          port.postMessage({
             type: "response",
             protocolVersion: artifactStorageProtocolVersion,
             id: request.id,
@@ -278,65 +271,9 @@ export const runArtifactStorageProcess = (
         failFatal(error);
       },
     );
-  };
-
-  port.on("message", (untrustedMessage) => {
-    if (state !== "uninitialized") {
-      handleRequest(untrustedMessage);
-      return;
-    }
-    state = "initializing";
-    try {
-      const initialization = parseArtifactStorageProcessInitialize(untrustedMessage);
-      kernel = createKernel(initialization.storage);
-      if (kernel === undefined) {
-        throw new TypeError("Artifact storage kernel factory returned no owner.");
-      }
-      capacity = initialization.storage.capacity;
-      state = "open";
-      void sendMessage(port, {
-        type: "ready",
-        protocolVersion: artifactStorageProtocolVersion,
-      }).catch(failFatal);
-    } catch (error) {
-      failFatal(error);
-    }
-  });
-  port.on("disconnect", () => {
-    if (!portClosed) {
-      failFatal(new TypeError("Artifact storage parent IPC disconnected."));
-    }
   });
 };
 
-class CurrentProcessPort implements ArtifactStorageProcessPort {
-  get connected(): boolean {
-    return process.connected;
-  }
-
-  send(value: unknown, callback: (error: Error | null) => void): boolean {
-    const send = process.send;
-    if (send === undefined) {
-      throw new Error("Artifact storage parent IPC is unavailable.");
-    }
-    return Reflect.apply(send, process, [value, callback]) as boolean;
-  }
-
-  disconnect(): void {
-    process.disconnect();
-  }
-
-  on(event: "message", listener: (value: unknown) => void): this;
-  on(event: "disconnect", listener: () => void): this;
-  on(event: "message" | "disconnect", listener: ((value: unknown) => void) | (() => void)): this {
-    Reflect.apply(process.on, process, [event, listener]);
-    return this;
-  }
-}
-
-const processPort: ArtifactStorageProcessPort | undefined =
-  typeof process.send === "function" ? new CurrentProcessPort() : undefined;
-
-if (process.argv[2] === artifactStorageProcessEntryArgument && processPort !== undefined) {
-  runArtifactStorageProcess(processPort);
+if (parentPort !== null) {
+  runArtifactStorageWorker(parentPort, workerData);
 }

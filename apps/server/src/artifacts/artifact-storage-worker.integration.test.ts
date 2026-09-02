@@ -1,23 +1,39 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
+import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  type ArtifactStorageProcessTransport,
-  createArtifactStorageClientWithSpawnerForTest,
+  type ArtifactStorageWorkerTransport,
+  createArtifactStorageClientWithFactoryForTest,
 } from "../../dist/artifacts/artifact-storage-client.js";
 import * as publicArtifacts from "../../dist/artifacts/index.js";
 import { ArtifactStorageClient } from "../../dist/artifacts/index.js";
+import { artifactStorageProtocolVersion } from "../../dist/artifacts/worker-protocol.js";
 
 const temporaryDirectories: string[] = [];
 const clients: ArtifactStorageClient[] = [];
-const spawnedProcesses: ReturnType<typeof spawn>[] = [];
 const uploadId = "11111111-1111-4111-8111-111111111111";
 const prepareId = "22222222-2222-4222-8222-222222222222";
 const finalizationId = "33333333-3333-4333-8333-333333333333";
+
+const readOpenFileDescriptorTargets = async (): Promise<readonly string[]> => {
+  const entries = await readdir("/proc/self/fd");
+  const targets = await Promise.all(
+    entries.map(async (entry): Promise<string | undefined> => {
+      try {
+        return await readlink(join("/proc/self/fd", entry));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          return undefined;
+        }
+        throw error;
+      }
+    }),
+  );
+  return targets.filter((target): target is string => target !== undefined);
+};
 
 afterEach(async () => {
   const cleanupErrors: unknown[] = [];
@@ -36,41 +52,6 @@ afterEach(async () => {
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => result.reason),
   );
-  const processResults = await Promise.allSettled(
-    spawnedProcesses.splice(0).map(async (child) => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        return;
-      }
-      const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // The bounded wait below is the only cleanup proof available to this test process.
-      }
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        await Promise.race([
-          closed,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error("Artifact storage test child did not exit after SIGKILL.")),
-              2_000,
-            );
-            timer.unref();
-          }),
-        ]);
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    }),
-  );
-  cleanupErrors.push(
-    ...processResults
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .map((result) => result.reason),
-  );
   if (cleanupErrors.length === 0) {
     const directoryResults = await Promise.allSettled(
       temporaryDirectories
@@ -84,21 +65,9 @@ afterEach(async () => {
     );
   }
   if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "Artifact storage process integration cleanup failed.");
+    throw new AggregateError(cleanupErrors, "Artifact storage Worker integration cleanup failed.");
   }
 });
-
-const waitForStoppedProcess = async (processId: number): Promise<void> => {
-  const deadline = performance.now() + 2_000;
-  while (performance.now() < deadline) {
-    const status = await readFile(`/proc/${processId}/status`, "utf8");
-    if (/^State:\s+[Tt]\s/mu.test(status)) {
-      return;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Artifact storage child process did not enter a stopped state.");
-};
 
 describe("artifact storage public boundary", () => {
   it("exports only the asynchronous client surface", () => {
@@ -116,8 +85,8 @@ describe("artifact storage public boundary", () => {
   });
 });
 
-describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process integration", () => {
-  it("scans and identity-cleans a staging entry through the owner process", async () => {
+describe.skipIf(process.platform !== "linux")("ArtifactStorageClient Worker integration", () => {
+  it("scans and identity-cleans a staging entry through the Worker", async () => {
     const parent = await mkdtemp(join(tmpdir(), "agentic-review-artifact-namespace-worker-"));
     await chmod(parent, 0o700);
     temporaryDirectories.push(parent);
@@ -139,7 +108,7 @@ describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process int
       exitTimeoutMilliseconds: 5_000,
     });
     clients.push(client);
-    const bytes = Buffer.from("namespace-process-owned");
+    const bytes = Buffer.from("namespace-worker-owned");
     const digest = createHash("sha256").update(bytes).digest("hex");
     await client.writePreparedChunk({
       uploadId,
@@ -198,7 +167,7 @@ describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process int
     });
     clients.push(client);
 
-    const bytes = Buffer.from('{"result":"process-owned"}');
+    const bytes = Buffer.from('{"result":"worker-owned"}');
     const digest = createHash("sha256").update(bytes).digest("hex");
     await expect(
       client.evaluateCapacity({
@@ -250,14 +219,14 @@ describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process int
     expect(await client.ownerExit).toBe(0);
   });
 
-  it("SIGKILLs a stopped owner once and waits for real process-exit proof", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "agentic-review-artifact-process-hang-"));
+  it("terminates an Atomics.wait-stalled Worker without claiming D-state coverage", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "agentic-review-artifact-worker-timeout-"));
     await chmod(parent, 0o700);
     temporaryDirectories.push(parent);
-    let child: ReturnType<typeof spawn> | undefined;
-    let killCalls = 0;
+    const workerOwnedPath = join(parent, "worker-owned-descriptor");
 
-    const client = await createArtifactStorageClientWithSpawnerForTest(
+    let actualWorkerExitObserved = false;
+    const client = await createArtifactStorageClientWithFactoryForTest(
       {
         storage: {
           rootPath: join(parent, "storage"),
@@ -270,32 +239,42 @@ describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process int
           },
           closeTimeoutMilliseconds: 5_000,
         },
-        startupTimeoutMilliseconds: 5_000,
-        requestTimeoutMilliseconds: 250,
+        startupTimeoutMilliseconds: 2_000,
+        requestTimeoutMilliseconds: 50,
         shutdownTimeoutMilliseconds: 500,
         exitTimeoutMilliseconds: 2_000,
       },
-      (executable, args, options) => {
-        const spawned = spawn(executable, [...args], options);
-        child = spawned;
-        spawnedProcesses.push(spawned);
-        const originalKill = spawned.kill.bind(spawned);
-        spawned.kill = (signal) => {
-          killCalls += 1;
-          return originalKill(signal);
-        };
-        return spawned as unknown as ArtifactStorageProcessTransport;
+      (_filename, options) => {
+        const worker = new Worker(
+          `
+            const { openSync } = require("node:fs");
+            const { parentPort, workerData } = require("node:worker_threads");
+            const workerOwnedDescriptor = openSync(workerData.workerOwnedPath, "w", 0o600);
+            parentPort.postMessage({
+              type: "ready",
+              protocolVersion: ${artifactStorageProtocolVersion},
+            });
+            parentPort.on("message", () => {
+              void workerOwnedDescriptor;
+              const stall = new Int32Array(new SharedArrayBuffer(4));
+              Atomics.wait(stall, 0, 0);
+            });
+          `,
+          {
+            eval: true,
+            trackUnmanagedFds: options.trackUnmanagedFds,
+            workerData: { ...options.workerData, workerOwnedPath },
+          },
+        );
+        worker.on("exit", () => {
+          actualWorkerExitObserved = true;
+        });
+        return worker as unknown as ArtifactStorageWorkerTransport;
       },
     );
     clients.push(client);
-    if (child?.pid === undefined) {
-      throw new Error("Artifact storage child process has no PID.");
-    }
-    expect(child.pid).not.toBe(process.pid);
+    expect(await readOpenFileDescriptorTargets()).toContain(workerOwnedPath);
 
-    process.kill(child.pid, "SIGSTOP");
-    await waitForStoppedProcess(child.pid);
-    const startedAt = performance.now();
     await expect(
       client.evaluateCapacity({
         request: { expectedTotalBytes: 1 },
@@ -307,11 +286,9 @@ describe.skipIf(process.platform !== "linux")("ArtifactStorageClient process int
         },
       }),
     ).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_CLIENT_TIMEOUT" });
-    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(200);
     await expect(client.terminationAttempt).resolves.toBeUndefined();
-    expect(killCalls).toBe(1);
     await expect(client.joinExit(2_000)).resolves.toBe(1);
-    expect(child.signalCode).toBe("SIGKILL");
-    expect(killCalls).toBe(1);
+    expect(actualWorkerExitObserved).toBe(true);
+    expect(await readOpenFileDescriptorTargets()).not.toContain(workerOwnedPath);
   });
 });
