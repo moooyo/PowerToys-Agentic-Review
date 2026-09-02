@@ -5,14 +5,13 @@ import {
 } from "@agentic-review/codex";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { DatabaseClient } from "./database/database-client.js";
-import { closeDatabaseStorage } from "./database/database-shutdown.js";
 import { DatabaseGitHubPollingState } from "./database/github-polling-state.js";
 import { DatabaseOperatorAuthPersistence } from "./database/operator-auth-persistence.js";
-import { DatabaseOwnerLock } from "./database/owner-lock.js";
 import { GitHubEventIngestionService } from "./github/ingestion-service.js";
 import { GitHubPollingCoordinator } from "./github/polling-coordinator.js";
 import { GitHubRestApiError, GitHubRestClient } from "./github/rest-client.js";
+import { createProductionServerLifecycle } from "./runtime/server-lifecycle.js";
+import { createServerStorageRuntime } from "./runtime/server-storage-runtime.js";
 import {
   createScheduleJobInput,
   defaultTrustedSchedulingPolicy,
@@ -21,37 +20,34 @@ import {
 import { OperatorAuthService } from "./security/operator-auth.js";
 import { createOperatorOidcClient } from "./security/operator-auth-oidc.js";
 
-const start = async (): Promise<void> => {
-  const config = loadConfig();
-  const shutdownController = new AbortController();
-  let database: DatabaseClient | undefined;
-  let databaseOwnerLock: DatabaseOwnerLock | undefined;
-  let pollingPromise: Promise<void> | undefined;
-  let application: { close(): Promise<void> } | undefined;
+const serverShutdownTimeoutMilliseconds = 120_000;
 
-  const closeStorage = async (): Promise<void> => closeDatabaseStorage(database, databaseOwnerLock);
+const normalizeFailure = (error: unknown): Error =>
+  error instanceof Error
+    ? error
+    : new Error("The server received a non-Error lifecycle failure.", { cause: error });
+
+const start = async (): Promise<void> => {
+  const lifecycle = createProductionServerLifecycle({
+    shutdownTimeoutMilliseconds: serverShutdownTimeoutMilliseconds,
+  });
+  let running = false;
+  let artifactFailStopLogged = false;
+
+  const requestSigintShutdown = (): void => lifecycle.requestGracefulShutdown("SIGINT");
+  const requestSigtermShutdown = (): void => lifecycle.requestGracefulShutdown("SIGTERM");
+  process.on("SIGINT", requestSigintShutdown);
+  process.on("SIGTERM", requestSigtermShutdown);
 
   try {
-    databaseOwnerLock = await DatabaseOwnerLock.acquire(config.databasePath);
-    const databasePath = databaseOwnerLock.databasePath;
-    database = await DatabaseClient.create({
-      databasePath,
-      migrationsDirectory: config.migrationsDirectory,
-    });
-    databaseOwnerLock.assertReady();
+    const config = loadConfig();
     const operatorAuthConfig = config.operatorAuth;
     const oidc =
       operatorAuthConfig?.oidc === undefined
         ? undefined
         : await createOperatorOidcClient(operatorAuthConfig.oidc);
-    const operatorAuth =
-      operatorAuthConfig === undefined
-        ? undefined
-        : new OperatorAuthService({
-            config: operatorAuthConfig.service,
-            persistence: new DatabaseOperatorAuthPersistence(database),
-            ...(oidc === undefined ? {} : { oidc }),
-          });
+    lifecycle.signal.throwIfAborted();
+
     const schedulingConfig =
       config.github === undefined
         ? undefined
@@ -62,6 +58,43 @@ const start = async (): Promise<void> => {
               issueTriage: IssueTriageV1ModelOutputSchema,
               pullRequestReview: PrReviewPlanV1ModelOutputSchema,
             },
+          });
+    lifecycle.signal.throwIfAborted();
+
+    const storageRuntime = await createServerStorageRuntime({
+      databasePath: config.databasePath,
+      migrationsDirectory: config.migrationsDirectory,
+      artifactStorage: config.artifactStorage,
+      onFailStop: (error) => {
+        lifecycle.onArtifactFailStop(error);
+        if (!artifactFailStopLogged) {
+          artifactFailStopLogged = true;
+          try {
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "fatal",
+                message: "Artifact storage requested a fail-stop.",
+                code: error.code,
+              }),
+            );
+          } catch {
+            // Logging failure cannot delay process-wide fail-stop.
+          }
+        }
+      },
+    });
+    lifecycle.adoptStorageRuntime(storageRuntime);
+    lifecycle.signal.throwIfAborted();
+
+    const database = storageRuntime.database;
+    const operatorAuth =
+      operatorAuthConfig === undefined
+        ? undefined
+        : new OperatorAuthService({
+            config: operatorAuthConfig.service,
+            persistence: new DatabaseOperatorAuthPersistence(database),
+            ...(oidc === undefined ? {} : { oidc }),
           });
     const githubIngestion =
       config.github === undefined || schedulingConfig === undefined
@@ -75,34 +108,18 @@ const start = async (): Promise<void> => {
     const app = buildApp({
       config,
       database,
-      shutdownSignal: shutdownController.signal,
+      shutdownSignal: lifecycle.signal,
+      artifactReadiness: storageRuntime.artifactReadiness,
+      serverAdmission: lifecycle.admission,
       ...(githubIngestion === undefined ? {} : { githubIngestion }),
       ...(operatorAuth === undefined ? {} : { operatorAuth }),
     });
-    application = app;
-    let shutdownPromise: Promise<void> | undefined;
-
-    const shutdown = (signal: string): Promise<void> => {
-      shutdownPromise ??= (async () => {
-        app.log.info({ signal }, "Server shutdown started.");
-        shutdownController.abort(new Error(`Received ${signal}.`));
-        try {
-          await Promise.all([app.close(), pollingPromise ?? Promise.resolve()]);
-        } finally {
-          await closeStorage();
-        }
-        app.log.info("Server shutdown completed.");
-      })().catch((error: unknown) => {
-        app.log.error({ error }, "Server shutdown failed.");
-        process.exitCode = 1;
-      });
-      return shutdownPromise;
-    };
-
-    process.once("SIGINT", () => void shutdown("SIGINT"));
-    process.once("SIGTERM", () => void shutdown("SIGTERM"));
+    lifecycle.adoptApplication(app);
+    lifecycle.signal.throwIfAborted();
 
     await app.listen({ host: config.host, port: config.port });
+    lifecycle.signal.throwIfAborted();
+
     const pollingConfig = config.github?.polling;
     if (
       pollingConfig !== undefined &&
@@ -144,7 +161,7 @@ const start = async (): Promise<void> => {
               );
             }
             if (waitMs > 0) {
-              await delay(waitMs, undefined, { signal: shutdownController.signal });
+              await delay(waitMs, undefined, { signal: lifecycle.signal });
             }
           },
         }),
@@ -164,7 +181,7 @@ const start = async (): Promise<void> => {
             signal,
           );
         },
-        signal: shutdownController.signal,
+        signal: lifecycle.signal,
         observeError: (error, context) => {
           app.log.error(
             { error, repository: context.repository.fullName },
@@ -180,37 +197,62 @@ const start = async (): Promise<void> => {
           );
         },
       });
-      pollingPromise = pollingCoordinator.run().catch((error: unknown) => {
-        if (!shutdownController.signal.aborted) {
-          app.log.error({ error }, "GitHub polling coordinator stopped unexpectedly.");
-          process.exitCode = 1;
-          setImmediate(() => void shutdown("GITHUB_POLLING_FAILURE"));
-        }
+      const pollingCompletion = pollingCoordinator.run().catch((error: unknown) => {
+        app.log.error({ error }, "GitHub polling coordinator stopped unexpectedly.");
+        throw error;
       });
+      lifecycle.trackBackground("github-polling", pollingCompletion);
     }
+
+    lifecycle.signal.throwIfAborted();
+    lifecycle.markRunning();
+    running = true;
     app.log.info(
       {
         host: config.host,
         port: config.port,
-        databasePath,
+        databasePath: config.databasePath,
         protocolVersion: config.protocolVersion,
       },
       "Agentic Review server is ready.",
     );
+    await lifecycle.completion;
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: "fatal",
-        message: "Agentic Review server failed to start.",
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    shutdownController.abort(error);
-    await application?.close().catch(() => undefined);
-    await pollingPromise?.catch(() => undefined);
-    await closeStorage().catch(() => undefined);
-    process.exitCode = 1;
+    const startupWasStopped =
+      !running && lifecycle.signal.aborted && error === lifecycle.signal.reason;
+    if (startupWasStopped) {
+      if (!artifactFailStopLogged) {
+        console.info(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "info",
+            message: "Agentic Review server startup was stopped.",
+          }),
+        );
+      }
+    } else {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "fatal",
+          message: running
+            ? "Agentic Review server failed while running."
+            : "Agentic Review server failed to start.",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+    if (running) {
+      lifecycle.onArtifactFailStop(normalizeFailure(error));
+    } else if (startupWasStopped) {
+      lifecycle.sealStartupShutdown();
+    } else {
+      lifecycle.sealStartupFailure(error);
+    }
+    await lifecycle.completion;
+  } finally {
+    process.off("SIGINT", requestSigintShutdown);
+    process.off("SIGTERM", requestSigtermShutdown);
   }
 };
 

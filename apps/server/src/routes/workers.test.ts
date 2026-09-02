@@ -14,6 +14,16 @@ const config: ServerConfig = {
   port: 0,
   databasePath: "unused.sqlite",
   migrationsDirectory: "unused",
+  artifactStorage: {
+    rootPath: "/unused/artifacts",
+    capacity: {
+      hardBytes: 10n * 1_024n * 1_024n,
+      hardEntries: 1_000,
+      emergencyReserveBytes: 1_024n * 1_024n,
+      perUploadMetadataHeadroomBytes: 64n * 1_024n,
+      cleanupBacklogHighWaterEntries: 100,
+    },
+  },
   protocolVersion: "1.0",
   heartbeatIntervalSeconds: 20,
   leaseTtlSeconds: 120,

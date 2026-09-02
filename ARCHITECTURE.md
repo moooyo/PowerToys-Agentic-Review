@@ -147,7 +147,17 @@ flowchart LR
     F[Fastify Main Thread] -->|MessagePort RPC| D[Database Worker Thread]
     D --> N[node:sqlite DatabaseSync]
     N --> S[(state.db)]
+    F -->|Bounded data-only RPC| A[Artifact Storage Worker Thread]
+    A --> L[(Private Linux Artifact Root)]
 ```
+
+The production Server lifecycle adopts Fastify, background tasks, the artifact transaction
+coordinator, both Worker Threads, SQLite, and the process-lifetime database owner lock. Readiness is
+published only after the first bounded artifact reconciliation sweep. Shutdown first closes global
+admission and aborts background scheduling, then drains Fastify and background database requests,
+proves artifact Worker exit, closes SQLite, and releases the owner lock. A fatal artifact integrity,
+protocol, or unknown-outcome condition follows the same ordered drain and then exits the complete
+Server with a nonzero status.
 
 The database thread applies:
 
@@ -242,9 +252,10 @@ POST /api/v1/worker/instances
 PUT  /api/v1/worker/instances/{instanceId}/heartbeat
 POST /api/v1/worker/leases/claim
 POST /api/v1/worker/runs/{runId}/events:batch
-POST /api/v1/worker/runs/{runId}/artifacts
+POST /api/v1/worker/runs/{runAttemptId}/artifacts
 PUT  /api/v1/worker/artifact-uploads/{uploadId}/chunks/{chunkIndex}
 POST /api/v1/worker/artifact-uploads/{uploadId}/complete
+POST /api/v1/worker/artifact-uploads/{uploadId}/terminate
 POST /api/v1/worker/runs/{runId}/complete
 POST /api/v1/worker/runs/{runId}/fail
 POST /api/v1/worker/runs/{runId}/release
@@ -324,9 +335,12 @@ Workers upload logs and artifacts through bounded, checksummed, resumable sessio
 completed file has a SHA-256 digest. The server validates declared sizes, content types, per-file
 limits, per-job quotas, and lease ownership.
 
-An artifact submitted after lease loss may be retained for diagnosis but cannot affect job state,
-approval, or publication. Workers keep local artifacts until the server acknowledges finalization,
-then remove the disposable workspace according to retention policy.
+Artifact operations are accepted only while the exact lease remains active. A submission after
+lease loss is rejected; reconciliation removes any uncommitted staging bytes without creating a
+`run_artifacts` record or allowing the data to participate in completion, approval, or publication.
+Any future diagnostic retention path must use a separately designed quarantine namespace and must
+remain isolated from result artifacts. Workers keep local artifacts until the server acknowledges
+finalization, then remove the disposable workspace according to retention policy.
 
 ## 14. Approval and GitHub Publication
 

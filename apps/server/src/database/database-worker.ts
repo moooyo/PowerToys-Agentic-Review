@@ -26,6 +26,39 @@ import type {
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
+import {
+  type ClassifyArtifactNamespacePageInput,
+  type CommitArtifactChunkInput,
+  type CommitArtifactFinalizeInput,
+  type CompleteArtifactCleanupInput,
+  type CompleteArtifactNamespaceCleanupInput,
+  type CreateArtifactUploadInput,
+  classifyArtifactNamespacePageAndAdvanceCursor,
+  commitArtifactChunk,
+  commitArtifactFinalize,
+  completeArtifactCleanup,
+  completeArtifactNamespaceCleanup,
+  createArtifactUpload,
+  type ListDueArtifactCleanupsInput,
+  type ListDueArtifactNamespaceCleanupsInput,
+  listDueArtifactCleanups,
+  listDueArtifactNamespaceCleanups,
+  type PrepareArtifactChunkInput,
+  type PrepareArtifactFinalizeInput,
+  prepareArtifactChunk,
+  prepareArtifactFinalize,
+  probeArtifactUploadCreate,
+  type RecordArtifactCleanupFailureInput,
+  type RecordArtifactNamespaceCleanupFailureInput,
+  readArtifactHealthAccounting,
+  readArtifactReconciliationCursor,
+  recordArtifactCleanupFailure,
+  recordArtifactNamespaceCleanupFailure,
+  type TerminalizeInactiveArtifactUploadsInput,
+  type TerminateArtifactUploadInput,
+  terminalizeInactiveArtifactUploads,
+  terminateArtifactUpload,
+} from "./artifacts.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
 import { adoptLegacyDatabase } from "./database-initialization.js";
 import { completeDatabaseShutdown } from "./database-shutdown.js";
@@ -129,6 +162,7 @@ interface HeartbeatRow {
 }
 
 interface TerminalAttemptRow extends HeartbeatRow {
+  readonly completion_mode: "inline_result_v1" | "result_artifact_v1";
   readonly result_digest: string | null;
   readonly result_json: string | null;
   readonly failure_code: string | null;
@@ -800,6 +834,7 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
           throw new Error("The selected job could not be leased atomically.");
         }
 
+        // Artifact completion is rollout-gated; normal claims intentionally use the DB inline default.
         database
           .prepare(`
           INSERT INTO run_attempts (
@@ -1091,6 +1126,7 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           attempt.worker_node_id,
           attempt.worker_instance_id,
           attempt.status,
+          attempt.completion_mode,
           attempt.lease_token_hash,
           attempt.lease_generation,
           attempt.lease_expires_at,
@@ -1140,6 +1176,9 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
     if (fence === undefined || !matchesTerminalLeaseIdentity(fence, input, tokenHash)) {
       throw new LeaseLostError();
+    }
+    if (fence.completion_mode !== "inline_result_v1") {
+      throw new TerminalSubmissionConflictError();
     }
 
     if (isTerminalAttemptState(fence.status) && fence.legacy_replay_id !== null) {
@@ -1331,6 +1370,7 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
           attempt.worker_node_id,
           attempt.worker_instance_id,
           attempt.status,
+          attempt.completion_mode,
           attempt.lease_token_hash,
           attempt.lease_generation,
           attempt.lease_expires_at,
@@ -1658,6 +1698,58 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return claimLease(request.input as ClaimLeaseInput);
     case "heartbeatLease":
       return heartbeatLease(request.input as HeartbeatLeaseInput);
+    case "createArtifactUpload":
+      return createArtifactUpload(database, request.input as CreateArtifactUploadInput);
+    case "probeArtifactUploadCreate":
+      return probeArtifactUploadCreate(database, request.input as CreateArtifactUploadInput);
+    case "prepareArtifactChunk":
+      return prepareArtifactChunk(database, request.input as PrepareArtifactChunkInput);
+    case "commitArtifactChunk":
+      return commitArtifactChunk(database, request.input as CommitArtifactChunkInput);
+    case "prepareArtifactFinalize":
+      return prepareArtifactFinalize(database, request.input as PrepareArtifactFinalizeInput);
+    case "commitArtifactFinalize":
+      return commitArtifactFinalize(database, request.input as CommitArtifactFinalizeInput);
+    case "terminateArtifactUpload":
+      return terminateArtifactUpload(database, request.input as TerminateArtifactUploadInput);
+    case "terminalizeInactiveArtifactUploads":
+      return terminalizeInactiveArtifactUploads(
+        database,
+        request.input as TerminalizeInactiveArtifactUploadsInput,
+      );
+    case "listDueArtifactCleanups":
+      return listDueArtifactCleanups(database, request.input as ListDueArtifactCleanupsInput);
+    case "completeArtifactCleanup":
+      return completeArtifactCleanup(database, request.input as CompleteArtifactCleanupInput);
+    case "recordArtifactCleanupFailure":
+      return recordArtifactCleanupFailure(
+        database,
+        request.input as RecordArtifactCleanupFailureInput,
+      );
+    case "classifyArtifactNamespacePageAndAdvanceCursor":
+      return classifyArtifactNamespacePageAndAdvanceCursor(
+        database,
+        request.input as ClassifyArtifactNamespacePageInput,
+      );
+    case "listDueArtifactNamespaceCleanups":
+      return listDueArtifactNamespaceCleanups(
+        database,
+        request.input as ListDueArtifactNamespaceCleanupsInput,
+      );
+    case "completeArtifactNamespaceCleanup":
+      return completeArtifactNamespaceCleanup(
+        database,
+        request.input as CompleteArtifactNamespaceCleanupInput,
+      );
+    case "recordArtifactNamespaceCleanupFailure":
+      return recordArtifactNamespaceCleanupFailure(
+        database,
+        request.input as RecordArtifactNamespaceCleanupFailureInput,
+      );
+    case "readArtifactHealthAccounting":
+      return readArtifactHealthAccounting(database, request.input as Record<string, never>);
+    case "readArtifactReconciliationCursor":
+      return readArtifactReconciliationCursor(database, request.input as Record<string, never>);
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":

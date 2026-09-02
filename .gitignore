@@ -13,6 +13,8 @@ coverage/
 data/
 .data/
 artifacts/
+!apps/server/src/artifacts/
+!apps/server/src/artifacts/**
 backups/
 *.key
 *.pem

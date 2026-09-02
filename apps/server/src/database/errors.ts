@@ -53,6 +53,60 @@ export class TerminalSubmissionConflictError extends Error {
   }
 }
 
+export class ArtifactUploadConflictError extends Error {
+  public readonly code = "ARTIFACT_UPLOAD_CONFLICT";
+
+  public constructor(message = "The artifact upload already has different immutable state.") {
+    super(message);
+    this.name = "ArtifactUploadConflictError";
+  }
+}
+
+export class ArtifactUploadQuotaExceededError extends Error {
+  public readonly code = "ARTIFACT_UPLOAD_QUOTA_EXCEEDED";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactUploadQuotaExceededError";
+  }
+}
+
+export class ArtifactCompletionModeMismatchError extends Error {
+  public readonly code = "ARTIFACT_COMPLETION_MODE_MISMATCH";
+
+  public constructor() {
+    super("The run attempt does not permit result artifact operations.");
+    this.name = "ArtifactCompletionModeMismatchError";
+  }
+}
+
+export class ArtifactReconciliationInvalidRequestError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
+
+  public constructor() {
+    super("The artifact reconciliation request is invalid.");
+    this.name = "ArtifactReconciliationInvalidRequestError";
+  }
+}
+
+export class ArtifactReconciliationConflictError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_CONFLICT";
+
+  public constructor() {
+    super("The artifact reconciliation state changed before the operation could commit.");
+    this.name = "ArtifactReconciliationConflictError";
+  }
+}
+
+export class ArtifactReconciliationStateError extends Error {
+  public readonly code = "ARTIFACT_RECONCILIATION_STATE_INVALID";
+
+  public constructor() {
+    super("The durable artifact reconciliation state is invalid.");
+    this.name = "ArtifactReconciliationStateError";
+  }
+}
+
 export class WorkerUnavailableError extends Error {
   public readonly code = "WORKER_UNAVAILABLE";
 

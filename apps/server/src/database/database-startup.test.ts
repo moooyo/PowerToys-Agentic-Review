@@ -106,7 +106,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(7);
+      expect(readSchemaVersion(migratedDatabase)).toBe(11);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );
@@ -118,6 +118,45 @@ describe("DatabaseClient startup", () => {
       migratedDatabase.close();
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "backs up an initialized v7 database before applying migrations through v11",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const versionSevenDirectory = await createMigrationPrefixDirectory(directory, 7);
+      const databasePath = join(directory, "data", "state.sqlite");
+
+      const versionSevenClient = await DatabaseClient.create({
+        databasePath,
+        migrationsDirectory: versionSevenDirectory,
+      });
+      await versionSevenClient.close();
+      expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
+        databaseInitializationMarkerContent,
+      );
+
+      const upgradedClient = await DatabaseClient.create({ databasePath, migrationsDirectory });
+      await upgradedClient.close();
+
+      const backupDirectory = join(directory, "data", "backups");
+      const backupFiles = await readdir(backupDirectory);
+      expect(backupFiles).toHaveLength(1);
+      const backupFilename = backupFiles[0] as string;
+      expect(backupFilename).toContain(".v7-to-v11.");
+
+      const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
+      const backupDatabase = new DatabaseSync(join(backupDirectory, backupFilename), {
+        readOnly: true,
+      });
+      try {
+        expect(readSchemaVersion(migratedDatabase)).toBe(11);
+        expect(readSchemaVersion(backupDatabase)).toBe(7);
+      } finally {
+        migratedDatabase.close();
+        backupDatabase.close();
+      }
+    },
+  );
 
   it("leaves a failed fresh migration in an explicit recovery-required state", async () => {
     const directory = await createTemporaryDirectory();
@@ -518,6 +557,24 @@ const createTemporaryDirectory = async (): Promise<string> => {
     await chmod(directory, 0o700);
   }
   temporaryDirectories.push(directory);
+  return directory;
+};
+
+const createMigrationPrefixDirectory = async (
+  parentDirectory: string,
+  targetVersion: number,
+): Promise<string> => {
+  const directory = join(parentDirectory, `migrations-v${targetVersion}`);
+  await mkdir(directory);
+  const filenames = (await readdir(migrationsDirectory)).filter((filename) => {
+    const versionText = /^(\d+)_.*\.sql$/u.exec(filename)?.[1];
+    return versionText !== undefined && Number.parseInt(versionText, 10) <= targetVersion;
+  });
+  await Promise.all(
+    filenames.map((filename) =>
+      copyFile(join(migrationsDirectory, filename), join(directory, filename)),
+    ),
+  );
   return directory;
 };
 

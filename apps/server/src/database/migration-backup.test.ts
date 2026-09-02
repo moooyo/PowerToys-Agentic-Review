@@ -1,5 +1,6 @@
 import {
   chmod,
+  copyFile,
   link,
   lstat,
   mkdir,
@@ -23,6 +24,15 @@ import {
 import { inspectMigrationState, runMigrations } from "../../dist/database/migrations.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
+const versionSevenMigrationFilenames = [
+  "0001_initial.sql",
+  "0002_github_ingestion.sql",
+  "0003_operator_auth.sql",
+  "0004_github_polling_state.sql",
+  "0005_operator_browser_flows.sql",
+  "0006_immutable_review_results.sql",
+  "0007_operator_login_claim.sql",
+] as const;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -101,14 +111,14 @@ describe("database migrations and backups", () => {
     try {
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
         currentVersion: 0,
-        targetVersion: 7,
-        pendingVersions: [1, 2, 3, 4, 5, 6, 7],
+        targetVersion: 11,
+        pendingVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
       });
 
-      expect(runMigrations(database, migrationsDirectory)).toBe(7);
+      expect(runMigrations(database, migrationsDirectory)).toBe(11);
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
-        currentVersion: 7,
-        targetVersion: 7,
+        currentVersion: 11,
+        targetVersion: 11,
         pendingVersions: [],
       });
     } finally {
@@ -118,10 +128,17 @@ describe("database migrations and backups", () => {
 
   it("creates a private verified backup before an upgrade", async () => {
     const directory = await createTemporaryDirectory();
+    const versionSevenDirectory = join(directory, "migrations-v7");
+    await mkdir(versionSevenDirectory);
+    await Promise.all(
+      versionSevenMigrationFilenames.map((filename) =>
+        copyFile(join(migrationsDirectory, filename), join(versionSevenDirectory, filename)),
+      ),
+    );
     const databasePath = join(directory, "state.sqlite");
     const database = new DatabaseSync(databasePath);
     try {
-      runMigrations(database, migrationsDirectory);
+      expect(runMigrations(database, versionSevenDirectory)).toBe(7);
       database.exec("CREATE TABLE backup_marker (value TEXT NOT NULL) STRICT");
       database.prepare("INSERT INTO backup_marker (value) VALUES (?)").run("present");
 
@@ -129,7 +146,7 @@ describe("database migrations and backups", () => {
         database,
         databasePath,
         currentVersion: 7,
-        targetVersion: 8,
+        targetVersion: 11,
       });
       const backupDatabase = new DatabaseSync(backupPath, { readOnly: true });
       try {

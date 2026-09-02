@@ -7,8 +7,9 @@
     "node": ">=24.20.0 <25"
   },
   "scripts": {
+    "prebuild": "node ./scripts/clean-build-output.mjs",
     "build": "tsc -b",
-    "clean": "tsc -b --clean",
+    "clean": "node ./scripts/clean-build-output.mjs",
     "dev": "node --enable-source-maps dist/main.js",
     "start": "node --enable-source-maps dist/main.js",
     "test": "pnpm build && vitest run",

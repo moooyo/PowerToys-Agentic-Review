@@ -15,7 +15,23 @@ import {
   type SelfOrAllowlistPolicy,
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ArtifactTransactionCoordinator,
+  type ArtifactTransactionDatabaseHandle,
+  type ArtifactTransactionDatabaseOperation,
+  registerArtifactTransactionOwnerLockHandle,
+  registerArtifactTransactionStorageHandle,
+} from "../../dist/artifacts/artifact-transaction-coordinator.js";
+import type {
+  ArtifactCapacityAdmission,
+  ArtifactCapacityEvaluationInput,
+  ArtifactCapacityLimits,
+  ArtifactUploadCleanupRequest,
+  PreparedArtifactChunk,
+  PreparedArtifactFinalization,
+} from "../../dist/artifacts/types.js";
+import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
@@ -24,9 +40,23 @@ import {
   databaseInitializationMarkerPath,
 } from "../../dist/database/storage-security.js";
 
+type FakeArtifactTransactionStorageOwner = Parameters<
+  typeof registerArtifactTransactionStorageHandle
+>[1];
+type FakeArtifactTransactionOwnerLock = Parameters<
+  typeof registerArtifactTransactionOwnerLockHandle
+>[1];
+
+const attachArtifactTransactionStorageForTest = (owner: FakeArtifactTransactionStorageOwner) =>
+  registerArtifactTransactionStorageHandle(owner, owner);
+
+const attachArtifactTransactionOwnerLockForTest = (owner: FakeArtifactTransactionOwnerLock) =>
+  registerArtifactTransactionOwnerLockHandle(owner, owner);
+
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
 const protocolVersion = "1.0";
 const leaseTtlSeconds = 300;
+const artifactLeaseToken = "database-client-artifact-lease-token";
 
 const workerCapabilities = {
   operatingSystem: "windows",
@@ -39,6 +69,168 @@ const workerCapabilities = {
 } satisfies WorkerCapabilities;
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+const artifactClientId = (ordinal: number): string =>
+  `10000000-0000-4000-8000-${ordinal.toString().padStart(12, "0")}`;
+
+const artifactTransactionDatabaseOperations = [
+  "probeArtifactUploadCreate",
+  "createArtifactUpload",
+  "prepareArtifactChunk",
+  "commitArtifactChunk",
+  "prepareArtifactFinalize",
+  "commitArtifactFinalize",
+  "terminateArtifactUpload",
+  "terminalizeInactiveArtifactUploads",
+  "listDueArtifactCleanups",
+  "completeArtifactCleanup",
+  "recordArtifactCleanupFailure",
+  "classifyArtifactNamespacePageAndAdvanceCursor",
+  "listDueArtifactNamespaceCleanups",
+  "completeArtifactNamespaceCleanup",
+  "recordArtifactNamespaceCleanupFailure",
+  "readArtifactHealthAccounting",
+  "readArtifactReconciliationCursor",
+] as const satisfies readonly ArtifactTransactionDatabaseOperation[];
+
+const exhaustiveArtifactTransactionDatabaseOperations: [
+  Exclude<
+    ArtifactTransactionDatabaseOperation,
+    (typeof artifactTransactionDatabaseOperations)[number]
+  >,
+] extends [never]
+  ? typeof artifactTransactionDatabaseOperations
+  : never = artifactTransactionDatabaseOperations;
+
+const artifactStorageCapacity: ArtifactCapacityLimits = {
+  hardBytes: 1_000_000_000n,
+  hardEntries: 100_000,
+  emergencyReserveBytes: 1_000n,
+  perUploadMetadataHeadroomBytes: 0n,
+  cleanupBacklogHighWaterEntries: 4_096,
+};
+
+const capacityAdmission = (input: ArtifactCapacityEvaluationInput): ArtifactCapacityAdmission => {
+  const requiredBytes = BigInt(input.request.expectedTotalBytes) * 2n;
+  const outstandingReservationBytes = input.accounting.liveUploadExpectedByteSizeBuckets.reduce(
+    (total, bucket) => total + BigInt(bucket.expectedTotalBytes) * 2n * BigInt(bucket.uploadCount),
+    0n,
+  );
+  const outstandingReservationEntries = input.accounting.liveUploadCount * 4;
+  const filesystemAvailableBytes = 1_000_000_000n;
+  return {
+    requiredBytes,
+    requiredEntries: 4,
+    physicalAllocatedBytes: 0n,
+    physicalEntries: 0,
+    outstandingReservationBytes,
+    outstandingReservationEntries,
+    filesystemAvailableBytes,
+    filesystemAvailableAfterReservationsBytes:
+      filesystemAvailableBytes - outstandingReservationBytes,
+    filesystemAllocationUnitBytes: 1n,
+    projectedChargedBytes: outstandingReservationBytes + requiredBytes,
+    projectedChargedEntries: outstandingReservationEntries + 4,
+  };
+};
+
+class FakeArtifactTransactionStorage implements FakeArtifactTransactionStorageOwner {
+  readonly exit = Promise.withResolvers<number>();
+  readonly ownerExit = this.exit.promise;
+  readonly terminal = Promise.withResolvers<Error>();
+  readonly terminalFailure = this.terminal.promise;
+
+  evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
+    return Promise.resolve(capacityAdmission(input));
+  }
+
+  writePreparedChunk(input: PreparedArtifactChunk) {
+    return Promise.resolve({
+      uploadId: input.uploadId,
+      prepareId: input.prepareId,
+      durableOffsetBytes: input.offsetBytes + input.bytes.byteLength,
+      replayed: input.receiptState === "committed",
+    });
+  }
+
+  finalizeArtifact(input: PreparedArtifactFinalization) {
+    return Promise.resolve({
+      ...input,
+      storageObjectKey: `sha256/${input.sha256.slice(0, 2)}/${input.sha256}`,
+      reused: false,
+    });
+  }
+
+  readObject(): Promise<Buffer> {
+    return Promise.reject(new Error("Fake artifact object reads are not configured."));
+  }
+
+  cleanupUpload(_input: ArtifactUploadCleanupRequest) {
+    return Promise.resolve({ stagingRemoved: false, publicationTemporariesRemoved: 0 });
+  }
+
+  scanNamespacePage(
+    input: Parameters<FakeArtifactTransactionStorageOwner["scanNamespacePage"]>[0],
+  ) {
+    return Promise.resolve({
+      scanSessionId: input.scanSessionId,
+      sweepGeneration: input.sweepGeneration,
+      expectedAfterKey: input.expectedAfterKey,
+      observations: [],
+      completedSweep: true,
+      nextAfterKey: null,
+    });
+  }
+
+  closeNamespaceScan(
+    input: Parameters<FakeArtifactTransactionStorageOwner["closeNamespaceScan"]>[0],
+  ) {
+    return Promise.resolve({ ...input, closed: true as const });
+  }
+
+  cleanupNamespaceEntry(
+    input: Parameters<FakeArtifactTransactionStorageOwner["cleanupNamespaceEntry"]>[0],
+  ) {
+    return Promise.resolve({
+      entryKey: input.entryKey,
+      observationSha256: input.observationSha256,
+      outcome: "identity_changed" as const,
+    });
+  }
+
+  close(): Promise<void> {
+    this.exit.resolve(0);
+    return Promise.resolve();
+  }
+}
+
+const createArtifactCoordinator = async (
+  client: DatabaseClient,
+  database: ArtifactTransactionDatabaseHandle = client.createArtifactTransactionDatabaseHandle(),
+  reconciliationIntervalMilliseconds = 60_000,
+): Promise<ArtifactTransactionCoordinator> => {
+  const storage = new FakeArtifactTransactionStorage();
+  const coordinator = await ArtifactTransactionCoordinator.create({
+    database,
+    storage: attachArtifactTransactionStorageForTest(storage),
+    storageCapacity: artifactStorageCapacity,
+    databaseOwnerLock: attachArtifactTransactionOwnerLockForTest({
+      close: () => Promise.resolve(),
+    }),
+    requestTimeoutMilliseconds: 5_000,
+    closeTimeoutMilliseconds: 5_000,
+    storageJoinTimeoutMilliseconds: 5_000,
+    maximumPendingTransactions: 16,
+    reconciliationBatchSize: 8,
+    reconciliationMaximumNamespacePagesPerSession: 8,
+    reconciliationIntervalMilliseconds,
+    reconciliationPassTimeoutMilliseconds: 5_000,
+    reconciliationInitialRetryDelaySeconds: 30,
+    reconciliationMaximumRetryDelaySeconds: 300,
+    onFailStop: () => undefined,
+  });
+  await coordinator.ready;
+  return coordinator;
+};
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
@@ -573,6 +765,28 @@ const withFixtureDatabase = <T>(
   }
 };
 
+const seedCompletedNamespaceSweepForTest = (fixture: DatabaseFixture): void => {
+  withFixtureDatabase(fixture, (database) => {
+    const completedAt = new Date().toISOString();
+    const update = database
+      .prepare(`
+        UPDATE artifact_namespace_reconciliation_cursors
+        SET sweep_generation = 1,
+            after_key = NULL,
+            updated_at = ?,
+            last_completed_at = ?
+        WHERE name = 'managed_namespace_v2'
+          AND sweep_generation = 0
+          AND after_key IS NULL
+          AND last_completed_at IS NULL
+      `)
+      .run(completedAt, completedAt);
+    if (Number(update.changes) !== 1) {
+      throw new Error("Expected the namespace sweep test fixture to be incomplete.");
+    }
+  });
+};
+
 const setWorkerState = (
   fixture: DatabaseFixture,
   workerNodeId: string,
@@ -622,6 +836,101 @@ const claimLease = async (
     protocolVersion,
     leaseTtlSeconds,
   });
+
+const addArtifactModeLease = (
+  fixture: DatabaseFixture,
+  workerId: string,
+  workerNodeId: string,
+  workerInstanceId: string,
+  suffix: string,
+) => {
+  const now = new Date().toISOString();
+  const future = "2099-09-01T00:00:00.000Z";
+  const jobId = `job-artifact-${suffix}`;
+  const runAttemptId = `run-artifact-${suffix}`;
+  withFixtureDatabase(fixture, (database) => {
+    database
+      .prepare(`
+        INSERT INTO jobs (
+          id,
+          job_kind,
+          semantic_key,
+          concurrency_key,
+          status,
+          execution_json,
+          required_capabilities_json,
+          resource_revision,
+          attempt_count,
+          max_attempts,
+          lease_generation,
+          current_run_attempt_id,
+          next_attempt_at,
+          started_at,
+          created_at,
+          updated_at
+        ) VALUES (
+          ?, 'pull_request_review', ?, ?, 'running', '{}', '[]', ?, 1, 3, 1, ?, ?, ?, ?, ?
+        )
+      `)
+      .run(
+        jobId,
+        `artifact-${suffix}-semantic-key`,
+        `artifact-${suffix}-concurrency-key`,
+        sha256(`artifact-${suffix}-revision`),
+        runAttemptId,
+        now,
+        now,
+        now,
+        now,
+      );
+    database
+      .prepare(`
+        INSERT INTO run_attempts (
+          id,
+          job_id,
+          attempt_number,
+          worker_id,
+          worker_node_id,
+          worker_instance_id,
+          status,
+          lease_token_hash,
+          lease_generation,
+          lease_expires_at,
+          execution_deadline_at,
+          no_progress_timeout_ms,
+          no_progress_deadline_at,
+          last_heartbeat_at,
+          phase,
+          completion_mode,
+          started_at
+        ) VALUES (
+          ?, ?, 1, ?, ?, ?, 'running', ?, 1, ?, ?, 600000, ?, ?,
+          'uploading', 'result_artifact_v1', ?
+        )
+      `)
+      .run(
+        runAttemptId,
+        jobId,
+        workerId,
+        workerNodeId,
+        workerInstanceId,
+        sha256(artifactLeaseToken),
+        future,
+        future,
+        future,
+        now,
+        now,
+      );
+  });
+  return {
+    jobId,
+    runAttemptId,
+    workerNodeId,
+    workerInstanceId,
+    leaseToken: artifactLeaseToken,
+    leaseGeneration: 1,
+  } as const;
+};
 
 const scheduleAndClaimReview = async (
   fixture: DatabaseFixture,
@@ -715,6 +1024,257 @@ describe("DatabaseClient lease integration", () => {
     if (granted?.outcome === "granted") {
       expect(["worker-a", "worker-b"]).toContain(granted.envelope.lease.workerNodeId);
     }
+  });
+
+  it("keeps artifact completion unreachable while normal claims intentionally default to inline v1", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-inline-rollout-gate",
+      "instance-inline-rollout-gate",
+    );
+    const claim = await claimLease(
+      fixture.client,
+      "worker-inline-rollout-gate",
+      "instance-inline-rollout-gate",
+      worker.capabilitiesDigest,
+    );
+    if (claim.outcome !== "granted") {
+      throw new Error("Expected the inline rollout-gate fixture to receive a lease.");
+    }
+
+    expect(claim.envelope).not.toHaveProperty("completionMode");
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare("SELECT completion_mode FROM run_attempts WHERE id = ?")
+          .get(claim.envelope.lease.runAttemptId),
+      ).toEqual({ completion_mode: "inline_result_v1" });
+    });
+    seedCompletedNamespaceSweepForTest(fixture);
+    const coordinator = await createArtifactCoordinator(fixture.client);
+    await expect(
+      coordinator.createArtifactUpload({
+        ...claim.envelope.lease,
+        clientArtifactId: artifactClientId(0),
+        purpose: "result",
+        name: "result.json",
+        mediaType: "application/json",
+        totalBytes: 2,
+        sha256: sha256("{}"),
+      }),
+    ).rejects.toMatchObject({
+      name: "ArtifactTransactionCoordinatorError",
+      code: "ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH",
+      message: "The run attempt does not permit result artifact operations.",
+    });
+    await coordinator.close();
+  });
+
+  it("maps artifact mutations through the single transaction authority", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-artifact-probe",
+      "instance-artifact-probe",
+    );
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
+      "worker-artifact-probe",
+      "instance-artifact-probe",
+      "probe",
+    );
+    const input = {
+      ...artifactLease,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result" as const,
+      name: "result.json",
+      mediaType: "application/json" as const,
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    };
+
+    seedCompletedNamespaceSweepForTest(fixture);
+    const databaseHandle = fixture.client.createArtifactTransactionDatabaseHandle();
+    expect(Reflect.ownKeys(databaseHandle)).toEqual([]);
+    expect(() => fixture.client.createArtifactTransactionDatabaseHandle()).toThrow(
+      /already issued/u,
+    );
+    const coordinator = await createArtifactCoordinator(fixture.client, databaseHandle);
+    const created = await coordinator.createArtifactUpload(input);
+    const chunk = {
+      ...artifactLease,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: 2,
+      chunkSha256: sha256("{}"),
+      data: Buffer.from("{}").toString("base64url"),
+    };
+    await expect(coordinator.putArtifactChunk(created.uploadId, chunk)).resolves.toMatchObject({
+      state: "receiving",
+      outcome: "accepted",
+      nextChunkIndex: 1,
+      nextOffsetBytes: 2,
+    });
+    await expect(coordinator.putArtifactChunk(created.uploadId, chunk)).resolves.toMatchObject({
+      state: "receiving",
+      outcome: "replayed",
+      nextChunkIndex: 1,
+      nextOffsetBytes: 2,
+    });
+    await expect(coordinator.createArtifactUpload(input)).resolves.toEqual({
+      ...created,
+      replayed: true,
+      nextChunkIndex: 1,
+      nextOffsetBytes: 2,
+    });
+    await coordinator.close();
+  });
+
+  it("rejects every ordinary artifact request and issues one opaque transaction handle", async () => {
+    const fixture = await createFixture();
+    let getterCalls = 0;
+    for (const operation of exhaustiveArtifactTransactionDatabaseOperations) {
+      const accessor = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(accessor, "value", {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return 1;
+        },
+      });
+      const bareRequest = Reflect.apply(fixture.client.request, fixture.client, [
+        operation,
+        accessor,
+      ]) as Promise<unknown>;
+      await expect(bareRequest).rejects.toMatchObject({
+        name: "DatabaseRequestError",
+        code: "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
+      });
+    }
+    const shutdownInput = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(shutdownInput, "value", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 1;
+      },
+    });
+    await expect(
+      Reflect.apply(fixture.client.request, fixture.client, ["shutdown", shutdownInput]),
+    ).rejects.toMatchObject({ code: "DATABASE_SHUTDOWN_AUTHORITY_REQUIRED" });
+    expect(getterCalls).toBe(0);
+    const handle = fixture.client.createArtifactTransactionDatabaseHandle();
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+    expect(() => fixture.client.createArtifactTransactionDatabaseHandle()).toThrow(
+      /already issued/u,
+    );
+    seedCompletedNamespaceSweepForTest(fixture);
+    const coordinator = await createArtifactCoordinator(fixture.client, handle);
+    await expect(fixture.client.close()).rejects.toMatchObject({
+      code: "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
+    });
+    await coordinator.close();
+  });
+
+  it("revokes an unconsumed artifact transaction handle when the database owner closes", async () => {
+    const fixture = await createFixture();
+    const handle = fixture.client.createArtifactTransactionDatabaseHandle();
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+
+    await expect(fixture.client.close()).resolves.toBeUndefined();
+  });
+
+  it("round-trips Server-authoritative artifact cleanup operations through the database Worker", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-artifact-reconcile",
+      "instance-artifact-reconcile",
+    );
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
+      "worker-artifact-reconcile",
+      "instance-artifact-reconcile",
+      "reconcile",
+    );
+    seedCompletedNamespaceSweepForTest(fixture);
+    const coordinator = await createArtifactCoordinator(fixture.client, undefined, 10);
+    await coordinator.createArtifactUpload({
+      ...artifactLease,
+      clientArtifactId: artifactClientId(0),
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: 2,
+      sha256: sha256("{}"),
+    });
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
+        .run("2000-01-01T00:00:00.000Z", artifactLease.runAttemptId);
+    });
+
+    await vi.waitFor(() => {
+      expect(coordinator.readiness.health).toMatchObject({
+        cleanup: { completed: 1, failed: 0 },
+        capacity: { liveUploadCount: 0, cleanupBacklogEntries: 0 },
+      });
+    });
+    await coordinator.close();
+  });
+
+  it("serializes the stable artifact upload quota error across the database protocol", async () => {
+    const fixture = await createFixture();
+    const worker = await registerWorker(
+      fixture.client,
+      "worker-artifact-quota",
+      "instance-artifact-quota",
+    );
+    const artifactLease = addArtifactModeLease(
+      fixture,
+      worker.workerId,
+      "worker-artifact-quota",
+      "instance-artifact-quota",
+      "quota",
+    );
+    seedCompletedNamespaceSweepForTest(fixture);
+    const coordinator = await createArtifactCoordinator(fixture.client);
+
+    for (let ordinal = 0; ordinal < maximumResultArtifactUploadIdentitiesPerAttempt; ordinal += 1) {
+      const upload = await coordinator.createArtifactUpload({
+        ...artifactLease,
+        clientArtifactId: artifactClientId(ordinal),
+        purpose: "result",
+        name: `result-${ordinal}.json`,
+        mediaType: "application/json",
+        totalBytes: 1,
+        sha256: sha256(`artifact-${ordinal}`),
+      });
+      await coordinator.terminateArtifactUpload(upload.uploadId, {
+        ...artifactLease,
+        state: "abandoned",
+        reason: "client_abandoned",
+      });
+    }
+
+    await expect(
+      coordinator.createArtifactUpload({
+        ...artifactLease,
+        clientArtifactId: artifactClientId(maximumResultArtifactUploadIdentitiesPerAttempt),
+        purpose: "result",
+        name: "result-over-quota.json",
+        mediaType: "application/json",
+        totalBytes: 1,
+        sha256: sha256("artifact-over-quota"),
+      }),
+    ).rejects.toMatchObject({
+      name: "ArtifactTransactionCoordinatorError",
+      code: "ARTIFACT_TRANSACTION_QUOTA_EXCEEDED",
+    });
+    await coordinator.close();
   });
 
   it("dead-letters an oversized claim response before committing a lease", async () => {
