@@ -14,6 +14,33 @@ import (
 )
 
 func TestReleaseEvidenceHasOnlyVerifiedExportedMintingSurfaces(t *testing.T) {
+	finalizedMethods := map[string]bool{
+		"Descriptor":          false,
+		"DescriptorDocument":  false,
+		"DescriptorSHA256":    false,
+		"ManifestDocument":    false,
+		"ManifestSHA256":      false,
+		"SnapshotForAssembly": false,
+	}
+	finalizedType := reflect.TypeOf(releasepackage.FinalizedRelease{})
+	for index := 0; index < finalizedType.NumMethod(); index++ {
+		name := finalizedType.Method(index).Name
+		if _, allowed := finalizedMethods[name]; !allowed {
+			t.Fatalf("FinalizedRelease exposes cleanup-bypassing method %s", name)
+		}
+		finalizedMethods[name] = true
+	}
+	for name, seen := range finalizedMethods {
+		if !seen {
+			t.Fatalf("expected FinalizedRelease method %s is absent", name)
+		}
+	}
+	snapshotType := reflect.TypeOf(releasepackage.AssemblySnapshot{})
+	for index := 0; index < snapshotType.NumField(); index++ {
+		if snapshotType.Field(index).IsExported() {
+			t.Fatalf("%s field %q is exported", snapshotType.Name(), snapshotType.Field(index).Name)
+		}
+	}
 	for _, evidenceType := range []reflect.Type{
 		reflect.TypeOf(releasepackage.ReviewedClosureEvidence{}),
 		reflect.TypeOf(releasepackage.ServiceHostBuildEvidence{}),
@@ -57,6 +84,12 @@ func TestReleaseEvidenceHasOnlyVerifiedExportedMintingSurfaces(t *testing.T) {
 			function, ok := declaration.(*ast.FuncDecl)
 			if !ok || !ast.IsExported(function.Name.Name) {
 				continue
+			}
+			if fieldListNamesType(function.Type.Results, "AssemblySnapshot") {
+				if function.Recv == nil || !fieldListNamesType(function.Recv, "FinalizedRelease") ||
+					function.Name.Name != "SnapshotForAssembly" {
+					t.Fatalf("production API %s can mint AssemblySnapshot", function.Name.Name)
+				}
 			}
 			for evidence, approvedFunction := range allowed {
 				if !fieldListNamesType(function.Type.Results, evidence) {

@@ -1,0 +1,58 @@
+# Canonical Outer Worker Package
+
+`outerpackage` defines the data-only contract used to assemble and verify a node-specific Worker
+transport package. It does not read a filesystem, sign with a private key, install files, provision
+CNG keys or certificates, or create Windows services.
+
+## Package closure
+
+The canonical `package-index.json` has three roots: `metadata`, `installation`, and
+`trusted-configuration`. The index and its detached signature are transport metadata and do not
+list themselves as payloads. Every other file has one case-fold-unique root/path entry.
+
+The metadata root has exactly five payloads:
+
+1. `package-descriptor.json`
+2. `prepare-receipt.json`
+3. `reviewed-closure.json`
+4. `compiled-release-template.json`
+5. `servicehost-build-receipt.json`
+
+The installation root also has the indexed `release-manifest.json`. The trusted-configuration root
+has the indexed Control and Executor bootstrap files. Those three files are intentionally absent
+from the runtime manifest. Every remaining installation or trusted-configuration entry must match
+the runtime manifest closure and its closed role policy.
+
+`BuildIndex` obtains one `releasepackage.AssemblySnapshot`. The snapshot revalidates and clones all
+six finalized documents inside the release and native-handle cleanup commit gates. The builder does
+not reconstruct reviewed metadata from caller-provided fields. `BuildOptions`, including bootstrap
+hashes, target roots, CNG identity, and mTLS identity, remains ordinary assembler input: this package
+commits it to signed data but does not verify its provenance. Package and installation IDs are
+lowercase Windows path components; their eventual physical placement under signed target roots is
+left to the future filesystem assembly and bootstrap gate.
+
+## Detached signature
+
+The signature envelope fixes `ecdsa-p256-sha256-p1363-low-s`. Its signature is the canonical
+unpadded base64url encoding of a 64-byte `r || s` value over:
+
+```text
+SHA256("AgenticReview outer package index signature v1\0" || canonical_index_bytes)
+```
+
+Verification accepts only canonical P-256 SubjectPublicKeyInfo DER and rejects zero, out-of-range,
+or high-S scalars, DER signatures, padding, and algorithm substitution. `VerifyDetachedSignature`
+returns only an error. Its `trustedSPKI` input is not an authority source; a future production
+adapter must supply that key exclusively from compiled `outertrust` policy.
+
+## Authority boundary
+
+Successful parsing, release comparison, or signature verification is an ordinary data result. It
+does not authorize installation, service creation, Claim, or execution. A future installer must
+enumerate the staged filesystem through stable handles, reject all unindexed objects, hash every
+payload, cross-bind both bootstrap documents, enforce target-root and identity placement, obtain
+the signer from compiled trust, and mint a separate opaque installation evidence value.
+
+In particular, `ValidateAgainstRelease` checks only that an index reproduces one finalized release
+closure. It deliberately reuses the node identity, root, and bootstrap values already carried by
+the index; it does not prove those assembler-origin values against an independent node authority.

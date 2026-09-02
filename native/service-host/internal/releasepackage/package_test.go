@@ -102,6 +102,68 @@ func TestFinalizeBuildsCanonicalManifestAndZeroAuthorityDescriptor(t *testing.T)
 	}
 }
 
+func TestAssemblySnapshotRetainsExactIndependentDocumentCopies(t *testing.T) {
+	prepared, request := validFinalization(t)
+	finalized, err := Finalize(prepared, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := finalized.SnapshotForAssembly()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []struct {
+		name         string
+		document     []byte
+		digest       [sha256.Size]byte
+		snapshotRead func() []byte
+		snapshotHash func() [sha256.Size]byte
+	}{
+		{"reviewed closure", prepared.state.closure.Document(), prepared.state.closure.SHA256(), snapshot.ReviewedClosureDocument, snapshot.ReviewedClosureSHA256},
+		{"prepare receipt", prepared.ReceiptDocument(), prepared.ReceiptSHA256(), snapshot.PrepareReceiptDocument, snapshot.PrepareReceiptSHA256},
+		{"compiled template", prepared.CompiledTemplateDocument(), prepared.CompiledTemplateSHA256(), snapshot.CompiledTemplateDocument, snapshot.CompiledTemplateSHA256},
+		{"ServiceHost build receipt", request.ServiceHostBuild.state.document, request.ServiceHostBuild.state.sha256, snapshot.ServiceHostBuildReceiptDocument, snapshot.ServiceHostBuildReceiptSHA256},
+		{"runtime manifest", finalized.ManifestDocument(), finalized.ManifestSHA256(), snapshot.ManifestDocument, snapshot.ManifestSHA256},
+		{"package descriptor", finalized.DescriptorDocument(), finalized.DescriptorSHA256(), snapshot.DescriptorDocument, snapshot.DescriptorSHA256},
+	}
+	for _, value := range expected {
+		t.Run(value.name, func(t *testing.T) {
+			snapshotDocument := value.snapshotRead()
+			if !bytes.Equal(snapshotDocument, value.document) || value.snapshotHash() != value.digest ||
+				sha256.Sum256(snapshotDocument) != value.digest {
+				t.Fatalf("assembly snapshot %s differs from its exact source", value.name)
+			}
+			snapshotDocument[0] ^= 0xff
+			if !bytes.Equal(value.snapshotRead(), value.document) || value.snapshotHash() != value.digest {
+				t.Fatalf("assembly snapshot %s aliases caller-visible bytes", value.name)
+			}
+		})
+	}
+	manifestDocument := finalized.ManifestDocument()
+	descriptorDocument := finalized.DescriptorDocument()
+	manifestDocument[0] ^= 0xff
+	descriptorDocument[0] ^= 0xff
+	if !bytes.Equal(finalized.ManifestDocument(), snapshot.ManifestDocument()) ||
+		!bytes.Equal(finalized.DescriptorDocument(), snapshot.DescriptorDocument()) {
+		t.Fatal("existing FinalizedRelease document getters alias caller-visible bytes")
+	}
+	if snapshot.Descriptor() != finalized.Descriptor() {
+		t.Fatal("assembly snapshot descriptor differs from finalized descriptor")
+	}
+}
+
+func TestAssemblySnapshotRejectsCorruptedFinalizedState(t *testing.T) {
+	prepared, request := validFinalization(t)
+	finalized, err := Finalize(prepared, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized.state.prepareReceiptDocument[0] ^= 0xff
+	if snapshot, err := finalized.SnapshotForAssembly(); !errors.Is(err, ErrInvalid) || snapshot.state != nil {
+		t.Fatalf("SnapshotForAssembly returned snapshot=%#v err=%v, want ErrInvalid", snapshot, err)
+	}
+}
+
 func TestFinalizeRejectsMixedPhaseContextAndServiceHost(t *testing.T) {
 	prepared, baseline := validFinalization(t)
 	tests := []struct {

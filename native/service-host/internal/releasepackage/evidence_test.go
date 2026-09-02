@@ -256,6 +256,42 @@ func TestFinalizeRejectsPreviouslyIssuedEvidenceAfterCleanupFatal(t *testing.T) 
 	}
 }
 
+func TestAssemblySnapshotRejectsFinalizedReleaseAfterCleanupFatal(t *testing.T) {
+	t.Run("release cleanup fatal", func(t *testing.T) {
+		previous := releaseCleanupCoordinator
+		releaseCleanupCoordinator = healthyReleaseCleanupState()
+		t.Cleanup(func() { releaseCleanupCoordinator = previous })
+		prepared, request := validFinalization(t)
+		finalized, err := Finalize(prepared, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseCleanupCoordinator.publish(newFakeReleaseFile("unresolved", []byte{1}, 26))
+		if snapshot, err := finalized.SnapshotForAssembly(); !errors.Is(err, ErrReleaseCleanupFatal) || snapshot.state != nil {
+			t.Fatalf("SnapshotForAssembly returned snapshot=%#v err=%v", snapshot, err)
+		}
+	})
+
+	t.Run("platform cleanup fatal", func(t *testing.T) {
+		previous := releaseCleanupCoordinator
+		platform := &fakePlatformCleanupGate{}
+		releaseCleanupCoordinator = &releaseCleanupState{
+			platformStatus: platform.status,
+			platformCommit: platform.commit,
+		}
+		t.Cleanup(func() { releaseCleanupCoordinator = previous })
+		prepared, request := validFinalization(t)
+		finalized, err := Finalize(prepared, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		platform.publish(errors.New("platform cleanup fatal"))
+		if snapshot, err := finalized.SnapshotForAssembly(); !errors.Is(err, ErrReleaseCleanupFatal) || snapshot.state != nil {
+			t.Fatalf("SnapshotForAssembly returned snapshot=%#v err=%v", snapshot, err)
+		}
+	})
+}
+
 func TestUnresolvedResourceClosePublishesFatalBeforeCommit(t *testing.T) {
 	previous := releaseCleanupCoordinator
 	releaseCleanupCoordinator = healthyReleaseCleanupState()

@@ -113,11 +113,19 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 	}
 	descriptorDigest := sha256.Sum256(descriptorDocument)
 	result := FinalizedRelease{state: &finalizedState{
-		manifestDocument:   append([]byte(nil), manifestDocument...),
-		manifestSHA256:     manifestDigest,
-		descriptorDocument: append([]byte(nil), descriptorDocument...),
-		descriptorSHA256:   descriptorDigest,
-		descriptor:         cloneDescriptor(descriptor),
+		reviewedClosureDocument:         append([]byte(nil), state.closure.state.document...),
+		reviewedClosureSHA256:           state.closure.state.sha256,
+		prepareReceiptDocument:          append([]byte(nil), state.receiptDocument...),
+		prepareReceiptSHA256:            state.receiptSHA256,
+		compiledTemplateDocument:        append([]byte(nil), state.templateDocument...),
+		compiledTemplateSHA256:          state.templateSHA256,
+		serviceHostBuildReceiptDocument: append([]byte(nil), serviceHostBuild.document...),
+		serviceHostBuildReceiptSHA256:   serviceHostBuild.sha256,
+		manifestDocument:                append([]byte(nil), manifestDocument...),
+		manifestSHA256:                  manifestDigest,
+		descriptorDocument:              append([]byte(nil), descriptorDocument...),
+		descriptorSHA256:                descriptorDigest,
+		descriptor:                      cloneDescriptor(descriptor),
 	}}
 	if err := operation.commit(); err != nil {
 		return FinalizedRelease{}, err

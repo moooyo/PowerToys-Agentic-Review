@@ -99,6 +99,10 @@ func (coordinator *releaseCleanupState) begin() (releaseEvidenceOperation, error
 }
 
 func (operation releaseEvidenceOperation) commit() error {
+	return operation.commitWith(func() error { return nil })
+}
+
+func (operation releaseEvidenceOperation) commitWith(commit func() error) error {
 	if operation.coordinator == nil {
 		return ErrReleaseCleanupFatal
 	}
@@ -110,11 +114,18 @@ func (operation releaseEvidenceOperation) commit() error {
 	if operation.coordinator.platformCommit == nil {
 		return ErrReleaseCleanupFatal
 	}
-	committed := false
-	if err := operation.coordinator.platformCommit(func() { committed = true }); err != nil || !committed {
+	if commit == nil {
 		return ErrReleaseCleanupFatal
 	}
-	return nil
+	committed := false
+	var commitErr error
+	if err := operation.coordinator.platformCommit(func() {
+		committed = true
+		commitErr = commit()
+	}); err != nil || !committed {
+		return ErrReleaseCleanupFatal
+	}
+	return commitErr
 }
 
 func publishReleaseCleanupFatal(resource cleanupResource) {

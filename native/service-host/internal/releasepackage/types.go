@@ -182,15 +182,30 @@ type PreparedRelease struct {
 }
 
 type finalizedState struct {
-	manifestDocument   []byte
-	manifestSHA256     [sha256.Size]byte
-	descriptorDocument []byte
-	descriptorSHA256   [sha256.Size]byte
-	descriptor         PackageDescriptor
+	reviewedClosureDocument         []byte
+	reviewedClosureSHA256           [sha256.Size]byte
+	prepareReceiptDocument          []byte
+	prepareReceiptSHA256            [sha256.Size]byte
+	compiledTemplateDocument        []byte
+	compiledTemplateSHA256          [sha256.Size]byte
+	serviceHostBuildReceiptDocument []byte
+	serviceHostBuildReceiptSHA256   [sha256.Size]byte
+	manifestDocument                []byte
+	manifestSHA256                  [sha256.Size]byte
+	descriptorDocument              []byte
+	descriptorSHA256                [sha256.Size]byte
+	descriptor                      PackageDescriptor
 }
 
 // FinalizedRelease is a canonical unsigned package candidate. External signing and Windows
 // verification remain mandatory before publication or installation.
 type FinalizedRelease struct {
+	state *finalizedState
+}
+
+// AssemblySnapshot is an opaque, immutable copy of one internally consistent finalized release.
+// SnapshotForAssembly is the only production constructor. The snapshot carries data, not
+// installation or execution authority.
+type AssemblySnapshot struct {
 	state *finalizedState
 }
