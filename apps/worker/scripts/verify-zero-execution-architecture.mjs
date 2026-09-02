@@ -17,11 +17,48 @@ const dormantExecutorAttemptReducerPath = `${executionSourceRoot}executor-attemp
 const dormantResultArtifactUploadSessionPath = `${workerSourceRoot}control/result-artifact-upload-session.ts`;
 const dormantArtifactHostControlV2ApiPath = `${workerSourceRoot}control/artifact-host-control-v2-api.ts`;
 const dormantArtifactHostControlV2ProtocolPath = `${workerSourceRoot}service-host/artifact-host-control-v2-protocol.ts`;
+const dormantArwxMinorOnePath = `${localProtocolSourceRoot}minor-1.ts`;
+const dormantJobExecutionEnvelopeV2Path = `${contractsSourceRoot}job-envelope-v2.ts`;
 const dormantProductionExcludedPaths = new Set([
   dormantResultArtifactUploadSessionPath,
   dormantArtifactHostControlV2ApiPath,
   dormantArtifactHostControlV2ProtocolPath,
+  dormantArwxMinorOnePath,
+  dormantJobExecutionEnvelopeV2Path,
 ]);
+const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
+  [`${contractsSourceRoot}index.ts`]:
+    "b5ec1e3a50525a2228979cf5b73afb423c804822c94f4dede91117e3d8f7944b",
+  [`${contractsSourceRoot}job-envelope.ts`]:
+    "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
+  [`${localProtocolSourceRoot}framing.ts`]:
+    "a2d1e79c9f3bb1ac564d8225e0f091f691f38b09d84b1187078bd1511ff00d18",
+  [`${localProtocolSourceRoot}index.ts`]:
+    "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
+  [`${localProtocolSourceRoot}messages.ts`]:
+    "5c69fda0dc87a7d348a0877f355cf029842896706352db4172fcca6fe730e3cb",
+});
+const reviewedRootBarrelExports = Object.freeze({
+  [`${contractsSourceRoot}index.ts`]: Object.freeze([
+    "./artifacts.js",
+    "./common.js",
+    "./dashboard.js",
+    "./github.js",
+    "./job-envelope.js",
+    "./scheduling.js",
+    "./states.js",
+    "./worker.js",
+  ]),
+  [`${localProtocolSourceRoot}index.ts`]: Object.freeze([
+    "./artifact-stream.js",
+    "./canonical.js",
+    "./capability.js",
+    "./framing.js",
+    "./handshake.js",
+    "./messages.js",
+    "./replay.js",
+  ]),
+});
 const reviewedProductionSourceSha256 = Object.freeze({
   [executorRuntimePath]: "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
   [controlRuntimePath]: "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
@@ -33,8 +70,10 @@ const reviewedDormantExecutionSourceSha256 = Object.freeze({
 const reviewedTypeBoxBridgeTarget =
   "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs";
 const firstPartySourceRedirects = new Map([
-  ["@agentic-review/contracts", `${contractsSourceRoot}worker.ts`],
+  ["@agentic-review/contracts", `${contractsSourceRoot}index.ts`],
+  ["@agentic-review/contracts/job-envelope-v2", dormantJobExecutionEnvelopeV2Path],
   ["@agentic-review/local-protocol", `${localProtocolSourceRoot}index.ts`],
+  ["@agentic-review/local-protocol/minor-1", dormantArwxMinorOnePath],
 ]);
 const allowedProductionModuleSpecifiers = new Set([
   "@sinclair/typebox",
@@ -113,6 +152,7 @@ const entrypointPolicies = Object.freeze({
 
 export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) {
   const readSource = productionSourceReader(sourceOverrides);
+  verifyDormantVersionFoundations(readSource);
   const dormantReducerSource = readSource(dormantExecutorAttemptReducerPath);
   verifyReviewedDormantExecutionSource(dormantExecutorAttemptReducerPath, dormantReducerSource);
   verifyDormantExecutorAttemptReducer(dormantReducerSource);
@@ -134,6 +174,51 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
   verifyAuthenticatedDisabledReady(executorSource, controlSource);
 }
 
+function verifyDormantVersionFoundations(readSource) {
+  for (const [sourcePath, expected] of Object.entries(
+    reviewedDormantVersionFoundationSourceSha256,
+  )) {
+    const source = readSource(sourcePath);
+    const normalized = source.replaceAll("\r\n", "\n");
+    if (normalized.includes("\r") || normalized.includes("\uFEFF")) {
+      throw new Error(`${sourcePath} is outside its reviewed dormant-foundation source form.`);
+    }
+    const actual = createHash("sha256").update(normalized, "utf8").digest("hex");
+    if (actual !== expected) {
+      throw new Error(`${sourcePath} differs from its reviewed dormant-foundation source.`);
+    }
+  }
+  for (const [sourcePath, expected] of Object.entries(reviewedRootBarrelExports)) {
+    const sourceFile = parseTypeScript(readSource(sourcePath), sourcePath);
+    const actual = sourceFile.program.body.map((statement) => {
+      if (
+        statement.type !== "ExportAllDeclaration" ||
+        statement.source?.type !== "StringLiteral" ||
+        statement.exportKind === "type" ||
+        (statement.attributes?.length ?? 0) !== 0 ||
+        (statement.assertions?.length ?? 0) !== 0
+      ) {
+        throw new Error(`${sourcePath} contains an unreviewed root-barrel declaration.`);
+      }
+      return statement.source.value;
+    });
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`${sourcePath} root-barrel exports differ from dormant-foundation policy.`);
+    }
+  }
+}
+
+export function verifyDormantSourceExclusionForTest(entrypoint, sourceOverrides = {}) {
+  if (
+    entrypoint !== legacyEntrypointPath &&
+    entrypoint !== entrypointPolicies.control.path &&
+    entrypoint !== entrypointPolicies.executor.path
+  ) {
+    throw new TypeError("Dormant-source exclusion requires a production entrypoint.");
+  }
+  verifyDormantSourceExclusion(entrypoint, productionSourceReader(sourceOverrides));
+}
+
 function verifyDormantSourceExclusion(entrypoint, readSource) {
   const pending = [entrypoint];
   const visited = new Set();
@@ -150,7 +235,9 @@ function verifyDormantSourceExclusion(entrypoint, readSource) {
     const runtimeLoads = collectSyntax(sourceFile.program, (node) =>
       node.type === "ImportExpression" ||
       (node.type === "CallExpression" &&
-        (node.callee?.type === "Import" || isIdentifier(node.callee, "require")))
+        (node.callee?.type === "Import" || isIdentifier(node.callee, "require"))) ||
+      node.type === "TSImportType" ||
+      node.type === "TSImportEqualsDeclaration"
         ? node
         : undefined,
     );

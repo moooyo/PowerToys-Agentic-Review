@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "@babel/parser";
 import {
   cleanOutputDirectory,
   verifyReviewedRoleTypeBoxValueImport,
@@ -20,10 +22,44 @@ import {
 } from "./verify-role-bundles.mjs";
 import {
   verifyDormantExecutorAttemptReducer,
+  verifyDormantSourceExclusionForTest,
   verifyZeroExecutionProductionArchitecture,
 } from "./verify-zero-execution-architecture.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const dormantVersionFoundationSha256 = Object.freeze({
+  "packages/contracts/src/index.ts":
+    "b5ec1e3a50525a2228979cf5b73afb423c804822c94f4dede91117e3d8f7944b",
+  "packages/contracts/src/job-envelope.ts":
+    "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
+  "packages/local-protocol/src/framing.ts":
+    "a2d1e79c9f3bb1ac564d8225e0f091f691f38b09d84b1187078bd1511ff00d18",
+  "packages/local-protocol/src/index.ts":
+    "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
+  "packages/local-protocol/src/messages.ts":
+    "5c69fda0dc87a7d348a0877f355cf029842896706352db4172fcca6fe730e3cb",
+});
+const reviewedRootBarrelExports = Object.freeze({
+  "packages/contracts/src/index.ts": Object.freeze([
+    "./artifacts.js",
+    "./common.js",
+    "./dashboard.js",
+    "./github.js",
+    "./job-envelope.js",
+    "./scheduling.js",
+    "./states.js",
+    "./worker.js",
+  ]),
+  "packages/local-protocol/src/index.ts": Object.freeze([
+    "./artifact-stream.js",
+    "./canonical.js",
+    "./capability.js",
+    "./framing.js",
+    "./handshake.js",
+    "./messages.js",
+    "./replay.js",
+  ]),
+});
 
 test("clean build removes polluted output before producing role artifacts", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "worker-role-build-"));
@@ -109,6 +145,8 @@ test("role policies include the exact shadow-runtime source additions", () => {
   for (const input of [
     "apps/worker/src/control/artifact-host-control-v2-api.ts",
     "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts",
+    "packages/contracts/src/job-envelope-v2.ts",
+    "packages/local-protocol/src/minor-1.ts",
   ]) {
     assert.equal(control.has(input), false, `Control policy unexpectedly includes ${input}`);
     assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
@@ -130,6 +168,16 @@ test("role policies include the exact shadow-runtime source additions", () => {
       input,
       /^(?:apps\/worker\/src\/(?:control|execution|server-client|workspaces?)\/|packages\/(?:codex|contracts)\/)/u,
     );
+  }
+});
+
+test("dormant version foundations leave the production v0 and v1 contracts byte-exact", () => {
+  for (const [path, expected] of Object.entries(dormantVersionFoundationSha256)) {
+    const normalized = repositorySource(path).replaceAll("\r\n", "\n");
+    assert.equal(createHash("sha256").update(normalized, "utf8").digest("hex"), expected);
+  }
+  for (const [path, expected] of Object.entries(reviewedRootBarrelExports)) {
+    assert.deepEqual(staticExportSources(repositorySource(path), path), expected);
   }
 });
 
@@ -204,27 +252,44 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const executorMainPath = "apps/worker/src/executor-main.ts";
   const roleEntrypointPath = "apps/worker/src/service-host/role-entrypoint.ts";
   const contractsWorkerPath = "packages/contracts/src/worker.ts";
+  const contractsIndexPath = "packages/contracts/src/index.ts";
   const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
   const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
   const dormantUploadSessionPath = "apps/worker/src/control/result-artifact-upload-session.ts";
   const dormantArtifactV2ApiPath = "apps/worker/src/control/artifact-host-control-v2-api.ts";
   const dormantArtifactV2ProtocolPath =
     "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts";
+  const dormantArwxMinorOnePath = "packages/local-protocol/src/minor-1.ts";
+  const dormantJobEnvelopeV2Path = "packages/contracts/src/job-envelope-v2.ts";
   const controlMain = repositorySource(controlMainPath);
   const executorMain = repositorySource(executorMainPath);
   const roleEntrypoint = repositorySource(roleEntrypointPath);
   const contractsWorker = repositorySource(contractsWorkerPath);
+  const contractsIndex = repositorySource(contractsIndexPath);
   const localProtocolIndex = repositorySource(localProtocolIndexPath);
   const dormantReducer = repositorySource(dormantReducerPath);
   const dormantUploadSession = repositorySource(dormantUploadSessionPath);
   const dormantArtifactV2Api = repositorySource(dormantArtifactV2ApiPath);
   const dormantArtifactV2Protocol = repositorySource(dormantArtifactV2ProtocolPath);
+  const dormantArwxMinorOne = repositorySource(dormantArwxMinorOnePath);
+  const dormantJobEnvelopeV2 = repositorySource(dormantJobEnvelopeV2Path);
   assert.match(dormantUploadSession, /export class ResultArtifactUploadSession/u);
-  for (const source of [controlMain, executorMain, roleEntrypoint, localProtocolIndex]) {
-    assert.doesNotMatch(source, /result-artifact-upload-session|artifact-host-control-v2/u);
+  for (const source of [
+    controlMain,
+    executorMain,
+    roleEntrypoint,
+    contractsIndex,
+    localProtocolIndex,
+  ]) {
+    assert.doesNotMatch(
+      source,
+      /result-artifact-upload-session|artifact-host-control-v2|job-envelope-v2|minor-1/u,
+    );
   }
   assert.match(dormantArtifactV2Api, /export class ArtifactHostControlV2Api/u);
   assert.match(dormantArtifactV2Protocol, /export function encodeArtifactHostControlV2Call/u);
+  assert.match(dormantArwxMinorOne, /export const LOCAL_PROTOCOL_MINOR_1_VERSION = 1/u);
+  assert.match(dormantJobEnvelopeV2, /export const JobExecutionEnvelopeV2Schema/u);
   const legacyWorkerServicePath = "apps/worker/src/worker-service.ts";
   const legacyWorkerService = repositorySource(legacyWorkerServicePath);
   assert.throws(
@@ -243,6 +308,37 @@ test("production role entrypoints and reachable imports remain zero execution", 
       /Production import graph reaches dormant source/u,
     );
   }
+  for (const [path, specifier] of [
+    [dormantArwxMinorOnePath, "../../../packages/local-protocol/src/minor-1.js"],
+    [dormantJobEnvelopeV2Path, "../../../packages/contracts/src/job-envelope-v2.js"],
+    [dormantArwxMinorOnePath, "@agentic-review/local-protocol/minor-1"],
+    [dormantJobEnvelopeV2Path, "@agentic-review/contracts/job-envelope-v2"],
+  ]) {
+    assert.throws(
+      () =>
+        verifyZeroExecutionProductionArchitecture({
+          [legacyWorkerServicePath]: `${legacyWorkerService}\nimport "${specifier}";\n`,
+        }),
+      new RegExp(
+        `Production import graph reaches dormant source: ${path.replaceAll("/", "\\/")}`,
+        "u",
+      ),
+    );
+  }
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [localProtocolIndexPath]: `${localProtocolIndex}\nexport * from "./minor-1.js";\n`,
+      }),
+    /packages\/local-protocol\/src\/index\.ts differs from its reviewed dormant-foundation source/u,
+  );
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [contractsWorkerPath]: `${contractsWorker}\nexport * from "./job-envelope-v2.js";\n`,
+      }),
+    /Production import graph reaches dormant source/u,
+  );
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
       [legacyWorkerServicePath]: `${legacyWorkerService}\nconst load = require; load("./control/result-artifact-upload-session.js");\n`,
@@ -373,6 +469,76 @@ test("production role entrypoints and reachable imports remain zero execution", 
       "apps/worker/src/control/host-control-worker-api.ts": "this unconnected source is not parsed",
     }),
   );
+});
+
+test("every production entrypoint rejects dormant v2 and minor-one imports through every route", () => {
+  const targets = [
+    {
+      entrypoint: "apps/worker/src/main.ts",
+      injectionPath: "apps/worker/src/worker-service.ts",
+      rootPrefix: "../../../",
+    },
+    {
+      entrypoint: "apps/worker/src/control-main.ts",
+      injectionPath: "apps/worker/src/control/shadow-supervisor.ts",
+      rootPrefix: "../../../../",
+    },
+    {
+      entrypoint: "apps/worker/src/executor-main.ts",
+      injectionPath: "apps/worker/src/service-host/executor-shadow-runtime.ts",
+      rootPrefix: "../../../../",
+    },
+  ];
+  const dormantModules = [
+    {
+      path: "packages/local-protocol/src/minor-1.ts",
+      bare: "@agentic-review/local-protocol/minor-1",
+      barrelPath: "packages/local-protocol/src/index.ts",
+      barrelExport: "./minor-1.js",
+    },
+    {
+      path: "packages/contracts/src/job-envelope-v2.ts",
+      bare: "@agentic-review/contracts/job-envelope-v2",
+      barrelPath: "packages/contracts/src/index.ts",
+      barrelExport: "./job-envelope-v2.js",
+    },
+  ];
+
+  for (const target of targets) {
+    const injectionSource = repositorySource(target.injectionPath);
+    for (const dormant of dormantModules) {
+      const direct = `${target.rootPrefix}${dormant.path.replace(/\.ts$/u, ".js")}`;
+      assert.throws(
+        () =>
+          verifyDormantSourceExclusionForTest(target.entrypoint, {
+            [target.injectionPath]: `${injectionSource}\nimport "${direct}";\n`,
+          }),
+        /Production import graph reaches dormant source/u,
+      );
+      assert.throws(
+        () =>
+          verifyDormantSourceExclusionForTest(target.entrypoint, {
+            [target.injectionPath]: `${injectionSource}\nimport "${dormant.bare}";\n`,
+          }),
+        /Production import graph reaches dormant source/u,
+      );
+      assert.throws(() =>
+        verifyDormantSourceExclusionForTest(target.entrypoint, {
+          [target.injectionPath]: `${injectionSource}\nimport Dormant = require("${direct}");\n`,
+        }),
+      );
+
+      const barrelSpecifier = `${target.rootPrefix}${dormant.barrelPath.replace(/\.ts$/u, ".js")}`;
+      assert.throws(
+        () =>
+          verifyDormantSourceExclusionForTest(target.entrypoint, {
+            [target.injectionPath]: `${injectionSource}\nimport "${barrelSpecifier}";\n`,
+            [dormant.barrelPath]: `${repositorySource(dormant.barrelPath)}\nexport * from "${dormant.barrelExport}";\n`,
+          }),
+        /Production import graph reaches dormant source/u,
+      );
+    }
+  }
 });
 
 test("dormant Executor attempt reducer remains import-free and synchronous", () => {
@@ -834,6 +1000,23 @@ test("TypeBox constructor exception is path, digest, count, and shape bound", ()
     assert.throws(() => validateReviewedTypeBoxConstructorShapeForTest(mutated));
   }
 });
+
+function staticExportSources(source, sourceName) {
+  const program = parse(source, {
+    sourceType: "module",
+    sourceFilename: sourceName,
+    plugins: ["typescript"],
+  }).program;
+  return program.body
+    .filter(
+      (statement) =>
+        (statement.type === "ExportAllDeclaration" ||
+          statement.type === "ExportNamedDeclaration") &&
+        statement.source?.type === "StringLiteral",
+    )
+    .map((statement) => statement.source.value)
+    .sort((left, right) => left.localeCompare(right, "en"));
+}
 
 function repositorySource(path) {
   return readFileSync(resolve(repositoryRoot, path), "utf8");

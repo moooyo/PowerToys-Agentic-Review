@@ -613,6 +613,10 @@ pair. A minor version may add optional fields or messages negotiated through `He
 validation still rejects an unnegotiated feature. Capability type, canonicalization version,
 signature algorithm, and key ID are versioned separately.
 
+[ADR 0018](0018-dormant-arwx-minor-1-and-job-envelope-v2.md) narrowly supersedes the optional-only
+minor rule for its exact-negotiated ARWX 1.1 profile. That profile is not rolling-compatible with
+ARWX 1.0 and cannot be selected by a mixed package pair.
+
 The package manifest binds compatible Control, Executor, ProcessHost, Codex, Git, schema, and local
 protocol versions. Control includes these digests in Server registration, and every attempt records
 them for audit. A rolling in-place upgrade of only one service is allowed only across a documented

@@ -15,9 +15,13 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.52"
+  },
+  "devDependencies": {
+    "vitest": "4.1.11"
   }
 }

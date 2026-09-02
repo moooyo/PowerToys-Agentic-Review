@@ -226,6 +226,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   HostControl error now supplies the authoritative `retryable` bit even when its HTTP status suggests
   the opposite. Malformed error bodies retain the local status fallback. Remote messages, response
   bodies, request bodies, URLs, causes, and lease tokens are not retained on the mapped error.
+- Source-only ARWX 1.1 and Job execution envelope v2 contracts. ADR 0018 fixes an exact minor-one
+  profile with no compatibility range, requires both raw `resultSha256` and canonical
+  `resultDigest` on `Complete`, and binds envelope version two to `result_artifact_v1`. The new
+  modules reuse the production framing and version-one envelope constraints without changing their
+  source, barrels, Claim schemas, producers, role bundles, or runtime consumers.
 
 ## Deliberately Disabled
 
@@ -265,6 +270,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   artifact-backed completion in production. Wiring remains forbidden until RPC2 compatibility,
   bootstrap and RoleConfig negotiation, ARWX result-digest versioning, signed matching artifacts,
   native Windows evidence, and a versioned claim envelope complete separate review.
+- The dormant ARWX 1.1 and Job execution envelope v2 modules are not exported from package barrels
+  and are unreachable from the legacy, Control, and Executor production graphs. Production remains
+  fixed to ARWX 1.0 and envelope v1. There is no minor fallback, Claim selection, RoleConfig v3,
+  RuntimeBootstrap selection, enabled slot, or runtime consumer. Activation requires an atomic
+  matching signed-package upgrade and native mixed-version rejection evidence.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release
