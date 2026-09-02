@@ -11,8 +11,8 @@ import {
   type ArtifactUploadCreateDatabaseHandle,
   type ArtifactUploadCreateOwnerLock,
   type ArtifactUploadCreateStorageOwner,
+  registerArtifactUploadCreateDatabaseHandle,
 } from "../../dist/artifacts/artifact-upload-create-coordinator.js";
-import { attachArtifactUploadCreateDatabaseForTest } from "../../dist/artifacts/artifact-upload-create-coordinator.testing.js";
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import type {
   ArtifactCapacityAdmission,
@@ -26,6 +26,14 @@ import type {
   ProbeArtifactUploadCreateResult,
 } from "../../dist/database/artifacts.js";
 import { DatabaseRequestError } from "../../dist/database/errors.js";
+
+type FakeArtifactUploadCreateDatabaseOwner = Parameters<
+  typeof registerArtifactUploadCreateDatabaseHandle
+>[1];
+
+const attachArtifactUploadCreateDatabaseForTest = (
+  owner: FakeArtifactUploadCreateDatabaseOwner,
+): ArtifactUploadCreateDatabaseHandle => registerArtifactUploadCreateDatabaseHandle(owner, owner);
 
 class FakeDatabaseOwner {
   readonly events: string[];

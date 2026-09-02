@@ -10,6 +10,11 @@ import type {
   CloseArtifactNamespaceScanInput,
   CloseArtifactNamespaceScanResult,
 } from "./artifact-namespace-contract.js";
+import {
+  type ArtifactTransactionStorageHandle,
+  registerArtifactTransactionStorageHandle,
+  revokeArtifactTransactionStorageHandle,
+} from "./artifact-transaction-coordinator.js";
 import { ArtifactStorageClientError, type ArtifactStorageClientErrorCode } from "./errors.js";
 import type {
   ArtifactCapacityAdmission,
@@ -179,6 +184,8 @@ export class ArtifactStorageClient {
   #ownerCloseObserved = false;
   #ownerExitCode: number | undefined;
   #killAttempted = false;
+  #artifactTransactionHandleIssued = false;
+  #artifactTransactionHandle: ArtifactTransactionStorageHandle | undefined;
 
   private constructor(
     options: ArtifactStorageClientSnapshot,
@@ -351,51 +358,123 @@ export class ArtifactStorageClient {
   }
 
   writePreparedChunk(input: PreparedArtifactChunk): Promise<DurableArtifactChunk> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("writePreparedChunk", input);
   }
 
   finalizeArtifact(input: PreparedArtifactFinalization): Promise<PublishedArtifactObject> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("finalizeArtifact", input);
   }
 
   async readObject(input: ArtifactObjectReadInput): Promise<Buffer> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) throw adopted;
     const output = await this.#request("readObject", input);
     return Buffer.from(output.bytes);
   }
 
   cleanupUpload(input: ArtifactUploadCleanupRequest): Promise<ArtifactUploadCleanupResult> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("cleanupUpload", input);
   }
 
   scanNamespacePage(
     input: ArtifactNamespaceScanPageInput,
   ): Promise<ArtifactNamespaceScanPageResult> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("scanNamespacePage", input);
   }
 
   closeNamespaceScan(
     input: CloseArtifactNamespaceScanInput,
   ): Promise<CloseArtifactNamespaceScanResult> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("closeNamespaceScan", input);
   }
 
   cleanupNamespaceEntry(
     input: ArtifactNamespaceObservation,
   ): Promise<ArtifactNamespaceCleanupResult> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("cleanupNamespaceEntry", input);
   }
 
   evaluateCapacity(input: ArtifactCapacityEvaluationInput): Promise<ArtifactCapacityAdmission> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined) return Promise.reject(adopted);
     return this.#request("evaluateCapacity", input);
   }
 
+  /** Transfers every mutation and shutdown capability to one ArtifactTransactionCoordinator. */
+  createArtifactTransactionStorageHandle(): ArtifactTransactionStorageHandle {
+    if (this.#artifactTransactionHandleIssued) {
+      throw new Error("Artifact storage transaction handle was already issued.");
+    }
+    const admissionError = this.#requestAdmissionError("evaluateCapacity", false);
+    if (admissionError !== undefined) throw admissionError;
+    if (this.#pending.size !== 0 || this.#admissionReservations !== 0) {
+      throw new ArtifactStorageClientError(
+        "ARTIFACT_STORAGE_CLIENT_BUSY",
+        "Artifact storage cannot transfer authority while operations are pending.",
+        true,
+      );
+    }
+    const handle = registerArtifactTransactionStorageHandle(this, {
+      ownerExit: this.#exited.promise,
+      terminalFailure: this.#terminalSignal.promise,
+      writePreparedChunk: (input) => this.#request("writePreparedChunk", input),
+      finalizeArtifact: (input) => this.#request("finalizeArtifact", input),
+      readObject: async (input) => {
+        const output = await this.#request("readObject", input);
+        return Buffer.from(output.bytes);
+      },
+      cleanupUpload: (input) => this.#request("cleanupUpload", input),
+      scanNamespacePage: (input) => this.#request("scanNamespacePage", input),
+      closeNamespaceScan: (input) => this.#request("closeNamespaceScan", input),
+      cleanupNamespaceEntry: (input) => this.#request("cleanupNamespaceEntry", input),
+      evaluateCapacity: (input) => this.#request("evaluateCapacity", input),
+      close: () => this.#startClose(),
+    });
+    this.#artifactTransactionHandleIssued = true;
+    this.#artifactTransactionHandle = handle;
+    return handle;
+  }
+
   close(): Promise<void> {
+    const adopted = this.#adoptedOperationError();
+    if (adopted !== undefined && this.#closePromise === undefined) {
+      const handle = this.#artifactTransactionHandle;
+      if (handle === undefined || !revokeArtifactTransactionStorageHandle(handle)) {
+        return Promise.reject(adopted);
+      }
+      this.#artifactTransactionHandle = undefined;
+    }
+    return this.#startClose();
+  }
+
+  #startClose(): Promise<void> {
     if (this.#closePromise === undefined) {
       const deadline = this.#now() + this.#options.shutdownTimeoutMilliseconds;
       this.#shutdownDeadline = deadline;
       this.#closePromise = this.#closeInternal(deadline);
     }
     return this.#closePromise;
+  }
+
+  #adoptedOperationError(): ArtifactStorageClientError | undefined {
+    return this.#artifactTransactionHandleIssued
+      ? new ArtifactStorageClientError(
+          "ARTIFACT_STORAGE_AUTHORITY_REQUIRED",
+          "Artifact storage operations require transaction coordinator authority.",
+        )
+      : undefined;
   }
 
   async joinExit(timeoutMilliseconds = this.#options.exitTimeoutMilliseconds): Promise<number> {

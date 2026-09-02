@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
   CreateResultArtifactUploadResponseSchema,
+  FinalizeResultArtifactUploadResponseSchema,
   isCanonicalResultArtifactChunkData,
   maximumResultArtifactBytes,
   ResultArtifactChunkResponseSchema,
@@ -43,6 +44,7 @@ import {
   recordArtifactNamespaceCleanupFailure,
   terminalizeInactiveArtifactUploads,
   terminateArtifactUpload,
+  toFinalizeResultArtifactUploadResponse,
   toResultArtifactChunkResponse,
   toTerminateResultArtifactUploadResponse,
 } from "../../dist/database/artifacts.js";
@@ -1676,6 +1678,7 @@ describe("result artifact database state machine", () => {
 
     expect(prepared.replayed).toBe(false);
     expect(prepared.receiptState).toBe("prepared");
+    expect(prepared).toMatchObject({ uploadState: "receiving", committedArtifact: null });
     expect(prepared.committedPrefix).toEqual([]);
     expect(replay).toEqual({ ...prepared, replayed: true });
     expect(() =>
@@ -1931,6 +1934,8 @@ describe("result artifact database state machine", () => {
     expect(finalizingPrepareReplay).toMatchObject({
       receiptState: "committed",
       replayed: true,
+      uploadState: "finalizing",
+      committedArtifact: null,
       committedPrefix: [
         {
           chunkIndex: 0,
@@ -1963,6 +1968,12 @@ describe("result artifact database state machine", () => {
         totalBytes: result.byteLength,
       },
     });
+    expect(Value.Check(FinalizeResultArtifactUploadResponseSchema, committed)).toBe(false);
+    const publicFinalizeResponse = toFinalizeResultArtifactUploadResponse(committed);
+    expect(Value.Check(FinalizeResultArtifactUploadResponseSchema, publicFinalizeResponse)).toBe(
+      true,
+    );
+    expect(publicFinalizeResponse.artifact).not.toHaveProperty("storageObjectKey");
     expect(
       commitArtifactFinalize(database, {
         ...finalize,
@@ -1970,11 +1981,22 @@ describe("result artifact database state machine", () => {
         storageObjectKey: prepared.storageObjectKey,
       }),
     ).toEqual({ ...committed, replayed: true });
+    expect(
+      completeArtifactCleanup(database, {
+        uploadId: upload.uploadId,
+        expectedAttemptCount: 0,
+      }),
+    ).toMatchObject({ status: "completed" });
     const committedPrepareReplay = prepareArtifactChunk(database, chunk);
     expect(committedPrepareReplay).toMatchObject({
       receiptState: "committed",
       replayed: true,
+      uploadState: "committed",
       committedPrefix: finalizingPrepareReplay.committedPrefix,
+    });
+    expect(committedPrepareReplay.committedArtifact).toEqual({
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
     });
     const committedChunkReplay = commitArtifactChunk(database, {
       ...chunk,
@@ -1986,6 +2008,55 @@ describe("result artifact database state machine", () => {
     expect(committedChunkResponse).not.toHaveProperty("prepareId");
     expect(() => database.prepare("UPDATE run_artifacts SET name = 'changed.json'").run()).toThrow(
       /run artifacts are immutable/u,
+    );
+  });
+
+  it("rejects damaged committed artifact verification metadata during prepare replay", async () => {
+    const { database } = await openFixture();
+    const result = Buffer.from('{"summary":"tamper"}', "utf8");
+    const upload = createArtifactUpload(database, {
+      ...identity,
+      clientArtifactId,
+      purpose: "result",
+      name: "result.json",
+      mediaType: "application/json",
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    });
+    const chunk = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkIndex: 0,
+      offsetBytes: 0,
+      chunkBytes: result.byteLength,
+      chunkSha256: sha256(result),
+    };
+    const preparedChunk = prepareArtifactChunk(database, chunk);
+    commitArtifactChunk(database, { ...chunk, prepareId: preparedChunk.prepareId });
+    const finalize = {
+      ...identity,
+      uploadId: upload.uploadId,
+      chunkCount: 1,
+      totalBytes: result.byteLength,
+      sha256: sha256(result),
+    };
+    const preparedFinalize = prepareArtifactFinalize(database, finalize);
+    commitArtifactFinalize(database, {
+      ...finalize,
+      finalizationId: preparedFinalize.finalizationId,
+      storageObjectKey: preparedFinalize.storageObjectKey,
+    });
+
+    database.exec("DROP TRIGGER tr_run_artifacts_immutable_update");
+    database
+      .prepare("UPDATE run_artifacts SET total_bytes = total_bytes + 1 WHERE upload_id = ?")
+      .run(upload.uploadId);
+
+    expect(() => prepareArtifactChunk(database, chunk)).toThrow(
+      /immutable run artifact does not match its finalized upload/u,
+    );
+    expect(() => prepareArtifactFinalize(database, finalize)).toThrow(
+      /immutable run artifact does not match its finalized upload/u,
     );
   });
 

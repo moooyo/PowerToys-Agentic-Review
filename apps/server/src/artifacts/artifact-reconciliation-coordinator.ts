@@ -13,12 +13,17 @@ import {
 } from "../database/artifacts.js";
 import type { DatabaseOperationMap } from "../database/protocol.js";
 import {
+  ArtifactMutationGateError,
+  type ArtifactMutationGateRunOptions,
+} from "./artifact-mutation-gate.js";
+import {
   type ArtifactNamespaceCleanupResult,
   type ArtifactNamespaceObservation,
   type ArtifactNamespaceScanPageInput,
   type ArtifactNamespaceScanPageResult,
   type CloseArtifactNamespaceScanInput,
   type CloseArtifactNamespaceScanResult,
+  maximumArtifactNamespaceManifestEntries,
   maximumArtifactNamespacePageSize,
   parseArtifactNamespaceEntryKey,
   snapshotArtifactNamespaceObservation,
@@ -59,6 +64,14 @@ const authorityClosureReasons = new Set([
   "metadata_fence_mismatch",
 ]);
 
+const isSafeUndispatchedGateCancellation = (error: unknown): boolean =>
+  error instanceof ArtifactMutationGateError &&
+  !error.callbackStarted &&
+  (error.code === "ARTIFACT_MUTATION_GATE_BUSY" ||
+    error.code === "ARTIFACT_MUTATION_GATE_CANCELLED" ||
+    error.code === "ARTIFACT_MUTATION_GATE_CLOSED" ||
+    error.code === "ARTIFACT_MUTATION_GATE_TIMEOUT");
+
 type ArtifactCleanupDatabaseOperation =
   | "classifyArtifactNamespacePageAndAdvanceCursor"
   | "completeArtifactCleanup"
@@ -87,6 +100,7 @@ type FatalWaiter = (error: ArtifactReconciliationCoordinatorError) => void;
 
 export type ArtifactReconciliationCoordinatorErrorCode =
   | "ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT"
+  | "ARTIFACT_RECONCILIATION_CLEANUP_FAILED"
   | "ARTIFACT_RECONCILIATION_DATABASE_FAILURE"
   | "ARTIFACT_RECONCILIATION_HEALTH_SATURATED"
   | "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED"
@@ -98,6 +112,8 @@ const errorMessages: Readonly<Record<ArtifactReconciliationCoordinatorErrorCode,
   Object.freeze({
     ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT:
       "Artifact reconciliation did not quiesce before its shutdown deadline.",
+    ARTIFACT_RECONCILIATION_CLEANUP_FAILED:
+      "Artifact upload cleanup exhausted its durable retry budget or has invalid retry identity.",
     ARTIFACT_RECONCILIATION_DATABASE_FAILURE:
       "Artifact reconciliation database state is unavailable or uncertain.",
     ARTIFACT_RECONCILIATION_HEALTH_SATURATED:
@@ -145,10 +161,16 @@ export interface ArtifactReconciliationStorageOwner {
 }
 
 export interface ArtifactReconciliationCoordinatorOptions {
-  /** Opaque one-shot handle minted by DatabaseClient. */
+  /** Opaque one-shot handle derived by the top-level artifact transaction coordinator. */
   readonly database: ArtifactReconciliationDatabaseHandle;
   readonly storage: ArtifactReconciliationStorageOwner;
+  /** Shared with every live artifact transaction for the complete DB/filesystem authority window. */
+  readonly mutationGate: {
+    run<T>(options: ArtifactMutationGateRunOptions, operation: () => Promise<T> | T): Promise<T>;
+  };
   readonly batchSize: number;
+  /** Bounds one immutable manifest session before yielding the shared mutation gate. */
+  readonly maximumNamespacePagesPerSession: number;
   readonly intervalMilliseconds: number;
   readonly passTimeoutMilliseconds: number;
   readonly closeTimeoutMilliseconds: number;
@@ -163,7 +185,7 @@ interface ArtifactReconciliationDatabaseHandleRecord {
 
 const databaseHandleRecords = new WeakMap<object, ArtifactReconciliationDatabaseHandleRecord>();
 
-/** @internal Imported only by DatabaseClient and the isolated fake-owner testing adapter. */
+/** @internal Imported only by the top-level coordinator and source-excluded unit tests. */
 export const registerArtifactReconciliationDatabaseHandle = (
   owner: ArtifactReconciliationDatabaseOwner,
 ): ArtifactReconciliationDatabaseHandle => {
@@ -777,8 +799,13 @@ export class ArtifactReconciliationCoordinator {
   readonly #cleanupNamespaceEntry: (
     input: ArtifactNamespaceObservation,
   ) => Promise<ArtifactNamespaceCleanupResult>;
+  readonly #runMutation: <T>(
+    options: ArtifactMutationGateRunOptions,
+    operation: () => Promise<T> | T,
+  ) => Promise<T>;
   readonly #batchSize: number;
-  readonly #namespaceBatchSize: number;
+  readonly #namespacePageSize: number;
+  readonly #maximumNamespacePagesPerSession: number;
   readonly #intervalMilliseconds: number;
   readonly #passTimeoutMilliseconds: number;
   readonly #closeTimeoutMilliseconds: number;
@@ -809,7 +836,9 @@ export class ArtifactReconciliationCoordinator {
     database: ArtifactReconciliationDatabaseOwner,
   ) {
     const storage = options.storage;
+    const mutationGate = options.mutationGate;
     const batchSize = options.batchSize;
+    const maximumNamespacePagesPerSession = options.maximumNamespacePagesPerSession;
     const intervalMilliseconds = options.intervalMilliseconds;
     const passTimeoutMilliseconds = options.passTimeoutMilliseconds;
     const closeTimeoutMilliseconds = options.closeTimeoutMilliseconds;
@@ -830,12 +859,14 @@ export class ArtifactReconciliationCoordinator {
     const closeNamespaceScan = storage.closeNamespaceScan;
     const cleanupNamespaceEntry = storage.cleanupNamespaceEntry;
     const ownerExit = storage.ownerExit;
+    const runMutation = mutationGate?.run;
     if (
       typeof requestDatabase !== "function" ||
       typeof cleanupUpload !== "function" ||
       typeof scanNamespacePage !== "function" ||
       typeof closeNamespaceScan !== "function" ||
       typeof cleanupNamespaceEntry !== "function" ||
+      typeof runMutation !== "function" ||
       !(ownerExit instanceof Promise) ||
       typeof onFailStop !== "function"
     ) {
@@ -863,12 +894,32 @@ export class ArtifactReconciliationCoordinator {
       Reflect.apply(cleanupNamespaceEntry, storage, [
         input,
       ]) as Promise<ArtifactNamespaceCleanupResult>;
+    this.#runMutation = (<T>(
+      gateOptions: ArtifactMutationGateRunOptions,
+      operation: () => Promise<T> | T,
+    ): Promise<T> =>
+      Reflect.apply(runMutation, mutationGate, [gateOptions, operation]) as Promise<T>) as <T>(
+      options: ArtifactMutationGateRunOptions,
+      operation: () => Promise<T> | T,
+    ) => Promise<T>;
     this.#batchSize = requirePositiveInteger(
       batchSize,
       maximumArtifactReconciliationBatchSize,
       "Artifact reconciliation batch size",
     );
-    this.#namespaceBatchSize = Math.min(this.#batchSize, maximumArtifactNamespacePageSize);
+    const configuredNamespacePagesPerSession = requirePositiveInteger(
+      maximumNamespacePagesPerSession,
+      maximumArtifactNamespaceManifestEntries / maximumArtifactNamespacePageSize,
+      "Artifact reconciliation namespace session page limit",
+    );
+    this.#maximumNamespacePagesPerSession = Math.min(
+      configuredNamespacePagesPerSession,
+      this.#batchSize,
+    );
+    this.#namespacePageSize = Math.min(
+      maximumArtifactNamespacePageSize,
+      Math.floor(this.#batchSize / this.#maximumNamespacePagesPerSession),
+    );
     this.#intervalMilliseconds = requirePositiveInteger(
       intervalMilliseconds,
       maximumCoordinatorMilliseconds,
@@ -954,11 +1005,23 @@ export class ArtifactReconciliationCoordinator {
       return;
     }
     const deadline = performance.now() + this.#passTimeoutMilliseconds;
-    const pass = Promise.resolve().then(() => this.#runPass(deadline));
+    const pass = Promise.resolve().then(() => {
+      const gatedPass = this.#runMutation({ deadline }, async () => {
+        const result = await this.#runPass(deadline);
+        // Publish admission-critical accounting before releasing the shared mutation lease.
+        this.#health = result.health;
+        return result;
+      });
+      return gatedPass.catch((error: unknown) => {
+        if (this.#state === "open" && isSafeUndispatchedGateCancellation(error)) {
+          this.#markHealthUncertain();
+        }
+        throw error;
+      });
+    });
     this.#currentPass = pass;
     void pass.then(
       (result) => {
-        this.#health = result.health;
         if (result.sweepCompleted) {
           this.#settleFirstSweep();
         }
@@ -969,6 +1032,22 @@ export class ArtifactReconciliationCoordinator {
         }
       },
       (error: unknown) => {
+        if (
+          error instanceof ArtifactMutationGateError &&
+          !error.callbackStarted &&
+          this.#state === "open" &&
+          (error.code === "ARTIFACT_MUTATION_GATE_BUSY" ||
+            error.code === "ARTIFACT_MUTATION_GATE_TIMEOUT" ||
+            error.code === "ARTIFACT_MUTATION_GATE_CANCELLED")
+        ) {
+          this.#currentPass = undefined;
+          this.#schedulePass(this.#intervalMilliseconds);
+          return;
+        }
+        if (this.#state === "closing" && isSafeUndispatchedGateCancellation(error)) {
+          this.#currentPass = undefined;
+          return;
+        }
         const fatal = this.#asFatal(error, "ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
         this.#currentPass = undefined;
         this.#rejectFirstPass(fatal);
@@ -985,6 +1064,20 @@ export class ArtifactReconciliationCoordinator {
       this.#startPass();
     }, delayMilliseconds);
     this.#timer.unref();
+  }
+
+  #markHealthUncertain(): void {
+    const health = this.#health;
+    if (health === undefined || !health.capacity.accountingCertain) {
+      return;
+    }
+    this.#health = Object.freeze({
+      ...health,
+      capacity: Object.freeze({
+        ...health.capacity,
+        accountingCertain: false,
+      }),
+    });
   }
 
   async #runPass(deadline: number): Promise<ArtifactReconciliationPassResult> {
@@ -1021,7 +1114,7 @@ export class ArtifactReconciliationCoordinator {
       await this.#cleanup(item, deadline);
     }
 
-    const namespaceScan = await this.#reconcileNamespacePage(deadline);
+    const namespaceSession = await this.#reconcileNamespaceSession(deadline);
     let namespaceCleanupPage: {
       readonly items: readonly ArtifactNamespaceCleanupWorkItem[];
       readonly hasMore: boolean;
@@ -1053,6 +1146,9 @@ export class ArtifactReconciliationCoordinator {
     if (health.namespaceCleanup.failed > 0) {
       throw this.#enterFatal("ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED");
     }
+    if (health.cleanup.failed > 0 || health.cleanup.invalidRetryIdentity > 0) {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_CLEANUP_FAILED");
+    }
     if (health.namespaceCleanup.operationalSaturated) {
       throw this.#enterFatal("ARTIFACT_RECONCILIATION_HEALTH_SATURATED");
     }
@@ -1060,16 +1156,34 @@ export class ArtifactReconciliationCoordinator {
       continueImmediately:
         terminalized.hasMore ||
         cleanupPage.hasMore ||
-        namespaceScan.hasMore ||
+        namespaceSession.hasMore ||
         namespaceCleanupPage.hasMore,
-      sweepCompleted: namespaceScan.sweepCompleted,
+      sweepCompleted: namespaceSession.sweepCompleted,
       health,
     });
   }
 
-  async #reconcileNamespacePage(
+  async #reconcileNamespaceSession(
     deadline: number,
   ): Promise<{ readonly hasMore: boolean; readonly sweepCompleted: boolean }> {
+    for (let pageCount = 0; pageCount < this.#maximumNamespacePagesPerSession; pageCount += 1) {
+      const page = await this.#reconcileNamespacePage(deadline, this.#namespacePageSize);
+      if (page.sweepCompleted) {
+        return Object.freeze({ hasMore: false, sweepCompleted: true });
+      }
+      if (this.#state !== "open") {
+        await this.#closeActiveNamespaceScan(deadline);
+        return Object.freeze({ hasMore: true, sweepCompleted: false });
+      }
+    }
+    await this.#closeActiveNamespaceScan(deadline);
+    return Object.freeze({ hasMore: true, sweepCompleted: false });
+  }
+
+  async #reconcileNamespacePage(
+    deadline: number,
+    maximumEntries: number,
+  ): Promise<{ readonly sweepCompleted: boolean }> {
     let cursor: ArtifactNamespaceCursorSnapshot;
     try {
       cursor = snapshotNamespaceCursor(
@@ -1092,7 +1206,7 @@ export class ArtifactReconciliationCoordinator {
       scanSessionId: this.#namespaceScanSessionId,
       sweepGeneration: cursor.sweepGeneration,
       expectedAfterKey: cursor.afterKey,
-      maximumEntries: this.#namespaceBatchSize,
+      maximumEntries,
     });
     const expectation = createArtifactStorageResponseExpectation("scanNamespacePage", input);
     let rawPage: ArtifactNamespaceScanPageResult;
@@ -1136,7 +1250,6 @@ export class ArtifactReconciliationCoordinator {
       this.#namespaceScanAfterKey = nextCursor.afterKey;
     }
     return Object.freeze({
-      hasMore: !page.completedSweep,
       sweepCompleted: page.completedSweep,
     });
   }
@@ -1481,6 +1594,41 @@ export class ArtifactReconciliationCoordinator {
     }
   }
 
+  async #closeActiveNamespaceScan(deadline: number): Promise<void> {
+    if (
+      this.#namespaceScanSessionId === undefined ||
+      this.#namespaceScanGeneration === undefined ||
+      this.#namespaceScanAfterKey === undefined
+    ) {
+      return;
+    }
+    const input = normalizeArtifactStorageOperationInput("closeNamespaceScan", {
+      scanSessionId: this.#namespaceScanSessionId,
+      sweepGeneration: this.#namespaceScanGeneration,
+      expectedAfterKey: this.#namespaceScanAfterKey,
+    });
+    const expectation = createArtifactStorageResponseExpectation("closeNamespaceScan", input);
+    let rawClosed: CloseArtifactNamespaceScanResult;
+    try {
+      rawClosed = await this.#awaitBeforeDeadline(
+        () => this.#closeNamespaceScan(input),
+        deadline,
+        "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
+      );
+    } catch (error) {
+      throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN");
+    }
+    try {
+      const closed = normalizeArtifactStorageOperationOutput("closeNamespaceScan", rawClosed);
+      assertArtifactStorageResponseMatchesExpectation(expectation, "closeNamespaceScan", closed);
+      this.#namespaceScanSessionId = undefined;
+      this.#namespaceScanGeneration = undefined;
+      this.#namespaceScanAfterKey = undefined;
+    } catch {
+      throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
+    }
+  }
+
   async #close(deadline: number): Promise<void> {
     if (this.#state === "closed") {
       return;
@@ -1505,41 +1653,17 @@ export class ArtifactReconciliationCoordinator {
           "ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT",
         );
       } catch (error) {
-        throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT");
+        if (this.#state === "closing" && isSafeUndispatchedGateCancellation(error)) {
+          if (this.#currentPass === currentPass) {
+            this.#currentPass = undefined;
+          }
+        } else {
+          throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_CLOSE_TIMEOUT");
+        }
       }
     }
 
-    if (
-      this.#namespaceScanSessionId !== undefined &&
-      this.#namespaceScanGeneration !== undefined &&
-      this.#namespaceScanAfterKey !== undefined
-    ) {
-      const input = normalizeArtifactStorageOperationInput("closeNamespaceScan", {
-        scanSessionId: this.#namespaceScanSessionId,
-        sweepGeneration: this.#namespaceScanGeneration,
-        expectedAfterKey: this.#namespaceScanAfterKey,
-      });
-      const expectation = createArtifactStorageResponseExpectation("closeNamespaceScan", input);
-      let rawClosed: CloseArtifactNamespaceScanResult;
-      try {
-        rawClosed = await this.#awaitBeforeDeadline(
-          () => this.#closeNamespaceScan(input),
-          deadline,
-          "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN",
-        );
-      } catch (error) {
-        throw this.#asFatal(error, "ARTIFACT_RECONCILIATION_STORAGE_OUTCOME_UNKNOWN");
-      }
-      try {
-        const closed = normalizeArtifactStorageOperationOutput("closeNamespaceScan", rawClosed);
-        assertArtifactStorageResponseMatchesExpectation(expectation, "closeNamespaceScan", closed);
-        this.#namespaceScanSessionId = undefined;
-        this.#namespaceScanGeneration = undefined;
-        this.#namespaceScanAfterKey = undefined;
-      } catch {
-        throw this.#enterFatal("ARTIFACT_RECONCILIATION_PROTOCOL_FAILURE");
-      }
-    }
+    await this.#closeActiveNamespaceScan(deadline);
 
     await this.#awaitNextTurn(deadline);
     if (this.#fatalError !== undefined) {

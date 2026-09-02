@@ -200,7 +200,7 @@ export interface ArtifactUploadCreateOwnerLock {
 
 export interface ArtifactUploadCreateCoordinatorOptions {
   /** All owners MUST be ready. Successful start transfers their shutdown ownership here. */
-  /** Opaque one-shot handle minted by DatabaseClient; it exposes no database operations. */
+  /** Opaque one-shot handle derived by the top-level artifact transaction coordinator. */
   readonly database: ArtifactUploadCreateDatabaseHandle;
   readonly storage: ArtifactUploadCreateStorageOwner;
   /** MUST equal the immutable capacity snapshot used to start the storage owner. */
@@ -225,7 +225,7 @@ const createDatabaseHandle = (
   return handle;
 };
 
-/** @internal Imported only by DatabaseClient and the isolated fake-owner testing adapter. */
+/** @internal Imported only by the top-level coordinator and source-excluded unit tests. */
 export const registerArtifactUploadCreateDatabaseHandle = (
   identity: object,
   owner: ArtifactUploadCreateDatabaseOwner,
@@ -663,9 +663,19 @@ export class ArtifactUploadCreateCoordinator {
   createArtifactUpload(
     input: CreateArtifactUploadInput,
     signal?: AbortSignal,
+    absoluteDeadline?: number,
   ): Promise<CreateArtifactUploadResult> {
     const startedAt = performance.now();
-    const deadline = startedAt + this.#requestTimeoutMilliseconds;
+    const configuredDeadline = startedAt + this.#requestTimeoutMilliseconds;
+    if (
+      absoluteDeadline !== undefined &&
+      (typeof absoluteDeadline !== "number" ||
+        !Number.isFinite(absoluteDeadline) ||
+        absoluteDeadline > configuredDeadline)
+    ) {
+      return Promise.reject(createCoordinatorError("ARTIFACT_CREATE_INVALID_REQUEST"));
+    }
+    const deadline = absoluteDeadline ?? configuredDeadline;
     const initialError = this.#admissionError();
     if (initialError !== undefined) {
       return Promise.reject(initialError);

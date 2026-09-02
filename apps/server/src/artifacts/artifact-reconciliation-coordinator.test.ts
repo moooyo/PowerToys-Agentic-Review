@@ -1,4 +1,6 @@
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
+import { ArtifactMutationGate } from "../../dist/artifacts/artifact-mutation-gate.js";
 import {
   type ArtifactNamespaceCleanupResult,
   type ArtifactNamespaceObservation,
@@ -13,11 +15,8 @@ import {
   ArtifactReconciliationCoordinatorError,
   type ArtifactReconciliationDatabaseHandle,
   type ArtifactReconciliationStorageOwner,
+  registerArtifactReconciliationDatabaseHandle,
 } from "../../dist/artifacts/artifact-reconciliation-coordinator.js";
-import {
-  attachArtifactReconciliationDatabaseForTest,
-  type FakeArtifactReconciliationDatabaseOwner,
-} from "../../dist/artifacts/artifact-reconciliation-coordinator.testing.js";
 import { ArtifactStorageClientError } from "../../dist/artifacts/errors.js";
 import type {
   ArtifactCleanupWorkItem,
@@ -25,6 +24,14 @@ import type {
   ArtifactReconciliationDatabaseOperation,
 } from "../../dist/database/artifacts.js";
 import type { DatabaseOperationMap } from "../../dist/database/protocol.js";
+
+type FakeArtifactReconciliationDatabaseOwner = Parameters<
+  typeof registerArtifactReconciliationDatabaseHandle
+>[0];
+
+const attachArtifactReconciliationDatabaseForTest = (
+  owner: FakeArtifactReconciliationDatabaseOwner,
+): ArtifactReconciliationDatabaseHandle => registerArtifactReconciliationDatabaseHandle(owner);
 
 type CleanupDatabaseOperation =
   | "classifyArtifactNamespacePageAndAdvanceCursor"
@@ -112,9 +119,13 @@ const namespaceObservation = (ordinal = 1): ArtifactNamespaceObservation => {
   };
 };
 
+const fullNamespacePage = (startOrdinal = 1): readonly ArtifactNamespaceObservation[] =>
+  Array.from({ length: 256 }, (_, index) => namespaceObservation(startOrdinal + index));
+
 class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
   readonly events: string[] = [];
   readonly inputs: unknown[] = [];
+  readonly timeline: string[] | undefined;
   items: ArtifactCleanupWorkItem[] = [];
   terminalHasMore = false;
   cleanupHasMore = false;
@@ -128,12 +139,19 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
   exposeClassifiedNamespaceCleanup = false;
   health = emptyHealth();
   onRequest: ((operation: CleanupDatabaseOperation) => void) | undefined;
+  namespaceClassificationBarrier: (() => Promise<void>) | undefined;
+
+  constructor(timeline?: string[]) {
+    this.timeline = timeline;
+  }
 
   async request<TOperation extends ArtifactReconciliationDatabaseOperation>(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
-    this.events.push(`db:${operation}`);
+    const event = `db:${operation}`;
+    this.events.push(event);
+    this.timeline?.push(event);
     this.inputs.push(input);
     this.onRequest?.(operation as CleanupDatabaseOperation);
     let result: unknown;
@@ -187,6 +205,7 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
         };
         break;
       case "classifyArtifactNamespacePageAndAdvanceCursor": {
+        await this.namespaceClassificationBarrier?.();
         if (this.namespaceClassificationError !== undefined) {
           throw this.namespaceClassificationError;
         }
@@ -213,20 +232,28 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
           },
         };
         if (this.exposeClassifiedNamespaceCleanup && page.observations.length > 0) {
-          this.namespaceItems = page.observations.map((observation) => ({
-            ...observation,
-            reason: "orphan" as const,
-            observedSweepGeneration: page.expectedSweepGeneration,
-            expectedAttemptCount: 0,
-            lastRetryDelaySeconds: null,
-          }));
+          this.namespaceItems = [
+            ...this.namespaceItems,
+            ...page.observations.map((observation) => ({
+              ...observation,
+              reason: "orphan" as const,
+              observedSweepGeneration: page.expectedSweepGeneration,
+              expectedAttemptCount: 0,
+              lastRetryDelaySeconds: null,
+            })),
+          ];
         }
         result = this.classificationOverride?.(input, classificationResult) ?? classificationResult;
         break;
       }
-      case "listDueArtifactNamespaceCleanups":
-        result = { items: this.namespaceItems, hasMore: false };
+      case "listDueArtifactNamespaceCleanups": {
+        const listing = input as DatabaseOperationMap["listDueArtifactNamespaceCleanups"]["input"];
+        result = {
+          items: this.namespaceItems.slice(0, listing.batchSize),
+          hasMore: this.namespaceItems.length > listing.batchSize,
+        };
         break;
+      }
       case "completeArtifactNamespaceCleanup": {
         if (this.namespaceCompleteError !== undefined) {
           throw this.namespaceCompleteError;
@@ -241,7 +268,11 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
           completedAt: timestamp,
           replayed: false,
         };
-        this.namespaceItems = [];
+        this.namespaceItems = this.namespaceItems.filter(
+          (item) =>
+            item.entryKey !== completion.entryKey ||
+            item.observationSha256 !== completion.observationSha256,
+        );
         break;
       }
       case "recordArtifactNamespaceCleanupFailure": {
@@ -258,7 +289,11 @@ class FakeDatabase implements FakeArtifactReconciliationDatabaseOwner {
           retryDelaySeconds: failure.retryDelaySeconds,
           replayed: false,
         };
-        this.namespaceItems = [];
+        this.namespaceItems = this.namespaceItems.filter(
+          (item) =>
+            item.entryKey !== failure.entryKey ||
+            item.observationSha256 !== failure.observationSha256,
+        );
         break;
       }
       default:
@@ -273,23 +308,33 @@ class FakeStorage implements ArtifactReconciliationStorageOwner {
   readonly ownerExitSignal = Promise.withResolvers<number>();
   readonly ownerExit: Promise<number>;
   readonly cleanupStarted = Promise.withResolvers<void>();
+  readonly timeline: string[] | undefined;
+  readonly namespaceScanInputs: ArtifactNamespaceScanPageInput[] = [];
+  readonly namespaceCloseInputs: CloseArtifactNamespaceScanInput[] = [];
   cleanupResult: () => Promise<{
     stagingRemoved: boolean;
     publicationTemporariesRemoved: number;
   }> = () => Promise.resolve({ stagingRemoved: false, publicationTemporariesRemoved: 0 });
-  namespacePages: readonly ArtifactNamespaceObservation[][] = [[]];
+  namespacePages: readonly (readonly ArtifactNamespaceObservation[])[] = [[]];
   namespacePageIndex = 0;
+  namespaceScanOverride:
+    | ((
+        input: ArtifactNamespaceScanPageInput,
+        result: ArtifactNamespaceScanPageResult,
+      ) => Promise<ArtifactNamespaceScanPageResult>)
+    | undefined;
   namespaceCleanupResult: (
     input: ArtifactNamespaceObservation,
   ) => Promise<ArtifactNamespaceCleanupResult> = () =>
     Promise.reject(new Error("Namespace cleanup was not configured."));
 
-  constructor(ownerExit?: Promise<number>) {
+  constructor(ownerExit?: Promise<number>, timeline?: string[]) {
     this.ownerExit = ownerExit ?? this.ownerExitSignal.promise;
+    this.timeline = timeline;
   }
 
   cleanupUpload(): Promise<{ stagingRemoved: boolean; publicationTemporariesRemoved: number }> {
-    this.events.push("storage:cleanup");
+    this.#record("storage:cleanup");
     this.cleanupStarted.resolve();
     return this.cleanupResult();
   }
@@ -297,32 +342,43 @@ class FakeStorage implements ArtifactReconciliationStorageOwner {
   scanNamespacePage(
     input: ArtifactNamespaceScanPageInput,
   ): Promise<ArtifactNamespaceScanPageResult> {
-    this.events.push("storage:scan-namespace");
+    this.#record("storage:scan-namespace");
+    this.namespaceScanInputs.push(input);
     const observations = this.namespacePages[this.namespacePageIndex] ?? [];
     this.namespacePageIndex += 1;
     const completedSweep = this.namespacePageIndex >= this.namespacePages.length;
-    return Promise.resolve({
+    if (!completedSweep && observations.length !== input.maximumEntries) {
+      return Promise.reject(new Error("A non-final fake namespace page must be full."));
+    }
+    const result: ArtifactNamespaceScanPageResult = {
       scanSessionId: input.scanSessionId,
       sweepGeneration: input.sweepGeneration,
       expectedAfterKey: input.expectedAfterKey,
       observations,
       completedSweep,
       nextAfterKey: completedSweep ? null : (observations.at(-1)?.entryKey ?? null),
-    });
+    };
+    return this.namespaceScanOverride?.(input, result) ?? Promise.resolve(result);
   }
 
   closeNamespaceScan(
     input: CloseArtifactNamespaceScanInput,
   ): Promise<CloseArtifactNamespaceScanResult> {
-    this.events.push("storage:close-namespace-scan");
+    this.#record("storage:close-namespace-scan");
+    this.namespaceCloseInputs.push(input);
     return Promise.resolve({ ...input, closed: true });
   }
 
   cleanupNamespaceEntry(
     input: ArtifactNamespaceObservation,
   ): Promise<ArtifactNamespaceCleanupResult> {
-    this.events.push("storage:cleanup-namespace");
+    this.#record("storage:cleanup-namespace");
     return this.namespaceCleanupResult(input);
+  }
+
+  #record(event: string): void {
+    this.events.push(event);
+    this.timeline?.push(event);
   }
 }
 
@@ -333,7 +389,9 @@ const optionsWithHandle = (
 ) => ({
   database,
   storage,
+  mutationGate: new ArtifactMutationGate({ maximumPendingOperations: 16 }),
   batchSize: 8,
+  maximumNamespacePagesPerSession: 8,
   intervalMilliseconds: 60_000,
   passTimeoutMilliseconds: 5_000,
   closeTimeoutMilliseconds: 5_000,
@@ -448,6 +506,34 @@ describe("ArtifactReconciliationCoordinator", () => {
     });
     await expect(coordinator.firstSweep).rejects.toMatchObject({
       code: "ARTIFACT_RECONCILIATION_NAMESPACE_CLEANUP_FAILED",
+    });
+    expect(failures).toHaveLength(1);
+  });
+
+  it.each([
+    { name: "failed upload cleanup", failed: 1, invalidRetryIdentity: 0 },
+    { name: "invalid upload cleanup retry identity", failed: 0, invalidRetryIdentity: 1 },
+  ])("fail-stops on $name health", async ({ failed, invalidRetryIdentity }) => {
+    const database = new FakeDatabase();
+    database.health = {
+      ...emptyHealth(),
+      cleanup: {
+        ...emptyHealth().cleanup,
+        failed,
+        invalidRetryIdentity,
+      },
+    };
+    const failures: Error[] = [];
+    const coordinator = ArtifactReconciliationCoordinator.start(
+      options(database, new FakeStorage(), (error) => failures.push(error)),
+    );
+
+    await expect(coordinator.firstPass).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_CLEANUP_FAILED",
+      requiresFailStop: true,
+    });
+    await expect(coordinator.firstSweep).rejects.toMatchObject({
+      code: "ARTIFACT_RECONCILIATION_CLEANUP_FAILED",
     });
     expect(failures).toHaveLength(1);
   });
@@ -589,20 +675,306 @@ describe("ArtifactReconciliationCoordinator", () => {
     expect(database.events).not.toContain("db:completeArtifactNamespaceCleanup");
   });
 
-  it("closes an active multi-page namespace session during coordinator shutdown", async () => {
+  it("holds the mutation gate across a complete scan session without interleaving cleanup", async () => {
+    const timeline: string[] = [];
+    const database = new FakeDatabase(timeline);
+    database.health = {
+      ...emptyHealth(),
+      capacity: {
+        ...emptyHealth().capacity,
+        accountingCertain: false,
+      },
+    };
+    database.items = [cleanupItem()];
+    database.exposeClassifiedNamespaceCleanup = true;
+    const firstClassification = Promise.withResolvers<void>();
+    const releaseClassification = Promise.withResolvers<void>();
+    let classificationCount = 0;
+    database.namespaceClassificationBarrier = async () => {
+      classificationCount += 1;
+      if (classificationCount === 1) {
+        firstClassification.resolve();
+        await releaseClassification.promise;
+      }
+    };
+    const storage = new FakeStorage(undefined, timeline);
+    storage.namespacePages = [fullNamespacePage(), [namespaceObservation(257)]];
+    storage.namespaceCleanupResult = (input) =>
+      Promise.resolve({
+        entryKey: input.entryKey,
+        observationSha256: input.observationSha256,
+        outcome: "removed",
+      });
+    const mutationGate = new ArtifactMutationGate({ maximumPendingOperations: 16 });
+    const coordinator = ArtifactReconciliationCoordinator.start({
+      ...options(database, storage),
+      mutationGate,
+      batchSize: 512,
+      maximumNamespacePagesPerSession: 2,
+    });
+
+    await firstClassification.promise;
+    let accountingCertainAtWriterEntry: boolean | undefined;
+    const writer = mutationGate.run({ deadline: performance.now() + 5_000 }, () => {
+      accountingCertainAtWriterEntry = coordinator.health?.capacity.accountingCertain;
+      timeline.push("writer");
+    });
+    releaseClassification.resolve();
+    await Promise.all([coordinator.firstSweep, writer]);
+
+    const firstScan = timeline.indexOf("storage:scan-namespace");
+    const firstClassify = timeline.indexOf("db:classifyArtifactNamespacePageAndAdvanceCursor");
+    const secondScan = timeline.indexOf("storage:scan-namespace", firstScan + 1);
+    const secondClassify = timeline.indexOf(
+      "db:classifyArtifactNamespacePageAndAdvanceCursor",
+      firstClassify + 1,
+    );
+    const uploadCleanup = timeline.indexOf("storage:cleanup");
+    const namespaceCleanup = timeline.indexOf("storage:cleanup-namespace");
+    const health = timeline.indexOf("db:readArtifactHealthAccounting");
+    const writerEntered = timeline.indexOf("writer");
+    expect([
+      uploadCleanup,
+      firstScan,
+      firstClassify,
+      secondScan,
+      secondClassify,
+      namespaceCleanup,
+      health,
+      writerEntered,
+    ]).not.toContain(-1);
+    expect(uploadCleanup).toBeLessThan(firstScan);
+    expect(firstScan).toBeLessThan(firstClassify);
+    expect(firstClassify).toBeLessThan(secondScan);
+    expect(secondScan).toBeLessThan(secondClassify);
+    expect(secondClassify).toBeLessThan(namespaceCleanup);
+    expect(namespaceCleanup).toBeLessThan(health);
+    expect(health).toBeLessThan(writerEntered);
+    expect(accountingCertainAtWriterEntry).toBe(false);
+    expect(storage.namespaceCloseInputs).toEqual([]);
+    expect(storage.namespaceScanInputs).toHaveLength(2);
+    expect(storage.namespaceScanInputs[1]).toMatchObject({
+      scanSessionId: storage.namespaceScanInputs[0]?.scanSessionId,
+      expectedAfterKey: namespaceObservation(256).entryKey,
+      maximumEntries: 256,
+    });
+    await coordinator.close();
+    await mutationGate.close();
+  });
+
+  it("closes a bounded multi-page namespace session before yielding its mutation lease", async () => {
+    const timeline: string[] = [];
+    const database = new FakeDatabase(timeline);
+    const firstClassification = Promise.withResolvers<void>();
+    const releaseClassification = Promise.withResolvers<void>();
+    let classificationCount = 0;
+    database.namespaceClassificationBarrier = async () => {
+      classificationCount += 1;
+      if (classificationCount === 1) {
+        firstClassification.resolve();
+        await releaseClassification.promise;
+      }
+    };
+    const storage = new FakeStorage(undefined, timeline);
+    storage.namespacePages = [fullNamespacePage(), [namespaceObservation(257)]];
+    const mutationGate = new ArtifactMutationGate({ maximumPendingOperations: 16 });
+    const coordinator = ArtifactReconciliationCoordinator.start({
+      ...options(database, storage),
+      mutationGate,
+      batchSize: 256,
+      maximumNamespacePagesPerSession: 1,
+    });
+
+    await firstClassification.promise;
+    const writerEntered = Promise.withResolvers<void>();
+    const releaseWriter = Promise.withResolvers<void>();
+    const writer = mutationGate.run({ deadline: performance.now() + 5_000 }, async () => {
+      timeline.push("writer");
+      writerEntered.resolve();
+      await releaseWriter.promise;
+    });
+    releaseClassification.resolve();
+    await Promise.all([coordinator.firstPass, writerEntered.promise]);
+
+    const firstAfterKey = namespaceObservation(256).entryKey;
+    expect(database.namespaceAfterKey).toBe(firstAfterKey);
+    expect(storage.namespaceScanInputs).toHaveLength(1);
+    expect(storage.namespaceCloseInputs).toEqual([
+      {
+        scanSessionId: storage.namespaceScanInputs[0]?.scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: firstAfterKey,
+      },
+    ]);
+    const scanClosed = timeline.indexOf("storage:close-namespace-scan");
+    const writerStarted = timeline.indexOf("writer");
+    expect([scanClosed, writerStarted]).not.toContain(-1);
+    expect(scanClosed).toBeLessThan(writerStarted);
+
+    releaseWriter.resolve();
+    await writer;
+    await coordinator.firstSweep;
+    expect(storage.namespaceScanInputs).toHaveLength(2);
+    expect(storage.namespaceScanInputs[1]).toMatchObject({
+      sweepGeneration: 0,
+      expectedAfterKey: firstAfterKey,
+      maximumEntries: 256,
+    });
+    expect(storage.namespaceScanInputs[1]?.scanSessionId).not.toBe(
+      storage.namespaceScanInputs[0]?.scanSessionId,
+    );
+    const firstScan = timeline.indexOf("storage:scan-namespace");
+    const secondScan = timeline.indexOf("storage:scan-namespace", firstScan + 1);
+    expect(timeline.indexOf("writer")).toBeLessThan(secondScan);
+    await coordinator.close();
+    await mutationGate.close();
+  });
+
+  it.each([
+    { name: "small batches", batchSize: 2, maximumPages: 2, pageSizes: [1, 1, 1, 1, 1] },
+    {
+      name: "non-divisible batches",
+      batchSize: 300,
+      maximumPages: 8,
+      pageSizes: [37, 37, 37, 37, 37, 37, 37, 37, 4],
+    },
+    {
+      name: "maximum batches",
+      batchSize: 1_024,
+      maximumPages: 8,
+      pageSizes: [128, 128, 128, 128, 128, 128, 128, 128, 1],
+    },
+  ])(
+    "bounds namespace production by same-pass cleanup capacity for $name",
+    async ({ batchSize, maximumPages, pageSizes }) => {
+      const database = new FakeDatabase();
+      database.exposeClassifiedNamespaceCleanup = true;
+      const storage = new FakeStorage();
+      let ordinal = 1;
+      storage.namespacePages = pageSizes.map((pageSize) => {
+        const page = Array.from({ length: pageSize }, () => namespaceObservation(ordinal++));
+        return page;
+      });
+      storage.namespaceCleanupResult = (input) =>
+        Promise.resolve({
+          entryKey: input.entryKey,
+          observationSha256: input.observationSha256,
+          outcome: "removed",
+        });
+      const mutationGate = new ArtifactMutationGate({ maximumPendingOperations: 16 });
+      const coordinator = ArtifactReconciliationCoordinator.start({
+        ...options(database, storage),
+        mutationGate,
+        batchSize,
+        maximumNamespacePagesPerSession: maximumPages,
+        passTimeoutMilliseconds: 30_000,
+      });
+
+      await coordinator.firstSweep;
+
+      const totalObservations = pageSizes.reduce((total, pageSize) => total + pageSize, 0);
+      expect(storage.namespaceScanInputs).toHaveLength(pageSizes.length);
+      expect(
+        storage.namespaceScanInputs.every(
+          (input) => input.maximumEntries <= Math.min(batchSize, 256),
+        ),
+      ).toBe(true);
+      const sessionPageSizes = new Map<string, Set<number>>();
+      const classifiedBySession = new Map<string, number>();
+      for (const [index, input] of storage.namespaceScanInputs.entries()) {
+        const sizes = sessionPageSizes.get(input.scanSessionId) ?? new Set<number>();
+        sizes.add(input.maximumEntries);
+        sessionPageSizes.set(input.scanSessionId, sizes);
+        classifiedBySession.set(
+          input.scanSessionId,
+          (classifiedBySession.get(input.scanSessionId) ?? 0) + (pageSizes[index] ?? 0),
+        );
+      }
+      expect([...sessionPageSizes.values()].every((sizes) => sizes.size === 1)).toBe(true);
+      expect([...classifiedBySession.values()].every((count) => count <= batchSize)).toBe(true);
+      expect(
+        database.events.filter((event) => event === "db:completeArtifactNamespaceCleanup"),
+      ).toHaveLength(totalObservations);
+      expect(database.namespaceItems).toEqual([]);
+      expect(coordinator.health?.namespaceCleanup.operationalSaturated).toBe(false);
+      await coordinator.close();
+      await mutationGate.close();
+    },
+  );
+
+  it("closes without fail-stop when a queued reconciliation pass expires before dispatch", async () => {
     const database = new FakeDatabase();
     const storage = new FakeStorage();
-    storage.namespacePages = [
-      Array.from({ length: 8 }, (_, index) => namespaceObservation(index + 1)),
-      [],
-    ];
-    const coordinator = ArtifactReconciliationCoordinator.start(options(database, storage));
+    const mutationGate = new ArtifactMutationGate({ maximumPendingOperations: 2 });
+    const writerEntered = Promise.withResolvers<void>();
+    const releaseWriter = Promise.withResolvers<void>();
+    const writer = mutationGate.run({ deadline: performance.now() + 5_000 }, async () => {
+      writerEntered.resolve();
+      await releaseWriter.promise;
+    });
+    await writerEntered.promise;
+    const failures: Error[] = [];
+    const coordinator = ArtifactReconciliationCoordinator.start({
+      ...options(database, storage, (error) => failures.push(error)),
+      mutationGate,
+      passTimeoutMilliseconds: 200,
+      closeTimeoutMilliseconds: 1_000,
+    });
 
-    await coordinator.firstPass;
-    const firstSweep = coordinator.firstSweep;
-    await coordinator.close();
-    await expect(firstSweep).rejects.toThrow(/closed before its first sweep/u);
-    expect(storage.events).toContain("storage:close-namespace-scan");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await expect(
+      mutationGate.run({ deadline: performance.now() + 5_000 }, () => undefined),
+    ).rejects.toMatchObject({ code: "ARTIFACT_MUTATION_GATE_BUSY", callbackStarted: false });
+    const closing = coordinator.close();
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+
+    await expect(closing).resolves.toBeUndefined();
+    await expect(coordinator.firstPass).resolves.toBeUndefined();
+    expect(database.events).toEqual([]);
+    expect(failures).toEqual([]);
+    releaseWriter.resolve();
+    await writer;
+    await mutationGate.close();
+  });
+
+  it("closes a non-final scan session after an accepted page returns during shutdown", async () => {
+    const timeline: string[] = [];
+    const database = new FakeDatabase(timeline);
+    const storage = new FakeStorage(undefined, timeline);
+    storage.namespacePages = [fullNamespacePage(), []];
+    const pageAccepted = Promise.withResolvers<void>();
+    const releasePage = Promise.withResolvers<void>();
+    storage.namespaceScanOverride = async (_input, result) => {
+      pageAccepted.resolve();
+      await releasePage.promise;
+      return result;
+    };
+    const mutationGate = new ArtifactMutationGate({ maximumPendingOperations: 16 });
+    const coordinator = ArtifactReconciliationCoordinator.start({
+      ...options(database, storage),
+      mutationGate,
+      batchSize: 256,
+      maximumNamespacePagesPerSession: 1,
+    });
+
+    await pageAccepted.promise;
+    const closing = coordinator.close();
+    releasePage.resolve();
+    await closing;
+
+    expect(storage.namespaceScanInputs).toHaveLength(1);
+    expect(storage.namespaceCloseInputs).toEqual([
+      {
+        scanSessionId: storage.namespaceScanInputs[0]?.scanSessionId,
+        sweepGeneration: 0,
+        expectedAfterKey: namespaceObservation(256).entryKey,
+      },
+    ]);
+    const classified = timeline.indexOf("db:classifyArtifactNamespacePageAndAdvanceCursor");
+    const scanClosed = timeline.indexOf("storage:close-namespace-scan");
+    expect([classified, scanClosed]).not.toContain(-1);
+    expect(classified).toBeLessThan(scanClosed);
+    await mutationGate.close();
   });
 
   it("replays an unlink after a lost DB completion response as already absent", async () => {
@@ -908,7 +1280,9 @@ describe("ArtifactReconciliationCoordinator", () => {
     expect(Object.fromEntries(reads)).toEqual({
       "options.database": 1,
       "options.storage": 1,
+      "options.mutationGate": 1,
       "options.batchSize": 1,
+      "options.maximumNamespacePagesPerSession": 1,
       "options.intervalMilliseconds": 1,
       "options.passTimeoutMilliseconds": 1,
       "options.closeTimeoutMilliseconds": 1,

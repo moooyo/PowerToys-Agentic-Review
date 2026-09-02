@@ -1151,6 +1151,31 @@ describe("ArtifactStorageClient protocol and lifecycle", () => {
     await expect(closing).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_CLIENT_PROTOCOL" });
   });
 
+  it("revokes unconsumed storage authority on close while disabling raw mutations", async () => {
+    const worker = new FakeArtifactWorker();
+    const client = await attach(worker);
+    const handle = client.createArtifactTransactionStorageHandle();
+
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+    expect(() => client.createArtifactTransactionStorageHandle()).toThrow(/already issued/u);
+    await expect(client.writePreparedChunk(chunkInput())).rejects.toMatchObject({
+      code: "ARTIFACT_STORAGE_AUTHORITY_REQUIRED",
+    });
+    await expect(
+      client.evaluateCapacity({
+        request: { expectedTotalBytes: 1 },
+        accounting: {
+          accountingCertain: true,
+          liveUploadCount: 0,
+          liveUploadExpectedByteSizeBuckets: [],
+          cleanupBacklogEntries: 0,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_STORAGE_AUTHORITY_REQUIRED" });
+    expect(worker.posted).toEqual([]);
+    await shutdownGracefully(client, worker);
+  });
+
   it("accepts shutdown acknowledgement delivered after exit but before IPC close", async () => {
     const worker = new FakeArtifactWorker();
     const client = await attach(worker);

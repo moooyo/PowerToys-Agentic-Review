@@ -36,6 +36,7 @@ export class ArtifactStorageCloseTimeoutError extends Error {
 }
 
 export type ArtifactStorageClientErrorCode =
+  | "ARTIFACT_STORAGE_AUTHORITY_REQUIRED"
   | "ARTIFACT_STORAGE_CAPACITY"
   | "ARTIFACT_STORAGE_CLIENT_BUSY"
   | "ARTIFACT_STORAGE_CLIENT_PROTOCOL"

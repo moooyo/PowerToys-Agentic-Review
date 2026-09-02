@@ -169,6 +169,10 @@ range durable and retries the commit. If it is committed, the Server verifies th
 still cover and match the committed receipt before returning the replay response. Changed metadata
 is a conflict. SQLite state is never rewound to conceal missing or corrupt staging bytes.
 
+After an upload is committed, its staging cleanup may already be durable. A committed chunk replay
+therefore verifies the requested range against the complete immutable CAS object identified by the
+database prepare result; it never requires or recreates staging data.
+
 If the lease expires or the process crashes after the staging write but before DB commit, durable
 bytes may be ahead of the committed cursor while the stable receipt remains prepared. They do not
 become accepted state until an exact retry completes the second database phase. The reconciler may
@@ -205,6 +209,10 @@ row and move the upload to `committed`. That transaction rechecks the lease and 
 receipt. A published object may therefore outlive a failed DB commit, response loss, lease loss, or
 Server crash. It is harmless only because it is immutable and a later exact finalization fully
 verifies it. Upload cleanup never deletes a published object.
+
+A committed finalization replay similarly verifies the immutable CAS object directly before the
+database replay phase. It does not call publication again and does not depend on a staging file that
+the cleanup journal is already authorized to remove.
 
 ### Upload terminal authority and create replays
 
@@ -337,15 +345,56 @@ with the same effective user ID. The storage root remains private to the Server 
 uses server-derived grammar and no-follow opens, and identity is revalidated immediately before
 unlink. An unknown unlink or directory-fsync outcome terminates the storage owner.
 
-Artifact HTTP routes and artifact-mode completion remain disabled in this slice. Before enabling
-writes, composition must place upload mutation and namespace scan/cleanup under one shared mutation
-gate so a live writer cannot race reconciliation authority inside the storage owner.
+Artifact HTTP routes and artifact-mode completion remain disabled in this slice. The internal
+transaction foundation now places create, chunk, finalization, termination, and reconciliation
+under one cancellable, bounded Server-process mutation gate. A writer holds the gate from before its
+database prepare through its filesystem durability phase and final database commit or definitive
+failure. A reconciliation pass holds the same gate while a filesystem manifest session is active,
+through every page classification and the session's final or explicit close. Upload and namespace
+cleanup cannot run between pages of that manifest.
+
+One manifest session has an independent page bound and one fixed page size. The page size and the
+effective page count are chosen so their product never exceeds the namespace cleanup batch that the
+same pass can drain. Classification therefore cannot create cleanup authority faster than a healthy
+pass consumes it. Reaching the bound explicitly closes the storage scan, preserves the last
+transactionally classified database cursor, and releases the gate. A later pass creates a new
+manifest and resumes after that durable cursor. This retains the non-starving wrap semantics without
+allowing a writer to mutate a file represented by a still-active immutable manifest. Page I/O yields
+the event loop, and the session boundary allows FIFO writer admission; the absolute pass deadline
+remains the fail-stop bound for an already dispatched unknown outcome.
+
+`DatabaseClient`, `ArtifactStorageClient`, and `DatabaseOwnerLock` each issue one opaque transaction
+handle. After a handle is consumed, the original owner cannot directly dispatch artifact database
+operations, mutate or close storage, request database shutdown, or release the owner lock. An
+unconsumed handle can be revoked only by its original owner as part of orderly abandonment. The
+top-level transaction coordinator is the only consumer and owns readiness, fatal propagation, and
+the close order: stop admission, close reconciliation and any scan session, cancel queued mutation
+callbacks, drain the active callback, close and prove storage-owner exit, close SQLite, then release
+the owner lock. Database and storage handles also bind terminal-failure signals. A failure observed
+during startup or normal operation synchronously poisons admission; normal shutdown does not settle
+those signals, and shutdown failures remain governed by the ordered close result. Test-only handle
+factories live only inside files excluded by the production TypeScript build. A package-local Node
+prebuild validates and removes only `apps/server/dist` before TypeScript runs, so a production build
+contains no stale reusable fake-owner adapter and never cleans referenced package outputs.
+
+Readiness is a live state, not merely the settled first-sweep promise. It requires a completed first
+namespace sweep, certain capacity accounting, no exhausted or invalid upload-cleanup retry identity,
+no failed namespace cleanup, and no operational namespace-health saturation. Fatal and closing
+transitions synchronously disable admission. This foundation intentionally has no consumer in
+`main.ts`, `app.ts`, Worker routes, claim selection, or Server configuration; production composition
+and external reachability require separate reviewed changes.
 
 Namespace cleanup health reads are independently bounded for each status. Saturated pending,
 retry-waiting, failed, or due counts are operational saturation: capacity admission becomes
 uncertain and the reconciler fail-stops. Saturated completed or superseded counts are historical
 saturation only. Historical counters are capped for display without disabling admission or a
 healthy reconciliation pass.
+
+If maintenance cannot enter the shared gate before its admission deadline, the last capacity
+snapshot is immediately marked uncertain. Already queued mutations recheck readiness before their
+first database operation and are rejected, allowing the FIFO to drain so a later maintenance pass
+can refresh health. This prevents continuous otherwise-valid traffic from starving reconciliation
+while an old healthy snapshot remains authoritative.
 
 ### Capacity admission
 

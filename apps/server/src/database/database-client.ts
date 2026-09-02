@@ -1,14 +1,12 @@
 import { Worker } from "node:worker_threads";
 import {
-  type ArtifactReconciliationDatabaseHandle,
-  registerArtifactReconciliationDatabaseHandle,
-} from "../artifacts/artifact-reconciliation-coordinator.js";
+  type ArtifactTransactionDatabaseHandle,
+  type ArtifactTransactionDatabaseOperation,
+  isArtifactTransactionDatabaseOperation,
+  registerArtifactTransactionDatabaseHandle,
+  revokeArtifactTransactionDatabaseHandle,
+} from "../artifacts/artifact-transaction-coordinator.js";
 import {
-  type ArtifactUploadCreateDatabaseHandle,
-  registerArtifactUploadCreateDatabaseHandle,
-} from "../artifacts/artifact-upload-create-coordinator.js";
-import {
-  type ArtifactReconciliationDatabaseOperation,
   isArtifactReconciliationDatabaseOperation,
   snapshotArtifactReconciliationDatabaseInput,
 } from "./artifacts.js";
@@ -26,6 +24,12 @@ interface PendingRequest {
   readonly resolve: (value: unknown) => void;
   readonly reject: (reason: Error) => void;
 }
+
+type ArtifactTransactionDatabaseDispatchers = {
+  readonly [TOperation in ArtifactTransactionDatabaseOperation]: (
+    input: DatabaseOperationMap[TOperation]["input"],
+  ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
+};
 
 export interface DatabaseWorkerTransport {
   postMessage(value: unknown): void;
@@ -62,19 +66,82 @@ export class DatabaseClient {
   readonly #pending = new Map<number, PendingRequest>();
   readonly #ready: Promise<void>;
   readonly #exited: Promise<number>;
+  readonly #terminalFailure = Promise.withResolvers<Error>();
   #resolveReady!: () => void;
   #rejectReady!: (reason: Error) => void;
   #resolveExited!: (exitCode: number) => void;
   #nextRequestId = 1;
   #isReady = false;
   #isClosing = false;
-  #artifactUploadCreateHandleIssued = false;
-  #artifactReconciliationHandleIssued = false;
+  #artifactTransactionHandleIssued = false;
+  #artifactTransactionHandle: ArtifactTransactionDatabaseHandle | undefined;
   #shutdownRequested = false;
   #shutdownResponseReceived = false;
   #shutdownAcknowledged = false;
   #terminalError: Error | undefined;
   #closePromise: Promise<void> | undefined;
+  readonly #artifactTransactionDispatchers: ArtifactTransactionDatabaseDispatchers = Object.freeze({
+    probeArtifactUploadCreate: (input) => this.#send("probeArtifactUploadCreate", input),
+    createArtifactUpload: (input) => this.#send("createArtifactUpload", input),
+    prepareArtifactChunk: (input) => this.#send("prepareArtifactChunk", input),
+    commitArtifactChunk: (input) => this.#send("commitArtifactChunk", input),
+    prepareArtifactFinalize: (input) => this.#send("prepareArtifactFinalize", input),
+    commitArtifactFinalize: (input) => this.#send("commitArtifactFinalize", input),
+    terminateArtifactUpload: (input) => this.#send("terminateArtifactUpload", input),
+    terminalizeInactiveArtifactUploads: (input) =>
+      this.#send(
+        "terminalizeInactiveArtifactUploads",
+        snapshotArtifactReconciliationDatabaseInput("terminalizeInactiveArtifactUploads", input),
+      ),
+    listDueArtifactCleanups: (input) =>
+      this.#send(
+        "listDueArtifactCleanups",
+        snapshotArtifactReconciliationDatabaseInput("listDueArtifactCleanups", input),
+      ),
+    completeArtifactCleanup: (input) =>
+      this.#send(
+        "completeArtifactCleanup",
+        snapshotArtifactReconciliationDatabaseInput("completeArtifactCleanup", input),
+      ),
+    recordArtifactCleanupFailure: (input) =>
+      this.#send(
+        "recordArtifactCleanupFailure",
+        snapshotArtifactReconciliationDatabaseInput("recordArtifactCleanupFailure", input),
+      ),
+    classifyArtifactNamespacePageAndAdvanceCursor: (input) =>
+      this.#send(
+        "classifyArtifactNamespacePageAndAdvanceCursor",
+        snapshotArtifactReconciliationDatabaseInput(
+          "classifyArtifactNamespacePageAndAdvanceCursor",
+          input,
+        ),
+      ),
+    listDueArtifactNamespaceCleanups: (input) =>
+      this.#send(
+        "listDueArtifactNamespaceCleanups",
+        snapshotArtifactReconciliationDatabaseInput("listDueArtifactNamespaceCleanups", input),
+      ),
+    completeArtifactNamespaceCleanup: (input) =>
+      this.#send(
+        "completeArtifactNamespaceCleanup",
+        snapshotArtifactReconciliationDatabaseInput("completeArtifactNamespaceCleanup", input),
+      ),
+    recordArtifactNamespaceCleanupFailure: (input) =>
+      this.#send(
+        "recordArtifactNamespaceCleanupFailure",
+        snapshotArtifactReconciliationDatabaseInput("recordArtifactNamespaceCleanupFailure", input),
+      ),
+    readArtifactHealthAccounting: (input) =>
+      this.#send(
+        "readArtifactHealthAccounting",
+        snapshotArtifactReconciliationDatabaseInput("readArtifactHealthAccounting", input),
+      ),
+    readArtifactReconciliationCursor: (input) =>
+      this.#send(
+        "readArtifactReconciliationCursor",
+        snapshotArtifactReconciliationDatabaseInput("readArtifactReconciliationCursor", input),
+      ),
+  } satisfies ArtifactTransactionDatabaseDispatchers);
 
   private constructor(
     options: DatabaseWorkerOptions | undefined,
@@ -145,25 +212,25 @@ export class DatabaseClient {
   public request<
     TOperation extends Exclude<
       DatabaseOperation,
-      "createArtifactUpload" | ArtifactReconciliationDatabaseOperation
+      ArtifactTransactionDatabaseOperation | "shutdown"
     >,
   >(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
-    if ((operation as DatabaseOperation) === "createArtifactUpload") {
+    if ((operation as DatabaseOperation) === "shutdown") {
       return Promise.reject(
         new DatabaseRequestError(
-          "Artifact upload creation requires capacity admission authority.",
-          "ARTIFACT_CREATE_ADMISSION_REQUIRED",
+          "Database shutdown requires lifecycle-owner authority.",
+          "DATABASE_SHUTDOWN_AUTHORITY_REQUIRED",
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
-    if (isArtifactReconciliationDatabaseOperation(operation)) {
+    if (isArtifactTransactionDatabaseOperation(operation)) {
       return Promise.reject(
         new DatabaseRequestError(
-          "Artifact reconciliation requires coordinator authority.",
-          "ARTIFACT_RECONCILIATION_AUTHORITY_REQUIRED",
+          "Artifact database operations require transaction coordinator authority.",
+          "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
@@ -173,47 +240,46 @@ export class DatabaseClient {
     return this.#send(operation, input);
   }
 
-  /** Returns an opaque one-shot handle that only ArtifactUploadCreateCoordinator can consume. */
-  public createArtifactUploadCreateDatabaseHandle(): ArtifactUploadCreateDatabaseHandle {
+  /** Returns one opaque handle that only ArtifactTransactionCoordinator can consume. */
+  public createArtifactTransactionDatabaseHandle(): ArtifactTransactionDatabaseHandle {
     if (this.#isClosing || this.#terminalError !== undefined) {
-      throw new Error("Database client is not available for artifact create adoption.");
+      throw new Error("Database client is not available for artifact transaction adoption.");
     }
-    if (this.#artifactUploadCreateHandleIssued) {
-      throw new Error("Database client artifact create handle was already issued.");
+    if (this.#artifactTransactionHandleIssued) {
+      throw new Error("Database client artifact transaction handle was already issued.");
     }
-    const handle = registerArtifactUploadCreateDatabaseHandle(this, {
-      probeArtifactUploadCreate: (input) => this.#send("probeArtifactUploadCreate", input),
-      createArtifactUpload: (input) => this.#send("createArtifactUpload", input),
-      close: () => this.#startClose(),
-    });
-    this.#artifactUploadCreateHandleIssued = true;
-    return handle;
-  }
-
-  /** Returns an opaque one-shot handle that only ArtifactReconciliationCoordinator can consume. */
-  public createArtifactReconciliationDatabaseHandle(): ArtifactReconciliationDatabaseHandle {
-    if (this.#isClosing || this.#terminalError !== undefined) {
-      throw new Error("Database client is not available for artifact reconciliation adoption.");
-    }
-    if (this.#artifactReconciliationHandleIssued) {
-      throw new Error("Database client artifact reconciliation handle was already issued.");
-    }
-    const handle = registerArtifactReconciliationDatabaseHandle({
-      request: (<TOperation extends ArtifactReconciliationDatabaseOperation>(
+    const handle = registerArtifactTransactionDatabaseHandle(this, {
+      terminalFailure: this.#terminalFailure.promise,
+      request: (<TOperation extends ArtifactTransactionDatabaseOperation>(
         operation: TOperation,
         input: DatabaseOperationMap[TOperation]["input"],
-      ) => this.#requestArtifactReconciliation(operation, input)) as <
-        TOperation extends ArtifactReconciliationDatabaseOperation,
+      ) => this.#requestArtifactTransaction(operation, input)) as <
+        TOperation extends ArtifactTransactionDatabaseOperation,
       >(
         operation: TOperation,
         input: DatabaseOperationMap[TOperation]["input"],
       ) => Promise<DatabaseOperationMap[TOperation]["output"]>,
+      close: () => this.#startClose(),
     });
-    this.#artifactReconciliationHandleIssued = true;
+    this.#artifactTransactionHandleIssued = true;
+    this.#artifactTransactionHandle = handle;
     return handle;
   }
 
   public close(): Promise<void> {
+    if (this.#artifactTransactionHandleIssued && this.#closePromise === undefined) {
+      const handle = this.#artifactTransactionHandle;
+      if (handle !== undefined && revokeArtifactTransactionDatabaseHandle(handle)) {
+        this.#artifactTransactionHandle = undefined;
+        return this.#startClose();
+      }
+      return Promise.reject(
+        new DatabaseRequestError(
+          "Database close requires artifact transaction coordinator authority.",
+          "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
+        ),
+      );
+    }
     return this.#startClose();
   }
 
@@ -275,17 +341,21 @@ export class DatabaseClient {
     return (await response) as DatabaseOperationMap[TOperation]["output"];
   }
 
-  #requestArtifactReconciliation<TOperation extends ArtifactReconciliationDatabaseOperation>(
+  #requestArtifactTransaction<TOperation extends ArtifactTransactionDatabaseOperation>(
     operation: TOperation,
     input: DatabaseOperationMap[TOperation]["input"],
   ): Promise<DatabaseOperationMap[TOperation]["output"]> {
     if (this.#isClosing || this.#terminalError !== undefined) {
-      return Promise.reject(new Error("Database client is not available for reconciliation."));
+      return Promise.reject(
+        new Error("Database client is not available for artifact transactions."),
+      );
     }
-    let inputSnapshot: Readonly<Record<string, unknown>>;
     try {
-      inputSnapshot = snapshotArtifactReconciliationDatabaseInput(operation, input);
+      return this.#artifactTransactionDispatchers[operation](input);
     } catch (error) {
+      if (!isArtifactReconciliationDatabaseOperation(operation)) {
+        return Promise.reject(error);
+      }
       const code =
         error instanceof Error && "code" in error && typeof error.code === "string"
           ? error.code
@@ -294,10 +364,6 @@ export class DatabaseClient {
         new DatabaseRequestError("The artifact reconciliation request is invalid.", code),
       );
     }
-    return this.#send(
-      operation,
-      inputSnapshot as unknown as DatabaseOperationMap[TOperation]["input"],
-    );
   }
 
   #handleMessage(message: DatabaseWorkerMessage): void {
@@ -332,6 +398,7 @@ export class DatabaseClient {
       return;
     }
     this.#terminalError = error;
+    this.#terminalFailure.resolve(error);
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) {
       pending.reject(error);

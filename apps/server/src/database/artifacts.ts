@@ -4,6 +4,7 @@ import {
   type CommittedRunArtifact,
   type CreateResultArtifactUploadRequest,
   type CreateResultArtifactUploadResponse,
+  type FinalizeResultArtifactUploadResponse,
   maximumResultArtifactBytes,
   maximumResultArtifactChunkBytes,
   maximumResultArtifactChunks,
@@ -362,7 +363,7 @@ export interface PrepareArtifactChunkInput extends ArtifactLeaseIdentity, Artifa
   readonly uploadId: string;
 }
 
-export interface PrepareArtifactChunkResult extends ArtifactChunkMetadata {
+interface PrepareArtifactChunkResultFields extends ArtifactChunkMetadata {
   readonly uploadId: string;
   readonly prepareId: string;
   readonly receiptState: "prepared" | "committed";
@@ -373,6 +374,19 @@ export interface PrepareArtifactChunkResult extends ArtifactChunkMetadata {
   readonly preparedNextChunkIndex: number;
   readonly preparedNextOffsetBytes: number;
 }
+
+export type PrepareArtifactChunkResult =
+  | (PrepareArtifactChunkResultFields & {
+      readonly uploadState: "receiving" | "finalizing";
+      readonly committedArtifact: null;
+    })
+  | (PrepareArtifactChunkResultFields & {
+      readonly uploadState: "committed";
+      readonly committedArtifact: {
+        readonly totalBytes: number;
+        readonly sha256: string;
+      };
+    });
 
 export interface CommitArtifactChunkInput extends PrepareArtifactChunkInput {
   readonly prepareId: string;
@@ -442,6 +456,25 @@ export interface CommitArtifactFinalizeResult {
   readonly replayed: boolean;
   readonly artifact: CommittedRunArtifact & { readonly storageObjectKey: string };
 }
+
+export const toFinalizeResultArtifactUploadResponse = (
+  result: CommitArtifactFinalizeResult,
+): FinalizeResultArtifactUploadResponse => ({
+  state: "committed",
+  replayed: result.replayed,
+  artifact: {
+    artifactId: result.artifact.artifactId,
+    uploadId: result.artifact.uploadId,
+    clientArtifactId: result.artifact.clientArtifactId,
+    jobId: result.artifact.jobId,
+    runAttemptId: result.artifact.runAttemptId,
+    purpose: result.artifact.purpose,
+    name: result.artifact.name,
+    mediaType: result.artifact.mediaType,
+    totalBytes: result.artifact.totalBytes,
+    sha256: result.artifact.sha256,
+  },
+});
 
 export interface TerminateArtifactUploadInput extends ArtifactLeaseIdentity {
   readonly uploadId: string;
@@ -708,8 +741,10 @@ const snapshotExactInput = (
   }
 };
 
-const snapshotEmptyReconciliationInput = (value: unknown): void => {
+const snapshotEmptyReconciliationInput = (value: unknown): Record<string, never> => {
   snapshotExactInput(value, []);
+  const snapshot: Record<string, never> = {};
+  return Object.freeze(snapshot);
 };
 
 const snapshotReconciliationBatchSize = (value: unknown): number => {
@@ -808,18 +843,21 @@ const snapshotClassifyArtifactNamespacePageInput = (
   });
 };
 
+export interface ArtifactReconciliationDatabaseInputMap {
+  readonly terminalizeInactiveArtifactUploads: TerminalizeInactiveArtifactUploadsInput;
+  readonly listDueArtifactCleanups: ListDueArtifactCleanupsInput;
+  readonly completeArtifactCleanup: CompleteArtifactCleanupInput;
+  readonly recordArtifactCleanupFailure: RecordArtifactCleanupFailureInput;
+  readonly classifyArtifactNamespacePageAndAdvanceCursor: ClassifyArtifactNamespacePageInput;
+  readonly listDueArtifactNamespaceCleanups: ListDueArtifactNamespaceCleanupsInput;
+  readonly completeArtifactNamespaceCleanup: CompleteArtifactNamespaceCleanupInput;
+  readonly recordArtifactNamespaceCleanupFailure: RecordArtifactNamespaceCleanupFailureInput;
+  readonly readArtifactHealthAccounting: Record<string, never>;
+  readonly readArtifactReconciliationCursor: Record<string, never>;
+}
+
 /** Internal Server authority only; Worker-facing routes must never dispatch these operations. */
-export type ArtifactReconciliationDatabaseOperation =
-  | "terminalizeInactiveArtifactUploads"
-  | "listDueArtifactCleanups"
-  | "completeArtifactCleanup"
-  | "recordArtifactCleanupFailure"
-  | "classifyArtifactNamespacePageAndAdvanceCursor"
-  | "listDueArtifactNamespaceCleanups"
-  | "completeArtifactNamespaceCleanup"
-  | "recordArtifactNamespaceCleanupFailure"
-  | "readArtifactHealthAccounting"
-  | "readArtifactReconciliationCursor";
+export type ArtifactReconciliationDatabaseOperation = keyof ArtifactReconciliationDatabaseInputMap;
 
 export const isArtifactReconciliationDatabaseOperation = (
   operation: string,
@@ -841,47 +879,105 @@ export const isArtifactReconciliationDatabaseOperation = (
   }
 };
 
-export const snapshotArtifactReconciliationDatabaseInput = (
-  operation: ArtifactReconciliationDatabaseOperation,
+const snapshotReconciliationBatchInput = (
   value: unknown,
-): Readonly<Record<string, unknown>> => {
-  switch (operation) {
-    case "terminalizeInactiveArtifactUploads":
-    case "listDueArtifactCleanups":
-    case "listDueArtifactNamespaceCleanups":
-      return snapshotExactInput(value, ["batchSize"]);
-    case "completeArtifactCleanup":
-      return snapshotExactInput(value, ["uploadId", "expectedAttemptCount"]);
-    case "recordArtifactCleanupFailure":
-      return snapshotExactInput(value, [
-        "uploadId",
-        "expectedAttemptCount",
-        "errorCode",
-        "retryDelaySeconds",
-      ]);
-    case "classifyArtifactNamespacePageAndAdvanceCursor":
-      return snapshotClassifyArtifactNamespacePageInput(value) as unknown as Readonly<
-        Record<string, unknown>
-      >;
-    case "completeArtifactNamespaceCleanup":
-      return snapshotArtifactNamespaceCleanupMutationIdentity(value) as unknown as Readonly<
-        Record<string, unknown>
-      >;
-    case "recordArtifactNamespaceCleanupFailure":
-      return snapshotExactInput(value, [
-        "entryKey",
-        "observationSha256",
-        "expectedAttemptCount",
-        "errorCode",
-        "retryDelaySeconds",
-      ]);
-    case "readArtifactHealthAccounting":
-    case "readArtifactReconciliationCursor":
-      return snapshotExactInput(value, []);
-    default:
-      throw new ArtifactReconciliationInvalidRequestError();
-  }
+): TerminalizeInactiveArtifactUploadsInput =>
+  Object.freeze({ batchSize: snapshotReconciliationBatchSize(value) });
+
+const snapshotCompleteArtifactCleanupInput = (value: unknown): CompleteArtifactCleanupInput => {
+  const snapshot = snapshotExactInput(value, ["uploadId", "expectedAttemptCount"]);
+  return Object.freeze({
+    uploadId: requireReconciliationUploadId(snapshot.uploadId),
+    expectedAttemptCount: snapshotExpectedCleanupAttempt(snapshot.expectedAttemptCount),
+  });
 };
+
+const snapshotCleanupFailureInput = (value: unknown): RecordArtifactCleanupFailureInput => {
+  const snapshot = snapshotExactInput(value, [
+    "uploadId",
+    "expectedAttemptCount",
+    "errorCode",
+    "retryDelaySeconds",
+  ]);
+  const errorCode = snapshot.errorCode;
+  const retryDelaySeconds = snapshot.retryDelaySeconds;
+  if (
+    typeof errorCode !== "string" ||
+    !Object.hasOwn(cleanupRetryMessages, errorCode) ||
+    !Number.isSafeInteger(retryDelaySeconds) ||
+    (retryDelaySeconds as number) < 1 ||
+    (retryDelaySeconds as number) > maximumArtifactCleanupRetryDelaySeconds
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return Object.freeze({
+    uploadId: requireReconciliationUploadId(snapshot.uploadId),
+    expectedAttemptCount: snapshotExpectedCleanupAttempt(snapshot.expectedAttemptCount),
+    errorCode: errorCode as ArtifactCleanupRetryErrorCode,
+    retryDelaySeconds: retryDelaySeconds as number,
+  });
+};
+
+const snapshotNamespaceCleanupFailureInput = (
+  value: unknown,
+): RecordArtifactNamespaceCleanupFailureInput => {
+  const snapshot = snapshotExactInput(value, [
+    "entryKey",
+    "observationSha256",
+    "expectedAttemptCount",
+    "errorCode",
+    "retryDelaySeconds",
+  ]);
+  const identity = snapshotArtifactNamespaceCleanupMutationIdentity({
+    entryKey: snapshot.entryKey,
+    observationSha256: snapshot.observationSha256,
+    expectedAttemptCount: snapshot.expectedAttemptCount,
+  });
+  const errorCode = snapshot.errorCode;
+  const retryDelaySeconds = snapshot.retryDelaySeconds;
+  if (
+    typeof errorCode !== "string" ||
+    !Object.hasOwn(namespaceCleanupRetryMessages, errorCode) ||
+    !Number.isSafeInteger(retryDelaySeconds) ||
+    (retryDelaySeconds as number) < 1 ||
+    (retryDelaySeconds as number) > maximumArtifactCleanupRetryDelaySeconds
+  ) {
+    throw new ArtifactReconciliationInvalidRequestError();
+  }
+  return Object.freeze({
+    ...identity,
+    errorCode: errorCode as ArtifactCleanupRetryErrorCode,
+    retryDelaySeconds: retryDelaySeconds as number,
+  });
+};
+
+type ArtifactReconciliationInputSnapshotters = {
+  readonly [TOperation in ArtifactReconciliationDatabaseOperation]: (
+    value: unknown,
+  ) => ArtifactReconciliationDatabaseInputMap[TOperation];
+};
+
+const artifactReconciliationInputSnapshotters: ArtifactReconciliationInputSnapshotters =
+  Object.freeze({
+    terminalizeInactiveArtifactUploads: snapshotReconciliationBatchInput,
+    listDueArtifactCleanups: snapshotReconciliationBatchInput,
+    completeArtifactCleanup: snapshotCompleteArtifactCleanupInput,
+    recordArtifactCleanupFailure: snapshotCleanupFailureInput,
+    classifyArtifactNamespacePageAndAdvanceCursor: snapshotClassifyArtifactNamespacePageInput,
+    listDueArtifactNamespaceCleanups: snapshotReconciliationBatchInput,
+    completeArtifactNamespaceCleanup: snapshotArtifactNamespaceCleanupMutationIdentity,
+    recordArtifactNamespaceCleanupFailure: snapshotNamespaceCleanupFailureInput,
+    readArtifactHealthAccounting: snapshotEmptyReconciliationInput,
+    readArtifactReconciliationCursor: snapshotEmptyReconciliationInput,
+  });
+
+export const snapshotArtifactReconciliationDatabaseInput = <
+  TOperation extends ArtifactReconciliationDatabaseOperation,
+>(
+  operation: TOperation,
+  value: unknown,
+): ArtifactReconciliationDatabaseInputMap[TOperation] =>
+  artifactReconciliationInputSnapshotters[operation](value);
 
 const withImmediateTransaction = <T>(database: DatabaseSync, action: () => T): T => {
   database.exec("BEGIN IMMEDIATE");
@@ -1193,7 +1289,7 @@ export const prepareArtifactChunk = (
       if (existing.status === "committed") {
         requireCommittedReplayReceipt(committedPrefix, existing);
       }
-      return prepareChunkResult(upload, existing, committedPrefix, true);
+      return prepareChunkResult(database, upload, existing, committedPrefix, true);
     }
 
     if (
@@ -1239,7 +1335,7 @@ export const prepareArtifactChunk = (
         now,
       );
     database.prepare("UPDATE artifact_uploads SET updated_at = ? WHERE id = ?").run(now, upload.id);
-    return prepareChunkResult(upload, receipt, committedPrefix, false);
+    return prepareChunkResult(database, upload, receipt, committedPrefix, false);
   });
 
 export const commitArtifactChunk = (
@@ -1345,6 +1441,9 @@ export const prepareArtifactFinalize = (
 
     if (upload.status === "finalizing" || upload.status === "committed") {
       requireMatchingFinalization(upload, input);
+      if (upload.status === "committed") {
+        requireRunArtifact(database, upload);
+      }
       return prepareFinalizeResult(upload, true);
     }
     if (
@@ -3196,6 +3295,15 @@ function requireRunArtifact(
   database: DatabaseSync,
   upload: ArtifactUploadRow,
 ): CommittedRunArtifact & { readonly storageObjectKey: string } {
+  if (
+    upload.finalization_id === null ||
+    upload.final_total_bytes === null ||
+    upload.final_sha256 === null
+  ) {
+    throw new ArtifactUploadConflictError(
+      "The finalized artifact upload has incomplete immutable metadata.",
+    );
+  }
   const row = database
     .prepare(`
       SELECT
@@ -3217,6 +3325,28 @@ function requireRunArtifact(
   if (row === undefined) {
     throw new ArtifactUploadConflictError(
       "The committed artifact upload has no immutable artifact record.",
+    );
+  }
+  if (
+    row.id !== upload.finalization_id ||
+    !uuidV4Pattern.test(row.id) ||
+    row.upload_id !== upload.id ||
+    row.job_id !== upload.job_id ||
+    row.run_attempt_id !== upload.run_attempt_id ||
+    row.client_artifact_id !== upload.client_artifact_id ||
+    row.purpose !== upload.purpose ||
+    row.name !== upload.name ||
+    row.media_type !== upload.media_type ||
+    !Number.isSafeInteger(row.total_bytes) ||
+    row.total_bytes !== upload.final_total_bytes ||
+    row.total_bytes !== upload.expected_total_bytes ||
+    !sha256Pattern.test(row.sha256) ||
+    row.sha256 !== upload.final_sha256 ||
+    row.sha256 !== upload.expected_sha256 ||
+    row.storage_object_key !== storageObjectKey(row.sha256)
+  ) {
+    throw new ArtifactUploadConflictError(
+      "The immutable run artifact does not match its finalized upload.",
     );
   }
   return {
@@ -3289,12 +3419,13 @@ function createUploadReplayResult(upload: ArtifactUploadRow): CreateArtifactUplo
 }
 
 function prepareChunkResult(
+  database: DatabaseSync,
   upload: ArtifactUploadRow,
   receipt: ArtifactChunkRow,
   committedPrefix: readonly ArtifactCommittedChunkReceipt[],
   replayed: boolean,
 ): PrepareArtifactChunkResult {
-  return {
+  const result = {
     uploadId: upload.id,
     prepareId: receipt.prepare_id,
     receiptState: receipt.status,
@@ -3317,6 +3448,25 @@ function prepareChunkResult(
     ),
     preparedNextChunkIndex: receipt.chunk_index + 1,
     preparedNextOffsetBytes: receipt.offset_bytes + receipt.chunk_bytes,
+  };
+  if (upload.status === "committed") {
+    const artifact = requireRunArtifact(database, upload);
+    return {
+      ...result,
+      uploadState: "committed",
+      committedArtifact: Object.freeze({
+        totalBytes: artifact.totalBytes,
+        sha256: artifact.sha256,
+      }),
+    };
+  }
+  if (upload.status !== "receiving" && upload.status !== "finalizing") {
+    throw new ArtifactUploadConflictError("The artifact chunk belongs to a terminated upload.");
+  }
+  return {
+    ...result,
+    uploadState: upload.status,
+    committedArtifact: null,
   };
 }
 

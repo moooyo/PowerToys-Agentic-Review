@@ -1,4 +1,13 @@
 export type {
+  ArtifactChunkTransportValidationErrorCode,
+  ResultArtifactChunkTransportMetadata,
+  ValidatedResultArtifactChunkTransport,
+} from "./artifact-chunk-transport.js";
+export {
+  ArtifactChunkTransportValidationError,
+  snapshotResultArtifactChunkTransport,
+} from "./artifact-chunk-transport.js";
+export type {
   ArtifactNamespaceCleanupResult,
   ArtifactNamespaceObservation,
   ArtifactNamespaceObservationIdentity,
@@ -14,29 +23,20 @@ export {
   maximumArtifactNamespacePageSize,
   parseArtifactNamespaceEntryKey,
 } from "./artifact-namespace-contract.js";
-export type {
-  ArtifactReconciliationCoordinatorErrorCode,
-  ArtifactReconciliationCoordinatorOptions,
-  ArtifactReconciliationDatabaseHandle,
-  ArtifactReconciliationStorageOwner,
-} from "./artifact-reconciliation-coordinator.js";
-export {
-  ArtifactReconciliationCoordinator,
-  ArtifactReconciliationCoordinatorError,
-} from "./artifact-reconciliation-coordinator.js";
 export type { ArtifactStorageClientOptions } from "./artifact-storage-client.js";
 export { ArtifactStorageClient } from "./artifact-storage-client.js";
 export type {
-  ArtifactUploadCreateCoordinatorErrorCode,
-  ArtifactUploadCreateCoordinatorOptions,
-  ArtifactUploadCreateDatabaseHandle,
-  ArtifactUploadCreateOwnerLock,
-  ArtifactUploadCreateStorageOwner,
-} from "./artifact-upload-create-coordinator.js";
+  ArtifactTransactionCoordinatorErrorCode,
+  ArtifactTransactionCoordinatorOptions,
+  ArtifactTransactionDatabaseHandle,
+  ArtifactTransactionOwnerLockHandle,
+  ArtifactTransactionReadiness,
+  ArtifactTransactionStorageHandle,
+} from "./artifact-transaction-coordinator.js";
 export {
-  ArtifactUploadCreateCoordinator,
-  ArtifactUploadCreateCoordinatorError,
-} from "./artifact-upload-create-coordinator.js";
+  ArtifactTransactionCoordinator,
+  ArtifactTransactionCoordinatorError,
+} from "./artifact-transaction-coordinator.js";
 export type { ArtifactStorageClientErrorCode } from "./errors.js";
 export { ArtifactStorageClientError } from "./errors.js";
 export type {
