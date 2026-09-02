@@ -362,8 +362,9 @@ with the same effective user ID. The storage root remains private to the Server 
 uses server-derived grammar and no-follow opens, and identity is revalidated immediately before
 unlink. An unknown unlink or directory-fsync outcome terminates the storage owner.
 
-Artifact HTTP routes and artifact-mode completion remain disabled in this slice. The internal
-transaction foundation now places create, chunk, finalization, termination, and reconciliation
+Artifact HTTP routes are registered in the Server, but artifact-mode claim selection and completion
+remain disabled in this slice. The internal transaction foundation now places create, chunk,
+finalization, termination, and reconciliation
 under one cancellable, bounded Server-process mutation gate. A writer holds the gate from before its
 database prepare through its filesystem durability phase and final database commit or definitive
 failure. A reconciliation pass holds the same gate while a filesystem manifest session is active,
@@ -478,6 +479,25 @@ Control never gains access to the Executor workspace, and Executor never gains a
 HostControl or the Server API. A broken ARWX or HostControl channel follows ADR 0007: Control does
 not guess an ambiguous terminal outcome, and fencing plus Server reconciliation decides when live
 authority is gone.
+
+A source-only Control upload-session model now covers the upload-only application lifecycle without
+changing that production boundary. It accepts only `ArtifactStart`, `ArtifactChunk`, `ArtifactEnd`,
+`Failed`, and `Complete` facts from one pre-bound authenticated local context. It derives the stable
+`clientArtifactId` from the Executor artifact ID, retains the raw Server lease token only in private
+Control request state, and delegates mutations through a frozen four-method `create`, `put`,
+`finalize`, and `terminate` interface. Exact retries reuse the same frozen request object. Explicit
+definitive, ambiguous, and lease-revoked outcomes, bounded exponential backoff, lease and hard
+deadlines, and shutdown fencing determine whether another retry is permitted. A request that ignores
+abort may settle later, but response application is fenced outside the dispatch promise, so the late
+settlement cannot change upload state or overlap a response application from another attempt. Once
+one dispatched attempt has an ambiguous outcome, later retry failures cannot downgrade the overall
+operation to definitive; only a valid exact-replay success resolves that uncertainty.
+
+The model is deliberately dormant. It is not exported from a barrel, imported by either role
+entrypoint or supervisor, included in a role bundle, or connected to HostControl. It does not add an
+HTTPS transport, select completion mode, submit run completion, change ARWX 1.0, enable Claim, or
+grant execution authority. A future transport slice must preserve the explicit outcome classifier;
+it cannot infer retryability from HTTP status alone.
 
 ## Consequences
 

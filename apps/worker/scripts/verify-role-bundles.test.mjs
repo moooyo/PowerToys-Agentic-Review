@@ -104,6 +104,8 @@ test("role policies include the exact shadow-runtime source additions", () => {
   assert.equal(control.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), false);
   assert.equal(control.has("apps/worker/src/control/host-control-worker-api.ts"), false);
   assert.equal(executor.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  assert.equal(control.has("apps/worker/src/control/result-artifact-upload-session.ts"), false);
+  assert.equal(executor.has("apps/worker/src/control/result-artifact-upload-session.ts"), false);
   assert.equal(control.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
   assert.equal(executor.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
   for (const input of [
@@ -197,12 +199,32 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const contractsWorkerPath = "packages/contracts/src/worker.ts";
   const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
   const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
+  const dormantUploadSessionPath = "apps/worker/src/control/result-artifact-upload-session.ts";
   const controlMain = repositorySource(controlMainPath);
   const executorMain = repositorySource(executorMainPath);
   const roleEntrypoint = repositorySource(roleEntrypointPath);
   const contractsWorker = repositorySource(contractsWorkerPath);
   const localProtocolIndex = repositorySource(localProtocolIndexPath);
   const dormantReducer = repositorySource(dormantReducerPath);
+  const dormantUploadSession = repositorySource(dormantUploadSessionPath);
+  assert.match(dormantUploadSession, /export class ResultArtifactUploadSession/u);
+  for (const source of [controlMain, executorMain, roleEntrypoint, localProtocolIndex]) {
+    assert.doesNotMatch(source, /result-artifact-upload-session/u);
+  }
+  const legacyWorkerServicePath = "apps/worker/src/worker-service.ts";
+  const legacyWorkerService = repositorySource(legacyWorkerServicePath);
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [legacyWorkerServicePath]: `${legacyWorkerService}\nimport "./control/result-artifact-upload-session.js";\n`,
+      }),
+    /Production import graph reaches dormant result artifact upload source/u,
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [legacyWorkerServicePath]: `${legacyWorkerService}\nconst load = require; load("./control/result-artifact-upload-session.js");\n`,
+    }),
+  );
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
       [controlMainPath]: replaceRequired(
@@ -325,7 +347,7 @@ test("production role entrypoints and reachable imports remain zero execution", 
   );
   assert.doesNotThrow(() =>
     verifyZeroExecutionProductionArchitecture({
-      "apps/worker/src/execution/job-executor.ts": "this unconnected source is not parsed",
+      "apps/worker/src/control/host-control-worker-api.ts": "this unconnected source is not parsed",
     }),
   );
 });
