@@ -257,6 +257,17 @@ milestone.
 
 ## Verification Evidence
 
+On 2026-09-02, integration commits `c34d377` and `1f64c20` combined the live fenced artifact
+routes and dormant installer-transaction model. The exact merged source completed the full
+TypeScript typecheck, test, build, and lint matrix on `test-env` with Node.js 24.20.0 and pnpm
+11.24.0. It passed 86 Codex tests, 84 local-protocol tests, 21 domain tests, 813 Worker tests plus
+15 role-bundle and zero-execution architecture tests, and 695 Server tests in 45 files. Biome
+checked 284 files. The exact installer-model source separately passed focused and all-package Go
+1.26.7 unit, race, and vet suites, plus Windows amd64 and arm64 all-package test compilation,
+builds, and cross-platform vet before its conflict-free merge. Independent reviews found no
+remaining P0-P2 issues. No validation ran on the local Windows machine. These results keep normal
+claims inline and do not constitute native Windows installer, signing, or execution evidence.
+
 On 2026-09-02, integration commit `edd92c0` combined the RoleConfig v2 zero-slot shadow branch and
 the dark artifact-storage branch without source conflicts; only this status document required a
 union of their independent evidence sections. The exact merged source completed the full
