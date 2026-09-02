@@ -2,10 +2,12 @@ import { EventEmitter } from "node:events";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import type { RequestOptions } from "node:https";
 import type { SecureContext, SecureContextOptions } from "node:tls";
+import { inspect } from "node:util";
 import type { RunCompletionSubmission, WorkerRegistrationRequest } from "@agentic-review/contracts";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
+import { WorkerApiError } from "./errors.js";
 import { HttpWorkerApi } from "./http-worker-api.js";
 
 const serverTime = "2026-08-31T00:00:00.000Z";
@@ -195,6 +197,120 @@ describe("HttpWorkerApi TLS preflight", () => {
       /terminal response for another run/u,
     );
   });
+
+  it.each([
+    [503, false],
+    [400, true],
+  ] as const)(
+    "honors an exact Server ErrorDetails retryable flag for HTTP %i",
+    async (statusCode, retryable) => {
+      const config = createHttpsConfig();
+      const api = new HttpWorkerApi(config, silentLogger(), {
+        createSecureContext: () => ({}) as SecureContext,
+        httpsRequest: (_url, _options, callback) =>
+          new StubClientRequest(
+            callback,
+            { code: "remote_failure", message: "The remote operation failed.", retryable },
+            "complete",
+            statusCode,
+          ) as unknown as ClientRequest,
+      });
+
+      const failure = await rejectionOf(api.register(registrationRequest(config)));
+
+      expect(failure).toBeInstanceOf(WorkerApiError);
+      expect(failure).toMatchObject({
+        statusCode,
+        errorCode: "remote_failure",
+        message: `Worker API returned HTTP ${statusCode}.`,
+        isRetryable: retryable,
+      });
+    },
+  );
+
+  it("falls back to HTTP status when the response is not an exact ErrorDetails", async () => {
+    const config = createHttpsConfig();
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(
+          callback,
+          {
+            code: "remote_failure",
+            message: "The remote operation failed.",
+            retryable: false,
+            unexpected: true,
+          },
+          "complete",
+          503,
+        ) as unknown as ClientRequest,
+    });
+
+    await expect(api.register(registrationRequest(config))).rejects.toMatchObject({
+      statusCode: 503,
+      errorCode: undefined,
+      message: "Worker API returned HTTP 503.",
+      isRetryable: true,
+    });
+  });
+
+  it("does not attach the HTTP response body, lease token, or a remote cause", async () => {
+    const config = createHttpsConfig();
+    const leaseToken = "secret-lease-token";
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(
+          callback,
+          {
+            error: {
+              code: "artifact_storage_integrity",
+              message: "Artifact storage integrity failed.",
+              retryable: false,
+            },
+            requestBody: { leaseToken },
+            cause: { message: leaseToken },
+          },
+          "complete",
+          503,
+        ) as unknown as ClientRequest,
+    });
+
+    const failure = await rejectionOf(api.register(registrationRequest(config)));
+
+    expect(failure).toMatchObject({
+      statusCode: 503,
+      errorCode: "artifact_storage_integrity",
+      isRetryable: false,
+    });
+    expect(failure).not.toHaveProperty("body");
+    expect(failure).not.toHaveProperty("requestBody");
+    expect(failure).not.toHaveProperty("cause");
+    expect(JSON.stringify(failure)).not.toContain(leaseToken);
+  });
+
+  it("drops invalid JSON parser causes that can echo remote response bytes", async () => {
+    const config = createHttpsConfig();
+    const leaseToken = "a".repeat(32);
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(
+          callback,
+          `{"leaseToken":"${leaseToken}`,
+          "complete",
+          503,
+          true,
+        ) as unknown as ClientRequest,
+    });
+
+    const failure = await rejectionOf(api.register(registrationRequest(config)));
+
+    expect(failure).toMatchObject({ message: "Worker API returned invalid JSON." });
+    expect(failure).not.toHaveProperty("cause");
+    expect(inspect(failure, { depth: 5, showHidden: true })).not.toContain(leaseToken);
+    expect(JSON.stringify(failure)).not.toContain(leaseToken);
+  });
 });
 
 class StubClientRequest extends EventEmitter {
@@ -202,6 +318,8 @@ class StubClientRequest extends EventEmitter {
     private readonly callback: (response: IncomingMessage) => void,
     private readonly responseBody: unknown,
     private readonly responseOutcome: "complete" | "aborted" | "error" | "closed" = "complete",
+    private readonly responseStatusCode = 200,
+    private readonly rawResponseBody = false,
   ) {
     super();
   }
@@ -223,11 +341,16 @@ class StubClientRequest extends EventEmitter {
   }
 
   public end(): this {
-    const response = Object.assign(new EventEmitter(), { statusCode: 200 }) as IncomingMessage;
+    const response = Object.assign(new EventEmitter(), {
+      statusCode: this.responseStatusCode,
+    }) as IncomingMessage;
     response.destroy = () => response;
     this.callback(response);
     queueMicrotask(() => {
-      response.emit("data", Buffer.from(JSON.stringify(this.responseBody), "utf8"));
+      const responseBody = this.rawResponseBody
+        ? String(this.responseBody)
+        : JSON.stringify(this.responseBody);
+      response.emit("data", Buffer.from(responseBody, "utf8"));
       if (this.responseOutcome === "complete") {
         response.emit("end");
       } else if (this.responseOutcome === "aborted") {
@@ -241,6 +364,15 @@ class StubClientRequest extends EventEmitter {
     });
     return this;
   }
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the promise to reject.");
 }
 
 function createHttpsConfig(): WorkerConfig {

@@ -478,6 +478,11 @@ ADR 0007's ownership split remains unchanged:
   terminate, and run-completion operations mapped to the exact methods and path templates in this
   ADR.
 
+[ADR 0017][adr-0017] stages that extended surface as a separate source-only HostControl 2.0 contract. The
+production HostControl 1.0 client, committed RoleConfig v2, release compatibility, and entrypoints do
+not recognize or consume it. This ADR's ownership assignment therefore remains a future activation
+requirement rather than current production authority.
+
 ServiceHost treats bounded request JSON as opaque application data after enforcing operation,
 route-identifier, frame, timeout, concurrency, and response limits. It cannot accept a raw URL,
 arbitrary method, header, certificate, proxy, redirect, path, or filesystem locator. It does not
@@ -543,3 +548,4 @@ This ADR does not define:
 [adr-0002]: 0002-linux-fastify-node-sqlite-server.md
 [adr-0003]: 0003-remote-windows-worker-leases.md
 [adr-0007]: 0007-windows-control-executor-isolation.md
+[adr-0017]: 0017-dormant-artifact-hostcontrol-v2.md

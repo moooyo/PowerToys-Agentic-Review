@@ -75,7 +75,14 @@ export function mapHostControlError(error: unknown): Error {
 
 function mapRemoteError(error: HostControlRemoteError): WorkerApiError {
   const statusCode = remoteStatusCode(error);
-  return new WorkerApiError(error.message, statusCode, error.code.toLowerCase());
+  return new WorkerApiError(
+    "Worker API HostControl operation failed.",
+    statusCode,
+    error.code.toLowerCase(),
+    {
+      retryable: error.retryable,
+    },
+  );
 }
 
 function remoteStatusCode(error: HostControlRemoteError): number {

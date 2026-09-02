@@ -1,6 +1,6 @@
 # Implementation Status
 
-Status date: 2026-09-02
+Status date: 2026-09-03
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
@@ -205,6 +205,17 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   apply responses after the dispatch is fenced, and ambiguity remains sticky until a valid replay
   succeeds. The public state contains no raw lease token or chunk bytes. No production entrypoint,
   supervisor, barrel, or role bundle consumes this module.
+- A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
+  0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
+  Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
+  path, origin, TLS credentials, and accepted status. Cross-language golden frames, operation-specific
+  body and response ceilings, strict Server error parsing, and conservative unknown-outcome handling
+  are covered without adding a production consumer. RPC1, RoleConfig v2, release compatibility, all
+  entrypoints, and the zero-slot posture remain unchanged.
+- Explicit Worker API retryability preservation. A strict Server `ErrorDetails` or decoded
+  HostControl error now supplies the authoritative `retryable` bit even when its HTTP status suggests
+  the opposite. Malformed error bodies retain the local status fallback. Remote messages, response
+  bodies, request bodies, URLs, causes, and lease tokens are not retained on the mapped error.
 
 ## Deliberately Disabled
 
@@ -237,12 +248,13 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   mutation and rejects artifact-backed completion before artifact lookup or storage read. The
   Server completion slice is present but default-off and unreachable until a future versioned claim
   envelope and rollout policy select `result_artifact_v1`.
-- The dormant Worker Control upload session has no HostControl or HTTPS adapter and no production
-  consumer. It neither changes the version-one ARWX envelope nor submits artifact-backed run
-  completion. Its four-method API depends on explicit operation-outcome classification and does not
-  use the legacy `WorkerApiError` HTTP-status retry inference. Production wiring remains forbidden
-  until fixed-origin HostControl transport, ARWX result-digest versioning, and a versioned claim
-  envelope complete separate review.
+- The dormant Worker Control upload session and Artifact HostControl v2 adapter have no production
+  consumer. The v2 codec and native fixed-origin capability are excluded from the legacy, Control,
+  and Executor entrypoints; RPC1 rejects v2 and the release manifest still requires
+  `serviceHostRpcVersion = 1`. They neither change the version-one ARWX envelope nor submit
+  artifact-backed completion in production. Wiring remains forbidden until RPC2 compatibility,
+  bootstrap and RoleConfig negotiation, ARWX result-digest versioning, signed matching artifacts,
+  native Windows evidence, and a versioned claim envelope complete separate review.
 - The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
   Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
   selects the composed runtime. Ordinary builds still contain no compiled production release

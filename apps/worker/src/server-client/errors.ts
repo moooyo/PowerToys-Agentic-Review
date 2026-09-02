@@ -1,12 +1,19 @@
+export interface WorkerApiErrorOptions extends ErrorOptions {
+  readonly retryable?: boolean;
+}
+
 export class WorkerApiError extends Error {
+  readonly #retryableOverride: boolean | undefined;
+
   public constructor(
     message: string,
     public readonly statusCode?: number,
     public readonly errorCode?: string,
-    options?: ErrorOptions,
+    options?: WorkerApiErrorOptions,
   ) {
     super(message, options);
     this.name = "WorkerApiError";
+    this.#retryableOverride = options?.retryable;
   }
 
   public get isLeaseLost(): boolean {
@@ -28,10 +35,11 @@ export class WorkerApiError extends Error {
 
   public get isRetryable(): boolean {
     return (
-      this.statusCode === undefined ||
-      this.statusCode === 408 ||
-      this.statusCode === 429 ||
-      this.statusCode >= 500
+      this.#retryableOverride ??
+      (this.statusCode === undefined ||
+        this.statusCode === 408 ||
+        this.statusCode === 429 ||
+        this.statusCode >= 500)
     );
   }
 }

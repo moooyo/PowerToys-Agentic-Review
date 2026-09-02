@@ -5,6 +5,7 @@ import {
   type ClaimLeaseRequest,
   type ClaimLeaseResponse,
   ClaimLeaseResponseSchema,
+  ErrorDetailsSchema,
   maximumClaimLeaseResponseUtf8Bytes,
   type RunCompletionSubmission,
   type RunFailureSubmission,
@@ -246,8 +247,8 @@ export class HttpWorkerApi implements WorkerApi {
           let payload: unknown;
           try {
             payload = text === "" ? undefined : JSON.parse(text);
-          } catch (error) {
-            rejectOnce(new ProtocolError("Worker API returned invalid JSON.", { cause: error }));
+          } catch {
+            rejectOnce(new ProtocolError("Worker API returned invalid JSON."));
             return;
           }
 
@@ -255,9 +256,10 @@ export class HttpWorkerApi implements WorkerApi {
             const details = readApiError(payload);
             rejectOnce(
               new WorkerApiError(
-                details.message ?? `Worker API returned HTTP ${statusCode}.`,
+                `Worker API returned HTTP ${statusCode}.`,
                 statusCode,
                 details.code,
+                details.retryable === undefined ? undefined : { retryable: details.retryable },
               ),
             );
             return;
@@ -348,7 +350,10 @@ function parseRunTerminalResponse(
   return value;
 }
 
-function readApiError(value: unknown): { code?: string; message?: string } {
+function readApiError(value: unknown): {
+  code?: string;
+  retryable?: boolean;
+} {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {};
   }
@@ -357,9 +362,12 @@ function readApiError(value: unknown): { code?: string; message?: string } {
     typeof object.error === "object" && object.error !== null && !Array.isArray(object.error)
       ? (object.error as Record<string, unknown>)
       : object;
+  if (!Value.Check(ErrorDetailsSchema, nested) || !/^[a-z][a-z0-9_]{0,127}$/u.test(nested.code)) {
+    return {};
+  }
   return {
-    ...(typeof nested.code === "string" ? { code: nested.code } : {}),
-    ...(typeof nested.message === "string" ? { message: nested.message } : {}),
+    code: nested.code,
+    retryable: nested.retryable,
   };
 }
 
