@@ -83,6 +83,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   permanent stale/cancel/terminal fences, strict snapshot projections, attempt-opaque issue revision
   bindings, verified terminal artifact provenance, and cancellation facades that cannot expose an
   `AbortSignal` reason to the local transport.
+- A source-only, import-free single-attempt lifecycle reducer. It snapshots attempt identity,
+  synchronously latches the first stop, joins verified terminal and zero-process facts, and orders one
+  disposition and cleanup result. It is hash-pinned but has no production consumer or runtime effect
+  adapter and is explicitly not an authority boundary. Its structured-data contract rejects
+  non-plain objects, accessors, symbols, non-enumerable properties, and extra fields; hostile Proxy
+  objects remain outside the caller contract so the reducer can retain a zero-import boundary.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
   shutdown, a composed Windows platform adapter, and an explicitly unavailable non-Windows adapter.
@@ -156,9 +162,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   payloads contain a remotely verified zero-slot supervisor candidate. Executor can emit only the
   authenticated disabled `Ready` attestation; Control cannot claim and reports zero available
   slots. A static guard locks both production entrypoints to those supervisors and rejects any
-  production import path into the dormant execution modules. Production enablement still requires a
-  compiled release profile, split-service packaging and installation, signing, and native Windows
-  preflight and attack-test evidence.
+  production import path into the dormant execution modules. The source-only attempt reducer is not
+  exported or included in either role bundle and cannot make the zero-execution configuration
+  effective. Its focused, full Worker, repository test, typecheck, build, and lint matrices passed on
+  Linux `test-env`; this does not substitute for native Windows evidence. Production enablement still
+  requires a compiled release profile, split-service packaging and installation, signing, and native
+  Windows preflight and attack-test evidence.
 - The shadow candidate remains unpublishable. The Go-to-Node shutdown-request bridge and zero-slot
   activation and lifecycle choreography have passed the Linux `test-env` matrices, but not the
   paired native Windows x64 and arm64 service-stop, deadline, partial-frame, race, and

@@ -18,7 +18,10 @@ import {
   verifyCanonicalRoleGraph,
   verifyReviewedInputDigest,
 } from "./verify-role-bundles.mjs";
-import { verifyZeroExecutionProductionArchitecture } from "./verify-zero-execution-architecture.mjs";
+import {
+  verifyDormantExecutorAttemptReducer,
+  verifyZeroExecutionProductionArchitecture,
+} from "./verify-zero-execution-architecture.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
@@ -101,6 +104,8 @@ test("role policies include the exact shadow-runtime source additions", () => {
   assert.equal(control.has("apps/worker/src/service-host/executor-shadow-runtime.ts"), false);
   assert.equal(control.has("apps/worker/src/control/host-control-worker-api.ts"), false);
   assert.equal(executor.has("apps/worker/src/control/host-control-worker-api.ts"), false);
+  assert.equal(control.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
+  assert.equal(executor.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
   for (const input of [
     "packages/contracts/src/index.ts",
     "packages/contracts/src/github.ts",
@@ -191,11 +196,13 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const roleEntrypointPath = "apps/worker/src/service-host/role-entrypoint.ts";
   const contractsWorkerPath = "packages/contracts/src/worker.ts";
   const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
+  const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
   const controlMain = repositorySource(controlMainPath);
   const executorMain = repositorySource(executorMainPath);
   const roleEntrypoint = repositorySource(roleEntrypointPath);
   const contractsWorker = repositorySource(contractsWorkerPath);
   const localProtocolIndex = repositorySource(localProtocolIndexPath);
+  const dormantReducer = repositorySource(dormantReducerPath);
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
       [controlMainPath]: replaceRequired(
@@ -257,7 +264,21 @@ test("production role entrypoints and reachable imports remain zero execution", 
   );
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
+      [executorMainPath]: replaceRequired(
+        executorMain,
+        '"./service-host/executor-shadow-runtime.js"',
+        '"./execution/executor-attempt-reducer.js"',
+      ),
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
       [roleEntrypointPath]: `${roleEntrypoint}\nimport "../execution/job-executor.js";\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nimport "../execution/executor-attempt-reducer.js";\n`,
     }),
   );
   assert.throws(() =>
@@ -272,13 +293,35 @@ test("production role entrypoints and reachable imports remain zero execution", 
   );
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst load = require; load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst load = process.getBuiltinModule("node:module").createRequire(import.meta.url); load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
+      [roleEntrypointPath]: `${roleEntrypoint}\nconst runtimeProcess = Reflect.get(global, "process"); const load = runtimeProcess["get" + "BuiltinModule"]("node:module").createRequire(import.meta.url); load("../execution/executor-attempt-reducer.js");\n`,
+    }),
+  );
+  assert.throws(() =>
+    verifyZeroExecutionProductionArchitecture({
       [contractsWorkerPath]: `${contractsWorker}\nexport * from "../../../apps/worker/src/execution/job-executor.js";\n`,
     }),
   );
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
-      [localProtocolIndexPath]: `${localProtocolIndex}\nexport * from "../../../apps/worker/src/execution/job-executor.js";\n`,
+      [localProtocolIndexPath]: `${localProtocolIndex}\nexport * from "../../../apps/worker/src/execution/executor-attempt-reducer.js";\n`,
     }),
+  );
+  assert.throws(
+    () =>
+      verifyZeroExecutionProductionArchitecture({
+        [dormantReducerPath]: `${dormantReducer}\nconst scopeDrift = true;\n`,
+      }),
+    /review the complete file and update its pinned SHA-256/u,
   );
   assert.doesNotThrow(() =>
     verifyZeroExecutionProductionArchitecture({
@@ -287,16 +330,56 @@ test("production role entrypoints and reachable imports remain zero execution", 
   );
 });
 
-test("reviewed production runtime source digests fence equivalent syntax drift", () => {
+test("dormant Executor attempt reducer remains import-free and synchronous", () => {
+  const reducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
+  const source = repositorySource(reducerPath);
+  assert.doesNotThrow(() => verifyDormantExecutorAttemptReducer(source));
+
+  for (const mutation of [
+    `${source}\nimport "node:fs";\n`,
+    `${source}\nvoid import("node:fs");\n`,
+    `${source}\nconst observedAt = Date.now();\n`,
+    `${source}\nconst pending = Promise.resolve();\n`,
+    `${source}\nexport let mutableState = 0;\n`,
+    `${source}\nexport const deferred = { run() {} };\n`,
+    `${source}\nconst mutableState = { count: 0 }; function advance() { mutableState.count += 1; }\n`,
+    `${source}\nexport enum HiddenState { Active }\n`,
+    `${source}\nexport class HiddenState { static state = {}; static { sideEffect(); } }\n`,
+    `${source}\nsideEffect();\n`,
+    replaceRequired(
+      source,
+      "  const identity = snapshotIdentity(identityValue);",
+      "  const deferredEffect = () => undefined;\n  deferredEffect();\n  const identity = snapshotIdentity(identityValue);",
+    ),
+    replaceRequired(
+      source,
+      "export class ExecutorAttemptReducerError extends Error {",
+      "export class ExecutorAttemptReducerError extends Error { static state = {};",
+    ),
+    `${source}\nasync function runLater() {}\n`,
+    `${source}\ntype DeferredEffect = () => void;\n`,
+    `${source}\nconst loader = new Function("return process");\n`,
+    `${source}\nconst builtin = global["process"]["getBuiltinModule"]("fs");\n`,
+    `${source}\nconst loader = ({}).constructor.constructor("return process");\n`,
+    `${source}\nconst runtimeProcess = Reflect.get(global, "process"); const load = runtimeProcess["get" + "BuiltinModule"]("node:module").createRequire(import.meta.url);\n`,
+  ]) {
+    assert.throws(() => verifyDormantExecutorAttemptReducer(mutation));
+  }
+});
+
+test("reviewed production and dormant source digests fence equivalent syntax drift", () => {
   const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
   const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
+  const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
   const executorSource = repositorySource(executorPath);
   const controlSource = repositorySource(controlPath);
+  const dormantReducerSource = repositorySource(dormantReducerPath);
   const crlf = (source) => source.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
   assert.doesNotThrow(() =>
     verifyZeroExecutionProductionArchitecture({
       [executorPath]: crlf(executorSource),
       [controlPath]: crlf(controlSource),
+      [dormantReducerPath]: crlf(dormantReducerSource),
     }),
   );
 

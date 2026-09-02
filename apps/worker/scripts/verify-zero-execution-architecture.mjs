@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
+import { scanRuntimeLoaderSyntax } from "./verify-role-bundles.mjs";
 
 const repositoryRoot = realpathSync(fileURLToPath(new URL("../../..", import.meta.url)));
 const workerSourceRoot = "apps/worker/src/";
@@ -11,9 +12,14 @@ const contractsSourceRoot = "packages/contracts/src/";
 const localProtocolSourceRoot = "packages/local-protocol/src/";
 const executorRuntimePath = `${workerSourceRoot}service-host/executor-shadow-runtime.ts`;
 const controlRuntimePath = `${workerSourceRoot}control/shadow-supervisor.ts`;
+const dormantExecutorAttemptReducerPath = `${executionSourceRoot}executor-attempt-reducer.ts`;
 const reviewedProductionSourceSha256 = Object.freeze({
   [executorRuntimePath]: "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
   [controlRuntimePath]: "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
+});
+const reviewedDormantExecutionSourceSha256 = Object.freeze({
+  [dormantExecutorAttemptReducerPath]:
+    "f2c1201b7699d1a0e150a10a1ed3fd5beaffb72318b67d08ffa00fcddc50a90f",
 });
 const reviewedTypeBoxBridgeTarget =
   "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs";
@@ -98,6 +104,9 @@ const entrypointPolicies = Object.freeze({
 
 export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) {
   const readSource = productionSourceReader(sourceOverrides);
+  const dormantReducerSource = readSource(dormantExecutorAttemptReducerPath);
+  verifyReviewedDormantExecutionSource(dormantExecutorAttemptReducerPath, dormantReducerSource);
+  verifyDormantExecutorAttemptReducer(dormantReducerSource);
   for (const [role, policy] of Object.entries(entrypointPolicies)) {
     verifyEntrypoint(role, policy, readSource(policy.path));
     verifyProductionImportGraph(policy.path, readSource);
@@ -107,6 +116,170 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
   verifyReviewedProductionSource(executorRuntimePath, executorSource);
   verifyReviewedProductionSource(controlRuntimePath, controlSource);
   verifyAuthenticatedDisabledReady(executorSource, controlSource);
+}
+
+function verifyReviewedDormantExecutionSource(sourcePath, source) {
+  if (source.includes("\uFEFF")) {
+    throw new Error(`${sourcePath} contains a byte-order mark outside the reviewed source form.`);
+  }
+  const normalized = source.replaceAll("\r\n", "\n");
+  if (normalized.includes("\r")) {
+    throw new Error(
+      `${sourcePath} contains an isolated carriage return outside the reviewed form.`,
+    );
+  }
+  const actual = createHash("sha256").update(normalized, "utf8").digest("hex");
+  if (actual !== reviewedDormantExecutionSourceSha256[sourcePath]) {
+    throw new Error(
+      `${sourcePath} differs from its reviewed dormant source; review the complete file and update its pinned SHA-256 with the guard tests.`,
+    );
+  }
+}
+
+export function verifyDormantExecutorAttemptReducer(source) {
+  scanRuntimeLoaderSyntax(source, dormantExecutorAttemptReducerPath);
+  const sourceFile = parseTypeScript(source, dormantExecutorAttemptReducerPath);
+  const forbiddenGlobals = new Set([
+    "AbortController",
+    "AbortSignal",
+    "Bun",
+    "Buffer",
+    "Date",
+    "Deno",
+    "Function",
+    "Math",
+    "Module",
+    "Promise",
+    "Reflect",
+    "SharedArrayBuffer",
+    "WebSocket",
+    "WebAssembly",
+    "clearImmediate",
+    "clearInterval",
+    "clearTimeout",
+    "console",
+    "crypto",
+    "eval",
+    "fetch",
+    "global",
+    "globalThis",
+    "localStorage",
+    "module",
+    "navigator",
+    "performance",
+    "process",
+    "queueMicrotask",
+    "require",
+    "sessionStorage",
+    "setImmediate",
+    "setInterval",
+    "setTimeout",
+  ]);
+  const forbiddenMemberNames = new Set([
+    "Function",
+    "_linkedBinding",
+    "_load",
+    "binding",
+    "constructor",
+    "dlopen",
+    "getBuiltinModule",
+    "process",
+    "require",
+  ]);
+  for (const statement of sourceFile.program.body) {
+    const declaration =
+      statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+    if (
+      statement.type === "ImportDeclaration" ||
+      ((statement.type === "ExportNamedDeclaration" || statement.type === "ExportAllDeclaration") &&
+        statement.source !== null)
+    ) {
+      throw new Error("Dormant Executor attempt reducer must not import or re-export a module.");
+    }
+    const allowedDirectDeclaration =
+      (statement.type === "VariableDeclaration" &&
+        statement.kind === "const" &&
+        statement.declarations.every((binding) => binding.init?.type === "RegExpLiteral")) ||
+      (statement.type === "FunctionDeclaration" && !statement.async && !statement.generator) ||
+      statement.type === "TSTypeAliasDeclaration";
+    const allowedExportDeclaration =
+      statement.type === "ExportNamedDeclaration" &&
+      statement.source === null &&
+      statement.specifiers.length === 0 &&
+      (declaration?.type === "TSInterfaceDeclaration" ||
+        declaration?.type === "TSTypeAliasDeclaration" ||
+        isDormantReducerErrorClass(declaration) ||
+        (declaration?.type === "FunctionDeclaration" &&
+          !declaration.async &&
+          !declaration.generator &&
+          (declaration.id?.name === "createExecutorAttemptState" ||
+            declaration.id?.name === "reduceExecutorAttempt")));
+    if (!allowedDirectDeclaration && !allowedExportDeclaration) {
+      throw new Error(
+        "Dormant Executor attempt reducer has an unreviewed module-level declaration or effect.",
+      );
+    }
+  }
+  for (const { node } of collectSyntaxRecords(sourceFile.program)) {
+    if (
+      node.type === "ImportExpression" ||
+      (node.type === "CallExpression" && node.callee?.type === "Import") ||
+      node.type === "TSImportType" ||
+      node.type === "TSImportEqualsDeclaration" ||
+      node.type === "AwaitExpression" ||
+      node.type === "YieldExpression" ||
+      node.type === "ArrowFunctionExpression" ||
+      node.type === "FunctionExpression" ||
+      node.type === "TSFunctionType" ||
+      node.type === "TSCallSignatureDeclaration" ||
+      node.type === "TSConstructSignatureDeclaration" ||
+      node.type === "TSMethodSignature" ||
+      node.type === "ObjectMethod" ||
+      node.type === "StaticBlock" ||
+      ((node.type === "ClassMethod" ||
+        node.type === "ClassPrivateMethod" ||
+        node.type === "ClassProperty" ||
+        node.type === "ClassPrivateProperty") &&
+        node.static) ||
+      (node.type === "VariableDeclaration" && node.kind !== "const") ||
+      ((node.type === "FunctionDeclaration" ||
+        node.type === "ClassMethod" ||
+        node.type === "ClassPrivateMethod" ||
+        node.type === "ObjectMethod") &&
+        (node.async || node.generator)) ||
+      (node.type === "NewExpression" &&
+        !isIdentifier(node.callee, "ExecutorAttemptReducerError")) ||
+      (node.type === "MemberExpression" &&
+        ((node.computed &&
+          node.property?.type === "StringLiteral" &&
+          forbiddenMemberNames.has(node.property.value)) ||
+          (!node.computed &&
+            node.property?.type === "Identifier" &&
+            node.property.name === "constructor"))) ||
+      (node.type === "Identifier" && forbiddenGlobals.has(node.name))
+    ) {
+      throw new Error(
+        "Dormant Executor attempt reducer contains an import, callback, async construct, authority-adjacent global, or side-effect surface.",
+      );
+    }
+  }
+}
+
+function isDormantReducerErrorClass(declaration) {
+  const member = declaration?.type === "ClassDeclaration" ? declaration.body.body[0] : undefined;
+  return (
+    declaration?.type === "ClassDeclaration" &&
+    declaration.id?.name === "ExecutorAttemptReducerError" &&
+    isIdentifier(declaration.superClass, "Error") &&
+    (declaration.decorators?.length ?? 0) === 0 &&
+    declaration.body.body.length === 1 &&
+    member?.type === "ClassMethod" &&
+    member.kind === "constructor" &&
+    !member.static &&
+    !member.async &&
+    !member.generator &&
+    (member.decorators?.length ?? 0) === 0
+  );
 }
 
 function verifyReviewedProductionSource(sourcePath, source) {
@@ -262,7 +435,9 @@ function verifyProductionImportGraph(entrypoint, readSource) {
       throw new Error(`Zero-execution production graph reaches forbidden source: ${sourcePath}`);
     }
     visited.add(sourcePath);
-    const sourceFile = parseTypeScript(readSource(sourcePath), sourcePath);
+    const source = readSource(sourcePath);
+    scanRuntimeLoaderSyntax(source, sourcePath);
+    const sourceFile = parseTypeScript(source, sourcePath);
     for (const dynamicImport of collectSyntax(sourceFile.program, (node) =>
       node.type === "ImportExpression" ||
       (node.type === "CallExpression" &&

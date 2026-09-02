@@ -27,6 +27,9 @@ Implemented boundaries:
 - Candidate zero-slot Control and Executor supervisors with a signed local handshake, disabled
   `Ready` attestation, one-slot maximum registration with zero advertised availability, and a
   bounded graceful-drain choreography that still requires native Windows verification.
+- A source-only, import-free single-attempt lifecycle reducer under `src/execution`. It snapshots
+  attempt identity, latches the first stop, joins terminal evidence with a zero process tree, and
+  orders disposition and cleanup without performing I/O or granting execution authority.
 
 The legacy single-process build still uses `PlaceholderJobExecutor` and advertises execution as
 disabled. The reviewed Control and Executor bundles now install candidate zero-slot supervisors.
@@ -44,6 +47,19 @@ The architecture guard also pins the LF-normalized SHA-256 of the complete candi
 Executor runtime sources. This is an accidental scope-drift and review fence: any source change must
 be reviewed as a whole before its pinned digest is updated with the guard tests. It is not a defense
 against a malicious repository author who can change the runtime, guard, and digest in one patch.
+The dormant attempt reducer is independently hash-pinned and scanned for imports, callbacks, async
+constructs, runtime loaders, and authority-adjacent globals. It has no barrel export, role-bundle
+input, production entrypoint consumer, runtime adapter, or effect executor. It does not interpret
+RoleConfig, admit a Claim, advertise capacity, verify a capability, or launch a process. Its unit and
+guard additions passed the Linux `test-env` focused, full Worker, repository test, typecheck, build,
+and lint matrices. Native Windows evidence remains intentionally out of scope for this source-only
+module.
+
+Reducer callers must supply ordinary non-Proxy structured-data objects. The reducer rejects
+non-plain prototypes, accessors, symbols, non-enumerable properties, and extra fields, then copies
+only data-property descriptor values into frozen snapshots. Hostile Proxy objects are outside this
+zero-import calling contract because JavaScript cannot identify them without invoking traps or an
+additional runtime dependency.
 
 ## Role bundle trust boundary
 
