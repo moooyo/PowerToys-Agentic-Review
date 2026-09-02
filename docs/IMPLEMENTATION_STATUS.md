@@ -154,6 +154,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   keeps Node, HostControl, ARWX standard I/O, and both relays alive until the graceful barrier or
   that deadline; Executor rejects the notification and can shut down only from authenticated
   Control `Drain`.
+- A dormant split-installation contract and exact Control/Executor WinSW source inputs. ADR 0013
+  freezes enrollment-before-package ordering, clean-host initial installation, physical NTFS roots,
+  same-basename wrapper/config payloads, demand-start and no-recovery maintenance fencing, complete
+  pair replacement, destination re-verification, and recoverable post-commit SCM policy activation.
+  The XML launches only the signed ServiceHost and is not an installer or installation evidence.
 
 ## Deliberately Disabled
 
@@ -197,10 +202,12 @@ Codex, or Git capability in this shadow milestone.
 
 After the shadow runtime is verified and any findings are closed, the release pipeline must compile
 the production release profile, produce signed role bundles and native binaries, and install the two
-services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy. Native Windows
-x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe, Authenticode,
-sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any Claim authority
-is enabled.
+services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
+ADR 0013 transaction. The repository still needs trusted enrollment evidence, destination evidence,
+the production Go installer and journal, authenticated installer readiness, and a pinned WinSW
+release. Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL,
+Named Pipe, Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests
+before any Claim authority is enabled.
 
 The product data path can proceed in parallel in this order: bounded result-artifact upload and
 storage, immutable server-side diff manifests, publication drafts, digest-bound approvals, GitHub
@@ -208,6 +215,15 @@ outbox reconciliation, and Dashboard write actions. Dynamic validation remains a
 stronger-isolation milestone.
 
 ## Verification Evidence
+
+The 2026-09-02 ADR 0013 and split WinSW input snapshot was transferred to `test-env` as a four-file
+archive. Its local and remote SHA-256 was
+`5f0025814efa8e7bed9c9c3e7e832abaf7035433a07a29b6d7a5d70aa5634723`. Both XML documents parsed
+successfully and a remote semantic check confirmed their exact IDs, ServiceHost executable and
+bootstrap paths, working directory, dependency, stop timeout, log roots, and absence of environment,
+service-account, start-mode, delayed-start, failure-action, and execution fields. Independent final
+review reported no P0-P2 findings. This is source-input verification, not native Windows installation
+evidence.
 
 The earlier Phase 1a, local-protocol, and fail-closed ServiceHost security-contract candidate was
 verified on the remote Debian `test-env` host with the official Node.js 24.20.0 Linux distribution.
