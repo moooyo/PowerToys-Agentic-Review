@@ -13,6 +13,41 @@ describe("WorkerApiError", () => {
     expect(error.isWorkerRegistrationLost).toBe(false);
     expect(error.isRetryable).toBe(false);
   });
+
+  it("honors a trusted retryability override instead of the status fallback", () => {
+    expect(
+      new WorkerApiError("Storage integrity failed.", 503, "artifact_storage_integrity", {
+        retryable: false,
+      }).isRetryable,
+    ).toBe(false);
+    expect(
+      new WorkerApiError("Request may be retried.", 400, "temporary_failure", {
+        retryable: true,
+      }).isRetryable,
+    ).toBe(true);
+  });
+
+  it("keeps status-based retryability and ErrorOptions compatibility without an override", () => {
+    const cause = new Error("connection reset");
+    const transportError = new WorkerApiError("Transport failed.", undefined, undefined, {
+      cause,
+    });
+
+    expect(transportError.isRetryable).toBe(true);
+    expect(transportError.cause).toBe(cause);
+    expect(new WorkerApiError("Server failed.", 503).isRetryable).toBe(true);
+    expect(new WorkerApiError("Request failed.", 400).isRetryable).toBe(false);
+  });
+
+  it("does not expose the retryability override as serialized error metadata", () => {
+    const error = new WorkerApiError("Remote failure.", 503, "remote_failure", {
+      retryable: false,
+    });
+
+    expect(error).not.toHaveProperty("retryable");
+    expect(error).not.toHaveProperty("retryableOverride");
+    expect(JSON.stringify(error)).not.toContain("retryable");
+  });
 });
 
 describe("isPermanentWorkerClientError", () => {

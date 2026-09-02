@@ -370,6 +370,8 @@ function validateOperationPayload(
         throw new HostControlProtocolError("HostControl signing payload is invalid.");
       }
       return;
+    default:
+      throw new HostControlProtocolError("HostControl operation is not supported.");
   }
 }
 

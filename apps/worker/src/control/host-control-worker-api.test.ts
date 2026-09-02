@@ -14,6 +14,7 @@ import {
 import {
   HOST_CONTROL_MAXIMUM_BODY_BYTES,
   HOST_CONTROL_MAXIMUM_RUN_COMPLETION_BODY_BYTES,
+  HostControlRemoteError,
 } from "../service-host/host-control-protocol.js";
 import {
   decodeHostControlOpaqueJson,
@@ -286,7 +287,47 @@ describe("HostControlWorkerApi opaque Worker API boundary", () => {
       serverTime,
     });
   });
+
+  it.each([
+    ["non-retryable upstream failure", "UPSTREAM_UNAVAILABLE", false, 503],
+    ["retryable lease conflict", "LEASE_LOST", true, 409],
+  ] as const)(
+    "preserves a trusted HostControl retryability flag for %s",
+    async (_name, code, retryable, statusCode) => {
+      const client = new FakeControlClient();
+      const leaseToken = "secret-lease-token";
+      client.operationError = Object.assign(
+        new HostControlRemoteError(code, "The remote operation failed.", retryable),
+        {
+          body: { leaseToken },
+          cause: new Error(leaseToken),
+        },
+      );
+      const api = new HostControlWorkerApi(client);
+
+      const failure = await rejectionOf(api.claimLease(claimRequest()));
+
+      expect(failure).toMatchObject({
+        statusCode,
+        errorCode: code.toLowerCase(),
+        message: "Worker API HostControl operation failed.",
+        isRetryable: retryable,
+      });
+      expect(failure).not.toHaveProperty("body");
+      expect(failure).not.toHaveProperty("cause");
+      expect(JSON.stringify(failure)).not.toContain(leaseToken);
+    },
+  );
 });
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the promise to reject.");
+}
 
 function registrationRequest(): WorkerRegistrationRequest {
   return {

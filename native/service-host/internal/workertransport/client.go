@@ -158,6 +158,13 @@ type clientState struct {
 	signerGate           *clientSignerGate
 }
 
+type executePolicy struct {
+	maximumRequestBytes  int64
+	maximumResponseBytes int64
+	primarySuccessStatus int
+	secondSuccessStatus  int
+}
+
 type clientSignerGate struct {
 	mu           sync.Mutex
 	closed       bool
@@ -521,6 +528,21 @@ func (c *clientState) execute(
 	body json.RawMessage,
 	timeout time.Duration,
 ) (json.RawMessage, error) {
+	return c.executeWithPolicy(ctx, method, target, body, timeout, executePolicy{
+		maximumRequestBytes:  c.maximumRequestBytes,
+		maximumResponseBytes: c.maximumResponseBytes,
+		primarySuccessStatus: http.StatusOK,
+	})
+}
+
+func (c *clientState) executeWithPolicy(
+	ctx context.Context,
+	method string,
+	target url.URL,
+	body json.RawMessage,
+	timeout time.Duration,
+	policy executePolicy,
+) (json.RawMessage, error) {
 	if ctx == nil {
 		return nil, errors.New("worker API context is required")
 	}
@@ -534,8 +556,8 @@ func (c *clientState) execute(
 		return nil, err
 	}
 	defer finish()
-	if int64(len(body)) > c.maximumRequestBytes {
-		return nil, fmt.Errorf("%w: maximum is %d bytes", ErrRequestTooLarge, c.maximumRequestBytes)
+	if int64(len(body)) > policy.maximumRequestBytes {
+		return nil, fmt.Errorf("%w: maximum is %d bytes", ErrRequestTooLarge, policy.maximumRequestBytes)
 	}
 	if len(body) == 0 || !json.Valid(body) {
 		return nil, ErrInvalidRequestJSON
@@ -589,7 +611,7 @@ func (c *clientState) execute(
 		}
 		return nil, errors.Join(err, closeError)
 	}
-	responseBody, err := readResponseBody(response, c.maximumResponseBytes)
+	responseBody, err := readResponseBody(response, policy.maximumResponseBytes)
 	if err != nil {
 		return nil, errors.Join(err, context.Cause(requestContext))
 	}
@@ -599,8 +621,10 @@ func (c *clientState) execute(
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		return nil, ErrRedirect
 	}
+	acceptedStatus := response.StatusCode == policy.primarySuccessStatus ||
+		policy.secondSuccessStatus != 0 && response.StatusCode == policy.secondSuccessStatus
 	if len(responseBody) == 0 {
-		if response.StatusCode != http.StatusOK {
+		if !acceptedStatus {
 			return nil, &StatusError{StatusCode: response.StatusCode}
 		}
 		return nil, ErrInvalidResponseJSON
@@ -608,7 +632,7 @@ func (c *clientState) execute(
 	if !json.Valid(responseBody) {
 		return nil, ErrInvalidResponseJSON
 	}
-	if response.StatusCode != http.StatusOK {
+	if !acceptedStatus {
 		return nil, &StatusError{
 			StatusCode: response.StatusCode,
 			Body:       json.RawMessage(bytes.Clone(responseBody)),

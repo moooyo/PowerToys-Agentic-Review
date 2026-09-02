@@ -106,6 +106,13 @@ test("role policies include the exact shadow-runtime source additions", () => {
   assert.equal(executor.has("apps/worker/src/control/host-control-worker-api.ts"), false);
   assert.equal(control.has("apps/worker/src/control/result-artifact-upload-session.ts"), false);
   assert.equal(executor.has("apps/worker/src/control/result-artifact-upload-session.ts"), false);
+  for (const input of [
+    "apps/worker/src/control/artifact-host-control-v2-api.ts",
+    "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts",
+  ]) {
+    assert.equal(control.has(input), false, `Control policy unexpectedly includes ${input}`);
+    assert.equal(executor.has(input), false, `Executor policy unexpectedly includes ${input}`);
+  }
   assert.equal(control.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
   assert.equal(executor.has("apps/worker/src/execution/executor-attempt-reducer.ts"), false);
   for (const input of [
@@ -200,6 +207,9 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const localProtocolIndexPath = "packages/local-protocol/src/index.ts";
   const dormantReducerPath = "apps/worker/src/execution/executor-attempt-reducer.ts";
   const dormantUploadSessionPath = "apps/worker/src/control/result-artifact-upload-session.ts";
+  const dormantArtifactV2ApiPath = "apps/worker/src/control/artifact-host-control-v2-api.ts";
+  const dormantArtifactV2ProtocolPath =
+    "apps/worker/src/service-host/artifact-host-control-v2-protocol.ts";
   const controlMain = repositorySource(controlMainPath);
   const executorMain = repositorySource(executorMainPath);
   const roleEntrypoint = repositorySource(roleEntrypointPath);
@@ -207,10 +217,14 @@ test("production role entrypoints and reachable imports remain zero execution", 
   const localProtocolIndex = repositorySource(localProtocolIndexPath);
   const dormantReducer = repositorySource(dormantReducerPath);
   const dormantUploadSession = repositorySource(dormantUploadSessionPath);
+  const dormantArtifactV2Api = repositorySource(dormantArtifactV2ApiPath);
+  const dormantArtifactV2Protocol = repositorySource(dormantArtifactV2ProtocolPath);
   assert.match(dormantUploadSession, /export class ResultArtifactUploadSession/u);
   for (const source of [controlMain, executorMain, roleEntrypoint, localProtocolIndex]) {
-    assert.doesNotMatch(source, /result-artifact-upload-session/u);
+    assert.doesNotMatch(source, /result-artifact-upload-session|artifact-host-control-v2/u);
   }
+  assert.match(dormantArtifactV2Api, /export class ArtifactHostControlV2Api/u);
+  assert.match(dormantArtifactV2Protocol, /export function encodeArtifactHostControlV2Call/u);
   const legacyWorkerServicePath = "apps/worker/src/worker-service.ts";
   const legacyWorkerService = repositorySource(legacyWorkerServicePath);
   assert.throws(
@@ -218,8 +232,17 @@ test("production role entrypoints and reachable imports remain zero execution", 
       verifyZeroExecutionProductionArchitecture({
         [legacyWorkerServicePath]: `${legacyWorkerService}\nimport "./control/result-artifact-upload-session.js";\n`,
       }),
-    /Production import graph reaches dormant result artifact upload source/u,
+    /Production import graph reaches dormant source/u,
   );
+  for (const path of [dormantArtifactV2ApiPath, dormantArtifactV2ProtocolPath]) {
+    assert.throws(
+      () =>
+        verifyZeroExecutionProductionArchitecture({
+          [legacyWorkerServicePath]: `${legacyWorkerService}\nimport "./${path.slice("apps/worker/src/".length).replace(/\.ts$/u, ".js")}";\n`,
+        }),
+      /Production import graph reaches dormant source/u,
+    );
+  }
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
       [legacyWorkerServicePath]: `${legacyWorkerService}\nconst load = require; load("./control/result-artifact-upload-session.js");\n`,
