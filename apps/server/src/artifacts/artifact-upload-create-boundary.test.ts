@@ -99,13 +99,16 @@ describe("artifact transaction composition boundary", () => {
     expect(barrel).not.toContain("artifact-transaction-coordinator.testing");
   });
 
-  it("omits every fake-owner adapter from production sources and output", async () => {
+  it("omits every testing adapter from production output", async () => {
     const sourceFiles = await listTypeScriptFiles(sourceRoot);
     expect(
       sourceFiles
         .map((path) => relative(sourceRoot, path).replaceAll("\\", "/"))
-        .filter((path) => path.endsWith(".testing.ts")),
-    ).toEqual([]);
+        .filter((path) => path.endsWith(".testing.ts"))
+        .sort(),
+    ).toEqual(
+      ["runtime/server-lifecycle.testing.ts", "runtime/server-storage-runtime.testing.ts"].sort(),
+    );
     const tsconfig = JSON.parse(
       await readFile(join(sourceRoot, "..", "tsconfig.json"), "utf8"),
     ) as { readonly exclude?: readonly string[] };
@@ -123,6 +126,55 @@ describe("artifact transaction composition boundary", () => {
     expect(cleanScript).not.toContain("process.argv");
     const productionArtifacts = await readdir(join(sourceRoot, "..", "dist", "artifacts"));
     expect(productionArtifacts.filter((entry) => entry.includes(".testing."))).toEqual([]);
+    const productionRuntime = await readdir(join(sourceRoot, "..", "dist", "runtime"));
+    expect(productionRuntime.filter((entry) => entry.includes(".testing."))).toEqual([]);
+  });
+
+  it("keeps lifecycle effects behind the trusted-source architecture boundary", async () => {
+    const coreModuleReference = `server-lifecycle-${"core.js"}`;
+    const constructorReference = `new ${"ServerLifecycleCore"}(`;
+    const coreSymbolReference = `ServerLifecycle${"Core"}`;
+    const allImports: string[] = [];
+    const productionImports: string[] = [];
+    const allConstructors: string[] = [];
+    const productionConstructors: string[] = [];
+    const productionCoreReferences: string[] = [];
+    for (const path of await listTypeScriptFiles(sourceRoot)) {
+      const relativePath = relative(sourceRoot, path).replaceAll("\\", "/");
+      const source = await readFile(path, "utf8");
+      const production =
+        !relativePath.endsWith(".test.ts") && !relativePath.endsWith(".testing.ts");
+      if (source.includes(coreModuleReference)) {
+        allImports.push(relativePath);
+        if (production) productionImports.push(relativePath);
+      }
+      if (source.includes(constructorReference)) {
+        allConstructors.push(relativePath);
+        if (production) productionConstructors.push(relativePath);
+      }
+      if (production && source.includes(coreSymbolReference)) {
+        productionCoreReferences.push(relativePath);
+      }
+    }
+
+    expect(allImports.sort()).toEqual(
+      ["runtime/server-lifecycle.testing.ts", "runtime/server-lifecycle.ts"].sort(),
+    );
+    expect(allConstructors.sort()).toEqual(
+      ["runtime/server-lifecycle.testing.ts", "runtime/server-lifecycle.ts"].sort(),
+    );
+    expect(productionImports).toEqual(["runtime/server-lifecycle.ts"]);
+    expect(productionConstructors).toEqual(["runtime/server-lifecycle.ts"]);
+    expect(productionCoreReferences.sort()).toEqual(
+      ["runtime/server-lifecycle-core.ts", "runtime/server-lifecycle.ts"].sort(),
+    );
+
+    const core = await readFile(join(sourceRoot, "runtime", "server-lifecycle-core.ts"), "utf8");
+    expect(core).toContain("trusted-source architecture boundary");
+    const lifecycle = await readFile(join(sourceRoot, "runtime", "server-lifecycle.ts"), "utf8");
+    expect(lifecycle).not.toContain("export type {");
+    const runtimeExports = await import("../../dist/runtime/server-lifecycle.js");
+    expect(Object.keys(runtimeExports)).toEqual(["createProductionServerLifecycle"]);
   });
 
   it("keeps reconciliation registrars and testing adapters out of the public barrel", async () => {
@@ -271,12 +323,13 @@ describe("artifact transaction composition boundary", () => {
     expect(references.sort()).toEqual([...expected].sort());
   });
 
-  it("keeps the transaction coordinator dark outside tests and its own module", async () => {
+  it("limits transaction coordinator construction to the reviewed lifecycle root", async () => {
     const allowed = new Set([
       "artifacts/artifact-upload-create-boundary.test.ts",
       "artifacts/artifact-transaction-coordinator.test.ts",
       "artifacts/artifact-transaction-coordinator.ts",
       "database/database-client.test.ts",
+      "runtime/server-storage-runtime.ts",
     ]);
     const unexpected: string[] = [];
     for (const path of await listTypeScriptFiles(sourceRoot)) {
@@ -289,6 +342,37 @@ describe("artifact transaction composition boundary", () => {
       }
     }
     expect(unexpected).toEqual([]);
+
+    const runtime = await readFile(
+      join(sourceRoot, "runtime", "server-storage-runtime.ts"),
+      "utf8",
+    );
+    for (const method of [
+      "createArtifactTransactionDatabaseHandle()",
+      "createArtifactTransactionStorageHandle()",
+      "createArtifactTransactionOwnerLockHandle()",
+    ]) {
+      expect(runtime.split(method)).toHaveLength(2);
+    }
+    expect(runtime).toContain(
+      "await awaitInitialSweep(coordinator.ready, initialSweepTimeoutMilliseconds)",
+    );
+    expect(runtime).not.toContain("registerWorkerArtifactRoutes");
+
+    const testingHook = "createServerStorageRuntimeWithInitialSweepTimeoutForTest";
+    const testingHookReferences: string[] = [];
+    for (const path of await listTypeScriptFiles(sourceRoot)) {
+      if ((await readFile(path, "utf8")).includes(testingHook)) {
+        testingHookReferences.push(relative(sourceRoot, path).replaceAll("\\", "/"));
+      }
+    }
+    expect(testingHookReferences.sort()).toEqual(
+      [
+        "artifacts/artifact-upload-create-boundary.test.ts",
+        "runtime/server-storage-runtime.testing.ts",
+        "runtime/server-storage-runtime.ts",
+      ].sort(),
+    );
 
     for (const relativePath of ["app.ts", "config.ts", "main.ts", "routes/workers.ts"]) {
       const source = await readFile(join(sourceRoot, relativePath), "utf8");

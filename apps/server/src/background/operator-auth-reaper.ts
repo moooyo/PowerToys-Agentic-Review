@@ -8,11 +8,26 @@ export const startOperatorAuthReaper = (
   database: Pick<DatabaseClient, "request">,
   config: Pick<ServerConfig, "operatorAuthCleanupBatchSize" | "operatorAuthCleanupIntervalSeconds">,
   logger: FastifyBaseLogger,
+  shutdownSignal: AbortSignal,
 ): (() => Promise<void>) => {
   let stopped = false;
   let activeRun: Promise<void> | undefined;
   let continuationTimer: NodeJS.Timeout | undefined;
+  let intervalTimer: NodeJS.Timeout | undefined;
   let remainingBatches = 0;
+
+  const stopAdmission = (): void => {
+    stopped = true;
+    if (intervalTimer !== undefined) {
+      clearInterval(intervalTimer);
+      intervalTimer = undefined;
+    }
+    if (continuationTimer !== undefined) {
+      clearTimeout(continuationTimer);
+      continuationTimer = undefined;
+    }
+    shutdownSignal.removeEventListener("abort", stopAdmission);
+  };
 
   const runBatch = (): void => {
     if (stopped || activeRun !== undefined || remainingBatches <= 0) {
@@ -64,16 +79,19 @@ export const startOperatorAuthReaper = (
     runBatch();
   };
 
-  startSweep();
-  const intervalTimer = setInterval(startSweep, config.operatorAuthCleanupIntervalSeconds * 1_000);
-  intervalTimer.unref();
+  shutdownSignal.addEventListener("abort", stopAdmission, { once: true });
+  if (shutdownSignal.aborted) {
+    stopAdmission();
+  } else {
+    startSweep();
+    if (!stopped) {
+      intervalTimer = setInterval(startSweep, config.operatorAuthCleanupIntervalSeconds * 1_000);
+      intervalTimer.unref();
+    }
+  }
 
   return async () => {
-    stopped = true;
-    clearInterval(intervalTimer);
-    if (continuationTimer !== undefined) {
-      clearTimeout(continuationTimer);
-    }
+    stopAdmission();
     await activeRun;
   };
 };

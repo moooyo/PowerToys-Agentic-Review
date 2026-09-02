@@ -157,11 +157,11 @@ child-process or artifact-specific cgroup contract. A storage failure whose outc
 indeterminate triggers whole-Server fail-stop. If the storage Worker does not exit within its
 bounded termination window, the composed Server must stop coordinating further shutdown work and
 terminate as a whole; the external process supervisor may start a replacement only after the old
-Server process has exited. Production enablement therefore requires a composed lifecycle proof over
-the real Server: client admission becomes unavailable synchronously, the bound coordinator reaction
-propagates fail-stop, queued and active artifact mutations settle or fail within their bounds, the
-storage Worker exits before SQLite closes and the owner lock is released during orderly shutdown,
-and every fatal storage path terminates the complete Server.
+Server process has exited. Production composition therefore uses one sealed Server lifecycle:
+client admission becomes unavailable synchronously, the bound coordinator reaction propagates
+fail-stop, queued and active artifact mutations settle or fail within their bounds, the storage
+Worker exits before SQLite closes and the owner lock is released during orderly shutdown, and every
+fatal storage path terminates the complete Server.
 It does not require a child-specific systemd unit, cgroup cleanup proof, or installed-profile
 verifier.
 
@@ -397,9 +397,11 @@ contains no stale reusable fake-owner adapter and never cleans referenced packag
 Readiness is a live state, not merely the settled first-sweep promise. It requires a completed first
 namespace sweep, certain capacity accounting, no exhausted or invalid upload-cleanup retry identity,
 no failed namespace cleanup, and no operational namespace-health saturation. Fatal and closing
-transitions synchronously disable admission. This foundation intentionally has no consumer in
-`main.ts`, `app.ts`, Worker routes, claim selection, or Server configuration; production composition
-and external reachability require separate reviewed changes.
+transitions synchronously disable admission. `main.ts` now composes this internal foundation before
+the Server becomes ready, and `app.ts` binds coarse readiness and process-wide admission to the same
+lifecycle. The runtime exposes only the database, a narrow readiness probe, and ordered close;
+artifact transaction methods remain unreachable. Worker artifact routes, artifact-mode claim
+selection, and artifact-backed completion remain disabled pending separately reviewed activation.
 
 Namespace cleanup health reads are independently bounded for each status. Saturated pending,
 retry-waiting, failed, or due counts are operational saturation: capacity admission becomes

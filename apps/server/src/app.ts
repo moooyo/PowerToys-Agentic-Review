@@ -16,13 +16,17 @@ import {
 } from "./routes/auth.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
-import { registerHealthRoutes } from "./routes/health.js";
+import { type ArtifactReadinessProbe, registerHealthRoutes } from "./routes/health.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
 
 export interface AppDependencies {
   readonly config: ServerConfig;
   readonly database: DatabaseClient;
   readonly shutdownSignal: AbortSignal;
+  readonly artifactReadiness: ArtifactReadinessProbe;
+  readonly serverAdmission: {
+    read(): boolean;
+  };
   readonly githubIngestion?: GitHubEventIngestionService;
   readonly operatorAuth?: OperatorAuthRouteService;
 }
@@ -51,6 +55,24 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   if (dependencies.config.allowInsecureWorkerAuth) {
     app.log.warn("Worker mTLS authentication is disabled for loopback-only development.");
   }
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "GET" && request.url === "/health/live") {
+      return;
+    }
+    let admitted = false;
+    try {
+      admitted = dependencies.serverAdmission.read() === true;
+    } catch {
+      admitted = false;
+    }
+    if (!admitted) {
+      return reply.code(503).send({
+        status: "not_ready",
+        serverTime: new Date().toISOString(),
+      });
+    }
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
@@ -141,7 +163,12 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
   });
 
-  registerHealthRoutes(app, dependencies.database);
+  registerHealthRoutes(
+    app,
+    dependencies.database,
+    dependencies.artifactReadiness,
+    dependencies.shutdownSignal,
+  );
   registerWorkerRoutes(app, dependencies);
 
   const operatorAuth = dependencies.operatorAuth;
@@ -200,15 +227,20 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
   }
 
-  const stopLeaseReaper = startLeaseReaper(dependencies.database, dependencies.config, app.log);
+  const stopLeaseReaper = startLeaseReaper(
+    dependencies.database,
+    dependencies.config,
+    app.log,
+    dependencies.shutdownSignal,
+  );
   const stopOperatorAuthReaper = startOperatorAuthReaper(
     dependencies.database,
     dependencies.config,
     app.log,
+    dependencies.shutdownSignal,
   );
   app.addHook("onClose", async () => {
-    stopLeaseReaper();
-    await stopOperatorAuthReaper();
+    await Promise.all([stopLeaseReaper(), stopOperatorAuthReaper()]);
   });
 
   return app;

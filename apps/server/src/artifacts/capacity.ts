@@ -11,6 +11,7 @@ import type {
 } from "./types.js";
 
 export const artifactCapacityEntriesPerUpload = 4;
+export const artifactCapacityFixedLayoutEntries = 3;
 export const maximumArtifactCapacityLiveUploads = 4_096;
 
 export const snapshotArtifactCapacityLimits = (

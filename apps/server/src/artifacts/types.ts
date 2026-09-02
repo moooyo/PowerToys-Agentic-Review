@@ -286,6 +286,6 @@ export type ArtifactCapacityProbe<T> =
 export interface ArtifactStorageKernelOptions {
   readonly rootPath: string;
   readonly capacity: ArtifactCapacityLimits;
-  /** Bounds asynchronous queue drain only; the dedicated storage watchdog owns syscall timeout. */
+  /** Bounds asynchronous queue drain; the client terminates a stalled storage Worker on timeout. */
   readonly closeTimeoutMilliseconds?: number;
 }

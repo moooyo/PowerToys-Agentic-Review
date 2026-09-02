@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../dist/config.js";
 
@@ -26,6 +26,126 @@ describe("loadConfig Phase 1 integrations", () => {
     expect(config.github).toBeUndefined();
     expect(config.operatorAuth).toBeUndefined();
     expect(config.dashboardDirectory).toBeUndefined();
+    expect(config.databasePath).toBe(
+      resolve(dirname(config.artifactStorage.rootPath), ".data", "agentic-review.db"),
+    );
+    expect(config.artifactStorage).toEqual({
+      rootPath: resolve(dirname(dirname(config.databasePath)), "artifacts"),
+      capacity: {
+        hardBytes: 10n * 1_024n * 1_024n * 1_024n,
+        hardEntries: 100_000,
+        emergencyReserveBytes: 1_024n * 1_024n * 1_024n,
+        perUploadMetadataHeadroomBytes: 64n * 1_024n,
+        cleanupBacklogHighWaterEntries: 1_024,
+      },
+    });
+  });
+
+  it("loads bounded artifact capacity without converting byte values through Number", async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = join(directory, "database", "server.sqlite");
+    const artifactRoot = join(directory, "artifact-root");
+    const config = loadConfig({
+      ...developmentEnvironment(),
+      AGENTIC_REVIEW_DATABASE_PATH: databasePath,
+      AGENTIC_REVIEW_ARTIFACT_ROOT: artifactRoot,
+      AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1099511627776",
+      AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "1000000",
+      AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES: "1073741824",
+      AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES: "1048576",
+      AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "4096",
+    });
+
+    expect(config.artifactStorage).toEqual({
+      rootPath: artifactRoot,
+      capacity: {
+        hardBytes: 1_099_511_627_776n,
+        hardEntries: 1_000_000,
+        emergencyReserveBytes: 1_073_741_824n,
+        perUploadMetadataHeadroomBytes: 1_048_576n,
+        cleanupBacklogHighWaterEntries: 4_096,
+      },
+    });
+
+    const minimumEntries = loadConfig({
+      ...developmentEnvironment(),
+      AGENTIC_REVIEW_DATABASE_PATH: databasePath,
+      AGENTIC_REVIEW_ARTIFACT_ROOT: artifactRoot,
+      AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "7",
+      AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "1",
+    });
+    expect(minimumEntries.artifactStorage.capacity.hardEntries).toBe(7);
+  });
+
+  it("rejects unsafe artifact paths, malformed bytes, and inconsistent capacity", async () => {
+    const directory = await temporaryDirectory();
+    const base = {
+      ...developmentEnvironment(),
+      AGENTIC_REVIEW_DATABASE_PATH: join(directory, "database", "server.sqlite"),
+      AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "artifacts"),
+    };
+    const invalid: NodeJS.ProcessEnv[] = [
+      {
+        ...developmentEnvironment(),
+        AGENTIC_REVIEW_DATABASE_PATH: join(directory, "database", "server.sqlite"),
+      },
+      { ...base, AGENTIC_REVIEW_ARTIFACT_ROOT: "relative/artifacts" },
+      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "10000000junk" },
+      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1099511627777" },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1073741824",
+        AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES: "1073741824",
+      },
+      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "6" },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "100",
+        AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "101",
+      },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES: "1048577",
+      },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "4097",
+      },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "database", "server.sqlite"),
+      },
+      {
+        ...base,
+        AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "database", "artifacts"),
+      },
+      {
+        ...base,
+        AGENTIC_REVIEW_DATABASE_PATH: join(directory, "artifacts", "database", "server.sqlite"),
+      },
+    ];
+
+    for (const environment of invalid) {
+      expect(() => loadConfig(environment)).toThrow();
+    }
+  });
+
+  it("documents the disjoint production layout and every artifact capacity control", async () => {
+    const example = await readFile(resolve(import.meta.dirname, "..", ".env.example"), "utf8");
+    expect(example).toContain(
+      "AGENTIC_REVIEW_DATABASE_PATH=/var/lib/agentic-review/database/agentic-review.db",
+    );
+    expect(example).toContain("AGENTIC_REVIEW_ARTIFACT_ROOT=/var/lib/agentic-review/artifacts");
+    for (const name of [
+      "AGENTIC_REVIEW_ARTIFACT_HARD_BYTES",
+      "AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES",
+      "AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES",
+      "AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES",
+      "AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES",
+    ]) {
+      expect(example).toContain(`${name}=`);
+    }
+    expect(example).toContain("Neither tree may equal or");
   });
 
   it("rejects integer settings with trailing text or values outside their purpose limit", () => {

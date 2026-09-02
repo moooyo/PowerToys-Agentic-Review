@@ -147,7 +147,17 @@ flowchart LR
     F[Fastify Main Thread] -->|MessagePort RPC| D[Database Worker Thread]
     D --> N[node:sqlite DatabaseSync]
     N --> S[(state.db)]
+    F -->|Bounded data-only RPC| A[Artifact Storage Worker Thread]
+    A --> L[(Private Linux Artifact Root)]
 ```
+
+The production Server lifecycle adopts Fastify, background tasks, the artifact transaction
+coordinator, both Worker Threads, SQLite, and the process-lifetime database owner lock. Readiness is
+published only after the first bounded artifact reconciliation sweep. Shutdown first closes global
+admission and aborts background scheduling, then drains Fastify and background database requests,
+proves artifact Worker exit, closes SQLite, and releases the owner lock. A fatal artifact integrity,
+protocol, or unknown-outcome condition follows the same ordered drain and then exits the complete
+Server with a nonzero status.
 
 The database thread applies:
 
