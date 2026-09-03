@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
+	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
@@ -15,12 +15,62 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-var errWindowsServiceStop = errors.New("Windows service stop requested")
+var (
+	errWindowsServiceStop           = errors.New("Windows service stop requested")
+	errWindowsServiceStartupTimeout = errors.New("Windows service startup timed out")
+)
 
 const (
-	serviceStartWaitHintMilliseconds uint32 = 30_000
+	servicePendingUpdateInterval            = 10 * time.Second
+	serviceStartupLimit                     = 5 * time.Minute
+	serviceStartWaitHintMilliseconds uint32 = uint32(serviceStartupLimit / time.Millisecond)
 	serviceStopWaitHintMilliseconds  uint32 = 300_000
 )
+
+type serviceTimeSignal struct {
+	channel <-chan time.Time
+	stop    func()
+}
+
+type windowsServiceTiming struct {
+	newTicker func(time.Duration) serviceTimeSignal
+	newTimer  func(time.Duration) serviceTimeSignal
+}
+
+func productionWindowsServiceTiming() windowsServiceTiming {
+	return windowsServiceTiming{
+		newTicker: func(interval time.Duration) serviceTimeSignal {
+			ticker := time.NewTicker(interval)
+			return serviceTimeSignal{channel: ticker.C, stop: ticker.Stop}
+		},
+		newTimer: func(interval time.Duration) serviceTimeSignal {
+			timer := time.NewTimer(interval)
+			return serviceTimeSignal{
+				channel: timer.C,
+				stop: func() {
+					if timer.Stop() {
+						return
+					}
+					select {
+					case <-timer.C:
+					default:
+					}
+				},
+			}
+		},
+	}
+}
+
+func (timing windowsServiceTiming) withDefaults() windowsServiceTiming {
+	production := productionWindowsServiceTiming()
+	if timing.newTicker == nil {
+		timing.newTicker = production.newTicker
+	}
+	if timing.newTimer == nil {
+		timing.newTimer = production.newTimer
+	}
+	return timing
+}
 
 type windowsServiceRunner struct {
 	isWindowsService func() (bool, error)
@@ -78,6 +128,7 @@ func serviceNameFromBootstrapPath(path string) (string, error) {
 type windowsServiceHandler struct {
 	host    platform.Host
 	options platform.BootstrapOptions
+	timing  windowsServiceTiming
 }
 
 // Execute ignores dynamic StartService arguments because the process command
@@ -89,15 +140,45 @@ func (handler *windowsServiceHandler) Execute(
 ) (bool, uint32) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
+	timing := handler.timing.withDefaults()
 
-	ready := make(chan struct{}, 1)
+	var pendingTicks <-chan time.Time
+	var stopPendingTicks func()
+	stopPendingProgress := func() {
+		pendingTicks = nil
+		if stopPendingTicks != nil {
+			stopPendingTicks()
+			stopPendingTicks = nil
+		}
+	}
+	startPendingProgress := func() {
+		stopPendingProgress()
+		ticker := timing.newTicker(servicePendingUpdateInterval)
+		pendingTicks = ticker.channel
+		stopPendingTicks = ticker.stop
+	}
+	startPendingProgress()
+	defer stopPendingProgress()
+
+	startupTimer := timing.newTimer(serviceStartupLimit)
+	startupTimeout := startupTimer.channel
+	stopStartupTimer := func() {
+		startupTimeout = nil
+		if startupTimer.stop != nil {
+			startupTimer.stop()
+			startupTimer.stop = nil
+		}
+	}
+	defer stopStartupTimer()
+
+	readyRequests := make(chan chan struct{})
 	var readyOnce sync.Once
-	var readySignaled atomic.Bool
 	options := handler.options
 	options.Ready = func() {
 		readyOnce.Do(func() {
-			readySignaled.Store(true)
-			ready <- struct{}{}
+			acknowledged := make(chan struct{})
+			readyRequests <- acknowledged
+			<-acknowledged
 		})
 	}
 
@@ -113,17 +194,22 @@ func (handler *windowsServiceHandler) Execute(
 	}()
 
 	stopRequested := false
+	startupTimedOut := false
+	runningReported := false
 	for {
 		select {
-		case <-ready:
-			if stopRequested || current.State != svc.StartPending {
-				continue
+		case acknowledged := <-readyRequests:
+			if !stopRequested && current.State == svc.StartPending {
+				stopStartupTimer()
+				stopPendingProgress()
+				current = svc.Status{
+					State:   svc.Running,
+					Accepts: svc.AcceptStop | svc.AcceptShutdown,
+				}
+				statuses <- current
+				runningReported = true
 			}
-			current = svc.Status{
-				State:   svc.Running,
-				Accepts: svc.AcceptStop | svc.AcceptShutdown,
-			}
-			statuses <- current
+			close(acknowledged)
 		case request, ok := <-requests:
 			if !ok {
 				requests = nil
@@ -135,6 +221,8 @@ func (handler *windowsServiceHandler) Execute(
 			case svc.Stop, svc.Shutdown:
 				if !stopRequested {
 					stopRequested = true
+					stopStartupTimer()
+					startPendingProgress()
 					current = svc.Status{
 						State:      svc.StopPending,
 						CheckPoint: 1,
@@ -144,9 +232,26 @@ func (handler *windowsServiceHandler) Execute(
 					cancel(errWindowsServiceStop)
 				}
 			}
+		case <-pendingTicks:
+			current.CheckPoint++
+			statuses <- current
+		case <-startupTimeout:
+			startupTimedOut = true
+			stopStartupTimer()
+			startPendingProgress()
+			current = svc.Status{
+				State:      svc.StopPending,
+				CheckPoint: 1,
+				WaitHint:   serviceStopWaitHintMilliseconds,
+			}
+			statuses <- current
+			cancel(errWindowsServiceStartupTimeout)
 		case err := <-result:
+			if startupTimedOut {
+				return true, uint32(exitPreflight)
+			}
 			if err == nil {
-				if stopRequested || readySignaled.Load() {
+				if stopRequested || runningReported {
 					return false, 0
 				}
 				return true, uint32(exitPreflight)
