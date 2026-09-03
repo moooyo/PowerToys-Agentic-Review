@@ -129,9 +129,10 @@ The installation uses service SIDs, not localized account names, in ACLs. It rec
 SIDs at installation and verifies the same SIDs at every startup. A service identity change makes
 the Worker non-executable until an administrator reprovisions the ACLs and credentials.
 
-The trusted service bootstrap applies explicit process security descriptors to its TypeScript
-payload. The peer service SID has no process-memory, handle-duplication, token-duplication, or thread
-control access. Default same-machine process and token ACLs are not the sole enforcement mechanism.
+The trusted service bootstrap applies explicit protected DACLs to the current ServiceHost process
+and primary token before opening the application channel. The peer service SID has no
+process-memory, handle-duplication, token-duplication, or thread-control access. Default
+same-machine process and token ACLs are not the sole enforcement mechanism.
 
 ### Native service bootstrap
 
@@ -162,6 +163,9 @@ SID `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` and a token-object DACL th
 `TOKEN_QUERY` only. `SYNCHRONIZE` is required to retain and wait on the verified peer lifetime; it
 does not grant process-memory or process-control access. The DACL does not grant handle duplication,
 token duplication, token assignment, impersonation, adjustment, or thread-control rights.
+The bootstrap is a one-shot operation: it verifies the two fixed restricted service identities,
+applies and reads back those two DACLs, closes the primary-token handle, and retains no wrapper,
+image, SCM-status, or lifecycle evidence.
 
 Each Node payload uses its inherited stdin/stdout anonymous pipes exclusively for the ARWX stream
 that ServiceHost relays to the verified inter-service Named Pipe. Role-local bootstrap and RPC use a
@@ -176,12 +180,10 @@ The inherited ARWX handles and the HostControl connection are not inherited by C
 ProcessHost, recipes, or any other child. Executor's ProcessHost Job Objects are nested inside the
 Executor service-root Job Object.
 ServiceHost is the sole long-lived owner of the root Job handle and never leaks it to Node. Process
-exit closes that handle automatically. Parent-child lineage alone does not make WinSW exit close a
-child-owned handle, so ServiceHost also retains and continuously waits on a stable handle to its
-verified WinSW wrapper. A wrapper signal or service-stop path immediately terminates the root Job,
-waits for zero active processes, closes the Job handle, and exits. This bounds even processes
-started directly by the Executor coordinator. All application contracts and decisions remain
-TypeScript.
+exit closes that handle automatically. A service-stop path immediately terminates the root Job,
+waits for zero active processes, closes the Job handle, and exits. The local bootstrap does not
+inspect or supervise its own wrapper. This bounds even processes started directly by the Executor
+coordinator. All application contracts and decisions remain TypeScript.
 
 ## Local Topology
 

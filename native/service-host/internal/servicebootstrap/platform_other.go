@@ -2,10 +2,12 @@
 
 package servicebootstrap
 
-// Open fails closed outside Windows.
-func Open(options Options) (Session, error) {
-	if err := validateOptions(options); err != nil {
-		return nil, err
+import "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+
+// Prepare fails closed outside Windows.
+func Prepare(role config.Role) error {
+	if _, err := resolveRole(role); err != nil {
+		return err
 	}
-	return nil, ErrUnsupportedPlatform
+	return ErrUnsupportedPlatform
 }

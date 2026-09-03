@@ -5,26 +5,16 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
 var (
-	ErrUnsupportedPlatform         = errors.New("ServiceHost bootstrap requires Windows")
-	ErrInvalidOptions              = errors.New("invalid ServiceHost bootstrap options")
-	ErrAlreadyBootstrapped         = errors.New("ServiceHost bootstrap has already been attempted")
-	ErrWrapperUnstable             = errors.New("WinSW wrapper identity is not stable")
-	ErrParentMismatch              = errors.New("ServiceHost is not a direct child of the current WinSW wrapper")
-	ErrDACLVerification            = errors.New("ServiceHost bootstrap DACL verification failed")
-	ErrInvalidEvidence             = errors.New("ServiceHost bootstrap evidence is invalid")
-	ErrCurrentImageMismatch        = errors.New("current ServiceHost image measurement is invalid")
-	ErrCurrentImageMeasured        = errors.New("current ServiceHost image measurement has already been attempted")
-	ErrInvalidCurrentImageEvidence = errors.New("current ServiceHost image evidence is invalid")
-	ErrClosed                      = errors.New("ServiceHost bootstrap session is closed")
+	ErrUnsupportedPlatform = errors.New("ServiceHost bootstrap requires Windows")
+	ErrInvalidRole         = errors.New("invalid ServiceHost role")
+	ErrAlreadyPrepared     = errors.New("ServiceHost bootstrap has already been attempted")
+	ErrDACLVerification    = errors.New("ServiceHost bootstrap DACL verification failed")
 )
 
 const (
@@ -39,147 +29,82 @@ const (
 	securityDescriptorDACLPresent   uint16 = 0x0004
 	securityDescriptorDACLProtected uint16 = 0x1000
 	accessAllowedACEType            uint8  = 0
-	noACEFlags                      uint8  = 0
-	maximumServiceNameUnits                = 256
 )
 
-// Options selects one of the two fixed production service identities. Callers
-// cannot supply service names or SIDs.
-type Options struct {
-	Role config.Role
+type roleIdentities struct {
+	own  winidentity.ServiceIdentity
+	peer winidentity.ServiceIdentity
 }
 
-// ResolvedOptions contains the fixed identities selected from Options.Role.
-// It is detached evidence output and is never accepted as bootstrap input.
-type ResolvedOptions struct {
-	Role            config.Role
-	ServiceName     string
-	OwnServiceSID   string
-	PeerServiceName string
-	PeerServiceSID  string
+type accessEntry struct {
+	sid     string
+	mask    uint32
+	aceType uint8
+	flags   uint8
 }
 
-// ServiceState is the SCM SERVICE_STATUS_PROCESS state sampled around opening
-// the retained wrapper process handle.
-type ServiceState uint32
-
-const (
-	ServiceStopped         ServiceState = 1
-	ServiceStartPending    ServiceState = 2
-	ServiceStopPending     ServiceState = 3
-	ServiceRunning         ServiceState = 4
-	ServiceContinuePending ServiceState = 5
-	ServicePausePending    ServiceState = 6
-	ServicePaused          ServiceState = 7
-)
-
-// ServiceObservation is detached SCM status evidence.
-type ServiceObservation struct {
-	State     ServiceState
-	ProcessID uint32
-}
-
-// AccessEntry is one detached ACE read back from a kernel object DACL.
-type AccessEntry struct {
-	SID     string
-	Mask    uint32
-	ACEType uint8
-	Flags   uint8
-}
-
-// DACLEvidence records the exact protected DACL read back after applying it.
-// Entries contains no native SID or ACL pointers.
-type DACLEvidence struct {
-	Control     uint16
-	Present     bool
-	Protected   bool
-	Null        bool
-	Defaulted   bool
-	AccessRules []AccessEntry
-}
-
-// Session owns the current service's stable WinSW process handle and all
-// auxiliary bootstrap handles. It is both the local wrapper watcher and the
-// StableWrapper identity anchor for this service lifetime. Peer verification
-// independently opens and retains the opposing service wrapper through SCM;
-// callers must never reconstruct either wrapper from a detached PID.
-type Session interface {
-	winprocess.WrapperWatcher
-	peerverify.StableWrapper
-	Evidence() Evidence
-	MeasureCurrentImage() (CurrentImageEvidence, error)
+type daclEvidence struct {
+	control     uint16
+	present     bool
+	protected   bool
+	null        bool
+	defaulted   bool
+	accessRules []accessEntry
 }
 
 type daclPolicy struct {
-	entries []AccessEntry
+	entries []accessEntry
 }
 
-func serviceDACLPolicies(ownServiceSID, peerServiceSID string) (daclPolicy, daclPolicy, error) {
-	if err := validateCanonicalServiceSID(ownServiceSID); err != nil {
-		return daclPolicy{}, daclPolicy{}, fmt.Errorf("own service SID: %w", err)
+func resolveRole(role config.Role) (roleIdentities, error) {
+	resolved := roleIdentities{
+		own: winidentity.ServiceIdentity{
+			Name: config.ControlServiceName,
+			SID:  config.ControlServiceSID,
+		},
+		peer: winidentity.ServiceIdentity{
+			Name: config.ExecutorServiceName,
+			SID:  config.ExecutorServiceSID,
+		},
 	}
-	if err := validateCanonicalServiceSID(peerServiceSID); err != nil {
-		return daclPolicy{}, daclPolicy{}, fmt.Errorf("peer service SID: %w", err)
+	switch role {
+	case config.RoleControl:
+	case config.RoleExecutor:
+		resolved.own, resolved.peer = resolved.peer, resolved.own
+	default:
+		return roleIdentities{}, fmt.Errorf("%w: role must be control or executor", ErrInvalidRole)
 	}
-	if ownServiceSID == peerServiceSID {
-		return daclPolicy{}, daclPolicy{}, errors.New("own and peer service SIDs must be different")
+	if resolved.own.Name == "" || resolved.peer.Name == "" ||
+		resolved.own.Name == resolved.peer.Name || strings.ContainsRune(resolved.own.Name, '\x00') ||
+		strings.ContainsRune(resolved.peer.Name, '\x00') {
+		return roleIdentities{}, fmt.Errorf("%w: fixed service names are invalid", ErrInvalidRole)
 	}
-	base := []AccessEntry{
-		{SID: localSystemSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
-		{SID: builtinAdministratorsSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
-		{SID: ownServiceSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
+	if err := validateCanonicalServiceSID(resolved.own.SID); err != nil {
+		return roleIdentities{}, fmt.Errorf("%w: fixed own service SID: %v", ErrInvalidRole, err)
 	}
-	processEntries := append(append([]AccessEntry(nil), base...), AccessEntry{
-		SID:     peerServiceSID,
-		Mask:    processQueryLimitedAccessMask | synchronizeAccessMask,
-		ACEType: accessAllowedACEType,
-		Flags:   noACEFlags,
-	})
-	tokenEntries := append(append([]AccessEntry(nil), base...), AccessEntry{
-		SID:     peerServiceSID,
-		Mask:    tokenQueryAccessMask,
-		ACEType: accessAllowedACEType,
-		Flags:   noACEFlags,
-	})
-	return daclPolicy{entries: processEntries}, daclPolicy{entries: tokenEntries}, nil
-}
-
-func fixedDACLPolicies(options ResolvedOptions) (daclPolicy, daclPolicy, error) {
-	expected, err := resolveOptions(Options{Role: options.Role})
-	if err != nil || options != expected {
-		return daclPolicy{}, daclPolicy{}, fmt.Errorf("%w: resolved service identities are not fixed for role", ErrInvalidOptions)
-	}
-	return serviceDACLPolicies(expected.OwnServiceSID, expected.PeerServiceSID)
-}
-
-func resolveOptions(options Options) (ResolvedOptions, error) {
-	resolved := ResolvedOptions{
-		Role:            options.Role,
-		ServiceName:     config.ControlServiceName,
-		OwnServiceSID:   config.ControlServiceSID,
-		PeerServiceName: config.ExecutorServiceName,
-		PeerServiceSID:  config.ExecutorServiceSID,
-	}
-	if options.Role == config.RoleExecutor {
-		resolved.ServiceName, resolved.PeerServiceName = resolved.PeerServiceName, resolved.ServiceName
-		resolved.OwnServiceSID, resolved.PeerServiceSID = resolved.PeerServiceSID, resolved.OwnServiceSID
-	} else if options.Role != config.RoleControl {
-		return ResolvedOptions{}, fmt.Errorf("%w: role must be control or executor", ErrInvalidOptions)
-	}
-	if !utf8.ValidString(resolved.ServiceName) || strings.ContainsRune(resolved.ServiceName, utf8.RuneError) ||
-		strings.ContainsRune(resolved.ServiceName, '\x00') ||
-		len(utf16.Encode([]rune(resolved.ServiceName))) > maximumServiceNameUnits {
-		return ResolvedOptions{}, fmt.Errorf("%w: fixed WinSW service name is invalid", ErrInvalidOptions)
-	}
-	if _, _, err := serviceDACLPolicies(resolved.OwnServiceSID, resolved.PeerServiceSID); err != nil {
-		return ResolvedOptions{}, fmt.Errorf("%w: fixed service identities: %v", ErrInvalidOptions, err)
+	if err := validateCanonicalServiceSID(resolved.peer.SID); err != nil || resolved.peer.SID == resolved.own.SID {
+		return roleIdentities{}, fmt.Errorf("%w: fixed peer service SID is invalid", ErrInvalidRole)
 	}
 	return resolved, nil
 }
 
-func validateOptions(options Options) error {
-	_, err := resolveOptions(options)
-	return err
+func policiesForRole(resolved roleIdentities) (daclPolicy, daclPolicy) {
+	base := []accessEntry{
+		{sid: localSystemSID, mask: genericAllAccessMask, aceType: accessAllowedACEType},
+		{sid: builtinAdministratorsSID, mask: genericAllAccessMask, aceType: accessAllowedACEType},
+		{sid: resolved.own.SID, mask: genericAllAccessMask, aceType: accessAllowedACEType},
+	}
+	process := append(append([]accessEntry(nil), base...), accessEntry{
+		sid:     resolved.peer.SID,
+		mask:    processQueryLimitedAccessMask | synchronizeAccessMask,
+		aceType: accessAllowedACEType,
+	})
+	token := append(append([]accessEntry(nil), base...), accessEntry{
+		sid:     resolved.peer.SID,
+		mask:    tokenQueryAccessMask,
+		aceType: accessAllowedACEType,
+	})
+	return daclPolicy{entries: process}, daclPolicy{entries: token}
 }
 
 func validateCanonicalServiceSID(value string) error {
@@ -196,54 +121,31 @@ func validateCanonicalServiceSID(value string) error {
 	return nil
 }
 
-func validateDACL(evidence DACLEvidence, policy daclPolicy) error {
-	if evidence.Control&(securityDescriptorDACLPresent|securityDescriptorDACLProtected) !=
-		securityDescriptorDACLPresent|securityDescriptorDACLProtected ||
-		!evidence.Present || !evidence.Protected {
+func validateDACL(evidence daclEvidence, policy daclPolicy) error {
+	if evidence.control&(securityDescriptorDACLPresent|securityDescriptorDACLProtected) !=
+		securityDescriptorDACLPresent|securityDescriptorDACLProtected || !evidence.present || !evidence.protected {
 		return fmt.Errorf("%w: descriptor does not contain a protected DACL", ErrDACLVerification)
 	}
-	if evidence.Null {
-		return fmt.Errorf("%w: descriptor contains a null DACL", ErrDACLVerification)
+	if evidence.null || evidence.defaulted {
+		return fmt.Errorf("%w: descriptor contains a null or defaulted DACL", ErrDACLVerification)
 	}
-	if evidence.Defaulted {
-		return fmt.Errorf("%w: descriptor DACL is defaulted", ErrDACLVerification)
+	if len(evidence.accessRules) != len(policy.entries) {
+		return fmt.Errorf("%w: DACL contains %d ACEs, want %d", ErrDACLVerification, len(evidence.accessRules), len(policy.entries))
 	}
-	if len(evidence.AccessRules) != len(policy.entries) {
-		return fmt.Errorf(
-			"%w: DACL contains %d ACEs, want %d",
-			ErrDACLVerification,
-			len(evidence.AccessRules),
-			len(policy.entries),
-		)
-	}
-	expected := make(map[string]AccessEntry, len(policy.entries))
+	expected := make(map[string]accessEntry, len(policy.entries))
 	for _, entry := range policy.entries {
-		expected[entry.SID] = entry
+		expected[entry.sid] = entry
 	}
-	seen := make(map[string]struct{}, len(evidence.AccessRules))
-	for _, entry := range evidence.AccessRules {
-		want, exists := expected[entry.SID]
-		if !exists {
-			return fmt.Errorf("%w: DACL contains unexpected SID %s", ErrDACLVerification, entry.SID)
+	seen := make(map[string]struct{}, len(evidence.accessRules))
+	for _, entry := range evidence.accessRules {
+		want, exists := expected[entry.sid]
+		if !exists || entry != want {
+			return fmt.Errorf("%w: unexpected ACE for SID %s", ErrDACLVerification, entry.sid)
 		}
-		if _, duplicate := seen[entry.SID]; duplicate {
-			return fmt.Errorf("%w: DACL contains duplicate SID %s", ErrDACLVerification, entry.SID)
+		if _, duplicate := seen[entry.sid]; duplicate {
+			return fmt.Errorf("%w: duplicate ACE for SID %s", ErrDACLVerification, entry.sid)
 		}
-		seen[entry.SID] = struct{}{}
-		if entry != want {
-			return fmt.Errorf(
-				"%w: DACL ACE for %s is %+v, want %+v",
-				ErrDACLVerification,
-				entry.SID,
-				entry,
-				want,
-			)
-		}
+		seen[entry.sid] = struct{}{}
 	}
 	return nil
-}
-
-func cloneDACLEvidence(value DACLEvidence) DACLEvidence {
-	value.AccessRules = append([]AccessEntry(nil), value.AccessRules...)
-	return value
 }

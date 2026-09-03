@@ -1,903 +1,227 @@
 package servicebootstrap
 
 import (
-	"context"
 	"errors"
 	"reflect"
-	"sync"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
-const (
-	testOwnServiceSID  = config.ControlServiceSID
-	testPeerServiceSID = config.ExecutorServiceSID
-)
-
-type fakeSCMService struct {
-	statuses   []ServiceObservation
-	statusCall int
-	closeCalls int
-	closeErrs  []error
-	events     *[]string
+type fakeTarget struct {
+	events *[]string
+	label  string
+	policy daclPolicy
+	err    error
 }
 
-func (s *fakeSCMService) Status() (ServiceObservation, error) {
-	*s.events = append(*s.events, "scm-status")
-	if s.statusCall >= len(s.statuses) {
-		return ServiceObservation{}, errors.New("unexpected SCM status call")
+func (target *fakeTarget) applyAndReadBackDACL(policy daclPolicy) (daclEvidence, error) {
+	*target.events = append(*target.events, target.label)
+	target.policy = policy
+	if target.err != nil {
+		return daclEvidence{}, target.err
 	}
-	status := s.statuses[s.statusCall]
-	s.statusCall++
-	return status, nil
-}
-
-func (s *fakeSCMService) Close() error {
-	*s.events = append(*s.events, "close-scm")
-	index := s.closeCalls
-	s.closeCalls++
-	if index < len(s.closeErrs) {
-		return s.closeErrs[index]
-	}
-	return nil
-}
-
-type fakeProcess struct {
-	processID     uint32
-	active        bool
-	creationTimes []time.Time
-	creationCalls int
-	startKeys     []peerverify.ProcessStartKey
-	startKeyCalls int
-	daclOverride  *DACLEvidence
-	daclPolicies  []daclPolicy
-	closeErrs     []error
-	closeCalls    int
-	closed        bool
-	events        *[]string
-	imagePaths    []string
-	imagePathCall int
-	image         peerverify.ImageSubject
-	openImageErr  error
-}
-
-func (p *fakeProcess) HandleProcessID() (uint32, error) {
-	*p.events = append(*p.events, "process-pid")
-	if p.closed {
-		return 0, ErrClosed
-	}
-	return p.processID, nil
-}
-
-func (p *fakeProcess) StillActive() (bool, error) {
-	*p.events = append(*p.events, "process-active")
-	if p.closed {
-		return false, ErrClosed
-	}
-	return p.active, nil
-}
-
-func (p *fakeProcess) HandleCreationTime() (time.Time, error) {
-	*p.events = append(*p.events, "process-created")
-	if p.closed {
-		return time.Time{}, ErrClosed
-	}
-	index := p.creationCalls
-	p.creationCalls++
-	if index >= len(p.creationTimes) {
-		index = len(p.creationTimes) - 1
-	}
-	return p.creationTimes[index], nil
-}
-
-func (p *fakeProcess) HandleStartKey() (peerverify.ProcessStartKey, error) {
-	*p.events = append(*p.events, "process-start-key")
-	if p.closed {
-		return peerverify.ProcessStartKey{}, ErrClosed
-	}
-	index := p.startKeyCalls
-	p.startKeyCalls++
-	if index >= len(p.startKeys) {
-		index = len(p.startKeys) - 1
-	}
-	return p.startKeys[index], nil
-}
-
-func (p *fakeProcess) ApplyAndVerifyDACL(policy daclPolicy) (DACLEvidence, error) {
-	*p.events = append(*p.events, "process-dacl")
-	p.daclPolicies = append(p.daclPolicies, policy)
-	if p.daclOverride != nil {
-		return cloneDACLEvidence(*p.daclOverride), nil
-	}
-	return exactDACLEvidence(policy), nil
-}
-
-func (p *fakeProcess) ImagePathDiagnostic() (string, error) {
-	*p.events = append(*p.events, "process-image-path")
-	if len(p.imagePaths) != 0 {
-		index := p.imagePathCall
-		p.imagePathCall++
-		if index >= len(p.imagePaths) {
-			index = len(p.imagePaths) - 1
-		}
-		return p.imagePaths[index], nil
-	}
-	return `C:\Program Files\AgenticReview\winsw.exe`, nil
-}
-
-func (p *fakeProcess) OpenImage() (peerverify.ImageSubject, error) {
-	*p.events = append(*p.events, "process-open-image")
-	if p.openImageErr != nil {
-		return nil, p.openImageErr
-	}
-	if p.image == nil {
-		return nil, errors.New("no fake process image")
-	}
-	return p.image, nil
-}
-
-func (p *fakeProcess) Wait(ctx context.Context) error {
-	*p.events = append(*p.events, "process-wait")
-	return ctx.Err()
-}
-
-func (p *fakeProcess) Close() error {
-	*p.events = append(*p.events, "close-wrapper")
-	index := p.closeCalls
-	p.closeCalls++
-	if index < len(p.closeErrs) && p.closeErrs[index] != nil {
-		return p.closeErrs[index]
-	}
-	p.closed = true
-	return nil
-}
-
-type fakeCurrentProcess struct {
-	*fakeProcess
-	parents     []uint32
-	parentCalls int
-}
-
-func (p *fakeCurrentProcess) DirectParentProcessID() (uint32, error) {
-	*p.events = append(*p.events, "current-parent")
-	index := p.parentCalls
-	p.parentCalls++
-	if index >= len(p.parents) {
-		index = len(p.parents) - 1
-	}
-	return p.parents[index], nil
+	return daclEvidence{
+		control: securityDescriptorDACLPresent | securityDescriptorDACLProtected,
+		present: true, protected: true, accessRules: append([]accessEntry(nil), policy.entries...),
+	}, nil
 }
 
 type fakeToken struct {
-	daclOverride *DACLEvidence
-	policies     []daclPolicy
-	closeErrs    []error
-	closeCalls   int
-	closed       bool
-	events       *[]string
+	fakeTarget
+	closeErr error
 }
 
-func (t *fakeToken) ApplyAndVerifyDACL(policy daclPolicy) (DACLEvidence, error) {
-	*t.events = append(*t.events, "token-dacl")
-	t.policies = append(t.policies, policy)
-	if t.daclOverride != nil {
-		return cloneDACLEvidence(*t.daclOverride), nil
-	}
-	return exactDACLEvidence(policy), nil
-}
-
-func (t *fakeToken) Close() error {
-	*t.events = append(*t.events, "close-token")
-	index := t.closeCalls
-	t.closeCalls++
-	if index < len(t.closeErrs) && t.closeErrs[index] != nil {
-		return t.closeErrs[index]
-	}
-	t.closed = true
-	return nil
+func (token *fakeToken) Close() error {
+	*token.events = append(*token.events, "close-token")
+	return token.closeErr
 }
 
 type fakePlatform struct {
-	service          *fakeSCMService
-	wrapper          *fakeProcess
-	current          *fakeCurrentProcess
-	token            *fakeToken
-	openWrapperCalls []uint32
-	openServiceNames []string
-	events           *[]string
+	events    *[]string
+	process   *fakeTarget
+	token     *fakeToken
+	processID uint32
 }
 
-type blockingPlatform struct {
-	bootstrapPlatform
-	entered chan struct{}
-	release chan struct{}
+func (platform *fakePlatform) currentProcess() (daclTarget, uint32, error) {
+	*platform.events = append(*platform.events, "current-process")
+	return platform.process, platform.processID, nil
 }
 
-func (p blockingPlatform) OpenSCMService(name string) (scmStatusSource, error) {
-	close(p.entered)
-	<-p.release
-	return p.bootstrapPlatform.OpenSCMService(name)
+func (platform *fakePlatform) openCurrentPrimaryToken() (primaryToken, error) {
+	*platform.events = append(*platform.events, "open-token")
+	return platform.token, nil
 }
 
-func (p *fakePlatform) OpenSCMService(name string) (scmStatusSource, error) {
-	*p.events = append(*p.events, "open-service")
-	p.openServiceNames = append(p.openServiceNames, name)
-	return p.service, nil
-}
-
-func (p *fakePlatform) OpenWrapperProcess(processID uint32) (wrapperProcess, error) {
-	*p.events = append(*p.events, "open-wrapper")
-	p.openWrapperCalls = append(p.openWrapperCalls, processID)
-	return p.wrapper, nil
-}
-
-func (p *fakePlatform) CurrentProcess() (currentProcess, error) {
-	*p.events = append(*p.events, "current-process")
-	return p.current, nil
-}
-
-func (p *fakePlatform) OpenCurrentPrimaryToken() (primaryToken, error) {
-	*p.events = append(*p.events, "open-token")
-	return p.token, nil
-}
-
-func TestOpenUsesOneSCMObservedWrapperForWatcherAndPeerVerification(t *testing.T) {
-	platform, wrapperCreated, hostCreated := newSuccessfulFakePlatform()
-	session, err := openWithTestPlatform(validOptions(), platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := session.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-	if len(*platform.events) == 0 || (*platform.events)[0] != "identity-preflight" {
-		t.Fatalf("first bootstrap operation = %v, want identity-preflight", *platform.events)
-	}
-
-	if !reflect.DeepEqual(platform.openWrapperCalls, []uint32{41}) {
-		t.Fatalf("wrapper opens = %v, want one open for PID 41", platform.openWrapperCalls)
-	}
-	if platform.service.statusCall != 2 {
-		t.Fatalf("SCM status calls = %d, want 2", platform.service.statusCall)
-	}
-	var watcher winprocess.WrapperWatcher = session
-	var stable peerverify.StableWrapper = session
-	if watcher.ProcessID() != 41 || !watcher.CreationTime().Equal(wrapperCreated) {
-		t.Fatalf("watcher facts = (%d, %v)", watcher.ProcessID(), watcher.CreationTime())
-	}
-	if stable.StableFacts() != (peerverify.StableProcessFacts{
-		ProcessID:    41,
-		CreationTime: wrapperCreated,
-		StartKey:     peerverify.ProcessStartKey{Available: true, SequenceNumber: 100},
-	}) {
-		t.Fatalf("stable wrapper facts = %+v", stable.StableFacts())
-	}
-	if processID, err := stable.HandleProcessID(); err != nil || processID != 41 {
-		t.Fatalf("stable handle PID = %d, error = %v", processID, err)
-	}
-
-	evidence := session.Evidence()
-	if err := evidence.Validate(); err != nil {
-		t.Fatalf("evidence validation error = %v", err)
-	}
-	if evidence.Options() != validResolvedOptions() ||
-		evidence.SCMBeforeOpen() != evidence.SCMAfterOpen() ||
-		evidence.DirectParentProcessID() != 41 ||
-		!evidence.StableServiceHostFacts().CreationTime.Equal(hostCreated) {
-		t.Fatalf("unexpected evidence: %+v", evidence)
-	}
-	if len(platform.current.daclPolicies) != 1 || len(platform.wrapper.daclPolicies) != 1 ||
-		len(platform.token.policies) != 1 {
-		t.Fatal("all three bootstrap DACL targets were not applied exactly once")
-	}
-	peerProcessACE := platform.wrapper.daclPolicies[0].entries[3]
-	if peerProcessACE.SID != testPeerServiceSID ||
-		peerProcessACE.Mask != processQueryLimitedAccessMask|synchronizeAccessMask {
-		t.Fatalf("peer process ACE = %+v", peerProcessACE)
-	}
-	peerTokenACE := platform.token.policies[0].entries[3]
-	if peerTokenACE.SID != testPeerServiceSID || peerTokenACE.Mask != tokenQueryAccessMask {
-		t.Fatalf("peer token ACE = %+v", peerTokenACE)
-	}
-}
-
-func TestOpenDerivesIdentityAndDACLPolicyOnlyFromFixedRole(t *testing.T) {
+func TestPrepareAppliesOnlyFixedRoleDACLsAfterIdentityPreflight(t *testing.T) {
 	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
 		t.Run(string(role), func(t *testing.T) {
-			platform, _, _ := newSuccessfulFakePlatform()
-			var captured winidentity.Options
-			dependencies := bootstrapDependencies{
+			resolved, err := resolveRole(role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			events := []string{}
+			process := &fakeTarget{events: &events, label: "process-dacl"}
+			token := &fakeToken{fakeTarget: fakeTarget{events: &events, label: "token-dacl"}}
+			platform := &fakePlatform{events: &events, process: process, token: token, processID: 42}
+			err = prepare(role, dependencies{
 				platform: platform,
 				identityPreflight: func(options winidentity.Options) (winidentity.Evidence, error) {
-					*platform.events = append(*platform.events, "identity-preflight")
-					captured = options
-					return validIdentityEvidence(options, 42), nil
-				},
-			}
-			session, err := openWithDependencies(Options{Role: role}, dependencies)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer session.Close()
-			resolved, err := resolveOptions(Options{Role: role})
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantIdentity := winidentity.Options{
-				OwnService:  winidentity.ServiceIdentity{Name: resolved.ServiceName, SID: resolved.OwnServiceSID},
-				PeerService: winidentity.ServiceIdentity{Name: resolved.PeerServiceName, SID: resolved.PeerServiceSID},
-			}
-			if captured != wantIdentity || !reflect.DeepEqual(platform.openServiceNames, []string{resolved.ServiceName}) {
-				t.Fatalf("identity inputs = %+v, SCM names = %v, want %+v and %q", captured, platform.openServiceNames, wantIdentity, resolved.ServiceName)
-			}
-			processPolicy, tokenPolicy, err := serviceDACLPolicies(resolved.OwnServiceSID, resolved.PeerServiceSID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(platform.current.daclPolicies, []daclPolicy{processPolicy}) ||
-				!reflect.DeepEqual(platform.wrapper.daclPolicies, []daclPolicy{processPolicy}) ||
-				!reflect.DeepEqual(platform.token.policies, []daclPolicy{tokenPolicy}) {
-				t.Fatal("DACL policy was not derived from the fixed role identities")
-			}
-			if session.Evidence().Role() != role || session.Evidence().ServiceName() != resolved.ServiceName ||
-				session.Evidence().PeerServiceName() != resolved.PeerServiceName {
-				t.Fatal("bootstrap evidence omitted the fixed role identity")
-			}
-		})
-	}
-}
-
-func TestIdentityPreflightFailureCannotReachPlatformOrDACLMutation(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		evidence func(winidentity.Options) winidentity.Evidence
-		err      error
-	}{
-		{name: "verification", err: errors.New("injected identity verification failure")},
-		{name: "cleanup", err: errors.New("injected identity cleanup failure")},
-		{name: "wrong fixed identity", evidence: func(options winidentity.Options) winidentity.Evidence {
-			value := validIdentityEvidence(options, 42)
-			value.OwnService.SID = config.ExecutorServiceSID
-			return value
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			platform, _, _ := newSuccessfulFakePlatform()
-			failure := test.err
-			dependencies := bootstrapDependencies{
-				platform: platform,
-				identityPreflight: func(options winidentity.Options) (winidentity.Evidence, error) {
-					if test.evidence != nil {
-						return test.evidence(options), nil
+					events = append(events, "identity-preflight")
+					if options.OwnService != resolved.own || options.PeerService != resolved.peer {
+						t.Fatalf("identity options = %#v", options)
 					}
-					return winidentity.Evidence{}, failure
+					return winidentity.Evidence{
+						ProcessID:   42,
+						OwnService:  winidentity.ServiceEvidence{Name: resolved.own.Name, SID: resolved.own.SID},
+						PeerService: winidentity.ServiceEvidence{Name: resolved.peer.Name, SID: resolved.peer.SID},
+					}, nil
 				},
-			}
-			if session, err := openWithDependencies(validOptions(), dependencies); session != nil || err == nil {
-				t.Fatalf("session = %v, error = %v", session, err)
-			}
-			if len(*platform.events) != 0 || len(platform.current.daclPolicies) != 0 ||
-				len(platform.wrapper.daclPolicies) != 0 || len(platform.token.policies) != 0 {
-				t.Fatalf("failed identity preflight reached platform or DACLs: events=%v", *platform.events)
-			}
-		})
-	}
-}
-
-func TestIdentityPIDMismatchClosesReadOnlyBootstrapResourcesBeforeDACLMutation(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	dependencies := bootstrapDependencies{
-		platform: platform,
-		identityPreflight: func(options winidentity.Options) (winidentity.Evidence, error) {
-			return validIdentityEvidence(options, 99), nil
-		},
-	}
-	if session, err := openWithDependencies(validOptions(), dependencies); session != nil || err == nil {
-		t.Fatalf("session = %v, error = %v", session, err)
-	}
-	if len(platform.current.daclPolicies) != 0 || len(platform.wrapper.daclPolicies) != 0 ||
-		len(platform.token.policies) != 0 {
-		t.Fatal("identity PID mismatch wrote a DACL")
-	}
-	if platform.wrapper.closeCalls == 0 || platform.service.closeCalls == 0 || platform.token.closeCalls != 0 {
-		t.Fatalf("cleanup calls = wrapper %d service %d token %d", platform.wrapper.closeCalls, platform.service.closeCalls, platform.token.closeCalls)
-	}
-}
-
-func TestServiceDACLPoliciesGrantOnlyReviewedRights(t *testing.T) {
-	processPolicy, tokenPolicy, err := serviceDACLPolicies(testOwnServiceSID, testPeerServiceSID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := []AccessEntry{
-		{SID: localSystemSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
-		{SID: builtinAdministratorsSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
-		{SID: testOwnServiceSID, Mask: genericAllAccessMask, ACEType: accessAllowedACEType, Flags: noACEFlags},
-	}
-	wantProcess := append(append([]AccessEntry(nil), base...), AccessEntry{
-		SID:     testPeerServiceSID,
-		Mask:    processQueryLimitedAccessMask | synchronizeAccessMask,
-		ACEType: accessAllowedACEType,
-		Flags:   noACEFlags,
-	})
-	wantToken := append(append([]AccessEntry(nil), base...), AccessEntry{
-		SID:     testPeerServiceSID,
-		Mask:    tokenQueryAccessMask,
-		ACEType: accessAllowedACEType,
-		Flags:   noACEFlags,
-	})
-	if !reflect.DeepEqual(processPolicy.entries, wantProcess) {
-		t.Fatalf("process DACL policy = %#v, want %#v", processPolicy.entries, wantProcess)
-	}
-	if !reflect.DeepEqual(tokenPolicy.entries, wantToken) {
-		t.Fatalf("token DACL policy = %#v, want %#v", tokenPolicy.entries, wantToken)
-	}
-}
-
-func TestBootstrapGateAllowsOnlyOneProcessWideAttempt(t *testing.T) {
-	gate := &bootstrapGate{}
-	firstPlatform, _, _ := newSuccessfulFakePlatform()
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	firstResult := make(chan Session, 1)
-	firstError := make(chan error, 1)
-	go func() {
-		platform := blockingPlatform{
-			bootstrapPlatform: firstPlatform,
-			entered:           entered,
-			release:           release,
-		}
-		session, err := gate.open(validOptions(), testBootstrapDependencies(platform, firstPlatform.events))
-		firstResult <- session
-		firstError <- err
-	}()
-	<-entered
-
-	secondPlatform, _, _ := newSuccessfulFakePlatform()
-	second, err := gate.open(validOptions(), testBootstrapDependencies(secondPlatform, secondPlatform.events))
-	if second != nil || !errors.Is(err, ErrAlreadyBootstrapped) {
-		t.Fatalf("second session = %v, error = %v", second, err)
-	}
-	if len(*secondPlatform.events) != 0 {
-		t.Fatalf("second bootstrap reached platform operations: %v", *secondPlatform.events)
-	}
-
-	close(release)
-	first := <-firstResult
-	if err := <-firstError; err != nil {
-		t.Fatal(err)
-	}
-	if first == nil {
-		t.Fatal("first bootstrap returned no session")
-	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestBootstrapGateDoesNotRetryAfterPartiallyMutatingFailure(t *testing.T) {
-	gate := &bootstrapGate{}
-	firstPlatform, _, _ := newSuccessfulFakePlatform()
-	invalidDACL := exactDACLEvidence(daclPolicy{entries: []AccessEntry{{SID: localSystemSID, Mask: 1}}})
-	firstPlatform.wrapper.daclOverride = &invalidDACL
-	if session, err := gate.open(validOptions(), testBootstrapDependencies(firstPlatform, firstPlatform.events)); session != nil || !errors.Is(err, ErrDACLVerification) {
-		t.Fatalf("first session = %v, error = %v", session, err)
-	}
-	secondPlatform, _, _ := newSuccessfulFakePlatform()
-	if session, err := gate.open(validOptions(), testBootstrapDependencies(secondPlatform, secondPlatform.events)); session != nil || !errors.Is(err, ErrAlreadyBootstrapped) {
-		t.Fatalf("second session = %v, error = %v", session, err)
-	}
-	if len(*secondPlatform.events) != 0 {
-		t.Fatalf("retry reached platform operations: %v", *secondPlatform.events)
-	}
-}
-
-func TestOpenRejectsSCMStateOrPIDChangesAroundOneProcessOpen(t *testing.T) {
-	tests := []struct {
-		name   string
-		second ServiceObservation
-	}{
-		{name: "state", second: ServiceObservation{State: ServicePaused, ProcessID: 41}},
-		{name: "PID", second: ServiceObservation{State: ServiceRunning, ProcessID: 42}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			platform, _, _ := newSuccessfulFakePlatform()
-			platform.service.statuses[1] = test.second
-			session, err := openWithTestPlatform(validOptions(), platform)
-			if session != nil || !errors.Is(err, ErrWrapperUnstable) {
-				t.Fatalf("session = %v, error = %v", session, err)
-			}
-			if !reflect.DeepEqual(platform.openWrapperCalls, []uint32{41}) {
-				t.Fatalf("wrapper opens = %v", platform.openWrapperCalls)
-			}
-			if platform.wrapper.closeCalls == 0 || platform.service.closeCalls == 0 {
-				t.Fatal("rejected handles were not closed")
-			}
-		})
-	}
-}
-
-func TestOpenRejectsNonCurrentWinSWParentBeforeChangingDACLs(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	platform.current.parents = []uint32{99, 99}
-	session, err := openWithTestPlatform(validOptions(), platform)
-	if session != nil || !errors.Is(err, ErrParentMismatch) {
-		t.Fatalf("session = %v, error = %v", session, err)
-	}
-	if len(platform.current.daclPolicies) != 0 || len(platform.wrapper.daclPolicies) != 0 ||
-		len(platform.token.policies) != 0 {
-		t.Fatal("DACLs were changed before direct-parent verification")
-	}
-}
-
-func TestOpenRejectsCreationOrStartKeyInstability(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*fakePlatform)
-	}{
-		{
-			name: "creation time",
-			mutate: func(platform *fakePlatform) {
-				platform.wrapper.creationTimes[1] = platform.wrapper.creationTimes[0].Add(time.Nanosecond)
-			},
-		},
-		{
-			name: "start key",
-			mutate: func(platform *fakePlatform) {
-				platform.wrapper.startKeys[1].SequenceNumber++
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			platform, _, _ := newSuccessfulFakePlatform()
-			test.mutate(platform)
-			session, err := openWithTestPlatform(validOptions(), platform)
-			if session != nil || !errors.Is(err, ErrWrapperUnstable) {
-				t.Fatalf("session = %v, error = %v", session, err)
-			}
-		})
-	}
-}
-
-func TestServiceDACLValidationRejectsExtraDuplicateAndBroadACEs(t *testing.T) {
-	processPolicy, _, err := serviceDACLPolicies(testOwnServiceSID, testPeerServiceSID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	valid := exactDACLEvidence(processPolicy)
-	if err := validateDACL(valid, processPolicy); err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name   string
-		mutate func(*DACLEvidence)
-	}{
-		{name: "unprotected", mutate: func(value *DACLEvidence) {
-			value.Control &^= securityDescriptorDACLProtected
-			value.Protected = false
-		}},
-		{name: "defaulted", mutate: func(value *DACLEvidence) { value.Defaulted = true }},
-		{name: "null", mutate: func(value *DACLEvidence) { value.Null = true }},
-		{name: "extra", mutate: func(value *DACLEvidence) {
-			value.AccessRules = append(value.AccessRules, AccessEntry{SID: "S-1-1-0", Mask: 1})
-		}},
-		{name: "duplicate", mutate: func(value *DACLEvidence) {
-			value.AccessRules[0] = value.AccessRules[1]
-		}},
-		{name: "peer broad", mutate: func(value *DACLEvidence) {
-			value.AccessRules[3].Mask = genericAllAccessMask
-		}},
-		{name: "deny", mutate: func(value *DACLEvidence) { value.AccessRules[3].ACEType = 1 }},
-		{name: "inherited", mutate: func(value *DACLEvidence) { value.AccessRules[3].Flags = 0x10 }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := cloneDACLEvidence(valid)
-			test.mutate(&candidate)
-			if err := validateDACL(candidate, processPolicy); !errors.Is(err, ErrDACLVerification) {
-				t.Fatalf("error = %v, want ErrDACLVerification", err)
-			}
-		})
-	}
-}
-
-func TestEvidenceIsDetached(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	session, err := openWithTestPlatform(validOptions(), platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer session.Close()
-	first := session.Evidence()
-	firstDACL := first.ServiceHostProcessDACL()
-	firstDACL.AccessRules[0].SID = "mutated"
-	second := session.Evidence()
-	if second.ServiceHostProcessDACL().AccessRules[0].SID == "mutated" {
-		t.Fatal("Evidence exposed mutable internal DACL storage")
-	}
-}
-
-func TestSessionCloseKeepsFailedWrapperHandleForRetry(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	closeFailure := errors.New("injected CloseHandle failure")
-	platform.wrapper.closeErrs = []error{closeFailure, nil}
-	session, err := openWithTestPlatform(validOptions(), platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := session.Close(); !errors.Is(err, closeFailure) {
-		t.Fatalf("first Close error = %v", err)
-	}
-	if processID, err := session.HandleProcessID(); err != nil || processID != 41 {
-		t.Fatalf("retained handle after failed Close = PID %d, error %v", processID, err)
-	}
-	if err := session.Close(); err != nil {
-		t.Fatalf("retry Close error = %v", err)
-	}
-	if platform.wrapper.closeCalls != 2 {
-		t.Fatalf("wrapper close calls = %d, want 2", platform.wrapper.closeCalls)
-	}
-	if _, err := session.HandleProcessID(); !errors.Is(err, ErrClosed) {
-		t.Fatalf("post-close HandleProcessID error = %v, want ErrClosed", err)
-	}
-}
-
-func TestSessionCloseUsesReverseAcquisitionOrder(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	session, err := openWithTestPlatform(validOptions(), platform)
-	if err != nil {
-		t.Fatal(err)
-	}
-	*platform.events = nil
-
-	if err := session.Close(); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"close-token", "close-wrapper", "close-scm"}
-	if !reflect.DeepEqual(*platform.events, want) {
-		t.Fatalf("Close events = %v, want %v", *platform.events, want)
-	}
-}
-
-func TestSessionCloseRetriesOnlyFailedResource(t *testing.T) {
-	tests := []struct {
-		name       string
-		fail       func(*fakePlatform, error)
-		retryEvent string
-		wantCalls  [3]int
-	}{
-		{
-			name: "primary token",
-			fail: func(platform *fakePlatform, closeFailure error) {
-				platform.token.closeErrs = []error{closeFailure, nil}
-			},
-			retryEvent: "close-token",
-			wantCalls:  [3]int{2, 1, 1},
-		},
-		{
-			name: "wrapper",
-			fail: func(platform *fakePlatform, closeFailure error) {
-				platform.wrapper.closeErrs = []error{closeFailure, nil}
-			},
-			retryEvent: "close-wrapper",
-			wantCalls:  [3]int{1, 2, 1},
-		},
-		{
-			name: "SCM service",
-			fail: func(platform *fakePlatform, closeFailure error) {
-				platform.service.closeErrs = []error{closeFailure, nil}
-			},
-			retryEvent: "close-scm",
-			wantCalls:  [3]int{1, 1, 2},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			platform, _, _ := newSuccessfulFakePlatform()
-			closeFailure := errors.New("injected close failure")
-			test.fail(platform, closeFailure)
-			session, err := openWithTestPlatform(validOptions(), platform)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			*platform.events = nil
-
-			if err := session.Close(); !errors.Is(err, closeFailure) {
-				t.Fatalf("first Close error = %v, want injected failure", err)
+			wantEvents := []string{"identity-preflight", "current-process", "open-token", "process-dacl", "token-dacl", "close-token"}
+			if !reflect.DeepEqual(events, wantEvents) {
+				t.Fatalf("events = %v, want %v", events, wantEvents)
 			}
-			wantFirst := []string{"close-token", "close-wrapper", "close-scm"}
-			if !reflect.DeepEqual(*platform.events, wantFirst) {
-				t.Fatalf("first Close events = %v, want %v", *platform.events, wantFirst)
-			}
-
-			*platform.events = nil
-			if err := session.Close(); err != nil {
-				t.Fatalf("retry Close error = %v", err)
-			}
-			if !reflect.DeepEqual(*platform.events, []string{test.retryEvent}) {
-				t.Fatalf("retry Close events = %v, want [%s]", *platform.events, test.retryEvent)
-			}
-			if got := [3]int{platform.token.closeCalls, platform.wrapper.closeCalls, platform.service.closeCalls}; got != test.wantCalls {
-				t.Fatalf("close calls = %v, want %v", got, test.wantCalls)
-			}
-
-			*platform.events = nil
-			if err := session.Close(); err != nil {
-				t.Fatalf("repeated Close error = %v", err)
-			}
-			if len(*platform.events) != 0 {
-				t.Fatalf("repeated Close retried released resources: %v", *platform.events)
+			processPolicy, tokenPolicy := policiesForRole(resolved)
+			if !reflect.DeepEqual(process.policy, processPolicy) || !reflect.DeepEqual(token.policy, tokenPolicy) {
+				t.Fatal("Prepare applied a non-fixed DACL policy")
 			}
 		})
 	}
 }
 
-func TestSessionCopiesSerializeConcurrentClose(t *testing.T) {
-	platform, _, _ := newSuccessfulFakePlatform()
-	session, err := openWithTestPlatform(validOptions(), platform)
+func TestPrepareFailsBeforeMutationAndAlwaysClosesOpenedToken(t *testing.T) {
+	resolved, err := resolveRole(config.RoleControl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	copyOfSession := session
-	*platform.events = nil
-
-	const closeCount = 16
-	start := make(chan struct{})
-	errorsFound := make(chan error, closeCount)
-	var wait sync.WaitGroup
-	for index := 0; index < closeCount; index++ {
-		candidate := session
-		if index%2 == 1 {
-			candidate = copyOfSession
-		}
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			<-start
-			errorsFound <- candidate.Close()
-		}()
-	}
-	close(start)
-	wait.Wait()
-	close(errorsFound)
-	for err := range errorsFound {
-		if err != nil {
-			t.Fatalf("concurrent Close error = %v", err)
-		}
-	}
-
-	want := []string{"close-token", "close-wrapper", "close-scm"}
-	if !reflect.DeepEqual(*platform.events, want) {
-		t.Fatalf("concurrent Close events = %v, want %v", *platform.events, want)
-	}
-	if got := [3]int{platform.token.closeCalls, platform.wrapper.closeCalls, platform.service.closeCalls}; got != [3]int{1, 1, 1} {
-		t.Fatalf("concurrent close calls = %v, want [1 1 1]", got)
-	}
-}
-
-func TestValidateOptionsAcceptsOnlyFixedRoles(t *testing.T) {
-	for _, options := range []Options{{}, {Role: "combined"}} {
-		if err := validateOptions(options); !errors.Is(err, ErrInvalidOptions) {
-			t.Fatalf("options = %+v, error = %v", options, err)
-		}
-	}
-}
-
-func newSuccessfulFakePlatform() (*fakePlatform, time.Time, time.Time) {
 	events := []string{}
-	wrapperCreated := time.Unix(1_700_000_000, 100).UTC()
-	hostCreated := wrapperCreated.Add(time.Second)
-	wrapper := &fakeProcess{
-		processID:     41,
-		active:        true,
-		creationTimes: []time.Time{wrapperCreated, wrapperCreated},
-		startKeys: []peerverify.ProcessStartKey{
-			{Available: true, SequenceNumber: 100},
-			{Available: true, SequenceNumber: 100},
-		},
-		events: &events,
-	}
-	currentProcess := &fakeCurrentProcess{
-		fakeProcess: &fakeProcess{
-			processID:     42,
-			active:        true,
-			creationTimes: []time.Time{hostCreated, hostCreated},
-			startKeys: []peerverify.ProcessStartKey{
-				{Available: true, SequenceNumber: 101},
-				{Available: true, SequenceNumber: 101},
-			},
-			events: &events,
-		},
-		parents: []uint32{41, 41},
-	}
-	service := &fakeSCMService{
-		statuses: []ServiceObservation{
-			{State: ServiceRunning, ProcessID: 41},
-			{State: ServiceRunning, ProcessID: 41},
-		},
-		events: &events,
-	}
-	token := &fakeToken{events: &events}
-	return &fakePlatform{
-		service: service,
-		wrapper: wrapper,
-		current: currentProcess,
-		token:   token,
-		events:  &events,
-	}, wrapperCreated, hostCreated
-}
-
-func validOptions() Options {
-	return Options{Role: config.RoleControl}
-}
-
-func validResolvedOptions() ResolvedOptions {
-	resolved, err := resolveOptions(validOptions())
-	if err != nil {
-		panic(err)
-	}
-	return resolved
-}
-
-func openWithTestPlatform(options Options, platform *fakePlatform) (Session, error) {
-	return openWithDependencies(options, testBootstrapDependencies(platform, platform.events))
-}
-
-func testBootstrapDependencies(platform bootstrapPlatform, events *[]string) bootstrapDependencies {
-	return bootstrapDependencies{
+	process := &fakeTarget{events: &events, label: "process-dacl", err: errors.New("process DACL failed")}
+	token := &fakeToken{fakeTarget: fakeTarget{events: &events, label: "token-dacl"}, closeErr: errors.New("close failed")}
+	platform := &fakePlatform{events: &events, process: process, token: token, processID: 42}
+	err = prepare(config.RoleControl, dependencies{
 		platform: platform,
-		identityPreflight: func(options winidentity.Options) (winidentity.Evidence, error) {
-			*events = append(*events, "identity-preflight")
-			return validIdentityEvidence(options, 42), nil
+		identityPreflight: func(winidentity.Options) (winidentity.Evidence, error) {
+			return winidentity.Evidence{
+				ProcessID:   42,
+				OwnService:  winidentity.ServiceEvidence{Name: resolved.own.Name, SID: resolved.own.SID},
+				PeerService: winidentity.ServiceEvidence{Name: resolved.peer.Name, SID: resolved.peer.SID},
+			}, nil
 		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "process DACL failed") || !strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("prepare error = %v", err)
+	}
+	if !reflect.DeepEqual(events, []string{"current-process", "open-token", "process-dacl", "close-token"}) {
+		t.Fatalf("events = %v", events)
 	}
 }
 
-func validIdentityEvidence(options winidentity.Options, processID uint32) winidentity.Evidence {
-	service := func(identity winidentity.ServiceIdentity) winidentity.ServiceEvidence {
-		return winidentity.ServiceEvidence{
-			Name: identity.Name, SID: identity.SID,
-			SIDType: winidentity.ServiceSIDTypeRestricted, ServiceType: 0x10,
-			StartAccount: `NT SERVICE\` + identity.Name, Domain: "NT SERVICE", AccountType: 5,
+func TestRolePoliciesGrantOnlyRequiredPeerAccess(t *testing.T) {
+	resolved, err := resolveRole(config.RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, token := policiesForRole(resolved)
+	if len(process.entries) != 4 || len(token.entries) != 4 {
+		t.Fatalf("policy lengths = %d/%d", len(process.entries), len(token.entries))
+	}
+	if process.entries[3] != (accessEntry{sid: resolved.peer.SID, mask: processQueryLimitedAccessMask | synchronizeAccessMask}) {
+		t.Fatalf("peer process ACE = %#v", process.entries[3])
+	}
+	if token.entries[3] != (accessEntry{sid: resolved.peer.SID, mask: tokenQueryAccessMask}) {
+		t.Fatalf("peer token ACE = %#v", token.entries[3])
+	}
+	for _, entries := range [][]accessEntry{process.entries[:3], token.entries[:3]} {
+		for _, entry := range entries {
+			if entry.mask != genericAllAccessMask {
+				t.Fatalf("full-access ACE = %#v", entry)
+			}
 		}
 	}
-	return winidentity.Evidence{
-		ProcessID:  processID,
-		OwnService: service(options.OwnService), PeerService: service(options.PeerService),
-		Token: winidentity.TokenEvidence{
-			TokenID: winidentity.LUID{LowPart: 1}, AuthenticationID: winidentity.LUID{LowPart: 2},
-			ModifiedID: winidentity.LUID{LowPart: 3}, Type: 1, HasRestrictions: true,
-			User: winidentity.SIDEntry{SID: options.OwnService.SID},
-			Groups: []winidentity.SIDEntry{
-				{SID: options.OwnService.SID, Attributes: 7},
-				{SID: "S-1-5-80-0", Attributes: 7},
-				{SID: "S-1-5-5-100-200", Attributes: 0xc0000007},
-			},
-			RestrictedSIDs: []winidentity.SIDEntry{
-				{SID: options.OwnService.SID},
-				{SID: "S-1-1-0"},
-				{SID: "S-1-5-33"},
-				{SID: "S-1-5-5-100-200"},
-			},
-			Privileges: []winidentity.PrivilegeEvidence{{Name: "SeChangeNotifyPrivilege", LUID: winidentity.LUID{LowPart: 4}, Attributes: 2}},
-		},
+}
+
+func TestValidateDACLRejectsAnythingExceptTheExactProtectedPolicy(t *testing.T) {
+	resolved, err := resolveRole(config.RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, _ := policiesForRole(resolved)
+	valid := daclEvidence{
+		control: securityDescriptorDACLPresent | securityDescriptorDACLProtected,
+		present: true, protected: true, accessRules: append([]accessEntry(nil), policy.entries...),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*daclEvidence)
+	}{
+		{"not protected", func(value *daclEvidence) { value.protected = false }},
+		{"null", func(value *daclEvidence) { value.null = true }},
+		{"defaulted", func(value *daclEvidence) { value.defaulted = true }},
+		{"missing ACE", func(value *daclEvidence) { value.accessRules = value.accessRules[:3] }},
+		{"extra ACE", func(value *daclEvidence) {
+			value.accessRules = append(value.accessRules, accessEntry{sid: "S-1-1-0", mask: genericAllAccessMask})
+		}},
+		{"wrong peer mask", func(value *daclEvidence) { value.accessRules[3].mask = genericAllAccessMask }},
+		{"wrong ACE type", func(value *daclEvidence) { value.accessRules[3].aceType = 1 }},
+		{"inheritance flags", func(value *daclEvidence) { value.accessRules[3].flags = 1 }},
+		{"duplicate SID", func(value *daclEvidence) { value.accessRules[3].sid = value.accessRules[2].sid }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.accessRules = append([]accessEntry(nil), valid.accessRules...)
+			test.mutate(&candidate)
+			if err := validateDACL(candidate, policy); !errors.Is(err, ErrDACLVerification) {
+				t.Fatalf("validateDACL = %v, want ErrDACLVerification", err)
+			}
+		})
 	}
 }
 
-func exactDACLEvidence(policy daclPolicy) DACLEvidence {
-	return DACLEvidence{
-		Control:     securityDescriptorDACLPresent | securityDescriptorDACLProtected,
-		Present:     true,
-		Protected:   true,
-		AccessRules: append([]AccessEntry(nil), policy.entries...),
+func TestPrepareRejectsUnsupportedRoleBeforePreflight(t *testing.T) {
+	called := false
+	err := prepare(config.Role("other"), dependencies{
+		platform: &fakePlatform{},
+		identityPreflight: func(winidentity.Options) (winidentity.Evidence, error) {
+			called = true
+			return winidentity.Evidence{}, nil
+		},
+	})
+	if !errors.Is(err, ErrInvalidRole) || called {
+		t.Fatalf("Prepare = %v, preflight called = %v", err, called)
+	}
+}
+
+func TestPrepareGateMakesEveryAttemptTerminal(t *testing.T) {
+	gate := prepareGate{}
+	resolved, err := resolveRole(config.RoleControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	process := &fakeTarget{events: &events, label: "process-dacl", err: errors.New("first attempt failed")}
+	token := &fakeToken{fakeTarget: fakeTarget{events: &events, label: "token-dacl"}}
+	deps := dependencies{
+		platform: &fakePlatform{events: &events, process: process, token: token, processID: 42},
+		identityPreflight: func(winidentity.Options) (winidentity.Evidence, error) {
+			return winidentity.Evidence{
+				ProcessID:   42,
+				OwnService:  winidentity.ServiceEvidence{Name: resolved.own.Name, SID: resolved.own.SID},
+				PeerService: winidentity.ServiceEvidence{Name: resolved.peer.Name, SID: resolved.peer.SID},
+			}, nil
+		},
+	}
+	if err := gate.run(config.RoleControl, deps); err == nil {
+		t.Fatal("first failed attempt returned nil")
+	}
+	if err := gate.run(config.RoleControl, deps); !errors.Is(err, ErrAlreadyPrepared) {
+		t.Fatalf("second attempt = %v, want ErrAlreadyPrepared", err)
 	}
 }

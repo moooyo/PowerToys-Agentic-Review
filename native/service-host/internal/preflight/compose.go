@@ -85,15 +85,6 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 	if err := validateConfigurationPair(controlConfig, executorConfig); err != nil {
 		return Evidence{}, err
 	}
-	if err := validateBootstrapBinding(
-		input.bootstrap,
-		input.role,
-		controlConfig,
-		executorConfig,
-		input.installation.identity,
-	); err != nil {
-		return Evidence{}, err
-	}
 	installationSigner := input.installation.release.signerPin
 	if !validSHA256(installationSigner) ||
 		subtle.ConstantTimeCompare(
@@ -194,7 +185,7 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 	if err != nil {
 		return Evidence{}, err
 	}
-	releaseBindings, serviceHost, err := bindReleaseBinding(
+	releaseBindings, _, err := bindReleaseBinding(
 		input.installation.release,
 		manifestEvidence,
 		fileIndex,
@@ -203,14 +194,6 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		return Evidence{}, err
 	}
 	bindings = append(bindings, releaseBindings...)
-	if err := validateCurrentImageBinding(
-		input.currentImage,
-		input.bootstrap,
-		input.installation.identity.ProcessID,
-		serviceHost,
-	); err != nil {
-		return Evidence{}, err
-	}
 	if err := validateDataRootBinding(input.dataRoot, input.role, controlConfig, executorConfig, roots); err != nil {
 		return Evidence{}, err
 	}
@@ -247,8 +230,6 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		controlCredentials:  cloneControlCredentials(input.credentials),
 		dataRoot:            cloneDataRootBinding(input.dataRoot),
 		contents:            cloneRuntimeContents(contents),
-		bootstrap:           input.bootstrap,
-		currentImage:        input.currentImage,
 	}
 	result.digest, err = digestEvidence(result)
 	if err != nil {

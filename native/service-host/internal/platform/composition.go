@@ -26,8 +26,7 @@ var (
 type compositionBuilder interface {
 	selectRole(context.Context, BootstrapOptions) error
 	loadReleaseAuthority(context.Context) error
-	openServiceBootstrap(context.Context) error
-	measureCurrentImage(context.Context) error
+	prepareServiceSecurity(context.Context) error
 	verifyInstallation(context.Context) error
 	verifyDataRoot(context.Context) error
 	openRoleCredentials(context.Context) error
@@ -103,8 +102,7 @@ func runComposition(
 	steps := []compositionStep{
 		{name: "select service role", run: func(ctx context.Context) error { return builder.selectRole(ctx, options) }},
 		{name: "load release authority", run: builder.loadReleaseAuthority},
-		{name: "open service bootstrap", run: builder.openServiceBootstrap},
-		{name: "measure current image", run: builder.measureCurrentImage},
+		{name: "prepare service security", run: builder.prepareServiceSecurity},
 		{name: "verify installation", run: builder.verifyInstallation},
 		{name: "verify data root", run: builder.verifyDataRoot},
 		{name: "open role credentials", run: builder.openRoleCredentials},
@@ -373,7 +371,6 @@ type runtimeSupervision struct {
 	readShutdownDeadline func() (time.Time, bool)
 	serveLocalRPC        func(context.Context) error
 	runRelay             func(context.Context) error
-	waitOwnWrapper       func(context.Context) error
 	waitPeerWrapper      func(context.Context) error
 	waitPeerHost         func(context.Context) error
 	waitStderr           func(context.Context) error
@@ -386,7 +383,6 @@ const (
 	supervisedLocalRPC supervisedTaskKind = iota
 	supervisedRelay
 	supervisedNode
-	supervisedOwnWrapper
 	supervisedPeerWrapper
 	supervisedPeerHost
 	supervisedStderr
@@ -443,8 +439,7 @@ func superviseRuntime(
 ) error {
 	if ctx == nil || cancel == nil || isNilCompositionValue(runtime.node) ||
 		runtime.serveLocalRPC == nil || runtime.runRelay == nil ||
-		runtime.waitOwnWrapper == nil || runtime.waitPeerWrapper == nil ||
-		runtime.waitPeerHost == nil || runtime.waitStderr == nil {
+		runtime.waitPeerWrapper == nil || runtime.waitPeerHost == nil || runtime.waitStderr == nil {
 		return errInvalidComposition
 	}
 	tasks := []supervisedTask{
@@ -455,9 +450,6 @@ func superviseRuntime(
 			return 0, runtime.runRelay(ctx)
 		}},
 		{kind: supervisedNode, name: "Node process", run: runtime.node.WaitContext},
-		{kind: supervisedOwnWrapper, name: "own WinSW wrapper", run: func(ctx context.Context) (uint32, error) {
-			return 0, runtime.waitOwnWrapper(ctx)
-		}},
 		{kind: supervisedPeerWrapper, name: "peer WinSW wrapper", run: func(ctx context.Context) (uint32, error) {
 			return 0, runtime.waitPeerWrapper(ctx)
 		}},
@@ -775,8 +767,6 @@ func (outcome *supervisionOutcome) observeClean(result supervisedResult) (error,
 		if outcome.relayClean || result.relayCleanAtCompletion {
 			return nil, false
 		}
-	case supervisedOwnWrapper:
-		// The current service wrapper must outlive its ServiceHost child.
 	default:
 		return fmt.Errorf("%w: unknown supervised task", errInvalidComposition), false
 	}

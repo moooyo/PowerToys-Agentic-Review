@@ -30,10 +30,6 @@ func TestPeerVerificationPlanAtomicallyMapsAttestedRoleInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			currentImage, ok := evidence.CurrentImageBinding()
-			if !ok {
-				t.Fatal("Evidence omitted current-image binding")
-			}
 			configuration := evidence.Configuration()
 			expectedWrapper := configuration.Installation.Root + `\` + configuration.PeerService.Name + ".exe"
 			if plan.Role() != role || plan.OwnService() != configuration.OwnService ||
@@ -42,8 +38,7 @@ func TestPeerVerificationPlanAtomicallyMapsAttestedRoleInputs(t *testing.T) {
 				plan.Wrapper().SHA256() == "" || plan.ServiceHost().SHA256() == "" ||
 				plan.ApprovedSignerCertificateDERSHA256() != evidence.ApprovedSignerCertificateDERSHA256() ||
 				plan.PreflightDigest() != preflightDigest ||
-				plan.ReleaseTemplateDigest() != evidence.ReleaseTemplateDigest() ||
-				plan.CurrentImageDigest() != currentImage.SourceDigest() {
+				plan.ReleaseTemplateDigest() != evidence.ReleaseTemplateDigest() {
 				t.Fatalf("plan omitted or selected wrong peer inputs: %#v", plan)
 			}
 
@@ -438,7 +433,6 @@ func TestPeerVerificationPlanRejectsZeroAndBoundMutations(t *testing.T) {
 		{"signer", func(value *PeerVerificationPlan) { value.approvedSignerPin = "bad" }},
 		{"preflight digest", func(value *PeerVerificationPlan) { value.preflightDigest = [32]byte{} }},
 		{"release digest", func(value *PeerVerificationPlan) { value.releaseDigest = [32]byte{} }},
-		{"current image digest", func(value *PeerVerificationPlan) { value.currentImageDigest = [32]byte{} }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

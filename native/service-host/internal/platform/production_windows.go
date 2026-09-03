@@ -33,8 +33,6 @@ type windowsComposition struct {
 	role    config.Role
 
 	releaseAuthority releaseprofile.Evidence
-	serviceBootstrap servicebootstrap.Session
-	currentImage     servicebootstrap.CurrentImageEvidence
 	installation     installverify.Evidence
 	dataRoot         dataroot.Evidence
 
@@ -94,25 +92,11 @@ func (composition *windowsComposition) loadReleaseAuthority(ctx context.Context)
 	return err
 }
 
-func (composition *windowsComposition) openServiceBootstrap(ctx context.Context) error {
+func (composition *windowsComposition) prepareServiceSecurity(ctx context.Context) error {
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	session, err := servicebootstrap.Open(servicebootstrap.Options{Role: composition.role})
-	composition.serviceBootstrap = session
-	return err
-}
-
-func (composition *windowsComposition) measureCurrentImage(ctx context.Context) error {
-	if cause := context.Cause(ctx); cause != nil {
-		return cause
-	}
-	if composition.serviceBootstrap == nil {
-		return errors.New("service bootstrap session is unavailable")
-	}
-	image, err := composition.serviceBootstrap.MeasureCurrentImage()
-	composition.currentImage = image
-	return err
+	return servicebootstrap.Prepare(composition.role)
 }
 
 func (composition *windowsComposition) verifyInstallation(ctx context.Context) error {
@@ -157,14 +141,9 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 }
 
 func (composition *windowsComposition) composePreflight(context.Context) error {
-	if composition.serviceBootstrap == nil {
-		return errors.New("service bootstrap session is unavailable")
-	}
 	evidence, err := preflight.Compose(preflight.Input{
 		Role:                 composition.role,
 		ActualBootstrapPath:  composition.options.ActualBootstrapPath,
-		Bootstrap:            composition.serviceBootstrap.Evidence(),
-		CurrentImage:         composition.currentImage,
 		Installation:         composition.installation,
 		DataRoot:             composition.dataRoot,
 		LocalAuthoritySigner: composition.localAuthority,
@@ -372,8 +351,7 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 	if composition.node == nil || composition.nodeOwner == nil ||
 		composition.nodeEndpoint == nil || composition.stderr == nil ||
 		composition.hostConnection == nil || composition.peerPipe == nil || composition.peerSession == nil ||
-		composition.serviceBootstrap == nil || composition.rpcServer == nil ||
-		composition.lifetime == nil || composition.serviceStop == nil {
+		composition.rpcServer == nil || composition.lifetime == nil || composition.serviceStop == nil {
 		return runtimeSupervision{}, errInvalidComposition
 	}
 	configuration := composition.runtimePlan.Configuration()
@@ -407,7 +385,6 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 				},
 			)
 		},
-		waitOwnWrapper:  composition.serviceBootstrap.Wait,
 		waitPeerWrapper: composition.peerSession.WaitWrapper,
 		waitPeerHost:    composition.peerSession.WaitPeer,
 		waitStderr:      func(context.Context) error { return composition.stderr.Wait() },
@@ -484,9 +461,6 @@ func (composition *windowsComposition) cleanup() error {
 	// FinalizeRuntimePlan closes this evidence on every path, but a native close
 	// failure deliberately retains the exact handles for this cleanup retry.
 	add("close retained data-root evidence", composition.dataRoot.Close())
-	if composition.serviceBootstrap != nil {
-		add("close service bootstrap session", composition.serviceBootstrap.Close())
-	}
 	return errors.Join(failures...)
 }
 

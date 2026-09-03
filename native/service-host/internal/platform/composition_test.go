@@ -19,8 +19,7 @@ import (
 var compositionTestStages = []string{
 	"select-role",
 	"load-release",
-	"open-bootstrap",
-	"measure-image",
+	"prepare-service-security",
 	"verify-installation",
 	"verify-data-root",
 	"open-credentials",
@@ -79,11 +78,8 @@ func (builder *fakeCompositionBuilder) selectRole(ctx context.Context, _ Bootstr
 func (builder *fakeCompositionBuilder) loadReleaseAuthority(ctx context.Context) error {
 	return builder.step(ctx, "load-release")
 }
-func (builder *fakeCompositionBuilder) openServiceBootstrap(ctx context.Context) error {
-	return builder.step(ctx, "open-bootstrap")
-}
-func (builder *fakeCompositionBuilder) measureCurrentImage(ctx context.Context) error {
-	return builder.step(ctx, "measure-image")
+func (builder *fakeCompositionBuilder) prepareServiceSecurity(ctx context.Context) error {
+	return builder.step(ctx, "prepare-service-security")
 }
 func (builder *fakeCompositionBuilder) verifyInstallation(ctx context.Context) error {
 	return builder.step(ctx, "verify-installation")
@@ -327,7 +323,7 @@ type supervisionCoordinator struct {
 
 func newSupervisionCoordinator() *supervisionCoordinator {
 	return &supervisionCoordinator{
-		started: make(chan string, 7),
+		started: make(chan string, 6),
 		release: make(chan struct{}),
 	}
 }
@@ -452,7 +448,6 @@ func coordinatedRuntime(
 		node:            node,
 		serveLocalRPC:   task("local-rpc"),
 		runRelay:        task("relay"),
-		waitOwnWrapper:  task("own-wrapper"),
 		waitPeerWrapper: task("peer-wrapper"),
 		waitPeerHost:    task("peer-host"),
 		waitStderr: func(context.Context) error {
@@ -479,12 +474,12 @@ type controlledSupervision struct {
 func newControlledSupervision() *controlledSupervision {
 	results := make(map[string]chan error)
 	for _, name := range []string{
-		"local-rpc", "relay", "own-wrapper", "peer-wrapper", "peer-host", "stderr",
+		"local-rpc", "relay", "peer-wrapper", "peer-host", "stderr",
 	} {
 		results[name] = make(chan error, 1)
 	}
 	return &controlledSupervision{
-		started:     make(chan string, 7),
+		started:     make(chan string, 6),
 		results:     results,
 		nodeResults: make(chan controlledNodeResult, 1),
 	}
@@ -550,7 +545,6 @@ func controlledRuntime(
 		node:            node,
 		serveLocalRPC:   control.task("local-rpc"),
 		runRelay:        control.task("relay"),
-		waitOwnWrapper:  control.task("own-wrapper"),
 		waitPeerWrapper: control.task("peer-wrapper"),
 		waitPeerHost:    control.task("peer-host"),
 		waitStderr:      control.task("stderr"),
@@ -565,8 +559,8 @@ func controlledRuntime(
 
 func waitForControlledStarts(t *testing.T, control *controlledSupervision) {
 	t.Helper()
-	started := make(map[string]struct{}, 7)
-	for len(started) != 7 {
+	started := make(map[string]struct{}, 6)
+	for len(started) != 6 {
 		select {
 		case name := <-control.started:
 			started[name] = struct{}{}
@@ -608,7 +602,7 @@ func TestSupervisionRequiresJointCleanBarrier(t *testing.T) {
 		control := newControlledSupervision()
 		rawNode := &controlledSupervisedNode{control: control}
 		node := mustNodeOwner(t, rawNode)
-		observed := make(chan supervisedTaskKind, 7)
+		observed := make(chan supervisedTaskKind, 6)
 		ctx, cancel := context.WithCancelCause(context.Background())
 		defer cancel(nil)
 		result := make(chan error, 1)
@@ -651,7 +645,7 @@ func TestSupervisionRequiresJointCleanBarrier(t *testing.T) {
 		control := newControlledSupervision()
 		rawNode := &controlledSupervisedNode{control: control}
 		node := mustNodeOwner(t, rawNode)
-		observed := make(chan supervisedTaskKind, 7)
+		observed := make(chan supervisedTaskKind, 6)
 		ctx, cancel := context.WithCancelCause(context.Background())
 		defer cancel(nil)
 		result := make(chan error, 1)
@@ -688,7 +682,7 @@ func TestSupervisionPreservesPreShutdownFailureAfterCleanProgress(t *testing.T) 
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	result := make(chan error, 1)
@@ -726,7 +720,6 @@ func TestSupervisionDoesNotLoseTerminalWhenParentIsAlreadyCanceled(t *testing.T)
 		node:            node,
 		serveLocalRPC:   waitContext,
 		runRelay:        func(context.Context) error { return terminal },
-		waitOwnWrapper:  waitContext,
 		waitPeerWrapper: waitContext,
 		waitPeerHost:    waitContext,
 		waitStderr:      waitContext,
@@ -758,11 +751,11 @@ func TestSupervisionCancelsTerminatesAndJoinsBeforeCleanup(t *testing.T) {
 	)
 	result := make(chan error, 1)
 	go func() { result <- runComposition(context.Background(), BootstrapOptions{}, builder) }()
-	started := make(map[string]struct{}, 7)
-	for range 7 {
+	started := make(map[string]struct{}, 6)
+	for range 6 {
 		started[<-coordinator.started] = struct{}{}
 	}
-	if len(started) != 7 {
+	if len(started) != 6 {
 		t.Fatalf("started tasks = %v", started)
 	}
 	close(coordinator.release)
@@ -771,7 +764,7 @@ func TestSupervisionCancelsTerminatesAndJoinsBeforeCleanup(t *testing.T) {
 	}
 	_, cleanupCalls, cleanupExitCount := builder.snapshot()
 	terminateCalls, closeCalls := rawNode.calls()
-	if terminateCalls != 1 || closeCalls != 1 || cleanupCalls != 1 || cleanupExitCount != 7 {
+	if terminateCalls != 1 || closeCalls != 1 || cleanupCalls != 1 || cleanupExitCount != 6 {
 		t.Fatalf(
 			"terminate=%d close=%d cleanup=%d joined-before-cleanup=%d",
 			terminateCalls,
@@ -801,7 +794,7 @@ func TestSupervisionPreservesPrimarySecondaryAndTerminationFailures(t *testing.T
 	)
 	result := make(chan error, 1)
 	go func() { result <- runComposition(context.Background(), BootstrapOptions{}, builder) }()
-	for range 7 {
+	for range 6 {
 		<-coordinator.started
 	}
 	close(coordinator.release)
@@ -812,7 +805,7 @@ func TestSupervisionPreservesPrimarySecondaryAndTerminationFailures(t *testing.T
 	}
 	_, _, cleanupExitCount := builder.snapshot()
 	terminateCalls, closeCalls := rawNode.calls()
-	if cleanupExitCount != 7 || terminateCalls != 1 || closeCalls != 0 {
+	if cleanupExitCount != 6 || terminateCalls != 1 || closeCalls != 0 {
 		t.Fatalf("joined=%d terminate=%d close=%d", cleanupExitCount, terminateCalls, closeCalls)
 	}
 }
@@ -834,7 +827,7 @@ func TestCleanLocalRPCExitDoesNotHideRelayShutdownFailure(t *testing.T) {
 	)
 	result := make(chan error, 1)
 	go func() { result <- runComposition(context.Background(), BootstrapOptions{}, builder) }()
-	for range 7 {
+	for range 6 {
 		<-coordinator.started
 	}
 	close(coordinator.release)
@@ -842,8 +835,8 @@ func TestCleanLocalRPCExitDoesNotHideRelayShutdownFailure(t *testing.T) {
 		t.Fatalf("clean local RPC exit hid relay failure: %v", err)
 	}
 	_, _, cleanupExitCount := builder.snapshot()
-	if cleanupExitCount != 7 {
-		t.Fatalf("joined tasks before cleanup = %d, want 7", cleanupExitCount)
+	if cleanupExitCount != 6 {
+		t.Fatalf("joined tasks before cleanup = %d, want 6", cleanupExitCount)
 	}
 }
 
@@ -864,7 +857,7 @@ func TestParentCancellationTerminatesAndJoinsEveryRuntimeTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() { result <- runComposition(ctx, BootstrapOptions{}, builder) }()
-	for range 7 {
+	for range 6 {
 		<-coordinator.started
 	}
 	cancel()
@@ -878,7 +871,7 @@ func TestParentCancellationTerminatesAndJoinsEveryRuntimeTask(t *testing.T) {
 	}
 	_, cleanupCalls, cleanupExitCount := builder.snapshot()
 	terminateCalls, closeCalls := rawNode.calls()
-	if terminateCalls != 1 || closeCalls != 1 || cleanupCalls != 1 || cleanupExitCount != 7 {
+	if terminateCalls != 1 || closeCalls != 1 || cleanupCalls != 1 || cleanupExitCount != 6 {
 		t.Fatalf(
 			"terminate=%d close=%d cleanup=%d joined-before-cleanup=%d",
 			terminateCalls,
@@ -893,7 +886,7 @@ func TestServiceStopRequestsNodeShutdownBeforeRuntimeCancellation(t *testing.T) 
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	stopContext, cancelStop := context.WithCancelCause(context.Background())
@@ -956,7 +949,7 @@ func TestArmedExecutorShutdownWaitsForNodeBeforeCancellingWatchers(t *testing.T)
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	runtime := controlledRuntime(control, node, observed)
@@ -993,7 +986,7 @@ func TestArmedShutdownAcceptsNodeExitPublishedBeforeTransportResults(t *testing.
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	runtime := controlledRuntime(control, node, observed)
@@ -1025,7 +1018,7 @@ func TestArmedExecutorShutdownDeadlineForcesHungNode(t *testing.T) {
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	runtime := controlledRuntime(control, node, observed)
@@ -1053,7 +1046,7 @@ func TestServiceStopDeadlineForcesHungNodeWithoutExecutorNotification(t *testing
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	stopContext, cancelStop := context.WithCancelCause(context.Background())
@@ -1159,7 +1152,7 @@ func TestServiceStopJoinsAnAlreadyArmedShutdownWhenNotificationRaces(t *testing.
 	control := newControlledSupervision()
 	rawNode := &controlledSupervisedNode{control: control}
 	node := mustNodeOwner(t, rawNode)
-	observed := make(chan supervisedTaskKind, 7)
+	observed := make(chan supervisedTaskKind, 6)
 	runtimeContext, cancelRuntime := context.WithCancelCause(context.Background())
 	defer cancelRuntime(nil)
 	stopContext, cancelStop := context.WithCancelCause(context.Background())
@@ -1289,7 +1282,7 @@ func TestServiceStopRemainsFirstCauseWhenRuntimeFailsDuringGrace(t *testing.T) {
 	}
 }
 
-func TestSupervisionTreatsWatcherExitAsUnexpected(t *testing.T) {
+func TestSupervisionTreatsPeerWrapperExitAsUnexpected(t *testing.T) {
 	coordinator := newSupervisionCoordinator()
 	rawNode := &fakeSupervisedNode{coordinator: coordinator}
 	node := mustNodeOwner(t, rawNode)
@@ -1298,14 +1291,14 @@ func TestSupervisionTreatsWatcherExitAsUnexpected(t *testing.T) {
 		coordinator,
 		node,
 		builder.currentRuntimeLifetime,
-		"own-wrapper",
+		"peer-wrapper",
 		nil,
 		"",
 		nil,
 	)
 	result := make(chan error, 1)
 	go func() { result <- runComposition(context.Background(), BootstrapOptions{}, builder) }()
-	for range 7 {
+	for range 6 {
 		<-coordinator.started
 	}
 	close(coordinator.release)
@@ -1339,11 +1332,6 @@ func TestSupervisionCleanExitStateMachine(t *testing.T) {
 		kind: supervisedPeerHost,
 		name: "peer ServiceHost",
 	}}
-	ownWrapper := supervisedResult{task: supervisedTask{
-		kind: supervisedOwnWrapper,
-		name: "own WinSW wrapper",
-	}}
-
 	beforeGraceful := supervisionOutcome{}
 	if terminal, _ := beforeGraceful.observeClean(nodeResult); !errors.Is(terminal, errUnexpectedComponent) {
 		t.Fatalf("Node exit before graceful progress = %v", terminal)
@@ -1370,9 +1358,6 @@ func TestSupervisionCleanExitStateMachine(t *testing.T) {
 	}
 	if terminal, _ := outcome.observeClean(peerHost); terminal != nil {
 		t.Fatalf("peer exit after relay clean = %v", terminal)
-	}
-	if terminal, _ := outcome.observeClean(ownWrapper); !errors.Is(terminal, errUnexpectedComponent) {
-		t.Fatalf("own wrapper exit during graceful shutdown = %v", terminal)
 	}
 	nodeResult.exitCode = 7
 	if terminal, _ := outcome.observeClean(nodeResult); !errors.Is(terminal, errUnexpectedComponent) {
@@ -1410,7 +1395,6 @@ func TestSupervisionConvergesAfterNodeWaitPanic(t *testing.T) {
 		node:            node,
 		serveLocalRPC:   waitForShutdown,
 		runRelay:        waitForShutdown,
-		waitOwnWrapper:  waitForShutdown,
 		waitPeerWrapper: waitForShutdown,
 		waitPeerHost:    waitForShutdown,
 		waitStderr:      waitForShutdown,
@@ -1675,7 +1659,6 @@ func TestCompositionRejectsTypedNilBuilderAndNode(t *testing.T) {
 		node:            node,
 		serveLocalRPC:   func(context.Context) error { return nil },
 		runRelay:        func(context.Context) error { return nil },
-		waitOwnWrapper:  func(context.Context) error { return nil },
 		waitPeerWrapper: func(context.Context) error { return nil },
 		waitPeerHost:    func(context.Context) error { return nil },
 		waitStderr:      func(context.Context) error { return nil },
