@@ -106,7 +106,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(11);
+      expect(readSchemaVersion(migratedDatabase)).toBe(12);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );
@@ -149,7 +149,7 @@ describe("DatabaseClient startup", () => {
         readOnly: true,
       });
       try {
-        expect(readSchemaVersion(migratedDatabase)).toBe(11);
+        expect(readSchemaVersion(migratedDatabase)).toBe(12);
         expect(readSchemaVersion(backupDatabase)).toBe(7);
       } finally {
         migratedDatabase.close();

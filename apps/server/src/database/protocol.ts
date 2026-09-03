@@ -75,10 +75,30 @@ import type {
   CleanupExpiredOperatorAuthInput,
   CleanupExpiredOperatorAuthResult,
 } from "./operator-auth.js";
+import type {
+  ClaimServerBindingAuthorizationV1Input,
+  ClaimServerBindingAuthorizationV1Result,
+  CommitServerBindingReceiptV1Input,
+  CommitServerBindingReceiptV1Result,
+  ConfirmServerBindingRecordV1Input,
+  ConfirmServerBindingRecordV1Result,
+  CreateServerBindingAuthorizationV1Input,
+  CreateServerBindingAuthorizationV1Result,
+  InitializeServerBindingIssuerV1Input,
+  InitializeServerBindingIssuerV1Result,
+  ReadServerBindingRecoveryReceiptV1Input,
+  RevokeServerBindingV1Input,
+  RevokeServerBindingV1Result,
+  ServerBindingActiveSnapshotV1,
+  ServerBindingRecoveryReceiptV1,
+  ServerBindingTrustedIssuerDescriptorV1,
+} from "./server-binding-persistence-v1.js";
 
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
   readonly migrationsDirectory: string;
+  readonly serverBindingTrustedIssuer?: ServerBindingTrustedIssuerDescriptorV1 | null;
+  readonly startupTimeoutMilliseconds?: number;
 }
 
 export interface RegisterWorkerInput {
@@ -321,6 +341,42 @@ export interface DatabaseOperationMap {
     readonly input: CommitArtifactCompletionInput;
     readonly output: LeaseTerminalResult;
   };
+  readonly initializeServerBindingIssuerV1: {
+    readonly input: InitializeServerBindingIssuerV1Input;
+    readonly output: InitializeServerBindingIssuerV1Result;
+  };
+  readonly createServerBindingAuthorizationV1: {
+    readonly input: CreateServerBindingAuthorizationV1Input;
+    readonly output: CreateServerBindingAuthorizationV1Result;
+  };
+  readonly claimServerBindingAuthorizationV1: {
+    readonly input: ClaimServerBindingAuthorizationV1Input;
+    readonly output: ClaimServerBindingAuthorizationV1Result;
+  };
+  readonly commitServerBindingReceiptV1: {
+    readonly input: CommitServerBindingReceiptV1Input;
+    readonly output: CommitServerBindingReceiptV1Result;
+  };
+  readonly confirmServerBindingRecordV1: {
+    readonly input: ConfirmServerBindingRecordV1Input;
+    readonly output: ConfirmServerBindingRecordV1Result;
+  };
+  readonly readServerBindingRecoveryReceiptV1: {
+    readonly input: ReadServerBindingRecoveryReceiptV1Input;
+    readonly output: ServerBindingRecoveryReceiptV1 | null;
+  };
+  readonly readServerBindingActiveSnapshotV1: {
+    readonly input: ReadServerBindingRecoveryReceiptV1Input;
+    readonly output: ServerBindingActiveSnapshotV1 | null;
+  };
+  readonly recheckServerBindingActiveSnapshotV1: {
+    readonly input: ServerBindingActiveSnapshotV1;
+    readonly output: ServerBindingActiveSnapshotV1;
+  };
+  readonly revokeServerBindingV1: {
+    readonly input: RevokeServerBindingV1Input;
+    readonly output: RevokeServerBindingV1Result;
+  };
   readonly completeLease: {
     readonly input: LeaseCompletionInput;
     readonly output: LeaseTerminalResult;
@@ -435,5 +491,5 @@ export type DatabaseWorkerMessage =
   | { readonly type: "ready" }
   | {
       readonly type: "fatal";
-      readonly error: { readonly name: string; readonly message: string };
+      readonly error: { readonly name: string; readonly message: string; readonly code?: string };
     };

@@ -7,6 +7,13 @@ import {
   revokeArtifactTransactionDatabaseHandle,
 } from "../artifacts/artifact-transaction-coordinator.js";
 import {
+  isServerBindingPersistenceDatabaseOperation,
+  registerServerBindingPersistenceDatabaseHandle,
+  revokeServerBindingPersistenceDatabaseHandle,
+  type ServerBindingPersistenceDatabaseHandle,
+  type ServerBindingPersistenceDatabaseOperation,
+} from "../enrollment/server-binding-coordinator-v1.js";
+import {
   isArtifactReconciliationDatabaseOperation,
   snapshotArtifactReconciliationDatabaseInput,
 } from "./artifacts.js";
@@ -31,6 +38,12 @@ type ArtifactTransactionDatabaseDispatchers = {
   ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
 };
 
+type ServerBindingPersistenceDatabaseDispatchers = {
+  readonly [TOperation in ServerBindingPersistenceDatabaseOperation]: (
+    input: DatabaseOperationMap[TOperation]["input"],
+  ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
+};
+
 export interface DatabaseWorkerTransport {
   postMessage(value: unknown): void;
   terminate(): Promise<number>;
@@ -40,6 +53,9 @@ export interface DatabaseWorkerTransport {
 }
 
 const testTransportAttachment = Symbol("database-client-test-transport-attachment");
+const databaseWorkerLifecycleTimeoutMilliseconds = 30_000;
+const defaultDatabaseWorkerStartupTimeoutMilliseconds = 30 * 60 * 1_000;
+const maximumDatabaseWorkerStartupTimeoutMilliseconds = 24 * 60 * 60 * 1_000;
 
 const createShutdownExitError = (): DatabaseRequestError =>
   new DatabaseRequestError(
@@ -47,18 +63,58 @@ const createShutdownExitError = (): DatabaseRequestError =>
     "DATABASE_WORKER_SHUTDOWN_INCOMPLETE",
   );
 
+const withDatabaseWorkerLifecycleTimeout = async <T>(
+  operation: Promise<T>,
+  timeoutMilliseconds: number,
+  message: string,
+): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMilliseconds);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
+
 export const terminateWorkerAndWaitForExit = async (
   worker: Pick<DatabaseWorkerTransport, "terminate">,
   exited: Promise<number>,
+  timeoutMilliseconds = databaseWorkerLifecycleTimeoutMilliseconds,
 ): Promise<unknown | undefined> => {
   let terminationError: unknown;
   try {
-    await worker.terminate();
+    await withDatabaseWorkerLifecycleTimeout(
+      Promise.resolve(worker.terminate()),
+      timeoutMilliseconds,
+      "Database Worker forced termination timed out.",
+    );
   } catch (error) {
     terminationError = error;
   }
-  await exited;
-  return terminationError;
+  let exitError: unknown;
+  try {
+    await withDatabaseWorkerLifecycleTimeout(
+      exited,
+      timeoutMilliseconds,
+      "Database Worker exit was not observed after forced termination.",
+    );
+  } catch (error) {
+    exitError = error;
+  }
+  if (terminationError !== undefined && exitError !== undefined) {
+    return new AggregateError(
+      [terminationError, exitError],
+      "Database Worker termination and exit proof both failed.",
+      { cause: terminationError },
+    );
+  }
+  return terminationError ?? exitError;
 };
 
 export class DatabaseClient {
@@ -73,8 +129,11 @@ export class DatabaseClient {
   #nextRequestId = 1;
   #isReady = false;
   #isClosing = false;
+  #exitObserved = false;
   #artifactTransactionHandleIssued = false;
   #artifactTransactionHandle: ArtifactTransactionDatabaseHandle | undefined;
+  #serverBindingPersistenceHandleIssued = false;
+  #serverBindingPersistenceHandle: ServerBindingPersistenceDatabaseHandle | undefined;
   #shutdownRequested = false;
   #shutdownResponseReceived = false;
   #shutdownAcknowledged = false;
@@ -144,6 +203,24 @@ export class DatabaseClient {
     prepareArtifactCompletion: (input) => this.#send("prepareArtifactCompletion", input),
     commitArtifactCompletion: (input) => this.#send("commitArtifactCompletion", input),
   } satisfies ArtifactTransactionDatabaseDispatchers);
+  readonly #serverBindingPersistenceDispatchers: ServerBindingPersistenceDatabaseDispatchers =
+    Object.freeze({
+      initializeServerBindingIssuerV1: (input) =>
+        this.#send("initializeServerBindingIssuerV1", input),
+      createServerBindingAuthorizationV1: (input) =>
+        this.#send("createServerBindingAuthorizationV1", input),
+      claimServerBindingAuthorizationV1: (input) =>
+        this.#send("claimServerBindingAuthorizationV1", input),
+      commitServerBindingReceiptV1: (input) => this.#send("commitServerBindingReceiptV1", input),
+      confirmServerBindingRecordV1: (input) => this.#send("confirmServerBindingRecordV1", input),
+      readServerBindingRecoveryReceiptV1: (input) =>
+        this.#send("readServerBindingRecoveryReceiptV1", input),
+      readServerBindingActiveSnapshotV1: (input) =>
+        this.#send("readServerBindingActiveSnapshotV1", input),
+      recheckServerBindingActiveSnapshotV1: (input) =>
+        this.#send("recheckServerBindingActiveSnapshotV1", input),
+      revokeServerBindingV1: (input) => this.#send("revokeServerBindingV1", input),
+    } satisfies ServerBindingPersistenceDatabaseDispatchers);
 
   private constructor(
     options: DatabaseWorkerOptions | undefined,
@@ -175,6 +252,7 @@ export class DatabaseClient {
       this.#fail(error);
     });
     this.#worker.on("exit", (exitCode) => {
+      this.#exitObserved = true;
       if (
         this.#isClosing &&
         this.#terminalError === undefined &&
@@ -194,14 +272,53 @@ export class DatabaseClient {
   }
 
   public static async create(options: DatabaseWorkerOptions): Promise<DatabaseClient> {
+    const startupTimeoutMilliseconds =
+      options.startupTimeoutMilliseconds ?? defaultDatabaseWorkerStartupTimeoutMilliseconds;
+    if (
+      !Number.isSafeInteger(startupTimeoutMilliseconds) ||
+      startupTimeoutMilliseconds < 1 ||
+      startupTimeoutMilliseconds > maximumDatabaseWorkerStartupTimeoutMilliseconds
+    ) {
+      throw new TypeError("Database Worker startup timeout is invalid.");
+    }
     const client = new DatabaseClient(options);
     try {
-      await client.#ready;
+      await withDatabaseWorkerLifecycleTimeout(
+        client.#ready,
+        startupTimeoutMilliseconds,
+        "Database Worker startup timed out.",
+      );
       return client;
     } catch (error) {
-      await client.#terminateAfterFailedStartup();
+      const terminationError = await client.#terminateAfterFailedStartup();
+      if (!client.#exitObserved) {
+        const failure = new AggregateError(
+          terminationError === undefined ? [error] : [error, terminationError],
+          "Database Worker startup failed without exit proof.",
+          { cause: error },
+        );
+        Object.defineProperty(failure, "ownerExit", {
+          configurable: false,
+          enumerable: false,
+          value: client.#exited,
+          writable: false,
+        });
+        throw failure;
+      }
+      if (terminationError !== undefined) {
+        throw new AggregateError(
+          [error, terminationError],
+          "Database Worker startup and termination both failed.",
+          { cause: error },
+        );
+      }
       throw error;
     }
+  }
+
+  /** Resolves only when the dedicated database Worker has exited. */
+  public get ownerExit(): Promise<number> {
+    return this.#exited;
   }
 
   /** @internal Test-only transport attachment. */
@@ -214,7 +331,7 @@ export class DatabaseClient {
   public request<
     TOperation extends Exclude<
       DatabaseOperation,
-      ArtifactTransactionDatabaseOperation | "shutdown"
+      ArtifactTransactionDatabaseOperation | ServerBindingPersistenceDatabaseOperation | "shutdown"
     >,
   >(
     operation: TOperation,
@@ -233,6 +350,14 @@ export class DatabaseClient {
         new DatabaseRequestError(
           "Artifact database operations require transaction coordinator authority.",
           "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
+        ),
+      ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
+    }
+    if (isServerBindingPersistenceDatabaseOperation(operation)) {
+      return Promise.reject(
+        new DatabaseRequestError(
+          "Server binding database operations require persistence coordinator authority.",
+          "SERVER_BINDING_PERSISTENCE_AUTHORITY_REQUIRED",
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
@@ -268,7 +393,39 @@ export class DatabaseClient {
     return handle;
   }
 
+  /** Returns one opaque handle that only ServerBindingCoordinatorV1 can consume. */
+  public createServerBindingPersistenceDatabaseHandle(): ServerBindingPersistenceDatabaseHandle {
+    if (this.#isClosing || this.#terminalError !== undefined) {
+      throw new Error("Database client is not available for Server binding persistence adoption.");
+    }
+    if (this.#serverBindingPersistenceHandleIssued) {
+      throw new Error("Database client Server binding persistence handle was already issued.");
+    }
+    const handle = registerServerBindingPersistenceDatabaseHandle(this, {
+      terminalFailure: this.#terminalFailure.promise,
+      request: (<TOperation extends ServerBindingPersistenceDatabaseOperation>(
+        operation: TOperation,
+        input: DatabaseOperationMap[TOperation]["input"],
+      ) => this.#requestServerBindingPersistence(operation, input)) as <
+        TOperation extends ServerBindingPersistenceDatabaseOperation,
+      >(
+        operation: TOperation,
+        input: DatabaseOperationMap[TOperation]["input"],
+      ) => Promise<DatabaseOperationMap[TOperation]["output"]>,
+    });
+    this.#serverBindingPersistenceHandleIssued = true;
+    this.#serverBindingPersistenceHandle = handle;
+    return handle;
+  }
+
   public close(): Promise<void> {
+    const serverBindingHandle = this.#serverBindingPersistenceHandle;
+    if (
+      serverBindingHandle !== undefined &&
+      revokeServerBindingPersistenceDatabaseHandle(serverBindingHandle)
+    ) {
+      this.#serverBindingPersistenceHandle = undefined;
+    }
     if (this.#artifactTransactionHandleIssued && this.#closePromise === undefined) {
       const handle = this.#artifactTransactionHandle;
       if (handle !== undefined && revokeArtifactTransactionDatabaseHandle(handle)) {
@@ -292,28 +449,76 @@ export class DatabaseClient {
 
   async #closeDatabaseOwner(): Promise<void> {
     if (this.#isClosing) {
-      await this.#exited;
+      await withDatabaseWorkerLifecycleTimeout(
+        this.#exited,
+        databaseWorkerLifecycleTimeoutMilliseconds,
+        "Database Worker exit was not observed while closing.",
+      );
       return;
     }
 
     this.#isClosing = true;
-    if (this.#terminalError === undefined) {
-      this.#shutdownRequested = true;
+    if (this.#terminalError !== undefined) {
+      const terminalError = this.#terminalError;
+      let exitObserved = false;
       try {
-        await this.#send("shutdown", {});
-      } catch (error) {
+        await withDatabaseWorkerLifecycleTimeout(
+          this.#exited,
+          databaseWorkerLifecycleTimeoutMilliseconds,
+          "Database Worker exit was not observed after terminal failure.",
+        );
+        exitObserved = true;
+      } catch {
+        // A terminal message or error is not exit proof; force termination below.
+      }
+      if (!exitObserved) {
         const terminationError = await terminateWorkerAndWaitForExit(this.#worker, this.#exited);
         if (terminationError !== undefined) {
           throw new AggregateError(
-            [error, terminationError],
-            "Database shutdown and Worker termination both failed.",
-            { cause: error },
+            [terminalError, terminationError],
+            "Database terminal failure and Worker termination both failed.",
+            { cause: terminalError },
           );
         }
-        throw error;
       }
+      throw terminalError;
     }
-    await this.#exited;
+
+    this.#shutdownRequested = true;
+    try {
+      await withDatabaseWorkerLifecycleTimeout(
+        this.#send("shutdown", {}),
+        databaseWorkerLifecycleTimeoutMilliseconds,
+        "Database Worker graceful shutdown timed out.",
+      );
+    } catch (error) {
+      const terminationError = await terminateWorkerAndWaitForExit(this.#worker, this.#exited);
+      if (terminationError !== undefined) {
+        throw new AggregateError(
+          [error, terminationError],
+          "Database shutdown and Worker termination both failed.",
+          { cause: error },
+        );
+      }
+      throw this.#terminalError ?? error;
+    }
+    try {
+      await withDatabaseWorkerLifecycleTimeout(
+        this.#exited,
+        databaseWorkerLifecycleTimeoutMilliseconds,
+        "Database Worker exit was not observed after graceful shutdown.",
+      );
+    } catch (error) {
+      const terminationError = await terminateWorkerAndWaitForExit(this.#worker, this.#exited);
+      if (terminationError !== undefined) {
+        throw new AggregateError(
+          [error, terminationError],
+          "Database Worker exit and forced termination both failed.",
+          { cause: error },
+        );
+      }
+      throw this.#terminalError ?? error;
+    }
     if (this.#terminalError !== undefined) {
       throw this.#terminalError;
     }
@@ -339,7 +544,15 @@ export class DatabaseClient {
     const response = new Promise<unknown>((resolve, reject) => {
       this.#pending.set(id, { operation, resolve, reject });
     });
-    this.#worker.postMessage(request);
+    try {
+      this.#worker.postMessage(request);
+    } catch {
+      this.#pending.delete(id);
+      throw new DatabaseRequestError(
+        "Database request could not be sent to the Worker.",
+        "DATABASE_REQUEST_NOT_SENT",
+      );
+    }
     return (await response) as DatabaseOperationMap[TOperation]["output"];
   }
 
@@ -368,6 +581,18 @@ export class DatabaseClient {
     }
   }
 
+  #requestServerBindingPersistence<TOperation extends ServerBindingPersistenceDatabaseOperation>(
+    operation: TOperation,
+    input: DatabaseOperationMap[TOperation]["input"],
+  ): Promise<DatabaseOperationMap[TOperation]["output"]> {
+    if (this.#isClosing || this.#terminalError !== undefined) {
+      return Promise.reject(
+        new Error("Database client is not available for Server binding persistence."),
+      );
+    }
+    return this.#serverBindingPersistenceDispatchers[operation](input);
+  }
+
   #handleMessage(message: DatabaseWorkerMessage): void {
     if (message.type === "ready") {
       this.#isReady = true;
@@ -375,7 +600,12 @@ export class DatabaseClient {
       return;
     }
     if (message.type === "fatal") {
-      this.#fail(new Error(`${message.error.name}: ${message.error.message}`));
+      this.#fail(
+        new DatabaseRequestError(
+          `${message.error.name}: ${message.error.message}`,
+          message.error.code,
+        ),
+      );
       return;
     }
 
@@ -400,6 +630,13 @@ export class DatabaseClient {
       return;
     }
     this.#terminalError = error;
+    const serverBindingHandle = this.#serverBindingPersistenceHandle;
+    if (
+      serverBindingHandle !== undefined &&
+      revokeServerBindingPersistenceDatabaseHandle(serverBindingHandle)
+    ) {
+      this.#serverBindingPersistenceHandle = undefined;
+    }
     this.#terminalFailure.resolve(error);
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) {
@@ -408,10 +645,9 @@ export class DatabaseClient {
     this.#pending.clear();
   }
 
-  async #terminateAfterFailedStartup(): Promise<void> {
+  async #terminateAfterFailedStartup(): Promise<unknown | undefined> {
     this.#isClosing = true;
-    await this.#worker.terminate().catch(() => undefined);
-    await this.#exited;
+    return terminateWorkerAndWaitForExit(this.#worker, this.#exited);
   }
 }
 

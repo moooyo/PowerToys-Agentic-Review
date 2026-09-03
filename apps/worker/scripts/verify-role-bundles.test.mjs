@@ -64,7 +64,7 @@ const reviewedRootBarrelExports = Object.freeze({
 });
 const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/server/src/database/database-worker.ts":
-    "52c0c988f0cdd1946ecc1fa29eaecabf84e77578649404966fc0750e95421d6c",
+    "16d6e8e71b879c05c96d4b1b5b286dfddb5ea3a656d2b5f1d89b7ef1eec5a985",
   "apps/worker/src/control/host-control-worker-api.ts":
     "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
   "apps/worker/src/execution/trusted-installation-manifest.ts":

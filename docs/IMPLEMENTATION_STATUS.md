@@ -189,17 +189,25 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   boundaries. The S0 implementation adds hidden TypeScript wire codecs and ordinary signature
   checks, a deterministic Server lifecycle reducer, a standard-library-only Go verifier, one-shot
   challenge and active-status evidence, shared golden documents, and production-reachability
-  guards. The compiled production verifier remains unavailable. There is no migration, signer,
-  trust key, route, binding resolver, Windows writer, reader, or production consumer. The
-  environment certificate map remains the only positive Worker mapping, and all Claim and
-  execution paths are unchanged.
-- A proposed dormant Server binding persistence v1 contract. ADR 0023 fixes migration 0012's four
-  strict tables, atomic authorization consumption plus pending creation, the internal issuance and
+  guards. The compiled production verifier remains unavailable. S0 still grants no route, binding
+  resolver, Windows writer, reader, or positive Worker authority. The environment certificate map
+  remains the only positive Worker mapping, and all Claim and execution paths are unchanged.
+- A dormant Server binding persistence v1 implementation. ADR 0023 and migration 0012 define four
+  strict tables, atomic authorization consumption plus pending creation, canonical issuance and
   revocation request digests, first-valid-receipt compare-and-swap, exact stored-byte replay,
-  append-only terminal revocation, issuer singleton bootstrap, full startup integrity audit, and an
-  opaque database capability. This documentation slice adds no migration, repository, signer,
-  route, trust key, authentication source, revocation veto, Windows consumer, Claim, slot, or
-  execution authority.
+  append-only terminal revocation, and an immutable issuer singleton. The Server adds a complete
+  repository with reducer replay and signature verification, a startup schema/aggregate audit with
+  bounded keyset pagination, exact schema and runtime checks for the persistent authentication-clock
+  high-water row, a production-unavailable signer/provider boundary, a fail-stopped bounded
+  coordinator, and a single-consumer opaque DatabaseClient capability. The signer trust profile is
+  independent from the provider, startup rollback closes only an atomically unadopted signer lease,
+  failed candidate cleanup permanently poisons the loader and quarantines the candidate, and the
+  future provider contract requires a Promise-only child-process transport whose close joins real
+  owner exit. Terminal coordinator failure immediately rejects every public pending operation with
+  the first cause while retaining raw settlement ownership. Production config and main do not load
+  a signer; startup leaves a fresh authority empty, and existing authority state fails closed without
+  the exact signer/trust descriptor. No route, authentication source, revocation veto, Windows
+  consumer, Claim, slot, or execution authority consumes this state.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
@@ -346,9 +354,9 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
-the ADR 0023 Server binding persistence implementation, S2 authenticated receipt authority,
-privileged enrollment writer and live evidence, destination evidence, the ADR 0021 protected-store
-implementation and opaque-evidence composition, the
+  production Server binding signer and trust material, S2 authenticated receipt authority,
+  privileged enrollment writer and live evidence, destination evidence, the ADR 0021 protected-store
+  implementation and opaque-evidence composition, the
 production Go installer, production-capable SCM schema and native adapter, a complete final
 recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
@@ -362,6 +370,23 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-03, the dormant Server binding persistence v1 slice completed its explicitly authorized
+local Windows verification. No command was run on `test-env`. With pnpm 11.24.0, the exact candidate
+passed all-workspace typecheck and build, including Dashboard Webpack, Worker bundles, and Server
+output; Biome checked 312 files; Contracts passed 27/27; the nine-file S0/S1, persistence, shutdown,
+health, artifact, and runtime-focused matrix passed 174 tests with 6 platform skips; the focused
+DatabaseClient capability matrix passed 5 tests with 66 unrelated tests skipped; the database
+startup owner-exit helper passed with 9 unrelated tests skipped; and Worker role-bundle plus
+zero-execution architecture verification passed 19/19. Independent final reviews found no remaining
+P0-P2 findings after the clock, transaction, settlement, signer, handle-ownership, lifecycle, and
+production-reachability fixes.
+
+The local Node runtime was 26.1.0 while repository engines require `>=24.20.0 <25`, so pnpm emitted
+an engine warning. The complete database-startup and migration-backup files were attempted locally;
+their POSIX ownership cases failed closed on Windows as designed (6 failed, 4 passed, 7 skipped).
+Those platform failures were not waived as Linux evidence, and no remote replacement run was made
+because this task explicitly authorized local verification instead of `test-env`.
 
 On 2026-09-02, the source-only package-private installer observation reducer completed the full
 ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled

@@ -53,6 +53,8 @@ packages/contracts/src/server-binding-authority-v1.ts
 packages/contracts/src/server-binding-authority-v1.test.ts
 apps/server/src/enrollment/server-binding-state-v1.ts
 apps/server/src/enrollment/server-binding-state-v1.test.ts
+apps/server/src/enrollment/server-binding-trust-profile-v1.ts
+apps/server/src/enrollment/server-binding-signer-provider-v1.ts
 apps/server/src/enrollment/server-binding-signer-v1.ts
 apps/server/src/enrollment/server-binding-coordinator-v1.ts
 apps/server/src/database/server-binding-persistence-v1.ts
@@ -80,6 +82,12 @@ and compiled-trust descriptor, pass its public facts into database startup, own 
 persistence capability lifecycle, and fail startup when initialized authority data cannot be
 audited. They may not register an enrollment route, resolve a Worker identity from a binding, or
 return an authority result to another subsystem.
+
+The current S1 implementation intentionally uses less than that allowance: production config and
+`main.ts` have no signer field, import, or loader call. The storage runtime can own an explicitly
+supplied internal signer context, but production startup supplies none. Adding production main
+composition for trust and signer loading requires a later separately reviewed change to the exact
+consumer and source-digest guards.
 
 The existing contracts root barrel remains unchanged. S1 may add only the exact package subpath
 `@agentic-review/contracts/server-binding-authority-v1` so the Server persistence and signer
@@ -520,14 +528,22 @@ authorization ID and request ID are Server-generated. The database Worker genera
 `bound_at`, and `consumed_at` after `BEGIN IMMEDIATE` and before the atomic first commit. It generates
 `revoked_at` inside the revocation transaction.
 
-Caller-supplied values cannot choose or replace those facts. Tests may inject a deterministic clock
-and UUID source only through a private test attachment that is absent from the production build.
+Caller-supplied values cannot choose or replace those facts. Tests may virtualize the process clock
+and assert generated UUID properties, but the production implementation exposes no clock, UUID, or
+provider attachment.
 
 Authorization expiry is evaluated strictly at the first claim transaction:
 
 ```text
 unused authorization is claimable iff transactionNow < expiresAt
 ```
+
+`transactionNow` advances the existing singleton `operator_auth_clock` high-water mark inside the
+same `BEGIN IMMEDIATE` transaction. S1 startup pins that table's exact schema and requires exactly
+one `singleton = 1` row. Every claim update must affect exactly one clock row and every subsequent
+read must return exactly one canonical timestamp. Once a claim observes a later time, an expired
+result or a recoverable immutable-identity conflict commits the advanced high-water mark before the
+stable application error is returned; neither path may roll observed time back.
 
 After exact consumption, later continuation ignores authorization expiry but must match the stored
 token hash, request ID, request digest, binding ID, certificate, tuple, and issuer. A different token
@@ -537,13 +553,36 @@ or request cannot inherit that exception.
 
 S1 defines a package-private signer-loader contract but does not select a production private-key
 store or HSM. The production loader remains unavailable until a later decision provides protected
-key storage and a compiled signed trust artifact. Tests use only a private test attachment and must
-not place a production private key or signer in a package export, environment fallback, fixture, or
-database.
+key storage and a compiled signed trust artifact. Tests replace the provider module only through
+test-runner module isolation; the production loader exposes no test attachment or mutable
+registration path. Tests must not place a production private key or signer in a package export,
+environment fallback, fixture, or database.
 
-The loader returns one immutable signer context only after its public SPKI matches the independently
-compiled S0 trust profile and the singleton key ID. Per-request caller keys and callbacks are
-forbidden.
+The provider contract is Promise-only and represents an already-isolated signer child-process
+transport, not an in-process HSM, CNG, native SDK, or synchronous callback. The Server process may
+only copy bounded input into IPC and return a native Promise immediately. Abort must cancel or fence
+the remote request, and `close()` must cancel outstanding work, forcibly terminate the isolated
+owner when graceful cancellation cannot finish, and resolve only after process exit is observed.
+Worker Threads are insufficient for a potentially blocking native signer. Until that reviewed
+process boundary exists, the production provider remains deliberately unavailable.
+
+If validation rejects a loaded provider candidate, its close operation is bounded. A close
+rejection or deadline expiry permanently poisons signer loading in that process, retains the
+candidate in a process-lifetime quarantine until a later successful close can be observed, and
+returns one stable startup-fatal error whose cause aggregates validation and cleanup failures. The
+failure must never be downgraded to an ordinary unavailable retry while owner exit is unproven.
+Candidate loading is serialized, and cleanup counts as successful only when an exact own data
+`close` function returns a native Promise that resolves.
+
+The same quarantine rule applies after a context has been adopted: normal or failure-driven signer
+shutdown places the provider adapter in process-lifetime quarantine before dropping the context's
+reference and removes it only after the native close Promise resolves. Rejection, an invalid return,
+or a caller-side close timeout leaves the provider quarantined.
+
+The loader returns one immutable signer context only after the provider-reported public SPKI matches
+the independently loaded, compiled S0 trust profile. The coordinator then compares that context with
+the startup database descriptor and initializes or replays the singleton before it publishes any
+authority. Per-request caller keys and callbacks are forbidden.
 
 The signer API distinguishes two provider shapes:
 
@@ -657,12 +696,14 @@ row.
 
 ### Startup integrity audit and lifecycle
 
-The main thread loads the optional signer and independently compiled trust profile before creating
-the database Worker. It passes only their verified public descriptor in `DatabaseWorkerOptions`.
-After `runMigrations()` succeeds, the Worker performs the schema and aggregate audit before fresh
-initialization is finalized and before it sends `ready`. If authority rows exist and the descriptor
-is absent or mismatched, Worker startup is fatal. After Worker readiness, the main thread completes
-the signer-context check before any future `app.listen()` or enrollment route registration.
+Current production startup deliberately passes no signer or trusted issuer descriptor. After
+`runMigrations()` succeeds, the Worker performs the schema and aggregate audit before it sends
+`ready`: a fresh zero-row authority remains uninitialized, while any retained authority row without
+the exact descriptor is fatal. Tests and reviewed internal composition may supply a signer context;
+the storage runtime then passes only its verified public descriptor into `DatabaseWorkerOptions`
+and the coordinator initializes or replays the issuer singleton after Worker readiness. Production
+main loading of the independently compiled trust profile and child-process signer, plus any future
+route publication, remains a separate reviewed activation slice.
 
 The S1 subsystem has the closed lifecycle:
 
@@ -681,6 +722,14 @@ closes without publishing `ready`; if startup fails, the original failure wins. 
 bounded operation and capability settlement, then releases signer references. Repeated close calls
 return the same promise and do not repeat effects.
 
+Calls admitted through a retained authority facade after `closing` begins, plus every `open()` after
+`closing` or `closed`, return the stable `CLOSED` category. Temporary pre-ready or repeated-open
+conditions return `NOT_READY`. A startup signer that has not yet been adopted by a coordinator is
+owned by a separate atomic cleanup lease; startup rollback may close only that unadopted lease and
+must never close a context already adopted by another owner. Coordinator construction verifies
+signer adoptability before consuming the one-shot database capability and restores that capability
+if the immediately following adoption unexpectedly fails.
+
 Database Worker exit, owner-loss evidence, protocol corruption, or an outcome-unknown persistence
 failure moves the subsystem to `failed`, rejects all pending and future work with the first terminal
 cause, and forbids reopen. A close after failure performs only best-effort owned-resource cleanup,
@@ -693,6 +742,7 @@ shutdown cannot make an ambiguous operation successful.
 The startup audit is bounded and paginated. It verifies:
 
 - the allowed zero-row fresh state or exactly one issuer singleton;
+- the exact `operator_auth_clock` schema and its single canonical high-water row;
 - signer SPKI, compiled trust profile, singleton key ID, issuer, profiles, schema, and algorithm;
 - every authorization's canonical fields and all-or-none consumption shape;
 - one exact consumed authorization for every binding and no consumed authorization without its
@@ -747,13 +797,15 @@ The implementation slice must cover, on the exact candidate:
 - zero-row issuer bootstrap, exact replay, row-without-issuer failure, signer mismatch, trust
   mismatch, key-ID mismatch, and forbidden replacement;
 - 32-byte token generation and hashing, no raw-token persistence, request digest golden vectors,
-  request-ID conflicts, unused expiry, exact consumed replay after expiry, and permanent tombstones;
+  request-ID conflicts, unused expiry, high-water rollback resistance, duplicate-clock rejection,
+  exact consumed replay after expiry, and permanent tombstones;
 - atomic authorization consumption plus pending creation under injected failures at every statement
   and commit boundary;
 - duplicate Worker generation, duplicate certificate, wrong direct certificate, wrong token,
   changed operator authorization, changed tuple, changed issuer, and changed request;
 - signer failure, double hashing, wrong key, wrong curve, DER signature, malformed P1363, invalid
-  scalar, high-S handling, and trusted verification before commit;
+  scalar, high-S handling, Promise-only provider enforcement, cancellation, deterministic close,
+  unadopted startup cleanup, and trusted verification before commit;
 - concurrent exact signers that produce different valid signatures, first-CAS-wins behavior, exact
   stored-byte replay, and conflicting requests;
 - activation exact replay and changed record conflict;

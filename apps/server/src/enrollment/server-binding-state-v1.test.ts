@@ -542,7 +542,7 @@ describe("server binding state v1", () => {
       .filter((path) => path !== moduleFile)
       .filter((path) => /server-binding-state-v1/iu.test(readFileSync(path, "utf8")))
       .map((path) => relative(repositoryRoot, path).replaceAll("\\", "/"));
-    expect(consumers).toEqual([]);
+    expect(consumers).toEqual(["apps/server/src/database/server-binding-persistence-v1.ts"]);
 
     const source = readFileSync(moduleFile, "utf8");
     const imports = [...source.matchAll(/\bfrom\s+["']([^"']+)["']/gu)].map((match) => match[1]);

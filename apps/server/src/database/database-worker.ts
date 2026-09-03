@@ -120,6 +120,29 @@ import {
   type ReviewCompletionJobContext,
   validateReviewCompletion,
 } from "./review-results.js";
+import {
+  auditServerBindingPersistenceV1,
+  type ClaimServerBindingAuthorizationV1Input,
+  type CommitServerBindingReceiptV1Input,
+  type ConfirmServerBindingRecordV1Input,
+  type CreateServerBindingAuthorizationV1Input,
+  claimServerBindingAuthorizationV1,
+  commitServerBindingReceiptV1,
+  confirmServerBindingRecordV1,
+  createServerBindingAuthorizationV1,
+  type InitializeServerBindingIssuerV1Input,
+  initializeServerBindingIssuerV1,
+  type ReadServerBindingRecoveryReceiptV1Input,
+  type RevokeServerBindingV1Input,
+  readServerBindingActiveSnapshotV1,
+  readServerBindingRecoveryReceiptV1,
+  recheckServerBindingActiveSnapshotV1,
+  revokeServerBindingV1,
+  type ServerBindingActiveSnapshotV1,
+  ServerBindingPersistenceErrorV1,
+  type ServerBindingTrustedIssuerDescriptorV1,
+  snapshotServerBindingTrustedIssuerDescriptorV1,
+} from "./server-binding-persistence-v1.js";
 import { DatabaseStorageBinding } from "./storage-security.js";
 
 interface WorkerRow {
@@ -239,6 +262,17 @@ if (port === null) {
 const options = workerData as DatabaseWorkerOptions;
 let database: DatabaseSync;
 let schemaVersion = 0;
+let serverBindingTrustedIssuer: Readonly<ServerBindingTrustedIssuerDescriptorV1> | null = null;
+
+const requireServerBindingTrustedIssuer = (): Readonly<ServerBindingTrustedIssuerDescriptorV1> => {
+  if (serverBindingTrustedIssuer === null) {
+    throw new ServerBindingPersistenceErrorV1(
+      "SERVER_BINDING_SIGNER_UNAVAILABLE",
+      "The Server binding trusted issuer is unavailable.",
+    );
+  }
+  return serverBindingTrustedIssuer;
+};
 const claimCandidatePageSize = 100;
 
 FormatRegistry.Set(
@@ -1760,6 +1794,60 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return prepareArtifactCompletion(database, request.input as ArtifactRunCompletionSubmission);
     case "commitArtifactCompletion":
       return commitArtifactCompletion(database, request.input as CommitArtifactCompletionInput);
+    case "initializeServerBindingIssuerV1":
+      return initializeServerBindingIssuerV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as InitializeServerBindingIssuerV1Input,
+      );
+    case "createServerBindingAuthorizationV1":
+      return createServerBindingAuthorizationV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as CreateServerBindingAuthorizationV1Input,
+      );
+    case "claimServerBindingAuthorizationV1":
+      return claimServerBindingAuthorizationV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as ClaimServerBindingAuthorizationV1Input,
+      );
+    case "commitServerBindingReceiptV1":
+      return commitServerBindingReceiptV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as CommitServerBindingReceiptV1Input,
+      );
+    case "confirmServerBindingRecordV1":
+      return confirmServerBindingRecordV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as ConfirmServerBindingRecordV1Input,
+      );
+    case "readServerBindingRecoveryReceiptV1":
+      return readServerBindingRecoveryReceiptV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as ReadServerBindingRecoveryReceiptV1Input,
+      );
+    case "readServerBindingActiveSnapshotV1":
+      return readServerBindingActiveSnapshotV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as ReadServerBindingRecoveryReceiptV1Input,
+      );
+    case "recheckServerBindingActiveSnapshotV1":
+      return recheckServerBindingActiveSnapshotV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as ServerBindingActiveSnapshotV1,
+      );
+    case "revokeServerBindingV1":
+      return revokeServerBindingV1(
+        database,
+        requireServerBindingTrustedIssuer(),
+        request.input as RevokeServerBindingV1Input,
+      );
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":
@@ -1880,6 +1968,11 @@ try {
     });
   }
   schemaVersion = runMigrations(database, options.migrationsDirectory);
+  serverBindingTrustedIssuer =
+    options.serverBindingTrustedIssuer === undefined || options.serverBindingTrustedIssuer === null
+      ? null
+      : snapshotServerBindingTrustedIssuerDescriptorV1(options.serverBindingTrustedIssuer);
+  auditServerBindingPersistenceV1(database, serverBindingTrustedIssuer);
   if (storage.snapshot.initializationState === "fresh") {
     storage.finalizeDatabaseInitialization();
   }
@@ -1914,6 +2007,17 @@ try {
       const output = handleRequest(request);
       port.postMessage({ type: "response", id: request.id, ok: true, output });
     } catch (error) {
+      if (
+        error instanceof ServerBindingPersistenceErrorV1 &&
+        error.code === "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE"
+      ) {
+        port.postMessage({ type: "fatal", error: serializeError(error) });
+        port.close();
+        queueMicrotask(() => {
+          throw error;
+        });
+        return;
+      }
       port.postMessage({
         type: "response",
         id: request.id,

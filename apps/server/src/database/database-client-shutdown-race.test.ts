@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   attachDatabaseClientForTest,
   type DatabaseWorkerTransport,
@@ -8,6 +8,7 @@ import {
 class FakeDatabaseWorker extends EventEmitter {
   readonly posted: unknown[] = [];
   terminateCalls = 0;
+  onTerminate: (() => void) | undefined;
 
   postMessage(value: unknown): void {
     this.posted.push(value);
@@ -15,6 +16,7 @@ class FakeDatabaseWorker extends EventEmitter {
 
   terminate(): Promise<number> {
     this.terminateCalls += 1;
+    this.onTerminate?.();
     return Promise.resolve(1);
   }
 }
@@ -173,5 +175,28 @@ describe("DatabaseClient shutdown exit races", () => {
       code: "DATABASE_WORKER_SHUTDOWN_INCOMPLETE",
     });
     expect(worker.terminateCalls).toBe(0);
+  });
+
+  it("forces termination when graceful shutdown never responds", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeDatabaseWorker();
+      worker.onTerminate = () => queueMicrotask(() => worker.emit("exit", 1));
+      const client = await attach(worker);
+      const closeResult = client.close().catch((error: unknown) => error);
+      await flush();
+      shutdownRequest(worker);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = await closeResult;
+      expect(error).toMatchObject({
+        name: "DatabaseRequestError",
+        code: "DATABASE_WORKER_SHUTDOWN_INCOMPLETE",
+      });
+      expect(worker.terminateCalls).toBe(1);
+      await expect(client.ownerExit).resolves.toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

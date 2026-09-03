@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,13 +36,18 @@ import type {
 } from "../../dist/artifacts/types.js";
 import type { ServerConfig } from "../../dist/config.js";
 import { maximumResultArtifactUploadIdentitiesPerAttempt } from "../../dist/database/artifacts.js";
-import { DatabaseClient } from "../../dist/database/database-client.js";
+import {
+  attachDatabaseClientForTest,
+  DatabaseClient,
+  type DatabaseWorkerTransport,
+} from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
 import {
   databaseInitializationMarkerContent,
   databaseInitializationMarkerPath,
 } from "../../dist/database/storage-security.js";
+import { ServerBindingCoordinatorV1 } from "../../dist/enrollment/server-binding-coordinator-v1.js";
 
 type FakeArtifactTransactionStorageOwner = Parameters<
   typeof registerArtifactTransactionStorageHandle
@@ -3780,5 +3786,144 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     });
     expect(result.authorizationDecisionIds).toHaveLength(1);
     expect(jobs.total).toBe(0);
+  });
+});
+
+class ServerBindingDatabaseWorkerTestTransport extends EventEmitter {
+  readonly posted: unknown[] = [];
+  terminateCalls = 0;
+  throwOnPost = false;
+
+  postMessage(value: unknown): void {
+    if (this.throwOnPost)
+      throw new DOMException("The value could not be cloned.", "DataCloneError");
+    this.posted.push(value);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "id" in value &&
+      "operation" in value &&
+      value.operation === "shutdown"
+    ) {
+      queueMicrotask(() => {
+        this.emit("message", {
+          type: "response",
+          id: value.id,
+          ok: true,
+          output: { closed: true },
+        });
+        this.emit("exit", 0);
+      });
+    }
+  }
+
+  terminate(): Promise<number> {
+    this.terminateCalls += 1;
+    return Promise.resolve(1);
+  }
+}
+
+const attachServerBindingDatabaseClientForTest = async (
+  worker: ServerBindingDatabaseWorkerTestTransport,
+): Promise<DatabaseClient> => {
+  const connecting = attachDatabaseClientForTest(worker as unknown as DatabaseWorkerTransport);
+  worker.emit("message", { type: "ready" });
+  return connecting;
+};
+
+describe("DatabaseClient Server binding persistence capability", () => {
+  it("rejects a Server binding persistence operation through the generic request path", async () => {
+    const worker = new ServerBindingDatabaseWorkerTestTransport();
+    const client = await attachServerBindingDatabaseClientForTest(worker);
+    let getterCalls = 0;
+    const input = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(input, "value", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 1;
+      },
+    });
+
+    const request = Reflect.apply(client.request, client, [
+      "initializeServerBindingIssuerV1",
+      input,
+    ]) as Promise<unknown>;
+
+    await expect(request).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "SERVER_BINDING_PERSISTENCE_AUTHORITY_REQUIRED",
+    });
+    expect(getterCalls).toBe(0);
+    expect(worker.posted).toEqual([]);
+    await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it("issues the Server binding persistence handle only once", async () => {
+    const worker = new ServerBindingDatabaseWorkerTestTransport();
+    const client = await attachServerBindingDatabaseClientForTest(worker);
+
+    const handle = client.createServerBindingPersistenceDatabaseHandle();
+
+    expect(Reflect.ownKeys(handle)).toEqual([]);
+    expect(() => client.createServerBindingPersistenceDatabaseHandle()).toThrow(/already issued/u);
+    await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it("revokes an unconsumed Server binding persistence handle without blocking close", async () => {
+    const worker = new ServerBindingDatabaseWorkerTestTransport();
+    const client = await attachServerBindingDatabaseClientForTest(worker);
+    client.createServerBindingPersistenceDatabaseHandle();
+
+    const close = client.close();
+
+    expect(client.close()).toBe(close);
+    await expect(close).resolves.toBeUndefined();
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]).toMatchObject({ operation: "shutdown" });
+    expect(worker.terminateCalls).toBe(0);
+  });
+
+  it("preserves fatal error codes and revokes an unconsumed persistence handle", async () => {
+    const worker = new ServerBindingDatabaseWorkerTestTransport();
+    const client = await attachServerBindingDatabaseClientForTest(worker);
+    const handle = client.createServerBindingPersistenceDatabaseHandle();
+
+    worker.emit("message", {
+      type: "fatal",
+      error: {
+        name: "ServerBindingPersistenceErrorV1",
+        message: "The durable Server binding state is invalid.",
+        code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+      },
+    });
+    worker.emit("exit", 1);
+
+    await expect(
+      client.request("listJobs", { page: 1, pageSize: 1, status: [], phase: [] }),
+    ).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+    });
+    expect(() => new ServerBindingCoordinatorV1({ database: handle })).toThrow(
+      /consumed or forged/u,
+    );
+    await expect(client.close()).rejects.toMatchObject({
+      code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+    });
+  });
+
+  it("removes a request when postMessage fails before sending", async () => {
+    const worker = new ServerBindingDatabaseWorkerTestTransport();
+    const client = await attachServerBindingDatabaseClientForTest(worker);
+    worker.throwOnPost = true;
+
+    await expect(client.request("ping", {})).rejects.toMatchObject({
+      name: "DatabaseRequestError",
+      code: "DATABASE_REQUEST_NOT_SENT",
+    });
+    worker.throwOnPost = false;
+    await expect(client.close()).resolves.toBeUndefined();
+    expect(worker.terminateCalls).toBe(0);
   });
 });

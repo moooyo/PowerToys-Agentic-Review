@@ -7,7 +7,7 @@ import {
   sign as nodeSign,
 } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as ts from "typescript/unstable/ast";
 import { createVirtualFileSystem } from "typescript/unstable/fs";
@@ -61,9 +61,222 @@ const testPrivateKey = createPrivateKey(testPrivateKeyPem);
 const testPublicKey = createPublicKey(testPrivateKey);
 const issuerSpki = testPublicKey.export({ format: "der", type: "spki" });
 const issuerKeyId = deriveServerBindingIssuerKeyIdV1(issuerSpki);
+const serverBindingAuthoritySubpath = "@agentic-review/contracts/server-binding-authority-v1";
+const serverBindingAuthorityConsumerAllowlist = [
+  "/apps/server/src/database/server-binding-persistence-v1.ts",
+  "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+  "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+] as const;
+const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>([
+  ["server-binding-state-v1", ["/apps/server/src/database/server-binding-persistence-v1.ts"]],
+  [
+    "server-binding-persistence-v1",
+    [
+      "/apps/server/src/database/database-worker.ts",
+      "/apps/server/src/database/protocol.ts",
+      "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+    ],
+  ],
+  [
+    "server-binding-coordinator-v1",
+    [
+      "/apps/server/src/database/database-client.ts",
+      "/apps/server/src/runtime/server-storage-runtime.ts",
+    ],
+  ],
+  [
+    "server-binding-signer-v1",
+    [
+      "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+      "/apps/server/src/runtime/server-storage-runtime.ts",
+    ],
+  ],
+  [
+    "server-binding-signer-provider-v1",
+    ["/apps/server/src/enrollment/server-binding-signer-v1.ts"],
+  ],
+  ["server-binding-trust-profile-v1", ["/apps/server/src/enrollment/server-binding-signer-v1.ts"]],
+]);
+const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>([
+  [
+    "/apps/server/src/database/database-client.ts",
+    [
+      "DatabaseClient",
+      "DatabaseWorkerTransport",
+      "attachDatabaseClientForTest",
+      "terminateWorkerAndWaitForExit",
+    ],
+  ],
+  ["/apps/server/src/database/database-worker.ts", []],
+  [
+    "/apps/server/src/database/protocol.ts",
+    [
+      "ClaimLeaseInput",
+      "ClaimLeaseResult",
+      "DatabaseHealth",
+      "DatabaseOperation",
+      "DatabaseOperationMap",
+      "DatabaseRequest",
+      "DatabaseResponse",
+      "DatabaseWorkerMessage",
+      "DatabaseWorkerOptions",
+      "HeartbeatLeaseInput",
+      "HeartbeatLeaseResult",
+      "HeartbeatWorkerInput",
+      "IngestSchedulingEventInput",
+      "IngestSchedulingEventResult",
+      "LeaseCompletionInput",
+      "LeaseFailureInput",
+      "LeaseTerminalResult",
+      "ReapExpiredLeasesInput",
+      "RegisterWorkerInput",
+      "RegisteredWorker",
+      "ScheduleJobInput",
+      "WebhookDeliveryInput",
+    ],
+  ],
+  [
+    "/apps/server/src/database/server-binding-persistence-v1.ts",
+    [
+      "ClaimServerBindingAuthorizationV1Input",
+      "ClaimServerBindingAuthorizationV1Result",
+      "CommitServerBindingReceiptV1Input",
+      "CommitServerBindingReceiptV1Result",
+      "ConfirmServerBindingRecordV1Input",
+      "ConfirmServerBindingRecordV1Result",
+      "CreateServerBindingAuthorizationV1Input",
+      "CreateServerBindingAuthorizationV1Result",
+      "InitializeServerBindingIssuerV1Input",
+      "InitializeServerBindingIssuerV1Result",
+      "ReadServerBindingRecoveryReceiptV1Input",
+      "RevokeServerBindingV1Input",
+      "RevokeServerBindingV1Result",
+      "ServerBindingActiveSnapshotV1",
+      "ServerBindingAuthorizationSnapshotV1",
+      "ServerBindingClaimSnapshotV1",
+      "ServerBindingIssuanceRequestBasisV1",
+      "ServerBindingIssuerSnapshotV1",
+      "ServerBindingPersistenceAuditResultV1",
+      "ServerBindingPersistenceErrorCodeV1",
+      "ServerBindingPersistenceErrorV1",
+      "ServerBindingRecoveryReceiptV1",
+      "ServerBindingRevocationRequestBasisV1",
+      "ServerBindingTrustedIssuerDescriptorV1",
+      "auditServerBindingPersistenceV1",
+      "claimServerBindingAuthorizationV1",
+      "commitServerBindingReceiptV1",
+      "confirmServerBindingRecordV1",
+      "createServerBindingAuthorizationV1",
+      "deriveServerBindingIssuanceRequestSha256V1",
+      "deriveServerBindingRevocationRequestSha256V1",
+      "initializeServerBindingIssuerV1",
+      "readServerBindingActiveSnapshotV1",
+      "readServerBindingRecoveryReceiptV1",
+      "recheckServerBindingActiveSnapshotV1",
+      "revokeServerBindingV1",
+      "snapshotServerBindingTrustedIssuerDescriptorV1",
+    ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+    [
+      "CreateServerBindingAuthorizationRequestV1",
+      "CreatedServerBindingAuthorizationV1",
+      "IssueServerBindingReceiptRequestV1",
+      "IssuedServerBindingReceiptV1",
+      "ServerBindingAuthorityPortV1",
+      "ServerBindingCoordinatorErrorCodeV1",
+      "ServerBindingCoordinatorErrorV1",
+      "ServerBindingCoordinatorOptionsV1",
+      "ServerBindingCoordinatorV1",
+      "ServerBindingPersistenceDatabaseHandle",
+      "ServerBindingPersistenceDatabaseOperation",
+      "createServerBindingTrustedIssuerDescriptorFromSignerV1",
+      "isServerBindingPersistenceDatabaseOperation",
+      "registerServerBindingPersistenceDatabaseHandle",
+      "revokeServerBindingPersistenceDatabaseHandle",
+    ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
+    [
+      "ServerBindingDigestNativeSignerProviderV1",
+      "ServerBindingPreimageSha256SignerProviderV1",
+      "ServerBindingSignerProviderV1",
+      "loadProductionServerBindingSignerProviderV1",
+    ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-trust-profile-v1.ts",
+    ["ProductionServerBindingTrustProfileV1", "loadProductionServerBindingTrustProfileV1"],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+    [
+      "ServerBindingSignerContextV1",
+      "ServerBindingSignerDescriptorV1",
+      "ServerBindingSignerErrorCodeV1",
+      "ServerBindingSignerErrorV1",
+      "adoptServerBindingSignerV1",
+      "assertServerBindingSignerAdoptableV1",
+      "closeServerBindingSignerV1",
+      "closeUnadoptedServerBindingSignerV1",
+      "loadServerBindingSignerV1",
+      "readServerBindingSignerDescriptorV1",
+      "signServerBindingReceiptStatementV1",
+    ],
+  ],
+  [
+    "/apps/server/src/runtime/server-storage-runtime.ts",
+    [
+      "CreateServerStorageRuntimeOptions",
+      "ServerStorageRuntime",
+      "createServerStorageRuntime",
+      "createServerStorageRuntimeWithInitialSweepTimeoutForTest",
+    ],
+  ],
+]);
+const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
+  [
+    "/apps/server/src/database/database-client.ts",
+    "1c4f411d714d29b165e83c6ebd914eb8342b59201dc4470224db27cd8e032dfd",
+  ],
+  [
+    "/apps/server/src/database/database-worker.ts",
+    "16d6e8e71b879c05c96d4b1b5b286dfddb5ea3a656d2b5f1d89b7ef1eec5a985",
+  ],
+  [
+    "/apps/server/src/database/protocol.ts",
+    "1a4ea73c438f21e2b4a1b94925e4df2406abb395a0146e77b35e429e7cab7e5a",
+  ],
+  [
+    "/apps/server/src/database/server-binding-persistence-v1.ts",
+    "14e69fbc1cde7553bdaaa7f90f9d54cc14d9d6b41f688c7cff852679111c0d2b",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+    "d64ec2717c051a6e4abb26e0401e0433d490c450b7c78db6b05cab1e8b6c8d05",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
+    "d7ec395d41529f395c59206080966503c79d2ca42a3742b876d8de6031f441ba",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-trust-profile-v1.ts",
+    "01338da175edb1d2c1cbbf1078ecb629155d04217ab5f97bb32579f16e1368cd",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+    "128a5f6183041f539544b27457320c78734d5daba374975c297a955a7fa5caef",
+  ],
+  [
+    "/apps/server/src/runtime/server-storage-runtime.ts",
+    "56487cd6b81f70b12276ebf1e6c9e481dd4981b37d9694c56caa860f13ca3ff3",
+  ],
+]);
 
 describe("dormant Server binding authority v1 wire contract", () => {
-  it("remains absent from every production export and consumer", () => {
+  it("remains absent from the root barrel and exposes only the controlled S1 subpath", () => {
     const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
     const contractsRoot = join(repositoryRoot, "packages", "contracts");
     const indexSource = readFileSync(join(contractsRoot, "src", "index.ts"), "utf8");
@@ -71,9 +284,30 @@ describe("dormant Server binding authority v1 wire contract", () => {
     const packageValue = JSON.parse(packageSource) as {
       readonly exports?: Readonly<Record<string, unknown>>;
     };
+    const serverPackageValue = JSON.parse(
+      readFileSync(join(repositoryRoot, "apps", "server", "package.json"), "utf8"),
+    ) as Readonly<Record<string, unknown>>;
+    const serverTsconfigValue = JSON.parse(
+      readFileSync(join(repositoryRoot, "apps", "server", "tsconfig.json"), "utf8"),
+    ) as { readonly compilerOptions?: Readonly<Record<string, unknown>> };
+    const rootTsconfigValue = JSON.parse(
+      readFileSync(join(repositoryRoot, "tsconfig.base.json"), "utf8"),
+    ) as { readonly compilerOptions?: Readonly<Record<string, unknown>> };
     expect(indexSource.toLowerCase()).not.toContain("server-binding-authority-v1");
-    expect(packageSource.toLowerCase()).not.toContain("server-binding-authority-v1");
-    expect(Object.keys(packageValue.exports ?? {})).toEqual(["."]);
+    expect(serverPackageValue).not.toHaveProperty("imports");
+    expect(serverPackageValue).not.toHaveProperty("exports");
+    expect(serverTsconfigValue.compilerOptions ?? {}).not.toHaveProperty("paths");
+    expect(rootTsconfigValue.compilerOptions ?? {}).not.toHaveProperty("paths");
+    expect(packageValue.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js",
+      },
+      "./server-binding-authority-v1": {
+        types: "./dist/server-binding-authority-v1.d.ts",
+        import: "./dist/server-binding-authority-v1.js",
+      },
+    });
 
     const definition = resolve(
       repositoryRoot,
@@ -162,6 +396,7 @@ describe("dormant Server binding authority v1 wire contract", () => {
       'import type { Receipt } from "./server-binding-authority-v1.js";',
       'type Receipt = import("./Server-Binding-Authority-V1.js").ServerBindingReceiptV1;',
       'export * from "@agentic-review/contracts/Server-Binding-Authority-V1";',
+      'import { parseServerBindingReceiptV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
       'import Receipt = require("./server-binding-authority-v1.js");',
       'await import("./server-binding-" + "authority-v1.js");',
       'require(["@agentic-review/contracts/server-binding-", "authority-v1"].join(""));',
@@ -177,6 +412,8 @@ describe("dormant Server binding authority v1 wire contract", () => {
       'Module._load("node:fs");',
       'const hiddenLoad = Module["_load"];',
       'process.dlopen(module, "addon.node");',
+      'Reflect.get(process, "get" + "BuiltinModule")("node:module");',
+      'Reflect.apply(Reflect.get, Reflect, [process, "get" + "BuiltinModule"]);',
       'const hiddenFunction = globalThis["Function"];',
       'import vm from "node:vm";',
       'import { createRequire as hiddenRequire } from "node:module";',
@@ -208,6 +445,11 @@ describe("dormant Server binding authority v1 wire contract", () => {
       {
         fileName: "benign-b.ts",
         source: 'import { JobSchema } from "@agentic-review/contracts";',
+      },
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-v1.ts",
+        source:
+          'import { deriveServerBindingIssuerKeyIdV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
       },
     ];
     const benignInspections = inspectProductionModules(benignSources);
@@ -262,6 +504,44 @@ describe("dormant Server binding authority v1 wire contract", () => {
     for (const escapeSource of aliasEscapeSources) {
       const inspection = inspectProductionModules([escapeSource]).get(escapeSource.fileName) ?? [];
       expect(inspection.length, escapeSource.source).toBeGreaterThan(0);
+    }
+
+    const authorityExportEscapes = [
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-v1.ts",
+        source:
+          'import { parseServerBindingReceiptV1 } from "@agentic-review/contracts/server-binding-authority-v1"; export { parseServerBindingReceiptV1 };',
+      },
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-v1.ts",
+        source:
+          'import { parseServerBindingReceiptV1 } from "@agentic-review/contracts/server-binding-authority-v1"; const escaped = parseServerBindingReceiptV1; export { escaped };',
+      },
+      {
+        fileName: "apps/server/src/routes/authority-barrel.ts",
+        source: 'export * from "../enrollment/server-binding-coordinator-v1.js";',
+      },
+      {
+        fileName: "apps/server/src/database/database-client.ts",
+        source: 'export * from "../enrollment/server-binding-coordinator-v1.js";',
+      },
+      {
+        fileName: "apps/server/src/database/database-client.ts",
+        source:
+          'import { ServerBindingCoordinatorV1 } from "../enrollment/server-binding-coordinator-v1.js"; let escaped; escaped = ServerBindingCoordinatorV1; export { escaped };',
+      },
+      {
+        fileName: "apps/server/src/database/database-client.ts",
+        source:
+          'const lookup = Reflect.get; Reflect.apply(lookup, Reflect, [process, "get" + "BuiltinModule"]); export class DatabaseClient {} export interface DatabaseWorkerTransport {} export const attachDatabaseClientForTest = 1; export const terminateWorkerAndWaitForExit = 1;',
+      },
+    ];
+    const authorityExportInspections = inspectProductionModules(authorityExportEscapes);
+    for (const escapeSource of authorityExportEscapes) {
+      expect(
+        authorityExportInspections.get(escapeSource.fileName)?.length ?? 0,
+        escapeSource.source,
+      ).toBeGreaterThan(0);
     }
   });
 
@@ -1166,13 +1446,61 @@ function inspectProductionModules(
   });
 }
 
+function isAllowedServerBindingAuthorityImport(node: ts.Node, normalizedFileName: string): boolean {
+  return (
+    ts.isStringLiteralLikeNode(node) &&
+    node.text === serverBindingAuthoritySubpath &&
+    ts.isImportDeclaration(node.parent) &&
+    node.parent.moduleSpecifier === node &&
+    serverBindingAuthorityConsumerAllowlist.some(
+      (suffix) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+    )
+  );
+}
+
 function inspectProductionSourceFile(
   sourceFile: ts.SourceFile,
   originalFileName: string,
 ): string[] {
   const violations = new Set<string>();
   const normalizedFileName = originalFileName.replaceAll("\\", "/").toLowerCase();
+  const expectedExportApi = isAbsolute(originalFileName)
+    ? [...sensitiveServerBindingConsumerExports.entries()].find(
+        ([suffix]) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+      )?.[1]
+    : undefined;
+  if (expectedExportApi !== undefined) {
+    const inspection = inspectExportSourceFile(sourceFile);
+    if (
+      inspection.forbidden.length !== 0 ||
+      JSON.stringify(inspection.names) !== JSON.stringify([...expectedExportApi].sort())
+    ) {
+      violations.add("sensitive consumer export API differs from its exact allowlist");
+    }
+  }
+  const expectedSourceSha256 = isAbsolute(originalFileName)
+    ? [...sensitiveServerBindingConsumerSourceSha256.entries()].find(
+        ([suffix]) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+      )?.[1]
+    : undefined;
+  if (expectedSourceSha256 !== undefined) {
+    const normalizedSource = sourceFile.getFullText().replaceAll("\r\n", "\n");
+    if (
+      normalizedSource.includes("\r") ||
+      normalizedSource.includes("\uFEFF") ||
+      createHash("sha256").update(normalizedSource, "utf8").digest("hex") !== expectedSourceSha256
+    ) {
+      violations.add("sensitive consumer source differs from its reviewed digest");
+    }
+  }
   const loaderBindings = collectImportedLoaderBindings(sourceFile);
+  const reflectGetAliases = collectReflectGetAliases(sourceFile);
+  if (reflectGetAliases.size !== 0) {
+    violations.add("Reflect.get loader-capable alias");
+  }
+  for (const violation of inspectSensitiveBindingExports(sourceFile)) {
+    violations.add(violation);
+  }
   const allowedLoaderBindingReferences = new Map<string, number>();
   let allowedWorkerCalls = 0;
   let allowedSpawnSyncCalls = 0;
@@ -1182,8 +1510,20 @@ function inspectProductionSourceFile(
     const candidates = [specifier.text, decodeStaticLiteral(specifier.getText(sourceFile))].map(
       (value) => value.replace(/^["'`]|["'`]$/gu, "").toLowerCase(),
     );
-    if (candidates.some((value) => value.includes("server-binding-authority-v1"))) {
-      violations.add("dormant contract static import/export");
+    if (
+      candidates.some((value) => value.includes("server-binding-authority-v1")) &&
+      !isAllowedServerBindingAuthorityImport(specifier, normalizedFileName)
+    ) {
+      violations.add("server binding authority import outside exact S1 allowlist");
+    }
+    for (const candidate of candidates) {
+      const moduleName = sensitiveServerBindingModuleName(candidate);
+      if (
+        moduleName !== undefined &&
+        !isAllowedSensitiveServerBindingConsumer(moduleName, normalizedFileName)
+      ) {
+        violations.add(`${moduleName} import outside exact S1 dependency allowlist`);
+      }
     }
     if (
       candidates.some(
@@ -1212,8 +1552,11 @@ function inspectProductionSourceFile(
       }
     }
     const staticValue = staticStringValue(node);
-    if (staticValue?.toLowerCase().includes("server-binding-authority-v1") === true) {
-      violations.add("dormant contract sensitive literal");
+    if (
+      staticValue?.toLowerCase().includes("server-binding-authority-v1") === true &&
+      !isAllowedServerBindingAuthorityImport(node, normalizedFileName)
+    ) {
+      violations.add("server binding authority sensitive literal outside exact S1 allowlist");
     }
     if (ts.isIdentifier(node)) {
       const identifier = node.text.toLowerCase();
@@ -1229,20 +1572,22 @@ function inspectProductionSourceFile(
         violations.add(`${identifier} loader reference`);
       }
     }
-    if (
-      ts.isElementAccessExpression(node) &&
-      ts.isStringLiteralLikeNode(node.argumentExpression) &&
-      [
-        "_load",
-        "createrequire",
-        "dlopen",
-        "eval",
-        "function",
-        "getbuiltinmodule",
-        "require",
-      ].includes(node.argumentExpression.text.toLowerCase())
-    ) {
-      violations.add(`${node.argumentExpression.text} computed loader reference`);
+    if (ts.isElementAccessExpression(node)) {
+      const memberName = staticStringValue(node.argumentExpression)?.toLowerCase();
+      if (
+        memberName !== undefined &&
+        [
+          "_load",
+          "createrequire",
+          "dlopen",
+          "eval",
+          "function",
+          "getbuiltinmodule",
+          "require",
+        ].includes(memberName)
+      ) {
+        violations.add(`${memberName} computed loader reference`);
+      }
     }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier !== undefined) inspectModuleSpecifier(node.moduleSpecifier);
@@ -1261,6 +1606,37 @@ function inspectProductionSourceFile(
     if (ts.isCallExpression(node)) {
       if (ts.isImportExpression(node.expression)) violations.add("dynamic import loader");
       const name = calledExpressionName(node.expression);
+      if (name === "get" && expressionReceiverName(node.expression) === "reflect") {
+        const receiver = node.arguments[0];
+        const memberName =
+          node.arguments[1] === undefined
+            ? undefined
+            : staticStringValue(node.arguments[1])?.toLowerCase();
+        if (
+          (receiver !== undefined &&
+            ts.isIdentifier(receiver) &&
+            ["globalthis", "module", "process"].includes(receiver.text.toLowerCase())) ||
+          (memberName !== undefined &&
+            [
+              "_load",
+              "createrequire",
+              "dlopen",
+              "function",
+              "getbuiltinmodule",
+              "require",
+            ].includes(memberName))
+        ) {
+          violations.add("Reflect.get runtime loader escape");
+        }
+      }
+      if (
+        name === "apply" &&
+        expressionReceiverName(node.expression) === "reflect" &&
+        node.arguments[0] !== undefined &&
+        isReflectGetReference(node.arguments[0], reflectGetAliases)
+      ) {
+        violations.add("Reflect.apply loader lookup escape");
+      }
       if (
         name === "createrequire" ||
         name === "dlopen" ||
@@ -1344,6 +1720,308 @@ function inspectProductionSourceFile(
     }
   }
   return [...violations].sort();
+}
+
+function sensitiveServerBindingModuleName(specifier: string): string | undefined {
+  const normalized = specifier.replaceAll("\\", "/").toLowerCase();
+  for (const moduleName of sensitiveServerBindingModuleConsumers.keys()) {
+    if (
+      normalized === moduleName ||
+      normalized.endsWith(`/${moduleName}`) ||
+      normalized.endsWith(`/${moduleName}.js`) ||
+      normalized.endsWith(`/${moduleName}.ts`)
+    ) {
+      return moduleName;
+    }
+  }
+  return undefined;
+}
+
+function isAllowedSensitiveServerBindingConsumer(
+  moduleName: string,
+  normalizedFileName: string,
+): boolean {
+  return (
+    sensitiveServerBindingModuleConsumers
+      .get(moduleName)
+      ?.some(
+        (suffix) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+      ) ?? false
+  );
+}
+
+function inspectSensitiveBindingExports(sourceFile: ts.SourceFile): string[] {
+  const taintedBindings = collectSensitiveImportedBindings(sourceFile);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const statement of sourceFile.statements) {
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (
+            ts.isIdentifier(declaration.name) &&
+            declaration.initializer !== undefined &&
+            exposesSensitiveBinding(declaration.initializer, taintedBindings) &&
+            !taintedBindings.has(declaration.name.text)
+          ) {
+            taintedBindings.add(declaration.name.text);
+            changed = true;
+          }
+        }
+      }
+      if (
+        ts.isExpressionStatement(statement) &&
+        ts.isBinaryExpression(statement.expression) &&
+        statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(statement.expression.left) &&
+        exposesSensitiveBinding(statement.expression.right, taintedBindings) &&
+        !taintedBindings.has(statement.expression.left.text)
+      ) {
+        taintedBindings.add(statement.expression.left.text);
+        changed = true;
+      }
+    }
+  }
+
+  const violations: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier !== undefined &&
+      ts.isStringLiteralLikeNode(statement.moduleSpecifier) &&
+      (statement.moduleSpecifier.text.toLowerCase() === serverBindingAuthoritySubpath ||
+        sensitiveServerBindingModuleName(statement.moduleSpecifier.text) !== undefined)
+    ) {
+      violations.push("sensitive module direct re-export");
+    }
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier === undefined &&
+      statement.exportClause !== undefined &&
+      ts.isNamedExports(statement.exportClause)
+    ) {
+      for (const element of statement.exportClause.elements) {
+        const localName = element.propertyName?.text ?? element.name.text;
+        if (taintedBindings.has(localName)) {
+          violations.push(`${localName} sensitive imported binding re-export`);
+        }
+      }
+    }
+    if (
+      ts.isExportAssignment(statement) &&
+      exposesSensitiveBinding(statement.expression, taintedBindings)
+    ) {
+      violations.push("sensitive imported binding export assignment");
+    }
+    if (ts.isVariableStatement(statement) && hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (
+          declaration.initializer !== undefined &&
+          exposesSensitiveBinding(declaration.initializer, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding exported through a variable");
+        }
+      }
+    }
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      hasModifier(statement, ts.SyntaxKind.ExportKeyword) &&
+      statement.body !== undefined &&
+      blockReturnsSensitiveBinding(statement.body, taintedBindings)
+    ) {
+      violations.push("sensitive imported binding returned by an exported function");
+    }
+    if (ts.isClassDeclaration(statement) && hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+      for (const member of statement.members) {
+        if (
+          ts.isPropertyDeclaration(member) &&
+          member.initializer !== undefined &&
+          exposesSensitiveBinding(member.initializer, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding exported through a class field");
+        }
+        if (
+          member.body !== undefined &&
+          blockReturnsSensitiveBinding(member.body, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding returned by an exported class member");
+        }
+      }
+    }
+  }
+  return violations;
+}
+
+function collectSensitiveImportedBindings(sourceFile: ts.SourceFile): Set<string> {
+  const bindings = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteralLikeNode(statement.moduleSpecifier) ||
+      statement.importClause === undefined
+    ) {
+      continue;
+    }
+    const moduleName = statement.moduleSpecifier.text.toLowerCase();
+    if (
+      moduleName !== serverBindingAuthoritySubpath &&
+      sensitiveServerBindingModuleName(moduleName) === undefined
+    ) {
+      continue;
+    }
+    if (statement.importClause.name !== undefined) {
+      bindings.add(statement.importClause.name.text);
+    }
+    const namedBindings = statement.importClause.namedBindings;
+    if (namedBindings === undefined) continue;
+    if (ts.isNamespaceImport(namedBindings)) {
+      bindings.add(namedBindings.name.text);
+      continue;
+    }
+    for (const element of namedBindings.elements) bindings.add(element.name.text);
+  }
+  return bindings;
+}
+
+function collectReflectGetAliases(sourceFile: ts.SourceFile): Set<string> {
+  const aliases = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer !== undefined &&
+        isReflectGetReference(node.initializer, aliases) &&
+        !aliases.has(node.name.text)
+      ) {
+        aliases.add(node.name.text);
+        changed = true;
+      }
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        isReflectGetReference(node.right, aliases) &&
+        !aliases.has(node.left.text)
+      ) {
+        aliases.add(node.left.text);
+        changed = true;
+      }
+      node.forEachChild((child) => {
+        visit(child);
+        return undefined;
+      });
+    };
+    visit(sourceFile);
+  }
+  return aliases;
+}
+
+function isReflectGetReference(expression: ts.Expression, aliases: ReadonlySet<string>): boolean {
+  if (ts.isIdentifier(expression)) return aliases.has(expression.text);
+  if (ts.isParenthesizedExpression(expression)) {
+    return isReflectGetReference(expression.expression, aliases);
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    return (
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text.toLowerCase() === "reflect" &&
+      expression.name.text.toLowerCase() === "get"
+    );
+  }
+  if (ts.isElementAccessExpression(expression)) {
+    return (
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text.toLowerCase() === "reflect" &&
+      staticStringValue(expression.argumentExpression)?.toLowerCase() === "get"
+    );
+  }
+  return false;
+}
+
+function exposesSensitiveBinding(
+  expression: ts.Expression,
+  bindings: ReadonlySet<string>,
+): boolean {
+  if (ts.isIdentifier(expression)) return bindings.has(expression.text);
+  if (ts.isParenthesizedExpression(expression)) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (
+    ts.isAsExpression(expression) ||
+    ts.isTypeAssertion(expression) ||
+    ts.isSatisfiesExpression(expression) ||
+    ts.isNonNullExpression(expression)
+  ) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    return expression.elements.some(
+      (element) => !ts.isOmittedExpression(element) && exposesSensitiveBinding(element, bindings),
+    );
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    return expression.properties.some((property) => {
+      if (ts.isShorthandPropertyAssignment(property)) return bindings.has(property.name.text);
+      if (ts.isPropertyAssignment(property)) {
+        return exposesSensitiveBinding(property.initializer, bindings);
+      }
+      if (ts.isSpreadAssignment(property))
+        return exposesSensitiveBinding(property.expression, bindings);
+      return false;
+    });
+  }
+  if (ts.isConditionalExpression(expression)) {
+    return (
+      exposesSensitiveBinding(expression.whenTrue, bindings) ||
+      exposesSensitiveBinding(expression.whenFalse, bindings)
+    );
+  }
+  if (ts.isArrowFunction(expression) && !ts.isBlock(expression.body)) {
+    return exposesSensitiveBinding(expression.body, bindings);
+  }
+  if (ts.isArrowFunction(expression) && ts.isBlock(expression.body)) {
+    return blockReturnsSensitiveBinding(expression.body, bindings);
+  }
+  return false;
+}
+
+function blockReturnsSensitiveBinding(block: ts.Block, bindings: ReadonlySet<string>): boolean {
+  let escaped = false;
+  const visit = (node: ts.Node): void => {
+    if (escaped || (node !== block && isFunctionLikeNode(node))) return;
+    if (
+      ts.isReturnStatement(node) &&
+      node.expression !== undefined &&
+      exposesSensitiveBinding(node.expression, bindings)
+    ) {
+      escaped = true;
+      return;
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(block);
+  return escaped;
+}
+
+function isFunctionLikeNode(node: ts.Node): boolean {
+  return (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  );
 }
 
 type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "worker";
@@ -1729,6 +2407,7 @@ function productionSourceFiles(root: string): string[] {
     ".git",
     ".turbo",
     ".umi",
+    ".umi-production",
     "coverage",
     "dist",
     "node_modules",
