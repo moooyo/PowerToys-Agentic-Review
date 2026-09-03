@@ -193,6 +193,13 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   trust key, route, binding resolver, Windows writer, reader, or production consumer. The
   environment certificate map remains the only positive Worker mapping, and all Claim and
   execution paths are unchanged.
+- A proposed dormant Server binding persistence v1 contract. ADR 0023 fixes migration 0012's four
+  strict tables, atomic authorization consumption plus pending creation, the internal issuance and
+  revocation request digests, first-valid-receipt compare-and-swap, exact stored-byte replay,
+  append-only terminal revocation, issuer singleton bootstrap, full startup integrity audit, and an
+  opaque database capability. This documentation slice adds no migration, repository, signer,
+  route, trust key, authentication source, revocation veto, Windows consumer, Claim, slot, or
+  execution authority.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
@@ -339,8 +346,9 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
-Server binding receipt authority, privileged enrollment writer and live evidence, destination
-evidence, the ADR 0021 protected-store implementation and opaque-evidence composition, the
+the ADR 0023 Server binding persistence implementation, S2 authenticated receipt authority,
+privileged enrollment writer and live evidence, destination evidence, the ADR 0021 protected-store
+implementation and opaque-evidence composition, the
 production Go installer, production-capable SCM schema and native adapter, a complete final
 recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
