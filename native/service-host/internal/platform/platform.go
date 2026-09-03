@@ -15,6 +15,9 @@ var (
 // installverify evidence inside the Windows Host implementation.
 type BootstrapOptions struct {
 	ActualBootstrapPath string
+	// Ready is called at most once after the local preflight has completed and
+	// before the host starts waiting for its peer service.
+	Ready func()
 }
 
 type Host interface {

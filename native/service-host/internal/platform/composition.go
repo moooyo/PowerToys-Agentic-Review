@@ -65,8 +65,9 @@ func (host compositionHost) Run(ctx context.Context, options BootstrapOptions) e
 }
 
 type compositionStep struct {
-	name string
-	run  func(context.Context) error
+	name         string
+	run          func(context.Context) error
+	reportsReady bool
 }
 
 func runComposition(
@@ -107,7 +108,7 @@ func runComposition(
 		{name: "verify installation", run: builder.verifyInstallation},
 		{name: "verify data root", run: builder.verifyDataRoot},
 		{name: "open role credentials", run: builder.openRoleCredentials},
-		{name: "compose preflight", run: builder.composePreflight},
+		{name: "compose preflight", run: builder.composePreflight, reportsReady: true},
 		{name: "connect peer pipe", run: builder.connectPeer},
 		{name: "verify peer", run: builder.verifyPeer},
 		{name: "finalize runtime plan", run: builder.finalizeRuntimePlan},
@@ -119,6 +120,7 @@ func runComposition(
 		{name: "accept HostControl", run: builder.acceptHostControl},
 		{name: "build role runtime", run: builder.buildRoleRuntime},
 	}
+	var readyOnce sync.Once
 	for _, step := range steps {
 		if cause := context.Cause(setupContext); cause != nil {
 			return finish(cause)
@@ -129,6 +131,14 @@ func runComposition(
 		}
 		if err := step.run(stepContext); err != nil {
 			return finish(fmt.Errorf("%s: %w", step.name, err))
+		}
+		if step.reportsReady {
+			if cause := context.Cause(setupContext); cause != nil {
+				return finish(cause)
+			}
+			if options.Ready != nil {
+				readyOnce.Do(options.Ready)
+			}
 		}
 	}
 	runtime, err := builder.runtimeSupervision()

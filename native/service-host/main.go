@@ -25,19 +25,68 @@ func main() {
 }
 
 func run(arguments []string, standardOutput io.Writer, standardError io.Writer) int {
+	command, code, runCommand := prepareCommand(arguments, standardOutput, standardError)
+	if !runCommand {
+		return code
+	}
+	return runPreparedCommand(command, standardError, platform.NewHost(), newServiceRunner())
+}
+
+type serviceRunner interface {
+	RunIfService(commandLine, platform.Host) (bool, error)
+}
+
+func runWithDependencies(
+	arguments []string,
+	standardOutput io.Writer,
+	standardError io.Writer,
+	host platform.Host,
+	services serviceRunner,
+) int {
+	command, code, runCommand := prepareCommand(arguments, standardOutput, standardError)
+	if !runCommand {
+		return code
+	}
+	return runPreparedCommand(command, standardError, host, services)
+}
+
+func prepareCommand(
+	arguments []string,
+	standardOutput io.Writer,
+	standardError io.Writer,
+) (commandLine, int, bool) {
 	command, err := parseCommandLine(arguments)
 	if err != nil {
 		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: %v\n", err)
-		return exitInvalidConfig
+		return commandLine{}, exitInvalidConfig, false
 	}
 	if command.showVersion {
 		_, _ = fmt.Fprintf(standardOutput, "AgenticReview.ServiceHost %s\n", version)
+		return commandLine{}, exitSuccess, false
+	}
+	return command, exitSuccess, true
+}
+
+func runPreparedCommand(
+	command commandLine,
+	standardError io.Writer,
+	host platform.Host,
+	services serviceRunner,
+) int {
+	handled, err := services.RunIfService(command, host)
+	if err != nil {
+		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: Windows service failed: %v\n", err)
+		return exitPreflight
+	}
+	if handled {
 		return exitSuccess
 	}
 
+	// The non-SCM path exists only for an explicit local developer invocation.
+	// Service detection failures above never fall back to interactive execution.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := platform.NewHost().Run(ctx, platform.BootstrapOptions{
+	if err := host.Run(ctx, platform.BootstrapOptions{
 		ActualBootstrapPath: command.configPath,
 	}); err != nil {
 		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: preflight failed: %v\n", err)

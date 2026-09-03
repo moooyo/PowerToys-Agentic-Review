@@ -207,6 +207,57 @@ func TestCompositionRunsFixedStagesAndCleansEveryFailure(t *testing.T) {
 	}
 }
 
+func TestCompositionReportsReadyOnceBetweenPreflightAndPeerConnection(t *testing.T) {
+	builder := &fakeCompositionBuilder{
+		failAt:  "connect-peer",
+		failure: errors.New("stop after ready"),
+	}
+	readyCalls := 0
+	readyAfter := ""
+	err := runComposition(context.Background(), BootstrapOptions{
+		ActualBootstrapPath: `C:\trusted.json`,
+		Ready: func() {
+			readyCalls++
+			builder.mu.Lock()
+			defer builder.mu.Unlock()
+			if len(builder.events) != 0 {
+				readyAfter = builder.events[len(builder.events)-1]
+			}
+		},
+	}, builder)
+	if !errors.Is(err, builder.failure) {
+		t.Fatalf("runComposition error = %v", err)
+	}
+	events, _, _ := builder.snapshot()
+	connectIndex := -1
+	for index, event := range events {
+		if event == "connect-peer" {
+			connectIndex = index
+			break
+		}
+	}
+	if readyCalls != 1 || readyAfter != "compose-preflight" || connectIndex < 0 {
+		t.Fatalf("ready calls=%d after=%q events=%v", readyCalls, readyAfter, events)
+	}
+}
+
+func TestCompositionDoesNotReportReadyWhenPreflightFails(t *testing.T) {
+	builder := &fakeCompositionBuilder{
+		failAt:  "compose-preflight",
+		failure: errors.New("preflight failed"),
+	}
+	readyCalls := 0
+	err := runComposition(context.Background(), BootstrapOptions{
+		Ready: func() { readyCalls++ },
+	}, builder)
+	if !errors.Is(err, builder.failure) {
+		t.Fatalf("runComposition error = %v", err)
+	}
+	if readyCalls != 0 {
+		t.Fatalf("ready calls = %d, want 0", readyCalls)
+	}
+}
+
 func TestCompositionRuntimeConstructionAndCleanupErrorsAreJoined(t *testing.T) {
 	runtimeFailure := errors.New("runtime construction failed")
 	cleanupFailure := errors.New("cleanup failed")
