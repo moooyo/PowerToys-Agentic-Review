@@ -7,18 +7,15 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./server-binding-authority-v1": {
-      "types": "./dist/server-binding-authority-v1.d.ts",
-      "import": "./dist/server-binding-authority-v1.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
+    "prebuild": "node ./scripts/clean-build-output.mjs",
     "build": "tsc -b",
-    "clean": "tsc -b --clean",
+    "clean": "node ./scripts/clean-build-output.mjs && tsc -b --clean",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

@@ -31,36 +31,6 @@ type ArtifactTransactionDatabaseDispatchers = {
   ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
 };
 
-type RetiredServerBindingPersistenceDatabaseOperation =
-  | "claimServerBindingAuthorizationV1"
-  | "commitServerBindingReceiptV1"
-  | "confirmServerBindingRecordV1"
-  | "createServerBindingAuthorizationV1"
-  | "initializeServerBindingIssuerV1"
-  | "readServerBindingActiveSnapshotV1"
-  | "readServerBindingRecoveryReceiptV1"
-  | "recheckServerBindingActiveSnapshotV1"
-  | "revokeServerBindingV1";
-
-const isRetiredServerBindingPersistenceDatabaseOperation = (
-  operation: DatabaseOperation,
-): operation is RetiredServerBindingPersistenceDatabaseOperation => {
-  switch (operation) {
-    case "claimServerBindingAuthorizationV1":
-    case "commitServerBindingReceiptV1":
-    case "confirmServerBindingRecordV1":
-    case "createServerBindingAuthorizationV1":
-    case "initializeServerBindingIssuerV1":
-    case "readServerBindingActiveSnapshotV1":
-    case "readServerBindingRecoveryReceiptV1":
-    case "recheckServerBindingActiveSnapshotV1":
-    case "revokeServerBindingV1":
-      return true;
-    default:
-      return false;
-  }
-};
-
 export interface DatabaseWorkerTransport {
   postMessage(value: unknown): void;
   terminate(): Promise<number>;
@@ -328,9 +298,7 @@ export class DatabaseClient {
   public request<
     TOperation extends Exclude<
       DatabaseOperation,
-      | ArtifactTransactionDatabaseOperation
-      | RetiredServerBindingPersistenceDatabaseOperation
-      | "shutdown"
+      ArtifactTransactionDatabaseOperation | "shutdown"
     >,
   >(
     operation: TOperation,
@@ -349,14 +317,6 @@ export class DatabaseClient {
         new DatabaseRequestError(
           "Artifact database operations require transaction coordinator authority.",
           "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",
-        ),
-      ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
-    }
-    if (isRetiredServerBindingPersistenceDatabaseOperation(operation)) {
-      return Promise.reject(
-        new DatabaseRequestError(
-          "Server binding persistence operations are retired.",
-          "SERVER_BINDING_PERSISTENCE_RETIRED",
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }

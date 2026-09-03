@@ -18,8 +18,9 @@ Branch `codex/worker-token-followups` completes three items that were deferred b
 handoff: the authenticated credential roster and Dashboard management flow, native ServiceHost
 bootstrap schema v4 and Bearer production composition, and removal of the superseded Server binding
 coordinator from the production storage lifecycle. The signed outer-package v1 and installer remain
-historical schema-v3 profiles and deliberately reject the schema-v4 runtime until a separately
-versioned release profile is defined.
+historical schema-v3 profiles. The later release follow-up adds outer-package v2 and split installer
+profile v2 contracts for schema v4 while leaving actual signed material and the production SCM
+installer deferred.
 
 ## Completed Scope
 
@@ -70,9 +71,9 @@ code, and signer-host code have no Server route or Worker-auth consumer.
 Native ServiceHost production composition now accepts only bootstrap schema v4. Control loads the
 fixed authentication file and constructs `NewBearerClient`; Executor has no Worker credential or
 Server transport. Historical schema v3 remains parseable for exact-byte compatibility but fails
-production startup before credential acquisition. The signed outer-package v1 still accepts only
-schema v3, so a new signed package and installer profile is required before the native split-service
-Worker can ship.
+production startup before credential acquisition. Signed outer-package v1 still accepts only schema
+v3; outer-package v2 and installer profile v2 now bind schema v4, but actual signed release material,
+destination evidence, and the production SCM installer are still required before shipment.
 
 The production Server storage lifecycle no longer creates, opens, or closes the superseded Server
 binding coordinator. Database startup preserves migration-0012 rows without auditing or activating
@@ -120,12 +121,12 @@ engine warning, but lint, typecheck, build, and the recorded focused tests compl
 
 ## Deferred Work
 
-1. Define the separately versioned signed outer-package and installer profiles that can publish the
-   schema-v4 native runtime. Signed package v1 remains immutable schema-v3 history.
-2. Delete superseded receipt, signer, signer-host, and archival persistence APIs and source in a
-   separate cleanup change after deciding where the retained historical tests should live.
-3. Perform deployment recovery exercises for Token creation, lost rotate responses, revocation,
-   and the explicitly accepted database-backup rollback behavior before a production rollout.
+1. Produce actual signed outer-package-v2 release material and implement the production destination
+   verification and SCM installer. Signed package v1 remains immutable schema-v3 history.
+
+The later `codex/worker-token-release-recovery` change completed the executable historical-source
+cleanup and the Token recovery exercises. Migration 0012 and its four-table upgrade compatibility
+coverage remain immutable history.
 
 Linux signer-host signals, reaping, cgroups, parent-death behavior, HSM/KMS integration, candidate
 certificates, signed receipts, and active-status assertions are not deferred requirements under

@@ -38,8 +38,13 @@ func ParseSignatureEnvelope(document []byte) (SignatureEnvelope, error) {
 // SigningDigest returns the domain-separated SHA-256 digest for canonical package-index bytes.
 // It performs no private-key operation.
 func SigningDigest(indexDocument []byte) ([sha256.Size]byte, error) {
-	if _, err := ParseIndex(indexDocument); err != nil {
+	index, err := ParseIndex(indexDocument)
+	if err != nil {
 		return [sha256.Size]byte{}, err
+	}
+	if !((index.SchemaVersion == IndexSchemaVersion && index.ProfileID == IndexProfileID) ||
+		(index.SchemaVersion == BearerTokenIndexSchemaVersion && index.ProfileID == BearerTokenIndexProfileID)) {
+		return [sha256.Size]byte{}, fmt.Errorf("%w: package index profile has no signature policy", ErrSignature)
 	}
 	digest := sha256.New()
 	_, _ = digest.Write([]byte(signatureDomain))

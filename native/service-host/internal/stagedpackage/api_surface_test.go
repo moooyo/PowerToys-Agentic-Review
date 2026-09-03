@@ -32,15 +32,16 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 		}
 	}
 	allowedMethods := map[string]bool{
-		"Close":                 false,
-		"ControlConfiguration":  false,
-		"ExecutorConfiguration": false,
-		"Files":                 false,
-		"Index":                 false,
-		"MarshalJSON":           false,
-		"Roots":                 false,
-		"SignerKeyID":           false,
-		"Validate":              false,
+		"Close":                        false,
+		"ControlConfiguration":         false,
+		"ExecutorConfiguration":        false,
+		"Files":                        false,
+		"Index":                        false,
+		"MarshalJSON":                  false,
+		"Roots":                        false,
+		"SelectBearerTokenInstallerV2": false,
+		"SignerKeyID":                  false,
+		"Validate":                     false,
 	}
 	for index := 0; index < evidenceType.NumMethod(); index++ {
 		name := evidenceType.Method(index).Name
@@ -54,6 +55,33 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 			t.Fatalf("StagedPackageEvidence method %s is absent", name)
 		}
 	}
+	installerType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2Package{})
+	for index := 0; index < installerType.NumField(); index++ {
+		if installerType.Field(index).IsExported() {
+			t.Fatalf("BearerTokenInstallerV2Package field %s is exported", installerType.Field(index).Name)
+		}
+	}
+	installerMethods := map[string]bool{"Close": false, "MarshalJSON": false, "Validate": false}
+	for index := 0; index < installerType.NumMethod(); index++ {
+		name := installerType.Method(index).Name
+		if _, allowed := installerMethods[name]; !allowed {
+			t.Fatalf("BearerTokenInstallerV2Package exposes unexpected method %s", name)
+		}
+		installerMethods[name] = true
+	}
+	for name, seen := range installerMethods {
+		if !seen {
+			t.Fatalf("BearerTokenInstallerV2Package method %s is absent", name)
+		}
+	}
+	zeroInstaller := stagedpackage.BearerTokenInstallerV2Package{}
+	if !errors.Is(zeroInstaller.Validate(), stagedpackage.ErrInstallerProfile) ||
+		!errors.Is(zeroInstaller.Close(), stagedpackage.ErrInstallerProfile) {
+		t.Fatal("zero BearerTokenInstallerV2Package behaved as a valid profile gate")
+	}
+	if _, err := json.Marshal(zeroInstaller); !errors.Is(err, stagedpackage.ErrSerialization) {
+		t.Fatalf("installer profile JSON serialization returned %v, want ErrSerialization", err)
+	}
 	if _, err := json.Marshal(stagedpackage.StagedPackageEvidence{}); !errors.Is(err, stagedpackage.ErrSerialization) {
 		t.Fatalf("JSON serialization returned %v, want ErrSerialization", err)
 	}
@@ -62,6 +90,43 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 		!errors.Is(zero.Close(), stagedpackage.ErrInvalidEvidence) ||
 		zero.SignerKeyID() != "" || zero.Index().SchemaVersion != 0 || zero.Roots() != nil || zero.Files() != nil {
 		t.Fatal("zero StagedPackageEvidence exposed data or behaved as valid evidence")
+	}
+}
+
+func TestOnlyRetainedStagedEvidenceCanSelectBearerTokenInstallerV2(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate stagedpackage source")
+	}
+	packages, err := parser.ParseDir(
+		token.NewFileSet(), filepath.Dir(currentFile), nil, parser.SkipObjectResolution,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := packages["stagedpackage"]
+	if production == nil {
+		t.Fatal("cannot locate stagedpackage production syntax tree")
+	}
+	selectors := 0
+	for fileName, file := range production.Files {
+		if strings.HasSuffix(fileName, "_test.go") {
+			continue
+		}
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || !resultNamesType(function.Type.Results, "BearerTokenInstallerV2Package") {
+				continue
+			}
+			if function.Name.Name != "SelectBearerTokenInstallerV2" || function.Recv == nil ||
+				!fieldListNamesType(function.Recv, "StagedPackageEvidence") {
+				t.Fatalf("unexpected BearerTokenInstallerV2Package selector %s", function.Name.Name)
+			}
+			selectors++
+		}
+	}
+	if selectors != 1 {
+		t.Fatalf("BearerTokenInstallerV2Package selectors = %d, want 1", selectors)
 	}
 }
 
@@ -156,4 +221,8 @@ func resultNamesType(fields *ast.FieldList, name string) bool {
 		return !found
 	})
 	return found
+}
+
+func fieldListNamesType(fields *ast.FieldList, name string) bool {
+	return resultNamesType(fields, name)
 }

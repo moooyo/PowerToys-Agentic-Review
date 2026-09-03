@@ -10,6 +10,7 @@ import (
 	"reflect"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -147,6 +148,81 @@ func (evidence StagedPackageEvidence) Files() []FileSnapshot {
 		return nil
 	}
 	return cloneFileSnapshots(evidence.state.files)
+}
+
+// SelectBearerTokenInstallerV2 converts retained staged evidence into the only type that a future
+// Token-profile installer may accept. Historical schema-v3 packages fail this gate.
+func (evidence StagedPackageEvidence) SelectBearerTokenInstallerV2() (BearerTokenInstallerV2Package, error) {
+	if err := evidence.Validate(); err != nil {
+		return BearerTokenInstallerV2Package{}, err
+	}
+	evidence.state.mu.Lock()
+	defer evidence.state.mu.Unlock()
+	if evidence.state.closed || validateBearerTokenInstallerV2(
+		evidence.state.index,
+		evidence.state.control,
+		evidence.state.executor,
+	) != nil {
+		return BearerTokenInstallerV2Package{}, ErrInstallerProfile
+	}
+	return BearerTokenInstallerV2Package{state: evidence.state, digest: evidence.state.digest}, nil
+}
+
+// Validate rechecks the originating staged evidence and its exact v2 profile selection.
+func (selection BearerTokenInstallerV2Package) Validate() error {
+	if selection.state == nil || selection.digest == ([sha256.Size]byte{}) {
+		return ErrInstallerProfile
+	}
+	evidence := StagedPackageEvidence{state: selection.state}
+	if err := evidence.Validate(); err != nil {
+		return errors.Join(ErrInstallerProfile, err)
+	}
+	selection.state.mu.Lock()
+	defer selection.state.mu.Unlock()
+	if selection.state.closed || selection.state.digest != selection.digest ||
+		validateBearerTokenInstallerV2(
+			selection.state.index,
+			selection.state.control,
+			selection.state.executor,
+		) != nil {
+		return ErrInstallerProfile
+	}
+	return nil
+}
+
+// Close releases the retained staged-package handles. It is idempotent with closing the
+// originating StagedPackageEvidence.
+func (selection BearerTokenInstallerV2Package) Close() error {
+	if selection.state == nil {
+		return ErrInstallerProfile
+	}
+	err := (StagedPackageEvidence{state: selection.state}).Close()
+	if !cleanupHealthy() {
+		return errors.Join(err, ErrCleanupFatal)
+	}
+	return err
+}
+
+// MarshalJSON refuses to serialize the retained v2 installer profile gate.
+func (BearerTokenInstallerV2Package) MarshalJSON() ([]byte, error) { return nil, ErrSerialization }
+
+func validateBearerTokenInstallerV2(index outerpackage.Index, control config.Config, executor config.Config) error {
+	if index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
+		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil ||
+		installerprofile.ValidatePackageRoots(
+			installerprofile.BearerTokenInstallerV2ID,
+			index.PackageID,
+			index.TargetRoots.Metadata,
+			index.TargetRoots.Installation,
+			index.TargetRoots.TrustedConfiguration,
+		) != nil || installerprofile.ValidateBearerTokenBootstrapPair(
+		installerprofile.BearerTokenInstallerV2ID,
+		control,
+		executor,
+	) != nil {
+		return ErrInstallerProfile
+	}
+	return nil
 }
 
 // MarshalJSON refuses to turn retained staging evidence into a transferable authority token.

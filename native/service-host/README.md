@@ -49,10 +49,10 @@ factory remains unavailable.
 
 The production composition accepts only bootstrap schema version 4 and the exact per-Worker Bearer
 Token profile. Schema version 3 remains parseable as immutable historical mTLS data, but production
-startup rejects it before opening any Worker credential. The signed outer-package v1 profile still
-binds schema-v3 mTLS fields and therefore cannot publish a schema-v4 installation; ordinary builds
-also contain no compiled release profile. Both paths remain deliberately fail-closed until a new
-signed package and installer profile is defined.
+startup rejects it before opening any Worker credential. Signed outer-package v2 and split
+installer profile v2 now bind schema-v4 bootstraps without an mTLS identity or package credential.
+The historical outer-package v1 remains schema-v3-only. Ordinary builds still contain no compiled
+release profile, and no complete production installer consumes the new staged profile yet.
 
 ## Command line
 
@@ -161,6 +161,11 @@ Schema version 4 makes the fixed file an exact Control-only data-root layout mem
 constructor as the only production Worker transport. Executor has no Worker authentication file,
 Server client, or Server transport. The Token remains ordinary trusted local configuration: it is
 not a signed package member, a preflight credential attestation, or a Control-to-Executor message.
+The local provisioning helper at `deploy/worker/split/provision-worker-auth.ps1` accepts only a
+secure-string Token or an interactive secure prompt, writes only the fixed path through a
+same-directory write-through replacement, and rereads the exact canonical bytes. It requires the
+installer-owned Control data root to exist and does not substitute for the still-deferred SCM/root
+transaction.
 
 Both roles require `APPDATA` and `LOCALAPPDATA` below their role-owned profile. Executor also
 requires `HOME`, `CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`,

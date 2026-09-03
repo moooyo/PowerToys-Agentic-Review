@@ -18,9 +18,16 @@ func TestProductionAPISurfaceRemainsDataOnly(t *testing.T) {
 	expectedBuildIndex := reflect.TypeOf(func(releasepackage.FinalizedRelease, outerpackage.BuildOptions) ([]byte, error) {
 		return nil, nil
 	})
+	expectedBuildBearerTokenIndex := reflect.TypeOf(func(
+		releasepackage.FinalizedRelease,
+		outerpackage.BearerTokenBuildOptions,
+	) ([]byte, error) {
+		return nil, nil
+	})
 	expectedValidate := reflect.TypeOf(func([]byte, releasepackage.FinalizedRelease) error { return nil })
 	expectedVerify := reflect.TypeOf(func([]byte, []byte, []byte) error { return nil })
 	if reflect.TypeOf(outerpackage.BuildIndex) != expectedBuildIndex ||
+		reflect.TypeOf(outerpackage.BuildBearerTokenIndex) != expectedBuildBearerTokenIndex ||
 		reflect.TypeOf(outerpackage.ValidateAgainstRelease) != expectedValidate ||
 		reflect.TypeOf(outerpackage.VerifyDetachedSignature) != expectedVerify {
 		t.Fatal("outerpackage production entry point signature changed")
@@ -44,6 +51,7 @@ func TestProductionAPISurfaceRemainsDataOnly(t *testing.T) {
 	}
 	allowedFunctions := map[string]bool{
 		"BuildIndex":                        false,
+		"BuildBearerTokenIndex":             false,
 		"MarshalIndexCanonical":             false,
 		"MarshalSignatureEnvelopeCanonical": false,
 		"ParseIndex":                        false,

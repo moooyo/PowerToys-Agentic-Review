@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
 )
 
@@ -16,9 +17,31 @@ func bindBootstrapPair(
 	executor config.Config,
 	documents documentSnapshot,
 ) error {
-	// The signed outer-package v1 profile is immutable historical schema v3.
-	// A Token-aware package requires a separately versioned signed profile.
-	if control.SchemaVersion != config.SchemaVersion || executor.SchemaVersion != config.SchemaVersion {
+	legacyMTLS := index.SchemaVersion == outerpackage.IndexSchemaVersion &&
+		index.ProfileID == outerpackage.IndexProfileID
+	bearerToken := index.SchemaVersion == outerpackage.BearerTokenIndexSchemaVersion &&
+		index.ProfileID == outerpackage.BearerTokenIndexProfileID
+	switch {
+	case legacyMTLS:
+		if control.SchemaVersion != config.SchemaVersion || executor.SchemaVersion != config.SchemaVersion ||
+			index.MTLSClientCredential == nil {
+			return ErrMismatch
+		}
+	case bearerToken:
+		if index.MTLSClientCredential != nil || installerprofile.ValidatePackageRoots(
+			installerprofile.BearerTokenInstallerV2ID,
+			index.PackageID,
+			index.TargetRoots.Metadata,
+			index.TargetRoots.Installation,
+			index.TargetRoots.TrustedConfiguration,
+		) != nil || installerprofile.ValidateBearerTokenBootstrapPair(
+			installerprofile.BearerTokenInstallerV2ID,
+			control,
+			executor,
+		) != nil {
+			return ErrMismatch
+		}
+	default:
 		return ErrMismatch
 	}
 	if err := validateConfigurationPair(control, executor); err != nil {
@@ -56,11 +79,14 @@ func bindBootstrapPair(
 	if control.Control == nil || executor.Executor == nil ||
 		control.Control.LocalAuthorityCNGKeyName != index.LocalAuthorityCNG.KeyName ||
 		control.Control.LocalAuthorityKeySecurityDescriptorSHA256 != index.LocalAuthorityCNG.SecurityDescriptorSHA256 ||
-		control.Control.ClientCertificateStore != index.MTLSClientCredential.CertificateStore ||
-		control.Control.ClientCertificateDERSHA256 != index.MTLSClientCredential.CertificateDERSHA256 ||
-		control.Control.ClientPrivateKeySecurityDescriptorSHA256 != index.MTLSClientCredential.PrivateKeySecurityDescriptorSHA256 ||
 		control.Control.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 ||
 		executor.Executor.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 {
+		return ErrMismatch
+	}
+	if legacyMTLS && (control.Control.ClientCertificateStore != index.MTLSClientCredential.CertificateStore ||
+		control.Control.ClientCertificateDERSHA256 != index.MTLSClientCredential.CertificateDERSHA256 ||
+		control.Control.ClientPrivateKeySecurityDescriptorSHA256 !=
+			index.MTLSClientCredential.PrivateKeySecurityDescriptorSHA256) {
 		return ErrMismatch
 	}
 	spkiRelative, err := relativeWindowsPath(

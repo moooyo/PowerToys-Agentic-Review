@@ -147,6 +147,39 @@ func TestHistoricalOuterPackageProfileRejectsSchemaVersion4Bootstraps(t *testing
 	assertFixtureRejected(t, fixture)
 }
 
+func TestBearerTokenOuterPackageV2AdmitsOnlySchemaVersion4Profile(t *testing.T) {
+	fixture := newAdmissionFixture(t)
+	selectBearerTokenAdmissionProfile(fixture)
+	fixture.rebuild(t)
+	snapshot, err := cloneDocumentSnapshot(
+		fixture.indexDocument,
+		fixture.envelopeDocument,
+		fixture.controlDocument,
+		fixture.executorDocument,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := admitSnapshot(snapshot, fixture.authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Index().SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
+		plan.Index().ProfileID != outerpackage.BearerTokenIndexProfileID ||
+		plan.Index().MTLSClientCredential != nil ||
+		plan.ControlConfiguration().SchemaVersion != config.BearerTokenSchemaVersion ||
+		plan.ExecutorConfiguration().SchemaVersion != config.BearerTokenSchemaVersion {
+		t.Fatal("admitted plan did not preserve the Token package and bootstrap profiles")
+	}
+
+	historicalBootstraps := newAdmissionFixture(t)
+	historicalBootstraps.index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
+	historicalBootstraps.index.ProfileID = outerpackage.BearerTokenIndexProfileID
+	historicalBootstraps.index.MTLSClientCredential = nil
+	historicalBootstraps.rebuild(t)
+	assertFixtureRejected(t, historicalBootstraps)
+}
+
 func TestAdmissionRejectsBootstrapBytesMixNodeMixRoleAndSPKIMismatch(t *testing.T) {
 	t.Run("unindexed valid bootstrap bytes", func(t *testing.T) {
 		fixture := newAdmissionFixture(t)
@@ -515,6 +548,18 @@ func signFixtureIndex(t *testing.T, key *ecdsa.PrivateKey, spki, index []byte) [
 	return document
 }
 
+func selectBearerTokenAdmissionProfile(fixture *admissionFixture) {
+	fixture.index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
+	fixture.index.ProfileID = outerpackage.BearerTokenIndexProfileID
+	fixture.index.MTLSClientCredential = nil
+	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	fixture.control.Control.ClientCertificateStore = ""
+	fixture.control.Control.ClientCertificateDERSHA256 = ""
+	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
+}
+
 func validAdmissionIndex() outerpackage.Index {
 	architecture := outerpackage.ArchitectureAMD64
 	payload := func(root outerpackage.Root, path string, role outerpackage.Role, digit string, pe bool) outerpackage.Payload {
@@ -530,7 +575,7 @@ func validAdmissionIndex() outerpackage.Index {
 			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			SecurityDescriptorSHA256: strings.Repeat("1", 64),
 		},
-		MTLSClientCredential: outerpackage.MTLSCredentialIdentity{
+		MTLSClientCredential: &outerpackage.MTLSCredentialIdentity{
 			CertificateDERSHA256:               strings.Repeat("2", 64),
 			CertificateStore:                   outerpackage.MTLSCertificateStore,
 			PrivateKeySecurityDescriptorSHA256: strings.Repeat("3", 64),

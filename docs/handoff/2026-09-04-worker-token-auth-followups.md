@@ -43,22 +43,25 @@ production storage lifecycle.
 - Windows production composition rejects schema v3 before opening a Worker credential, loads the
   fixed schema-v4 authentication file for Control, and creates `NewBearerClient`. The platform
   production graph contains no `wincert` import, `NewClient` call, or mTLS evidence input.
-- Signed outer-package v1 remains immutable schema-v3 history and explicitly rejects schema v4.
-  This preserves fail-closed release behavior until a new signed package and installer profile is
-  reviewed.
+- Signed outer-package v1 remains immutable schema-v3 history. Outer-package v2 and split installer
+  profile v2 bind only schema-v4 bootstraps, omit mTLS/package credential material, reject
+  `worker-auth-v1.json` as a payload, and require the retained staged-evidence typed gate.
 - The Server storage runtime no longer imports, creates, opens, or closes the historical Server
   binding coordinator or signer. Token-only database startup preserves dormant migration-0012 rows
   without requiring a trusted receipt issuer; those rows remain inert and do not create Worker
   credentials.
 - `DatabaseClient` no longer imports or exposes the old coordinator capability, and the production
   database Worker no longer imports receipt persistence or implements its nine mutation/read
-  operations. Attempts to invoke those historical operation names return a stable retired error.
+  operations. Unknown internal database operations now fail closed through the generic unsupported
+  operation boundary; the historical operation vocabulary no longer exists in the protocol.
 - Credential and runtime roster projections replace any Token-shaped historical display name with
   `Redacted worker`, while every current create and registration path rejects such a value before
   persistence.
-- Migration `0012_server_binding_persistence_v1.sql` remains byte-identical history. Historical
-  persistence, coordinator, signer, and signer-host source remains available for archival tests but
-  has no HTTP, Worker-authentication, or storage-runtime consumer.
+- Migration `0012_server_binding_persistence_v1.sql` remains byte-identical history. The historical
+  persistence, coordinator, signer, signer-host, contracts, fixtures, and native verifier source
+  was subsequently deleted. ADRs and handoffs preserve the design record, while the startup
+  compatibility test preserves representative rows in all four legacy tables across v12/v13
+  startup without creating a Worker credential.
 
 ## Verification
 
@@ -95,11 +98,12 @@ packages, the updated source-pin guard, `go vet ./...`, and both Windows archite
 
 ## Remaining Work
 
-1. Define a separately versioned signed outer-package and installer profile that can publish native
-   bootstrap schema v4. The current signed package v1 must remain schema-v3-only.
-2. Build the production split-service installer and destination evidence that provisions the fixed
-   authentication file separately from signed package content.
-3. Delete the now-inert historical Server binding APIs and source in a separate cleanup after
-   deciding whether archival executable tests should move out of the production TypeScript tree.
-4. Perform deployment recovery exercises for create-response loss, rotation-response loss,
-   revocation, and accepted database-backup Token rollback.
+1. Produce actual signed outer-package-v2 release material.
+2. Build the production split-service SCM installer and destination evidence that provisions the
+   fixed authentication file separately from signed package content.
+
+The later `codex/worker-token-release-recovery` change completed the v2 package and installer-profile
+contracts, deleted the retired Server-binding implementation island, and added the six-case Token
+recovery matrix plus `docs/operations/worker-token-recovery.md`. Only the two release and
+installation workstreams above remain; the production installer still includes repository-local
+implementation as well as privileged environment validation.

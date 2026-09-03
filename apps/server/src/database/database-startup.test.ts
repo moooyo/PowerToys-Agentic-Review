@@ -131,33 +131,17 @@ describe("DatabaseClient startup", () => {
         const dataDirectory = join(directory, `data-v${startingSchemaVersion}`);
         const databasePath = join(dataDirectory, "state.sqlite");
         await mkdir(dataDirectory, { mode: 0o700 });
-        const seedDatabase = new DatabaseSync(databasePath);
-        try {
-          expect(runMigrations(seedDatabase, migrationPrefixDirectory)).toBe(startingSchemaVersion);
-          seedDatabase
-            .prepare(`
-              INSERT INTO server_binding_receipt_issuer (
-                singleton_id,
-                authority_schema_version,
-                issuer,
-                receipt_profile_id,
-                active_status_profile_id,
-                signature_algorithm,
-                issuer_key_id,
-                initialized_at
-              ) VALUES (1, 1, ?, ?, ?, ?, ?, ?)
-            `)
-            .run(
-              "agentic-review-server-enrollment-binding-authority-v1",
-              "agentic-review-server-binding-receipt-v1",
-              "agentic-review-server-binding-active-status-v1",
-              "ecdsa-p256-sha256-p1363-low-s",
-              "a".repeat(64),
-              "2026-09-03T00:00:00.000Z",
+        const expectedLegacyRows = (() => {
+          const seedDatabase = new DatabaseSync(databasePath);
+          try {
+            expect(runMigrations(seedDatabase, migrationPrefixDirectory)).toBe(
+              startingSchemaVersion,
             );
-        } finally {
-          seedDatabase.close();
-        }
+            return seedLegacyServerBindingRows(seedDatabase);
+          } finally {
+            seedDatabase.close();
+          }
+        })();
         await chmod(databasePath, 0o600);
         await writeInitializationMarker(databasePath);
 
@@ -168,18 +152,7 @@ describe("DatabaseClient startup", () => {
         const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
         try {
           expect(readSchemaVersion(migratedDatabase)).toBe(13);
-          expect(
-            migratedDatabase
-              .prepare(`
-                SELECT issuer_key_id AS issuerKeyId, initialized_at AS initializedAt
-                FROM server_binding_receipt_issuer
-                WHERE singleton_id = 1
-              `)
-              .get(),
-          ).toEqual({
-            issuerKeyId: "a".repeat(64),
-            initializedAt: "2026-09-03T00:00:00.000Z",
-          });
+          expect(readLegacyServerBindingRows(migratedDatabase)).toEqual(expectedLegacyRows);
           expect(
             migratedDatabase.prepare("SELECT COUNT(*) AS count FROM worker_node_credentials").get(),
           ).toEqual({ count: 0 });
@@ -624,6 +597,163 @@ const readSchemaVersion = (database: DatabaseSync): number => {
     readonly version: number | null;
   };
   return row.version ?? 0;
+};
+
+interface LegacyServerBindingRows {
+  readonly authorization: unknown;
+  readonly binding: unknown;
+  readonly issuer: unknown;
+  readonly revocation: unknown;
+}
+
+const readLegacyServerBindingRows = (database: DatabaseSync): LegacyServerBindingRows => ({
+  authorization: database.prepare("SELECT * FROM server_binding_authorizations").get(),
+  binding: database.prepare("SELECT * FROM server_bindings").get(),
+  issuer: database.prepare("SELECT * FROM server_binding_receipt_issuer").get(),
+  revocation: database.prepare("SELECT * FROM server_binding_revocations").get(),
+});
+
+const seedLegacyServerBindingRows = (database: DatabaseSync): LegacyServerBindingRows => {
+  const authorizationId = "10000000-0000-4000-8000-000000000001";
+  const requestId = "10000000-0000-4000-8000-000000000002";
+  const bindingId = "10000000-0000-4000-8000-000000000003";
+  const revocationId = "10000000-0000-4000-8000-000000000004";
+  const issuerKeyId = "a".repeat(64);
+  const tokenSha256 = "b".repeat(64);
+  const issuanceRequestSha256 = "c".repeat(64);
+  const certificateDerSha256 = "d".repeat(64);
+  const statementDocumentSha256 = "e".repeat(64);
+  const revocationRequestSha256 = "f".repeat(64);
+  const createdAt = "2026-09-03T00:00:00.000Z";
+  const consumedAt = "2026-09-03T00:00:01.000Z";
+  const revokedAt = "2026-09-03T00:00:02.000Z";
+  const expiresAt = "2026-09-03T00:10:00.000Z";
+  const workerNodeId = "legacy-worker";
+  const installationId = "legacy-installation";
+  const statementJson = JSON.stringify({
+    bindingId,
+    bindingRevision: 1,
+    boundAt: consumedAt,
+    certificateDerSha256,
+    enrollmentGeneration: 1,
+    installationId,
+    statementType: "durable-binding-created",
+    workerNodeId,
+  });
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database
+      .prepare(`
+        INSERT INTO server_binding_receipt_issuer (
+          singleton_id,
+          authority_schema_version,
+          issuer,
+          receipt_profile_id,
+          active_status_profile_id,
+          signature_algorithm,
+          issuer_key_id,
+          initialized_at
+        ) VALUES (1, 1, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        "agentic-review-server-enrollment-binding-authority-v1",
+        "agentic-review-server-binding-receipt-v1",
+        "agentic-review-server-binding-active-status-v1",
+        "ecdsa-p256-sha256-p1363-low-s",
+        issuerKeyId,
+        createdAt,
+      );
+    database
+      .prepare(`
+        INSERT INTO server_binding_authorizations (
+          authorization_id,
+          request_id,
+          token_sha256,
+          operator_issuer,
+          operator_subject,
+          worker_node_id,
+          installation_id,
+          enrollment_generation,
+          expected_certificate_der_sha256,
+          issuer_key_id,
+          created_at,
+          expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+      `)
+      .run(
+        authorizationId,
+        requestId,
+        tokenSha256,
+        "legacy-operator-issuer",
+        "legacy-operator-subject",
+        workerNodeId,
+        installationId,
+        certificateDerSha256,
+        issuerKeyId,
+        createdAt,
+        expiresAt,
+      );
+    database
+      .prepare(`
+        UPDATE server_binding_authorizations
+        SET
+          consumed_binding_id = ?,
+          consumed_issuance_request_sha256 = ?,
+          consumed_at = ?
+        WHERE authorization_id = ?
+      `)
+      .run(bindingId, issuanceRequestSha256, consumedAt, authorizationId);
+    database
+      .prepare(`
+        INSERT INTO server_bindings (
+          binding_id,
+          binding_revision,
+          authorization_id,
+          request_id,
+          issuance_request_sha256,
+          worker_node_id,
+          installation_id,
+          enrollment_generation,
+          certificate_der_sha256,
+          issuer_key_id,
+          phase,
+          bound_at,
+          statement_json,
+          statement_document_sha256
+        ) VALUES (?, 1, ?, ?, ?, ?, ?, 1, ?, ?, 'signing_pending', ?, ?, ?)
+      `)
+      .run(
+        bindingId,
+        authorizationId,
+        requestId,
+        issuanceRequestSha256,
+        workerNodeId,
+        installationId,
+        certificateDerSha256,
+        issuerKeyId,
+        consumedAt,
+        statementJson,
+        statementDocumentSha256,
+      );
+    database
+      .prepare(`
+        INSERT INTO server_binding_revocations (
+          revocation_id,
+          revocation_request_sha256,
+          binding_id,
+          prior_phase,
+          reason_code,
+          revoked_at
+        ) VALUES (?, ?, ?, 'signing_pending', 'operator_requested', ?)
+      `)
+      .run(revocationId, revocationRequestSha256, bindingId, revokedAt);
+    database.exec("COMMIT");
+  } catch (error) {
+    if (database.isTransaction) database.exec("ROLLBACK");
+    throw error;
+  }
+  return readLegacyServerBindingRows(database);
 };
 
 const createTemporaryDirectory = async (): Promise<string> => {

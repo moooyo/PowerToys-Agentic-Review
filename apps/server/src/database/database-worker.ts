@@ -275,15 +275,6 @@ class WorkerNodeCredentialError extends Error {
   }
 }
 
-class RetiredServerBindingPersistenceError extends Error {
-  public readonly code = "SERVER_BINDING_PERSISTENCE_RETIRED";
-
-  public constructor() {
-    super("Server binding persistence operations are retired.");
-    this.name = "RetiredServerBindingPersistenceError";
-  }
-}
-
 const assertWorkerTokenSha256 = (value: string): void => {
   if (!sha256Pattern.test(value)) {
     throw new TypeError("Worker token hashes must be lowercase SHA-256 values.");
@@ -2256,16 +2247,6 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return prepareArtifactCompletion(database, request.input as ArtifactRunCompletionSubmission);
     case "commitArtifactCompletion":
       return commitArtifactCompletion(database, request.input as CommitArtifactCompletionInput);
-    case "initializeServerBindingIssuerV1":
-    case "createServerBindingAuthorizationV1":
-    case "claimServerBindingAuthorizationV1":
-    case "commitServerBindingReceiptV1":
-    case "confirmServerBindingRecordV1":
-    case "readServerBindingRecoveryReceiptV1":
-    case "readServerBindingActiveSnapshotV1":
-    case "recheckServerBindingActiveSnapshotV1":
-    case "revokeServerBindingV1":
-      throw new RetiredServerBindingPersistenceError();
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":
@@ -2316,6 +2297,7 @@ const handleRequest = (request: DatabaseRequest): unknown => {
     case "shutdown":
       return { closed: true } as const;
   }
+  throw new TypeError("Unsupported database operation.");
 };
 
 try {

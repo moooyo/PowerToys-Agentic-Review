@@ -39,6 +39,39 @@ func TestDetachedP256SignatureVerifiesCanonicalIndex(t *testing.T) {
 	}
 }
 
+func TestBearerTokenIndexUsesExistingSignatureV1WithoutCrossProfileInterchange(t *testing.T) {
+	index, err := buildBearerTokenIndex(validFinalizedSource(t, "a", "b"), validBearerTokenBuildOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, spki, envelopeDocument := signedEnvelopeFixture(t, index)
+	if err := VerifyDetachedSignature(index, envelopeDocument, spki); err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := ParseSignatureEnvelope(envelopeDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.SchemaVersion != SignatureSchemaVersion {
+		t.Fatalf("Token package signature schema = %d", envelope.SchemaVersion)
+	}
+	digest, err := SigningDigest(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := hex.EncodeToString(digest[:]); actual != bearerTokenSigningDigestGoldenSHA256 {
+		t.Fatalf("Token signing digest golden = %s, want %s", actual, bearerTokenSigningDigestGoldenSHA256)
+	}
+	legacyIndex := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
+	_, legacySPKI, legacyEnvelope := signedEnvelopeFixture(t, legacyIndex)
+	if err := VerifyDetachedSignature(index, legacyEnvelope, legacySPKI); !errors.Is(err, ErrSignature) {
+		t.Fatalf("v1 envelope over v2 index returned %v", err)
+	}
+	if err := VerifyDetachedSignature(legacyIndex, envelopeDocument, spki); !errors.Is(err, ErrSignature) {
+		t.Fatalf("v2-index envelope over v1 index returned %v", err)
+	}
+}
+
 func TestSignatureEnvelopeRejectsMalleableAndNonP1363Signatures(t *testing.T) {
 	index := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
 	_, spki, envelopeDocument := signedEnvelopeFixture(t, index)
@@ -238,4 +271,7 @@ func encodeP1363(r, s *big.Int) string {
 
 func cloneEnvelope(value SignatureEnvelope) SignatureEnvelope { return value }
 
-const signingDigestGoldenSHA256 = "78d20854c371e7aac5101d190cb17e8adbc6e0218e8117f37bc6891820dcb67a"
+const (
+	signingDigestGoldenSHA256            = "78d20854c371e7aac5101d190cb17e8adbc6e0218e8117f37bc6891820dcb67a"
+	bearerTokenSigningDigestGoldenSHA256 = "23a0158267b8a7ce204c075a78c32143c24b7227b5b1d940548dc9f74c88cbf4"
+)

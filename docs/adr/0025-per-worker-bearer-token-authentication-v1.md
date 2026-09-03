@@ -299,9 +299,10 @@ authentication sources. Production rollout creates a Token for every retained Wo
 configuration, and then switches the Server to Token-only authentication.
 
 Migration `0012_server_binding_persistence_v1.sql` remains immutable migration history. Its dormant
-tables never become Worker authentication authority. A later forward cleanup migration may remove
-them only after proving that they contain no rows. The receipt, signer, signer-host, compiled trust,
-and related source remain production-unreachable until a separate cleanup change deletes them.
+tables never become Worker authentication authority. The superseded receipt, signer, signer-host,
+compiled trust, node-enrollment record, and related executable source were deleted on 2026-09-04.
+The migration and its existing rows remain intact; a later forward cleanup migration may remove
+the tables only after proving that every deployed database contains no rows.
 
 ## Verification Requirements
 

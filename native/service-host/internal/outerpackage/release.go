@@ -52,7 +52,66 @@ func BuildIndex(finalized releasepackage.FinalizedRelease, options BuildOptions)
 	return buildIndex(snapshot, options)
 }
 
+// BuildBearerTokenIndex constructs the separately versioned schema-v4 package profile. Its options
+// have no Worker credential field, and the resulting index rejects Token-shaped signed strings.
+func BuildBearerTokenIndex(
+	finalized releasepackage.FinalizedRelease,
+	options BearerTokenBuildOptions,
+) ([]byte, error) {
+	snapshot, err := finalized.SnapshotForAssembly()
+	if err != nil {
+		return nil, err
+	}
+	return buildBearerTokenIndex(snapshot, options)
+}
+
 func buildIndex(finalized finalizedReleaseSource, options BuildOptions) ([]byte, error) {
+	credential := options.MTLSClientCredential
+	return buildIndexForProfile(finalized, indexBuildOptions{
+		packageID:            options.PackageID,
+		installationID:       options.InstallationID,
+		workerNodeID:         options.WorkerNodeID,
+		localAuthorityCNG:    options.LocalAuthorityCNG,
+		mtlsClientCredential: &credential,
+		targetRoots:          options.TargetRoots,
+		controlBootstrap:     options.ControlBootstrap,
+		executorBootstrap:    options.ExecutorBootstrap,
+		profileID:            IndexProfileID,
+		schemaVersion:        IndexSchemaVersion,
+	})
+}
+
+func buildBearerTokenIndex(
+	finalized finalizedReleaseSource,
+	options BearerTokenBuildOptions,
+) ([]byte, error) {
+	return buildIndexForProfile(finalized, indexBuildOptions{
+		packageID:         options.PackageID,
+		installationID:    options.InstallationID,
+		workerNodeID:      options.WorkerNodeID,
+		localAuthorityCNG: options.LocalAuthorityCNG,
+		targetRoots:       options.TargetRoots,
+		controlBootstrap:  options.ControlBootstrap,
+		executorBootstrap: options.ExecutorBootstrap,
+		profileID:         BearerTokenIndexProfileID,
+		schemaVersion:     BearerTokenIndexSchemaVersion,
+	})
+}
+
+type indexBuildOptions struct {
+	packageID            string
+	installationID       string
+	workerNodeID         string
+	localAuthorityCNG    LocalAuthorityCNGIdentity
+	mtlsClientCredential *MTLSCredentialIdentity
+	targetRoots          TargetRoots
+	controlBootstrap     BootstrapPayload
+	executorBootstrap    BootstrapPayload
+	profileID            string
+	schemaVersion        uint32
+}
+
+func buildIndexForProfile(finalized finalizedReleaseSource, options indexBuildOptions) ([]byte, error) {
 	documents, descriptor, manifest, err := captureFinalizedRelease(finalized)
 	if err != nil {
 		return nil, err
@@ -65,8 +124,8 @@ func buildIndex(finalized finalizedReleaseSource, options BuildOptions) ([]byte,
 		documentPayload(RootMetadata, CompiledReleaseTemplatePath, RoleCompiledReleaseTemplate, documents.compiledTemplate, documents.compiledTemplateSHA256),
 		documentPayload(RootMetadata, ServiceHostBuildReceiptPath, RoleServiceHostBuildReceipt, documents.serviceHostBuild, documents.serviceHostBuildSHA256),
 		documentPayload(RootInstallation, RuntimeManifestPath, RoleRuntimeManifest, documents.manifest, documents.manifestSHA256),
-		bootstrapPayload(ControlBootstrapPath, RoleControlBootstrap, options.ControlBootstrap),
-		bootstrapPayload(ExecutorBootstrapPath, RoleExecutorBootstrap, options.ExecutorBootstrap),
+		bootstrapPayload(ControlBootstrapPath, RoleControlBootstrap, options.controlBootstrap),
+		bootstrapPayload(ExecutorBootstrapPath, RoleExecutorBootstrap, options.executorBootstrap),
 	}
 	for _, file := range manifest.Files {
 		role, ok := outerRoleFromManifest(file.Role)
@@ -83,22 +142,22 @@ func buildIndex(finalized finalizedReleaseSource, options BuildOptions) ([]byte,
 		payloads = append(payloads, payload)
 	}
 	return MarshalIndexCanonical(Index{
-		InstallationID:                       options.InstallationID,
-		LocalAuthorityCNG:                    options.LocalAuthorityCNG,
-		MTLSClientCredential:                 options.MTLSClientCredential,
+		InstallationID:                       options.installationID,
+		LocalAuthorityCNG:                    options.localAuthorityCNG,
+		MTLSClientCredential:                 options.mtlsClientCredential,
 		NodeSpecificLocalAuthorityPublicSPKI: NodeSpecificSPKI(descriptor.NodeSpecificSPKI),
-		PackageID:                            options.PackageID,
+		PackageID:                            options.packageID,
 		Payloads:                             payloads,
-		ProfileID:                            IndexProfileID,
+		ProfileID:                            options.profileID,
 		ReleaseID:                            descriptor.ReleaseID,
-		SchemaVersion:                        IndexSchemaVersion,
+		SchemaVersion:                        options.schemaVersion,
 		Source: SourceIdentity{
 			Commit: descriptor.Source.Commit,
 			Tree:   descriptor.Source.Tree,
 		},
 		TargetArchitecture: architecture,
-		TargetRoots:        options.TargetRoots,
-		WorkerNodeID:       options.WorkerNodeID,
+		TargetRoots:        options.targetRoots,
+		WorkerNodeID:       options.workerNodeID,
 	})
 }
 
@@ -126,16 +185,22 @@ func validateAgainstRelease(document []byte, finalized finalizedReleaseSource) e
 	if !ok {
 		return ErrMismatch
 	}
-	expected, err := buildIndex(finalized, BuildOptions{
-		PackageID:            index.PackageID,
-		InstallationID:       index.InstallationID,
-		WorkerNodeID:         index.WorkerNodeID,
-		LocalAuthorityCNG:    index.LocalAuthorityCNG,
-		MTLSClientCredential: index.MTLSClientCredential,
-		TargetRoots:          index.TargetRoots,
-		ControlBootstrap:     BootstrapPayload{SHA256: control.SHA256, Size: control.Size},
-		ExecutorBootstrap:    BootstrapPayload{SHA256: executor.SHA256, Size: executor.Size},
-	})
+	options := indexBuildOptions{
+		packageID:         index.PackageID,
+		installationID:    index.InstallationID,
+		workerNodeID:      index.WorkerNodeID,
+		localAuthorityCNG: index.LocalAuthorityCNG,
+		targetRoots:       index.TargetRoots,
+		controlBootstrap:  BootstrapPayload{SHA256: control.SHA256, Size: control.Size},
+		executorBootstrap: BootstrapPayload{SHA256: executor.SHA256, Size: executor.Size},
+		profileID:         index.ProfileID,
+		schemaVersion:     index.SchemaVersion,
+	}
+	if index.MTLSClientCredential != nil {
+		credential := *index.MTLSClientCredential
+		options.mtlsClientCredential = &credential
+	}
+	expected, err := buildIndexForProfile(finalized, options)
 	if err != nil || !bytes.Equal(expected, document) {
 		return ErrMismatch
 	}
