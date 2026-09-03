@@ -65,6 +65,7 @@ const serverBindingAuthoritySubpath = "@agentic-review/contracts/server-binding-
 const serverBindingAuthorityConsumerAllowlist = [
   "/apps/server/src/database/server-binding-persistence-v1.ts",
   "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+  "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
   "/apps/server/src/enrollment/server-binding-signer-v1.ts",
 ] as const;
 const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>([
@@ -84,6 +85,8 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
       "/apps/server/src/runtime/server-storage-runtime.ts",
     ],
   ],
+  ["server-binding-signer-host-client-v1", []],
+  ["server-binding-signer-host-protocol-v1", []],
   [
     "server-binding-signer-v1",
     [
@@ -96,6 +99,15 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
     ["/apps/server/src/enrollment/server-binding-signer-v1.ts"],
   ],
   ["server-binding-trust-profile-v1", ["/apps/server/src/enrollment/server-binding-signer-v1.ts"]],
+]);
+const sensitiveServerBindingConsumerImports = new Map<string, readonly string[]>([
+  ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts", []],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
+    [
+      "@agentic-review/contracts/server-binding-authority-v1|ServerBindingActiveStatusStatementV1:ServerBindingActiveStatusStatementV1:type,ServerBindingReceiptStatementV1:ServerBindingReceiptStatementV1:type,deriveServerBindingIssuerKeyIdV1:deriveServerBindingIssuerKeyIdV1:value,marshalServerBindingActiveStatusStatementV1:marshalServerBindingActiveStatusStatementV1:value,marshalServerBindingReceiptStatementV1:marshalServerBindingReceiptStatementV1:value",
+    ],
+  ],
 ]);
 const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>([
   [
@@ -198,6 +210,49 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
     ],
   ],
   [
+    "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+    [
+      "ServerBindingSignerHostCleanupStateV1",
+      "ServerBindingSignerHostClientErrorCodeV1",
+      "ServerBindingSignerHostClientEventV1",
+      "ServerBindingSignerHostClientStateV1",
+      "ServerBindingSignerHostLogicalStateV1",
+      "ServerBindingSignerHostStateErrorCodeV1",
+      "ServerBindingSignerHostStateErrorV1",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_ASSIGNED_REQUEST_IDS",
+      "createServerBindingSignerHostClientStateV1",
+      "reduceServerBindingSignerHostClientStateV1",
+    ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
+    [
+      "SERVER_BINDING_SIGNER_HOST_FORCED_EXIT_TIMEOUT_MILLISECONDS",
+      "SERVER_BINDING_SIGNER_HOST_GRACEFUL_SHUTDOWN_TIMEOUT_MILLISECONDS",
+      "SERVER_BINDING_SIGNER_HOST_HANDSHAKE_TIMEOUT_MILLISECONDS",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_BUFFERED_STDERR_BYTES",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_BUFFERED_STDOUT_BYTES",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_CONCURRENT_REQUESTS",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_FRAME_BYTES",
+      "SERVER_BINDING_SIGNER_HOST_MAXIMUM_STATEMENT_BYTES",
+      "SERVER_BINDING_SIGNER_HOST_PROTOCOL_VERSION",
+      "SERVER_BINDING_SIGNER_HOST_SIGNING_TIMEOUT_MILLISECONDS",
+      "ServerBindingSignerHostCancellationReasonV1",
+      "ServerBindingSignerHostChildErrorCodeV1",
+      "ServerBindingSignerHostChildMessageV1",
+      "ServerBindingSignerHostFrameDecoderV1",
+      "ServerBindingSignerHostOperationV1",
+      "ServerBindingSignerHostParentMessageV1",
+      "ServerBindingSignerHostProtocolErrorCodeV1",
+      "ServerBindingSignerHostProtocolErrorV1",
+      "frameServerBindingSignerHostPayloadV1",
+      "marshalServerBindingSignerHostChildMessageV1",
+      "marshalServerBindingSignerHostParentMessageV1",
+      "parseServerBindingSignerHostChildMessageV1",
+      "parseServerBindingSignerHostParentMessageV1",
+    ],
+  ],
+  [
     "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
     [
       "ServerBindingDigestNativeSignerProviderV1",
@@ -256,6 +311,14 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   [
     "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
     "d64ec2717c051a6e4abb26e0401e0433d490c450b7c78db6b05cab1e8b6c8d05",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+    "3abbf2d6034ce3b5f76ee30a82a5716ccbcb8dbb9c061d9e009c7a29bb793ed5",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
+    "508078468d24f1bddb79a3880d4795d53678bc38540f56288fc9bd26c5f719ac",
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
@@ -363,6 +426,17 @@ describe("dormant Server binding authority v1 wire contract", () => {
     const productionSources = productionSourceFiles(repositoryRoot)
       .filter((file) => resolve(file) !== definition)
       .map((file) => ({ fileName: file, source: readFileSync(file, "utf8") }));
+    const normalizedProductionFiles = productionSources.map(({ fileName }) =>
+      fileName.replaceAll("\\", "/").toLowerCase(),
+    );
+    for (const suffix of sensitiveServerBindingConsumerImports.keys()) {
+      expect(
+        normalizedProductionFiles.some(
+          (fileName) => fileName === suffix.slice(1) || fileName.endsWith(suffix),
+        ),
+        suffix,
+      ).toBe(true);
+    }
     const inspections = inspectProductionModules(productionSources);
     const offenders: string[] = [];
     for (const { fileName } of productionSources) {
@@ -451,6 +525,11 @@ describe("dormant Server binding authority v1 wire contract", () => {
         source:
           'import { deriveServerBindingIssuerKeyIdV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
       },
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
+        source:
+          'import { deriveServerBindingIssuerKeyIdV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
+      },
     ];
     const benignInspections = inspectProductionModules(benignSources);
     for (const benign of benignSources) {
@@ -482,6 +561,42 @@ describe("dormant Server binding authority v1 wire contract", () => {
     const driftInspections = inspectProductionModules(allowlistDriftSources);
     for (const drift of allowlistDriftSources) {
       expect(driftInspections.get(drift.fileName)?.length ?? 0, drift.fileName).toBeGreaterThan(0);
+    }
+
+    const pureProtocolPath = resolve(
+      "apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
+    );
+    const pureClientPath = resolve(
+      "apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+    );
+    const pureModuleMutations = [
+      {
+        expected: "signer-host A1 pure module contains signing or I/O call",
+        fileName: pureProtocolPath,
+        source: "void crypto.subtle.sign({}, {}, new Uint8Array());",
+      },
+      {
+        expected: "signer-host A1 import set differs from its exact allowlist",
+        fileName: pureClientPath,
+        source: 'import { readFileSync } from "node:fs"; void readFileSync;',
+      },
+      {
+        expected: "signer-host A1 pure module contains private-key material or API names",
+        fileName: pureClientPath,
+        source: 'const privateKey = "-----BEGIN PRIVATE KEY-----"; void privateKey;',
+      },
+      {
+        expected: "production import of a test bridge",
+        fileName: resolve("apps/server/src/main.ts"),
+        source: 'import "./enrollment/signer-bridge.test.js";',
+      },
+    ];
+    for (const mutation of pureModuleMutations) {
+      const inspection =
+        inspectProductionModules([{ fileName: mutation.fileName, source: mutation.source }]).get(
+          mutation.fileName,
+        ) ?? [];
+      expect(inspection, mutation.source).toContain(mutation.expected);
     }
 
     const aliasEscapeSources = [
@@ -1493,6 +1608,26 @@ function inspectProductionSourceFile(
       violations.add("sensitive consumer source differs from its reviewed digest");
     }
   }
+  const expectedImports = isAbsolute(originalFileName)
+    ? [...sensitiveServerBindingConsumerImports.entries()].find(
+        ([suffix]) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+      )?.[1]
+    : undefined;
+  if (expectedImports !== undefined) {
+    const actualImports = sourceFile.statements
+      .filter(ts.isImportDeclaration)
+      .map((declaration) => {
+        const moduleName = ts.isStringLiteralLikeNode(declaration.moduleSpecifier)
+          ? declaration.moduleSpecifier.text
+          : "invalid";
+        return `${moduleName}|${importedBindingSignature(declaration)}`;
+      })
+      .sort();
+    if (JSON.stringify(actualImports) !== JSON.stringify([...expectedImports].sort())) {
+      violations.add("signer-host A1 import set differs from its exact allowlist");
+    }
+    for (const violation of inspectSignerHostA1PureModule(sourceFile)) violations.add(violation);
+  }
   const loaderBindings = collectImportedLoaderBindings(sourceFile);
   const reflectGetAliases = collectReflectGetAliases(sourceFile);
   if (reflectGetAliases.size !== 0) {
@@ -1517,6 +1652,14 @@ function inspectProductionSourceFile(
       violations.add("server binding authority import outside exact S1 allowlist");
     }
     for (const candidate of candidates) {
+      const normalizedCandidate = candidate.replaceAll("\\", "/");
+      if (
+        /(?:^|\/)[^/]+\.(?:spec|test|testing)(?:\.[cm]?[jt]sx?)?(?:[?#].*)?$/u.test(
+          normalizedCandidate,
+        )
+      ) {
+        violations.add("production import of a test bridge");
+      }
       const moduleName = sensitiveServerBindingModuleName(candidate);
       if (
         moduleName !== undefined &&
@@ -2022,6 +2165,60 @@ function isFunctionLikeNode(node: ts.Node): boolean {
     ts.isSetAccessorDeclaration(node) ||
     ts.isConstructorDeclaration(node)
   );
+}
+
+function inspectSignerHostA1PureModule(sourceFile: ts.SourceFile): string[] {
+  const violations = new Set<string>();
+  const source = sourceFile.getFullText();
+  if (
+    /BEGIN (?:EC |RSA |ENCRYPTED |OPENSSH )?PRIVATE KEY|\bcreatePrivateKey\b|\bgenerateKeyPair(?:Sync)?\b|\bprivateKey\b|\bprivate_key\b|\bpkcs8\b|\bjwk\b/iu.test(
+      source,
+    )
+  ) {
+    violations.add("signer-host A1 pure module contains private-key material or API names");
+  }
+
+  const forbiddenCalls = new Set([
+    "derivebits",
+    "derivekey",
+    "fetch",
+    "generatekey",
+    "generatekeypair",
+    "generatekeypairsync",
+    "importkey",
+    "open",
+    "sign",
+    "unwrapkey",
+  ]);
+  const forbiddenConstructors = new Set(["eventsource", "websocket", "xmlhttprequest"]);
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callName = calledExpressionName(node.expression);
+      if (callName !== undefined && forbiddenCalls.has(callName)) {
+        violations.add("signer-host A1 pure module contains signing or I/O call");
+      }
+    }
+    if (ts.isNewExpression(node)) {
+      const constructorName = calledExpressionName(node.expression);
+      if (constructorName !== undefined && forbiddenConstructors.has(constructorName)) {
+        violations.add("signer-host A1 pure module contains I/O construction");
+      }
+    }
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text.toLowerCase() === "process" &&
+      ["env", "stderr", "stdin", "stdout"].includes(node.name.text.toLowerCase())
+    ) {
+      violations.add("signer-host A1 pure module contains process I/O access");
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(sourceFile);
+  return [...violations].sort();
 }
 
 type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "worker";

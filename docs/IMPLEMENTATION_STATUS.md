@@ -208,14 +208,19 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   a signer; startup leaves a fresh authority empty, and existing authority state fails closed without
   the exact signer/trust descriptor. No route, authentication source, revocation veto, Windows
   consumer, Claim, slot, or execution authority consumes this state.
-- A proposed dormant Linux Server binding signer-host transport v1 contract. ADR 0024 fixes a
-  dedicated 8 KiB length-prefixed canonical protocol, one statement-specific direct child,
-  identity handshake, receipt and active-status operations, single concurrency,
-  fail-stop cancellation, bounded stderr, forced termination, observed-exit-only close, and
-  process-lifetime quarantine. This documentation slice deliberately leaves the production
-  provider, host-profile, and trust loaders unavailable and adds no key backend, compiled trust,
-  signer binary, configuration, `main.ts` wiring, issuer initialization, route, authentication
-  source, Claim, slot, package, installation, or execution authority.
+- A source-only A1 foundation for the proposed dormant Linux Server binding signer-host transport
+  v1 contract. ADR 0024 fixes the complete transport; the implemented subset provides its exact
+  8 KiB length-prefixed canonical message codec, statement-profile validation, canonical P-256
+  SPKI/key-ID pairing, P1363 low-S shape checks, incremental fragmentation/coalescing decoder, and
+  an import-free logical/cleanup lifecycle reducer with an exact bounded 4096-ID lifetime ledger,
+  one reserved shutdown ID, and automatic healthy close fencing at the signing limit. Both modules
+  have zero production consumers and
+  are pinned by exact import, export, source-digest, private-key, signing, I/O, and dependency
+  guards. The direct child-process client, profile, provider bridge, out-of-tree fixture, and real
+  Linux exit-proof matrix remain unimplemented. Production signer and trust loaders remain
+  unavailable, and this subset adds no key backend, compiled trust, signer binary, configuration,
+  `main.ts` wiring, issuer initialization, route, authentication source, Claim, slot, package,
+  installation, or execution authority.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
@@ -362,11 +367,12 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
-the ADR 0024 dormant signer-host transport implementation, production Server binding signer and
-trust material, S2 authenticated receipt authority, privileged enrollment writer and live evidence,
-destination evidence, the ADR 0021 protected-store implementation and opaque-evidence composition,
-the production Go installer, production-capable SCM schema and native adapter, a complete final
-recovery schedule, authenticated installer readiness, and a pinned WinSW release.
+the remaining ADR 0024 signer-host child-process client, profile/provider bridge, fixture, and Linux
+exit-proof verification, production Server binding signer and trust material, S2 authenticated
+receipt authority, privileged enrollment writer and live evidence, destination evidence, the ADR
+0021 protected-store implementation and opaque-evidence composition, the production Go installer,
+production-capable SCM schema and native adapter, a complete final recovery schedule,
+authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
 Claim authority is enabled.
@@ -395,6 +401,24 @@ an engine warning. The complete database-startup and migration-backup files were
 their POSIX ownership cases failed closed on Windows as designed (6 failed, 4 passed, 7 skipped).
 Those platform failures were not waived as Linux evidence, and no remote replacement run was made
 because this task explicitly authorized local verification instead of `test-env`.
+
+On 2026-09-03, the source-only signer-host A1 protocol and lifecycle foundation completed its
+explicitly authorized local Windows verification. No command was run on `test-env`. All-workspace
+typecheck and build passed, including Dashboard Webpack, Worker bundles, and Server output; Biome
+checked 316 files. The protocol, lifecycle, and Server binding architecture matrix passed 53/53.
+The non-platform Server selection passed 680 tests with 36 skips across 45 files, and the remaining
+supported Worker-route cases passed 23 tests with one excluded baseline case. Codex passed 86,
+local-protocol 92, Contracts 27, Domain 21, Worker 897, and Worker role-bundle/zero-execution guards
+19 tests.
+
+The complete local workspace test was also attempted and is not reported as passing; the exact
+final Server rerun was 712 passed, 43 skipped, and 86 failed. Eighty-five failures came from five
+existing database/backup suites whose secure ownership path requires POSIX behavior unavailable on
+Windows.
+The remaining deep-JSON Worker-route assertion returned 409 instead of 413 under unsupported Node
+26.1.0 and reproduced unchanged on the pre-A1 `main` source. These failures were neither changed nor
+waived as Linux or supported-Node evidence. A1 remains source-only and does not claim child-process,
+real-exit, or Linux transport verification.
 
 On 2026-09-02, the source-only package-private installer observation reducer completed the full
 ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled
