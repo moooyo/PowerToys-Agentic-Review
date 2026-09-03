@@ -76,6 +76,17 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   a persistent authentication clock high-water mark, and authenticated Dashboard reads.
 - Startup and periodic bounded cleanup for expired login transactions, sessions, and browser
   bindings.
+- Explicit whole-Server database recovery maintenance selected only by the canonical
+  `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` setting. Configuration requires a loopback listener
+  and operator authentication, ignores GitHub integration settings, and defaults to normal mode.
+  Before listening, every maintenance start atomically deletes operator login transactions,
+  sessions, and browser bindings without changing the authentication clock high-water mark. While
+  active, a database-only storage runtime owns SQLite and never opens, enumerates, creates, or
+  reconciles the artifact root. A root route fence and the shared Worker scope reject all Worker and
+  worker-artifact routes with `worker_api_maintenance` before rate limiting, Token authentication,
+  database work, or artifact work; liveness remains available, readiness remains closed, GitHub
+  webhook/polling/ingestion and the lease reaper remain stopped, and local operator login, Worker
+  credential management, and Dashboard reads remain available.
 - Production Dashboard HTTP adapter and Server read APIs for work items, jobs, workers, and
   system state.
 - Codex static-review launch specifications, bounded JSONL parsing, strict PR/Issue result
@@ -380,6 +391,17 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-04, the recovery maintenance follow-up added the strict loopback-only Server mode,
+pre-listen atomic operator-auth purge, database-only storage runtime, Worker route fence, not-ready
+health projection, GitHub and lease-reaper suppression, and local operator recovery surface. Local
+Windows focused config,
+composition, health, route, and direct database tests passed 44 cases with the one POSIX database
+Worker restart case skipped. The exact source copied to a native WSL ext4 checkout passed all 850
+Server tests in 51 files, including the three atomic purge/restart cases and six existing Worker
+Token recovery cases. All-workspace typecheck and build passed, Biome checked 316 files, and the
+Worker zero-execution architecture check plus all 19 role-bundle guards passed. No command used
+`test-env`; Node 26.1.0 emitted the existing repository engine warning.
 
 On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
 split installer profile v2, schema-v4 admission, the retained staged-evidence typed installer gate,

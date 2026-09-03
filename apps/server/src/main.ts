@@ -11,7 +11,10 @@ import { GitHubEventIngestionService } from "./github/ingestion-service.js";
 import { GitHubPollingCoordinator } from "./github/polling-coordinator.js";
 import { GitHubRestApiError, GitHubRestClient } from "./github/rest-client.js";
 import { createProductionServerLifecycle } from "./runtime/server-lifecycle.js";
-import { createServerStorageRuntime } from "./runtime/server-storage-runtime.js";
+import {
+  createRecoveryMaintenanceStorageRuntime,
+  createServerStorageRuntime,
+} from "./runtime/server-storage-runtime.js";
 import {
   createScheduleJobInput,
   defaultTrustedSchedulingPolicy,
@@ -49,7 +52,7 @@ const start = async (): Promise<void> => {
     lifecycle.signal.throwIfAborted();
 
     const schedulingConfig =
-      config.github === undefined
+      config.recoveryMaintenance || config.github === undefined
         ? undefined
         : await loadTrustedSchedulingConfig({
             promptDirectory: config.github.promptDirectory,
@@ -61,33 +64,42 @@ const start = async (): Promise<void> => {
           });
     lifecycle.signal.throwIfAborted();
 
-    const storageRuntime = await createServerStorageRuntime({
-      databasePath: config.databasePath,
-      migrationsDirectory: config.migrationsDirectory,
-      artifactStorage: config.artifactStorage,
-      onFailStop: (error) => {
-        lifecycle.onArtifactFailStop(error);
-        if (!artifactFailStopLogged) {
-          artifactFailStopLogged = true;
-          try {
-            console.error(
-              JSON.stringify({
-                timestamp: new Date().toISOString(),
-                level: "fatal",
-                message: "Artifact storage requested a fail-stop.",
-                code: error.code,
-              }),
-            );
-          } catch {
-            // Logging failure cannot delay process-wide fail-stop.
-          }
-        }
-      },
-    });
+    const storageRuntime = config.recoveryMaintenance
+      ? await createRecoveryMaintenanceStorageRuntime({
+          databasePath: config.databasePath,
+          migrationsDirectory: config.migrationsDirectory,
+        })
+      : await createServerStorageRuntime({
+          databasePath: config.databasePath,
+          migrationsDirectory: config.migrationsDirectory,
+          artifactStorage: config.artifactStorage,
+          onFailStop: (error) => {
+            lifecycle.onArtifactFailStop(error);
+            if (!artifactFailStopLogged) {
+              artifactFailStopLogged = true;
+              try {
+                console.error(
+                  JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    level: "fatal",
+                    message: "Artifact storage requested a fail-stop.",
+                    code: error.code,
+                  }),
+                );
+              } catch {
+                // Logging failure cannot delay process-wide fail-stop.
+              }
+            }
+          },
+        });
     lifecycle.adoptStorageRuntime(storageRuntime);
     lifecycle.signal.throwIfAborted();
 
     const database = storageRuntime.database;
+    if (config.recoveryMaintenance) {
+      await database.request("purgeOperatorAuthForRecovery", {});
+      lifecycle.signal.throwIfAborted();
+    }
     const operatorAuth =
       operatorAuthConfig === undefined
         ? undefined
@@ -97,7 +109,7 @@ const start = async (): Promise<void> => {
             ...(oidc === undefined ? {} : { oidc }),
           });
     const githubIngestion =
-      config.github === undefined || schedulingConfig === undefined
+      config.recoveryMaintenance || config.github === undefined || schedulingConfig === undefined
         ? undefined
         : new GitHubEventIngestionService({
             database,
@@ -125,6 +137,7 @@ const start = async (): Promise<void> => {
     const pollingConfig = config.github?.polling;
     if (
       pollingConfig !== undefined &&
+      !config.recoveryMaintenance &&
       config.github !== undefined &&
       githubIngestion !== undefined &&
       schedulingConfig !== undefined
@@ -215,6 +228,7 @@ const start = async (): Promise<void> => {
         port: config.port,
         databasePath: config.databasePath,
         protocolVersion: config.protocolVersion,
+        recoveryMaintenance: config.recoveryMaintenance,
       },
       "Agentic Review server is ready.",
     );

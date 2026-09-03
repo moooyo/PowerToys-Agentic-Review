@@ -25,17 +25,21 @@ describe("production server composition", () => {
 
     for (const required of [
       "createProductionServerLifecycle({",
+      "await createRecoveryMaintenanceStorageRuntime({",
       "await createServerStorageRuntime({",
       'message: "Artifact storage requested a fail-stop."',
       "code: error.code",
       "lifecycle.onArtifactFailStop(error);",
       "lifecycle.adoptStorageRuntime(storageRuntime);",
+      'await database.request("purgeOperatorAuthForRecovery", {});',
       "artifactReadiness: storageRuntime.artifactReadiness",
       "artifactTransactions: storageRuntime.artifactTransactions",
       "artifactCompletion: storageRuntime.artifactCompletion",
       "serverAdmission: lifecycle.admission",
       "lifecycle.adoptApplication(app);",
       'lifecycle.trackBackground("github-polling", pollingCompletion);',
+      "config.recoveryMaintenance || config.github === undefined",
+      "!config.recoveryMaintenance",
       "lifecycle.markRunning();",
       "error === lifecycle.signal.reason",
       "Agentic Review server startup was stopped.",
@@ -60,14 +64,19 @@ describe("production server composition", () => {
     }
 
     const storageCreate = source.indexOf("await createServerStorageRuntime({");
+    const recoveryStorageCreate = source.indexOf("await createRecoveryMaintenanceStorageRuntime({");
     const storageAdoption = source.indexOf("lifecycle.adoptStorageRuntime(storageRuntime);");
     const appCreate = source.indexOf("const app = buildApp({");
+    const recoveryPurge = source.indexOf('await database.request("purgeOperatorAuthForRecovery"');
     const appAdoption = source.indexOf("lifecycle.adoptApplication(app);");
     const listen = source.indexOf("await app.listen(");
     const backgroundTracking = source.indexOf("lifecycle.trackBackground(");
     const running = source.indexOf("lifecycle.markRunning();");
 
     expect(storageCreate).toBeLessThan(storageAdoption);
+    expect(recoveryStorageCreate).toBeLessThan(storageAdoption);
+    expect(storageAdoption).toBeLessThan(recoveryPurge);
+    expect(recoveryPurge).toBeLessThan(appCreate);
     expect(storageAdoption).toBeLessThan(appCreate);
     expect(appCreate).toBeLessThan(appAdoption);
     expect(appAdoption).toBeLessThan(listen);
@@ -95,6 +104,10 @@ describe("production server composition", () => {
       "runtime/server-lifecycle.ts",
     ]);
     expect(references("createServerStorageRuntime")).toEqual([
+      "main.ts",
+      "runtime/server-storage-runtime.ts",
+    ]);
+    expect(references("createRecoveryMaintenanceStorageRuntime")).toEqual([
       "main.ts",
       "runtime/server-storage-runtime.ts",
     ]);

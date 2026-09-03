@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { artifactCapacityFixedLayoutEntries } from "../../dist/artifacts/capacity.js";
 import { DatabaseOwnerLock } from "../../dist/database/owner-lock.js";
 import {
+  createRecoveryMaintenanceStorageRuntime,
   createServerStorageRuntime,
   type ServerStorageRuntime,
 } from "../../dist/runtime/server-storage-runtime.js";
@@ -51,6 +52,53 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== "linux")("ServerStorageRuntime", () => {
+  it("keeps recovery maintenance database-only and releases its owner lock", async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = await databasePathFor(directory);
+    const artifactRoot = join(directory, "artifact-sentinel");
+    const sentinelPath = join(artifactRoot, "must-not-be-touched.txt");
+    await mkdir(artifactRoot, { mode: 0o700 });
+    await writeFile(sentinelPath, "preserve recovery evidence", { mode: 0o600 });
+    const entriesBefore = await readdir(artifactRoot);
+    const sentinelBefore = await readFile(sentinelPath, "utf8");
+
+    const runtime = await createRecoveryMaintenanceStorageRuntime({
+      databasePath,
+      migrationsDirectory,
+    });
+    runtimes.push(runtime);
+
+    expect(runtime.artifactReadiness.read()).toEqual({ ready: false });
+    await expect(runtime.database.request("ping", {})).resolves.toMatchObject({
+      schemaVersion: 13,
+    });
+    await expect(
+      runtime.artifactTransactions.createArtifactUpload({} as never),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_NOT_READY" });
+    await expect(
+      runtime.artifactTransactions.putArtifactChunk("unused", {} as never),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_NOT_READY" });
+    await expect(
+      runtime.artifactTransactions.finalizeArtifactUpload("unused", {} as never),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_NOT_READY" });
+    await expect(
+      runtime.artifactTransactions.terminateArtifactUpload("unused", {} as never),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TRANSACTION_NOT_READY" });
+    await expect(runtime.artifactCompletion.completeArtifactRun({} as never)).rejects.toMatchObject(
+      { code: "ARTIFACT_TRANSACTION_NOT_READY" },
+    );
+    expect(await readdir(artifactRoot)).toEqual(entriesBefore);
+    expect(await readFile(sentinelPath, "utf8")).toBe(sentinelBefore);
+
+    await runtime.close();
+    await runtime.close();
+    expect(runtime.artifactReadiness.read()).toEqual({ ready: false });
+    expect(await readdir(artifactRoot)).toEqual(entriesBefore);
+    expect(await readFile(sentinelPath, "utf8")).toBe(sentinelBefore);
+    const nextOwner = await DatabaseOwnerLock.acquire(databasePath);
+    await nextOwner.close();
+  });
+
   it("returns only after the first sweep and owns the complete close order", async () => {
     const directory = await temporaryDirectory();
     const databasePath = await databasePathFor(directory);

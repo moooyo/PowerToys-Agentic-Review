@@ -75,6 +75,33 @@ describe("health routes", () => {
     }
   });
 
+  it("keeps liveness available and readiness closed during recovery maintenance", async () => {
+    const request = vi.fn(async () => databaseHealth);
+    const read = vi.fn(() => ({ ready: true }));
+    const app = Fastify({ logger: false });
+    registerHealthRoutes(
+      app,
+      { request } as unknown as DatabaseClient,
+      { read },
+      new AbortController().signal,
+      true,
+    );
+
+    try {
+      const live = await app.inject({ method: "GET", url: "/health/live" });
+      const ready = await app.inject({ method: "GET", url: "/health/ready" });
+
+      expect(live.statusCode).toBe(200);
+      expect(live.json()).toMatchObject({ status: "ok" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json()).toMatchObject({ status: "not_ready" });
+      expect(request).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("checks live artifact readiness before and after a successful database ping", async () => {
     const events: string[] = [];
     const request = vi.fn(async () => {
@@ -227,6 +254,7 @@ describe("health routes", () => {
 const config: ServerConfig = {
   host: "127.0.0.1",
   port: 0,
+  recoveryMaintenance: false,
   databasePath: "unused.sqlite",
   migrationsDirectory: "unused",
   artifactStorage: {

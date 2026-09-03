@@ -60,6 +60,12 @@ export interface CleanupExpiredOperatorAuthResult {
   readonly hasMore: boolean;
 }
 
+export interface PurgeOperatorAuthForRecoveryResult {
+  readonly deletedBrowserFlows: number;
+  readonly deletedLoginTransactions: number;
+  readonly deletedSessions: number;
+}
+
 const assertGeneration = (value: number): void => {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError("Operator authentication browser generation must be a positive integer.");
@@ -432,6 +438,26 @@ export const deleteOperatorBrowserFlow = (
     .prepare("DELETE FROM operator_browser_flows WHERE browser_sha256 = ?")
     .run(input.browserSha256);
   return { deleted: Number(result.changes) === 1 };
+};
+
+export const purgeOperatorAuthForRecovery = (
+  database: DatabaseSync,
+): PurgeOperatorAuthForRecoveryResult => {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const loginResult = database.prepare("DELETE FROM operator_login_transactions").run();
+    const sessionResult = database.prepare("DELETE FROM operator_sessions").run();
+    const browserResult = database.prepare("DELETE FROM operator_browser_flows").run();
+    database.exec("COMMIT");
+    return {
+      deletedBrowserFlows: Number(browserResult.changes),
+      deletedLoginTransactions: Number(loginResult.changes),
+      deletedSessions: Number(sessionResult.changes),
+    };
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
 };
 
 export const cleanupExpiredOperatorAuth = (

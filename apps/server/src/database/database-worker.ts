@@ -96,6 +96,7 @@ import {
   deleteOperatorSession,
   finalizeOperatorLogin,
   findOperatorSession,
+  purgeOperatorAuthForRecovery,
 } from "./operator-auth.js";
 import type {
   AuthenticateWorkerTokenInput,
@@ -2282,6 +2283,8 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return deleteOperatorBrowserFlow(database, request.input as DeleteOperatorBrowserFlowInput);
     case "cleanupExpiredOperatorAuth":
       return cleanupExpiredOperatorAuth(database, request.input as CleanupExpiredOperatorAuthInput);
+    case "purgeOperatorAuthForRecovery":
+      return purgeOperatorAuthForRecovery(database);
     case "readGitHubPollingProjection":
       return readGitHubPollingProjection(database, request.input as GitHubPollingProjectionKey);
     case "writeGitHubPollingProjection":

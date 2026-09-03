@@ -12,6 +12,8 @@ describe("Server application Worker authentication wiring", () => {
     expect(source).toContain("registerWorkerCredentialRoutes(credentialScope");
     expect(source).toContain("registerWorkerRoutes(workerScope");
     expect(source).toContain("registerWorkerArtifactRoutes(workerScope");
+    expect(source).toContain("isWorkerApiRoute(request.routeOptions.url)");
+    expect(source).toContain('code: "worker_api_maintenance"');
     expect(source).toContain("database: dependencies.database");
     expect(source).toContain("await workerScope.register(rateLimit");
     expect(source).toContain("workerScope.addHook(");
@@ -22,6 +24,9 @@ describe("Server application Worker authentication wiring", () => {
     expect(source).toContain('code: "request_rate_limited"');
     expect(source).not.toContain("workerCertificateBindings");
     expect(source).not.toContain("allowInsecureWorkerAuth");
+    expect(source.indexOf('workerScope.addHook("onRequest"')).toBeLessThan(
+      source.indexOf("await workerScope.register(rateLimit"),
+    );
   });
 
   it("removes query strings and Worker tokens from request log URLs", () => {

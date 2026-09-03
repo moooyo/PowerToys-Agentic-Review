@@ -1,6 +1,6 @@
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import type { ArtifactCompletionPort, ArtifactTransactionPort } from "./artifacts/index.js";
 import { startLeaseReaper } from "./background/lease-reaper.js";
 import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
@@ -46,6 +46,16 @@ const workerTokenInPath = /arw1_[A-Za-z0-9_-]{43}/gu;
 const operatorWorkerCredentialRequestsPerMinute = 300;
 const redactWorkerTokens = (value: string): string =>
   value.replace(workerTokenInPath, "[REDACTED]");
+
+const isWorkerApiRoute = (routeUrl: string | undefined): boolean =>
+  routeUrl === "/api/v1/worker" || routeUrl?.startsWith("/api/v1/worker/") === true;
+
+const sendWorkerApiMaintenance = (reply: FastifyReply): FastifyReply =>
+  reply.code(503).send({
+    code: "worker_api_maintenance",
+    message: "Worker API access is disabled during recovery maintenance.",
+    retryable: true,
+  });
 
 export const sanitizeRequestLogUrl = (url: string | undefined): string =>
   redactWorkerTokens((url ?? "").split("?", 1)[0] ?? "");
@@ -99,6 +109,9 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         status: "not_ready",
         serverTime: new Date().toISOString(),
       });
+    }
+    if (dependencies.config.recoveryMaintenance && isWorkerApiRoute(request.routeOptions.url)) {
+      return sendWorkerApiMaintenance(reply);
     }
   });
 
@@ -215,8 +228,14 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     dependencies.database,
     dependencies.artifactReadiness,
     dependencies.shutdownSignal,
+    dependencies.config.recoveryMaintenance,
   );
   app.register(async (workerScope) => {
+    workerScope.addHook("onRequest", async (_request, reply) => {
+      if (dependencies.config.recoveryMaintenance) {
+        return sendWorkerApiMaintenance(reply);
+      }
+    });
     await workerScope.register(rateLimit, {
       global: false,
       max: 600,
@@ -273,7 +292,9 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
   }
 
-  const webhook = dependencies.config.github?.webhook;
+  const webhook = dependencies.config.recoveryMaintenance
+    ? undefined
+    : dependencies.config.github?.webhook;
   if (webhook !== undefined) {
     const githubIngestion = dependencies.githubIngestion;
     if (githubIngestion === undefined) {
@@ -310,12 +331,14 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
   }
 
-  const stopLeaseReaper = startLeaseReaper(
-    dependencies.database,
-    dependencies.config,
-    app.log,
-    dependencies.shutdownSignal,
-  );
+  const stopLeaseReaper = dependencies.config.recoveryMaintenance
+    ? async (): Promise<void> => {}
+    : startLeaseReaper(
+        dependencies.database,
+        dependencies.config,
+        app.log,
+        dependencies.shutdownSignal,
+      );
   const stopOperatorAuthReaper = startOperatorAuthReaper(
     dependencies.database,
     dependencies.config,
