@@ -121,8 +121,10 @@ engine warning, but lint, typecheck, build, and the recorded focused tests compl
 
 ## Deferred Work
 
-1. Produce actual signed outer-package-v2 release material and implement the production destination
-   verification and SCM installer. Signed package v1 remains immutable schema-v3 history.
+1. Produce actual signed outer-package-v2 release material and implement root materialization,
+   atomic swap, and the production SCM installer. The later installer-destination slice completed
+   the read-only typed-gate re-verification evidence for all three fixed post-swap roots, but no
+   production installer invokes it. Signed package v1 remains immutable schema-v3 history.
 
 The later `codex/worker-token-release-recovery` change completed the executable historical-source
 cleanup and the Token recovery exercises. Migration 0012 and its four-table upgrade compatibility

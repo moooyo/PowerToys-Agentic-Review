@@ -61,7 +61,9 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 			t.Fatalf("BearerTokenInstallerV2Package field %s is exported", installerType.Field(index).Name)
 		}
 	}
-	installerMethods := map[string]bool{"Close": false, "MarshalJSON": false, "Validate": false}
+	installerMethods := map[string]bool{
+		"Close": false, "MarshalJSON": false, "Validate": false, "WithDestinationBinding": false,
+	}
 	for index := 0; index < installerType.NumMethod(); index++ {
 		name := installerType.Method(index).Name
 		if _, allowed := installerMethods[name]; !allowed {
@@ -72,6 +74,62 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 	for name, seen := range installerMethods {
 		if !seen {
 			t.Fatalf("BearerTokenInstallerV2Package method %s is absent", name)
+		}
+	}
+	withBinding, present := installerType.MethodByName("WithDestinationBinding")
+	if !present {
+		t.Fatal("WithDestinationBinding is absent")
+	}
+	expectedWithBinding := reflect.TypeOf(func(
+		stagedpackage.BearerTokenInstallerV2Package,
+		func(stagedpackage.BearerTokenInstallerV2DestinationBinding) error,
+	) (stagedpackage.BearerTokenInstallerV2DestinationLease, error) {
+		return stagedpackage.BearerTokenInstallerV2DestinationLease{}, nil
+	})
+	if withBinding.Type != expectedWithBinding {
+		t.Fatal("WithDestinationBinding changed its exact one-shot lease contract")
+	}
+	bindingType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2DestinationBinding{})
+	for index := 0; index < bindingType.NumField(); index++ {
+		if bindingType.Field(index).IsExported() {
+			t.Fatalf("BearerTokenInstallerV2DestinationBinding field %s is exported", bindingType.Field(index).Name)
+		}
+	}
+	bindingMethods := map[string]bool{
+		"ControlDocument": false, "ExecutorDocument": false, "IndexDocument": false,
+		"MarshalJSON": false, "SignatureEnvelopeDocument": false, "SignerKeyID": false, "Validate": false,
+	}
+	for index := 0; index < bindingType.NumMethod(); index++ {
+		name := bindingType.Method(index).Name
+		if _, allowed := bindingMethods[name]; !allowed {
+			t.Fatalf("BearerTokenInstallerV2DestinationBinding exposes unexpected method %s", name)
+		}
+		bindingMethods[name] = true
+	}
+	for name, seen := range bindingMethods {
+		if !seen {
+			t.Fatalf("BearerTokenInstallerV2DestinationBinding method %s is absent", name)
+		}
+	}
+	leaseType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2DestinationLease{})
+	for index := 0; index < leaseType.NumField(); index++ {
+		if leaseType.Field(index).IsExported() {
+			t.Fatalf("BearerTokenInstallerV2DestinationLease field %s is exported", leaseType.Field(index).Name)
+		}
+	}
+	leaseMethods := map[string]bool{
+		"Close": false, "CommitIfValid": false, "MarshalJSON": false, "Validate": false,
+	}
+	for index := 0; index < leaseType.NumMethod(); index++ {
+		name := leaseType.Method(index).Name
+		if _, allowed := leaseMethods[name]; !allowed {
+			t.Fatalf("BearerTokenInstallerV2DestinationLease exposes unexpected method %s", name)
+		}
+		leaseMethods[name] = true
+	}
+	for name, seen := range leaseMethods {
+		if !seen {
+			t.Fatalf("BearerTokenInstallerV2DestinationLease method %s is absent", name)
 		}
 	}
 	zeroInstaller := stagedpackage.BearerTokenInstallerV2Package{}
@@ -130,7 +188,7 @@ func TestOnlyRetainedStagedEvidenceCanSelectBearerTokenInstallerV2(t *testing.T)
 	}
 }
 
-func TestStagedPackageHasNoProductionConsumer(t *testing.T) {
+func TestOnlyInstallerDestinationConsumesStagedPackage(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate stagedpackage source")
@@ -138,6 +196,7 @@ func TestStagedPackageHasNoProductionConsumer(t *testing.T) {
 	packageDirectory := filepath.Clean(filepath.Dir(currentFile))
 	serviceHostRoot := filepath.Clean(filepath.Join(packageDirectory, "..", ".."))
 	const stagedImport = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/stagedpackage"
+	allowedConsumer := filepath.Clean(filepath.Join(serviceHostRoot, "internal", "installerdestination"))
 	err := filepath.WalkDir(serviceHostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -156,7 +215,9 @@ func TestStagedPackageHasNoProductionConsumer(t *testing.T) {
 				return err
 			}
 			if value == stagedImport {
-				t.Fatalf("production source %s consumes observation-only staged evidence", path)
+				if filepath.Clean(filepath.Dir(path)) != allowedConsumer {
+					t.Fatalf("production source %s consumes staged evidence outside installerdestination", path)
+				}
 			}
 		}
 		return nil

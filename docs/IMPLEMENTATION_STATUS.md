@@ -9,7 +9,8 @@ Status date: 2026-09-04
 > client; production composition rejects historical schema v3 before opening any Worker credential.
 > Signed outer-package v2 and split installer profile v2 now bind schema-v4 bootstraps without mTLS
 > or package credential material; historical v1 remains schema-v3-only. Actual signed release
-> material, destination evidence, and the production SCM installer remain incomplete. Historical
+> material, root materialization/swap, and the production SCM installer remain incomplete. The
+> verify-only destination evidence composition is now implemented. Historical
 > source and verification evidence remain recorded below, but none of the superseded receipt or
 > signer-host paths is a future production-enablement prerequisite.
 
@@ -363,7 +364,7 @@ the production release profile, produce signed role bundles and native binaries,
 services, identities, ACLs, local capability-signing key, firewall policy, fixed plaintext Control
 authentication profile, and machine-enforced Codex policy through a versioned ADR 0013 transaction.
 The repository now has the versioned Token-aware outer-package and installation-profile contracts,
-but still needs actual signed release material, destination evidence, the production Go installer,
+but still needs actual signed release material, root materialization and atomic swap, the production Go installer,
 production-capable SCM schema and native adapter, a complete final recovery schedule, authenticated
 installer readiness, and a pinned WinSW release. The ADR
 0014 receipt reader, ADR 0021 protected receipt store, Server binding signer and trust material,
@@ -380,6 +381,19 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-04, the installer destination slice added the only production consumer of
+`BearerTokenInstallerV2Package`. The read-only composition accepts no caller-supplied path or
+detached authority, borrows an exact one-shot view of the admitted index, envelope, and schema-v4
+bootstraps, and reopens all three profile-fixed roots after a future installer swap. It validates
+exact path casing, complete tree closure, every signed payload digest and size, exact metadata
+index/signature bytes, exact bootstrap bytes, repeated compiled outer admission, role-scoped PE
+Authenticode, and retained filesystem
+identity/security evidence. The opaque result owns both source and destination handles, refuses
+serialization, rejects repeated or post-close use, and propagates staged, native, and destination
+cleanup-fatal state. Focused `installerdestination` and `stagedpackage` tests passed locally. This
+does not implement archive extraction, candidate materialization, ACL writes, root swap, SCM, CNG
+provisioning, readiness, or installer transaction recovery.
 
 On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
 split installer profile v2, schema-v4 admission, the retained staged-evidence typed installer gate,

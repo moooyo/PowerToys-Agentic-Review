@@ -157,7 +157,8 @@ The future privileged Go installer must:
    verified absence as the maintenance fence without creating a service;
 6. journal and place or swap all three complete physical roots without junctions or in-place file
    replacement;
-7. reopen and fully reverify all three exact signed destination roots;
+7. reopen and fully reverify all three exact signed destination roots through the verify-only
+   `installerdestination.Verify` typed-gate composition;
 8. on a clean install, create each service disabled, journal and apply its protected security and
    remaining configuration independently, and move the fully configured pair to demand-start only
    in Executor-before-Control order; then, while demand-start and no-recovery remain enforced,
@@ -199,9 +200,11 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 Native bootstrap schema v4, Control data-root verification, preflight, production composition,
 signed outer-package v2, and installer profile v2 now select the fixed ADR 0025 authentication file
 and contain no Worker mTLS path. Signed package v1 deliberately remains historical schema v3.
-`stagedpackage.SelectBearerTokenInstallerV2` rejects v1 before a future installer can consume v2
-evidence. The repository still lacks the production split installer, destination-verification
-evidence, transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the
+`stagedpackage.SelectBearerTokenInstallerV2` rejects v1 before the destination verifier can consume
+v2 evidence. The read-only `installerdestination.Verify` composition now implements step 7, but no
+production installer performs steps 3 through 6 or invokes it. The repository still lacks the
+production split installer, root materializer and atomic swap, transaction-journal schema v2 and
+its durable Windows store, the native SCM adapter, the
 complete final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
 disabled-create intermediate DACL and failure-action clearing, authenticated installer-facing
 readiness observation, archive/extractor, and native Windows verification evidence.

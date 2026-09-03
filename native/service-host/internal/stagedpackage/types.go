@@ -84,20 +84,23 @@ type evidenceIssuer struct{ marker byte }
 var successfulEvidenceIssuer = &evidenceIssuer{marker: 1}
 
 type evidenceState struct {
-	mu          sync.Mutex
-	issuer      *evidenceIssuer
-	closed      bool
-	rootPath    string
-	owner       *handleOwner
-	index       outerpackage.Index
-	control     config.Config
-	executor    config.Config
-	signerKeyID string
-	envelope    []byte
-	documents   releasepackage.FinalizedDocumentFacts
-	roots       []RootSnapshot
-	files       []FileSnapshot
-	digest      [sha256.Size]byte
+	mu                  sync.Mutex
+	issuer              *evidenceIssuer
+	closed              bool
+	rootPath            string
+	owner               *handleOwner
+	index               outerpackage.Index
+	control             config.Config
+	executor            config.Config
+	signerKeyID         string
+	envelope            []byte
+	documents           releasepackage.FinalizedDocumentFacts
+	roots               []RootSnapshot
+	files               []FileSnapshot
+	digest              [sha256.Size]byte
+	destinationBorrowed bool
+	destinationConsumed bool
+	destinationOwner    *destinationOwnership
 }
 
 // StagedPackageEvidence is opaque read-only proof that one retained staged tree matched a signed
@@ -112,4 +115,38 @@ type StagedPackageEvidence struct {
 type BearerTokenInstallerV2Package struct {
 	state  *evidenceState
 	digest [sha256.Size]byte
+}
+
+type destinationBindingIssuer struct{ marker byte }
+
+var successfulDestinationBindingIssuer = &destinationBindingIssuer{marker: 1}
+
+type destinationBorrowState struct {
+	mu     sync.Mutex
+	active bool
+}
+
+type destinationOwnership struct{ marker byte }
+
+// BearerTokenInstallerV2DestinationBinding is an opaque, detached view of the exact admitted
+// documents required to reverify a post-swap installer destination. It is minted only through a
+// live BearerTokenInstallerV2Package and is not accepted by any public installation entry point.
+type BearerTokenInstallerV2DestinationBinding struct {
+	issuer           *destinationBindingIssuer
+	borrow           *destinationBorrowState
+	sourceDigest     [sha256.Size]byte
+	indexDocument    []byte
+	envelopeDocument []byte
+	controlDocument  []byte
+	executorDocument []byte
+	signerKeyID      string
+	digest           [sha256.Size]byte
+}
+
+// BearerTokenInstallerV2DestinationLease is the exclusive source-handle capability transferred to
+// a successful destination verifier. Existing staged-evidence aliases cannot close its handles.
+type BearerTokenInstallerV2DestinationLease struct {
+	state  *evidenceState
+	digest [sha256.Size]byte
+	owner  *destinationOwnership
 }
