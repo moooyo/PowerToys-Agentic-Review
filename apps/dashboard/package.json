@@ -12,6 +12,7 @@
     "build": "max build",
     "preview": "max preview --port 8000",
     "setup": "max setup",
+    "test": "vitest run src",
     "typecheck": "max setup && tsc --noEmit"
   },
   "dependencies": {

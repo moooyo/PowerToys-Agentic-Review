@@ -91,13 +91,11 @@ import type {
   RevokeServerBindingV1Result,
   ServerBindingActiveSnapshotV1,
   ServerBindingRecoveryReceiptV1,
-  ServerBindingTrustedIssuerDescriptorV1,
 } from "./server-binding-persistence-v1.js";
 
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
   readonly migrationsDirectory: string;
-  readonly serverBindingTrustedIssuer?: ServerBindingTrustedIssuerDescriptorV1 | null;
   readonly startupTimeoutMilliseconds?: number;
 }
 
@@ -126,6 +124,12 @@ export interface AuthenticateWorkerTokenInput {
   readonly workerTokenSha256: string;
 }
 
+export interface ListWorkerNodeCredentialsInput {
+  readonly offset: number;
+  readonly limit: number;
+  readonly sort?: "identity";
+}
+
 export type AuthenticateWorkerTokenResult =
   | {
       readonly outcome: "authenticated";
@@ -137,6 +141,7 @@ export type AuthenticateWorkerTokenResult =
 export interface RotateWorkerTokenInput {
   readonly workerNodeId: string;
   readonly workerTokenSha256: string;
+  readonly expectedUpdatedAt: string;
   readonly rotatedByIssuer: string;
   readonly rotatedBySubject: string;
 }
@@ -150,6 +155,22 @@ export interface RevokeWorkerTokenInput {
 export interface WorkerNodeCredentialMutationResult {
   readonly workerNodeId: string;
   readonly authState: WorkerNodeAuthState;
+}
+
+export interface WorkerNodeCredentialListItem {
+  readonly workerNodeId: string;
+  readonly displayName: string;
+  readonly authState: WorkerNodeAuthState;
+  readonly createdAt: string;
+  readonly activatedAt: string | null;
+  readonly rotatedAt: string | null;
+  readonly revokedAt: string | null;
+  readonly updatedAt: string;
+}
+
+export interface WorkerNodeCredentialListResult {
+  readonly items: readonly WorkerNodeCredentialListItem[];
+  readonly total: number;
 }
 
 export interface RegisteredWorker {
@@ -301,6 +322,10 @@ export interface DatabaseOperationMap {
   readonly authenticateWorkerToken: {
     readonly input: AuthenticateWorkerTokenInput;
     readonly output: AuthenticateWorkerTokenResult;
+  };
+  readonly listWorkerNodeCredentials: {
+    readonly input: ListWorkerNodeCredentialsInput;
+    readonly output: WorkerNodeCredentialListResult;
   };
   readonly rotateWorkerToken: {
     readonly input: RotateWorkerTokenInput;

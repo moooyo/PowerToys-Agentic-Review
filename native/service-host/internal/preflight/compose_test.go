@@ -464,6 +464,60 @@ func TestValidateControlCredentialFactsBindsPinsAndRejectsKeyReuse(t *testing.T)
 	}
 }
 
+func TestBearerTokenSchemaPreflightBindsOnlyTheLocalCapabilitySigner(t *testing.T) {
+	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
+		t.Run(string(role), func(t *testing.T) {
+			fixture := newCompositionFixture(t, role)
+			selectBearerTokenSchema(t, &fixture)
+			evidence, err := composeSnapshots(fixture.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			credentials, exists := evidence.ControlCredentials()
+			if role == config.RoleExecutor {
+				if exists {
+					t.Fatal("Executor evidence contains Control credentials")
+				}
+				return
+			}
+			if !exists || credentials.WorkerAuthenticationProfile() !=
+				config.WorkerAuthenticationProfileBearerTokenV1 || credentials.HasMTLSAttestation() {
+				t.Fatalf("schemaVersion 4 credentials = %#v, exists=%v", credentials, exists)
+			}
+		})
+	}
+}
+
+func TestBearerTokenSchemaPreflightRejectsHistoricalMTLSMaterial(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ControlCredentialEvidence)
+	}{
+		{name: "mTLS marker", mutate: func(value *ControlCredentialEvidence) { value.mtlsBound = true }},
+		{name: "mTLS facts", mutate: func(value *ControlCredentialEvidence) { value.mtlsFacts.storeName = "MY" }},
+		{name: "missing profile", mutate: func(value *ControlCredentialEvidence) { value.authenticationProfile = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCompositionFixture(t, config.RoleControl)
+			selectBearerTokenSchema(t, &fixture)
+			test.mutate(fixture.input.credentials)
+			_, err := composeSnapshots(fixture.input)
+			assertPreflightErrorCode(t, err, ErrorEvidence)
+		})
+	}
+}
+
+func TestConfigurationPairRejectsMixedBootstrapSchemaVersions(t *testing.T) {
+	fixture := newCompositionFixture(t, config.RoleControl)
+	selectBearerTokenSchema(t, &fixture)
+	fixture.executor.SchemaVersion = config.SchemaVersion
+	fixture.installation.executorConfig = cloneConfig(fixture.executor)
+	replaceConfigurationRead(t, &fixture.installation.executorBootstrap, fixture.executor)
+	_, err := composeSnapshots(fixture.input)
+	assertPreflightErrorCode(t, err, ErrorConfigurationPair)
+}
+
 func TestComposeSnapshotsRequiresRoleAppropriateCredentials(t *testing.T) {
 	control := newCompositionFixture(t, config.RoleControl)
 	control.input.credentials = nil
@@ -492,36 +546,42 @@ func credentialFactFixtures(
 	configuration config.Config,
 ) (localCredentialFacts, mtlsCredentialFacts) {
 	t.Helper()
-	localSPKI := mustDecodeDigest(t, configuration.Control.LocalAuthorityPublicKeySHA256)
-	localDescriptor := mustDecodeDigest(t, configuration.Control.LocalAuthorityKeySecurityDescriptorSHA256)
+	local := localCredentialFactFixture(t, configuration)
 	certificateDER := mustDecodeDigest(t, configuration.Control.ClientCertificateDERSHA256)
 	mtlsDescriptor := mustDecodeDigest(t, configuration.Control.ClientPrivateKeySecurityDescriptorSHA256)
 	mtlsSPKI := sha256.Sum256([]byte("distinct mTLS public key"))
+	return local, mtlsCredentialFacts{
+		storeScope:                 wincert.LocalMachineStoreScope,
+		storeName:                  configuration.Control.ClientCertificateStore,
+		certificateDER:             certificateDER,
+		keySecurityDescriptor:      mtlsDescriptor,
+		identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "mtls", MachineKey: true},
+		publicKeySPKI:              mtlsSPKI,
+		validatedControlServiceSID: configuration.OwnService.SID,
+		validatedExecutorSID:       configuration.PeerService.SID,
+		containerName:              "mtls-container",
+		keyName:                    "mtls-container",
+		algorithm:                  "ECDSA_P256",
+		keyLengthBits:              256,
+		keyUsage:                   2,
+	}
+}
+
+func localCredentialFactFixture(t *testing.T, configuration config.Config) localCredentialFacts {
+	t.Helper()
+	localSPKI := mustDecodeDigest(t, configuration.Control.LocalAuthorityPublicKeySHA256)
+	localDescriptor := mustDecodeDigest(t, configuration.Control.LocalAuthorityKeySecurityDescriptorSHA256)
 	return localCredentialFacts{
-			keyName:                    configuration.Control.LocalAuthorityCNGKeyName,
-			keySecurityDescriptor:      localDescriptor,
-			identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "local-authority", MachineKey: true},
-			publicKeySPKI:              localSPKI,
-			validatedControlServiceSID: configuration.OwnService.SID,
-			validatedExecutorSID:       configuration.PeerService.SID,
-			algorithm:                  "ECDSA_P256",
-			keyLengthBits:              256,
-			keyUsage:                   2,
-		}, mtlsCredentialFacts{
-			storeScope:                 wincert.LocalMachineStoreScope,
-			storeName:                  configuration.Control.ClientCertificateStore,
-			certificateDER:             certificateDER,
-			keySecurityDescriptor:      mtlsDescriptor,
-			identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "mtls", MachineKey: true},
-			publicKeySPKI:              mtlsSPKI,
-			validatedControlServiceSID: configuration.OwnService.SID,
-			validatedExecutorSID:       configuration.PeerService.SID,
-			containerName:              "mtls-container",
-			keyName:                    "mtls-container",
-			algorithm:                  "ECDSA_P256",
-			keyLengthBits:              256,
-			keyUsage:                   2,
-		}
+		keyName:                    configuration.Control.LocalAuthorityCNGKeyName,
+		keySecurityDescriptor:      localDescriptor,
+		identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "local-authority", MachineKey: true},
+		publicKeySPKI:              localSPKI,
+		validatedControlServiceSID: configuration.OwnService.SID,
+		validatedExecutorSID:       configuration.PeerService.SID,
+		algorithm:                  "ECDSA_P256",
+		keyLengthBits:              256,
+		keyUsage:                   2,
+	}
 }
 
 func TestCompiledCompatibilityMatchesReleaseAndRuntimeConstants(t *testing.T) {

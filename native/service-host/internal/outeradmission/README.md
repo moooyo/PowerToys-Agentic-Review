@@ -10,8 +10,9 @@ ADR 0025 supersedes only the Worker mTLS credential fields in the exact admissio
 below. They remain documented as immutable historical schema-v3 bindings and are not current Worker
 authentication or future release gates. The local capability-authority CNG/SPKI, detached package
 signature and compiled `outertrust`, and Authenticode boundaries remain unchanged. A Token-aware
-replacement requires a new versioned profile; neither the plaintext Worker Token nor its Server-side
-SHA-256 digest belongs in signed package admission.
+replacement requires a new versioned profile. Admission v1 explicitly rejects ServiceHost
+bootstrap schema v4 rather than reinterpreting its signed mTLS identity fields; neither the
+plaintext Worker Token nor its Server-side SHA-256 digest belongs in signed package admission.
 
 All four byte slices are bounded and cloned before verification. Signature verification, canonical
 parsing, and bootstrap binding use the same immutable snapshots. A verifier-side mutation or a

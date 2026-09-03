@@ -86,6 +86,9 @@ func newFakeFileSystem(current config.Config) *fakeFileSystem {
 	fs.addDirectory(current.Node.Environment["USERPROFILE"], winfile.SecurityModeManaged, 7, roleDirectorySecurity(current))
 	fs.addDirectory(current.Node.Environment["APPDATA"], winfile.SecurityModeManaged, 8, roleDirectorySecurity(current))
 	fs.addDirectory(current.Node.Environment["LOCALAPPDATA"], winfile.SecurityModeManaged, 9, roleDirectorySecurity(current))
+	if current.Role == config.RoleControl && current.SchemaVersion == config.BearerTokenSchemaVersion {
+		fs.addFile(config.WorkerAuthenticationProfilePath, 12, roleFileSecurity(current))
+	}
 	if current.Role == config.RoleExecutor {
 		fs.addDirectory(current.Node.Environment["CODEX_HOME"], winfile.SecurityModeManaged, 10, roleDirectorySecurity(current))
 		fs.addFile(current.Node.Environment["GIT_CONFIG_GLOBAL"], 11, roleFileSecurity(current))
@@ -286,6 +289,34 @@ func pairedConfigs() (config.Config, config.Config) {
 	control := baseConfig(config.RoleControl)
 	executor := baseConfig(config.RoleExecutor)
 	return control, executor
+}
+
+func bearerVerificationFixture(role config.Role) (
+	config.Config,
+	config.Config,
+	installationSnapshot,
+	*fakeFileSystem,
+) {
+	current, peer, installation, _ := verificationFixture(role)
+	control := current
+	executor := peer
+	if role == config.RoleExecutor {
+		control, executor = peer, current
+	}
+	control.SchemaVersion = config.BearerTokenSchemaVersion
+	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	control.Control.ClientCertificateStore = ""
+	control.Control.ClientCertificateDERSHA256 = ""
+	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	executor.SchemaVersion = config.BearerTokenSchemaVersion
+	installation.control = cloneConfig(control)
+	installation.executor = cloneConfig(executor)
+	if role == config.RoleControl {
+		current, peer = control, executor
+	} else {
+		current, peer = executor, control
+	}
+	return current, peer, installation, newFakeFileSystem(current)
 }
 
 func baseConfig(role config.Role) config.Config {

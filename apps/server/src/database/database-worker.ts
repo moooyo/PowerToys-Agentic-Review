@@ -16,7 +16,7 @@ import {
   WorkerRegistrationRequestSchema,
 } from "@agentic-review/contracts";
 import { resolveExpiredAttempt } from "@agentic-review/domain";
-import { FormatRegistry } from "@sinclair/typebox";
+import { FormatRegistry, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { GitHubPollingProjectionKey } from "../github/poller.js";
 import type {
@@ -113,12 +113,14 @@ import type {
   LeaseCompletionInput,
   LeaseFailureInput,
   LeaseTerminalResult,
+  ListWorkerNodeCredentialsInput,
   ReapExpiredLeasesInput,
   RegisteredWorker,
   RegisterWorkerInput,
   RevokeWorkerTokenInput,
   RotateWorkerTokenInput,
   WorkerNodeAuthState,
+  WorkerNodeCredentialListResult,
   WorkerNodeCredentialMutationResult,
 } from "./protocol.js";
 import {
@@ -128,29 +130,6 @@ import {
   type ReviewCompletionJobContext,
   validateReviewCompletion,
 } from "./review-results.js";
-import {
-  auditServerBindingPersistenceV1,
-  type ClaimServerBindingAuthorizationV1Input,
-  type CommitServerBindingReceiptV1Input,
-  type ConfirmServerBindingRecordV1Input,
-  type CreateServerBindingAuthorizationV1Input,
-  claimServerBindingAuthorizationV1,
-  commitServerBindingReceiptV1,
-  confirmServerBindingRecordV1,
-  createServerBindingAuthorizationV1,
-  type InitializeServerBindingIssuerV1Input,
-  initializeServerBindingIssuerV1,
-  type ReadServerBindingRecoveryReceiptV1Input,
-  type RevokeServerBindingV1Input,
-  readServerBindingActiveSnapshotV1,
-  readServerBindingRecoveryReceiptV1,
-  recheckServerBindingActiveSnapshotV1,
-  revokeServerBindingV1,
-  type ServerBindingActiveSnapshotV1,
-  ServerBindingPersistenceErrorV1,
-  type ServerBindingTrustedIssuerDescriptorV1,
-  snapshotServerBindingTrustedIssuerDescriptorV1,
-} from "./server-binding-persistence-v1.js";
 import { DatabaseStorageBinding } from "./storage-security.js";
 
 interface WorkerRow {
@@ -270,17 +249,6 @@ if (port === null) {
 const options = workerData as DatabaseWorkerOptions;
 let database: DatabaseSync;
 let schemaVersion = 0;
-let serverBindingTrustedIssuer: Readonly<ServerBindingTrustedIssuerDescriptorV1> | null = null;
-
-const requireServerBindingTrustedIssuer = (): Readonly<ServerBindingTrustedIssuerDescriptorV1> => {
-  if (serverBindingTrustedIssuer === null) {
-    throw new ServerBindingPersistenceErrorV1(
-      "SERVER_BINDING_SIGNER_UNAVAILABLE",
-      "The Server binding trusted issuer is unavailable.",
-    );
-  }
-  return serverBindingTrustedIssuer;
-};
 const claimCandidatePageSize = 100;
 
 FormatRegistry.Set(
@@ -293,6 +261,9 @@ FormatRegistry.Set("uri", (value) => URL.canParse(value));
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const sha256Pattern = /^[0-9a-f]{64}$/u;
+const workerTokenShapePattern = /arw1_[A-Za-z0-9_-]{43}/u;
+const redactedWorkerDisplayName = "Redacted worker";
+const canonicalDateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 
 class WorkerNodeCredentialError extends Error {
   public constructor(
@@ -301,6 +272,15 @@ class WorkerNodeCredentialError extends Error {
   ) {
     super(message);
     this.name = "WorkerNodeCredentialError";
+  }
+}
+
+class RetiredServerBindingPersistenceError extends Error {
+  public readonly code = "SERVER_BINDING_PERSISTENCE_RETIRED";
+
+  public constructor() {
+    super("Server binding persistence operations are retired.");
+    this.name = "RetiredServerBindingPersistenceError";
   }
 }
 
@@ -320,6 +300,36 @@ const assertBoundedText = (value: string, name: string, maximumLength: number): 
   if (value.length < 1 || value.length > maximumLength || value.includes("\0")) {
     throw new TypeError(`${name} must be non-empty text within its supported length.`);
   }
+};
+
+const assertNoWorkerTokenShape = (value: string, name: string): void => {
+  if (workerTokenShapePattern.test(value)) {
+    throw new TypeError(`${name} must not contain a Worker token-shaped value.`);
+  }
+};
+
+const isCanonicalDateTime = (value: unknown): value is string => {
+  if (typeof value !== "string" || !canonicalDateTimePattern.test(value)) {
+    return false;
+  }
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+};
+
+const assertCanonicalDateTime = (value: string, name: string): void => {
+  if (!isCanonicalDateTime(value)) {
+    throw new TypeError(`${name} must be a canonical UTC date-time value.`);
+  }
+};
+
+const nextMonotonicDateTime = (previous: string): string => {
+  assertCanonicalDateTime(previous, "Stored worker credential updatedAt");
+  const nextMilliseconds = Math.max(Date.now(), Date.parse(previous) + 1);
+  const next = new Date(nextMilliseconds).toISOString();
+  if (next <= previous) {
+    throw new Error("The worker credential update time could not advance monotonically.");
+  }
+  return next;
 };
 
 const canonicalJson = (value: unknown): string => {
@@ -457,6 +467,7 @@ const createWorkerNodeCredential = (
 ): WorkerNodeCredentialMutationResult & { readonly authState: "pending" } => {
   assertWorkerNodeId(input.workerNodeId);
   assertBoundedText(input.displayName, "displayName", 512);
+  assertNoWorkerTokenShape(input.displayName, "displayName");
   assertWorkerTokenSha256(input.workerTokenSha256);
   assertBoundedText(input.createdByIssuer, "createdByIssuer", 2048);
   assertBoundedText(input.createdBySubject, "createdBySubject", 512);
@@ -539,6 +550,107 @@ const authenticateWorkerToken = (
   };
 };
 
+const workerNodeCredentialListResultSchema = Type.Object(
+  {
+    items: Type.Array(
+      Type.Object(
+        {
+          workerNodeId: Type.String({
+            minLength: 1,
+            maxLength: 128,
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          }),
+          displayName: Type.String({ minLength: 1, maxLength: 512 }),
+          authState: Type.Union([
+            Type.Literal("pending"),
+            Type.Literal("active"),
+            Type.Literal("revoked"),
+          ]),
+          createdAt: Type.String({ format: "date-time" }),
+          activatedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+          rotatedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+          revokedAt: Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+          updatedAt: Type.String({ format: "date-time" }),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: 200 },
+    ),
+    total: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+  { additionalProperties: false },
+);
+
+const listWorkerNodeCredentials = (
+  input: ListWorkerNodeCredentialsInput,
+): WorkerNodeCredentialListResult => {
+  if (!Number.isSafeInteger(input.offset) || input.offset < 0) {
+    throw new TypeError("Worker credential list offset must be a non-negative safe integer.");
+  }
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 200) {
+    throw new TypeError("Worker credential list limit must be an integer from 1 through 200.");
+  }
+  if (input.sort !== undefined && input.sort !== "identity") {
+    throw new TypeError("Worker credential list sort must be identity when provided.");
+  }
+  const orderBy =
+    input.sort === "identity"
+      ? "ORDER BY worker_node_id ASC"
+      : "ORDER BY updated_at DESC, worker_node_id ASC";
+  const items = (
+    database
+      .prepare(`
+      SELECT
+        worker_node_id AS workerNodeId,
+        display_name AS displayName,
+        auth_state AS authState,
+        created_at AS createdAt,
+        activated_at AS activatedAt,
+        rotated_at AS rotatedAt,
+        revoked_at AS revokedAt,
+        updated_at AS updatedAt
+      FROM worker_node_credentials
+      ${orderBy}
+      LIMIT ? OFFSET ?
+    `)
+      .all(input.limit, input.offset) as unknown as Record<string, unknown>[]
+  ).map((item) =>
+    typeof item.displayName === "string" && workerTokenShapePattern.test(item.displayName)
+      ? { ...item, displayName: redactedWorkerDisplayName }
+      : item,
+  );
+  const count = database.prepare("SELECT COUNT(*) AS total FROM worker_node_credentials").get() as
+    | { readonly total: number }
+    | undefined;
+  const result: unknown = { items, total: count?.total };
+  if (
+    !Value.Check(workerNodeCredentialListResultSchema, result) ||
+    result.items.length > input.limit ||
+    result.items.some(
+      (item) =>
+        !isCanonicalDateTime(item.createdAt) ||
+        !isCanonicalDateTime(item.updatedAt) ||
+        (item.activatedAt !== null && !isCanonicalDateTime(item.activatedAt)) ||
+        (item.rotatedAt !== null && !isCanonicalDateTime(item.rotatedAt)) ||
+        (item.revokedAt !== null && !isCanonicalDateTime(item.revokedAt)),
+    ) ||
+    result.total < result.items.length ||
+    result.items.some((item, index) => {
+      const previous = result.items[index - 1];
+      return (
+        previous !== undefined &&
+        (input.sort === "identity"
+          ? previous.workerNodeId > item.workerNodeId
+          : previous.updatedAt < item.updatedAt ||
+            (previous.updatedAt === item.updatedAt && previous.workerNodeId > item.workerNodeId))
+      );
+    })
+  ) {
+    throw new Error("The worker credential list projection is invalid.");
+  }
+  return result;
+};
+
 const rotateWorkerToken = (
   input: RotateWorkerTokenInput,
 ): WorkerNodeCredentialMutationResult & {
@@ -546,18 +658,20 @@ const rotateWorkerToken = (
 } => {
   assertWorkerNodeId(input.workerNodeId);
   assertWorkerTokenSha256(input.workerTokenSha256);
+  assertCanonicalDateTime(input.expectedUpdatedAt, "expectedUpdatedAt");
   assertBoundedText(input.rotatedByIssuer, "rotatedByIssuer", 2048);
   assertBoundedText(input.rotatedBySubject, "rotatedBySubject", 512);
-  const now = new Date().toISOString();
 
   return withImmediateTransaction(() => {
     const credential = database
       .prepare(`
-        SELECT auth_state
+        SELECT auth_state, updated_at
         FROM worker_node_credentials
         WHERE worker_node_id = ?
       `)
-      .get(input.workerNodeId) as { readonly auth_state: WorkerNodeAuthState } | undefined;
+      .get(input.workerNodeId) as
+      | { readonly auth_state: WorkerNodeAuthState; readonly updated_at: string }
+      | undefined;
     if (credential === undefined) {
       throw new WorkerNodeCredentialError(
         "WORKER_NODE_CREDENTIAL_NOT_FOUND",
@@ -568,6 +682,12 @@ const rotateWorkerToken = (
       throw new WorkerNodeCredentialError(
         "WORKER_NODE_CREDENTIAL_REVOKED",
         "A revoked worker node credential cannot be rotated.",
+      );
+    }
+    if (credential.updated_at !== input.expectedUpdatedAt) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_CONFLICT",
+        "The worker node credential changed before token rotation.",
       );
     }
 
@@ -599,6 +719,7 @@ const rotateWorkerToken = (
       );
     }
 
+    const updatedAt = nextMonotonicDateTime(credential.updated_at);
     const update = database
       .prepare(`
         UPDATE worker_node_credentials
@@ -607,16 +728,17 @@ const rotateWorkerToken = (
             updated_by_subject = ?,
             rotated_at = ?,
             updated_at = ?
-        WHERE worker_node_id = ? AND auth_state = ?
+        WHERE worker_node_id = ? AND auth_state = ? AND updated_at = ?
       `)
       .run(
         input.workerTokenSha256,
         input.rotatedByIssuer,
         input.rotatedBySubject,
-        now,
-        now,
+        updatedAt,
+        updatedAt,
         input.workerNodeId,
         credential.auth_state,
+        credential.updated_at,
       );
     if (Number(update.changes) !== 1) {
       throw new Error("The worker node credential changed during token rotation.");
@@ -632,16 +754,17 @@ const revokeWorkerToken = (
   assertWorkerNodeId(input.workerNodeId);
   assertBoundedText(input.revokedByIssuer, "revokedByIssuer", 2048);
   assertBoundedText(input.revokedBySubject, "revokedBySubject", 512);
-  const now = new Date().toISOString();
 
   return withImmediateTransaction(() => {
     const credential = database
       .prepare(`
-        SELECT auth_state
+        SELECT auth_state, updated_at
         FROM worker_node_credentials
         WHERE worker_node_id = ?
       `)
-      .get(input.workerNodeId) as { readonly auth_state: WorkerNodeAuthState } | undefined;
+      .get(input.workerNodeId) as
+      | { readonly auth_state: WorkerNodeAuthState; readonly updated_at: string }
+      | undefined;
     if (credential === undefined) {
       throw new WorkerNodeCredentialError(
         "WORKER_NODE_CREDENTIAL_NOT_FOUND",
@@ -649,6 +772,7 @@ const revokeWorkerToken = (
       );
     }
     if (credential.auth_state !== "revoked") {
+      const revokedAt = nextMonotonicDateTime(credential.updated_at);
       const update = database
         .prepare(`
           UPDATE worker_node_credentials
@@ -657,15 +781,16 @@ const revokeWorkerToken = (
               updated_by_subject = ?,
               updated_at = ?,
               revoked_at = ?
-          WHERE worker_node_id = ? AND auth_state = ?
+          WHERE worker_node_id = ? AND auth_state = ? AND updated_at = ?
         `)
         .run(
           input.revokedByIssuer,
           input.revokedBySubject,
-          now,
-          now,
+          revokedAt,
+          revokedAt,
           input.workerNodeId,
           credential.auth_state,
+          credential.updated_at,
         );
       if (Number(update.changes) !== 1) {
         throw new Error("The worker node credential changed during token revocation.");
@@ -741,7 +866,7 @@ const registerWorker = (input: RegisterWorkerInput): RegisteredWorker => {
   return withImmediateTransaction(() => {
     const credential = database
       .prepare(`
-        SELECT worker_node_id, auth_state
+        SELECT worker_node_id, auth_state, updated_at
         FROM worker_node_credentials
         WHERE token_sha256 = ?
           AND auth_state IN ('pending', 'active')
@@ -750,6 +875,7 @@ const registerWorker = (input: RegisterWorkerInput): RegisteredWorker => {
       | {
           readonly worker_node_id: string;
           readonly auth_state: Exclude<WorkerNodeAuthState, "revoked">;
+          readonly updated_at: string;
         }
       | undefined;
     if (credential === undefined) {
@@ -770,20 +896,30 @@ const registerWorker = (input: RegisterWorkerInput): RegisteredWorker => {
       maxSlots: input.maxSlots,
       capabilities: input.capabilities,
     };
-    if (!Value.Check(WorkerRegistrationRequestSchema, registrationRequest)) {
+    if (
+      !Value.Check(WorkerRegistrationRequestSchema, registrationRequest) ||
+      workerTokenShapePattern.test(input.displayName)
+    ) {
       throw new WorkerNodeCredentialError(
         "WORKER_REGISTRATION_INVALID",
         "The worker registration request is invalid.",
       );
     }
     if (credential.auth_state === "pending") {
+      const activatedAt = nextMonotonicDateTime(credential.updated_at);
       const activation = database
         .prepare(`
           UPDATE worker_node_credentials
           SET auth_state = 'active', activated_at = ?, updated_at = ?
-          WHERE worker_node_id = ? AND token_sha256 = ? AND auth_state = 'pending'
+          WHERE worker_node_id = ? AND token_sha256 = ? AND auth_state = 'pending' AND updated_at = ?
         `)
-        .run(now, now, input.workerNodeId, input.workerTokenSha256);
+        .run(
+          activatedAt,
+          activatedAt,
+          input.workerNodeId,
+          input.workerTokenSha256,
+          credential.updated_at,
+        );
       if (Number(activation.changes) !== 1) {
         throw new Error("The pending worker node credential could not be activated atomically.");
       }
@@ -2050,6 +2186,8 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return createWorkerNodeCredential(request.input as CreateWorkerNodeCredentialInput);
     case "authenticateWorkerToken":
       return authenticateWorkerToken(request.input as AuthenticateWorkerTokenInput);
+    case "listWorkerNodeCredentials":
+      return listWorkerNodeCredentials(request.input as ListWorkerNodeCredentialsInput);
     case "rotateWorkerToken":
       return rotateWorkerToken(request.input as RotateWorkerTokenInput);
     case "revokeWorkerToken":
@@ -2119,59 +2257,15 @@ const handleRequest = (request: DatabaseRequest): unknown => {
     case "commitArtifactCompletion":
       return commitArtifactCompletion(database, request.input as CommitArtifactCompletionInput);
     case "initializeServerBindingIssuerV1":
-      return initializeServerBindingIssuerV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as InitializeServerBindingIssuerV1Input,
-      );
     case "createServerBindingAuthorizationV1":
-      return createServerBindingAuthorizationV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as CreateServerBindingAuthorizationV1Input,
-      );
     case "claimServerBindingAuthorizationV1":
-      return claimServerBindingAuthorizationV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as ClaimServerBindingAuthorizationV1Input,
-      );
     case "commitServerBindingReceiptV1":
-      return commitServerBindingReceiptV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as CommitServerBindingReceiptV1Input,
-      );
     case "confirmServerBindingRecordV1":
-      return confirmServerBindingRecordV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as ConfirmServerBindingRecordV1Input,
-      );
     case "readServerBindingRecoveryReceiptV1":
-      return readServerBindingRecoveryReceiptV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as ReadServerBindingRecoveryReceiptV1Input,
-      );
     case "readServerBindingActiveSnapshotV1":
-      return readServerBindingActiveSnapshotV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as ReadServerBindingRecoveryReceiptV1Input,
-      );
     case "recheckServerBindingActiveSnapshotV1":
-      return recheckServerBindingActiveSnapshotV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as ServerBindingActiveSnapshotV1,
-      );
     case "revokeServerBindingV1":
-      return revokeServerBindingV1(
-        database,
-        requireServerBindingTrustedIssuer(),
-        request.input as RevokeServerBindingV1Input,
-      );
+      throw new RetiredServerBindingPersistenceError();
     case "completeLease":
       return completeLease(request.input as LeaseCompletionInput);
     case "failLease":
@@ -2292,11 +2386,6 @@ try {
     });
   }
   schemaVersion = runMigrations(database, options.migrationsDirectory);
-  serverBindingTrustedIssuer =
-    options.serverBindingTrustedIssuer === undefined || options.serverBindingTrustedIssuer === null
-      ? null
-      : snapshotServerBindingTrustedIssuerDescriptorV1(options.serverBindingTrustedIssuer);
-  auditServerBindingPersistenceV1(database, serverBindingTrustedIssuer);
   if (storage.snapshot.initializationState === "fresh") {
     storage.finalizeDatabaseInitialization();
   }
@@ -2331,17 +2420,6 @@ try {
       const output = handleRequest(request);
       port.postMessage({ type: "response", id: request.id, ok: true, output });
     } catch (error) {
-      if (
-        error instanceof ServerBindingPersistenceErrorV1 &&
-        error.code === "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE"
-      ) {
-        port.postMessage({ type: "fatal", error: serializeError(error) });
-        port.close();
-        queueMicrotask(() => {
-          throw error;
-        });
-        return;
-      }
       port.postMessage({
         type: "response",
         id: request.id,

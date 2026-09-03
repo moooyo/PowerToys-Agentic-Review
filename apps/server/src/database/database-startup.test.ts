@@ -120,6 +120,77 @@ describe("DatabaseClient startup", () => {
   });
 
   it.skipIf(process.platform === "win32")(
+    "starts Token-only from schema v12 and v13 while preserving dormant Server binding rows",
+    async () => {
+      for (const startingSchemaVersion of [12, 13] as const) {
+        const directory = await createTemporaryDirectory();
+        const migrationPrefixDirectory = await createMigrationPrefixDirectory(
+          directory,
+          startingSchemaVersion,
+        );
+        const dataDirectory = join(directory, `data-v${startingSchemaVersion}`);
+        const databasePath = join(dataDirectory, "state.sqlite");
+        await mkdir(dataDirectory, { mode: 0o700 });
+        const seedDatabase = new DatabaseSync(databasePath);
+        try {
+          expect(runMigrations(seedDatabase, migrationPrefixDirectory)).toBe(startingSchemaVersion);
+          seedDatabase
+            .prepare(`
+              INSERT INTO server_binding_receipt_issuer (
+                singleton_id,
+                authority_schema_version,
+                issuer,
+                receipt_profile_id,
+                active_status_profile_id,
+                signature_algorithm,
+                issuer_key_id,
+                initialized_at
+              ) VALUES (1, 1, ?, ?, ?, ?, ?, ?)
+            `)
+            .run(
+              "agentic-review-server-enrollment-binding-authority-v1",
+              "agentic-review-server-binding-receipt-v1",
+              "agentic-review-server-binding-active-status-v1",
+              "ecdsa-p256-sha256-p1363-low-s",
+              "a".repeat(64),
+              "2026-09-03T00:00:00.000Z",
+            );
+        } finally {
+          seedDatabase.close();
+        }
+        await chmod(databasePath, 0o600);
+        await writeInitializationMarker(databasePath);
+
+        const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
+        await expect(client.request("ping", {})).resolves.toMatchObject({ schemaVersion: 13 });
+        await client.close();
+
+        const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
+        try {
+          expect(readSchemaVersion(migratedDatabase)).toBe(13);
+          expect(
+            migratedDatabase
+              .prepare(`
+                SELECT issuer_key_id AS issuerKeyId, initialized_at AS initializedAt
+                FROM server_binding_receipt_issuer
+                WHERE singleton_id = 1
+              `)
+              .get(),
+          ).toEqual({
+            issuerKeyId: "a".repeat(64),
+            initializedAt: "2026-09-03T00:00:00.000Z",
+          });
+          expect(
+            migratedDatabase.prepare("SELECT COUNT(*) AS count FROM worker_node_credentials").get(),
+          ).toEqual({ count: 0 });
+        } finally {
+          migratedDatabase.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
     "backs up an initialized v7 database before applying migrations through v13",
     async () => {
       const directory = await createTemporaryDirectory();

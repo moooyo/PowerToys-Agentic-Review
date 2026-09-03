@@ -75,9 +75,8 @@ type Config struct {
 	Limits       Limits
 }
 
-// BearerConfig is the source-only configuration for the superseding per-Worker Token transport.
-// Production composition must not select this constructor until a versioned role configuration
-// profile replaces the current exact mTLS profile.
+// BearerConfig is the configuration selected by bootstrap schema v4 for the per-Worker Token
+// transport.
 type BearerConfig struct {
 	Origin             string
 	ServerName         string

@@ -46,6 +46,64 @@ func TestVerifyRuntimeEvidenceForEachRole(t *testing.T) {
 	}
 }
 
+func TestVerifyBearerTokenControlRetainsTheFixedAuthenticationFile(t *testing.T) {
+	current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+
+	evidence, err := verifyWithDependencies(
+		context.Background(), current, peer, installation,
+		dependencies{openTraversalRoot: fs.openTraversalRoot},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer evidence.Close()
+	found := false
+	for _, path := range evidence.RuntimePaths() {
+		if path.Purpose() == PurposeWorkerAuth && path.Path() == config.WorkerAuthenticationProfilePath &&
+			path.Kind() == winfile.ObjectKindFile {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("schemaVersion 4 Control evidence omitted the fixed Worker authentication file")
+	}
+}
+
+func TestVerifyBearerTokenDataRootRejectsMissingOrMisplacedAuthenticationFiles(t *testing.T) {
+	t.Run("missing Control file", func(t *testing.T) {
+		current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+		delete(fs.nodes, config.WorkerAuthenticationProfilePath)
+		if _, err := verifyWithDependencies(
+			context.Background(), current, peer, installation,
+			dependencies{openTraversalRoot: fs.openTraversalRoot},
+		); !errors.Is(err, ErrFilesystem) {
+			t.Fatalf("missing Worker authentication file returned %v", err)
+		}
+	})
+
+	t.Run("wrong Control file kind", func(t *testing.T) {
+		current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+		fs.nodes[config.WorkerAuthenticationProfilePath].kind = winfile.ObjectKindDirectory
+		if _, err := verifyWithDependencies(
+			context.Background(), current, peer, installation,
+			dependencies{openTraversalRoot: fs.openTraversalRoot},
+		); !errors.Is(err, ErrFilesystem) {
+			t.Fatalf("wrong Worker authentication file kind returned %v", err)
+		}
+	})
+
+	t.Run("Executor copy", func(t *testing.T) {
+		current, peer, installation, fs := bearerVerificationFixture(config.RoleExecutor)
+		fs.addFile(current.Node.DataRoot+`\worker-auth-v1.json`, 13, roleFileSecurity(current))
+		if _, err := verifyWithDependencies(
+			context.Background(), current, peer, installation,
+			dependencies{openTraversalRoot: fs.openTraversalRoot},
+		); !errors.Is(err, ErrFilesystem) {
+			t.Fatalf("Executor Worker authentication file returned %v", err)
+		}
+	})
+}
+
 func TestEvidenceGettersReturnDetachedCopies(t *testing.T) {
 	current, peer, installation, fs := verificationFixture(config.RoleControl)
 	evidence, err := verifyWithDependencies(

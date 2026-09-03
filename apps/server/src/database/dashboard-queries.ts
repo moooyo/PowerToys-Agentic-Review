@@ -25,6 +25,9 @@ import {
 import { Value } from "@sinclair/typebox/value";
 import { GitHubIngestionInvariantError } from "./errors.js";
 
+const workerTokenShapePattern = /arw1_[A-Za-z0-9_-]{43}/u;
+const redactedWorkerDisplayName = "Redacted worker";
+
 interface WorkItemRow {
   readonly id: string;
   readonly kind: DashboardWorkItemListItem["kind"];
@@ -483,7 +486,7 @@ interface WorkerRow {
   readonly lastHeartbeatAt: string;
 }
 
-const workerSql = `
+const workerSelectSql = `
   SELECT
     worker.id,
     worker.node_id AS "workerNodeId",
@@ -503,6 +506,9 @@ const workerSql = `
     ), '[]') AS "currentJobIdsJson",
     worker.last_seen_at AS "lastHeartbeatAt"
   FROM workers AS worker
+`;
+
+const workerWhereSql = (statusCount: number): string => `
   WHERE worker.superseded_at IS NULL
     AND (
     ? IS NULL OR lower(
@@ -510,11 +516,19 @@ const workerSql = `
       worker.version
     ) LIKE ? ESCAPE '\\'
   )
-  ORDER BY worker.last_seen_at DESC, worker.id
+  ${statusCount === 0 ? "" : `AND worker.status IN (${Array.from({ length: statusCount }, () => "?").join(", ")})`}
 `;
+
+const workerOrderSql = (sort: DashboardWorkerListQuery["sort"]): string =>
+  sort === "identity"
+    ? "ORDER BY worker.node_id, worker.instance_id, worker.id"
+    : "ORDER BY worker.last_seen_at DESC, worker.id";
 
 const stringValue = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
+
+const safeWorkerDisplayName = (value: string): string =>
+  workerTokenShapePattern.test(value) ? redactedWorkerDisplayName : value;
 
 const nonNegativeInteger = (value: unknown): number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -530,34 +544,48 @@ export const listWorkers = (
 
   return withReadTransaction(database, () => {
     const search = searchPattern(input.search);
-    const rows = database.prepare(workerSql).all(search, search) as unknown as WorkerRow[];
-    const projected = rows
-      .filter((row) => statuses.length === 0 || statuses.includes(row.status))
-      .map((row) => {
-        const capabilities = parseJson<WorkerCapabilities>(row.capabilitiesJson);
-        const health =
-          row.healthJson === null ? null : parseJson<Record<string, unknown>>(row.healthJson);
-        const currentJobIds = parseJson<string[]>(row.currentJobIdsJson);
-        const labels = capabilities.labels ?? {};
-        const location = stringValue(labels.location) ?? stringValue(health?.location);
-        const capabilityNames = [...new Set(capabilities.recipeIds)].sort();
-        return {
-          id: row.id,
-          workerNodeId: row.workerNodeId,
-          instanceId: row.instanceId,
-          displayName: row.displayName,
-          status: row.status,
-          version: row.version,
-          location,
-          activeSlots: currentJobIds.length,
-          maxSlots: row.maxSlots,
-          capabilities: capabilityNames,
-          currentJobIds,
-          lastHeartbeatAt: row.lastHeartbeatAt,
-          diskFreeBytes: nonNegativeInteger(health?.freeDiskBytes),
-        };
-      });
-    const result = { items: [...paginate(projected, page, size)], total: projected.length };
+    const whereSql = workerWhereSql(statuses.length);
+    const queryParameters = [search, search, ...statuses];
+    const count = database
+      .prepare(`SELECT COUNT(*) AS total FROM workers AS worker ${whereSql}`)
+      .get(...queryParameters) as unknown as { readonly total: number };
+    if (!Number.isSafeInteger(count.total) || count.total < 0) {
+      throw new GitHubIngestionInvariantError("The database worker count is invalid.");
+    }
+    const pageCount = Math.ceil(count.total / size);
+    const rows =
+      count.total === 0 || page > pageCount
+        ? []
+        : (database
+            .prepare(
+              `${workerSelectSql} ${whereSql} ${workerOrderSql(input.sort)} LIMIT ? OFFSET ?`,
+            )
+            .all(...queryParameters, size, (page - 1) * size) as unknown as WorkerRow[]);
+    const projected = rows.map((row) => {
+      const capabilities = parseJson<WorkerCapabilities>(row.capabilitiesJson);
+      const health =
+        row.healthJson === null ? null : parseJson<Record<string, unknown>>(row.healthJson);
+      const currentJobIds = parseJson<string[]>(row.currentJobIdsJson);
+      const labels = capabilities.labels ?? {};
+      const location = stringValue(labels.location) ?? stringValue(health?.location);
+      const capabilityNames = [...new Set(capabilities.recipeIds)].sort();
+      return {
+        id: row.id,
+        workerNodeId: row.workerNodeId,
+        instanceId: row.instanceId,
+        displayName: safeWorkerDisplayName(row.displayName),
+        status: row.status,
+        version: row.version,
+        location,
+        activeSlots: currentJobIds.length,
+        maxSlots: row.maxSlots,
+        capabilities: capabilityNames,
+        currentJobIds,
+        lastHeartbeatAt: row.lastHeartbeatAt,
+        diskFreeBytes: nonNegativeInteger(health?.freeDiskBytes),
+      };
+    });
+    const result = { items: projected, total: count.total };
     if (!Value.Check(DashboardWorkerListResponseSchema, result)) {
       throw new GitHubIngestionInvariantError(
         "The database worker projection does not match DashboardWorkerListResponseSchema.",

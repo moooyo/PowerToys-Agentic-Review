@@ -14,9 +14,10 @@
 // Runtime-created descendants must have the own virtual-service SID as owner
 // and the exact auto-inherited DACL, including OWNER RIGHTS protection against
 // implicit WRITE_DAC. Runtime verification never creates or repairs paths.
-// The fixed .gitconfig file follows this inherited-file policy: the installer
-// must set its owner to the role SID and inherit from Profile, or a restricted
-// pre-launch bootstrap must create it before verification.
+// The fixed .gitconfig and schema-v4 Control Worker authentication files follow
+// this inherited-file policy. The installer or an authorized local bootstrap
+// must create them before verification; runtime verification never creates or
+// rewrites either file.
 //
 // The effective-access argument also depends on installverify proving the
 // fixed SERVICE_SID_TYPE_RESTRICTED virtual-account token. SYSTEM and

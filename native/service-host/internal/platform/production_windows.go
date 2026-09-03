@@ -23,7 +23,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/rootcert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
@@ -40,7 +39,6 @@ type windowsComposition struct {
 	dataRoot         dataroot.Evidence
 
 	localAuthority *cng.Signer
-	mtlsCredential *wincert.Credential
 
 	preflightEvidence preflight.Evidence
 	peerPlan          preflight.PeerVerificationPlan
@@ -137,15 +135,15 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
+	configuration := composition.installation.ControlConfiguration()
+	if err := requireProductionBearerProfile(configuration); err != nil {
+		return err
+	}
 	if composition.role == config.RoleExecutor {
 		return nil
 	}
 	if composition.role != config.RoleControl {
 		return errors.New("unsupported credential role")
-	}
-	configuration := composition.installation.ControlConfiguration()
-	if configuration.Control == nil {
-		return errors.New("verified Control configuration is unavailable")
 	}
 	control := configuration.Control
 	localAuthority, err := cng.Open(cng.Options{
@@ -155,17 +153,6 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 		ExecutorServiceSID:               configuration.PeerService.SID,
 	})
 	composition.localAuthority = localAuthority
-	if err != nil {
-		return err
-	}
-	credential, err := wincert.Acquire(wincert.Config{
-		StoreName:                           control.ClientCertificateStore,
-		CertificateSHA256:                   control.ClientCertificateDERSHA256,
-		ExpectedKeySecurityDescriptorSHA256: control.ClientPrivateKeySecurityDescriptorSHA256,
-		ControlServiceSID:                   configuration.OwnService.SID,
-		ExecutorServiceSID:                  configuration.PeerService.SID,
-	})
-	composition.mtlsCredential = credential
 	return err
 }
 
@@ -181,7 +168,6 @@ func (composition *windowsComposition) composePreflight(context.Context) error {
 		Installation:         composition.installation,
 		DataRoot:             composition.dataRoot,
 		LocalAuthoritySigner: composition.localAuthority,
-		MTLSCredential:       composition.mtlsCredential,
 	})
 	composition.preflightEvidence = evidence
 	if err != nil {
@@ -324,15 +310,20 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 		if err != nil {
 			return nil, err
 		}
-		if composition.mtlsCredential == nil || composition.localAuthority == nil || configuration.Control == nil {
+		if composition.localAuthority == nil || requireProductionBearerProfile(configuration) != nil ||
+			configuration.Control.WorkerAuthenticationProfile != workertransport.WorkerAuthProfileID {
 			return nil, errors.New("Control runtime credentials are unavailable")
 		}
-		client, err := workertransport.NewClient(workertransport.Config{
+		authentication, err := workertransport.LoadWorkerAuth()
+		if err != nil {
+			return nil, err
+		}
+		client, err := workertransport.NewBearerClient(workertransport.BearerConfig{
 			Origin:             configuration.Control.ServerOrigin,
 			ServerName:         configuration.Control.ServerName,
 			RootCertificateDER: roots,
-			ClientCertificate:  composition.mtlsCredential.TLSCertificate(),
-			ClientSigner:       composition.mtlsCredential,
+			WorkerNodeID:       configuration.WorkerNodeID,
+			WorkerAuth:         authentication,
 			Limits: workertransport.Limits{
 				MaximumRequestBytes:       localrpc.MaximumRunCompletionRequestBodyBytes,
 				MaximumResponseBytes:      localrpc.MaximumClaimResponseBodyBytes,
@@ -355,7 +346,7 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 	}, func(localRole localrpc.Role, dispatcher localrpc.ControlDispatcher) error {
 		if composition.role == config.RoleExecutor &&
 			(composition.workerClient != nil || composition.dispatcher != nil ||
-				composition.localAuthority != nil || composition.mtlsCredential != nil) {
+				composition.localAuthority != nil) {
 			return errors.New("Executor runtime received Control-only dependencies")
 		}
 		shutdownTimeout, err := gracefulShutdownTimeout(configuration)
@@ -452,11 +443,9 @@ func (composition *windowsComposition) cleanup() error {
 	if composition.dispatcher != nil {
 		add("close Control dispatcher", composition.dispatcher.Close())
 	}
-	clientClosed := true
 	if composition.workerClient != nil {
 		err := composition.workerClient.Close()
 		add("close Worker API client", err)
-		clientClosed = err == nil
 	}
 	if composition.hostConnection != nil {
 		add("close HostControl connection", composition.hostConnection.Close())
@@ -488,9 +477,6 @@ func (composition *windowsComposition) cleanup() error {
 	}
 	if composition.peerSession != nil && peerPipeClosed {
 		add("close peer verification session", composition.peerSession.Close())
-	}
-	if composition.mtlsCredential != nil && clientClosed {
-		add("close mTLS credential", composition.mtlsCredential.Close())
 	}
 	if composition.localAuthority != nil {
 		add("close local-authority signer", composition.localAuthority.Close())

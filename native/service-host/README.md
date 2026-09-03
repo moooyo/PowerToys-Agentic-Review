@@ -14,14 +14,14 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - handle-relative secure configuration traversal with owned AccessCheck tokens and final descriptor
   reinspection;
 - exact restricted virtual-service identity and token preflight;
-- persisted CNG P-256 signing and Local Machine mTLS certificate acquisition with fixed provider,
-  non-exportability, exact key-DACL digests, detached key identities, and signing-only policy checks;
+- persisted CNG P-256 local-capability signing with a fixed provider, non-exportability, exact
+  key-DACL digest, detached key identity, and signing-only policy checks;
 - handle-bound NTFS object, volume, and protected-DACL evidence;
 - retained role-data verification with protected installer boundaries, exact inherited descendant
   ACLs, closed fixed layout, bounded content traversal, and final pre-launch reinspection;
 - handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
-- a fixed-origin TLS 1.3 Worker API client that accepts a non-exportable signer;
-- a source-only fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
+- a historical fixed-origin TLS 1.3 mTLS Worker API client retained outside production composition;
+- a production-composed fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
   `worker-auth-v1.json` profile, without a generic header or Token source;
 - stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
@@ -47,11 +47,12 @@ payloads remain zero-execution foundations: Executor can emit only the authentic
 claims work. This source must not be used to enable production execution. The non-Windows production
 factory remains unavailable.
 
-The accepted per-Worker Bearer Token design is not selected by this production composition yet.
-The committed exact role configuration is still schema version 3 and still identifies an mTLS
-credential. Selecting the source-only Bearer constructor before a versioned replacement profile
-would silently reinterpret that signed contract, so startup remains fail-closed on the existing
-composition until that profile and its exact data-root layout are replaced together.
+The production composition accepts only bootstrap schema version 4 and the exact per-Worker Bearer
+Token profile. Schema version 3 remains parseable as immutable historical mTLS data, but production
+startup rejects it before opening any Worker credential. The signed outer-package v1 profile still
+binds schema-v3 mTLS fields and therefore cannot publish a schema-v4 installation; ordinary builds
+also contain no compiled release profile. Both paths remain deliberately fail-closed until a new
+signed package and installer profile is defined.
 
 ## Command line
 
@@ -73,17 +74,17 @@ unknown properties, trailing bytes, or alternative number spellings. The complet
 limited to 64 KiB. Windows paths are lexical local-drive paths; production composition must read
 them through the included handle-relative Windows security adapter.
 
-The schema version 3 Control document is:
+The schema version 4 Control document is:
 
 ```json
-{"schemaVersion":3,"role":"control","workerNodeId":"powertoys-node:01","ownService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"peerService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\control.mjs","bundleSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dataRoot":"C:\\ProgramData\\AgenticReview\\Control","workingDirectory":"C:\\ProgramData\\AgenticReview\\Control\\Work","environment":{"APPDATA":"C:\\ProgramData\\AgenticReview\\Control\\Profile\\AppData","LOCALAPPDATA":"C:\\ProgramData\\AgenticReview\\Control\\Profile\\LocalAppData","NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Control\\Profile"}},"control":{"serverOrigin":"https://review.example.test","serverName":"review.example.test","rootCertificatePath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\server-root.cer","rootCertificateSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","clientCertificateStore":"MY","clientCertificateDerSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","clientPrivateKeySecurityDescriptorSha256":"0000000000000000000000000000000000000000000000000000000000000000","localAuthorityCngKeyName":"AgenticReview.Worker.Control.LocalAuthority","localAuthorityKeySecurityDescriptorSha256":"9999999999999999999999999999999999999999999999999999999999999999","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111"},"executor":null,"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000,"forceTerminationReserveMilliseconds":15000}}
+{"schemaVersion":4,"role":"control","workerNodeId":"powertoys-node:01","ownService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"peerService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\control.mjs","bundleSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","dataRoot":"C:\\ProgramData\\AgenticReview\\Control","workingDirectory":"C:\\ProgramData\\AgenticReview\\Control\\Work","environment":{"APPDATA":"C:\\ProgramData\\AgenticReview\\Control\\Profile\\AppData","LOCALAPPDATA":"C:\\ProgramData\\AgenticReview\\Control\\Profile\\LocalAppData","NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Control\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Control\\Profile"}},"control":{"serverOrigin":"https://review.example.test","serverName":"review.example.test","rootCertificatePath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\server-root.cer","rootCertificateSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","workerAuthenticationProfile":"agentic-review-worker-auth-v1","localAuthorityCngKeyName":"AgenticReview.Worker.Control.LocalAuthority","localAuthorityKeySecurityDescriptorSha256":"9999999999999999999999999999999999999999999999999999999999999999","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111"},"executor":null,"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000,"forceTerminationReserveMilliseconds":15000}}
 ```
 
-The matching Executor document uses the same release and pipe identity, reverses the service
-identities, and exposes only public policy and executable inputs:
+The matching schema version 4 Executor document uses the same release and pipe identity, reverses
+the service identities, and exposes only public policy and executable inputs:
 
 ```json
-{"schemaVersion":3,"role":"executor","workerNodeId":"powertoys-node:01","ownService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"peerService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\executor.mjs","bundleSha256":"4444444444444444444444444444444444444444444444444444444444444444","dataRoot":"C:\\ProgramData\\AgenticReview\\Executor","workingDirectory":"C:\\ProgramData\\AgenticReview\\Executor\\Work","environment":{"APPDATA":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\AppData","CODEX_HOME":"C:\\ProgramData\\AgenticReview\\Executor\\Codex","GCM_INTERACTIVE":"never","GIT_CONFIG_GLOBAL":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\.gitconfig","GIT_CONFIG_NOSYSTEM":"1","GIT_TERMINAL_PROMPT":"0","HOME":"C:\\ProgramData\\AgenticReview\\Executor\\Profile","LOCALAPPDATA":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\LocalAppData","NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Executor\\Profile"}},"control":null,"executor":{"localAuthorityPublicKeyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\local-authority.spki","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111","codexPolicyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\codex-requirements.toml","codexPolicySha256":"2222222222222222222222222222222222222222222222222222222222222222","processHostPath":"C:\\Program Files\\AgenticReview\\Worker\\bin\\AgenticReview.ProcessHost.exe","processHostSha256":"3333333333333333333333333333333333333333333333333333333333333333"},"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000,"forceTerminationReserveMilliseconds":15000}}
+{"schemaVersion":4,"role":"executor","workerNodeId":"powertoys-node:01","ownService":{"name":"AgenticReview.Worker.Executor","sid":"S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"},"peerService":{"name":"AgenticReview.Worker.Control","sid":"S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"},"pipeName":"\\\\.\\pipe\\AgenticReview.Worker.ControlExecutor.v1","installation":{"root":"C:\\Program Files\\AgenticReview\\Worker","trustedConfigurationRoot":"C:\\ProgramData\\AgenticReview\\TrustedConfig","releaseId":"worker-2026.08.31.1","manifestPath":"C:\\Program Files\\AgenticReview\\Worker\\release-manifest.json","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approvedAuthenticodeSignerCertificateDerSha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"node":{"executablePath":"C:\\Program Files\\AgenticReview\\Worker\\runtime\\node.exe","executableSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","bundlePath":"C:\\Program Files\\AgenticReview\\Worker\\app\\executor.mjs","bundleSha256":"4444444444444444444444444444444444444444444444444444444444444444","dataRoot":"C:\\ProgramData\\AgenticReview\\Executor","workingDirectory":"C:\\ProgramData\\AgenticReview\\Executor\\Work","environment":{"APPDATA":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\AppData","CODEX_HOME":"C:\\ProgramData\\AgenticReview\\Executor\\Codex","GCM_INTERACTIVE":"never","GIT_CONFIG_GLOBAL":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\.gitconfig","GIT_CONFIG_NOSYSTEM":"1","GIT_TERMINAL_PROMPT":"0","HOME":"C:\\ProgramData\\AgenticReview\\Executor\\Profile","LOCALAPPDATA":"C:\\ProgramData\\AgenticReview\\Executor\\Profile\\LocalAppData","NODE_ENV":"production","PATH":"C:\\Program Files\\AgenticReview\\Worker\\runtime","SYSTEMROOT":"C:\\Windows","TEMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","TMP":"C:\\ProgramData\\AgenticReview\\Executor\\Temp","USERPROFILE":"C:\\ProgramData\\AgenticReview\\Executor\\Profile"}},"control":null,"executor":{"localAuthorityPublicKeyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\local-authority.spki","localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111","codexPolicyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\codex-requirements.toml","codexPolicySha256":"2222222222222222222222222222222222222222222222222222222222222222","processHostPath":"C:\\Program Files\\AgenticReview\\Worker\\bin\\AgenticReview.ProcessHost.exe","processHostSha256":"3333333333333333333333333333333333333333333333333333333333333333"},"limits":{"rootJobMaximumProcesses":128,"rootJobMaximumMemoryBytes":"17179869184","maximumFrameBytes":1048576,"maximumQueuedBytesPerDirection":4194304,"connectTimeoutMilliseconds":30000,"shutdownTimeoutMilliseconds":120000,"forceTerminationReserveMilliseconds":15000}}
 ```
 
 Service names, service SIDs, role, and pipe name are a fixed production combination. Exactly one
@@ -91,12 +92,13 @@ of `control` and `executor` is an object for the selected role; the other proper
 `null`. The release manifest and approved Authenticode signer certificate digest bind both
 documents to one installed package. The Control origin is a canonical HTTPS origin with no user
 information, path, query, fragment, or explicit default port, and `serverName` must equal its host.
-The client certificate store is fixed to the Windows `MY` store. No certificate or private-key
-bytes, CNG handle, mTLS key name, or provider selector is accepted in configuration. The mTLS
-credential is selected only by the configured certificate DER digest. The expected raw security
-descriptor digests bind the reviewed ACLs of both private keys. Native preflight fixes both keys to
-the machine-scope Microsoft Software Key Storage Provider, proves they are non-exportable and
-Control-only, and rejects reuse of one key for both mTLS and local-authority signing.
+Schema version 4 requires `workerAuthenticationProfile` to equal
+`agentic-review-worker-auth-v1`. It rejects the historical client-certificate store, certificate
+digest, and client-private-key descriptor fields. The local Control-to-Executor capability signer
+is unchanged: native preflight fixes it to the machine-scope Microsoft Software Key Storage
+Provider and proves that it is non-exportable, signing-only, and Control-only. Schema version 3
+still requires its original mTLS fields when parsing historical bytes, but it is not a runnable
+production authentication path.
 
 Both documents must contain the same `workerNodeId`. It is a 1-through-128-byte ASCII entity
 identifier: the first byte is alphanumeric, and subsequent bytes may also use `.`, `_`, `:`, or
@@ -130,7 +132,7 @@ and secrets will use separate typed, protected inputs rather than arbitrary envi
 No Server lease token, private key bytes, arbitrary executable path from Control, or free-form
 command belongs in this configuration.
 
-### Per-Worker Bearer transport candidate
+### Per-Worker Bearer transport
 
 `internal/workertransport` contains the reusable Token-only transport selected by ADR 0025. Its
 only production reader path is:
@@ -155,10 +157,10 @@ exposed by the parsed profile API, formatting, errors, response forwarding, runt
 HostControl, or Control-to-Executor RPC. Closing the client clears its retained Token bytes after
 active requests drain.
 
-This source-only capability is deliberately not a second positive production authentication path.
-A later versioned role configuration and data-root profile must make the fixed file an exact
-Control-only layout member and then replace, rather than coexist with, the schema-v3 mTLS
-composition.
+Schema version 4 makes the fixed file an exact Control-only data-root layout member and selects this
+constructor as the only production Worker transport. Executor has no Worker authentication file,
+Server client, or Server transport. The Token remains ordinary trusted local configuration: it is
+not a signed package member, a preflight credential attestation, or a Control-to-Executor message.
 
 Both roles require `APPDATA` and `LOCALAPPDATA` below their role-owned profile. Executor also
 requires `HOME`, `CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`,
@@ -198,9 +200,9 @@ called with `WTD_REVOKE_NONE`, `WTD_REVOCATION_CHECK_NONE`, and
 `WTD_CACHE_ONLY_URL_RETRIEVAL`; it performs no CRL or OCSP check and blocks trust-provider CRL and
 AIA retrieval. The verifier supplies no URL reference. The release pipeline, installer, and
 signer-pin rotation process must perform online code-signing revocation checks before authorizing a
-release. Independently, the Server remains the live Worker revocation authority. The current
-schema-v3 composition uses mTLS; its versioned ADR-0025 replacement will use the per-Worker Token
-database state and can deny a revoked Worker regardless of its locally pinned executable signature.
+release. Independently, the Server remains the live Worker revocation authority. The schema-v4
+composition uses the per-Worker Token database state and can deny a revoked Worker regardless of
+its locally pinned executable signature.
 
 The Windows platform factory is composed, but an ordinary build rejects startup while loading its
 release authority because `compiled_unavailable.go` contains no production release template. A

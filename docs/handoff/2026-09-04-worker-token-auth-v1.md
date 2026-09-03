@@ -12,6 +12,15 @@ Bearer Token per Worker node. The Server remains the online authority for Worker
 revocation. The local Windows environment, Server, database, and authenticated operators are
 trusted under the selected profile.
 
+## 2026-09-04 Follow-up Amendment
+
+Branch `codex/worker-token-followups` completes three items that were deferred by the initial
+handoff: the authenticated credential roster and Dashboard management flow, native ServiceHost
+bootstrap schema v4 and Bearer production composition, and removal of the superseded Server binding
+coordinator from the production storage lifecycle. The signed outer-package v1 and installer remain
+historical schema-v3 profiles and deliberately reject the schema-v4 runtime until a separately
+versioned release profile is defined.
+
 ## Completed Scope
 
 - Migration `0013_worker_token_auth_v1.sql` adds the node-level credential record with a unique
@@ -39,9 +48,15 @@ trusted under the selected profile.
   profile at `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, sends Bearer authorization
   on every Worker request, validates the Server certificate, and loads no client certificate,
   private key, PFX, or passphrase.
-- The native ServiceHost now has a source-only TLS 1.3 Bearer client, exact canonical profile
-  reader, centralized Worker and artifact authorization injection, Token-reflection filtering,
-  lifecycle clearing, and mappings for the selected Token-authentication and rate-limit errors.
+- The native ServiceHost has a TLS 1.3 Bearer client, exact canonical profile reader, centralized
+  Worker and artifact authorization injection, Token-reflection filtering, lifecycle clearing, and
+  mappings for the selected Token-authentication and rate-limit errors. Bootstrap schema v4 now
+  selects it for Control while Executor receives no Worker credential or Server transport.
+- The operator credential roster returns only non-secret lifecycle data for pending, active, and
+  revoked nodes through strict 200-record pages. The Dashboard aggregates the complete bounded
+  roster, merges it with Worker runtime state, and provides create, rotate, revoke, one-time reveal,
+  and clipboard-copy operations without using browser storage. Rotation uses the record's
+  `updatedAt` as a compare-and-set precondition, and persistent display text rejects Token shapes.
 - Architecture, deployment, implementation-status, ADR, and historical handoff documentation now
   identify receipt, signer-host, and Worker-mTLS material as superseded rather than future gates.
 
@@ -52,12 +67,17 @@ database-backed Bearer Token. The certificate fingerprint map and TLS client-CA 
 configured or accepted by the Server. The retained migration-0012 tables, receipt code, signer
 code, and signer-host code have no Server route or Worker-auth consumer.
 
-The native ServiceHost Bearer implementation is deliberately not a second production path yet.
-`internal/platform/production_windows.go` still belongs to the unavailable exact schema-v3
-candidate and still constructs the historical mTLS client. Selecting Bearer there would silently
-reinterpret signed bootstrap and package fields. A later explicitly versioned bootstrap,
-data-root, package, and installer profile must replace that candidate and provision the fixed
-Token file before the native split-service Worker can ship.
+Native ServiceHost production composition now accepts only bootstrap schema v4. Control loads the
+fixed authentication file and constructs `NewBearerClient`; Executor has no Worker credential or
+Server transport. Historical schema v3 remains parseable for exact-byte compatibility but fails
+production startup before credential acquisition. The signed outer-package v1 still accepts only
+schema v3, so a new signed package and installer profile is required before the native split-service
+Worker can ship.
+
+The production Server storage lifecycle no longer creates, opens, or closes the superseded Server
+binding coordinator. Database startup preserves migration-0012 rows without auditing or activating
+them as live receipt authority. Those rows do not participate in Worker authentication and do not
+create a Worker credential.
 
 This repository remains execution-disabled. Successful Worker authentication does not grant a
 Claim, lease, slot, package, installation, local capability, or execution authority.
@@ -81,6 +101,13 @@ Native all-package Windows compile:      passed
 Independent native review:               no remaining P0-P2 findings
 ```
 
+The follow-up verification additionally passed Dashboard `48/48`, Server `235/235`, Contracts
+`28/28`, historical coordinator and persistence `50/50`, Worker `908/908` plus role guards `19/19`,
+local WSL database `164/164`, native focused tests, native all-package compilation and vet, and
+Windows amd64 and arm64 cross-builds. Browser
+verification covered desktop and 390-pixel layouts, clipboard copy, and Token removal from the DOM
+after the one-time panel closed.
+
 The full workspace test command was also attempted locally. Codex, Contracts, Local Protocol,
 Domain, and Worker completed successfully. The Server reported `820` passed, `43` skipped, and `97`
 failed on Windows. Those failures are confined to the repository's deliberate POSIX database-owner
@@ -93,14 +120,11 @@ engine warning, but lint, typecheck, build, and the recorded focused tests compl
 
 ## Deferred Work
 
-1. Define and implement the explicitly versioned native bootstrap, package, data-root, and
-   installation profile that removes schema-v3 Worker-mTLS fields and selects the fixed Bearer
-   profile. This is part of the already-deferred production split-service installer milestone.
-2. Add Dashboard controls for create, rotate, revoke, and one-time Token copy if an operator UI is
-   desired. The authenticated same-origin management API is complete.
-3. Delete superseded receipt, signer, signer-host, and migration-history runtime source only in a
-   separate cleanup change after proving no retained migration-0012 rows require historical audit.
-4. Perform deployment recovery exercises for Token creation, lost rotate responses, revocation,
+1. Define the separately versioned signed outer-package and installer profiles that can publish the
+   schema-v4 native runtime. Signed package v1 remains immutable schema-v3 history.
+2. Delete superseded receipt, signer, signer-host, and archival persistence APIs and source in a
+   separate cleanup change after deciding where the retained historical tests should live.
+3. Perform deployment recovery exercises for Token creation, lost rotate responses, revocation,
    and the explicitly accepted database-backup rollback behavior before a production rollout.
 
 Linux signer-host signals, reaping, cgroups, parent-death behavior, HSM/KMS integration, candidate

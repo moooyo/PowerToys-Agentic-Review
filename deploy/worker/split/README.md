@@ -175,11 +175,13 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 
 ## Deferred production work
 
-The repository still lacks explicitly versioned package, bootstrap, and RoleConfig replacements
-that remove the historical Worker mTLS and Server-receipt fields and select the fixed ADR 0025
-Control configuration file. It also lacks the production split installer, destination-verification
-evidence, transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the
-complete final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
+Native bootstrap schema v4, Control data-root verification, preflight, and production composition
+now select the fixed ADR 0025 authentication file and contain no Worker mTLS path. The repository
+still lacks the separately versioned signed outer-package and installer profiles needed to publish
+that schema-v4 runtime; signed package v1 deliberately accepts only historical schema v3 and fails
+closed. It also lacks the production split installer, destination-verification evidence,
+transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the complete
+final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
 disabled-create intermediate DACL and failure-action clearing, authenticated installer-facing
 readiness observation, archive/extractor, and native Windows verification evidence.
 Legacy-to-split migration is separately deferred. Those items must be designed and reviewed before

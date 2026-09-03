@@ -49,7 +49,6 @@ import {
   databaseInitializationMarkerContent,
   databaseInitializationMarkerPath,
 } from "../../dist/database/storage-security.js";
-import { ServerBindingCoordinatorV1 } from "../../dist/enrollment/server-binding-coordinator-v1.js";
 
 type FakeArtifactTransactionStorageOwner = Parameters<
   typeof registerArtifactTransactionStorageHandle
@@ -898,13 +897,14 @@ const registerWorkerWithToken = (
   workerTokenSha256: string,
   maxSlots = 1,
   registrationProtocolVersion = protocolVersion,
+  displayName = workerInstanceId,
 ) =>
   client.request("registerWorker", {
     protocolVersion: registrationProtocolVersion,
     workerNodeId,
     workerTokenSha256,
     workerInstanceId,
-    displayName: workerInstanceId,
+    displayName,
     workerVersion: "test",
     maxSlots,
     capabilities: workerCapabilities,
@@ -1194,6 +1194,326 @@ afterEach(async () => {
 });
 
 describe("DatabaseClient Worker token authentication", () => {
+  it("lists credential states in stable update order without exposing token hashes", async () => {
+    const fixture = await createFixture(false);
+    const firstWorkerNodeId = "worker-token-list-a";
+    const secondWorkerNodeId = "worker-token-list-b";
+    const revokedWorkerNodeId = "worker-token-list-c";
+    const firstTokenSha256 = sha256("worker-token-list-a-secret");
+    const secondTokenSha256 = sha256("worker-token-list-b-secret");
+    const revokedTokenSha256 = sha256("worker-token-list-c-secret");
+    await createWorkerNodeCredential(fixture.client, firstWorkerNodeId, firstTokenSha256);
+    await createWorkerNodeCredential(fixture.client, secondWorkerNodeId, secondTokenSha256);
+    await createWorkerNodeCredential(fixture.client, revokedWorkerNodeId, revokedTokenSha256);
+    await fixture.client.request("revokeWorkerToken", {
+      workerNodeId: revokedWorkerNodeId,
+      revokedByIssuer: "https://issuer.example.test",
+      revokedBySubject: "credential-list-test",
+    });
+
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("2099-09-03T00:00:00.000Z", firstWorkerNodeId);
+      database
+        .prepare(
+          "UPDATE worker_node_credentials SET updated_at = ?, revoked_at = ? WHERE worker_node_id = ?",
+        )
+        .run("2099-09-04T00:00:00.000Z", "2099-09-04T00:00:00.000Z", revokedWorkerNodeId);
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("2099-09-04T00:00:00.000Z", secondWorkerNodeId);
+    });
+
+    const result = await fixture.client.request("listWorkerNodeCredentials", {
+      offset: 0,
+      limit: 200,
+    });
+
+    expect(result.total).toBe(3);
+    expect(result.items.map((item) => item.workerNodeId)).toEqual([
+      secondWorkerNodeId,
+      revokedWorkerNodeId,
+      firstWorkerNodeId,
+    ]);
+    expect(result.items.map((item) => item.authState)).toEqual(["pending", "revoked", "pending"]);
+    expect(result.items[1]).toMatchObject({
+      revokedAt: "2099-09-04T00:00:00.000Z",
+      updatedAt: "2099-09-04T00:00:00.000Z",
+    });
+    expect(JSON.stringify(result)).not.toContain(firstTokenSha256);
+    expect(JSON.stringify(result)).not.toContain(secondTokenSha256);
+    expect(JSON.stringify(result)).not.toContain(revokedTokenSha256);
+    expect(JSON.stringify(result)).not.toContain("token_sha256");
+
+    await expect(
+      fixture.client.request("listWorkerNodeCredentials", { offset: 1, limit: 1 }),
+    ).resolves.toEqual({ items: [result.items[1]], total: 3 });
+  });
+
+  it("rejects invalid stored timestamps at the credential list output boundary", async () => {
+    const fixture = await createFixture(false);
+    const workerNodeId = "worker-token-list-invalid";
+    await createWorkerNodeCredential(
+      fixture.client,
+      workerNodeId,
+      sha256("worker-token-list-invalid-secret"),
+    );
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("not-a-date-time", workerNodeId);
+    });
+
+    await expect(
+      fixture.client.request("listWorkerNodeCredentials", { offset: 0, limit: 200 }),
+    ).rejects.toThrow("The worker credential list projection is invalid.");
+  });
+
+  it("paginates beyond 200 credentials while retaining the full total", async () => {
+    const fixture = await createFixture(false);
+    withFixtureDatabase(fixture, (database) => {
+      const insert = database.prepare(`
+        INSERT INTO worker_node_credentials (
+          worker_node_id,
+          display_name,
+          token_sha256,
+          auth_state,
+          created_by_issuer,
+          created_by_subject,
+          updated_by_issuer,
+          updated_by_subject,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      `);
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        for (let index = 0; index < 201; index += 1) {
+          const workerNodeId = `worker-page-${index.toString().padStart(3, "0")}`;
+          insert.run(
+            workerNodeId,
+            `Worker ${index}`,
+            sha256(workerNodeId),
+            "https://issuer.example.test",
+            "credential-list-test",
+            "https://issuer.example.test",
+            "credential-list-test",
+            "2026-09-04T00:00:00.000Z",
+            "2026-09-04T00:00:00.000Z",
+          );
+        }
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    });
+
+    await expect(
+      fixture.client.request("listWorkerNodeCredentials", {
+        offset: 200,
+        limit: 1,
+        sort: "identity",
+      }),
+    ).resolves.toMatchObject({
+      items: [{ workerNodeId: "worker-page-200" }],
+      total: 201,
+    });
+  });
+
+  it("keeps credential identity pagination stable while lifecycle timestamps change", async () => {
+    const fixture = await createFixture(false);
+    for (const workerNodeId of ["worker-credential-z", "worker-credential-a"]) {
+      await createWorkerNodeCredential(fixture.client, workerNodeId, sha256(workerNodeId));
+    }
+
+    const firstPage = await fixture.client.request("listWorkerNodeCredentials", {
+      offset: 0,
+      limit: 1,
+      sort: "identity",
+    });
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("2099-09-04T00:00:00.000Z", "worker-credential-a");
+    });
+    const secondPage = await fixture.client.request("listWorkerNodeCredentials", {
+      offset: 1,
+      limit: 1,
+      sort: "identity",
+    });
+    const updateOrder = await fixture.client.request("listWorkerNodeCredentials", {
+      offset: 0,
+      limit: 1,
+    });
+
+    expect(firstPage).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-credential-a" }],
+    });
+    expect(secondPage).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-credential-z" }],
+    });
+    expect(updateOrder).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-credential-a" }],
+    });
+  });
+
+  it("rejects invalid credential list offsets and limits", async () => {
+    const fixture = await createFixture(false);
+    for (const input of [
+      { offset: -1, limit: 1 },
+      { offset: 0.5, limit: 1 },
+      { offset: 0, limit: 0 },
+      { offset: 0, limit: 201 },
+      { offset: 0, limit: 1.5 },
+      { offset: 0, limit: 1, sort: "updated" },
+    ]) {
+      await expect(fixture.client.request("listWorkerNodeCredentials", input)).rejects.toThrow(
+        /Worker credential list (?:offset|limit|sort)/u,
+      );
+    }
+  });
+
+  it("rejects token-shaped display names before credential or roster persistence", async () => {
+    const fixture = await createFixture(false);
+    const tokenShape = `arw1_${"A".repeat(43)}`;
+    await expect(
+      fixture.client.request("createWorkerNodeCredential", {
+        workerNodeId: "worker-token-shaped-create",
+        displayName: `Unsafe ${tokenShape} credential`,
+        workerTokenSha256: sha256("worker-token-shaped-create-secret"),
+        createdByIssuer: "https://issuer.example.test",
+        createdBySubject: "database-client-test",
+      }),
+    ).rejects.toThrow("displayName must not contain a Worker token-shaped value.");
+
+    await expect(
+      registerWorkerWithToken(
+        fixture.client,
+        "worker-token-shaped-unknown",
+        "worker-token-shaped-unknown-instance",
+        sha256("worker-token-shaped-unknown-secret"),
+        1,
+        protocolVersion,
+        `Unsafe ${tokenShape} unknown roster`,
+      ),
+    ).rejects.toMatchObject({ code: "WORKER_TOKEN_INVALID" });
+
+    const workerNodeId = "worker-token-shaped-registration";
+    const workerTokenSha256 = sha256("worker-token-shaped-registration-secret");
+    await createWorkerNodeCredential(fixture.client, workerNodeId, workerTokenSha256);
+    await expect(
+      registerWorkerWithToken(
+        fixture.client,
+        workerNodeId,
+        "worker-token-shaped-registration-instance",
+        workerTokenSha256,
+        1,
+        protocolVersion,
+        `Unsafe ${tokenShape} roster`,
+      ),
+    ).rejects.toMatchObject({ code: "WORKER_REGISTRATION_INVALID" });
+
+    expect(readWorkerNodeCredential(fixture, workerNodeId).auth_state).toBe("pending");
+    withFixtureDatabase(fixture, (database) => {
+      expect(database.prepare("SELECT COUNT(*) AS count FROM workers").get()).toEqual({ count: 0 });
+      expect(
+        database.prepare("SELECT COUNT(*) AS count FROM worker_node_credentials").get(),
+      ).toEqual({ count: 1 });
+    });
+  });
+
+  it("redacts token-shaped historical display names from credential and Dashboard rosters", async () => {
+    const fixture = await createFixture(false);
+    const workerNodeId = "worker-token-shaped-historical";
+    const workerInstanceId = "worker-token-shaped-historical-instance";
+    const tokenShape = `arw1_${"B".repeat(43)}`;
+    const workerTokenSha256 = sha256("worker-token-shaped-historical-secret");
+    await createWorkerNodeCredential(fixture.client, workerNodeId, workerTokenSha256);
+    await registerWorkerWithToken(
+      fixture.client,
+      workerNodeId,
+      workerInstanceId,
+      workerTokenSha256,
+    );
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET display_name = ? WHERE worker_node_id = ?")
+        .run(`Historic ${tokenShape} Worker`, workerNodeId);
+      database
+        .prepare("UPDATE workers SET display_name = ? WHERE node_id = ? AND instance_id = ?")
+        .run(`Historic ${tokenShape} Worker`, workerNodeId, workerInstanceId);
+    });
+
+    const credentials = await fixture.client.request("listWorkerNodeCredentials", {
+      offset: 0,
+      limit: 200,
+    });
+    const workers = await fixture.client.request("listWorkers", {
+      page: 1,
+      pageSize: 20,
+      search: workerNodeId,
+      status: [],
+    });
+
+    expect(credentials.items).toHaveLength(1);
+    expect(credentials.items[0]?.displayName).toBe("Redacted worker");
+    expect(workers.items).toHaveLength(1);
+    expect(workers.items[0]?.displayName).toBe("Redacted worker");
+    expect(JSON.stringify({ credentials, workers })).not.toContain(tokenShape);
+  });
+
+  it("keeps identity pagination stable while heartbeats change recency order", async () => {
+    const fixture = await createFixture(false);
+    await registerWorker(fixture.client, "worker-z", "instance-z");
+    await registerWorker(fixture.client, "worker-a", "instance-a");
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE workers SET last_seen_at = ? WHERE node_id = ?")
+        .run("2026-09-04T00:00:02.000Z", "worker-z");
+      database
+        .prepare("UPDATE workers SET last_seen_at = ? WHERE node_id = ?")
+        .run("2026-09-04T00:00:01.000Z", "worker-a");
+    });
+
+    const firstIdentityPage = await fixture.client.request("listWorkers", {
+      page: 1,
+      pageSize: 1,
+      sort: "identity",
+    });
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE workers SET last_seen_at = ? WHERE node_id = ?")
+        .run("2026-09-04T00:00:03.000Z", "worker-a");
+    });
+    const secondIdentityPage = await fixture.client.request("listWorkers", {
+      page: 2,
+      pageSize: 1,
+      sort: "identity",
+    });
+    const recencyPage = await fixture.client.request("listWorkers", {
+      page: 1,
+      pageSize: 1,
+    });
+
+    expect(firstIdentityPage).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-a", instanceId: "instance-a" }],
+    });
+    expect(secondIdentityPage).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-z", instanceId: "instance-z" }],
+    });
+    expect(recencyPage).toMatchObject({
+      total: 2,
+      items: [{ workerNodeId: "worker-a", instanceId: "instance-a" }],
+    });
+  });
+
   it("creates a pending credential and authenticates only the stored lowercase token hash", async () => {
     const fixture = await createFixture(false);
     const workerNodeId = "worker-token-pending";
@@ -1242,6 +1562,12 @@ describe("DatabaseClient Worker token authentication", () => {
     const workerInstanceId = "worker-token-active-instance";
     const workerTokenSha256 = sha256("worker-token-active-secret");
     await createWorkerNodeCredential(fixture.client, workerNodeId, workerTokenSha256);
+    const pendingUpdatedAt = "2099-09-04T01:00:00.000Z";
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run(pendingUpdatedAt, workerNodeId);
+    });
 
     const first = await registerWorkerWithToken(
       fixture.client,
@@ -1264,16 +1590,29 @@ describe("DatabaseClient Worker token authentication", () => {
       expect(
         database
           .prepare(
-            "SELECT auth_state, activated_at IS NOT NULL AS activated FROM worker_node_credentials WHERE worker_node_id = ?",
+            "SELECT auth_state, activated_at, updated_at FROM worker_node_credentials WHERE worker_node_id = ?",
           )
           .get(workerNodeId),
-      ).toEqual({ auth_state: "active", activated: 1 });
+      ).toEqual({
+        auth_state: "active",
+        activated_at: "2099-09-04T01:00:00.001Z",
+        updated_at: "2099-09-04T01:00:00.001Z",
+      });
       expect(
         database
           .prepare("SELECT COUNT(*) AS count FROM workers WHERE node_id = ?")
           .get(workerNodeId),
       ).toEqual({ count: 1 });
     });
+    await expect(
+      fixture.client.request("rotateWorkerToken", {
+        workerNodeId,
+        workerTokenSha256: sha256("worker-token-active-stale-rotation"),
+        expectedUpdatedAt: pendingUpdatedAt,
+        rotatedByIssuer: "https://issuer.example.test",
+        rotatedBySubject: "stale-token-rotator",
+      }),
+    ).rejects.toMatchObject({ code: "WORKER_NODE_CREDENTIAL_CONFLICT" });
   });
 
   it("rejects unknown tokens and rolls pending activation back when registration fails", async () => {
@@ -1351,6 +1690,7 @@ describe("DatabaseClient Worker token authentication", () => {
       fixture.client.request("rotateWorkerToken", {
         workerNodeId,
         workerTokenSha256: firstTokenSha256,
+        expectedUpdatedAt: pendingBeforeRotation.updated_at,
         rotatedByIssuer: "https://issuer.example.test",
         rotatedBySubject: "token-rotator",
       }),
@@ -1361,6 +1701,7 @@ describe("DatabaseClient Worker token authentication", () => {
       fixture.client.request("rotateWorkerToken", {
         workerNodeId,
         workerTokenSha256: secondTokenSha256,
+        expectedUpdatedAt: pendingBeforeRotation.updated_at,
         rotatedByIssuer: "https://issuer.example.test",
         rotatedBySubject: "token-rotator",
       }),
@@ -1392,6 +1733,7 @@ describe("DatabaseClient Worker token authentication", () => {
       fixture.client.request("rotateWorkerToken", {
         workerNodeId,
         workerTokenSha256: thirdTokenSha256,
+        expectedUpdatedAt: activeBeforeRotation.updated_at,
         rotatedByIssuer: "https://issuer.example.test",
         rotatedBySubject: "token-rotator",
       }),
@@ -1423,6 +1765,7 @@ describe("DatabaseClient Worker token authentication", () => {
       fixture.client.request("rotateWorkerToken", {
         workerNodeId,
         workerTokenSha256: otherTokenSha256,
+        expectedUpdatedAt: activeAfterRotation.updated_at,
         rotatedByIssuer: "https://issuer.example.test",
         rotatedBySubject: "token-rotator",
       }),
@@ -1433,6 +1776,44 @@ describe("DatabaseClient Worker token authentication", () => {
         workerTokenSha256: thirdTokenSha256,
       }),
     ).resolves.toEqual({ outcome: "authenticated", workerNodeId, authState: "active" });
+  });
+
+  it("uses updatedAt as a monotonic compare-and-swap version for token rotation", async () => {
+    const fixture = await createFixture(false);
+    const workerNodeId = "worker-token-rotate-cas";
+    const firstTokenSha256 = sha256("worker-token-rotate-cas-first");
+    const secondTokenSha256 = sha256("worker-token-rotate-cas-second");
+    const thirdTokenSha256 = sha256("worker-token-rotate-cas-third");
+    await createWorkerNodeCredential(fixture.client, workerNodeId, firstTokenSha256);
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("2099-09-04T00:00:00.000Z", workerNodeId);
+    });
+
+    const expectedUpdatedAt = readWorkerNodeCredential(fixture, workerNodeId).updated_at;
+    await expect(
+      fixture.client.request("rotateWorkerToken", {
+        workerNodeId,
+        workerTokenSha256: secondTokenSha256,
+        expectedUpdatedAt,
+        rotatedByIssuer: "https://issuer.example.test",
+        rotatedBySubject: "first-token-rotator",
+      }),
+    ).resolves.toEqual({ workerNodeId, authState: "pending" });
+    const afterFirstRotation = readWorkerNodeCredential(fixture, workerNodeId);
+    expect(afterFirstRotation.updated_at).toBe("2099-09-04T00:00:00.001Z");
+
+    await expect(
+      fixture.client.request("rotateWorkerToken", {
+        workerNodeId,
+        workerTokenSha256: thirdTokenSha256,
+        expectedUpdatedAt,
+        rotatedByIssuer: "https://issuer.example.test",
+        rotatedBySubject: "stale-token-rotator",
+      }),
+    ).rejects.toMatchObject({ code: "WORKER_NODE_CREDENTIAL_CONFLICT" });
+    expect(readWorkerNodeCredential(fixture, workerNodeId)).toEqual(afterFirstRotation);
   });
 
   it("revokes credentials idempotently and hides revoked tokens as invalid", async () => {
@@ -1446,6 +1827,11 @@ describe("DatabaseClient Worker token authentication", () => {
       "worker-token-revoked-instance",
       workerTokenSha256,
     );
+    withFixtureDatabase(fixture, (database) => {
+      database
+        .prepare("UPDATE worker_node_credentials SET updated_at = ? WHERE worker_node_id = ?")
+        .run("2099-09-04T02:00:00.000Z", workerNodeId);
+    });
     const revocation = {
       workerNodeId,
       revokedByIssuer: "https://issuer.example.test",
@@ -1467,6 +1853,8 @@ describe("DatabaseClient Worker token authentication", () => {
       auth_state: "revoked",
       updated_by_issuer: revocation.revokedByIssuer,
       updated_by_subject: revocation.revokedBySubject,
+      updated_at: "2099-09-04T02:00:00.001Z",
+      revoked_at: "2099-09-04T02:00:00.001Z",
     });
     await expect(
       fixture.client.request("revokeWorkerToken", {
@@ -1489,6 +1877,7 @@ describe("DatabaseClient Worker token authentication", () => {
       fixture.client.request("rotateWorkerToken", {
         workerNodeId,
         workerTokenSha256: sha256("worker-token-revoked-replacement"),
+        expectedUpdatedAt: readWorkerNodeCredential(fixture, workerNodeId).updated_at,
         rotatedByIssuer: "https://issuer.example.test",
         rotatedBySubject: "token-rotator",
       }),
@@ -4211,7 +4600,7 @@ describe("DatabaseClient scheduling ingestion integration", () => {
   });
 });
 
-class ServerBindingDatabaseWorkerTestTransport extends EventEmitter {
+class DatabaseWorkerTestTransport extends EventEmitter {
   readonly posted: unknown[] = [];
   terminateCalls = 0;
   throwOnPost = false;
@@ -4245,18 +4634,30 @@ class ServerBindingDatabaseWorkerTestTransport extends EventEmitter {
   }
 }
 
-const attachServerBindingDatabaseClientForTest = async (
-  worker: ServerBindingDatabaseWorkerTestTransport,
+const attachTestDatabaseClient = async (
+  worker: DatabaseWorkerTestTransport,
 ): Promise<DatabaseClient> => {
   const connecting = attachDatabaseClientForTest(worker as unknown as DatabaseWorkerTransport);
   worker.emit("message", { type: "ready" });
   return connecting;
 };
 
-describe("DatabaseClient Server binding persistence capability", () => {
-  it("rejects a Server binding persistence operation through the generic request path", async () => {
-    const worker = new ServerBindingDatabaseWorkerTestTransport();
-    const client = await attachServerBindingDatabaseClientForTest(worker);
+const retiredServerBindingOperations = [
+  "claimServerBindingAuthorizationV1",
+  "commitServerBindingReceiptV1",
+  "confirmServerBindingRecordV1",
+  "createServerBindingAuthorizationV1",
+  "initializeServerBindingIssuerV1",
+  "readServerBindingActiveSnapshotV1",
+  "readServerBindingRecoveryReceiptV1",
+  "recheckServerBindingActiveSnapshotV1",
+  "revokeServerBindingV1",
+] as const;
+
+describe("DatabaseClient retired operations and transport failures", () => {
+  it("rejects every retired Server binding operation before reading or sending input", async () => {
+    const worker = new DatabaseWorkerTestTransport();
+    const client = await attachTestDatabaseClient(worker);
     let getterCalls = 0;
     const input = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(input, "value", {
@@ -4267,56 +4668,29 @@ describe("DatabaseClient Server binding persistence capability", () => {
       },
     });
 
-    const request = Reflect.apply(client.request, client, [
-      "initializeServerBindingIssuerV1",
-      input,
-    ]) as Promise<unknown>;
-
-    await expect(request).rejects.toMatchObject({
-      name: "DatabaseRequestError",
-      code: "SERVER_BINDING_PERSISTENCE_AUTHORITY_REQUIRED",
-    });
+    for (const operation of retiredServerBindingOperations) {
+      const request = Reflect.apply(client.request, client, [operation, input]) as Promise<unknown>;
+      await expect(request).rejects.toMatchObject({
+        name: "DatabaseRequestError",
+        code: "SERVER_BINDING_PERSISTENCE_RETIRED",
+        message: "Server binding persistence operations are retired.",
+      });
+    }
     expect(getterCalls).toBe(0);
     expect(worker.posted).toEqual([]);
     await expect(client.close()).resolves.toBeUndefined();
   });
 
-  it("issues the Server binding persistence handle only once", async () => {
-    const worker = new ServerBindingDatabaseWorkerTestTransport();
-    const client = await attachServerBindingDatabaseClientForTest(worker);
-
-    const handle = client.createServerBindingPersistenceDatabaseHandle();
-
-    expect(Reflect.ownKeys(handle)).toEqual([]);
-    expect(() => client.createServerBindingPersistenceDatabaseHandle()).toThrow(/already issued/u);
-    await expect(client.close()).resolves.toBeUndefined();
-  });
-
-  it("revokes an unconsumed Server binding persistence handle without blocking close", async () => {
-    const worker = new ServerBindingDatabaseWorkerTestTransport();
-    const client = await attachServerBindingDatabaseClientForTest(worker);
-    client.createServerBindingPersistenceDatabaseHandle();
-
-    const close = client.close();
-
-    expect(client.close()).toBe(close);
-    await expect(close).resolves.toBeUndefined();
-    expect(worker.posted).toHaveLength(1);
-    expect(worker.posted[0]).toMatchObject({ operation: "shutdown" });
-    expect(worker.terminateCalls).toBe(0);
-  });
-
-  it("preserves fatal error codes and revokes an unconsumed persistence handle", async () => {
-    const worker = new ServerBindingDatabaseWorkerTestTransport();
-    const client = await attachServerBindingDatabaseClientForTest(worker);
-    const handle = client.createServerBindingPersistenceDatabaseHandle();
+  it("preserves fatal database Worker error codes without a retired capability", async () => {
+    const worker = new DatabaseWorkerTestTransport();
+    const client = await attachTestDatabaseClient(worker);
 
     worker.emit("message", {
       type: "fatal",
       error: {
-        name: "ServerBindingPersistenceErrorV1",
-        message: "The durable Server binding state is invalid.",
-        code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+        name: "DatabaseWorkerFatalTestError",
+        message: "The database Worker failed.",
+        code: "DATABASE_WORKER_FATAL_TEST",
       },
     });
     worker.emit("exit", 1);
@@ -4325,19 +4699,16 @@ describe("DatabaseClient Server binding persistence capability", () => {
       client.request("listJobs", { page: 1, pageSize: 1, status: [], phase: [] }),
     ).rejects.toMatchObject({
       name: "DatabaseRequestError",
-      code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+      code: "DATABASE_WORKER_FATAL_TEST",
     });
-    expect(() => new ServerBindingCoordinatorV1({ database: handle })).toThrow(
-      /consumed or forged/u,
-    );
     await expect(client.close()).rejects.toMatchObject({
-      code: "SERVER_BINDING_STORAGE_INTEGRITY_FAILURE",
+      code: "DATABASE_WORKER_FATAL_TEST",
     });
   });
 
   it("removes a request when postMessage fails before sending", async () => {
-    const worker = new ServerBindingDatabaseWorkerTestTransport();
-    const client = await attachServerBindingDatabaseClientForTest(worker);
+    const worker = new DatabaseWorkerTestTransport();
+    const client = await attachTestDatabaseClient(worker);
     worker.throwOnPost = true;
 
     await expect(client.request("ping", {})).rejects.toMatchObject({

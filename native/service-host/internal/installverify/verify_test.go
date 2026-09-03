@@ -86,6 +86,37 @@ func TestVerifyWithDependenciesProducesOpaqueDetachedEvidence(t *testing.T) {
 	}
 }
 
+func TestVerifyWithDependenciesAcceptsSchemaVersion4BootstrapPair(t *testing.T) {
+	fixture := newInstallFixture(t)
+	controlPath := testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath
+	executorPath := testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
+	control, err := config.Parse(fixture.fs.mustNode(controlPath).data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := config.Parse(fixture.fs.mustNode(executorPath).data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.SchemaVersion = config.BearerTokenSchemaVersion
+	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	control.Control.ClientCertificateStore = ""
+	control.Control.ClientCertificateDERSHA256 = ""
+	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	executor.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.fs.mustNode(controlPath).data = mustConfigDocument(t, control)
+	fixture.fs.mustNode(executorPath).data = mustConfigDocument(t, executor)
+
+	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ControlConfiguration().SchemaVersion != config.BearerTokenSchemaVersion ||
+		evidence.ExecutorConfiguration().SchemaVersion != config.BearerTokenSchemaVersion {
+		t.Fatal("installation evidence omitted the schemaVersion 4 bootstrap pair")
+	}
+}
+
 func TestVerifyWithDependenciesRejectsClosedTreeAndIdentityViolations(t *testing.T) {
 	t.Run("unexpected file", func(t *testing.T) {
 		fixture := newInstallFixture(t)
@@ -177,6 +208,7 @@ func TestValidateConfigurationPairRejectsSharedIdentityAndProtocolLimitMismatche
 		name   string
 		mutate func(*config.Config)
 	}{
+		{"schema version", func(value *config.Config) { value.SchemaVersion = config.BearerTokenSchemaVersion }},
 		{"worker node ID", func(value *config.Config) { value.WorkerNodeID = "powertoys-node:02" }},
 		{"maximum frame", func(value *config.Config) { value.Limits.MaximumFrameBytes-- }},
 		{"maximum queue", func(value *config.Config) { value.Limits.MaximumQueuedBytesPerDirection++ }},
@@ -236,6 +268,15 @@ func assertVerificationError(t *testing.T, fixture *installFixture, target error
 	if evidence.Validate() == nil {
 		t.Fatal("failed verification returned usable evidence")
 	}
+}
+
+func mustConfigDocument(t *testing.T, value config.Config) []byte {
+	t.Helper()
+	document, err := config.MarshalCanonical(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
 }
 
 type installFixture struct {

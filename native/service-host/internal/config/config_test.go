@@ -2,16 +2,27 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+const (
+	historicalV3ControlCanonicalSHA256  = "d8097fcdb0c31710f1967d1011188f892902a1ad09ac53885724cb8cc49dc260"
+	historicalV3ExecutorCanonicalSHA256 = "8fc0e33c2241153277c2b7eb507a5469b2ea04225eed1570458d91c580385a85"
+)
+
 func TestCanonicalConfigurationRoundTrip(t *testing.T) {
-	for _, original := range []Config{validConfig(), validExecutorConfig()} {
-		t.Run(string(original.Role), func(t *testing.T) {
+	for _, original := range []Config{
+		validConfig(), validExecutorConfig(), validBearerTokenConfig(), validBearerTokenExecutorConfig(),
+	} {
+		name := string(original.Role) + "-schema-" + strconv.Itoa(original.SchemaVersion)
+		t.Run(name, func(t *testing.T) {
 			document, err := MarshalCanonical(original)
 			if err != nil {
 				t.Fatalf("MarshalCanonical returned an error: %v", err)
@@ -24,6 +35,84 @@ func TestCanonicalConfigurationRoundTrip(t *testing.T) {
 				parsed.Node.ExecutablePath != original.Node.ExecutablePath {
 				t.Fatalf("Parse returned the wrong configuration: %#v", parsed)
 			}
+		})
+	}
+}
+
+func TestHistoricalSchemaVersion3CanonicalBytesRemainImmutable(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		value    Config
+		expected string
+	}{
+		{name: "control", value: validConfig(), expected: historicalV3ControlCanonicalSHA256},
+		{name: "executor", value: validExecutorConfig(), expected: historicalV3ExecutorCanonicalSHA256},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := mustCanonical(t, test.value)
+			digest := sha256.Sum256(document)
+			if actual := hex.EncodeToString(digest[:]); actual != test.expected {
+				t.Fatalf("schemaVersion 3 canonical digest = %s, want immutable %s", actual, test.expected)
+			}
+		})
+	}
+}
+
+func TestBearerTokenSchemaIsCanonicalAndMutuallyExclusiveWithMTLS(t *testing.T) {
+	control := validBearerTokenConfig()
+	document := mustCanonical(t, control)
+	if !bytes.Contains(document, []byte(`"workerAuthenticationProfile":"agentic-review-worker-auth-v1"`)) ||
+		bytes.Contains(document, []byte("clientCertificate")) ||
+		bytes.Contains(document, []byte("clientPrivateKey")) {
+		t.Fatalf("schemaVersion 4 Control document selected the wrong authentication fields: %s", document)
+	}
+	if parsed, err := Parse(document); err != nil || parsed.SchemaVersion != BearerTokenSchemaVersion ||
+		parsed.Control == nil || parsed.Control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 {
+		t.Fatalf("Parse schemaVersion 4 = %#v, %v", parsed, err)
+	}
+	withEmptyLegacyField := bytes.Replace(
+		document,
+		[]byte(`"workerAuthenticationProfile":`),
+		[]byte(`"clientCertificateStore":"","workerAuthenticationProfile":`),
+		1,
+	)
+	_, err := Parse(withEmptyLegacyField)
+	assertConfigErrorCode(t, err, ErrorCanonical)
+
+	tests := []struct {
+		name   string
+		value  Config
+		mutate func(*Config)
+	}{
+		{name: "v4 missing profile", value: control, mutate: func(value *Config) {
+			value.Control.WorkerAuthenticationProfile = ""
+		}},
+		{name: "v4 wrong profile", value: control, mutate: func(value *Config) {
+			value.Control.WorkerAuthenticationProfile = "other"
+		}},
+		{name: "v4 certificate store", value: control, mutate: func(value *Config) {
+			value.Control.ClientCertificateStore = WindowsCertificateStore
+		}},
+		{name: "v4 certificate digest", value: control, mutate: func(value *Config) {
+			value.Control.ClientCertificateDERSHA256 = strings.Repeat("f", 64)
+		}},
+		{name: "v4 private-key descriptor", value: control, mutate: func(value *Config) {
+			value.Control.ClientPrivateKeySecurityDescriptorSHA256 = strings.Repeat("0", 64)
+		}},
+		{name: "v4 alternate data root", value: control, mutate: func(value *Config) {
+			value.Node.DataRoot = `D:\AgenticReview\Control`
+			value.Node.WorkingDirectory = value.Node.DataRoot + `\Work`
+			rewriteEnvironmentRoot(value.Node.Environment, `C:\ProgramData\AgenticReview\Control`, value.Node.DataRoot)
+		}},
+		{name: "v3 bearer profile", value: validConfig(), mutate: func(value *Config) {
+			value.Control.WorkerAuthenticationProfile = WorkerAuthenticationProfileBearerTokenV1
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := cloneConfig(test.value)
+			test.mutate(&value)
+			assertConfigErrorCode(t, value.Validate(), ErrorValidation)
 		})
 	}
 }
@@ -118,8 +207,15 @@ func TestReadmeConfigurationExamplesAreCanonical(t *testing.T) {
 		if parseErr != nil {
 			t.Fatalf("README %s JSON example is invalid: %v", expectedRole, parseErr)
 		}
-		if parsed.Role != expectedRole {
-			t.Fatalf("README JSON example role = %s, want %s", parsed.Role, expectedRole)
+		if parsed.Role != expectedRole || parsed.SchemaVersion != BearerTokenSchemaVersion {
+			t.Fatalf("README JSON example role/schema = %s/%d, want %s/%d",
+				parsed.Role, parsed.SchemaVersion, expectedRole, BearerTokenSchemaVersion)
+		}
+		if expectedRole == RoleControl && (parsed.Control == nil ||
+			parsed.Control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 ||
+			parsed.Control.ClientCertificateStore != "" || parsed.Control.ClientCertificateDERSHA256 != "" ||
+			parsed.Control.ClientPrivateKeySecurityDescriptorSHA256 != "") {
+			t.Fatalf("README Control JSON example does not select Token-only authentication: %#v", parsed.Control)
 		}
 		remaining = remaining[end+len("\n```"):]
 	}
@@ -444,6 +540,30 @@ func validExecutorConfig() Config {
 	value.Control = nil
 	value.Executor = validExecutorConfiguration()
 	return value
+}
+
+func validBearerTokenConfig() Config {
+	value := validConfig()
+	value.SchemaVersion = BearerTokenSchemaVersion
+	value.Control.WorkerAuthenticationProfile = WorkerAuthenticationProfileBearerTokenV1
+	value.Control.ClientCertificateStore = ""
+	value.Control.ClientCertificateDERSHA256 = ""
+	value.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	return value
+}
+
+func validBearerTokenExecutorConfig() Config {
+	value := validExecutorConfig()
+	value.SchemaVersion = BearerTokenSchemaVersion
+	return value
+}
+
+func rewriteEnvironmentRoot(environment map[string]string, oldRoot, newRoot string) {
+	for name, value := range environment {
+		if strings.HasPrefix(value, oldRoot+`\`) {
+			environment[name] = newRoot + value[len(oldRoot):]
+		}
+	}
 }
 
 func cloneConfig(value Config) Config {
