@@ -208,6 +208,14 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   a signer; startup leaves a fresh authority empty, and existing authority state fails closed without
   the exact signer/trust descriptor. No route, authentication source, revocation veto, Windows
   consumer, Claim, slot, or execution authority consumes this state.
+- A proposed dormant Linux Server binding signer-host transport v1 contract. ADR 0024 fixes a
+  dedicated 8 KiB length-prefixed canonical protocol, one statement-specific direct child,
+  identity handshake, receipt and active-status operations, single concurrency,
+  fail-stop cancellation, bounded stderr, forced termination, observed-exit-only close, and
+  process-lifetime quarantine. This documentation slice deliberately leaves the production
+  provider, host-profile, and trust loaders unavailable and adds no key backend, compiled trust,
+  signer binary, configuration, `main.ts` wiring, issuer initialization, route, authentication
+  source, Claim, slot, package, installation, or execution authority.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
@@ -354,10 +362,10 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
 ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
-  production Server binding signer and trust material, S2 authenticated receipt authority,
-  privileged enrollment writer and live evidence, destination evidence, the ADR 0021 protected-store
-  implementation and opaque-evidence composition, the
-production Go installer, production-capable SCM schema and native adapter, a complete final
+the ADR 0024 dormant signer-host transport implementation, production Server binding signer and
+trust material, S2 authenticated receipt authority, privileged enrollment writer and live evidence,
+destination evidence, the ADR 0021 protected-store implementation and opaque-evidence composition,
+the production Go installer, production-capable SCM schema and native adapter, a complete final
 recovery schedule, authenticated installer readiness, and a pinned WinSW release.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
 Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
