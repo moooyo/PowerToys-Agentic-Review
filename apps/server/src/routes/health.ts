@@ -10,6 +10,7 @@ export const registerHealthRoutes = (
   database: DatabaseClient,
   artifactReadiness: ArtifactReadinessProbe,
   shutdownSignal: AbortSignal,
+  recoveryMaintenance = false,
 ): void => {
   app.get("/health/live", async () => ({
     status: "ok",
@@ -33,7 +34,7 @@ export const registerHealthRoutes = (
       }
     };
 
-    if (!isReady()) {
+    if (recoveryMaintenance || !isReady()) {
       return sendNotReady();
     }
     try {

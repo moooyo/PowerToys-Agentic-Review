@@ -51,6 +51,7 @@ export interface ArtifactRuntimeConfig {
 export interface ServerConfig {
   readonly host: string;
   readonly port: number;
+  readonly recoveryMaintenance: boolean;
   readonly databasePath: string;
   readonly migrationsDirectory: string;
   readonly artifactStorage: ArtifactRuntimeConfig;
@@ -141,6 +142,24 @@ const readBoolean = (environment: NodeJS.ProcessEnv, name: string, fallback: boo
     return false;
   }
   throw new Error(`${name} must be true, false, 1, or 0.`);
+};
+
+const readStrictBoolean = (
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  fallback: boolean,
+): boolean => {
+  const raw = environment[name];
+  if (raw === undefined) {
+    return fallback;
+  }
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  throw new Error(`${name} must be true or false.`);
 };
 
 const readArtifactRuntimeConfig = (
@@ -575,6 +594,14 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
   }
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const host = environment.AGENTIC_REVIEW_HOST ?? "127.0.0.1";
+  const recoveryMaintenance = readStrictBoolean(
+    environment,
+    "AGENTIC_REVIEW_RECOVERY_MAINTENANCE",
+    false,
+  );
+  if (recoveryMaintenance && !isLoopbackHost(host)) {
+    throw new Error("Recovery maintenance requires a loopback server listener.");
+  }
   const configuredDatabasePath = environment.AGENTIC_REVIEW_DATABASE_PATH?.trim();
   const databasePathIsExplicit =
     configuredDatabasePath !== undefined && configuredDatabasePath !== "";
@@ -631,10 +658,15 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
             : { passphrase: environment.AGENTIC_REVIEW_TLS_KEY_PASSPHRASE }),
         })
       : undefined;
+  const operatorAuth = readOperatorAuthConfig(environment, host);
+  if (recoveryMaintenance && operatorAuth === undefined) {
+    throw new Error("Recovery maintenance requires configured operator authentication.");
+  }
 
   return Object.freeze({
     host,
     port: readPositiveInteger(environment, "AGENTIC_REVIEW_PORT", 8080, 65_535),
+    recoveryMaintenance,
     databasePath,
     migrationsDirectory: resolve(
       environment.AGENTIC_REVIEW_MIGRATIONS_DIRECTORY ?? resolve(repositoryRoot, "migrations"),
@@ -696,8 +728,8 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     ),
     allowInsecureHttp,
     tls,
-    github: readGitHubConfig(environment, repositoryRoot),
-    operatorAuth: readOperatorAuthConfig(environment, host),
+    github: recoveryMaintenance ? undefined : readGitHubConfig(environment, repositoryRoot),
+    operatorAuth,
     dashboardDirectory:
       configuredDashboardDirectory === undefined || configuredDashboardDirectory === ""
         ? environment.NODE_ENV?.trim().toLowerCase() === "production"

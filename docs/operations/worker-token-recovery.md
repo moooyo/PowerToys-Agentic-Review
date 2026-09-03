@@ -114,13 +114,28 @@ following storage operation:
 3. Only after that complete retention step, remove the sidecars from the active data directory.
 4. Replace the database file with the selected verified backup, keep the data directory at mode
    `0700`, and restore the database file to mode `0600` with the Server owner.
-5. Before starting the Server, establish a deployment-level maintenance fence that denies every
-   `/api/v1/worker/*` request and restricts the operator login and credential-management paths to
-   one designated local recovery terminal. Do not expose restored operator cookies or sessions to
-   the ordinary network during reconciliation. Stopping managed Workers is insufficient because
-   external holders of a restored Worker Token or operator cookie could otherwise authenticate.
-6. Keep the existing `.agentic-review-database-initialized` marker, then start the Server behind
-   that fence.
+5. Before starting the Server, configure the built-in recovery boundary:
+   - set `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` exactly;
+   - set `AGENTIC_REVIEW_HOST` to `127.0.0.1`, `::1`, or another accepted loopback spelling;
+   - keep operator authentication configured;
+   - remove the ordinary reverse-proxy upstream and remove any container published port for this
+     Server; and
+   - permit access only from the designated local recovery terminal or through an SSH tunnel whose
+     Server-side destination is the loopback listener.
+   Do not expose the recovery listener through a reverse proxy, load balancer, container port, or
+   ordinary network interface. Stopping managed Workers is insufficient because external holders
+   of a restored Worker Token could otherwise attempt authentication.
+   For production OIDC, preserve the registered `AGENTIC_REVIEW_PUBLIC_ORIGIN` through a local
+   hosts/DNS mapping and the SSH tunnel to the loopback listener; do not restore the ordinary
+   reverse-proxy upstream merely to complete the callback. For a container, the tunnel endpoint
+   must run in the same network namespace or the Server must use host networking. Ordinary bridged
+   container networking is not a supported recovery topology.
+6. Keep the existing `.agentic-review-database-initialized` marker, then start the Server. Every
+   maintenance start atomically deletes restored operator login transactions, sessions, and browser
+   bindings before the listener opens, while preserving the operator authentication clock
+   high-water mark. Maintenance uses a database-only storage runtime and does not open, enumerate,
+   create, or reconcile the artifact root. Confirm that `/health/live` returns 200,
+   `/health/ready` returns 503, and a Worker endpoint returns 503 with `worker_api_maintenance`.
 
 Do not combine the restored database with newer SQLite sidecars. Restoring into a new data directory
 is not supported by this runbook or the current public tooling: a backup does not contain the
@@ -129,8 +144,8 @@ public adoption CLI. Keep recovery blocked rather than inventing an authorizatio
 
 After startup:
 
-1. Start a new operator login and do not rely on an operator session restored from the database
-   snapshot.
+1. Start a new operator login. Restored operator cookies are invalid because maintenance startup
+   purged their database sessions before listening.
 2. Treat the restored credential roster as authoritative. A Windows Worker configuration is not
    rolled back with the database, so a later local Token may immediately receive HTTP 401.
 3. For every externally recorded post-backup revocation, revoke the node only when it is still
@@ -144,13 +159,22 @@ After startup:
 7. Complete the independent whole-Server database, job, lease, artifact-metadata, and artifact-storage
    consistency recovery procedure before authorizing work dispatch. Completing this Token runbook
    alone is never sufficient to resume dispatch.
-8. Remove the Worker API maintenance fence only after credential reconciliation and the independent
-   whole-Server consistency procedure have both completed.
+8. Only after credential reconciliation and the independent whole-Server consistency procedure
+   have both completed, stop the maintenance Server, set
+   `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=false`, restore the normal listener and approved ingress,
+   and start the Server in normal mode. Do not expose the maintenance process itself by restoring
+   the reverse-proxy upstream or container published port around it.
 
 If no approved whole-Server consistency recovery procedure exists, or any part of it cannot be
-completed, keep work dispatch blocked. If the deployment cannot isolate Worker API ingress while
-leaving the operator credential path available, keep database recovery blocked as well. This
-credential runbook does not fill either missing deployment capability.
+completed, keep work dispatch blocked. The Server supplies the Worker API fence, readiness state,
+GitHub ingestion/polling and lease-reaper suppression, restored-session purge, and a database-only
+runtime that leaves the artifact tree untouched. This mode is not a replacement for restoring and
+validating a coherent database and artifact set before normal mode resumes. The deployment still
+owns the required loopback-only topology; if the reverse proxy, published port, or ordinary network
+listener cannot be removed, keep database recovery blocked. Container recovery is supported only
+for host-network processes or a trusted local tunnel sidecar in the same network namespace;
+ordinary bridged-container recovery is unsupported, and a published port is not an acceptable
+shortcut.
 
 These post-restore rotations are an operational reconciliation step. They do not add an
 anti-rollback epoch or change the accepted local trust model.
@@ -161,23 +185,30 @@ restored database cannot reconstruct changes that are absent from its snapshot.
 
 The database state-machine recovery matrix is implemented in
 `apps/server/src/database/worker-token-recovery.test.ts`. It uses the real `DatabaseClient` and
-database Worker operations. It does not inject a transport-level network failure. The operator
-route suite separately proves one-time plaintext responses and `no-store` headers. The backup case
-restores a clean, closed SQLite snapshot so that the test isolates credential rollback behavior;
-the existing migration-backup suite separately verifies backup creation, validation, and durable
-publication.
+database Worker operations. It does not inject a transport-level network failure. The maintenance
+boundary is covered by `apps/server/src/recovery-maintenance.test.ts`, and the atomic purge,
+rollback, clock preservation, restart, old-cookie rejection, and fresh-login behavior are covered
+by `apps/server/src/database/operator-auth-recovery.test.ts`. The operator route suite separately
+proves one-time plaintext responses and `no-store` headers. The backup case restores a clean,
+closed SQLite snapshot so that the test isolates credential rollback behavior; the existing
+migration-backup suite separately verifies backup creation, validation, and durable publication.
 
 Run from the repository root on Linux, or from a local WSL repository copy stored on its native
 Linux filesystem:
 
 ```bash
 pnpm --filter @agentic-review/server build
-pnpm --filter @agentic-review/server exec vitest run src/database/worker-token-recovery.test.ts
+pnpm --filter @agentic-review/server exec vitest run \
+  src/recovery-maintenance.test.ts \
+  src/database/operator-auth-recovery.test.ts \
+  src/database/worker-token-recovery.test.ts
 ```
 
-Running the file directly on Windows skips it because the production Server database owner checks
-require POSIX filesystem ownership. A checkout mounted from NTFS into WSL is not a substitute for a
-native WSL filesystem copy and does not count as recovery verification.
+Running `worker-token-recovery.test.ts` and the database Worker restart case directly on Windows
+skips those cases because the production Server database owner checks require POSIX filesystem
+ownership. The configuration, route, health, direct atomic-purge, and rollback tests run on
+Windows. A checkout mounted from NTFS into WSL is not a substitute for a native WSL filesystem copy
+and does not count as database Worker recovery verification.
 
-The six tests must pass before a Token-authenticated production rollout or after changing Worker
-credential persistence semantics.
+The complete maintenance and recovery set must pass before a Token-authenticated production rollout
+or after changing Worker credential or operator-session persistence semantics.

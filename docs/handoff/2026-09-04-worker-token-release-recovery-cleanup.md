@@ -46,6 +46,12 @@ and Token recovery work. It does not implement the complete production SCM insta
 - `docs/operations/worker-token-recovery.md` and the six-case database matrix define recovery for
   lost create/rotate responses, cross-restart revocation, accepted whole-database Token rollback,
   post-backup node disappearance, and pre-v13 restoration.
+- The follow-up recovery maintenance mode requires an exact loopback listener plus configured
+  operator authentication, purges restored operator login state before listening, closes readiness
+  and every Worker/worker-artifact route before authentication or storage access, and suppresses
+  GitHub ingestion/polling and the lease reaper. Its database-only storage runtime never opens or
+  reconciles the artifact root. Operator login, credential reconciliation, and Dashboard reads
+  remain available only through the deployment's local recovery access path.
 
 ## Verification
 
@@ -82,12 +88,23 @@ extra entries, repeated and post-close use, borrowed-view expiry, source/destina
 mapping, and source ownership. It is verify-only and does not claim that a privileged root swap was
 performed.
 
+The recovery-maintenance follow-up then passed all-workspace typecheck, build, and lint with Biome
+checking 316 files. Windows focused config/composition/health/route/direct-database tests passed 44
+cases with the one POSIX database Worker restart case skipped. The exact source in a native WSL ext4
+checkout passed all 850 Server tests in 51 files, including the database-only artifact sentinel,
+atomic purge rollback, clock preservation, cross-restart old-cookie rejection, and the six Worker
+Token recovery cases. The
+Worker zero-execution architecture check and all 19 role-bundle guards also passed. No command used
+`test-env`.
+
 ## Remaining Release Work
 
 Repository-local implementation remains for root materialization and atomic swap, the production
-SCM installer, fixed WinSW validation, CNG provisioning, service creation and policy, transaction
-recovery, and deployment maintenance-ingress integration. Destination re-verification itself is
-complete as a read-only composition, but no production installer invokes it yet.
+SCM installer, fixed WinSW validation, CNG provisioning, service creation and policy, and installer
+transaction recovery. Destination re-verification is complete as a read-only composition, but no
+production installer invokes it yet. Server database recovery maintenance ingress is implemented;
+deployment operators must still remove the ordinary reverse-proxy upstream and unsupported bridge
+container exposure while it is active.
 
 External release work remains to produce the actual Authenticode-signed ServiceHost, role bundles,
 outer-package-v2 signature, compiled release profile, and compiled outer-trust material, then run

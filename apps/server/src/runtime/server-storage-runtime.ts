@@ -2,7 +2,7 @@ import {
   type ArtifactCompletionPort,
   ArtifactStorageClient,
   ArtifactTransactionCoordinator,
-  type ArtifactTransactionCoordinatorError,
+  ArtifactTransactionCoordinatorError,
   type ArtifactTransactionPort,
 } from "../artifacts/index.js";
 import type { ArtifactRuntimeConfig } from "../config.js";
@@ -99,6 +99,11 @@ export interface CreateServerStorageRuntimeOptions {
   readonly migrationsDirectory: string;
   readonly artifactStorage: ArtifactRuntimeConfig;
   readonly onFailStop: (error: ArtifactTransactionCoordinatorError) => void | Promise<void>;
+}
+
+export interface CreateRecoveryMaintenanceStorageRuntimeOptions {
+  readonly databasePath: string;
+  readonly migrationsDirectory: string;
 }
 
 type ServerStorageRuntimeSnapshot = CreateServerStorageRuntimeOptions;
@@ -277,6 +282,99 @@ const throwStartupFailure = (error: unknown, cleanupErrors: readonly unknown[]):
     "Server storage startup and ownership cleanup both failed.",
     { cause: error },
   );
+};
+
+const recoveryArtifactUnavailable = async (): Promise<never> => {
+  throw new ArtifactTransactionCoordinatorError("ARTIFACT_TRANSACTION_NOT_READY");
+};
+
+const recoveryArtifactTransactions = Object.freeze({
+  createArtifactUpload: recoveryArtifactUnavailable,
+  putArtifactChunk: recoveryArtifactUnavailable,
+  finalizeArtifactUpload: recoveryArtifactUnavailable,
+  terminateArtifactUpload: recoveryArtifactUnavailable,
+} satisfies ArtifactTransactionPort);
+
+const recoveryArtifactCompletion = Object.freeze({
+  completeArtifactRun: recoveryArtifactUnavailable,
+} satisfies ArtifactCompletionPort);
+
+const snapshotRecoveryMaintenanceOptions = (
+  options: CreateRecoveryMaintenanceStorageRuntimeOptions,
+): CreateRecoveryMaintenanceStorageRuntimeOptions => {
+  if (typeof options !== "object" || options === null) {
+    throw new TypeError("Recovery maintenance storage runtime options must be an object.");
+  }
+  return Object.freeze({
+    databasePath: options.databasePath,
+    migrationsDirectory: options.migrationsDirectory,
+  });
+};
+
+export const createRecoveryMaintenanceStorageRuntime = async (
+  options: CreateRecoveryMaintenanceStorageRuntimeOptions,
+): Promise<ServerStorageRuntime> => {
+  const snapshot = snapshotRecoveryMaintenanceOptions(options);
+  let ownerLock: DatabaseOwnerLock | undefined;
+  let database: DatabaseClient | undefined;
+  let failedDatabaseOwnerExit: Promise<number> | undefined;
+
+  try {
+    ownerLock = await DatabaseOwnerLock.acquire(snapshot.databasePath);
+    database = await DatabaseClient.create({
+      databasePath: ownerLock.databasePath,
+      migrationsDirectory: snapshot.migrationsDirectory,
+    });
+    ownerLock.assertReady();
+
+    const activeDatabase = database;
+    const activeOwnerLock = ownerLock;
+    let closePromise: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closePromise ??= (async () => {
+        const cleanupErrors = await closeRawOwners(
+          undefined,
+          undefined,
+          activeDatabase,
+          undefined,
+          activeOwnerLock,
+        );
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError(
+            cleanupErrors,
+            "Recovery maintenance database storage shutdown failed.",
+          );
+        }
+      })();
+      return closePromise;
+    };
+    return Object.freeze({
+      database: activeDatabase,
+      artifactReadiness: Object.freeze({
+        read: () => Object.freeze({ ready: false }),
+      }),
+      artifactTransactions: recoveryArtifactTransactions,
+      artifactCompletion: recoveryArtifactCompletion,
+      close,
+    });
+  } catch (error) {
+    if (
+      database === undefined &&
+      error instanceof Error &&
+      "ownerExit" in error &&
+      error.ownerExit instanceof Promise
+    ) {
+      failedDatabaseOwnerExit = error.ownerExit as Promise<number>;
+    }
+    const cleanupErrors = await closeRawOwners(
+      undefined,
+      undefined,
+      database,
+      failedDatabaseOwnerExit,
+      ownerLock,
+    );
+    return throwStartupFailure(error, cleanupErrors);
+  }
 };
 
 const createServerStorageRuntimeFromSnapshot = async (

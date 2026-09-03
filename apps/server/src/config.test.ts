@@ -25,6 +25,7 @@ describe("loadConfig Phase 1 integrations", () => {
     const config = loadConfig(developmentEnvironment());
     expect(config.github).toBeUndefined();
     expect(config.operatorAuth).toBeUndefined();
+    expect(config.recoveryMaintenance).toBe(false);
     expect(config.dashboardDirectory).toBeUndefined();
     expect(config.databasePath).toBe(
       resolve(dirname(config.artifactStorage.rootPath), ".data", "agentic-review.db"),
@@ -147,6 +148,7 @@ describe("loadConfig Phase 1 integrations", () => {
     }
     expect(example).toContain("Neither tree may equal or");
     expect(example).toContain("AGENTIC_REVIEW_ALLOW_INSECURE_HTTP=true");
+    expect(example).toContain("AGENTIC_REVIEW_RECOVERY_MAINTENANCE=false");
     expect(example).not.toContain("AGENTIC_REVIEW_TLS_CLIENT_CA_PATH");
     expect(example).not.toContain("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON");
     expect(example).not.toContain("AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH");
@@ -235,6 +237,56 @@ describe("loadConfig Phase 1 integrations", () => {
       },
       oidc: undefined,
     });
+  });
+
+  it("loads recovery maintenance only from a canonical boolean with loopback operator auth", () => {
+    const operatorEnvironment = {
+      ...developmentEnvironment(),
+      AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback-development-bypass",
+      AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
+      AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "recovery-operator",
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(
+      loadConfig({
+        ...operatorEnvironment,
+        AGENTIC_REVIEW_RECOVERY_MAINTENANCE: "true",
+        AGENTIC_REVIEW_GITHUB_WEBHOOK_SECRET_PATH: "missing-during-maintenance",
+      }),
+    ).toMatchObject({
+      host: "127.0.0.1",
+      recoveryMaintenance: true,
+      github: undefined,
+      operatorAuth: { service: { mode: "loopback-development-bypass" } },
+    });
+    expect(
+      loadConfig({
+        ...developmentEnvironment(),
+        AGENTIC_REVIEW_RECOVERY_MAINTENANCE: "false",
+      }).recoveryMaintenance,
+    ).toBe(false);
+
+    for (const value of ["", " ", " true ", "false ", "1", "0", "TRUE", "yes"]) {
+      expect(() =>
+        loadConfig({
+          ...operatorEnvironment,
+          AGENTIC_REVIEW_RECOVERY_MAINTENANCE: value,
+        }),
+      ).toThrow(/must be true or false/u);
+    }
+    expect(() =>
+      loadConfig({
+        ...developmentEnvironment(),
+        AGENTIC_REVIEW_RECOVERY_MAINTENANCE: "true",
+      }),
+    ).toThrow(/configured operator authentication/u);
+    expect(() =>
+      loadConfig({
+        ...operatorEnvironment,
+        AGENTIC_REVIEW_HOST: "0.0.0.0",
+        AGENTIC_REVIEW_RECOVERY_MAINTENANCE: "true",
+      }),
+    ).toThrow(/loopback server listener/u);
   });
 
   it("requires OIDC operator authentication in production", async () => {

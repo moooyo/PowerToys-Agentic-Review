@@ -18,6 +18,7 @@ import { registerWorkerRoutes } from "../../dist/routes/workers.js";
 const config: ServerConfig = {
   host: "127.0.0.1",
   port: 0,
+  recoveryMaintenance: false,
   databasePath: "unused.sqlite",
   migrationsDirectory: "unused",
   artifactStorage: {

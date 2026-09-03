@@ -1120,6 +1120,7 @@ const publishResultArtifact = async (
 const serverConfigFor = (fixture: DatabaseFixture): ServerConfig => ({
   host: "127.0.0.1",
   port: 0,
+  recoveryMaintenance: false,
   databasePath: fixture.databasePath,
   migrationsDirectory,
   artifactStorage: {
@@ -1969,6 +1970,7 @@ describe("DatabaseClient lease integration", () => {
     const config = {
       host: "127.0.0.1",
       port: 0,
+      recoveryMaintenance: false,
       databasePath: fixture.databasePath,
       migrationsDirectory,
       artifactStorage: {

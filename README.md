@@ -28,3 +28,20 @@ runtimes, production release profile, dual-service installer and signing pipelin
 Windows x64 and arm64 verification suite are complete. Phase 1b result artifacts, immutable diff
 validation, approval persistence, and GitHub publication also remain deliberately disabled. Dynamic
 validation remains a separate stronger-isolation milestone.
+
+## Database recovery maintenance
+
+Whole-Server database rollback uses `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` with a loopback-only
+listener and configured operator authentication. On each maintenance start, the Server atomically
+invalidates restored operator login transactions, sessions, and browser bindings before listening;
+it keeps liveness available, reports not-ready, rejects every Worker API route, and leaves local
+operator credential reconciliation and Dashboard reads available. GitHub ingestion and the lease
+reaper remain stopped until normal mode returns. A database-only maintenance runtime owns SQLite
+without opening, enumerating, creating, or reconciling the artifact root.
+
+The listener is not a network isolation boundary by itself. Remove the ordinary reverse-proxy
+upstream and any container published port, then use only the designated local terminal or an SSH
+tunnel to the loopback listener. For containers, use host networking or a local tunnel sidecar in
+the same network namespace; ordinary bridged-container recovery is unsupported. Follow
+[`docs/operations/worker-token-recovery.md`](./docs/operations/worker-token-recovery.md) for the
+complete sequence.

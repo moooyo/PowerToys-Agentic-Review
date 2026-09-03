@@ -74,6 +74,7 @@ import type {
 import type {
   CleanupExpiredOperatorAuthInput,
   CleanupExpiredOperatorAuthResult,
+  PurgeOperatorAuthForRecoveryResult,
 } from "./operator-auth.js";
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
@@ -470,6 +471,10 @@ export interface DatabaseOperationMap {
   readonly cleanupExpiredOperatorAuth: {
     readonly input: CleanupExpiredOperatorAuthInput;
     readonly output: CleanupExpiredOperatorAuthResult;
+  };
+  readonly purgeOperatorAuthForRecovery: {
+    readonly input: Record<string, never>;
+    readonly output: PurgeOperatorAuthForRecoveryResult;
   };
   readonly readGitHubPollingProjection: {
     readonly input: GitHubPollingProjectionKey;
