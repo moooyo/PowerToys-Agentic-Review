@@ -223,8 +223,6 @@ interface Fixture {
 
 function createFixture(): Fixture {
   const files: FixtureFile[] = [
-    file("AgenticReview.Worker.Control.exe", "service-wrapper", "control winsw"),
-    file("AgenticReview.Worker.Executor.exe", "service-wrapper", "executor winsw"),
     file("app\\control.mjs", "control-bundle", "control worker bundle"),
     file("app\\executor.mjs", "executor-bundle", "executor worker bundle"),
     file("codex\\codex.exe", "codex-cli", "codex executable"),
@@ -236,8 +234,6 @@ function createFixture(): Fixture {
     file("native\\AgenticReview.ServiceHost.exe", "service-host", "service host"),
     file("native\\AgenticReview.ProcessHost.exe", "process-host", "process host"),
     file("runtime\\node.exe", "node-runtime", "node executable"),
-    file("service\\control.xml", "service-config", "control service config"),
-    file("service\\executor.xml", "service-config", "executor service config"),
     file("LICENSE.txt", "license", "release license"),
     file("server-root.cer", "ca-bundle", "server root certificate", "trusted-configuration"),
     file(
@@ -320,16 +316,12 @@ describe("verifyTrustedInstallation", () => {
       compatibility,
       files: [
         manifestFile("runtime&tools\\node.exe", "node-runtime", "1"),
-        manifestFile("AgenticReview.Worker.Executor.exe", "service-wrapper", "2"),
         manifestFile("app\\executor.mjs", "executor-bundle", "3"),
         manifestFile("native\\AgenticReview.ProcessHost.exe", "process-host", "4"),
         manifestFile("git\\cmd\\git.exe", "git-cli", "5"),
         manifestFile("codex\\codex.exe", "codex-cli", "6"),
-        manifestFile("AgenticReview.Worker.Control.exe", "service-wrapper", "7"),
         manifestFile("native\\AgenticReview.ServiceHost.exe", "service-host", "8"),
         manifestFile("app\\control.mjs", "control-bundle", "9"),
-        manifestFile("service\\control.xml", "service-config", "a"),
-        manifestFile("service\\executor.xml", "service-config", "b"),
         manifestFile("certificates\\server&root.cer", "ca-bundle", "c", "trusted-configuration"),
         manifestFile("keys\\local-authority.spki", "trusted-config", "d", "trusted-configuration"),
         manifestFile("policy\\codex-requirements.toml", "policy", "e", "trusted-configuration"),
@@ -340,7 +332,7 @@ describe("verifyTrustedInstallation", () => {
     };
 
     expect(digest(Buffer.from(serializeTrustedInstallationManifest(manifest), "utf8"))).toBe(
-      "b1ab8900b3fff2f3f54150dadaa779945dc0d5461962120ff1e7e8371c239e8c",
+      "418079e3fa9fd82d36ebd0f9d6c1e044f08d616d5a976430d5ab94db8b8834c5",
     );
   });
 
@@ -663,7 +655,7 @@ describe("verifyTrustedInstallation", () => {
     expect(() => serializeTrustedInstallationManifest(crossRootValue)).not.toThrow();
   });
 
-  it("requires the complete dual-service runtime role set and role-appropriate extensions", async () => {
+  it("requires the complete runtime role set and role-appropriate extensions", async () => {
     const missing = createFixture();
     const missingValue = cloneManifest(missing.manifest);
     missingValue.files = missingValue.files.filter((entry) => entry.role !== "process-host");
@@ -673,15 +665,14 @@ describe("verifyTrustedInstallation", () => {
       ),
     ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
 
-    const oneWrapper = createFixture();
-    const oneWrapperValue = cloneManifest(oneWrapper.manifest);
-    const secondWrapperIndex = oneWrapperValue.files.findLastIndex(
-      (entry) => entry.role === "service-wrapper",
+    const missingServiceHost = createFixture();
+    const missingServiceHostValue = cloneManifest(missingServiceHost.manifest);
+    missingServiceHostValue.files = missingServiceHostValue.files.filter(
+      (entry) => entry.role !== "service-host",
     );
-    oneWrapperValue.files.splice(secondWrapperIndex, 1);
     await expect(
       verifyTrustedInstallation(
-        replaceManifest(oneWrapper, Buffer.from(JSON.stringify(oneWrapperValue))),
+        replaceManifest(missingServiceHost, Buffer.from(JSON.stringify(missingServiceHostValue))),
       ),
     ).rejects.toMatchObject({ code: "MANIFEST_FORMAT_INVALID" });
 
@@ -886,9 +877,7 @@ describe("verifyTrustedInstallation", () => {
 
   it("rechecks files after the complete directory traversal", async () => {
     const fixture = createFixture();
-    const earlyFile = fixture.fileIO.node(
-      win32.join(installationRoot, "AgenticReview.Worker.Control.exe"),
-    );
+    const earlyFile = fixture.fileIO.node(win32.join(installationRoot, "app\\control.mjs"));
     const lateDirectory = win32.join(installationRoot, "runtime");
     fixture.fileIO.onOpenDirectory = (path) => {
       if (pathKey(path) === pathKey(lateDirectory)) earlyFile.ctimeNs += 1n;
@@ -900,7 +889,7 @@ describe("verifyTrustedInstallation", () => {
 
     const crossRoot = createFixture();
     const installationFile = crossRoot.fileIO.node(
-      win32.join(installationRoot, "AgenticReview.Worker.Control.exe"),
+      win32.join(installationRoot, "app\\control.mjs"),
     );
     crossRoot.fileIO.onOpenDirectory = (path) => {
       if (pathKey(path) === pathKey(trustedConfigurationRoot)) installationFile.ctimeNs += 1n;
@@ -1089,7 +1078,6 @@ function file(
   root: TrustedInstallationFileRoot = "installation",
 ): FixtureFile {
   const portableExecutableRoles = new Set<TrustedInstallationFileRole>([
-    "service-wrapper",
     "service-host",
     "node-runtime",
     "process-host",

@@ -136,7 +136,7 @@ const reviewedProductionSourceSha256 = Object.freeze({
   [`${workerSourceRoot}control/host-control-worker-api.ts`]:
     "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
   [`${workerSourceRoot}execution/trusted-installation-manifest.ts`]:
-    "e09f1c8e12dcd883261584dbc2b3f575a6098f6c327522e8caf0f3b2b4fa1928",
+    "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   [pinnedServerClaimProducerPath]:
     "b0d6eb99cfa1ccd45fbf2582bcaa2ab69205634f13c423e7a504abc99291763d",
 });

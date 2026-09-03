@@ -9,7 +9,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
 var workerTokenShapePattern = regexp.MustCompile(`arw1_[A-Za-z0-9_-]{43}`)
@@ -32,7 +31,6 @@ var specialPayloadRules = map[Role]specialPayloadRule{
 }
 
 var runtimeRoleMapping = map[Role]releasemanifest.FileRole{
-	RoleServiceWrapper: releasemanifest.RoleServiceWrapper,
 	RoleServiceHost:    releasemanifest.RoleServiceHost,
 	RoleNodeRuntime:    releasemanifest.RoleNodeRuntime,
 	RoleControlBundle:  releasemanifest.RoleControlBundle,
@@ -44,7 +42,6 @@ var runtimeRoleMapping = map[Role]releasemanifest.FileRole{
 	RoleCodexRuntime:   releasemanifest.RoleCodexRuntime,
 	RoleNativeLibrary:  releasemanifest.RoleNativeLibrary,
 	RoleCABundle:       releasemanifest.RoleCABundle,
-	RoleServiceConfig:  releasemanifest.RoleServiceConfig,
 	RoleTrustedConfig:  releasemanifest.RoleTrustedConfig,
 	RolePolicy:         releasemanifest.RolePolicy,
 	RoleSchema:         releasemanifest.RoleSchema,
@@ -55,7 +52,7 @@ var runtimeRoleMapping = map[Role]releasemanifest.FileRole{
 }
 
 var portableExecutableRoles = map[Role]struct{}{
-	RoleServiceWrapper: {}, RoleServiceHost: {}, RoleNodeRuntime: {}, RoleProcessHost: {},
+	RoleServiceHost: {}, RoleNodeRuntime: {}, RoleProcessHost: {},
 	RoleCodexCLI: {}, RoleGitCLI: {}, RoleGitHelper: {}, RoleCodexRuntime: {}, RoleNativeLibrary: {},
 }
 
@@ -160,9 +157,6 @@ func normalizeIndex(value Index) (Index, error) {
 		if specialCounts[role] != 1 {
 			return Index{}, fmt.Errorf("%w: fixed package payload closure is incomplete", ErrInvalid)
 		}
-	}
-	if err := releasepackage.ValidateRuntimeManifestProfile(runtimeFiles); err != nil {
-		return Index{}, fmt.Errorf("%w: runtime payload closure violates the release profile", ErrInvalid)
 	}
 	if nodeSPKIMatches != 1 {
 		return Index{}, fmt.Errorf("%w: node-specific SPKI payload binding is absent", ErrInvalid)

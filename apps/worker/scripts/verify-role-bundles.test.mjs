@@ -68,7 +68,7 @@ const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/worker/src/control/host-control-worker-api.ts":
     "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
   "apps/worker/src/execution/trusted-installation-manifest.ts":
-    "e09f1c8e12dcd883261584dbc2b3f575a6098f6c327522e8caf0f3b2b4fa1928",
+    "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   "apps/worker/src/service-host/runtime-bootstrap.ts":
     "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
   "packages/contracts/src/worker.ts":

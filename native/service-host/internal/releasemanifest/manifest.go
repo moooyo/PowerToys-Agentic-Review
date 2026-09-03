@@ -45,7 +45,6 @@ const (
 )
 
 const (
-	RoleServiceWrapper FileRole = "service-wrapper"
 	RoleServiceHost    FileRole = "service-host"
 	RoleNodeRuntime    FileRole = "node-runtime"
 	RoleControlBundle  FileRole = "control-bundle"
@@ -57,7 +56,6 @@ const (
 	RoleCodexRuntime   FileRole = "codex-runtime"
 	RoleNativeLibrary  FileRole = "native-library"
 	RoleCABundle       FileRole = "ca-bundle"
-	RoleServiceConfig  FileRole = "service-config"
 	RoleTrustedConfig  FileRole = "trusted-config"
 	RolePolicy         FileRole = "policy"
 	RoleSchema         FileRole = "schema"
@@ -139,10 +137,10 @@ func (e *ManifestError) Error() string { return e.Message }
 func (e *ManifestError) Unwrap() error { return e.Cause }
 
 var allowedRoles = map[FileRole]struct{}{
-	RoleServiceWrapper: {}, RoleServiceHost: {}, RoleNodeRuntime: {},
+	RoleServiceHost: {}, RoleNodeRuntime: {},
 	RoleControlBundle: {}, RoleExecutorBundle: {}, RoleProcessHost: {},
 	RoleCodexCLI: {}, RoleGitCLI: {}, RoleGitHelper: {}, RoleCodexRuntime: {},
-	RoleNativeLibrary: {}, RoleCABundle: {}, RoleServiceConfig: {},
+	RoleNativeLibrary: {}, RoleCABundle: {},
 	RoleTrustedConfig: {}, RolePolicy: {}, RoleSchema: {}, RolePrompt: {},
 	RoleRecipe: {}, RoleRuntimeData: {}, RoleLicense: {},
 }
@@ -152,7 +150,6 @@ var allowedRoles = map[FileRole]struct{}{
 // dependency and the role-specific CA, public-key, policy, schema, prompt, and recipe inputs used
 // by that release.
 var requiredRoleCounts = map[FileRole]int{
-	RoleServiceWrapper: 2,
 	RoleServiceHost:    1,
 	RoleNodeRuntime:    1,
 	RoleControlBundle:  1,
@@ -160,20 +157,19 @@ var requiredRoleCounts = map[FileRole]int{
 	RoleProcessHost:    1,
 	RoleCodexCLI:       1,
 	RoleGitCLI:         1,
-	RoleServiceConfig:  2,
 }
 
 var executableRoles = map[FileRole]struct{}{
-	RoleServiceWrapper: {}, RoleServiceHost: {}, RoleNodeRuntime: {},
+	RoleServiceHost: {}, RoleNodeRuntime: {},
 	RoleProcessHost: {}, RoleCodexCLI: {}, RoleGitCLI: {}, RoleGitHelper: {},
 	RoleCodexRuntime: {},
 }
 
 var installationOnlyRoles = map[FileRole]struct{}{
-	RoleServiceWrapper: {}, RoleServiceHost: {}, RoleNodeRuntime: {},
+	RoleServiceHost: {}, RoleNodeRuntime: {},
 	RoleControlBundle: {}, RoleExecutorBundle: {}, RoleProcessHost: {},
 	RoleCodexCLI: {}, RoleGitCLI: {}, RoleGitHelper: {}, RoleCodexRuntime: {},
-	RoleNativeLibrary: {}, RoleServiceConfig: {}, RoleRuntimeData: {}, RoleLicense: {},
+	RoleNativeLibrary: {}, RoleRuntimeData: {}, RoleLicense: {},
 }
 
 var trustedConfigurationOnlyRoles = map[FileRole]struct{}{
@@ -535,7 +531,7 @@ func validateRoleRootAndPath(file File) error {
 	extension := windowsExtension(file.Path)
 	allowed := false
 	switch file.Role {
-	case RoleServiceWrapper, RoleServiceHost, RoleNodeRuntime, RoleProcessHost,
+	case RoleServiceHost, RoleNodeRuntime, RoleProcessHost,
 		RoleCodexCLI, RoleGitCLI, RoleGitHelper:
 		allowed = extension == ".exe"
 	case RoleCodexRuntime:
@@ -546,8 +542,6 @@ func validateRoleRootAndPath(file File) error {
 		allowed = extension == ".mjs"
 	case RoleCABundle:
 		allowed = extensionIs(extension, ".pem", ".crt", ".cer")
-	case RoleServiceConfig:
-		allowed = extension == ".xml"
 	case RoleTrustedConfig:
 		allowed = extension == ".spki"
 	case RolePolicy:

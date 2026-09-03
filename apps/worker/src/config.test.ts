@@ -580,22 +580,13 @@ describe("Worker registration metadata policy", () => {
 });
 
 describe("Worker execution shutdown policy", () => {
-  it("accepts the exact WinSW shutdown budget boundary", () => {
+  it("accepts the configured shutdown grace period independently of service hosting", () => {
     const config = loadWorkerConfig({
       ...enabledEnvironment(),
-      WORKER_SHUTDOWN_GRACE_SECONDS: "105",
+      WORKER_SHUTDOWN_GRACE_SECONDS: "3600",
     });
 
-    expect(config.shutdownGraceSeconds).toBe(105);
-  });
-
-  it("rejects a composite shutdown budget beyond the WinSW timeout", () => {
-    expect(() =>
-      loadWorkerConfig({
-        ...enabledEnvironment(),
-        WORKER_SHUTDOWN_GRACE_SECONDS: "106",
-      }),
-    ).toThrow(/WinSW allows 150000 ms including the safety margin/u);
+    expect(config.shutdownGraceSeconds).toBe(3_600);
   });
 
   it("does not apply execution shutdown phases while execution is disabled", () => {

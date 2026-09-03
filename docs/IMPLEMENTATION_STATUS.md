@@ -9,8 +9,9 @@ Status date: 2026-09-04
 > current signed outer-package schema/profile v2 and split installer profile v2 bind only the
 > schema-4 Control/Executor pair and contain no Worker credential material. No earlier outer-package
 > or bootstrap profile is retained as a compatibility surface. The separate Control-to-Executor
-> local CNG capability signer, WinSW launch inputs, node-specific packaging, Authenticode checks,
-> and verify-only destination evidence are replaceable current candidates. The two-service
+> local CNG capability signer, node-specific packaging, Authenticode checks, and verify-only
+> destination evidence are replaceable current candidates. WinSW launch inputs have been removed;
+> ServiceHost is the selected native service binary for both roles. The two-service
 > Control/Executor isolation remains the selected Windows Worker boundary. Actual signed release
 > material and the production Windows clean installer remain incomplete.
 >
@@ -220,11 +221,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   keeps Node, HostControl, ARWX standard I/O, and both relays alive until the graceful barrier or
   that deadline; Executor rejects the notification and can shut down only from authenticated
   Control `Drain`.
-- Reusable Control/Executor WinSW source inputs and the ADR 0026 clean-install-only direction.
-  Upgrade, legacy migration, rollback, journal recovery, and cross-version storage were withdrawn
-  before publication. WinSW, the current node-specific package shape, and destination evidence are
-  implementation candidates rather than permanent ADR 0026 requirements. The existing XML launches
-  only the signed ServiceHost and is not an installer or installation evidence.
+- The native two-service ServiceHost direction and the ADR 0026 clean-install-only policy. WinSW
+  source inputs, wrapper binaries, and service XML package roles were removed before publication.
+  Both Windows services use the same per-architecture ServiceHost payload; the future clean
+  installer creates their distinct SCM records and starts Executor before Control.
 - The ADR 0014 trusted-enrollment-record and ADR 0022 through ADR 0024 Server-binding designs remain
   as historical decision records, but their executable TypeScript and Go contracts, persistence,
   coordinator, signer, signer-host, fixtures, and native node-enrollment/verifier packages were
@@ -239,10 +239,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   Server-binding contract test now live in `production-source-boundaries.test.ts`. They retain the
   general zero-execution protections while removing the obsolete signer-host spawn allowance and
   every executable Server-binding contract test.
-- A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
-  paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
-  construction, admission, and staged verification reject alternate paths or casing, wrong roots or
-  roles, missing or duplicate slots, and architecture-field misuse.
+- A current package profile with exactly one per-architecture ServiceHost PE payload and no wrapper
+  executable or service XML payload roles. Release preparation, finalized-document inspection,
+  outer-index parsing, signing-digest construction, admission, and staged verification retain the
+  generic role, root, hash, size, architecture, ACL, and Authenticode checks for supported payloads.
 - A source-only, dormant Control result-artifact upload session. It binds one authenticated local
   attempt context to one private Server lease, accepts only the five result lifecycle facts, and
   drives a frozen `create`/`put`/`finalize`/`terminate` port with stable application identities,
@@ -251,12 +251,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   apply responses after the dispatch is fenced, and ambiguity remains sticky until a valid replay
   succeeds. The public state contains no raw lease token or chunk bytes. No production entrypoint,
   supervisor, barrel, or role bundle consumes this module.
-- Current split-service SCM and WinSW candidate facts include fixed service records, virtual
-  accounts, restricted service SIDs, a Control dependency on Executor, and Executor-before-Control
-  start order. ADR 0026 retains only the product boundary of distinct service identities and ordered
-  start; a future clean installer may simplify or replace the current WinSW and SCM details. The
-  earlier journal-coupled lifecycle is historical, and a service adapter for the selected final
-  design is still missing.
+- The selected split-service SCM direction includes fixed service records, virtual accounts,
+  restricted service SIDs, a Control dependency on Executor, and Executor-before-Control start
+  order. Both records target the same native ServiceHost binary with role-specific configuration.
+  The earlier WinSW and journal-coupled lifecycle is retired; the clean installer is still missing.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
@@ -726,8 +724,8 @@ Runtime smoke results:
   ready; the owner then released the lock during a clean SIGTERM shutdown.
 Not yet verified:
 
-- The Worker service, WinSW template, and installer have not been exercised on a Windows test
-  machine.
+- The native two-service Worker clean installer has not been implemented or exercised on a Windows
+  test machine.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for

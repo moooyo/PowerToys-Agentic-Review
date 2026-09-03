@@ -193,16 +193,12 @@ func identityFixture(role config.Role, control config.Config, executor config.Co
 func productionManifestFixture() releasemanifest.Manifest {
 	files := []releasemanifest.File{
 		manifestFixtureFile(releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, "1"),
-		manifestFixtureFile(releasemanifest.RootInstallation, `AgenticReview.Worker.Control.exe`, releasemanifest.RoleServiceWrapper, "2"),
-		manifestFixtureFile(releasemanifest.RootInstallation, `AgenticReview.Worker.Executor.exe`, releasemanifest.RoleServiceWrapper, "3"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `native\AgenticReview.ServiceHost.exe`, releasemanifest.RoleServiceHost, "4"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, "5"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `app\executor.mjs`, releasemanifest.RoleExecutorBundle, "6"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `native\AgenticReview.ProcessHost.exe`, releasemanifest.RoleProcessHost, "7"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `codex\codex.exe`, releasemanifest.RoleCodexCLI, "8"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `git\cmd\git.exe`, releasemanifest.RoleGitCLI, "9"),
-		manifestFixtureFile(releasemanifest.RootInstallation, `service\control.xml`, releasemanifest.RoleServiceConfig, "a"),
-		manifestFixtureFile(releasemanifest.RootInstallation, `service\executor.xml`, releasemanifest.RoleServiceConfig, "b"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `git\mingw64\bin\git-remote-https.exe`, releasemanifest.RoleGitHelper, "c"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `codex\runtime\codex-runtime.dll`, releasemanifest.RoleCodexRuntime, "d"),
 		manifestFixtureFile(releasemanifest.RootInstallation, `git\mingw64\bin\libcurl.dll`, releasemanifest.RoleNativeLibrary, "e"),

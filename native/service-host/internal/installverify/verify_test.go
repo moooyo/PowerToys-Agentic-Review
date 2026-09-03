@@ -304,8 +304,6 @@ func newInstallFixtureWithTrustedContent(
 		role releasemanifest.FileRole
 		data []byte
 	}{
-		{releasemanifest.RootInstallation, config.ControlServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-control-wrapper")},
-		{releasemanifest.RootInstallation, config.ExecutorServiceName + `.exe`, releasemanifest.RoleServiceWrapper, []byte("MZ-executor-wrapper")},
 		{releasemanifest.RootInstallation, releaseprofile.ServiceHostRelativePath, releasemanifest.RoleServiceHost, []byte("MZ-service-host")},
 		{releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, []byte("MZ-node")},
 		{releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, []byte("export const role='control';")},
@@ -313,8 +311,6 @@ func newInstallFixtureWithTrustedContent(
 		{releasemanifest.RootInstallation, `native\processhost.exe`, releasemanifest.RoleProcessHost, []byte("MZ-process-host")},
 		{releasemanifest.RootInstallation, `codex\codex.exe`, releasemanifest.RoleCodexCLI, []byte("MZ-codex")},
 		{releasemanifest.RootInstallation, `git\git.exe`, releasemanifest.RoleGitCLI, []byte("MZ-git")},
-		{releasemanifest.RootInstallation, `service\control.xml`, releasemanifest.RoleServiceConfig, []byte("<service id='control'/>")},
-		{releasemanifest.RootInstallation, `service\executor.xml`, releasemanifest.RoleServiceConfig, []byte("<service id='executor'/>")},
 		{releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, append([]byte(nil), rootCertificate...)},
 		{releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, append([]byte(nil), localAuthoritySPKI...)},
 		{releasemanifest.RootTrustedConfiguration, `policy\codex.toml`, releasemanifest.RolePolicy, append([]byte(nil), codexPolicy...)},

@@ -10,8 +10,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 )
 
-// PeerVerificationPlan contains only the fixed service and pipe identity plus
-// provenance digests for the preflight evidence that created it.
+// PeerVerificationPlan contains only the fixed service and pipe identity.
 type PeerVerificationPlan struct {
 	role        config.Role
 	ownService  config.ServiceIdentity

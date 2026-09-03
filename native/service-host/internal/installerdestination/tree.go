@@ -141,8 +141,7 @@ func (v *verifier) verifyFile(root outerpackage.Root, file *openedFile, expected
 
 func portableExecutableRole(role outerpackage.Role) bool {
 	switch role {
-	case outerpackage.RoleServiceWrapper,
-		outerpackage.RoleServiceHost,
+	case outerpackage.RoleServiceHost,
 		outerpackage.RoleNodeRuntime,
 		outerpackage.RoleProcessHost,
 		outerpackage.RoleCodexCLI,

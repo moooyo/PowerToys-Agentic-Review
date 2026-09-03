@@ -39,26 +39,6 @@ func TestBuildIndexIsCanonicalDeterministicAndBoundToRelease(t *testing.T) {
 		bytes.Contains(first, []byte("arw1_")) {
 		t.Fatalf("Token package index contains forbidden credential material: %s", first)
 	}
-	for _, path := range []string{
-		releasepackage.ControlServiceWrapperPath,
-		releasepackage.ExecutorServiceWrapperPath,
-	} {
-		payload := findPayloadPath(parsed.Payloads, path)
-		if payload.Root != RootInstallation || payload.Role != RoleServiceWrapper ||
-			payload.TargetArchitecture == nil || *payload.TargetArchitecture != parsed.TargetArchitecture {
-			t.Fatalf("unexpected fixed WinSW wrapper payload: %#v", payload)
-		}
-	}
-	for _, path := range []string{
-		releasepackage.ControlServiceConfigPath,
-		releasepackage.ExecutorServiceConfigPath,
-	} {
-		payload := findPayloadPath(parsed.Payloads, path)
-		if payload.Root != RootInstallation || payload.Role != RoleServiceConfig ||
-			payload.TargetArchitecture != nil {
-			t.Fatalf("unexpected fixed WinSW configuration payload: %#v", payload)
-		}
-	}
 	if err := validateAgainstRelease(first, release); err != nil {
 		t.Fatal(err)
 	}
@@ -252,94 +232,6 @@ func TestIndexRejectsPathRoleRootSizeAndArchitectureAttacks(t *testing.T) {
 	}
 }
 
-func TestIndexRejectsInvalidFixedWinSWSlotsThroughEveryCanonicalEntryPoint(t *testing.T) {
-	baseline := mustParseIndex(t, mustBuildIndex(t, validFinalizedSource(t, "a", "b")))
-	tests := []struct {
-		name   string
-		mutate func(*Index)
-	}{
-		{name: "alternate wrapper path", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ControlServiceWrapperPath).Path =
-				`bin\AgenticReview.Worker.Control.exe`
-		}},
-		{name: "wrapper path casing", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ControlServiceWrapperPath).Path =
-				strings.ToLower(releasepackage.ControlServiceWrapperPath)
-		}},
-		{name: "wrapper root", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ExecutorServiceWrapperPath).Root = RootTrustedConfiguration
-		}},
-		{name: "alternate service config path", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ControlServiceConfigPath).Path = `service\control.xml`
-		}},
-		{name: "service config path casing", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ExecutorServiceConfigPath).Path =
-				strings.ToLower(releasepackage.ExecutorServiceConfigPath)
-		}},
-		{name: "service roles exchanged", mutate: func(value *Index) {
-			wrapper := findPayloadPath(value.Payloads, releasepackage.ControlServiceWrapperPath)
-			configuration := findPayloadPath(value.Payloads, releasepackage.ControlServiceConfigPath)
-			wrapper.Role, configuration.Role = configuration.Role, wrapper.Role
-			wrapper.TargetArchitecture = nil
-			architecture := value.TargetArchitecture
-			configuration.TargetArchitecture = &architecture
-		}},
-		{name: "missing wrapper", mutate: func(value *Index) {
-			value.Payloads = removePayloadPath(value.Payloads, releasepackage.ControlServiceWrapperPath)
-		}},
-		{name: "duplicate service config", mutate: func(value *Index) {
-			duplicate := *findPayloadPath(value.Payloads, releasepackage.ControlServiceConfigPath)
-			value.Payloads = append(value.Payloads, duplicate)
-		}},
-		{name: "wrapper architecture absent", mutate: func(value *Index) {
-			findPayloadPath(value.Payloads, releasepackage.ControlServiceWrapperPath).TargetArchitecture = nil
-		}},
-		{name: "service config architecture present", mutate: func(value *Index) {
-			architecture := value.TargetArchitecture
-			findPayloadPath(value.Payloads, releasepackage.ControlServiceConfigPath).TargetArchitecture = &architecture
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			value := cloneIndex(baseline)
-			test.mutate(&value)
-			if _, err := MarshalIndexCanonical(value); err == nil {
-				t.Fatal("MarshalIndexCanonical accepted an invalid fixed WinSW slot")
-			}
-			document, err := marshalCanonical(value, MaximumIndexBytes)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := ParseIndex(document); err == nil {
-				t.Fatal("ParseIndex accepted an invalid fixed WinSW slot")
-			}
-			if _, err := SigningDigest(document); err == nil {
-				t.Fatal("SigningDigest accepted an invalid fixed WinSW slot")
-			}
-		})
-	}
-}
-
-func TestBuildIndexRejectsFinalizedManifestWithAlternateWinSWPath(t *testing.T) {
-	release := validFinalizedSource(t, "a", "b")
-	findManifestFilePath(release.manifest.Files, releasepackage.ControlServiceConfigPath).Path =
-		`service\control.xml`
-	document, err := releasemanifest.MarshalCanonical(release.manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release.manifestDocument = document
-	digest := sha256.Sum256(document)
-	release.descriptor.RuntimeManifestSHA256 = hex.EncodeToString(digest[:])
-	release.descriptorDocument, err = marshalCanonical(release.descriptor, releasemanifest.MaximumDocumentBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := buildIndex(release, validBuildOptions()); err == nil {
-		t.Fatal("buildIndex accepted a finalized manifest with an alternate WinSW path")
-	}
-}
-
 func TestBuildIndexRejectsWorkerAuthenticationFile(t *testing.T) {
 	release := validFinalizedSource(t, "a", "b")
 	policy := findManifestFileRole(release.manifest.Files, releasemanifest.RolePolicy)
@@ -506,8 +398,6 @@ func validRuntimeManifest(releaseID string) releasemanifest.Manifest {
 		ReleaseID:       releaseID,
 		SchemaVersion:   releasemanifest.SchemaVersion,
 		Files: []releasemanifest.File{
-			file(releasemanifest.RootInstallation, releasepackage.ControlServiceWrapperPath, releasemanifest.RoleServiceWrapper, "1", "1"),
-			file(releasemanifest.RootInstallation, releasepackage.ExecutorServiceWrapperPath, releasemanifest.RoleServiceWrapper, "2", "1"),
 			file(releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, "3", "1"),
 			file(releasemanifest.RootInstallation, `app\executor.mjs`, releasemanifest.RoleExecutorBundle, "4", "1"),
 			file(releasemanifest.RootInstallation, `codex\codex.exe`, releasemanifest.RoleCodexCLI, "5", "1"),
@@ -515,8 +405,6 @@ func validRuntimeManifest(releaseID string) releasemanifest.Manifest {
 			file(releasemanifest.RootInstallation, `native\AgenticReview.ProcessHost.exe`, releasemanifest.RoleProcessHost, "7", "1"),
 			file(releasemanifest.RootInstallation, `native\AgenticReview.ServiceHost.exe`, releasemanifest.RoleServiceHost, "f", "4096"),
 			file(releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, "8", "1"),
-			file(releasemanifest.RootInstallation, releasepackage.ControlServiceConfigPath, releasemanifest.RoleServiceConfig, "9", "1"),
-			file(releasemanifest.RootInstallation, releasepackage.ExecutorServiceConfigPath, releasemanifest.RoleServiceConfig, "a", "1"),
 			file(releasemanifest.RootInstallation, `data\runtime.json`, releasemanifest.RoleRuntimeData, "0", "1"),
 			file(releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, "b", "1"),
 			file(releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, "c", "1"),

@@ -210,8 +210,7 @@ func validateAuthenticodeEvidence(evidence authenticode.Evidence, expectedSigner
 
 func requiresAuthenticode(role releasemanifest.FileRole) bool {
 	switch role {
-	case releasemanifest.RoleServiceWrapper,
-		releasemanifest.RoleServiceHost,
+	case releasemanifest.RoleServiceHost,
 		releasemanifest.RoleNodeRuntime,
 		releasemanifest.RoleProcessHost,
 		releasemanifest.RoleCodexCLI,
