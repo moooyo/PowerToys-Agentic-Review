@@ -168,7 +168,6 @@ func TestAllServicesGroupIsNotAnUnexpectedIndividualServiceSID(t *testing.T) {
 }
 
 func TestValidateVerificationOptionsRejectsNoncanonicalSecurityInputs(t *testing.T) {
-	fixture := newVerificationFixture(PipePeerClient)
 	tests := []struct {
 		name   string
 		mutate func(*verificationOptions)
@@ -176,18 +175,11 @@ func TestValidateVerificationOptionsRejectsNoncanonicalSecurityInputs(t *testing
 		{name: "unknown endpoint", mutate: func(value *verificationOptions) { value.PipePeer = PipePeerUnknown }},
 		{name: "zero local PID", mutate: func(value *verificationOptions) { value.LocalProcessID = 0 }},
 		{name: "noncanonical service SID", mutate: func(value *verificationOptions) { value.ExpectedServiceSID = "S-1-5-80-01-2-3-4-5" }},
-		{name: "relative wrapper path", mutate: func(value *verificationOptions) { value.WrapperImage.Path = "winsw.exe" }},
-		{name: "uppercase hash", mutate: func(value *verificationOptions) {
-			value.ServiceHostImage.SHA256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-		}},
-		{name: "same image path", mutate: func(value *verificationOptions) { value.ServiceHostImage.Path = value.WrapperImage.Path }},
-		{name: "invalid signer pin", mutate: func(value *verificationOptions) { value.ExpectedLeafSignerCertificateDERSHA256 = "bad" }},
-		{name: "missing Authenticode", mutate: func(value *verificationOptions) { value.AuthenticodeVerifier = nil }},
 		{name: "missing token verifier", mutate: func(value *verificationOptions) { value.TokenVerifier = nil }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			options := fixture.options
+			options := newVerificationFixture(PipePeerClient).options
 			test.mutate(&options)
 			if err := validateVerificationOptions(options); !errors.Is(err, ErrInvalidOptions) {
 				t.Fatalf("error = %v, want ErrInvalidOptions", err)

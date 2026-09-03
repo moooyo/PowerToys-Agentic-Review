@@ -371,7 +371,6 @@ type runtimeSupervision struct {
 	readShutdownDeadline func() (time.Time, bool)
 	serveLocalRPC        func(context.Context) error
 	runRelay             func(context.Context) error
-	waitPeerWrapper      func(context.Context) error
 	waitPeerHost         func(context.Context) error
 	waitStderr           func(context.Context) error
 	onResult             func(supervisedTaskKind)
@@ -383,7 +382,6 @@ const (
 	supervisedLocalRPC supervisedTaskKind = iota
 	supervisedRelay
 	supervisedNode
-	supervisedPeerWrapper
 	supervisedPeerHost
 	supervisedStderr
 )
@@ -439,7 +437,7 @@ func superviseRuntime(
 ) error {
 	if ctx == nil || cancel == nil || isNilCompositionValue(runtime.node) ||
 		runtime.serveLocalRPC == nil || runtime.runRelay == nil ||
-		runtime.waitPeerWrapper == nil || runtime.waitPeerHost == nil || runtime.waitStderr == nil {
+		runtime.waitPeerHost == nil || runtime.waitStderr == nil {
 		return errInvalidComposition
 	}
 	tasks := []supervisedTask{
@@ -450,9 +448,6 @@ func superviseRuntime(
 			return 0, runtime.runRelay(ctx)
 		}},
 		{kind: supervisedNode, name: "Node process", run: runtime.node.WaitContext},
-		{kind: supervisedPeerWrapper, name: "peer WinSW wrapper", run: func(ctx context.Context) (uint32, error) {
-			return 0, runtime.waitPeerWrapper(ctx)
-		}},
 		{kind: supervisedPeerHost, name: "peer ServiceHost", run: func(ctx context.Context) (uint32, error) {
 			return 0, runtime.waitPeerHost(ctx)
 		}},
@@ -763,7 +758,7 @@ func (outcome *supervisionOutcome) observeClean(result supervisedResult) (error,
 		if result.afterShutdown || outcome.gracefulProgress || result.gracefulAtCompletion {
 			return nil, false
 		}
-	case supervisedPeerWrapper, supervisedPeerHost:
+	case supervisedPeerHost:
 		if outcome.relayClean || result.relayCleanAtCompletion {
 			return nil, false
 		}

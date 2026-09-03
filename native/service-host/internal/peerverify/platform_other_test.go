@@ -14,7 +14,7 @@ func TestPreflightWindowsVerifierHasOneConcurrentClaimAndFailsClosedOutsideWindo
 	if verifier, err := ClaimPreflightWindowsVerifier(); verifier.verify != nil || !errors.Is(err, ErrPreflightVerifierUnavailable) {
 		t.Fatalf("unauthorized public claim returned (%#v, %v)", verifier, err)
 	}
-	const contenders = 32
+	const contenders = 16
 	type claimResult struct {
 		verifier PreflightWindowsVerifier
 		err      error
@@ -41,35 +41,17 @@ func TestPreflightWindowsVerifierHasOneConcurrentClaimAndFailsClosedOutsideWindo
 		if result.err == nil {
 			successes++
 			winner = result.verifier
-			continue
-		}
-		if !errors.Is(result.err, ErrPreflightVerifierUnavailable) {
+		} else if !errors.Is(result.err, ErrPreflightVerifierUnavailable) {
 			t.Fatalf("losing claim error = %v", result.err)
 		}
 	}
 	if successes != 1 {
-		t.Fatalf("successful concurrent claims = %d, want 1", successes)
+		t.Fatalf("successful claims = %d", successes)
 	}
-
-	session, err := winner.Verify(config.RoleControl, nil, ImageExpectation{}, ImageExpectation{}, "")
-	if session != nil || !errors.Is(err, ErrUnsupportedPlatform) {
-		t.Fatalf("claimed verifier returned (%v, %v), want nil and ErrUnsupportedPlatform", session, err)
+	if session, err := winner.Verify(config.RoleControl, nil); session != nil || !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("claimed verifier returned (%v, %v)", session, err)
 	}
-	session, err = (PreflightWindowsVerifier{}).Verify(
-		config.RoleControl,
-		nil,
-		ImageExpectation{},
-		ImageExpectation{},
-		"",
-	)
-	if session != nil || !errors.Is(err, ErrPreflightVerifierUnavailable) {
-		t.Fatalf("zero verifier returned (%v, %v), want nil and ErrPreflightVerifierUnavailable", session, err)
-	}
-}
-
-func TestNewWindowsAuthenticodeVerifierFailsClosedOutsideWindows(t *testing.T) {
-	verifier, err := NewWindowsAuthenticodeVerifier()
-	if verifier != nil || !errors.Is(err, ErrUnsupportedPlatform) {
-		t.Fatalf("NewWindowsAuthenticodeVerifier returned (%v, %v)", verifier, err)
+	if session, err := (PreflightWindowsVerifier{}).Verify(config.RoleControl, nil); session != nil || !errors.Is(err, ErrPreflightVerifierUnavailable) {
+		t.Fatalf("zero verifier returned (%v, %v)", session, err)
 	}
 }

@@ -20,10 +20,8 @@ func isNativeHandleOwnershipFatal(err error) bool {
 	return errors.Is(err, ErrNativeHandleOwnershipFatal) || errors.Is(err, windows.ERROR_INVALID_HANDLE)
 }
 
-// verifyPreflightWindows opens and retains the opposing service's WinSW
-// wrapper from a stable SCM observation, then verifies the named-pipe peer that
-// is its direct ServiceHost child. It is reachable only through the claimed
-// PreflightWindowsVerifier authority.
+// verifyPreflightWindows retains the opposing service process identified by
+// matching stable SCM and named-pipe PID observations.
 func verifyPreflightWindows(options productionOptions) (*Session, error) {
 	return verifyWindowsEndpoint(options, options.PipeEndpoint, windowsVerificationPlatformImpl{})
 }
@@ -37,16 +35,16 @@ func (windowsVerificationPlatformImpl) CurrentProcessID() uint32 {
 func (windowsVerificationPlatformImpl) OpenPeerService(name string) (serviceStatusSource, error) {
 	namePointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
-		return nil, fmt.Errorf("encode peer WinSW service name: %w", err)
+		return nil, fmt.Errorf("encode peer service name: %w", err)
 	}
 	manager, err := windows.OpenSCManager(nil, nil, scmManagerOpenAccess)
 	if err != nil {
-		return nil, fmt.Errorf("OpenSCManagerW for peer WinSW service: %w", err)
+		return nil, fmt.Errorf("OpenSCManagerW for peer service: %w", err)
 	}
 	result := &windowsServiceStatusSource{manager: manager}
 	service, err := windows.OpenService(manager, namePointer, scmServiceOpenAccess)
 	if err != nil {
-		return result, fmt.Errorf("OpenServiceW for peer WinSW service %q: %w", name, err)
+		return result, fmt.Errorf("OpenServiceW for peer service %q: %w", name, err)
 	}
 	result.service = service
 	return result, nil
@@ -54,10 +52,6 @@ func (windowsVerificationPlatformImpl) OpenPeerService(name string) (serviceStat
 
 func (windowsVerificationPlatformImpl) OpenProcess(processID uint32) (PeerProcess, error) {
 	return (windowsProcessOpener{}).OpenProcess(processID)
-}
-
-func (windowsVerificationPlatformImpl) NewAuthenticodeVerifier() (AuthenticodeVerifier, error) {
-	return NewWindowsAuthenticodeVerifier()
 }
 
 type windowsServiceStatusSource struct {
@@ -103,7 +97,7 @@ func (source *windowsServiceStatusSource) Close() error {
 	var serviceErr error
 	if source.service != 0 {
 		if err := closeHandle(source.service); err != nil {
-			serviceErr = fmt.Errorf("close peer WinSW service query handle: %w", err)
+			serviceErr = fmt.Errorf("close peer service query handle: %w", err)
 		} else {
 			source.service = 0
 		}

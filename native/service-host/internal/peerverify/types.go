@@ -3,13 +3,10 @@ package peerverify
 import (
 	"context"
 	"errors"
-	"io"
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 )
@@ -19,11 +16,7 @@ var (
 	ErrInvalidOptions               = errors.New("invalid ServiceHost peer verification options")
 	ErrPreflightVerifierUnavailable = errors.New("preflight Windows peer verifier authority is unavailable")
 	ErrNativeHandleOwnershipFatal   = errors.New("peer verifier native handle ownership is unresolved; the current ServiceHost process must exit")
-	ErrPeerUnstable                 = errors.New("named-pipe peer process is not stable")
-	ErrWrapperUnstable              = errors.New("verified WinSW wrapper process is not stable")
-	ErrParentMismatch               = errors.New("ServiceHost is not a direct child of the verified WinSW wrapper")
-	ErrImageMismatch                = errors.New("reopened executable candidate does not match its pinned file identity")
-	ErrAuthenticode                 = errors.New("reopened executable candidate failed Authenticode verification")
+	ErrPeerUnstable                 = errors.New("peer service process is not stable")
 	ErrTokenMismatch                = errors.New("peer process token does not have the expected restricted service SID")
 	ErrClosed                       = errors.New("verified peer session is closed")
 )
@@ -37,118 +30,6 @@ const (
 	PipePeerClient
 	PipePeerServer
 )
-
-// ImageExpectation is a manifest-pinned executable path and SHA-256 digest.
-// SHA256 must be a lowercase, 64-character hexadecimal digest. Platform
-// orchestration must verify the containing installation tree and protected
-// ancestors before invoking this package; this package only reopens this path.
-type ImageExpectation struct {
-	Path   string
-	SHA256 string
-}
-
-// StableProcessFacts are facts already bound to a retained process object.
-type StableProcessFacts struct {
-	ProcessID    uint32
-	CreationTime time.Time
-	StartKey     ProcessStartKey
-}
-
-// ProcessStartKey is the kernel process sequence number when the running
-// Windows version exposes ProcessSequenceNumber. CreationTime plus the retained
-// handle remains the mandatory fallback when Available is false.
-type ProcessStartKey struct {
-	Available      bool
-	SequenceNumber uint64
-}
-
-// FileIdentity is the FILE_ID_INFO identity of an open image file.
-type FileIdentity struct {
-	VolumeSerialNumber uint64
-	FileID             [16]byte
-}
-
-// ImageSubject is a read-only file reopened from the retained process's path.
-// It is bound to its own file handle, not to the process's mapped image section.
-// Implementations must reject reparse points, directories, delete-pending
-// files, and files with more than one hard link. The verifier owns the object
-// and closes it after hashing and Authenticode inspection; callbacks must not
-// retain it.
-//
-// ProcessPathDiagnostic and FinalPathDiagnostic are diagnostic strings. They
-// select the applicable manifest pin but are not themselves identity proof.
-type ImageSubject interface {
-	io.ReaderAt
-	Size() int64
-	Identity() FileIdentity
-	ProcessPathDiagnostic() string
-	FinalPathDiagnostic() (string, error)
-	VerifyUnchanged() error
-	// Close must retain every original native handle when it returns an error
-	// so a later Close call can retry. Successful repeated calls return nil.
-	Close() error
-}
-
-// StableProcess is a retained process object. Its query methods must remain
-// bound to the same native process handle until Close. OpenImage must derive
-// the image path from that handle and return a separately retained read-only
-// file object. Wait must promptly honor context cancellation.
-type StableProcess interface {
-	HandleProcessID() (uint32, error)
-	StillActive() (bool, error)
-	HandleCreationTime() (time.Time, error)
-	HandleStartKey() (ProcessStartKey, error)
-	ImagePathDiagnostic() (string, error)
-	OpenImage() (ImageSubject, error)
-	Wait(context.Context) error
-	// Close must retain every original native handle when it returns an error
-	// so a later Close call can retry. ErrNativeHandleOwnershipFatal is the
-	// exception: the suspect numeric handle remains tombstoned and must never be
-	// passed to a native close again. Successful repeated calls return nil.
-	Close() error
-}
-
-// PeerProcess adds the lineage and token observations required for the pipe
-// endpoint. TokenSnapshot must open the primary token with exactly TOKEN_QUERY,
-// capture the snapshot, and close the token before returning. Wrapper adapters
-// do not need these capabilities.
-type PeerProcess interface {
-	StableProcess
-	DirectParentProcessID() (uint32, error)
-	TokenSnapshot() (TokenSnapshot, error)
-}
-
-// StableWrapper is an already-verified WinSW wrapper and its retained process
-// object. Verify takes ownership of it on every call, including rejected calls.
-// StableFacts must be the facts established when the wrapper handle was opened
-// around stable SCM observations. Its inherited Close contract also requires
-// retaining the wrapper's original handle after every failed close attempt.
-type StableWrapper interface {
-	StableProcess
-	StableFacts() StableProcessFacts
-}
-
-// AuthenticodeEvidence is detached evidence from a policy-aware verifier.
-// The production runtime policy accepts only one embedded primary signature
-// and binds its exact SignerInfo leaf certificate DER to the configured pin.
-type AuthenticodeEvidence = authenticode.Evidence
-
-const (
-	AuthenticodeSignatureKindEmbedded        = authenticode.SignatureKindEmbedded
-	AuthenticodeRuntimeRevocationPolicy      = authenticode.RevocationPolicyRuntimeCacheOnlyNoCheck
-	AuthenticodeDigestPolicySHA256Only       = authenticode.DigestPolicySHA256Only
-	AuthenticodeStrongSignaturePolicyCurrent = authenticode.StrongSignaturePolicyWindowsOSCurrent
-	AuthenticodeSHA256ObjectIdentifier       = authenticode.SHA256ObjectIdentifier
-)
-
-// AuthenticodeVerifier validates the PE signature from the supplied reopened
-// file handle. It must not reopen ProcessPathDiagnostic or otherwise replace
-// the supplied subject with another path-based check. A multi-signature
-// verifier must bind trust and the reported leaf certificate atomically to the
-// same signature.
-type AuthenticodeVerifier interface {
-	VerifyAuthenticode(ImageSubject) (AuthenticodeEvidence, error)
-}
 
 // SIDAttributes is a detached SID_AND_ATTRIBUTES observation.
 type SIDAttributes struct {
@@ -216,21 +97,23 @@ type TokenVerifier interface {
 	VerifyToken(TokenSnapshot, string) (TokenEvidence, error)
 }
 
-// productionOptions is constructed only by a claimed PreflightWindowsVerifier.
-// The opposing service identity, pipe endpoint direction, and all native
-// implementations remain selected internally from Role.
-type productionOptions struct {
-	Role                                   config.Role
-	PipeEndpoint                           *winpipe.Endpoint
-	WrapperImage                           ImageExpectation
-	ServiceHostImage                       ImageExpectation
-	ExpectedLeafSignerCertificateDERSHA256 string
+// PeerProcess is the retained opposing Windows service process. The primary
+// token must be opened with TOKEN_QUERY only. Wait must honor cancellation.
+type PeerProcess interface {
+	HandleProcessID() (uint32, error)
+	StillActive() (bool, error)
+	TokenSnapshot() (TokenSnapshot, error)
+	Wait(context.Context) error
+	Close() error
 }
 
-// PreflightWindowsVerifier is the opaque, process-wide authority for entering
-// native Windows peer verification. Its zero value fails closed. The sole
-// authority is claimed during preflight package initialization and is never
-// exposed by a preflight plan.
+type productionOptions struct {
+	Role         config.Role
+	PipeEndpoint *winpipe.Endpoint
+}
+
+// PreflightWindowsVerifier is the opaque process-wide authority for native
+// Windows peer verification. Its zero value fails closed.
 type PreflightWindowsVerifier struct {
 	verify func(productionOptions) (*Session, error)
 }
@@ -247,10 +130,7 @@ const (
 )
 
 // ClaimPreflightWindowsVerifier transfers the sole process-wide verification
-// authority. Repository architecture tests restrict this call to preflight's
-// reviewed atomic plan bridge, and the runtime caller check prevents another
-// sibling package from claiming first. Concurrent and repeated claims fail
-// closed.
+// authority to preflight's fixed plan bridge.
 //
 //go:noinline
 func ClaimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
@@ -279,15 +159,10 @@ func claimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
 	return PreflightWindowsVerifier{verify: verifyPreflightWindows}, nil
 }
 
-// Verify enters the fixed native verifier with copy-only inputs selected by a
-// validated preflight plan. Only the holder of the claimed authority can call
-// the production implementation successfully.
+// Verify enters the fixed native verifier with the role and connected pipe.
 func (verifier PreflightWindowsVerifier) Verify(
 	role config.Role,
 	endpoint *winpipe.Endpoint,
-	wrapper ImageExpectation,
-	serviceHost ImageExpectation,
-	expectedLeafSignerCertificateDERSHA256 string,
 ) (*Session, error) {
 	if verifier.verify == nil {
 		return nil, ErrPreflightVerifierUnavailable
@@ -295,81 +170,33 @@ func (verifier PreflightWindowsVerifier) Verify(
 	if fatal := rejectedNativeOwners.fatalError(); fatal != nil {
 		return nil, fatal
 	}
-	return verifier.verify(productionOptions{
-		Role:                                   role,
-		PipeEndpoint:                           endpoint,
-		WrapperImage:                           wrapper,
-		ServiceHostImage:                       serviceHost,
-		ExpectedLeafSignerCertificateDERSHA256: expectedLeafSignerCertificateDERSHA256,
-	})
+	return verifier.verify(productionOptions{Role: role, PipeEndpoint: endpoint})
 }
 
-// BeginCommit linearizes a successful verification result against unresolved
-// native-owner publication. The caller must hold the returned read lease until
-// its final endpoint reinspection and Session publication complete.
-func (verifier PreflightWindowsVerifier) BeginCommit() (func(), error) {
-	if verifier.verify == nil {
-		return func() {}, ErrPreflightVerifierUnavailable
-	}
-	return rejectedNativeOwners.beginUse()
-}
-
-// verificationOptions contains the private dependencies used by the pure
-// verification core and its tests. Production callers cannot supply them.
 type verificationOptions struct {
-	PipePeer                               PipePeer
-	LocalProcessID                         uint32
-	ExpectedServiceSID                     string
-	WrapperImage                           ImageExpectation
-	ServiceHostImage                       ImageExpectation
-	ExpectedLeafSignerCertificateDERSHA256 string
-	AuthenticodeVerifier                   AuthenticodeVerifier
-	TokenVerifier                          TokenVerifier
+	PipePeer           PipePeer
+	LocalProcessID     uint32
+	ExpectedServiceSID string
+	TokenVerifier      TokenVerifier
 }
 
-// PIDObservationEvidence records the two source reads surrounding process
-// handle acquisition. Equality is necessary for stability but is not identity
-// proof or authentication.
+// PIDObservationEvidence records the two observations surrounding retained
+// process acquisition.
 type PIDObservationEvidence struct {
 	BeforeOpen uint32
 	AfterOpen  uint32
 }
 
-// ImageEvidence binds a digest and Authenticode result to one retained file
-// identity. Path fields remain diagnostic.
-type ImageEvidence struct {
-	ExpectedPath                           string
-	ProcessPathDiagnostic                  string
-	FinalPathDiagnostic                    string
-	FinalPathDiagnosticError               string
-	Identity                               FileIdentity
-	Size                                   int64
-	SHA256                                 string
-	ExpectedLeafSignerCertificateDERSHA256 string
-	Authenticode                           AuthenticodeEvidence
-}
-
-// ProcessEvidence contains stable process and image facts. DirectParentID is
-// populated for the peer ServiceHost and zero for the wrapper.
-type ProcessEvidence struct {
-	ProcessID      uint32
-	CreationTime   time.Time
-	StartKey       ProcessStartKey
-	DirectParentID uint32
-	Image          ImageEvidence
-}
-
-// VerificationEvidence is audit evidence, not a cryptographic authentication
-// assertion. The retained process objects are the lifetime anchors.
+// VerificationEvidence records the identity facts established for the
+// retained service process.
 type VerificationEvidence struct {
-	PipePID     PIDObservationEvidence
-	Wrapper     ProcessEvidence
-	ServiceHost ProcessEvidence
-	PeerToken   TokenEvidence
+	SCMPID        PIDObservationEvidence
+	PipePID       PIDObservationEvidence
+	PeerProcessID uint32
+	PeerToken     TokenEvidence
 }
 
-// Session owns the stable peer ServiceHost and WinSW wrapper objects. They stay
-// open until Close so PID reuse cannot retarget later checks in the session.
+// Session owns the retained opposing service process for the pipe lifetime.
 // Session values may be copied; every copy shares one private lifetime state.
 type Session struct {
 	state *sessionState
@@ -379,7 +206,6 @@ type sessionState struct {
 	mu            sync.Mutex
 	activeWaits   sync.WaitGroup
 	peer          PeerProcess
-	wrapper       StableWrapper
 	evidence      VerificationEvidence
 	waitContext   context.Context
 	cancelWaits   context.CancelFunc
@@ -388,30 +214,18 @@ type sessionState struct {
 	closeComplete chan struct{}
 }
 
-// Evidence returns the detached facts captured during verification.
+// Evidence returns detached verification facts.
 func (s *Session) Evidence() VerificationEvidence {
 	if s == nil || s.state == nil {
 		return VerificationEvidence{}
 	}
-	state := s.state
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.evidence
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+	return s.state.evidence
 }
 
-// WaitPeer waits for the retained ServiceHost process or cancellation. Close
-// cancels an active wait before joining it.
+// WaitPeer waits for the retained peer process or cancellation.
 func (s *Session) WaitPeer(ctx context.Context) error {
-	return s.wait(ctx, false)
-}
-
-// WaitWrapper waits for the retained WinSW wrapper process or cancellation.
-// Close cancels an active wait before joining it.
-func (s *Session) WaitWrapper(ctx context.Context) error {
-	return s.wait(ctx, true)
-}
-
-func (s *Session) wait(ctx context.Context, wrapper bool) error {
 	if ctx == nil {
 		return errors.New("process wait context is required")
 	}
@@ -420,18 +234,11 @@ func (s *Session) wait(ctx context.Context, wrapper bool) error {
 	}
 	state := s.state
 	state.mu.Lock()
-	if state.closed || state.waitContext == nil {
+	if state.closed || state.waitContext == nil || isNilInterface(state.peer) {
 		state.mu.Unlock()
 		return ErrClosed
 	}
-	var process StableProcess = state.peer
-	if wrapper {
-		process = state.wrapper
-	}
-	if isNilInterface(process) {
-		state.mu.Unlock()
-		return ErrClosed
-	}
+	peer := state.peer
 	lifetime := state.waitContext
 	state.activeWaits.Add(1)
 	state.mu.Unlock()
@@ -443,14 +250,11 @@ func (s *Session) wait(ctx context.Context, wrapper bool) error {
 		stopLifetimeCancellation()
 		cancel()
 	}()
-	return process.Wait(waitContext)
+	return peer.Wait(waitContext)
 }
 
-// Close cancels and joins active waits before releasing retained process
-// objects. No new wait can begin after closing starts. If an underlying close
-// fails, that object remains owned by the Session and a later Close retries it.
-// ErrNativeHandleOwnershipFatal is sticky and must never retry the suspect
-// numeric handle; the Session must remain retained until process exit.
+// Close cancels active waits, joins them, and releases the retained process.
+// A failed native close keeps ownership so a later call can retry it.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
@@ -467,7 +271,7 @@ func (s *Session) Close() error {
 			<-complete
 			continue
 		}
-		if isNilInterface(state.peer) && isNilInterface(state.wrapper) {
+		if isNilInterface(state.peer) {
 			state.closed = true
 			state.mu.Unlock()
 			return nil
@@ -478,23 +282,17 @@ func (s *Session) Close() error {
 		complete := state.closeComplete
 		cancelWaits := state.cancelWaits
 		peer := state.peer
-		wrapper := state.wrapper
 		state.mu.Unlock()
 
 		if cancelWaits != nil {
 			cancelWaits()
 		}
 		state.activeWaits.Wait()
-		peerErr := closeStableProcess("close verified peer ServiceHost process", peer)
-		wrapperErr := closeStableProcess("close verified WinSW wrapper process", wrapper)
-		closeErr := errors.Join(peerErr, wrapperErr)
+		closeErr := closePeerProcess(peer)
 
 		state.mu.Lock()
-		if peerErr == nil {
+		if closeErr == nil {
 			state.peer = nil
-		}
-		if wrapperErr == nil {
-			state.wrapper = nil
 		}
 		state.closing = false
 		close(complete)

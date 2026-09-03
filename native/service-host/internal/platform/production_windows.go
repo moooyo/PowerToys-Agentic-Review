@@ -385,9 +385,8 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 				},
 			)
 		},
-		waitPeerWrapper: composition.peerSession.WaitWrapper,
-		waitPeerHost:    composition.peerSession.WaitPeer,
-		waitStderr:      func(context.Context) error { return composition.stderr.Wait() },
+		waitPeerHost: composition.peerSession.WaitPeer,
+		waitStderr:   func(context.Context) error { return composition.stderr.Wait() },
 	}
 	if composition.role == config.RoleControl {
 		runtime.requestNodeShutdown = func(

@@ -1119,19 +1119,16 @@ type peerverifySourceAnalysis struct {
 }
 
 var expectedPeerverifyIdentifiers = map[string]peerverifyIdentifierCounts{
-	"internal/peerverify/authenticode_other.go":   {},
-	"internal/peerverify/authenticode_windows.go": {},
-	"internal/peerverify/doc.go":                  {},
-	"internal/peerverify/image_windows.go":        {},
-	"internal/peerverify/platform_other.go":       {},
-	"internal/peerverify/process_windows.go":      {},
-	"internal/peerverify/production.go":           {},
-	"internal/peerverify/production_windows.go":   {},
-	"internal/peerverify/token.go":                {},
-	"internal/peerverify/token_windows.go":        {},
-	"internal/peerverify/types.go":                {claimPreflightWindowsVerifier: 1},
-	"internal/peerverify/validation.go":           {},
-	"internal/peerverify/verify.go":               {},
+	"internal/peerverify/doc.go":                {},
+	"internal/peerverify/platform_other.go":     {},
+	"internal/peerverify/process_windows.go":    {},
+	"internal/peerverify/production.go":         {},
+	"internal/peerverify/production_windows.go": {},
+	"internal/peerverify/token.go":              {},
+	"internal/peerverify/token_windows.go":      {},
+	"internal/peerverify/types.go":              {claimPreflightWindowsVerifier: 1},
+	"internal/peerverify/validation.go":         {},
+	"internal/peerverify/verify.go":             {},
 }
 
 func TestProductionPeerVerificationHasOneAtomicBridge(t *testing.T) {
