@@ -8,10 +8,24 @@ export type ReviewControlErrorCode =
   | "unsupported_operation";
 
 interface ReviewControlErrorOptions {
-  readonly cause?: unknown;
   readonly operation: string;
   readonly retryable: boolean;
 }
+
+const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
+const safeDiagnosticPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+
+const sanitizedMessage = (message: string): string =>
+  workerTokenExposurePattern.test(message)
+    ? "The control-plane request failed without exposing credential details."
+    : message;
+
+const sanitizedDiagnostic = (value: string | undefined): string | undefined =>
+  value !== undefined &&
+  safeDiagnosticPattern.test(value) &&
+  !workerTokenExposurePattern.test(value)
+    ? value
+    : undefined;
 
 export class ReviewControlError extends Error {
   readonly code: ReviewControlErrorCode;
@@ -19,7 +33,7 @@ export class ReviewControlError extends Error {
   readonly retryable: boolean;
 
   constructor(code: ReviewControlErrorCode, message: string, options: ReviewControlErrorOptions) {
-    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    super(sanitizedMessage(message));
     this.name = "ReviewControlError";
     this.code = code;
     this.operation = options.operation;
@@ -43,15 +57,14 @@ export class ReviewControlHttpError extends ReviewControlError {
     super("http_error", message, options);
     this.name = "ReviewControlHttpError";
     this.status = options.status;
-    this.requestId = options.requestId;
-    this.serverCode = options.serverCode;
+    this.requestId = sanitizedDiagnostic(options.requestId);
+    this.serverCode = sanitizedDiagnostic(options.serverCode);
   }
 }
 
 export class ReviewControlNetworkError extends ReviewControlError {
-  constructor(operation: string, cause: unknown) {
+  constructor(operation: string) {
     super("network_error", `The ${operation} request could not reach the control plane.`, {
-      cause,
       operation,
       retryable: true,
     });
@@ -62,9 +75,8 @@ export class ReviewControlNetworkError extends ReviewControlError {
 export class ReviewControlProtocolError extends ReviewControlError {
   readonly path: string | undefined;
 
-  constructor(operation: string, message: string, path?: string, cause?: unknown) {
+  constructor(operation: string, message: string, path?: string) {
     super("protocol_error", message, {
-      cause,
       operation,
       retryable: false,
     });

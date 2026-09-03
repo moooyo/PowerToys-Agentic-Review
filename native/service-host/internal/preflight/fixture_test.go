@@ -137,6 +137,7 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 			mtls:           mtlsAttestationFixture(mtlsFacts),
 			localFacts:     localFacts,
 			mtlsFacts:      mtlsFacts,
+			mtlsBound:      true,
 			bound:          true,
 			attested:       true,
 		}
@@ -147,6 +148,30 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	return compositionFixture{
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
+	}
+}
+
+func selectBearerTokenSchema(t *testing.T, fixture *compositionFixture) {
+	t.Helper()
+	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	fixture.control.Control.ClientCertificateStore = ""
+	fixture.control.Control.ClientCertificateDERSHA256 = ""
+	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.installation.controlConfig = cloneConfig(fixture.control)
+	fixture.installation.executorConfig = cloneConfig(fixture.executor)
+	replaceConfigurationRead(t, &fixture.installation.controlBootstrap, fixture.control)
+	replaceConfigurationRead(t, &fixture.installation.executorBootstrap, fixture.executor)
+	if fixture.input.role == config.RoleControl {
+		localFacts := localCredentialFactFixture(t, fixture.control)
+		fixture.input.credentials = &ControlCredentialEvidence{
+			localAuthority:        cngAttestationFixture(localFacts),
+			localFacts:            localFacts,
+			authenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
+			bound:                 true,
+			attested:              true,
+		}
 	}
 }
 

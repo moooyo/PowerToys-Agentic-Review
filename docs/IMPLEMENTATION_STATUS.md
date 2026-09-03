@@ -4,11 +4,12 @@ Status date: 2026-09-04
 
 > ADR 0025 selects per-Worker Bearer Token authentication. The Server and runnable TypeScript
 > Worker use that profile and no longer use Worker mutual TLS, certificate binding, Server binding
-> receipts, or the dormant signer-host direction. The native ServiceHost contains a reviewed
-> source-only Bearer transport, but its unavailable schema-v3 production candidate still composes
-> the historical mTLS profile; a versioned bootstrap, data-root, and installer replacement is
-> required before that native candidate can ship. Historical source and verification evidence
-> remain recorded below, but none of the superseded receipt or signer-host paths is a future
+> receipts, or the dormant signer-host direction. Native ServiceHost bootstrap schema v4 now makes
+> the fixed Worker authentication file a Control-only data-root member and selects the Bearer
+> client; production composition rejects historical schema v3 before opening any Worker credential.
+> The signed outer-package v1 and installer profiles still bind schema-v3 mTLS fields and therefore
+> cannot publish this runtime candidate. Historical source and verification evidence remain
+> recorded below, but none of the superseded receipt or signer-host paths is a future
 > production-enablement prerequisite.
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
@@ -135,10 +136,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   persisted non-exportable CNG P-256 local-capability signing; strict fixed-profile Worker Bearer
   loading; stable pipe-peer process and token verification; canonical role-local RPC; fixed-origin
   TLS 1.3 transport; stable WinSW observation; and suspended Node launch into a non-breakaway root
-  Job. The source-only Bearer constructor sends the Token on every Worker and artifact request and
-  recognizes the selected Token-authentication errors, but `production_windows.go` does not select
-  it yet. The unavailable schema-v3 candidate continues to compose the historical client
-  certificate until a versioned replacement removes that contract rather than reinterpreting it.
+  Job. Bootstrap schema v4 selects the fixed canonical authentication profile and Bearer transport
+  for Control, keeps the Token out of preflight evidence and runtime bootstrap, and gives Executor
+  no Server transport. `production_windows.go` rejects schema v3 before credential acquisition and
+  contains no production `wincert`, mTLS evidence, or legacy `NewClient` path. Signed package v1
+  intentionally continues to reject schema v4 until a separately versioned package profile exists.
 - Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy,
   Control-only key ACL semantics, detached key identities, key-reuse detection inputs, and canonical
   public-SPKI digests for the local Control-to-Executor capability signer. Historical mTLS key
@@ -410,9 +412,10 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, local capability-signing key, firewall policy, fixed plaintext Control
 authentication profile, and machine-enforced Codex policy through a versioned ADR 0013 transaction.
-The repository still needs that versioned Token-aware role and installation profile, destination
-evidence, the production Go installer, production-capable SCM schema and native adapter, a complete
-final recovery schedule, authenticated installer readiness, and a pinned WinSW release. The ADR
+The repository still needs a versioned Token-aware signed outer-package and installation profile,
+destination evidence, the production Go installer, production-capable SCM schema and native
+adapter, a complete final recovery schedule, authenticated installer readiness, and a pinned WinSW
+release. The ADR
 0014 receipt reader, ADR 0021 protected receipt store, Server binding signer and trust material,
 receipt authority, privileged enrollment writer, and ADR 0024 Linux signer-host matrix are
 superseded historical work and are not future gates.
@@ -427,6 +430,20 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-04, the Worker Token follow-up completed the authenticated credential roster and
+Dashboard create, rotate, revoke, copy, and one-time reveal flow; native schema-v4 Token composition;
+and removal of the superseded Server binding coordinator from the production storage lifecycle.
+Token-only database startup now preserves dormant migration-0012 rows without requiring a receipt
+signer or creating an implicit Worker credential. Local verification passed all-workspace lint over
+334 files, typecheck, and build; Dashboard 48/48; the Server Token and credential route matrix
+235/235; Contracts 28/28; historical coordinator and persistence tests 50/50; Worker unit tests
+908/908 plus role and architecture guards 19/19; a clean local WSL database matrix 164/164;
+native focused tests, all-package
+compilation, and `go vet ./...`;
+and Windows amd64 and arm64 cross-builds. Browser verification covered desktop and 390-pixel layouts,
+clipboard copy, and removal of the revealed Token from the DOM after closure. No command used
+`test-env`; Node 26.1.0 continued to produce the repository engine warning.
 
 On 2026-09-04, the per-Worker Bearer Token implementation completed explicitly authorized local
 verification without using `test-env`. All-workspace lint, typecheck, and build passed; the Server

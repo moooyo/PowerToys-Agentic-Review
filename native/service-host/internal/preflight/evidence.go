@@ -165,16 +165,34 @@ func (e Evidence) Validate() error {
 		if e.controlCredentials == nil || !e.controlCredentials.bound || !e.controlCredentials.attested {
 			return invalidEvidenceError("Control credential evidence is absent", nil)
 		}
-		if localCredentialFactsFrom(e.controlCredentials.localAuthority) != e.controlCredentials.localFacts ||
-			mtlsCredentialFactsFrom(e.controlCredentials.mtls) != e.controlCredentials.mtlsFacts {
-			return invalidEvidenceError("stored credential attestations differ from their bound facts", nil)
+		if localCredentialFactsFrom(e.controlCredentials.localAuthority) != e.controlCredentials.localFacts {
+			return invalidEvidenceError("stored local-authority attestation differs from its bound facts", nil)
 		}
-		if err := validateControlCredentialFacts(
-			e.control.Configuration,
-			e.controlCredentials.localFacts,
-			e.controlCredentials.mtlsFacts,
-		); err != nil {
-			return invalidEvidenceError("Control credential attestation is inconsistent", err)
+		if e.control.Configuration.SchemaVersion == config.BearerTokenSchemaVersion {
+			if e.controlCredentials.mtlsBound || e.controlCredentials.authenticationProfile !=
+				config.WorkerAuthenticationProfileBearerTokenV1 ||
+				mtlsCredentialFactsFrom(e.controlCredentials.mtls) != (mtlsCredentialFacts{}) ||
+				e.controlCredentials.mtlsFacts != (mtlsCredentialFacts{}) {
+				return invalidEvidenceError("schemaVersion 4 evidence contains historical mTLS material", nil)
+			}
+			if err := validateBearerControlCredentialFacts(
+				e.control.Configuration,
+				e.controlCredentials.localFacts,
+			); err != nil {
+				return invalidEvidenceError("Bearer Token Control credential attestation is inconsistent", err)
+			}
+		} else {
+			if !e.controlCredentials.mtlsBound || e.controlCredentials.authenticationProfile != "" ||
+				mtlsCredentialFactsFrom(e.controlCredentials.mtls) != e.controlCredentials.mtlsFacts {
+				return invalidEvidenceError("stored mTLS attestation differs from its bound facts", nil)
+			}
+			if err := validateControlCredentialFacts(
+				e.control.Configuration,
+				e.controlCredentials.localFacts,
+				e.controlCredentials.mtlsFacts,
+			); err != nil {
+				return invalidEvidenceError("historical Control credential attestation is inconsistent", err)
+			}
 		}
 	} else if e.controlCredentials != nil || len(e.contents) != 2 {
 		return invalidEvidenceError("Executor evidence contains forbidden Control material or wrong content", nil)
@@ -514,6 +532,10 @@ func encodeControlCredentials(encoder *preflightDigestEncoder, evidence ControlC
 	encoder.u32(local.keyLengthBits)
 	encoder.u32(local.exportPolicy)
 	encoder.u32(local.keyUsage)
+	if evidence.authenticationProfile != "" {
+		encoder.text(evidence.authenticationProfile)
+		return
+	}
 	mtls := evidence.mtlsFacts
 	encoder.text(mtls.storeScope)
 	encoder.text(mtls.storeName)

@@ -9,11 +9,19 @@ import type {
   WorkItemState,
 } from "@agentic-review/contracts";
 import type { ReviewControlAdapter } from "./adapter";
-import { ReviewControlRequestError, ReviewControlUnsupportedOperationError } from "./errors";
+import {
+  ReviewControlProtocolError,
+  ReviewControlRequestError,
+  ReviewControlUnsupportedOperationError,
+} from "./errors";
 import { DashboardHttpClient, type DashboardHttpClientOptions } from "./http-client";
 import {
+  mapCreatedWorkerCredentialResponse,
   mapJobListResponse,
+  mapRevokedWorkerCredentialResponse,
+  mapRotatedWorkerCredentialResponse,
   mapSystemSnapshotResponse,
+  mapWorkerCredentialListResponse,
   mapWorkerListResponse,
   mapWorkItemListResponse,
 } from "./http-mappers";
@@ -25,6 +33,9 @@ import type {
   PageResult,
   Publication,
   SystemSnapshot,
+  WorkerCredential,
+  WorkerCredentialRevocation,
+  WorkerCredentialSecret,
   WorkerNode,
   WorkItem,
 } from "./types";
@@ -32,9 +43,17 @@ import type {
 const endpoints = {
   jobs: "/api/v1/dashboard/jobs",
   system: "/api/v1/dashboard/system",
+  workerCredentials: "/api/v1/operator/worker-nodes",
   workers: "/api/v1/dashboard/workers",
   workItems: "/api/v1/dashboard/work-items",
 } as const;
+
+const workerNodeIdPattern =
+  /^worker:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
+const canonicalDateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const WORKER_ROSTER_PAGE_SIZE = 200;
+const MAX_WORKER_ROSTER_ITEMS = 10_000;
 
 const workItemKinds = {
   issue: true,
@@ -197,7 +216,7 @@ const assertKnownFilters = (
   const allowedNames = new Set(allowed);
   const unknown = Object.keys(filters).find((name) => !allowedNames.has(name));
   if (unknown !== undefined) {
-    invalidRequest(operation, `query.filters.${unknown}`, "a supported filter name");
+    invalidRequest(operation, "query.filters", "supported filter names only");
   }
 };
 
@@ -248,6 +267,96 @@ const buildWorkerPath = (query: ListQuery, operation: string): string => {
   return withQuery(endpoints.workers, parameters);
 };
 
+const buildWorkerCredentialMutationPath = (
+  workerNodeId: string,
+  operation: string,
+  suffix: "token/rotate" | "revoke",
+): string => {
+  if (!workerNodeIdPattern.test(workerNodeId)) {
+    invalidRequest(operation, "workerNodeId", "a canonical worker node identifier");
+  }
+  return `${endpoints.workerCredentials}/${workerNodeId}/${suffix}`;
+};
+
+const ensureMatchingWorkerNodeId = (actual: string, expected: string, operation: string): void => {
+  if (actual !== expected) {
+    throw new ReviewControlProtocolError(
+      operation,
+      `The ${operation} response did not match the requested worker node.`,
+      "$.workerNodeId",
+    );
+  }
+};
+
+interface StrictRosterOptions<TItem> {
+  readonly itemId: (item: TItem) => string;
+  readonly operation: string;
+  readonly readPage: (page: number) => Promise<PageResult<TItem>>;
+}
+
+const collectStrictRoster = async <TItem>({
+  itemId,
+  operation,
+  readPage,
+}: StrictRosterOptions<TItem>): Promise<PageResult<TItem>> => {
+  const items: TItem[] = [];
+  const itemIds = new Set<string>();
+  let expectedTotal: number | undefined;
+
+  for (let page = 1; ; page += 1) {
+    const result = await readPage(page);
+    if (result.items.length > WORKER_ROSTER_PAGE_SIZE) {
+      throw new ReviewControlProtocolError(
+        operation,
+        `The ${operation} response exceeded the requested page size.`,
+      );
+    }
+    if (expectedTotal === undefined) {
+      expectedTotal = result.total;
+      if (expectedTotal > MAX_WORKER_ROSTER_ITEMS) {
+        throw new ReviewControlProtocolError(
+          operation,
+          `The ${operation} response exceeds the dashboard roster limit.`,
+        );
+      }
+    } else if (result.total !== expectedTotal) {
+      throw new ReviewControlProtocolError(
+        operation,
+        `The ${operation} response changed total records between pages.`,
+      );
+    }
+
+    const previousCount = items.length;
+    for (const item of result.items) {
+      const id = itemId(item);
+      if (itemIds.has(id)) {
+        throw new ReviewControlProtocolError(
+          operation,
+          `The ${operation} response repeated a worker between pages.`,
+        );
+      }
+      itemIds.add(id);
+      items.push(item);
+    }
+
+    if (items.length > expectedTotal) {
+      throw new ReviewControlProtocolError(
+        operation,
+        `The ${operation} response returned more records than its total.`,
+      );
+    }
+    if (items.length === expectedTotal) {
+      return { items, total: expectedTotal };
+    }
+    if (items.length === previousCount || result.items.length < WORKER_ROSTER_PAGE_SIZE) {
+      throw new ReviewControlProtocolError(
+        operation,
+        `The ${operation} response made no valid pagination progress.`,
+      );
+    }
+  }
+};
+
 export interface HttpReviewControlAdapterOptions extends DashboardHttpClientOptions {
   readonly client?: DashboardHttpClient;
 }
@@ -283,6 +392,81 @@ export class HttpReviewControlAdapter implements ReviewControlAdapter {
     const operation = "listWorkers";
     const response = await this.client.get(buildWorkerPath(query, operation), operation);
     return mapWorkerListResponse(response, operation);
+  }
+
+  async listAllWorkers(): Promise<PageResult<WorkerNode>> {
+    const operation = "listAllWorkers";
+    return collectStrictRoster({
+      itemId: (item) => item.id,
+      operation,
+      readPage: async (page) => {
+        const response = await this.client.get(
+          `${endpoints.workers}?page=${page}&pageSize=${WORKER_ROSTER_PAGE_SIZE}&sort=identity`,
+          operation,
+        );
+        return mapWorkerListResponse(response, operation);
+      },
+    });
+  }
+
+  async listWorkerCredentials(): Promise<PageResult<WorkerCredential>> {
+    const operation = "listWorkerCredentials";
+    return collectStrictRoster({
+      itemId: (item) => item.workerNodeId,
+      operation,
+      readPage: async (page) => {
+        const response = await this.client.get(
+          `${endpoints.workerCredentials}?page=${page}&pageSize=${WORKER_ROSTER_PAGE_SIZE}&sort=identity`,
+          operation,
+        );
+        return mapWorkerCredentialListResponse(response, operation);
+      },
+    });
+  }
+
+  async createWorkerCredential(displayName: string): Promise<WorkerCredentialSecret> {
+    const operation = "createWorkerCredential";
+    if (
+      displayName.length < 1 ||
+      displayName.length > 512 ||
+      displayName.includes("\0") ||
+      workerTokenExposurePattern.test(displayName)
+    ) {
+      invalidRequest(operation, "displayName", "a non-empty string no longer than 512 characters");
+    }
+    const response = await this.client.post(endpoints.workerCredentials, operation, {
+      displayName,
+    });
+    return mapCreatedWorkerCredentialResponse(response, operation);
+  }
+
+  async rotateWorkerToken(
+    workerNodeId: string,
+    expectedUpdatedAt: string,
+  ): Promise<WorkerCredentialSecret> {
+    const operation = "rotateWorkerToken";
+    const path = buildWorkerCredentialMutationPath(workerNodeId, operation, "token/rotate");
+    const expectedUpdatedAtMilliseconds = Date.parse(expectedUpdatedAt);
+    if (
+      !canonicalDateTimePattern.test(expectedUpdatedAt) ||
+      !Number.isFinite(expectedUpdatedAtMilliseconds) ||
+      new Date(expectedUpdatedAtMilliseconds).toISOString() !== expectedUpdatedAt
+    ) {
+      invalidRequest(operation, "expectedUpdatedAt", "an RFC 3339 date-time");
+    }
+    const response = await this.client.post(path, operation, { expectedUpdatedAt });
+    const result = mapRotatedWorkerCredentialResponse(response, operation);
+    ensureMatchingWorkerNodeId(result.workerNodeId, workerNodeId, operation);
+    return result;
+  }
+
+  async revokeWorkerToken(workerNodeId: string): Promise<WorkerCredentialRevocation> {
+    const operation = "revokeWorkerToken";
+    const path = buildWorkerCredentialMutationPath(workerNodeId, operation, "revoke");
+    const response = await this.client.post(path, operation, {});
+    const result = mapRevokedWorkerCredentialResponse(response, operation);
+    ensureMatchingWorkerNodeId(result.workerNodeId, workerNodeId, operation);
+    return result;
   }
 
   async setWorkerDrain(_workerId: string, _drain: boolean): Promise<void> {

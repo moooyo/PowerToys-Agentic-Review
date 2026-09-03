@@ -244,7 +244,9 @@ func captureRuntimeContents(
 }
 
 // BindControlCredentials obtains atomic attestations from the concrete live
-// objects and binds every configured certificate and key input.
+// objects selected by the explicit bootstrap schema. Schema v3 binds the
+// historical mTLS credential and local capability signer. Schema v4 binds only
+// the unchanged local capability signer and rejects an mTLS object.
 func BindControlCredentials(
 	configuration config.Config,
 	localAuthority *cng.Signer,
@@ -258,10 +260,10 @@ func BindControlCredentials(
 			err,
 		)
 	}
-	if localAuthority == nil || mtls == nil {
+	if localAuthority == nil {
 		return ControlCredentialEvidence{}, preflightError(
 			ErrorCredentialIdentity,
-			"Control credential binding requires both live credential objects",
+			"Control credential binding requires the local-authority signer",
 			nil,
 		)
 	}
@@ -269,11 +271,37 @@ func BindControlCredentials(
 	if err != nil {
 		return ControlCredentialEvidence{}, preflightError(ErrorCredentialIdentity, "read local-authority attestation", err)
 	}
+	localFacts := localCredentialFactsFrom(localAttestation)
+	if configuration.SchemaVersion == config.BearerTokenSchemaVersion {
+		if mtls != nil {
+			return ControlCredentialEvidence{}, preflightError(
+				ErrorCredentialIdentity,
+				"schemaVersion 4 Control credential binding rejects an mTLS object",
+				nil,
+			)
+		}
+		if err := validateBearerControlCredentialFacts(configuration, localFacts); err != nil {
+			return ControlCredentialEvidence{}, err
+		}
+		return ControlCredentialEvidence{
+			localAuthority:        localAttestation,
+			localFacts:            localFacts,
+			authenticationProfile: configuration.Control.WorkerAuthenticationProfile,
+			bound:                 true,
+			attested:              true,
+		}, nil
+	}
+	if mtls == nil {
+		return ControlCredentialEvidence{}, preflightError(
+			ErrorCredentialIdentity,
+			"schemaVersion 3 Control credential binding requires the live mTLS credential",
+			nil,
+		)
+	}
 	mtlsAttestation, err := mtls.Attestation()
 	if err != nil {
 		return ControlCredentialEvidence{}, preflightError(ErrorCredentialIdentity, "read mTLS attestation", err)
 	}
-	localFacts := localCredentialFactsFrom(localAttestation)
 	mtlsFacts := mtlsCredentialFactsFrom(mtlsAttestation)
 	if err := validateControlCredentialFacts(configuration, localFacts, mtlsFacts); err != nil {
 		return ControlCredentialEvidence{}, err
@@ -283,6 +311,7 @@ func BindControlCredentials(
 		mtls:           mtlsAttestation,
 		localFacts:     localFacts,
 		mtlsFacts:      mtlsFacts,
+		mtlsBound:      true,
 		bound:          true,
 		attested:       true,
 	}, nil
@@ -380,6 +409,55 @@ func validateControlCredentialFacts(
 	local localCredentialFacts,
 	mtls mtlsCredentialFacts,
 ) error {
+	if configuration.SchemaVersion != config.SchemaVersion {
+		return preflightError(ErrorCredentialIdentity, "mTLS facts require schemaVersion 3", nil)
+	}
+	if err := validateLocalCredentialFacts(configuration, local); err != nil {
+		return err
+	}
+	control := configuration.Control
+	if control == nil {
+		return preflightError(ErrorCredentialIdentity, "Control credential configuration is absent", nil)
+	}
+	if mtls.storeScope != wincert.LocalMachineStoreScope ||
+		mtls.storeName != control.ClientCertificateStore ||
+		!digestMatchesHex(mtls.certificateDER, control.ClientCertificateDERSHA256) ||
+		!digestMatchesHex(mtls.keySecurityDescriptor, control.ClientPrivateKeySecurityDescriptorSHA256) {
+		return preflightError(ErrorCredentialIdentity, "mTLS attestation differs from configuration", nil)
+	}
+	if mtls.validatedControlServiceSID != configuration.OwnService.SID ||
+		mtls.validatedExecutorSID != configuration.PeerService.SID {
+		return preflightError(ErrorCredentialIdentity, "mTLS attestation used different service SID inputs", nil)
+	}
+	if !validCredentialIdentity(mtls.identity) {
+		return preflightError(ErrorCredentialIdentity, "mTLS attestation contains an invalid key identity", nil)
+	}
+	if mtls.containerName == "" || mtls.keyName != mtls.containerName || mtls.algorithm != "ECDSA_P256" ||
+		mtls.keyLengthBits != 256 || mtls.exportPolicy != 0 || mtls.keyUsage != 2 {
+		return preflightError(ErrorCredentialIdentity, "mTLS attestation key properties are invalid", nil)
+	}
+	if local.identity == mtls.identity {
+		return preflightError(ErrorCredentialIdentity, "mTLS and local-authority keys reuse one CNG identity", nil)
+	}
+	if local.publicKeySPKI == ([sha256.Size]byte{}) || mtls.publicKeySPKI == ([sha256.Size]byte{}) ||
+		subtle.ConstantTimeCompare(local.publicKeySPKI[:], mtls.publicKeySPKI[:]) == 1 {
+		return preflightError(ErrorCredentialIdentity, "mTLS and local-authority keys reuse one public key", nil)
+	}
+	return nil
+}
+
+func validateBearerControlCredentialFacts(
+	configuration config.Config,
+	local localCredentialFacts,
+) error {
+	if configuration.SchemaVersion != config.BearerTokenSchemaVersion || configuration.Control == nil ||
+		configuration.Control.WorkerAuthenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 {
+		return preflightError(ErrorCredentialIdentity, "Bearer Token facts require the schemaVersion 4 profile", nil)
+	}
+	return validateLocalCredentialFacts(configuration, local)
+}
+
+func validateLocalCredentialFacts(configuration config.Config, local localCredentialFacts) error {
 	control := configuration.Control
 	if control == nil {
 		return preflightError(ErrorCredentialIdentity, "Control credential configuration is absent", nil)
@@ -389,38 +467,15 @@ func validateControlCredentialFacts(
 		!digestMatchesHex(local.publicKeySPKI, control.LocalAuthorityPublicKeySHA256) {
 		return preflightError(ErrorCredentialIdentity, "local-authority attestation differs from configuration", nil)
 	}
-	if mtls.storeScope != wincert.LocalMachineStoreScope ||
-		mtls.storeName != control.ClientCertificateStore ||
-		!digestMatchesHex(mtls.certificateDER, control.ClientCertificateDERSHA256) ||
-		!digestMatchesHex(mtls.keySecurityDescriptor, control.ClientPrivateKeySecurityDescriptorSHA256) {
-		return preflightError(ErrorCredentialIdentity, "mTLS attestation differs from configuration", nil)
+	if local.validatedControlServiceSID != configuration.OwnService.SID ||
+		local.validatedExecutorSID != configuration.PeerService.SID {
+		return preflightError(ErrorCredentialIdentity, "local-authority attestation used different service SID inputs", nil)
 	}
-	for _, observed := range []struct {
-		control  string
-		executor string
-	}{
-		{local.validatedControlServiceSID, local.validatedExecutorSID},
-		{mtls.validatedControlServiceSID, mtls.validatedExecutorSID},
-	} {
-		if observed.control != configuration.OwnService.SID ||
-			observed.executor != configuration.PeerService.SID {
-			return preflightError(ErrorCredentialIdentity, "credential attestation used different service SID inputs", nil)
-		}
+	if !validCredentialIdentity(local.identity) {
+		return preflightError(ErrorCredentialIdentity, "local-authority attestation contains an invalid key identity", nil)
 	}
-	if !validCredentialIdentity(local.identity) || !validCredentialIdentity(mtls.identity) {
-		return preflightError(ErrorCredentialIdentity, "credential attestation contains an invalid key identity", nil)
-	}
-	if local.algorithm != "ECDSA_P256" || local.keyLengthBits != 256 || local.exportPolicy != 0 || local.keyUsage != 2 ||
-		mtls.containerName == "" || mtls.keyName != mtls.containerName || mtls.algorithm != "ECDSA_P256" ||
-		mtls.keyLengthBits != 256 || mtls.exportPolicy != 0 || mtls.keyUsage != 2 {
-		return preflightError(ErrorCredentialIdentity, "credential attestation key properties are invalid", nil)
-	}
-	if local.identity == mtls.identity {
-		return preflightError(ErrorCredentialIdentity, "mTLS and local-authority keys reuse one CNG identity", nil)
-	}
-	if local.publicKeySPKI == ([sha256.Size]byte{}) || mtls.publicKeySPKI == ([sha256.Size]byte{}) ||
-		subtle.ConstantTimeCompare(local.publicKeySPKI[:], mtls.publicKeySPKI[:]) == 1 {
-		return preflightError(ErrorCredentialIdentity, "mTLS and local-authority keys reuse one public key", nil)
+	if local.algorithm != "ECDSA_P256" || local.keyLengthBits != 256 || local.exportPolicy != 0 || local.keyUsage != 2 {
+		return preflightError(ErrorCredentialIdentity, "local-authority attestation key properties are invalid", nil)
 	}
 	return nil
 }

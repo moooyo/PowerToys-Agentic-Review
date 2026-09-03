@@ -83,6 +83,30 @@ export interface WorkerNode {
   diskFreeGb: number;
 }
 
+export type WorkerCredentialAuthState = "pending" | "active" | "revoked";
+
+export interface WorkerCredential {
+  workerNodeId: string;
+  displayName: string;
+  authState: WorkerCredentialAuthState;
+  createdAt: string;
+  activatedAt: string | null;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+  updatedAt: string;
+}
+
+export interface WorkerCredentialSecret {
+  workerNodeId: string;
+  authState: Exclude<WorkerCredentialAuthState, "revoked">;
+  token: string;
+}
+
+export interface WorkerCredentialRevocation {
+  workerNodeId: string;
+  authState: "revoked";
+}
+
 export interface Approval {
   id: string;
   workItemRef: string;

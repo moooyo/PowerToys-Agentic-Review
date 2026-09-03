@@ -135,6 +135,18 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 	}
 }
 
+func TestHistoricalOuterPackageProfileRejectsSchemaVersion4Bootstraps(t *testing.T) {
+	fixture := newAdmissionFixture(t)
+	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	fixture.control.Control.ClientCertificateStore = ""
+	fixture.control.Control.ClientCertificateDERSHA256 = ""
+	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
+	fixture.rebuild(t)
+	assertFixtureRejected(t, fixture)
+}
+
 func TestAdmissionRejectsBootstrapBytesMixNodeMixRoleAndSPKIMismatch(t *testing.T) {
 	t.Run("unindexed valid bootstrap bytes", func(t *testing.T) {
 		fixture := newAdmissionFixture(t)

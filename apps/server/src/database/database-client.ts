@@ -7,13 +7,6 @@ import {
   revokeArtifactTransactionDatabaseHandle,
 } from "../artifacts/artifact-transaction-coordinator.js";
 import {
-  isServerBindingPersistenceDatabaseOperation,
-  registerServerBindingPersistenceDatabaseHandle,
-  revokeServerBindingPersistenceDatabaseHandle,
-  type ServerBindingPersistenceDatabaseHandle,
-  type ServerBindingPersistenceDatabaseOperation,
-} from "../enrollment/server-binding-coordinator-v1.js";
-import {
   isArtifactReconciliationDatabaseOperation,
   snapshotArtifactReconciliationDatabaseInput,
 } from "./artifacts.js";
@@ -38,10 +31,34 @@ type ArtifactTransactionDatabaseDispatchers = {
   ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
 };
 
-type ServerBindingPersistenceDatabaseDispatchers = {
-  readonly [TOperation in ServerBindingPersistenceDatabaseOperation]: (
-    input: DatabaseOperationMap[TOperation]["input"],
-  ) => Promise<DatabaseOperationMap[TOperation]["output"]>;
+type RetiredServerBindingPersistenceDatabaseOperation =
+  | "claimServerBindingAuthorizationV1"
+  | "commitServerBindingReceiptV1"
+  | "confirmServerBindingRecordV1"
+  | "createServerBindingAuthorizationV1"
+  | "initializeServerBindingIssuerV1"
+  | "readServerBindingActiveSnapshotV1"
+  | "readServerBindingRecoveryReceiptV1"
+  | "recheckServerBindingActiveSnapshotV1"
+  | "revokeServerBindingV1";
+
+const isRetiredServerBindingPersistenceDatabaseOperation = (
+  operation: DatabaseOperation,
+): operation is RetiredServerBindingPersistenceDatabaseOperation => {
+  switch (operation) {
+    case "claimServerBindingAuthorizationV1":
+    case "commitServerBindingReceiptV1":
+    case "confirmServerBindingRecordV1":
+    case "createServerBindingAuthorizationV1":
+    case "initializeServerBindingIssuerV1":
+    case "readServerBindingActiveSnapshotV1":
+    case "readServerBindingRecoveryReceiptV1":
+    case "recheckServerBindingActiveSnapshotV1":
+    case "revokeServerBindingV1":
+      return true;
+    default:
+      return false;
+  }
 };
 
 export interface DatabaseWorkerTransport {
@@ -132,8 +149,6 @@ export class DatabaseClient {
   #exitObserved = false;
   #artifactTransactionHandleIssued = false;
   #artifactTransactionHandle: ArtifactTransactionDatabaseHandle | undefined;
-  #serverBindingPersistenceHandleIssued = false;
-  #serverBindingPersistenceHandle: ServerBindingPersistenceDatabaseHandle | undefined;
   #shutdownRequested = false;
   #shutdownResponseReceived = false;
   #shutdownAcknowledged = false;
@@ -203,24 +218,6 @@ export class DatabaseClient {
     prepareArtifactCompletion: (input) => this.#send("prepareArtifactCompletion", input),
     commitArtifactCompletion: (input) => this.#send("commitArtifactCompletion", input),
   } satisfies ArtifactTransactionDatabaseDispatchers);
-  readonly #serverBindingPersistenceDispatchers: ServerBindingPersistenceDatabaseDispatchers =
-    Object.freeze({
-      initializeServerBindingIssuerV1: (input) =>
-        this.#send("initializeServerBindingIssuerV1", input),
-      createServerBindingAuthorizationV1: (input) =>
-        this.#send("createServerBindingAuthorizationV1", input),
-      claimServerBindingAuthorizationV1: (input) =>
-        this.#send("claimServerBindingAuthorizationV1", input),
-      commitServerBindingReceiptV1: (input) => this.#send("commitServerBindingReceiptV1", input),
-      confirmServerBindingRecordV1: (input) => this.#send("confirmServerBindingRecordV1", input),
-      readServerBindingRecoveryReceiptV1: (input) =>
-        this.#send("readServerBindingRecoveryReceiptV1", input),
-      readServerBindingActiveSnapshotV1: (input) =>
-        this.#send("readServerBindingActiveSnapshotV1", input),
-      recheckServerBindingActiveSnapshotV1: (input) =>
-        this.#send("recheckServerBindingActiveSnapshotV1", input),
-      revokeServerBindingV1: (input) => this.#send("revokeServerBindingV1", input),
-    } satisfies ServerBindingPersistenceDatabaseDispatchers);
 
   private constructor(
     options: DatabaseWorkerOptions | undefined,
@@ -331,7 +328,9 @@ export class DatabaseClient {
   public request<
     TOperation extends Exclude<
       DatabaseOperation,
-      ArtifactTransactionDatabaseOperation | ServerBindingPersistenceDatabaseOperation | "shutdown"
+      | ArtifactTransactionDatabaseOperation
+      | RetiredServerBindingPersistenceDatabaseOperation
+      | "shutdown"
     >,
   >(
     operation: TOperation,
@@ -353,11 +352,11 @@ export class DatabaseClient {
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
-    if (isServerBindingPersistenceDatabaseOperation(operation)) {
+    if (isRetiredServerBindingPersistenceDatabaseOperation(operation)) {
       return Promise.reject(
         new DatabaseRequestError(
-          "Server binding database operations require persistence coordinator authority.",
-          "SERVER_BINDING_PERSISTENCE_AUTHORITY_REQUIRED",
+          "Server binding persistence operations are retired.",
+          "SERVER_BINDING_PERSISTENCE_RETIRED",
         ),
       ) as Promise<DatabaseOperationMap[TOperation]["output"]>;
     }
@@ -393,39 +392,7 @@ export class DatabaseClient {
     return handle;
   }
 
-  /** Returns one opaque handle that only ServerBindingCoordinatorV1 can consume. */
-  public createServerBindingPersistenceDatabaseHandle(): ServerBindingPersistenceDatabaseHandle {
-    if (this.#isClosing || this.#terminalError !== undefined) {
-      throw new Error("Database client is not available for Server binding persistence adoption.");
-    }
-    if (this.#serverBindingPersistenceHandleIssued) {
-      throw new Error("Database client Server binding persistence handle was already issued.");
-    }
-    const handle = registerServerBindingPersistenceDatabaseHandle(this, {
-      terminalFailure: this.#terminalFailure.promise,
-      request: (<TOperation extends ServerBindingPersistenceDatabaseOperation>(
-        operation: TOperation,
-        input: DatabaseOperationMap[TOperation]["input"],
-      ) => this.#requestServerBindingPersistence(operation, input)) as <
-        TOperation extends ServerBindingPersistenceDatabaseOperation,
-      >(
-        operation: TOperation,
-        input: DatabaseOperationMap[TOperation]["input"],
-      ) => Promise<DatabaseOperationMap[TOperation]["output"]>,
-    });
-    this.#serverBindingPersistenceHandleIssued = true;
-    this.#serverBindingPersistenceHandle = handle;
-    return handle;
-  }
-
   public close(): Promise<void> {
-    const serverBindingHandle = this.#serverBindingPersistenceHandle;
-    if (
-      serverBindingHandle !== undefined &&
-      revokeServerBindingPersistenceDatabaseHandle(serverBindingHandle)
-    ) {
-      this.#serverBindingPersistenceHandle = undefined;
-    }
     if (this.#artifactTransactionHandleIssued && this.#closePromise === undefined) {
       const handle = this.#artifactTransactionHandle;
       if (handle !== undefined && revokeArtifactTransactionDatabaseHandle(handle)) {
@@ -581,18 +548,6 @@ export class DatabaseClient {
     }
   }
 
-  #requestServerBindingPersistence<TOperation extends ServerBindingPersistenceDatabaseOperation>(
-    operation: TOperation,
-    input: DatabaseOperationMap[TOperation]["input"],
-  ): Promise<DatabaseOperationMap[TOperation]["output"]> {
-    if (this.#isClosing || this.#terminalError !== undefined) {
-      return Promise.reject(
-        new Error("Database client is not available for Server binding persistence."),
-      );
-    }
-    return this.#serverBindingPersistenceDispatchers[operation](input);
-  }
-
   #handleMessage(message: DatabaseWorkerMessage): void {
     if (message.type === "ready") {
       this.#isReady = true;
@@ -630,13 +585,6 @@ export class DatabaseClient {
       return;
     }
     this.#terminalError = error;
-    const serverBindingHandle = this.#serverBindingPersistenceHandle;
-    if (
-      serverBindingHandle !== undefined &&
-      revokeServerBindingPersistenceDatabaseHandle(serverBindingHandle)
-    ) {
-      this.#serverBindingPersistenceHandle = undefined;
-    }
     this.#terminalFailure.resolve(error);
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) {

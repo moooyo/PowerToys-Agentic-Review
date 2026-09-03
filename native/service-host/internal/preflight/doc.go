@@ -6,7 +6,10 @@
 // process, certificate-store, or key-opening operations. A dedicated
 // installation verifier must obtain handle-bound evidence first. Compose
 // accepts opaque bootstrap and installation Evidence, current-image Evidence,
-// plus concrete live credential objects. It cross-binds the compiled release
+// plus concrete live credential objects. Historical schema v3 binds both local
+// capability and mTLS attestations; schema v4 binds only the unchanged local
+// capability signer and deliberately excludes the ordinary Worker Token. It
+// cross-binds the compiled release
 // authority, the unique verified ServiceHost self entry, current process and
 // file identities, service identities, and cached atomic attestations into an
 // immutable detached value.

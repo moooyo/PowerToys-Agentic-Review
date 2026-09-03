@@ -16,6 +16,11 @@ func bindBootstrapPair(
 	executor config.Config,
 	documents documentSnapshot,
 ) error {
+	// The signed outer-package v1 profile is immutable historical schema v3.
+	// A Token-aware package requires a separately versioned signed profile.
+	if control.SchemaVersion != config.SchemaVersion || executor.SchemaVersion != config.SchemaVersion {
+		return ErrMismatch
+	}
 	if err := validateConfigurationPair(control, executor); err != nil {
 		return ErrMismatch
 	}
@@ -93,7 +98,8 @@ func bindBootstrapPair(
 }
 
 func validateConfigurationPair(control, executor config.Config) error {
-	if control.Role != config.RoleControl || executor.Role != config.RoleExecutor ||
+	if control.SchemaVersion != executor.SchemaVersion ||
+		control.Role != config.RoleControl || executor.Role != config.RoleExecutor ||
 		control.OwnService != executor.PeerService || control.PeerService != executor.OwnService ||
 		control.WorkerNodeID != executor.WorkerNodeID || control.PipeName != executor.PipeName ||
 		!windowsPathEqual(control.Installation.Root, executor.Installation.Root) ||

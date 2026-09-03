@@ -78,18 +78,11 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
   [
     "server-binding-persistence-v1",
     [
-      "/apps/server/src/database/database-worker.ts",
       "/apps/server/src/database/protocol.ts",
       "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
     ],
   ],
-  [
-    "server-binding-coordinator-v1",
-    [
-      "/apps/server/src/database/database-client.ts",
-      "/apps/server/src/runtime/server-storage-runtime.ts",
-    ],
-  ],
+  ["server-binding-coordinator-v1", []],
   [
     "server-binding-signer-host-client-v1",
     ["/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts"],
@@ -103,13 +96,7 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
     "server-binding-signer-host-protocol-v1",
     ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts"],
   ],
-  [
-    "server-binding-signer-v1",
-    [
-      "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
-      "/apps/server/src/runtime/server-storage-runtime.ts",
-    ],
-  ],
+  ["server-binding-signer-v1", ["/apps/server/src/enrollment/server-binding-coordinator-v1.ts"]],
   [
     "server-binding-signer-provider-v1",
     [
@@ -200,6 +187,7 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
       "LeaseCompletionInput",
       "LeaseFailureInput",
       "LeaseTerminalResult",
+      "ListWorkerNodeCredentialsInput",
       "ReapExpiredLeasesInput",
       "RegisterWorkerInput",
       "RegisteredWorker",
@@ -208,6 +196,8 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
       "ScheduleJobInput",
       "WebhookDeliveryInput",
       "WorkerNodeAuthState",
+      "WorkerNodeCredentialListItem",
+      "WorkerNodeCredentialListResult",
       "WorkerNodeCredentialMutationResult",
     ],
   ],
@@ -374,15 +364,15 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
 const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   [
     "/apps/server/src/database/database-client.ts",
-    "1c4f411d714d29b165e83c6ebd914eb8342b59201dc4470224db27cd8e032dfd",
+    "6be063ba0d86ebf7f02bce231394ecd88241d77785d03936e32dc94a13d20413",
   ],
   [
     "/apps/server/src/database/database-worker.ts",
-    "066a12f83697af170d4777e78c51761c5819bd521d20ac17312722408de7a94c",
+    "50243b8a639a5dcca4f2b8a02ab7c80e4bbb91337b281fc86d595892b978a6ad",
   ],
   [
     "/apps/server/src/database/protocol.ts",
-    "33f6b71418e5f0d22416bd8fed6d20f4cf196fecca4e5ff0709940d529548e53",
+    "af05e3d40b755a9f07c1934f24e0cb5741bc401e36a813bdb8c7e23463b2867f",
   ],
   [
     "/apps/server/src/database/server-binding-persistence-v1.ts",
@@ -422,7 +412,7 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   ],
   [
     "/apps/server/src/runtime/server-storage-runtime.ts",
-    "56487cd6b81f70b12276ebf1e6c9e481dd4981b37d9694c56caa860f13ca3ff3",
+    "ab4b4bb2425175628bc31fdfb2f0789d13aecdaf5ec52f3f3685328f8f316e45",
   ],
 ]);
 

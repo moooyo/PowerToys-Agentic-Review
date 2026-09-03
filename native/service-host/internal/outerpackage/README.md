@@ -8,7 +8,9 @@ ADR 0025 supersedes only the Worker mTLS credential fields in the exact package 
 below. Those fields remain documented as immutable historical schema-v3 data and are not current
 Worker authentication or future production gates. The local capability-authority CNG/SPKI,
 detached package signature and compiled `outertrust`, and Authenticode boundaries remain unchanged.
-A Token-aware replacement must use a new versioned profile. The plaintext Token exists only in
+A Token-aware replacement must use a new versioned profile. ServiceHost bootstrap schema v4 now
+defines the runtime Token composition, but this package-v1 contract cannot carry or authorize that
+bootstrap pair. The plaintext Token exists only in
 `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, its SHA-256 digest exists only in the
 Server database, and neither value is a package input.
 

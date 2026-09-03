@@ -27,8 +27,11 @@ const publicOrigin = "https://review.example.com";
 const sessionToken = "S".repeat(43);
 const fixedUuid = "123e4567-e89b-42d3-a456-426614174000";
 const fixedWorkerNodeId = `worker:${fixedUuid}`;
+const revokedWorkerNodeId = "worker:123e4567-e89b-42d3-a456-426614174001";
 const fixedToken = `arw1_${"A".repeat(43)}`;
 const fixedTokenSha256 = createHash("sha256").update(fixedToken, "ascii").digest("hex");
+const credentialUpdatedAt = "2026-09-03T02:00:00.000Z";
+const rotationBody = { expectedUpdatedAt: credentialUpdatedAt } as const;
 
 const session: OperatorSession = {
   issuer: "https://identity.example.com",
@@ -67,6 +70,9 @@ const createDatabase = (
         const workerNodeId = (input as { readonly workerNodeId: string }).workerNodeId;
         if (operation === "createWorkerNodeCredential") {
           return { workerNodeId, authState: "pending" };
+        }
+        if (operation === "listWorkerNodeCredentials") {
+          return { items: [], total: 0 };
         }
         if (operation === "rotateWorkerToken") {
           return { workerNodeId, authState: "active" };
@@ -120,6 +126,207 @@ beforeEach(() => {
 });
 
 describe("operator worker credential routes", () => {
+  it("lists pending and revoked credentials without requiring an Origin header", async () => {
+    const items = [
+      {
+        workerNodeId: fixedWorkerNodeId,
+        displayName: "Pending Worker",
+        authState: "pending",
+        createdAt: "2026-09-03T00:00:00.000Z",
+        activatedAt: null,
+        rotatedAt: null,
+        revokedAt: null,
+        updatedAt: credentialUpdatedAt,
+      },
+      {
+        workerNodeId: revokedWorkerNodeId,
+        displayName: "Revoked Worker",
+        authState: "revoked",
+        createdAt: "2026-09-03T00:00:00.000Z",
+        activatedAt: "2026-09-03T00:30:00.000Z",
+        rotatedAt: "2026-09-03T01:00:00.000Z",
+        revokedAt: "2026-09-03T01:30:00.000Z",
+        updatedAt: "2026-09-03T01:30:00.000Z",
+      },
+    ] as const;
+    const { database, request } = createDatabase(async (operation, input) => {
+      expect(operation).toBe("listWorkerNodeCredentials");
+      expect(input).toEqual({ offset: 0, limit: 200 });
+      return { items, total: items.length };
+    });
+    const { app } = createApp({ database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: WORKER_CREDENTIAL_PATHS.list,
+        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expectNoStore(response);
+      expect(response.json()).toEqual({ items, total: 2 });
+      expect(response.body).not.toContain(fixedToken);
+      expect(response.body).not.toContain(fixedTokenSha256);
+      expect(response.body).not.toContain("tokenSha256");
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("passes strict page and pageSize values to the database", async () => {
+    const { database, request } = createDatabase(async (operation, input) => {
+      expect(operation).toBe("listWorkerNodeCredentials");
+      expect(input).toEqual({ offset: 6, limit: 3, sort: "identity" });
+      return { items: [], total: 12 };
+    });
+    const { app } = createApp({ database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: `${WORKER_CREDENTIAL_PATHS.list}?page=3&pageSize=3&sort=identity`,
+        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expectNoStore(response);
+      expect(response.json()).toEqual({ items: [], total: 12 });
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["unknown parameter", "?unknown=1"],
+    ["repeated page", "?page=1&page=1"],
+    ["repeated pageSize", "?pageSize=200&pageSize=200"],
+    ["unknown sort", "?sort=updated"],
+    ["repeated sort", "?sort=identity&sort=identity"],
+    ["encoded sort name", "?%73ort=identity"],
+    ["encoded sort value", "?sort=%69dentity"],
+    ["empty page", "?page="],
+    ["zero page", "?page=0"],
+    ["leading-zero page", "?page=01"],
+    ["fractional page", "?page=1.0"],
+    ["signed page", "?page=%2B1"],
+    ["encoded page name", "?%70age=1"],
+    ["encoded page value", "?page=%31"],
+    ["empty trailing field", "?page=1&"],
+    ["oversized pageSize", "?pageSize=201"],
+    ["unsafe page", "?page=9007199254740992"],
+    ["overflowing offset", "?page=9007199254740991&pageSize=200"],
+  ])("rejects a %s list query before database access", async (_name, query) => {
+    const { database, request } = createDatabase();
+    const { app } = createApp({ database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: `${WORKER_CREDENTIAL_PATHS.list}${query}`,
+        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expectNoStore(response);
+      expect(response.json()).toMatchObject({ code: "request_validation_failed" });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("requires an authenticated operator session to list credentials", async () => {
+    const auth = createAuth(false);
+    const { database, request } = createDatabase();
+    const { app } = createApp({ auth, database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: WORKER_CREDENTIAL_PATHS.list,
+      });
+
+      expect(response.statusCode).toBe(401);
+      expectNoStore(response);
+      expect(response.json()).toMatchObject({ code: "operator_authentication_required" });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects unexpected database list fields without exposing them", async () => {
+    const { database } = createDatabase(async () => ({
+      items: [
+        {
+          workerNodeId: fixedWorkerNodeId,
+          displayName: "Unsafe Worker",
+          authState: "pending",
+          createdAt: "2026-09-03T00:00:00.000Z",
+          activatedAt: null,
+          rotatedAt: null,
+          revokedAt: null,
+          updatedAt: "2026-09-03T00:00:00.000Z",
+          token: fixedToken,
+          tokenSha256: fixedTokenSha256,
+        },
+      ],
+      total: 1,
+    }));
+    const { app } = createApp({ database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: WORKER_CREDENTIAL_PATHS.list,
+        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expectNoStore(response);
+      expect(response.body).not.toContain(fixedToken);
+      expect(response.body).not.toContain(fixedTokenSha256);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a stored token-shaped display name without reflecting it", async () => {
+    const { database } = createDatabase(async () => ({
+      items: [
+        {
+          workerNodeId: fixedWorkerNodeId,
+          displayName: `Historic ${fixedToken} Worker`,
+          authState: "pending",
+          createdAt: "2026-09-03T00:00:00.000Z",
+          activatedAt: null,
+          rotatedAt: null,
+          revokedAt: null,
+          updatedAt: "2026-09-03T00:00:00.000Z",
+        },
+      ],
+      total: 1,
+    }));
+    const { app } = createApp({ database });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: WORKER_CREDENTIAL_PATHS.list,
+        headers: { cookie: `${OPERATOR_SESSION_COOKIE}=${sessionToken}` },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expectNoStore(response);
+      expect(response.body).not.toContain(fixedToken);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("creates one pending worker credential and returns the plaintext token only in the response", async () => {
     const { database, request } = createDatabase();
     const { app } = createApp({ database });
@@ -177,6 +384,7 @@ describe("operator worker credential routes", () => {
           method: "POST",
           url: `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
           headers: authenticatedHeaders(),
+          payload: rotationBody,
         });
 
         expect(response.statusCode).toBe(200);
@@ -189,6 +397,7 @@ describe("operator worker credential routes", () => {
         expect(request).toHaveBeenCalledWith("rotateWorkerToken", {
           workerNodeId: fixedWorkerNodeId,
           workerTokenSha256: fixedTokenSha256,
+          expectedUpdatedAt: credentialUpdatedAt,
           rotatedByIssuer: session.issuer,
           rotatedBySubject: session.subject,
         });
@@ -338,6 +547,7 @@ describe("operator worker credential routes", () => {
     ["empty display name", { displayName: "" }],
     ["NUL display name", { displayName: "invalid\0name" }],
     ["oversized display name", { displayName: "x".repeat(513) }],
+    ["token-shaped display name", { displayName: `Worker ${fixedToken} copy` }],
     ["unknown create field", { displayName: "Worker", token: fixedToken }],
     ["non-object body", ["Worker"]],
   ])("rejects %s without generating or storing a token", async (_name, payload) => {
@@ -385,11 +595,25 @@ describe("operator worker credential routes", () => {
   });
 
   it.each([
-    ["rotate invalid node", "/api/v1/operator/worker-nodes/not-a-worker/token/rotate", undefined],
+    [
+      "rotate invalid node",
+      "/api/v1/operator/worker-nodes/not-a-worker/token/rotate",
+      rotationBody,
+    ],
+    [
+      "rotate missing body",
+      `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
+      undefined,
+    ],
     [
       "rotate unexpected body",
       `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
       { token: fixedToken },
+    ],
+    [
+      "rotate non-canonical timestamp",
+      `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
+      { expectedUpdatedAt: "2026-09-03T02:00:00Z" },
     ],
     ["revoke invalid node", "/api/v1/operator/worker-nodes/worker:123/revoke", undefined],
     [
@@ -431,7 +655,7 @@ describe("operator worker credential routes", () => {
     [
       "revoked rotation",
       `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
-      undefined,
+      rotationBody,
       "WORKER_NODE_CREDENTIAL_REVOKED",
       409,
     ],
@@ -445,7 +669,7 @@ describe("operator worker credential routes", () => {
     [
       "unknown database failure",
       `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
-      undefined,
+      rotationBody,
       undefined,
       503,
     ],
@@ -494,6 +718,7 @@ describe("operator worker credential routes", () => {
         method: "POST",
         url: `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
         headers: authenticatedHeaders(),
+        payload: rotationBody,
       });
 
       expect(response.statusCode).toBe(503);

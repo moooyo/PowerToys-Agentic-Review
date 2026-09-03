@@ -7,6 +7,9 @@ import type {
   PageResult,
   Publication,
   SystemSnapshot,
+  WorkerCredential,
+  WorkerCredentialRevocation,
+  WorkerCredentialSecret,
   WorkerNode,
   WorkItem,
 } from "../types";
@@ -20,6 +23,7 @@ import {
 } from "./fixtures";
 
 const latencyMs = 90;
+const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
 
 const wait = async (): Promise<void> =>
   new Promise((resolve) => {
@@ -27,6 +31,17 @@ const wait = async (): Promise<void> =>
   });
 
 const clone = <T>(value: T): T => structuredClone(value);
+
+const createMockToken = (): string => {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  const encoded = globalThis
+    .btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  return `arw1_${encoded}`;
+};
 
 const selected = (actual: string, expected: string | string[] | undefined): boolean => {
   if (expected === undefined) {
@@ -66,6 +81,16 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
   private readonly workItems = clone(workItemFixtures);
   private readonly jobs = clone(jobFixtures);
   private readonly workers = clone(workerFixtures);
+  private readonly workerCredentials: WorkerCredential[] = this.workers.map((worker) => ({
+    workerNodeId: worker.id,
+    displayName: worker.displayName,
+    authState: "active",
+    createdAt: worker.lastHeartbeatAt,
+    activatedAt: worker.lastHeartbeatAt,
+    rotatedAt: null,
+    revokedAt: null,
+    updatedAt: worker.lastHeartbeatAt,
+  }));
   private readonly approvals = clone(approvalFixtures);
   private readonly publications = clone(publicationFixtures);
 
@@ -146,6 +171,72 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
         selected(worker.status, query.filters?.status),
     );
     return page(filtered, query);
+  }
+
+  async listAllWorkers(): Promise<PageResult<WorkerNode>> {
+    await wait();
+    return { items: clone(this.workers), total: this.workers.length };
+  }
+
+  async listWorkerCredentials(): Promise<PageResult<WorkerCredential>> {
+    await wait();
+    return page(this.workerCredentials, { page: 1, pageSize: 200 });
+  }
+
+  async createWorkerCredential(displayName: string): Promise<WorkerCredentialSecret> {
+    await wait();
+    if (workerTokenExposurePattern.test(displayName)) {
+      throw new Error("The worker display name contains credential material.");
+    }
+    const workerNodeId = `worker:${globalThis.crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    this.workerCredentials.unshift({
+      workerNodeId,
+      displayName,
+      authState: "pending",
+      createdAt: now,
+      activatedAt: null,
+      rotatedAt: null,
+      revokedAt: null,
+      updatedAt: now,
+    });
+    return { workerNodeId, authState: "pending", token: createMockToken() };
+  }
+
+  async rotateWorkerToken(
+    workerNodeId: string,
+    expectedUpdatedAt: string,
+  ): Promise<WorkerCredentialSecret> {
+    await wait();
+    const credential = this.workerCredentials.find((item) => item.workerNodeId === workerNodeId);
+    if (
+      credential === undefined ||
+      credential.authState === "revoked" ||
+      credential.updatedAt !== expectedUpdatedAt
+    ) {
+      throw new Error("The worker credential cannot be rotated in its current state.");
+    }
+    const now = new Date().toISOString();
+    credential.rotatedAt = now;
+    credential.updatedAt = now;
+    return { workerNodeId, authState: credential.authState, token: createMockToken() };
+  }
+
+  async revokeWorkerToken(workerNodeId: string): Promise<WorkerCredentialRevocation> {
+    await wait();
+    const credential = this.workerCredentials.find((item) => item.workerNodeId === workerNodeId);
+    if (credential === undefined) {
+      throw new Error("The worker credential does not exist.");
+    }
+    const now = new Date().toISOString();
+    credential.authState = "revoked";
+    credential.revokedAt ??= now;
+    credential.updatedAt = now;
+    const worker = this.workers.find((item) => item.id === workerNodeId);
+    if (worker !== undefined) {
+      worker.status = "disabled";
+    }
+    return { workerNodeId, authState: "revoked" };
   }
 
   async setWorkerDrain(workerId: string, drain: boolean): Promise<void> {

@@ -57,8 +57,8 @@ func TestProductionBootstrapAndClaimAuthoritySourcesRemainExact(t *testing.T) {
 		"internal/localrpc/runtime_bootstrap.go":          "a854417104b2587d6535dc6503f17d638a191c0b8a9d15defc00ad20ac739fe9",
 		"internal/localrpc/runtime_bootstrap_exchange.go": "732a4079aca6cfc3f40a8ac2f72c6263c0ac12dbbfa0471d0f443937e12b81a1",
 		"internal/localrpc/server.go":                     "33031fe40dd5b7ff50b632ba3e619166bcea4f0f7e69ee1983cd64480f12f007",
-		"internal/platform/production_windows.go":         "8313bf514a5305d8643a4126c2e8be0be394afebef9e711561a4af75a18645dc",
-		"internal/preflight/compose.go":                   "48a0d6e4a2690be0f41dd350ec25519645c949589fbb987f6214fbaed54d9c53",
+		"internal/platform/production_windows.go":         "513cd687c1188cbd5f612d44a53a2703b77078bb5508698e824ed7453c073d54",
+		"internal/preflight/compose.go":                   "5b563da95ba48c31d8f9ee82a866b7dbff1fd9c8898a95d569fb15c14198cb5a",
 		"internal/releasemanifest/manifest.go":            "161d7144da7b0d91a134d97f32368cb2b5bf9e8b9706fd0870be1aee4b4bd86d",
 		"internal/releaseprofile/profile.go":              "e1049d6425c3d8c148cef79583849b9f6b8cef9e7cc61d471ebe6d0544397491",
 	}

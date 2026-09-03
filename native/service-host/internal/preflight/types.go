@@ -81,7 +81,8 @@ type VerifiedFile struct {
 
 // Input accepts opaque service-bootstrap, current-image, and installation
 // evidence, retained data-root verifier evidence, and concrete live credential
-// objects. Executor must leave both credential pointers nil.
+// objects. Schema v3 Control requires both credential pointers, schema v4
+// Control requires only LocalAuthoritySigner, and Executor must leave both nil.
 type Input struct {
 	Role                 config.Role
 	ActualBootstrapPath  string
@@ -163,12 +164,14 @@ type releaseBindingSnapshot struct {
 // the concrete validated credential objects. Its fields cannot be populated by
 // callers, and the values themselves expose only copy-returning accessors.
 type ControlCredentialEvidence struct {
-	localAuthority cng.Attestation
-	mtls           wincert.Attestation
-	localFacts     localCredentialFacts
-	mtlsFacts      mtlsCredentialFacts
-	bound          bool
-	attested       bool
+	localAuthority        cng.Attestation
+	mtls                  wincert.Attestation
+	localFacts            localCredentialFacts
+	mtlsFacts             mtlsCredentialFacts
+	authenticationProfile string
+	mtlsBound             bool
+	bound                 bool
+	attested              bool
 }
 
 func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
@@ -176,6 +179,12 @@ func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
 }
 
 func (e ControlCredentialEvidence) MTLSAttestation() wincert.Attestation { return e.mtls }
+
+func (e ControlCredentialEvidence) WorkerAuthenticationProfile() string {
+	return e.authenticationProfile
+}
+
+func (e ControlCredentialEvidence) HasMTLSAttestation() bool { return e.mtlsBound }
 
 // DataRootBinding retains only detached role, installation-root identity, and
 // digest facts. It deliberately contains no dataroot Evidence or native handle.

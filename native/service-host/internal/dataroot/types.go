@@ -58,6 +58,7 @@ const (
 	PurposeHome             PathPurpose = "home"
 	PurposeCodexHome        PathPurpose = "codex_home"
 	PurposeGitConfigGlobal  PathPurpose = "git_config_global"
+	PurposeWorkerAuth       PathPurpose = "worker_authentication_profile"
 )
 
 type PathClass string

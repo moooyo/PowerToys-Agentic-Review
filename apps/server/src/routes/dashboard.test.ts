@@ -106,18 +106,38 @@ describe("dashboard read routes", () => {
     try {
       const response = await app.inject({
         method: "GET",
-        url: `${DASHBOARD_API_PATHS.workers}?status=online,draining&pageSize=200`,
+        url: `${DASHBOARD_API_PATHS.workers}?status=online,draining&pageSize=200&sort=identity`,
       });
 
       expect(response.statusCode).toBe(200);
       expect(request).toHaveBeenCalledWith("listWorkers", {
         pageSize: 200,
+        sort: "identity",
         status: ["online", "draining"],
       });
     } finally {
       await close(app);
     }
   });
+
+  it.each(["sort=heartbeat", "sort=identity&sort=identity"])(
+    "rejects an invalid or repeated worker sort before database access: %s",
+    async (query) => {
+      const { app, request } = createApp();
+
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `${DASHBOARD_API_PATHS.workers}?${query}`,
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(request).not.toHaveBeenCalled();
+      } finally {
+        await close(app);
+      }
+    },
+  );
 
   it("returns the shared system DTO without route-local synthesis", async () => {
     const { app, request } = createApp();

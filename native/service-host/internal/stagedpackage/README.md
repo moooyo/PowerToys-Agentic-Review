@@ -9,9 +9,10 @@ ADR 0025 supersedes only the Worker mTLS credential fields in the exact staged-p
 described below. They remain immutable historical schema-v3 bindings, not current Worker
 authentication or future production gates. The local capability-authority CNG/SPKI, detached
 package signature and compiled `outertrust`, and Authenticode boundaries remain unchanged. A
-Token-aware replacement requires a new versioned profile, while the plaintext Worker Token remains
-outside the package and staged trees in the fixed Control configuration file and its SHA-256 digest
-exists only in the Server database.
+Token-aware replacement requires a new versioned profile. ServiceHost bootstrap schema v4 is
+therefore rejected by this staged-package v1 chain. The plaintext Worker Token remains outside the
+package and staged trees in the fixed Control data-root file, and its SHA-256 digest exists only in
+the Server database.
 
 The volume root and staging ancestors use the closed ambient `winacl` policy. The staging root and
 every descendant use the closed managed trusted-configuration policy: SYSTEM and Administrators

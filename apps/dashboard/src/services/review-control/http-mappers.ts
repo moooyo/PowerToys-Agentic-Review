@@ -20,6 +20,9 @@ import type {
   JobStage,
   PageResult,
   SystemSnapshot,
+  WorkerCredential,
+  WorkerCredentialRevocation,
+  WorkerCredentialSecret,
   WorkerNode,
   WorkItem,
 } from "./types";
@@ -139,7 +142,17 @@ const healthStates = {
   unavailable: true,
 } as const;
 
+const workerCredentialAuthStates = {
+  active: true,
+  pending: true,
+  revoked: true,
+} as const;
+
 const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const workerNodeIdPattern =
+  /^worker:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
+const workerTokenPattern = /^arw1_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 const gitObjectIdPattern = /^[a-f0-9]{40,64}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -166,7 +179,7 @@ const asObject = (
   const allowed = new Set(allowedKeys);
   const unexpected = Object.keys(object).find((key) => !allowed.has(key));
   if (unexpected !== undefined) {
-    return fail(operation, `${path}.${unexpected}`, "no additional property");
+    return fail(operation, path, "an object with no additional properties");
   }
   return object;
 };
@@ -673,6 +686,39 @@ const mapWorker = (value: unknown, operation: string, path: string): WorkerNode 
   };
 };
 
+const workerCredentialKeys = [
+  "workerNodeId",
+  "displayName",
+  "authState",
+  "createdAt",
+  "activatedAt",
+  "rotatedAt",
+  "revokedAt",
+  "updatedAt",
+] as const;
+
+const mapWorkerCredential = (value: unknown, operation: string, path: string): WorkerCredential => {
+  const item = asObject(value, operation, path, workerCredentialKeys);
+  const workerNodeId = readEntityId(item, "workerNodeId", operation, path);
+  const displayName = readString(item, "displayName", operation, path, 1, 512);
+  if (
+    workerTokenExposurePattern.test(workerNodeId) ||
+    workerTokenExposurePattern.test(displayName)
+  ) {
+    fail(operation, path, "a credential record without secret material");
+  }
+  return {
+    workerNodeId,
+    displayName,
+    authState: readEnum(item, "authState", operation, path, workerCredentialAuthStates),
+    createdAt: readDateTime(item, "createdAt", operation, path),
+    activatedAt: readNullableDateTime(item, "activatedAt", operation, path),
+    rotatedAt: readNullableDateTime(item, "rotatedAt", operation, path),
+    revokedAt: readNullableDateTime(item, "revokedAt", operation, path),
+    updatedAt: readDateTime(item, "updatedAt", operation, path),
+  };
+};
+
 const healthKeys = ["id", "name", "status", "summary", "checkedAt"] as const;
 
 const mapHealth = (value: unknown, operation: string, path: string): HealthComponent => {
@@ -762,3 +808,53 @@ export const mapWorkerListResponse = (
   value: unknown,
   operation = "listWorkers",
 ): PageResult<WorkerNode> => mapPage(value, operation, mapWorker);
+
+export const mapWorkerCredentialListResponse = (
+  value: unknown,
+  operation = "listWorkerCredentials",
+): PageResult<WorkerCredential> => {
+  const result = mapPage(value, operation, mapWorkerCredential);
+  if (result.items.length > 200) {
+    fail(operation, "$.items", "an array with at most 200 items");
+  }
+  return result;
+};
+
+const mapWorkerCredentialSecret = (value: unknown, operation: string): WorkerCredentialSecret => {
+  const result = asObject(value, operation, "$", ["workerNodeId", "authState", "token"]);
+  return {
+    workerNodeId: readString(result, "workerNodeId", operation, "$", 43, 43, workerNodeIdPattern),
+    authState: readEnum(result, "authState", operation, "$", {
+      active: true,
+      pending: true,
+    }),
+    token: readString(result, "token", operation, "$", 48, 48, workerTokenPattern),
+  };
+};
+
+export const mapCreatedWorkerCredentialResponse = (
+  value: unknown,
+  operation = "createWorkerCredential",
+): WorkerCredentialSecret => {
+  const result = mapWorkerCredentialSecret(value, operation);
+  if (result.authState !== "pending") {
+    fail(operation, "$.authState", "pending");
+  }
+  return result;
+};
+
+export const mapRotatedWorkerCredentialResponse = (
+  value: unknown,
+  operation = "rotateWorkerToken",
+): WorkerCredentialSecret => mapWorkerCredentialSecret(value, operation);
+
+export const mapRevokedWorkerCredentialResponse = (
+  value: unknown,
+  operation = "revokeWorkerToken",
+): WorkerCredentialRevocation => {
+  const result = asObject(value, operation, "$", ["workerNodeId", "authState"]);
+  return {
+    workerNodeId: readString(result, "workerNodeId", operation, "$", 43, 43, workerNodeIdPattern),
+    authState: readEnum(result, "authState", operation, "$", { revoked: true }),
+  };
+};

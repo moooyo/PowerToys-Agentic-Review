@@ -275,6 +275,9 @@ func validateConfigurationPair(control config.Config, executor config.Config) er
 	mismatch := func(field string) error {
 		return preflightError(ErrorConfigurationPair, "Control and Executor configurations disagree on "+field, nil)
 	}
+	if control.SchemaVersion != executor.SchemaVersion {
+		return mismatch("schemaVersion")
+	}
 	if control.OwnService != executor.PeerService || control.PeerService != executor.OwnService {
 		return mismatch("mutual ownService and peerService identities")
 	}

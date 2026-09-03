@@ -25,7 +25,6 @@ import {
   serverBindingReceiptSigningPreimageV1,
 } from "@agentic-review/contracts/server-binding-authority-v1";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DatabaseClient } from "../../dist/database/database-client.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import {
   auditServerBindingPersistenceV1,
@@ -825,44 +824,6 @@ describe("dormant Server binding persistence v1", () => {
     ).toThrow(/server binding revocations are append-only/u);
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
-
-  it.skipIf(process.platform === "win32")(
-    "fails real database startup when a retained aggregate is corrupt",
-    async () => {
-      const directory = await createTemporaryDirectory("agentic-review-binding-startup-");
-      const databasePath = join(directory, "data", "state.sqlite");
-      const initialClient = await DatabaseClient.create({
-        databasePath,
-        migrationsDirectory,
-        serverBindingTrustedIssuer: trustedIssuer,
-      });
-      await initialClient.close();
-
-      const database = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
-      const fixture = { database, databasePath, directory };
-      fixtures.push(fixture);
-      database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
-      initializeServerBindingIssuerV1(database, trustedIssuer, {
-        expectedIssuerKeyId: trustedIssuer.issuerKeyId,
-      });
-      const authorization = createAuthorization(database, 70);
-      const pending = claimNewBinding(database, authorization);
-
-      database.exec("DROP TRIGGER tr_server_binding_transition");
-      database
-        .prepare("UPDATE server_bindings SET statement_document_sha256 = ? WHERE binding_id = ?")
-        .run("ff".repeat(32), pending.claim.basis.tuple.bindingId);
-      database.close();
-
-      await expect(
-        DatabaseClient.create({
-          databasePath,
-          migrationsDirectory,
-          serverBindingTrustedIssuer: trustedIssuer,
-        }),
-      ).rejects.toThrow(/durable Server binding state is invalid/iu);
-    },
-  );
 });
 
 function createTrustedIssuer(publicKeySpki: Uint8Array): ServerBindingTrustedIssuerDescriptorV1 {

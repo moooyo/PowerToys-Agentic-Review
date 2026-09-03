@@ -53,6 +53,7 @@ type QueryRecord = Record<string, unknown>;
 interface QueryFieldLimits {
   readonly filters: Readonly<Record<string, number>>;
   readonly entityIds?: readonly string[];
+  readonly literals?: Readonly<Record<string, readonly string[]>>;
 }
 
 const MAX_PAGE = Number.MAX_SAFE_INTEGER;
@@ -135,6 +136,18 @@ const entityIdValue = (value: unknown, field: string): string | undefined => {
   return entityId;
 };
 
+const literalValue = (
+  value: unknown,
+  field: string,
+  allowedValues: readonly string[],
+): string | undefined => {
+  const literal = singleQueryValue(value, field);
+  if (literal !== undefined && !allowedValues.includes(literal)) {
+    throw new DashboardQueryValidationError(field, "must be a supported value");
+  }
+  return literal;
+};
+
 const filterValue = (
   value: unknown,
   field: string,
@@ -172,6 +185,7 @@ const normalizeQuery = (value: unknown, limits: QueryFieldLimits): QueryRecord =
     "search",
     ...Object.keys(limits.filters),
     ...(limits.entityIds ?? []),
+    ...Object.keys(limits.literals ?? {}),
   ]);
   const unknownField = Object.keys(raw).find((field) => !allowedFields.has(field));
   if (unknownField !== undefined) {
@@ -200,6 +214,12 @@ const normalizeQuery = (value: unknown, limits: QueryFieldLimits): QueryRecord =
     const entityId = entityIdValue(raw[field], field);
     if (entityId !== undefined) {
       normalized[field] = entityId;
+    }
+  }
+  for (const [field, allowedValues] of Object.entries(limits.literals ?? {})) {
+    const literal = literalValue(raw[field], field, allowedValues);
+    if (literal !== undefined) {
+      normalized[field] = literal;
     }
   }
   return normalized;
@@ -272,7 +292,10 @@ export const registerDashboardRoutes = (
   app.get<{ Querystring: DashboardWorkerListQuery; Reply: DashboardWorkerListResponse }>(
     DASHBOARD_API_PATHS.workers,
     {
-      preValidation: normalizeQueryPreValidation({ filters: { status: 16 } }),
+      preValidation: normalizeQueryPreValidation({
+        filters: { status: 16 },
+        literals: { sort: ["identity"] },
+      }),
       onRequest: authenticate,
       schema: {
         querystring: workerQuerySchema,

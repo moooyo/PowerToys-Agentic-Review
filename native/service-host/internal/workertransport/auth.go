@@ -9,11 +9,13 @@ import (
 	"io"
 	"os"
 	"unicode/utf8"
+
+	roleconfig "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 )
 
 const (
-	WorkerAuthProfileID            = "agentic-review-worker-auth-v1"
-	WorkerAuthProfilePath          = `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`
+	WorkerAuthProfileID            = roleconfig.WorkerAuthenticationProfileBearerTokenV1
+	WorkerAuthProfilePath          = roleconfig.WorkerAuthenticationProfilePath
 	MaximumWorkerAuthDocumentBytes = 4 * 1024
 	workerTokenPrefix              = "arw1_"
 	workerTokenEncodedBytes        = 43

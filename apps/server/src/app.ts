@@ -43,6 +43,7 @@ const isRequestValidationError = (
   error instanceof Error && "validation" in error && error.validation !== undefined;
 
 const workerTokenInPath = /arw1_[A-Za-z0-9_-]{43}/gu;
+const operatorWorkerCredentialRequestsPerMinute = 300;
 const redactWorkerTokens = (value: string): string =>
   value.replace(workerTokenInPath, "[REDACTED]");
 
@@ -241,12 +242,15 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     app.register(async (credentialScope) => {
       await credentialScope.register(rateLimit, {
         global: false,
-        max: 60,
+        max: operatorWorkerCredentialRequestsPerMinute,
         timeWindow: "1 minute",
       });
       credentialScope.addHook(
         "onRequest",
-        credentialScope.rateLimit({ max: 60, timeWindow: "1 minute" }),
+        credentialScope.rateLimit({
+          max: operatorWorkerCredentialRequestsPerMinute,
+          timeWindow: "1 minute",
+        }),
       );
       registerWorkerCredentialRoutes(credentialScope, {
         database: dependencies.database,

@@ -131,6 +131,9 @@ func validateConfigurationPair(control, executor config.Config) error {
 	if control.Role != config.RoleControl || executor.Role != config.RoleExecutor {
 		return mismatch("role")
 	}
+	if control.SchemaVersion != executor.SchemaVersion {
+		return mismatch("schemaVersion")
+	}
 	if control.OwnService != executor.PeerService || control.PeerService != executor.OwnService {
 		return mismatch("mutual service identities")
 	}

@@ -1506,42 +1506,45 @@ describe("Server binding coordinator v1", () => {
     await coordinator.close();
   });
 
-  it("keeps production composition lifecycle-only and out of the application surface", () => {
+  it("keeps superseded Server binding composition out of the production runtime", () => {
     const repositoryRoot = resolve(import.meta.dirname, "../../../..");
     const runtimeSource = readFileSync(
       resolve(repositoryRoot, "apps/server/src/runtime/server-storage-runtime.ts"),
       "utf8",
     );
+    const databaseClientSource = readFileSync(
+      resolve(repositoryRoot, "apps/server/src/database/database-client.ts"),
+      "utf8",
+    );
+    const databaseWorkerSource = readFileSync(
+      resolve(repositoryRoot, "apps/server/src/database/database-worker.ts"),
+      "utf8",
+    );
+    const databaseProtocolSource = readFileSync(
+      resolve(repositoryRoot, "apps/server/src/database/protocol.ts"),
+      "utf8",
+    );
     const mainSource = readFileSync(resolve(repositoryRoot, "apps/server/src/main.ts"), "utf8");
     const appSource = readFileSync(resolve(repositoryRoot, "apps/server/src/app.ts"), "utf8");
-    const runtimeClose = runtimeSource.indexOf("const close = (): Promise<void> =>");
-    const bindingClose = runtimeSource.indexOf(
-      "const bindingClose = activeServerBindingCoordinator.close()",
-      runtimeClose,
-    );
-    const artifactClose = runtimeSource.indexOf(
-      "const artifactClose = bindingClose.then(",
-      runtimeClose,
-    );
-    const artifactOwnerClose = runtimeSource.indexOf("activeCoordinator.close()", artifactClose);
-    const aggregateClose = runtimeSource.indexOf(
-      "Promise.allSettled([bindingClose, artifactClose])",
-      runtimeClose,
-    );
+    const forbiddenComposition =
+      /ServerBindingCoordinatorV1|serverBindingSigner|serverBindingTrustedIssuer|createServerBindingPersistenceDatabaseHandle|server-binding-(?:coordinator|signer)/u;
+    const forbiddenProductionValueEdge =
+      /from\s+["'][^"']*server-binding-(?:coordinator|persistence|signer)[^"']*["']/u;
 
-    expect(runtimeSource).toContain("database.createServerBindingPersistenceDatabaseHandle()");
-    expect(runtimeSource).toContain("await serverBindingCoordinator.open()");
-    expect(runtimeClose).toBeGreaterThan(-1);
-    expect(bindingClose).toBeGreaterThan(runtimeClose);
-    expect(artifactClose).toBeGreaterThan(bindingClose);
-    expect(artifactOwnerClose).toBeGreaterThan(artifactClose);
-    expect(aggregateClose).toBeGreaterThan(artifactOwnerClose);
-    expect(runtimeSource).not.toMatch(
-      /\b(?:activeServerBindingCoordinator|serverBindingCoordinator)\.authority\b/u,
+    expect(runtimeSource).not.toMatch(forbiddenComposition);
+    expect(mainSource).not.toMatch(forbiddenComposition);
+    expect(appSource).not.toMatch(forbiddenComposition);
+    expect(databaseClientSource).not.toMatch(forbiddenProductionValueEdge);
+    expect(databaseClientSource).not.toMatch(
+      /createServerBindingPersistenceDatabaseHandle|serverBindingPersistenceDispatchers|registerServerBindingPersistenceDatabaseHandle/u,
     );
-    expect(mainSource).not.toContain("serverBindingSigner");
-    expect(mainSource).not.toContain("ServerBindingCoordinatorV1");
-    expect(appSource).not.toContain("serverBinding");
+    expect(databaseWorkerSource).not.toMatch(forbiddenProductionValueEdge);
+    expect(databaseWorkerSource).not.toMatch(
+      /auditServerBindingPersistenceV1|requireServerBindingTrustedIssuer|snapshotServerBindingTrustedIssuerDescriptorV1/u,
+    );
+    expect(databaseWorkerSource).toContain("SERVER_BINDING_PERSISTENCE_RETIRED");
+    expect(databaseProtocolSource).not.toContain("serverBindingTrustedIssuer");
+    expect(runtimeSource).toContain("closePromise ??= activeCoordinator.close()");
   });
 
   it("normalizes a signer failure while closing before open and enters failed", async () => {

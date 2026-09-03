@@ -286,6 +286,7 @@ export type DashboardWorkerRead = Static<typeof DashboardWorkerReadSchema>;
 export const DashboardWorkerListQuerySchema = Type.Object(
   {
     ...DashboardListQueryProperties,
+    sort: Type.Optional(Type.Literal("identity")),
     status: Type.Optional(
       Type.Union([
         WorkerStateSchema,

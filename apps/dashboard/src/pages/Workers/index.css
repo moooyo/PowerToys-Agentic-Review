@@ -1,0 +1,123 @@
+.worker-inventory__identity {
+  max-width: 100%;
+}
+
+.worker-inventory__node-id,
+.worker-inventory__instance-id {
+  display: block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-inventory__node-id {
+  color: rgba(0, 0, 0, 0.58);
+  font-size: 12px;
+}
+
+.worker-inventory__instance-id {
+  color: rgba(0, 0, 0, 0.42);
+  font-size: 11px;
+}
+
+.credential-reveal {
+  width: 100%;
+}
+
+.credential-reveal__seal {
+  position: relative;
+  overflow: hidden;
+  padding: 20px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  box-shadow: inset 4px 0 0 #38bdf8;
+  color: #e2e8f0;
+}
+
+.credential-reveal__seal::after {
+  position: absolute;
+  top: -42px;
+  right: -42px;
+  width: 112px;
+  height: 112px;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.credential-reveal__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  color: #7dd3fc;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+}
+
+.credential-reveal__identity,
+.credential-reveal__token-block {
+  width: 100%;
+}
+
+.credential-reveal__identity {
+  margin-bottom: 16px;
+}
+
+.credential-reveal__label.ant-typography {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.credential-reveal__node.ant-typography {
+  color: #e2e8f0;
+  overflow-wrap: anywhere;
+}
+
+.credential-reveal__token.ant-input {
+  border-color: #475569;
+  background: #020617;
+  color: #f8fafc;
+  line-height: 1.65;
+  resize: none;
+  word-break: break-all;
+}
+
+.credential-reveal__token.ant-input:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+}
+
+.credential-reveal__copy.ant-btn {
+  align-self: flex-start;
+  border-color: #475569;
+  background: #1e293b;
+  color: #f8fafc;
+}
+
+.credential-reveal__copy.ant-btn:hover,
+.credential-reveal__copy.ant-btn:focus-visible {
+  border-color: #38bdf8;
+  background: #0f172a;
+  color: #7dd3fc;
+}
+
+.credential-reveal__footnote.ant-typography {
+  margin: 0;
+  font-size: 12px;
+}
+
+@media (max-width: 576px) {
+  .credential-reveal__seal {
+    padding: 16px;
+  }
+
+  .credential-reveal__copy.ant-btn {
+    width: 100%;
+  }
+}
