@@ -180,16 +180,19 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   Server-receipt paths, service and physical-root profile identifiers, internal key-separation
   checks, create-once recovery semantics, and the separation between ordinary parsed `Record` data
   and opaque `RecordEvidence`. Both platform readers remain fail-closed: the dedicated Windows
-  reader identity, handle-bound reader, Server receipt authority, and live native evidence are not
-  implemented, and no release or installer code consumes this contract.
-- A proposed source-only Server enrollment binding authority contract. ADR 0022 fixes the dormant
+  reader identity, handle-bound reader, enabled compiled Server trust, and composed live native
+  evidence are not implemented, and no release or installer code consumes this contract.
+- A source-only, dormant Server enrollment binding authority S0 contract. ADR 0022 fixes the dormant
   `absent -> signing_pending -> reserved -> active -> revoked` lifecycle, a 4 KiB signed historical
   receipt, a separate 4 KiB challenge-bound active-status assertion, dedicated issuer trust,
   exact-replay persistence semantics, monotonic revocation, and authenticated future S1/S2
-  boundaries. This documentation slice adds no codec, migration, signer, trust key, route, binding
-  resolver, Windows writer, reader, live evidence, or production consumer. The environment
-  certificate map remains the only positive Worker mapping, and all Claim and execution paths are
-  unchanged.
+  boundaries. The S0 implementation adds hidden TypeScript wire codecs and ordinary signature
+  checks, a deterministic Server lifecycle reducer, a standard-library-only Go verifier, one-shot
+  challenge and active-status evidence, shared golden documents, and production-reachability
+  guards. The compiled production verifier remains unavailable. There is no migration, signer,
+  trust key, route, binding resolver, Windows writer, reader, or production consumer. The
+  environment certificate map remains the only positive Worker mapping, and all Claim and
+  execution paths are unchanged.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
