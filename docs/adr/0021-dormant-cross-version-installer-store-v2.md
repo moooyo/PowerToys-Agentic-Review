@@ -1,12 +1,14 @@
 # ADR 0021: Dormant Cross-Version Installer Store v2
 
-> Amended by ADR 0025: future migration prerequisites must use the selected Bearer Token enrollment
-> model instead of ADR 0014 mTLS and receipt evidence. Store ownership, publication ordering, and
-> crash recovery remain unchanged.
+> Withdrawn before publication by ADR 0026. Its source package was deleted and no production
+> installer will read or migrate this store format.
+>
+> Historical note: ADR 0025 replaced the mTLS enrollment premise before ADR 0026 withdrew this
+> entire unpublished cross-version store direction.
 
 ## Status
 
-Accepted as a source-only, dormant storage contract on 2026-09-03.
+Withdrawn before publication by ADR 0026.
 
 This decision freezes canonical documents, namespace ownership, migration preconditions,
 publication ordering, and conservative crash recovery. The source-only

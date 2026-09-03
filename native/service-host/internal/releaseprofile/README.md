@@ -194,6 +194,6 @@ must use the signer pin from compiled `Evidence` for every Authenticode decision
 
 There is not yet a production release pipeline in this repository. Consequently, the composed
 Windows runtime remains unavailable in ordinary builds because they intentionally contain no
-compiled release template. The existing `deploy/worker/install-worker.ps1` installs the older
-single-service skeleton, rejects execution, and does not create the split bundles, release template,
-schema-v2 runtime manifest, or signed ServiceHost package.
+compiled release template. ADR 0026 removed the unpublished legacy single-service installer; the
+future clean installer may reuse or simplify this release-profile composition but has no
+compatibility obligation to it.

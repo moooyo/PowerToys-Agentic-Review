@@ -4,6 +4,13 @@ Status: Accepted for initial implementation
 
 Last updated: 2026-09-03
 
+> Amended by ADR 0026 before the first Worker installer was published. The required product boundary
+> is two distinct Windows service identities with Control-only Server credentials and
+> Executor-before-Control start. WinSW, persistent CNG, node-specific packages, retained-handle
+> destination evidence, and their exact root layout are current implementation candidates that may
+> be simplified or replaced. The first supported installer is clean-install-only; no Worker upgrade,
+> migration, fallback, or rollback format currently exists.
+
 ## 1. Purpose
 
 PowerToys Agentic Review discovers GitHub issues and pull requests assigned to a configured
@@ -24,7 +31,7 @@ Workers run on Windows, and the dashboard uses React and Ant Design Pro.
 | Database | Node built-in `node:sqlite` in a dedicated Worker Thread |
 | Database topology | One server instance is the only SQLite owner |
 | Workers | Remote TypeScript processes on Windows |
-| Worker hosting | Two WinSW-managed Windows Services per logical node |
+| Worker hosting | Two distinct Windows Services per logical node; the current candidate uses WinSW |
 | Process supervision | Native `AgenticReview.ProcessHost.exe` using Windows Job Objects |
 | Native adapters | Go 1.24 ProcessHost and ServiceHost, cross-compiled for Windows x64/arm64 |
 | Worker transport | Outbound HTTPS with one long-lived Bearer Token per Worker node |
@@ -84,8 +91,9 @@ ephemeral container layer. A SQLite deployment has exactly one active server rep
 
 ### 4.2 Remote Windows Workers
 
-Each logical worker node is implemented by two WinSW services with distinct restricted Windows
-identities, as specified by ADR 0007:
+Each logical worker node uses two services with distinct restricted Windows identities, as specified
+by ADR 0007. The current implementation candidate hosts them through WinSW, but ADR 0026 permits a
+direct ServiceHost SCM implementation or another simpler wrapper:
 
 - `AgenticReview.Worker.Control` owns the fixed local Worker authentication profile, registration,
   claims, leases, and Server uploads. The standard data path uses a fixed-origin, route-limited
@@ -100,9 +108,10 @@ Executor boundary. Each worker machine installs:
 
 - A pinned Node.js 24 LTS runtime.
 - The compiled Control and Executor TypeScript worker bundles.
-- WinSW for Windows Service integration.
-- `AgenticReview.ServiceHost.exe` for the local identity channel, CNG operations used by the local
-  capability signer, Control-only fixed-origin HTTPS transport, and service-root Job Object.
+- The selected Windows Service integration; the current candidate uses WinSW.
+- `AgenticReview.ServiceHost.exe` for the local identity channel, the selected local-capability
+  mechanism, Control-only fixed-origin HTTPS transport, and service-root Job Object. Persistent CNG
+  is a current candidate rather than a permanent product requirement.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
 - A pinned Codex CLI version.
 - PowerToys build tools required by its advertised recipes.
@@ -188,16 +197,17 @@ All lease and outbox mutations use prepared statements and short `BEGIN IMMEDIAT
 GitHub calls, Codex calls, schema validation, and artifact I/O never run inside a SQLite
 transaction.
 
-`node:sqlite` is currently a Node.js release-candidate API. The deployment pins an exact Node.js
-patch and image digest. Every Node upgrade requires database contract, migration, concurrency, and
-backup verification before rollout.
+`node:sqlite` is currently a Node.js release-candidate API. The Server deployment pins an exact
+Node.js patch and image digest. Any future Server Node.js upgrade requires database contract,
+migration, concurrency, and backup verification before rollout; this is separate from the
+clean-install-only Windows Worker decision.
 
 ## 7. Worker Registration and Capabilities
 
 A worker has a stable Server-generated `workerNodeId`, a new `workerInstanceId` for every Control
-payload start, and a new local Executor boot ID for every Executor payload start. WinSW recovery
-that restarts either Node payload changes the corresponding ID; a pipe reconnect without a process
-restart does not.
+payload start, and a new local Executor boot ID for every Executor payload start. Restarting either
+Node payload through the selected service host changes the corresponding ID; a pipe reconnect
+without a process restart does not.
 
 Any authenticated Dashboard user may create, rotate, or revoke a Worker credential. Creation
 produces one node-specific 256-bit Bearer Token and a `pending` database record. The Server returns
@@ -518,11 +528,12 @@ The Linux server is deployed with systemd or as a single-replica container using
 volume for SQLite, artifacts, and backups. The dashboard build is copied into the server image and
 served by Fastify.
 
-Each Windows worker is installed as two WinSW-managed Windows Services under distinct restricted,
-non-administrator identities. Executor starts first; Control begins claiming only after their local
-identity, protocol, package, ACL, sandbox, and credential preflight succeeds. Control enters drain
-mode before upgrade and stops claiming before either executable bundle is replaced. Production
-execution fails closed unless the split-service boundary in ADR 0007 is active.
+Each Windows worker is installed as two Windows Services under distinct restricted,
+non-administrator identities. The current candidate uses WinSW; the final clean installer may use a
+direct ServiceHost SCM implementation. Executor starts first, and Control begins claiming only after
+the selected local identity, protocol, release, ACL, sandbox, and credential preflight succeeds.
+Production execution fails closed unless the split-service boundary in ADR 0007 is active. The first
+published format has no Worker upgrade path; any future upgrade requires a new ADR.
 
 Server upgrades pause claims, create a database backup, apply checked SQL migrations, start the new
 server, run reconciliation, and then resume claims. Restoring a backup also restores its Worker
@@ -564,8 +575,9 @@ approvals, the GitHub outbox, and Dashboard write actions.
 - Install the TypeScript Control and Executor business supervisors behind their existing role
   entrypoints and complete authenticated handshake, `Ready`, reconnect, drain, and preflight flows.
 - Keep `executionEnabled=false`, advertise zero slots, and reject Claim before dispatcher ownership.
-- Build the production release profile, signed package, and dual-service installer only after the
-  shadow runtime is complete.
+- Build the selected authenticated release format and clean dual-service installer only after the
+  shadow runtime is complete. The current release-profile/package/destination composition may be
+  reused or simplified.
 - Run the ADR 0007 native Windows x64 and arm64 verification and attack suite before enabling any
   Claim authority.
 
@@ -582,7 +594,8 @@ approvals, the GitHub outbox, and Dashboard write actions.
 - Worker Token provisioning, rotation, revocation, and recovery exercises.
 - Backup and restore exercises.
 - Multi-worker concurrency and fault-injection verification.
-- Worker upgrade and drain automation.
+- A post-publication decision for Worker upgrade and drain automation, if product requirements later
+  justify supporting upgrade.
 - Security review for public fork validation.
 
 ## 21. References

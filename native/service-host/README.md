@@ -164,8 +164,8 @@ not a signed package member, a preflight credential attestation, or a Control-to
 The local provisioning helper at `deploy/worker/split/provision-worker-auth.ps1` accepts only a
 secure-string Token or an interactive secure prompt, writes only the fixed path through a
 same-directory write-through replacement, and rereads the exact canonical bytes. It requires the
-installer-owned Control data root to exist and does not substitute for the still-deferred SCM/root
-transaction.
+installer-owned Control data root to exist and does not substitute for the still-deferred
+clean-install root placement and SCM implementation.
 
 Both roles require `APPDATA` and `LOCALAPPDATA` below their role-owned profile. Executor also
 requires `HOME`, `CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`,

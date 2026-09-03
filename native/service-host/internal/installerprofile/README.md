@@ -11,8 +11,9 @@ provisioned separately at `C:\ProgramData\AgenticReview\Control\worker-auth-v1.j
 verification and before Control starts. Provisioning may use one same-directory temporary file,
 which is write-through, owner/DACL-checked, replaced into the fixed path, and deleted on failure.
 
-The package is a validation contract, not a complete installer. The production SCM adapter,
-destination transaction, crash recovery, service creation, activation readiness, and rollback
-consumer remain deferred. A future v2 consumer must accept only
+The package is a validation contract, not a complete installer. The Windows-only clean installer,
+root placement, service creation/read-back, and activation remain deferred. ADR 0026 explicitly
+removes upgrade, migration, rollback-journal, and cross-version-store prerequisites. If the clean
+installer reuses this profile, its consumer must accept only
 `stagedpackage.BearerTokenInstallerV2Package`; ordinary `StagedPackageEvidence` and historical v1
 packages are not sufficient installer inputs.

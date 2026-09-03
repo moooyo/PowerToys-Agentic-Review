@@ -8,11 +8,16 @@ Status date: 2026-09-04
 > the fixed Worker authentication file a Control-only data-root member and selects the Bearer
 > client; production composition rejects historical schema v3 before opening any Worker credential.
 > Signed outer-package v2 and split installer profile v2 now bind schema-v4 bootstraps without mTLS
-> or package credential material; historical v1 remains schema-v3-only. Actual signed release
-> material, root materialization/swap, and the production SCM installer remain incomplete. The
+> or package credential material; historical v1 remains schema-v3-only. Actual authenticated release
+> material and the production Windows clean installer remain incomplete. The
 > verify-only destination evidence composition is now implemented. Historical
 > source and verification evidence remain recorded below, but none of the superseded receipt or
 > signer-host paths is a future production-enablement prerequisite.
+>
+> ADR 0026 now selects an unpublished clean-install-only Windows installer. The former transaction
+> v1 model, transaction v2 lab, cross-version store lab, and legacy single-service mTLS deployment
+> files were deleted before publication. No upgrade, migration, fallback reader, rollback journal,
+> or cross-version store is a future installer prerequisite.
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
@@ -210,11 +215,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   keeps Node, HostControl, ARWX standard I/O, and both relays alive until the graceful barrier or
   that deadline; Executor rejects the notification and can shut down only from authenticated
   Control `Drain`.
-- A dormant split-installation contract and exact Control/Executor WinSW source inputs. ADR 0013
-  freezes enrollment-before-package ordering, clean-host initial installation, physical NTFS roots,
-  same-basename wrapper/config payloads, demand-start and no-recovery maintenance fencing, complete
-  pair replacement, destination re-verification, and recoverable post-commit SCM policy activation.
-  The XML launches only the signed ServiceHost and is not an installer or installation evidence.
+- Reusable Control/Executor WinSW source inputs and the ADR 0026 clean-install-only direction.
+  Upgrade, legacy migration, rollback, journal recovery, and cross-version storage were withdrawn
+  before publication. WinSW, the current node-specific package shape, and destination evidence are
+  implementation candidates rather than permanent ADR 0026 requirements. The existing XML launches
+  only the signed ServiceHost and is not an installer or installation evidence.
 - The ADR 0014 trusted-enrollment-record and ADR 0022 through ADR 0024 Server-binding designs remain
   as historical decision records, but their executable TypeScript and Go contracts, persistence,
   coordinator, signer, signer-host, fixtures, and native node-enrollment/verifier packages were
@@ -231,17 +236,6 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
   roles, missing or duplicate slots, and architecture-field misuse.
-- A dormant split-installer transaction-journal contract and pure data-model slice. ADR 0015 freezes
-  the fixed namespace, protected single-writer model, journal-first inactive materialization,
-  per-effect write-ahead intents, deterministic root-action plans, policy cursors, commit
-  roll-forward, and failed-closed matrix. `installtransaction` now provides the exact typed records,
-  closed pending-action union, fixed path derivation, strict bounded canonical codec, complete
-  single-record validation, non-authorizing next-intent derivation, and a package-private source-only
-  observation reducer. The reducer handles exact pending create, populate, and rename observations;
-  preserves immutable transaction bindings; advances sequences without wraparound; and withholds
-  every phase, SCM-policy, policy-action, and rollback-root evidence gate. No production code
-  consumes it, and no journal store, filesystem mutation, SCM adapter, readiness boundary, or
-  installer is implemented.
 - A source-only, dormant Control result-artifact upload session. It binds one authenticated local
   attempt context to one private Server lease, accepts only the five result lifecycle facts, and
   drives a frozen `create`/`put`/`finalize`/`terminate` port with stable application identities,
@@ -250,34 +244,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   apply responses after the dispatch is fenced, and ambiguity remains sticky until a valid replay
   succeeds. The public state contains no raw lease token or chunk bytes. No production entrypoint,
   supervisor, barrel, or role bundle consumes this module.
-- A split-service SCM policy contract. ADR 0016 fixes both service records, virtual accounts,
-  restricted service SID type, one-privilege requirement, protected service-object rights,
-  bootstrap query rights, minimal native handle masks, disabled-create then secured demand-start/
-  no-recovery pre-start target, full-field maintenance read-back contract, Control-then-Executor
-  stop order, and Executor-then-Control start order. It also proves that SCM effects require a new
-  transaction-journal schema v2 rather than being hidden behind ADR 0015's v1 policy actions. The
-  final delayed-start and restart schedule, failure-action clear ABI, preferred-node behavior,
-  protected-DACL publication, preshutdown value, intermediate create-DACL evidence, pinned WinSW
-  behavior, schema-v2 production composition, native adapter, and Windows evidence remain explicit
-  production commit and rollback blockers.
-- A source-only, dormant installer transaction schema-v2 lab. ADR 0020 independently restates the
-  v1 filesystem action shapes, fixes the ADR 0016 maintenance, stop, disabled-create/configure, and
-  Executor-before-Control start ordinals, and adds an explicit service-configured checkpoint. Every
-  SCM plan stops before ordinal 1 at a state-derived checkpoint containing the exact ordered missing
-  prerequisites. The schema has no `COMMITTED`, `ROLLED_BACK`, or `applied` value;
-  `FAILED_CLOSED` is its only terminal phase. The package-private reducer and observations carry no
-  effect authority and has no runtime consumer, filesystem operation, registry operation, SCM
-  adapter, or native call. Its only non-test importer is the source-only ADR 0021 store contract;
-  protected native storage and native SCM composition remain separate later reviews.
-- A source-only dormant cross-version protected-store v2 lab. ADR 0021 permanently reuses the
-  physical `writer-v1.lock` and `active-head-v1.json` paths, defines the one-way strict v2 head
-  migration and bounded append-only hash-linked entry namespace, and closes entry-before-head
-  publication and conservative crash recovery. `internal/installstorev2lab` implements strict
-  ordinary Head, Predecessor, v1 inventory, and Entry codecs, fixed path/sequence derivation,
-  package-private A-E/V residue and crash-transition models, opaque zero-value-invalid capability
-  shapes, and lifecycle stubs that always return `ErrUnavailable`. It is the sole non-test importer
-  of the ADR 0020 lab and has no production consumer. There is no filesystem operation, migration,
-  permit issuer, native adapter, available store, or native Windows evidence.
+- Current split-service SCM and WinSW candidate facts include fixed service records, virtual
+  accounts, restricted service SIDs, a Control dependency on Executor, and Executor-before-Control
+  start order. ADR 0026 retains only the product boundary of distinct service identities and ordered
+  start; a future clean installer may simplify or replace the current WinSW and SCM details. The
+  earlier journal-coupled lifecycle is historical, and a service adapter for the selected final
+  design is still missing.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
@@ -343,8 +315,9 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 - The dormant ARWX 1.1 and Job execution envelope v2 modules are not exported from package barrels
   and are unreachable from the legacy, Control, and Executor production graphs. Production remains
   fixed to ARWX 1.0 and envelope v1. There is no minor fallback, Claim selection, RoleConfig v3,
-  RuntimeBootstrap selection, enabled slot, or runtime consumer. Activation requires an atomic
-  matching signed-package upgrade and native mixed-version rejection evidence.
+  RuntimeBootstrap selection, enabled slot, or runtime consumer. First activation requires one
+  complete matching clean install and native Windows evidence. Any future upgrade or mixed-version
+  policy requires a new ADR.
 - The RoleConfig v3 and RuntimeBootstrapV2 lab contracts remain permanently blocked under the
   `disabled-execution-lab-v1` profile. Their `protocolVersion = "2.0"` selects only the dormant local
   HostControl RPC2 target; it does not assert Worker API 1.1 or ARWX 1.1 readiness. The derived
@@ -370,15 +343,16 @@ That verification must keep
 alone owns the fixed Worker Token and Server transport while Executor has no Server, lease,
 workspace, ProcessHost, Codex, or Git capability in this shadow milestone.
 
-After the shadow runtime is verified and any findings are closed, the release pipeline must compile
-the production release profile, produce signed role bundles and native binaries, and install the two
-services, identities, ACLs, local capability-signing key, firewall policy, fixed plaintext Control
-authentication profile, and machine-enforced Codex policy through a versioned ADR 0013 transaction.
-The repository now has the versioned Token-aware outer-package and installation-profile contracts,
-but still needs actual signed release material, root materialization and atomic swap, the production Go installer,
-production-capable SCM schema and native adapter, a complete final recovery schedule, authenticated
-installer readiness, and a pinned WinSW release. The ADR
-0014 receipt reader, ADR 0021 protected receipt store, Server binding signer and trust material,
+After the shadow runtime is verified and any findings are closed, the release pipeline must produce
+authenticated role bundles and native binaries, and the ADR 0026 path must install the selected two
+service identities, roots, ACLs, and fixed plaintext Control authentication profile. The current
+compiled release profile, outer package, WinSW, CNG, destination evidence, and machine-policy
+components may be reused or simplified before that installer is implemented.
+The repository still needs actual authenticated release material, root placement, the production
+Windows installer, its selected service adapter, and a practical readiness check. No upgrade,
+migration, fallback, rollback journal, cross-version store, or final recovery schedule is required
+for the first unpublished install format. The ADR 0014 receipt reader, withdrawn ADR 0015/0020/0021
+installer models, Server binding signer and trust material,
 receipt authority, privileged enrollment writer, and ADR 0024 Linux signer-host matrix are
 superseded historical work and are not future gates.
 Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
@@ -393,6 +367,15 @@ validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
+On 2026-09-04, ADR 0026 withdrew the unpublished installer transaction v1 model, transaction v2
+lab, and cross-version store v2 lab. Their 50 files were deleted together with the three legacy
+single-service mTLS deployment files. Current production source contains no import or reference to
+the deleted packages, and the retained Token helper remains under `deploy/worker/split`. Local
+verification passed `git diff --check`, the focused current package/admission/staging/destination/
+installation-verification Go matrix, `go vet ./...`, and Windows amd64 and arm64 `go build ./...`.
+No command used `test-env`. Historical verification entries below remain provenance for deleted
+experiments, not current implementation or future prerequisites.
+
 On 2026-09-04, the installer destination slice added the only production consumer of
 `BearerTokenInstallerV2Package`. The read-only composition accepts no caller-supplied path or
 detached authority, borrows an exact one-shot view of the admitted index, envelope, and schema-v4
@@ -404,7 +387,8 @@ identity/security evidence. The opaque result owns both source and destination h
 serialization, rejects repeated or post-close use, and propagates staged, native, and destination
 cleanup-fatal state. Focused `installerdestination` and `stagedpackage` tests passed locally. This
 does not implement archive extraction, candidate materialization, ACL writes, root swap, SCM, CNG
-provisioning, readiness, or installer transaction recovery.
+provisioning, or readiness. The withdrawn installer transaction recovery model is not required by
+ADR 0026.
 
 On 2026-09-04, the recovery maintenance follow-up added the strict loopback-only Server mode,
 pre-listen atomic operator-auth purge, database-only storage runtime, Worker route fence, not-ready
@@ -519,8 +503,8 @@ findings. The local runtime was Node 26.1.0 while the repository requires `>=24.
 emitted an engine warning. These local results are not Linux evidence; ADR 0025 later cancelled the
 ADR 0024 Linux process matrix because signer-host is no longer a production direction.
 
-On 2026-09-02, the source-only package-private installer observation reducer completed the full
-ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled
+On 2026-09-02, the now-withdrawn source-only package-private installer observation reducer
+completed the full ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled
 the focused `installtransaction` test binary for Windows amd64 and arm64, and both architectures
 completed all-package builds and cross-platform vet. The reducer remains unexported and has no
 production consumer; every idle phase, pending SCM policy action, policy-plan continuation, and
@@ -615,8 +599,8 @@ profile, or ADR 0015 state and recovery model. No validation ran on the local Wi
 Windows enrollment reader still returns `ErrUnavailable`; these results are contract and
 cross-compilation evidence, not enrollment, installation, signing, or native runtime evidence.
 
-On 2026-09-02, the dormant `installtransaction` model completed the full ServiceHost matrix on
-`test-env` with Go 1.26.7: all-package unit, race, and vet suites, followed by Windows amd64 and
+On 2026-09-02, the now-withdrawn dormant `installtransaction` model completed the full ServiceHost
+matrix on `test-env` with Go 1.26.7: all-package unit, race, and vet suites, followed by Windows amd64 and
 arm64 all-package test compilation, builds, and cross-platform vet. The exact package also passed
 focused unit, race, and vet runs. Independent review found no remaining P0-P2 issues. No validation
 ran on the local Windows machine. This proves the pure codec, validation, path, and next-intent

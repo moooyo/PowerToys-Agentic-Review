@@ -1,11 +1,16 @@
 # ADR 0016: Windows Split-Service SCM Policy v1
 
+> Partially superseded before publication by ADR 0026. Its service and WinSW values are optional
+> implementation input, not permanently selected product requirements. The journal-coupled
+> maintenance fence, upgrade, rollback, and blocked final-policy lifecycle are retired.
+>
 ## Status
 
-Accepted as the fixed service-record and maintenance-fence contract for the dormant RoleConfig v2
-split installer. This decision does not make service creation, activation, commit, or rollback
-available in production. The final recovery schedule, per-service preshutdown contract, pinned
-WinSW release behavior, and transaction-journal schema v2 remain explicit blockers.
+Partially superseded before publication by ADR 0026.
+
+Current installer work must start from ADR 0026. The remaining sections below preserve historical
+SCM analysis and do not create a production prerequisite unless a later decision explicitly reuses
+one value.
 
 This ADR resolves only the portions of the SCM deferral in ADRs 0013 and 0015 that can be fixed
 without inventing product recovery values or claiming untested WinSW behavior. RoleConfig remains

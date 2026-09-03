@@ -1,15 +1,14 @@
 # ADR 0015: Split Installer Transaction Journal v1
 
-> Amended by ADR 0025: Worker mTLS and Server binding receipt facts are removed from the selected
-> enrollment direction. Journal durability, rollback, service fencing, and the rule that secrets
-> never enter the journal remain unchanged.
+> Withdrawn before publication by ADR 0026. No production installer may read, write, migrate, or
+> recreate this journal format.
+>
+> Historical note: ADR 0025 removed Worker mTLS and Server binding receipt facts before ADR 0026
+> withdrew this entire unpublished journal direction.
 
 ## Status
 
-Accepted as the narrow transaction and journal contract for the dormant RoleConfig v2 split
-installer. This decision defines ordinary data, deterministic reduction, and required Windows
-durability semantics. It does not make a production installer, destination verifier, SCM adapter,
-or installer-facing readiness boundary available.
+Withdrawn before publication by ADR 0026.
 
 ## Context
 

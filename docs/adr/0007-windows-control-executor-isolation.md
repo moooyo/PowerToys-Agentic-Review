@@ -1,8 +1,15 @@
 # ADR 0007: Isolate Windows Worker Control and Execution Identities
 
-> Amended by ADR 0025: Worker-to-Server authentication uses a per-Worker Bearer Token in ordinary
-> local Control configuration instead of a CNG-backed mTLS client certificate. The local
-> Control-to-Executor capability signer and process isolation remain unchanged.
+> Amended by ADR 0026 before publication of a Worker installer. The permanent product boundary is
+> two distinct Windows service identities, Control-only Server credentials, an authenticated local
+> channel, and Executor-before-Control start. WinSW, persistent CNG, node-specific packages,
+> destination evidence, and their exact installation mechanics are current replaceable candidates.
+> The first supported installer is clean-install-only; no Worker upgrade, migration, fallback, or
+> rollback path is selected.
+>
+> Historical note: ADR 0025 replaced Worker-to-Server mTLS with a per-Worker Bearer Token. ADR 0026
+> later made the persistent CNG local signer an implementation candidate rather than a permanent
+> installer requirement; the Control/Executor identity boundary remains current.
 
 - Status: Accepted
 - Date: 2026-08-31
@@ -30,13 +37,14 @@ identity.
 ## Decision
 
 Represent one physical Windows machine as one logical Worker node, but install two independently
-supervised WinSW services with different Windows identities:
+supervised Windows services with different Windows identities. The current candidate uses WinSW,
+which a later clean-installer decision may replace:
 
-- `AgenticReview.Worker.Control` owns Server communication, mTLS, registration, claims, lease
+- `AgenticReview.Worker.Control` owns the Worker Bearer Token, Server communication, registration, claims, lease
   renewal, fencing, and result upload. It cannot read execution workspaces, Codex state, Codex
   credentials, Git binaries, or ProcessHost binaries, and cannot launch repository-facing tools.
 - `AgenticReview.Worker.Executor` owns disposable checkouts, Codex, Git, ProcessHost, validation
-  tools, resource budgets, and cleanup. It has no Server mTLS key, Server bearer credential, GitHub
+  tools, resource budgets, and cleanup. It has no Server bearer credential, GitHub
   App credential, publication credential, webhook secret, database access, or raw Server lease
   token.
 
@@ -55,9 +63,9 @@ own Node child; that private bootstrap/RPC channel is not an inter-service trans
 all preflight checks in this ADR succeed. The current single-process mode may remain available for
 contract development with execution disabled; it is not a production fallback.
 
-This ADR supersedes ADR 0004 only where ADR 0004 describes one Worker service identity. ADR 0004's
-WinSW hosting, ProcessHost, Job Object, drain, and headless-execution decisions remain in force for
-the Executor service.
+This ADR supersedes ADR 0004 only where ADR 0004 describes one Worker service identity. ProcessHost,
+Job Object, drain, and headless-execution isolation remain applicable to Executor. WinSW hosting is
+a current candidate rather than a permanent requirement.
 
 ## Security Objective and Threat Model
 
@@ -70,7 +78,7 @@ attacker must not be able to:
 - renew, complete, fail, or release a Server lease directly;
 - claim another job or manufacture a locally authorized job;
 - access GitHub publication or ingestion credentials;
-- read the Control mTLS key, Control signing key, Control memory, or Control state;
+- read the Control Worker Token, current local signing key, Control memory, or Control state;
 - change trusted Worker executables, manifests, service configuration, or ACLs; or
 - renew local authority after the last signed grant or make a stale result acceptable to the
   Server.
@@ -128,19 +136,20 @@ control access. Default same-machine process and token ACLs are not the sole enf
 ### Native service bootstrap
 
 Node.js does not expose all Windows primitives required here, including exact Named Pipe security
-attributes, endpoint PID checks, token inspection, and restricted handle inheritance. Each WinSW
-service therefore launches a small signed `AgenticReview.ServiceHost.exe` as its direct child. The
-ServiceHost is a Go platform adapter, not a Node addon and not a third Windows service. It contains
-no scheduling, lease, repository, prompt, result, or publication policy.
+attributes, endpoint PID checks, token inspection, and restricted handle inheritance. The current
+candidate has WinSW launch a small signed `AgenticReview.ServiceHost.exe`; ADR 0026 permits a direct
+ServiceHost SCM implementation instead. ServiceHost is a Go platform adapter, not a Node addon or
+third Windows service. It contains no scheduling, lease, repository, prompt, result, or publication
+policy.
 
 ServiceHost performs only these duties:
 
 - own or connect the ACL-restricted Named Pipe and verify its peer ServiceHost;
 - create a private per-launch HostControl pipe, bind its only client to the exact Node child, and
   expose a role-local typed native RPC endpoint over that channel;
-- on Control, use the non-exportable CNG client-certificate key through a fixed-origin,
-  route-limited mTLS Worker API transport and sign dedicated local-authority prehashes requested by
-  the trusted Control payload;
+- on Control, own the fixed-origin, route-limited Bearer Token Worker API transport and, in the
+  current candidate, sign dedicated local-authority prehashes requested by the trusted Control
+  payload;
 - start one pinned Node executable and one pinned TypeScript bundle with an explicit inherited
   handle list and a replacement environment;
 - relay bounded, framed bytes between the Node payload and the verified local Named Pipe session;
@@ -304,7 +313,7 @@ artifact bytes.
 
 ## Execution Capabilities
 
-Control never sends the Server's random lease token, mTLS material, Authorization header, or raw
+Control never sends the Server's random lease token, Worker Token, Authorization header, or raw
 Server response to Executor. After a successful Server claim, Control creates a signed local
 `ExecutionCapabilityV1` containing only:
 
@@ -319,12 +328,12 @@ Server response to Executor. After a successful Server claim, Control creates a 
 - issue time, maximum Server lease time, and a local grant duration no longer than 45 seconds; and
 - a nonce and protocol audience.
 
-The capability is serialized with the shared canonical representation and signed with ECDSA P-256
-and SHA-256 by a non-exportable CNG key available only to Control. Executor has only the pinned
-public key. It verifies the signature, audience, Executor boot ID, schema digest, all limits, and the
-full envelope digest before creating a workspace. It accepts each `capabilityId` once. Replay state
-may be in memory because an Executor restart changes its boot ID and invalidates every old
-capability.
+The current candidate serializes the capability with the shared canonical representation and signs
+it with ECDSA P-256 and SHA-256 through a non-exportable CNG key available only to Control. Executor
+has only the public key. The required boundary is Control-only grant authority and complete
+Executor-side verification; ADR 0026 permits replacing persistent CNG and its package binding.
+Executor verifies the signature, audience, boot ID, schema digest, limits, and full envelope digest
+before creating a workspace. It accepts each `capabilityId` once.
 
 The capability never contains a free-form command. Executor maps a typed operation to a locally
 installed, signed, manifest-pinned executable and fixed argument builder. A recipe ID is not an
@@ -366,62 +375,24 @@ Control stops renewing local grants immediately when Server renewal is uncertain
 extend local execution based only on a healthy pipe. The local 45-second grant is deliberately
 shorter than the Server lease TTL and Worker self-abort threshold.
 
-## Native mTLS Transport
+## Native Worker Transport and Local Capability Candidate
 
-Node.js standard TLS and HTTPS APIs do not accept an `NCRYPT_KEY_HANDLE`, a Windows certificate
-store locator, or an application-provided signing callback. The standard Control TypeScript data
-path therefore never loads a PEM or PFX copy of the Server mTLS private key. Its ServiceHost obtains
-the certificate and non-exportable key from the Local Machine store and CNG, then performs the
-Worker API request through Go TLS using a narrowly scoped CNG-backed signer.
+ADR 0025 replaces Worker mTLS with a Bearer Token stored only in Control's fixed local
+configuration. The typed HostControl path pins the Server origin, SNI, TLS policy, routes, byte
+limits, deadlines, and concurrency; callers cannot supply arbitrary URLs, redirects, proxies, or
+hop-by-hop headers.
 
-ServiceHost and Node run with the same trusted Control service identity. A key DACL that grants the
-Control service SID cannot create a per-process boundary between them; a compromised Control Node
-could call CNG through other native code. The security boundary is between Control and Executor.
-The supported path withholds private-key bytes and handles from Node and reduces accidental misuse,
-but it does not claim to contain a compromised Control process. Making the route limiter a boundary
-against Control would require another token and service SID, which is outside this two-service
-design.
+The current implementation uses a non-exportable CNG P-256 key available only to Control for local
+capability signatures. That mechanism preserves the asymmetric Control-to-Executor grant boundary,
+but ADR 0026 does not require persistent CNG, its security-descriptor digest, or node-specific
+package binding. A later implementation may replace it with a simpler mechanism while keeping the
+Control-only authority and Executor verification properties.
 
-The HostControl pipe is independent of the ARWX stream, so a large Worker API response cannot delay
-an authorization renewal or cancellation frame. Its first exchange is a bounded,
-role-specific `RuntimeBootstrapV1` document and acknowledgement. Control then keeps the connection
-for typed Worker API and signing RPC; Executor exposes only explicitly approved native bootstrap and
-workspace operations. An ARWX frame can never select a HostControl operation.
-
-The role-local RPC accepts only typed Worker API operations. Each operation maps locally to one
-fixed method and path template; schema-validated identifiers are encoded as individual path
-segments. It pins the configured Server origin, SNI, TLS roots, client certificate,
-request and response byte limits, deadlines, and concurrency. Redirects are disabled. Go transport
-proxy discovery is disabled unless installation policy pins one authenticated enterprise proxy.
-The caller cannot provide a raw URL, `Host`, SNI, TLS roots, client certificate, redirect behavior,
-proxy, or hop-by-hop headers. Route checks never use string prefixes or caller-controlled
-percent-encoding. It is not an HTTP CONNECT endpoint, generic reverse proxy, socket broker, or
-arbitrary URL fetcher.
-
-Capability signing accepts the one installed local-authority key and an exactly 32-byte prehash;
-CNG signs that digest once without hashing it again. This is deliberately a raw prehash signing
-operation available to the trusted Control identity, not an interface that can prove how Control
-constructed the digest. Its safety comes from the dedicated key, verifier-side domain separation,
-and complete denial to Executor, not from the digest length. A stronger per-process signing boundary
-would likewise require a separate ServiceHost identity.
-
-Handshake transcript, execution capability, and renewal signing each use an unambiguous versioned
-domain tag before hashing. Every local-authority wire signature uses fixed-width P1363 `r || s` and
-low-S normalization. A future design that cannot preserve domain separation must provision
-different keys per purpose instead of reusing this key.
-
-The certificate is selected only by the pinned SHA-256 digest of its DER form; subject, display
-name, issuer name, and the conventional SHA-1 certificate thumbprint are not selectors. Acquisition
-requires
-`CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG`, `CRYPT_ACQUIRE_COMPARE_KEY_FLAG`,
-`CRYPT_ACQUIRE_NO_HEALING`, and `CRYPT_ACQUIRE_SILENT_FLAG`, with exact `pfCallerFree` ownership.
-Preflight reads back algorithm P-256, `ExportPolicy=0`, signing-only key usage, and the protected key
-DACL. `NCryptSignHash` returns fixed-width P1363 `r || s`: the Go TLS signer converts it to ASN.1 DER,
-while local capabilities retain P1363 and normalize to low-S. Executor cannot open the Control RPC
-endpoint or either CNG key. Losing the native transport makes Control advertise zero slots and
+The HostControl pipe remains independent of the ARWX stream, and an ARWX frame cannot select a
+HostControl operation. Losing the selected native transport makes Control advertise zero slots and
 stops local grant renewal.
 
-## Crash, Restart, and Upgrade Semantics
+## Crash and Restart Semantics
 
 - If Control exits or its pipe handle closes, Executor cancels all attempts immediately. On restart,
   Control creates a new `workerInstanceId`; old Server leases cannot be resumed.
@@ -436,15 +407,15 @@ stops local grant renewal.
 - Orphan attempt directories are never treated as resumable state. Executor's bounded startup
   janitor removes only validated, non-reparse attempt roots after the retention interval.
 
-WinSW applies bounded restart recovery independently to both services. Control depends on Executor
-readiness, not merely the Windows service `RUNNING` state. Upgrades first drain Control, wait for
-`Drained`, stop both services, atomically replace a complete signed package, start Executor, and then
-start Control. Rollback must use a protocol-compatible package pair and must never re-enable the
-single-identity execution path.
+The current WinSW candidate applies bounded restart recovery independently to both services.
+Control depends on Executor readiness, not merely the Windows service `RUNNING` state. A direct
+ServiceHost SCM implementation may replace WinSW. The first supported format has no upgrade or
+rollback path; any later design requires a new ADR and must never re-enable the single-identity
+execution path.
 
 ## Codex Authentication Options
 
-No Codex authentication mode may reuse the Server mTLS key, a GitHub credential, an operator
+No Codex authentication mode may reuse the Worker Bearer Token, a GitHub credential, an operator
 credential, or the Control capability-signing key. One of these modes must be selected explicitly:
 
 1. **External inference broker (preferred).** An enterprise gateway holds the long-lived OpenAI
@@ -508,14 +479,13 @@ restricted service SIDs.
 
 | Resource | Control | Executor | Administrator / SYSTEM |
 |---|---|---|---|
-| Signed manifest, WinSW and ServiceHost configs, launchers, and Worker bundles | Read; execute Control only | Read; execute Executor only | Full control |
+| Authenticated release files and selected service configuration | Read; execute Control only | Read; execute Executor only | Full control |
 | Trusted policy: capability public keys, Codex requirements, repository and recipe allowlists | Read | Read | Full control |
 | Codex, Git, ProcessHost, and validation-tool program files | Read for complete-tree integrity verification; no execute | Read/execute | Full control |
 | Control configuration and state | Modify | Deny | Full control |
 | Control logs | Append/read | Deny | Full control |
-| Server mTLS certificate public material | Read | Deny | Full control |
-| Server mTLS CNG private key | Sign/use, non-exportable | Deny | Recovery policy only |
-| Local capability private key | Sign/use, non-exportable | Deny | Recovery policy only |
+| Worker Bearer Token configuration | Read | Deny | Full control |
+| Current local capability private-key candidate | Sign/use, non-exportable | Deny | Recovery policy only |
 | Executor runtime state and logs | Deny | Modify | Full control |
 | Executor Codex home and authentication state | Deny | Modify | Full control |
 | Attempt workspaces, temp, and Git object data | Deny | Modify | Full control |
@@ -536,7 +506,12 @@ the Server Worker API, and Control is denied repository and inference endpoints.
 default to no network. Where Windows Firewall cannot express a stable FQDN policy safely, deployment
 must use an authenticated egress proxy or enterprise firewall rather than a broad allow rule.
 
-## Installer Responsibilities
+## Current Candidate Installer Responsibilities
+
+The mechanism list below documents the pre-ADR-0026 candidate. The clean installer may simplify or
+replace WinSW, persistent CNG, package layout, destination evidence, firewall details, and machine
+policy. It must preserve the distinct Control/Executor identities, Control-only Server credential,
+authenticated release input, and Executor-before-Control start boundary.
 
 The signed Windows installer or privileged provisioning script must complete all of these actions
 before either service can advertise execution:
@@ -552,8 +527,8 @@ before either service can advertise execution:
 4. Create separate Control and Executor data roots and apply the ACL matrix above with inheritance
    disabled. Create a third administrator-owned trusted-configuration root that is read-only to both
    services. Workspace and temp roots must be disjoint from program and Control data roots.
-5. Enroll a non-exportable machine mTLS key for Control and grant private-key use only to the Control
-   SID. Rotate the certificate if its key was ever readable by the former single Worker identity.
+5. Provision the fixed Worker Bearer Token configuration for Control only; do not place Server
+   credentials in Executor.
 6. Create the non-exportable local capability-signing key for Control, export only its public key to
    the read-only trusted-configuration root, and record its key ID for rotation.
 7. Provision the selected Executor-only Codex authentication mode. Rotate any Codex credential that
@@ -567,9 +542,9 @@ before either service can advertise execution:
     Executor, wait for local readiness, then start Control. An installation report is evidence, not
     a substitute for runtime verification.
 
-Uninstall and upgrade operations must drain claims first. They remove services and per-service
-secrets without following reparse points or recursively deleting paths that fail the recorded-root
-identity checks.
+No uninstall or upgrade operation is selected for the first unpublished format. A future upgrade or
+uninstall design requires a new ADR and must not infer compatibility from this historical mechanism
+description.
 
 ## Fail-Closed Runtime Preflight
 
@@ -580,7 +555,8 @@ fails. It must not claim and then hope Executor becomes healthy.
 Control requires:
 
 - the expected non-admin Control token and restricted service SID;
-- a valid, non-exportable mTLS key whose ACL excludes Executor;
+- a valid fixed Worker Token configuration and route-limited Server transport unavailable to
+  Executor;
 - a valid local signing key whose ACL excludes Executor;
 - a trusted complete package manifest and protected Control directories;
 - the expected firewall posture and Server TLS policy;
@@ -605,8 +581,8 @@ Executor requires:
 - the exact inter-service and HostControl pipe ACLs, first-instance ownership, bound peer/child
   identities, and capability public key.
 
-Preflight is rerun at service start, after pipe reconnect, after upgrade, after credential rotation,
-and periodically for drift. A configuration request to enable production execution while the
+Preflight is rerun at service start, after pipe reconnect, after credential rotation, and
+periodically for drift. A configuration request to enable production execution while the
 reported isolation mode is missing or single-process is a startup error, not a warning.
 
 ## Protocol and Package Versioning
@@ -621,10 +597,10 @@ signature algorithm, and key ID are versioned separately.
 minor rule for its exact-negotiated ARWX 1.1 profile. That profile is not rolling-compatible with
 ARWX 1.0 and cannot be selected by a mixed package pair.
 
-The package manifest binds compatible Control, Executor, ProcessHost, Codex, Git, schema, and local
-protocol versions. Control includes these digests in Server registration, and every attempt records
-them for audit. A rolling in-place upgrade of only one service is allowed only across a documented
-minor-version compatibility window. Otherwise the node must drain and upgrade atomically.
+The current package candidate binds compatible Control, Executor, ProcessHost, Codex, Git, schema,
+and local protocol versions. Control includes selected release identities in Server registration,
+and every attempt records them for audit. The first supported Worker format has no rolling or
+atomic upgrade path. Any future upgrade and mixed-version policy requires a new ADR.
 
 ## Required Windows Verification
 
@@ -632,10 +608,10 @@ Production enablement requires repeatable tests on supported, fully patched Wind
 hosts. Linux cross-compilation or mocked ACL tests are not sufficient. The release evidence must
 include:
 
-- positive installation, registration, claim, static review, artifact, completion, drain, upgrade,
-  and uninstall flows;
-- access tests proving Executor and an Executor child cannot open the mTLS key, capability private
-  key, Control state, Control logs, or Control process memory, and cannot reach the Server API;
+- positive clean installation, registration, claim, static review, artifact, completion, and drain;
+- access tests proving Executor and an Executor child cannot open the Worker Token configuration,
+  capability private key, Control state, Control logs, or Control process memory, and cannot reach
+  the Server API;
 - reciprocal tests proving Control cannot open Executor workspaces, Codex home, Codex credentials,
   Git data, or executable directories;
 - pipe name-squatting, remote-pipe, second-client, wrong-SID, wrong-wrapper, non-direct-child,
@@ -652,18 +628,22 @@ include:
   submodules, and project-local Codex configuration;
 - proof that the configured elevated native sandbox is active and cannot fall back to unelevated or
   unsandboxed command execution;
-- package tamper, Authenticode signer mismatch, unexpected file, writable parent, ACL drift,
-  firewall drift, certificate rotation, capability-key rotation, and broker revocation tests; and
+- release tamper, signer mismatch, unexpected file, writable parent, ACL drift, firewall drift,
+  Worker Token rotation, selected local-capability rotation, and broker revocation tests; and
 - multi-slot cancellation and resource-exhaustion tests showing one attempt cannot extend another
   attempt's grant or starve the cancellation watchdog; and
 - ServiceHost death, inherited-handle leakage, root-Job breakaway, nested-Job compatibility, and
   attempts by a compromised Executor payload to create a process outside the service-root Job.
 
 Tests must inspect the final Windows tokens, process and token-object DACLs, service SDDL, firewall
-policy, WinSW-to-payload parent relationships, process trees, Job Object active-process counts, and
-event logs. A passing functional review alone does not authorize production execution.
+policy, process trees, Job Object active-process counts, and event logs. If WinSW remains selected,
+they must also inspect its wrapper-to-payload parent relationships. A passing functional review
+alone does not authorize production execution.
 
-## Migration Sequence
+## Historical Migration Sequence
+
+ADR 0026 selects no migration sequence. The following sequence is historical analysis only and is
+not a production requirement for the first clean install.
 
 1. Keep `WORKER_EXECUTION_ENABLED=false` in every production-like environment.
 2. Extract and version the Control-Executor contracts while the existing Worker remains a disabled
@@ -691,7 +671,8 @@ event logs. A passing functional review alone does not authorize production exec
 - One machine remains one Worker in scheduling and dashboard semantics.
 - Compromise of the execution identity does not expose Server or GitHub control-plane credentials.
 - Control can fence and kill local execution without reading the checkout or running Codex.
-- Installation, upgrades, credential rotation, Windows testing, and support become more involved.
+- Clean installation, credential rotation, Windows testing, and support become more involved. Any
+  future upgrade support requires a new ADR.
 - A local signed capability protocol and two coordinated service lifecycles must be maintained.
 - ServiceHost adds a second small Go platform adapter but no Node ABI-specific addon or application
   policy outside TypeScript.

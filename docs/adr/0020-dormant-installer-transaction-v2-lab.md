@@ -1,8 +1,11 @@
 # ADR 0020: Dormant installer transaction schema v2 lab
 
+> Withdrawn before publication by ADR 0026. Its source package was deleted and is not a future
+> installer prerequisite.
+>
 ## Status
 
-Accepted as a source-only, dormant, blocked contract on 2026-09-03.
+Withdrawn before publication by ADR 0026.
 
 This decision does not activate an installer, a journal writer, filesystem mutation, registry
 mutation, SCM mutation, service start or stop, Claim, or execution. The source-only

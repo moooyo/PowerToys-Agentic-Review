@@ -52,6 +52,12 @@ and Token recovery work. It does not implement the complete production SCM insta
   GitHub ingestion/polling and the lease reaper. Its database-only storage runtime never opens or
   reconciles the artifact root. Operator login, credential reconciliation, and Dashboard reads
   remain available only through the deployment's local recovery access path.
+- ADR 0026 withdraws the unpublished installer transaction v1 model, transaction v2 lab, and
+  cross-version store v2 lab. Their 50 source files and the legacy single-service mTLS installer,
+  WinSW template, and environment example were deleted. The first supported installer is
+  clean-install-only: ordinary install rejects every existing or partial Worker, and no upgrade,
+  migration, fallback reader, rollback generation, or transaction journal is a future prerequisite.
+  A later explicit cleanup command may remove only objects tied to the same failed-run marker.
 
 ## Verification
 
@@ -72,6 +78,10 @@ Native focused package tests:            passed uncached
 Native all-package vet:                  passed
 Windows amd64 and arm64 Go builds:       passed
 PowerShell input/privilege-scope smoke:  passed
+Unreleased installer cleanup:           50 transaction/store files plus 3 legacy deploy files removed
+Deleted package production references:  none
+Current installer-verification Go gate:  passed
+Windows amd64 and arm64 rebuild:         passed
 ```
 
 The local Node runtime was `26.1.0`, while the repository requires `>=24.20.0 <25`; pnpm emitted
@@ -98,14 +108,18 @@ also passed. No command used `test-env`.
 
 ## Remaining Release Work
 
-Repository-local implementation remains for root materialization and atomic swap, the production
-SCM installer, fixed WinSW validation, CNG provisioning, service creation and policy, and installer
-transaction recovery. Destination re-verification is complete as a read-only composition, but no
-production installer invokes it yet. Server database recovery maintenance ingress is implemented;
+Repository-local implementation remains for the Windows-only clean installer: selected release
+verification, root placement, local configuration, service creation/read-back, and
+Executor-before-Control start. WinSW, the current node-specific package shape, CNG, and destination
+evidence may be reused or simplified by that implementation; ADR 0026 does not freeze them. No
+installer transaction recovery, upgrade, migration, or rollback implementation is required.
+Server database recovery maintenance ingress is implemented;
 deployment operators must still remove the ordinary reverse-proxy upstream and unsupported bridge
 container exposure while it is active.
 
-External release work remains to produce the actual Authenticode-signed ServiceHost, role bundles,
-outer-package-v2 signature, compiled release profile, and compiled outer-trust material, then run
-the complete installation and recovery matrix on privileged Windows amd64 and arm64 hosts. Those
-artifacts and machine-level results cannot be replaced by placeholder credentials or unit tests.
+External release work remains to produce the authenticated artifacts selected by the final clean
+installer. Under the current composition those include the Authenticode-signed ServiceHost, role
+bundles, outer-package-v2 signature, compiled release profile, and compiled outer-trust material;
+a later simplification may reduce that list. The resulting path must pass the clean-install matrix
+on privileged Windows amd64 and arm64 hosts. Real artifacts and machine-level results cannot be
+replaced by placeholder credentials or unit tests.
