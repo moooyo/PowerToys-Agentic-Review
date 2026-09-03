@@ -47,6 +47,27 @@ type serviceExecuteResult struct {
 	code     uint32
 }
 
+type readyBarrierHost struct {
+	allowReady    <-chan struct{}
+	readyEntered  chan<- struct{}
+	readyReturned chan<- struct{}
+}
+
+func (host readyBarrierHost) Run(ctx context.Context, options platform.BootstrapOptions) error {
+	if host.allowReady != nil {
+		<-host.allowReady
+	}
+	if host.readyEntered != nil {
+		host.readyEntered <- struct{}{}
+	}
+	options.Ready()
+	if host.readyReturned != nil {
+		host.readyReturned <- struct{}{}
+	}
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
 func TestServiceNameFromBootstrapPathUsesFixedRoleIdentity(t *testing.T) {
 	tests := []struct {
 		name string
@@ -196,8 +217,42 @@ func TestWindowsServiceHandlerStatusAndControlFlow(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceReadyBlocksUntilRunningStatusHandoff(t *testing.T) {
+	readyEntered := make(chan struct{}, 1)
+	readyReturned := make(chan struct{}, 1)
+	handler := &windowsServiceHandler{host: readyBarrierHost{
+		readyEntered:  readyEntered,
+		readyReturned: readyReturned,
+	}}
+	requests := make(chan svc.ChangeRequest, 1)
+	statuses := make(chan svc.Status)
+	result := make(chan serviceExecuteResult, 1)
+	go func() {
+		specific, code := handler.Execute(nil, requests, statuses)
+		result <- serviceExecuteResult{specific: specific, code: code}
+	}()
+
+	expectServiceState(t, statuses, svc.StartPending)
+	expectSignal(t, readyEntered, "ready callback entry")
+	assertNoSignal(t, readyReturned, "ready callback returned before Running handoff")
+	expectServiceState(t, statuses, svc.Running)
+	expectSignal(t, readyReturned, "ready callback return")
+
+	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	expectServiceState(t, statuses, svc.StopPending)
+	outcome := receiveServiceResult(t, result)
+	if outcome.specific || outcome.code != 0 {
+		t.Fatalf("service outcome = %+v, want clean stop", outcome)
+	}
+}
+
 func TestWindowsServiceHandlerStopBeforeReadyNeverReportsRunning(t *testing.T) {
-	handler := &windowsServiceHandler{host: &fakeWindowsServiceHost{}}
+	allowReady := make(chan struct{})
+	readyReturned := make(chan struct{}, 1)
+	handler := &windowsServiceHandler{host: readyBarrierHost{
+		allowReady:    allowReady,
+		readyReturned: readyReturned,
+	}}
 	requests := make(chan svc.ChangeRequest, 1)
 	statuses := make(chan svc.Status, 3)
 	result := make(chan serviceExecuteResult, 1)
@@ -213,6 +268,8 @@ func TestWindowsServiceHandlerStopBeforeReadyNeverReportsRunning(t *testing.T) {
 	}
 	requests <- svc.ChangeRequest{Cmd: svc.Stop}
 	expectServiceState(t, statuses, svc.StopPending)
+	close(allowReady)
+	expectSignal(t, readyReturned, "ready callback release after pre-ready stop")
 	outcome := receiveServiceResult(t, result)
 	if outcome.specific || outcome.code != 0 {
 		t.Fatalf("service outcome = %+v, want clean stop", outcome)
@@ -296,6 +353,24 @@ func expectServiceState(t *testing.T, statuses <-chan svc.Status, want svc.State
 	case <-time.After(serviceTestTimeout):
 		t.Fatalf("timed out waiting for service state %v", want)
 		return svc.Status{}
+	}
+}
+
+func expectSignal(t *testing.T, signal <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(serviceTestTimeout):
+		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
+func assertNoSignal(t *testing.T, signal <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-signal:
+		t.Fatal(label)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

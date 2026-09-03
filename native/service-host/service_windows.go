@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
@@ -90,14 +89,14 @@ func (handler *windowsServiceHandler) Execute(
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	ready := make(chan struct{}, 1)
+	readyRequests := make(chan chan struct{})
 	var readyOnce sync.Once
-	var readySignaled atomic.Bool
 	options := handler.options
 	options.Ready = func() {
 		readyOnce.Do(func() {
-			readySignaled.Store(true)
-			ready <- struct{}{}
+			acknowledged := make(chan struct{})
+			readyRequests <- acknowledged
+			<-acknowledged
 		})
 	}
 
@@ -113,17 +112,19 @@ func (handler *windowsServiceHandler) Execute(
 	}()
 
 	stopRequested := false
+	runningReported := false
 	for {
 		select {
-		case <-ready:
-			if stopRequested || current.State != svc.StartPending {
-				continue
+		case acknowledged := <-readyRequests:
+			if !stopRequested && current.State == svc.StartPending {
+				current = svc.Status{
+					State:   svc.Running,
+					Accepts: svc.AcceptStop | svc.AcceptShutdown,
+				}
+				statuses <- current
+				runningReported = true
 			}
-			current = svc.Status{
-				State:   svc.Running,
-				Accepts: svc.AcceptStop | svc.AcceptShutdown,
-			}
-			statuses <- current
+			close(acknowledged)
 		case request, ok := <-requests:
 			if !ok {
 				requests = nil
@@ -146,7 +147,7 @@ func (handler *windowsServiceHandler) Execute(
 			}
 		case err := <-result:
 			if err == nil {
-				if stopRequested || readySignaled.Load() {
+				if stopRequested || runningReported {
 					return false, 0
 				}
 				return true, uint32(exitPreflight)
