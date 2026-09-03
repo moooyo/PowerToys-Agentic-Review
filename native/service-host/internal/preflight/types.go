@@ -12,7 +12,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
@@ -80,9 +79,9 @@ type VerifiedFile struct {
 }
 
 // Input accepts opaque service-bootstrap, current-image, and installation
-// evidence, retained data-root verifier evidence, and concrete live credential
-// objects. Schema v3 Control requires both credential pointers, schema v4
-// Control requires only LocalAuthoritySigner, and Executor must leave both nil.
+// evidence, retained data-root verifier evidence, and the concrete local
+// authority signer. Control requires LocalAuthoritySigner, and Executor must
+// leave it nil.
 type Input struct {
 	Role                 config.Role
 	ActualBootstrapPath  string
@@ -91,7 +90,6 @@ type Input struct {
 	Installation         installverify.Evidence
 	DataRoot             dataroot.Evidence
 	LocalAuthoritySigner *cng.Signer
-	MTLSCredential       *wincert.Credential
 }
 
 // BootstrapBinding is the detached cross-package proof captured from opaque
@@ -160,16 +158,13 @@ type releaseBindingSnapshot struct {
 	bound                 bool
 }
 
-// ControlCredentialEvidence contains only attestations returned atomically by
-// the concrete validated credential objects. Its fields cannot be populated by
-// callers, and the values themselves expose only copy-returning accessors.
+// ControlCredentialEvidence contains only the attestation returned atomically
+// by the concrete validated local-authority signer. Its fields cannot be
+// populated by callers, and the value exposes only copy-returning accessors.
 type ControlCredentialEvidence struct {
 	localAuthority        cng.Attestation
-	mtls                  wincert.Attestation
 	localFacts            localCredentialFacts
-	mtlsFacts             mtlsCredentialFacts
 	authenticationProfile string
-	mtlsBound             bool
 	bound                 bool
 	attested              bool
 }
@@ -178,13 +173,9 @@ func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
 	return e.localAuthority
 }
 
-func (e ControlCredentialEvidence) MTLSAttestation() wincert.Attestation { return e.mtls }
-
 func (e ControlCredentialEvidence) WorkerAuthenticationProfile() string {
 	return e.authenticationProfile
 }
-
-func (e ControlCredentialEvidence) HasMTLSAttestation() bool { return e.mtlsBound }
 
 // DataRootBinding retains only detached role, installation-root identity, and
 // digest facts. It deliberately contains no dataroot Evidence or native handle.

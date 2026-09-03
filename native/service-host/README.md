@@ -20,7 +20,6 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - retained role-data verification with protected installer boundaries, exact inherited descendant
   ACLs, closed fixed layout, bounded content traversal, and final pre-launch reinspection;
 - handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
-- a historical fixed-origin TLS 1.3 mTLS Worker API client retained outside production composition;
 - a production-composed fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
   `worker-auth-v1.json` profile, without a generic header or Token source;
 - stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
@@ -47,12 +46,11 @@ payloads remain zero-execution foundations: Executor can emit only the authentic
 claims work. This source must not be used to enable production execution. The non-Windows production
 factory remains unavailable.
 
-The production composition accepts only bootstrap schema version 4 and the exact per-Worker Bearer
-Token profile. Schema version 3 remains parseable as immutable historical mTLS data, but production
-startup rejects it before opening any Worker credential. Signed outer-package v2 and split
-installer profile v2 now bind schema-v4 bootstraps without an mTLS identity or package credential.
-The historical outer-package v1 remains schema-v3-only. Ordinary builds still contain no compiled
-release profile, and no complete production installer consumes the new staged profile yet.
+Bootstrap schema version 4 and the exact per-Worker Bearer Token profile are the only supported
+configuration contract. Every other schema version fails the strict parser. Signed
+outer-package v2 and split installer profile v2 bind schema-v4 bootstraps without a Worker client
+certificate or package credential. Ordinary builds still contain no compiled release profile, and
+no complete production installer consumes the new staged profile yet.
 
 ## Command line
 
@@ -93,12 +91,10 @@ of `control` and `executor` is an object for the selected role; the other proper
 documents to one installed package. The Control origin is a canonical HTTPS origin with no user
 information, path, query, fragment, or explicit default port, and `serverName` must equal its host.
 Schema version 4 requires `workerAuthenticationProfile` to equal
-`agentic-review-worker-auth-v1`. It rejects the historical client-certificate store, certificate
-digest, and client-private-key descriptor fields. The local Control-to-Executor capability signer
-is unchanged: native preflight fixes it to the machine-scope Microsoft Software Key Storage
-Provider and proves that it is non-exportable, signing-only, and Control-only. Schema version 3
-still requires its original mTLS fields when parsing historical bytes, but it is not a runnable
-production authentication path.
+`agentic-review-worker-auth-v1`. Client-certificate store, certificate digest, and client-private-key
+descriptor properties are unknown fields and fail strict parsing. Native preflight fixes the local
+Control-to-Executor capability signer to the machine-scope Microsoft Software Key Storage Provider
+and proves that it is non-exportable, signing-only, and Control-only.
 
 Both documents must contain the same `workerNodeId`. It is a 1-through-128-byte ASCII entity
 identifier: the first byte is alphanumeric, and subsequent bytes may also use `.`, `_`, `:`, or

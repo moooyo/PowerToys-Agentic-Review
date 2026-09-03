@@ -14,19 +14,19 @@ import (
 	"testing"
 )
 
-func TestNewBearerClientPinsServerTLSWithoutAClientCertificate(t *testing.T) {
+func TestNewClientPinsServerTLSWithoutAClientCertificate(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://attacker.invalid:8080")
 	configuration := validBearerConfig(t)
 	originalRootByte := configuration.RootCertificateDER[0][0]
-	client, err := NewBearerClient(configuration)
+	client, err := NewClient(configuration)
 	if err != nil {
-		t.Fatalf("NewBearerClient returned an error: %v", err)
+		t.Fatalf("NewClient returned an error: %v", err)
 	}
 	defer client.Close()
 
 	transport, ok := client.state.httpClient.Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("NewBearerClient installed transport type %T", client.state.httpClient.Transport)
+		t.Fatalf("NewClient installed transport type %T", client.state.httpClient.Transport)
 	}
 	if transport.Proxy != nil || transport.TLSClientConfig == nil ||
 		transport.TLSClientConfig.MinVersion != tls.VersionTLS13 || transport.TLSClientConfig.InsecureSkipVerify {
@@ -105,24 +105,24 @@ func TestBearerClientAddsOneExactAuthorizationHeaderToWorkerAndArtifactRequests(
 	}
 }
 
-func TestNewBearerClientRejectsMissingMismatchedOrMalformedProfilesWithoutDisclosure(t *testing.T) {
+func TestNewClientRejectsMissingMismatchedOrMalformedProfilesWithoutDisclosure(t *testing.T) {
 	valid := validBearerConfig(t)
 	other := parseTestWorkerAuth(t, "other-node:1", testWorkerToken)
 	tests := []struct {
 		name   string
-		mutate func(*BearerConfig)
+		mutate func(*Config)
 	}{
-		{name: "missing node", mutate: func(value *BearerConfig) { value.WorkerNodeID = "" }},
-		{name: "missing profile", mutate: func(value *BearerConfig) { value.WorkerAuth = WorkerAuth{} }},
-		{name: "mismatched profile", mutate: func(value *BearerConfig) { value.WorkerAuth = other }},
+		{name: "missing node", mutate: func(value *Config) { value.WorkerNodeID = "" }},
+		{name: "missing profile", mutate: func(value *Config) { value.WorkerAuth = WorkerAuth{} }},
+		{name: "mismatched profile", mutate: func(value *Config) { value.WorkerAuth = other }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			configuration := valid
 			test.mutate(&configuration)
-			_, err := NewBearerClient(configuration)
+			_, err := NewClient(configuration)
 			if !errors.Is(err, ErrInvalidConfiguration) {
-				t.Fatalf("NewBearerClient returned %v", err)
+				t.Fatalf("NewClient returned %v", err)
 			}
 			if strings.Contains(err.Error(), testWorkerToken) || strings.Contains(err.Error(), "Bearer") {
 				t.Fatalf("configuration error disclosed authentication material: %v", err)
@@ -221,17 +221,9 @@ func TestBearerClientCloseDoesNotExposeCredentialBearingTransportErrors(t *testi
 	}
 }
 
-func validBearerConfig(t *testing.T) BearerConfig {
+func validBearerConfig(t *testing.T) Config {
 	t.Helper()
-	legacy, _ := validConfig(t)
-	return BearerConfig{
-		Origin:             legacy.Origin,
-		ServerName:         legacy.ServerName,
-		RootCertificateDER: legacy.RootCertificateDER,
-		WorkerNodeID:       "powertoys-node:01",
-		WorkerAuth:         parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),
-		Limits:             legacy.Limits,
-	}
+	return validConfig(t)
 }
 
 func testBearerClient(t *testing.T, roundTripper http.RoundTripper, limits Limits) *Client {
@@ -240,7 +232,7 @@ func testBearerClient(t *testing.T, roundTripper http.RoundTripper, limits Limit
 	if err != nil {
 		t.Fatalf("parse test origin: %v", err)
 	}
-	return newBearerClient(
+	return newClient(
 		origin,
 		roundTripper,
 		parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),

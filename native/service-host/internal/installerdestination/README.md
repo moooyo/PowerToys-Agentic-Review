@@ -2,7 +2,7 @@
 
 `installerdestination.Verify` is the production verify-only composition for the split Worker
 installer's post-materialization boundary. Its only authorizing input is a live
-`stagedpackage.BearerTokenInstallerV2Package`; it accepts no path, serialized evidence, detached
+`stagedpackage.InstallerPackage`; it accepts no path, serialized evidence, detached
 index, trust key, verifier, or filesystem-policy callback.
 
 The staged gate lends the destination verifier one synchronous, one-shot binding to the exact

@@ -42,8 +42,7 @@ func SigningDigest(indexDocument []byte) ([sha256.Size]byte, error) {
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	if !((index.SchemaVersion == IndexSchemaVersion && index.ProfileID == IndexProfileID) ||
-		(index.SchemaVersion == BearerTokenIndexSchemaVersion && index.ProfileID == BearerTokenIndexProfileID)) {
+	if index.SchemaVersion != IndexSchemaVersion || index.ProfileID != IndexProfileID {
 		return [sha256.Size]byte{}, fmt.Errorf("%w: package index profile has no signature policy", ErrSignature)
 	}
 	digest := sha256.New()

@@ -233,10 +233,6 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			401,
 			false,
 			"worker_authentication_failed",
-			"worker_mtls_required",
-			"worker_certificate_unauthorized",
-			"worker_certificate_missing",
-			"worker_transport_authentication_failed",
 			"worker_authentication_state_invalid",
 			"worker_authentication_state_missing",
 		) ||
@@ -246,7 +242,6 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			403,
 			false,
 			"insecure_worker_auth_loopback_only",
-			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
 			"worker_registration_required",
 		) ||
@@ -305,10 +300,6 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			401,
 			false,
 			"worker_authentication_failed",
-			"worker_mtls_required",
-			"worker_certificate_unauthorized",
-			"worker_certificate_missing",
-			"worker_transport_authentication_failed",
 			"worker_authentication_state_invalid",
 			"worker_authentication_state_missing",
 		) ||
@@ -318,7 +309,6 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			403,
 			false,
 			"insecure_worker_auth_loopback_only",
-			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
 			"worker_registration_required",
 		) ||
@@ -369,10 +359,6 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			401,
 			false,
 			"worker_authentication_failed",
-			"worker_mtls_required",
-			"worker_certificate_unauthorized",
-			"worker_certificate_missing",
-			"worker_transport_authentication_failed",
 			"worker_authentication_state_invalid",
 			"worker_authentication_state_missing",
 		) ||
@@ -382,7 +368,6 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			403,
 			false,
 			"insecure_worker_auth_loopback_only",
-			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
 			"worker_registration_required",
 		) ||
@@ -433,10 +418,6 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			401,
 			false,
 			"worker_authentication_failed",
-			"worker_mtls_required",
-			"worker_certificate_unauthorized",
-			"worker_certificate_missing",
-			"worker_transport_authentication_failed",
 			"worker_authentication_state_invalid",
 			"worker_authentication_state_missing",
 		) ||
@@ -446,7 +427,6 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			403,
 			false,
 			"insecure_worker_auth_loopback_only",
-			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
 			"worker_registration_required",
 		) ||
@@ -498,10 +478,6 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			401,
 			false,
 			"worker_authentication_failed",
-			"worker_mtls_required",
-			"worker_certificate_unauthorized",
-			"worker_certificate_missing",
-			"worker_transport_authentication_failed",
 			"worker_authentication_state_invalid",
 			"worker_authentication_state_missing",
 		) ||
@@ -511,7 +487,6 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			403,
 			false,
 			"insecure_worker_auth_loopback_only",
-			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
 			"worker_registration_required",
 		) ||

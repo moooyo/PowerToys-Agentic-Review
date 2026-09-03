@@ -12,4 +12,4 @@ There is not yet a production installer. ADR 0026 defines the next installer as 
 it accepts only the current split profile, refuses every existing or partial installation, and has
 no upgrade, migration, fallback parser, rollback generation, or transaction journal.
 
-See `split/README.md` for the reusable split launch inputs and Token provisioning helper.
+See `split/README.md` for the current split inputs and Token provisioning helper.

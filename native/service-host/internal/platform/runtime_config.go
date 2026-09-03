@@ -54,7 +54,7 @@ func runtimeRoles(role config.Role) (localrpc.Role, relay.Role, error) {
 }
 
 func requireProductionBearerProfile(configuration config.Config) error {
-	if configuration.SchemaVersion != config.BearerTokenSchemaVersion || configuration.Control == nil ||
+	if configuration.SchemaVersion != config.SchemaVersion || configuration.Control == nil ||
 		configuration.Control.WorkerAuthenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 {
 		return errors.New("production composition requires the schemaVersion 4 Worker Bearer Token profile")
 	}

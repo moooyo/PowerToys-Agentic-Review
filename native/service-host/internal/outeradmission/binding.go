@@ -17,31 +17,20 @@ func bindBootstrapPair(
 	executor config.Config,
 	documents documentSnapshot,
 ) error {
-	legacyMTLS := index.SchemaVersion == outerpackage.IndexSchemaVersion &&
-		index.ProfileID == outerpackage.IndexProfileID
-	bearerToken := index.SchemaVersion == outerpackage.BearerTokenIndexSchemaVersion &&
-		index.ProfileID == outerpackage.BearerTokenIndexProfileID
-	switch {
-	case legacyMTLS:
-		if control.SchemaVersion != config.SchemaVersion || executor.SchemaVersion != config.SchemaVersion ||
-			index.MTLSClientCredential == nil {
-			return ErrMismatch
-		}
-	case bearerToken:
-		if index.MTLSClientCredential != nil || installerprofile.ValidatePackageRoots(
-			installerprofile.BearerTokenInstallerV2ID,
+	if index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		index.ProfileID != outerpackage.IndexProfileID ||
+		control.SchemaVersion != config.SchemaVersion || executor.SchemaVersion != config.SchemaVersion ||
+		installerprofile.ValidatePackageRoots(
+			installerprofile.ProfileID,
 			index.PackageID,
 			index.TargetRoots.Metadata,
 			index.TargetRoots.Installation,
 			index.TargetRoots.TrustedConfiguration,
-		) != nil || installerprofile.ValidateBearerTokenBootstrapPair(
-			installerprofile.BearerTokenInstallerV2ID,
-			control,
-			executor,
-		) != nil {
-			return ErrMismatch
-		}
-	default:
+		) != nil || installerprofile.ValidateBootstrapPair(
+		installerprofile.ProfileID,
+		control,
+		executor,
+	) != nil {
 		return ErrMismatch
 	}
 	if err := validateConfigurationPair(control, executor); err != nil {
@@ -81,12 +70,6 @@ func bindBootstrapPair(
 		control.Control.LocalAuthorityKeySecurityDescriptorSHA256 != index.LocalAuthorityCNG.SecurityDescriptorSHA256 ||
 		control.Control.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 ||
 		executor.Executor.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 {
-		return ErrMismatch
-	}
-	if legacyMTLS && (control.Control.ClientCertificateStore != index.MTLSClientCredential.CertificateStore ||
-		control.Control.ClientCertificateDERSHA256 != index.MTLSClientCredential.CertificateDERSHA256 ||
-		control.Control.ClientPrivateKeySecurityDescriptorSHA256 !=
-			index.MTLSClientCredential.PrivateKeySecurityDescriptorSHA256) {
 		return ErrMismatch
 	}
 	spkiRelative, err := relativeWindowsPath(

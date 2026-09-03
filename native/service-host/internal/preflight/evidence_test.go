@@ -72,7 +72,7 @@ func TestEvidenceDigestAndRuntimePlanAreRoleLocal(t *testing.T) {
 				}
 			}
 			if _, hasCredentials := evidence.ControlCredentials(); hasCredentials != (role == config.RoleControl) {
-				t.Fatal("credential attestation is present for the wrong role")
+				t.Fatal("local-authority attestation is present for the wrong role")
 			}
 		})
 	}
@@ -483,12 +483,6 @@ func TestEvidenceValidateRejectsSecureReadAndAttestationDrift(t *testing.T) {
 			facts := value.controlCredentials.localFacts
 			facts.identity.UniqueName += ".other"
 			value.controlCredentials.localAuthority = cngAttestationFixture(facts)
-		}},
-		{"mTLS attestation getters", func(value *Evidence) {
-			facts := value.controlCredentials.mtlsFacts
-			facts.containerName += ".other"
-			facts.keyName = facts.containerName
-			value.controlCredentials.mtls = mtlsAttestationFixture(facts)
 		}},
 	}
 	for _, test := range tests {

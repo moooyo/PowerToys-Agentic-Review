@@ -5,12 +5,12 @@ absolute staging-root path and opens that path from its drive root one component
 not accept a file inventory, public key, signature verifier, ACL callback, or preconstructed
 admission plan.
 
-The verifier preserves historical outer-package v1/schema-v3 admission and also verifies the exact
-outer-package v2/schema-v4 profile. The plaintext Worker Token remains outside the package and staged
-trees in the fixed Control data-root file, and its SHA-256 digest exists only in the Server database.
-`SelectBearerTokenInstallerV2` is the mandatory typed gate for the v2 destination verifier; it
-rejects v1 evidence, is non-serializable, revalidates the retained closure, and owns the matching
-`Close` path. Its one-shot `WithDestinationBinding` borrow is the only production bridge to
+The verifier admits only the current outer-package schema and bootstrap schema. The plaintext
+Worker Token remains outside the package and staged trees in the fixed Control data-root file, and
+its SHA-256 digest exists only in the Server database. `SelectInstallerPackage` is the
+mandatory typed gate for the destination verifier; it is non-serializable, revalidates the retained
+closure, and owns the matching `Close` path. Its one-shot `WithDestinationBinding` borrow is the
+only production bridge to
 `installerdestination`: the view is opaque, non-serializable, valid only during the synchronous
 callback, and cannot be reconstructed from its detached bytes. A successful callback transfers an
 opaque source-handle lease to the destination verifier; pre-existing staged-evidence aliases then
@@ -54,11 +54,10 @@ and later validation are also linearized with the `winfile` process cleanup quar
 The evidence is a retained observation of staged bytes. Its sole production consumer is the
 read-only post-swap destination verifier. It is not filesystem mutation, CNG, certificate, SCM,
 Claim, readiness, or execution evidence and refuses JSON serialization. Signed `packageId`,
-`installationId`, target roots, CNG identity, and
-profile-specific authentication selection are cross-bound to the bootstrap fields that exist, but
-this verifier does not inspect the target filesystem, CNG provider, certificate store, or
-private-key ACL. It therefore cannot claim that staged directories already occupy the signed target
-roots.
+`installationId`, target roots, CNG identity, and authentication selection are cross-bound to the
+bootstrap fields that exist, but this verifier does not inspect the target filesystem, CNG
+provider, or private-key ACL. It therefore cannot claim that staged directories already occupy the
+signed target roots.
 
 Ordinary builds contain no compiled outer signer and fail closed during admission. Native Windows
 Lab A remains blocked until a provisioned fixed-NTFS staging fixture exists with the exact managed

@@ -32,16 +32,16 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 		}
 	}
 	allowedMethods := map[string]bool{
-		"Close":                        false,
-		"ControlConfiguration":         false,
-		"ExecutorConfiguration":        false,
-		"Files":                        false,
-		"Index":                        false,
-		"MarshalJSON":                  false,
-		"Roots":                        false,
-		"SelectBearerTokenInstallerV2": false,
-		"SignerKeyID":                  false,
-		"Validate":                     false,
+		"Close":                  false,
+		"ControlConfiguration":   false,
+		"ExecutorConfiguration":  false,
+		"Files":                  false,
+		"Index":                  false,
+		"MarshalJSON":            false,
+		"Roots":                  false,
+		"SelectInstallerPackage": false,
+		"SignerKeyID":            false,
+		"Validate":               false,
 	}
 	for index := 0; index < evidenceType.NumMethod(); index++ {
 		name := evidenceType.Method(index).Name
@@ -55,10 +55,10 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 			t.Fatalf("StagedPackageEvidence method %s is absent", name)
 		}
 	}
-	installerType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2Package{})
+	installerType := reflect.TypeOf(stagedpackage.InstallerPackage{})
 	for index := 0; index < installerType.NumField(); index++ {
 		if installerType.Field(index).IsExported() {
-			t.Fatalf("BearerTokenInstallerV2Package field %s is exported", installerType.Field(index).Name)
+			t.Fatalf("InstallerPackage field %s is exported", installerType.Field(index).Name)
 		}
 	}
 	installerMethods := map[string]bool{
@@ -67,13 +67,13 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 	for index := 0; index < installerType.NumMethod(); index++ {
 		name := installerType.Method(index).Name
 		if _, allowed := installerMethods[name]; !allowed {
-			t.Fatalf("BearerTokenInstallerV2Package exposes unexpected method %s", name)
+			t.Fatalf("InstallerPackage exposes unexpected method %s", name)
 		}
 		installerMethods[name] = true
 	}
 	for name, seen := range installerMethods {
 		if !seen {
-			t.Fatalf("BearerTokenInstallerV2Package method %s is absent", name)
+			t.Fatalf("InstallerPackage method %s is absent", name)
 		}
 	}
 	withBinding, present := installerType.MethodByName("WithDestinationBinding")
@@ -81,18 +81,18 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 		t.Fatal("WithDestinationBinding is absent")
 	}
 	expectedWithBinding := reflect.TypeOf(func(
-		stagedpackage.BearerTokenInstallerV2Package,
-		func(stagedpackage.BearerTokenInstallerV2DestinationBinding) error,
-	) (stagedpackage.BearerTokenInstallerV2DestinationLease, error) {
-		return stagedpackage.BearerTokenInstallerV2DestinationLease{}, nil
+		stagedpackage.InstallerPackage,
+		func(stagedpackage.DestinationBinding) error,
+	) (stagedpackage.DestinationLease, error) {
+		return stagedpackage.DestinationLease{}, nil
 	})
 	if withBinding.Type != expectedWithBinding {
 		t.Fatal("WithDestinationBinding changed its exact one-shot lease contract")
 	}
-	bindingType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2DestinationBinding{})
+	bindingType := reflect.TypeOf(stagedpackage.DestinationBinding{})
 	for index := 0; index < bindingType.NumField(); index++ {
 		if bindingType.Field(index).IsExported() {
-			t.Fatalf("BearerTokenInstallerV2DestinationBinding field %s is exported", bindingType.Field(index).Name)
+			t.Fatalf("DestinationBinding field %s is exported", bindingType.Field(index).Name)
 		}
 	}
 	bindingMethods := map[string]bool{
@@ -102,19 +102,19 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 	for index := 0; index < bindingType.NumMethod(); index++ {
 		name := bindingType.Method(index).Name
 		if _, allowed := bindingMethods[name]; !allowed {
-			t.Fatalf("BearerTokenInstallerV2DestinationBinding exposes unexpected method %s", name)
+			t.Fatalf("DestinationBinding exposes unexpected method %s", name)
 		}
 		bindingMethods[name] = true
 	}
 	for name, seen := range bindingMethods {
 		if !seen {
-			t.Fatalf("BearerTokenInstallerV2DestinationBinding method %s is absent", name)
+			t.Fatalf("DestinationBinding method %s is absent", name)
 		}
 	}
-	leaseType := reflect.TypeOf(stagedpackage.BearerTokenInstallerV2DestinationLease{})
+	leaseType := reflect.TypeOf(stagedpackage.DestinationLease{})
 	for index := 0; index < leaseType.NumField(); index++ {
 		if leaseType.Field(index).IsExported() {
-			t.Fatalf("BearerTokenInstallerV2DestinationLease field %s is exported", leaseType.Field(index).Name)
+			t.Fatalf("DestinationLease field %s is exported", leaseType.Field(index).Name)
 		}
 	}
 	leaseMethods := map[string]bool{
@@ -123,19 +123,19 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 	for index := 0; index < leaseType.NumMethod(); index++ {
 		name := leaseType.Method(index).Name
 		if _, allowed := leaseMethods[name]; !allowed {
-			t.Fatalf("BearerTokenInstallerV2DestinationLease exposes unexpected method %s", name)
+			t.Fatalf("DestinationLease exposes unexpected method %s", name)
 		}
 		leaseMethods[name] = true
 	}
 	for name, seen := range leaseMethods {
 		if !seen {
-			t.Fatalf("BearerTokenInstallerV2DestinationLease method %s is absent", name)
+			t.Fatalf("DestinationLease method %s is absent", name)
 		}
 	}
-	zeroInstaller := stagedpackage.BearerTokenInstallerV2Package{}
+	zeroInstaller := stagedpackage.InstallerPackage{}
 	if !errors.Is(zeroInstaller.Validate(), stagedpackage.ErrInstallerProfile) ||
 		!errors.Is(zeroInstaller.Close(), stagedpackage.ErrInstallerProfile) {
-		t.Fatal("zero BearerTokenInstallerV2Package behaved as a valid profile gate")
+		t.Fatal("zero InstallerPackage behaved as a valid profile gate")
 	}
 	if _, err := json.Marshal(zeroInstaller); !errors.Is(err, stagedpackage.ErrSerialization) {
 		t.Fatalf("installer profile JSON serialization returned %v, want ErrSerialization", err)
@@ -151,7 +151,7 @@ func TestProductionSurfaceHasOnePathOnlyMinterAndOpaqueEvidence(t *testing.T) {
 	}
 }
 
-func TestOnlyRetainedStagedEvidenceCanSelectBearerTokenInstallerV2(t *testing.T) {
+func TestOnlyRetainedStagedEvidenceCanSelectInstallerPackage(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate stagedpackage source")
@@ -173,18 +173,18 @@ func TestOnlyRetainedStagedEvidenceCanSelectBearerTokenInstallerV2(t *testing.T)
 		}
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || !resultNamesType(function.Type.Results, "BearerTokenInstallerV2Package") {
+			if !ok || !resultNamesType(function.Type.Results, "InstallerPackage") {
 				continue
 			}
-			if function.Name.Name != "SelectBearerTokenInstallerV2" || function.Recv == nil ||
+			if function.Name.Name != "SelectInstallerPackage" || function.Recv == nil ||
 				!fieldListNamesType(function.Recv, "StagedPackageEvidence") {
-				t.Fatalf("unexpected BearerTokenInstallerV2Package selector %s", function.Name.Name)
+				t.Fatalf("unexpected InstallerPackage selector %s", function.Name.Name)
 			}
 			selectors++
 		}
 	}
 	if selectors != 1 {
-		t.Fatalf("BearerTokenInstallerV2Package selectors = %d, want 1", selectors)
+		t.Fatalf("InstallerPackage selectors = %d, want 1", selectors)
 	}
 }
 

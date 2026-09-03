@@ -15,12 +15,12 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/stagedpackage"
 )
 
-func productionSource(selection stagedpackage.BearerTokenInstallerV2Package) sourceLease {
-	var transferred stagedpackage.BearerTokenInstallerV2DestinationLease
+func productionSource(selection stagedpackage.InstallerPackage) sourceLease {
+	var transferred stagedpackage.DestinationLease
 	hasTransferred := false
 	return sourceLease{
 		withBinding: func(use func(sourcePlan) error) error {
-			lease, err := selection.WithDestinationBinding(func(binding stagedpackage.BearerTokenInstallerV2DestinationBinding) error {
+			lease, err := selection.WithDestinationBinding(func(binding stagedpackage.DestinationBinding) error {
 				if binding.Validate() != nil {
 					return ErrInvalidSource
 				}
@@ -106,10 +106,10 @@ func translateStagedError(err error) error {
 
 func parseSourcePlan(indexDocument, envelopeDocument, controlDocument, executorDocument []byte, signerKeyID string) (sourcePlan, error) {
 	index, err := outerpackage.ParseIndex(indexDocument)
-	if err != nil || index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil ||
+	if err != nil || index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		index.ProfileID != outerpackage.IndexProfileID ||
 		installerprofile.ValidatePackageRoots(
-			installerprofile.BearerTokenInstallerV2ID,
+			installerprofile.ProfileID,
 			index.PackageID,
 			index.TargetRoots.Metadata,
 			index.TargetRoots.Installation,
@@ -128,8 +128,8 @@ func parseSourcePlan(indexDocument, envelopeDocument, controlDocument, executorD
 		return sourcePlan{}, ErrInvalidSource
 	}
 	executor, err := config.Parse(executorDocument)
-	if err != nil || installerprofile.ValidateBearerTokenBootstrapPair(
-		installerprofile.BearerTokenInstallerV2ID,
+	if err != nil || installerprofile.ValidateBootstrapPair(
+		installerprofile.ProfileID,
 		control,
 		executor,
 	) != nil {

@@ -18,7 +18,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
@@ -131,15 +130,13 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 		},
 	}
 	if role == config.RoleControl {
-		localFacts, mtlsFacts := credentialFactFixtures(t, control)
+		localFacts := localCredentialFactFixture(t, control)
 		input.credentials = &ControlCredentialEvidence{
-			localAuthority: cngAttestationFixture(localFacts),
-			mtls:           mtlsAttestationFixture(mtlsFacts),
-			localFacts:     localFacts,
-			mtlsFacts:      mtlsFacts,
-			mtlsBound:      true,
-			bound:          true,
-			attested:       true,
+			localAuthority:        cngAttestationFixture(localFacts),
+			localFacts:            localFacts,
+			authenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
+			bound:                 true,
+			attested:              true,
 		}
 	} else {
 		input.actualBootstrapPath = executorRead.File.Path
@@ -148,30 +145,6 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	return compositionFixture{
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
-	}
-}
-
-func selectBearerTokenSchema(t *testing.T, fixture *compositionFixture) {
-	t.Helper()
-	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	fixture.control.Control.ClientCertificateStore = ""
-	fixture.control.Control.ClientCertificateDERSHA256 = ""
-	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.installation.controlConfig = cloneConfig(fixture.control)
-	fixture.installation.executorConfig = cloneConfig(fixture.executor)
-	replaceConfigurationRead(t, &fixture.installation.controlBootstrap, fixture.control)
-	replaceConfigurationRead(t, &fixture.installation.executorBootstrap, fixture.executor)
-	if fixture.input.role == config.RoleControl {
-		localFacts := localCredentialFactFixture(t, fixture.control)
-		fixture.input.credentials = &ControlCredentialEvidence{
-			localAuthority:        cngAttestationFixture(localFacts),
-			localFacts:            localFacts,
-			authenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
-			bound:                 true,
-			attested:              true,
-		}
 	}
 }
 
@@ -261,40 +234,6 @@ func cngAttestationFixture(facts localCredentialFacts) cng.Attestation {
 		panic("cng attestation fixture layout changed")
 	}
 	return *(*cng.Attestation)(unsafe.Pointer(&value))
-}
-
-func mtlsAttestationFixture(facts mtlsCredentialFacts) wincert.Attestation {
-	type layout struct {
-		storeScope                  string
-		storeName                   string
-		certificateDERSHA256        [sha256.Size]byte
-		containerName               string
-		keyName                     string
-		keySecurityDescriptorSHA256 [sha256.Size]byte
-		keyIdentity                 cng.KeyIdentity
-		publicKeySPKISHA256         [sha256.Size]byte
-		validatedControlServiceSID  string
-		validatedExecutorServiceSID string
-		algorithm                   string
-		keyLengthBits               uint32
-		exportPolicy                uint32
-		keyUsage                    uint32
-		validated                   bool
-	}
-	value := layout{
-		storeScope: facts.storeScope, storeName: facts.storeName,
-		certificateDERSHA256: facts.certificateDER, containerName: facts.containerName,
-		keyName: facts.keyName, keySecurityDescriptorSHA256: facts.keySecurityDescriptor,
-		keyIdentity: facts.identity, publicKeySPKISHA256: facts.publicKeySPKI,
-		validatedControlServiceSID:  facts.validatedControlServiceSID,
-		validatedExecutorServiceSID: facts.validatedExecutorSID,
-		algorithm:                   facts.algorithm, keyLengthBits: facts.keyLengthBits,
-		exportPolicy: facts.exportPolicy, keyUsage: facts.keyUsage, validated: true,
-	}
-	if unsafe.Sizeof(value) != unsafe.Sizeof(wincert.Attestation{}) {
-		panic("wincert attestation fixture layout changed")
-	}
-	return *(*wincert.Attestation)(unsafe.Pointer(&value))
 }
 
 func identityFixture(role config.Role, control config.Config, executor config.Config) winidentity.Evidence {
@@ -471,9 +410,7 @@ func configurationFixtures(
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath:                       testTrustedRoot + `\` + rootCA.Path,
 			RootCertificateSHA256:                     rootCA.SHA256,
-			ClientCertificateStore:                    config.WindowsCertificateStore,
-			ClientCertificateDERSHA256:                strings.Repeat("5", 64),
-			ClientPrivateKeySecurityDescriptorSHA256:  strings.Repeat("6", 64),
+			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
 			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("7", 64),
 			LocalAuthorityPublicKeySHA256:             spki.SHA256,

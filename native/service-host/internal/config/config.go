@@ -19,10 +19,8 @@ import (
 )
 
 const (
-	// SchemaVersion is the immutable historical mTLS bootstrap schema.
-	SchemaVersion = 3
-	// BearerTokenSchemaVersion selects the per-Worker Bearer Token bootstrap profile.
-	BearerTokenSchemaVersion                 = 4
+	// SchemaVersion is the current per-Worker Bearer Token bootstrap schema.
+	SchemaVersion                            = 4
 	WorkerAuthenticationProfileBearerTokenV1 = "agentic-review-worker-auth-v1"
 	WorkerAuthenticationProfilePath          = `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`
 	MaximumDocumentBytes                     = 64 * 1024
@@ -32,7 +30,6 @@ const (
 	ControlServiceSID                        = "S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"
 	ExecutorServiceSID                       = "S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"
 	ControlExecutorPipeName                  = `\\.\pipe\AgenticReview.Worker.ControlExecutor.v1`
-	WindowsCertificateStore                  = "MY"
 	minimumRootJobMemory                     = uint64(256 * 1024 * 1024)
 	maximumRootJobMemory                     = uint64(1 * 1024 * 1024 * 1024 * 1024)
 	maximumEnvironmentValues                 = 128
@@ -75,10 +72,7 @@ type ControlConfiguration struct {
 	ServerName                                string `json:"serverName"`
 	RootCertificatePath                       string `json:"rootCertificatePath"`
 	RootCertificateSHA256                     string `json:"rootCertificateSha256"`
-	WorkerAuthenticationProfile               string `json:"workerAuthenticationProfile,omitempty"`
-	ClientCertificateStore                    string `json:"clientCertificateStore,omitempty"`
-	ClientCertificateDERSHA256                string `json:"clientCertificateDerSha256,omitempty"`
-	ClientPrivateKeySecurityDescriptorSHA256  string `json:"clientPrivateKeySecurityDescriptorSha256,omitempty"`
+	WorkerAuthenticationProfile               string `json:"workerAuthenticationProfile"`
 	LocalAuthorityCNGKeyName                  string `json:"localAuthorityCngKeyName"`
 	LocalAuthorityKeySecurityDescriptorSHA256 string `json:"localAuthorityKeySecurityDescriptorSha256"`
 	LocalAuthorityPublicKeySHA256             string `json:"localAuthorityPublicKeySha256"`
@@ -235,8 +229,8 @@ func MarshalCanonical(value Config) ([]byte, error) {
 }
 
 func (c Config) Validate() error {
-	if c.SchemaVersion != SchemaVersion && c.SchemaVersion != BearerTokenSchemaVersion {
-		return invalid("schemaVersion must be 3 or 4")
+	if c.SchemaVersion != SchemaVersion {
+		return invalid("schemaVersion must be 4")
 	}
 	if c.Role != RoleControl && c.Role != RoleExecutor {
 		return invalid("role must be control or executor")
@@ -399,30 +393,11 @@ func (c Config) validateControlConfiguration(control ControlConfiguration) error
 	); err != nil {
 		return err
 	}
-	if c.SchemaVersion == SchemaVersion {
-		if control.WorkerAuthenticationProfile != "" {
-			return invalid("control.workerAuthenticationProfile is not allowed by schemaVersion 3")
-		}
-		if control.ClientCertificateStore != WindowsCertificateStore {
-			return invalid("control.clientCertificateStore must be MY")
-		}
-		if !validSHA256(control.ClientCertificateDERSHA256) {
-			return invalid("control.clientCertificateDerSha256 must be a lowercase SHA-256 digest")
-		}
-		if !validSHA256(control.ClientPrivateKeySecurityDescriptorSHA256) {
-			return invalid("control.clientPrivateKeySecurityDescriptorSha256 must be a lowercase SHA-256 digest")
-		}
-	} else {
-		if control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 {
-			return invalid("control.workerAuthenticationProfile must select agentic-review-worker-auth-v1")
-		}
-		if control.ClientCertificateStore != "" || control.ClientCertificateDERSHA256 != "" ||
-			control.ClientPrivateKeySecurityDescriptorSHA256 != "" {
-			return invalid("schemaVersion 4 does not allow Worker client-certificate fields")
-		}
-		if !isDirectChild(c.Node.DataRoot, WorkerAuthenticationProfilePath) {
-			return invalid("schemaVersion 4 requires the fixed Worker authentication profile below node.dataRoot")
-		}
+	if control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 {
+		return invalid("control.workerAuthenticationProfile must select agentic-review-worker-auth-v1")
+	}
+	if !isDirectChild(c.Node.DataRoot, WorkerAuthenticationProfilePath) {
+		return invalid("schemaVersion 4 requires the fixed Worker authentication profile below node.dataRoot")
 	}
 	if !validCNGName(control.LocalAuthorityCNGKeyName) {
 		return invalid("control.localAuthorityCngKeyName must be bounded canonical text")

@@ -96,7 +96,7 @@ func normalizeIndex(value Index) (Index, error) {
 		validateTargetRoots(value.TargetRoots) != nil {
 		return Index{}, fmt.Errorf("%w: package index identity fields are invalid", ErrInvalid)
 	}
-	if value.SchemaVersion == BearerTokenIndexSchemaVersion && bearerTokenIndexContainsTokenShape(value) {
+	if indexContainsTokenShape(value) {
 		return Index{}, fmt.Errorf("%w: Token-profile package index contains Worker credential material", ErrInvalid)
 	}
 	if len(value.Payloads) == 0 || len(value.Payloads) > MaximumPayloads {
@@ -119,8 +119,7 @@ func normalizeIndex(value Index) (Index, error) {
 			return Index{}, fmt.Errorf("%w: payload root and path are not case-fold unique", ErrInvalid)
 		}
 		seen[key] = struct{}{}
-		if forbiddenPayloadPath(payload.Path) ||
-			value.SchemaVersion == BearerTokenIndexSchemaVersion && forbiddenWorkerAuthenticationPayloadPath(payload.Path) {
+		if forbiddenPayloadPath(payload.Path) || forbiddenWorkerAuthenticationPayloadPath(payload.Path) {
 			return Index{}, fmt.Errorf("%w: payload path is forbidden", ErrInvalid)
 		}
 		size, err := parseSize(payload.Size)
@@ -189,7 +188,7 @@ func normalizeIndex(value Index) (Index, error) {
 	return cloneIndex(value), nil
 }
 
-func bearerTokenIndexContainsTokenShape(value Index) bool {
+func indexContainsTokenShape(value Index) bool {
 	values := []string{
 		value.InstallationID,
 		value.LocalAuthorityCNG.KeyName,
@@ -213,26 +212,17 @@ func bearerTokenIndexContainsTokenShape(value Index) bool {
 }
 
 func validateIndexProfile(value Index) error {
-	switch {
-	case value.SchemaVersion == IndexSchemaVersion && value.ProfileID == IndexProfileID:
-		if value.MTLSClientCredential == nil || validateMTLSIdentity(*value.MTLSClientCredential) != nil {
-			return ErrInvalid
-		}
-		return nil
-	case value.SchemaVersion == BearerTokenIndexSchemaVersion && value.ProfileID == BearerTokenIndexProfileID:
-		if value.MTLSClientCredential != nil || installerprofile.ValidatePackageRoots(
-			installerprofile.BearerTokenInstallerV2ID,
+	if value.SchemaVersion != IndexSchemaVersion || value.ProfileID != IndexProfileID ||
+		installerprofile.ValidatePackageRoots(
+			installerprofile.ProfileID,
 			value.PackageID,
 			value.TargetRoots.Metadata,
 			value.TargetRoots.Installation,
 			value.TargetRoots.TrustedConfiguration,
 		) != nil {
-			return ErrInvalid
-		}
-		return nil
-	default:
 		return ErrInvalid
 	}
+	return nil
 }
 
 func validRoot(value Root) bool {
@@ -274,14 +264,6 @@ func validateNodeSPKI(value NodeSpecificSPKI) error {
 func validateCNGIdentity(value LocalAuthorityCNGIdentity) error {
 	if !validBoundedASCIIText(value.KeyName, 256) || strings.TrimSpace(value.KeyName) != value.KeyName ||
 		!validSHA256(value.SecurityDescriptorSHA256) {
-		return ErrInvalid
-	}
-	return nil
-}
-
-func validateMTLSIdentity(value MTLSCredentialIdentity) error {
-	if value.CertificateStore != MTLSCertificateStore || !validSHA256(value.CertificateDERSHA256) ||
-		!validSHA256(value.PrivateKeySecurityDescriptorSHA256) {
 		return ErrInvalid
 	}
 	return nil
@@ -528,9 +510,5 @@ func clonePayloads(values []Payload) []Payload {
 
 func cloneIndex(value Index) Index {
 	value.Payloads = clonePayloads(value.Payloads)
-	if value.MTLSClientCredential != nil {
-		credential := *value.MTLSClientCredential
-		value.MTLSClientCredential = &credential
-	}
 	return value
 }

@@ -1,6 +1,7 @@
 package outerpackage
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -30,45 +31,52 @@ func TestDetachedP256SignatureVerifiesCanonicalIndex(t *testing.T) {
 		parsed.SchemaVersion != SignatureSchemaVersion {
 		t.Fatalf("unexpected signature envelope: %#v", parsed)
 	}
-	digest, err := SigningDigest(index)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual := hex.EncodeToString(digest[:]); actual != signingDigestGoldenSHA256 {
-		t.Fatalf("signing digest golden = %s, want %s", actual, signingDigestGoldenSHA256)
-	}
 }
 
-func TestBearerTokenIndexUsesExistingSignatureV1WithoutCrossProfileInterchange(t *testing.T) {
-	index, err := buildBearerTokenIndex(validFinalizedSource(t, "a", "b"), validBearerTokenBuildOptions())
-	if err != nil {
-		t.Fatal(err)
+func TestSignaturePolicyRejectsSchema3MTLSAndLegacyProfile(t *testing.T) {
+	index := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
+	tests := []struct {
+		name     string
+		document []byte
+	}{
+		{
+			name: "schema 3",
+			document: bytes.Replace(
+				index,
+				[]byte(`"schemaVersion":2`),
+				[]byte(`"schemaVersion":3`),
+				1,
+			),
+		},
+		{
+			name: "mTLS field",
+			document: bytes.Replace(
+				index,
+				[]byte(`"nodeSpecificLocalAuthorityPublicKeySpki":`),
+				[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"nodeSpecificLocalAuthorityPublicKeySpki":`),
+				1,
+			),
+		},
+		{
+			name: "legacy profile",
+			document: bytes.Replace(
+				index,
+				[]byte(`"profileId":"`+IndexProfileID+`"`),
+				[]byte(`"profileId":"agentic-review-worker-outer-package-v1"`),
+				1,
+			),
+		},
 	}
-	_, spki, envelopeDocument := signedEnvelopeFixture(t, index)
-	if err := VerifyDetachedSignature(index, envelopeDocument, spki); err != nil {
-		t.Fatal(err)
-	}
-	envelope, err := ParseSignatureEnvelope(envelopeDocument)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if envelope.SchemaVersion != SignatureSchemaVersion {
-		t.Fatalf("Token package signature schema = %d", envelope.SchemaVersion)
-	}
-	digest, err := SigningDigest(index)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actual := hex.EncodeToString(digest[:]); actual != bearerTokenSigningDigestGoldenSHA256 {
-		t.Fatalf("Token signing digest golden = %s, want %s", actual, bearerTokenSigningDigestGoldenSHA256)
-	}
-	legacyIndex := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
-	_, legacySPKI, legacyEnvelope := signedEnvelopeFixture(t, legacyIndex)
-	if err := VerifyDetachedSignature(index, legacyEnvelope, legacySPKI); !errors.Is(err, ErrSignature) {
-		t.Fatalf("v1 envelope over v2 index returned %v", err)
-	}
-	if err := VerifyDetachedSignature(legacyIndex, envelopeDocument, spki); !errors.Is(err, ErrSignature) {
-		t.Fatalf("v2-index envelope over v1 index returned %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := SigningDigest(test.document); err == nil {
+				t.Fatal("SigningDigest accepted an unsupported package profile")
+			}
+			_, spki, envelope := rawSignedEnvelopeFixture(t, test.document)
+			if err := VerifyDetachedSignature(test.document, envelope, spki); !errors.Is(err, ErrSignature) {
+				t.Fatalf("VerifyDetachedSignature returned %v", err)
+			}
+		})
 	}
 }
 
@@ -140,7 +148,7 @@ func TestDetachedSignatureRejectsIndexAndTrustedKeyMixAndMatch(t *testing.T) {
 	index := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
 	_, spki, envelope := signedEnvelopeFixture(t, index)
 	parsed := mustParseIndex(t, index)
-	parsed.PackageID = "worker-package-other"
+	parsed.Source.Commit = strings.Repeat("c", 40)
 	changedIndex, err := MarshalIndexCanonical(parsed)
 	if err != nil {
 		t.Fatal(err)
@@ -207,15 +215,37 @@ func signedEnvelopeFixture(
 	index []byte,
 ) (*ecdsa.PrivateKey, []byte, []byte) {
 	t.Helper()
+	digest, err := SigningDigest(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signedEnvelopeFixtureForDigest(t, index, digest)
+}
+
+func rawSignedEnvelopeFixture(
+	t *testing.T,
+	index []byte,
+) (*ecdsa.PrivateKey, []byte, []byte) {
+	t.Helper()
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(signatureDomain))
+	_, _ = hash.Write(index)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return signedEnvelopeFixtureForDigest(t, index, digest)
+}
+
+func signedEnvelopeFixtureForDigest(
+	t *testing.T,
+	index []byte,
+	digest [sha256.Size]byte,
+) (*ecdsa.PrivateKey, []byte, []byte) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest, err := SigningDigest(index)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,8 +300,3 @@ func encodeP1363(r, s *big.Int) string {
 }
 
 func cloneEnvelope(value SignatureEnvelope) SignatureEnvelope { return value }
-
-const (
-	signingDigestGoldenSHA256            = "78d20854c371e7aac5101d190cb17e8adbc6e0218e8117f37bc6891820dcb67a"
-	bearerTokenSigningDigestGoldenSHA256 = "23a0158267b8a7ce204c075a78c32143c24b7227b5b1d940548dc9f74c88cbf4"
-)

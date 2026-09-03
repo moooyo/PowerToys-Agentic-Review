@@ -180,13 +180,12 @@ func validateConfigurationPair(control, executor config.Config) error {
 		executor.Limits.ForceTerminationReserveMilliseconds {
 		return mismatch("limits.forceTerminationReserveMilliseconds")
 	}
-	if control.SchemaVersion == config.BearerTokenSchemaVersion &&
-		installerprofile.ValidateBearerTokenBootstrapPair(
-			installerprofile.BearerTokenInstallerV2ID,
-			control,
-			executor,
-		) != nil {
-		return mismatch("schema-v4 installer profile")
+	if installerprofile.ValidateBootstrapPair(
+		installerprofile.ProfileID,
+		control,
+		executor,
+	) != nil {
+		return mismatch("installer profile")
 	}
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 )
 
 func TestComposeReturnsDetachedProductionEvidenceForBothRoles(t *testing.T) {
@@ -400,75 +399,48 @@ func TestReleaseBindingCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
 	}
 }
 
-func TestComposeRejectsDOSShortNameFormInConfiguration(t *testing.T) {
+func TestValidateControlCredentialFactsBindsLocalAuthorityPins(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
-	dataRoot := `C:\PROGRA~1\AgenticReview\Control`
-	fixture.control.Node.DataRoot = dataRoot
-	fixture.control.Node.WorkingDirectory = dataRoot + `\Work`
-	fixture.control.Node.Environment["TEMP"] = dataRoot + `\Temp`
-	fixture.control.Node.Environment["TMP"] = dataRoot + `\Temp`
-	fixture.control.Node.Environment["USERPROFILE"] = dataRoot + `\Profile`
-	fixture.control.Node.Environment["APPDATA"] = dataRoot + `\Profile\AppData`
-	fixture.control.Node.Environment["LOCALAPPDATA"] = dataRoot + `\Profile\LocalAppData`
-	fixture.installation.controlConfig = cloneConfig(fixture.control)
-	replaceConfigurationRead(t, &fixture.installation.controlBootstrap, fixture.control)
-	_, err := composeSnapshots(fixture.input)
-	assertPreflightErrorCode(t, err, ErrorConfiguration)
-}
-
-func TestValidateControlCredentialFactsBindsPinsAndRejectsKeyReuse(t *testing.T) {
-	fixture := newCompositionFixture(t, config.RoleControl)
-	validLocal, validMTLS := credentialFactFixtures(t, fixture.control)
+	valid := localCredentialFactFixture(t, fixture.control)
 	tests := []struct {
 		name   string
-		mutate func(*localCredentialFacts, *mtlsCredentialFacts)
+		mutate func(*localCredentialFacts)
 	}{
-		{"local key name", func(local *localCredentialFacts, _ *mtlsCredentialFacts) { local.keyName += ".other" }},
-		{"local descriptor", func(local *localCredentialFacts, _ *mtlsCredentialFacts) { local.keySecurityDescriptor[0] ^= 0xff }},
-		{"local public key", func(local *localCredentialFacts, _ *mtlsCredentialFacts) { local.publicKeySPKI[0] ^= 0xff }},
-		{"mTLS scope", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.storeScope = "CurrentUser" }},
-		{"mTLS store", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.storeName = "ROOT" }},
-		{"certificate DER", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.certificateDER[0] ^= 0xff }},
-		{"mTLS descriptor", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.keySecurityDescriptor[0] ^= 0xff }},
-		{"local Control SID", func(local *localCredentialFacts, _ *mtlsCredentialFacts) {
+		{"key name", func(local *localCredentialFacts) { local.keyName += ".other" }},
+		{"descriptor", func(local *localCredentialFacts) { local.keySecurityDescriptor[0] ^= 0xff }},
+		{"public key", func(local *localCredentialFacts) { local.publicKeySPKI[0] ^= 0xff }},
+		{"Control SID", func(local *localCredentialFacts) {
 			local.validatedControlServiceSID = config.ExecutorServiceSID
 		}},
-		{"local Executor SID", func(local *localCredentialFacts, _ *mtlsCredentialFacts) {
+		{"Executor SID", func(local *localCredentialFacts) {
 			local.validatedExecutorSID = config.ControlServiceSID
 		}},
-		{"mTLS Control SID", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) {
-			mtls.validatedControlServiceSID = config.ExecutorServiceSID
-		}},
-		{"mTLS Executor SID", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) {
-			mtls.validatedExecutorSID = config.ControlServiceSID
-		}},
-		{"same identity", func(local *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.identity = local.identity }},
-		{"same public key", func(local *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.publicKeySPKI = local.publicKeySPKI }},
-		{"wrong provider", func(local *localCredentialFacts, _ *mtlsCredentialFacts) {
+		{"wrong provider", func(local *localCredentialFacts) {
 			local.identity.ProviderName = "Other Provider"
 		}},
-		{"user key", func(_ *localCredentialFacts, mtls *mtlsCredentialFacts) { mtls.identity.MachineKey = false }},
-		{"empty unique name", func(local *localCredentialFacts, _ *mtlsCredentialFacts) { local.identity.UniqueName = "" }},
+		{"user key", func(local *localCredentialFacts) { local.identity.MachineKey = false }},
+		{"empty unique name", func(local *localCredentialFacts) { local.identity.UniqueName = "" }},
+		{"algorithm", func(local *localCredentialFacts) { local.algorithm = "RSA" }},
+		{"key length", func(local *localCredentialFacts) { local.keyLengthBits = 384 }},
+		{"key usage", func(local *localCredentialFacts) { local.keyUsage = 1 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			local := validLocal
-			mtls := validMTLS
-			test.mutate(&local, &mtls)
-			err := validateControlCredentialFacts(fixture.control, local, mtls)
+			local := valid
+			test.mutate(&local)
+			err := validateControlCredentialFacts(fixture.control, local)
 			assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
 		})
 	}
-	if err := validateControlCredentialFacts(fixture.control, validLocal, validMTLS); err != nil {
+	if err := validateControlCredentialFacts(fixture.control, valid); err != nil {
 		t.Fatalf("valid credential facts were rejected: %v", err)
 	}
 }
 
-func TestBearerTokenSchemaPreflightBindsOnlyTheLocalCapabilitySigner(t *testing.T) {
+func TestCurrentSchemaPreflightBindsOnlyTheLocalCapabilitySigner(t *testing.T) {
 	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
 		t.Run(string(role), func(t *testing.T) {
 			fixture := newCompositionFixture(t, role)
-			selectBearerTokenSchema(t, &fixture)
 			evidence, err := composeSnapshots(fixture.input)
 			if err != nil {
 				t.Fatal(err)
@@ -481,26 +453,24 @@ func TestBearerTokenSchemaPreflightBindsOnlyTheLocalCapabilitySigner(t *testing.
 				return
 			}
 			if !exists || credentials.WorkerAuthenticationProfile() !=
-				config.WorkerAuthenticationProfileBearerTokenV1 || credentials.HasMTLSAttestation() {
-				t.Fatalf("schemaVersion 4 credentials = %#v, exists=%v", credentials, exists)
+				config.WorkerAuthenticationProfileBearerTokenV1 {
+				t.Fatalf("current-schema credentials = %#v, exists=%v", credentials, exists)
 			}
 		})
 	}
 }
 
-func TestBearerTokenSchemaPreflightRejectsHistoricalMTLSMaterial(t *testing.T) {
+func TestCurrentSchemaPreflightRejectsCredentialProfileMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*ControlCredentialEvidence)
 	}{
-		{name: "mTLS marker", mutate: func(value *ControlCredentialEvidence) { value.mtlsBound = true }},
-		{name: "mTLS facts", mutate: func(value *ControlCredentialEvidence) { value.mtlsFacts.storeName = "MY" }},
 		{name: "missing profile", mutate: func(value *ControlCredentialEvidence) { value.authenticationProfile = "" }},
+		{name: "wrong profile", mutate: func(value *ControlCredentialEvidence) { value.authenticationProfile = "other" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newCompositionFixture(t, config.RoleControl)
-			selectBearerTokenSchema(t, &fixture)
 			test.mutate(fixture.input.credentials)
 			_, err := composeSnapshots(fixture.input)
 			assertPreflightErrorCode(t, err, ErrorEvidence)
@@ -510,11 +480,8 @@ func TestBearerTokenSchemaPreflightRejectsHistoricalMTLSMaterial(t *testing.T) {
 
 func TestConfigurationPairRejectsMixedBootstrapSchemaVersions(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
-	selectBearerTokenSchema(t, &fixture)
-	fixture.executor.SchemaVersion = config.SchemaVersion
-	fixture.installation.executorConfig = cloneConfig(fixture.executor)
-	replaceConfigurationRead(t, &fixture.installation.executorBootstrap, fixture.executor)
-	_, err := composeSnapshots(fixture.input)
+	fixture.executor.SchemaVersion = 3
+	err := validateConfigurationPair(fixture.control, fixture.executor)
 	assertPreflightErrorCode(t, err, ErrorConfigurationPair)
 }
 
@@ -535,36 +502,10 @@ func TestPublicComposeRejectsZeroBootstrapEvidenceFirst(t *testing.T) {
 	assertPreflightErrorCode(t, err, ErrorServiceBootstrap)
 }
 
-func TestBindControlCredentialsRejectsMissingConcreteObjects(t *testing.T) {
+func TestBindControlCredentialsRejectsMissingLocalAuthoritySigner(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
-	_, err := BindControlCredentials(fixture.control, nil, nil)
+	_, err := BindControlCredentials(fixture.control, nil)
 	assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
-}
-
-func credentialFactFixtures(
-	t *testing.T,
-	configuration config.Config,
-) (localCredentialFacts, mtlsCredentialFacts) {
-	t.Helper()
-	local := localCredentialFactFixture(t, configuration)
-	certificateDER := mustDecodeDigest(t, configuration.Control.ClientCertificateDERSHA256)
-	mtlsDescriptor := mustDecodeDigest(t, configuration.Control.ClientPrivateKeySecurityDescriptorSHA256)
-	mtlsSPKI := sha256.Sum256([]byte("distinct mTLS public key"))
-	return local, mtlsCredentialFacts{
-		storeScope:                 wincert.LocalMachineStoreScope,
-		storeName:                  configuration.Control.ClientCertificateStore,
-		certificateDER:             certificateDER,
-		keySecurityDescriptor:      mtlsDescriptor,
-		identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "mtls", MachineKey: true},
-		publicKeySPKI:              mtlsSPKI,
-		validatedControlServiceSID: configuration.OwnService.SID,
-		validatedExecutorSID:       configuration.PeerService.SID,
-		containerName:              "mtls-container",
-		keyName:                    "mtls-container",
-		algorithm:                  "ECDSA_P256",
-		keyLengthBits:              256,
-		keyUsage:                   2,
-	}
 }
 
 func localCredentialFactFixture(t *testing.T, configuration config.Config) localCredentialFacts {

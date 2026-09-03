@@ -33,7 +33,7 @@ type productionReference struct {
 
 func TestProductionProfileAcceptsOnlySchemaVersion4BearerTokenConfiguration(t *testing.T) {
 	configuration := config.Config{
-		SchemaVersion: config.BearerTokenSchemaVersion,
+		SchemaVersion: config.SchemaVersion,
 		Control: &config.ControlConfiguration{
 			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 		},
@@ -42,11 +42,11 @@ func TestProductionProfileAcceptsOnlySchemaVersion4BearerTokenConfiguration(t *t
 		t.Fatalf("schemaVersion 4 Bearer Token profile was rejected: %v", err)
 	}
 
-	configuration.SchemaVersion = config.SchemaVersion
+	configuration.SchemaVersion = 3
 	if err := requireProductionBearerProfile(configuration); err == nil {
 		t.Fatal("historical schemaVersion 3 remained a positive production authentication path")
 	}
-	configuration.SchemaVersion = config.BearerTokenSchemaVersion
+	configuration.SchemaVersion = config.SchemaVersion
 	configuration.Control.WorkerAuthenticationProfile = ""
 	if err := requireProductionBearerProfile(configuration); err == nil {
 		t.Fatal("schemaVersion 4 without the exact Bearer Token profile was accepted")
@@ -98,13 +98,10 @@ func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *tes
 		})
 	}
 
-	if legacy := references["NewClient"]; len(legacy) != 0 {
-		t.Fatalf("production source references the historical Worker mTLS constructor: %v", legacy)
-	}
 	expected := productionReference{
 		path: "internal/platform/production_windows.go", function: "buildRoleRuntime",
 	}
-	for _, name := range []string{"LoadWorkerAuth", "NewBearerClient"} {
+	for _, name := range []string{"LoadWorkerAuth", "NewClient"} {
 		observed := references[name]
 		if len(observed) != 1 || observed[0] != expected {
 			t.Fatalf("production %s references = %v, want exactly %v", name, observed, expected)

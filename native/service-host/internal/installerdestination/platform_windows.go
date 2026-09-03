@@ -10,11 +10,11 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
-// Verify consumes one live v2 staged-package gate and read-only reverifies all three fixed
+// Verify consumes one live installer-package gate and read-only reverifies all three fixed
 // destinations. It performs no filesystem mutation, SCM operation, secret provisioning, service
 // start, or readiness check. Ownership transfers when the staged gate begins its one-shot borrow;
 // a gate rejected before that point remains the caller's responsibility.
-func Verify(ctx context.Context, selection stagedpackage.BearerTokenInstallerV2Package) (Evidence, error) {
+func Verify(ctx context.Context, selection stagedpackage.InstallerPackage) (Evidence, error) {
 	policy, err := newProductionSecurityPolicy()
 	if err != nil {
 		return Evidence{}, ErrInvalidSource

@@ -9,6 +9,6 @@ import (
 )
 
 // Verify fails closed outside Windows before opening any path.
-func Verify(context.Context, stagedpackage.BearerTokenInstallerV2Package) (Evidence, error) {
+func Verify(context.Context, stagedpackage.InstallerPackage) (Evidence, error) {
 	return Evidence{}, ErrUnsupportedPlatform
 }

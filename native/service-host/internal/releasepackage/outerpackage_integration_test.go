@@ -9,9 +9,10 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
-func TestOuterPackagePublicEntryPointsUseRealFinalizedReleaseSnapshot(t *testing.T) {
+func TestOuterPackagePublicEntryPointUsesRealFinalizedReleaseSnapshot(t *testing.T) {
 	finalized := releasepackage.FinalizedReleaseForOuterPackageTest(t)
-	document, err := outerpackage.BuildIndex(finalized, outerPackageBuildOptions())
+	options := outerPackageBuildOptions()
+	document, err := outerpackage.BuildIndex(finalized, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,30 +20,13 @@ func TestOuterPackagePublicEntryPointsUseRealFinalizedReleaseSnapshot(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if index.ReleaseID != finalized.Descriptor().ReleaseID ||
+	if index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		index.ProfileID != outerpackage.IndexProfileID ||
+		index.LocalAuthorityCNG != options.LocalAuthorityCNG ||
+		index.ReleaseID != finalized.Descriptor().ReleaseID ||
 		index.Source.Commit != finalized.Descriptor().Source.Commit ||
 		index.Source.Tree != finalized.Descriptor().Source.Tree {
 		t.Fatalf("outer index differs from real finalized release: %#v", index)
-	}
-	if err := outerpackage.ValidateAgainstRelease(document, finalized); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestBearerTokenOuterPackagePublicEntryPointUsesRealFinalizedReleaseSnapshot(t *testing.T) {
-	finalized := releasepackage.FinalizedReleaseForOuterPackageTest(t)
-	document, err := outerpackage.BuildBearerTokenIndex(finalized, outerBearerTokenBuildOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	index, err := outerpackage.ParseIndex(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil ||
-		index.ReleaseID != finalized.Descriptor().ReleaseID {
-		t.Fatalf("Token outer index differs from real finalized release: %#v", index)
 	}
 	if err := outerpackage.ValidateAgainstRelease(document, finalized); err != nil {
 		t.Fatal(err)
@@ -82,11 +66,6 @@ func outerPackageBuildOptions() outerpackage.BuildOptions {
 			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			SecurityDescriptorSHA256: strings.Repeat("1", 64),
 		},
-		MTLSClientCredential: outerpackage.MTLSCredentialIdentity{
-			CertificateDERSHA256:               strings.Repeat("2", 64),
-			CertificateStore:                   outerpackage.MTLSCertificateStore,
-			PrivateKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
-		},
 		TargetRoots: outerpackage.TargetRoots{
 			Installation:         `C:\Program Files\AgenticReview\Worker`,
 			Metadata:             `C:\ProgramData\AgenticReview\Packages\worker-package-2026.09.02.1`,
@@ -100,18 +79,5 @@ func outerPackageBuildOptions() outerpackage.BuildOptions {
 			SHA256: strings.Repeat("5", 64),
 			Size:   "1024",
 		},
-	}
-}
-
-func outerBearerTokenBuildOptions() outerpackage.BearerTokenBuildOptions {
-	legacy := outerPackageBuildOptions()
-	return outerpackage.BearerTokenBuildOptions{
-		PackageID:         legacy.PackageID,
-		InstallationID:    legacy.InstallationID,
-		WorkerNodeID:      legacy.WorkerNodeID,
-		LocalAuthorityCNG: legacy.LocalAuthorityCNG,
-		TargetRoots:       legacy.TargetRoots,
-		ControlBootstrap:  legacy.ControlBootstrap,
-		ExecutorBootstrap: legacy.ExecutorBootstrap,
 	}
 }

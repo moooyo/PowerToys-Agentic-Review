@@ -11,19 +11,18 @@ and Token recovery work. It does not implement the complete production SCM insta
 
 ## Completed Scope
 
-- Outer-package index schema 2/profile `agentic-review-worker-outer-package-v2` omits the historical
-  mTLS identity and binds only bootstrap schema v4. The existing signature envelope, algorithm, and
-  domain remain schema v1; the signed canonical index bytes prevent v1/v2 interchange.
-- `BuildBearerTokenIndex` has no Worker credential-specific or mTLS field. Package v2 rejects
-  `worker-auth-v1.json` at every indexed root and path depth and rejects Token-shaped values in all
-  signed identity and path strings. Historical package v1 and its canonical golden bytes remain
-  unchanged.
+- The current outer-package index schema 2/profile `agentic-review-worker-outer-package-v2` contains
+  no Worker client credential and binds only bootstrap schema 4. The independent signature envelope,
+  algorithm, and domain remain schema 1 and sign the canonical current-profile index bytes.
+- `BuildIndex` has no Worker credential field. Package v2 rejects `worker-auth-v1.json` at every
+  indexed root and path depth and rejects Token-shaped values in all signed identity and path
+  strings. No earlier outer-package profile is accepted or retained as a compatibility surface.
 - Split installer profile `agentic-review-worker-split-installer-v2` fixes the installation,
   metadata, trusted-configuration, Control-data, and Executor-data roots. Outer admission and
   installation verification require the matching schema-v4 Control/Executor pair.
-- `stagedpackage.SelectBearerTokenInstallerV2` rejects historical v1 evidence and returns an opaque,
-  non-serializable typed gate with revalidation, cleanup-fatal propagation, and deterministic handle
-  ownership through `Close`.
+- `stagedpackage.SelectInstallerPackage` accepts only current package-v2/schema-4 evidence and
+  returns an opaque, non-serializable typed gate with revalidation, cleanup-fatal propagation, and
+  deterministic handle ownership through `Close`.
 - `installerdestination.Verify` is the only production consumer of that typed gate. It reopens the
   three fixed post-swap roots, requires exact path casing and closed trees, rehashes every signed
   payload, byte-compares the index, envelope, and both bootstraps, reruns compiled outer admission,
@@ -99,7 +98,7 @@ The credential helper's canonical input, rejection, PowerShell 5.1 parsing, and 
 enable/restore paths were exercised; physical replacement under the fixed ProgramData ACL awaits
 the production installer environment.
 
-The installer-destination focused matrix covers the v2 positive closure, historical-profile and
+The installer-destination focused matrix covers the v2 positive closure, alternate-profile and
 fixed-root rejection, exact root and payload casing, payload/index/envelope/bootstrap byte drift,
 extra entries, repeated and post-close use, borrowed-view expiry, source/destination cleanup-fatal
 mapping, and source ownership. It is verify-only and does not claim that a privileged root swap was

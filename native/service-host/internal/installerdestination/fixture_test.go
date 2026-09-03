@@ -97,8 +97,8 @@ func newDestinationFixture(t testing.TB) *destinationFixture {
 			Path: `keys\local-authority.spki`, SHA256: hex.EncodeToString(spkiDigest[:]),
 		},
 		PackageID: "worker-package-001", Payloads: payloads,
-		ProfileID: outerpackage.BearerTokenIndexProfileID, ReleaseID: "worker-2026.09.04.1",
-		SchemaVersion:      outerpackage.BearerTokenIndexSchemaVersion,
+		ProfileID: outerpackage.IndexProfileID, ReleaseID: "worker-2026.09.04.1",
+		SchemaVersion:      outerpackage.IndexSchemaVersion,
 		Source:             outerpackage.SourceIdentity{Commit: strings.Repeat("8", 40), Tree: strings.Repeat("9", 40)},
 		TargetArchitecture: outerpackage.ArchitectureAMD64,
 		TargetRoots: outerpackage.TargetRoots{
@@ -422,7 +422,7 @@ func fakeSecurity(mode winfile.SecurityMode) winfile.SecurityDescriptorEvidence 
 
 func fixtureBootstrapPair(manifestSHA256 string) (config.Config, config.Config) {
 	control := config.Config{
-		SchemaVersion: config.BearerTokenSchemaVersion, Role: config.RoleControl, WorkerNodeID: "worker-node-001",
+		SchemaVersion: config.SchemaVersion, Role: config.RoleControl, WorkerNodeID: "worker-node-001",
 		OwnService:  config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},
 		PeerService: config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID},
 		PipeName:    config.ControlExecutorPipeName,

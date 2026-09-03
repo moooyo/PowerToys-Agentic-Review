@@ -1,6 +1,6 @@
 # Split Windows Worker Installation Inputs
 
-This directory contains reusable split Control/Executor WinSW launch inputs and the fixed-path
+This directory contains the current split Control/Executor WinSW launch inputs and the fixed-path
 Worker Token provisioning helper. It is not yet a complete installer, and ADR 0026 does not require
 the future installer to retain WinSW or the current package-verification composition.
 

@@ -1,4 +1,4 @@
-# Signed Package Admission Profiles
+# Signed Package Admission Profile
 
 `outeradmission.Admit` is the production entry point for the first signed-package admission stage.
 It accepts canonical package-index bytes, detached-envelope bytes, and the exact Control and
@@ -6,11 +6,10 @@ Executor ServiceHost bootstrap bytes. It takes no public key, verifier callback,
 filesystem handle, or installation option. The outer signer is loaded only through
 `outertrust.Production`.
 
-Admission dispatches only two exact profiles. Historical outer-package v1 requires schema-v3
-bootstraps and the signed mTLS identity. Outer-package v2 requires schema-v4 bootstraps, the fixed
-`agentic-review-worker-auth-v1` selector, installer profile v2 roots, and no mTLS index field or
-bootstrap field. Cross-version pairs fail closed. Neither the plaintext Worker Token nor its
-Server-side SHA-256 digest belongs in signed package admission.
+Admission accepts only the current `outerpackage.IndexSchemaVersion` and
+`outerpackage.IndexProfileID` together with `config.SchemaVersion`, the fixed
+`agentic-review-worker-auth-v1` selector, and the current installer-profile roots. Neither the
+plaintext Worker Token nor its Server-side SHA-256 digest belongs in signed package admission.
 
 All four byte slices are bounded and cloned before verification. Signature verification, canonical
 parsing, and bootstrap binding use the same immutable snapshots. A verifier-side mutation or a
@@ -25,15 +24,13 @@ The logical binding proves:
   manifest digest agree across both bootstraps and the signed index;
 - the Node executable, Control and Executor bundles, root CA, ProcessHost, Executor policy, and
   local-authority SPKI selectors match indexed runtime payloads;
-- the CNG key name, security-descriptor digest, and shared shutdown and transport limits agree;
-- v1 additionally binds the mTLS certificate/private-key identity; and
-- v2 additionally binds the fixed Control/Executor data roots and Token authentication selector.
+- the CNG key name, security-descriptor digest, and shared shutdown and transport limits agree; and
+- the fixed Control and Executor data roots and Worker authentication selector agree.
 
-The ServiceHost bootstrap schema version 3 is not a RoleConfig v3. This package does not construct
-or mint a runtime RoleConfig and `SignedPackagePlan` carries no RoleConfig authority fields. The
-existing guarded runtime chain independently remains on foundation v2 with
-`executionEnabled=false` and `maximumSlots=1`. In particular, the admission inputs do not contain
-the SPKI payload bytes needed for the Executor's inline RoleConfig public-key descriptor.
+This package does not construct or mint a runtime RoleConfig and `SignedPackagePlan` carries no
+RoleConfig authority fields. The existing guarded runtime chain independently remains on foundation
+v2 with `executionEnabled=false` and `maximumSlots=1`. In particular, the admission inputs do not
+contain the SPKI payload bytes needed for the Executor's inline RoleConfig public-key descriptor.
 
 `SignedPackagePlan` is opaque, refuses JSON serialization, and returns detached data copies. It is
 not installation or execution evidence. Package ID, installation ID, metadata root, source and

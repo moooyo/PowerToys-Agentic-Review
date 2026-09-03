@@ -2,20 +2,20 @@
 
 Status date: 2026-09-04
 
-> ADR 0025 selects per-Worker Bearer Token authentication. The Server and runnable TypeScript
-> Worker use that profile and no longer use Worker mutual TLS, certificate binding, Server binding
-> receipts, or the dormant signer-host direction. Native ServiceHost bootstrap schema v4 now makes
-> the fixed Worker authentication file a Control-only data-root member and selects the Bearer
-> client; production composition rejects historical schema v3 before opening any Worker credential.
-> Signed outer-package v2 and split installer profile v2 now bind schema-v4 bootstraps without mTLS
-> or package credential material; historical v1 remains schema-v3-only. Actual authenticated release
-> material and the production Windows clean installer remain incomplete. The
-> verify-only destination evidence composition is now implemented. Historical
-> source and verification evidence remain recorded below, but none of the superseded receipt or
-> signer-host paths is a future production-enablement prerequisite.
+> ADR 0025 selects the sole per-Worker Bearer Token authentication profile. The Server, runnable
+> TypeScript Worker, and native ServiceHost accept only that profile. Native bootstrap schema 4
+> makes the fixed Worker authentication file a Control-only data-root member and selects the fixed
+> Bearer client; every other bootstrap schema is rejected by strict parsing and validation. The
+> current signed outer-package schema/profile v2 and split installer profile v2 bind only the
+> schema-4 Control/Executor pair and contain no Worker credential material. No earlier outer-package
+> or bootstrap profile is retained as a compatibility surface. The separate Control-to-Executor
+> local CNG capability signer, WinSW launch inputs, node-specific packaging, Authenticode checks,
+> and verify-only destination evidence are replaceable current candidates. The two-service
+> Control/Executor isolation remains the selected Windows Worker boundary. Actual signed release
+> material and the production Windows clean installer remain incomplete.
 >
-> ADR 0026 now selects an unpublished clean-install-only Windows installer. The former transaction
-> v1 model, transaction v2 lab, cross-version store lab, and legacy single-service mTLS deployment
+> ADR 0026 selects an unpublished clean-install-only Windows installer. The former transaction v1
+> model, transaction v2 lab, cross-version store lab, and legacy single-service mTLS deployment
 > files were deleted before publication. No upgrade, migration, fallback reader, rollback journal,
 > or cross-version store is a future installer prerequisite.
 
@@ -156,16 +156,15 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   persisted non-exportable CNG P-256 local-capability signing; strict fixed-profile Worker Bearer
   loading; stable pipe-peer process and token verification; canonical role-local RPC; fixed-origin
   TLS 1.3 transport; stable WinSW observation; and suspended Node launch into a non-breakaway root
-  Job. Bootstrap schema v4 selects the fixed canonical authentication profile and Bearer transport
+  Job. Bootstrap schema 4 selects the fixed canonical authentication profile and Bearer transport
   for Control, keeps the Token out of preflight evidence and runtime bootstrap, and gives Executor
-  no Server transport. `production_windows.go` rejects schema v3 before credential acquisition and
-  contains no production `wincert`, mTLS evidence, or legacy `NewClient` path. Signed package v1
-  remains schema-v3-only; outer-package v2, installer profile v2, and the retained staged-evidence
-  typed gate now accept only the matching schema-v4 pair.
+  no Server transport. Strict parsing and validation reject every other bootstrap schema and all
+  Worker client-certificate properties. The current outer-package v2, installer profile v2, and
+  staged-evidence typed gate accept only the matching schema-4 pair.
 - Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy,
   Control-only key ACL semantics, detached key identities, key-reuse detection inputs, and canonical
-  public-SPKI digests for the local Control-to-Executor capability signer. Historical mTLS key
-  contracts are no longer part of Worker authentication.
+  public-SPKI digests for the local Control-to-Executor capability signer. This local CNG authority
+  remains separate from Worker authentication.
 - Pre-resume Node process and primary-token protected DACL application with exact readback, plus
   root-Job drain semantics that retain the lifetime handle whenever zero active processes cannot be
   confirmed.
@@ -381,7 +380,7 @@ No command used `test-env`. Historical verification entries below remain provena
 experiments, not current implementation or future prerequisites.
 
 On 2026-09-04, the installer destination slice added the only production consumer of
-`BearerTokenInstallerV2Package`. The read-only composition accepts no caller-supplied path or
+`InstallerPackage`. The read-only composition accepts no caller-supplied path or
 detached authority, borrows an exact one-shot view of the admitted index, envelope, and schema-v4
 bootstraps, and reopens all three profile-fixed roots after a future installer swap. It validates
 exact path casing, complete tree closure, every signed payload digest and size, exact metadata
@@ -415,12 +414,12 @@ typecheck, build, and lint passed with Biome checking 312 files, and the Worker 
 architecture check plus all 19 role-bundle guards passed. No command used `test-env`.
 
 On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
-split installer profile v2, schema-v4 admission, the retained staged-evidence typed installer gate,
-and the fixed-path SecureString provisioning helper while keeping signature envelope/domain v1 and
-historical outer-package v1 unchanged. It deleted 47 tracked files from the retired Server-binding,
-signer-host, contracts, native verifier, and node-enrollment implementation island. That
-intermediate commit still retained the unreleased Server-binding migration and a pre-v13 recovery
-case; the current pre-release schema reset removes both. The current five-case recovery matrix and
+split installer profile v2, schema-4 admission, the retained staged-evidence typed installer gate,
+and the fixed-path SecureString provisioning helper while keeping signature envelope/domain v1. It
+deleted 47 tracked files from the retired Server-binding, signer-host, contracts, native verifier,
+and node-enrollment implementation island. That intermediate commit still retained the unreleased
+Server-binding migration and a pre-v13 recovery case; the current pre-release schema reset removes
+both. The current five-case recovery matrix and
 `docs/operations/worker-token-recovery.md` cover lost create/rotate responses, cross-restart
 revocation, current-schema snapshot rollback reconciliation, and post-backup node loss. Local
 verification passed lint over 314 files, all-workspace typecheck and build, Dashboard
@@ -720,10 +719,6 @@ Runtime smoke results:
   returned 200; same-origin logout returned 204 and invalidated the session.
 - A second Server using the same database path exited with code 1 while the owning Server remained
   ready; the owner then released the lock during a clean SIGTERM shutdown.
-- An earlier, now-historical production mutual-TLS test returned 401 without a client certificate,
-  200 for a valid certificate bound to the claimed worker node, and 403 when that certificate
-  claimed a different worker node. ADR 0025 replaced this authentication path.
-
 Not yet verified:
 
 - The Worker service, WinSW template, and installer have not been exercised on a Windows test
