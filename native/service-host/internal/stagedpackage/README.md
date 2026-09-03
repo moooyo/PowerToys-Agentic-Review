@@ -1,6 +1,6 @@
 # Handle-Bound Staged Package Verification
 
-`stagedpackage.Verify` is the only production entry point. On Windows it accepts one canonical
+`stagedpackage.Verify` is the only production evidence minter. On Windows it accepts one canonical
 absolute staging-root path and opens that path from its drive root one component at a time. It does
 not accept a file inventory, public key, signature verifier, ACL callback, or preconstructed
 admission plan.
@@ -8,9 +8,13 @@ admission plan.
 The verifier preserves historical outer-package v1/schema-v3 admission and also verifies the exact
 outer-package v2/schema-v4 profile. The plaintext Worker Token remains outside the package and staged
 trees in the fixed Control data-root file, and its SHA-256 digest exists only in the Server database.
-`SelectBearerTokenInstallerV2` is the mandatory typed gate for a future v2 installer consumer; it
+`SelectBearerTokenInstallerV2` is the mandatory typed gate for the v2 destination verifier; it
 rejects v1 evidence, is non-serializable, revalidates the retained closure, and owns the matching
-`Close` path.
+`Close` path. Its one-shot `WithDestinationBinding` borrow is the only production bridge to
+`installerdestination`: the view is opaque, non-serializable, valid only during the synchronous
+callback, and cannot be reconstructed from its detached bytes. A successful callback transfers an
+opaque source-handle lease to the destination verifier; pre-existing staged-evidence aliases then
+reject `Close` and cannot invalidate the destination result.
 
 The volume root and staging ancestors use the closed ambient `winacl` policy. The staging root and
 every descendant use the closed managed trusted-configuration policy: SYSTEM and Administrators
@@ -47,9 +51,10 @@ and later validation are also linearized with the `winfile` process cleanup quar
 
 ## Authority boundary
 
-The evidence is a retained observation of staged bytes. It is not installation, physical target
-placement, CNG, certificate, SCM, Claim, or execution evidence, has no production consumer, and
-refuses JSON serialization. Signed `packageId`, `installationId`, target roots, CNG identity, and
+The evidence is a retained observation of staged bytes. Its sole production consumer is the
+read-only post-swap destination verifier. It is not filesystem mutation, CNG, certificate, SCM,
+Claim, readiness, or execution evidence and refuses JSON serialization. Signed `packageId`,
+`installationId`, target roots, CNG identity, and
 profile-specific authentication selection are cross-bound to the bootstrap fields that exist, but
 this verifier does not inspect the target filesystem, CNG provider, certificate store, or
 private-key ACL. It therefore cannot claim that staged directories already occupy the signed target
@@ -61,4 +66,4 @@ ACLs, real canonical package bytes, signed AMD64 and ARM64 PE payloads, and the 
 chain. Cross-compilation checks the Windows adapter, but it cannot replace that lab.
 
 This package performs no archive extraction, download, file or ACL write, bootstrap generation,
-CNG or certificate provisioning, SCM operation, installation, rollback, launch, or Claim change.
+CNG or certificate provisioning, SCM operation, root swap, rollback, launch, or Claim change.

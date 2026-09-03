@@ -24,6 +24,13 @@ and Token recovery work. It does not implement the complete production SCM insta
 - `stagedpackage.SelectBearerTokenInstallerV2` rejects historical v1 evidence and returns an opaque,
   non-serializable typed gate with revalidation, cleanup-fatal propagation, and deterministic handle
   ownership through `Close`.
+- `installerdestination.Verify` is the only production consumer of that typed gate. It reopens the
+  three fixed post-swap roots, requires exact path casing and closed trees, rehashes every signed
+  payload, byte-compares the index, envelope, and both bootstraps, reruns compiled outer admission,
+  rechecks PE Authenticode, and
+  retains both source and destination handles in non-serializable process-local evidence. Its
+  one-shot gate borrow expires on callback return, and cleanup-fatal state propagates from both
+  sides.
 - `deploy/worker/split/provision-worker-auth.ps1` accepts only SecureString or interactive Token
   input, verifies canonical base64url, writes the exact fixed JSON without BOM or trailing newline,
   uses same-directory write-through replacement, and verifies the Control service SID owner plus
@@ -69,11 +76,18 @@ The credential helper's canonical input, rejection, PowerShell 5.1 parsing, and 
 enable/restore paths were exercised; physical replacement under the fixed ProgramData ACL awaits
 the production installer environment.
 
+The installer-destination focused matrix covers the v2 positive closure, historical-profile and
+fixed-root rejection, exact root and payload casing, payload/index/envelope/bootstrap byte drift,
+extra entries, repeated and post-close use, borrowed-view expiry, source/destination cleanup-fatal
+mapping, and source ownership. It is verify-only and does not claim that a privileged root swap was
+performed.
+
 ## Remaining Release Work
 
-Repository-local implementation remains for the production SCM installer, destination
-re-verification consumer, fixed WinSW validation, CNG provisioning, service creation and policy,
-transaction recovery, and deployment maintenance-ingress integration.
+Repository-local implementation remains for root materialization and atomic swap, the production
+SCM installer, fixed WinSW validation, CNG provisioning, service creation and policy, transaction
+recovery, and deployment maintenance-ingress integration. Destination re-verification itself is
+complete as a read-only composition, but no production installer invokes it yet.
 
 External release work remains to produce the actual Authenticode-signed ServiceHost, role bundles,
 outer-package-v2 signature, compiled release profile, and compiled outer-trust material, then run

@@ -109,18 +109,16 @@ func TestAdmissionSurfaceCannotAcceptCallerTrustOrMintInstallationEvidence(t *te
 	}
 }
 
-func TestSignedPackagePlanHasOnlyHandleBoundStagedPackageConsumer(t *testing.T) {
+func TestSignedPackagePlanHasOnlyHandleBoundPackageConsumers(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate outeradmission source")
 	}
 	serviceHostRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
-	expectedConsumer := filepath.Clean(filepath.Join(
-		serviceHostRoot,
-		"internal",
-		"stagedpackage",
-		"platform_windows.go",
-	))
+	expectedConsumers := map[string]struct{}{
+		filepath.Clean(filepath.Join(serviceHostRoot, "internal", "stagedpackage", "platform_windows.go")): {},
+		filepath.Clean(filepath.Join(serviceHostRoot, "internal", "installerdestination", "source.go")):    {},
+	}
 	const admissionImport = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outeradmission"
 	consumers := 0
 	err := filepath.WalkDir(serviceHostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -143,8 +141,8 @@ func TestSignedPackagePlanHasOnlyHandleBoundStagedPackageConsumer(t *testing.T) 
 				return err
 			}
 			if value == admissionImport {
-				if filepath.Clean(path) != expectedConsumer {
-					t.Fatalf("production source %s consumes SignedPackagePlan outside stagedpackage", path)
+				if _, allowed := expectedConsumers[filepath.Clean(path)]; !allowed {
+					t.Fatalf("production source %s consumes SignedPackagePlan outside approved handle-bound verifiers", path)
 				}
 				consumers++
 			}
@@ -154,8 +152,8 @@ func TestSignedPackagePlanHasOnlyHandleBoundStagedPackageConsumer(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if consumers != 1 {
-		t.Fatalf("outeradmission production consumers = %d, want stagedpackage only", consumers)
+	if consumers != len(expectedConsumers) {
+		t.Fatalf("outeradmission production consumers = %d, want %d", consumers, len(expectedConsumers))
 	}
 }
 

@@ -1,7 +1,12 @@
 package stagedpackage
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,6 +69,89 @@ func TestBearerTokenInstallerV2GateAcceptsOnlyMatchingV2PackageAndBootstraps(t *
 	control.Control.WorkerAuthenticationProfile = "other"
 	if err := validateBearerTokenInstallerV2(index, control, executor); err == nil {
 		t.Fatal("Bearer Token installer v2 gate accepted a different Worker authentication profile")
+	}
+}
+
+func TestDestinationBindingIsOpaqueAndExpiresAfterItsBorrow(t *testing.T) {
+	index := validTestIndex(t)
+	index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
+	index.ProfileID = outerpackage.BearerTokenIndexProfileID
+	index.MTLSClientCredential = nil
+	control, executor := stagedBearerTokenBootstrapPair()
+	controlDocument, err := config.MarshalCanonical(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executorDocument, err := config.MarshalCanonical(executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for payloadIndex := range index.Payloads {
+		payload := &index.Payloads[payloadIndex]
+		var document []byte
+		switch payload.Role {
+		case outerpackage.RoleControlBootstrap:
+			document = controlDocument
+		case outerpackage.RoleExecutorBootstrap:
+			document = executorDocument
+		default:
+			continue
+		}
+		digest := sha256.Sum256(document)
+		payload.SHA256 = hex.EncodeToString(digest[:])
+		payload.Size = strconv.Itoa(len(document))
+	}
+	indexDocument, err := outerpackage.MarshalIndexCanonical(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexDigest := sha256.Sum256(indexDocument)
+	signature := make([]byte, 64)
+	signature[31], signature[63] = 1, 1
+	signerKeyID := strings.Repeat("a", 64)
+	envelope, err := outerpackage.MarshalSignatureEnvelopeCanonical(outerpackage.SignatureEnvelope{
+		Algorithm: outerpackage.SignatureAlgorithm, IndexSHA256: hex.EncodeToString(indexDigest[:]),
+		SchemaVersion: outerpackage.SignatureSchemaVersion,
+		Signature:     base64.RawURLEncoding.EncodeToString(signature), SignerKeyID: signerKeyID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	borrow := &destinationBorrowState{active: true}
+	binding := BearerTokenInstallerV2DestinationBinding{
+		issuer: successfulDestinationBindingIssuer, borrow: borrow, sourceDigest: [32]byte{1},
+		indexDocument: indexDocument, envelopeDocument: envelope,
+		controlDocument: controlDocument, executorDocument: executorDocument, signerKeyID: signerKeyID,
+	}
+	binding.digest = digestDestinationBinding(binding)
+	if err := binding.Validate(); err != nil || len(binding.IndexDocument()) == 0 {
+		t.Fatalf("live destination binding was invalid: %v", err)
+	}
+	if _, err := json.Marshal(binding); !errors.Is(err, ErrSerialization) {
+		t.Fatalf("MarshalJSON returned %v, want ErrSerialization", err)
+	}
+	borrow.active = false
+	if err := binding.Validate(); !errors.Is(err, ErrInstallerProfile) || binding.IndexDocument() != nil || binding.SignerKeyID() != "" {
+		t.Fatal("expired destination binding remained usable")
+	}
+	borrowed := StagedPackageEvidence{state: &evidenceState{destinationBorrowed: true}}
+	if err := borrowed.Close(); !errors.Is(err, ErrInstallerProfile) {
+		t.Fatalf("Close during a destination borrow returned %v", err)
+	}
+	owner := &destinationOwnership{marker: 1}
+	transferred := StagedPackageEvidence{state: &evidenceState{
+		destinationConsumed: true, destinationOwner: owner,
+	}}
+	if err := transferred.Close(); !errors.Is(err, ErrInstallerProfile) {
+		t.Fatalf("unowned Close after destination transfer returned %v", err)
+	}
+	zeroLease := BearerTokenInstallerV2DestinationLease{}
+	if !errors.Is(zeroLease.Validate(), ErrInstallerProfile) ||
+		!errors.Is(zeroLease.Close(), ErrInstallerProfile) {
+		t.Fatal("zero destination lease behaved as an ownership capability")
+	}
+	if _, err := json.Marshal(zeroLease); !errors.Is(err, ErrSerialization) {
+		t.Fatalf("destination lease MarshalJSON returned %v, want ErrSerialization", err)
 	}
 }
 

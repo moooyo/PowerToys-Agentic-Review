@@ -1,6 +1,7 @@
 package stagedpackage
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -43,10 +44,14 @@ func (evidence StagedPackageEvidence) Validate() error {
 	return nil
 }
 
-// Close reinspects the retained closure and releases every owned handle. A native close that does
-// not converge publishes a process-fatal cleanup state and retains the owner for process teardown.
+// Close reinspects the retained closure and releases every owned handle unless ownership has been
+// transferred to a destination lease. A native close that does not converge publishes a
+// process-fatal cleanup state and retains the owner for process teardown.
 func (evidence StagedPackageEvidence) Close() error {
-	state := evidence.state
+	return closeEvidenceState(evidence.state, nil)
+}
+
+func closeEvidenceState(state *evidenceState, authorization *destinationOwnership) error {
 	if state == nil {
 		return ErrInvalidEvidence
 	}
@@ -54,6 +59,12 @@ func (evidence StagedPackageEvidence) Close() error {
 	defer state.mu.Unlock()
 	if state.closed {
 		return nil
+	}
+	if state.destinationBorrowed {
+		return ErrInstallerProfile
+	}
+	if state.destinationOwner != authorization {
+		return ErrInstallerProfile
 	}
 	var result error
 	if state.owner == nil || state.owner.recheck() != nil {
@@ -66,6 +77,7 @@ func (evidence StagedPackageEvidence) Close() error {
 		return ErrCleanupFatal
 	}
 	state.owner = nil
+	state.destinationOwner = nil
 	if cleanupErr != nil {
 		result = errors.Join(result, ErrCleanup)
 	}
@@ -201,6 +213,256 @@ func (selection BearerTokenInstallerV2Package) Close() error {
 		return errors.Join(err, ErrCleanupFatal)
 	}
 	return err
+}
+
+// WithDestinationBinding lends an immutable view of the exact admitted v2 documents to one
+// synchronous destination-verification callback. The originating staged handles remain owned by
+// selection and must stay live for the complete callback. Success returns the exclusive close
+// lease; pre-existing evidence and selection aliases can no longer release the source handles.
+func (selection BearerTokenInstallerV2Package) WithDestinationBinding(
+	use func(BearerTokenInstallerV2DestinationBinding) error,
+) (result BearerTokenInstallerV2DestinationLease, resultErr error) {
+	if use == nil {
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	if err := selection.Validate(); err != nil {
+		return BearerTokenInstallerV2DestinationLease{}, err
+	}
+	selection.state.mu.Lock()
+	if selection.state.closed || selection.state.digest != selection.digest ||
+		selection.state.destinationBorrowed || selection.state.destinationConsumed {
+		selection.state.mu.Unlock()
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	indexDocument, err := outerpackage.MarshalIndexCanonical(selection.state.index)
+	if err != nil {
+		selection.state.mu.Unlock()
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	controlDocument, err := config.MarshalCanonical(selection.state.control)
+	if err != nil {
+		selection.state.mu.Unlock()
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	executorDocument, err := config.MarshalCanonical(selection.state.executor)
+	if err != nil {
+		selection.state.mu.Unlock()
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	borrow := &destinationBorrowState{active: true}
+	binding := BearerTokenInstallerV2DestinationBinding{
+		issuer:           successfulDestinationBindingIssuer,
+		borrow:           borrow,
+		sourceDigest:     selection.digest,
+		indexDocument:    bytes.Clone(indexDocument),
+		envelopeDocument: bytes.Clone(selection.state.envelope),
+		controlDocument:  bytes.Clone(controlDocument),
+		executorDocument: bytes.Clone(executorDocument),
+		signerKeyID:      selection.state.signerKeyID,
+	}
+	binding.digest = digestDestinationBinding(binding)
+	selection.state.destinationBorrowed = true
+	selection.state.mu.Unlock()
+	ownership := &destinationOwnership{marker: 1}
+	transferred := false
+	defer func() {
+		borrow.mu.Lock()
+		borrow.active = false
+		borrow.mu.Unlock()
+		selection.state.mu.Lock()
+		selection.state.destinationBorrowed = false
+		if transferred {
+			selection.state.destinationConsumed = true
+			selection.state.destinationOwner = ownership
+		}
+		selection.state.mu.Unlock()
+	}()
+	if binding.Validate() != nil {
+		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+	}
+	if err := use(binding); err != nil {
+		return BearerTokenInstallerV2DestinationLease{}, err
+	}
+	if err := selection.Validate(); err != nil {
+		return BearerTokenInstallerV2DestinationLease{}, err
+	}
+	transferred = true
+	result = BearerTokenInstallerV2DestinationLease{
+		state: selection.state, digest: selection.digest, owner: ownership,
+	}
+	return result, nil
+}
+
+// Validate rejects zero, forged, or internally inconsistent destination bindings.
+func (binding BearerTokenInstallerV2DestinationBinding) Validate() error {
+	if binding.borrow == nil {
+		return ErrInstallerProfile
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	return binding.validateActiveLocked()
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) validateActiveLocked() error {
+	if binding.issuer != successfulDestinationBindingIssuer || !binding.borrow.active ||
+		binding.sourceDigest == ([sha256.Size]byte{}) || binding.digest == ([sha256.Size]byte{}) ||
+		binding.signerKeyID == "" || digestDestinationBinding(binding) != binding.digest {
+		return ErrInstallerProfile
+	}
+	index, err := outerpackage.ParseIndex(binding.indexDocument)
+	if err != nil || index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
+		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil {
+		return ErrInstallerProfile
+	}
+	envelope, err := outerpackage.ParseSignatureEnvelope(binding.envelopeDocument)
+	indexDigest := sha256.Sum256(binding.indexDocument)
+	if err != nil || envelope.SignerKeyID != binding.signerKeyID ||
+		envelope.IndexSHA256 != hex.EncodeToString(indexDigest[:]) {
+		return ErrInstallerProfile
+	}
+	control, err := config.Parse(binding.controlDocument)
+	if err != nil {
+		return ErrInstallerProfile
+	}
+	executor, err := config.Parse(binding.executorDocument)
+	if err != nil || validateBearerTokenInstallerV2(index, control, executor) != nil {
+		return ErrInstallerProfile
+	}
+	return nil
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) IndexDocument() []byte {
+	if binding.borrow == nil {
+		return nil
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	if binding.validateActiveLocked() != nil {
+		return nil
+	}
+	return bytes.Clone(binding.indexDocument)
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) SignatureEnvelopeDocument() []byte {
+	if binding.borrow == nil {
+		return nil
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	if binding.validateActiveLocked() != nil {
+		return nil
+	}
+	return bytes.Clone(binding.envelopeDocument)
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) ControlDocument() []byte {
+	if binding.borrow == nil {
+		return nil
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	if binding.validateActiveLocked() != nil {
+		return nil
+	}
+	return bytes.Clone(binding.controlDocument)
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) ExecutorDocument() []byte {
+	if binding.borrow == nil {
+		return nil
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	if binding.validateActiveLocked() != nil {
+		return nil
+	}
+	return bytes.Clone(binding.executorDocument)
+}
+
+func (binding BearerTokenInstallerV2DestinationBinding) SignerKeyID() string {
+	if binding.borrow == nil {
+		return ""
+	}
+	binding.borrow.mu.Lock()
+	defer binding.borrow.mu.Unlock()
+	if binding.validateActiveLocked() != nil {
+		return ""
+	}
+	return binding.signerKeyID
+}
+
+func (BearerTokenInstallerV2DestinationBinding) MarshalJSON() ([]byte, error) {
+	return nil, ErrSerialization
+}
+
+// Validate rechecks the exclusively transferred staged source handles.
+func (lease BearerTokenInstallerV2DestinationLease) Validate() error {
+	validated := false
+	if err := lease.CommitIfValid(func() { validated = true }); err != nil || !validated {
+		if err == nil {
+			err = ErrInstallerProfile
+		}
+		return err
+	}
+	return nil
+}
+
+// CommitIfValid linearizes one destination operation with the staged-package cleanup quarantine
+// while holding the exclusive source ownership state stable.
+func (lease BearerTokenInstallerV2DestinationLease) CommitIfValid(commit func()) error {
+	if lease.state == nil || lease.digest == ([sha256.Size]byte{}) || lease.owner == nil {
+		return ErrInstallerProfile
+	}
+	if commit == nil {
+		return ErrInstallerProfile
+	}
+	operation, err := beginCleanupOperation()
+	if err != nil {
+		return ErrCleanupFatal
+	}
+	lease.state.mu.Lock()
+	defer lease.state.mu.Unlock()
+	if lease.state.closed || lease.state.digest != lease.digest || !lease.state.destinationConsumed ||
+		lease.state.destinationOwner != lease.owner {
+		return ErrInstallerProfile
+	}
+	if validateEvidenceState(lease.state) != nil || lease.state.owner.recheck() != nil {
+		return ErrInvalidEvidence
+	}
+	if err := operation.commit(commit); err != nil {
+		return ErrCleanupFatal
+	}
+	return nil
+}
+
+// Close is the only capability allowed to release a successfully transferred staged source.
+func (lease BearerTokenInstallerV2DestinationLease) Close() error {
+	if lease.state == nil || lease.owner == nil {
+		return ErrInstallerProfile
+	}
+	err := closeEvidenceState(lease.state, lease.owner)
+	if !cleanupHealthy() {
+		return errors.Join(err, ErrCleanupFatal)
+	}
+	return err
+}
+
+func (BearerTokenInstallerV2DestinationLease) MarshalJSON() ([]byte, error) {
+	return nil, ErrSerialization
+}
+
+func digestDestinationBinding(binding BearerTokenInstallerV2DestinationBinding) [sha256.Size]byte {
+	encoder := evidenceEncoder{hash: sha256.New()}
+	encoder.bytes([]byte("AgenticReview Bearer Token installer v2 destination binding v1\x00"))
+	encoder.bytes(binding.sourceDigest[:])
+	encoder.bytes(binding.indexDocument)
+	encoder.bytes(binding.envelopeDocument)
+	encoder.bytes(binding.controlDocument)
+	encoder.bytes(binding.executorDocument)
+	encoder.text(binding.signerKeyID)
+	var result [sha256.Size]byte
+	copy(result[:], encoder.hash.Sum(nil))
+	return result
 }
 
 // MarshalJSON refuses to serialize the retained v2 installer profile gate.

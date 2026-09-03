@@ -99,11 +99,14 @@ packages, the updated source-pin guard, `go vet ./...`, and both Windows archite
 ## Remaining Work
 
 1. Produce actual signed outer-package-v2 release material.
-2. Build the production split-service SCM installer and destination evidence that provisions the
-   fixed authentication file separately from signed package content.
+2. Build the production split-service SCM installer, root materializer/atomic swap, and privileged
+   activation path that provision the fixed authentication file separately from signed package
+   content.
 
 The later `codex/worker-token-release-recovery` change completed the v2 package and installer-profile
 contracts, deleted the retired Server-binding implementation island, and added the six-case Token
 recovery matrix plus `docs/operations/worker-token-recovery.md`. Only the two release and
-installation workstreams above remain; the production installer still includes repository-local
-implementation as well as privileged environment validation.
+installation workstreams above remain. The later installer-destination slice completed the
+read-only typed-gate re-verification evidence for all three fixed post-swap roots; no production
+installer materializes or swaps those roots or invokes that verifier yet. The production installer
+still includes repository-local implementation as well as privileged environment validation.
