@@ -43,7 +43,8 @@ close fails closed. Destination and staged cleanup-fatal states propagate throug
 validation, and `Close`.
 
 This package is deliberately read-only. It does not extract an archive, create a directory, write
-an ACL or file, materialize a candidate, rename or swap a root, provision the Worker Token or CNG
-key, mutate SCM, start a service, perform readiness, commit a transaction, or recover an installer
-journal. The privileged installer must perform those operations separately and call this verifier
-only after all three final roots have been swapped into place.
+an ACL or file, materialize a candidate, rename or place a root, provision the Worker Token or CNG
+key, mutate SCM, start a service, perform readiness, persist a run marker, or clean failed-run
+residue. If the ADR 0026 clean installer reuses this verifier, it must call it only after placing all
+three final roots; a future same-run marker may authorize narrow cleanup but never resume or
+rollback an installation.

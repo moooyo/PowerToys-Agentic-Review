@@ -100,7 +100,8 @@ against `winfile`'s rejected-native-handle quarantine, so either cleanup domain 
   ServiceHost mix-and-match failures explicit before outer package signing. A prepare receipt alone
   cannot reconstruct prepared state; the independently checked reviewed-closure evidence is also
   required.
-- The existing legacy single-service installer remains unchanged and cannot install this package.
+- ADR 0026 removed the unpublished legacy single-service installer; it is not a compatibility input
+  for a future clean installer.
 - A later CLI must obtain inventory and signed-ServiceHost metadata from handle-bound trusted
   readers and obtain both closure and build-receipt evidence from their independent approval
   readers. It must not turn caller-authored JSON, a self-computed digest, detached signature

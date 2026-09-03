@@ -1,12 +1,15 @@
 # ADR 0013: Windows Node Enrollment and Split Installation
 
-> Amended by ADR 0025: Server registration uses a per-Worker Bearer Token and no longer provisions
-> an mTLS client credential or Server binding receipt. Local-authority, split-service, installation,
-> rollback, and zero-execution decisions remain unchanged.
+> Partially superseded before publication by ADR 0026. The upgrade, migration, rollback, journal,
+> and recovery lifecycle in this document is not a production direction. Its remaining mechanisms
+> are optional implementation input only where a future ADR 0026 installer explicitly reuses them.
+>
+> Historical note: ADR 0025 replaced Worker mTLS and Server binding receipts before ADR 0026
+> superseded this unpublished installer lifecycle.
 
 ## Status
 
-Accepted for the dormant RoleConfig v2 zero-execution installation foundation.
+Partially superseded before publication by ADR 0026.
 
 ## Context
 
@@ -291,25 +294,19 @@ Windows verification matrix from ADR 0007. This ADR supplies no migration switch
   stopped and no mixed generation is allowed to run.
 - The split WinSW templates are signed package inputs, not an installer and not proof of SCM, ACL,
   start/recovery policy, credential, firewall, or physical-root state.
-- The existing `deploy/worker/install-worker.ps1` and legacy single-service template remain
-  unchanged and are not a base for this profile.
+- ADR 0026 removed the unpublished legacy single-service installer and template; they are not
+  compatibility inputs for a future clean installer.
 - Native Windows x64 and arm64 installation, crash recovery, ACL, identity, CNG, certificate,
   WinSW, pipe, readiness, upgrade, rollback, and uninstall evidence remains mandatory before any
   production use.
 
 ## Deferred Decisions
 
-- ADR 0014 freezes the generation-one enrollment record and fail-closed evidence boundary; the
-  dedicated reader identity, handle-bound reader, certificate issuance, Server receipt authority,
-  rotation, revocation, writer journal, and interrupted-enrollment recovery remain deferred;
-- the production Go installer API and destination-verification evidence type;
-- ADR 0015 freezes the transaction record, action plans, and crash-recovery state model; its codec,
-  reducer, protected Windows store, write-through and directory-flush primitives remain deferred;
-- the pinned WinSW build, verified virtual-account installation behavior, service SDDL, and native
-  recovery-policy validation;
-- the authenticated installer-facing observation of Control's disabled readiness result; and
-- archive, download, extraction, uninstall, and retention policy for immutable package metadata;
-- legacy-to-split migration, including legacy credential rotation and service/root removal.
+ADR 0026 replaces this historical deferred list. The current work is one Windows-only clean
+installer with selected release verification, root placement, local configuration, two service
+identities, service read-back, and Executor-before-Control start. It has no legacy migration,
+upgrade, rollback, journal, or cross-version store requirement. Existing WinSW, CNG, package, and
+destination-verification mechanisms may be reused or simplified by later implementation work.
 
 ## Non-Goals
 

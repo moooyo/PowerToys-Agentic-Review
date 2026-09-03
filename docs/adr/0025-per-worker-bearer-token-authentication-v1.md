@@ -1,5 +1,8 @@
 # ADR 0025: Per-Worker Bearer Token Authentication and Direct Registration v1
 
+> ADR 0026 later withdrew the unpublished installer journal, upgrade, migration, and cross-version
+> store directions. This ADR remains authoritative for Worker Token authentication only.
+
 ## Status
 
 Accepted for implementation on 2026-09-03.
