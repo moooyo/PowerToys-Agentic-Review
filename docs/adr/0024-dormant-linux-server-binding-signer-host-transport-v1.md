@@ -161,7 +161,7 @@ explicit `null` allowed for `error.requestId`. Parsing must be followed by exact
 byte comparison. All regular expressions use a strict final anchor that cannot accept a trailing
 line terminator.
 
-The protocol constants are:
+The fixed wire, transport, and client constants are:
 
 ```text
 protocolVersion = "1.0"
@@ -170,6 +170,7 @@ maximumStatementBytes = 4096
 maximumBufferedStdoutBytes = 16384
 maximumBufferedStderrBytes = 16384
 maximumConcurrentRequests = 1
+maximumAssignedRequestIdsPerClient = 4096
 handshakeTimeoutMilliseconds = 10000
 signingTimeoutMilliseconds = 15000
 gracefulShutdownTimeoutMilliseconds = 5000
@@ -204,10 +205,21 @@ error
 Unknown message types, unknown fields, wrong field order, a message in the wrong lifecycle state,
 or a second response for one request are fatal protocol corruption.
 
-IDs use lowercase canonical UUID v4. The parent generates one `instanceId` and every `requestId`.
-The child may only echo them. One request ID may recur only on frames for the same logical signing,
-cancellation, or shutdown operation and is never assigned to a second operation during one client
-lifetime.
+IDs use lowercase canonical UUID v4. The parent obtains one `instanceId` and every accepted
+`requestId` from a cryptographically secure UUID v4 generator; a value that merely has v4 layout
+bits is insufficient. The child may only echo them. One request ID may recur only on frames for the
+same logical signing, cancellation, or shutdown operation and is never assigned to a second
+operation during one client lifetime.
+
+The parent keeps an exact, bounded lifetime ledger. One client may assign at most 4096 request IDs.
+At most 4095 are signing IDs; the final slot is reserved for orderly `shutdown`. A local busy
+rejection assigns no ID. Settlement of the 4095th successful signing operation synchronously fences
+new admission and enters orderly `closing`; the client sends the reserved shutdown request and does
+not reopen or automatically spawn a replacement. An attempted over-limit signing transition is an
+internal invariant failure, while public calls after the fence use the existing closed-admission
+result. This is a fixed parent-local v1 limit, is not negotiable, and adds no wire field. A future B
+activation that needs healthy rollover must define it separately and may begin a replacement only
+after the old child has `exit_proven`; it must never reuse an ID ledger or restart a failed child.
 
 ### Handshake
 
@@ -576,6 +588,9 @@ The A implementation must cover the exact candidate with focused unit and real c
   statement bytes, oversize statement, wrong response operation, and complete parent verification;
 - single concurrency, duplicate request IDs, unknown IDs, duplicate responses, response before
   request, response after cancellation, and late results after terminal failure;
+- cryptographically generated UUID v4 IDs, exact lifetime duplicate rejection, the 4094/4095/4096
+  assignment boundaries, the reserved shutdown ID, automatic healthy close fencing, and no A-side
+  replacement after capacity retirement;
 - all three exact cancellation reasons plus rejection of alternate spelling, case, separators, and
   combined reason strings;
 - a second local signing call returning recoverable busy without sending a frame, settling the first
