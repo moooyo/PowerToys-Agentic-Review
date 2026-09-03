@@ -71,10 +71,12 @@ cryptographic acceptance.
 ## Authority boundary
 
 Successful parsing, release comparison, or signature verification is an ordinary data result. It
-does not authorize installation, service creation, Claim, or execution. A future installer must
-enumerate the staged filesystem through stable handles, reject all unindexed objects, hash every
-payload, cross-bind both bootstrap documents, enforce target-root and identity placement, obtain
-the signer from compiled trust, and mint a separate opaque installation evidence value.
+does not authorize installation, service creation, Claim, or execution. If a future installer
+reuses this candidate composition, it must enumerate the staged filesystem through stable handles,
+reject all unindexed objects, hash every payload, cross-bind both bootstrap documents, enforce
+target-root and identity placement, obtain the signer from compiled trust, and mint a separate
+opaque installation evidence value. ADR 0026 permits replacing that composition with a simpler
+authenticated package and hash-verification boundary.
 
 In particular, `ValidateAgainstRelease` checks only that an index reproduces one finalized release
 closure. It deliberately reuses the node identity, root, and bootstrap values already carried by

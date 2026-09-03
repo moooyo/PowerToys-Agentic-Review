@@ -575,8 +575,9 @@ pnpm lint
 ```
 
 The final run passed 86 Codex tests, 84 local-protocol tests, 21 domain tests, 651 Worker tests plus
-9 role-bundle verifier tests, and 650 Server tests in 40 files. Biome checked 265 files. The real
-Linux Worker integration proved normal storage operations, shutdown, forced termination of an
+9 role-bundle verifier tests, and 650 Server tests in 40 files. Biome checked 265 files. The Linux
+Server's real artifact-storage Node Worker Thread integration proved normal storage operations,
+shutdown, forced termination of an
 `Atomics.wait` stall, a real nonzero Worker exit, and cleanup of a deliberately unclosed
 `openSync` descriptor through `trackUnmanagedFds: true`. It does not claim D-state coverage. The
 local and remote nine-file code manifests matched at SHA-256

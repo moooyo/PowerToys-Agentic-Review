@@ -1,8 +1,13 @@
 # ADR 0009: Node-Specific Two-Phase Worker Release Packages
 
+> ADR 0026 makes this unpublished node-specific release and receipt composition a historical
+> implementation record. A future clean installer may replace it with a simpler node-neutral,
+> architecture-specific signed package and is not required to preserve its phases, receipts,
+> retained handles, or CNG bindings.
+
 ## Status
 
-Accepted for the RoleConfig v2 zero-execution release foundation.
+Historical implementation record; not a production-installer prerequisite after ADR 0026.
 
 ## Context
 

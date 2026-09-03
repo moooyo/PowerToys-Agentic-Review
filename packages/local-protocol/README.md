@@ -62,9 +62,11 @@ Signatures use ECDSA P-256 with SHA-256 over length-prefixed, domain-separated c
 `keyId` is the lowercase SHA-256 digest of the public key's DER SubjectPublicKeyInfo. The wire encoding is
 exactly 64-byte IEEE P1363 `r || s`, base64url without padding, with low-S normalization. DER,
 high-S, wrong-curve, malformed, and noncanonical encodings are rejected. Production signing remains
-the responsibility of the Control-only non-exportable CNG adapter. That adapter signs the exported
-32-byte signing digest directly and must not hash it a second time. The Node helpers hash the
-domain-separated signing bytes internally and are the shared contract implementation and test oracle.
+the responsibility of the current Control-only non-exportable CNG adapter. If that candidate is
+retained, it signs the exported 32-byte signing digest directly and must not hash it a second time.
+ADR 0026 permits replacing this local mechanism without changing Worker-to-Server Token
+authentication. The Node helpers hash the domain-separated signing bytes internally and are the
+shared contract implementation and test oracle.
 
 For the handshake, Control calls `createHandshakeTranscriptV1`, sends the exact 32-byte result of
 `createHandshakeTranscriptSigningDigest` to the narrow ServiceHost signing operation, and passes the

@@ -2,11 +2,13 @@
 
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 admission profile is not reinterpreted; a new profile must replace its mTLS
-> bindings before production use. Compiled package trust remains unchanged.
+> bindings before production use. ADR 0026 makes compiled package trust, node-specific admission,
+> retained handles, and opaque evidence replaceable implementation candidates rather than future
+> installer requirements.
 
 ## Status
 
-Accepted for the dormant RoleConfig v2 package foundation.
+Historical implementation record; not a production-installer prerequisite after ADR 0026.
 
 ## Context
 

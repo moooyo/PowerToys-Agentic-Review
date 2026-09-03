@@ -2,11 +2,13 @@
 
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 staged-package profile is not reinterpreted; a new profile must replace its mTLS
-> evidence fields before production use. Filesystem and handle-bound verification remain valid.
+> evidence fields before production use. ADR 0026 makes this retained-handle and opaque-evidence
+> composition a replaceable implementation candidate; a future clean installer may use a simpler
+> signed manifest and hash-verification boundary.
 
 ## Status
 
-Accepted for the dormant RoleConfig v2 zero-execution package foundation.
+Historical implementation record; not a production-installer prerequisite after ADR 0026.
 
 ## Context
 

@@ -2,11 +2,13 @@
 
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 package schema is not reinterpreted; a new package profile must replace its mTLS
-> fields before production use. Package signing and canonicalization remain valid principles.
+> fields before production use. ADR 0026 further makes the node-specific index, compiled trust,
+> receipt set, retained handles, and opaque evidence chain replaceable implementation candidates.
+> Package signing and canonicalization remain valid principles.
 
 ## Status
 
-Accepted for the RoleConfig v2 zero-execution release foundation.
+Historical implementation record; not a production-installer prerequisite after ADR 0026.
 
 ## Context
 
@@ -101,10 +103,11 @@ runtime-configuration key as trust input.
 - Signing covers metadata and payload identities without introducing a package-index self hash.
 - Pure validation can be reused by release tooling without granting filesystem or service-control
   authority.
-- A future installer must independently enumerate the physical package, verify every indexed byte,
-  reject index/signature duplicates and all unindexed objects, parse and cross-bind both bootstrap
-  configurations, obtain the outer signer key from compiled trust, and only then mint opaque
-  installation evidence.
+- Under this historical composition, an installer would independently enumerate the physical
+  package, verify every indexed byte, reject index/signature duplicates and all unindexed objects,
+  parse and cross-bind both bootstrap configurations, obtain the outer signer key from compiled
+  trust, and only then mint opaque installation evidence. ADR 0026 does not require reusing this
+  composition.
 
 ## Non-Goals
 

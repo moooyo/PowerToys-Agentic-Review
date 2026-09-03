@@ -16,9 +16,10 @@ ADR 0003, ADR 0007, ADR 0008, ADR 0013, ADR 0015, and ADR 0021 are amended only 
 Worker client certificate, certificate binding, or Server binding receipt. The implementation uses
 bootstrap schema 4, outer-package schema/profile v2, and split installer profile v2 as the only
 current path; earlier draft bootstrap and package formats are not supported compatibility surfaces.
-Lease tokens, package signatures, Authenticode, the Control-to-Executor local CNG capability signer,
-the Control/Executor service split, artifact receipts, process isolation, and zero-execution policy
-remain separate and unchanged. This amendment does not claim a complete production installer.
+Lease tokens, package authentication, Control-to-Executor local authorization, the Control/Executor
+service split, artifact receipts, process isolation, and zero-execution policy remain separate from
+Worker API authentication. ADR 0026 permits replacing the current CNG, Authenticode, and package
+composition. This amendment does not claim a complete production installer.
 
 ## Context
 
@@ -51,8 +52,9 @@ The system keeps the following credentials distinct:
 
 1. A long-lived Worker Bearer Token authenticates one Worker node to the Server Worker API.
 2. A short-lived lease token fences one run attempt and remains unchanged.
-3. The Control-to-Executor local capability signer remains a Windows-local authorization boundary.
-4. Package signing, Authenticode, GitHub, Codex, and operator OIDC credentials remain unchanged.
+3. A short-lived Control-to-Executor capability remains a Windows-local authorization boundary. The
+   current implementation uses a CNG signer, but ADR 0026 permits replacing that mechanism.
+4. Package authentication, GitHub, Codex, and operator OIDC credentials remain separate.
 
 The Worker Bearer Token is never used as a lease token, local capability, package credential,
 operator session, GitHub credential, or Codex credential.
