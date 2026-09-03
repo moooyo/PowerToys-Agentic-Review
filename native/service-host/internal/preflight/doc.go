@@ -19,12 +19,11 @@
 // binds that verifier's digest and installation-root identities without
 // consuming its handles. FinalizeRuntimePlan is the only RuntimePlan-producing
 // API; it rechecks and closes the shared data-root evidence before returning.
-// PeerVerificationPlan separately freezes the exact verified peer wrapper,
-// sole current-image-bound ServiceHost, compiled signer pin, role, pipe,
-// service identities, and all preflight provenance digests. VerifyWindows is
-// the package's deliberate native-I/O boundary: it attests the concrete
-// endpoint, invokes peerverify through the sole process-wide opaque authority,
-// then reattests the same endpoint before returning a Session. A rejected
-// Session that cannot close remains process-lifetime quarantined and requires
-// immediate ServiceHost termination through ErrPeerCleanupFatal.
+// PeerVerificationPlan separately freezes only the fixed role, pipe, service
+// identities, and preflight provenance digests. VerifyWindows attests the
+// concrete endpoint, invokes peerverify, and reattests the same endpoint before
+// returning a Session. Service setup must configure the restricted service SID,
+// token policy, and process DACL before SCM reports the service as running;
+// peerverify then binds that running service PID to the connected pipe PID and
+// validates the retained process token.
 package preflight

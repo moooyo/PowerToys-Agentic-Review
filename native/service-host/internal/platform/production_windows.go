@@ -407,10 +407,9 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 				},
 			)
 		},
-		waitOwnWrapper:  composition.serviceBootstrap.Wait,
-		waitPeerWrapper: composition.peerSession.WaitWrapper,
-		waitPeerHost:    composition.peerSession.WaitPeer,
-		waitStderr:      func(context.Context) error { return composition.stderr.Wait() },
+		waitOwnWrapper: composition.serviceBootstrap.Wait,
+		waitPeerHost:   composition.peerSession.WaitPeer,
+		waitStderr:     func(context.Context) error { return composition.stderr.Wait() },
 	}
 	if composition.role == config.RoleControl {
 		runtime.requestNodeShutdown = func(
