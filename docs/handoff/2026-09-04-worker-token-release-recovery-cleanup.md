@@ -27,8 +27,8 @@ and Token recovery work. It does not implement the complete production SCM insta
 - `installerdestination.Verify` is the only production consumer of that typed gate. It reopens the
   three fixed post-swap roots, requires exact path casing and closed trees, rehashes every signed
   payload, byte-compares the index, envelope, and both bootstraps, reruns compiled outer admission,
-  rechecks PE Authenticode, and
-  retains both source and destination handles in non-serializable process-local evidence. Its
+  rechecks PE Authenticode, and retains both source and destination handles in non-serializable
+  process-local evidence. Its
   one-shot gate borrow expires on callback return, and cleanup-fatal state propagates from both
   sides.
 - `deploy/worker/split/provision-worker-auth.ps1` accepts only SecureString or interactive Token
@@ -93,9 +93,8 @@ checking 316 files. Windows focused config/composition/health/route/direct-datab
 cases with the one POSIX database Worker restart case skipped. The exact source in a native WSL ext4
 checkout passed all 850 Server tests in 51 files, including the database-only artifact sentinel,
 atomic purge rollback, clock preservation, cross-restart old-cookie rejection, and the six Worker
-Token recovery cases. The
-Worker zero-execution architecture check and all 19 role-bundle guards also passed. No command used
-`test-env`.
+Token recovery cases. The Worker zero-execution architecture check and all 19 role-bundle guards
+also passed. No command used `test-env`.
 
 ## Remaining Release Work
 
