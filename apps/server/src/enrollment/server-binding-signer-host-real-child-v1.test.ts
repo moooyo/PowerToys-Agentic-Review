@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   deriveServerBindingIssuerKeyIdV1,
   marshalServerBindingActiveStatusV1,
+  marshalServerBindingReceiptStatementV1,
   marshalServerBindingReceiptV1,
   SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID,
   SERVER_BINDING_AUTHORITY_ISSUER,
@@ -70,6 +71,7 @@ vi.mock("./server-binding-signer-host-profile-v1.js", () => ({
 }));
 
 import { createServerBindingSignerHostDirectClientV1 } from "./server-binding-signer-host-client-v1.js";
+import { createServerBindingSignerHostProviderV1 } from "./server-binding-signer-host-provider-v1.js";
 
 const fixturePath = resolve(
   process.cwd(),
@@ -165,6 +167,35 @@ describe("dormant Server binding signer-host real child fixture v1", () => {
 
     await client.close();
     expect(client.readTerminalError()).toBeNull();
+  });
+
+  it("composes the statement-only provider over the real direct child", async () => {
+    const provider = await createServerBindingSignerHostProviderV1();
+    const spki = provider.issuerPublicKeySpki;
+    const issuerKeyId = deriveServerBindingIssuerKeyIdV1(spki);
+    const signature = Buffer.from(
+      await provider.signReceiptStatementV1(
+        marshalServerBindingReceiptStatementV1(receiptStatement),
+        new AbortController().signal,
+      ),
+    ).toString("base64url");
+    expect(
+      verifyServerBindingReceiptWithSpkiV1(
+        marshalServerBindingReceiptV1({
+          algorithm: SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
+          issuer: SERVER_BINDING_AUTHORITY_ISSUER,
+          issuerKeyId,
+          profileId: SERVER_BINDING_RECEIPT_PROFILE_ID,
+          schemaVersion: SERVER_BINDING_AUTHORITY_SCHEMA_VERSION,
+          signature,
+          statement: receiptStatement,
+        }),
+        spki,
+      ).signatureValid,
+    ).toBe(true);
+    const closing = provider.close();
+    expect(provider.close()).toBe(closing);
+    await closing;
   });
 
   it("fails closed on pre-ready exit and protocol corruption", async () => {

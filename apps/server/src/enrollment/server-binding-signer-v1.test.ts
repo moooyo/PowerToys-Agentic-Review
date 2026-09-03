@@ -6,16 +6,23 @@ import {
 } from "node:crypto";
 import {
   deriveServerBindingIssuerKeyIdV1,
+  marshalServerBindingActiveStatusStatementV1,
+  marshalServerBindingActiveStatusV1,
   marshalServerBindingReceiptStatementV1,
   marshalServerBindingReceiptV1,
+  SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID,
   SERVER_BINDING_AUTHORITY_ISSUER,
   SERVER_BINDING_AUTHORITY_SCHEMA_VERSION,
   SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
   SERVER_BINDING_RECEIPT_PROFILE_ID,
+  type ServerBindingActiveStatusStatementV1,
+  type ServerBindingActiveStatusV1,
   type ServerBindingReceiptStatementV1,
   type ServerBindingReceiptV1,
+  serverBindingActiveStatusSigningPreimageV1,
   serverBindingReceiptSigningDigestV1,
   serverBindingReceiptSigningPreimageV1,
+  verifyServerBindingActiveStatusWithSpkiV1,
   verifyServerBindingReceiptWithSpkiV1,
 } from "@agentic-review/contracts/server-binding-authority-v1";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,14 +32,18 @@ const signerMaterialMock = vi.hoisted(() => ({
   trustProfile: undefined as unknown,
 }));
 
-vi.mock("./server-binding-signer-provider-v1.js", () => ({
-  loadProductionServerBindingSignerProviderV1: async (): Promise<unknown> => {
-    if (signerMaterialMock.provider === undefined) {
-      throw new Error("The mocked production signer provider is unavailable.");
-    }
-    return signerMaterialMock.provider;
-  },
-}));
+vi.mock("./server-binding-signer-provider-v1.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./server-binding-signer-provider-v1.js")>();
+  return {
+    ...actual,
+    loadProductionServerBindingSignerProviderV1: async (): Promise<unknown> => {
+      if (signerMaterialMock.provider === undefined) {
+        throw new Error("The mocked production signer provider is unavailable.");
+      }
+      return signerMaterialMock.provider;
+    },
+  };
+});
 
 vi.mock("./server-binding-trust-profile-v1.js", () => ({
   loadProductionServerBindingTrustProfileV1: async (): Promise<unknown> => {
@@ -48,10 +59,12 @@ import * as signerModule from "./server-binding-signer-v1.js";
 const {
   adoptServerBindingSignerV1,
   assertServerBindingSignerAdoptableV1,
+  assertServerBindingSignerOwnershipAvailableV1,
   closeServerBindingSignerV1,
   closeUnadoptedServerBindingSignerV1,
   loadServerBindingSignerV1,
   readServerBindingSignerDescriptorV1,
+  signServerBindingActiveStatusStatementV1,
   signServerBindingReceiptStatementV1,
 } = signerModule;
 const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
@@ -74,6 +87,20 @@ const statement: ServerBindingReceiptStatementV1 = Object.freeze({
   installationId: "worker.installation-1",
   statementType: "durable-binding-created",
   workerNodeId: "worker:node-1",
+});
+const activeStatusStatement: ServerBindingActiveStatusStatementV1 = Object.freeze({
+  bindingId: statement.bindingId,
+  bindingRevision: statement.bindingRevision,
+  certificateDerSha256: statement.certificateDerSha256,
+  challengeNonceBase64Url: "A".repeat(43),
+  enrollmentGeneration: statement.enrollmentGeneration,
+  expiresAt: "2026-09-03T01:02:33.004Z",
+  installationId: statement.installationId,
+  issuedAt: statement.boundAt,
+  receiptSha256: "22".repeat(32),
+  recordDocumentSha256: "33".repeat(32),
+  statementType: "active-binding-current",
+  workerNodeId: statement.workerNodeId,
 });
 
 type TestProvider =
@@ -99,10 +126,12 @@ describe("dormant Server binding signer v1", () => {
       "ServerBindingSignerErrorV1",
       "adoptServerBindingSignerV1",
       "assertServerBindingSignerAdoptableV1",
+      "assertServerBindingSignerOwnershipAvailableV1",
       "closeServerBindingSignerV1",
       "closeUnadoptedServerBindingSignerV1",
       "loadServerBindingSignerV1",
       "readServerBindingSignerDescriptorV1",
+      "signServerBindingActiveStatusStatementV1",
       "signServerBindingReceiptStatementV1",
     ]);
     expect(loadServerBindingSignerV1.length).toBe(0);
@@ -118,7 +147,8 @@ describe("dormant Server binding signer v1", () => {
     const productionProvider = await vi.importActual<
       typeof import("./server-binding-signer-provider-v1.js")
     >("./server-binding-signer-provider-v1.js");
-    expect(Object.keys(productionProvider)).toEqual([
+    expect(Object.keys(productionProvider).sort()).toEqual([
+      "ServerBindingSignerProviderStartupErrorV1",
       "loadProductionServerBindingSignerProviderV1",
     ]);
     expect(
@@ -199,6 +229,211 @@ describe("dormant Server binding signer v1", () => {
     );
     expect(observedInputs).toEqual([Buffer.from(serverBindingReceiptSigningDigestV1(statement))]);
     verifySignature(signature);
+  });
+
+  it("passes exact canonical statement bytes to the statement-only provider", async () => {
+    const terminal = Promise.withResolvers<Error>();
+    const receiptInputs: Buffer[] = [];
+    const activeInputs: Buffer[] = [];
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => null,
+        signActiveStatusStatementV1: async (statementJson: Uint8Array) => {
+          activeInputs.push(Buffer.from(statementJson));
+          const parsed = JSON.parse(Buffer.from(statementJson).toString("utf8"));
+          return normalizeLowS(
+            nodeSign("sha256", serverBindingActiveStatusSigningPreimageV1(parsed), {
+              dsaEncoding: "ieee-p1363",
+              key: testPrivateKey,
+            }),
+          );
+        },
+        signReceiptStatementV1: async (statementJson: Uint8Array) => {
+          receiptInputs.push(Buffer.from(statementJson));
+          const parsed = JSON.parse(Buffer.from(statementJson).toString("utf8"));
+          return normalizeLowS(
+            nodeSign("sha256", serverBindingReceiptSigningPreimageV1(parsed), {
+              dsaEncoding: "ieee-p1363",
+              key: testPrivateKey,
+            }),
+          );
+        },
+        terminalFailure: terminal.promise,
+      }),
+    );
+
+    expect(context.readTerminalError()).toBeNull();
+    expect(context.terminalFailure).toBeInstanceOf(Promise);
+    const receiptSignature = await signServerBindingReceiptStatementV1(context, statement);
+    const activeSignature = await signServerBindingActiveStatusStatementV1(
+      context,
+      activeStatusStatement,
+    );
+    expect(receiptInputs).toEqual([Buffer.from(marshalServerBindingReceiptStatementV1(statement))]);
+    expect(activeInputs).toEqual([
+      Buffer.from(marshalServerBindingActiveStatusStatementV1(activeStatusStatement)),
+    ]);
+    verifySignature(receiptSignature);
+    verifyActiveSignature(activeSignature);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).resolves.toBe("closed");
+    let terminalSettled = false;
+    void context.terminalFailure.then(() => {
+      terminalSettled = true;
+    });
+    await Promise.resolve();
+    expect(terminalSettled).toBe(false);
+  });
+
+  it("latches one post-publication statement-provider terminal failure through close", async () => {
+    const terminal = Promise.withResolvers<Error>();
+    let terminalSnapshot: Error | null = null;
+    let closeCalls = 0;
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => {
+          closeCalls += 1;
+        },
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => terminalSnapshot,
+        signActiveStatusStatementV1: async () => Buffer.alloc(64),
+        signReceiptStatementV1: async () => Buffer.alloc(64),
+        terminalFailure: terminal.promise,
+      }),
+    );
+    const providerError = Object.assign(new Error("Private signer-host detail."), {
+      code: "SIGNER_HOST_OUTCOME_UNKNOWN",
+    });
+    terminalSnapshot = providerError;
+    terminal.resolve(providerError);
+    const observed = await context.terminalFailure;
+
+    expect(observed).toMatchObject({
+      name: "ServerBindingSignerErrorV1",
+      code: "SIGNER_OUTCOME_UNKNOWN",
+      message: "The Server binding signer outcome is unknown.",
+    });
+    expect(context.readTerminalError()).toBe(observed);
+    expect(() => assertServerBindingSignerAdoptableV1(context)).toThrow(observed);
+    await expect(signServerBindingReceiptStatementV1(context, statement)).rejects.toBe(observed);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).rejects.toBe(observed);
+    expect(closeCalls).toBe(1);
+  });
+
+  it("observes a native provider terminal Promise through the intrinsic then", async () => {
+    const terminal = Promise.withResolvers<Error>();
+    // biome-ignore lint/suspicious/noThenProperty: This regression verifies intrinsic Promise observation.
+    Object.defineProperty(terminal.promise, "then", {
+      configurable: true,
+      value: () => {
+        throw new Error("Private shadowed then must not run.");
+      },
+      writable: false,
+    });
+    let terminalSnapshot: Error | null = null;
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => terminalSnapshot,
+        signActiveStatusStatementV1: async () => Buffer.alloc(64),
+        signReceiptStatementV1: async () => Buffer.alloc(64),
+        terminalFailure: terminal.promise,
+      }),
+    );
+    const providerError = new Error("Private signer-host terminal detail.");
+    terminalSnapshot = providerError;
+    terminal.resolve(providerError);
+
+    const observed = await context.terminalFailure;
+    expect(observed).toMatchObject({ code: "SIGNER_OUTCOME_UNKNOWN" });
+    expect(context.readTerminalError()).toBe(observed);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).rejects.toBe(observed);
+  });
+
+  it("rejects a pre-mint terminal snapshot and a high-S statement-provider result", async () => {
+    let rejectedCloseCalls = 0;
+    const startupError = Object.assign(new Error("Private signer-host startup detail."), {
+      code: "SIGNER_HOST_MISMATCH",
+    });
+    await expect(
+      loadWithRawMaterial(
+        Object.freeze({
+          close: async () => {
+            rejectedCloseCalls += 1;
+          },
+          issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+          kind: "binding-statements-v1" as const,
+          readTerminalError: () => startupError,
+          signActiveStatusStatementV1: async () => Buffer.alloc(64),
+          signReceiptStatementV1: async () => Buffer.alloc(64),
+          terminalFailure: Promise.resolve(startupError),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "SIGNER_UNAVAILABLE" });
+    expect(rejectedCloseCalls).toBe(1);
+
+    const highSignature = forceHighS(
+      nodeSign("sha256", serverBindingReceiptSigningPreimageV1(statement), {
+        dsaEncoding: "ieee-p1363",
+        key: testPrivateKey,
+      }),
+    );
+    const pendingTerminal = Promise.withResolvers<Error>();
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => null,
+        signActiveStatusStatementV1: async () => highSignature,
+        signReceiptStatementV1: async () => highSignature,
+        terminalFailure: pendingTerminal.promise,
+      }),
+    );
+    const observed = await signServerBindingReceiptStatementV1(context, statement).catch(
+      (error: unknown) => error,
+    );
+    expect(observed).toMatchObject({ code: "SIGNATURE_INVALID" });
+    expect(await context.terminalFailure).toBe(observed);
+    expect(context.readTerminalError()).toBe(observed);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).rejects.toBe(observed);
+  });
+
+  it("terminalizes a statement-provider signature from the wrong private key", async () => {
+    const { privateKey: wrongPrivateKey } = generateKeyPairSync("ec", {
+      namedCurve: "prime256v1",
+    });
+    const terminal = Promise.withResolvers<Error>();
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => null,
+        signActiveStatusStatementV1: async () => Buffer.alloc(64),
+        signReceiptStatementV1: async (statementJson: Uint8Array) => {
+          const parsed = JSON.parse(Buffer.from(statementJson).toString("utf8"));
+          return normalizeLowS(
+            nodeSign("sha256", serverBindingReceiptSigningPreimageV1(parsed), {
+              dsaEncoding: "ieee-p1363",
+              key: wrongPrivateKey,
+            }),
+          );
+        },
+        terminalFailure: terminal.promise,
+      }),
+    );
+    const observed = await signServerBindingReceiptStatementV1(context, statement).catch(
+      (error: unknown) => error,
+    );
+    expect(observed).toMatchObject({ code: "SIGNATURE_INVALID" });
+    expect(await context.terminalFailure).toBe(observed);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).rejects.toBe(observed);
   });
 
   it("rejects digest-provider double hashing after complete re-verification", async () => {
@@ -289,6 +524,165 @@ describe("dormant Server binding signer v1", () => {
     expect(closeCalls).toBe(1);
   });
 
+  it("publishes one close promise before abort listeners can reenter close", async () => {
+    let closeCalls = 0;
+    let reentrantClose: Promise<void> | undefined;
+    let context: Readonly<import("./server-binding-signer-v1.js").ServerBindingSignerContextV1>;
+    const owner = {};
+    context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => {
+          closeCalls += 1;
+        },
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "preimage-sha256" as const,
+        signPreimageSha256: (_preimage: Uint8Array, signal: AbortSignal) =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => {
+                reentrantClose = closeServerBindingSignerV1(context, owner);
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          }),
+      }),
+    );
+    adoptServerBindingSignerV1(context, owner);
+    const signing = signServerBindingReceiptStatementV1(context, statement);
+    await Promise.resolve();
+    const closing = closeServerBindingSignerV1(context, owner);
+
+    expect(reentrantClose).toBe(closing);
+    await expect(signing).rejects.toMatchObject({ code: "SIGNER_UNAVAILABLE" });
+    await closing;
+    expect(closeCalls).toBe(1);
+  });
+
+  it("rechecks admission after caller-controlled statement and signal traps", async () => {
+    let signCalls = 0;
+    const first = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "preimage-sha256" as const,
+        signPreimageSha256: async () => {
+          signCalls += 1;
+          return Buffer.alloc(64);
+        },
+      }),
+    );
+    const firstOwner = {};
+    adoptServerBindingSignerV1(first, firstOwner);
+    let firstClose: Promise<void> | undefined;
+    const hostileStatement = new Proxy(
+      { ...statement },
+      {
+        ownKeys(target) {
+          firstClose = closeServerBindingSignerV1(first, firstOwner);
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    await expect(
+      signServerBindingReceiptStatementV1(first, hostileStatement),
+    ).rejects.toMatchObject({ code: "SIGNER_UNAVAILABLE" });
+    await firstClose;
+    expect(signCalls).toBe(0);
+
+    const second = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "preimage-sha256" as const,
+        signPreimageSha256: async () => {
+          signCalls += 1;
+          return Buffer.alloc(64);
+        },
+      }),
+    );
+    const secondOwner = {};
+    adoptServerBindingSignerV1(second, secondOwner);
+    let secondClose: Promise<void> | undefined;
+    const hostileSignal = {
+      get aborted() {
+        secondClose = closeServerBindingSignerV1(second, secondOwner);
+        return false;
+      },
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as AbortSignal;
+    await expect(
+      signServerBindingReceiptStatementV1(second, statement, hostileSignal),
+    ).rejects.toMatchObject({ code: "SIGNER_UNAVAILABLE" });
+    await secondClose;
+    expect(signCalls).toBe(0);
+  });
+
+  it("reads a statement-provider terminal snapshot while close is still settling", async () => {
+    const terminal = Promise.withResolvers<Error>();
+    const closeGate = Promise.withResolvers<void>();
+    const providerError = new Error("Private close-time signer-host failure.");
+    let terminalSnapshot: Error | null = null;
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => {
+          terminalSnapshot = providerError;
+          terminal.resolve(providerError);
+          await closeGate.promise;
+        },
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => terminalSnapshot,
+        signActiveStatusStatementV1: async () => Buffer.alloc(64),
+        signReceiptStatementV1: async () => Buffer.alloc(64),
+        terminalFailure: terminal.promise,
+      }),
+    );
+    const owner = {};
+    adoptServerBindingSignerV1(context, owner);
+    const closing = closeServerBindingSignerV1(context, owner);
+    await Promise.resolve();
+    await Promise.resolve();
+    const observed = context.readTerminalError();
+    expect(observed).toMatchObject({ code: "SIGNER_OUTCOME_UNKNOWN" });
+    closeGate.resolve();
+    await expect(closing).rejects.toBe(observed);
+  });
+
+  it("lets an already-aborted statement request terminalize its signer host", async () => {
+    const terminal = Promise.withResolvers<Error>();
+    const providerError = new Error("Private aborted signer-host request.");
+    let terminalSnapshot: Error | null = null;
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: async () => undefined,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "binding-statements-v1" as const,
+        readTerminalError: () => terminalSnapshot,
+        signActiveStatusStatementV1: async () => Buffer.alloc(64),
+        signReceiptStatementV1: async (_statement: Uint8Array, signal: AbortSignal) => {
+          expect(signal.aborted).toBe(true);
+          terminalSnapshot = providerError;
+          terminal.resolve(providerError);
+          throw providerError;
+        },
+        terminalFailure: terminal.promise,
+      }),
+    );
+    const controller = new AbortController();
+    controller.abort();
+    const observed = await signServerBindingReceiptStatementV1(
+      context,
+      statement,
+      controller.signal,
+    ).catch((error: unknown) => error);
+    expect(observed).toMatchObject({ code: "SIGNER_OUTCOME_UNKNOWN" });
+    expect(context.readTerminalError()).toBe(observed);
+    await expect(closeUnadoptedServerBindingSignerV1(context)).rejects.toBe(observed);
+  });
+
   it("permits exactly one owner and rejects descriptors after close", async () => {
     const context = await loadWithProvider({
       issuerPublicKeySpki: issuerSpki,
@@ -342,7 +736,43 @@ describe("dormant Server binding signer v1", () => {
     await closeServerBindingSignerV1(adopted, owner);
   });
 
-  it("rejects synchronous provider results and non-Promise close operations", async () => {
+  it("blocks replacement loading while adopted provider cleanup remains unresolved", async () => {
+    const closeGate = Promise.withResolvers<void>();
+    const context = await loadWithRawMaterial(
+      Object.freeze({
+        close: () => closeGate.promise,
+        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+        kind: "preimage-sha256" as const,
+        signPreimageSha256: async () => Buffer.alloc(64),
+      }),
+    );
+    const owner = {};
+    assertServerBindingSignerOwnershipAvailableV1(context);
+    adoptServerBindingSignerV1(context, owner);
+    const closing = closeServerBindingSignerV1(context, owner);
+
+    await expect(
+      loadWithProvider({
+        issuerPublicKeySpki: issuerSpki,
+        kind: "preimage-sha256",
+        signPreimageSha256: async () => Buffer.alloc(64),
+      }),
+    ).rejects.toMatchObject({
+      code: "SIGNER_UNAVAILABLE",
+      message: "A prior Server binding signer provider cleanup remains unresolved.",
+    });
+
+    closeGate.resolve();
+    await closing;
+    const replacement = await loadWithProvider({
+      issuerPublicKeySpki: issuerSpki,
+      kind: "preimage-sha256",
+      signPreimageSha256: async () => Buffer.alloc(64),
+    });
+    await closeUnadoptedServerBindingSignerV1(replacement);
+  });
+
+  it("rejects synchronous provider results", async () => {
     const synchronousSigner = await loadWithRawMaterial(
       Object.freeze({
         close: async () => undefined,
@@ -355,18 +785,6 @@ describe("dormant Server binding signer v1", () => {
       signServerBindingReceiptStatementV1(synchronousSigner, statement),
     ).rejects.toMatchObject({ code: "SIGNER_MISMATCH" });
     await closeUnadoptedServerBindingSignerV1(synchronousSigner);
-
-    const synchronousClose = await loadWithRawMaterial(
-      Object.freeze({
-        close: () => undefined,
-        issuerPublicKeySpki: Uint8Array.from(issuerSpki),
-        kind: "preimage-sha256" as const,
-        signPreimageSha256: async () => Buffer.alloc(64),
-      }),
-    );
-    await expect(closeUnadoptedServerBindingSignerV1(synchronousClose)).rejects.toMatchObject({
-      code: "SIGNER_UNAVAILABLE",
-    });
   });
 
   it("requires exact canonical trust and provider SPKIs in the loaded material", async () => {
@@ -549,6 +967,38 @@ function verifySignature(signature: string): void {
       signatureValid: true,
     }),
   );
+}
+
+function verifyActiveSignature(signature: string): void {
+  const activeStatus: ServerBindingActiveStatusV1 = {
+    algorithm: SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
+    issuer: SERVER_BINDING_AUTHORITY_ISSUER,
+    issuerKeyId,
+    profileId: SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID,
+    schemaVersion: SERVER_BINDING_AUTHORITY_SCHEMA_VERSION,
+    signature,
+    statement: activeStatusStatement,
+  };
+  expect(
+    verifyServerBindingActiveStatusWithSpkiV1(
+      marshalServerBindingActiveStatusV1(activeStatus),
+      issuerSpki,
+    ),
+  ).toEqual(
+    Object.freeze({
+      algorithm: SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
+      documentKind: "active-status",
+      issuerKeyId,
+      signatureValid: true,
+    }),
+  );
+}
+
+function normalizeLowS(signature: Uint8Array): Buffer {
+  const result = Buffer.from(signature);
+  const s = readUnsignedBigEndian(result.subarray(32));
+  if (s > p256HalfOrder) writeUnsignedBigEndian(p256Order - s, result, 32, 32);
+  return result;
 }
 
 function forceHighS(signature: Uint8Array): Buffer {

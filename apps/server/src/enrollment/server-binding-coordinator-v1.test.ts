@@ -22,14 +22,21 @@ const signerMaterialMock = vi.hoisted(() => ({
   trustProfile: undefined as unknown,
 }));
 
-vi.mock("../../dist/enrollment/server-binding-signer-provider-v1.js", () => ({
-  loadProductionServerBindingSignerProviderV1: async (): Promise<unknown> => {
-    if (signerMaterialMock.provider === undefined) {
-      throw new Error("The mocked production signer provider is unavailable.");
-    }
-    return signerMaterialMock.provider;
-  },
-}));
+vi.mock("../../dist/enrollment/server-binding-signer-provider-v1.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../dist/enrollment/server-binding-signer-provider-v1.js")
+    >();
+  return {
+    ...actual,
+    loadProductionServerBindingSignerProviderV1: async (): Promise<unknown> => {
+      if (signerMaterialMock.provider === undefined) {
+        throw new Error("The mocked production signer provider is unavailable.");
+      }
+      return signerMaterialMock.provider;
+    },
+  };
+});
 
 vi.mock("../../dist/enrollment/server-binding-trust-profile-v1.js", () => ({
   loadProductionServerBindingTrustProfileV1: async (): Promise<unknown> => {
@@ -57,6 +64,7 @@ import {
 import {
   adoptServerBindingSignerV1,
   closeServerBindingSignerV1,
+  closeUnadoptedServerBindingSignerV1,
   loadServerBindingSignerV1,
   type ServerBindingSignerContextV1,
   signServerBindingReceiptStatementV1,
@@ -70,6 +78,8 @@ F0qkH3Q//jWyVZNp7k5o+oDKezoZWbxoB46t9HT3+DoCEUaaBPUsIz+c
 const testPrivateKey = createPrivateKey(testPrivateKeyPem);
 const issuerSpki = createPublicKey(testPrivateKey).export({ format: "der", type: "spki" });
 const issuerKeyId = deriveServerBindingIssuerKeyIdV1(issuerSpki);
+const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+const p256HalfOrder = p256Order >> 1n;
 const timestamp = "2026-09-03T01:02:03.004Z";
 const expiresAt = "2026-09-03T02:02:03.004Z";
 const bindingId = "0f7d78fa-f002-4ede-9cd6-06951ee9b745";
@@ -330,6 +340,68 @@ const loadTestSigner = async (
   }
 };
 
+const loadTerminalTestSigner = async (
+  options: Readonly<{
+    readonly close?: () => Promise<void>;
+    readonly signReceiptStatementV1?: (
+      statementJson: Uint8Array,
+      signal: AbortSignal,
+    ) => Promise<unknown>;
+  }> = {},
+): Promise<{
+  readonly closeCalls: () => number;
+  readonly fail: (error: Error) => void;
+  readonly signer: Readonly<ServerBindingSignerContextV1>;
+}> => {
+  if (signerMaterialMock.provider !== undefined || signerMaterialMock.trustProfile !== undefined) {
+    throw new Error("A signer material mock is already active.");
+  }
+  const terminal = Promise.withResolvers<Error>();
+  let terminalSnapshot: Error | null = null;
+  let closeCalls = 0;
+  signerMaterialMock.provider = Object.freeze({
+    close: async () => {
+      closeCalls += 1;
+      await options.close?.();
+    },
+    issuerPublicKeySpki: Uint8Array.from(issuerSpki),
+    kind: "binding-statements-v1" as const,
+    readTerminalError: () => terminalSnapshot,
+    signActiveStatusStatementV1: async () => Buffer.alloc(64),
+    signReceiptStatementV1:
+      options.signReceiptStatementV1 ??
+      (async (statementJson: Uint8Array) => {
+        const parsed = JSON.parse(
+          Buffer.from(statementJson).toString("utf8"),
+        ) as ServerBindingReceiptStatementV1;
+        return normalizeLowS(
+          nodeSign("sha256", serverBindingReceiptSigningPreimageV1(parsed), {
+            dsaEncoding: "ieee-p1363",
+            key: testPrivateKey,
+          }),
+        );
+      }),
+    terminalFailure: terminal.promise,
+  });
+  signerMaterialMock.trustProfile = Object.freeze({
+    compiledTrustedIssuerPublicKeySpki: Uint8Array.from(issuerSpki),
+  });
+  try {
+    const signer = await loadServerBindingSignerV1();
+    return {
+      closeCalls: () => closeCalls,
+      fail: (error) => {
+        terminalSnapshot = error;
+        terminal.resolve(error);
+      },
+      signer,
+    };
+  } finally {
+    signerMaterialMock.provider = undefined;
+    signerMaterialMock.trustProfile = undefined;
+  }
+};
+
 const signedReceiptForClaim = async (
   signer: Readonly<ServerBindingSignerContextV1>,
   claim: PendingClaim,
@@ -355,6 +427,20 @@ const signedReceiptForClaim = async (
 
 const codedDatabaseError = (code: string): Error & { readonly code: string } =>
   Object.assign(new Error(`Private database detail for ${code}.`), { code });
+
+const normalizeLowS = (signature: Uint8Array): Buffer => {
+  const result = Buffer.from(signature);
+  let s = 0n;
+  for (const byte of result.subarray(32)) s = (s << 8n) | BigInt(byte);
+  if (s <= p256HalfOrder) return result;
+  let normalized = p256Order - s;
+  for (let index = 63; index >= 32; index -= 1) {
+    result[index] = Number(normalized & 0xffn);
+    normalized >>= 8n;
+  }
+  if (normalized !== 0n) throw new Error("Test scalar does not fit.");
+  return result;
+};
 
 afterEach(() => {
   signerMaterialMock.provider = undefined;
@@ -415,6 +501,219 @@ describe("Server binding coordinator v1", () => {
     const coordinator = new ServerBindingCoordinatorV1({ database: handle });
     await coordinator.close();
     await closeServerBindingSignerV1(signer, signerOwner);
+  });
+
+  it("rejects a pre-construction signer terminal snapshot without consuming the database", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    const providerError = new Error("Private pre-construction signer-host failure.");
+    terminalSigner.fail(providerError);
+    const database = new FakeDatabase();
+    const handle = attachDatabase(database);
+
+    expect(
+      () => new ServerBindingCoordinatorV1({ database: handle, signer: terminalSigner.signer }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "PERSISTENCE_OUTCOME_UNKNOWN",
+        name: "ServerBindingCoordinatorErrorV1",
+      }),
+    );
+    expect(database.requests).toEqual([]);
+
+    const ownerless = new ServerBindingCoordinatorV1({ database: handle });
+    await ownerless.close();
+    await expect(closeUnadoptedServerBindingSignerV1(terminalSigner.signer)).rejects.toMatchObject({
+      code: "SIGNER_OUTCOME_UNKNOWN",
+    });
+  });
+
+  it("restores the database handle when signer failure appears before adoption", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    const database = new FakeDatabase();
+    const handle = attachDatabase(database);
+    const options = { signer: terminalSigner.signer } as {
+      readonly signer: Readonly<ServerBindingSignerContextV1>;
+      readonly database: ServerBindingPersistenceDatabaseHandle;
+    };
+    Object.defineProperty(options, "database", {
+      enumerable: true,
+      get() {
+        terminalSigner.fail(new Error("Private pre-adoption signer-host failure."));
+        return handle;
+      },
+    });
+
+    expect(() => new ServerBindingCoordinatorV1(options)).toThrowError(
+      expect.objectContaining({ code: "PERSISTENCE_OUTCOME_UNKNOWN" }),
+    );
+    expect(database.requests).toEqual([]);
+    const ownerless = new ServerBindingCoordinatorV1({ database: handle });
+    await ownerless.close();
+    await expect(closeUnadoptedServerBindingSignerV1(terminalSigner.signer)).rejects.toMatchObject({
+      code: "SIGNER_OUTCOME_UNKNOWN",
+    });
+  });
+
+  it("owns and fails a signer that terminates after adoption but before open", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    const database = new FakeDatabase();
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+    terminalSigner.fail(new Error("Private post-adoption signer-host failure."));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(coordinator.state).toBe("failed");
+    expect(database.requests).toEqual([]);
+    const observed = await coordinator.open().catch((error: unknown) => error);
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+    await expect(coordinator.close()).rejects.toBe(observed);
+    expect(terminalSigner.closeCalls()).toBe(1);
+  });
+
+  it("observes signer terminal failure through the intrinsic Promise then", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    // biome-ignore lint/suspicious/noThenProperty: This regression verifies intrinsic Promise observation.
+    Object.defineProperty(terminalSigner.signer.terminalFailure, "then", {
+      configurable: true,
+      value: () => {
+        throw new Error("Private shadowed signer then must not run.");
+      },
+      writable: false,
+    });
+    const database = new FakeDatabase();
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+
+    terminalSigner.fail(new Error("Private intrinsic signer terminal failure."));
+    await vi.waitFor(() => expect(coordinator.state).toBe("failed"));
+    const observed = await coordinator.open().catch((error: unknown) => error);
+    expect(observed).toMatchObject({ code: "PERSISTENCE_OUTCOME_UNKNOWN" });
+    await expect(coordinator.close()).rejects.toBe(observed);
+  });
+
+  it("fails open immediately when the signer terminates during database initialization", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    const database = new FakeDatabase();
+    const initialization =
+      Promise.withResolvers<DatabaseOperationMap["initializeServerBindingIssuerV1"]["output"]>();
+    database.handlers.set("initializeServerBindingIssuerV1", () => initialization.promise);
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+    const opening = coordinator.open().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(database.requests).toHaveLength(1));
+
+    terminalSigner.fail(new Error("Private initialization-time signer-host failure."));
+    const observed = await opening;
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+    expect(coordinator.state).toBe("failed");
+    expect(coordinator.authority).toBeNull();
+
+    initialization.resolve(initializeResult());
+    await expect(coordinator.close()).rejects.toBe(observed);
+    expect(databaseOperations(database)).toEqual(["initializeServerBindingIssuerV1"]);
+  });
+
+  it("prefers the signer snapshot when initialization rejects in the same turn", async () => {
+    const terminalSigner = await loadTerminalTestSigner();
+    const database = new FakeDatabase();
+    database.handlers.set("initializeServerBindingIssuerV1", async () => {
+      terminalSigner.fail(new Error("Private simultaneous signer-host failure."));
+      throw codedDatabaseError("SERVER_BINDING_STORAGE_INTEGRITY_FAILURE");
+    });
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+
+    const observed = await coordinator.open().catch((error: unknown) => error);
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+    expect(coordinator.state).toBe("failed");
+    await expect(coordinator.close()).rejects.toBe(observed);
+  });
+
+  it("fails an in-flight signing wrapper without committing a late signature", async () => {
+    const signStarted = Promise.withResolvers<void>();
+    const signResult = Promise.withResolvers<unknown>();
+    const terminalSigner = await loadTerminalTestSigner({
+      signReceiptStatementV1: async () => {
+        signStarted.resolve();
+        return await signResult.promise;
+      },
+    });
+    const database = new FakeDatabase();
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+    await coordinator.open();
+    const operation = requireAuthority(coordinator)
+      .issueReceipt(validIssueRequest())
+      .catch((error: unknown) => error);
+    await signStarted.promise;
+
+    terminalSigner.fail(new Error("Private in-flight signer-host failure."));
+    const observed = await operation;
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+    expect(databaseOperations(database)).toEqual([
+      "initializeServerBindingIssuerV1",
+      "claimServerBindingAuthorizationV1",
+    ]);
+
+    signResult.resolve(Buffer.alloc(64));
+    await expect(coordinator.close()).rejects.toBe(observed);
+    expect(databaseOperations(database)).not.toContain("commitServerBindingReceiptV1");
+  });
+
+  it("revokes ready authority and preserves signer terminal failure through close", async () => {
+    const closeGate = Promise.withResolvers<void>();
+    const terminalSigner = await loadTerminalTestSigner({ close: () => closeGate.promise });
+    const database = new FakeDatabase();
+    const coordinator = createCoordinator(database, terminalSigner.signer);
+    await coordinator.open();
+    const authority = requireAuthority(coordinator);
+
+    terminalSigner.fail(new Error("Private ready signer-host failure."));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(coordinator.state).toBe("failed");
+    expect(coordinator.authority).toBeNull();
+    const observed = await authority
+      .readRecoveryReceipt({ certificateDerSha256 })
+      .catch((error: unknown) => error);
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+
+    const closing = coordinator.close().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(terminalSigner.closeCalls()).toBe(1));
+    closeGate.resolve();
+    await expect(closing).resolves.toBe(observed);
+    expect(databaseOperations(database)).toEqual(["initializeServerBindingIssuerV1"]);
+  });
+
+  it("keeps close failed when signer termination arrives during provider cleanup", async () => {
+    const closeGate = Promise.withResolvers<void>();
+    const terminalSigner = await loadTerminalTestSigner({ close: () => closeGate.promise });
+    const coordinator = createCoordinator(new FakeDatabase(), terminalSigner.signer);
+    const closing = coordinator.close();
+    expect(coordinator.close()).toBe(closing);
+    const closingResult = closing.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(terminalSigner.closeCalls()).toBe(1));
+
+    terminalSigner.fail(new Error("Private close-time signer-host failure."));
+    closeGate.resolve();
+    const observed = await closingResult;
+    expect(observed).toMatchObject({
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding signer outcome is unknown.",
+    });
+    expect(coordinator.state).toBe("failed");
+    await expect(coordinator.open()).rejects.toBe(observed);
   });
 
   it("opens without signer authority and keeps open single-use", async () => {
@@ -961,23 +1260,6 @@ describe("Server binding coordinator v1", () => {
     await expect(coordinator.open()).rejects.toMatchObject({ code: "CLOSED" });
   });
 
-  it("normalizes a signer failure while closing before open and enters failed", async () => {
-    const signer = await loadTestSigner(undefined, async () => {
-      throw new Error("Private provider close detail.");
-    });
-    const coordinator = createCoordinator(new FakeDatabase(), signer);
-
-    const observed = await coordinator.close().catch((error: unknown) => error);
-
-    expect(observed).toMatchObject({
-      name: "ServerBindingCoordinatorErrorV1",
-      code: "PERSISTENCE_OUTCOME_UNKNOWN",
-      message: "The binding coordinator failed.",
-    });
-    expect(coordinator.state).toBe("failed");
-    await expect(coordinator.open()).rejects.toBe(observed);
-  });
-
   it("lets an in-flight open settle before completing close without publishing authority", async () => {
     const signer = await loadTestSigner();
     const database = new FakeDatabase();
@@ -1260,5 +1542,22 @@ describe("Server binding coordinator v1", () => {
     expect(mainSource).not.toContain("serverBindingSigner");
     expect(mainSource).not.toContain("ServerBindingCoordinatorV1");
     expect(appSource).not.toContain("serverBinding");
+  });
+
+  it("normalizes a signer failure while closing before open and enters failed", async () => {
+    const signer = await loadTestSigner(undefined, async () => {
+      throw new Error("Private provider close detail.");
+    });
+    const coordinator = createCoordinator(new FakeDatabase(), signer);
+
+    const observed = await coordinator.close().catch((error: unknown) => error);
+
+    expect(observed).toMatchObject({
+      name: "ServerBindingCoordinatorErrorV1",
+      code: "PERSISTENCE_OUTCOME_UNKNOWN",
+      message: "The binding coordinator failed.",
+    });
+    expect(coordinator.state).toBe("failed");
+    await expect(coordinator.open()).rejects.toBe(observed);
   });
 });

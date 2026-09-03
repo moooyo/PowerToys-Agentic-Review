@@ -626,6 +626,7 @@ export class ServerBindingSignerHostClientErrorV1 extends Error {
 export interface ServerBindingSignerHostDirectClientV1 {
   readonly ready: Promise<void>;
   readonly terminalFailure: Promise<ServerBindingSignerHostClientErrorV1>;
+  hasProvenCleanup(): boolean;
   readIssuerPublicKeySpki(): Uint8Array | null;
   readTerminalError(): ServerBindingSignerHostClientErrorV1 | null;
   signReceiptStatementV1(statementJson: Uint8Array, signal: AbortSignal): Promise<Uint8Array>;
@@ -659,6 +660,7 @@ const emptySignerHostEnvironment = Object.freeze(Object.create(null) as Record<s
 /** Creates a dormant direct-child client without exposing path, environment, timeout, or spawn seams. */
 export function createServerBindingSignerHostDirectClientV1(): Readonly<ServerBindingSignerHostDirectClientV1> {
   const owner = new DirectSignerHostOwner(quarantinedSignerHostOwners.size !== 0);
+  const hasProvenCleanup = (): boolean => owner.hasProvenCleanup();
   const readIssuerPublicKeySpki = (): Uint8Array | null => owner.readIssuerPublicKeySpki();
   const readTerminalError = (): ServerBindingSignerHostClientErrorV1 | null =>
     owner.readTerminalError();
@@ -671,6 +673,7 @@ export function createServerBindingSignerHostDirectClientV1(): Readonly<ServerBi
     signal: AbortSignal,
   ): Promise<Uint8Array> => owner.signActiveStatusStatementV1(statementJson, signal);
   const close = (): Promise<void> => owner.close();
+  Object.freeze(hasProvenCleanup);
   Object.freeze(readIssuerPublicKeySpki);
   Object.freeze(readTerminalError);
   Object.freeze(signReceiptStatementV1);
@@ -679,6 +682,7 @@ export function createServerBindingSignerHostDirectClientV1(): Readonly<ServerBi
   return Object.freeze({
     ready: owner.ready,
     terminalFailure: owner.terminalFailure,
+    hasProvenCleanup,
     readIssuerPublicKeySpki,
     readTerminalError,
     signReceiptStatementV1,
@@ -739,6 +743,10 @@ class DirectSignerHostOwner {
 
   public readIssuerPublicKeySpki(): Uint8Array | null {
     return this.#issuerPublicKeySpki === null ? null : Uint8Array.from(this.#issuerPublicKeySpki);
+  }
+
+  public hasProvenCleanup(): boolean {
+    return this.#cleanupProven;
   }
 
   public readTerminalError(): ServerBindingSignerHostClientErrorV1 | null {
@@ -1024,8 +1032,15 @@ class DirectSignerHostOwner {
       this.#state.shutdownAcknowledged &&
       code === 0 &&
       signal === null;
+    const awaitingOrderlyAcknowledgement =
+      this.#state.logicalState === "closing" &&
+      this.#state.cleanupState === "child_live" &&
+      this.#state.shutdownRequestId !== null &&
+      !this.#state.shutdownAcknowledged &&
+      code === 0 &&
+      signal === null;
     const forced = this.#state.cleanupState === "termination_requested";
-    if (!orderly && !forced && this.#terminalError === null) {
+    if (!orderly && !awaitingOrderlyAcknowledgement && !forced && this.#terminalError === null) {
       const error = this.#latchTerminal(
         this.#readyResolved ? "SIGNER_HOST_OUTCOME_UNKNOWN" : "SIGNER_HOST_UNAVAILABLE",
         "The Server binding signer-host process exited unexpectedly.",
@@ -1435,17 +1450,15 @@ class DirectSignerHostOwner {
 
     if (this.#terminalError !== null) return await promise;
 
-    try {
-      if (this.#pending?.requestId === requestId) this.#pending.requestWritten = true;
-      await this.#writeFrame(frame);
-    } catch {
+    if (this.#pending?.requestId === requestId) this.#pending.requestWritten = true;
+    void this.#writeFrame(frame).catch(() => {
       if (
         this.#pending?.requestId !== requestId &&
         (this.#state.logicalState === "closed" ||
           this.#state.cleanupState === "termination_requested" ||
           this.#state.cleanupState === "exit_proven")
       ) {
-        return await promise;
+        return;
       }
       const error = this.#latchTerminal(
         "SIGNER_HOST_OUTCOME_UNKNOWN",
@@ -1453,8 +1466,7 @@ class DirectSignerHostOwner {
       );
       this.#rejectPending(error);
       void this.#ensureForcedCleanup();
-      throw error;
-    }
+    });
     return await promise;
   }
 
@@ -1639,6 +1651,19 @@ class DirectSignerHostOwner {
     ) {
       this.#maybeReleaseQuarantine();
       return;
+    }
+    if (
+      this.#state.logicalState === "closing" &&
+      this.#state.cleanupState === "child_live" &&
+      this.#exitObserved &&
+      this.#state.shutdownRequestId !== null &&
+      !this.#state.shutdownAcknowledged &&
+      this.#terminalError === null
+    ) {
+      this.#latchTerminal(
+        "SIGNER_HOST_PROTOCOL_FAILURE",
+        "The Server binding signer-host exited without acknowledging shutdown.",
+      );
     }
     if (this.#state.cleanupState === "child_live") {
       this.#state = reduceServerBindingSignerHostClientStateV1(this.#state, {
