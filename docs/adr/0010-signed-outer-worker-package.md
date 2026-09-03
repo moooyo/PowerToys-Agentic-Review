@@ -1,5 +1,9 @@
 # ADR 0010: Canonical Signed Outer Worker Packages
 
+> Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
+> design. This v1 package schema is not reinterpreted; a new package profile must replace its mTLS
+> fields before production use. Package signing and canonicalization remain valid principles.
+
 ## Status
 
 Accepted for the RoleConfig v2 zero-execution release foundation.

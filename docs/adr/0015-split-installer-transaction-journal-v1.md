@@ -1,5 +1,9 @@
 # ADR 0015: Split Installer Transaction Journal v1
 
+> Amended by ADR 0025: Worker mTLS and Server binding receipt facts are removed from the selected
+> enrollment direction. Journal durability, rollback, service fencing, and the rule that secrets
+> never enter the journal remain unchanged.
+
 ## Status
 
 Accepted as the narrow transaction and journal contract for the dormant RoleConfig v2 split

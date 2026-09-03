@@ -1,5 +1,9 @@
 # ADR 0011: Signed Package Admission v1
 
+> Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
+> design. This v1 admission profile is not reinterpreted; a new profile must replace its mTLS
+> bindings before production use. Compiled package trust remains unchanged.
+
 ## Status
 
 Accepted for the dormant RoleConfig v2 package foundation.

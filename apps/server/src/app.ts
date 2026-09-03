@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { ArtifactCompletionPort, ArtifactTransactionPort } from "./artifacts/index.js";
@@ -19,6 +20,7 @@ import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
 import { type ArtifactReadinessProbe, registerHealthRoutes } from "./routes/health.js";
 import { registerWorkerArtifactRoutes } from "./routes/worker-artifacts.js";
+import { registerWorkerCredentialRoutes } from "./routes/worker-credentials.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
 
 export interface AppDependencies {
@@ -40,25 +42,46 @@ const isRequestValidationError = (
 ): error is Error & { readonly validation: unknown } =>
   error instanceof Error && "validation" in error && error.validation !== undefined;
 
+const workerTokenInPath = /arw1_[A-Za-z0-9_-]{43}/gu;
+const redactWorkerTokens = (value: string): string =>
+  value.replace(workerTokenInPath, "[REDACTED]");
+
+export const sanitizeRequestLogUrl = (url: string | undefined): string =>
+  redactWorkerTokens((url ?? "").split("?", 1)[0] ?? "");
+
 export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
-  if (dependencies.config.tls === undefined && !dependencies.config.allowInsecureWorkerAuth) {
+  if (dependencies.config.tls === undefined && !dependencies.config.allowInsecureHttp) {
     throw new Error(
-      "Worker authentication is fail-closed: configure TLS or explicitly enable loopback-only insecure development mode.",
+      "Server transport is fail-closed: configure TLS or explicitly enable loopback development HTTP.",
     );
   }
 
   const app = Fastify({
     logger: {
       level: process.env.AGENTIC_REVIEW_LOG_LEVEL ?? "info",
+      redact: {
+        paths: ["req.headers.authorization"],
+        censor: "[REDACTED]",
+      },
+      serializers: {
+        req(request) {
+          return {
+            method: request.method,
+            url: sanitizeRequestLogUrl(request.url),
+            ...(request.headers.host === undefined
+              ? {}
+              : { host: redactWorkerTokens(request.headers.host) }),
+            ...(request.socket.remoteAddress === undefined
+              ? {}
+              : { remoteAddress: request.socket.remoteAddress }),
+          };
+        },
+      },
     },
     bodyLimit: 2 * 1_024 * 1_024,
     requestTimeout: 40_000,
     ...(dependencies.config.tls === undefined ? {} : { https: dependencies.config.tls }),
   });
-
-  if (dependencies.config.allowInsecureWorkerAuth) {
-    app.log.warn("Worker mTLS authentication is disabled for loopback-only development.");
-  }
 
   app.addHook("onRequest", async (request, reply) => {
     if (request.method === "GET" && request.url === "/health/live") {
@@ -79,6 +102,13 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   });
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof Error && "statusCode" in error && error.statusCode === 429) {
+      return reply.code(429).send({
+        code: "request_rate_limited",
+        message: "Too many requests were received. Retry later.",
+        retryable: true,
+      });
+    }
     if (error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
       return reply.code(413).send({
         code: "request_body_too_large",
@@ -185,21 +215,44 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     dependencies.artifactReadiness,
     dependencies.shutdownSignal,
   );
-  registerWorkerRoutes(app, {
-    config: dependencies.config,
-    database: dependencies.database,
-    artifactCompletion: dependencies.artifactCompletion,
-    shutdownSignal: dependencies.shutdownSignal,
-  });
-  registerWorkerArtifactRoutes(app, {
-    config: dependencies.config,
-    transactions: dependencies.artifactTransactions,
-    shutdownSignal: dependencies.shutdownSignal,
+  app.register(async (workerScope) => {
+    await workerScope.register(rateLimit, {
+      global: false,
+      max: 600,
+      timeWindow: "1 minute",
+    });
+    workerScope.addHook("onRequest", workerScope.rateLimit({ max: 600, timeWindow: "1 minute" }));
+    registerWorkerRoutes(workerScope, {
+      config: dependencies.config,
+      database: dependencies.database,
+      artifactCompletion: dependencies.artifactCompletion,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
+    registerWorkerArtifactRoutes(workerScope, {
+      database: dependencies.database,
+      transactions: dependencies.artifactTransactions,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
   });
 
   const operatorAuth = dependencies.operatorAuth;
   if (operatorAuth !== undefined) {
     registerOperatorAuthRoutes(app, operatorAuth);
+    app.register(async (credentialScope) => {
+      await credentialScope.register(rateLimit, {
+        global: false,
+        max: 60,
+        timeWindow: "1 minute",
+      });
+      credentialScope.addHook(
+        "onRequest",
+        credentialScope.rateLimit({ max: 60, timeWindow: "1 minute" }),
+      );
+      registerWorkerCredentialRoutes(credentialScope, {
+        database: dependencies.database,
+        operatorAuth,
+      });
+    });
     registerDashboardRoutes(app, {
       database: dependencies.database,
       authenticate: async (request, reply) => {

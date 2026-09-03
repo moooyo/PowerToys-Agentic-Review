@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed as a source-only, dormant authority contract on 2026-09-03.
+Superseded by ADR 0025 on 2026-09-03. The receipt, active-status, candidate-mTLS, and Server binding
+authority defined here are no longer part of the selected Worker authentication design.
 
 This decision freezes the intended receipt and active-status documents, signature domains, trust
 source, Server lifecycle, persistence semantics, authenticated exchange boundaries, and later

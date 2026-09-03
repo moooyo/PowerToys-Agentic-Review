@@ -108,9 +108,9 @@ type CompleteArtifactRunResponse struct {
 }
 
 // ArtifactClientV2 is a source-only, dormant capability for the version-two result-artifact
-// transport. It borrows the fixed origin, mTLS identity, request concurrency, timeout, and
-// lifecycle of an existing Client. It cannot configure a URL, headers, TLS, or connection
-// ownership and becomes closed when the borrowed Client closes.
+// transport. It borrows the fixed origin, selected Worker authentication, request concurrency,
+// timeout, and lifecycle of an existing Client. It cannot configure a URL, headers, TLS, or
+// connection ownership and becomes closed when the borrowed Client closes.
 type ArtifactClientV2 struct {
 	state *clientState
 }
@@ -375,6 +375,7 @@ func knownArtifactServerErrorCode(code string) bool {
 	switch code {
 	case "request_validation_failed",
 		"worker_identity_missing",
+		"worker_authentication_failed",
 		"worker_mtls_required",
 		"worker_certificate_unauthorized",
 		"worker_certificate_missing",
@@ -384,7 +385,9 @@ func knownArtifactServerErrorCode(code string) bool {
 		"insecure_worker_auth_loopback_only",
 		"worker_certificate_unmapped",
 		"worker_identity_mismatch",
+		"worker_registration_required",
 		"request_body_too_large",
+		"request_rate_limited",
 		"run_attempt_mismatch",
 		"artifact_upload_quota_exceeded",
 		"artifact_storage_capacity",
@@ -404,6 +407,7 @@ func knownArtifactServerErrorCode(code string) bool {
 		"artifact_transaction_timeout",
 		"artifact_transaction_closed",
 		"artifact_storage_integrity",
+		"worker_authentication_unavailable",
 		"terminal_submission_conflict",
 		"result_digest_mismatch",
 		"artifact_result_encoding_invalid",

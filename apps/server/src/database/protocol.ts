@@ -104,11 +104,52 @@ export interface DatabaseWorkerOptions {
 export interface RegisterWorkerInput {
   readonly protocolVersion: string;
   readonly workerNodeId: string;
+  readonly workerTokenSha256: string;
   readonly workerInstanceId: string;
   readonly displayName: string;
   readonly workerVersion: string;
   readonly maxSlots: number;
   readonly capabilities: unknown;
+}
+
+export type WorkerNodeAuthState = "pending" | "active" | "revoked";
+
+export interface CreateWorkerNodeCredentialInput {
+  readonly workerNodeId: string;
+  readonly displayName: string;
+  readonly workerTokenSha256: string;
+  readonly createdByIssuer: string;
+  readonly createdBySubject: string;
+}
+
+export interface AuthenticateWorkerTokenInput {
+  readonly workerTokenSha256: string;
+}
+
+export type AuthenticateWorkerTokenResult =
+  | {
+      readonly outcome: "authenticated";
+      readonly workerNodeId: string;
+      readonly authState: Exclude<WorkerNodeAuthState, "revoked">;
+    }
+  | { readonly outcome: "invalid" };
+
+export interface RotateWorkerTokenInput {
+  readonly workerNodeId: string;
+  readonly workerTokenSha256: string;
+  readonly rotatedByIssuer: string;
+  readonly rotatedBySubject: string;
+}
+
+export interface RevokeWorkerTokenInput {
+  readonly workerNodeId: string;
+  readonly revokedByIssuer: string;
+  readonly revokedBySubject: string;
+}
+
+export interface WorkerNodeCredentialMutationResult {
+  readonly workerNodeId: string;
+  readonly authState: WorkerNodeAuthState;
 }
 
 export interface RegisteredWorker {
@@ -252,6 +293,24 @@ export interface DatabaseOperationMap {
   readonly registerWorker: {
     readonly input: RegisterWorkerInput;
     readonly output: RegisteredWorker;
+  };
+  readonly createWorkerNodeCredential: {
+    readonly input: CreateWorkerNodeCredentialInput;
+    readonly output: WorkerNodeCredentialMutationResult & { readonly authState: "pending" };
+  };
+  readonly authenticateWorkerToken: {
+    readonly input: AuthenticateWorkerTokenInput;
+    readonly output: AuthenticateWorkerTokenResult;
+  };
+  readonly rotateWorkerToken: {
+    readonly input: RotateWorkerTokenInput;
+    readonly output: WorkerNodeCredentialMutationResult & {
+      readonly authState: Exclude<WorkerNodeAuthState, "revoked">;
+    };
+  };
+  readonly revokeWorkerToken: {
+    readonly input: RevokeWorkerTokenInput;
+    readonly output: WorkerNodeCredentialMutationResult & { readonly authState: "revoked" };
   };
   readonly heartbeatWorker: {
     readonly input: HeartbeatWorkerInput;

@@ -13,6 +13,7 @@ import {
   maximumClaimLeaseResponseUtf8Bytes,
   type RunTerminalResponse,
   RunTerminalResponseSchema,
+  WorkerRegistrationRequestSchema,
 } from "@agentic-review/contracts";
 import { resolveExpiredAttempt } from "@agentic-review/domain";
 import { FormatRegistry } from "@sinclair/typebox";
@@ -97,8 +98,11 @@ import {
   findOperatorSession,
 } from "./operator-auth.js";
 import type {
+  AuthenticateWorkerTokenInput,
+  AuthenticateWorkerTokenResult,
   ClaimLeaseInput,
   ClaimLeaseResult,
+  CreateWorkerNodeCredentialInput,
   DatabaseHealth,
   DatabaseRequest,
   DatabaseWorkerOptions,
@@ -112,6 +116,10 @@ import type {
   ReapExpiredLeasesInput,
   RegisteredWorker,
   RegisterWorkerInput,
+  RevokeWorkerTokenInput,
+  RotateWorkerTokenInput,
+  WorkerNodeAuthState,
+  WorkerNodeCredentialMutationResult,
 } from "./protocol.js";
 import {
   canonicalizeLegacyReviewResultSubmission,
@@ -284,6 +292,35 @@ FormatRegistry.Set(
 FormatRegistry.Set("uri", (value) => URL.canParse(value));
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
+const sha256Pattern = /^[0-9a-f]{64}$/u;
+
+class WorkerNodeCredentialError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkerNodeCredentialError";
+  }
+}
+
+const assertWorkerTokenSha256 = (value: string): void => {
+  if (!sha256Pattern.test(value)) {
+    throw new TypeError("Worker token hashes must be lowercase SHA-256 values.");
+  }
+};
+
+const assertWorkerNodeId = (value: string): void => {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)) {
+    throw new TypeError("Worker node identifiers must use the supported ASCII identifier format.");
+  }
+};
+
+const assertBoundedText = (value: string, name: string, maximumLength: number): void => {
+  if (value.length < 1 || value.length > maximumLength || value.includes("\0")) {
+    throw new TypeError(`${name} must be non-empty text within its supported length.`);
+  }
+};
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
@@ -415,6 +452,229 @@ const withImmediateTransaction = <T>(action: () => T): T => {
   }
 };
 
+const createWorkerNodeCredential = (
+  input: CreateWorkerNodeCredentialInput,
+): WorkerNodeCredentialMutationResult & { readonly authState: "pending" } => {
+  assertWorkerNodeId(input.workerNodeId);
+  assertBoundedText(input.displayName, "displayName", 512);
+  assertWorkerTokenSha256(input.workerTokenSha256);
+  assertBoundedText(input.createdByIssuer, "createdByIssuer", 2048);
+  assertBoundedText(input.createdBySubject, "createdBySubject", 512);
+  const now = new Date().toISOString();
+
+  return withImmediateTransaction(() => {
+    const conflict = database
+      .prepare(`
+        SELECT worker_node_id
+        FROM worker_node_credentials
+        WHERE worker_node_id = ? OR token_sha256 = ?
+        LIMIT 1
+      `)
+      .get(input.workerNodeId, input.workerTokenSha256) as
+      | { readonly worker_node_id: string }
+      | undefined;
+    if (conflict !== undefined) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_CONFLICT",
+        "The worker node identifier or token is already registered.",
+      );
+    }
+
+    database
+      .prepare(`
+        INSERT INTO worker_node_credentials (
+          worker_node_id,
+          display_name,
+          token_sha256,
+          auth_state,
+          created_by_issuer,
+          created_by_subject,
+          updated_by_issuer,
+          updated_by_subject,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.workerNodeId,
+        input.displayName,
+        input.workerTokenSha256,
+        input.createdByIssuer,
+        input.createdBySubject,
+        input.createdByIssuer,
+        input.createdBySubject,
+        now,
+        now,
+      );
+
+    return { workerNodeId: input.workerNodeId, authState: "pending" };
+  });
+};
+
+const authenticateWorkerToken = (
+  input: AuthenticateWorkerTokenInput,
+): AuthenticateWorkerTokenResult => {
+  if (!sha256Pattern.test(input.workerTokenSha256)) {
+    return { outcome: "invalid" };
+  }
+  const row = database
+    .prepare(`
+      SELECT worker_node_id, auth_state
+      FROM worker_node_credentials
+      WHERE token_sha256 = ? AND auth_state IN ('pending', 'active')
+    `)
+    .get(input.workerTokenSha256) as
+    | {
+        readonly worker_node_id: string;
+        readonly auth_state: Exclude<WorkerNodeAuthState, "revoked">;
+      }
+    | undefined;
+  if (row === undefined) {
+    return { outcome: "invalid" };
+  }
+  return {
+    outcome: "authenticated",
+    workerNodeId: row.worker_node_id,
+    authState: row.auth_state,
+  };
+};
+
+const rotateWorkerToken = (
+  input: RotateWorkerTokenInput,
+): WorkerNodeCredentialMutationResult & {
+  readonly authState: Exclude<WorkerNodeAuthState, "revoked">;
+} => {
+  assertWorkerNodeId(input.workerNodeId);
+  assertWorkerTokenSha256(input.workerTokenSha256);
+  assertBoundedText(input.rotatedByIssuer, "rotatedByIssuer", 2048);
+  assertBoundedText(input.rotatedBySubject, "rotatedBySubject", 512);
+  const now = new Date().toISOString();
+
+  return withImmediateTransaction(() => {
+    const credential = database
+      .prepare(`
+        SELECT auth_state
+        FROM worker_node_credentials
+        WHERE worker_node_id = ?
+      `)
+      .get(input.workerNodeId) as { readonly auth_state: WorkerNodeAuthState } | undefined;
+    if (credential === undefined) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_NOT_FOUND",
+        "The worker node credential does not exist.",
+      );
+    }
+    if (credential.auth_state === "revoked") {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_REVOKED",
+        "A revoked worker node credential cannot be rotated.",
+      );
+    }
+
+    const tokenOwner = database
+      .prepare(`
+        SELECT worker_node_id
+        FROM worker_node_credentials
+        WHERE token_sha256 = ? AND worker_node_id <> ?
+      `)
+      .get(input.workerTokenSha256, input.workerNodeId) as
+      | { readonly worker_node_id: string }
+      | undefined;
+    if (tokenOwner !== undefined) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_CONFLICT",
+        "The worker token is already assigned to another worker node.",
+      );
+    }
+    if (
+      database
+        .prepare(
+          "SELECT 1 AS matched FROM worker_node_credentials WHERE worker_node_id = ? AND token_sha256 = ?",
+        )
+        .get(input.workerNodeId, input.workerTokenSha256) !== undefined
+    ) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_CONFLICT",
+        "The replacement worker token must differ from the current token.",
+      );
+    }
+
+    const update = database
+      .prepare(`
+        UPDATE worker_node_credentials
+        SET token_sha256 = ?,
+            updated_by_issuer = ?,
+            updated_by_subject = ?,
+            rotated_at = ?,
+            updated_at = ?
+        WHERE worker_node_id = ? AND auth_state = ?
+      `)
+      .run(
+        input.workerTokenSha256,
+        input.rotatedByIssuer,
+        input.rotatedBySubject,
+        now,
+        now,
+        input.workerNodeId,
+        credential.auth_state,
+      );
+    if (Number(update.changes) !== 1) {
+      throw new Error("The worker node credential changed during token rotation.");
+    }
+
+    return { workerNodeId: input.workerNodeId, authState: credential.auth_state };
+  });
+};
+
+const revokeWorkerToken = (
+  input: RevokeWorkerTokenInput,
+): WorkerNodeCredentialMutationResult & { readonly authState: "revoked" } => {
+  assertWorkerNodeId(input.workerNodeId);
+  assertBoundedText(input.revokedByIssuer, "revokedByIssuer", 2048);
+  assertBoundedText(input.revokedBySubject, "revokedBySubject", 512);
+  const now = new Date().toISOString();
+
+  return withImmediateTransaction(() => {
+    const credential = database
+      .prepare(`
+        SELECT auth_state
+        FROM worker_node_credentials
+        WHERE worker_node_id = ?
+      `)
+      .get(input.workerNodeId) as { readonly auth_state: WorkerNodeAuthState } | undefined;
+    if (credential === undefined) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_NODE_CREDENTIAL_NOT_FOUND",
+        "The worker node credential does not exist.",
+      );
+    }
+    if (credential.auth_state !== "revoked") {
+      const update = database
+        .prepare(`
+          UPDATE worker_node_credentials
+          SET auth_state = 'revoked',
+              updated_by_issuer = ?,
+              updated_by_subject = ?,
+              updated_at = ?,
+              revoked_at = ?
+          WHERE worker_node_id = ? AND auth_state = ?
+        `)
+        .run(
+          input.revokedByIssuer,
+          input.revokedBySubject,
+          now,
+          now,
+          input.workerNodeId,
+          credential.auth_state,
+        );
+      if (Number(update.changes) !== 1) {
+        throw new Error("The worker node credential changed during token revocation.");
+      }
+    }
+    return { workerNodeId: input.workerNodeId, authState: "revoked" };
+  });
+};
+
 type ExecutionTemplateParseResult =
   | { readonly ok: true; readonly template: JobExecutionTemplate }
   | { readonly ok: false; readonly message: string };
@@ -471,11 +731,64 @@ const deadLetterClaimCandidate = (
 };
 
 const registerWorker = (input: RegisterWorkerInput): RegisteredWorker => {
+  if (!sha256Pattern.test(input.workerTokenSha256)) {
+    throw new WorkerNodeCredentialError("WORKER_TOKEN_INVALID", "The worker token is invalid.");
+  }
   const now = new Date().toISOString();
   const capabilitiesJson = canonicalJson(input.capabilities);
   const capabilitiesDigest = hash(capabilitiesJson);
 
   return withImmediateTransaction(() => {
+    const credential = database
+      .prepare(`
+        SELECT worker_node_id, auth_state
+        FROM worker_node_credentials
+        WHERE token_sha256 = ?
+          AND auth_state IN ('pending', 'active')
+      `)
+      .get(input.workerTokenSha256) as
+      | {
+          readonly worker_node_id: string;
+          readonly auth_state: Exclude<WorkerNodeAuthState, "revoked">;
+        }
+      | undefined;
+    if (credential === undefined) {
+      throw new WorkerNodeCredentialError("WORKER_TOKEN_INVALID", "The worker token is invalid.");
+    }
+    if (credential.worker_node_id !== input.workerNodeId) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_IDENTITY_MISMATCH",
+        "The worker registration identity does not match the worker token.",
+      );
+    }
+    const registrationRequest = {
+      protocolVersion: input.protocolVersion,
+      workerNodeId: input.workerNodeId,
+      workerInstanceId: input.workerInstanceId,
+      displayName: input.displayName,
+      workerVersion: input.workerVersion,
+      maxSlots: input.maxSlots,
+      capabilities: input.capabilities,
+    };
+    if (!Value.Check(WorkerRegistrationRequestSchema, registrationRequest)) {
+      throw new WorkerNodeCredentialError(
+        "WORKER_REGISTRATION_INVALID",
+        "The worker registration request is invalid.",
+      );
+    }
+    if (credential.auth_state === "pending") {
+      const activation = database
+        .prepare(`
+          UPDATE worker_node_credentials
+          SET auth_state = 'active', activated_at = ?, updated_at = ?
+          WHERE worker_node_id = ? AND token_sha256 = ? AND auth_state = 'pending'
+        `)
+        .run(now, now, input.workerNodeId, input.workerTokenSha256);
+      if (Number(activation.changes) !== 1) {
+        throw new Error("The pending worker node credential could not be activated atomically.");
+      }
+    }
+
     const existingInstance = database
       .prepare(`
         SELECT superseded_at
@@ -621,8 +934,11 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
           capabilities_json,
           capabilities_digest,
           status
-        FROM workers
-        WHERE node_id = ? AND instance_id = ?
+        FROM workers AS worker
+        INNER JOIN worker_node_credentials AS credential
+          ON credential.worker_node_id = worker.node_id
+          AND credential.auth_state = 'active'
+        WHERE worker.node_id = ? AND worker.instance_id = ?
       `)
       .get(input.workerNodeId, input.workerInstanceId) as unknown as WorkerRow | undefined;
 
@@ -1730,6 +2046,14 @@ const handleRequest = (request: DatabaseRequest): unknown => {
   switch (request.operation) {
     case "ping":
       return ping();
+    case "createWorkerNodeCredential":
+      return createWorkerNodeCredential(request.input as CreateWorkerNodeCredentialInput);
+    case "authenticateWorkerToken":
+      return authenticateWorkerToken(request.input as AuthenticateWorkerTokenInput);
+    case "rotateWorkerToken":
+      return rotateWorkerToken(request.input as RotateWorkerTokenInput);
+    case "revokeWorkerToken":
+      return revokeWorkerToken(request.input as RevokeWorkerTokenInput);
     case "registerWorker":
       return registerWorker(request.input as RegisterWorkerInput);
     case "heartbeatWorker":

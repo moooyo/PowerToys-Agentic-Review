@@ -106,7 +106,7 @@ describe("DatabaseClient startup", () => {
     const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
       expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(12);
+      expect(readSchemaVersion(migratedDatabase)).toBe(13);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );
@@ -120,17 +120,21 @@ describe("DatabaseClient startup", () => {
   });
 
   it.skipIf(process.platform === "win32")(
-    "backs up an initialized v7 database before applying migrations through v11",
+    "backs up an initialized v7 database before applying migrations through v13",
     async () => {
       const directory = await createTemporaryDirectory();
       const versionSevenDirectory = await createMigrationPrefixDirectory(directory, 7);
       const databasePath = join(directory, "data", "state.sqlite");
 
-      const versionSevenClient = await DatabaseClient.create({
-        databasePath,
-        migrationsDirectory: versionSevenDirectory,
-      });
-      await versionSevenClient.close();
+      await mkdir(join(directory, "data"), { mode: 0o700 });
+      const versionSevenDatabase = new DatabaseSync(databasePath);
+      try {
+        expect(runMigrations(versionSevenDatabase, versionSevenDirectory)).toBe(7);
+      } finally {
+        versionSevenDatabase.close();
+      }
+      await chmod(databasePath, 0o600);
+      await writeInitializationMarker(databasePath);
       expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
         databaseInitializationMarkerContent,
       );
@@ -142,14 +146,14 @@ describe("DatabaseClient startup", () => {
       const backupFiles = await readdir(backupDirectory);
       expect(backupFiles).toHaveLength(1);
       const backupFilename = backupFiles[0] as string;
-      expect(backupFilename).toContain(".v7-to-v11.");
+      expect(backupFilename).toContain(".v7-to-v13.");
 
       const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
       const backupDatabase = new DatabaseSync(join(backupDirectory, backupFilename), {
         readOnly: true,
       });
       try {
-        expect(readSchemaVersion(migratedDatabase)).toBe(12);
+        expect(readSchemaVersion(migratedDatabase)).toBe(13);
         expect(readSchemaVersion(backupDatabase)).toBe(7);
       } finally {
         migratedDatabase.close();
@@ -187,7 +191,7 @@ describe("DatabaseClient startup", () => {
 
     const replacement = await DatabaseClient.create({
       databasePath: join(directory, "replacement-data", "state.sqlite"),
-      migrationsDirectory: invalidMigrationsDirectory,
+      migrationsDirectory,
     });
     await replacement.close();
   });

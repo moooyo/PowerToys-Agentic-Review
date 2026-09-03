@@ -13,7 +13,7 @@ import { type ArtifactReadinessProbe, registerHealthRoutes } from "../../dist/ro
 
 const databaseHealth = {
   sqliteVersion: "3.50.4",
-  schemaVersion: 12,
+  schemaVersion: 13,
 };
 
 const createHealthApp = (
@@ -248,9 +248,8 @@ const config: ServerConfig = {
   retryDelaySeconds: 1,
   workerOfflineAfterSeconds: 90,
   maxLongPollSeconds: 30,
-  allowInsecureWorkerAuth: true,
+  allowInsecureHttp: true,
   tls: undefined,
-  workerCertificateBindings: {},
   github: undefined,
   operatorAuth: undefined,
   dashboardDirectory: undefined,
@@ -260,6 +259,7 @@ const content = Buffer.from("{}", "utf8");
 const contentSha256 = createHash("sha256").update(content).digest("hex");
 const uploadId = "10000000-0000-4000-8000-000000000001";
 const clientArtifactId = "20000000-0000-4000-8000-000000000002";
+const workerToken = `arw1_${Buffer.alloc(32, 13).toString("base64url")}`;
 const leaseIdentity = {
   jobId: "job-id",
   runAttemptId: "run-attempt-id",
@@ -377,6 +377,12 @@ const createBuildAppDatabaseRequest = (): ReturnType<typeof vi.fn> =>
           status: "online",
           capabilitiesDigest: "0".repeat(64),
         };
+      case "authenticateWorkerToken":
+        return {
+          outcome: "authenticated",
+          workerNodeId: leaseIdentity.workerNodeId,
+          authState: "active",
+        };
       case "ping":
         return databaseHealth;
       default:
@@ -408,45 +414,52 @@ describe("buildApp artifact readiness", () => {
     { path: "/api/v1/worker/runs/run-attempt-id/complete", payload: "" },
     { path: "/api/v1/worker/runs/run-attempt-id/fail", payload: "{" },
     { path: "/api/v1/worker/runs/run-attempt-id/fail", payload: "" },
-  ])("maps malformed terminal JSON at $path to a zero-dispatch 400", async ({ path, payload }) => {
-    const databaseRequest = createBuildAppDatabaseRequest();
-    const completeArtifactRun = vi.fn(async () => {
-      throw new Error("Unexpected artifact completion.");
-    });
-    const artifactTransactions = createBuildAppArtifactTransactions();
-    const app = buildApp(
-      createBuildAppDependencies(
-        { read: () => ({ ready: true }) },
-        { read: () => true },
-        databaseRequest,
-        artifactTransactions,
-        { completeArtifactRun },
-      ),
-    );
-    databaseRequest.mockClear();
-    try {
-      const response = await app.inject({
-        method: "POST",
-        url: path,
-        headers: { "content-type": "application/json" },
-        payload,
+  ])(
+    "authenticates before mapping malformed terminal JSON at $path to 400",
+    async ({ path, payload }) => {
+      const databaseRequest = createBuildAppDatabaseRequest();
+      const completeArtifactRun = vi.fn(async () => {
+        throw new Error("Unexpected artifact completion.");
       });
-      expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({
-        code: "request_validation_failed",
-        message: "The request body is not valid JSON.",
-        retryable: false,
-      });
-      expect(databaseRequest).not.toHaveBeenCalled();
-      expect(completeArtifactRun).not.toHaveBeenCalled();
-      expect(artifactTransactions.createArtifactUpload).not.toHaveBeenCalled();
-      expect(artifactTransactions.putArtifactChunk).not.toHaveBeenCalled();
-      expect(artifactTransactions.finalizeArtifactUpload).not.toHaveBeenCalled();
-      expect(artifactTransactions.terminateArtifactUpload).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-    }
-  });
+      const artifactTransactions = createBuildAppArtifactTransactions();
+      const app = buildApp(
+        createBuildAppDependencies(
+          { read: () => ({ ready: true }) },
+          { read: () => true },
+          databaseRequest,
+          artifactTransactions,
+          { completeArtifactRun },
+        ),
+      );
+      databaseRequest.mockClear();
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: path,
+          headers: {
+            authorization: `Bearer ${workerToken}`,
+            "content-type": "application/json",
+          },
+          payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+          code: "request_validation_failed",
+          message: "The request body is not valid JSON.",
+          retryable: false,
+        });
+        expect(databaseRequest).toHaveBeenCalledOnce();
+        expect(databaseRequest).toHaveBeenCalledWith("authenticateWorkerToken", expect.any(Object));
+        expect(completeArtifactRun).not.toHaveBeenCalled();
+        expect(artifactTransactions.createArtifactUpload).not.toHaveBeenCalled();
+        expect(artifactTransactions.putArtifactChunk).not.toHaveBeenCalled();
+        expect(artifactTransactions.finalizeArtifactUpload).not.toHaveBeenCalled();
+        expect(artifactTransactions.terminateArtifactUpload).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
 
   it("passes the narrow artifact probe through buildApp readiness", async () => {
     const app = buildApp(createBuildAppDependencies({ read: () => ({ ready: false }) }));
@@ -514,6 +527,59 @@ describe("buildApp artifact readiness", () => {
 });
 
 describe("production route inventory", () => {
+  it("rate limits Worker requests before performing the token database lookup", async () => {
+    const previousLogLevel = process.env.AGENTIC_REVIEW_LOG_LEVEL;
+    process.env.AGENTIC_REVIEW_LOG_LEVEL = "silent";
+    const databaseRequest = vi.fn(async (operation: string) => {
+      if (operation === "authenticateWorkerToken") {
+        return { outcome: "invalid" as const };
+      }
+      throw new Error(`Unexpected database operation: ${operation}`);
+    });
+    const app = buildApp(
+      createBuildAppDependencies(
+        { read: () => ({ ready: true }) },
+        { read: () => true },
+        databaseRequest,
+      ),
+    );
+
+    try {
+      await app.ready();
+      databaseRequest.mockClear();
+      let response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/instances",
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: workerRegistrationPayload,
+      });
+      expect(response.statusCode).toBe(401);
+      for (let requestIndex = 1; requestIndex <= 600; requestIndex += 1) {
+        response = await app.inject({
+          method: "POST",
+          url: "/api/v1/worker/instances",
+          headers: { authorization: `Bearer ${workerToken}` },
+          payload: workerRegistrationPayload,
+        });
+      }
+
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toEqual({
+        code: "request_rate_limited",
+        message: "Too many requests were received. Retry later.",
+        retryable: true,
+      });
+      expect(databaseRequest).toHaveBeenCalledTimes(600);
+    } finally {
+      await app.close();
+      if (previousLogLevel === undefined) {
+        delete process.env.AGENTIC_REVIEW_LOG_LEVEL;
+      } else {
+        process.env.AGENTIC_REVIEW_LOG_LEVEL = previousLogLevel;
+      }
+    }
+  });
+
   it("registers every artifact route through the production application root", async () => {
     const app = buildApp(createBuildAppDependencies());
 
@@ -583,6 +649,7 @@ describe("production route inventory", () => {
       const response = await app.inject({
         method: route.method,
         url: route.url,
+        headers: { authorization: `Bearer ${workerToken}` },
         payload: route.payload,
       });
 

@@ -83,7 +83,8 @@ Implement the filesystem and transport group without weakening the frozen databa
 
 1. Add a private artifact storage root with separate staging and immutable object namespaces.
 2. Add Worker HTTP routes for create, chunk upload, finalize, and explicit termination. Worker
-   identity must come from the authenticated mTLS binding, not a request-body override.
+   identity must come from the authenticated per-node Bearer Token mapping, not a request-body
+   override. The Server stores only the Token hash and requires an `active` Worker node.
 3. Preserve the two-phase order:
    `DB prepare -> durable staging write -> DB commit` for each chunk.
 4. Preserve the final order:

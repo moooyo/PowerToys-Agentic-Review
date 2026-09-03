@@ -8,7 +8,7 @@ The Worker never receives GitHub credentials and never opens the Server SQLite d
 
 Implemented boundaries:
 
-- HTTPS/mTLS Worker API client.
+- HTTPS Worker API client with one long-lived Bearer Token per Worker node.
 - Stable node identity and per-process instance identity.
 - Capability registration and deterministic capability digest.
 - Capacity-aware long-poll claim loop.
@@ -115,18 +115,48 @@ POST /api/v1/worker/runs/{runAttemptId}/fail
 ```
 
 Registration, claim, heartbeat, lease identity, execution envelopes, and terminal submissions all
-use runtime-validated schemas from `@agentic-review/contracts`.
+use runtime-validated schemas from `@agentic-review/contracts`. Every Worker API request sends the
+same node-specific Token in the `Authorization: Bearer <token>` header. The Token and
+`workerNodeId` are loaded only from:
+
+```text
+C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
+```
+
+The UTF-8 file is at most 4 KiB and contains exactly these canonical `JSON.stringify` bytes, with
+the shown member order and no BOM, extra whitespace, or trailing newline:
+
+```json
+{"profileId":"agentic-review-worker-auth-v1","token":"arw1_<43-base64url-characters>","workerNodeId":"<entity-id>"}
+```
+
+The local Windows environment is trusted under ADR 0025, so this file contains the Token in
+plaintext. Do not commit, package, diagnose, or log it. Environment variables and command-line
+arguments are not alternate Token or Worker identity sources.
 
 ## Development launch
 
 Use a development-only HTTP endpoint explicitly:
 
 ```powershell
+$workerToken = Read-Host 'Worker Token returned by the Server operator API'
+$workerNodeId = Read-Host 'Worker node ID returned by the Server operator API'
+$authDirectory = 'C:\ProgramData\AgenticReview\Control'
+$authPath = Join-Path $authDirectory 'worker-auth-v1.json'
+$authProfile = [ordered]@{
+  profileId = 'agentic-review-worker-auth-v1'
+  token = $workerToken
+  workerNodeId = $workerNodeId
+} | ConvertTo-Json -Compress
+New-Item -ItemType Directory -Force -Path $authDirectory | Out-Null
+[System.IO.File]::WriteAllText($authPath, $authProfile, [System.Text.UTF8Encoding]::new($false))
+
 $env:WORKER_SERVER_URL = 'http://127.0.0.1:3000'
 $env:WORKER_ALLOW_INSECURE_HTTP = 'true'
-$env:WORKER_NODE_ID = 'development-worker'
 $env:WORKER_EXECUTION_ENABLED = 'false'
 node --enable-source-maps .\dist\worker.mjs
 ```
 
-Production deployments must use HTTPS with a unique mTLS certificate for each worker node.
+Production deployments must use HTTPS. `WORKER_TLS_CA_PATH` may load a fixed Server CA, and
+`WORKER_TLS_SERVER_NAME` may override the validated Server name. Client certificates, private
+keys, PFX files, and client-key passphrases are not loaded.

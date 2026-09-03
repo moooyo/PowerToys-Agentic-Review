@@ -5,11 +5,13 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  readFileSync,
   readSync,
   realpathSync,
 } from "node:fs";
 import { hostname } from "node:os";
 import { win32 } from "node:path";
+import { TextDecoder } from "node:util";
 import type {
   ProtocolVersion,
   WorkerArchitecture,
@@ -31,9 +33,10 @@ const winSwStopTimeoutMs = 150_000;
 const processExitSettleMs = 5_000;
 const shutdownSafetyMarginMs = 10_000;
 const maximumTlsCaBytes = mebibyte;
-const maximumTlsCertificateBytes = mebibyte;
-const maximumTlsPrivateKeyBytes = 256 * kibibyte;
-const maximumTlsPfxBytes = mebibyte;
+const maximumWorkerAuthProfileBytes = 4 * kibibyte;
+const workerAuthProfileId = "agentic-review-worker-auth-v1";
+const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Control\\worker-auth-v1.json";
+const workerTokenPattern = /^arw1_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 const fileTypeModeMask = 0o170000n;
 const regularFileMode = 0o100000n;
 
@@ -66,14 +69,11 @@ export interface SecretFileSystem {
 
 export interface WorkerConfigDependencies {
   readonly secretFileSystem?: SecretFileSystem;
+  readonly workerAuthFileReader?: (path: string) => Buffer;
 }
 
 export interface TlsClientConfig {
   readonly ca?: Buffer;
-  readonly cert?: Buffer;
-  readonly key?: Buffer;
-  readonly pfx?: Buffer;
-  readonly passphrase?: string;
   readonly serverName?: string;
   readonly rejectUnauthorized: true;
 }
@@ -115,6 +115,7 @@ export interface WorkerConfig {
   readonly serverUrl: URL;
   readonly protocolVersion: ProtocolVersion;
   readonly workerNodeId: string;
+  readonly workerToken: string;
   readonly displayName: string;
   readonly workerVersion: string;
   readonly maxSlots: number;
@@ -138,6 +139,9 @@ export function loadWorkerConfig(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies: WorkerConfigDependencies = {},
 ): WorkerConfig {
+  const authentication = loadWorkerAuthentication(
+    dependencies.workerAuthFileReader ?? systemWorkerAuthFileReader,
+  );
   const allowInsecureHttp = readBoolean(environment, "WORKER_ALLOW_INSECURE_HTTP", false);
   const serverUrlText = readRequired(environment, "WORKER_SERVER_URL");
   const serverUrl = new URL(serverUrlText);
@@ -209,7 +213,8 @@ export function loadWorkerConfig(
   return {
     serverUrl,
     protocolVersion: readProtocolVersion(environment.WORKER_PROTOCOL_VERSION),
-    workerNodeId: validateIdentifier(readRequired(environment, "WORKER_NODE_ID"), "WORKER_NODE_ID"),
+    workerNodeId: authentication.workerNodeId,
+    workerToken: authentication.token,
     displayName,
     workerVersion,
     maxSlots,
@@ -572,22 +577,6 @@ function loadTlsConfig(
   secretFileSystem: SecretFileSystem,
 ): TlsClientConfig {
   const caPath = readOptionalWindowsPath(environment, "WORKER_TLS_CA_PATH");
-  const certPath = readOptionalWindowsPath(environment, "WORKER_TLS_CERT_PATH");
-  const keyPath = readOptionalWindowsPath(environment, "WORKER_TLS_KEY_PATH");
-  const pfxPath = readOptionalWindowsPath(environment, "WORKER_TLS_PFX_PATH");
-  const usesPemPair = certPath !== undefined || keyPath !== undefined;
-
-  if (usesPemPair && (certPath === undefined || keyPath === undefined)) {
-    throw new Error("WORKER_TLS_CERT_PATH and WORKER_TLS_KEY_PATH must be configured together.");
-  }
-  if (usesPemPair && pfxPath !== undefined) {
-    throw new Error("Configure either PEM certificate/key files or a PFX file, not both.");
-  }
-  if (!usesPemPair && pfxPath === undefined) {
-    throw new Error(
-      "HTTPS Worker API access requires a client certificate/key pair or a PFX file.",
-    );
-  }
 
   return {
     ...(caPath === undefined
@@ -595,39 +584,63 @@ function loadTlsConfig(
       : {
           ca: readSecretFile(caPath, "WORKER_TLS_CA_PATH", maximumTlsCaBytes, secretFileSystem),
         }),
-    ...(certPath === undefined
-      ? {}
-      : {
-          cert: readSecretFile(
-            certPath,
-            "WORKER_TLS_CERT_PATH",
-            maximumTlsCertificateBytes,
-            secretFileSystem,
-          ),
-        }),
-    ...(keyPath === undefined
-      ? {}
-      : {
-          key: readSecretFile(
-            keyPath,
-            "WORKER_TLS_KEY_PATH",
-            maximumTlsPrivateKeyBytes,
-            secretFileSystem,
-          ),
-        }),
-    ...(pfxPath === undefined
-      ? {}
-      : {
-          pfx: readSecretFile(pfxPath, "WORKER_TLS_PFX_PATH", maximumTlsPfxBytes, secretFileSystem),
-        }),
-    ...(environment.WORKER_TLS_PFX_PASSPHRASE === undefined
-      ? {}
-      : { passphrase: environment.WORKER_TLS_PFX_PASSPHRASE }),
     ...(environment.WORKER_TLS_SERVER_NAME === undefined
       ? {}
       : { serverName: environment.WORKER_TLS_SERVER_NAME }),
     rejectUnauthorized: true,
   };
+}
+
+function loadWorkerAuthentication(
+  readFile: (path: string) => Buffer,
+): Readonly<{ token: string; workerNodeId: string }> {
+  try {
+    const bytes = readFile(workerAuthProfilePath);
+    if (
+      !Buffer.isBuffer(bytes) ||
+      bytes.byteLength === 0 ||
+      bytes.byteLength > maximumWorkerAuthProfileBytes
+    ) {
+      throw new Error("Worker authentication profile size is invalid.");
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error("Worker authentication profile must be an object.");
+    }
+
+    const profile = value as Record<string, unknown>;
+    const keys = Object.keys(profile).sort();
+    if (
+      keys.length !== 3 ||
+      keys[0] !== "profileId" ||
+      keys[1] !== "token" ||
+      keys[2] !== "workerNodeId" ||
+      profile.profileId !== workerAuthProfileId ||
+      typeof profile.token !== "string" ||
+      !workerTokenPattern.test(profile.token) ||
+      typeof profile.workerNodeId !== "string"
+    ) {
+      throw new Error("Worker authentication profile is invalid.");
+    }
+
+    const workerNodeId = validateIdentifier(profile.workerNodeId, "workerNodeId");
+    const canonicalText = JSON.stringify({
+      profileId: workerAuthProfileId,
+      token: profile.token,
+      workerNodeId,
+    });
+    if (text !== canonicalText) {
+      throw new Error("Worker authentication profile is not canonical.");
+    }
+
+    return {
+      token: profile.token,
+      workerNodeId,
+    };
+  } catch {
+    throw new Error("Unable to load Worker authentication profile.");
+  }
 }
 
 function readSecretFile(
@@ -752,6 +765,8 @@ const systemSecretFileSystem: SecretFileSystem = {
     readSync(descriptor, buffer, offset, length, position),
   close: (descriptor) => closeSync(descriptor),
 };
+
+const systemWorkerAuthFileReader = (path: string): Buffer => readFileSync(path);
 
 function readRequired(environment: NodeJS.ProcessEnv, name: string): string {
   const value = environment[name]?.trim();
@@ -1073,7 +1088,7 @@ function assertWellFormedUnicode(value: string, name: string): void {
 }
 
 function validateIdentifier(value: string, name: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)) {
     throw new Error(`${name} contains unsupported characters or exceeds 128 characters.`);
   }
   return value;

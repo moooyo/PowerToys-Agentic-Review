@@ -111,18 +111,262 @@ describe("database migrations and backups", () => {
     try {
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
         currentVersion: 0,
-        targetVersion: 12,
-        pendingVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        targetVersion: 13,
+        pendingVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
       });
 
-      expect(runMigrations(database, migrationsDirectory)).toBe(12);
+      expect(runMigrations(database, migrationsDirectory)).toBe(13);
       expect(inspectMigrationState(database, migrationsDirectory)).toEqual({
-        currentVersion: 12,
-        targetVersion: 12,
+        currentVersion: 13,
+        targetVersion: 13,
         pendingVersions: [],
       });
     } finally {
       database.close();
+    }
+  });
+
+  it("creates a constrained Worker credential schema with independently unique identities", async () => {
+    const directory = await createTemporaryDirectory();
+    const database = new DatabaseSync(join(directory, "worker-credentials.sqlite"));
+    const createdAt = "2026-09-03T00:00:00.000Z";
+    try {
+      runMigrations(database, migrationsDirectory);
+      const insertCredential = database.prepare(`
+        INSERT INTO worker_node_credentials (
+          worker_node_id,
+          display_name,
+          token_sha256,
+          auth_state,
+          created_by_issuer,
+          created_by_subject,
+          updated_by_issuer,
+          updated_by_subject,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      `);
+      insertCredential.run(
+        "worker-migration-a",
+        "Worker migration A",
+        "a".repeat(64),
+        "https://issuer.example.test",
+        "migration-test",
+        "https://issuer.example.test",
+        "migration-test",
+        createdAt,
+        createdAt,
+      );
+      expect(() =>
+        insertCredential.run(
+          "worker-migration-a",
+          "Duplicate Worker node",
+          "b".repeat(64),
+          "https://issuer.example.test",
+          "migration-test",
+          "https://issuer.example.test",
+          "migration-test",
+          createdAt,
+          createdAt,
+        ),
+      ).toThrow(/UNIQUE constraint failed/u);
+      expect(() =>
+        insertCredential.run(
+          "worker-migration-b",
+          "Duplicate Token",
+          "a".repeat(64),
+          "https://issuer.example.test",
+          "migration-test",
+          "https://issuer.example.test",
+          "migration-test",
+          createdAt,
+          createdAt,
+        ),
+      ).toThrow(/UNIQUE constraint failed/u);
+      expect(() =>
+        insertCredential.run(
+          "worker-migration-c",
+          "Uppercase Token Digest",
+          "A".repeat(64),
+          "https://issuer.example.test",
+          "migration-test",
+          "https://issuer.example.test",
+          "migration-test",
+          createdAt,
+          createdAt,
+        ),
+      ).toThrow(/CHECK constraint failed/u);
+      expect(
+        database
+          .prepare("SELECT name FROM pragma_table_info('worker_node_credentials') ORDER BY cid")
+          .all(),
+      ).toEqual([
+        { name: "worker_node_id" },
+        { name: "display_name" },
+        { name: "token_sha256" },
+        { name: "auth_state" },
+        { name: "created_by_issuer" },
+        { name: "created_by_subject" },
+        { name: "updated_by_issuer" },
+        { name: "updated_by_subject" },
+        { name: "created_at" },
+        { name: "updated_at" },
+        { name: "activated_at" },
+        { name: "rotated_at" },
+        { name: "revoked_at" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("upgrades v12 Worker instances without granting implicit Token credentials", async () => {
+    const directory = await createTemporaryDirectory();
+    const versionTwelveDirectory = join(directory, "migrations-v12");
+    await mkdir(versionTwelveDirectory);
+    const migrationFilenames = (await readdir(migrationsDirectory)).sort().slice(0, 12);
+    await Promise.all(
+      migrationFilenames.map((filename) =>
+        copyFile(join(migrationsDirectory, filename), join(versionTwelveDirectory, filename)),
+      ),
+    );
+    const database = new DatabaseSync(join(directory, "upgrade-v12.sqlite"));
+    const now = "2026-09-03T00:00:00.000Z";
+    try {
+      expect(runMigrations(database, versionTwelveDirectory)).toBe(12);
+      database
+        .prepare(`
+          INSERT INTO workers (
+            id,
+            node_id,
+            instance_id,
+            display_name,
+            version,
+            protocol_version,
+            max_slots,
+            capabilities_json,
+            capabilities_digest,
+            status,
+            registered_at,
+            last_seen_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'offline', ?, ?, ?)
+        `)
+        .run(
+          "legacy-worker-id",
+          "legacy-worker-node",
+          "legacy-worker-instance",
+          "Legacy Worker",
+          "1.0.0",
+          "1.0",
+          1,
+          "{}",
+          "a".repeat(64),
+          now,
+          now,
+          now,
+        );
+
+      expect(runMigrations(database, migrationsDirectory)).toBe(13);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM workers").get()).toEqual({ count: 1 });
+      expect(
+        database.prepare("SELECT COUNT(*) AS count FROM worker_node_credentials").get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("accepts restoration of a backup that revives the Token state captured in that backup", async () => {
+    const directory = await createTemporaryDirectory();
+    const databasePath = join(directory, "rollback-state.sqlite");
+    const backupPath = join(directory, "rollback-backup.sqlite");
+    const oldTokenSha256 = "a".repeat(64);
+    const newTokenSha256 = "b".repeat(64);
+    const createdAt = "2026-09-03T00:00:00.000Z";
+    const rotatedAt = "2026-09-03T00:00:01.000Z";
+    const seedDatabase = new DatabaseSync(databasePath);
+    try {
+      runMigrations(seedDatabase, migrationsDirectory);
+      seedDatabase
+        .prepare(`
+          INSERT INTO worker_node_credentials (
+            worker_node_id,
+            display_name,
+            token_sha256,
+            auth_state,
+            created_by_issuer,
+            created_by_subject,
+            updated_by_issuer,
+            updated_by_subject,
+            created_at,
+            updated_at,
+            activated_at
+          ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          "worker-backup-rollback",
+          "Worker backup rollback",
+          oldTokenSha256,
+          "https://issuer.example.test",
+          "credential-creator",
+          "https://issuer.example.test",
+          "credential-creator",
+          createdAt,
+          createdAt,
+          createdAt,
+        );
+    } finally {
+      seedDatabase.close();
+    }
+    await copyFile(databasePath, backupPath);
+
+    const rotatedDatabase = new DatabaseSync(databasePath);
+    try {
+      rotatedDatabase
+        .prepare(`
+          UPDATE worker_node_credentials
+          SET token_sha256 = ?,
+              updated_by_issuer = ?,
+              updated_by_subject = ?,
+              rotated_at = ?,
+              updated_at = ?
+          WHERE worker_node_id = ? AND auth_state = 'active'
+        `)
+        .run(
+          newTokenSha256,
+          "https://issuer.example.test",
+          "credential-rotator",
+          rotatedAt,
+          rotatedAt,
+          "worker-backup-rollback",
+        );
+      expect(
+        rotatedDatabase
+          .prepare("SELECT worker_node_id FROM worker_node_credentials WHERE token_sha256 = ?")
+          .get(newTokenSha256),
+      ).toEqual({ worker_node_id: "worker-backup-rollback" });
+    } finally {
+      rotatedDatabase.close();
+    }
+
+    await copyFile(backupPath, databasePath);
+    const restoredDatabase = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        restoredDatabase
+          .prepare(
+            "SELECT worker_node_id, auth_state FROM worker_node_credentials WHERE token_sha256 = ?",
+          )
+          .get(oldTokenSha256),
+      ).toEqual({ worker_node_id: "worker-backup-rollback", auth_state: "active" });
+      expect(
+        restoredDatabase
+          .prepare("SELECT worker_node_id FROM worker_node_credentials WHERE token_sha256 = ?")
+          .get(newTokenSha256),
+      ).toBeUndefined();
+    } finally {
+      restoredDatabase.close();
     }
   });
 
@@ -146,7 +390,7 @@ describe("database migrations and backups", () => {
         database,
         databasePath,
         currentVersion: 7,
-        targetVersion: 12,
+        targetVersion: 13,
       });
       const backupDatabase = new DatabaseSync(backupPath, { readOnly: true });
       try {

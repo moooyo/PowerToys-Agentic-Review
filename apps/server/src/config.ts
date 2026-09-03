@@ -63,9 +63,8 @@ export interface ServerConfig {
   readonly retryDelaySeconds: number;
   readonly workerOfflineAfterSeconds: number;
   readonly maxLongPollSeconds: number;
-  readonly allowInsecureWorkerAuth: boolean;
+  readonly allowInsecureHttp: boolean;
   readonly tls: HttpsServerOptions | undefined;
-  readonly workerCertificateBindings: Readonly<Record<string, string>>;
   readonly github: GitHubIntegrationConfig | undefined;
   readonly operatorAuth: OperatorAuthRuntimeConfig | undefined;
   readonly dashboardDirectory: string | undefined;
@@ -128,6 +127,20 @@ const readPositiveInteger = (
   }
 
   return value;
+};
+
+const readBoolean = (environment: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean => {
+  const raw = environment[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  if (raw === "true" || raw === "1") {
+    return true;
+  }
+  if (raw === "false" || raw === "0") {
+    return false;
+  }
+  throw new Error(`${name} must be true, false, 1, or 0.`);
 };
 
 const readArtifactRuntimeConfig = (
@@ -215,20 +228,6 @@ const readArtifactRuntimeConfig = (
       cleanupBacklogHighWaterEntries,
     }),
   });
-};
-
-const readBoolean = (environment: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean => {
-  const raw = environment[name]?.trim().toLowerCase();
-  if (raw === undefined || raw === "") {
-    return fallback;
-  }
-  if (raw === "true" || raw === "1") {
-    return true;
-  }
-  if (raw === "false" || raw === "0") {
-    return false;
-  }
-  throw new Error(`${name} must be true, false, 1, or 0.`);
 };
 
 const readRequired = (environment: NodeJS.ProcessEnv, name: string): string => {
@@ -554,58 +553,6 @@ const readOperatorAuthConfig = (
   });
 };
 
-const normalizeSha256Fingerprint = (fingerprint: string): string => {
-  const normalized = fingerprint.trim().replaceAll(":", "").toUpperCase();
-  if (!/^[0-9A-F]{64}$/.test(normalized)) {
-    throw new Error(
-      "Worker certificate fingerprints must be SHA-256 values encoded as 64 hexadecimal characters, with optional colon separators.",
-    );
-  }
-  return normalized;
-};
-
-const readWorkerCertificateBindings = (
-  environment: NodeJS.ProcessEnv,
-): Readonly<Record<string, string>> => {
-  const raw = environment.AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON;
-  if (raw === undefined || raw.trim() === "") {
-    return Object.freeze({});
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON must contain valid JSON.", {
-      cause: error,
-    });
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON must contain a JSON object.");
-  }
-
-  const bindings: Record<string, string> = {};
-  for (const [fingerprint, workerNodeId] of Object.entries(parsed)) {
-    if (
-      typeof workerNodeId !== "string" ||
-      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(workerNodeId)
-    ) {
-      throw new Error("Every worker certificate binding must map to a valid workerNodeId.");
-    }
-
-    const normalizedFingerprint = normalizeSha256Fingerprint(fingerprint);
-    const existing = bindings[normalizedFingerprint];
-    if (existing !== undefined && existing !== workerNodeId) {
-      throw new Error(
-        `Certificate fingerprint ${normalizedFingerprint} is mapped to more than one workerNodeId.`,
-      );
-    }
-    bindings[normalizedFingerprint] = workerNodeId;
-  }
-
-  return Object.freeze(bindings);
-};
-
 const isLoopbackHost = (host: string): boolean => {
   const normalized = host.trim().toLowerCase();
   return (
@@ -617,6 +564,15 @@ const isLoopbackHost = (host: string): boolean => {
 };
 
 export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): ServerConfig => {
+  for (const name of [
+    "AGENTIC_REVIEW_TLS_CLIENT_CA_PATH",
+    "AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON",
+    "AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH",
+  ] as const) {
+    if (environment[name]?.trim()) {
+      throw new Error(`${name} is no longer supported by Worker Token authentication.`);
+    }
+  }
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const host = environment.AGENTIC_REVIEW_HOST ?? "127.0.0.1";
   const configuredDatabasePath = environment.AGENTIC_REVIEW_DATABASE_PATH?.trim();
@@ -627,12 +583,6 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
       ? resolve(repositoryRoot, ".data", "agentic-review.db")
       : configuredDatabasePath,
   );
-  const allowInsecureWorkerAuth = readBoolean(
-    environment,
-    "AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH",
-    false,
-  );
-  const workerCertificateBindings = readWorkerCertificateBindings(environment);
   const configuredDashboardDirectory = environment.AGENTIC_REVIEW_DASHBOARD_DIRECTORY?.trim();
   if (
     configuredDashboardDirectory !== undefined &&
@@ -642,34 +592,45 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     throw new Error("AGENTIC_REVIEW_DASHBOARD_DIRECTORY must be an absolute path.");
   }
 
-  if (allowInsecureWorkerAuth) {
-    if (environment.NODE_ENV?.trim().toLowerCase() === "production") {
-      throw new Error("AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH cannot be enabled in production.");
-    }
-    if (!isLoopbackHost(host)) {
-      throw new Error("Insecure Worker authentication is restricted to a loopback listener.");
-    }
-  } else if (Object.keys(workerCertificateBindings).length === 0) {
+  const production = environment.NODE_ENV?.trim().toLowerCase() === "production";
+  const allowInsecureHttp = readBoolean(environment, "AGENTIC_REVIEW_ALLOW_INSECURE_HTTP", false);
+  const tlsKeyPath = environment.AGENTIC_REVIEW_TLS_KEY_PATH?.trim();
+  const tlsCertPath = environment.AGENTIC_REVIEW_TLS_CERT_PATH?.trim();
+  const tlsKeyConfigured = tlsKeyPath !== undefined && tlsKeyPath !== "";
+  const tlsCertConfigured = tlsCertPath !== undefined && tlsCertPath !== "";
+  if (tlsKeyConfigured !== tlsCertConfigured) {
     throw new Error(
-      "AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON must configure at least one certificate when insecure Worker authentication is disabled.",
+      "AGENTIC_REVIEW_TLS_KEY_PATH and AGENTIC_REVIEW_TLS_CERT_PATH must be configured together.",
+    );
+  }
+  if (production && allowInsecureHttp) {
+    throw new Error("AGENTIC_REVIEW_ALLOW_INSECURE_HTTP cannot be enabled in production.");
+  }
+  if (allowInsecureHttp && !isLoopbackHost(host)) {
+    throw new Error("Development HTTP is restricted to a loopback listener.");
+  }
+  if (allowInsecureHttp && tlsKeyConfigured) {
+    throw new Error(
+      "AGENTIC_REVIEW_ALLOW_INSECURE_HTTP cannot be combined with TLS configuration.",
+    );
+  }
+  if (!production && !tlsKeyConfigured && !allowInsecureHttp) {
+    throw new Error(
+      "Configure TLS or explicitly enable loopback development HTTP with AGENTIC_REVIEW_ALLOW_INSECURE_HTTP=true.",
     );
   }
 
-  const tls: HttpsServerOptions | undefined = allowInsecureWorkerAuth
-    ? undefined
-    : Object.freeze({
-        key: readSecretFile(environment, "AGENTIC_REVIEW_TLS_KEY_PATH"),
-        cert: readSecretFile(environment, "AGENTIC_REVIEW_TLS_CERT_PATH"),
-        ca: readSecretFile(environment, "AGENTIC_REVIEW_TLS_CLIENT_CA_PATH"),
-        requestCert: true,
-        // The shared listener also serves the operator dashboard. Worker routes
-        // separately require an authorized client certificate in their preHandler.
-        rejectUnauthorized: false,
-        minVersion: "TLSv1.2",
-        ...(environment.AGENTIC_REVIEW_TLS_KEY_PASSPHRASE === undefined
-          ? {}
-          : { passphrase: environment.AGENTIC_REVIEW_TLS_KEY_PASSPHRASE }),
-      });
+  const tls: HttpsServerOptions | undefined =
+    production || tlsKeyConfigured
+      ? Object.freeze({
+          key: readSecretFile(environment, "AGENTIC_REVIEW_TLS_KEY_PATH"),
+          cert: readSecretFile(environment, "AGENTIC_REVIEW_TLS_CERT_PATH"),
+          minVersion: "TLSv1.2",
+          ...(environment.AGENTIC_REVIEW_TLS_KEY_PASSPHRASE === undefined
+            ? {}
+            : { passphrase: environment.AGENTIC_REVIEW_TLS_KEY_PASSPHRASE }),
+        })
+      : undefined;
 
   return Object.freeze({
     host,
@@ -733,9 +694,8 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
       30,
       300,
     ),
-    allowInsecureWorkerAuth,
+    allowInsecureHttp,
     tls,
-    workerCertificateBindings,
     github: readGitHubConfig(environment, repositoryRoot),
     operatorAuth: readOperatorAuthConfig(environment, host),
     dashboardDirectory:

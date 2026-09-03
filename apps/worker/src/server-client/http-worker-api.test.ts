@@ -7,13 +7,14 @@ import type { RunCompletionSubmission, WorkerRegistrationRequest } from "@agenti
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
-import { WorkerApiError } from "./errors.js";
+import { ProtocolError, WorkerApiError } from "./errors.js";
 import { HttpWorkerApi } from "./http-worker-api.js";
 
 const serverTime = "2026-08-31T00:00:00.000Z";
+const workerToken = `arw1_${"A".repeat(43)}`;
 
-describe("HttpWorkerApi TLS preflight", () => {
-  it("creates one secure context and reuses it without forwarding raw TLS material", async () => {
+describe("HttpWorkerApi transport and authentication", () => {
+  it("creates one Server-only secure context and reuses it with Bearer authentication", async () => {
     const secureContext = {} as SecureContext;
     const contextOptions: SecureContextOptions[] = [];
     const requestOptions: RequestOptions[] = [];
@@ -41,13 +42,7 @@ describe("HttpWorkerApi TLS preflight", () => {
     await api.register(registrationRequest(config));
 
     expect(createContext).toHaveBeenCalledOnce();
-    expect(contextOptions).toEqual([
-      {
-        ca: config.tls?.ca,
-        pfx: config.tls?.pfx,
-        passphrase: config.tls?.passphrase,
-      },
-    ]);
+    expect(contextOptions).toEqual([{ ca: config.tls?.ca }]);
     expect(httpsRequest).toHaveBeenCalledTimes(2);
     for (const options of requestOptions) {
       expect((options as RequestOptions & { secureContext?: SecureContext }).secureContext).toBe(
@@ -55,6 +50,7 @@ describe("HttpWorkerApi TLS preflight", () => {
       );
       expect(options.servername).toBe("worker-api.internal");
       expect(options.rejectUnauthorized).toBe(true);
+      expect(options.headers).toMatchObject({ authorization: `Bearer ${workerToken}` });
       expect(options).not.toHaveProperty("ca");
       expect(options).not.toHaveProperty("cert");
       expect(options).not.toHaveProperty("key");
@@ -66,7 +62,7 @@ describe("HttpWorkerApi TLS preflight", () => {
   it("propagates TLS preflight failures synchronously without logging or requesting", () => {
     const logs: string[] = [];
     const logger = capturingLogger(logs);
-    const preflightError = new Error("TLS client material is invalid.");
+    const preflightError = new Error("TLS Server trust material is invalid.");
     const createContext = vi.fn(() => {
       throw preflightError;
     });
@@ -90,6 +86,186 @@ describe("HttpWorkerApi TLS preflight", () => {
     expect(createContext).toHaveBeenCalledOnce();
     expect(httpsRequest).not.toHaveBeenCalled();
     expect(logs).toEqual([]);
+  });
+
+  it("keeps Bearer authentication enabled on explicit development HTTP", async () => {
+    const { tls: _tls, ...httpsConfig } = createHttpsConfig();
+    const config: WorkerConfig = {
+      ...httpsConfig,
+      serverUrl: new URL("http://127.0.0.1:8080"),
+      allowInsecureHttp: true,
+    };
+    const requestOptions: RequestOptions[] = [];
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      httpRequest: (_url, options, callback) => {
+        requestOptions.push(options);
+        return new StubClientRequest(callback, registrationResponse()) as unknown as ClientRequest;
+      },
+    });
+
+    await api.register(registrationRequest(config));
+
+    expect(requestOptions).toHaveLength(1);
+    expect(requestOptions[0]?.headers).toMatchObject({
+      authorization: `Bearer ${workerToken}`,
+    });
+  });
+
+  it("never includes the Worker Token in request logs", async () => {
+    const logEntries: unknown[] = [];
+    const logger: Logger = {
+      debug: (message, fields) => logEntries.push({ level: "debug", message, fields }),
+      info: (message, fields) => logEntries.push({ level: "info", message, fields }),
+      warn: (message, fields) => logEntries.push({ level: "warn", message, fields }),
+      error: (message, fields) => logEntries.push({ level: "error", message, fields }),
+    };
+    const config = createHttpsConfig();
+    const api = new HttpWorkerApi(config, logger, {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(callback, registrationResponse()) as unknown as ClientRequest,
+    });
+
+    await api.register(registrationRequest(config));
+
+    expect(logEntries).toEqual([
+      {
+        level: "debug",
+        message: "Worker API request started.",
+        fields: { method: "POST", path: "/api/v1/worker/instances" },
+      },
+    ]);
+    expect(JSON.stringify(logEntries)).not.toContain(workerToken);
+  });
+
+  it.each([
+    ["a direct Token", { ...registrationResponse(), workerId: workerToken }, false],
+    [
+      "a JSON-escaped Token",
+      `{"protocolVersion":"1.0","workerId":"${jsonUnicodeEscape(workerToken)}","state":"online","heartbeatIntervalMs":5000,"leaseTtlMs":30000,"serverTime":"${serverTime}"}`,
+      true,
+    ],
+  ])("rejects registration responses that reflect %s", async (_scenario, responseBody, rawJson) => {
+    const config = createHttpsConfig();
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(
+          callback,
+          responseBody,
+          "complete",
+          200,
+          rawJson,
+        ) as unknown as ClientRequest,
+    });
+
+    const failure = await rejectionOf(api.register(registrationRequest(config)));
+
+    expect(failure).toBeInstanceOf(ProtocolError);
+    expect(failure).toMatchObject({
+      message: "Worker API response contained confidential authentication data.",
+    });
+    expect(inspect(failure, { depth: 5, showHidden: true })).not.toContain(workerToken);
+    expect(JSON.stringify(failure)).not.toContain(workerToken);
+  });
+
+  it("recursively rejects a reflected Token before interpreting an HTTP error", async () => {
+    const config = createHttpsConfig();
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (_url, _options, callback) =>
+        new StubClientRequest(
+          callback,
+          { error: { details: { echoed: `prefix-${workerToken}-suffix` } } },
+          "complete",
+          503,
+        ) as unknown as ClientRequest,
+    });
+
+    await expect(api.register(registrationRequest(config))).rejects.toMatchObject({
+      name: "ProtocolError",
+      message: "Worker API response contained confidential authentication data.",
+    });
+  });
+
+  it("adds the same Bearer Token to every Worker API operation", async () => {
+    const config = createHttpsConfig();
+    const requestOptions: RequestOptions[] = [];
+    const completion = completionSubmission(config);
+    const failure = {
+      jobId: "job-failure",
+      runAttemptId: "run-failure",
+      workerNodeId: config.workerNodeId,
+      workerInstanceId: "worker-instance",
+      leaseToken: "f".repeat(32),
+      leaseGeneration: 1,
+      code: "test_failure",
+      message: "The test run failed.",
+      retryable: false,
+    };
+    const api = new HttpWorkerApi(config, silentLogger(), {
+      createSecureContext: () => ({}) as SecureContext,
+      httpsRequest: (url, options, callback) => {
+        requestOptions.push(options);
+        const responseBody =
+          url.pathname === "/api/v1/worker/instances"
+            ? registrationResponse()
+            : url.pathname === "/api/v1/worker/leases/claim"
+              ? { outcome: "no_work", serverTime }
+              : url.pathname.endsWith("/heartbeat")
+                ? {
+                    serverTime,
+                    nextHeartbeatInMs: 5_000,
+                    workerState: "online",
+                    commands: [],
+                  }
+                : url.pathname.endsWith("/complete")
+                  ? {
+                      jobId: completion.jobId,
+                      runAttemptId: completion.runAttemptId,
+                      jobState: "succeeded",
+                      runState: "succeeded",
+                    }
+                  : {
+                      jobId: failure.jobId,
+                      runAttemptId: failure.runAttemptId,
+                      jobState: "failed",
+                      runState: "failed",
+                    };
+        return new StubClientRequest(callback, responseBody) as unknown as ClientRequest;
+      },
+    });
+
+    await api.register(registrationRequest(config));
+    await api.claimLease({
+      protocolVersion: config.protocolVersion,
+      workerNodeId: config.workerNodeId,
+      workerInstanceId: "worker-instance",
+      availableSlots: 1,
+      waitSeconds: 0,
+      capabilitiesDigest: "f".repeat(64),
+    });
+    await api.heartbeat("worker-instance", {
+      protocolVersion: config.protocolVersion,
+      workerNodeId: config.workerNodeId,
+      workerInstanceId: "worker-instance",
+      heartbeatSequence: 1,
+      observedAt: serverTime,
+      availableSlots: 1,
+      activeLeases: [],
+      health: {
+        state: "online",
+        freeDiskBytes: 1,
+        memoryUsageBytes: 1,
+      },
+    });
+    await api.completeRun(completion.runAttemptId, completion);
+    await api.failRun(failure.runAttemptId, failure);
+
+    expect(requestOptions).toHaveLength(5);
+    for (const options of requestOptions) {
+      expect(options.headers).toMatchObject({ authorization: `Bearer ${workerToken}` });
+    }
   });
 
   it("accepts a bounded claim envelope larger than the completion-result limit", async () => {
@@ -375,11 +551,18 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("Expected the promise to reject.");
 }
 
+function jsonUnicodeEscape(value: string): string {
+  return [...value]
+    .map((character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .join("");
+}
+
 function createHttpsConfig(): WorkerConfig {
   return {
     serverUrl: new URL("https://worker-api.internal"),
     protocolVersion: "1.0",
     workerNodeId: "worker-node",
+    workerToken,
     displayName: "Test worker",
     workerVersion: "0.1.0-test",
     maxSlots: 1,
@@ -405,8 +588,6 @@ function createHttpsConfig(): WorkerConfig {
     allowInsecureHttp: false,
     tls: {
       ca: Buffer.from("test-ca"),
-      pfx: Buffer.from("test-pfx"),
-      passphrase: "test-passphrase",
       serverName: "worker-api.internal",
       rejectUnauthorized: true,
     },

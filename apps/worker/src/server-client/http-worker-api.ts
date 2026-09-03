@@ -63,10 +63,6 @@ export class HttpWorkerApi implements WorkerApi {
       const createContext = dependencies.createSecureContext ?? createSecureContext;
       this.#secureContext = createContext({
         ...(tls.ca === undefined ? {} : { ca: tls.ca }),
-        ...(tls.cert === undefined ? {} : { cert: tls.cert }),
-        ...(tls.key === undefined ? {} : { key: tls.key }),
-        ...(tls.pfx === undefined ? {} : { pfx: tls.pfx }),
-        ...(tls.passphrase === undefined ? {} : { passphrase: tls.passphrase }),
       });
     }
   }
@@ -155,6 +151,7 @@ export class HttpWorkerApi implements WorkerApi {
       method,
       headers: {
         accept: "application/json",
+        authorization: `Bearer ${this.config.workerToken}`,
         "content-type": "application/json",
         "content-length": serializedBody.byteLength,
         "user-agent": `agentic-review-worker/${this.config.workerVersion}`,
@@ -251,6 +248,12 @@ export class HttpWorkerApi implements WorkerApi {
             rejectOnce(new ProtocolError("Worker API returned invalid JSON."));
             return;
           }
+          if (responseContainsWorkerToken(payload, this.config.workerToken)) {
+            rejectOnce(
+              new ProtocolError("Worker API response contained confidential authentication data."),
+            );
+            return;
+          }
 
           if (statusCode < 200 || statusCode >= 300) {
             const details = readApiError(payload);
@@ -307,6 +310,35 @@ export class HttpWorkerApi implements WorkerApi {
       this.logger.debug("Worker API request started.", { method, path });
     });
   }
+}
+
+function responseContainsWorkerToken(value: unknown, workerToken: string): boolean {
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "string") {
+      if (current.includes(workerToken)) {
+        return true;
+      }
+      continue;
+    }
+    if (typeof current !== "object" || current === null) {
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const nested of current) {
+        pending.push(nested);
+      }
+      continue;
+    }
+    for (const [key, nested] of Object.entries(current)) {
+      if (key.includes(workerToken)) {
+        return true;
+      }
+      pending.push(nested);
+    }
+  }
+  return false;
 }
 
 function parseRegistrationResponse(value: unknown): WorkerRegistrationResponse {

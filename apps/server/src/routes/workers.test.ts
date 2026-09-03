@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
   maximumRunCompletionRequestBytes,
   maximumRunCompletionResultUtf8Bytes,
@@ -37,13 +39,14 @@ const config: ServerConfig = {
   retryDelaySeconds: 1,
   workerOfflineAfterSeconds: 90,
   maxLongPollSeconds: 30,
-  allowInsecureWorkerAuth: true,
+  allowInsecureHttp: true,
   tls: undefined,
-  workerCertificateBindings: {},
   github: undefined,
   operatorAuth: undefined,
   dashboardDirectory: undefined,
 };
+
+const workerToken = `arw1_${Buffer.alloc(32, 9).toString("base64url")}`;
 
 const leaseIdentity = {
   jobId: "job-id",
@@ -53,6 +56,24 @@ const leaseIdentity = {
   leaseToken: "x".repeat(32),
   leaseGeneration: 1,
 };
+
+const workerRegistrationPayload = {
+  protocolVersion: "1.0",
+  workerNodeId: leaseIdentity.workerNodeId,
+  workerInstanceId: leaseIdentity.workerInstanceId,
+  displayName: "Worker node",
+  workerVersion: "1.0.0",
+  maxSlots: 1,
+  capabilities: {
+    operatingSystem: "windows",
+    architecture: "x64",
+    headless: true,
+    interactiveDesktop: false,
+    codexVersion: "1.0.0",
+    recipeIds: [],
+    labels: {},
+  },
+} as const;
 
 const createApp = (
   terminalError = new DatabaseRequestError(
@@ -74,9 +95,22 @@ const createApp = (
     throw new Error("Unexpected artifact-backed completion.");
   });
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (incomingRequest) => {
+    incomingRequest.headers.authorization ??= `Bearer ${workerToken}`;
+  });
   registerWorkerRoutes(app, {
     config,
-    database: { request } as unknown as DatabaseClient,
+    database: {
+      request: vi.fn(async (operation: string, input: unknown) =>
+        operation === "authenticateWorkerToken"
+          ? {
+              outcome: "authenticated",
+              workerNodeId: leaseIdentity.workerNodeId,
+              authState: "active",
+            }
+          : request(operation, input),
+      ),
+    } as unknown as DatabaseClient,
     artifactCompletion: {
       completeArtifactRun,
     } satisfies ArtifactCompletionPort,
@@ -86,6 +120,150 @@ const createApp = (
 };
 
 describe("Worker terminal routes", () => {
+  it("uses a pending token to atomically register its database-mapped Worker node", async () => {
+    const request = vi.fn(async (operation: string, _input: unknown) => {
+      if (operation === "authenticateWorkerToken") {
+        return {
+          outcome: "authenticated" as const,
+          workerNodeId: leaseIdentity.workerNodeId,
+          authState: "pending" as const,
+        };
+      }
+      if (operation === "registerWorker") {
+        return {
+          workerId: "worker-id",
+          status: "online" as const,
+          capabilitiesDigest: "a".repeat(64),
+        };
+      }
+      throw new Error(`Unexpected database operation: ${operation}`);
+    });
+    const app = Fastify({ logger: false });
+    registerWorkerRoutes(app, {
+      config,
+      database: { request } as unknown as DatabaseClient,
+      artifactCompletion: {
+        completeArtifactRun: vi.fn(async () => {
+          throw new Error("Unexpected artifact completion.");
+        }),
+      },
+      shutdownSignal: new AbortController().signal,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/instances",
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: workerRegistrationPayload,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(request).toHaveBeenNthCalledWith(1, "authenticateWorkerToken", {
+        workerTokenSha256: createHash("sha256").update(workerToken, "ascii").digest("hex"),
+      });
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        "registerWorker",
+        expect.objectContaining({
+          workerNodeId: leaseIdentity.workerNodeId,
+          workerTokenSha256: createHash("sha256").update(workerToken, "ascii").digest("hex"),
+        }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps an unavailable atomic registration recheck to the authentication 503", async () => {
+    const request = vi.fn(async (operation: string) => {
+      if (operation === "authenticateWorkerToken") {
+        return {
+          outcome: "authenticated" as const,
+          workerNodeId: leaseIdentity.workerNodeId,
+          authState: "pending" as const,
+        };
+      }
+      throw new Error("private database failure");
+    });
+    const app = Fastify({ logger: false });
+    registerWorkerRoutes(app, {
+      config,
+      database: { request } as unknown as DatabaseClient,
+      artifactCompletion: {
+        completeArtifactRun: vi.fn(async () => {
+          throw new Error("Unexpected artifact completion.");
+        }),
+      },
+      shutdownSignal: new AbortController().signal,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/instances",
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: workerRegistrationPayload,
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        code: "worker_authentication_unavailable",
+        message: "Worker authentication is temporarily unavailable.",
+        retryable: true,
+      });
+      expect(response.body).not.toContain("private database failure");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("pins authentication hooks on every Worker and artifact route", async () => {
+    const workerSource = await readFile(new URL("./workers.ts", import.meta.url), "utf8");
+    const artifactSource = await readFile(
+      new URL("./worker-artifacts.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(workerSource.match(/\bonRequest:/gu)).toHaveLength(6);
+    expect(workerSource.match(/\bpreValidation:/gu)).toHaveLength(6);
+    expect(artifactSource.match(/\bonRequest:/gu)).toHaveLength(4);
+    expect(artifactSource.match(/\bpreValidation:/gu)).toHaveLength(4);
+    expect(workerSource).not.toContain("createWorkerAuthenticationPreHandler");
+  });
+
+  it.each([
+    ["POST", "/api/v1/worker/instances"],
+    ["POST", "/api/v1/worker/leases/claim"],
+    ["PUT", "/api/v1/worker/instances/worker-instance/heartbeat"],
+    ["PUT", "/api/v1/worker/leases/run-attempt-id/heartbeat"],
+    ["POST", "/api/v1/worker/runs/run-attempt-id/complete"],
+    ["POST", "/api/v1/worker/runs/run-attempt-id/fail"],
+  ] as const)("authenticates %s %s before body validation", async (method, url) => {
+    const request = vi.fn(async () => {
+      throw new Error("Unexpected database request.");
+    });
+    const completeArtifactRun = vi.fn(async () => {
+      throw new Error("Unexpected artifact completion.");
+    });
+    const app = Fastify({ logger: false });
+    registerWorkerRoutes(app, {
+      config,
+      database: { request } as unknown as DatabaseClient,
+      artifactCompletion: { completeArtifactRun },
+      shutdownSignal: new AbortController().signal,
+    });
+    try {
+      const response = await app.inject({ method, url });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+      expect(response.json()).toMatchObject({ code: "worker_authentication_failed" });
+      expect(request).not.toHaveBeenCalled();
+      expect(completeArtifactRun).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it.each([
     {
       path: "/api/v1/worker/runs/run-attempt-id/complete",
@@ -230,9 +408,9 @@ describe("Worker terminal routes", () => {
     }
   });
 
-  it("rejects deeply nested JSON when result-size serialization cannot complete", async () => {
+  it("rejects deeply nested JSON when its serialized result exceeds the limit", async () => {
     const { app, request } = createApp();
-    const depth = 20_000;
+    const depth = Math.floor(maximumRunCompletionResultUtf8Bytes / 2) + 1;
     const nestedResult = `${"[".repeat(depth)}null${"]".repeat(depth)}`;
     const payload = `{
       "jobId":"${leaseIdentity.jobId}",
@@ -384,9 +562,7 @@ describe("Worker terminal routes", () => {
   it("rejects an unauthenticated terminal body before its content parser runs", async () => {
     const secureConfig: ServerConfig = {
       ...config,
-      allowInsecureWorkerAuth: false,
       tls: {},
-      workerCertificateBindings: { ["A".repeat(64)]: leaseIdentity.workerNodeId },
     };
     const request = vi.fn(async () => {
       throw new Error("Unexpected database request.");
@@ -422,7 +598,11 @@ describe("Worker terminal routes", () => {
         }),
       });
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toMatchObject({ code: "worker_mtls_required", retryable: false });
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+      expect(response.json()).toMatchObject({
+        code: "worker_authentication_failed",
+        retryable: false,
+      });
       expect(parser).not.toHaveBeenCalled();
       expect(request).not.toHaveBeenCalled();
       expect(completeArtifactRun).not.toHaveBeenCalled();
@@ -434,9 +614,7 @@ describe("Worker terminal routes", () => {
   it("rejects unauthenticated malformed terminal JSON before parsing", async () => {
     const secureConfig: ServerConfig = {
       ...config,
-      allowInsecureWorkerAuth: false,
       tls: {},
-      workerCertificateBindings: { ["A".repeat(64)]: leaseIdentity.workerNodeId },
     };
     const request = vi.fn(async () => {
       throw new Error("Unexpected database request.");
@@ -468,7 +646,11 @@ describe("Worker terminal routes", () => {
         payload: "{",
       });
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toMatchObject({ code: "worker_mtls_required", retryable: false });
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+      expect(response.json()).toMatchObject({
+        code: "worker_authentication_failed",
+        retryable: false,
+      });
       expect(parser).not.toHaveBeenCalled();
       expect(request).not.toHaveBeenCalled();
       expect(completeArtifactRun).not.toHaveBeenCalled();

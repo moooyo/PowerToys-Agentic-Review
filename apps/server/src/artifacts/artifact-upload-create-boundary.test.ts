@@ -396,9 +396,12 @@ describe("artifact transaction composition boundary", () => {
 
     const adapter = await readFile(join(sourceRoot, "routes", "worker-artifacts.ts"), "utf8");
     expect(adapter).toContain("createWorkerAuthenticationHooks");
+    expect(adapter).toContain(
+      'import type { DatabaseClient } from "../database/database-client.js"',
+    );
+    expect(adapter).toContain("createWorkerAuthenticationHooks(database)");
     expect(adapter).toContain("onRequest: authenticateWorker.onRequest");
     expect(adapter).toContain("preValidation: [authenticateWorker.preValidation");
-    expect(adapter).not.toContain("DatabaseClient");
     expect(adapter).not.toContain("ArtifactStorageClient.create(");
     expect(adapter).not.toContain("request.raw");
     expect(adapter).not.toContain("ArtifactTransactionCoordinator.create(");

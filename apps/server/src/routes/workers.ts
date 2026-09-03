@@ -25,10 +25,11 @@ import { type ArtifactCompletionPort, ArtifactServiceError } from "../artifacts/
 import type { ServerConfig } from "../config.js";
 import type { DatabaseClient } from "../database/database-client.js";
 import { DatabaseRequestError } from "../database/errors.js";
+import type { RegisteredWorker } from "../database/protocol.js";
 import {
   createWorkerAuthenticationHooks,
-  createWorkerAuthenticationPreHandler,
   getAuthenticatedWorkerIdentity,
+  getAuthenticatedWorkerTokenSha256,
 } from "../security/worker-identity.js";
 
 interface RouteDependencies {
@@ -253,6 +254,38 @@ const sendLeaseLost = (runAttemptId: string) => ({
   reasonCode: "lease_lost",
 });
 
+const handleRegistrationDatabaseError = (error: unknown, reply: FastifyReply): FastifyReply => {
+  if (error instanceof DatabaseRequestError && error.code === "WORKER_TOKEN_INVALID") {
+    return reply.header("www-authenticate", "Bearer").code(401).send({
+      code: "worker_authentication_failed",
+      message: "Worker authentication failed.",
+      retryable: false,
+    });
+  }
+  if (error instanceof DatabaseRequestError && error.code === "WORKER_IDENTITY_MISMATCH") {
+    return reply.code(403).send({
+      code: "worker_identity_mismatch",
+      message: "The claimed workerNodeId does not match the authenticated Worker identity.",
+      retryable: false,
+    });
+  }
+  if (error instanceof DatabaseRequestError && error.code === "WORKER_REGISTRATION_INVALID") {
+    return reply.code(400).send({
+      code: "request_validation_failed",
+      message: "The Worker registration request is invalid.",
+      retryable: false,
+    });
+  }
+  if (error instanceof DatabaseRequestError && error.code === "WORKER_INSTANCE_SUPERSEDED") {
+    throw error;
+  }
+  return reply.code(503).send({
+    code: "worker_authentication_unavailable",
+    message: "Worker authentication is temporarily unavailable.",
+    retryable: true,
+  });
+};
+
 const heartbeatOneLease = async (
   database: DatabaseClient,
   config: ServerConfig,
@@ -297,8 +330,9 @@ export const registerWorkerRoutes = (
   dependencies: RouteDependencies,
 ): void => {
   const { config, database, artifactCompletion, shutdownSignal } = dependencies;
-  const authenticateWorker = createWorkerAuthenticationPreHandler(config);
-  const authenticateTerminalWorker = createWorkerAuthenticationHooks(config);
+  const authenticateRegistration = createWorkerAuthenticationHooks(database, "registration");
+  const authenticateWorker = createWorkerAuthenticationHooks(database);
+  const authenticateTerminalWorker = createWorkerAuthenticationHooks(database);
 
   const registerWorker = async (
     request: FastifyRequest<{ Body: WorkerRegistrationRequest }>,
@@ -313,10 +347,17 @@ export const registerWorkerRoutes = (
     }
 
     const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
-    const worker = await database.request("registerWorker", {
-      ...request.body,
-      workerNodeId,
-    });
+    const workerTokenSha256 = getAuthenticatedWorkerTokenSha256(request);
+    let worker: RegisteredWorker;
+    try {
+      worker = await database.request("registerWorker", {
+        ...request.body,
+        workerNodeId,
+        workerTokenSha256,
+      });
+    } catch (error) {
+      return handleRegistrationDatabaseError(error, reply);
+    }
     const response: WorkerRegistrationResponse = {
       protocolVersion: "1.0",
       workerId: worker.workerId,
@@ -331,7 +372,8 @@ export const registerWorkerRoutes = (
     "/api/v1/worker/instances",
     {
       schema: { body: registrationRequestSchema },
-      preHandler: authenticateWorker,
+      onRequest: authenticateRegistration.onRequest,
+      preValidation: authenticateRegistration.preValidation,
     },
     registerWorker,
   );
@@ -340,7 +382,8 @@ export const registerWorkerRoutes = (
     "/api/v1/worker/leases/claim",
     {
       schema: { body: claimRequestSchema },
-      preHandler: authenticateWorker,
+      onRequest: authenticateWorker.onRequest,
+      preValidation: authenticateWorker.preValidation,
     },
     async (request) => {
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
@@ -383,7 +426,8 @@ export const registerWorkerRoutes = (
     "/api/v1/worker/instances/:workerInstanceId/heartbeat",
     {
       schema: { body: workerHeartbeatSchema },
-      preHandler: authenticateWorker,
+      onRequest: authenticateWorker.onRequest,
+      preValidation: authenticateWorker.preValidation,
     },
     async (request, reply) => {
       if (request.params.workerInstanceId !== request.body.workerInstanceId) {
@@ -444,7 +488,8 @@ export const registerWorkerRoutes = (
           },
         },
       },
-      preHandler: authenticateWorker,
+      onRequest: authenticateWorker.onRequest,
+      preValidation: authenticateWorker.preValidation,
     },
     async (request) => {
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);

@@ -1,5 +1,9 @@
 # ADR 0007: Isolate Windows Worker Control and Execution Identities
 
+> Amended by ADR 0025: Worker-to-Server authentication uses a per-Worker Bearer Token in ordinary
+> local Control configuration instead of a CNG-backed mTLS client certificate. The local
+> Control-to-Executor capability signer and process isolation remain unchanged.
+
 - Status: Accepted
 - Date: 2026-08-31
 

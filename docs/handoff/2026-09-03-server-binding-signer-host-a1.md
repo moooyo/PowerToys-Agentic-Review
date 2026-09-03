@@ -1,5 +1,8 @@
 # Dormant Server Binding Signer Host v1 A1 Handoff
 
+> Historical handoff. ADR 0025 supersedes the signer-host direction and cancels its deferred Linux
+> process-verification requirement.
+
 Status date: 2026-09-03
 
 Branch: `codex/server-binding-signer-host-v1-lab`

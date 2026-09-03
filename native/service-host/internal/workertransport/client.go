@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +73,18 @@ type Config struct {
 	// The caller retains ownership and must close the signer only after that lifecycle barrier.
 	ClientSigner crypto.Signer
 	Limits       Limits
+}
+
+// BearerConfig is the source-only configuration for the superseding per-Worker Token transport.
+// Production composition must not select this constructor until a versioned role configuration
+// profile replaces the current exact mTLS profile.
+type BearerConfig struct {
+	Origin             string
+	ServerName         string
+	RootCertificateDER [][]byte
+	WorkerNodeID       string
+	WorkerAuth         WorkerAuth
+	Limits             Limits
 }
 
 type RegisterRequest struct {
@@ -156,6 +170,8 @@ type clientState struct {
 	closeIdleConnections func() error
 	transportReleased    bool
 	signerGate           *clientSignerGate
+	workerToken          []byte
+	bearerAuthentication bool
 }
 
 type executePolicy struct {
@@ -213,22 +229,63 @@ func NewClient(config Config) (*Client, error) {
 		Certificates: []tls.Certificate{certificate},
 	}
 	dialTimeout := min(config.Limits.RequestTimeout, 30*time.Second)
-	transport := &http.Transport{
+	transport := newHTTPTransport(tlsConfig, config.Limits, dialTimeout)
+	return newClient(origin, transport, signerGate, config.Limits), nil
+}
+
+// NewBearerClient constructs an HTTPS client that authenticates every fixed Worker API operation
+// with one opaque per-Worker Bearer Token and presents no TLS client certificate.
+func NewBearerClient(config BearerConfig) (*Client, error) {
+	origin, err := parseOrigin(config.Origin)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateServerName(config.ServerName); err != nil {
+		return nil, err
+	}
+	rootCAs, err := prepareRootCAs(config.RootCertificateDER)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateLimits(config.Limits); err != nil {
+		return nil, err
+	}
+	if err := validateEntityID(config.WorkerNodeID); err != nil {
+		return nil, configurationError("WorkerNodeID is invalid", nil)
+	}
+	if err := config.WorkerAuth.validate(); err != nil {
+		return nil, configurationError("WorkerAuth is required", err)
+	}
+	if config.WorkerAuth.WorkerNodeID() != config.WorkerNodeID {
+		return nil, configurationError("WorkerAuth belongs to a different WorkerNodeID", nil)
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		ServerName: config.ServerName,
+		RootCAs:    rootCAs,
+	}
+	dialTimeout := min(config.Limits.RequestTimeout, 30*time.Second)
+	transport := newHTTPTransport(tlsConfig, config.Limits, dialTimeout)
+	return newBearerClient(origin, transport, config.WorkerAuth, config.Limits), nil
+}
+
+func newHTTPTransport(tlsConfig *tls.Config, limits Limits, dialTimeout time.Duration) *http.Transport {
+	return &http.Transport{
 		Proxy:                  nil,
 		DialContext:            (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:      true,
-		MaxIdleConns:           config.Limits.MaximumConcurrentRequests,
-		MaxIdleConnsPerHost:    config.Limits.MaximumConcurrentRequests,
-		MaxConnsPerHost:        config.Limits.MaximumConcurrentRequests,
+		MaxIdleConns:           limits.MaximumConcurrentRequests,
+		MaxIdleConnsPerHost:    limits.MaximumConcurrentRequests,
+		MaxConnsPerHost:        limits.MaximumConcurrentRequests,
 		IdleConnTimeout:        90 * time.Second,
 		TLSHandshakeTimeout:    dialTimeout,
-		ResponseHeaderTimeout:  max(config.Limits.RequestTimeout, config.Limits.ClaimTimeout),
+		ResponseHeaderTimeout:  max(limits.RequestTimeout, limits.ClaimTimeout),
 		ExpectContinueTimeout:  time.Second,
 		TLSClientConfig:        tlsConfig,
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: maximumResponseHeaders,
 	}
-	return newClient(origin, transport, signerGate, config.Limits), nil
 }
 
 func (c *Client) Register(ctx context.Context, request RegisterRequest) (RegisterResponse, error) {
@@ -341,6 +398,8 @@ func (c *Client) Close() error {
 
 		state.lifecycleMu.Lock()
 		state.signerGate = nil
+		clear(state.workerToken)
+		state.workerToken = nil
 		state.drained = true
 		state.lifecycleMu.Unlock()
 	})
@@ -368,6 +427,9 @@ func (c *Client) CloseIdleConnections() error {
 	state.lifecycleMu.Unlock()
 
 	if err := closeIdleConnections(); err != nil {
+		if state.bearerAuthentication {
+			return errors.New("close worker API idle connections")
+		}
 		return fmt.Errorf("close worker API idle connections: %w", err)
 	}
 	if finalRelease {
@@ -386,6 +448,25 @@ func newClient(
 	signerGate *clientSignerGate,
 	limits Limits,
 ) *Client {
+	return newClientState(origin, roundTripper, signerGate, nil, limits)
+}
+
+func newBearerClient(
+	origin url.URL,
+	roundTripper http.RoundTripper,
+	workerAuth WorkerAuth,
+	limits Limits,
+) *Client {
+	return newClientState(origin, roundTripper, nil, workerAuth.tokenBytes(), limits)
+}
+
+func newClientState(
+	origin url.URL,
+	roundTripper http.RoundTripper,
+	signerGate *clientSignerGate,
+	workerToken []byte,
+	limits Limits,
+) *Client {
 	return &Client{
 		state: &clientState{
 			origin: origin,
@@ -401,6 +482,8 @@ func newClient(
 			requests:             make(map[uint64]context.CancelCauseFunc),
 			closeIdleConnections: prepareIdleConnectionCloser(roundTripper),
 			signerGate:           signerGate,
+			workerToken:          bytes.Clone(workerToken),
+			bearerAuthentication: len(workerToken) != 0,
 		},
 	}
 }
@@ -588,6 +671,9 @@ func (c *clientState) executeWithPolicy(
 		"Content-Type": {"application/json"},
 		"User-Agent":   {workerUserAgent},
 	}
+	if len(c.workerToken) != 0 {
+		request.Header.Set("Authorization", "Bearer "+string(c.workerToken))
+	}
 	request.ContentLength = int64(len(requestBody))
 
 	response, err := httpClient.Do(request)
@@ -596,9 +682,9 @@ func (c *clientState) executeWithPolicy(
 		if response != nil && response.Body != nil {
 			closeError = response.Body.Close()
 		}
-		return nil, fmt.Errorf(
-			"worker API request failed: %w",
+		return nil, workerRequestError(
 			errors.Join(err, context.Cause(requestContext), closeError),
+			c.workerToken,
 		)
 	}
 	if response == nil {
@@ -609,14 +695,17 @@ func (c *clientState) executeWithPolicy(
 		if response.Body != nil {
 			closeError = response.Body.Close()
 		}
-		return nil, errors.Join(err, closeError)
+		return nil, workerRequestError(errors.Join(err, closeError), c.workerToken)
 	}
 	responseBody, err := readResponseBody(response, policy.maximumResponseBytes)
 	if err != nil {
-		return nil, errors.Join(err, context.Cause(requestContext))
+		return nil, workerRequestError(errors.Join(err, context.Cause(requestContext)), c.workerToken)
 	}
 	if errors.Is(context.Cause(requestContext), ErrClosed) {
 		return nil, ErrClosed
+	}
+	if responseContainsWorkerCredential(responseBody, c.workerToken) {
+		return nil, ErrInvalidResponseJSON
 	}
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		return nil, ErrRedirect
@@ -915,4 +1004,62 @@ func configurationError(message string, cause error) error {
 		return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrInvalidConfiguration, message, cause)
+}
+
+func workerRequestError(cause error, token []byte) error {
+	if cause == nil || !containsWorkerCredentialText(cause.Error(), token) {
+		return fmt.Errorf("worker API request failed: %w", cause)
+	}
+	return errors.New("worker API request failed")
+}
+
+func responseContainsWorkerCredential(body []byte, token []byte) bool {
+	if len(token) == 0 {
+		return false
+	}
+	digest := sha256.Sum256(token)
+	digestHex := hex.EncodeToString(digest[:])
+	if bytes.Contains(body, token) || bytes.Contains(body, []byte(digestHex)) ||
+		bytes.Contains(body, []byte(strings.ToUpper(digestHex))) {
+		return true
+	}
+	if !bytes.ContainsRune(body, '\\') {
+		return false
+	}
+	var value any
+	if json.Unmarshal(body, &value) != nil {
+		return false
+	}
+	var contains func(any) bool
+	contains = func(candidate any) bool {
+		switch typed := candidate.(type) {
+		case string:
+			return containsWorkerCredentialText(typed, token)
+		case []any:
+			for _, item := range typed {
+				if contains(item) {
+					return true
+				}
+			}
+		case map[string]any:
+			for name, item := range typed {
+				if containsWorkerCredentialText(name, token) || contains(item) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return contains(value)
+}
+
+func containsWorkerCredentialText(value string, token []byte) bool {
+	if len(token) == 0 {
+		return false
+	}
+	if strings.Contains(value, string(token)) {
+		return true
+	}
+	digest := sha256.Sum256(token)
+	return strings.Contains(strings.ToLower(value), hex.EncodeToString(digest[:]))
 }

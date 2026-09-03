@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  loadWorkerConfig,
+  loadWorkerConfig as loadWorkerConfigProduction,
   type SecretFileSystem,
   type StableSecretFileMetadata,
+  type WorkerConfig,
+  type WorkerConfigDependencies,
 } from "./config.js";
 
 const mebibyte = 1024 * 1024;
 const gibibyte = 1024 * mebibyte;
+const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Control\\worker-auth-v1.json";
+const workerNodeId = "worker-config:test";
+const workerToken = `arw1_${"A".repeat(43)}`;
 
 describe("Worker transport policy", () => {
   it.each(["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"])(
@@ -61,17 +66,142 @@ describe("Worker transport policy", () => {
   });
 });
 
-describe("Worker TLS material policy", () => {
-  it("reads an exact bounded secret from a stable file descriptor and always closes it", () => {
-    const content = Buffer.from("test-pfx-content", "utf8");
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, content]]));
+describe("Worker authentication profile", () => {
+  it("loads the exact production file and derives both Worker credentials from it", () => {
+    const reader = vi.fn(() => workerAuthProfileBytes());
+    const config = loadWorkerConfigProduction(
+      {
+        ...baseEnvironment(),
+        WORKER_NODE_ID: "ignored-environment-node",
+        WORKER_TOKEN: `arw1_${"E".repeat(43)}`,
+      },
+      { workerAuthFileReader: reader },
+    );
 
-    const config = loadWorkerConfig(httpsEnvironment(), {
-      secretFileSystem: fixture.fileSystem,
+    expect(reader).toHaveBeenCalledOnce();
+    expect(reader).toHaveBeenCalledWith(workerAuthProfilePath);
+    expect(config.workerNodeId).toBe(workerNodeId);
+    expect(config.workerToken).toBe(workerToken);
+  });
+
+  it.each([
+    ["trailing whitespace", Buffer.from(`${workerAuthProfileBytes().toString("utf8")}\n`)],
+    [
+      "a different member order",
+      Buffer.from(
+        JSON.stringify({
+          token: workerToken,
+          profileId: "agentic-review-worker-auth-v1",
+          workerNodeId,
+        }),
+      ),
+    ],
+    [
+      "an escaped equivalent Token",
+      Buffer.from(
+        `{"profileId":"agentic-review-worker-auth-v1","token":"arw1_\\u0041${"A".repeat(42)}","workerNodeId":"${workerNodeId}"}`,
+      ),
+    ],
+    [
+      "a duplicate member",
+      Buffer.from(
+        `{"profileId":"agentic-review-worker-auth-v1","token":"${workerToken}","token":"${workerToken}","workerNodeId":"${workerNodeId}"}`,
+      ),
+    ],
+  ])("rejects canonical-profile deviations including %s", (_scenario, bytes) => {
+    expect(() =>
+      loadWorkerConfigProduction(baseEnvironment(), { workerAuthFileReader: () => bytes }),
+    ).toThrow("Unable to load Worker authentication profile.");
+  });
+
+  it.each([
+    ["an empty file", Buffer.alloc(0)],
+    ["more than 4 KiB", Buffer.alloc(4 * 1024 + 1, 0x20)],
+    ["invalid UTF-8", Buffer.from([0xff])],
+    ["invalid JSON", Buffer.from("{", "utf8")],
+    ["a non-object", Buffer.from("[]", "utf8")],
+    [
+      "a missing member",
+      Buffer.from(
+        JSON.stringify({ profileId: "agentic-review-worker-auth-v1", token: workerToken }),
+      ),
+    ],
+    ["an extra member", Buffer.from(JSON.stringify({ ...workerAuthProfile(), extra: true }))],
+    [
+      "the wrong profile ID",
+      Buffer.from(JSON.stringify({ ...workerAuthProfile(), profileId: "other-profile" })),
+    ],
+    ["a non-string Token", Buffer.from(JSON.stringify({ ...workerAuthProfile(), token: 1 }))],
+    [
+      "a non-canonical Token",
+      Buffer.from(JSON.stringify({ ...workerAuthProfile(), token: `arw1_${"A".repeat(42)}B` })),
+    ],
+    [
+      "an invalid Worker node ID",
+      Buffer.from(JSON.stringify({ ...workerAuthProfile(), workerNodeId: ":invalid" })),
+    ],
+  ])("rejects %s without exposing profile contents", (_scenario, bytes) => {
+    let caught: unknown;
+    try {
+      loadWorkerConfigProduction(baseEnvironment(), { workerAuthFileReader: () => bytes });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe("Unable to load Worker authentication profile.");
+    expect((caught as Error).message).not.toContain(workerToken);
+    expect((caught as Error).cause).toBeUndefined();
+  });
+
+  it("does not fall back to environment credentials when the fixed file cannot be read", () => {
+    const environmentToken = `arw1_${"E".repeat(42)}A`;
+
+    expect(() =>
+      loadWorkerConfigProduction(
+        {
+          ...baseEnvironment(),
+          WORKER_NODE_ID: "environment-node",
+          WORKER_TOKEN: environmentToken,
+        },
+        {
+          workerAuthFileReader: () => {
+            throw new Error(`${environmentToken} is unavailable at ${workerAuthProfilePath}`);
+          },
+        },
+      ),
+    ).toThrow("Unable to load Worker authentication profile.");
+  });
+});
+
+describe("Worker TLS material policy", () => {
+  it("requires no client certificate and ignores legacy client TLS settings", () => {
+    const config = loadWorkerConfig({
+      ...httpsEnvironment(),
+      WORKER_TLS_CERT_PATH: "C:\\legacy\\worker.crt",
+      WORKER_TLS_KEY_PATH: "C:\\legacy\\worker.key",
+      WORKER_TLS_PFX_PATH: "C:\\legacy\\worker.pfx",
+      WORKER_TLS_PFX_PASSPHRASE: "unused",
+      WORKER_TLS_SERVER_NAME: "review.internal",
     });
 
-    expect(config.tls?.pfx).toEqual(content);
-    expect(fixture.open).toHaveBeenCalledWith(tlsPfxPath);
+    expect(config.tls).toEqual({
+      serverName: "review.internal",
+      rejectUnauthorized: true,
+    });
+  });
+
+  it("reads only the Server CA from a stable file descriptor and always closes it", () => {
+    const content = Buffer.from("test-server-ca", "utf8");
+    const fixture = createSecretFileSystem(new Map([[tlsCaPath, content]]));
+
+    const config = loadWorkerConfig(
+      { ...httpsEnvironment(), WORKER_TLS_CA_PATH: tlsCaPath },
+      { secretFileSystem: fixture.fileSystem },
+    );
+
+    expect(config.tls?.ca).toEqual(content);
+    expect(fixture.open).toHaveBeenCalledWith(tlsCaPath);
     expect(fixture.read).toHaveBeenCalledWith(47, expect.any(Buffer), 0, content.length, 0);
     expect(fixture.fstat).toHaveBeenCalledTimes(2);
     expect(fixture.lstat).toHaveBeenCalledTimes(2);
@@ -80,149 +210,73 @@ describe("Worker TLS material policy", () => {
     expect(fixture.close).toHaveBeenCalledWith(47);
   });
 
-  it("rejects oversized PFX material before opening it", () => {
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, Buffer.from("small", "utf8")]]));
+  it("rejects oversized Server CA material before opening it", () => {
+    const fixture = createSecretFileSystem(new Map([[tlsCaPath, Buffer.from("small", "utf8")]]));
     fixture.lstat.mockReturnValue(secretMetadata(BigInt(mebibyte + 1)));
 
     expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
+      loadWorkerConfig(
+        { ...httpsEnvironment(), WORKER_TLS_CA_PATH: tlsCaPath },
+        { secretFileSystem: fixture.fileSystem },
+      ),
+    ).toThrow("Unable to securely read WORKER_TLS_CA_PATH.");
     expect(fixture.open).not.toHaveBeenCalled();
     expect(fixture.close).not.toHaveBeenCalled();
   });
 
-  it("applies a smaller independent bound to private key material", () => {
-    const files = new Map([
-      [tlsCertificatePath, Buffer.from("certificate", "utf8")],
-      [tlsPrivateKeyPath, Buffer.alloc(256 * 1024 + 1, 1)],
-    ]);
-    const fixture = createSecretFileSystem(files);
-
-    expect(() =>
-      loadWorkerConfig(pemHttpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_KEY_PATH.");
-    expect(fixture.open).toHaveBeenCalledTimes(1);
-    expect(fixture.open).toHaveBeenCalledWith(tlsCertificatePath);
-    expect(fixture.close).toHaveBeenCalledOnce();
-  });
-
-  it("rejects symbolic links and canonical-path mismatches before opening a secret", () => {
+  it("rejects symbolic links and canonical-path mismatches before opening the Server CA", () => {
     const symlinkFixture = createSecretFileSystem(
-      new Map([[tlsPfxPath, Buffer.from("pfx", "utf8")]]),
+      new Map([[tlsCaPath, Buffer.from("ca", "utf8")]]),
     );
     symlinkFixture.lstat.mockReturnValue(
-      secretMetadata(3n, { isFile: false, isSymbolicLink: true }),
+      secretMetadata(2n, { isFile: false, isSymbolicLink: true }),
     );
 
     expect(() =>
-      loadWorkerConfig(httpsEnvironment(), {
-        secretFileSystem: symlinkFixture.fileSystem,
-      }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
+      loadWorkerConfig(
+        { ...httpsEnvironment(), WORKER_TLS_CA_PATH: tlsCaPath },
+        { secretFileSystem: symlinkFixture.fileSystem },
+      ),
+    ).toThrow("Unable to securely read WORKER_TLS_CA_PATH.");
     expect(symlinkFixture.open).not.toHaveBeenCalled();
 
     const mismatchFixture = createSecretFileSystem(
-      new Map([[tlsPfxPath, Buffer.from("pfx", "utf8")]]),
+      new Map([[tlsCaPath, Buffer.from("ca", "utf8")]]),
     );
-    mismatchFixture.realpath.mockReturnValue("C:\\AgenticReview\\Secrets\\other.pfx");
+    mismatchFixture.realpath.mockReturnValue("C:\\AgenticReview\\Secrets\\other-ca.pem");
 
     expect(() =>
-      loadWorkerConfig(httpsEnvironment(), {
-        secretFileSystem: mismatchFixture.fileSystem,
-      }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
+      loadWorkerConfig(
+        { ...httpsEnvironment(), WORKER_TLS_CA_PATH: tlsCaPath },
+        { secretFileSystem: mismatchFixture.fileSystem },
+      ),
+    ).toThrow("Unable to securely read WORKER_TLS_CA_PATH.");
     expect(mismatchFixture.open).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["negative device identity", { device: -1n }],
-    ["missing inode identity", { inode: 0n }],
-    ["invalid file mode", { mode: 0n }],
-    ["non-regular file mode", { mode: 0o040755n }],
-    ["zero link count", { linkCount: 0n }],
-    ["hard-linked file", { linkCount: 2n }],
-    ["negative modification timestamp", { modifiedTimeNanoseconds: -1n }],
-    ["negative change timestamp", { changedTimeNanoseconds: -1n }],
-  ])("rejects TLS material with %s", (_scenario, overrides) => {
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, Buffer.from("pfx", "utf8")]]));
-    fixture.lstat.mockReturnValue(secretMetadata(3n, overrides));
-
-    expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
-    expect(fixture.open).not.toHaveBeenCalled();
-    expect(fixture.close).not.toHaveBeenCalled();
-  });
-
-  it("rejects a different file identity returned by the opened descriptor", () => {
-    const content = Buffer.from("pfx", "utf8");
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, content]]));
-    fixture.fstat.mockReturnValue(secretMetadata(BigInt(content.length), { inode: 99n }));
-
-    expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
-    expect(fixture.read).not.toHaveBeenCalled();
-    expect(fixture.close).toHaveBeenCalledOnce();
-  });
-
-  it("rejects metadata changes and path replacement after reading", () => {
-    const content = Buffer.from("pfx", "utf8");
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, content]]));
-    const initialMetadata = secretMetadata(BigInt(content.length));
-    fixture.lstat
-      .mockReturnValueOnce(initialMetadata)
-      .mockReturnValueOnce({ ...initialMetadata, changedTimeNanoseconds: 91n });
-
-    expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
-    expect(fixture.read).toHaveBeenCalledOnce();
-    expect(fixture.close).toHaveBeenCalledOnce();
-  });
-
-  it("fails closed on a short read and still closes the descriptor", () => {
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, Buffer.from("pfx", "utf8")]]));
-    fixture.read.mockReturnValue(0);
-
-    expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
-    expect(fixture.close).toHaveBeenCalledOnce();
-  });
-
-  it("does not expose an underlying read error or the configured secret path", () => {
+  it("does not expose an underlying Server CA read error", () => {
     const fixture = createSecretFileSystem(
-      new Map([[tlsPfxPath, Buffer.from("private-secret-marker", "utf8")]]),
+      new Map([[tlsCaPath, Buffer.from("private-secret-marker", "utf8")]]),
     );
     fixture.read.mockImplementation(() => {
-      throw new Error(`private-secret-marker at ${tlsPfxPath}`);
+      throw new Error(`private-secret-marker at ${tlsCaPath}`);
     });
 
     let caught: unknown;
     try {
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem });
+      loadWorkerConfig(
+        { ...httpsEnvironment(), WORKER_TLS_CA_PATH: tlsCaPath },
+        { secretFileSystem: fixture.fileSystem },
+      );
     } catch (error) {
       caught = error;
     }
 
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toBe("Unable to securely read WORKER_TLS_PFX_PATH.");
+    expect((caught as Error).message).toBe("Unable to securely read WORKER_TLS_CA_PATH.");
     expect((caught as Error).message).not.toContain("private-secret-marker");
-    expect((caught as Error).message).not.toContain(tlsPfxPath);
+    expect((caught as Error).message).not.toContain(tlsCaPath);
     expect((caught as Error).cause).toBeUndefined();
-    expect(fixture.close).toHaveBeenCalledOnce();
-  });
-
-  it("fails closed when the descriptor cannot be closed", () => {
-    const fixture = createSecretFileSystem(new Map([[tlsPfxPath, Buffer.from("pfx", "utf8")]]));
-    fixture.close.mockImplementation(() => {
-      throw new Error("close failed");
-    });
-
-    expect(() =>
-      loadWorkerConfig(httpsEnvironment(), { secretFileSystem: fixture.fileSystem }),
-    ).toThrow("Unable to securely read WORKER_TLS_PFX_PATH.");
     expect(fixture.close).toHaveBeenCalledOnce();
   });
 });
@@ -676,7 +730,6 @@ function baseEnvironment(): NodeJS.ProcessEnv {
   return {
     WORKER_SERVER_URL: "http://127.0.0.1:8080",
     WORKER_ALLOW_INSECURE_HTTP: "true",
-    WORKER_NODE_ID: "worker-config-test",
     WORKER_DATA_DIR: "D:\\AgenticReview\\Data",
     WORKER_RECIPE_IDS: "",
   };
@@ -701,25 +754,36 @@ function enabledEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-const tlsPfxPath = "C:\\AgenticReview\\Secrets\\worker.pfx";
-const tlsCertificatePath = "C:\\AgenticReview\\Secrets\\worker.crt";
-const tlsPrivateKeyPath = "C:\\AgenticReview\\Secrets\\worker.key";
+const tlsCaPath = "C:\\AgenticReview\\Secrets\\server-ca.pem";
 
 function httpsEnvironment(): NodeJS.ProcessEnv {
   return {
     ...baseEnvironment(),
     WORKER_SERVER_URL: "https://review.internal",
     WORKER_ALLOW_INSECURE_HTTP: "false",
-    WORKER_TLS_PFX_PATH: tlsPfxPath,
   };
 }
 
-function pemHttpsEnvironment(): NodeJS.ProcessEnv {
-  const environment = httpsEnvironment();
-  delete environment.WORKER_TLS_PFX_PATH;
-  environment.WORKER_TLS_CERT_PATH = tlsCertificatePath;
-  environment.WORKER_TLS_KEY_PATH = tlsPrivateKeyPath;
-  return environment;
+function loadWorkerConfig(
+  environment: NodeJS.ProcessEnv,
+  dependencies: WorkerConfigDependencies = {},
+): WorkerConfig {
+  return loadWorkerConfigProduction(environment, {
+    ...dependencies,
+    workerAuthFileReader: dependencies.workerAuthFileReader ?? (() => workerAuthProfileBytes()),
+  });
+}
+
+function workerAuthProfile(): Readonly<Record<string, unknown>> {
+  return {
+    profileId: "agentic-review-worker-auth-v1",
+    token: workerToken,
+    workerNodeId,
+  };
+}
+
+function workerAuthProfileBytes(): Buffer {
+  return Buffer.from(JSON.stringify(workerAuthProfile()), "utf8");
 }
 
 function secretMetadata(

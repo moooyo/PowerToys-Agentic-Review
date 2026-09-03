@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed on 2026-09-03.
+Superseded by ADR 0025 on 2026-09-03. Production Worker authentication no longer requires a receipt
+signer, signer-host child process, or the Linux signer-host verification matrix.
 
 This decision defines only a dormant, process-isolated transport foundation for the Server binding
 signer. It does not select or load a production private-key backend, compile production trust,

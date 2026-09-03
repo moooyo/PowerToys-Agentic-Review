@@ -1,5 +1,9 @@
 # ADR 0019: Stage a Dormant RoleConfig v3 Disabled-Execution Lab
 
+> Historical exact profile note: ADR 0025 supersedes the `server_binding_receipt` activation blocker
+> as a future production requirement. The fixed lab profile is not reinterpreted and remains
+> disabled; a later profile must define replacement activation gates.
+
 - Status: Accepted
 - Date: 2026-09-03
 

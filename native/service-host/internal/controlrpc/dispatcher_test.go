@@ -345,6 +345,8 @@ func TestStatusErrorsUseOnlyTheOperationSpecificAllowlist(t *testing.T) {
 		expected  publicErrorSpec
 	}{
 		{name: "wrong operation", operation: localrpc.OperationRegister, status: 409, body: leaseLost, expected: upstreamErrorSpec},
+		{name: "registration-required on register", operation: localrpc.OperationRegister, status: 403,
+			body: canonicalStatusBody(t, "worker_registration_required", "secret", false), expected: upstreamErrorSpec},
 		{name: "wrong status", operation: localrpc.OperationCompleteRun, status: 400, body: leaseLost, expected: upstreamErrorSpec},
 		{name: "wrong retryable", operation: localrpc.OperationCompleteRun, status: 409,
 			body: canonicalStatusBody(t, "lease_lost", "secret", true), expected: upstreamErrorSpec},

@@ -9,7 +9,7 @@ const temporaryDirectories: string[] = [];
 const developmentEnvironment = (): NodeJS.ProcessEnv => ({
   NODE_ENV: "development",
   AGENTIC_REVIEW_HOST: "127.0.0.1",
-  AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH: "true",
+  AGENTIC_REVIEW_ALLOW_INSECURE_HTTP: "true",
 });
 
 afterEach(async () => {
@@ -146,6 +146,10 @@ describe("loadConfig Phase 1 integrations", () => {
       expect(example).toContain(`${name}=`);
     }
     expect(example).toContain("Neither tree may equal or");
+    expect(example).toContain("AGENTIC_REVIEW_ALLOW_INSECURE_HTTP=true");
+    expect(example).not.toContain("AGENTIC_REVIEW_TLS_CLIENT_CA_PATH");
+    expect(example).not.toContain("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON");
+    expect(example).not.toContain("AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH");
   });
 
   it("rejects integer settings with trailing text or values outside their purpose limit", () => {
@@ -237,12 +241,7 @@ describe("loadConfig Phase 1 integrations", () => {
     const directory = await temporaryDirectory();
     const keyPath = join(directory, "server.key");
     const certPath = join(directory, "server.crt");
-    const caPath = join(directory, "worker-ca.crt");
-    await Promise.all([
-      writeFile(keyPath, "key", "utf8"),
-      writeFile(certPath, "cert", "utf8"),
-      writeFile(caPath, "ca", "utf8"),
-    ]);
+    await Promise.all([writeFile(keyPath, "key", "utf8"), writeFile(certPath, "cert", "utf8")]);
 
     expect(() =>
       loadConfig({
@@ -250,10 +249,60 @@ describe("loadConfig Phase 1 integrations", () => {
         AGENTIC_REVIEW_HOST: "0.0.0.0",
         AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
         AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
-        AGENTIC_REVIEW_TLS_CLIENT_CA_PATH: caPath,
-        AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON: `{"${"a".repeat(64)}":"worker-1"}`,
       }),
     ).toThrow(/OPERATOR_AUTH_MODE=oidc/u);
+  });
+
+  it("requires explicit loopback development HTTP and never configures client TLS", async () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "development",
+        AGENTIC_REVIEW_HOST: "127.0.0.1",
+      }),
+    ).toThrow(/ALLOW_INSECURE_HTTP=true/u);
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "development",
+        AGENTIC_REVIEW_HOST: "0.0.0.0",
+        AGENTIC_REVIEW_ALLOW_INSECURE_HTTP: "true",
+      }),
+    ).toThrow(/loopback/u);
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "production",
+        AGENTIC_REVIEW_HOST: "0.0.0.0",
+        AGENTIC_REVIEW_ALLOW_INSECURE_HTTP: "true",
+      }),
+    ).toThrow(/cannot be enabled in production/u);
+
+    const directory = await temporaryDirectory();
+    const keyPath = join(directory, "server.key");
+    const certPath = join(directory, "server.crt");
+    await Promise.all([writeFile(keyPath, "key", "utf8"), writeFile(certPath, "cert", "utf8")]);
+    const config = loadConfig({
+      NODE_ENV: "development",
+      AGENTIC_REVIEW_HOST: "0.0.0.0",
+      AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
+      AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
+    });
+    expect(config.allowInsecureHttp).toBe(false);
+    expect(config.tls).toMatchObject({ minVersion: "TLSv1.2" });
+    expect(config.tls).not.toHaveProperty("ca");
+    expect(config.tls).not.toHaveProperty("requestCert");
+    expect(config.tls).not.toHaveProperty("rejectUnauthorized");
+  });
+
+  it.each([
+    "AGENTIC_REVIEW_TLS_CLIENT_CA_PATH",
+    "AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON",
+    "AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH",
+  ])("rejects the legacy Worker mTLS setting %s", (name) => {
+    expect(() =>
+      loadConfig({
+        ...developmentEnvironment(),
+        [name]: "legacy-value",
+      }),
+    ).toThrow(/no longer supported by Worker Token authentication/u);
   });
 });
 
