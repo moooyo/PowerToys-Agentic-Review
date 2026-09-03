@@ -62,6 +62,11 @@ const testPublicKey = createPublicKey(testPrivateKey);
 const issuerSpki = testPublicKey.export({ format: "der", type: "spki" });
 const issuerKeyId = deriveServerBindingIssuerKeyIdV1(issuerSpki);
 const serverBindingAuthoritySubpath = "@agentic-review/contracts/server-binding-authority-v1";
+const serverBindingSignerHostFixtureSuffix =
+  "/apps/server/testdata/server-binding-signer-host-fixture-v1.mjs";
+const serverBindingSignerHostFixtureBasename = "server-binding-signer-host-fixture-v1.mjs";
+const serverBindingSignerHostFixtureSha256 =
+  "3410ff22fcea8ed82eedd4267c3092c14da3ee8c64d7d5346c0ceb62981ad0e0";
 const serverBindingAuthorityConsumerAllowlist = [
   "/apps/server/src/database/server-binding-persistence-v1.ts",
   "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
@@ -86,7 +91,14 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
     ],
   ],
   ["server-binding-signer-host-client-v1", []],
-  ["server-binding-signer-host-protocol-v1", []],
+  [
+    "server-binding-signer-host-profile-v1",
+    ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts"],
+  ],
+  [
+    "server-binding-signer-host-protocol-v1",
+    ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts"],
+  ],
   [
     "server-binding-signer-v1",
     [
@@ -101,7 +113,17 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
   ["server-binding-trust-profile-v1", ["/apps/server/src/enrollment/server-binding-signer-v1.ts"]],
 ]);
 const sensitiveServerBindingConsumerImports = new Map<string, readonly string[]>([
-  ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts", []],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+    [
+      "./server-binding-signer-host-profile-v1.js|ServerBindingSignerHostProfileV1:ServerBindingSignerHostProfileV1:type,loadProductionServerBindingSignerHostProfileV1:loadProductionServerBindingSignerHostProfileV1:value",
+      "./server-binding-signer-host-protocol-v1.js|SERVER_BINDING_SIGNER_HOST_FORCED_EXIT_TIMEOUT_MILLISECONDS:SERVER_BINDING_SIGNER_HOST_FORCED_EXIT_TIMEOUT_MILLISECONDS:value,SERVER_BINDING_SIGNER_HOST_GRACEFUL_SHUTDOWN_TIMEOUT_MILLISECONDS:SERVER_BINDING_SIGNER_HOST_GRACEFUL_SHUTDOWN_TIMEOUT_MILLISECONDS:value,SERVER_BINDING_SIGNER_HOST_HANDSHAKE_TIMEOUT_MILLISECONDS:SERVER_BINDING_SIGNER_HOST_HANDSHAKE_TIMEOUT_MILLISECONDS:value,SERVER_BINDING_SIGNER_HOST_MAXIMUM_BUFFERED_STDERR_BYTES:SERVER_BINDING_SIGNER_HOST_MAXIMUM_BUFFERED_STDERR_BYTES:value,SERVER_BINDING_SIGNER_HOST_PROTOCOL_VERSION:SERVER_BINDING_SIGNER_HOST_PROTOCOL_VERSION:value,SERVER_BINDING_SIGNER_HOST_SIGNING_TIMEOUT_MILLISECONDS:SERVER_BINDING_SIGNER_HOST_SIGNING_TIMEOUT_MILLISECONDS:value,ServerBindingSignerHostFrameDecoderV1:ServerBindingSignerHostFrameDecoderV1:value,ServerBindingSignerHostOperationV1:ServerBindingSignerHostOperationV1:type,ServerBindingSignerHostParentMessageV1:ServerBindingSignerHostParentMessageV1:type,frameServerBindingSignerHostPayloadV1:frameServerBindingSignerHostPayloadV1:value,marshalServerBindingSignerHostParentMessageV1:marshalServerBindingSignerHostParentMessageV1:value,parseServerBindingSignerHostChildMessageV1:parseServerBindingSignerHostChildMessageV1:value",
+      "node:child_process|ChildProcessWithoutNullStreams:ChildProcessWithoutNullStreams:type,spawn:spawnSignerHostProcess:value",
+      "node:crypto|randomUUID:randomUUID:value",
+      "node:path|isAbsolute:isAbsolute:value",
+    ],
+  ],
+  ["/apps/server/src/enrollment/server-binding-signer-host-profile-v1.ts", []],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
     [
@@ -213,16 +235,23 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
     "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
     [
       "ServerBindingSignerHostCleanupStateV1",
+      "ServerBindingSignerHostClientErrorV1",
       "ServerBindingSignerHostClientErrorCodeV1",
       "ServerBindingSignerHostClientEventV1",
       "ServerBindingSignerHostClientStateV1",
+      "ServerBindingSignerHostDirectClientV1",
       "ServerBindingSignerHostLogicalStateV1",
       "ServerBindingSignerHostStateErrorCodeV1",
       "ServerBindingSignerHostStateErrorV1",
       "SERVER_BINDING_SIGNER_HOST_MAXIMUM_ASSIGNED_REQUEST_IDS",
+      "createServerBindingSignerHostDirectClientV1",
       "createServerBindingSignerHostClientStateV1",
       "reduceServerBindingSignerHostClientStateV1",
     ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-profile-v1.ts",
+    ["ServerBindingSignerHostProfileV1", "loadProductionServerBindingSignerHostProfileV1"],
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
@@ -314,7 +343,11 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
-    "3abbf2d6034ce3b5f76ee30a82a5716ccbcb8dbb9c061d9e009c7a29bb793ed5",
+    "655c58067cd8b125a6cf32675efc9bbf07111349f783d2071feadbfb0a9c687d",
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-host-profile-v1.ts",
+    "7d69bce8d28832a741c1d3419fb9320a18ab68bb206977a3df9b0a9fa1dead42",
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
@@ -361,6 +394,26 @@ describe("dormant Server binding authority v1 wire contract", () => {
     expect(serverPackageValue).not.toHaveProperty("exports");
     expect(serverTsconfigValue.compilerOptions ?? {}).not.toHaveProperty("paths");
     expect(rootTsconfigValue.compilerOptions ?? {}).not.toHaveProperty("paths");
+    const signerHostFixture = resolve(
+      repositoryRoot,
+      "apps",
+      "server",
+      "testdata",
+      serverBindingSignerHostFixtureBasename,
+    );
+    const signerHostFixtureSource = readFileSync(signerHostFixture, "utf8").replaceAll(
+      "\r\n",
+      "\n",
+    );
+    expect(signerHostFixtureSource).not.toContain("\r");
+    expect(signerHostFixtureSource).not.toContain("\uFEFF");
+    expect(createHash("sha256").update(signerHostFixtureSource, "utf8").digest("hex")).toBe(
+      serverBindingSignerHostFixtureSha256,
+    );
+    expect(JSON.stringify(serverPackageValue)).not.toContain(
+      serverBindingSignerHostFixtureBasename,
+    );
+    expect(JSON.stringify(serverTsconfigValue)).not.toContain("testdata");
     expect(packageValue.exports).toEqual({
       ".": {
         types: "./dist/index.d.ts",
@@ -530,6 +583,11 @@ describe("dormant Server binding authority v1 wire contract", () => {
         source:
           'import { deriveServerBindingIssuerKeyIdV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
       },
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+        source:
+          'import { type ChildProcessWithoutNullStreams, spawn as spawnSignerHostProcess } from "node:child_process"; const emptySignerHostEnvironment = Object.freeze(Object.create(null)); class DirectSignerHostOwner { async #initialize() { const profile = { executablePath: "x", arguments: [], workingDirectory: "y" }; let child: ChildProcessWithoutNullStreams; child = spawnSignerHostProcess(profile.executablePath, [...profile.arguments], { cwd: profile.workingDirectory, detached: false, env: emptySignerHostEnvironment, shell: false, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, }); void child; } }',
+      },
     ];
     const benignInspections = inspectProductionModules(benignSources);
     for (const benign of benignSources) {
@@ -556,6 +614,11 @@ describe("dormant Server binding authority v1 wire contract", () => {
         fileName: "apps/worker/src/execution/process-host-client.ts",
         source:
           'import { type ChildProcessWithoutNullStreams, spawn as spawnChildProcess } from "node:child_process"; const defaultSpawnProcess = (executable, argumentsList, options) => spawnChildProcess(executable, [...argumentsList], { cwd: options.cwd, env: options.env, shell: false, windowsHide: true, detached: false, stdio: ["pipe", "pipe", "pipe"], }); spawnChildProcess(dynamicPath, [], {});',
+      },
+      {
+        fileName: "apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+        source:
+          'import { type ChildProcessWithoutNullStreams, spawn as spawnSignerHostProcess } from "node:child_process"; class DirectSignerHostOwner { async #initialize() { const profile = { executablePath: "x", arguments: [], workingDirectory: "y", environment: process.env }; let child: ChildProcessWithoutNullStreams; child = spawnSignerHostProcess(profile.executablePath, [...profile.arguments], { cwd: profile.workingDirectory, detached: false, env: profile.environment, shell: false, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, }); void child; } }',
       },
     ];
     const driftInspections = inspectProductionModules(allowlistDriftSources);
@@ -589,6 +652,16 @@ describe("dormant Server binding authority v1 wire contract", () => {
         expected: "production import of a test bridge",
         fileName: resolve("apps/server/src/main.ts"),
         source: 'import "./enrollment/signer-bridge.test.js";',
+      },
+      {
+        expected: "production signer-host fixture reference",
+        fileName: resolve("apps/server/src/main.ts"),
+        source: 'import "../testdata/server-binding-signer-host-fixture-v1.mjs";',
+      },
+      {
+        expected: "production signer-host fixture scenario selector",
+        fileName: resolve("apps/server/src/main.ts"),
+        source: 'const signerHostMode = "--fixture-scenario=normal"; void signerHostMode;',
       },
     ];
     for (const mutation of pureModuleMutations) {
@@ -1640,6 +1713,7 @@ function inspectProductionSourceFile(
   let allowedWorkerCalls = 0;
   let allowedSpawnSyncCalls = 0;
   let allowedProcessHostSpawnCalls = 0;
+  let allowedSignerHostSpawnCalls = 0;
   const inspectModuleSpecifier = (specifier: ts.Expression): void => {
     if (!ts.isStringLiteralLikeNode(specifier)) return;
     const candidates = [specifier.text, decodeStaticLiteral(specifier.getText(sourceFile))].map(
@@ -1700,6 +1774,12 @@ function inspectProductionSourceFile(
       !isAllowedServerBindingAuthorityImport(node, normalizedFileName)
     ) {
       violations.add("server binding authority sensitive literal outside exact S1 allowlist");
+    }
+    if (staticValue?.toLowerCase().includes(serverBindingSignerHostFixtureBasename) === true) {
+      violations.add("production signer-host fixture reference");
+    }
+    if (staticValue?.toLowerCase().includes("--fixture-scenario=") === true) {
+      violations.add("production signer-host fixture scenario selector");
     }
     if (ts.isIdentifier(node)) {
       const identifier = node.text.toLowerCase();
@@ -1814,6 +1894,13 @@ function inspectProductionSourceFile(
           violations.add("spawnChildProcess loader outside exact allowlist");
         }
       }
+      if (name === "spawnsignerhostprocess") {
+        if (isAllowedSignerHostSpawnCall(node, sourceFile, normalizedFileName)) {
+          allowedSignerHostSpawnCalls += 1;
+        } else {
+          violations.add("spawnSignerHostProcess loader outside exact allowlist");
+        }
+      }
     }
     if (ts.isNewExpression(node) && calledExpressionName(node.expression) === "worker") {
       if (isAllowedWorkerCall(node, sourceFile, normalizedFileName)) {
@@ -1850,10 +1937,17 @@ function inspectProductionSourceFile(
   )
     ? 1
     : 0;
+  const expectedSignerHostSpawnCalls = matchesNormalizedFileSuffix(
+    normalizedFileName,
+    "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+  )
+    ? 1
+    : 0;
   if (
     allowedWorkerCalls !== expectedWorkerCalls ||
     allowedSpawnSyncCalls !== expectedSpawnSyncCalls ||
-    allowedProcessHostSpawnCalls !== expectedProcessHostSpawnCalls
+    allowedProcessHostSpawnCalls !== expectedProcessHostSpawnCalls ||
+    allowedSignerHostSpawnCalls !== expectedSignerHostSpawnCalls
   ) {
     violations.add("exact loader allowlist call count mismatch");
   }
@@ -2221,7 +2315,7 @@ function inspectSignerHostA1PureModule(sourceFile: ts.SourceFile): string[] {
   return [...violations].sort();
 }
 
-type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "worker";
+type ImportedLoaderKind = "process-host-spawn" | "signer-host-spawn" | "spawn-sync" | "worker";
 
 function collectImportedLoaderBindings(
   sourceFile: ts.SourceFile,
@@ -2248,7 +2342,14 @@ function collectImportedLoaderBindings(
       }
       if (moduleName === "node:child_process" || moduleName === "child_process") {
         if (imported === "spawnsync") bindings.set(element.name.text, "spawn-sync");
-        if (imported === "spawn") bindings.set(element.name.text, "process-host-spawn");
+        if (imported === "spawn") {
+          bindings.set(
+            element.name.text,
+            element.name.text === "spawnSignerHostProcess"
+              ? "signer-host-spawn"
+              : "process-host-spawn",
+          );
+        }
       }
     }
   }
@@ -2274,6 +2375,13 @@ function isAllowedImportedLoaderReference(
     parent.expression === identifier
   ) {
     return isAllowedProcessHostSpawnCall(parent, sourceFile, normalizedFileName);
+  }
+  if (
+    kind === "signer-host-spawn" &&
+    ts.isCallExpression(parent) &&
+    parent.expression === identifier
+  ) {
+    return isAllowedSignerHostSpawnCall(parent, sourceFile, normalizedFileName);
   }
   return false;
 }
@@ -2321,7 +2429,12 @@ function inspectLoaderImport(
       ? "spawnSync:spawnSync:value"
       : normalizedFileName.endsWith("/apps/worker/src/execution/process-host-client.ts")
         ? "ChildProcessWithoutNullStreams:ChildProcessWithoutNullStreams:type,spawn:spawnChildProcess:value"
-        : undefined;
+        : matchesNormalizedFileSuffix(
+              normalizedFileName,
+              "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+            )
+          ? "ChildProcessWithoutNullStreams:ChildProcessWithoutNullStreams:type,spawn:spawnSignerHostProcess:value"
+          : undefined;
     if (expected === undefined || importedBindingSignature(declaration) !== expected) {
       violations.add("child_process import outside exact allowlist");
     }
@@ -2463,6 +2576,29 @@ function isAllowedProcessHostSpawnCall(
     compactNodeText(arrow, sourceFile) ===
       '(executable,argumentsList,options)=>spawnChildProcess(executable,[...argumentsList],{cwd:options.cwd,env:options.env,shell:false,windowsHide:true,detached:false,stdio:["pipe","pipe","pipe"],})'
   );
+}
+
+function isAllowedSignerHostSpawnCall(
+  expression: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  if (
+    !matchesNormalizedFileSuffix(
+      normalizedFileName,
+      "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+    ) ||
+    compactNodeText(expression, sourceFile) !==
+      'spawnSignerHostProcess(profile.executablePath,[...profile.arguments],{cwd:profile.workingDirectory,detached:false,env:emptySignerHostEnvironment,shell:false,stdio:["pipe","pipe","pipe"],windowsHide:true,})'
+  ) {
+    return false;
+  }
+  const method = findAncestor(expression, ts.isMethodDeclaration);
+  return method?.name.getText(sourceFile) === "#initialize";
+}
+
+function matchesNormalizedFileSuffix(normalizedFileName: string, suffix: string): boolean {
+  return normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix);
 }
 
 function compactNodeText(node: ts.Node, sourceFile: ts.SourceFile): string {
@@ -2622,6 +2758,9 @@ function productionSourceFiles(root: string): string[] {
         !/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
         /\.(?:spec|test)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name)
       ) {
+        continue;
+      }
+      if (path.replaceAll("\\", "/").toLowerCase().endsWith(serverBindingSignerHostFixtureSuffix)) {
         continue;
       }
       files.push(path);
