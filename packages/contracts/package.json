@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./server-binding-authority-v1": {
+      "types": "./dist/server-binding-authority-v1.d.ts",
+      "import": "./dist/server-binding-authority-v1.js"
     }
   },
   "files": [

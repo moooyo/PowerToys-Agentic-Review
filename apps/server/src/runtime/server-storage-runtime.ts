@@ -8,6 +8,14 @@ import {
 import type { ArtifactRuntimeConfig } from "../config.js";
 import { DatabaseClient } from "../database/database-client.js";
 import { DatabaseOwnerLock } from "../database/owner-lock.js";
+import {
+  createServerBindingTrustedIssuerDescriptorFromSignerV1,
+  ServerBindingCoordinatorV1,
+} from "../enrollment/server-binding-coordinator-v1.js";
+import {
+  closeUnadoptedServerBindingSignerV1,
+  type ServerBindingSignerContextV1,
+} from "../enrollment/server-binding-signer-v1.js";
 
 const policy = Object.freeze({
   storageCloseTimeoutMilliseconds: 30_000,
@@ -26,7 +34,64 @@ const policy = Object.freeze({
   reconciliationMaximumRetryDelaySeconds: 300,
   initialSweepTimeoutMilliseconds: 120_000,
   constructionOwnerExitTimeoutMilliseconds: 30_000,
+  bindingSignerCleanupTimeoutMilliseconds: 30_000,
 });
+const quarantinedDatabaseOwnerLocks = new Set<DatabaseOwnerLock>();
+
+const quarantineDatabaseOwnerLockUntilExit = (
+  ownerLock: DatabaseOwnerLock,
+  ownerExit: Promise<number>,
+): void => {
+  quarantinedDatabaseOwnerLocks.add(ownerLock);
+  void ownerExit.then(
+    async (exitCode) => {
+      if (!Number.isSafeInteger(exitCode) || exitCode < 0) return;
+      try {
+        await ownerLock.close();
+        quarantinedDatabaseOwnerLocks.delete(ownerLock);
+      } catch {
+        // Retain the lock until process termination if explicit release cannot be proven.
+      }
+    },
+    () => {
+      // Retain the lock until process termination when owner exit cannot be proven.
+    },
+  );
+};
+
+const quarantineRawOwnersUntilStorageExit = (
+  ownerLock: DatabaseOwnerLock,
+  storageOwnerExit: Promise<number>,
+  database: DatabaseClient | undefined,
+  failedDatabaseOwnerExit: Promise<number> | undefined,
+): void => {
+  quarantinedDatabaseOwnerLocks.add(ownerLock);
+  void storageOwnerExit.then(
+    async (exitCode) => {
+      if (!Number.isSafeInteger(exitCode) || exitCode < 0) return;
+      if (database !== undefined) {
+        try {
+          await database.close();
+        } catch {
+          quarantineDatabaseOwnerLockUntilExit(ownerLock, database.ownerExit);
+          return;
+        }
+      } else if (failedDatabaseOwnerExit !== undefined) {
+        quarantineDatabaseOwnerLockUntilExit(ownerLock, failedDatabaseOwnerExit);
+        return;
+      }
+      try {
+        await ownerLock.close();
+        quarantinedDatabaseOwnerLocks.delete(ownerLock);
+      } catch {
+        // Retain the lock until process termination if explicit release cannot be proven.
+      }
+    },
+    () => {
+      // Retain the lock until process termination when storage exit cannot be proven.
+    },
+  );
+};
 
 export interface ServerStorageRuntime {
   readonly database: DatabaseClient;
@@ -42,6 +107,7 @@ export interface CreateServerStorageRuntimeOptions {
   readonly databasePath: string;
   readonly migrationsDirectory: string;
   readonly artifactStorage: ArtifactRuntimeConfig;
+  readonly serverBindingSigner?: Readonly<ServerBindingSignerContextV1>;
   readonly onFailStop: (error: ArtifactTransactionCoordinatorError) => void | Promise<void>;
 }
 
@@ -75,10 +141,12 @@ const snapshotOptions = (
   if (typeof onFailStop !== "function") {
     throw new TypeError("Server storage fail-stop observer must be a function.");
   }
+  const serverBindingSigner = options.serverBindingSigner;
   return Object.freeze({
     databasePath,
     migrationsDirectory,
     artifactStorage: Object.freeze({ rootPath, capacity: capacitySnapshot }),
+    ...(serverBindingSigner === undefined ? {} : { serverBindingSigner }),
     onFailStop,
   });
 };
@@ -113,6 +181,7 @@ const closeRawOwners = async (
   storage: ArtifactStorageClient | undefined,
   failedStorageOwnerExit: Promise<number> | undefined,
   database: DatabaseClient | undefined,
+  failedDatabaseOwnerExit: Promise<number> | undefined,
   ownerLock: DatabaseOwnerLock | undefined,
 ): Promise<unknown[]> => {
   const errors: unknown[] = [];
@@ -140,15 +209,47 @@ const closeRawOwners = async (
     }
   }
 
-  if (!storageExitProven) return errors;
+  if (!storageExitProven) {
+    const unresolvedStorageExit = storage?.ownerExit ?? failedStorageOwnerExit;
+    if (ownerLock !== undefined && unresolvedStorageExit !== undefined) {
+      quarantineRawOwnersUntilStorageExit(
+        ownerLock,
+        unresolvedStorageExit,
+        database,
+        failedDatabaseOwnerExit,
+      );
+    }
+    return errors;
+  }
 
+  let databaseExitProven = database === undefined && failedDatabaseOwnerExit === undefined;
   if (database !== undefined) {
     try {
       await database.close();
+      databaseExitProven = true;
     } catch (error) {
       errors.push(error);
-      return errors;
+      try {
+        await waitForOwnerExit(database.ownerExit);
+        databaseExitProven = true;
+      } catch (exitError) {
+        errors.push(exitError);
+      }
     }
+  } else if (failedDatabaseOwnerExit !== undefined) {
+    try {
+      await waitForOwnerExit(failedDatabaseOwnerExit);
+      databaseExitProven = true;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (!databaseExitProven) {
+    const unresolvedOwnerExit = database?.ownerExit ?? failedDatabaseOwnerExit;
+    if (ownerLock !== undefined && unresolvedOwnerExit !== undefined) {
+      quarantineDatabaseOwnerLockUntilExit(ownerLock, unresolvedOwnerExit);
+    }
+    return errors;
   }
   if (ownerLock !== undefined) {
     try {
@@ -181,6 +282,26 @@ const awaitInitialSweep = async (
   }
 };
 
+const closeUnadoptedSignerDuringStartup = async (
+  signer: Readonly<ServerBindingSignerContextV1>,
+): Promise<void> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      closeUnadoptedServerBindingSignerV1(signer),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Server binding signer startup cleanup timed out.")),
+          policy.bindingSignerCleanupTimeoutMilliseconds,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
+
 const throwStartupFailure = (error: unknown, cleanupErrors: readonly unknown[]): never => {
   if (cleanupErrors.length === 0) throw error;
   throw new AggregateError(
@@ -196,8 +317,10 @@ const createServerStorageRuntimeFromSnapshot = async (
 ): Promise<ServerStorageRuntime> => {
   let ownerLock: DatabaseOwnerLock | undefined;
   let database: DatabaseClient | undefined;
+  let failedDatabaseOwnerExit: Promise<number> | undefined;
   let storage: ArtifactStorageClient | undefined;
   let failedStorageOwnerExit: Promise<number> | undefined;
+  let serverBindingCoordinator: ServerBindingCoordinatorV1 | undefined;
   let coordinator: ArtifactTransactionCoordinator | undefined;
   let ownership: "untransferred" | "transferring" | "coordinator" = "untransferred";
 
@@ -206,8 +329,22 @@ const createServerStorageRuntimeFromSnapshot = async (
     database = await DatabaseClient.create({
       databasePath: ownerLock.databasePath,
       migrationsDirectory: snapshot.migrationsDirectory,
+      ...(snapshot.serverBindingSigner === undefined
+        ? {}
+        : {
+            serverBindingTrustedIssuer: createServerBindingTrustedIssuerDescriptorFromSignerV1(
+              snapshot.serverBindingSigner,
+            ),
+          }),
     });
     ownerLock.assertReady();
+    serverBindingCoordinator = new ServerBindingCoordinatorV1({
+      database: database.createServerBindingPersistenceDatabaseHandle(),
+      ...(snapshot.serverBindingSigner === undefined
+        ? {}
+        : { signer: snapshot.serverBindingSigner }),
+    });
+    await serverBindingCoordinator.open();
     try {
       storage = await ArtifactStorageClient.create({
         storage: {
@@ -253,6 +390,7 @@ const createServerStorageRuntimeFromSnapshot = async (
     await awaitInitialSweep(coordinator.ready, initialSweepTimeoutMilliseconds);
 
     const activeCoordinator = coordinator;
+    const activeServerBindingCoordinator = serverBindingCoordinator;
     const activeDatabase = database;
     const artifactTransactions = Object.freeze({
       createArtifactUpload: (input, signal) =>
@@ -267,6 +405,25 @@ const createServerStorageRuntimeFromSnapshot = async (
     const artifactCompletion = Object.freeze({
       completeArtifactRun: (input, signal) => activeCoordinator.completeArtifactRun(input, signal),
     } satisfies ArtifactCompletionPort);
+    let closePromise: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closePromise ??= (async () => {
+        const bindingClose = activeServerBindingCoordinator.close();
+        const artifactClose = bindingClose.then(
+          () => activeCoordinator.close(),
+          () => activeCoordinator.close(),
+        );
+        const settled = await Promise.allSettled([bindingClose, artifactClose]);
+        const errors = settled.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+          throw new AggregateError(errors, "Server storage owners failed to close.");
+        }
+      })();
+      return closePromise;
+    };
     return Object.freeze({
       database: activeDatabase,
       artifactReadiness: Object.freeze({
@@ -274,24 +431,59 @@ const createServerStorageRuntimeFromSnapshot = async (
       }),
       artifactTransactions,
       artifactCompletion,
-      close: () => activeCoordinator.close(),
+      close,
     });
   } catch (error) {
+    if (
+      database === undefined &&
+      error instanceof Error &&
+      "ownerExit" in error &&
+      error.ownerExit instanceof Promise
+    ) {
+      failedDatabaseOwnerExit = error.ownerExit as Promise<number>;
+    }
     if (ownership === "coordinator" && coordinator !== undefined) {
-      try {
-        await coordinator.close();
-      } catch (cleanupError) {
-        throwStartupFailure(error, [cleanupError]);
-      }
+      const cleanupCoordinator = coordinator;
+      const bindingClose = serverBindingCoordinator?.close() ?? Promise.resolve();
+      const artifactClose = bindingClose.then(
+        () => cleanupCoordinator.close(),
+        () => cleanupCoordinator.close(),
+      );
+      const settled = await Promise.allSettled([bindingClose, artifactClose]);
+      const cleanupErrors = settled.flatMap((result) => {
+        if (result.status !== "rejected") return [];
+        if (result.reason === error) return [];
+        return [result.reason];
+      });
+      if (cleanupErrors.length !== 0) throwStartupFailure(error, cleanupErrors);
       throw error;
+    }
+    const coordinatorCleanupErrors: unknown[] = [];
+    if (serverBindingCoordinator !== undefined) {
+      try {
+        await serverBindingCoordinator.close();
+      } catch (cleanupError) {
+        if (cleanupError !== error) {
+          coordinatorCleanupErrors.push(cleanupError);
+        }
+      }
+    } else if (snapshot.serverBindingSigner !== undefined) {
+      try {
+        await closeUnadoptedSignerDuringStartup(snapshot.serverBindingSigner);
+      } catch (cleanupError) {
+        if (cleanupError !== error) {
+          coordinatorCleanupErrors.push(cleanupError);
+        }
+      }
     }
     const cleanupErrors = await closeRawOwners(
       storage,
       failedStorageOwnerExit,
       database,
+      failedDatabaseOwnerExit,
       ownerLock,
     );
-    return throwStartupFailure(error, cleanupErrors);
+    return throwStartupFailure(error, [...coordinatorCleanupErrors, ...cleanupErrors]);
   }
 };
 
