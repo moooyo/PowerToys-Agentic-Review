@@ -5,16 +5,20 @@ package outerpackage
 import "errors"
 
 const (
-	IndexSchemaVersion     = uint32(1)
-	IndexProfileID         = "agentic-review-worker-outer-package-v1"
-	SignatureSchemaVersion = uint32(1)
-	SignatureAlgorithm     = "ecdsa-p256-sha256-p1363-low-s"
-	MaximumIndexBytes      = 8 * 1024 * 1024
-	MaximumEnvelopeBytes   = 4 * 1024
-	MaximumPayloads        = 8_200
-	MaximumPathBytes       = 4_096
-	MaximumPayloadBytes    = uint64(8 * 1024 * 1024 * 1024)
-	MaximumTotalBytes      = uint64(32 * 1024 * 1024 * 1024)
+	// IndexSchemaVersion and IndexProfileID are the immutable historical mTLS profile.
+	IndexSchemaVersion = uint32(1)
+	IndexProfileID     = "agentic-review-worker-outer-package-v1"
+	// BearerTokenIndexSchemaVersion and BearerTokenIndexProfileID select the Token-aware profile.
+	BearerTokenIndexSchemaVersion = uint32(2)
+	BearerTokenIndexProfileID     = "agentic-review-worker-outer-package-v2"
+	SignatureSchemaVersion        = uint32(1)
+	SignatureAlgorithm            = "ecdsa-p256-sha256-p1363-low-s"
+	MaximumIndexBytes             = 8 * 1024 * 1024
+	MaximumEnvelopeBytes          = 4 * 1024
+	MaximumPayloads               = 8_200
+	MaximumPathBytes              = 4_096
+	MaximumPayloadBytes           = uint64(8 * 1024 * 1024 * 1024)
+	MaximumTotalBytes             = uint64(32 * 1024 * 1024 * 1024)
 
 	PackageIndexPath            = `package-index.json`
 	SignatureEnvelopePath       = `package-index.signature.json`
@@ -124,7 +128,7 @@ type Payload struct {
 type Index struct {
 	InstallationID                       string                    `json:"installationId"`
 	LocalAuthorityCNG                    LocalAuthorityCNGIdentity `json:"localAuthorityCng"`
-	MTLSClientCredential                 MTLSCredentialIdentity    `json:"mtlsClientCredential"`
+	MTLSClientCredential                 *MTLSCredentialIdentity   `json:"mtlsClientCredential,omitempty"`
 	NodeSpecificLocalAuthorityPublicSPKI NodeSpecificSPKI          `json:"nodeSpecificLocalAuthorityPublicKeySpki"`
 	PackageID                            string                    `json:"packageId"`
 	Payloads                             []Payload                 `json:"payloads"`
@@ -153,6 +157,18 @@ type BuildOptions struct {
 	TargetRoots          TargetRoots
 	ControlBootstrap     BootstrapPayload
 	ExecutorBootstrap    BootstrapPayload
+}
+
+// BearerTokenBuildOptions contains the non-secret inputs for the schema-v4 package profile. The
+// profile has no credential field and rejects Token-shaped values in every signed string.
+type BearerTokenBuildOptions struct {
+	PackageID         string
+	InstallationID    string
+	WorkerNodeID      string
+	LocalAuthorityCNG LocalAuthorityCNGIdentity
+	TargetRoots       TargetRoots
+	ControlBootstrap  BootstrapPayload
+	ExecutorBootstrap BootstrapPayload
 }
 
 type SignatureEnvelope struct {

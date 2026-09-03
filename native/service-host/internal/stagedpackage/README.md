@@ -1,18 +1,16 @@
-# Handle-Bound Staged Package Verification v1
+# Handle-Bound Staged Package Verification
 
 `stagedpackage.Verify` is the only production entry point. On Windows it accepts one canonical
 absolute staging-root path and opens that path from its drive root one component at a time. It does
 not accept a file inventory, public key, signature verifier, ACL callback, or preconstructed
 admission plan.
 
-ADR 0025 supersedes only the Worker mTLS credential fields in the exact staged-package profile
-described below. They remain immutable historical schema-v3 bindings, not current Worker
-authentication or future production gates. The local capability-authority CNG/SPKI, detached
-package signature and compiled `outertrust`, and Authenticode boundaries remain unchanged. A
-Token-aware replacement requires a new versioned profile. ServiceHost bootstrap schema v4 is
-therefore rejected by this staged-package v1 chain. The plaintext Worker Token remains outside the
-package and staged trees in the fixed Control data-root file, and its SHA-256 digest exists only in
-the Server database.
+The verifier preserves historical outer-package v1/schema-v3 admission and also verifies the exact
+outer-package v2/schema-v4 profile. The plaintext Worker Token remains outside the package and staged
+trees in the fixed Control data-root file, and its SHA-256 digest exists only in the Server database.
+`SelectBearerTokenInstallerV2` is the mandatory typed gate for a future v2 installer consumer; it
+rejects v1 evidence, is non-serializable, revalidates the retained closure, and owns the matching
+`Close` path.
 
 The volume root and staging ancestors use the closed ambient `winacl` policy. The staging root and
 every descendant use the closed managed trusted-configuration policy: SYSTEM and Administrators
@@ -52,9 +50,10 @@ and later validation are also linearized with the `winfile` process cleanup quar
 The evidence is a retained observation of staged bytes. It is not installation, physical target
 placement, CNG, certificate, SCM, Claim, or execution evidence, has no production consumer, and
 refuses JSON serialization. Signed `packageId`, `installationId`, target roots, CNG identity, and
-mTLS identity are cross-bound to the bootstrap fields that exist, but this verifier does not inspect
-the target filesystem, CNG provider, certificate store, or private-key ACL. It therefore cannot
-claim that staged directories already occupy the signed target roots.
+profile-specific authentication selection are cross-bound to the bootstrap fields that exist, but
+this verifier does not inspect the target filesystem, CNG provider, certificate store, or
+private-key ACL. It therefore cannot claim that staged directories already occupy the signed target
+roots.
 
 Ordinary builds contain no compiled outer signer and fail closed during admission. Native Windows
 Lab A remains blocked until a provisioned fixed-NTFS staging fixture exists with the exact managed

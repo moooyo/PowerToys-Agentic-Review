@@ -4642,46 +4642,22 @@ const attachTestDatabaseClient = async (
   return connecting;
 };
 
-const retiredServerBindingOperations = [
-  "claimServerBindingAuthorizationV1",
-  "commitServerBindingReceiptV1",
-  "confirmServerBindingRecordV1",
-  "createServerBindingAuthorizationV1",
-  "initializeServerBindingIssuerV1",
-  "readServerBindingActiveSnapshotV1",
-  "readServerBindingRecoveryReceiptV1",
-  "recheckServerBindingActiveSnapshotV1",
-  "revokeServerBindingV1",
-] as const;
+describe("DatabaseClient transport failures", () => {
+  it.skipIf(process.platform === "win32")(
+    "fails closed for an unknown database operation",
+    async () => {
+      const { client } = await createFixture(false);
 
-describe("DatabaseClient retired operations and transport failures", () => {
-  it("rejects every retired Server binding operation before reading or sending input", async () => {
-    const worker = new DatabaseWorkerTestTransport();
-    const client = await attachTestDatabaseClient(worker);
-    let getterCalls = 0;
-    const input = Object.create(null) as Record<string, unknown>;
-    Object.defineProperty(input, "value", {
-      enumerable: true,
-      get() {
-        getterCalls += 1;
-        return 1;
-      },
-    });
-
-    for (const operation of retiredServerBindingOperations) {
-      const request = Reflect.apply(client.request, client, [operation, input]) as Promise<unknown>;
-      await expect(request).rejects.toMatchObject({
+      await expect(
+        Reflect.apply(client.request, client, ["unknownDatabaseOperation", {}]),
+      ).rejects.toMatchObject({
         name: "DatabaseRequestError",
-        code: "SERVER_BINDING_PERSISTENCE_RETIRED",
-        message: "Server binding persistence operations are retired.",
+        message: "Unsupported database operation.",
       });
-    }
-    expect(getterCalls).toBe(0);
-    expect(worker.posted).toEqual([]);
-    await expect(client.close()).resolves.toBeUndefined();
-  });
+    },
+  );
 
-  it("preserves fatal database Worker error codes without a retired capability", async () => {
+  it("preserves fatal database Worker error codes", async () => {
     const worker = new DatabaseWorkerTestTransport();
     const client = await attachTestDatabaseClient(worker);
 

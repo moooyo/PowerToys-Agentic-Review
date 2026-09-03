@@ -38,7 +38,7 @@ func validTestIndex(t testing.TB) outerpackage.Index {
 			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			SecurityDescriptorSHA256: strings.Repeat("5", 64),
 		},
-		MTLSClientCredential: outerpackage.MTLSCredentialIdentity{
+		MTLSClientCredential: &outerpackage.MTLSCredentialIdentity{
 			CertificateDERSHA256:               strings.Repeat("6", 64),
 			CertificateStore:                   outerpackage.MTLSCertificateStore,
 			PrivateKeySecurityDescriptorSHA256: strings.Repeat("7", 64),

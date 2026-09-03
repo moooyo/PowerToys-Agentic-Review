@@ -1,0 +1,1233 @@
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import * as ts from "typescript/unstable/ast";
+import { createVirtualFileSystem } from "typescript/unstable/fs";
+import { API as TypeScriptApi } from "typescript/unstable/sync";
+import { describe, expect, it } from "vitest";
+
+const serverBindingAuthoritySubpath = "@agentic-review/contracts/server-binding-authority-v1";
+const serverBindingSignerHostFixtureBasename = "server-binding-signer-host-fixture-v1.mjs";
+const serverBindingAuthorityConsumerAllowlist: readonly string[] = [];
+const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>([
+  ["server-binding-state-v1", []],
+  ["server-binding-persistence-v1", []],
+  ["server-binding-coordinator-v1", []],
+  ["server-binding-signer-host-client-v1", []],
+  ["server-binding-signer-host-provider-v1", []],
+  ["server-binding-signer-host-profile-v1", []],
+  ["server-binding-signer-host-protocol-v1", []],
+  ["server-binding-signer-v1", []],
+  ["server-binding-signer-provider-v1", []],
+  ["server-binding-trust-profile-v1", []],
+]);
+const retiredFileGroups = [
+  ["apps/server/src/database", /^server-binding-persistence-v1(?:\.|$)/u],
+  ["apps/server/src/enrollment", /^server-binding-/u],
+  ["apps/server/testdata", /^server-binding-/u],
+  ["native/service-host/internal/nodeenrollment", /\.go$/u],
+  ["native/service-host/internal/serverbindingauthorityv1", /\.go$/u],
+  ["packages/contracts/src", /^server-binding-authority-v1(?:\.|$)/u],
+  ["packages/contracts/dist", /^server-binding-authority-v1(?:\.|$)/u],
+  ["testdata", /^server-binding-authority-v1(?:\.|$)/u],
+] as const;
+const retiredDatabaseOperations = [
+  "claimServerBindingAuthorizationV1",
+  "commitServerBindingReceiptV1",
+  "confirmServerBindingRecordV1",
+  "createServerBindingAuthorizationV1",
+  "initializeServerBindingIssuerV1",
+  "readServerBindingActiveSnapshotV1",
+  "readServerBindingRecoveryReceiptV1",
+  "recheckServerBindingActiveSnapshotV1",
+  "revokeServerBindingV1",
+] as const;
+const retiredDatabaseTables = [
+  "server_binding_receipt_issuer",
+  "server_binding_authorizations",
+  "server_bindings",
+  "server_binding_revocations",
+] as const;
+// A future reviewed DROP-only cleanup migration must be named explicitly here before it may refer
+// to the retired tables. The allowlist is intentionally empty while migration 0012 is retained.
+const retiredTableMigrationAllowlist = new Set<string>();
+
+describe("production source boundaries", () => {
+  it("removes the retired Server binding island while preserving reviewed production surfaces", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const contractsPackage = JSON.parse(
+      readFileSync(join(repositoryRoot, "packages", "contracts", "package.json"), "utf8"),
+    ) as { readonly exports?: Readonly<Record<string, unknown>> };
+    expect(contractsPackage.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js",
+      },
+    });
+    for (const [directory, pattern] of retiredFileGroups) {
+      expect(readMatchingFileNames(join(repositoryRoot, directory), pattern), directory).toEqual(
+        [],
+      );
+    }
+    const migrationDocument = readFileSync(
+      join(repositoryRoot, "migrations", "0012_server_binding_persistence_v1.sql"),
+    );
+    expect(createHash("sha256").update(migrationDocument).digest("hex")).toBe(
+      "aeb61e4c1f2dedafe49977192a72ce7c626ae1bd1555cbe63cf5202ec23ded9f",
+    );
+    const migrationsDirectory = join(repositoryRoot, "migrations");
+    const laterMigrations = readdirSync(migrationsDirectory)
+      .filter((name) => /^\d{4}_.+\.sql$/u.test(name) && Number(name.slice(0, 4)) > 12)
+      .filter((name) => !retiredTableMigrationAllowlist.has(name));
+    for (const migration of laterMigrations) {
+      const source = readFileSync(join(migrationsDirectory, migration), "utf8");
+      for (const table of retiredDatabaseTables) {
+        expect(source.includes(table), `${migration}: ${table}`).toBe(false);
+      }
+    }
+
+    const serverPackage = JSON.parse(
+      readFileSync(join(repositoryRoot, "apps", "server", "package.json"), "utf8"),
+    ) as Readonly<Record<string, unknown>>;
+    const serverTsconfig = JSON.parse(
+      readFileSync(join(repositoryRoot, "apps", "server", "tsconfig.json"), "utf8"),
+    ) as { readonly compilerOptions?: Readonly<Record<string, unknown>> };
+    const rootTsconfig = JSON.parse(
+      readFileSync(join(repositoryRoot, "tsconfig.base.json"), "utf8"),
+    ) as { readonly compilerOptions?: Readonly<Record<string, unknown>> };
+    expect(serverPackage).not.toHaveProperty("imports");
+    expect(serverPackage).not.toHaveProperty("exports");
+    expect(serverTsconfig.compilerOptions ?? {}).not.toHaveProperty("paths");
+    expect(rootTsconfig.compilerOptions ?? {}).not.toHaveProperty("paths");
+
+    const productionSources = productionSourceFiles(repositoryRoot).map((fileName) => ({
+      fileName,
+      source: readFileSync(fileName, "utf8"),
+    }));
+    for (const operation of retiredDatabaseOperations) {
+      expect(
+        productionSources.some(({ source }) => source.includes(operation)),
+        operation,
+      ).toBe(false);
+    }
+    for (const table of retiredDatabaseTables) {
+      expect(
+        productionSources.some(({ source }) => source.includes(table)),
+        table,
+      ).toBe(false);
+    }
+
+    const inspections = inspectProductionModules(productionSources);
+    const offenders: string[] = [];
+    for (const { fileName } of productionSources) {
+      const violations = inspections.get(fileName) ?? ["AST inspection result unavailable"];
+      if (violations.length !== 0) {
+        offenders.push(
+          `${relative(repositoryRoot, fileName).replaceAll("\\", "/")}: ${violations.join(", ")}`,
+        );
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("rejects runtime loader escapes and attempts to restore retired binding modules", () => {
+    const mutations = [
+      'import "../feature.test.js";',
+      'import vm from "node:vm";',
+      'await import("./hidden.js");',
+      'require("./hidden.js");',
+      'createRequire(import.meta.url)("./hidden.js");',
+      'process.getBuiltinModule("node:fs");',
+      'process.dlopen(module, "addon.node");',
+      'Module._load("node:fs");',
+      'eval("ignored");',
+      'new Function("return 1");',
+      'new Worker(new URL("./hidden.js", import.meta.url));',
+      'spawn("node", ["hidden.js"]);',
+      'spawnSync("node", ["hidden.js"]);',
+      'execFile("node", ["hidden.js"]);',
+      'fork("./hidden.js");',
+      'import { parseServerBindingReceiptV1 } from "@agentic-review/contracts/server-binding-authority-v1";',
+      'import "../enrollment/server-binding-coordinator-v1.js";',
+      String.raw`await import("./server-binding-\\u0061uthority-v1.js");`,
+      'const hidden = globalThis["Function"]; void hidden;',
+      'const lookup = Reflect.get; Reflect.apply(lookup, Reflect, [process, "get" + "BuiltinModule"]);',
+    ];
+    const sources = mutations.map((source, index) => ({
+      fileName: `mutation-${index}.ts`,
+      source,
+    }));
+    const inspections = inspectProductionModules(sources);
+    for (const mutation of sources) {
+      expect(inspections.get(mutation.fileName)?.length ?? 0, mutation.source).toBeGreaterThan(0);
+    }
+  });
+
+  it("permits only the exact reviewed Worker and child-process launch sites", () => {
+    const allowed = [
+      {
+        fileName: resolve("test-fixtures/apps/server/src/artifacts/artifact-storage-client.ts"),
+        source:
+          'import { Worker, type WorkerOptions } from "node:worker_threads"; const defaultWorkerFactory = (filename, options) => new Worker(filename, options) as ArtifactStorageWorkerTransport;',
+      },
+      {
+        fileName: resolve("test-fixtures/apps/server/src/database/database-client.ts"),
+        source:
+          'import { Worker } from "node:worker_threads"; class DatabaseClient { constructor(options) { const workerUrl = import.meta.url.endsWith(".ts") ? new URL("./database-worker.ts", import.meta.url) : new URL("./database-worker.js", import.meta.url); this.worker = new Worker(workerUrl, { workerData: options }); } }',
+      },
+      {
+        fileName: resolve("test-fixtures/apps/worker/scripts/build-worker-bundles.mjs"),
+        source:
+          'import { spawnSync } from "node:child_process"; function typecheckWorker() { const typeScriptPackage = fileURLToPath(import.meta.resolve("typescript/package.json")); const compiler = resolve(dirname(typeScriptPackage), "bin/tsc"); spawnSync(process.execPath, [compiler, "-p", "tsconfig.json", "--noEmit"], { cwd: workerRoot, encoding: "utf8", windowsHide: true, }); }',
+      },
+      {
+        fileName: resolve("test-fixtures/apps/worker/src/execution/process-host-client.ts"),
+        source:
+          'import { type ChildProcessWithoutNullStreams, spawn as spawnChildProcess } from "node:child_process"; const defaultSpawnProcess = (executable, argumentsList, options) => spawnChildProcess(executable, [...argumentsList], { cwd: options.cwd, env: options.env, shell: false, windowsHide: true, detached: false, stdio: ["pipe", "pipe", "pipe"], });',
+      },
+    ];
+    const allowedInspections = inspectProductionModules(allowed);
+    for (const source of allowed) {
+      expect(allowedInspections.get(source.fileName), source.fileName).toEqual([]);
+    }
+
+    const drift = [
+      {
+        fileName: "apps/server/src/database/database-client.ts",
+        source:
+          'import { Worker } from "node:worker_threads"; const W = Worker; new W(new URL("./hidden.js", import.meta.url));',
+      },
+      {
+        fileName: "apps/worker/src/execution/process-host-client.ts",
+        source:
+          'import { spawn as spawnChildProcess } from "node:child_process"; spawnChildProcess.call(null, dynamicPath, [], {});',
+      },
+      {
+        fileName: "apps/server/src/main.ts",
+        source: 'import { spawn } from "node:child_process"; spawn("node", ["hidden.js"]);',
+      },
+    ];
+    const driftInspections = inspectProductionModules(drift);
+    for (const source of drift) {
+      expect(driftInspections.get(source.fileName)?.length ?? 0, source.fileName).toBeGreaterThan(
+        0,
+      );
+    }
+  });
+});
+
+function readMatchingFileNames(directory: string, pattern: RegExp): string[] {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && pattern.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
+  const modifiers = (node as ts.Node & { readonly modifiers?: readonly ts.Node[] }).modifiers;
+  return modifiers?.some((value) => value.kind === kind) ?? false;
+}
+
+interface AstSourceInput {
+  readonly fileName: string;
+  readonly source: string;
+}
+
+function inspectProductionModules(
+  sources: readonly AstSourceInput[],
+): ReadonlyMap<string, string[]> {
+  return withVirtualSourceFiles(sources, (sourceFiles) => {
+    const inspections = new Map<string, string[]>();
+    for (const source of sources) {
+      const sourceFile = sourceFiles.get(source.fileName);
+      if (sourceFile === undefined) throw new Error(`Missing virtual AST for ${source.fileName}.`);
+      inspections.set(source.fileName, inspectProductionSourceFile(sourceFile, source.fileName));
+    }
+    return inspections;
+  });
+}
+
+function isAllowedServerBindingAuthorityImport(node: ts.Node, normalizedFileName: string): boolean {
+  return (
+    ts.isStringLiteralLikeNode(node) &&
+    node.text === serverBindingAuthoritySubpath &&
+    ts.isImportDeclaration(node.parent) &&
+    node.parent.moduleSpecifier === node &&
+    serverBindingAuthorityConsumerAllowlist.some(
+      (suffix) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+    )
+  );
+}
+
+function inspectProductionSourceFile(
+  sourceFile: ts.SourceFile,
+  originalFileName: string,
+): string[] {
+  const violations = new Set<string>();
+  const normalizedFileName = originalFileName.replaceAll("\\", "/").toLowerCase();
+  const loaderBindings = collectImportedLoaderBindings(sourceFile);
+  const reflectGetAliases = collectReflectGetAliases(sourceFile);
+  if (reflectGetAliases.size !== 0) {
+    violations.add("Reflect.get loader-capable alias");
+  }
+  for (const violation of inspectSensitiveBindingExports(sourceFile)) {
+    violations.add(violation);
+  }
+  const allowedLoaderBindingReferences = new Map<string, number>();
+  let allowedWorkerCalls = 0;
+  let allowedSpawnSyncCalls = 0;
+  let allowedProcessHostSpawnCalls = 0;
+  const inspectModuleSpecifier = (specifier: ts.Expression): void => {
+    if (!ts.isStringLiteralLikeNode(specifier)) return;
+    const candidates = [specifier.text, decodeStaticLiteral(specifier.getText(sourceFile))].map(
+      (value) => value.replace(/^["'`]|["'`]$/gu, "").toLowerCase(),
+    );
+    if (
+      candidates.some((value) => value.includes("server-binding-authority-v1")) &&
+      !isAllowedServerBindingAuthorityImport(specifier, normalizedFileName)
+    ) {
+      violations.add("server binding authority import outside exact S1 allowlist");
+    }
+    for (const candidate of candidates) {
+      const normalizedCandidate = candidate.replaceAll("\\", "/");
+      if (
+        /(?:^|\/)[^/]+\.(?:spec|test|testing)(?:\.[cm]?[jt]sx?)?(?:[?#].*)?$/u.test(
+          normalizedCandidate,
+        )
+      ) {
+        violations.add("production import of a test bridge");
+      }
+      const moduleName = sensitiveServerBindingModuleName(candidate);
+      if (
+        moduleName !== undefined &&
+        !isAllowedSensitiveServerBindingConsumer(moduleName, normalizedFileName)
+      ) {
+        violations.add(`${moduleName} import outside exact S1 dependency allowlist`);
+      }
+    }
+    if (
+      candidates.some(
+        (value) =>
+          value === "module" ||
+          value === "node:module" ||
+          value === "vm" ||
+          value.startsWith("node:vm"),
+      )
+    ) {
+      violations.add("runtime loader module import");
+    }
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && findAncestor(node, ts.isImportDeclaration) === undefined) {
+      const loaderKind = loaderBindings.get(node.text);
+      if (loaderKind !== undefined) {
+        if (isAllowedImportedLoaderReference(node, loaderKind, sourceFile, normalizedFileName)) {
+          allowedLoaderBindingReferences.set(
+            node.text,
+            (allowedLoaderBindingReferences.get(node.text) ?? 0) + 1,
+          );
+        } else {
+          violations.add(`${node.text} loader binding escaped its direct call target`);
+        }
+      }
+    }
+    const staticValue = staticStringValue(node);
+    if (
+      staticValue?.toLowerCase().includes("server-binding-authority-v1") === true &&
+      !isAllowedServerBindingAuthorityImport(node, normalizedFileName)
+    ) {
+      violations.add("server binding authority sensitive literal outside exact S1 allowlist");
+    }
+    if (staticValue?.toLowerCase().includes(serverBindingSignerHostFixtureBasename) === true) {
+      violations.add("production signer-host fixture reference");
+    }
+    if (staticValue?.toLowerCase().includes("--fixture-scenario=") === true) {
+      violations.add("production signer-host fixture scenario selector");
+    }
+    if (ts.isIdentifier(node)) {
+      const identifier = node.text.toLowerCase();
+      if (
+        identifier === "_load" ||
+        identifier === "createrequire" ||
+        identifier === "dlopen" ||
+        identifier === "eval" ||
+        identifier === "function" ||
+        identifier === "getbuiltinmodule" ||
+        identifier === "require"
+      ) {
+        violations.add(`${identifier} loader reference`);
+      }
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const memberName = staticStringValue(node.argumentExpression)?.toLowerCase();
+      if (
+        memberName !== undefined &&
+        [
+          "_load",
+          "createrequire",
+          "dlopen",
+          "eval",
+          "function",
+          "getbuiltinmodule",
+          "require",
+        ].includes(memberName)
+      ) {
+        violations.add(`${memberName} computed loader reference`);
+      }
+    }
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined) inspectModuleSpecifier(node.moduleSpecifier);
+    }
+    if (ts.isImportDeclaration(node)) {
+      inspectLoaderImport(node, normalizedFileName, violations);
+    }
+    if (
+      ts.isImportTypeNode(node) &&
+      ts.isLiteralTypeNode(node.argument) &&
+      ts.isStringLiteralLikeNode(node.argument.literal)
+    ) {
+      inspectModuleSpecifier(node.argument.literal);
+    }
+    if (ts.isImportEqualsDeclaration(node)) violations.add("import equals loader");
+    if (ts.isCallExpression(node)) {
+      if (ts.isImportExpression(node.expression)) violations.add("dynamic import loader");
+      const name = calledExpressionName(node.expression);
+      if (name === "get" && expressionReceiverName(node.expression) === "reflect") {
+        const receiver = node.arguments[0];
+        const memberName =
+          node.arguments[1] === undefined
+            ? undefined
+            : staticStringValue(node.arguments[1])?.toLowerCase();
+        if (
+          (receiver !== undefined &&
+            ts.isIdentifier(receiver) &&
+            ["globalthis", "module", "process"].includes(receiver.text.toLowerCase())) ||
+          (memberName !== undefined &&
+            [
+              "_load",
+              "createrequire",
+              "dlopen",
+              "function",
+              "getbuiltinmodule",
+              "require",
+            ].includes(memberName))
+        ) {
+          violations.add("Reflect.get runtime loader escape");
+        }
+      }
+      if (
+        name === "apply" &&
+        expressionReceiverName(node.expression) === "reflect" &&
+        node.arguments[0] !== undefined &&
+        isReflectGetReference(node.arguments[0], reflectGetAliases)
+      ) {
+        violations.add("Reflect.apply loader lookup escape");
+      }
+      if (
+        name === "createrequire" ||
+        name === "dlopen" ||
+        name === "eval" ||
+        name === "getbuiltinmodule" ||
+        name === "require"
+      ) {
+        violations.add(`${name} runtime loader`);
+      }
+      if (name === "function") violations.add("Function runtime loader");
+      if (name === "_load" && expressionReceiverName(node.expression) === "module") {
+        violations.add("Module._load runtime loader");
+      }
+      if (
+        name === "execfile" ||
+        name === "execfilesync" ||
+        name === "fork" ||
+        name === "importscripts" ||
+        name === "spawn" ||
+        name === "spawnsync"
+      ) {
+        if (isAllowedSpawnSyncCall(node, sourceFile, normalizedFileName)) {
+          allowedSpawnSyncCalls += 1;
+        } else {
+          violations.add(`${name} process or script loader`);
+        }
+      }
+      if (name === "spawnchildprocess") {
+        if (isAllowedProcessHostSpawnCall(node, sourceFile, normalizedFileName)) {
+          allowedProcessHostSpawnCalls += 1;
+        } else {
+          violations.add("spawnChildProcess loader outside exact allowlist");
+        }
+      }
+    }
+    if (ts.isNewExpression(node) && calledExpressionName(node.expression) === "worker") {
+      if (isAllowedWorkerCall(node, sourceFile, normalizedFileName)) {
+        allowedWorkerCalls += 1;
+      } else {
+        violations.add("Worker loader");
+      }
+    }
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text.toLowerCase() === "function"
+    ) {
+      violations.add("Function runtime loader");
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(sourceFile);
+  const expectedWorkerCalls =
+    normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-client.ts") ||
+    normalizedFileName.endsWith("/apps/server/src/database/database-client.ts")
+      ? 1
+      : 0;
+  const expectedSpawnSyncCalls = normalizedFileName.endsWith(
+    "/apps/worker/scripts/build-worker-bundles.mjs",
+  )
+    ? 1
+    : 0;
+  const expectedProcessHostSpawnCalls = normalizedFileName.endsWith(
+    "/apps/worker/src/execution/process-host-client.ts",
+  )
+    ? 1
+    : 0;
+  if (
+    allowedWorkerCalls !== expectedWorkerCalls ||
+    allowedSpawnSyncCalls !== expectedSpawnSyncCalls ||
+    allowedProcessHostSpawnCalls !== expectedProcessHostSpawnCalls
+  ) {
+    violations.add("exact loader allowlist call count mismatch");
+  }
+  for (const binding of loaderBindings.keys()) {
+    if ((allowedLoaderBindingReferences.get(binding) ?? 0) !== 1) {
+      violations.add(`${binding} loader binding reference count mismatch`);
+    }
+  }
+  return [...violations].sort();
+}
+
+function sensitiveServerBindingModuleName(specifier: string): string | undefined {
+  let normalized = specifier.replaceAll("\\", "/").toLowerCase();
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    // Invalid percent encoding remains unmatched and is rejected by ordinary module resolution.
+  }
+  const suffixStart = normalized.search(/[?#]/u);
+  if (suffixStart >= 0) normalized = normalized.slice(0, suffixStart);
+  for (const moduleName of sensitiveServerBindingModuleConsumers.keys()) {
+    if (
+      normalized === moduleName ||
+      normalized.endsWith(`/${moduleName}`) ||
+      normalized.endsWith(`/${moduleName}.js`) ||
+      normalized.endsWith(`/${moduleName}.ts`)
+    ) {
+      return moduleName;
+    }
+  }
+  return undefined;
+}
+
+function isAllowedSensitiveServerBindingConsumer(
+  moduleName: string,
+  normalizedFileName: string,
+): boolean {
+  return (
+    sensitiveServerBindingModuleConsumers
+      .get(moduleName)
+      ?.some(
+        (suffix) => normalizedFileName === suffix.slice(1) || normalizedFileName.endsWith(suffix),
+      ) ?? false
+  );
+}
+
+function inspectSensitiveBindingExports(sourceFile: ts.SourceFile): string[] {
+  const taintedBindings = collectSensitiveImportedBindings(sourceFile);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const statement of sourceFile.statements) {
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (
+            ts.isIdentifier(declaration.name) &&
+            declaration.initializer !== undefined &&
+            exposesSensitiveBinding(declaration.initializer, taintedBindings) &&
+            !taintedBindings.has(declaration.name.text)
+          ) {
+            taintedBindings.add(declaration.name.text);
+            changed = true;
+          }
+        }
+      }
+      if (
+        ts.isExpressionStatement(statement) &&
+        ts.isBinaryExpression(statement.expression) &&
+        statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(statement.expression.left) &&
+        exposesSensitiveBinding(statement.expression.right, taintedBindings) &&
+        !taintedBindings.has(statement.expression.left.text)
+      ) {
+        taintedBindings.add(statement.expression.left.text);
+        changed = true;
+      }
+    }
+  }
+
+  const violations: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier !== undefined &&
+      ts.isStringLiteralLikeNode(statement.moduleSpecifier) &&
+      (statement.moduleSpecifier.text.toLowerCase() === serverBindingAuthoritySubpath ||
+        sensitiveServerBindingModuleName(statement.moduleSpecifier.text) !== undefined)
+    ) {
+      violations.push("sensitive module direct re-export");
+    }
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier === undefined &&
+      statement.exportClause !== undefined &&
+      ts.isNamedExports(statement.exportClause)
+    ) {
+      for (const element of statement.exportClause.elements) {
+        const localName = element.propertyName?.text ?? element.name.text;
+        if (taintedBindings.has(localName)) {
+          violations.push(`${localName} sensitive imported binding re-export`);
+        }
+      }
+    }
+    if (
+      ts.isExportAssignment(statement) &&
+      exposesSensitiveBinding(statement.expression, taintedBindings)
+    ) {
+      violations.push("sensitive imported binding export assignment");
+    }
+    if (ts.isVariableStatement(statement) && hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (
+          declaration.initializer !== undefined &&
+          exposesSensitiveBinding(declaration.initializer, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding exported through a variable");
+        }
+      }
+    }
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      hasModifier(statement, ts.SyntaxKind.ExportKeyword) &&
+      statement.body !== undefined &&
+      blockReturnsSensitiveBinding(statement.body, taintedBindings)
+    ) {
+      violations.push("sensitive imported binding returned by an exported function");
+    }
+    if (ts.isClassDeclaration(statement) && hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+      for (const member of statement.members) {
+        if (
+          ts.isPropertyDeclaration(member) &&
+          member.initializer !== undefined &&
+          exposesSensitiveBinding(member.initializer, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding exported through a class field");
+        }
+        if (
+          member.body !== undefined &&
+          blockReturnsSensitiveBinding(member.body, taintedBindings)
+        ) {
+          violations.push("sensitive imported binding returned by an exported class member");
+        }
+      }
+    }
+  }
+  return violations;
+}
+
+function collectSensitiveImportedBindings(sourceFile: ts.SourceFile): Set<string> {
+  const bindings = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteralLikeNode(statement.moduleSpecifier) ||
+      statement.importClause === undefined
+    ) {
+      continue;
+    }
+    const moduleName = statement.moduleSpecifier.text.toLowerCase();
+    if (
+      moduleName !== serverBindingAuthoritySubpath &&
+      sensitiveServerBindingModuleName(moduleName) === undefined
+    ) {
+      continue;
+    }
+    if (statement.importClause.name !== undefined) {
+      bindings.add(statement.importClause.name.text);
+    }
+    const namedBindings = statement.importClause.namedBindings;
+    if (namedBindings === undefined) continue;
+    if (ts.isNamespaceImport(namedBindings)) {
+      bindings.add(namedBindings.name.text);
+      continue;
+    }
+    for (const element of namedBindings.elements) bindings.add(element.name.text);
+  }
+  return bindings;
+}
+
+function collectReflectGetAliases(sourceFile: ts.SourceFile): Set<string> {
+  const aliases = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer !== undefined &&
+        isReflectGetReference(node.initializer, aliases) &&
+        !aliases.has(node.name.text)
+      ) {
+        aliases.add(node.name.text);
+        changed = true;
+      }
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        isReflectGetReference(node.right, aliases) &&
+        !aliases.has(node.left.text)
+      ) {
+        aliases.add(node.left.text);
+        changed = true;
+      }
+      node.forEachChild((child) => {
+        visit(child);
+        return undefined;
+      });
+    };
+    visit(sourceFile);
+  }
+  return aliases;
+}
+
+function isReflectGetReference(expression: ts.Expression, aliases: ReadonlySet<string>): boolean {
+  if (ts.isIdentifier(expression)) return aliases.has(expression.text);
+  if (ts.isParenthesizedExpression(expression)) {
+    return isReflectGetReference(expression.expression, aliases);
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    return (
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text.toLowerCase() === "reflect" &&
+      expression.name.text.toLowerCase() === "get"
+    );
+  }
+  if (ts.isElementAccessExpression(expression)) {
+    return (
+      ts.isIdentifier(expression.expression) &&
+      expression.expression.text.toLowerCase() === "reflect" &&
+      staticStringValue(expression.argumentExpression)?.toLowerCase() === "get"
+    );
+  }
+  return false;
+}
+
+function exposesSensitiveBinding(
+  expression: ts.Expression,
+  bindings: ReadonlySet<string>,
+): boolean {
+  if (ts.isIdentifier(expression)) return bindings.has(expression.text);
+  if (ts.isParenthesizedExpression(expression)) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (
+    ts.isAsExpression(expression) ||
+    ts.isTypeAssertion(expression) ||
+    ts.isSatisfiesExpression(expression) ||
+    ts.isNonNullExpression(expression)
+  ) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+    return exposesSensitiveBinding(expression.expression, bindings);
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    return expression.elements.some(
+      (element) => !ts.isOmittedExpression(element) && exposesSensitiveBinding(element, bindings),
+    );
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    return expression.properties.some((property) => {
+      if (ts.isShorthandPropertyAssignment(property)) return bindings.has(property.name.text);
+      if (ts.isPropertyAssignment(property)) {
+        return exposesSensitiveBinding(property.initializer, bindings);
+      }
+      if (ts.isSpreadAssignment(property))
+        return exposesSensitiveBinding(property.expression, bindings);
+      return false;
+    });
+  }
+  if (ts.isConditionalExpression(expression)) {
+    return (
+      exposesSensitiveBinding(expression.whenTrue, bindings) ||
+      exposesSensitiveBinding(expression.whenFalse, bindings)
+    );
+  }
+  if (ts.isArrowFunction(expression) && !ts.isBlock(expression.body)) {
+    return exposesSensitiveBinding(expression.body, bindings);
+  }
+  if (ts.isArrowFunction(expression) && ts.isBlock(expression.body)) {
+    return blockReturnsSensitiveBinding(expression.body, bindings);
+  }
+  return false;
+}
+
+function blockReturnsSensitiveBinding(block: ts.Block, bindings: ReadonlySet<string>): boolean {
+  let escaped = false;
+  const visit = (node: ts.Node): void => {
+    if (escaped || (node !== block && isFunctionLikeNode(node))) return;
+    if (
+      ts.isReturnStatement(node) &&
+      node.expression !== undefined &&
+      exposesSensitiveBinding(node.expression, bindings)
+    ) {
+      escaped = true;
+      return;
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(block);
+  return escaped;
+}
+
+function isFunctionLikeNode(node: ts.Node): boolean {
+  return (
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  );
+}
+
+type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "worker";
+
+function collectImportedLoaderBindings(
+  sourceFile: ts.SourceFile,
+): ReadonlyMap<string, ImportedLoaderKind> {
+  const bindings = new Map<string, ImportedLoaderKind>();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteralLikeNode(statement.moduleSpecifier) ||
+      statement.importClause?.namedBindings === undefined ||
+      !ts.isNamedImports(statement.importClause.namedBindings)
+    ) {
+      continue;
+    }
+    const moduleName = statement.moduleSpecifier.text.toLowerCase();
+    for (const element of statement.importClause.namedBindings.elements) {
+      if (element.isTypeOnly) continue;
+      const imported = (element.propertyName?.text ?? element.name.text).toLowerCase();
+      if (
+        (moduleName === "node:worker_threads" || moduleName === "worker_threads") &&
+        imported === "worker"
+      ) {
+        bindings.set(element.name.text, "worker");
+      }
+      if (moduleName === "node:child_process" || moduleName === "child_process") {
+        if (imported === "spawnsync") bindings.set(element.name.text, "spawn-sync");
+        if (imported === "spawn") bindings.set(element.name.text, "process-host-spawn");
+      }
+    }
+  }
+  return bindings;
+}
+
+function isAllowedImportedLoaderReference(
+  identifier: ts.Identifier,
+  kind: ImportedLoaderKind,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  const parent = identifier.parent;
+  if (kind === "worker" && ts.isNewExpression(parent) && parent.expression === identifier) {
+    return isAllowedWorkerCall(parent, sourceFile, normalizedFileName);
+  }
+  if (kind === "spawn-sync" && ts.isCallExpression(parent) && parent.expression === identifier) {
+    return isAllowedSpawnSyncCall(parent, sourceFile, normalizedFileName);
+  }
+  if (
+    kind === "process-host-spawn" &&
+    ts.isCallExpression(parent) &&
+    parent.expression === identifier
+  ) {
+    return isAllowedProcessHostSpawnCall(parent, sourceFile, normalizedFileName);
+  }
+  return false;
+}
+
+function staticStringValue(node: ts.Node): string | undefined {
+  if (ts.isStringLiteralLikeNode(node)) return node.text;
+  if (ts.isParenthesizedExpression(node)) return staticStringValue(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = staticStringValue(node.left);
+    const right = staticStringValue(node.right);
+    return left === undefined || right === undefined ? undefined : `${left}${right}`;
+  }
+  if (ts.isTemplateExpression(node)) {
+    let value = node.head.text;
+    for (const span of node.templateSpans) {
+      const expression = staticStringValue(span.expression);
+      if (expression === undefined) return undefined;
+      value += `${expression}${span.literal.text}`;
+    }
+    return value;
+  }
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "join" &&
+    ts.isArrayLiteralExpression(node.expression.expression) &&
+    (node.arguments.length === 0 ||
+      (node.arguments.length === 1 && staticStringValue(node.arguments[0] as ts.Node) === ""))
+  ) {
+    const parts = node.expression.expression.elements.map((element) => staticStringValue(element));
+    return parts.some((part) => part === undefined) ? undefined : parts.join("");
+  }
+  return undefined;
+}
+
+function inspectLoaderImport(
+  declaration: ts.ImportDeclaration,
+  normalizedFileName: string,
+  violations: Set<string>,
+): void {
+  if (!ts.isStringLiteralLikeNode(declaration.moduleSpecifier)) return;
+  const moduleName = declaration.moduleSpecifier.text.toLowerCase();
+  if (moduleName === "node:child_process" || moduleName === "child_process") {
+    const expected = normalizedFileName.endsWith("/apps/worker/scripts/build-worker-bundles.mjs")
+      ? "spawnSync:spawnSync:value"
+      : normalizedFileName.endsWith("/apps/worker/src/execution/process-host-client.ts")
+        ? "ChildProcessWithoutNullStreams:ChildProcessWithoutNullStreams:type,spawn:spawnChildProcess:value"
+        : undefined;
+    if (expected === undefined || importedBindingSignature(declaration) !== expected) {
+      violations.add("child_process import outside exact allowlist");
+    }
+  }
+  if (moduleName === "node:worker_threads" || moduleName === "worker_threads") {
+    const expected = normalizedFileName.endsWith(
+      "/apps/server/src/artifacts/artifact-storage-client.ts",
+    )
+      ? "Worker:Worker:value,WorkerOptions:WorkerOptions:type"
+      : normalizedFileName.endsWith("/apps/server/src/database/database-client.ts")
+        ? "Worker:Worker:value"
+        : normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-worker.ts") ||
+            normalizedFileName.endsWith("/apps/server/src/database/database-worker.ts")
+          ? "parentPort:parentPort:value,workerData:workerData:value"
+          : undefined;
+    if (expected === undefined || importedBindingSignature(declaration) !== expected) {
+      violations.add("worker_threads import outside exact allowlist");
+    }
+  }
+}
+
+function importedBindingSignature(declaration: ts.ImportDeclaration): string {
+  const clause = declaration.importClause;
+  const phaseModifier = clause?.phaseModifier as ts.Node | ts.SyntaxKind | undefined;
+  const phaseModifierKind = typeof phaseModifier === "number" ? phaseModifier : phaseModifier?.kind;
+  if (
+    clause === undefined ||
+    clause.name !== undefined ||
+    (phaseModifierKind !== undefined && phaseModifierKind !== ts.SyntaxKind.TypeKeyword) ||
+    clause.namedBindings === undefined ||
+    !ts.isNamedImports(clause.namedBindings)
+  ) {
+    return "invalid";
+  }
+  const clauseIsTypeOnly = clause.isTypeOnly || phaseModifierKind === ts.SyntaxKind.TypeKeyword;
+  return clause.namedBindings.elements
+    .map((element) => {
+      const imported = element.propertyName?.text ?? element.name.text;
+      return `${imported}:${element.name.text}:${clauseIsTypeOnly || element.isTypeOnly ? "type" : "value"}`;
+    })
+    .sort()
+    .join(",");
+}
+
+function isAllowedWorkerCall(
+  expression: ts.NewExpression,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  if (
+    normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-client.ts") &&
+    compactNodeText(expression, sourceFile) === "newWorker(filename,options)"
+  ) {
+    const arrow = findAncestor(expression, ts.isArrowFunction);
+    const declaration = arrow?.parent;
+    return (
+      arrow !== undefined &&
+      declaration !== undefined &&
+      ts.isVariableDeclaration(declaration) &&
+      ts.isIdentifier(declaration.name) &&
+      declaration.name.text === "defaultWorkerFactory" &&
+      declaration.initializer === arrow &&
+      compactNodeText(arrow, sourceFile) ===
+        "(filename,options)=>newWorker(filename,options)asArtifactStorageWorkerTransport"
+    );
+  }
+  if (
+    normalizedFileName.endsWith("/apps/server/src/database/database-client.ts") &&
+    compactNodeText(expression, sourceFile) === "newWorker(workerUrl,{workerData:options})"
+  ) {
+    const constructorDeclaration = findAncestor(expression, ts.isConstructorDeclaration);
+    const containingClass =
+      constructorDeclaration === undefined
+        ? undefined
+        : findAncestor(constructorDeclaration, ts.isClassDeclaration);
+    const initializer =
+      constructorDeclaration === undefined
+        ? undefined
+        : findUniqueVariableInitializer(constructorDeclaration, "workerUrl");
+    return (
+      constructorDeclaration !== undefined &&
+      containingClass?.name?.text === "DatabaseClient" &&
+      initializer !== undefined &&
+      compactNodeText(initializer, sourceFile) ===
+        'import.meta.url.endsWith(".ts")?newURL("./database-worker.ts",import.meta.url):newURL("./database-worker.js",import.meta.url)'
+    );
+  }
+  return false;
+}
+
+function isAllowedSpawnSyncCall(
+  expression: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  if (
+    !normalizedFileName.endsWith("/apps/worker/scripts/build-worker-bundles.mjs") ||
+    calledExpressionName(expression.expression) !== "spawnsync" ||
+    compactNodeText(expression, sourceFile) !==
+      'spawnSync(process.execPath,[compiler,"-p","tsconfig.json","--noEmit"],{cwd:workerRoot,encoding:"utf8",windowsHide:true,})'
+  ) {
+    return false;
+  }
+  const functionDeclaration = findAncestor(expression, ts.isFunctionDeclaration);
+  if (functionDeclaration?.name?.text !== "typecheckWorker") return false;
+  const packageInitializer = findUniqueVariableInitializer(
+    functionDeclaration,
+    "typeScriptPackage",
+  );
+  const compilerInitializer = findUniqueVariableInitializer(functionDeclaration, "compiler");
+  return (
+    packageInitializer !== undefined &&
+    compilerInitializer !== undefined &&
+    compactNodeText(packageInitializer, sourceFile) ===
+      'fileURLToPath(import.meta.resolve("typescript/package.json"))' &&
+    compactNodeText(compilerInitializer, sourceFile) ===
+      'resolve(dirname(typeScriptPackage),"bin/tsc")'
+  );
+}
+
+function isAllowedProcessHostSpawnCall(
+  expression: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  if (
+    !normalizedFileName.endsWith("/apps/worker/src/execution/process-host-client.ts") ||
+    compactNodeText(expression, sourceFile) !==
+      'spawnChildProcess(executable,[...argumentsList],{cwd:options.cwd,env:options.env,shell:false,windowsHide:true,detached:false,stdio:["pipe","pipe","pipe"],})'
+  ) {
+    return false;
+  }
+  const arrow = findAncestor(expression, ts.isArrowFunction);
+  const declaration = arrow?.parent;
+  return (
+    arrow !== undefined &&
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    ts.isIdentifier(declaration.name) &&
+    declaration.name.text === "defaultSpawnProcess" &&
+    declaration.initializer === arrow &&
+    compactNodeText(arrow, sourceFile) ===
+      '(executable,argumentsList,options)=>spawnChildProcess(executable,[...argumentsList],{cwd:options.cwd,env:options.env,shell:false,windowsHide:true,detached:false,stdio:["pipe","pipe","pipe"],})'
+  );
+}
+
+function compactNodeText(node: ts.Node, sourceFile: ts.SourceFile): string {
+  return node.getText(sourceFile).replace(/\s+/gu, "");
+}
+
+function findAncestor<TNode extends ts.Node>(
+  node: ts.Node,
+  predicate: (candidate: ts.Node) => candidate is TNode,
+): TNode | undefined {
+  let current = node.parent as ts.Node | undefined;
+  while (current !== undefined && current !== current.parent) {
+    if (predicate(current)) return current;
+    current = current.parent as ts.Node | undefined;
+  }
+  return undefined;
+}
+
+function findUniqueVariableInitializer(root: ts.Node, name: string): ts.Expression | undefined {
+  const matches: ts.Expression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      node.initializer !== undefined
+    ) {
+      matches.push(node.initializer);
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(root);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function withVirtualSourceFiles<T>(
+  sources: readonly AstSourceInput[],
+  inspect: (sourceFiles: ReadonlyMap<string, ts.SourceFile>) => T,
+): T {
+  const virtualRoot = resolve(process.cwd(), ".server-binding-authority-ast").replaceAll("\\", "/");
+  const configPath = `${virtualRoot}/tsconfig.json`;
+  const virtualPaths = sources.map(
+    (source, index) => `${virtualRoot}/source-${index}${sourceFileExtension(source.fileName)}`,
+  );
+  const virtualFiles: Record<string, string> = {
+    [configPath]: JSON.stringify({
+      compilerOptions: { allowJs: true, checkJs: false },
+      files: virtualPaths,
+    }),
+  };
+  for (let index = 0; index < sources.length; index += 1) {
+    const source = sources[index];
+    const virtualPath = virtualPaths[index];
+    if (source === undefined || virtualPath === undefined) {
+      throw new Error("Virtual AST source indexing failed.");
+    }
+    virtualFiles[virtualPath] = source.source;
+  }
+
+  const api = new TypeScriptApi({
+    cwd: virtualRoot,
+    fs: createVirtualFileSystem(virtualFiles),
+  });
+  try {
+    const snapshot = api.updateSnapshot({
+      openFiles: virtualPaths,
+      openProjects: [configPath],
+    });
+    try {
+      const sourceFiles = new Map<string, ts.SourceFile>();
+      for (let index = 0; index < sources.length; index += 1) {
+        const source = sources[index];
+        const virtualPath = virtualPaths[index];
+        if (source === undefined || virtualPath === undefined) {
+          throw new Error("Virtual AST source indexing failed.");
+        }
+        const project = snapshot.getDefaultProjectForFile(virtualPath);
+        const sourceFile = project?.program.getSourceFile(virtualPath);
+        if (sourceFile === undefined)
+          throw new Error(`TypeScript did not parse ${source.fileName}.`);
+        sourceFiles.set(source.fileName, sourceFile);
+      }
+      return inspect(sourceFiles);
+    } finally {
+      snapshot.dispose();
+    }
+  } finally {
+    api.close();
+  }
+}
+
+function sourceFileExtension(fileName: string): string {
+  return fileName.toLowerCase().match(/\.(?:[cm]?[jt]s|[jt]sx)$/u)?.[0] ?? ".ts";
+}
+
+function calledExpressionName(expression: ts.Expression): string | undefined {
+  if (ts.isIdentifier(expression)) return expression.text.toLowerCase();
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text.toLowerCase();
+  if (
+    ts.isElementAccessExpression(expression) &&
+    ts.isStringLiteralLikeNode(expression.argumentExpression)
+  ) {
+    return expression.argumentExpression.text.toLowerCase();
+  }
+  return undefined;
+}
+
+function expressionReceiverName(expression: ts.Expression): string | undefined {
+  if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+    return expression.expression.text.toLowerCase();
+  }
+  if (ts.isElementAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+    return expression.expression.text.toLowerCase();
+  }
+  return undefined;
+}
+
+function decodeStaticLiteral(value: string): string {
+  return value
+    .replace(/\\u\{([0-9a-f]{1,6})\}/giu, (_match, hexadecimal: string) =>
+      codePointForScan(hexadecimal),
+    )
+    .replace(/\\u([0-9a-f]{4})/giu, (_match, hexadecimal: string) => codePointForScan(hexadecimal))
+    .replace(/\\x([0-9a-f]{2})/giu, (_match, hexadecimal: string) => codePointForScan(hexadecimal));
+}
+
+function codePointForScan(hexadecimal: string): string {
+  const value = Number.parseInt(hexadecimal, 16);
+  return Number.isSafeInteger(value) && value <= 0x10ffff
+    ? String.fromCodePoint(value)
+    : "invalid-code-point";
+}
+
+function productionSourceFiles(root: string): string[] {
+  const skippedDirectories = new Set([
+    ".git",
+    ".turbo",
+    ".umi",
+    ".umi-production",
+    "coverage",
+    "dist",
+    "node_modules",
+  ]);
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!skippedDirectories.has(entry.name)) visit(path);
+        continue;
+      }
+      if (
+        !entry.isFile() ||
+        !/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
+        /\.(?:spec|test)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name)
+      ) {
+        continue;
+      }
+      files.push(path);
+    }
+  };
+  visit(root);
+  return files.sort();
+}

@@ -7,10 +7,11 @@ Status date: 2026-09-04
 > receipts, or the dormant signer-host direction. Native ServiceHost bootstrap schema v4 now makes
 > the fixed Worker authentication file a Control-only data-root member and selects the Bearer
 > client; production composition rejects historical schema v3 before opening any Worker credential.
-> The signed outer-package v1 and installer profiles still bind schema-v3 mTLS fields and therefore
-> cannot publish this runtime candidate. Historical source and verification evidence remain
-> recorded below, but none of the superseded receipt or signer-host paths is a future
-> production-enablement prerequisite.
+> Signed outer-package v2 and split installer profile v2 now bind schema-v4 bootstraps without mTLS
+> or package credential material; historical v1 remains schema-v3-only. Actual signed release
+> material, destination evidence, and the production SCM installer remain incomplete. Historical
+> source and verification evidence remain recorded below, but none of the superseded receipt or
+> signer-host paths is a future production-enablement prerequisite.
 
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
@@ -140,7 +141,8 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   for Control, keeps the Token out of preflight evidence and runtime bootstrap, and gives Executor
   no Server transport. `production_windows.go` rejects schema v3 before credential acquisition and
   contains no production `wincert`, mTLS evidence, or legacy `NewClient` path. Signed package v1
-  intentionally continues to reject schema v4 until a separately versioned package profile exists.
+  remains schema-v3-only; outer-package v2, installer profile v2, and the retained staged-evidence
+  typed gate now accept only the matching schema-v4 pair.
 - Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy,
   Control-only key ACL semantics, detached key identities, key-reuse detection inputs, and canonical
   public-SPKI digests for the local Control-to-Executor capability signer. Historical mTLS key
@@ -201,70 +203,18 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   same-basename wrapper/config payloads, demand-start and no-recovery maintenance fencing, complete
   pair replacement, destination re-verification, and recoverable post-commit SCM policy activation.
   The XML launches only the signed ServiceHost and is not an installer or installation evidence.
-- A historical canonical generation-one trusted enrollment record contract, superseded for Worker
-  authentication by ADR 0025. ADR 0014 fixed the record and
-  Server-receipt paths, service and physical-root profile identifiers, internal key-separation
-  checks, create-once recovery semantics, and the separation between ordinary parsed `Record` data
-  and opaque `RecordEvidence`. Both platform readers remain fail-closed: the dedicated Windows
-  reader identity, handle-bound reader, enabled compiled Server trust, and composed live native
-  evidence are not implemented, and no release or installer code consumes this contract.
-- A historical source-only Server enrollment binding authority S0 contract, superseded by ADR 0025.
-  ADR 0022 fixed the dormant
-  `absent -> signing_pending -> reserved -> active -> revoked` lifecycle, a 4 KiB signed historical
-  receipt, a separate 4 KiB challenge-bound active-status assertion, dedicated issuer trust,
-  exact-replay persistence semantics, monotonic revocation, and authenticated future S1/S2
-  boundaries. The S0 implementation adds hidden TypeScript wire codecs and ordinary signature
-  checks, a deterministic Server lifecycle reducer, a standard-library-only Go verifier, one-shot
-  challenge and active-status evidence, shared golden documents, and production-reachability
-  guards. The compiled production verifier remains unavailable. S0 grants no route, binding
-  resolver, Windows writer, reader, or positive Worker authority. Its former
-  environment-certificate comparison point has been removed; current Worker identity comes only
-  from ADR 0025 Token state.
-- A historical dormant Server binding persistence v1 implementation, superseded by ADR 0025. ADR
-  0023 and migration 0012 define four
-  strict tables, atomic authorization consumption plus pending creation, canonical issuance and
-  revocation request digests, first-valid-receipt compare-and-swap, exact stored-byte replay,
-  append-only terminal revocation, and an immutable issuer singleton. The Server adds a complete
-  repository with reducer replay and signature verification, a startup schema/aggregate audit with
-  bounded keyset pagination, exact schema and runtime checks for the persistent authentication-clock
-  high-water row, a production-unavailable signer/provider boundary, a fail-stopped bounded
-  coordinator, and a single-consumer opaque DatabaseClient capability. The signer trust profile is
-  independent from the provider, startup rollback closes only an atomically unadopted signer lease,
-  failed candidate cleanup permanently poisons the loader and quarantines the candidate, and the
-  future provider contract requires a Promise-only child-process transport whose close joins real
-  owner exit. Terminal coordinator failure immediately rejects every public pending operation with
-  the first cause while retaining raw settlement ownership. Production config and main do not load
-  a signer; startup leaves a fresh authority empty, and existing authority state fails closed without
-  the exact signer/trust descriptor. No route, authentication source, revocation veto, Windows
-  consumer, Claim, slot, or execution authority consumes this state.
-- A historical dormant A1+A2+A3 source implementation for the proposed Linux Server binding
-  signer-host transport v1 contract, superseded by ADR 0025. ADR 0024 fixed the complete transport.
-  A1 provides the exact 8 KiB
-  length-prefixed canonical message codec, statement-profile validation, canonical P-256
-  SPKI/key-ID pairing, P1363 low-S shape checks, incremental fragmentation/coalescing decoder, and
-  an import-free logical/cleanup lifecycle reducer with an exact bounded 4096-ID lifetime ledger,
-  one reserved shutdown ID, and automatic healthy close fencing at the signing limit. A2 adds a
-  production-unavailable exact profile loader and direct `node:child_process` owner with
-  cryptographic UUID v4 generation, one fixed protocol argument, an empty null-prototype
-  replacement environment, three dedicated pipes, verified hello/ready identity and public key,
-  one-request admission, bounded stdout and stderr, phase-specific deadlines, abort cancellation,
-  forced termination, real exit plus stdio-close proof, first-terminal-cause reuse, and
-  process-lifetime quarantine that blocks replacement while exit remains unproved. A source-excluded
-  fixture supplies fixed protocol, corruption, overflow, cancellation, shutdown, and hanging-child
-  scenarios for fake-process and real-child tests. A3 adds the exact frozen statement-only
-  host-provider bridge, canonical receipt and active-status statement dispatch, independent signer
-  verification, first-cause terminal propagation, signer-before-database adoption fencing, and
-  outcome-unknown mapping into the existing S1 coordinator. Existing preimage and digest providers
-  retain their byte, hash, signature, and normal error semantics, while replacement admission is
-  intentionally tightened whenever prior provider cleanup remains unresolved. The sensitive
-  modules and fixture are
-  pinned by exact import, export, source-digest, spawn-shape, terminal-chain, private-key, signing,
-  I/O, compiler-input, package, and production-reachability guards. The host-provider has zero
-  production consumers and remains unreachable from `main.ts`. The former Linux exit-proof matrix
-  is cancelled and is not a release gate. Production signer, trust, and host-profile loaders remain
-  unavailable, and A1+A2+A3 add no production key backend, compiled trust, signer binary,
-  configuration, `main.ts` wiring, issuer initialization, route, authentication source, Claim,
-  slot, package, installation, or execution authority.
+- The ADR 0014 trusted-enrollment-record and ADR 0022 through ADR 0024 Server-binding designs remain
+  as historical decision records, but their executable TypeScript and Go contracts, persistence,
+  coordinator, signer, signer-host, fixtures, and native node-enrollment/verifier packages were
+  deleted after ADR 0025 selected simple per-Worker Token authentication.
+- Migration `0012_server_binding_persistence_v1.sql` remains immutable compatibility history with a
+  pinned SHA-256. Its four legacy tables are inert. The v12/v13 startup test inserts representative
+  issuer, authorization, binding, and revocation rows, proves that startup preserves every row, and
+  proves that no Worker credential is synthesized from them.
+- The broad production runtime-loader and exact reviewed source/API guards formerly hosted by the
+  Server-binding contract test now live in `production-source-boundaries.test.ts`. They retain the
+  general zero-execution protections while removing the obsolete signer-host spawn allowance and
+  every executable Server-binding contract test.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
   paths. Release preparation, finalized-document inspection, outer-index parsing, signing-digest
   construction, admission, and staged verification reject alternate paths or casing, wrong roots or
@@ -412,10 +362,10 @@ After the shadow runtime is verified and any findings are closed, the release pi
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, local capability-signing key, firewall policy, fixed plaintext Control
 authentication profile, and machine-enforced Codex policy through a versioned ADR 0013 transaction.
-The repository still needs a versioned Token-aware signed outer-package and installation profile,
-destination evidence, the production Go installer, production-capable SCM schema and native
-adapter, a complete final recovery schedule, authenticated installer readiness, and a pinned WinSW
-release. The ADR
+The repository now has the versioned Token-aware outer-package and installation-profile contracts,
+but still needs actual signed release material, destination evidence, the production Go installer,
+production-capable SCM schema and native adapter, a complete final recovery schedule, authenticated
+installer readiness, and a pinned WinSW release. The ADR
 0014 receipt reader, ADR 0021 protected receipt store, Server binding signer and trust material,
 receipt authority, privileged enrollment writer, and ADR 0024 Linux signer-host matrix are
 superseded historical work and are not future gates.
@@ -430,6 +380,22 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
+split installer profile v2, schema-v4 admission, the retained staged-evidence typed installer gate,
+and the fixed-path SecureString provisioning helper while keeping signature envelope/domain v1 and
+historical outer-package v1 unchanged. It deleted 47 tracked files from the retired Server-binding,
+signer-host, contracts, native verifier, and node-enrollment implementation island while retaining
+migration 0012 and representative four-table v12/v13 compatibility coverage. The six-case recovery
+matrix and `docs/operations/worker-token-recovery.md` cover lost create/rotate responses,
+cross-restart revocation, snapshot rollback reconciliation, post-backup node loss, and pre-v13
+restore. Local verification passed lint over 314 files, all-workspace typecheck and build, Dashboard
+48/48, Server 235/235, Contracts 8/8, Worker 908/908 plus role guards 19/19, and a clean native-WSL
+database/recovery matrix 170/170. Native focused package tests, `go vet ./...`, Windows amd64 and
+arm64 builds, and PowerShell canonical/noncanonical/plaintext-input plus privilege-restoration smoke
+checks passed. Physical ProgramData replacement remains part of the production installer lab. No
+command used
+`test-env`; Node 26.1.0 continued to emit the repository engine warning.
 
 On 2026-09-04, the Worker Token follow-up completed the authenticated credential roster and
 Dashboard create, rotate, revoke, copy, and one-time reveal flow; native schema-v4 Token composition;

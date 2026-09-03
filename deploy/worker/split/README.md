@@ -1,7 +1,8 @@
 # Split Windows Worker Installation Inputs
 
-This directory contains dormant RoleConfig v2 source inputs for the future split Windows installer.
-It is not an installer, a deployable package, or installation evidence. The legacy
+This directory contains dormant RoleConfig v2 source inputs for the future split Windows installer
+and a fixed-path local Worker credential provisioning helper. It is not a complete installer, a
+deployable package, or installation evidence. The legacy
 `deploy/worker/install-worker.ps1` remains unchanged and cannot install this profile or the ADR 0025
 per-Worker Bearer Token profile.
 
@@ -24,6 +25,7 @@ package trust material, firewall rules, machine policy, physical roots, or the W
 ```text
 deploy/worker/split/
   README.md
+  provision-worker-auth.ps1
   winsw/
     AgenticReview.Worker.Control.xml.template
     AgenticReview.Worker.Executor.xml.template
@@ -88,8 +90,7 @@ is terminal. The Linux Server stores only the Token's SHA-256 digest and continu
 Worker API over HTTPS. Restoring an older database backup intentionally restores the Token state in
 that backup, including the accepted possibility of reviving a later-revoked Token.
 
-The plaintext Token and `workerNodeId` reside only in the fixed ordinary Control configuration
-file:
+Persistent plaintext Token storage resides only in the fixed ordinary Control configuration file:
 
 ```text
 C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
@@ -100,7 +101,8 @@ configuration, not a package payload, signed package input, WinSW substitution, 
 variable, command-line argument, registry value, or alternate credential source. Control uses the
 Token only as `Authorization: Bearer <token>` for Worker API requests and continues to validate the
 Server's HTTPS certificate. It loads no Worker client certificate, private key, PFX, or client-key
-passphrase.
+passphrase. The non-secret `workerNodeId` is deliberately cross-bound in this file, both bootstrap
+documents, the signed package index, and Server state.
 
 The Worker Token does not replace the short-lived lease token, the Control-to-Executor local
 capability signer, package signatures, Authenticode, artifact receipts, GitHub credentials, Codex
@@ -123,10 +125,29 @@ Before Control starts, the privileged installation flow must place and exactly v
 signing and package-root replacement. Rotation replaces only that configuration value and restarts
 Control; it does not rebuild or resign the Worker package.
 
+After the installer has created the fixed Control data root, the local provisioning helper can
+write or rotate the profile without putting plaintext Token data on a command line:
+
+```powershell
+$token = Read-Host 'Worker Token' -AsSecureString
+.\provision-worker-auth.ps1 -WorkerNodeId 'worker-node-001' -Token $token
+```
+
+If `-Token` is omitted, the helper prompts for the Token as a secure string. It accepts no plaintext
+Token parameter or output path, writes canonical UTF-8 without a BOM through a same-directory
+write-through replacement, removes bounded stale temporary credential files before writing, rereads
+the exact bytes, sets and verifies the fixed Control service SID as file owner, and never emits the
+Token. The parent Control data root must already carry the installer-owned inheritance profile and
+the helper must run under an installer identity that holds `SeRestorePrivilege`. The caller must
+serialize provisioning operations. The helper enables that privilege only for the bounded file
+operation and restores its prior state before returning. `-ValidateOnly` validates input without
+writing. It is a credential provisioning helper, not the deferred SCM/root transaction installer.
+
 The future privileged Go installer must:
 
 1. verify the expanded staging tree with `stagedpackage.Verify`;
-2. consume the opaque `StagedPackageEvidence` in that same process without serialization;
+2. select `BearerTokenInstallerV2Package` from the retained evidence and consume only that typed v2
+   gate in the same process without serialization;
 3. materialize and fully verify complete inactive metadata, installation, and
    trusted-configuration roots;
 4. for an upgrade, drain Control and wait for authenticated `Drained`; for an initial install,
@@ -166,8 +187,8 @@ Claim before that gate, and RoleConfig v2 prevents Claim after the gate as well.
 ## Zero-execution boundary
 
 RoleConfig remains foundation version 2 with `executionEnabled=false` and `maximumSlots=1`; the
-runtime advertises zero available slots and `EXECUTION_DISABLED`. Bootstrap schema version 3 is not
-RoleConfig v3. No enrollment field, package field, XML element, environment variable, command-line
+runtime advertises zero available slots and `EXECUTION_DISABLED`. Bootstrap schema version 4 is not
+RoleConfig v4. No enrollment field, package field, XML element, environment variable, command-line
 argument, installer option, or rollback state can enable execution.
 
 These files do not authorize Claim, `StartAttempt`, ProcessHost launch, repository commands, or
@@ -175,13 +196,13 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 
 ## Deferred production work
 
-Native bootstrap schema v4, Control data-root verification, preflight, and production composition
-now select the fixed ADR 0025 authentication file and contain no Worker mTLS path. The repository
-still lacks the separately versioned signed outer-package and installer profiles needed to publish
-that schema-v4 runtime; signed package v1 deliberately accepts only historical schema v3 and fails
-closed. It also lacks the production split installer, destination-verification evidence,
-transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the complete
-final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
+Native bootstrap schema v4, Control data-root verification, preflight, production composition,
+signed outer-package v2, and installer profile v2 now select the fixed ADR 0025 authentication file
+and contain no Worker mTLS path. Signed package v1 deliberately remains historical schema v3.
+`stagedpackage.SelectBearerTokenInstallerV2` rejects v1 before a future installer can consume v2
+evidence. The repository still lacks the production split installer, destination-verification
+evidence, transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the
+complete final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
 disabled-create intermediate DACL and failure-action clearing, authenticated installer-facing
 readiness observation, archive/extractor, and native Windows verification evidence.
 Legacy-to-split migration is separately deferred. Those items must be designed and reviewed before

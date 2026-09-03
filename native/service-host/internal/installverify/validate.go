@@ -10,6 +10,7 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
@@ -178,6 +179,14 @@ func validateConfigurationPair(control, executor config.Config) error {
 	if control.Limits.ForceTerminationReserveMilliseconds !=
 		executor.Limits.ForceTerminationReserveMilliseconds {
 		return mismatch("limits.forceTerminationReserveMilliseconds")
+	}
+	if control.SchemaVersion == config.BearerTokenSchemaVersion &&
+		installerprofile.ValidateBearerTokenBootstrapPair(
+			installerprofile.BearerTokenInstallerV2ID,
+			control,
+			executor,
+		) != nil {
+		return mismatch("schema-v4 installer profile")
 	}
 	return nil
 }

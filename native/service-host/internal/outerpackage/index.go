@@ -2,13 +2,17 @@ package outerpackage
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
+
+var workerTokenShapePattern = regexp.MustCompile(`arw1_[A-Za-z0-9_-]{43}`)
 
 type specialPayloadRule struct {
 	root         Root
@@ -83,15 +87,17 @@ func ParseIndex(document []byte) (Index, error) {
 }
 
 func normalizeIndex(value Index) (Index, error) {
-	if value.SchemaVersion != IndexSchemaVersion || value.ProfileID != IndexProfileID ||
-		!validPackageComponentID(value.PackageID) || !validPackageComponentID(value.InstallationID) ||
+	if validateIndexProfile(value) != nil || !validPackageComponentID(value.PackageID) ||
+		!validPackageComponentID(value.InstallationID) ||
 		!validEntityID(value.WorkerNodeID) || !validReleaseID(value.ReleaseID) ||
 		!validArchitecture(value.TargetArchitecture) || validateSource(value.Source) != nil ||
 		validateNodeSPKI(value.NodeSpecificLocalAuthorityPublicSPKI) != nil ||
 		validateCNGIdentity(value.LocalAuthorityCNG) != nil ||
-		validateMTLSIdentity(value.MTLSClientCredential) != nil ||
 		validateTargetRoots(value.TargetRoots) != nil {
 		return Index{}, fmt.Errorf("%w: package index identity fields are invalid", ErrInvalid)
+	}
+	if value.SchemaVersion == BearerTokenIndexSchemaVersion && bearerTokenIndexContainsTokenShape(value) {
+		return Index{}, fmt.Errorf("%w: Token-profile package index contains Worker credential material", ErrInvalid)
 	}
 	if len(value.Payloads) == 0 || len(value.Payloads) > MaximumPayloads {
 		return Index{}, fmt.Errorf("%w: payload count is outside the supported range", ErrInvalid)
@@ -113,7 +119,8 @@ func normalizeIndex(value Index) (Index, error) {
 			return Index{}, fmt.Errorf("%w: payload root and path are not case-fold unique", ErrInvalid)
 		}
 		seen[key] = struct{}{}
-		if forbiddenPayloadPath(payload.Path) {
+		if forbiddenPayloadPath(payload.Path) ||
+			value.SchemaVersion == BearerTokenIndexSchemaVersion && forbiddenWorkerAuthenticationPayloadPath(payload.Path) {
 			return Index{}, fmt.Errorf("%w: payload path is forbidden", ErrInvalid)
 		}
 		size, err := parseSize(payload.Size)
@@ -180,6 +187,52 @@ func normalizeIndex(value Index) (Index, error) {
 	})
 	value.Payloads = payloads
 	return cloneIndex(value), nil
+}
+
+func bearerTokenIndexContainsTokenShape(value Index) bool {
+	values := []string{
+		value.InstallationID,
+		value.LocalAuthorityCNG.KeyName,
+		value.NodeSpecificLocalAuthorityPublicSPKI.Path,
+		value.PackageID,
+		value.ReleaseID,
+		value.TargetRoots.Installation,
+		value.TargetRoots.Metadata,
+		value.TargetRoots.TrustedConfiguration,
+		value.WorkerNodeID,
+	}
+	for _, payload := range value.Payloads {
+		values = append(values, payload.Path)
+	}
+	for _, candidate := range values {
+		if workerTokenShapePattern.MatchString(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateIndexProfile(value Index) error {
+	switch {
+	case value.SchemaVersion == IndexSchemaVersion && value.ProfileID == IndexProfileID:
+		if value.MTLSClientCredential == nil || validateMTLSIdentity(*value.MTLSClientCredential) != nil {
+			return ErrInvalid
+		}
+		return nil
+	case value.SchemaVersion == BearerTokenIndexSchemaVersion && value.ProfileID == BearerTokenIndexProfileID:
+		if value.MTLSClientCredential != nil || installerprofile.ValidatePackageRoots(
+			installerprofile.BearerTokenInstallerV2ID,
+			value.PackageID,
+			value.TargetRoots.Metadata,
+			value.TargetRoots.Installation,
+			value.TargetRoots.TrustedConfiguration,
+		) != nil {
+			return ErrInvalid
+		}
+		return nil
+	default:
+		return ErrInvalid
+	}
 }
 
 func validRoot(value Root) bool {
@@ -349,6 +402,14 @@ func forbiddenPayloadPath(value string) bool {
 	return false
 }
 
+func forbiddenWorkerAuthenticationPayloadPath(value string) bool {
+	leaf := asciiCaseFold(value)
+	if separator := strings.LastIndexByte(leaf, '\\'); separator >= 0 {
+		leaf = leaf[separator+1:]
+	}
+	return leaf == installerprofile.WorkerAuthenticationFileName
+}
+
 func parseSize(value string) (uint64, error) {
 	if value == "" || value == "0" || len(value) > 20 || value[0] == '0' {
 		return 0, ErrInvalid
@@ -467,5 +528,9 @@ func clonePayloads(values []Payload) []Payload {
 
 func cloneIndex(value Index) Index {
 	value.Payloads = clonePayloads(value.Payloads)
+	if value.MTLSClientCredential != nil {
+		credential := *value.MTLSClientCredential
+		value.MTLSClientCredential = &credential
+	}
 	return value
 }

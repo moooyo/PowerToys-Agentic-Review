@@ -25,6 +25,7 @@ var (
 	ErrCleanup             = errors.New("staged package cleanup failed")
 	ErrCleanupFatal        = errors.New("staged package handle cleanup is unresolved; process must exit")
 	ErrSerialization       = errors.New("staged package evidence cannot be serialized")
+	ErrInstallerProfile    = errors.New("staged package does not select the Bearer Token installer v2 profile")
 )
 
 const (
@@ -104,4 +105,11 @@ type evidenceState struct {
 // evidence. Callers must Close it to release all retained handles.
 type StagedPackageEvidence struct {
 	state *evidenceState
+}
+
+// BearerTokenInstallerV2Package is the non-forgeable profile gate required by a future v2
+// installer consumer. It retains no authority beyond the originating StagedPackageEvidence.
+type BearerTokenInstallerV2Package struct {
+	state  *evidenceState
+	digest [sha256.Size]byte
 }

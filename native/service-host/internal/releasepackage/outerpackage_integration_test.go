@@ -29,6 +29,26 @@ func TestOuterPackagePublicEntryPointsUseRealFinalizedReleaseSnapshot(t *testing
 	}
 }
 
+func TestBearerTokenOuterPackagePublicEntryPointUsesRealFinalizedReleaseSnapshot(t *testing.T) {
+	finalized := releasepackage.FinalizedReleaseForOuterPackageTest(t)
+	document, err := outerpackage.BuildBearerTokenIndex(finalized, outerBearerTokenBuildOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := outerpackage.ParseIndex(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
+		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil ||
+		index.ReleaseID != finalized.Descriptor().ReleaseID {
+		t.Fatalf("Token outer index differs from real finalized release: %#v", index)
+	}
+	if err := outerpackage.ValidateAgainstRelease(document, finalized); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOuterPackageBuildIndexRejectsCleanupFatalAfterFinalization(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -80,5 +100,18 @@ func outerPackageBuildOptions() outerpackage.BuildOptions {
 			SHA256: strings.Repeat("5", 64),
 			Size:   "1024",
 		},
+	}
+}
+
+func outerBearerTokenBuildOptions() outerpackage.BearerTokenBuildOptions {
+	legacy := outerPackageBuildOptions()
+	return outerpackage.BearerTokenBuildOptions{
+		PackageID:         legacy.PackageID,
+		InstallationID:    legacy.InstallationID,
+		WorkerNodeID:      legacy.WorkerNodeID,
+		LocalAuthorityCNG: legacy.LocalAuthorityCNG,
+		TargetRoots:       legacy.TargetRoots,
+		ControlBootstrap:  legacy.ControlBootstrap,
+		ExecutorBootstrap: legacy.ExecutorBootstrap,
 	}
 }

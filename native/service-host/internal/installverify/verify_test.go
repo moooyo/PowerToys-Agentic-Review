@@ -117,6 +117,43 @@ func TestVerifyWithDependenciesAcceptsSchemaVersion4BootstrapPair(t *testing.T) 
 	}
 }
 
+func TestVerifyWithDependenciesRejectsSchemaVersion4OutsideInstallerV2DataRoots(t *testing.T) {
+	fixture := newInstallFixture(t)
+	controlPath := testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath
+	executorPath := testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
+	control, err := config.Parse(fixture.fs.mustNode(controlPath).data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := config.Parse(fixture.fs.mustNode(executorPath).data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.SchemaVersion = config.BearerTokenSchemaVersion
+	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
+	control.Control.ClientCertificateStore = ""
+	control.Control.ClientCertificateDERSHA256 = ""
+	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
+	executor.SchemaVersion = config.BearerTokenSchemaVersion
+	oldRoot := executor.Node.DataRoot
+	executor.Node.DataRoot = `D:\AgenticReview\Executor`
+	executor.Node.WorkingDirectory = strings.Replace(executor.Node.WorkingDirectory, oldRoot, executor.Node.DataRoot, 1)
+	for name, value := range executor.Node.Environment {
+		executor.Node.Environment[name] = strings.Replace(value, oldRoot, executor.Node.DataRoot, 1)
+	}
+	fixture.fs.mustNode(controlPath).data = mustConfigDocument(t, control)
+	fixture.fs.mustNode(executorPath).data = mustConfigDocument(t, executor)
+
+	if _, err := verifyWithDependencies(
+		context.Background(),
+		fixture.options,
+		fixture.authority,
+		fixture.dependencies(),
+	); !errors.Is(err, ErrConfiguration) {
+		t.Fatalf("verifyWithDependencies returned %v, want ErrConfiguration", err)
+	}
+}
+
 func TestVerifyWithDependenciesRejectsClosedTreeAndIdentityViolations(t *testing.T) {
 	t.Run("unexpected file", func(t *testing.T) {
 		fixture := newInstallFixture(t)
