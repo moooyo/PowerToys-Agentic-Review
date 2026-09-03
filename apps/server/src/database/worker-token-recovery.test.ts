@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -88,24 +88,6 @@ const removeDatabaseSidecars = async (databasePath: string): Promise<void> => {
   for (const suffix of ["-journal", "-wal", "-shm"] as const) {
     await rm(`${databasePath}${suffix}`, { force: true });
   }
-};
-
-const createMigrationPrefixDirectory = async (
-  parentDirectory: string,
-  targetVersion: number,
-): Promise<string> => {
-  const directory = join(parentDirectory, `migrations-v${targetVersion}`);
-  await mkdir(directory, { mode: 0o700 });
-  const filenames = (await readdir(migrationsDirectory)).filter((filename) => {
-    const versionText = /^(\d+)_.*\.sql$/u.exec(filename)?.[1];
-    return versionText !== undefined && Number.parseInt(versionText, 10) <= targetVersion;
-  });
-  await Promise.all(
-    filenames.map((filename) =>
-      copyFile(join(migrationsDirectory, filename), join(directory, filename)),
-    ),
-  );
-  return directory;
 };
 
 const createCredential = (
@@ -547,81 +529,5 @@ describe.skipIf(process.platform === "win32")("Worker Token operational recovery
         sort: "identity",
       }),
     ).resolves.toEqual({ items: [], total: 0 });
-  });
-
-  it("restores a pre-v13 database without inventing Worker Token credentials", async () => {
-    const fixture = await createFixture();
-    const retainedDirectory = join(fixture.directory, "retained-pre-v13");
-    await mkdir(retainedDirectory, { mode: 0o700 });
-    const versionTwelveMigrations = await createMigrationPrefixDirectory(retainedDirectory, 12);
-    const preV13Path = join(retainedDirectory, "server-v12.sqlite");
-    const preV13Database = new DatabaseSync(preV13Path);
-    const observedAt = "2026-09-04T00:00:00.000Z";
-    try {
-      expect(runMigrations(preV13Database, versionTwelveMigrations)).toBe(12);
-      preV13Database
-        .prepare(`
-          INSERT INTO workers (
-            id,
-            node_id,
-            instance_id,
-            display_name,
-            version,
-            protocol_version,
-            max_slots,
-            capabilities_json,
-            capabilities_digest,
-            status,
-            registered_at,
-            last_seen_at,
-            updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'offline', ?, ?, ?)
-        `)
-        .run(
-          "pre-v13-worker-id",
-          "worker:pre-v13-node",
-          "pre-v13-worker-instance",
-          "Pre-v13 Worker",
-          "1.0.0",
-          "1.0",
-          1,
-          "{}",
-          "a".repeat(64),
-          observedAt,
-          observedAt,
-          observedAt,
-        );
-    } finally {
-      preV13Database.close();
-    }
-    if (process.platform !== "win32") {
-      await chmod(preV13Path, 0o600);
-    }
-
-    await closeFixtureClient(fixture);
-    await removeDatabaseSidecars(fixture.databasePath);
-    await copyFile(preV13Path, fixture.databasePath);
-    if (process.platform !== "win32") {
-      await chmod(fixture.databasePath, 0o600);
-    }
-    await reopenFixtureClient(fixture);
-
-    await expect(
-      currentClient(fixture).request("listWorkerNodeCredentials", {
-        offset: 0,
-        limit: 200,
-        sort: "identity",
-      }),
-    ).resolves.toEqual({ items: [], total: 0 });
-    await expect(
-      currentClient(fixture).request("listWorkers", {
-        page: 1,
-        pageSize: 200,
-        sort: "identity",
-      }),
-    ).resolves.toMatchObject({
-      items: [{ workerNodeId: "worker:pre-v13-node" }],
-      total: 1,
-    });
   });
 });

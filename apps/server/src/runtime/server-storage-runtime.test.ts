@@ -70,7 +70,7 @@ describe.skipIf(process.platform !== "linux")("ServerStorageRuntime", () => {
 
     expect(runtime.artifactReadiness.read()).toEqual({ ready: false });
     await expect(runtime.database.request("ping", {})).resolves.toMatchObject({
-      schemaVersion: 13,
+      schemaVersion: 12,
     });
     await expect(
       runtime.artifactTransactions.createArtifactUpload({} as never),
@@ -151,7 +151,7 @@ describe.skipIf(process.platform !== "linux")("ServerStorageRuntime", () => {
     expect(layoutEntries).toHaveLength(artifactCapacityFixedLayoutEntries);
     expect(layoutEntries.every((entry) => entry.isDirectory())).toBe(true);
     await expect(runtime.database.request("ping", {})).resolves.toMatchObject({
-      schemaVersion: 13,
+      schemaVersion: 12,
     });
     await expect(runtime.database.close()).rejects.toMatchObject({
       code: "ARTIFACT_TRANSACTION_AUTHORITY_REQUIRED",

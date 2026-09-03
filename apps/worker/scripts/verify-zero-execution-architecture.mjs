@@ -138,7 +138,7 @@ const reviewedProductionSourceSha256 = Object.freeze({
   [`${workerSourceRoot}execution/trusted-installation-manifest.ts`]:
     "e09f1c8e12dcd883261584dbc2b3f575a6098f6c327522e8caf0f3b2b4fa1928",
   [pinnedServerClaimProducerPath]:
-    "36914f84bfd692353a1d47d6596136339138ade1f9ac5154b492388232fe8162",
+    "b0d6eb99cfa1ccd45fbf2582bcaa2ab69205634f13c423e7a504abc99291763d",
 });
 const reviewedDormantExecutionSourceSha256 = Object.freeze({
   [dormantExecutorAttemptReducerPath]:

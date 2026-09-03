@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +22,10 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
   ["server-binding-trust-profile-v1", []],
 ]);
 const retiredFileGroups = [
+  ["apps/server/src/database", /^database-initialization(?:\.|$)/u],
+  ["apps/server/dist/database", /^database-initialization(?:\.|$)/u],
+  ["apps/server/src/database", /^migration-backup(?:\.|$)/u],
+  ["apps/server/dist/database", /^migration-backup(?:\.|$)/u],
   ["apps/server/src/database", /^server-binding-persistence-v1(?:\.|$)/u],
   ["apps/server/src/enrollment", /^server-binding-/u],
   ["apps/server/testdata", /^server-binding-/u],
@@ -49,9 +52,14 @@ const retiredDatabaseTables = [
   "server_bindings",
   "server_binding_revocations",
 ] as const;
-// A future reviewed DROP-only cleanup migration must be named explicitly here before it may refer
-// to the retired tables. The allowlist is intentionally empty while migration 0012 is retained.
-const retiredTableMigrationAllowlist = new Set<string>();
+const retiredDatabaseBootstrapTokens = [
+  ".agentic-review-allow-legacy-adoption",
+  "agentic-review-database-initialization-v1",
+  "adoptLegacyDatabase",
+  "cleanupIncompleteMigrationBackups",
+  "consumeLegacyAdoptionAuthorization",
+  "createMigrationBackup",
+] as const;
 
 describe("production source boundaries", () => {
   it("removes the retired Server binding island while preserving reviewed production surfaces", () => {
@@ -70,17 +78,14 @@ describe("production source boundaries", () => {
         [],
       );
     }
-    const migrationDocument = readFileSync(
-      join(repositoryRoot, "migrations", "0012_server_binding_persistence_v1.sql"),
-    );
-    expect(createHash("sha256").update(migrationDocument).digest("hex")).toBe(
-      "aeb61e4c1f2dedafe49977192a72ce7c626ae1bd1555cbe63cf5202ec23ded9f",
-    );
     const migrationsDirectory = join(repositoryRoot, "migrations");
-    const laterMigrations = readdirSync(migrationsDirectory)
-      .filter((name) => /^\d{4}_.+\.sql$/u.test(name) && Number(name.slice(0, 4)) > 12)
-      .filter((name) => !retiredTableMigrationAllowlist.has(name));
-    for (const migration of laterMigrations) {
+    const migrations = readdirSync(migrationsDirectory)
+      .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
+      .sort();
+    expect(migrations).toContain("0012_worker_token_auth_v1.sql");
+    expect(migrations).not.toContain("0012_server_binding_persistence_v1.sql");
+    expect(migrations).not.toContain("0013_worker_token_auth_v1.sql");
+    for (const migration of migrations) {
       const source = readFileSync(join(migrationsDirectory, migration), "utf8");
       for (const table of retiredDatabaseTables) {
         expect(source.includes(table), `${migration}: ${table}`).toBe(false);
@@ -115,6 +120,12 @@ describe("production source boundaries", () => {
       expect(
         productionSources.some(({ source }) => source.includes(table)),
         table,
+      ).toBe(false);
+    }
+    for (const token of retiredDatabaseBootstrapTokens) {
+      expect(
+        productionSources.some(({ source }) => source.includes(token)),
+        token,
       ).toBe(false);
     }
 

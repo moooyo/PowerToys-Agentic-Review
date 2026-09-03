@@ -933,7 +933,7 @@ describe("result artifact database state machine", () => {
       .prepare("SELECT id FROM artifact_uploads WHERE client_artifact_id = ?")
       .get(artifactClientId(0)) as { readonly id: string };
 
-    expect(runMigrations(database, migrationsDirectory)).toBe(13);
+    expect(runMigrations(database, migrationsDirectory)).toBe(12);
     expect(
       database
         .prepare(`
@@ -1043,7 +1043,7 @@ describe("result artifact database state machine", () => {
           legacyCursor.lastCompletedAt,
         );
 
-      expect(runMigrations(database, migrationsDirectory)).toBe(13);
+      expect(runMigrations(database, migrationsDirectory)).toBe(12);
       expect(
         database
           .prepare(`

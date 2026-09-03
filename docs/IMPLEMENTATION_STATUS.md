@@ -45,8 +45,10 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   owner lock. Fatal artifact failures log only a stable code and terminate the complete Server. A
   separate boolean probe supplies artifact health; the frozen four-method transaction port carries no
   coordinator close, fatal, or owner capability.
-- A process-lifetime SQLite owner lock, lock-time migration rechecks, verified pre-migration
-  online backups, atomic backup publication, and incomplete-backup cleanup.
+- A process-lifetime SQLite owner lock and exact migration filename/checksum validation. Fresh
+  databases apply the complete current migration set; every initialized database must already be
+  exact current schema version 12. Production startup performs no cross-version migration,
+  automatic migration backup, legacy adoption, or backup-directory cleanup.
 - Atomic job claim, lease generation and token fencing, worker and attempt heartbeats, hard and
   no-progress deadlines, terminal submissions, and expired-lease recovery.
 - Idempotent terminal completion and failure replay, with token fencing and explicit conflict
@@ -224,10 +226,12 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   as historical decision records, but their executable TypeScript and Go contracts, persistence,
   coordinator, signer, signer-host, fixtures, and native node-enrollment/verifier packages were
   deleted after ADR 0025 selected simple per-Worker Token authentication.
-- Migration `0012_server_binding_persistence_v1.sql` remains immutable compatibility history with a
-  pinned SHA-256. Its four legacy tables are inert. The v12/v13 startup test inserts representative
-  issuer, authorization, binding, and revocation rows, proves that startup preserves every row, and
-  proves that no Worker credential is synthesized from them.
+- A pre-release database schema reset removes the superseded Server-binding migration and all four
+  of its tables. `0012_worker_token_auth_v1.sql` is now the final migration and the current schema
+  version is 12. The Server has no schema-13 compatibility or legacy-adoption path: nonempty
+  databases without the current initialization marker and databases from the retired schema 13 are
+  rejected and must be rebuilt. The normal migration framework and all other business migrations
+  remain intact.
 - The broad production runtime-loader and exact reviewed source/API guards formerly hosted by the
   Server-binding contract test now live in `production-source-boundaries.test.ts`. They retain the
   general zero-execution protections while removing the obsolete signer-host spawn allowance and
@@ -396,20 +400,30 @@ health projection, GitHub and lease-reaper suppression, and local operator recov
 Windows focused config,
 composition, health, route, and direct database tests passed 44 cases with the one POSIX database
 Worker restart case skipped. The exact source copied to a native WSL ext4 checkout passed all 850
-Server tests in 51 files, including the three atomic purge/restart cases and six existing Worker
-Token recovery cases. All-workspace typecheck and build passed, Biome checked 316 files, and the
+Server tests in 51 files, including the three atomic purge/restart cases and the then-current six
+Worker Token recovery cases. All-workspace typecheck and build passed, Biome checked 316 files, and the
 Worker zero-execution architecture check plus all 19 role-bundle guards passed. No command used
 `test-env`; Node 26.1.0 emitted the existing repository engine warning.
+
+On 2026-09-04, the final pre-release database schema reset removed the unreleased Server-binding
+migration, renumbered the Worker Token migration to current version 12, removed legacy database
+adoption and automatic migration-backup code, and made every initialized database require the exact
+current migration filenames and checksums. Verification used a native WSL ext4 checkout and a
+task-local Node 24.20.0 toolchain: the five-file database/recovery focus passed 100/100, the complete
+Server suite passed 833/833 in 49 files, and Contracts passed 8/8 in 2 files. All-workspace
+typecheck, build, and lint passed with Biome checking 312 files, and the Worker zero-execution
+architecture check plus all 19 role-bundle guards passed. No command used `test-env`.
 
 On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
 split installer profile v2, schema-v4 admission, the retained staged-evidence typed installer gate,
 and the fixed-path SecureString provisioning helper while keeping signature envelope/domain v1 and
 historical outer-package v1 unchanged. It deleted 47 tracked files from the retired Server-binding,
-signer-host, contracts, native verifier, and node-enrollment implementation island while retaining
-migration 0012 and representative four-table v12/v13 compatibility coverage. The six-case recovery
-matrix and `docs/operations/worker-token-recovery.md` cover lost create/rotate responses,
-cross-restart revocation, snapshot rollback reconciliation, post-backup node loss, and pre-v13
-restore. Local verification passed lint over 314 files, all-workspace typecheck and build, Dashboard
+signer-host, contracts, native verifier, and node-enrollment implementation island. That
+intermediate commit still retained the unreleased Server-binding migration and a pre-v13 recovery
+case; the current pre-release schema reset removes both. The current five-case recovery matrix and
+`docs/operations/worker-token-recovery.md` cover lost create/rotate responses, cross-restart
+revocation, current-schema snapshot rollback reconciliation, and post-backup node loss. Local
+verification passed lint over 314 files, all-workspace typecheck and build, Dashboard
 48/48, Server 235/235, Contracts 8/8, Worker 908/908 plus role guards 19/19, and a clean native-WSL
 database/recovery matrix 170/170. Native focused package tests, `go vet ./...`, Windows amd64 and
 arm64 builds, and PowerShell canonical/noncanonical/plaintext-input plus privilege-restoration smoke
@@ -420,8 +434,9 @@ command used
 On 2026-09-04, the Worker Token follow-up completed the authenticated credential roster and
 Dashboard create, rotate, revoke, copy, and one-time reveal flow; native schema-v4 Token composition;
 and removal of the superseded Server binding coordinator from the production storage lifecycle.
-Token-only database startup now preserves dormant migration-0012 rows without requiring a receipt
-signer or creating an implicit Worker credential. Local verification passed all-workspace lint over
+At that intermediate commit, Token-only startup preserved dormant Server-binding rows. The current
+pre-release schema reset removes that migration and compatibility behavior entirely. Local
+verification passed all-workspace lint over
 334 files, typecheck, and build; Dashboard 48/48; the Server Token and credential route matrix
 235/235; Contracts 28/28; historical coordinator and persistence tests 50/50; Worker unit tests
 908/908 plus role and architecture guards 19/19; a clean local WSL database matrix 164/164;
@@ -456,10 +471,11 @@ P0-P2 findings after the clock, transaction, settlement, signer, handle-ownershi
 production-reachability fixes.
 
 The local Node runtime was 26.1.0 while repository engines require `>=24.20.0 <25`, so pnpm emitted
-an engine warning. The complete database-startup and migration-backup files were attempted locally;
+an engine warning. The then-current database-startup and migration-backup files were attempted locally;
 their POSIX ownership cases failed closed on Windows as designed (6 failed, 4 passed, 7 skipped).
 Those platform failures were not waived as Linux evidence, and no remote replacement run was made
-because this task explicitly authorized local verification instead of `test-env`.
+because this task explicitly authorized local verification instead of `test-env`. The internal
+migration-backup module was later deleted by the pre-release schema reset.
 
 On 2026-09-03, the source-only signer-host A1 protocol and lifecycle foundation completed its
 explicitly authorized local Windows verification. No command was run on `test-env`. All-workspace

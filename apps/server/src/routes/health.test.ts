@@ -13,7 +13,7 @@ import { type ArtifactReadinessProbe, registerHealthRoutes } from "../../dist/ro
 
 const databaseHealth = {
   sqliteVersion: "3.50.4",
-  schemaVersion: 13,
+  schemaVersion: 12,
 };
 
 const createHealthApp = (
