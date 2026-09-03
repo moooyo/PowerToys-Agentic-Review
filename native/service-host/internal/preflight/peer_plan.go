@@ -17,18 +17,17 @@ import (
 // contains no endpoint or native object and leaves no image selection to the
 // platform layer.
 type PeerVerificationPlan struct {
-	role               config.Role
-	ownService         config.ServiceIdentity
-	peerService        config.ServiceIdentity
-	pipeName           string
-	installationRoot   string
-	wrapper            PinnedRuntimeFile
-	serviceHost        PinnedRuntimeFile
-	approvedSignerPin  string
-	preflightDigest    [32]byte
-	releaseDigest      [32]byte
-	currentImageDigest [32]byte
-	valid              bool
+	role              config.Role
+	ownService        config.ServiceIdentity
+	peerService       config.ServiceIdentity
+	pipeName          string
+	installationRoot  string
+	wrapper           PinnedRuntimeFile
+	serviceHost       PinnedRuntimeFile
+	approvedSignerPin string
+	preflightDigest   [32]byte
+	releaseDigest     [32]byte
+	valid             bool
 }
 
 func (plan PeerVerificationPlan) Role() config.Role                  { return plan.role }
@@ -44,10 +43,9 @@ func (plan PeerVerificationPlan) ApprovedSignerCertificateDERSHA256() string {
 }
 func (plan PeerVerificationPlan) PreflightDigest() [32]byte       { return plan.preflightDigest }
 func (plan PeerVerificationPlan) ReleaseTemplateDigest() [32]byte { return plan.releaseDigest }
-func (plan PeerVerificationPlan) CurrentImageDigest() [32]byte    { return plan.currentImageDigest }
 
 // PeerVerificationPlan selects the exact peer wrapper and sole ServiceHost
-// from release-, current-image-, and installation-bound preflight evidence.
+// from release- and installation-bound preflight evidence.
 func (e Evidence) PeerVerificationPlan() (PeerVerificationPlan, error) {
 	if err := e.Validate(); err != nil {
 		return PeerVerificationPlan{}, err
@@ -58,18 +56,17 @@ func (e Evidence) PeerVerificationPlan() (PeerVerificationPlan, error) {
 		return PeerVerificationPlan{}, err
 	}
 	plan := PeerVerificationPlan{
-		role:               e.role,
-		ownService:         configuration.OwnService,
-		peerService:        configuration.PeerService,
-		pipeName:           configuration.PipeName,
-		installationRoot:   configuration.Installation.Root,
-		wrapper:            PinnedRuntimeFile{path: wrapper.AbsolutePath, sha256: wrapper.SHA256},
-		serviceHost:        PinnedRuntimeFile{path: serviceHost.AbsolutePath, sha256: serviceHost.SHA256},
-		approvedSignerPin:  e.release.signerPin,
-		preflightDigest:    e.digest,
-		releaseDigest:      e.release.templateDigest,
-		currentImageDigest: e.currentImage.sourceDigest,
-		valid:              true,
+		role:              e.role,
+		ownService:        configuration.OwnService,
+		peerService:       configuration.PeerService,
+		pipeName:          configuration.PipeName,
+		installationRoot:  configuration.Installation.Root,
+		wrapper:           PinnedRuntimeFile{path: wrapper.AbsolutePath, sha256: wrapper.SHA256},
+		serviceHost:       PinnedRuntimeFile{path: serviceHost.AbsolutePath, sha256: serviceHost.SHA256},
+		approvedSignerPin: e.release.signerPin,
+		preflightDigest:   e.digest,
+		releaseDigest:     e.release.templateDigest,
+		valid:             true,
 	}
 	if err := plan.Validate(); err != nil {
 		return PeerVerificationPlan{}, err
@@ -107,7 +104,7 @@ func (plan PeerVerificationPlan) Validate() error {
 	if windowsPathEqual(plan.wrapper.path, plan.serviceHost.path) ||
 		!validSHA256(plan.wrapper.sha256) || !validSHA256(plan.serviceHost.sha256) ||
 		!validSHA256(plan.approvedSignerPin) || plan.preflightDigest == ([32]byte{}) ||
-		plan.releaseDigest == ([32]byte{}) || plan.currentImageDigest == ([32]byte{}) {
+		plan.releaseDigest == ([32]byte{}) {
 		return invalidPeerVerificationPlan("peer image or signer pins are invalid", nil)
 	}
 	return nil

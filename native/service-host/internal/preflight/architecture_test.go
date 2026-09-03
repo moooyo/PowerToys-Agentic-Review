@@ -15,8 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
 )
 
 const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
@@ -1070,11 +1068,12 @@ func TestPublicPreflightInputUsesOnlyOpaqueAuthorityEvidence(t *testing.T) {
 	if _, exists := inputType.FieldByName("ReleaseProfile"); exists {
 		t.Fatal("Input exposes caller-constructible release authority")
 	}
-	currentImage, exists := inputType.FieldByName("CurrentImage")
-	if !exists || currentImage.Type != reflect.TypeOf(servicebootstrap.CurrentImageEvidence{}) {
-		t.Fatal("Input does not require concrete opaque CurrentImageEvidence")
+	for _, removed := range []string{"Bootstrap", "CurrentImage"} {
+		if _, exists := inputType.FieldByName(removed); exists {
+			t.Fatalf("Input still exposes removed %s evidence", removed)
+		}
 	}
-	for _, value := range []any{CurrentImageBinding{}, Evidence{}, PeerVerificationPlan{}} {
+	for _, value := range []any{Evidence{}, PeerVerificationPlan{}} {
 		typeOfValue := reflect.TypeOf(value)
 		for index := 0; index < typeOfValue.NumField(); index++ {
 			if typeOfValue.Field(index).IsExported() {

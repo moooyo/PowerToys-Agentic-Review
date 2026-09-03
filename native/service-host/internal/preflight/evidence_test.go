@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
@@ -377,30 +376,7 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 		{"root ancestor", func(value *Evidence) { value.roots[0].Ancestors[0].EvidenceSHA256[0] ^= 0xff }},
 		{"file identity", func(value *Evidence) { value.files[0].Object.Evidence.Identity.FileID[0] ^= 0xff }},
 		{"service identity", func(value *Evidence) { value.identity.ProcessID++ }},
-		{"bootstrap role", func(value *Evidence) { value.bootstrap.role = config.RoleExecutor }},
-		{"bootstrap own name", func(value *Evidence) { value.bootstrap.ownServiceName += ".other" }},
-		{"bootstrap own SID", func(value *Evidence) { value.bootstrap.ownServiceSID = config.ExecutorServiceSID }},
-		{"bootstrap peer name", func(value *Evidence) { value.bootstrap.peerServiceName += ".other" }},
-		{"bootstrap peer SID", func(value *Evidence) { value.bootstrap.peerServiceSID = config.ControlServiceSID }},
-		{"bootstrap PID", func(value *Evidence) { value.bootstrap.serviceHostFacts.ProcessID++ }},
-		{"bootstrap creation time", func(value *Evidence) {
-			value.bootstrap.serviceHostFacts.CreationTime = value.bootstrap.serviceHostFacts.CreationTime.Add(time.Nanosecond)
-		}},
-		{"bootstrap start key", func(value *Evidence) { value.bootstrap.serviceHostFacts.StartKey.SequenceNumber++ }},
-		{"bootstrap source digest", func(value *Evidence) { value.bootstrap.sourceDigest[0] ^= 0xff }},
 		{"signer", func(value *Evidence) { value.release.signerPin = strings.Repeat("a", 64) }},
-		{"current image digest", func(value *Evidence) { value.currentImage.sourceDigest[0] ^= 0xff }},
-		{"current image bootstrap", func(value *Evidence) { value.currentImage.bootstrapDigest[0] ^= 0xff }},
-		{"current image process", func(value *Evidence) { value.currentImage.processFacts.ProcessID++ }},
-		{"current image creation time", func(value *Evidence) {
-			value.currentImage.processFacts.CreationTime = value.currentImage.processFacts.CreationTime.Add(time.Nanosecond)
-		}},
-		{"current image start key", func(value *Evidence) { value.currentImage.processFacts.StartKey.SequenceNumber++ }},
-		{"current image path", func(value *Evidence) { value.currentImage.processPath += ".other" }},
-		{"current image volume", func(value *Evidence) { value.currentImage.identity.VolumeSerialNumber++ }},
-		{"current image identity", func(value *Evidence) { value.currentImage.identity.FileID[0] ^= 0xff }},
-		{"current image size", func(value *Evidence) { value.currentImage.size++ }},
-		{"current image SHA-256", func(value *Evidence) { value.currentImage.sha256[0] ^= 0xff }},
 		{"data root", func(value *Evidence) { value.dataRoot.digest[0] ^= 0xff }},
 		{"data-root installation target", func(value *Evidence) { value.dataRoot.installationRoots[0].target.FileID[0] ^= 0xff }},
 		{"data-root installation ancestor", func(value *Evidence) { value.dataRoot.installationRoots[0].ancestors[0].FileID[0] ^= 0xff }},
@@ -476,9 +452,6 @@ func TestEvidenceValidateRejectsSecureReadAndAttestationDrift(t *testing.T) {
 		}},
 		{"release template digest", func(value *Evidence) { value.release.templateDigest[0] ^= 0xff }},
 		{"release self", func(value *Evidence) { value.release.serviceHost.SHA256 = strings.Repeat("a", 64) }},
-		{"current image bootstrap digest", func(value *Evidence) { value.currentImage.bootstrapDigest[0] ^= 0xff }},
-		{"current image process", func(value *Evidence) { value.currentImage.processFacts.ProcessID++ }},
-		{"current image identity", func(value *Evidence) { value.currentImage.identity.FileID[0] ^= 0xff }},
 		{"local attestation getters", func(value *Evidence) {
 			facts := value.controlCredentials.localFacts
 			facts.identity.UniqueName += ".other"

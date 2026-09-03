@@ -155,8 +155,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   handle-relative configuration traversal; exact restricted virtual-service token verification;
   persisted non-exportable CNG P-256 local-capability signing; strict fixed-profile Worker Bearer
   loading; stable pipe-peer process and token verification; canonical role-local RPC; fixed-origin
-  TLS 1.3 transport; stable WinSW observation; and suspended Node launch into a non-breakaway root
-  Job. Bootstrap schema 4 selects the fixed canonical authentication profile and Bearer transport
+  TLS 1.3 transport; stable peer-wrapper observation; and suspended Node launch into a non-breakaway
+  root Job. A one-shot local service bootstrap verifies the fixed restricted identities, applies and
+  reads back exact protected DACLs on the current ServiceHost process and primary token, closes its
+  token handle, and retains no wrapper, image, SCM-status, or lifecycle evidence. Bootstrap schema 4
+  selects the fixed canonical authentication profile and Bearer transport
   for Control, keeps the Token out of preflight evidence and runtime bootstrap, and gives Executor
   no Server transport. Strict parsing and validation reject every other bootstrap schema and all
   Worker client-certificate properties. The current outer-package v2, installer profile v2, and
@@ -181,13 +184,14 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   identity before filesystem access, parses complete self-relative DACLs, applies exact per-role
   read/execute profiles, and accepts only the bounded ambient rights used by standard Windows
   `Program Files` and `ProgramData` ancestors.
-- Opaque preflight evidence that consumes concrete installation, local-capability-signing, and
-  transport-configuration attestations rather than caller-assembled prerequisite booleans or
-  credential identity values.
+- Opaque preflight evidence that consumes concrete installation, data-root, and
+  local-capability-signing attestations rather than caller-assembled prerequisite booleans or
+  credential identity values. Local process security is completed before preflight and is not
+  recast as a detached bootstrap or current-image authority.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
   before a lease is committed; oversized stored jobs are dead-lettered without creating an attempt.
-- A Windows ServiceHost composition path that connects compiled release authority, secure service
-  bootstrap, installation and role-data verification, role-specific credentials, preflight, peer
+- A Windows ServiceHost composition path that connects compiled release authority, one-shot local
+  service security, installation and role-data verification, role-specific credentials, preflight, peer
   verification, runtime bootstrap, HostControl, guarded Node launch, role-local RPC, ARWX relay,
   lifecycle supervision, and bounded cleanup.
 - HostControl I/O ownership that keeps overlapped operations, buffers, events, handles, and terminal
@@ -728,7 +732,7 @@ Not yet verified:
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
   x64 and arm64, but their Named Pipe, CNG local-capability signer, filesystem, process/token DACL,
-  root Job, wrapper-watch, fixed Worker authentication profile, Server-certificate verification,
+  root Job, peer-wrapper watch, fixed Worker authentication profile, Server-certificate verification,
   role-local RPC, and fixed-origin HTTPS behavior has not been exercised on a native Windows test
   machine. The production Authenticode and
   installation-verification code has only fake-provider execution plus Windows cross-compilation;

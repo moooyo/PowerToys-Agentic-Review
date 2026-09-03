@@ -8,13 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releaseprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -116,12 +114,9 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	if role == config.RoleExecutor {
 		currentConfig, peerConfig = peerConfig, currentConfig
 	}
-	bootstrap := bootstrapBindingFixture(role, currentConfig, installation.identity)
 	input := snapshotInput{
 		role: role, actualBootstrapPath: controlRead.File.Path,
 		installation: installation,
-		bootstrap:    bootstrap,
-		currentImage: currentImageBindingFixture(t, bootstrap, verifiedFiles),
 		dataRoot: DataRootBinding{
 			role: role, currentPath: currentConfig.Node.DataRoot, peerPath: peerConfig.Node.DataRoot,
 			peerObservation:   dataroot.PeerLiveRootNotObservedByDesign,
@@ -145,64 +140,6 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 	return compositionFixture{
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
-	}
-}
-
-func bootstrapBindingFixture(
-	role config.Role,
-	current config.Config,
-	identity winidentity.Evidence,
-) BootstrapBinding {
-	digest := sha256.Sum256([]byte("service-bootstrap-evidence-" + string(role)))
-	return BootstrapBinding{
-		role:             role,
-		ownServiceName:   current.OwnService.Name,
-		ownServiceSID:    current.OwnService.SID,
-		peerServiceName:  current.PeerService.Name,
-		peerServiceSID:   current.PeerService.SID,
-		serviceHostFacts: stableServiceHostFactsFixture(identity.ProcessID),
-		sourceDigest:     digest,
-		bound:            true,
-	}
-}
-
-func stableServiceHostFactsFixture(processID uint32) peerverify.StableProcessFacts {
-	return peerverify.StableProcessFacts{
-		ProcessID:    processID,
-		CreationTime: time.Date(2026, time.August, 31, 12, 0, 0, 123, time.UTC),
-		StartKey:     peerverify.ProcessStartKey{Available: true, SequenceNumber: 9001},
-	}
-}
-
-func currentImageBindingFixture(
-	t *testing.T,
-	bootstrap BootstrapBinding,
-	files []VerifiedFile,
-) CurrentImageBinding {
-	t.Helper()
-	var serviceHost VerifiedFile
-	for _, file := range files {
-		if file.Role == releasemanifest.RoleServiceHost {
-			serviceHost = file
-			break
-		}
-	}
-	if serviceHost.Role != releasemanifest.RoleServiceHost {
-		t.Fatal("fixture has no ServiceHost")
-	}
-	digest := mustDecodeDigest(t, serviceHost.SHA256)
-	return CurrentImageBinding{
-		sourceDigest:    sha256.Sum256([]byte("current-image-evidence")),
-		bootstrapDigest: bootstrap.sourceDigest,
-		processFacts:    bootstrap.serviceHostFacts,
-		processPath:     serviceHost.AbsolutePath,
-		identity: peerverify.FileIdentity{
-			VolumeSerialNumber: serviceHost.Object.Evidence.Identity.VolumeSerialNumber,
-			FileID:             serviceHost.Object.Evidence.Identity.FileID,
-		},
-		size:   serviceHost.Size,
-		sha256: digest,
-		bound:  true,
 	}
 }
 

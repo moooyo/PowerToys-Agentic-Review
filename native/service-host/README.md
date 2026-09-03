@@ -25,7 +25,7 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
 - suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
-  pre-resume process and primary-token DACLs, and stable WinSW wrapper observation;
+  pre-resume process and primary-token DACLs;
 - a per-launch HostControl endpoint with bounded overlapped-I/O ownership, cancellation,
   completion publication, cleanup, and fatal-operation quarantine;
 - a sealed zero-execution Claim policy derived from the committed runtime bootstrap;
@@ -36,10 +36,10 @@ This directory contains the fail-closed foundation and a composed Windows runtim
   chain, plus an explicitly unavailable non-Windows factory; and
 - pure Go tests for those contracts.
 
-The Windows factory now composes release authority, secure service bootstrap, current-image and
-installation verification, role-owned data roots, role credentials, preflight, peer verification,
-runtime bootstrap, guarded Node launch, HostControl, role-specific RPC, ARWX relay, lifecycle
-supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
+The Windows factory now prepares the fixed service identity and local process/token DACLs, then
+composes release authority, installation verification, role-owned data roots, role credentials,
+preflight, peer verification, runtime bootstrap, guarded Node launch, HostControl, role-specific
+RPC, ARWX relay, lifecycle supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
 release profile and fail closed before using installed configuration. The current TypeScript role
 payloads remain zero-execution foundations: Executor can emit only the authenticated disabled
 `Ready` state (`ready=false`, `availableSlots=0`, `reasonCode=EXECUTION_DISABLED`), and Control never

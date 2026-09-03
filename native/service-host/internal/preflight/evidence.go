@@ -10,7 +10,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
@@ -104,7 +103,7 @@ func (e Evidence) Validate() error {
 	if err != nil {
 		return invalidEvidenceError("configured file bindings are invalid", err)
 	}
-	releaseBindings, serviceHost, err := bindReleaseBinding(e.release, e.manifest, fileIndex)
+	releaseBindings, _, err := bindReleaseBinding(e.release, e.manifest, fileIndex)
 	if err != nil {
 		return invalidEvidenceError("compiled release bindings are invalid", err)
 	}
@@ -136,18 +135,6 @@ func (e Evidence) Validate() error {
 		e.identity.OwnService.SID != current.OwnService.SID ||
 		e.identity.PeerService.Name != peer.OwnService.Name || e.identity.PeerService.SID != peer.OwnService.SID {
 		return invalidEvidenceError("service identity evidence differs from the selected configuration", nil)
-	}
-	if err := validateBootstrapBinding(
-		e.bootstrap,
-		e.role,
-		e.control.Configuration,
-		e.executor.Configuration,
-		e.identity,
-	); err != nil {
-		return invalidEvidenceError("service bootstrap binding is invalid", err)
-	}
-	if err := validateCurrentImageBinding(e.currentImage, e.bootstrap, e.identity.ProcessID, serviceHost); err != nil {
-		return invalidEvidenceError("current ServiceHost image binding is invalid", err)
 	}
 	if err := validateDataRootBinding(e.dataRoot, e.role, e.control.Configuration, e.executor.Configuration, roots); err != nil {
 		return invalidEvidenceError("data-root binding is invalid", err)
@@ -300,7 +287,7 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	encoder := preflightDigestEncoder{hash: sha256.New()}
-	encoder.text("agentic-review/service-host-preflight-evidence/v3")
+	encoder.text("agentic-review/service-host-preflight-evidence/v4")
 	encoder.text(string(e.role))
 	encoder.text(e.actualBootstrapPath)
 	encodeConfigurationEvidence(&encoder, e.control, controlDocument)
@@ -334,8 +321,6 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		encodeVerifiedFile(&encoder, binding.VerifiedFile)
 	}
 	encodeIdentityEvidence(&encoder, e.identity)
-	encodeBootstrapBinding(&encoder, e.bootstrap)
-	encodeCurrentImageBinding(&encoder, e.currentImage)
 	encoder.text(string(e.dataRoot.role))
 	encoder.text(e.dataRoot.currentPath)
 	encoder.text(e.dataRoot.peerPath)
@@ -377,16 +362,6 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 	return result, nil
 }
 
-func encodeBootstrapBinding(encoder *preflightDigestEncoder, binding BootstrapBinding) {
-	encoder.text(string(binding.role))
-	encoder.text(binding.ownServiceName)
-	encoder.text(binding.ownServiceSID)
-	encoder.text(binding.peerServiceName)
-	encoder.text(binding.peerServiceSID)
-	encodeStableProcessFacts(encoder, binding.serviceHostFacts)
-	encoder.bytes(binding.sourceDigest[:])
-}
-
 func encodeReleaseBinding(encoder *preflightDigestEncoder, binding releaseBindingSnapshot) {
 	encoder.bytes(binding.templateDigest[:])
 	encoder.text(binding.manifestSHA256)
@@ -400,25 +375,6 @@ func encodeReleaseBinding(encoder *preflightDigestEncoder, binding releaseBindin
 		encodeManifestFile(encoder, dependency)
 	}
 	encodeManifestFile(encoder, binding.serviceHost)
-}
-
-func encodeCurrentImageBinding(encoder *preflightDigestEncoder, binding CurrentImageBinding) {
-	encoder.bytes(binding.sourceDigest[:])
-	encoder.bytes(binding.bootstrapDigest[:])
-	encodeStableProcessFacts(encoder, binding.processFacts)
-	encoder.text(binding.processPath)
-	encoder.u64(binding.identity.VolumeSerialNumber)
-	encoder.bytes(binding.identity.FileID[:])
-	encoder.u64(binding.size)
-	encoder.bytes(binding.sha256[:])
-}
-
-func encodeStableProcessFacts(encoder *preflightDigestEncoder, facts peerverify.StableProcessFacts) {
-	encoder.u32(facts.ProcessID)
-	encoder.i64(facts.CreationTime.Unix())
-	encoder.u32(uint32(facts.CreationTime.Nanosecond()))
-	encoder.boolean(facts.StartKey.Available)
-	encoder.u64(facts.StartKey.SequenceNumber)
 }
 
 func encodeIdentityEvidence(encoder *preflightDigestEncoder, evidence winidentity.Evidence) {
