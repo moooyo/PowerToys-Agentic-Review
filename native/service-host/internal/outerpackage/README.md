@@ -4,6 +4,14 @@
 transport package. It does not read a filesystem, sign with a private key, install files, provision
 CNG keys or certificates, or create Windows services.
 
+ADR 0025 supersedes only the Worker mTLS credential fields in the exact package profile described
+below. Those fields remain documented as immutable historical schema-v3 data and are not current
+Worker authentication or future production gates. The local capability-authority CNG/SPKI,
+detached package signature and compiled `outertrust`, and Authenticode boundaries remain unchanged.
+A Token-aware replacement must use a new versioned profile. The plaintext Token exists only in
+`C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, its SHA-256 digest exists only in the
+Server database, and neither value is a package input.
+
 ## Package closure
 
 The canonical `package-index.json` has three roots: `metadata`, `installation`, and

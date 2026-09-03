@@ -80,16 +80,18 @@ configuration file:
 C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
 ```
 
-The file is a UTF-8 JSON object of at most 4 KiB with exactly these members:
+The file is the exact UTF-8 JSON object below, occupies at most 4 KiB, and contains no BOM,
+insignificant whitespace, alternate member order, duplicate member, or trailing byte:
 
 ```json
 {"profileId":"agentic-review-worker-auth-v1","token":"arw1_<43-base64url-characters>","workerNodeId":"<entity-id>"}
 ```
 
-Member order and insignificant JSON whitespace are not security properties. Missing, extra,
-wrongly typed, or malformed members are rejected. Production accepts no environment variable,
-command-line argument, package field, registry value, or alternate file path as a second Worker
-Token source. Tests may inject an in-memory reader without changing the production path.
+The Worker parses the document, validates the three values, reserializes them in the order above,
+and requires exact byte equality. Missing, extra, duplicate, wrongly typed, noncanonical, or
+malformed members are rejected. Production accepts no environment variable, command-line
+argument, package field, registry value, or alternate file path as a second Worker Token source.
+Tests may inject an in-memory reader without changing the production path.
 
 This profile does not require DPAPI, Credential Manager, CNG, a protected hardware key, or a
 special local reader identity. The file must not be committed to source control, included in a
@@ -111,6 +113,8 @@ token_sha256
 auth_state
 created_by_issuer
 created_by_subject
+updated_by_issuer
+updated_by_subject
 created_at
 activated_at
 rotated_at
@@ -127,12 +131,16 @@ pending -> revoked
 active -> revoked
 ```
 
-Rotation changes only `token_sha256`, `rotated_at`, and `updated_at`; it does not change the state.
-`revoked` is terminal. Reusing a revoked node requires creating a new Worker node identity.
+Rotation changes only `token_sha256`, `rotated_at`, `updated_at`, and the two last-operator fields;
+it does not change the state. `revoked` is terminal. Reusing a revoked node requires creating a new
+Worker node identity.
 
-The database stores the authenticated operator identity for ordinary accountability. It does not
-introduce a second administrator role because every authenticated dashboard user has equal Token
-management authority.
+The database stores the creator and the last operator to rotate or revoke the credential for
+ordinary accountability. It does not introduce a second administrator role because every
+authenticated dashboard user has equal Token management authority. State-transition admission is
+enforced by the sole `database-worker` API inside `BEGIN IMMEDIATE` transactions. Direct SQL writes
+by a trusted administrator are outside this profile's threat model; migration `0013` therefore
+uses ordinary `CHECK` and `UNIQUE` constraints rather than a second trigger policy layer.
 
 ### Operator Token management
 
@@ -198,7 +206,12 @@ received; the Server never retains plaintext to replay a response.
 Revocation is idempotent and rejects all later Worker requests. Existing process-instance rows may
 be marked disabled or offline. A request that completed authentication before revocation may finish;
 revocation applies to subsequent authentication. Existing leases remain governed by their current
-lease token and TTL, but a revoked node cannot claim new work.
+lease token and TTL, but the claim transaction rechecks that the node remains active before granting
+new work.
+
+Rotation invalidates the old Token for subsequent requests. A request authenticated before the
+rotation transaction may finish with the already-established node identity, including an existing
+long poll. This request-level race is accepted and is not a second active Token.
 
 The Server authenticates each request against the database and does not use a long-lived Token
 cache. Database unavailability fails closed. Basic request-rate limiting protects the authentication

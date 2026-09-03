@@ -5,6 +5,14 @@ absolute staging-root path and opens that path from its drive root one component
 not accept a file inventory, public key, signature verifier, ACL callback, or preconstructed
 admission plan.
 
+ADR 0025 supersedes only the Worker mTLS credential fields in the exact staged-package profile
+described below. They remain immutable historical schema-v3 bindings, not current Worker
+authentication or future production gates. The local capability-authority CNG/SPKI, detached
+package signature and compiled `outertrust`, and Authenticode boundaries remain unchanged. A
+Token-aware replacement requires a new versioned profile, while the plaintext Worker Token remains
+outside the package and staged trees in the fixed Control configuration file and its SHA-256 digest
+exists only in the Server database.
+
 The volume root and staging ancestors use the closed ambient `winacl` policy. The staging root and
 every descendant use the closed managed trusted-configuration policy: SYSTEM and Administrators
 have full control, both fixed Worker service SIDs have read/traverse access, and staged files do not

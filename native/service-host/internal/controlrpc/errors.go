@@ -83,6 +83,8 @@ func buildStatusMappings() map[statusMappingKey]publicErrorSpec {
 			"REQUEST_VALIDATION_FAILED", "The Worker API rejected the request.", false)
 		add(operation, 400, "worker_identity_missing", false,
 			"WORKER_IDENTITY_MISSING", "The Worker API request is missing a worker identity.", false)
+		add(operation, 401, "worker_authentication_failed", false,
+			"WORKER_AUTHENTICATION_FAILED", "The Worker API rejected the Worker Token.", false)
 		add(operation, 401, "worker_certificate_missing", false,
 			"WORKER_CERTIFICATE_MISSING", "The Worker API did not receive a client certificate.", false)
 		add(operation, 401, "worker_certificate_unauthorized", false,
@@ -97,8 +99,21 @@ func buildStatusMappings() map[statusMappingKey]publicErrorSpec {
 			"WORKER_IDENTITY_MISMATCH", "The Worker API rejected the worker identity.", false)
 		add(operation, 413, "request_body_too_large", false,
 			"REQUEST_BODY_TOO_LARGE", "The Worker API rejected an oversized request.", false)
+		add(operation, 429, "request_rate_limited", true,
+			"UPSTREAM_UNAVAILABLE", "The Worker API rate-limited the request.", true)
 		add(operation, 500, "internal_error", true,
 			"UPSTREAM_ERROR", "The Worker API could not complete the request.", true)
+		add(operation, 503, "worker_authentication_unavailable", true,
+			"UPSTREAM_UNAVAILABLE", "Worker authentication is temporarily unavailable.", true)
+	}
+	for _, operation := range []localrpc.Operation{
+		localrpc.OperationClaim,
+		localrpc.OperationInstanceHeartbeat,
+		localrpc.OperationCompleteRun,
+		localrpc.OperationFailRun,
+	} {
+		add(operation, 403, "worker_registration_required", false,
+			"WORKER_REGISTRATION_REQUIRED", "The Worker must register before using this operation.", false)
 	}
 
 	add(localrpc.OperationRegister, 409, "protocol_version_unsupported", false,

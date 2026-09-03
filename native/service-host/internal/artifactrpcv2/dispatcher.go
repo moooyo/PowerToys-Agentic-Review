@@ -232,6 +232,7 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			details,
 			401,
 			false,
+			"worker_authentication_failed",
 			"worker_mtls_required",
 			"worker_certificate_unauthorized",
 			"worker_certificate_missing",
@@ -247,6 +248,7 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			"insecure_worker_auth_loopback_only",
 			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
+			"worker_registration_required",
 		) ||
 		statusTupleMatches(
 			status,
@@ -259,7 +261,7 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			"artifact_upload_quota_exceeded",
 		) ||
 		statusTupleMatches(status, details, 413, false, "request_body_too_large") ||
-		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy") ||
+		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy", "request_rate_limited") ||
 		statusTupleMatches(
 			status,
 			details,
@@ -268,6 +270,7 @@ func createArtifactUploadServerStatus(status int, details statusDetails) bool {
 			"artifact_transaction_cancelled",
 			"artifact_transaction_not_ready",
 			"artifact_transaction_timeout",
+			"worker_authentication_unavailable",
 		) ||
 		statusTupleMatches(
 			status,
@@ -301,6 +304,7 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			details,
 			401,
 			false,
+			"worker_authentication_failed",
 			"worker_mtls_required",
 			"worker_certificate_unauthorized",
 			"worker_certificate_missing",
@@ -316,6 +320,7 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			"insecure_worker_auth_loopback_only",
 			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
+			"worker_registration_required",
 		) ||
 		statusTupleMatches(
 			status,
@@ -327,7 +332,7 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			"lease_lost",
 		) ||
 		statusTupleMatches(status, details, 413, false, "request_body_too_large") ||
-		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy") ||
+		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy", "request_rate_limited") ||
 		statusTupleMatches(
 			status,
 			details,
@@ -336,6 +341,7 @@ func putArtifactChunkServerStatus(status int, details statusDetails) bool {
 			"artifact_transaction_cancelled",
 			"artifact_transaction_not_ready",
 			"artifact_transaction_timeout",
+			"worker_authentication_unavailable",
 		) ||
 		statusTupleMatches(
 			status,
@@ -362,6 +368,7 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			details,
 			401,
 			false,
+			"worker_authentication_failed",
 			"worker_mtls_required",
 			"worker_certificate_unauthorized",
 			"worker_certificate_missing",
@@ -377,6 +384,7 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			"insecure_worker_auth_loopback_only",
 			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
+			"worker_registration_required",
 		) ||
 		statusTupleMatches(
 			status,
@@ -388,7 +396,7 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			"lease_lost",
 		) ||
 		statusTupleMatches(status, details, 413, false, "request_body_too_large") ||
-		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy") ||
+		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy", "request_rate_limited") ||
 		statusTupleMatches(
 			status,
 			details,
@@ -397,6 +405,7 @@ func finalizeArtifactUploadServerStatus(status int, details statusDetails) bool 
 			"artifact_transaction_cancelled",
 			"artifact_transaction_not_ready",
 			"artifact_transaction_timeout",
+			"worker_authentication_unavailable",
 		) ||
 		statusTupleMatches(
 			status,
@@ -423,6 +432,7 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			details,
 			401,
 			false,
+			"worker_authentication_failed",
 			"worker_mtls_required",
 			"worker_certificate_unauthorized",
 			"worker_certificate_missing",
@@ -438,6 +448,7 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			"insecure_worker_auth_loopback_only",
 			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
+			"worker_registration_required",
 		) ||
 		statusTupleMatches(
 			status,
@@ -449,7 +460,7 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			"lease_lost",
 		) ||
 		statusTupleMatches(status, details, 413, false, "request_body_too_large") ||
-		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy") ||
+		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy", "request_rate_limited") ||
 		statusTupleMatches(
 			status,
 			details,
@@ -458,6 +469,7 @@ func terminateArtifactUploadServerStatus(status int, details statusDetails) bool
 			"artifact_transaction_cancelled",
 			"artifact_transaction_not_ready",
 			"artifact_transaction_timeout",
+			"worker_authentication_unavailable",
 		) ||
 		statusTupleMatches(
 			status,
@@ -485,6 +497,7 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			details,
 			401,
 			false,
+			"worker_authentication_failed",
 			"worker_mtls_required",
 			"worker_certificate_unauthorized",
 			"worker_certificate_missing",
@@ -500,6 +513,7 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			"insecure_worker_auth_loopback_only",
 			"worker_certificate_unmapped",
 			"worker_identity_mismatch",
+			"worker_registration_required",
 		) ||
 		statusTupleMatches(
 			status,
@@ -521,7 +535,7 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			"review_result_invalid",
 			"stored_execution_template_invalid",
 		) ||
-		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy") ||
+		statusTupleMatches(status, details, 429, true, "artifact_transaction_busy", "request_rate_limited") ||
 		statusTupleMatches(
 			status,
 			details,
@@ -530,6 +544,7 @@ func completeArtifactRunServerStatus(status int, details statusDetails) bool {
 			"artifact_transaction_cancelled",
 			"artifact_transaction_not_ready",
 			"artifact_transaction_timeout",
+			"worker_authentication_unavailable",
 		) ||
 		statusTupleMatches(status, details, 503, false, "artifact_storage_integrity")
 }

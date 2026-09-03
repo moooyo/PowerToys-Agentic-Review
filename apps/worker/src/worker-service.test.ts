@@ -1001,6 +1001,7 @@ function createConfig(): WorkerConfig {
     serverUrl: new URL("http://127.0.0.1:3000"),
     protocolVersion: "1.0",
     workerNodeId: "worker-node",
+    workerToken: `arw1_${"A".repeat(43)}`,
     displayName: "Test worker",
     workerVersion: "0.1.0-test",
     maxSlots: 1,

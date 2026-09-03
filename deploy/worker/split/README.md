@@ -2,18 +2,22 @@
 
 This directory contains dormant RoleConfig v2 source inputs for the future split Windows installer.
 It is not an installer, a deployable package, or installation evidence. The legacy
-`deploy/worker/install-worker.ps1` remains unchanged and cannot install this profile.
+`deploy/worker/install-worker.ps1` remains unchanged and cannot install this profile or the ADR 0025
+per-Worker Bearer Token profile.
 
-The first installation profile accepts only an enrolled host with no existing Worker service or
-runtime installation. Discovery of the legacy `AgenticReview.Worker` service, a legacy runtime
-root, or a partial legacy installation fails closed. Legacy-to-split migration requires a separate
-ADR and is not inferred from the upgrade procedure below. A previously committed split pair may use
-the split-to-split upgrade path.
+The first installation profile accepts only a host with no existing Worker service or runtime
+installation. Discovery of the legacy `AgenticReview.Worker` service, a legacy runtime root, or a
+partial legacy installation fails closed. Legacy-to-split migration requires a separate ADR and is
+not inferred from the upgrade procedure below. A previously committed split pair may use the
+split-to-split upgrade path.
 
-The design authority is ADR 0013 together with ADR 0007, ADRs 0009 through 0012, the ADR 0015
-transaction model, and the ADR 0016 SCM policy contract. The XML files only describe how the two
-WinSW wrappers launch ServiceHost. They do not provision services, accounts, restricted service
-SIDs, ACLs, keys, certificates, firewall rules, machine policy, or physical roots.
+The design authority is ADR 0025 together with the still-applicable split-service, package,
+transaction, and SCM decisions in ADR 0007, ADRs 0009 through 0013, ADR 0015, and ADR 0016. The
+mTLS credential, Server binding receipt, and enrollment-record requirements in those earlier exact
+profiles are historical and must be replaced by explicitly versioned profiles rather than silently
+reinterpreted. The XML files only describe how the two WinSW wrappers launch ServiceHost. They do
+not provision services, accounts, restricted service SIDs, ACLs, the local capability-signing key,
+package trust material, firewall rules, machine policy, physical roots, or the Worker Bearer Token.
 
 ## Source files
 
@@ -70,19 +74,54 @@ future installer must configure the exact matching virtual account and
 `SERVICE_SID_TYPE_RESTRICTED` before any start. Directly invoking WinSW installation with these XML
 files is unsupported; the resulting default identity is invalid and ServiceHost must fail closed.
 
-The XML contains no Node path, bundle path, application environment, secret, package signer,
-RoleConfig value, slot count, or execution setting. ServiceHost obtains the Node and bundle selectors
-from the signed, protected bootstrap and independently verifies the running service identity,
-manifest, signer, paths, ACLs, and peer.
+The XML contains no Node path, bundle path, application environment, Worker Bearer Token, other
+secret, package signer, RoleConfig value, slot count, or execution setting. ServiceHost obtains the
+Node and bundle selectors from the signed, protected bootstrap and independently verifies the
+running service identity, manifest, signer, paths, ACLs, and peer.
+
+## Worker API credential boundary
+
+ADR 0025 assigns one independently revocable, long-lived Bearer Token to each Worker node. Any
+authenticated dashboard user may create a pending node, rotate its Token, or revoke it. The first
+successful Worker registration changes the Server-side state from `pending` to `active`; `revoked`
+is terminal. The Linux Server stores only the Token's SHA-256 digest and continues to serve the
+Worker API over HTTPS. Restoring an older database backup intentionally restores the Token state in
+that backup, including the accepted possibility of reviving a later-revoked Token.
+
+The plaintext Token and `workerNodeId` reside only in the fixed ordinary Control configuration
+file:
+
+```text
+C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
+```
+
+The exact canonical JSON profile is defined by ADR 0025. The file is persistent local
+configuration, not a package payload, signed package input, WinSW substitution, environment
+variable, command-line argument, registry value, or alternate credential source. Control uses the
+Token only as `Authorization: Bearer <token>` for Worker API requests and continues to validate the
+Server's HTTPS certificate. It loads no Worker client certificate, private key, PFX, or client-key
+passphrase.
+
+The Worker Token does not replace the short-lived lease token, the Control-to-Executor local
+capability signer, package signatures, Authenticode, artifact receipts, GitHub credentials, Codex
+credentials, or authenticated ARWX readiness. A Server binding receipt, active-status assertion,
+receipt signer, signer-host, KMS, HSM, and the former Linux signer-host verification matrix are not
+future deployment gates under the accepted trust model.
 
 ## Required package and activation flow
 
-Node enrollment completes before release preparation. The node-specific package is then built from
-the enrolled local-authority SPKI, mTLS identity, fixed roots, final wrapper configurations, both
-role bundles, and all other reviewed dependencies. The reviewed role entrypoints are
-`apps/worker/src/control-main.ts` and `apps/worker/src/executor-main.ts`; their bundle outputs become
-the exact package payloads `app\control.mjs` and `app\executor.mjs`. Those are the only role bundle
-payloads; legacy `worker.mjs`, source maps, and metadata sidecars are forbidden.
+The Server creates the pending Worker node before release preparation. The node-specific package is
+then built from the Worker node ID, the Control-to-Executor local capability-authority SPKI, fixed
+roots, final wrapper configurations, both role bundles, and all other reviewed non-Token
+dependencies. Neither the plaintext Token nor its digest is a package input. The reviewed role
+entrypoints are `apps/worker/src/control-main.ts` and `apps/worker/src/executor-main.ts`; their bundle
+outputs become the exact package payloads `app\control.mjs` and `app\executor.mjs`. Those are the only
+role bundle payloads; legacy `worker.mjs`, source maps, and metadata sidecars are forbidden.
+
+Before Control starts, the privileged installation flow must place and exactly validate
+`worker-auth-v1.json` at its fixed path. This credential provisioning is separate from package
+signing and package-root replacement. Rotation replaces only that configuration value and restarts
+Control; it does not rebuild or resign the Worker package.
 
 The future privileged Go installer must:
 
@@ -113,6 +152,11 @@ the new pair or restore a previously verified, protocol-compatible split pair. A
 recovery never rolls back solely because activation policy remains `PENDING`; it rolls forward by
 reapplying and verifying the exact policy until the journal records `APPLIED`.
 
+When Control first registers with a pending Token, the Server atomically activates that Worker node
+and records the process instance. Authentication does not grant Claim, lease, slot, package,
+installation, local capability, or execution authority. Every later Worker request is admitted from
+the current database-backed Token state, and database unavailability fails authentication closed.
+
 The stricter Executor installer-activation readiness in step 8 applies only to a privileged install
 or upgrade transaction. On an ordinary machine boot, SCM may start Control after Executor reaches
 `SERVICE_RUNNING`. Control must then establish a fresh authenticated ARWX session and receive the
@@ -131,10 +175,14 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 
 ## Deferred production work
 
-The repository still lacks the trusted enrollment evidence boundary, production split installer,
-destination-verification evidence, transaction-journal schema v2 and its durable Windows store,
-the native SCM adapter, the complete final recovery and preshutdown policy, pinned WinSW release
-validation, native proof of the disabled-create intermediate DACL and failure-action clearing,
-authenticated installer-facing readiness observation, archive/extractor, and native Windows
-verification evidence. Legacy-to-split migration is separately deferred. Those items must be
-designed and reviewed before these inputs can become a supported installation path.
+The repository still lacks explicitly versioned package, bootstrap, and RoleConfig replacements
+that remove the historical Worker mTLS and Server-receipt fields and select the fixed ADR 0025
+Control configuration file. It also lacks the production split installer, destination-verification
+evidence, transaction-journal schema v2 and its durable Windows store, the native SCM adapter, the
+complete final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
+disabled-create intermediate DACL and failure-action clearing, authenticated installer-facing
+readiness observation, archive/extractor, and native Windows verification evidence.
+Legacy-to-split migration is separately deferred. Those items must be designed and reviewed before
+these inputs can become a supported installation path. Worker client-certificate enrollment,
+binding receipts, receipt trust, signer-host implementation, and signer-host Linux process tests are
+not deferred requirements.

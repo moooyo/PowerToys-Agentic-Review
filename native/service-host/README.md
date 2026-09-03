@@ -21,6 +21,8 @@ This directory contains the fail-closed foundation and a composed Windows runtim
   ACLs, closed fixed layout, bounded content traversal, and final pre-launch reinspection;
 - handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
 - a fixed-origin TLS 1.3 Worker API client that accepts a non-exportable signer;
+- a source-only fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
+  `worker-auth-v1.json` profile, without a generic header or Token source;
 - stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
 - suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
@@ -44,6 +46,12 @@ payloads remain zero-execution foundations: Executor can emit only the authentic
 `Ready` state (`ready=false`, `availableSlots=0`, `reasonCode=EXECUTION_DISABLED`), and Control never
 claims work. This source must not be used to enable production execution. The non-Windows production
 factory remains unavailable.
+
+The accepted per-Worker Bearer Token design is not selected by this production composition yet.
+The committed exact role configuration is still schema version 3 and still identifies an mTLS
+credential. Selecting the source-only Bearer constructor before a versioned replacement profile
+would silently reinterpret that signed contract, so startup remains fail-closed on the existing
+composition until that profile and its exact data-root layout are replaced together.
 
 ## Command line
 
@@ -122,6 +130,36 @@ and secrets will use separate typed, protected inputs rather than arbitrary envi
 No Server lease token, private key bytes, arbitrary executable path from Control, or free-form
 command belongs in this configuration.
 
+### Per-Worker Bearer transport candidate
+
+`internal/workertransport` contains the reusable Token-only transport selected by ADR 0025. Its
+only production reader path is:
+
+```text
+C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
+```
+
+The reader accepts one regular UTF-8 JSON file of at most 4 KiB with exactly `profileId`, `token`,
+and `workerNodeId`. It rejects duplicate, unknown, missing, wrongly typed, malformed, trailing,
+or byte-order-marked input. The Token must be exactly `arw1_` plus the canonical unpadded base64url
+encoding of 32 bytes, and the profile Worker node ID must match the expected runtime Worker node.
+No alternate path, environment variable, command-line argument, registry value, package member,
+or local RPC field is accepted.
+
+The Bearer client retains the existing private Server root pool, fixed `serverName`, TLS 1.3
+minimum, proxy disablement, fixed routes, redirect rejection, byte bounds, deadlines, concurrency,
+and lifecycle cancellation. It installs no TLS client certificate or client-signing callback and
+adds exactly one `Authorization: Bearer <token>` header inside the private transport for every
+Worker and artifact request. The Token, its SHA-256 digest, and the Authorization value are not
+exposed by the parsed profile API, formatting, errors, response forwarding, runtime bootstrap,
+HostControl, or Control-to-Executor RPC. Closing the client clears its retained Token bytes after
+active requests drain.
+
+This source-only capability is deliberately not a second positive production authentication path.
+A later versioned role configuration and data-root profile must make the fixed file an exact
+Control-only layout member and then replace, rather than coexist with, the schema-v3 mTLS
+composition.
+
 Both roles require `APPDATA` and `LOCALAPPDATA` below their role-owned profile. Executor also
 requires `HOME`, `CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`,
 `GIT_TERMINAL_PROMPT=0`, and `GCM_INTERACTIVE=never`. `GIT_CONFIG_GLOBAL` is a canonical file path
@@ -160,8 +198,9 @@ called with `WTD_REVOKE_NONE`, `WTD_REVOCATION_CHECK_NONE`, and
 `WTD_CACHE_ONLY_URL_RETRIEVAL`; it performs no CRL or OCSP check and blocks trust-provider CRL and
 AIA retrieval. The verifier supplies no URL reference. The release pipeline, installer, and
 signer-pin rotation process must perform online code-signing revocation checks before authorizing a
-release. Independently, the Server remains the live Worker revocation authority through mTLS and
-can deny a revoked Worker regardless of its locally pinned executable signature.
+release. Independently, the Server remains the live Worker revocation authority. The current
+schema-v3 composition uses mTLS; its versioned ADR-0025 replacement will use the per-Worker Token
+database state and can deny a revoked Worker regardless of its locally pinned executable signature.
 
 The Windows platform factory is composed, but an ordinary build rejects startup while loading its
 release authority because `compiled_unavailable.go` contains no production release template. A

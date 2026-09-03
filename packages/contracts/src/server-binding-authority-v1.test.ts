@@ -180,8 +180,11 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
   [
     "/apps/server/src/database/protocol.ts",
     [
+      "AuthenticateWorkerTokenInput",
+      "AuthenticateWorkerTokenResult",
       "ClaimLeaseInput",
       "ClaimLeaseResult",
+      "CreateWorkerNodeCredentialInput",
       "DatabaseHealth",
       "DatabaseOperation",
       "DatabaseOperationMap",
@@ -200,8 +203,12 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
       "ReapExpiredLeasesInput",
       "RegisterWorkerInput",
       "RegisteredWorker",
+      "RevokeWorkerTokenInput",
+      "RotateWorkerTokenInput",
       "ScheduleJobInput",
       "WebhookDeliveryInput",
+      "WorkerNodeAuthState",
+      "WorkerNodeCredentialMutationResult",
     ],
   ],
   [
@@ -371,11 +378,11 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   ],
   [
     "/apps/server/src/database/database-worker.ts",
-    "16d6e8e71b879c05c96d4b1b5b286dfddb5ea3a656d2b5f1d89b7ef1eec5a985",
+    "066a12f83697af170d4777e78c51761c5819bd521d20ac17312722408de7a94c",
   ],
   [
     "/apps/server/src/database/protocol.ts",
-    "1a4ea73c438f21e2b4a1b94925e4df2406abb395a0146e77b35e429e7cab7e5a",
+    "33f6b71418e5f0d22416bd8fed6d20f4cf196fecca4e5ff0709940d529548e53",
   ],
   [
     "/apps/server/src/database/server-binding-persistence-v1.ts",

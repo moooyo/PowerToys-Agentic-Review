@@ -27,7 +27,7 @@ import {
   ArtifactTransactionCoordinatorError,
   type ArtifactTransactionPort,
 } from "../artifacts/index.js";
-import type { ServerConfig } from "../config.js";
+import type { DatabaseClient } from "../database/database-client.js";
 import {
   createWorkerAuthenticationHooks,
   getAuthenticatedWorkerIdentity,
@@ -36,7 +36,7 @@ import {
 export type WorkerArtifactTransactions = ArtifactTransactionPort;
 
 export interface WorkerArtifactRouteDependencies {
-  readonly config: ServerConfig;
+  readonly database: DatabaseClient;
   readonly transactions: WorkerArtifactTransactions;
   readonly shutdownSignal: AbortSignal;
 }
@@ -494,8 +494,8 @@ export const registerWorkerArtifactRoutes = (
   app: FastifyInstance,
   dependencies: WorkerArtifactRouteDependencies,
 ): void => {
-  const { config, transactions, shutdownSignal } = dependencies;
-  const authenticateWorker = createWorkerAuthenticationHooks(config);
+  const { database, transactions, shutdownSignal } = dependencies;
+  const authenticateWorker = createWorkerAuthenticationHooks(database);
 
   app.post<{ Params: RunArtifactParameters; Body: CreateResultArtifactUploadRequest }>(
     "/api/v1/worker/runs/:runAttemptId/artifacts",

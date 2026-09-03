@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { TLSSocket } from "node:tls";
 import {
   type CreateResultArtifactUploadResponse,
   maximumResultArtifactChunkBytes,
@@ -8,22 +7,17 @@ import {
   maximumResultArtifactChunks,
 } from "@agentic-review/contracts";
 import { FormatRegistry } from "@sinclair/typebox";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import {
   ArtifactChunkTransportValidationError,
   ArtifactTransactionCoordinatorError,
 } from "../../dist/artifacts/index.js";
-import type { ServerConfig } from "../../dist/config.js";
+import type { DatabaseClient } from "../../dist/database/database-client.js";
 import {
   registerWorkerArtifactRoutes,
   type WorkerArtifactTransactions,
 } from "../../dist/routes/worker-artifacts.js";
-import {
-  createWorkerAuthenticationHooks,
-  createWorkerAuthenticationPreHandler,
-  getAuthenticatedWorkerIdentity,
-} from "../../dist/security/worker-identity.js";
 
 const uploadId = "10000000-0000-4000-8000-000000000001";
 const clientArtifactId = "20000000-0000-4000-8000-000000000002";
@@ -32,38 +26,7 @@ const content = Buffer.from("artifact chunk", "utf8");
 const sha256 = createHash("sha256").update(content).digest("hex");
 const chunkData = content.toString("base64url");
 const shutdownController = new AbortController();
-
-const insecureConfig: ServerConfig = {
-  host: "127.0.0.1",
-  port: 0,
-  databasePath: "unused.sqlite",
-  migrationsDirectory: "unused",
-  artifactStorage: {
-    rootPath: "/unused/artifacts",
-    capacity: {
-      hardBytes: 10n * 1_024n * 1_024n,
-      hardEntries: 1_000,
-      emergencyReserveBytes: 1_024n * 1_024n,
-      perUploadMetadataHeadroomBytes: 64n * 1_024n,
-      cleanupBacklogHighWaterEntries: 100,
-    },
-  },
-  protocolVersion: "1.0",
-  heartbeatIntervalSeconds: 20,
-  leaseTtlSeconds: 120,
-  leaseReaperIntervalSeconds: 15,
-  operatorAuthCleanupIntervalSeconds: 300,
-  operatorAuthCleanupBatchSize: 100,
-  retryDelaySeconds: 1,
-  workerOfflineAfterSeconds: 90,
-  maxLongPollSeconds: 30,
-  allowInsecureWorkerAuth: true,
-  tls: undefined,
-  workerCertificateBindings: {},
-  github: undefined,
-  operatorAuth: undefined,
-  dashboardDirectory: undefined,
-};
+const workerToken = `arw1_${Buffer.alloc(32, 11).toString("base64url")}`;
 
 const leaseIdentity = {
   jobId: "job-id",
@@ -183,12 +146,25 @@ const installProductionBodyLimitHandler = (app: FastifyInstance): void => {
 
 const createApp = (
   transactions: WorkerArtifactTransactions = createTransactions(),
-  config: ServerConfig = insecureConfig,
 ): FastifyInstance => {
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (request) => {
+    request.headers.authorization ??= `Bearer ${workerToken}`;
+  });
   installProductionBodyLimitHandler(app);
   registerWorkerArtifactRoutes(app, {
-    config,
+    database: {
+      request: vi.fn(async (operation: string) => {
+        if (operation !== "authenticateWorkerToken") {
+          throw new Error(`Unexpected database operation: ${operation}`);
+        }
+        return {
+          outcome: "authenticated",
+          workerNodeId: leaseIdentity.workerNodeId,
+          authState: "active",
+        };
+      }),
+    } as unknown as DatabaseClient,
     transactions,
     shutdownSignal: shutdownController.signal,
   });
@@ -200,46 +176,6 @@ const noCalls = (transactions: WorkerArtifactTransactions): void => {
   expect(transactions.putArtifactChunk).not.toHaveBeenCalled();
   expect(transactions.finalizeArtifactUpload).not.toHaveBeenCalled();
   expect(transactions.terminateArtifactUpload).not.toHaveBeenCalled();
-};
-
-const createHookRequest = (body: unknown, socket: object): FastifyRequest =>
-  ({ body, raw: { socket } }) as unknown as FastifyRequest;
-
-const createHookReply = (): {
-  readonly reply: FastifyReply;
-  readonly status: () => number | undefined;
-  readonly body: () => unknown;
-} => {
-  let status: number | undefined;
-  let body: unknown;
-  const candidate = {
-    sent: false,
-    code: vi.fn((value: number) => {
-      status = value;
-      return candidate;
-    }),
-    send: vi.fn((value: unknown) => {
-      body = value;
-      candidate.sent = true;
-      return candidate;
-    }),
-  };
-  return {
-    reply: candidate as unknown as FastifyReply,
-    status: () => status,
-    body: () => body,
-  };
-};
-
-const createTlsSocket = (certificateRaw: Buffer, authorized = true): TLSSocket => {
-  const socket = Object.create(TLSSocket.prototype) as TLSSocket;
-  Object.defineProperties(socket, {
-    encrypted: { value: true },
-    authorized: { value: authorized },
-    remoteAddress: { value: "192.0.2.10" },
-    getPeerCertificate: { value: () => ({ raw: certificateRaw }) },
-  });
-  return socket;
 };
 
 describe("Worker result artifact routes", () => {
@@ -862,23 +798,46 @@ describe("Worker result artifact timestamp responses", () => {
   });
 });
 
-describe("Worker result artifact authentication hooks", () => {
-  it("returns one frozen pair of route hooks", () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
+describe("Worker result artifact bearer authentication", () => {
+  const createAuthenticationApp = (
+    authenticateWorkerToken: ReturnType<typeof vi.fn>,
+    transactions = createTransactions(),
+  ): FastifyInstance => {
+    const app = Fastify({ logger: false });
+    installProductionBodyLimitHandler(app);
+    registerWorkerArtifactRoutes(app, {
+      database: { request: authenticateWorkerToken } as unknown as DatabaseClient,
+      transactions,
+      shutdownSignal: shutdownController.signal,
+    });
+    return app;
+  };
 
-    expect(Object.isFrozen(hooks)).toBe(true);
-    expect(typeof hooks.onRequest).toBe("function");
-    expect(typeof hooks.preValidation).toBe("function");
+  it.each([
+    ["POST", `/api/v1/worker/runs/${leaseIdentity.runAttemptId}/artifacts`],
+    ["PUT", `/api/v1/worker/artifact-uploads/${uploadId}/chunks/0`],
+    ["POST", `/api/v1/worker/artifact-uploads/${uploadId}/complete`],
+    ["POST", `/api/v1/worker/artifact-uploads/${uploadId}/terminate`],
+  ] as const)("authenticates %s %s before body validation", async (method, url) => {
+    const authenticateWorkerToken = vi.fn();
+    const transactions = createTransactions();
+    const app = createAuthenticationApp(authenticateWorkerToken, transactions);
+    try {
+      const response = await app.inject({ method, url });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+      expect(response.json()).toMatchObject({ code: "worker_authentication_failed" });
+      expect(authenticateWorkerToken).not.toHaveBeenCalled();
+      noCalls(transactions);
+    } finally {
+      await app.close();
+    }
   });
 
-  it("rejects an unauthenticated large body before its content parser runs", async () => {
+  it("rejects a missing token before parsing a large body", async () => {
+    const authenticateWorkerToken = vi.fn();
     const transactions = createTransactions();
-    const secureConfig: ServerConfig = {
-      ...insecureConfig,
-      allowInsecureWorkerAuth: false,
-      tls: {},
-      workerCertificateBindings: { ["A".repeat(64)]: leaseIdentity.workerNodeId },
-    };
     const app = Fastify({ logger: false });
     app.removeContentTypeParser("application/json");
     const parser = vi.fn(
@@ -890,7 +849,7 @@ describe("Worker result artifact authentication hooks", () => {
     );
     app.addContentTypeParser("application/json", { parseAs: "string" }, parser);
     registerWorkerArtifactRoutes(app, {
-      config: secureConfig,
+      database: { request: authenticateWorkerToken } as unknown as DatabaseClient,
       transactions,
       shutdownSignal: shutdownController.signal,
     });
@@ -903,320 +862,68 @@ describe("Worker result artifact authentication hooks", () => {
       });
 
       expect(response.statusCode).toBe(401);
-      expect(response.json()).toEqual({
-        code: "worker_mtls_required",
-        message: "A mutually authenticated TLS connection is required.",
-        retryable: false,
-      });
+      expect(response.headers["www-authenticate"]).toBe("Bearer");
+      expect(response.json()).toMatchObject({ code: "worker_authentication_failed" });
       expect(parser).not.toHaveBeenCalled();
+      expect(authenticateWorkerToken).not.toHaveBeenCalled();
       noCalls(transactions);
     } finally {
       await app.close();
     }
   });
 
-  it("allows an authenticated transport to reach parsing before schema validation", async () => {
-    const transactions = createTransactions();
-    const app = Fastify({ logger: false });
-    app.removeContentTypeParser("application/json");
-    const parser = vi.fn(
-      (
-        _request: FastifyRequest,
-        body: string,
-        done: (error: Error | null, value?: unknown) => void,
-      ) => done(null, JSON.parse(body)),
-    );
-    app.addContentTypeParser("application/json", { parseAs: "string" }, parser);
-    registerWorkerArtifactRoutes(app, {
-      config: insecureConfig,
-      transactions,
-      shutdownSignal: shutdownController.signal,
+  it.each([
+    ["pending", 403, "worker_registration_required"],
+    ["unavailable", 503, "worker_authentication_unavailable"],
+  ] as const)("fails closed for %s authentication", async (condition, status, code) => {
+    const authenticateWorkerToken = vi.fn(async () => {
+      if (condition === "unavailable") {
+        throw new Error(`database failure for ${workerToken}`);
+      }
+      return {
+        outcome: "authenticated" as const,
+        workerNodeId: leaseIdentity.workerNodeId,
+        authState: "pending" as const,
+      };
     });
+    const transactions = createTransactions();
+    const app = createAuthenticationApp(authenticateWorkerToken, transactions);
     try {
       const response = await app.inject({
         method: "POST",
         url: `/api/v1/worker/runs/${leaseIdentity.runAttemptId}/artifacts`,
-        headers: { "content-type": "application/json" },
-        payload: JSON.stringify({ workerNodeId: leaseIdentity.workerNodeId }),
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: createRequest(),
       });
-
-      expect(response.statusCode).toBe(400);
-      expect(parser).toHaveBeenCalledOnce();
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ code });
+      expect(response.body).not.toContain(workerToken);
       noCalls(transactions);
     } finally {
       await app.close();
     }
   });
 
-  it("does not publish final identity until preValidation consumes the transport", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), { remoteAddress: "127.0.0.1" });
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-    await hooks.preValidation(request, reply.reply);
-
-    expect(getAuthenticatedWorkerIdentity(request)).toEqual({
-      workerNodeId: leaseIdentity.workerNodeId,
-      certificateFingerprint: undefined,
-      authenticationMethod: "insecure-loopback",
-    });
-  });
-
-  it("keeps interleaved transport authentication state keyed to each request", async () => {
-    const certificateA = Buffer.from("interleaved worker certificate A", "utf8");
-    const certificateB = Buffer.from("interleaved worker certificate B", "utf8");
-    const fingerprintA = createHash("sha256").update(certificateA).digest("hex").toUpperCase();
-    const fingerprintB = createHash("sha256").update(certificateB).digest("hex").toUpperCase();
-    const workerA = "interleaved-worker-a";
-    const workerB = "interleaved-worker-b";
-    const hooks = createWorkerAuthenticationHooks({
-      ...insecureConfig,
-      allowInsecureWorkerAuth: false,
-      tls: {},
-      workerCertificateBindings: {
-        [fingerprintA]: workerA,
-        [fingerprintB]: workerB,
-      },
-    });
-    const requestA = createHookRequest({ workerNodeId: workerA }, createTlsSocket(certificateA));
-    const requestB = createHookRequest({ workerNodeId: workerB }, createTlsSocket(certificateB));
-    const replyA = createHookReply();
-    const replyB = createHookReply();
-
-    await hooks.onRequest(requestA, replyA.reply);
-    await hooks.onRequest(requestB, replyB.reply);
-    await hooks.preValidation(requestB, replyB.reply);
-    await hooks.preValidation(requestA, replyA.reply);
-
-    expect(replyA.status()).toBeUndefined();
-    expect(replyB.status()).toBeUndefined();
-    expect(getAuthenticatedWorkerIdentity(requestA)).toEqual({
-      workerNodeId: workerA,
-      certificateFingerprint: fingerprintA,
-      authenticationMethod: "mtls",
-    });
-    expect(getAuthenticatedWorkerIdentity(requestB)).toEqual({
-      workerNodeId: workerB,
-      certificateFingerprint: fingerprintB,
-      authenticationMethod: "mtls",
-    });
-  });
-
-  it("consumes a pending transport exactly once and fails closed on reuse", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), { remoteAddress: "127.0.0.1" });
-    const firstReply = createHookReply();
-    await hooks.onRequest(request, firstReply.reply);
-    await hooks.preValidation(request, firstReply.reply);
-
-    const secondReply = createHookReply();
-    await hooks.preValidation(request, secondReply.reply);
-
-    expect(secondReply.status()).toBe(401);
-    expect(secondReply.body()).toEqual({
-      code: "worker_authentication_state_missing",
-      message: "Worker transport authentication state is missing.",
-      retryable: false,
-    });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("does not allow one hook factory to consume another factory's transport", async () => {
-    const first = createWorkerAuthenticationHooks(insecureConfig);
-    const second = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), { remoteAddress: "127.0.0.1" });
-    await first.onRequest(request, createHookReply().reply);
-    const reply = createHookReply();
-
-    await second.preValidation(request, reply.reply);
-
-    expect(reply.status()).toBe(401);
-    expect(reply.body()).toMatchObject({ code: "worker_authentication_state_missing" });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("invalidates the pending transport when onRequest is invoked twice", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), { remoteAddress: "127.0.0.1" });
-    await hooks.onRequest(request, createHookReply().reply);
-    const duplicateReply = createHookReply();
-
-    await hooks.onRequest(request, duplicateReply.reply);
-    const consumeReply = createHookReply();
-    await hooks.preValidation(request, consumeReply.reply);
-
-    expect(duplicateReply.status()).toBe(401);
-    expect(duplicateReply.body()).toMatchObject({ code: "worker_authentication_state_invalid" });
-    expect(consumeReply.status()).toBe(401);
-    expect(consumeReply.body()).toMatchObject({ code: "worker_authentication_state_missing" });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("rejects insecure authentication from a non-loopback transport", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), { remoteAddress: "192.0.2.10" });
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-
-    expect(reply.status()).toBe(403);
-    expect(reply.body()).toMatchObject({ code: "insecure_worker_auth_loopback_only" });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it.each([
-    [false, Buffer.from("unauthorized leaf", "utf8"), "worker_certificate_unauthorized"],
-    [true, Buffer.alloc(0), "worker_certificate_missing"],
-    [true, Buffer.from("unmapped leaf", "utf8"), "worker_certificate_unmapped"],
-  ] as const)(
-    "rejects TLS authorization boundary %s/%s with %s",
-    async (authorized, certificateRaw, expectedCode) => {
-      const secureConfig: ServerConfig = {
-        ...insecureConfig,
-        allowInsecureWorkerAuth: false,
-        tls: {},
-        workerCertificateBindings: {},
-      };
-      const hooks = createWorkerAuthenticationHooks(secureConfig);
-      const request = createHookRequest(
-        createRequest(),
-        createTlsSocket(Buffer.from(certificateRaw), authorized),
-      );
-      const reply = createHookReply();
-
-      await hooks.onRequest(request, reply.reply);
-
-      expect(reply.status()).toBe(authorized ? (certificateRaw.length === 0 ? 401 : 403) : 401);
-      expect(reply.body()).toMatchObject({ code: expectedCode, retryable: false });
-      expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-    },
-  );
-
-  it("rejects a mismatched active lease worker claim", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(
-      {
-        workerNodeId: leaseIdentity.workerNodeId,
-        activeLeases: [{ workerNodeId: "another-worker" }],
-      },
-      { remoteAddress: "127.0.0.1" },
-    );
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-    await hooks.preValidation(request, reply.reply);
-
-    expect(reply.status()).toBe(403);
-    expect(reply.body()).toMatchObject({ code: "worker_identity_mismatch" });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("does not invoke body accessors while binding identity", async () => {
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const getter = vi.fn(() => leaseIdentity.workerNodeId);
-    const body = Object.create(null) as Record<string, unknown>;
-    Object.defineProperty(body, "workerNodeId", { enumerable: true, get: getter });
-    const request = createHookRequest(body, { remoteAddress: "127.0.0.1" });
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-    await hooks.preValidation(request, reply.reply);
-
-    expect(getter).not.toHaveBeenCalled();
-    expect(reply.status()).toBe(400);
-    expect(reply.body()).toMatchObject({ code: "worker_identity_missing" });
-  });
-
-  it("binds an authorized TLS leaf fingerprint to its configured worker node", async () => {
-    const certificateRaw = Buffer.from("test worker leaf certificate", "utf8");
-    const fingerprint = createHash("sha256").update(certificateRaw).digest("hex").toUpperCase();
-    const secureConfig: ServerConfig = {
-      ...insecureConfig,
-      allowInsecureWorkerAuth: false,
-      tls: {},
-      workerCertificateBindings: { [fingerprint]: leaseIdentity.workerNodeId },
-    };
-    const hooks = createWorkerAuthenticationHooks(secureConfig);
-    const request = createHookRequest(createRequest(), createTlsSocket(certificateRaw));
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-    await hooks.preValidation(request, reply.reply);
-
-    expect(getAuthenticatedWorkerIdentity(request)).toEqual({
-      workerNodeId: leaseIdentity.workerNodeId,
-      certificateFingerprint: fingerprint,
-      authenticationMethod: "mtls",
-    });
-  });
-
-  it("rejects a body identity that differs from the TLS certificate binding", async () => {
-    const certificateRaw = Buffer.from("second test worker leaf certificate", "utf8");
-    const fingerprint = createHash("sha256").update(certificateRaw).digest("hex").toUpperCase();
-    const secureConfig: ServerConfig = {
-      ...insecureConfig,
-      allowInsecureWorkerAuth: false,
-      tls: {},
-      workerCertificateBindings: { [fingerprint]: "certificate-worker" },
-    };
-    const hooks = createWorkerAuthenticationHooks(secureConfig);
-    const request = createHookRequest(createRequest(), createTlsSocket(certificateRaw));
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-    await hooks.preValidation(request, reply.reply);
-
-    expect(reply.status()).toBe(403);
-    expect(reply.body()).toEqual({
-      code: "worker_identity_mismatch",
-      message: "The claimed workerNodeId does not match the authenticated Worker identity.",
-      retryable: false,
-    });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("fails closed when transport properties cannot be read", async () => {
-    const socket = Object.create(null) as Record<string, unknown>;
-    Object.defineProperty(socket, "remoteAddress", {
-      get: () => {
-        throw new Error("hostile socket getter");
-      },
-    });
-    const hooks = createWorkerAuthenticationHooks(insecureConfig);
-    const request = createHookRequest(createRequest(), socket);
-    const reply = createHookReply();
-
-    await hooks.onRequest(request, reply.reply);
-
-    expect(reply.status()).toBe(401);
-    expect(reply.body()).toEqual({
-      code: "worker_transport_authentication_failed",
-      message: "Worker transport authentication could not be completed.",
-      retryable: false,
-    });
-    expect(() => getAuthenticatedWorkerIdentity(request)).toThrow(/not authenticated/u);
-  });
-
-  it("preserves the legacy preHandler missing-body error priority", async () => {
-    const secureConfig: ServerConfig = {
-      ...insecureConfig,
-      allowInsecureWorkerAuth: false,
-      tls: {},
-      workerCertificateBindings: {},
-    };
-    const request = createHookRequest({}, { remoteAddress: "192.0.2.10" });
-    const reply = createHookReply();
-
-    await createWorkerAuthenticationPreHandler(secureConfig)(request, reply.reply);
-
-    expect(reply.status()).toBe(400);
-    expect(reply.body()).toEqual({
-      code: "worker_identity_missing",
-      message: "The request must claim a workerNodeId.",
-      retryable: false,
-    });
+  it("rejects a body identity that differs from the token mapping", async () => {
+    const authenticateWorkerToken = vi.fn(async () => ({
+      outcome: "authenticated" as const,
+      workerNodeId: "worker:another-node",
+      authState: "active" as const,
+    }));
+    const transactions = createTransactions();
+    const app = createAuthenticationApp(authenticateWorkerToken, transactions);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/worker/runs/${leaseIdentity.runAttemptId}/artifacts`,
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: createRequest(),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ code: "worker_identity_mismatch" });
+      noCalls(transactions);
+    } finally {
+      await app.close();
+    }
   });
 });

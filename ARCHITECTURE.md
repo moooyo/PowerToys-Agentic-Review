@@ -2,7 +2,7 @@
 
 Status: Accepted for initial implementation
 
-Last updated: 2026-08-30
+Last updated: 2026-09-03
 
 ## 1. Purpose
 
@@ -27,7 +27,7 @@ Workers run on Windows, and the dashboard uses React and Ant Design Pro.
 | Worker hosting | Two WinSW-managed Windows Services per logical node |
 | Process supervision | Native `AgenticReview.ProcessHost.exe` using Windows Job Objects |
 | Native adapters | Go 1.24 ProcessHost and ServiceHost, cross-compiled for Windows x64/arm64 |
-| Worker transport | Outbound HTTPS with mutual TLS |
+| Worker transport | Outbound HTTPS with one long-lived Bearer Token per Worker node |
 | Queue semantics | Server-issued leases with heartbeats and fencing generations |
 | GitHub | Webhooks when available, reconciliation polling always enabled |
 | Scheduling authorization | Self or explicit GitHub user/App allowlist, deny unknown actors |
@@ -46,9 +46,9 @@ flowchart LR
     O[Operator] -->|OIDC HTTPS| S
     S --> DB[(SQLite)]
     S --> AS[Artifact Store]
-    W1C[Worker 1 Control] -->|HTTPS mTLS| S
-    W2C[Worker 2 Control] -->|HTTPS mTLS| S
-    WNC[Worker N Control] -->|HTTPS mTLS| S
+    W1C[Worker 1 Control] -->|HTTPS plus Bearer Token| S
+    W2C[Worker 2 Control] -->|HTTPS plus Bearer Token| S
+    WNC[Worker N Control] -->|HTTPS plus Bearer Token| S
     W1C <-->|Signed local grants| W1E[Worker 1 Executor]
     W2C <-->|Signed local grants| W2E[Worker 2 Executor]
     WNC <-->|Signed local grants| WNE[Worker N Executor]
@@ -59,8 +59,9 @@ flowchart LR
 ```
 
 GitHub is authoritative for issue and pull request state. SQLite is authoritative for local
-projections, jobs, attempts, leases, findings, approvals, publications, and audit history. Git is
-authoritative for prompts, schemas, validation recipes, migrations, and non-secret policy.
+projections, Worker node credentials and revocation, jobs, attempts, leases, findings, approvals,
+publications, and audit history. Git is authoritative for prompts, schemas, validation recipes,
+migrations, and non-secret policy.
 
 ## 4. Deployment Topology
 
@@ -73,7 +74,7 @@ The server is deployed as one Linux process or one container replica. It owns:
 - Webhook verification and reconciliation polling.
 - The scheduling and actor authorization policy.
 - The SQLite database and database Worker Thread.
-- Worker registration, leases, heartbeat processing, and the lease reaper.
+- Worker credential management, registration, leases, heartbeat processing, and the lease reaper.
 - Artifact upload and retention.
 - Publication approvals and the GitHub transactional outbox.
 - The Ant Design Pro static bundle.
@@ -86,12 +87,10 @@ ephemeral container layer. A SQLite deployment has exactly one active server rep
 Each logical worker node is implemented by two WinSW services with distinct restricted Windows
 identities, as specified by ADR 0007:
 
-- `AgenticReview.Worker.Control` owns registration, claims, leases, Server uploads, and use authority
-  for its non-exportable CNG mTLS key. The standard data path uses a fixed-origin, route-limited
-  Worker API transport in ServiceHost and never gives Node private-key bytes or a key handle. Node
-  and ServiceHost share the trusted Control identity, so this is defense-in-depth inside Control,
-  not a per-process security boundary. Control has no checkout, Codex, Git, ProcessHost, or
-  validation-tool access.
+- `AgenticReview.Worker.Control` owns the fixed local Worker authentication profile, registration,
+  claims, leases, and Server uploads. The standard data path uses a fixed-origin, route-limited
+  HTTPS Worker API transport and sends the node's Bearer Token only in the `Authorization` header.
+  Control has no checkout, Codex, Git, ProcessHost, or validation-tool access.
 - `AgenticReview.Worker.Executor` owns Codex, Git, ProcessHost, validation tools, and disposable
   workspaces. It has no Server, GitHub, database, webhook, or publication credential.
 
@@ -102,13 +101,14 @@ Executor boundary. Each worker machine installs:
 - A pinned Node.js 24 LTS runtime.
 - The compiled Control and Executor TypeScript worker bundles.
 - WinSW for Windows Service integration.
-- `AgenticReview.ServiceHost.exe` for the local identity channel, CNG operations, Control-only
-  fixed-origin mTLS transport, and service-root Job Object.
+- `AgenticReview.ServiceHost.exe` for the local identity channel, CNG operations used by the local
+  capability signer, Control-only fixed-origin HTTPS transport, and service-root Job Object.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
 - A pinned Codex CLI version.
 - PowerToys build tools required by its advertised recipes.
-- An individual mTLS client certificate with a non-exportable CNG private key whose ACL denies the
-  Executor identity; the standard Control path uses it through ServiceHost.
+- An individual long-lived Worker Bearer Token in the fixed plaintext Control configuration file
+  `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`. The local Windows environment is
+  trusted, and the Token is not copied into the Executor boundary, packages, diagnostics, or logs.
 - An Executor-specific Codex credential, workload identity, or inference-broker capability.
 
 Workers open outbound connections only. They do not expose inbound HTTP ports and never receive a
@@ -130,7 +130,8 @@ The server contains the following logical modules:
 - `WorkItemProjector`: maintains canonical GitHub state and request epochs.
 - `JobScheduler`: creates idempotent jobs for immutable revisions.
 - `LeaseService`: atomically grants, renews, expires, and fences worker leases.
-- `WorkerRegistry`: tracks node identity, process instances, capabilities, and health.
+- `WorkerRegistry`: manages per-node Token state and tracks process instances, capabilities, and
+  health.
 - `ArtifactService`: accepts bounded, checksummed, resumable uploads.
 - `ApprovalService`: creates immutable publication drafts and approvals.
 - `GitHubPublisher`: processes an idempotent outbox and reconciles uncertain writes.
@@ -193,11 +194,23 @@ backup verification before rollout.
 
 ## 7. Worker Registration and Capabilities
 
-A worker has a stable `workerNodeId`, a new `workerInstanceId` for every Control payload start, and
-a new local Executor boot ID for every Executor payload start. WinSW recovery that restarts either
-Node payload changes the corresponding ID; a pipe reconnect without a process restart does not.
-The client certificate is mapped to the node record, and request bodies cannot override the
-identity established by the certificate.
+A worker has a stable Server-generated `workerNodeId`, a new `workerInstanceId` for every Control
+payload start, and a new local Executor boot ID for every Executor payload start. WinSW recovery
+that restarts either Node payload changes the corresponding ID; a pipe reconnect without a process
+restart does not.
+
+Any authenticated Dashboard user may create, rotate, or revoke a Worker credential. Creation
+produces one node-specific 256-bit Bearer Token and a `pending` database record. The Server returns
+the plaintext Token only once and stores only its lowercase SHA-256 digest. The first valid
+registration transitions the node from `pending` to `active`; an explicit revocation transitions a
+`pending` or `active` node to terminal `revoked`. Rotation replaces the digest atomically without an
+overlap window. Request bodies may assert `workerNodeId`, but cannot override the identity derived
+from the Token.
+
+The Worker Token is long-lived until rotation or revocation and is stored in the fixed canonical
+plaintext Control configuration file. Restoring an older Server database backup intentionally
+restores the credential state in that backup, including the accepted risk that an older Token or a
+later-revoked credential can become valid again.
 
 Registration reports:
 
@@ -255,7 +268,10 @@ its results from committing. Workers self-terminate after renewal failure to min
 
 ## 9. Worker API
 
-The worker plane is available only over HTTPS with mTLS. Workers require no inbound endpoint.
+The worker plane is available only over HTTPS and authenticates each request with the node's Bearer
+Token. A `pending` Token may call only the registration endpoint; every other Worker route requires
+an `active` node. The Server checks the database on every request and fails closed when the
+authentication database is unavailable. Workers require no inbound endpoint.
 
 ```text
 POST /api/v1/worker/instances
@@ -406,12 +422,16 @@ lockfile is mandatory, and dependency upgrades require UI contract and end-to-en
 ## 16. Security Boundaries
 
 - The server owns GitHub credentials and never sends them to workers.
-- Every worker has an individual mTLS certificate and Codex identity, held by separate Control and
-  Executor service identities respectively.
-- Node's standard TLS APIs never receive CNG private-key bytes or a key handle. The Control
-  ServiceHost provides the standard fixed-origin path, while the shared trusted Control SID remains
-  the key-use authority. The transport cannot reach arbitrary hosts or routes.
-- Worker identity comes from the certificate, not request JSON or source IP.
+- Every worker has an individual long-lived Bearer Token and an Executor Codex identity, held by
+  separate Control and Executor service identities respectively.
+- The Control transport validates the Server HTTPS certificate, is limited to the configured Server
+  origin and Worker routes, and cannot reach arbitrary hosts or routes.
+- Worker identity comes from the database mapping of the Bearer Token digest, not request JSON or
+  source IP. SQLite stores no plaintext Worker Token.
+- A pending Worker credential may register exactly its Server-generated node identity; active and
+  revoked states are enforced independently of process-instance state.
+- Any authenticated Dashboard user has equal authority to create, rotate, and revoke Worker
+  credentials. Database-backup rollback of that state is an explicitly accepted risk.
 - Lease tokens authorize one attempt and cannot authorize publication.
 - Workers cannot access SQLite, approval state, or the GitHub outbox.
 - Repository, issue, PR, and artifact content is untrusted input.
@@ -420,8 +440,12 @@ lockfile is mandatory, and dependency upgrades require UI contract and end-to-en
 - Dashboard authorization is enforced by server policy, not only route visibility.
 - Secrets are never stored in SQLite, prompts, logs, job envelopes, or Git.
 
-The Linux server uses an approved secret store, container secrets, or systemd credentials. Windows
-workers use certificate private-key ACLs and service-account-protected secret storage.
+The Linux server uses an approved secret store, container secrets, or systemd credentials for its
+remaining deployment credentials. The Worker Bearer Token is intentionally stored as plaintext in
+the fixed Control configuration file because the local Windows environment is trusted; it still
+must not enter source control, packages, diagnostics, logs, command-line arguments, or environment
+variables. The local Control-to-Executor capability signer and package/Authenticode signing remain
+separate key boundaries.
 
 ## 17. Observability
 
@@ -501,8 +525,10 @@ mode before upgrade and stops claiming before either executable bundle is replac
 execution fails closed unless the split-service boundary in ADR 0007 is active.
 
 Server upgrades pause claims, create a database backup, apply checked SQL migrations, start the new
-server, run reconciliation, and then resume claims. Worker and protocol versions are advertised at
-registration; the server can require a minimum compatible version.
+server, run reconciliation, and then resume claims. Restoring a backup also restores its Worker
+Token hashes and `pending`/`active`/`revoked` state; anti-rollback protection is not part of this
+trust model. Worker and protocol versions are advertised at registration; the server can require a
+minimum compatible version.
 
 ## 20. Initial Delivery Plan
 
@@ -553,7 +579,7 @@ approvals, the GitHub outbox, and Dashboard write actions.
 
 ### Phase 3: Hardening
 
-- Certificate enrollment and rotation.
+- Worker Token provisioning, rotation, revocation, and recovery exercises.
 - Backup and restore exercises.
 - Multi-worker concurrency and fault-injection verification.
 - Worker upgrade and drain automation.

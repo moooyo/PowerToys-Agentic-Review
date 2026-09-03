@@ -1,27 +1,22 @@
 import { createHash } from "node:crypto";
-import { TLSSocket } from "node:tls";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { ServerConfig } from "../config.js";
+import type { DatabaseClient } from "../database/database-client.js";
+
+export type WorkerAuthenticationPolicy = "registration" | "active";
 
 export interface AuthenticatedWorkerIdentity {
   readonly workerNodeId: string;
-  readonly certificateFingerprint: string | undefined;
-  readonly authenticationMethod: "mtls" | "insecure-loopback";
+  readonly authState: "pending" | "active";
+  readonly authenticationMethod: "bearer-token";
 }
 
-type AuthenticatedWorkerTransport =
-  | {
-      readonly workerNodeId: string;
-      readonly certificateFingerprint: string;
-      readonly authenticationMethod: "mtls";
-    }
-  | {
-      readonly workerNodeId: undefined;
-      readonly certificateFingerprint: undefined;
-      readonly authenticationMethod: "insecure-loopback";
-    };
+interface AuthenticatedWorkerCredential {
+  readonly identity: AuthenticatedWorkerIdentity;
+  readonly workerTokenSha256: string;
+}
 
-const authenticatedWorkerIdentities = new WeakMap<object, AuthenticatedWorkerIdentity>();
+const workerTokenPattern = /^arw1_[A-Za-z0-9_-]{43}$/u;
+const authenticatedWorkerCredentials = new WeakMap<object, AuthenticatedWorkerCredential>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -38,12 +33,12 @@ const readClaimedWorkerNodeIds = (body: unknown): readonly string[] => {
     if (!isRecord(body)) {
       return [];
     }
+    const claimedWorkerNodeIds: string[] = [];
     const workerNodeId = readOwnString(body, "workerNodeId");
-    if (workerNodeId === undefined) {
-      return [];
+    if (workerNodeId !== undefined) {
+      claimedWorkerNodeIds.push(workerNodeId);
     }
 
-    const claimedWorkerNodeIds = [workerNodeId];
     const activeLeases = Object.getOwnPropertyDescriptor(body, "activeLeases");
     if (
       activeLeases !== undefined &&
@@ -65,247 +60,196 @@ const readClaimedWorkerNodeIds = (body: unknown): readonly string[] => {
   }
 };
 
-const isLoopbackAddress = (address: string | undefined): boolean => {
-  if (address === undefined) {
-    return false;
+const readWorkerToken = (request: FastifyRequest): string | undefined => {
+  const authorizationValues: string[] = [];
+  for (let index = 0; index < request.raw.rawHeaders.length; index += 2) {
+    if (request.raw.rawHeaders[index]?.toLowerCase() === "authorization") {
+      authorizationValues.push(request.raw.rawHeaders[index + 1] ?? "");
+    }
   }
-  const normalized = address.toLowerCase().split("%", 1)[0] ?? "";
-  return (
-    normalized === "::1" ||
-    normalized.startsWith("::ffff:127.") ||
-    /^127(?:\.[0-9]{1,3}){3}$/.test(normalized)
-  );
+  if (authorizationValues.length === 0 && typeof request.headers.authorization === "string") {
+    authorizationValues.push(request.headers.authorization);
+  }
+  const authorization = authorizationValues[0];
+  if (authorizationValues.length !== 1 || !authorization?.startsWith("Bearer ")) {
+    return undefined;
+  }
+  const token = authorization.slice("Bearer ".length);
+  if (!workerTokenPattern.test(token)) {
+    return undefined;
+  }
+  const encodedSecret = token.slice("arw1_".length);
+  let secret: Buffer;
+  try {
+    secret = Buffer.from(encodedSecret, "base64url");
+  } catch {
+    return undefined;
+  }
+  if (secret.length !== 32 || secret.toString("base64url") !== encodedSecret) {
+    return undefined;
+  }
+  return token;
 };
 
 const sendAuthenticationFailure = (
   reply: FastifyReply,
-  statusCode: 400 | 401 | 403,
+  statusCode: 401 | 403 | 503,
   code: string,
   message: string,
+  retryable: boolean,
 ): void => {
-  void reply.code(statusCode).send({
-    code,
-    message,
-    retryable: false,
-  });
-};
-
-const fingerprintPeerCertificate = (socket: TLSSocket): string | undefined => {
-  const certificate = socket.getPeerCertificate();
-  if (!Buffer.isBuffer(certificate.raw) || certificate.raw.length === 0) {
-    return undefined;
+  if (statusCode === 401) {
+    reply.header("www-authenticate", "Bearer");
   }
-  return createHash("sha256").update(certificate.raw).digest("hex").toUpperCase();
+  void reply.code(statusCode).send({ code, message, retryable });
 };
 
-const authenticateWorkerTransport = (
-  config: ServerConfig,
+const authenticateWorker = async (
+  database: DatabaseClient,
+  policy: WorkerAuthenticationPolicy,
   request: FastifyRequest,
   reply: FastifyReply,
-): AuthenticatedWorkerTransport | undefined => {
-  if (config.allowInsecureWorkerAuth) {
-    if (!isLoopbackAddress(request.raw.socket.remoteAddress)) {
-      sendAuthenticationFailure(
-        reply,
-        403,
-        "insecure_worker_auth_loopback_only",
-        "Insecure Worker authentication is restricted to loopback clients.",
-      );
-      return undefined;
-    }
-    return Object.freeze({
-      workerNodeId: undefined,
-      certificateFingerprint: undefined,
-      authenticationMethod: "insecure-loopback" as const,
-    });
-  }
-
-  const socket = request.raw.socket;
-  if (!(socket instanceof TLSSocket) || !socket.encrypted) {
+): Promise<AuthenticatedWorkerCredential | undefined> => {
+  const token = readWorkerToken(request);
+  if (token === undefined) {
     sendAuthenticationFailure(
       reply,
       401,
-      "worker_mtls_required",
-      "A mutually authenticated TLS connection is required.",
-    );
-    return undefined;
-  }
-  if (!socket.authorized) {
-    sendAuthenticationFailure(
-      reply,
-      401,
-      "worker_certificate_unauthorized",
-      "The Worker client certificate was not authorized by the configured CA.",
+      "worker_authentication_failed",
+      "Worker authentication failed.",
+      false,
     );
     return undefined;
   }
 
-  let certificateFingerprint: string | undefined;
+  const workerTokenSha256 = createHash("sha256").update(token, "ascii").digest("hex");
+  let result: unknown;
   try {
-    certificateFingerprint = fingerprintPeerCertificate(socket);
+    result = await database.request("authenticateWorkerToken", { workerTokenSha256 });
   } catch {
     sendAuthenticationFailure(
       reply,
-      401,
-      "worker_certificate_missing",
-      "The TLS connection did not provide a usable Worker client certificate.",
+      503,
+      "worker_authentication_unavailable",
+      "Worker authentication is temporarily unavailable.",
+      true,
     );
     return undefined;
   }
-  if (certificateFingerprint === undefined) {
+
+  if (!isRecord(result) || readOwnString(result, "outcome") !== "authenticated") {
     sendAuthenticationFailure(
       reply,
       401,
-      "worker_certificate_missing",
-      "The TLS connection did not provide a usable Worker client certificate.",
+      "worker_authentication_failed",
+      "Worker authentication failed.",
+      false,
     );
     return undefined;
   }
-  const workerNodeId = config.workerCertificateBindings[certificateFingerprint];
-  if (workerNodeId === undefined) {
+  const workerNodeId = readOwnString(result, "workerNodeId");
+  const authState = readOwnString(result, "authState");
+  if (workerNodeId === undefined || (authState !== "pending" && authState !== "active")) {
+    sendAuthenticationFailure(
+      reply,
+      503,
+      "worker_authentication_unavailable",
+      "Worker authentication is temporarily unavailable.",
+      true,
+    );
+    return undefined;
+  }
+  if (policy === "active" && authState !== "active") {
     sendAuthenticationFailure(
       reply,
       403,
-      "worker_certificate_unmapped",
-      "The Worker client certificate is not bound to a workerNodeId.",
+      "worker_registration_required",
+      "The Worker must complete registration before using this route.",
+      false,
     );
     return undefined;
   }
-  return Object.freeze({
-    workerNodeId,
-    certificateFingerprint,
-    authenticationMethod: "mtls" as const,
-  });
-};
 
-const safelyAuthenticateWorkerTransport = (
-  config: ServerConfig,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): AuthenticatedWorkerTransport | undefined => {
-  try {
-    return authenticateWorkerTransport(config, request, reply);
-  } catch {
-    sendAuthenticationFailure(
-      reply,
-      401,
-      "worker_transport_authentication_failed",
-      "Worker transport authentication could not be completed.",
-    );
-    return undefined;
-  }
+  return Object.freeze({
+    identity: Object.freeze({
+      workerNodeId,
+      authState,
+      authenticationMethod: "bearer-token" as const,
+    }),
+    workerTokenSha256,
+  });
 };
 
 const bindAuthenticatedWorkerIdentity = (
   request: FastifyRequest,
   reply: FastifyReply,
-  transport: AuthenticatedWorkerTransport,
-  claimedWorkerNodeIds: readonly string[],
+  credential: AuthenticatedWorkerCredential,
 ): void => {
-  const workerNodeId = transport.workerNodeId ?? claimedWorkerNodeIds[0];
-  if (workerNodeId === undefined) {
-    sendAuthenticationFailure(
-      reply,
-      400,
-      "worker_identity_missing",
-      "The request must claim a workerNodeId.",
-    );
-    return;
-  }
-  if (claimedWorkerNodeIds.some((claimedWorkerNodeId) => claimedWorkerNodeId !== workerNodeId)) {
+  const claimedWorkerNodeIds = readClaimedWorkerNodeIds(request.body);
+  if (
+    claimedWorkerNodeIds.some((workerNodeId) => workerNodeId !== credential.identity.workerNodeId)
+  ) {
     sendAuthenticationFailure(
       reply,
       403,
       "worker_identity_mismatch",
       "The claimed workerNodeId does not match the authenticated Worker identity.",
+      false,
     );
     return;
   }
-  authenticatedWorkerIdentities.set(
-    request,
-    Object.freeze({
-      workerNodeId,
-      certificateFingerprint: transport.certificateFingerprint,
-      authenticationMethod: transport.authenticationMethod,
-    }),
-  );
+  authenticatedWorkerCredentials.set(request, credential);
 };
 
-export const createWorkerAuthenticationPreHandler =
-  (config: ServerConfig): ((request: FastifyRequest, reply: FastifyReply) => Promise<void>) =>
-  async (request, reply) => {
-    const claimedWorkerNodeIds = readClaimedWorkerNodeIds(request.body);
-    if (claimedWorkerNodeIds.length === 0) {
-      sendAuthenticationFailure(
-        reply,
-        400,
-        "worker_identity_missing",
-        "The request must claim a workerNodeId.",
-      );
-      return;
-    }
-    const transport = safelyAuthenticateWorkerTransport(config, request, reply);
-    if (transport !== undefined) {
-      bindAuthenticatedWorkerIdentity(request, reply, transport, claimedWorkerNodeIds);
-    }
-  };
-
 export const createWorkerAuthenticationHooks = (
-  config: ServerConfig,
+  database: DatabaseClient,
+  policy: WorkerAuthenticationPolicy = "active",
 ): Readonly<{
   readonly onRequest: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   readonly preValidation: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> => {
-  const pendingTransports = new WeakMap<object, AuthenticatedWorkerTransport>();
+  const pendingCredentials = new WeakMap<object, AuthenticatedWorkerCredential>();
   const onRequest = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    authenticatedWorkerIdentities.delete(request);
-    if (pendingTransports.has(request)) {
-      pendingTransports.delete(request);
-      sendAuthenticationFailure(
-        reply,
-        401,
-        "worker_authentication_state_invalid",
-        "Worker transport authentication state is invalid.",
-      );
-      return;
-    }
-    const transport = safelyAuthenticateWorkerTransport(config, request, reply);
-    if (transport !== undefined) {
-      pendingTransports.set(request, transport);
+    authenticatedWorkerCredentials.delete(request);
+    pendingCredentials.delete(request);
+    const credential = await authenticateWorker(database, policy, request, reply);
+    if (credential !== undefined) {
+      pendingCredentials.set(request, credential);
     }
   };
   const preValidation = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    authenticatedWorkerIdentities.delete(request);
-    const transport = pendingTransports.get(request);
-    pendingTransports.delete(request);
-    if (transport === undefined) {
-      sendAuthenticationFailure(
-        reply,
-        401,
-        "worker_authentication_state_missing",
-        "Worker transport authentication state is missing.",
-      );
+    authenticatedWorkerCredentials.delete(request);
+    const credential = pendingCredentials.get(request);
+    pendingCredentials.delete(request);
+    if (credential === undefined) {
+      if (!reply.sent) {
+        sendAuthenticationFailure(
+          reply,
+          503,
+          "worker_authentication_unavailable",
+          "Worker authentication is temporarily unavailable.",
+          true,
+        );
+      }
       return;
     }
-    const claimedWorkerNodeIds = readClaimedWorkerNodeIds(request.body);
-    if (claimedWorkerNodeIds.length === 0) {
-      sendAuthenticationFailure(
-        reply,
-        400,
-        "worker_identity_missing",
-        "The request must claim a workerNodeId.",
-      );
-      return;
-    }
-    bindAuthenticatedWorkerIdentity(request, reply, transport, claimedWorkerNodeIds);
+    bindAuthenticatedWorkerIdentity(request, reply, credential);
   };
   return Object.freeze({ onRequest, preValidation });
 };
 
 export const getAuthenticatedWorkerIdentity = (request: object): AuthenticatedWorkerIdentity => {
-  const identity = authenticatedWorkerIdentities.get(request);
-  if (identity === undefined) {
+  const credential = authenticatedWorkerCredentials.get(request);
+  if (credential === undefined) {
     throw new Error("The Worker request was not authenticated.");
   }
-  return identity;
+  return credential.identity;
+};
+
+export const getAuthenticatedWorkerTokenSha256 = (request: object): string => {
+  const credential = authenticatedWorkerCredentials.get(request);
+  if (credential === undefined) {
+    throw new Error("The Worker request was not authenticated.");
+  }
+  return credential.workerTokenSha256;
 };
