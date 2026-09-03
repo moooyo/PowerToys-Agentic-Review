@@ -90,7 +90,11 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
       "/apps/server/src/runtime/server-storage-runtime.ts",
     ],
   ],
-  ["server-binding-signer-host-client-v1", []],
+  [
+    "server-binding-signer-host-client-v1",
+    ["/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts"],
+  ],
+  ["server-binding-signer-host-provider-v1", []],
   [
     "server-binding-signer-host-profile-v1",
     ["/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts"],
@@ -108,7 +112,10 @@ const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>
   ],
   [
     "server-binding-signer-provider-v1",
-    ["/apps/server/src/enrollment/server-binding-signer-v1.ts"],
+    [
+      "/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts",
+      "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+    ],
   ],
   ["server-binding-trust-profile-v1", ["/apps/server/src/enrollment/server-binding-signer-v1.ts"]],
 ]);
@@ -125,9 +132,37 @@ const sensitiveServerBindingConsumerImports = new Map<string, readonly string[]>
   ],
   ["/apps/server/src/enrollment/server-binding-signer-host-profile-v1.ts", []],
   [
+    "/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts",
+    [
+      "./server-binding-signer-host-client-v1.js|ServerBindingSignerHostClientErrorV1:ServerBindingSignerHostClientErrorV1:value,createServerBindingSignerHostDirectClientV1:createServerBindingSignerHostDirectClientV1:value",
+      "./server-binding-signer-provider-v1.js|ServerBindingSignerProviderStartupErrorV1:ServerBindingSignerProviderStartupErrorV1:value,ServerBindingStatementSignerProviderV1:ServerBindingStatementSignerProviderV1:type",
+    ],
+  ],
+  [
     "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
     [
       "@agentic-review/contracts/server-binding-authority-v1|ServerBindingActiveStatusStatementV1:ServerBindingActiveStatusStatementV1:type,ServerBindingReceiptStatementV1:ServerBindingReceiptStatementV1:type,deriveServerBindingIssuerKeyIdV1:deriveServerBindingIssuerKeyIdV1:value,marshalServerBindingActiveStatusStatementV1:marshalServerBindingActiveStatusStatementV1:value,marshalServerBindingReceiptStatementV1:marshalServerBindingReceiptStatementV1:value",
+    ],
+  ],
+  ["/apps/server/src/enrollment/server-binding-signer-provider-v1.ts", []],
+  [
+    "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+    [
+      "./server-binding-signer-provider-v1.js|ServerBindingSignerProviderStartupErrorV1:ServerBindingSignerProviderStartupErrorV1:value,loadProductionServerBindingSignerProviderV1:loadProductionServerBindingSignerProviderV1:value",
+      "./server-binding-trust-profile-v1.js|loadProductionServerBindingTrustProfileV1:loadProductionServerBindingTrustProfileV1:value",
+      "@agentic-review/contracts/server-binding-authority-v1|SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID:SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID:value,SERVER_BINDING_AUTHORITY_ISSUER:SERVER_BINDING_AUTHORITY_ISSUER:value,SERVER_BINDING_AUTHORITY_MAXIMUM_DOCUMENT_BYTES:SERVER_BINDING_AUTHORITY_MAXIMUM_DOCUMENT_BYTES:value,SERVER_BINDING_AUTHORITY_SCHEMA_VERSION:SERVER_BINDING_AUTHORITY_SCHEMA_VERSION:value,SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM:SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM:value,SERVER_BINDING_RECEIPT_PROFILE_ID:SERVER_BINDING_RECEIPT_PROFILE_ID:value,ServerBindingActiveStatusStatementV1:ServerBindingActiveStatusStatementV1:type,ServerBindingActiveStatusV1:ServerBindingActiveStatusV1:type,ServerBindingReceiptStatementV1:ServerBindingReceiptStatementV1:type,ServerBindingReceiptV1:ServerBindingReceiptV1:type,deriveServerBindingIssuerKeyIdV1:deriveServerBindingIssuerKeyIdV1:value,marshalServerBindingActiveStatusStatementV1:marshalServerBindingActiveStatusStatementV1:value,marshalServerBindingActiveStatusV1:marshalServerBindingActiveStatusV1:value,marshalServerBindingReceiptStatementV1:marshalServerBindingReceiptStatementV1:value,marshalServerBindingReceiptV1:marshalServerBindingReceiptV1:value,serverBindingActiveStatusSigningPreimageV1:serverBindingActiveStatusSigningPreimageV1:value,serverBindingReceiptSigningPreimageV1:serverBindingReceiptSigningPreimageV1:value,verifyServerBindingActiveStatusWithSpkiV1:verifyServerBindingActiveStatusWithSpkiV1:value,verifyServerBindingReceiptWithSpkiV1:verifyServerBindingReceiptWithSpkiV1:value",
+      "node:crypto|createHash:createHash:value,timingSafeEqual:timingSafeEqual:value",
+      "node:util/types|isPromise:isPromise:value",
+    ],
+  ],
+  [
+    "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+    [
+      "../database/protocol.js|DatabaseOperationMap:DatabaseOperationMap:type",
+      "../database/server-binding-persistence-v1.js|ConfirmServerBindingRecordV1Input:ConfirmServerBindingRecordV1Input:type,ReadServerBindingRecoveryReceiptV1Input:ReadServerBindingRecoveryReceiptV1Input:type,RevokeServerBindingV1Input:RevokeServerBindingV1Input:type,ServerBindingActiveSnapshotV1:ServerBindingActiveSnapshotV1:type,ServerBindingRecoveryReceiptV1:ServerBindingRecoveryReceiptV1:type,ServerBindingTrustedIssuerDescriptorV1:ServerBindingTrustedIssuerDescriptorV1:type,deriveServerBindingRevocationRequestSha256V1:deriveServerBindingRevocationRequestSha256V1:value",
+      "./server-binding-signer-v1.js|ServerBindingSignerContextV1:ServerBindingSignerContextV1:type,ServerBindingSignerErrorV1:ServerBindingSignerErrorV1:value,adoptServerBindingSignerV1:adoptServerBindingSignerV1:value,assertServerBindingSignerOwnershipAvailableV1:assertServerBindingSignerOwnershipAvailableV1:value,closeServerBindingSignerV1:closeServerBindingSignerV1:value,readServerBindingSignerDescriptorV1:readServerBindingSignerDescriptorV1:value,signServerBindingReceiptStatementV1:signServerBindingReceiptStatementV1:value",
+      "@agentic-review/contracts/server-binding-authority-v1|SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID:SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID:value,SERVER_BINDING_AUTHORITY_ISSUER:SERVER_BINDING_AUTHORITY_ISSUER:value,SERVER_BINDING_AUTHORITY_SCHEMA_VERSION:SERVER_BINDING_AUTHORITY_SCHEMA_VERSION:value,SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM:SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM:value,SERVER_BINDING_RECEIPT_PROFILE_ID:SERVER_BINDING_RECEIPT_PROFILE_ID:value,ServerBindingReceiptStatementV1:ServerBindingReceiptStatementV1:type,marshalServerBindingReceiptStatementV1:marshalServerBindingReceiptStatementV1:value,marshalServerBindingReceiptV1:marshalServerBindingReceiptV1:value,parseServerBindingReceiptV1:parseServerBindingReceiptV1:value,verifyServerBindingReceiptWithSpkiV1:verifyServerBindingReceiptWithSpkiV1:value",
+      "node:crypto|createHash:createHash:value,randomBytes:randomBytes:value,randomUUID:randomUUID:value",
     ],
   ],
 ]);
@@ -254,6 +289,10 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
     ["ServerBindingSignerHostProfileV1", "loadProductionServerBindingSignerHostProfileV1"],
   ],
   [
+    "/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts",
+    ["createServerBindingSignerHostProviderV1"],
+  ],
+  [
     "/apps/server/src/enrollment/server-binding-signer-host-protocol-v1.ts",
     [
       "SERVER_BINDING_SIGNER_HOST_FORCED_EXIT_TIMEOUT_MILLISECONDS",
@@ -286,7 +325,10 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
     [
       "ServerBindingDigestNativeSignerProviderV1",
       "ServerBindingPreimageSha256SignerProviderV1",
+      "ServerBindingSignerProviderStartupErrorCodeV1",
+      "ServerBindingSignerProviderStartupErrorV1",
       "ServerBindingSignerProviderV1",
+      "ServerBindingStatementSignerProviderV1",
       "loadProductionServerBindingSignerProviderV1",
     ],
   ],
@@ -303,10 +345,12 @@ const sensitiveServerBindingConsumerExports = new Map<string, readonly string[]>
       "ServerBindingSignerErrorV1",
       "adoptServerBindingSignerV1",
       "assertServerBindingSignerAdoptableV1",
+      "assertServerBindingSignerOwnershipAvailableV1",
       "closeServerBindingSignerV1",
       "closeUnadoptedServerBindingSignerV1",
       "loadServerBindingSignerV1",
       "readServerBindingSignerDescriptorV1",
+      "signServerBindingActiveStatusStatementV1",
       "signServerBindingReceiptStatementV1",
     ],
   ],
@@ -339,11 +383,11 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   ],
   [
     "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
-    "d64ec2717c051a6e4abb26e0401e0433d490c450b7c78db6b05cab1e8b6c8d05",
+    "db571ab2313277b3a75fc5997b12efa0174aa6e8552dc5c00dd06cd14713e902",
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
-    "655c58067cd8b125a6cf32675efc9bbf07111349f783d2071feadbfb0a9c687d",
+    "241be9daea4c9ec2c0f80b672334746a3a775076b008684dd6275361e47453c5",
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-host-profile-v1.ts",
@@ -354,8 +398,12 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
     "508078468d24f1bddb79a3880d4795d53678bc38540f56288fc9bd26c5f719ac",
   ],
   [
+    "/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts",
+    "f909d28905a5871d1320ddbbdee5929c4df8c653f4d271880ac246d03674fd2c",
+  ],
+  [
     "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
-    "d7ec395d41529f395c59206080966503c79d2ca42a3742b876d8de6031f441ba",
+    "1bfe67b23d9693a9e4b7e6024c84d11ec018b03d5f744a529d989488e243da71",
   ],
   [
     "/apps/server/src/enrollment/server-binding-trust-profile-v1.ts",
@@ -363,7 +411,7 @@ const sensitiveServerBindingConsumerSourceSha256 = new Map<string, string>([
   ],
   [
     "/apps/server/src/enrollment/server-binding-signer-v1.ts",
-    "128a5f6183041f539544b27457320c78734d5daba374975c297a955a7fa5caef",
+    "137f70492faf070484c81ab8262b6090c5ec5cc4f0708b87ec9ebf28d9a33ed5",
   ],
   [
     "/apps/server/src/runtime/server-storage-runtime.ts",
@@ -663,6 +711,34 @@ describe("dormant Server binding authority v1 wire contract", () => {
         fileName: resolve("apps/server/src/main.ts"),
         source: 'const signerHostMode = "--fixture-scenario=normal"; void signerHostMode;',
       },
+      {
+        expected:
+          "server-binding-signer-host-provider-v1 import outside exact S1 dependency allowlist",
+        fileName: resolve("apps/server/src/main.ts"),
+        source:
+          'import { createServerBindingSignerHostProviderV1 } from "./enrollment/server-binding-signer-host-provider-v1.js"; void createServerBindingSignerHostProviderV1;',
+      },
+      {
+        expected:
+          "server-binding-signer-host-provider-v1 import outside exact S1 dependency allowlist",
+        fileName: resolve("apps/server/src/main.ts"),
+        source:
+          'import { createServerBindingSignerHostProviderV1 } from "./enrollment/server-binding-signer-host-provider-v1.js?raw#escape"; void createServerBindingSignerHostProviderV1;',
+      },
+      {
+        expected:
+          "server-binding-signer-host-provider-v1 import outside exact S1 dependency allowlist",
+        fileName: resolve("apps/server/src/main.ts"),
+        source:
+          'import { createServerBindingSignerHostProviderV1 } from "./enrollment/server%2Dbinding%2Dsigner%2Dhost%2Dprovider%2Dv1.js"; void createServerBindingSignerHostProviderV1;',
+      },
+      {
+        expected:
+          "server-binding-signer-host-client-v1 import outside exact S1 dependency allowlist",
+        fileName: resolve("apps/server/src/enrollment/server-binding-signer-provider-v1.ts"),
+        source:
+          'import { createServerBindingSignerHostDirectClientV1 } from "./server-binding-signer-host-client-v1.js"; void createServerBindingSignerHostDirectClientV1;',
+      },
     ];
     for (const mutation of pureModuleMutations) {
       const inspection =
@@ -731,6 +807,90 @@ describe("dormant Server binding authority v1 wire contract", () => {
         escapeSource.source,
       ).toBeGreaterThan(0);
     }
+  });
+
+  it("pins the single statement-provider terminal chain before production activation", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const readServerSource = (name: string): string =>
+      readFileSync(
+        join(repositoryRoot, "apps", "server", "src", "enrollment", name),
+        "utf8",
+      ).replaceAll("\r\n", "\n");
+    const clientSource = readServerSource("server-binding-signer-host-client-v1.ts");
+    const hostProviderSource = readServerSource("server-binding-signer-host-provider-v1.ts");
+    const providerSource = readServerSource("server-binding-signer-provider-v1.ts");
+    const signerSource = readServerSource("server-binding-signer-v1.ts");
+    const coordinatorSource = readServerSource("server-binding-coordinator-v1.ts");
+
+    expect(hostProviderSource.match(/terminalFailure:\s*client\.terminalFailure/gu)).toHaveLength(
+      1,
+    );
+    expect(hostProviderSource.match(/client\.readTerminalError\(\)/gu)).toHaveLength(2);
+    expect(providerSource).not.toContain("server-binding-signer-host-client-v1");
+    expect(providerSource).not.toContain("node:child_process");
+    expect(signerSource).not.toContain("provider.terminalFailure.then(");
+    expect(
+      signerSource.match(
+        /Reflect\.apply\(intrinsicPromiseThen, provider\.terminalFailure, \[observe, observe\]\)/gu,
+      ),
+    ).toHaveLength(1);
+    expect(
+      signerSource.indexOf("observeStatementProviderTerminal(provider, terminal)"),
+    ).toBeLessThan(signerSource.indexOf("readStatementProviderTerminal(provider)"));
+    expect(signerSource.indexOf("readStatementProviderTerminal(provider)")).toBeLessThan(
+      signerSource.indexOf("const context = Object.create(null)"),
+    );
+    expect(signerSource).toContain("terminalFailure: {");
+    expect(signerSource).toContain("readTerminalError: {");
+    expect(coordinatorSource).not.toContain("signer.terminalFailure.then(");
+    expect(
+      coordinatorSource.match(
+        /Reflect\.apply\(intrinsicPromiseThen, signer\.terminalFailure, \[observeSignerTerminal\]\)/gu,
+      ),
+    ).toHaveLength(1);
+    expect(
+      coordinatorSource.indexOf("assertServerBindingSignerOwnershipAvailableV1(signer)"),
+    ).toBeLessThan(
+      coordinatorSource.indexOf(
+        "Reflect.apply(intrinsicPromiseThen, signer.terminalFailure, [observeSignerTerminal])",
+      ),
+    );
+    expect(
+      coordinatorSource.indexOf(
+        "Reflect.apply(intrinsicPromiseThen, signer.terminalFailure, [observeSignerTerminal])",
+      ),
+    ).toBeLessThan(coordinatorSource.indexOf("terminalSnapshot = signer.readTerminalError()"));
+    expect(coordinatorSource.indexOf("terminalSnapshot = signer.readTerminalError()")).toBeLessThan(
+      coordinatorSource.indexOf("databaseHandle = options.database"),
+    );
+    expect(coordinatorSource).toContain("this.#raceTerminal(initialization)");
+    expect(
+      coordinatorSource.match(/this\.#failIfSignerTerminal\(\)/gu)?.length ?? 0,
+    ).toBeGreaterThanOrEqual(3);
+    expect(clientSource).toContain("hasProvenCleanup");
+
+    const allowedTerminalSources = new Set([
+      "/apps/server/src/enrollment/server-binding-coordinator-v1.ts",
+      "/apps/server/src/enrollment/server-binding-signer-host-client-v1.ts",
+      "/apps/server/src/enrollment/server-binding-signer-host-provider-v1.ts",
+      "/apps/server/src/enrollment/server-binding-signer-provider-v1.ts",
+      "/apps/server/src/enrollment/server-binding-signer-v1.ts",
+    ]);
+    const unexpectedTerminalConsumers = productionSourceFiles(repositoryRoot)
+      .filter((file) => {
+        const source = readFileSync(file, "utf8");
+        return /\b(?:client|provider|signer)\.terminalFailure\b|\breadTerminalError\b/u.test(
+          source,
+        );
+      })
+      .map((file) => file.replaceAll("\\", "/").toLowerCase())
+      .filter(
+        (file) =>
+          ![...allowedTerminalSources].some(
+            (suffix) => file === suffix.slice(1) || file.endsWith(suffix),
+          ),
+      );
+    expect(unexpectedTerminalConsumers).toEqual([]);
   });
 
   it("shares exactly two LF-delimited canonical documents with the Go contract", () => {
@@ -1960,7 +2120,14 @@ function inspectProductionSourceFile(
 }
 
 function sensitiveServerBindingModuleName(specifier: string): string | undefined {
-  const normalized = specifier.replaceAll("\\", "/").toLowerCase();
+  let normalized = specifier.replaceAll("\\", "/").toLowerCase();
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    // Invalid percent encoding remains unmatched and is rejected by ordinary module resolution.
+  }
+  const suffixStart = normalized.search(/[?#]/u);
+  if (suffixStart >= 0) normalized = normalized.slice(0, suffixStart);
   for (const moduleName of sensitiveServerBindingModuleConsumers.keys()) {
     if (
       normalized === moduleName ||
@@ -2458,19 +2625,22 @@ function inspectLoaderImport(
 
 function importedBindingSignature(declaration: ts.ImportDeclaration): string {
   const clause = declaration.importClause;
+  const phaseModifier = clause?.phaseModifier as ts.Node | ts.SyntaxKind | undefined;
+  const phaseModifierKind = typeof phaseModifier === "number" ? phaseModifier : phaseModifier?.kind;
   if (
     clause === undefined ||
     clause.name !== undefined ||
-    clause.phaseModifier !== undefined ||
+    (phaseModifierKind !== undefined && phaseModifierKind !== ts.SyntaxKind.TypeKeyword) ||
     clause.namedBindings === undefined ||
     !ts.isNamedImports(clause.namedBindings)
   ) {
     return "invalid";
   }
+  const clauseIsTypeOnly = clause.isTypeOnly || phaseModifierKind === ts.SyntaxKind.TypeKeyword;
   return clause.namedBindings.elements
     .map((element) => {
       const imported = element.propertyName?.text ?? element.name.text;
-      return `${imported}:${element.name.text}:${element.isTypeOnly ? "type" : "value"}`;
+      return `${imported}:${element.name.text}:${clauseIsTypeOnly || element.isTypeOnly ? "type" : "value"}`;
     })
     .sort()
     .join(",");

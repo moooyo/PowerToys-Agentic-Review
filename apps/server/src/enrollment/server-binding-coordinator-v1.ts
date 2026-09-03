@@ -12,18 +12,18 @@ import {
   verifyServerBindingReceiptWithSpkiV1,
 } from "@agentic-review/contracts/server-binding-authority-v1";
 import type { DatabaseOperationMap } from "../database/protocol.js";
-import type {
-  ConfirmServerBindingRecordV1Input,
-  ReadServerBindingRecoveryReceiptV1Input,
-  RevokeServerBindingV1Input,
-  ServerBindingActiveSnapshotV1,
-  ServerBindingRecoveryReceiptV1,
-  ServerBindingTrustedIssuerDescriptorV1,
+import {
+  type ConfirmServerBindingRecordV1Input,
+  deriveServerBindingRevocationRequestSha256V1,
+  type ReadServerBindingRecoveryReceiptV1Input,
+  type RevokeServerBindingV1Input,
+  type ServerBindingActiveSnapshotV1,
+  type ServerBindingRecoveryReceiptV1,
+  type ServerBindingTrustedIssuerDescriptorV1,
 } from "../database/server-binding-persistence-v1.js";
-import { deriveServerBindingRevocationRequestSha256V1 } from "../database/server-binding-persistence-v1.js";
 import {
   adoptServerBindingSignerV1,
-  assertServerBindingSignerAdoptableV1,
+  assertServerBindingSignerOwnershipAvailableV1,
   closeServerBindingSignerV1,
   readServerBindingSignerDescriptorV1,
   type ServerBindingSignerContextV1,
@@ -42,6 +42,7 @@ const sha256 = /^[0-9a-f]{64}(?![\s\S])/u;
 const entityId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/u;
 const packageComponentId = /^[a-z0-9][a-z0-9._+-]{0,127}(?![\s\S])/u;
 const utcMilliseconds = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z(?![\s\S])/u;
+const intrinsicPromiseThen = Promise.prototype.then;
 
 export type ServerBindingPersistenceDatabaseOperation =
   | "claimServerBindingAuthorizationV1"
@@ -288,6 +289,12 @@ const normalizeSignerError = (error: unknown): ServerBindingCoordinatorErrorV1 =
     case "SIGNER_MISMATCH":
     case "SIGNATURE_INVALID":
       return coordinatorError("SIGNER_MISMATCH", "The binding signature did not verify.", error);
+    case "SIGNER_OUTCOME_UNKNOWN":
+      return coordinatorError(
+        "PERSISTENCE_OUTCOME_UNKNOWN",
+        "The binding signer outcome is unknown.",
+        error,
+      );
     case "SIGNER_UNAVAILABLE":
       return coordinatorError("SIGNER_UNAVAILABLE", "The binding signer is unavailable.", error);
   }
@@ -1303,26 +1310,78 @@ export class ServerBindingCoordinatorV1 {
       defaultCloseTimeoutMilliseconds,
       "closeTimeoutMilliseconds",
     );
+    let signerTerminalGate:
+      | {
+          cancelled: boolean;
+          pending: ServerBindingCoordinatorErrorV1 | undefined;
+          target: ServerBindingCoordinatorV1 | null;
+        }
+      | undefined;
     if (signer !== undefined) {
       try {
-        assertServerBindingSignerAdoptableV1(signer);
+        assertServerBindingSignerOwnershipAvailableV1(signer);
       } catch (error) {
         throw normalizeSignerError(error);
       }
+      signerTerminalGate = { cancelled: false, pending: undefined, target: null };
+      const gate = signerTerminalGate;
+      const observeSignerTerminal = (error: unknown): void => {
+        if (gate.cancelled) return;
+        const normalized = normalizeSignerError(error);
+        if (gate.target === null) {
+          gate.pending ??= normalized;
+          return;
+        }
+        gate.target.#fail(normalized);
+      };
+      void Reflect.apply(intrinsicPromiseThen, signer.terminalFailure, [observeSignerTerminal]);
+      let terminalSnapshot: ServerBindingSignerErrorV1 | null;
+      try {
+        terminalSnapshot = signer.readTerminalError();
+      } catch (error) {
+        gate.cancelled = true;
+        throw normalizeSignerError(error);
+      }
+      if (terminalSnapshot !== null) {
+        gate.cancelled = true;
+        throw normalizeSignerError(terminalSnapshot);
+      }
     }
-    const databaseHandle = options.database;
-    const databaseRecord = consumeDatabaseHandle(databaseHandle);
+    let databaseHandle: ServerBindingPersistenceDatabaseHandle;
+    let databaseRecord: DatabaseHandleRecord;
+    try {
+      databaseHandle = options.database;
+      databaseRecord = consumeDatabaseHandle(databaseHandle);
+    } catch (error) {
+      if (signerTerminalGate !== undefined) signerTerminalGate.cancelled = true;
+      throw error;
+    }
     if (signer !== undefined) {
       try {
         adoptServerBindingSignerV1(signer, this);
       } catch (error) {
+        if (signerTerminalGate !== undefined) signerTerminalGate.cancelled = true;
         databaseHandleRecords.set(databaseHandle, databaseRecord);
         throw normalizeSignerError(error);
       }
     }
     this.#database = databaseRecord.owner;
     this.#signer = signer;
-    void this.#database.terminalFailure.then((error) => this.#fail(error));
+    if (signer !== undefined && signerTerminalGate !== undefined) {
+      signerTerminalGate.target = this;
+      if (signerTerminalGate.pending !== undefined) this.#fail(signerTerminalGate.pending);
+      try {
+        const terminalSnapshot = signer.readTerminalError();
+        if (terminalSnapshot !== null) this.#fail(normalizeSignerError(terminalSnapshot));
+      } catch (error) {
+        this.#fail(normalizeSignerError(error));
+      }
+    }
+    const observeDatabaseTerminal = (error: unknown): void => this.#fail(error);
+    void Reflect.apply(intrinsicPromiseThen, this.#database.terminalFailure, [
+      observeDatabaseTerminal,
+      observeDatabaseTerminal,
+    ]);
   }
 
   public get state(): CoordinatorState {
@@ -1359,6 +1418,7 @@ export class ServerBindingCoordinatorV1 {
   async #open(): Promise<void> {
     try {
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      this.#failIfSignerTerminal();
       const signer = this.#signer;
       if (signer !== undefined) {
         const initialization = this.#trackSettlement(
@@ -1367,7 +1427,7 @@ export class ServerBindingCoordinatorV1 {
           }),
         );
         const initialized = await withTimeout(
-          initialization,
+          this.#raceTerminal(initialization),
           this.#operationTimeoutMilliseconds,
           () =>
             coordinatorError(
@@ -1375,6 +1435,7 @@ export class ServerBindingCoordinatorV1 {
               "The binding coordinator open deadline expired.",
             ),
         );
+        this.#failIfSignerTerminal();
         if (initialized.issuer.issuerKeyId !== signer.issuerKeyId) {
           throw coordinatorError(
             "SIGNER_MISMATCH",
@@ -1383,10 +1444,12 @@ export class ServerBindingCoordinatorV1 {
         }
         if (this.#state === "opening") this.#authority = this.#createAuthorityPort();
       }
+      this.#failIfSignerTerminal();
       if (this.#terminalError !== undefined) throw this.#terminalError;
       if (this.#state === "opening") this.#state = "ready";
     } catch (error) {
       if (this.#terminalError !== undefined) throw this.#terminalError;
+      this.#failIfSignerTerminal();
       const normalized = normalizeDatabaseError(error);
       this.#fail(normalized);
       throw this.#terminalError ?? normalized;
@@ -1454,6 +1517,16 @@ export class ServerBindingCoordinatorV1 {
     this.#settlements.add(started);
     void started.finally(() => this.#settlements.delete(started)).catch(() => undefined);
     return started;
+  }
+
+  #raceTerminal<T>(operation: Promise<T>): Promise<T> {
+    const terminal = Promise.withResolvers<never>();
+    const rejectTerminal = (error: ServerBindingCoordinatorErrorV1): void => terminal.reject(error);
+    this.#terminalWaiters.add(rejectTerminal);
+    if (this.#terminalError !== undefined) rejectTerminal(this.#terminalError);
+    return Promise.race([operation, terminal.promise]).finally(() => {
+      this.#terminalWaiters.delete(rejectTerminal);
+    });
   }
 
   #createAuthorityPort(): Readonly<ServerBindingAuthorityPortV1> {
@@ -1760,6 +1833,23 @@ export class ServerBindingCoordinatorV1 {
     this.#signerClosePromise =
       signer === undefined ? Promise.resolve() : closeServerBindingSignerV1(signer, this);
     return this.#signerClosePromise;
+  }
+
+  #failIfSignerTerminal(): void {
+    const signer = this.#signer;
+    if (signer === undefined) return;
+    let terminalError: ServerBindingSignerErrorV1 | null;
+    try {
+      terminalError = signer.readTerminalError();
+    } catch (error) {
+      const normalized = normalizeSignerError(error);
+      this.#fail(normalized);
+      throw this.#terminalError ?? normalized;
+    }
+    if (terminalError === null) return;
+    const normalized = normalizeSignerError(terminalError);
+    this.#fail(normalized);
+    throw this.#terminalError ?? normalized;
   }
 
   #fail(error: unknown): void {

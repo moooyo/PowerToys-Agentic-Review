@@ -3,20 +3,30 @@ import { isPromise } from "node:util/types";
 
 import {
   deriveServerBindingIssuerKeyIdV1,
+  marshalServerBindingActiveStatusStatementV1,
+  marshalServerBindingActiveStatusV1,
   marshalServerBindingReceiptStatementV1,
   marshalServerBindingReceiptV1,
+  SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID,
   SERVER_BINDING_AUTHORITY_ISSUER,
   SERVER_BINDING_AUTHORITY_MAXIMUM_DOCUMENT_BYTES,
   SERVER_BINDING_AUTHORITY_SCHEMA_VERSION,
   SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
   SERVER_BINDING_RECEIPT_PROFILE_ID,
+  type ServerBindingActiveStatusStatementV1,
+  type ServerBindingActiveStatusV1,
   type ServerBindingReceiptStatementV1,
   type ServerBindingReceiptV1,
+  serverBindingActiveStatusSigningPreimageV1,
   serverBindingReceiptSigningPreimageV1,
+  verifyServerBindingActiveStatusWithSpkiV1,
   verifyServerBindingReceiptWithSpkiV1,
 } from "@agentic-review/contracts/server-binding-authority-v1";
 
-import { loadProductionServerBindingSignerProviderV1 } from "./server-binding-signer-provider-v1.js";
+import {
+  loadProductionServerBindingSignerProviderV1,
+  ServerBindingSignerProviderStartupErrorV1,
+} from "./server-binding-signer-provider-v1.js";
 import { loadProductionServerBindingTrustProfileV1 } from "./server-binding-trust-profile-v1.js";
 
 const canonicalP256SpkiBytes = 91;
@@ -37,11 +47,13 @@ const typedArrayTagGetter = Object.getOwnPropertyDescriptor(
   typedArrayPrototype,
   Symbol.toStringTag,
 )?.get;
+const intrinsicPromiseThen = Promise.prototype.then;
 
 export type ServerBindingSignerErrorCodeV1 =
   | "SIGNATURE_INVALID"
   | "SIGNER_INPUT_INVALID"
   | "SIGNER_MISMATCH"
+  | "SIGNER_OUTCOME_UNKNOWN"
   | "SIGNER_UNAVAILABLE";
 
 export class ServerBindingSignerErrorV1 extends Error {
@@ -62,6 +74,8 @@ export class ServerBindingSignerErrorV1 extends Error {
 export interface ServerBindingSignerContextV1 {
   readonly issuerKeyId: string;
   readonly issuerPublicKeySpki: Readonly<Uint8Array>;
+  readonly terminalFailure: Promise<ServerBindingSignerErrorV1>;
+  readonly readTerminalError: () => ServerBindingSignerErrorV1 | null;
 }
 
 export interface ServerBindingSignerDescriptorV1 {
@@ -83,18 +97,44 @@ interface DigestNativeProviderV1 {
   readonly close: () => Promise<unknown>;
 }
 
-type SignerProviderV1 = DigestNativeProviderV1 | PreimageSha256ProviderV1;
+interface BindingStatementProviderV1 {
+  readonly kind: "binding-statements-v1";
+  readonly issuerPublicKeySpki: Buffer;
+  readonly terminalFailure: Promise<unknown>;
+  readonly readTerminalError: () => unknown;
+  readonly signReceiptStatementV1: (
+    statementJson: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+  readonly signActiveStatusStatementV1: (
+    statementJson: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+  readonly close: () => Promise<unknown>;
+}
+
+type SignerProviderV1 =
+  | BindingStatementProviderV1
+  | DigestNativeProviderV1
+  | PreimageSha256ProviderV1;
+
+interface SignerTerminalStateV1 {
+  readonly control: PromiseWithResolvers<ServerBindingSignerErrorV1>;
+  error: ServerBindingSignerErrorV1 | undefined;
+}
 
 interface SignerContextStateV1 {
   readonly issuerKeyId: string;
   readonly issuerPublicKeySpki: Buffer;
   provider: SignerProviderV1 | undefined;
+  closingProvider: SignerProviderV1 | undefined;
   readonly activeOperations: Set<Promise<unknown>>;
   readonly abortControllers: Set<AbortController>;
   closePromise: Promise<void> | undefined;
   unadoptedClosePromise: Promise<"closed"> | undefined;
   closed: boolean;
   owner: object | undefined;
+  readonly terminal: SignerTerminalStateV1;
 }
 
 interface IntrinsicUint8View {
@@ -132,6 +172,12 @@ async function loadServerBindingSignerUnlockedV1(): Promise<
   Readonly<ServerBindingSignerContextV1>
 > {
   if (signerLoaderTerminalError !== undefined) throw signerLoaderTerminalError;
+  if (quarantinedProviderCandidates.size !== 0) {
+    throw signerError(
+      "SIGNER_UNAVAILABLE",
+      "A prior Server binding signer provider cleanup remains unresolved.",
+    );
+  }
   let trustCandidate: unknown;
   try {
     trustCandidate = await loadProductionServerBindingTrustProfileV1();
@@ -142,10 +188,11 @@ async function loadServerBindingSignerUnlockedV1(): Promise<
   let providerCandidate: unknown;
   try {
     providerCandidate = await loadProductionServerBindingSignerProviderV1();
-  } catch {
-    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer provider is unavailable.");
+  } catch (error) {
+    throw normalizeProviderStartupError(error);
   }
-  let provider: SignerProviderV1;
+  let provider: SignerProviderV1 | undefined;
+  let terminal: SignerTerminalStateV1 | undefined;
   try {
     provider = snapshotProvider(providerCandidate);
     if (
@@ -156,6 +203,12 @@ async function loadServerBindingSignerUnlockedV1(): Promise<
         "SIGNER_MISMATCH",
         "The Server binding signer provider does not match the compiled trust SPKI.",
       );
+    }
+    terminal = createSignerTerminalStateV1();
+    if (provider.kind === "binding-statements-v1") {
+      observeStatementProviderTerminal(provider, terminal);
+      const startupTerminal = readStatementProviderTerminal(provider);
+      if (startupTerminal !== null) throw normalizeProviderStartupError(startupTerminal);
     }
   } catch (error) {
     try {
@@ -174,8 +227,16 @@ async function loadServerBindingSignerUnlockedV1(): Promise<
     }
     throw error;
   }
+  if (provider === undefined || terminal === undefined) {
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer provider is unavailable.");
+  }
 
   const context = Object.create(null) as ServerBindingSignerContextV1;
+  const readTerminalError = (): ServerBindingSignerErrorV1 | null => {
+    const state = signerContexts.get(context);
+    return state === undefined ? (terminal.error ?? null) : readSignerTerminalError(state);
+  };
+  Object.freeze(readTerminalError);
   Object.defineProperties(context, {
     issuerKeyId: {
       configurable: false,
@@ -188,18 +249,32 @@ async function loadServerBindingSignerUnlockedV1(): Promise<
       enumerable: true,
       get: () => Uint8Array.from(trusted.bytes),
     },
+    readTerminalError: {
+      configurable: false,
+      enumerable: true,
+      value: readTerminalError,
+      writable: false,
+    },
+    terminalFailure: {
+      configurable: false,
+      enumerable: true,
+      value: terminal.control.promise,
+      writable: false,
+    },
   });
   Object.freeze(context);
   signerContexts.set(context, {
     issuerKeyId: trusted.issuerKeyId,
     issuerPublicKeySpki: trusted.bytes,
     provider,
+    closingProvider: undefined,
     activeOperations: new Set(),
     abortControllers: new Set(),
     closePromise: undefined,
     unadoptedClosePromise: undefined,
     closed: false,
     owner: undefined,
+    terminal,
   });
   return context;
 }
@@ -218,28 +293,57 @@ export async function signServerBindingReceiptStatementV1(
   if (state === undefined || state === null) {
     throw signerError("SIGNER_MISMATCH", "The Server binding signer context is invalid.");
   }
+  const terminalError = readSignerTerminalError(state);
+  if (terminalError !== null) throw terminalError;
   const provider = state.provider;
   if (state.closed || provider === undefined) {
     throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is closed.");
   }
-  if (signal?.aborted === true) {
+  if (signal?.aborted === true && provider.kind !== "binding-statements-v1") {
     throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer operation was cancelled.");
   }
 
   const statementSnapshot = snapshotReceiptStatement(statement);
-  const preimage = Buffer.from(serverBindingReceiptSigningPreimageV1(statementSnapshot));
-  const providerInput =
-    provider.kind === "preimage-sha256" ? preimage : createHash("sha256").update(preimage).digest();
+  let preimage: Buffer | undefined;
+  let providerInput: Buffer;
+  if (provider.kind === "binding-statements-v1") {
+    providerInput = Buffer.from(marshalServerBindingReceiptStatementV1(statementSnapshot));
+  } else {
+    preimage = Buffer.from(serverBindingReceiptSigningPreimageV1(statementSnapshot));
+    providerInput =
+      provider.kind === "preimage-sha256"
+        ? preimage
+        : createHash("sha256").update(preimage).digest();
+  }
   const controller = new AbortController();
   const relayAbort = (): void => controller.abort(signal?.reason);
-  signal?.addEventListener("abort", relayAbort, { once: true });
+  try {
+    signal?.addEventListener("abort", relayAbort, { once: true });
+    if (signal?.aborted === true) controller.abort(signal.reason);
+  } catch {
+    preimage?.fill(0);
+    if (providerInput !== preimage) providerInput.fill(0);
+    throw signerError("SIGNER_INPUT_INVALID", "The Server binding signer signal is invalid.");
+  }
+  const admissionTerminal = readSignerTerminalError(state);
+  if (admissionTerminal !== null || state.closed || state.provider !== provider) {
+    removeAbortRelay(signal, relayAbort);
+    preimage?.fill(0);
+    if (providerInput !== preimage) providerInput.fill(0);
+    if (admissionTerminal !== null) throw admissionTerminal;
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is closed.");
+  }
   state.abortControllers.add(controller);
 
   let providerResult: unknown;
   let operation: Promise<unknown> | undefined;
   try {
     const signOperation =
-      provider.kind === "preimage-sha256" ? provider.signPreimageSha256 : provider.signDigest;
+      provider.kind === "binding-statements-v1"
+        ? provider.signReceiptStatementV1
+        : provider.kind === "preimage-sha256"
+          ? provider.signPreimageSha256
+          : provider.signDigest;
     operation = Promise.resolve().then(() => {
       const result = Reflect.apply(signOperation, undefined, [
         Uint8Array.from(providerInput),
@@ -256,23 +360,37 @@ export async function signServerBindingReceiptStatementV1(
     state.activeOperations.add(operation);
     providerResult = await operation;
   } catch (error) {
+    const observedTerminal = readSignerTerminalError(state);
+    if (observedTerminal !== null) throw observedTerminal;
     if (error instanceof ServerBindingSignerErrorV1) throw error;
     throw signerError(
       "SIGNER_UNAVAILABLE",
       "The Server binding signer provider could not complete the operation.",
     );
   } finally {
-    signal?.removeEventListener("abort", relayAbort);
+    removeAbortRelay(signal, relayAbort);
     state.abortControllers.delete(controller);
     if (operation !== undefined) state.activeOperations.delete(operation);
-    preimage.fill(0);
+    preimage?.fill(0);
     if (providerInput !== preimage) providerInput.fill(0);
   }
+  const observedTerminal = readSignerTerminalError(state);
+  if (observedTerminal !== null) throw observedTerminal;
   if (controller.signal.aborted || state.closed) {
     throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer operation was cancelled.");
   }
 
-  const signature = canonicalizeP1363LowS(providerResult);
+  let signature: Buffer;
+  try {
+    signature = canonicalizeP1363LowS(providerResult, provider.kind !== "binding-statements-v1");
+  } catch (error) {
+    if (provider.kind !== "binding-statements-v1") throw error;
+    const terminal =
+      error instanceof ServerBindingSignerErrorV1
+        ? error
+        : signerError("SIGNATURE_INVALID", "The statement signer result is invalid.");
+    throw latchSignerTerminalError(state.terminal, terminal);
+  }
   const encodedSignature = signature.toString("base64url");
   const receipt: ServerBindingReceiptV1 = {
     algorithm: SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
@@ -288,16 +406,154 @@ export async function signServerBindingReceiptStatementV1(
     const document = marshalServerBindingReceiptV1(receipt);
     verifyServerBindingReceiptWithSpkiV1(document, state.issuerPublicKeySpki);
   } catch {
-    throw signerError(
+    const error = signerError(
       "SIGNATURE_INVALID",
       "The Server binding signer result did not verify against the compiled trust SPKI.",
     );
+    throw provider.kind === "binding-statements-v1"
+      ? latchSignerTerminalError(state.terminal, error)
+      : error;
   }
   return encodedSignature;
 }
 
-/** Verifies synchronously that a live signer has not yet been adopted. */
-export function assertServerBindingSignerAdoptableV1(
+/** Signs only the v1 active-status statement domain without widening the provider operation set. */
+export async function signServerBindingActiveStatusStatementV1(
+  context: Readonly<ServerBindingSignerContextV1>,
+  statement: ServerBindingActiveStatusStatementV1 | Uint8Array,
+  signal?: AbortSignal,
+): Promise<string> {
+  const state =
+    context !== null && typeof context === "object" ? signerContexts.get(context) : null;
+  if (state === undefined || state === null) {
+    throw signerError("SIGNER_MISMATCH", "The Server binding signer context is invalid.");
+  }
+  const terminalError = readSignerTerminalError(state);
+  if (terminalError !== null) throw terminalError;
+  const provider = state.provider;
+  if (state.closed || provider === undefined) {
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is closed.");
+  }
+  if (signal?.aborted === true && provider.kind !== "binding-statements-v1") {
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer operation was cancelled.");
+  }
+
+  const statementSnapshot = snapshotActiveStatusStatement(statement);
+  let preimage: Buffer | undefined;
+  let providerInput: Buffer;
+  if (provider.kind === "binding-statements-v1") {
+    providerInput = Buffer.from(marshalServerBindingActiveStatusStatementV1(statementSnapshot));
+  } else {
+    preimage = Buffer.from(serverBindingActiveStatusSigningPreimageV1(statementSnapshot));
+    providerInput =
+      provider.kind === "preimage-sha256"
+        ? preimage
+        : createHash("sha256").update(preimage).digest();
+  }
+  const controller = new AbortController();
+  const relayAbort = (): void => controller.abort(signal?.reason);
+  try {
+    signal?.addEventListener("abort", relayAbort, { once: true });
+    if (signal?.aborted === true) controller.abort(signal.reason);
+  } catch {
+    preimage?.fill(0);
+    if (providerInput !== preimage) providerInput.fill(0);
+    throw signerError("SIGNER_INPUT_INVALID", "The Server binding signer signal is invalid.");
+  }
+  const admissionTerminal = readSignerTerminalError(state);
+  if (admissionTerminal !== null || state.closed || state.provider !== provider) {
+    removeAbortRelay(signal, relayAbort);
+    preimage?.fill(0);
+    if (providerInput !== preimage) providerInput.fill(0);
+    if (admissionTerminal !== null) throw admissionTerminal;
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is closed.");
+  }
+  state.abortControllers.add(controller);
+
+  let providerResult: unknown;
+  let operation: Promise<unknown> | undefined;
+  try {
+    const signOperation =
+      provider.kind === "binding-statements-v1"
+        ? provider.signActiveStatusStatementV1
+        : provider.kind === "preimage-sha256"
+          ? provider.signPreimageSha256
+          : provider.signDigest;
+    operation = Promise.resolve().then(() => {
+      const result = Reflect.apply(signOperation, undefined, [
+        Uint8Array.from(providerInput),
+        controller.signal,
+      ]);
+      if (!isPromise(result)) {
+        throw signerError(
+          "SIGNER_MISMATCH",
+          "The Server binding signer provider must return a native Promise.",
+        );
+      }
+      return result;
+    });
+    state.activeOperations.add(operation);
+    providerResult = await operation;
+  } catch (error) {
+    const observedTerminal = readSignerTerminalError(state);
+    if (observedTerminal !== null) throw observedTerminal;
+    if (error instanceof ServerBindingSignerErrorV1) throw error;
+    throw signerError(
+      "SIGNER_UNAVAILABLE",
+      "The Server binding signer provider could not complete the operation.",
+    );
+  } finally {
+    removeAbortRelay(signal, relayAbort);
+    state.abortControllers.delete(controller);
+    if (operation !== undefined) state.activeOperations.delete(operation);
+    preimage?.fill(0);
+    if (providerInput !== preimage) providerInput.fill(0);
+  }
+  const observedTerminal = readSignerTerminalError(state);
+  if (observedTerminal !== null) throw observedTerminal;
+  if (controller.signal.aborted || state.closed) {
+    throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer operation was cancelled.");
+  }
+
+  let signature: Buffer;
+  try {
+    signature = canonicalizeP1363LowS(providerResult, provider.kind !== "binding-statements-v1");
+  } catch (error) {
+    if (provider.kind !== "binding-statements-v1") throw error;
+    const terminal =
+      error instanceof ServerBindingSignerErrorV1
+        ? error
+        : signerError("SIGNATURE_INVALID", "The statement signer result is invalid.");
+    throw latchSignerTerminalError(state.terminal, terminal);
+  }
+  const encodedSignature = signature.toString("base64url");
+  const activeStatus: ServerBindingActiveStatusV1 = {
+    algorithm: SERVER_BINDING_AUTHORITY_SIGNATURE_ALGORITHM,
+    issuer: SERVER_BINDING_AUTHORITY_ISSUER,
+    issuerKeyId: state.issuerKeyId,
+    profileId: SERVER_BINDING_ACTIVE_STATUS_PROFILE_ID,
+    schemaVersion: SERVER_BINDING_AUTHORITY_SCHEMA_VERSION,
+    signature: encodedSignature,
+    statement: statementSnapshot,
+  };
+
+  try {
+    const document = marshalServerBindingActiveStatusV1(activeStatus);
+    verifyServerBindingActiveStatusWithSpkiV1(document, state.issuerPublicKeySpki);
+  } catch {
+    const error = signerError(
+      "SIGNATURE_INVALID",
+      "The Server binding signer result did not verify against the compiled trust SPKI.",
+    );
+    throw provider.kind === "binding-statements-v1"
+      ? latchSignerTerminalError(state.terminal, error)
+      : error;
+  }
+  return encodedSignature;
+}
+
+/** @internal Verifies the signer brand and ownership fence without reading its terminal snapshot. */
+export function assertServerBindingSignerOwnershipAvailableV1(
   context: Readonly<ServerBindingSignerContextV1>,
 ): void {
   const state =
@@ -310,6 +566,19 @@ export function assertServerBindingSignerAdoptableV1(
   }
 }
 
+/** Verifies synchronously that a live signer has not yet been adopted. */
+export function assertServerBindingSignerAdoptableV1(
+  context: Readonly<ServerBindingSignerContextV1>,
+): void {
+  assertServerBindingSignerOwnershipAvailableV1(context);
+  const state = signerContexts.get(context);
+  if (state === undefined) {
+    throw signerError("SIGNER_MISMATCH", "The Server binding signer context is invalid.");
+  }
+  const terminalError = readSignerTerminalError(state);
+  if (terminalError !== null) throw terminalError;
+}
+
 /** Adopts one live signer context for exactly one coordinator owner. */
 export function adoptServerBindingSignerV1(
   context: Readonly<ServerBindingSignerContextV1>,
@@ -320,6 +589,8 @@ export function adoptServerBindingSignerV1(
   if (state === undefined || state === null || owner === null || typeof owner !== "object") {
     throw signerError("SIGNER_MISMATCH", "The Server binding signer adoption is invalid.");
   }
+  const terminalError = readSignerTerminalError(state);
+  if (terminalError !== null) throw terminalError;
   if (state.closed || state.owner !== undefined) {
     throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is unavailable.");
   }
@@ -342,13 +613,23 @@ export function closeServerBindingSignerV1(
       signerError("SIGNER_MISMATCH", "The Server binding signer owner is invalid."),
     );
   }
-  state.closePromise ??= (async () => {
-    state.closed = true;
-    for (const controller of state.abortControllers) {
-      controller.abort(new Error("Server binding signer shutdown requested."));
-    }
-    const provider = state.provider;
-    state.provider = undefined;
+  if (state.closePromise !== undefined) return state.closePromise;
+  const control = Promise.withResolvers<void>();
+  state.closePromise = control.promise;
+  void closeSignerStateV1(state).then(control.resolve, control.reject);
+  return state.closePromise;
+}
+
+async function closeSignerStateV1(state: SignerContextStateV1): Promise<void> {
+  state.closed = true;
+  readSignerTerminalError(state);
+  for (const controller of state.abortControllers) {
+    controller.abort(new Error("Server binding signer shutdown requested."));
+  }
+  const provider = state.provider;
+  state.provider = undefined;
+  state.closingProvider = provider;
+  try {
     let providerClose: Promise<unknown> = Promise.resolve();
     if (provider !== undefined) {
       quarantinedProviderCandidates.add(provider);
@@ -370,13 +651,31 @@ export function closeServerBindingSignerV1(
     }
     const settlements = await Promise.allSettled([...state.activeOperations, providerClose]);
     if (settlements.at(-1)?.status === "rejected") {
+      if (provider?.kind === "binding-statements-v1") {
+        try {
+          readStatementProviderTerminal(provider);
+        } catch {
+          // A malformed terminal snapshot is still outcome-unknown after context publication.
+        }
+        throw latchSignerOutcomeUnknown(state.terminal, settlements.at(-1));
+      }
       throw signerError(
         "SIGNER_UNAVAILABLE",
         "The Server binding signer provider could not close cleanly.",
       );
     }
-  })();
-  return state.closePromise;
+    if (provider?.kind === "binding-statements-v1" && state.terminal.error === undefined) {
+      try {
+        const providerTerminal = readStatementProviderTerminal(provider);
+        if (providerTerminal !== null) latchSignerOutcomeUnknown(state.terminal, providerTerminal);
+      } catch (error) {
+        latchSignerOutcomeUnknown(state.terminal, error);
+      }
+    }
+    if (state.terminal.error !== undefined) throw state.terminal.error;
+  } finally {
+    state.closingProvider = undefined;
+  }
 }
 
 /** Closes a startup signer only when no coordinator or other owner has adopted it. */
@@ -410,6 +709,8 @@ export function readServerBindingSignerDescriptorV1(
   if (state === undefined || state === null) {
     throw signerError("SIGNER_MISMATCH", "The Server binding signer context is invalid.");
   }
+  const terminalError = readSignerTerminalError(state);
+  if (terminalError !== null) throw terminalError;
   if (state.closed) {
     throw signerError("SIGNER_UNAVAILABLE", "The Server binding signer context is closed.");
   }
@@ -425,8 +726,122 @@ function snapshotTrustProfile(value: unknown): Readonly<{ bytes: Buffer; issuerK
   return snapshotCanonicalP256Spki(fields.compiledTrustedIssuerPublicKeySpki);
 }
 
+function createSignerTerminalStateV1(): SignerTerminalStateV1 {
+  return { control: Promise.withResolvers<ServerBindingSignerErrorV1>(), error: undefined };
+}
+
+function observeStatementProviderTerminal(
+  provider: BindingStatementProviderV1,
+  terminal: SignerTerminalStateV1,
+): void {
+  const observe = (error: unknown): ServerBindingSignerErrorV1 =>
+    latchSignerOutcomeUnknown(terminal, error);
+  void Reflect.apply(intrinsicPromiseThen, provider.terminalFailure, [observe, observe]);
+}
+
+function readStatementProviderTerminal(provider: BindingStatementProviderV1): Error | null {
+  let value: unknown;
+  try {
+    value = Reflect.apply(provider.readTerminalError, undefined, []);
+  } catch {
+    throw signerError(
+      "SIGNER_MISMATCH",
+      "The statement signer terminal snapshot could not be read.",
+    );
+  }
+  if (value !== null && !(value instanceof Error)) {
+    throw signerError("SIGNER_MISMATCH", "The statement signer terminal snapshot is invalid.");
+  }
+  return value;
+}
+
+function readSignerTerminalError(state: SignerContextStateV1): ServerBindingSignerErrorV1 | null {
+  if (state.terminal.error !== undefined) return state.terminal.error;
+  const provider = state.provider ?? state.closingProvider;
+  if (provider?.kind !== "binding-statements-v1") return null;
+  try {
+    const providerError = readStatementProviderTerminal(provider);
+    return providerError === null ? null : latchSignerOutcomeUnknown(state.terminal, providerError);
+  } catch (error) {
+    return latchSignerOutcomeUnknown(state.terminal, error);
+  }
+}
+
+function removeAbortRelay(signal: AbortSignal | undefined, listener: () => void): void {
+  try {
+    signal?.removeEventListener("abort", listener);
+  } catch {
+    // The private controller and operation correlation remain authoritative.
+  }
+}
+
+function latchSignerOutcomeUnknown(
+  terminal: SignerTerminalStateV1,
+  _cause: unknown,
+): ServerBindingSignerErrorV1 {
+  return latchSignerTerminalError(
+    terminal,
+    signerError("SIGNER_OUTCOME_UNKNOWN", "The Server binding signer outcome is unknown."),
+  );
+}
+
+function latchSignerTerminalError(
+  terminal: SignerTerminalStateV1,
+  error: ServerBindingSignerErrorV1,
+): ServerBindingSignerErrorV1 {
+  if (terminal.error !== undefined) return terminal.error;
+  terminal.error = error;
+  terminal.control.resolve(error);
+  return error;
+}
+
+function normalizeProviderStartupError(error: unknown): ServerBindingSignerErrorV1 {
+  if (
+    error instanceof ServerBindingSignerProviderStartupErrorV1 &&
+    error.code === "SIGNER_MISMATCH"
+  ) {
+    return signerError(
+      "SIGNER_MISMATCH",
+      "The Server binding signer provider startup identity is invalid.",
+    );
+  }
+  return signerError("SIGNER_UNAVAILABLE", "The Server binding signer provider is unavailable.");
+}
+
 function snapshotProvider(value: unknown): SignerProviderV1 {
   const fields = snapshotExactDataObject(value, "Server binding signer provider");
+  if (fields.kind === "binding-statements-v1") {
+    assertExactKeys(fields, [
+      "close",
+      "issuerPublicKeySpki",
+      "kind",
+      "readTerminalError",
+      "signActiveStatusStatementV1",
+      "signReceiptStatementV1",
+      "terminalFailure",
+    ]);
+    if (
+      typeof fields.close !== "function" ||
+      typeof fields.readTerminalError !== "function" ||
+      typeof fields.signActiveStatusStatementV1 !== "function" ||
+      typeof fields.signReceiptStatementV1 !== "function" ||
+      !isPromise(fields.terminalFailure)
+    ) {
+      throw signerError("SIGNER_MISMATCH", "The statement signer operations are invalid.");
+    }
+    return Object.freeze({
+      close: fields.close as BindingStatementProviderV1["close"],
+      issuerPublicKeySpki: snapshotCanonicalP256Spki(fields.issuerPublicKeySpki).bytes,
+      kind: "binding-statements-v1" as const,
+      readTerminalError:
+        fields.readTerminalError as BindingStatementProviderV1["readTerminalError"],
+      signActiveStatusStatementV1:
+        fields.signActiveStatusStatementV1 as BindingStatementProviderV1["signActiveStatusStatementV1"],
+      signReceiptStatementV1:
+        fields.signReceiptStatementV1 as BindingStatementProviderV1["signReceiptStatementV1"],
+      terminalFailure: fields.terminalFailure,
+    });
+  }
   if (fields.kind === "preimage-sha256") {
     assertExactKeys(fields, ["close", "issuerPublicKeySpki", "kind", "signPreimageSha256"]);
     if (typeof fields.signPreimageSha256 !== "function" || typeof fields.close !== "function") {
@@ -576,6 +991,61 @@ function snapshotReceiptStatement(
   return Object.freeze(parsed as ServerBindingReceiptStatementV1);
 }
 
+function snapshotActiveStatusStatement(
+  value: ServerBindingActiveStatusStatementV1 | Uint8Array,
+): Readonly<ServerBindingActiveStatusStatementV1> {
+  let canonicalBytes: Buffer;
+  const intrinsicView = readIntrinsicUint8ViewOrUndefined(value);
+  if (intrinsicView === undefined) {
+    try {
+      canonicalBytes = Buffer.from(
+        marshalServerBindingActiveStatusStatementV1(value as ServerBindingActiveStatusStatementV1),
+      );
+    } catch {
+      throw signerError("SIGNER_INPUT_INVALID", "The active-status statement is invalid.");
+    }
+  } else {
+    if (
+      intrinsicView.byteLength === 0 ||
+      intrinsicView.byteLength > SERVER_BINDING_AUTHORITY_MAXIMUM_DOCUMENT_BYTES
+    ) {
+      throw signerError(
+        "SIGNER_INPUT_INVALID",
+        "The active-status statement byte length is invalid.",
+      );
+    }
+    canonicalBytes = copyIntrinsicUint8View(
+      value,
+      intrinsicView,
+      "active-status statement",
+      "SIGNER_INPUT_INVALID",
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(canonicalBytes));
+  } catch {
+    throw signerError("SIGNER_INPUT_INVALID", "The active-status statement bytes are invalid.");
+  }
+
+  let remarshal: Buffer;
+  try {
+    remarshal = Buffer.from(
+      marshalServerBindingActiveStatusStatementV1(parsed as ServerBindingActiveStatusStatementV1),
+    );
+  } catch {
+    throw signerError("SIGNER_INPUT_INVALID", "The active-status statement fields are invalid.");
+  }
+  if (
+    remarshal.byteLength !== canonicalBytes.byteLength ||
+    !timingSafeEqual(remarshal, canonicalBytes)
+  ) {
+    throw signerError("SIGNER_INPUT_INVALID", "The active-status statement is not canonical.");
+  }
+  return Object.freeze(parsed as ServerBindingActiveStatusStatementV1);
+}
+
 function snapshotCanonicalP256Spki(value: unknown): {
   readonly bytes: Buffer;
   readonly issuerKeyId: string;
@@ -600,7 +1070,7 @@ function snapshotCanonicalP256Spki(value: unknown): {
   return Object.freeze({ bytes, issuerKeyId });
 }
 
-function canonicalizeP1363LowS(value: unknown): Buffer {
+function canonicalizeP1363LowS(value: unknown, normalizeHighS = true): Buffer {
   const view = readIntrinsicUint8ViewOrUndefined(value);
   if (view === undefined || view.byteLength !== 64) {
     throw signerError(
@@ -615,6 +1085,9 @@ function canonicalizeP1363LowS(value: unknown): Buffer {
     throw signerError("SIGNATURE_INVALID", "The ECDSA signature scalars are invalid.");
   }
   if (s > p256HalfOrder) {
+    if (!normalizeHighS) {
+      throw signerError("SIGNATURE_INVALID", "The ECDSA signature is not low-S canonical.");
+    }
     s = p256Order - s;
     writeUnsignedBigEndian(s, signature, 32, 32);
   }
@@ -744,10 +1217,12 @@ function writeUnsignedBigEndian(
 }
 
 Object.freeze(loadServerBindingSignerV1);
+Object.freeze(assertServerBindingSignerOwnershipAvailableV1);
 Object.freeze(assertServerBindingSignerAdoptableV1);
 Object.freeze(adoptServerBindingSignerV1);
 Object.freeze(closeServerBindingSignerV1);
 Object.freeze(closeUnadoptedServerBindingSignerV1);
+Object.freeze(signServerBindingActiveStatusStatementV1);
 
 function signerError(
   code: ServerBindingSignerErrorCodeV1,

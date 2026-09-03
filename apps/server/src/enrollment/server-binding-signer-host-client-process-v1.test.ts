@@ -690,7 +690,7 @@ describe("dormant Server binding signer-host direct client v1", () => {
     expect(await closeRejection).toMatchObject({ code: "SIGNER_HOST_OUTCOME_UNKNOWN" });
   });
 
-  it("keeps a settled signature stable when its write callback fails after forced close", async () => {
+  it("settles a signature before its deferred write and keeps late failure quarantined", async () => {
     vi.useFakeTimers();
     const { child, client } = await readyClient();
     child.stdin.deferWriteCallbacks = true;
@@ -706,6 +706,7 @@ describe("dormant Server binding signer-host direct client v1", () => {
       signature: validSignature,
       type: "signature",
     });
+    expect(Buffer.from(await signing)).toEqual(Buffer.from(validSignature, "base64url"));
 
     const close = client.close();
     await vi.advanceTimersByTimeAsync(
@@ -717,7 +718,6 @@ describe("dormant Server binding signer-host direct client v1", () => {
     await expectReplacementBlocked();
 
     child.stdin.settleNextWrite(new Error("late private sign write failure"));
-    expect(Buffer.from(await signing)).toEqual(Buffer.from(validSignature, "base64url"));
     await flushPromiseJobs();
     expect(client.readTerminalError()).toBeNull();
     await expectReplacementCanStart();
@@ -755,6 +755,35 @@ describe("dormant Server binding signer-host direct client v1", () => {
     child.exit(null, "SIGKILL");
     await expect(client.close()).rejects.toBe(signError);
     expect(JSON.stringify(signError)).not.toContain("private abort reason");
+  });
+
+  it("settles an aborted sign before deferred writes while retaining raw-write quarantine", async () => {
+    const { child, client } = await readyClient();
+    child.stdin.deferWriteCallbacks = true;
+    const controller = new AbortController();
+    const signing = client.signReceiptStatementV1(
+      Buffer.from(JSON.stringify(receiptStatement)),
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(child.stdin.writes).toHaveLength(2));
+
+    controller.abort();
+    const signError = await rejection(signing);
+    expect(signError).toBe(await client.terminalFailure);
+    expect(signError).toMatchObject({ code: "SIGNER_HOST_OUTCOME_UNKNOWN" });
+    await vi.waitFor(() => expect(child.stdin.writes).toHaveLength(3));
+    await vi.waitFor(() => expect(child.killCalls).toEqual(["SIGKILL"]));
+
+    child.exit(null, "SIGKILL");
+    await expect(client.close()).rejects.toBe(signError);
+    await expectReplacementBlocked();
+
+    child.stdin.settleNextWrite(new Error("late private sign write failure"));
+    await flushPromiseJobs();
+    await expectReplacementBlocked();
+    child.stdin.settleNextWrite(new Error("late private cancel write failure"));
+    await flushPromiseJobs();
+    await expectReplacementCanStart();
   });
 
   it("maps invalid readiness identity and malformed output to stable mismatch", async () => {
@@ -952,6 +981,39 @@ describe("dormant Server binding signer-host direct client v1", () => {
     child.closeAfterExit();
     await close;
     expect(closed).toBe(true);
+  });
+
+  it("accepts a buffered shutdown acknowledgement delivered after child exit", async () => {
+    const { child, client } = await readyClient();
+    const close = client.close();
+    await vi.waitFor(() => expect(child.stdin.writes).toHaveLength(2));
+    child.emit("exit", 0, null);
+    sendChildMessage(child, {
+      protocolVersion: "1.0",
+      requestId,
+      type: "shutdown_ack",
+    });
+    child.closeAfterExit();
+    await close;
+    expect(client.readTerminalError()).toBeNull();
+  });
+
+  it("rejects a clean exit whose missing shutdown acknowledgement crosses the deadline", async () => {
+    vi.useFakeTimers();
+    const { child, client } = await readyClient();
+    const close = client.close();
+    await vi.waitFor(() => expect(child.stdin.writes).toHaveLength(2));
+    child.emit("exit", 0, null);
+
+    await vi.advanceTimersByTimeAsync(
+      SERVER_BINDING_SIGNER_HOST_GRACEFUL_SHUTDOWN_TIMEOUT_MILLISECONDS,
+    );
+    child.closeAfterExit();
+
+    const error = await rejection(close);
+    expect(error).toBe(await client.terminalFailure);
+    expect(error).toMatchObject({ code: "SIGNER_HOST_PROTOCOL_FAILURE" });
+    expect(client.hasProvenCleanup()).toBe(true);
   });
 
   it("quarantines an unexpected exit until child close and all stdio closes are proved", async () => {

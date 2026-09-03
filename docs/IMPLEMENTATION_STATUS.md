@@ -208,7 +208,7 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   a signer; startup leaves a fresh authority empty, and existing authority state fails closed without
   the exact signer/trust descriptor. No route, authentication source, revocation veto, Windows
   consumer, Claim, slot, or execution authority consumes this state.
-- A dormant A1+A2 source implementation for the proposed Linux Server binding signer-host
+- A dormant A1+A2+A3 source implementation for the proposed Linux Server binding signer-host
   transport v1 contract. ADR 0024 fixes the complete transport. A1 provides the exact 8 KiB
   length-prefixed canonical message codec, statement-profile validation, canonical P-256
   SPKI/key-ID pairing, P1363 low-S shape checks, incremental fragmentation/coalescing decoder, and
@@ -221,12 +221,17 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   forced termination, real exit plus stdio-close proof, first-terminal-cause reuse, and
   process-lifetime quarantine that blocks replacement while exit remains unproved. A source-excluded
   fixture supplies fixed protocol, corruption, overflow, cancellation, shutdown, and hanging-child
-  scenarios for fake-process and real-child tests. The sensitive modules and fixture are pinned by
-  exact import, export, source-digest, spawn-shape, private-key, signing, I/O, compiler-input,
-  package, and production-reachability guards. The provider bridge remains unimplemented, and the
-  mandatory Linux exit-proof matrix remains incomplete and unverified. Production signer, trust,
-  and host-profile loaders remain
-  unavailable, and A1+A2 add no production key backend, compiled trust, signer binary,
+scenarios for fake-process and real-child tests. A3 adds the exact frozen statement-only
+host-provider bridge, canonical receipt and active-status statement dispatch, independent signer
+verification, first-cause terminal propagation, signer-before-database adoption fencing, and
+outcome-unknown mapping into the existing S1 coordinator. Existing preimage and digest providers
+retain their byte, hash, signature, and normal error semantics, while replacement admission is
+intentionally tightened whenever prior provider cleanup remains unresolved. The sensitive modules and fixture are
+  pinned by exact import, export, source-digest, spawn-shape, terminal-chain, private-key, signing,
+  I/O, compiler-input, package, and production-reachability guards. The host-provider has zero
+  production consumers and remains unreachable from `main.ts`; the mandatory Linux exit-proof
+  matrix remains incomplete and unverified. Production signer, trust, and host-profile loaders
+  remain unavailable, and A1+A2+A3 add no production key backend, compiled trust, signer binary,
   configuration, `main.ts` wiring, issuer initialization, route, authentication source, Claim,
   slot, package, installation, or execution authority.
 - A closed RoleConfig v2 package profile for the two exact WinSW wrapper and same-basename XML
@@ -374,9 +379,9 @@ Codex, or Git capability in this shadow milestone.
 After the shadow runtime is verified and any findings are closed, the release pipeline must compile
 the production release profile, produce signed role bundles and native binaries, and install the two
 services, identities, ACLs, keys, firewall policy, and machine-enforced Codex policy through the
-ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader and
-the remaining ADR 0024 signer-host provider bridge, mandatory Linux exit-proof verification, and
-separately reviewed B production activation profile, production Server binding signer and trust
+ADR 0013 transaction. The repository still needs the ADR 0014 handle-bound enrollment reader,
+mandatory ADR 0024 Linux exit-proof verification, and the separately reviewed B production
+activation profile, production Server binding signer and trust
 material, S2 authenticated
 receipt authority, privileged enrollment writer and live evidence, destination evidence, the ADR
 0021 protected-store implementation and opaque-evidence composition, the production Go installer,
@@ -440,6 +445,18 @@ repository engines require `>=24.20.0 <25`, so pnpm emitted an engine warning. T
 generic Node child lifecycle behavior on Windows; they are not evidence for Linux signals, process
 reaping, credentials, executable ownership, cgroups, or parent-death semantics. Mandatory Linux
 verification remains to be recorded against the exact candidate.
+
+On 2026-09-03, the dormant signer-host A3 source bridge was implemented between the A2 direct-child
+client and the existing S1 signer/coordinator ownership model. The host-provider remains
+package-private with zero production consumers, while the production provider, host-profile, and
+trust loaders remain unavailable and `main.ts` cannot reach the bridge. Local verification was
+explicitly authorized and no command was run on `test-env`. The nine-file signer-host, provider,
+signer, coordinator, and architecture matrix passed 153/153; all-workspace typecheck and build
+passed; Biome checked 323 files; and the built Server tree contained none of four pinned fixture,
+scenario, private-key, or stderr markers. Independent final reviews found no remaining P0-P2
+findings. The local runtime was Node 26.1.0 while the repository requires `>=24.20.0 <25`, so pnpm
+emitted an engine warning. These local results are not Linux evidence, and the mandatory ADR 0024
+Linux process matrix remains deferred.
 
 On 2026-09-02, the source-only package-private installer observation reducer completed the full
 ServiceHost Go 1.26.7 unit, race, and vet suites on Linux `test-env`. The exact source also compiled

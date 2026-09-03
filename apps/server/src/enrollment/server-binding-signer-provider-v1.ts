@@ -22,9 +22,42 @@ export interface ServerBindingDigestNativeSignerProviderV1 {
   readonly close: () => Promise<void>;
 }
 
+/** Exact statement-only provider backed by the dormant direct-child signer-host client. */
+export interface ServerBindingStatementSignerProviderV1 {
+  readonly kind: "binding-statements-v1";
+  readonly issuerPublicKeySpki: Uint8Array;
+  readonly terminalFailure: Promise<Error>;
+  readonly readTerminalError: () => Error | null;
+  readonly signReceiptStatementV1: (
+    statementJson: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<Uint8Array>;
+  readonly signActiveStatusStatementV1: (
+    statementJson: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<Uint8Array>;
+  readonly close: () => Promise<void>;
+}
+
 export type ServerBindingSignerProviderV1 =
   | ServerBindingDigestNativeSignerProviderV1
-  | ServerBindingPreimageSha256SignerProviderV1;
+  | ServerBindingPreimageSha256SignerProviderV1
+  | ServerBindingStatementSignerProviderV1;
+
+export type ServerBindingSignerProviderStartupErrorCodeV1 =
+  | "SIGNER_MISMATCH"
+  | "SIGNER_UNAVAILABLE";
+
+/** Stable startup-only category shared by the dormant bridge and signer loader. */
+export class ServerBindingSignerProviderStartupErrorV1 extends Error {
+  public constructor(
+    public readonly code: ServerBindingSignerProviderStartupErrorCodeV1,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ServerBindingSignerProviderStartupErrorV1";
+  }
+}
 
 /**
  * Production signing remains unavailable until a later decision supplies protected private-key
