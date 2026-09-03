@@ -19,8 +19,6 @@ func TestAccessForFileExhaustivelyMapsManifestRoles(t *testing.T) {
 		role   releasemanifest.FileRole
 		access serviceAccess
 	}{
-		{"Control wrapper", releasemanifest.RootInstallation, config.ControlServiceName + ".exe", releasemanifest.RoleServiceWrapper, executeControl},
-		{"Executor wrapper", releasemanifest.RootInstallation, config.ExecutorServiceName + ".exe", releasemanifest.RoleServiceWrapper, executeExecutor},
 		{"ServiceHost", releasemanifest.RootInstallation, `native\servicehost.exe`, releasemanifest.RoleServiceHost, executeBoth},
 		{"Node", releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, executeBoth},
 		{"Control bundle", releasemanifest.RootInstallation, `app\control.mjs`, releasemanifest.RoleControlBundle, executeControl},
@@ -33,7 +31,6 @@ func TestAccessForFileExhaustivelyMapsManifestRoles(t *testing.T) {
 		{"shared Node library", releasemanifest.RootInstallation, `runtime\node.dll`, releasemanifest.RoleNativeLibrary, executeBoth},
 		{"Executor library", releasemanifest.RootInstallation, `git\mingw64\bin\libcurl.dll`, releasemanifest.RoleNativeLibrary, executeExecutor},
 		{"installation CA", releasemanifest.RootInstallation, `runtime\ca.pem`, releasemanifest.RoleCABundle, readBoth},
-		{"service config", releasemanifest.RootInstallation, `service\control.xml`, releasemanifest.RoleServiceConfig, readBoth},
 		{"runtime data", releasemanifest.RootInstallation, `runtime\snapshot.dat`, releasemanifest.RoleRuntimeData, readBoth},
 		{"license", releasemanifest.RootInstallation, `LICENSE.txt`, releasemanifest.RoleLicense, readBoth},
 		{"trusted CA", releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, readBoth},
@@ -63,7 +60,6 @@ func TestAccessForFileExhaustivelyMapsManifestRoles(t *testing.T) {
 	}
 
 	allRoles := []releasemanifest.FileRole{
-		releasemanifest.RoleServiceWrapper,
 		releasemanifest.RoleServiceHost,
 		releasemanifest.RoleNodeRuntime,
 		releasemanifest.RoleControlBundle,
@@ -75,7 +71,6 @@ func TestAccessForFileExhaustivelyMapsManifestRoles(t *testing.T) {
 		releasemanifest.RoleCodexRuntime,
 		releasemanifest.RoleNativeLibrary,
 		releasemanifest.RoleCABundle,
-		releasemanifest.RoleServiceConfig,
 		releasemanifest.RoleTrustedConfig,
 		releasemanifest.RolePolicy,
 		releasemanifest.RoleSchema,
@@ -102,7 +97,6 @@ func TestAccessForFileRejectsUnknownOrInconsistentPurpose(t *testing.T) {
 		{root: releasemanifest.RootInstallation, relativePath: `unknown.bin`, purpose: purposeManifestEntry, manifest: &releasemanifest.File{Root: releasemanifest.RootInstallation, Path: `unknown.bin`, Role: "unknown"}},
 		{root: releasemanifest.RootTrustedConfiguration, relativePath: validInstallation.Path, purpose: purposeManifestEntry, manifest: &validInstallation},
 		{root: releasemanifest.RootInstallation, relativePath: validTrusted.Path, purpose: purposeManifestEntry, manifest: &validTrusted},
-		{root: releasemanifest.RootInstallation, relativePath: `other.exe`, purpose: purposeManifestEntry, manifest: &releasemanifest.File{Root: releasemanifest.RootInstallation, Path: `other.exe`, Role: releasemanifest.RoleServiceWrapper}},
 		{root: releasemanifest.RootInstallation, relativePath: validInstallation.Path, purpose: purposeManifestEntry},
 		{root: releasemanifest.RootInstallation, relativePath: `other\node.exe`, purpose: purposeManifestEntry, manifest: &validInstallation},
 		{root: releasemanifest.RootTrustedConfiguration, relativePath: releasemanifest.ControlBootstrapConfigurationPath, purpose: purposeManifest},

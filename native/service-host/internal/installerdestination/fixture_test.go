@@ -16,7 +16,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installerprofile"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
@@ -43,8 +42,6 @@ func newDestinationFixture(t testing.TB) *destinationFixture {
 		{outerpackage.RootInstallation, outerpackage.RuntimeManifestPath, outerpackage.RoleRuntimeManifest, false},
 		{outerpackage.RootTrustedConfiguration, outerpackage.ControlBootstrapPath, outerpackage.RoleControlBootstrap, false},
 		{outerpackage.RootTrustedConfiguration, outerpackage.ExecutorBootstrapPath, outerpackage.RoleExecutorBootstrap, false},
-		{outerpackage.RootInstallation, releasepackage.ControlServiceWrapperPath, outerpackage.RoleServiceWrapper, true},
-		{outerpackage.RootInstallation, releasepackage.ExecutorServiceWrapperPath, outerpackage.RoleServiceWrapper, true},
 		{outerpackage.RootInstallation, `app\control.mjs`, outerpackage.RoleControlBundle, false},
 		{outerpackage.RootInstallation, `app\executor.mjs`, outerpackage.RoleExecutorBundle, false},
 		{outerpackage.RootInstallation, `codex\codex.exe`, outerpackage.RoleCodexCLI, true},
@@ -52,8 +49,6 @@ func newDestinationFixture(t testing.TB) *destinationFixture {
 		{outerpackage.RootInstallation, `native\AgenticReview.ProcessHost.exe`, outerpackage.RoleProcessHost, true},
 		{outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, true},
 		{outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, true},
-		{outerpackage.RootInstallation, releasepackage.ControlServiceConfigPath, outerpackage.RoleServiceConfig, false},
-		{outerpackage.RootInstallation, releasepackage.ExecutorServiceConfigPath, outerpackage.RoleServiceConfig, false},
 		{outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, false},
 	}
 	for _, spec := range specs {

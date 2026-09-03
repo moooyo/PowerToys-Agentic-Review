@@ -194,15 +194,6 @@ func accessForFile(request fileSecurityRequest) (serviceAccess, error) {
 	}
 
 	switch request.manifest.Role {
-	case releasemanifest.RoleServiceWrapper:
-		switch {
-		case strings.EqualFold(request.relativePath, config.ControlServiceName+".exe"):
-			return executeControl, nil
-		case strings.EqualFold(request.relativePath, config.ExecutorServiceName+".exe"):
-			return executeExecutor, nil
-		default:
-			return serviceAccess{}, errors.New("service wrapper path does not identify a fixed service")
-		}
 	case releasemanifest.RoleServiceHost, releasemanifest.RoleNodeRuntime:
 		return executeBoth, nil
 	case releasemanifest.RoleControlBundle:
@@ -220,7 +211,6 @@ func accessForFile(request fileSecurityRequest) (serviceAccess, error) {
 		}
 		return executeExecutor, nil
 	case releasemanifest.RoleCABundle,
-		releasemanifest.RoleServiceConfig,
 		releasemanifest.RoleRuntimeData,
 		releasemanifest.RoleLicense:
 		return readBoth, nil

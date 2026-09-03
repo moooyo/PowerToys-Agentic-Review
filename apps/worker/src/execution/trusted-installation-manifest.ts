@@ -40,7 +40,6 @@ const requiredCompatibility: TrustedInstallationCompatibility = Object.freeze({
 });
 
 export const trustedInstallationFileRoles = [
-  "service-wrapper",
   "service-host",
   "node-runtime",
   "control-bundle",
@@ -52,7 +51,6 @@ export const trustedInstallationFileRoles = [
   "codex-runtime",
   "native-library",
   "ca-bundle",
-  "service-config",
   "trusted-config",
   "policy",
   "schema",
@@ -83,7 +81,6 @@ const rootSortOrder = new Map<TrustedInstallationFileRoot, number>([
   ["trusted-configuration", 1],
 ]);
 const requiredRoleCounts = new Map<TrustedInstallationFileRole, number>([
-  ["service-wrapper", 2],
   ["service-host", 1],
   ["node-runtime", 1],
   ["control-bundle", 1],
@@ -91,13 +88,11 @@ const requiredRoleCounts = new Map<TrustedInstallationFileRole, number>([
   ["process-host", 1],
   ["codex-cli", 1],
   ["git-cli", 1],
-  ["service-config", 2],
 ]);
 // This is the format-level minimum, not a deployable release profile. Before execution is
 // enabled, a concrete profile and typed config binding must require every Git/Codex dependency and
 // the role-specific CA, public-key, policy, schema, prompt, and recipe inputs used by that release.
 const executableRoles = new Set<TrustedInstallationFileRole>([
-  "service-wrapper",
   "service-host",
   "node-runtime",
   "process-host",
@@ -114,7 +109,6 @@ const scriptRoles = new Set<TrustedInstallationFileRole>(["control-bundle", "exe
 const installationOnlyRoles = new Set<TrustedInstallationFileRole>([
   ...portableExecutableRoles,
   ...scriptRoles,
-  "service-config",
   "runtime-data",
   "license",
 ]);
@@ -163,7 +157,6 @@ const dangerousNonDataExtensions = new Set([
   ".chm",
 ]);
 const roleExtensions = new Map<TrustedInstallationFileRole, ReadonlySet<string>>([
-  ["service-wrapper", new Set([".exe"])],
   ["service-host", new Set([".exe"])],
   ["node-runtime", new Set([".exe"])],
   ["control-bundle", new Set([".mjs"])],
@@ -175,7 +168,6 @@ const roleExtensions = new Map<TrustedInstallationFileRole, ReadonlySet<string>>
   ["codex-runtime", new Set([".exe", ".dll", ".node"])],
   ["native-library", new Set([".dll", ".node"])],
   ["ca-bundle", new Set([".pem", ".crt", ".cer"])],
-  ["service-config", new Set([".xml"])],
   ["trusted-config", new Set([".spki"])],
   ["policy", new Set([".toml", ".json", ".yaml", ".yml"])],
   ["schema", new Set([".json"])],

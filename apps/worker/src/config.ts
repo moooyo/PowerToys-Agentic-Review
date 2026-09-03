@@ -29,9 +29,6 @@ const maximumTotalMemoryBytes = 64 * processHostResourceBounds.maximumMemoryByte
 const maximumTotalOutputBytes = 64 * processHostResourceBounds.maximumOutputBytes.maximum;
 const maximumPerAttemptDiskBytes = tebibyte;
 const maximumTotalWorkspaceDiskBytes = 64 * maximumPerAttemptDiskBytes;
-const winSwStopTimeoutMs = 150_000;
-const processExitSettleMs = 5_000;
-const shutdownSafetyMarginMs = 10_000;
 const maximumTlsCaBytes = mebibyte;
 const maximumWorkerAuthProfileBytes = 4 * kibibyte;
 const workerAuthProfileId = "agentic-review-worker-auth-v1";
@@ -194,7 +191,7 @@ export function loadWorkerConfig(
   // real paths, reject reparse points, confirm file identity, and compare binary digests. The
   // executor must also pass its runtime isolation gate before any untrusted job can start.
   const execution = executionEnabled
-    ? loadExecutionConfig(environment, dataDirectory, maxSlots, shutdownGraceSeconds)
+    ? loadExecutionConfig(environment, dataDirectory, maxSlots)
     : undefined;
 
   const logLevel = environment.WORKER_LOG_LEVEL ?? "info";
@@ -267,7 +264,6 @@ function loadExecutionConfig(
   environment: NodeJS.ProcessEnv,
   dataDirectory: string,
   maxSlots: number,
-  shutdownGraceSeconds: number,
 ): WorkerExecutionConfig {
   const trustedExecutableRoot = readRequiredWindowsPath(
     environment,
@@ -371,12 +367,6 @@ function loadExecutionConfig(
     1_000,
     300_000,
   );
-  assertShutdownBudget(
-    shutdownGraceSeconds,
-    processHostRequestTimeoutMs,
-    processHostShutdownTimeoutMs,
-  );
-
   const perAttemptDiskBytes = readInteger(
     environment,
     "WORKER_EXECUTION_PER_ATTEMPT_DISK_BYTES",
@@ -457,24 +447,6 @@ function loadExecutionConfig(
     orphanRetentionHours,
     orphanScanLimit,
   };
-}
-
-function assertShutdownBudget(
-  shutdownGraceSeconds: number,
-  processHostRequestTimeoutMs: number,
-  processHostShutdownTimeoutMs: number,
-): void {
-  const requiredMilliseconds =
-    shutdownGraceSeconds * 1_000 +
-    processHostRequestTimeoutMs +
-    processExitSettleMs +
-    processHostShutdownTimeoutMs +
-    shutdownSafetyMarginMs;
-  if (requiredMilliseconds > winSwStopTimeoutMs) {
-    throw new Error(
-      `Worker shutdown requires ${requiredMilliseconds} ms but WinSW allows ${winSwStopTimeoutMs} ms including the safety margin.`,
-    );
-  }
 }
 
 function readResourceLimits(

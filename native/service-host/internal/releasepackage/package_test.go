@@ -77,20 +77,6 @@ func TestFinalizeBuildsCanonicalManifestAndZeroAuthorityDescriptor(t *testing.T)
 	if manifest.ReleaseID != request.ReleaseID || len(manifest.Files) != len(request.Dependencies)+1 {
 		t.Fatalf("unexpected runtime manifest: %#v", manifest)
 	}
-	for _, expected := range []struct {
-		path string
-		role releasemanifest.FileRole
-	}{
-		{ControlServiceWrapperPath, releasemanifest.RoleServiceWrapper},
-		{ExecutorServiceWrapperPath, releasemanifest.RoleServiceWrapper},
-		{ControlServiceConfigPath, releasemanifest.RoleServiceConfig},
-		{ExecutorServiceConfigPath, releasemanifest.RoleServiceConfig},
-	} {
-		file, found := manifest.LookupFile(releasemanifest.RootInstallation, expected.path)
-		if !found || file.Path != expected.path || file.Role != expected.role {
-			t.Fatalf("runtime manifest fixed WinSW slot = %#v, found=%v", file, found)
-		}
-	}
 	self, found := manifest.LookupFile(releasemanifest.RootInstallation, releaseprofile.ServiceHostRelativePath)
 	serviceHost := request.ServiceHost.state.metadata
 	if !found || self.SHA256 != serviceHost.SHA256 || self.Size != serviceHost.Size {
@@ -355,73 +341,6 @@ func TestPrepareRejectsNoncanonicalUnsafeAndUnreviewedInventory(t *testing.T) {
 				t.Fatalf("Prepare returned %v, want %v", err, test.want)
 			}
 		})
-	}
-}
-
-func TestReviewedClosureRejectsInvalidFixedWinSWSlotsWithMatchingApproval(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*[]releaseprofile.Dependency)
-	}{
-		{name: "alternate wrapper path", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ControlServiceWrapperPath)].Path = `bin\AgenticReview.Worker.Control.exe`
-		}},
-		{name: "wrapper path casing", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ControlServiceWrapperPath)].Path = strings.ToLower(ControlServiceWrapperPath)
-		}},
-		{name: "wrapper root", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ControlServiceWrapperPath)].Root = releasemanifest.RootTrustedConfiguration
-		}},
-		{name: "alternate service config path", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ControlServiceConfigPath)].Path = `service\control.xml`
-		}},
-		{name: "service config path casing", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ExecutorServiceConfigPath)].Path = strings.ToLower(ExecutorServiceConfigPath)
-		}},
-		{name: "service roles exchanged", mutate: func(values *[]releaseprofile.Dependency) {
-			wrapper := dependencyPathIndex(*values, ControlServiceWrapperPath)
-			configuration := dependencyPathIndex(*values, ControlServiceConfigPath)
-			(*values)[wrapper].Role, (*values)[configuration].Role =
-				(*values)[configuration].Role, (*values)[wrapper].Role
-		}},
-		{name: "missing wrapper", mutate: func(values *[]releaseprofile.Dependency) {
-			*values = removeDependencyPath(*values, ControlServiceWrapperPath)
-		}},
-		{name: "duplicate service config", mutate: func(values *[]releaseprofile.Dependency) {
-			(*values)[dependencyPathIndex(*values, ControlServiceConfigPath)].Path = ExecutorServiceConfigPath
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dependencies := validDependencies()
-			test.mutate(&dependencies)
-			document := reviewedClosureDocumentForTest(t, dependencies)
-			digest := sha256.Sum256(document)
-			if _, err := parseReviewedClosure(document, hexDigest(digest)); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("parseReviewedClosure returned %v, want ErrInvalid", err)
-			}
-		})
-	}
-}
-
-func TestParsePrepareReceiptRejectsAlternateFixedWinSWSlot(t *testing.T) {
-	request := validPrepareRequest(t)
-	prepared, err := Prepare(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var receipt prepareReceiptDocument
-	if err := parseCanonical(prepared.ReceiptDocument(), &receipt); err != nil {
-		t.Fatal(err)
-	}
-	receipt.Dependencies[dependencyPathIndex(receipt.Dependencies, ControlServiceConfigPath)].Path =
-		`service\control.xml`
-	document, err := marshalCanonical(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ParsePrepareReceipt(document, request.ReviewedClosure); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("ParsePrepareReceipt returned %v, want ErrInvalid", err)
 	}
 }
 
@@ -742,10 +661,6 @@ func validDependencies() []releaseprofile.Dependency {
 		return value
 	}
 	return []releaseprofile.Dependency{
-		file(ControlServiceWrapperPath, releasemanifest.RoleServiceWrapper, "1"),
-		file(ControlServiceConfigPath, releasemanifest.RoleServiceConfig, "9"),
-		file(ExecutorServiceWrapperPath, releasemanifest.RoleServiceWrapper, "2"),
-		file(ExecutorServiceConfigPath, releasemanifest.RoleServiceConfig, "a"),
 		file(ControlBundlePath, releasemanifest.RoleControlBundle, "3"),
 		file(ExecutorBundlePath, releasemanifest.RoleExecutorBundle, "4"),
 		file(`codex\codex.exe`, releasemanifest.RoleCodexCLI, "5"),
@@ -798,9 +713,9 @@ func cloneFinalizeRequest(value FinalizeRequest) FinalizeRequest {
 func hexDigest(value [sha256.Size]byte) string { return hex.EncodeToString(value[:]) }
 
 const (
-	compiledTemplateGoldenSHA256  = "87bf868e15b0ba6e47899f75f888147470eff634ab754d2f99cc8e015c66cb1a"
-	reviewedClosureGoldenSHA256   = "54b9ae2accb633cd6ce5dcb5cb3bf9a5b0ebc859f6451f9664fbdd2f6cf19cf2"
-	prepareReceiptGoldenSHA256    = "44405499a5eb16d68f6a19371f3fd9b897a4d9d49ae35d67d79e5f694736c933"
-	runtimeManifestGoldenSHA256   = "716eb10405be9c6b45a8a30b0752718bd1928f9104f044692e2d786ecad2d21a"
-	packageDescriptorGoldenSHA256 = "fb9ed77e0b6fa554eb9457a77d5c18ac20e0796dffe36c43bd771dcb4c939ac4"
+	compiledTemplateGoldenSHA256  = "006c9cff43ce1793f794388f30d6ebe25d4eab5416dc943c3e2fb0cabc966949"
+	reviewedClosureGoldenSHA256   = "0a3281e5c431c7c7ecb6b39057f70cfa09776353005ec79ba9c813c99f4360d3"
+	prepareReceiptGoldenSHA256    = "ccc1e776bc1d441544873d13ea0db8500020e1133349a6bd0c76905861ea1805"
+	runtimeManifestGoldenSHA256   = "fb94e7685a6b42ed816cd0fc7957406db2b8dce97c143de04ab46986d98d4d35"
+	packageDescriptorGoldenSHA256 = "1e7da6e50b488cc507f8f5d630d9822c055fc674e7d675b238541861f06377fe"
 )

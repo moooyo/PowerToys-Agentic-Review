@@ -420,8 +420,7 @@ func isSpecialPayloadRole(role outerpackage.Role) bool {
 
 func isPortableExecutableRole(role outerpackage.Role) bool {
 	switch role {
-	case outerpackage.RoleServiceWrapper,
-		outerpackage.RoleServiceHost,
+	case outerpackage.RoleServiceHost,
 		outerpackage.RoleNodeRuntime,
 		outerpackage.RoleProcessHost,
 		outerpackage.RoleCodexCLI,

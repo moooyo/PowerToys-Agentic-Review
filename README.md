@@ -18,8 +18,8 @@ disabled boundaries are tracked in [docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEM
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
 - `migrations`: forward-only SQLite schema for leases, GitHub projections, OIDC sessions, and
   polling checkpoints.
-- `deploy/worker`: legacy execution-disabled WinSW installer scaffold; the split-service installer is
-  pending.
+- `deploy/worker`: split Windows Worker provisioning inputs; the native two-service clean installer
+  is pending.
 
 Phase 1a supports authenticated, read-only GitHub ingestion, immutable result projections, and
 Dashboard views. The native Windows ServiceHost composition is connected in zero-execution mode,

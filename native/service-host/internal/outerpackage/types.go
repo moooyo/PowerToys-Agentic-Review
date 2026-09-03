@@ -62,7 +62,6 @@ const (
 	RoleControlBootstrap        Role = "control-bootstrap"
 	RoleExecutorBootstrap       Role = "executor-bootstrap"
 
-	RoleServiceWrapper Role = "service-wrapper"
 	RoleServiceHost    Role = "service-host"
 	RoleNodeRuntime    Role = "node-runtime"
 	RoleControlBundle  Role = "control-bundle"
@@ -74,7 +73,6 @@ const (
 	RoleCodexRuntime   Role = "codex-runtime"
 	RoleNativeLibrary  Role = "native-library"
 	RoleCABundle       Role = "ca-bundle"
-	RoleServiceConfig  Role = "service-config"
 	RoleTrustedConfig  Role = "trusted-config"
 	RolePolicy         Role = "policy"
 	RoleSchema         Role = "schema"

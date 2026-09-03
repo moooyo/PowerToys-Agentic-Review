@@ -67,9 +67,6 @@ func validateCanonicalDependencies(
 		SHA256: strings.Repeat("0", sha256.Size*2),
 		Size:   "1",
 	})
-	if err := ValidateRuntimeManifestProfile(files); err != nil {
-		return nil, err
-	}
 	document, err := releasemanifest.MarshalCanonical(releasemanifest.Manifest{
 		Compatibility:   releasemanifest.RequiredCompatibility(),
 		Files:           files,
@@ -97,45 +94,6 @@ func validateCanonicalDependencies(
 		return nil, fmt.Errorf("%w: dependency inventory is not in canonical order", ErrInvalid)
 	}
 	return cloneDependencies(canonical), nil
-}
-
-// ValidateRuntimeManifestProfile enforces the fixed WinSW slots of the RoleConfig v2
-// node-specific package profile without changing the generic release-manifest schema.
-func ValidateRuntimeManifestProfile(files []releasemanifest.File) error {
-	rules := [...]struct {
-		path string
-		role releasemanifest.FileRole
-	}{
-		{ControlServiceWrapperPath, releasemanifest.RoleServiceWrapper},
-		{ExecutorServiceWrapperPath, releasemanifest.RoleServiceWrapper},
-		{ControlServiceConfigPath, releasemanifest.RoleServiceConfig},
-		{ExecutorServiceConfigPath, releasemanifest.RoleServiceConfig},
-	}
-	counts := [len(rules)]int{}
-	for _, file := range files {
-		matched := false
-		for index, rule := range rules {
-			if !strings.EqualFold(file.Path, rule.path) {
-				continue
-			}
-			matched = true
-			if file.Root != releasemanifest.RootInstallation || file.Path != rule.path || file.Role != rule.role {
-				return fmt.Errorf("%w: file %s does not match its fixed WinSW package slot", ErrInvalid, file.Path)
-			}
-			counts[index]++
-			break
-		}
-		if !matched && (file.Role == releasemanifest.RoleServiceWrapper ||
-			file.Role == releasemanifest.RoleServiceConfig) {
-			return fmt.Errorf("%w: file %s is not a fixed WinSW package slot", ErrInvalid, file.Path)
-		}
-	}
-	for index, count := range counts {
-		if count != 1 {
-			return fmt.Errorf("%w: fixed WinSW package slot %s must appear exactly once", ErrInvalid, rules[index].path)
-		}
-	}
-	return nil
 }
 
 func forbiddenReleaseDependency(dependency releaseprofile.Dependency) bool {

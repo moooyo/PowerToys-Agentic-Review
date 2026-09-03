@@ -6,7 +6,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winacl"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
@@ -106,7 +105,6 @@ func installationAccess(role outerpackage.Role, path string) (accessPair, error)
 	switch role {
 	case outerpackage.RoleRuntimeManifest,
 		outerpackage.RoleCABundle,
-		outerpackage.RoleServiceConfig,
 		outerpackage.RoleRuntimeData,
 		outerpackage.RoleLicense:
 		return readBothAccess, nil
@@ -126,15 +124,6 @@ func installationAccess(role outerpackage.Role, path string) (accessPair, error)
 			return executeBothAccess, nil
 		}
 		return executeExecutorAccess, nil
-	case outerpackage.RoleServiceWrapper:
-		switch {
-		case strings.EqualFold(path, releasepackage.ControlServiceWrapperPath):
-			return executeControlAccess, nil
-		case strings.EqualFold(path, releasepackage.ExecutorServiceWrapperPath):
-			return executeExecutorAccess, nil
-		default:
-			return accessPair{}, errors.New("service wrapper path is not fixed")
-		}
 	default:
 		return accessPair{}, errors.New("installation file role is not permitted")
 	}

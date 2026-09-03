@@ -707,16 +707,16 @@ func TestPeerVerificationFileSelectionRequiresFixedWrappersAndUniqueServiceHost(
 	}{
 		{"missing peer wrapper", func(files []VerifiedFile) []VerifiedFile {
 			for index := range files {
-				if files[index].Role == releasemanifest.RoleServiceWrapper &&
+				if files[index].Role == serviceWrapperVerificationRole &&
 					strings.EqualFold(files[index].Path, configuration.PeerService.Name+".exe") {
-					files[index].Role = releasemanifest.RoleServiceConfig
+					files[index].Role = releasemanifest.RoleRuntimeData
 				}
 			}
 			return files
 		}},
 		{"missing own wrapper", func(files []VerifiedFile) []VerifiedFile {
 			for index := range files {
-				if files[index].Role == releasemanifest.RoleServiceWrapper &&
+				if files[index].Role == serviceWrapperVerificationRole &&
 					strings.EqualFold(files[index].Path, configuration.OwnService.Name+".exe") {
 					files[index].Path = `other.exe`
 				}
@@ -725,7 +725,7 @@ func TestPeerVerificationFileSelectionRequiresFixedWrappersAndUniqueServiceHost(
 		}},
 		{"duplicate peer wrapper", func(files []VerifiedFile) []VerifiedFile {
 			for _, file := range files {
-				if file.Role == releasemanifest.RoleServiceWrapper &&
+				if file.Role == serviceWrapperVerificationRole &&
 					strings.EqualFold(file.Path, configuration.PeerService.Name+".exe") {
 					return append(files, cloneFile(file))
 				}

@@ -25,8 +25,8 @@ func TestCanonicalSplitWorkerManifestRoundTrip(t *testing.T) {
 	if len(parsed.Files) != len(value.Files) {
 		t.Fatalf("parsed file count = %d, want %d", len(parsed.Files), len(value.Files))
 	}
-	if parsed.Files[0].Root != RootInstallation || parsed.Files[0].Path != `AgenticReview.Worker.Control.exe` {
-		t.Fatalf("canonical first file = %#v, want installation Control wrapper", parsed.Files[0])
+	if parsed.Files[0].Root != RootInstallation || parsed.Files[0].Path != `app\control.mjs` {
+		t.Fatalf("canonical first file = %#v, want installation Control bundle", parsed.Files[0])
 	}
 	if parsed.Files[len(parsed.Files)-1].Root != RootTrustedConfiguration {
 		t.Fatalf("canonical last root = %q, want trusted-configuration", parsed.Files[len(parsed.Files)-1].Root)
@@ -40,7 +40,7 @@ func TestCanonicalSplitWorkerManifestRoundTrip(t *testing.T) {
 
 	// This digest is shared with the TypeScript schema-v2 serializer for the same fixture.
 	digest := sha256.Sum256(document)
-	if actual := hex.EncodeToString(digest[:]); actual != "b1ab8900b3fff2f3f54150dadaa779945dc0d5461962120ff1e7e8371c239e8c" {
+	if actual := hex.EncodeToString(digest[:]); actual != "418079e3fa9fd82d36ebd0f9d6c1e044f08d616d5a976430d5ab94db8b8834c5" {
 		t.Fatalf("canonical cross-language digest = %s", actual)
 	}
 }
@@ -61,24 +61,15 @@ func TestManifestRejectsNoncanonicalAndUnknownJSON(t *testing.T) {
 	}
 }
 
-func TestManifestRequiresExactCompatibilityAndDualRoles(t *testing.T) {
+func TestManifestRequiresExactCompatibilityAndRuntimeRoles(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*Manifest)
 	}{
 		{name: "worker API", mutate: func(value *Manifest) { value.Compatibility.WorkerAPIProtocolVersion = "2.0" }},
 		{name: "local minor", mutate: func(value *Manifest) { value.Compatibility.LocalProtocolMaximumMinor = 1 }},
-		{name: "one wrapper", mutate: func(value *Manifest) {
-			removed := false
-			files := make([]File, 0, len(value.Files)-1)
-			for _, file := range value.Files {
-				if file.Role == RoleServiceWrapper && !removed {
-					removed = true
-					continue
-				}
-				files = append(files, file)
-			}
-			value.Files = files
+		{name: "missing node runtime", mutate: func(value *Manifest) {
+			value.Files = removeRole(value.Files, RoleNodeRuntime)
 		}},
 		{name: "missing executor", mutate: func(value *Manifest) {
 			value.Files = removeRole(value.Files, RoleExecutorBundle)
@@ -325,16 +316,12 @@ func validManifest() Manifest {
 		SchemaVersion:   SchemaVersion,
 		Files: []File{
 			manifestFile(RootInstallation, `runtime&tools\node.exe`, RoleNodeRuntime, "1"),
-			manifestFile(RootInstallation, `AgenticReview.Worker.Executor.exe`, RoleServiceWrapper, "2"),
 			manifestFile(RootInstallation, `app\executor.mjs`, RoleExecutorBundle, "3"),
 			manifestFile(RootInstallation, `native\AgenticReview.ProcessHost.exe`, RoleProcessHost, "4"),
 			manifestFile(RootInstallation, `git\cmd\git.exe`, RoleGitCLI, "5"),
 			manifestFile(RootInstallation, `codex\codex.exe`, RoleCodexCLI, "6"),
-			manifestFile(RootInstallation, `AgenticReview.Worker.Control.exe`, RoleServiceWrapper, "7"),
 			manifestFile(RootInstallation, `native\AgenticReview.ServiceHost.exe`, RoleServiceHost, "8"),
 			manifestFile(RootInstallation, `app\control.mjs`, RoleControlBundle, "9"),
-			manifestFile(RootInstallation, `service\control.xml`, RoleServiceConfig, "a"),
-			manifestFile(RootInstallation, `service\executor.xml`, RoleServiceConfig, "b"),
 			manifestFile(RootTrustedConfiguration, `certificates\server&root.cer`, RoleCABundle, "c"),
 			manifestFile(RootTrustedConfiguration, `keys\local-authority.spki`, RoleTrustedConfig, "d"),
 			manifestFile(RootTrustedConfiguration, `policy\codex-requirements.toml`, RolePolicy, "e"),

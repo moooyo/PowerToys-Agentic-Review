@@ -18,7 +18,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
 func TestAdmitSnapshotBindsSignedIndexAndBothCanonicalBootstraps(t *testing.T) {
@@ -535,8 +534,6 @@ func validAdmissionIndex() outerpackage.Index {
 			payload(outerpackage.RootInstallation, outerpackage.RuntimeManifestPath, outerpackage.RoleRuntimeManifest, "a", false),
 			payload(outerpackage.RootTrustedConfiguration, outerpackage.ControlBootstrapPath, outerpackage.RoleControlBootstrap, "5", false),
 			payload(outerpackage.RootTrustedConfiguration, outerpackage.ExecutorBootstrapPath, outerpackage.RoleExecutorBootstrap, "6", false),
-			payload(outerpackage.RootInstallation, releasepackage.ControlServiceWrapperPath, outerpackage.RoleServiceWrapper, "1", true),
-			payload(outerpackage.RootInstallation, releasepackage.ExecutorServiceWrapperPath, outerpackage.RoleServiceWrapper, "2", true),
 			payload(outerpackage.RootInstallation, `app\control.mjs`, outerpackage.RoleControlBundle, "3", false),
 			payload(outerpackage.RootInstallation, `app\executor.mjs`, outerpackage.RoleExecutorBundle, "4", false),
 			payload(outerpackage.RootInstallation, `codex\codex.exe`, outerpackage.RoleCodexCLI, "5", true),
@@ -544,8 +541,6 @@ func validAdmissionIndex() outerpackage.Index {
 			payload(outerpackage.RootInstallation, `native\AgenticReview.ProcessHost.exe`, outerpackage.RoleProcessHost, "7", true),
 			payload(outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, "f", true),
 			payload(outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, "8", true),
-			payload(outerpackage.RootInstallation, releasepackage.ControlServiceConfigPath, outerpackage.RoleServiceConfig, "9", false),
-			payload(outerpackage.RootInstallation, releasepackage.ExecutorServiceConfigPath, outerpackage.RoleServiceConfig, "a", false),
 			payload(outerpackage.RootTrustedConfiguration, `certificates\server-root.cer`, outerpackage.RoleCABundle, "b", false),
 			payload(outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, "c", false),
 			payload(outerpackage.RootTrustedConfiguration, `policy\codex-requirements.toml`, outerpackage.RolePolicy, "d", false),

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasepackage"
 )
 
 func validTestIndex(t testing.TB) outerpackage.Index {
@@ -19,8 +18,6 @@ func validTestIndex(t testing.TB) outerpackage.Index {
 		testPayload(outerpackage.RootInstallation, outerpackage.RuntimeManifestPath, outerpackage.RoleRuntimeManifest, "6", false),
 		testPayload(outerpackage.RootTrustedConfiguration, outerpackage.ControlBootstrapPath, outerpackage.RoleControlBootstrap, "7", false),
 		testPayload(outerpackage.RootTrustedConfiguration, outerpackage.ExecutorBootstrapPath, outerpackage.RoleExecutorBootstrap, "8", false),
-		testPayload(outerpackage.RootInstallation, releasepackage.ControlServiceWrapperPath, outerpackage.RoleServiceWrapper, "9", true),
-		testPayload(outerpackage.RootInstallation, releasepackage.ExecutorServiceWrapperPath, outerpackage.RoleServiceWrapper, "a", true),
 		testPayload(outerpackage.RootInstallation, `app\control.mjs`, outerpackage.RoleControlBundle, "b", false),
 		testPayload(outerpackage.RootInstallation, `app\executor.mjs`, outerpackage.RoleExecutorBundle, "c", false),
 		testPayload(outerpackage.RootInstallation, `codex\codex.exe`, outerpackage.RoleCodexCLI, "d", true),
@@ -28,8 +25,6 @@ func validTestIndex(t testing.TB) outerpackage.Index {
 		testPayload(outerpackage.RootInstallation, `native\AgenticReview.ProcessHost.exe`, outerpackage.RoleProcessHost, "f", true),
 		testPayload(outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, "0", true),
 		testPayload(outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, "1", true),
-		testPayload(outerpackage.RootInstallation, releasepackage.ControlServiceConfigPath, outerpackage.RoleServiceConfig, "2", false),
-		testPayload(outerpackage.RootInstallation, releasepackage.ExecutorServiceConfigPath, outerpackage.RoleServiceConfig, "3", false),
 		testPayload(outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, "4", false),
 	}
 	value := outerpackage.Index{

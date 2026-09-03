@@ -23,11 +23,6 @@ const (
 
 	ControlBundlePath  = `app\control.mjs`
 	ExecutorBundlePath = `app\executor.mjs`
-
-	ControlServiceWrapperPath  = `AgenticReview.Worker.Control.exe`
-	ExecutorServiceWrapperPath = `AgenticReview.Worker.Executor.exe`
-	ControlServiceConfigPath   = `AgenticReview.Worker.Control.xml`
-	ExecutorServiceConfigPath  = `AgenticReview.Worker.Executor.xml`
 )
 
 var (

@@ -482,7 +482,7 @@ func selectPeerVerificationFiles(
 	serviceHostCount := 0
 	for _, file := range files {
 		switch file.Role {
-		case releasemanifest.RoleServiceWrapper:
+		case serviceWrapperVerificationRole:
 			wrapperCount++
 			if file.Root == releasemanifest.RootInstallation && strings.EqualFold(file.Path, peerWrapperPath) {
 				peerWrapper = cloneFile(file)
@@ -524,5 +524,7 @@ func invalidPeerVerificationPlan(message string, cause error) error {
 type atomicPeerVerifier interface {
 	VerifyWindows(*winpipe.Endpoint) (*peerverify.Session, error)
 }
+
+const serviceWrapperVerificationRole releasemanifest.FileRole = "service-wrapper"
 
 var _ atomicPeerVerifier = PeerVerificationPlan{}
