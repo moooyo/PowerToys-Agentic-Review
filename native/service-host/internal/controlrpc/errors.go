@@ -13,7 +13,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/wincert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
 )
 
@@ -85,16 +84,8 @@ func buildStatusMappings() map[statusMappingKey]publicErrorSpec {
 			"WORKER_IDENTITY_MISSING", "The Worker API request is missing a worker identity.", false)
 		add(operation, 401, "worker_authentication_failed", false,
 			"WORKER_AUTHENTICATION_FAILED", "The Worker API rejected the Worker Token.", false)
-		add(operation, 401, "worker_certificate_missing", false,
-			"WORKER_CERTIFICATE_MISSING", "The Worker API did not receive a client certificate.", false)
-		add(operation, 401, "worker_certificate_unauthorized", false,
-			"WORKER_CERTIFICATE_UNAUTHORIZED", "The Worker API rejected the client certificate.", false)
-		add(operation, 401, "worker_mtls_required", false,
-			"WORKER_MTLS_REQUIRED", "The Worker API requires mutual TLS.", false)
 		add(operation, 403, "insecure_worker_auth_loopback_only", false,
 			"INSECURE_WORKER_AUTH_LOOPBACK_ONLY", "The Worker API rejected insecure remote authentication.", false)
-		add(operation, 403, "worker_certificate_unmapped", false,
-			"WORKER_CERTIFICATE_UNMAPPED", "The Worker API client certificate is not mapped to a worker.", false)
 		add(operation, 403, "worker_identity_mismatch", false,
 			"WORKER_IDENTITY_MISMATCH", "The Worker API rejected the worker identity.", false)
 		add(operation, 413, "request_body_too_large", false,
@@ -283,19 +274,6 @@ func isLocalCredentialError(err error) bool {
 		cng.ErrInvalidKeySecurity,
 		cng.ErrInvalidSignature,
 		cng.ErrClosed,
-		wincert.ErrUnsupportedPlatform,
-		wincert.ErrInvalidConfiguration,
-		wincert.ErrCertificateNotFound,
-		wincert.ErrDuplicateCertificate,
-		wincert.ErrEnumerationLimit,
-		wincert.ErrInvalidCertificate,
-		wincert.ErrInvalidProviderInfo,
-		wincert.ErrInvalidKey,
-		wincert.ErrInvalidKeySecurity,
-		wincert.ErrInvalidDigest,
-		wincert.ErrUnsupportedSignerOptions,
-		wincert.ErrInvalidSignature,
-		wincert.ErrClosed,
 	}
 	for _, target := range localErrors {
 		if errors.Is(err, target) {

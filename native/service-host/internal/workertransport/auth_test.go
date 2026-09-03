@@ -36,7 +36,7 @@ func TestParseWorkerAuthAcceptsExactProfileWithoutRetainingSource(t *testing.T) 
 		fmt.Sprintf("%q", auth),
 		fmt.Sprintf("%x", auth),
 		fmt.Sprintf("%d", auth),
-		fmt.Sprintf("%#v", BearerConfig{WorkerAuth: auth}),
+		fmt.Sprintf("%#v", Config{WorkerAuth: auth}),
 	} {
 		if strings.Contains(formatted, testWorkerToken) || !strings.Contains(formatted, "redacted") {
 			t.Fatalf("WorkerAuth formatting was not redacted: %s", formatted)

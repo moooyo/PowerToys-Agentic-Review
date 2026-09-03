@@ -1,4 +1,4 @@
-// Package installerprofile defines the immutable split Worker installation profiles selected by
+// Package installerprofile defines the immutable split Worker installation profile selected by
 // signed outer packages. Validation is data-only and does not install files or provision secrets.
 package installerprofile
 
@@ -13,9 +13,9 @@ import (
 var workerTokenShapePattern = regexp.MustCompile(`arw1_[A-Za-z0-9_-]{43}`)
 
 const (
-	// BearerTokenInstallerV2ID is the first installation profile that provisions the Worker API
+	// ProfileID selects the current installation profile, which provisions the Worker API
 	// credential independently from the signed package.
-	BearerTokenInstallerV2ID = "agentic-review-worker-split-installer-v2"
+	ProfileID = "agentic-review-worker-split-installer-v2"
 
 	InstallationRoot             = `C:\Program Files\AgenticReview\Worker`
 	TrustedConfigurationRoot     = `C:\ProgramData\AgenticReview\TrustedConfig`
@@ -27,7 +27,7 @@ const (
 
 var ErrInvalid = errors.New("invalid split Worker installer profile")
 
-// ValidatePackageRoots binds one package ID to the fixed v2 physical package-root selection.
+// ValidatePackageRoots binds one package ID to the fixed current physical package-root selection.
 func ValidatePackageRoots(
 	profileID string,
 	packageID string,
@@ -35,7 +35,7 @@ func ValidatePackageRoots(
 	installationRoot string,
 	trustedConfigurationRoot string,
 ) error {
-	if profileID != BearerTokenInstallerV2ID || !validPackageID(packageID) ||
+	if profileID != ProfileID || !validPackageID(packageID) ||
 		metadataRoot != MetadataRootParent+`\`+packageID || installationRoot != InstallationRoot ||
 		trustedConfigurationRoot != TrustedConfigurationRoot {
 		return ErrInvalid
@@ -43,22 +43,20 @@ func ValidatePackageRoots(
 	return nil
 }
 
-// ValidateBearerTokenBootstrapPair binds schema v4 to the fixed role data roots and the ordinary
+// ValidateBootstrapPair binds the current schema to the fixed role data roots and the ordinary
 // local Worker authentication file profile. It never reads or validates the Token itself.
-func ValidateBearerTokenBootstrapPair(profileID string, control config.Config, executor config.Config) error {
+func ValidateBootstrapPair(profileID string, control config.Config, executor config.Config) error {
 	if control.Validate() != nil || executor.Validate() != nil ||
-		profileID != BearerTokenInstallerV2ID ||
-		control.SchemaVersion != config.BearerTokenSchemaVersion ||
-		executor.SchemaVersion != config.BearerTokenSchemaVersion ||
+		profileID != ProfileID ||
+		control.SchemaVersion != config.SchemaVersion ||
+		executor.SchemaVersion != config.SchemaVersion ||
 		control.Role != config.RoleControl || executor.Role != config.RoleExecutor ||
 		control.Control == nil || executor.Executor == nil ||
 		control.Node.DataRoot != ControlDataRoot || executor.Node.DataRoot != ExecutorDataRoot ||
 		control.Installation.Root != InstallationRoot || executor.Installation.Root != InstallationRoot ||
 		control.Installation.TrustedConfigurationRoot != TrustedConfigurationRoot ||
 		executor.Installation.TrustedConfigurationRoot != TrustedConfigurationRoot ||
-		control.Control.WorkerAuthenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 ||
-		control.Control.ClientCertificateStore != "" || control.Control.ClientCertificateDERSHA256 != "" ||
-		control.Control.ClientPrivateKeySecurityDescriptorSHA256 != "" {
+		control.Control.WorkerAuthenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 {
 		return ErrInvalid
 	}
 	controlDocument, controlErr := config.MarshalCanonical(control)

@@ -38,8 +38,14 @@ func TestAdmitSnapshotBindsSignedIndexAndBothCanonicalBootstraps(t *testing.T) {
 	}
 	if err := plan.Validate(); err != nil || plan.SignerKeyID() != fixture.authority.SignerKeyID() ||
 		plan.Index().WorkerNodeID != fixture.index.WorkerNodeID ||
+		plan.Index().SchemaVersion != outerpackage.IndexSchemaVersion ||
+		plan.Index().ProfileID != outerpackage.IndexProfileID ||
+		plan.ControlConfiguration().SchemaVersion != config.SchemaVersion ||
+		plan.ExecutorConfiguration().SchemaVersion != config.SchemaVersion ||
 		plan.ControlConfiguration().Role != config.RoleControl ||
-		plan.ExecutorConfiguration().Role != config.RoleExecutor {
+		plan.ExecutorConfiguration().Role != config.RoleExecutor ||
+		plan.ControlConfiguration().Control.WorkerAuthenticationProfile !=
+			config.WorkerAuthenticationProfileBearerTokenV1 {
 		t.Fatalf("unexpected admitted plan: signer=%q err=%v", plan.SignerKeyID(), err)
 	}
 	indexDocument := plan.IndexDocument()
@@ -65,19 +71,9 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 	}{
 		{name: "index worker node", mutate: func(value *admissionFixture) { value.index.WorkerNodeID = "worker-node-002" }},
 		{name: "index release", mutate: func(value *admissionFixture) { value.index.ReleaseID = "worker-2026.09.02.2" }},
-		{name: "index installation root", mutate: func(value *admissionFixture) { value.index.TargetRoots.Installation = `D:\AgenticReview\Worker` }},
-		{name: "index trusted root", mutate: func(value *admissionFixture) {
-			value.index.TargetRoots.TrustedConfiguration = `D:\AgenticReview\Trusted`
-		}},
 		{name: "CNG key name", mutate: func(value *admissionFixture) { value.index.LocalAuthorityCNG.KeyName += ".Other" }},
 		{name: "CNG security descriptor", mutate: func(value *admissionFixture) {
 			value.index.LocalAuthorityCNG.SecurityDescriptorSHA256 = strings.Repeat("6", 64)
-		}},
-		{name: "mTLS certificate", mutate: func(value *admissionFixture) {
-			value.index.MTLSClientCredential.CertificateDERSHA256 = strings.Repeat("6", 64)
-		}},
-		{name: "mTLS private key DACL", mutate: func(value *admissionFixture) {
-			value.index.MTLSClientCredential.PrivateKeySecurityDescriptorSHA256 = strings.Repeat("6", 64)
 		}},
 		{name: "manifest digest", mutate: func(value *admissionFixture) {
 			value.control.Installation.ManifestSHA256 = strings.Repeat("6", 64)
@@ -135,51 +131,6 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 	}
 }
 
-func TestHistoricalOuterPackageProfileRejectsSchemaVersion4Bootstraps(t *testing.T) {
-	fixture := newAdmissionFixture(t)
-	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	fixture.control.Control.ClientCertificateStore = ""
-	fixture.control.Control.ClientCertificateDERSHA256 = ""
-	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.rebuild(t)
-	assertFixtureRejected(t, fixture)
-}
-
-func TestBearerTokenOuterPackageV2AdmitsOnlySchemaVersion4Profile(t *testing.T) {
-	fixture := newAdmissionFixture(t)
-	selectBearerTokenAdmissionProfile(fixture)
-	fixture.rebuild(t)
-	snapshot, err := cloneDocumentSnapshot(
-		fixture.indexDocument,
-		fixture.envelopeDocument,
-		fixture.controlDocument,
-		fixture.executorDocument,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := admitSnapshot(snapshot, fixture.authority)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Index().SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		plan.Index().ProfileID != outerpackage.BearerTokenIndexProfileID ||
-		plan.Index().MTLSClientCredential != nil ||
-		plan.ControlConfiguration().SchemaVersion != config.BearerTokenSchemaVersion ||
-		plan.ExecutorConfiguration().SchemaVersion != config.BearerTokenSchemaVersion {
-		t.Fatal("admitted plan did not preserve the Token package and bootstrap profiles")
-	}
-
-	historicalBootstraps := newAdmissionFixture(t)
-	historicalBootstraps.index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
-	historicalBootstraps.index.ProfileID = outerpackage.BearerTokenIndexProfileID
-	historicalBootstraps.index.MTLSClientCredential = nil
-	historicalBootstraps.rebuild(t)
-	assertFixtureRejected(t, historicalBootstraps)
-}
-
 func TestAdmissionRejectsBootstrapBytesMixNodeMixRoleAndSPKIMismatch(t *testing.T) {
 	t.Run("unindexed valid bootstrap bytes", func(t *testing.T) {
 		fixture := newAdmissionFixture(t)
@@ -234,7 +185,6 @@ func TestAdmissionRejectsInvalidBootstrapServiceAndPipeAuthority(t *testing.T) {
 		{name: "own service", mutate: func(value *config.Config) { value.OwnService.Name = config.ExecutorServiceName }},
 		{name: "own service SID", mutate: func(value *config.Config) { value.OwnService.SID = config.ExecutorServiceSID }},
 		{name: "pipe", mutate: func(value *config.Config) { value.PipeName = `\\.\pipe\Other` }},
-		{name: "mTLS store", mutate: func(value *config.Config) { value.Control.ClientCertificateStore = "ROOT" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -349,14 +299,12 @@ func TestSignedPackagePlanRejectsZeroAndPrivateStateMutation(t *testing.T) {
 	}
 }
 
-func TestAdmissionKeepsUnprovablePlacementFieldsAsSignedDataOnly(t *testing.T) {
+func TestAdmissionKeepsNonBindingSignedFieldsAsDataOnly(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*admissionFixture)
 	}{
-		{name: "package ID", mutate: func(value *admissionFixture) { value.index.PackageID = "worker-package-other" }},
 		{name: "installation ID", mutate: func(value *admissionFixture) { value.index.InstallationID = "installation-other" }},
-		{name: "metadata root", mutate: func(value *admissionFixture) { value.index.TargetRoots.Metadata = `D:\AgenticReview\Metadata` }},
 		{name: "source identity", mutate: func(value *admissionFixture) { value.index.Source.Commit = strings.Repeat("9", 40) }},
 		{name: "target architecture", mutate: func(value *admissionFixture) {
 			value.index.TargetArchitecture = outerpackage.ArchitectureARM64
@@ -548,18 +496,6 @@ func signFixtureIndex(t *testing.T, key *ecdsa.PrivateKey, spki, index []byte) [
 	return document
 }
 
-func selectBearerTokenAdmissionProfile(fixture *admissionFixture) {
-	fixture.index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
-	fixture.index.ProfileID = outerpackage.BearerTokenIndexProfileID
-	fixture.index.MTLSClientCredential = nil
-	fixture.control.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	fixture.control.Control.ClientCertificateStore = ""
-	fixture.control.Control.ClientCertificateDERSHA256 = ""
-	fixture.control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	fixture.executor.SchemaVersion = config.BearerTokenSchemaVersion
-}
-
 func validAdmissionIndex() outerpackage.Index {
 	architecture := outerpackage.ArchitectureAMD64
 	payload := func(root outerpackage.Root, path string, role outerpackage.Role, digit string, pe bool) outerpackage.Payload {
@@ -574,11 +510,6 @@ func validAdmissionIndex() outerpackage.Index {
 		LocalAuthorityCNG: outerpackage.LocalAuthorityCNGIdentity{
 			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			SecurityDescriptorSHA256: strings.Repeat("1", 64),
-		},
-		MTLSClientCredential: &outerpackage.MTLSCredentialIdentity{
-			CertificateDERSHA256:               strings.Repeat("2", 64),
-			CertificateStore:                   outerpackage.MTLSCertificateStore,
-			PrivateKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
 		},
 		NodeSpecificLocalAuthorityPublicSPKI: outerpackage.NodeSpecificSPKI{
 			Path: `keys\local-authority.spki`, SHA256: strings.Repeat("c", 64),
@@ -644,10 +575,10 @@ func validAdmissionControlConfig() config.Config {
 		Control: &config.ControlConfiguration{
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath: `C:\ProgramData\AgenticReview\TrustedConfig\certificates\server-root.cer`, RootCertificateSHA256: strings.Repeat("b", 64),
-			ClientCertificateStore: config.WindowsCertificateStore, ClientCertificateDERSHA256: strings.Repeat("2", 64),
-			ClientPrivateKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
-			LocalAuthorityCNGKeyName:                 "AgenticReview.Worker.Control.LocalAuthority", LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("1", 64),
-			LocalAuthorityPublicKeySHA256: strings.Repeat("c", 64),
+			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
+			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
+			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("1", 64),
+			LocalAuthorityPublicKeySHA256:             strings.Repeat("c", 64),
 		},
 		Limits: admissionLimits(),
 	}

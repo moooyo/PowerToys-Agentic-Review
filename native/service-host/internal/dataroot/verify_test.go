@@ -46,8 +46,8 @@ func TestVerifyRuntimeEvidenceForEachRole(t *testing.T) {
 	}
 }
 
-func TestVerifyBearerTokenControlRetainsTheFixedAuthenticationFile(t *testing.T) {
-	current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+func TestVerifyControlRetainsTheFixedAuthenticationFile(t *testing.T) {
+	current, peer, installation, fs := verificationFixture(config.RoleControl)
 
 	evidence, err := verifyWithDependencies(
 		context.Background(), current, peer, installation,
@@ -65,13 +65,13 @@ func TestVerifyBearerTokenControlRetainsTheFixedAuthenticationFile(t *testing.T)
 		}
 	}
 	if !found {
-		t.Fatal("schemaVersion 4 Control evidence omitted the fixed Worker authentication file")
+		t.Fatal("Control evidence omitted the fixed Worker authentication file")
 	}
 }
 
-func TestVerifyBearerTokenDataRootRejectsMissingOrMisplacedAuthenticationFiles(t *testing.T) {
+func TestVerifyDataRootRejectsMissingOrMisplacedAuthenticationFiles(t *testing.T) {
 	t.Run("missing Control file", func(t *testing.T) {
-		current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+		current, peer, installation, fs := verificationFixture(config.RoleControl)
 		delete(fs.nodes, config.WorkerAuthenticationProfilePath)
 		if _, err := verifyWithDependencies(
 			context.Background(), current, peer, installation,
@@ -82,7 +82,7 @@ func TestVerifyBearerTokenDataRootRejectsMissingOrMisplacedAuthenticationFiles(t
 	})
 
 	t.Run("wrong Control file kind", func(t *testing.T) {
-		current, peer, installation, fs := bearerVerificationFixture(config.RoleControl)
+		current, peer, installation, fs := verificationFixture(config.RoleControl)
 		fs.nodes[config.WorkerAuthenticationProfilePath].kind = winfile.ObjectKindDirectory
 		if _, err := verifyWithDependencies(
 			context.Background(), current, peer, installation,
@@ -93,7 +93,7 @@ func TestVerifyBearerTokenDataRootRejectsMissingOrMisplacedAuthenticationFiles(t
 	})
 
 	t.Run("Executor copy", func(t *testing.T) {
-		current, peer, installation, fs := bearerVerificationFixture(config.RoleExecutor)
+		current, peer, installation, fs := verificationFixture(config.RoleExecutor)
 		fs.addFile(current.Node.DataRoot+`\worker-auth-v1.json`, 13, roleFileSecurity(current))
 		if _, err := verifyWithDependencies(
 			context.Background(), current, peer, installation,

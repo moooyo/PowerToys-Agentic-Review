@@ -112,7 +112,8 @@ func TestArtifactClientV2UsesOnlyFixedRoutesMethodsAndHeaders(t *testing.T) {
 			t.Errorf("request %d = %s %s %q", index, got.method, got.target, got.body)
 		}
 		if !headersEqual(got.headers, http.Header{
-			"Accept": {"application/json"}, "Content-Type": {"application/json"}, "User-Agent": {workerUserAgent},
+			"Accept": {"application/json"}, "Authorization": {"Bearer " + testWorkerToken},
+			"Content-Type": {"application/json"}, "User-Agent": {workerUserAgent},
 		}) {
 			t.Errorf("request %d sent unexpected headers: %#v", index, got.headers)
 		}

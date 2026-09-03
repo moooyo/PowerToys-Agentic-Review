@@ -13,7 +13,7 @@ import (
 )
 
 func TestProductionEntryPointRequiresConcreteTypedGate(t *testing.T) {
-	expected := reflect.TypeOf(func(context.Context, stagedpackage.BearerTokenInstallerV2Package) (installerdestination.Evidence, error) {
+	expected := reflect.TypeOf(func(context.Context, stagedpackage.InstallerPackage) (installerdestination.Evidence, error) {
 		return installerdestination.Evidence{}, nil
 	})
 	if reflect.TypeOf(installerdestination.Verify) != expected {
@@ -53,7 +53,7 @@ func TestPublicVerifyFailsClosedOutsideWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("non-Windows fail-closed contract")
 	}
-	evidence, err := installerdestination.Verify(context.Background(), stagedpackage.BearerTokenInstallerV2Package{})
+	evidence, err := installerdestination.Verify(context.Background(), stagedpackage.InstallerPackage{})
 	if !errors.Is(err, installerdestination.ErrUnsupportedPlatform) || evidence.Validate() == nil {
 		t.Fatalf("Verify returned evidence=%#v err=%v", evidence, err)
 	}

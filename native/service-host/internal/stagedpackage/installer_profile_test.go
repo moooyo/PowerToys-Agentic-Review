@@ -15,7 +15,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
 )
 
-func TestBearerTokenInstallerV2GatePreservesCleanupFatal(t *testing.T) {
+func TestInstallerPackageGatePreservesCleanupFatal(t *testing.T) {
 	original := processCleanup
 	processCleanup = &cleanupState{
 		fatal:          true,
@@ -24,35 +24,24 @@ func TestBearerTokenInstallerV2GatePreservesCleanupFatal(t *testing.T) {
 	}
 	t.Cleanup(func() { processCleanup = original })
 
-	if _, err := (StagedPackageEvidence{}).SelectBearerTokenInstallerV2(); !errors.Is(err, ErrCleanupFatal) {
-		t.Fatalf("SelectBearerTokenInstallerV2 returned %v, want ErrCleanupFatal", err)
+	if _, err := (StagedPackageEvidence{}).SelectInstallerPackage(); !errors.Is(err, ErrCleanupFatal) {
+		t.Fatalf("SelectInstallerPackage returned %v, want ErrCleanupFatal", err)
 	}
-	selection := BearerTokenInstallerV2Package{state: &evidenceState{}, digest: [32]byte{1}}
+	selection := InstallerPackage{state: &evidenceState{}, digest: [32]byte{1}}
 	if err := selection.Validate(); !errors.Is(err, ErrCleanupFatal) {
-		t.Fatalf("BearerTokenInstallerV2Package.Validate returned %v, want ErrCleanupFatal", err)
+		t.Fatalf("InstallerPackage.Validate returned %v, want ErrCleanupFatal", err)
 	}
-	selection = BearerTokenInstallerV2Package{
+	selection = InstallerPackage{
 		state:  &evidenceState{owner: &handleOwner{}},
 		digest: [32]byte{1},
 	}
 	if err := selection.Close(); !errors.Is(err, ErrCleanupFatal) {
-		t.Fatalf("BearerTokenInstallerV2Package.Close returned %v, want ErrCleanupFatal", err)
+		t.Fatalf("InstallerPackage.Close returned %v, want ErrCleanupFatal", err)
 	}
 }
 
-func TestBearerTokenInstallerV2GateRejectsHistoricalStagedProfile(t *testing.T) {
-	legacy := validTestIndex(t)
-	control, executor := stagedBearerTokenBootstrapPair()
-	if err := validateBearerTokenInstallerV2(legacy, control, executor); err == nil {
-		t.Fatal("Bearer Token installer v2 gate accepted the historical schema-v3 package profile")
-	}
-}
-
-func TestBearerTokenInstallerV2GateAcceptsOnlyMatchingV2PackageAndBootstraps(t *testing.T) {
+func TestInstallerPackageGateAcceptsOnlyMatchingCurrentPackageAndBootstraps(t *testing.T) {
 	index := validTestIndex(t)
-	index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
-	index.ProfileID = outerpackage.BearerTokenIndexProfileID
-	index.MTLSClientCredential = nil
 	document, err := outerpackage.MarshalIndexCanonical(index)
 	if err != nil {
 		t.Fatal(err)
@@ -61,23 +50,20 @@ func TestBearerTokenInstallerV2GateAcceptsOnlyMatchingV2PackageAndBootstraps(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	control, executor := stagedBearerTokenBootstrapPair()
-	if err := validateBearerTokenInstallerV2(index, control, executor); err != nil {
+	control, executor := stagedInstallerBootstrapPair()
+	if err := validateInstallerPackage(index, control, executor); err != nil {
 		t.Fatal(err)
 	}
 
 	control.Control.WorkerAuthenticationProfile = "other"
-	if err := validateBearerTokenInstallerV2(index, control, executor); err == nil {
-		t.Fatal("Bearer Token installer v2 gate accepted a different Worker authentication profile")
+	if err := validateInstallerPackage(index, control, executor); err == nil {
+		t.Fatal("installer package gate accepted a different Worker authentication profile")
 	}
 }
 
 func TestDestinationBindingIsOpaqueAndExpiresAfterItsBorrow(t *testing.T) {
 	index := validTestIndex(t)
-	index.SchemaVersion = outerpackage.BearerTokenIndexSchemaVersion
-	index.ProfileID = outerpackage.BearerTokenIndexProfileID
-	index.MTLSClientCredential = nil
-	control, executor := stagedBearerTokenBootstrapPair()
+	control, executor := stagedInstallerBootstrapPair()
 	controlDocument, err := config.MarshalCanonical(control)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +104,7 @@ func TestDestinationBindingIsOpaqueAndExpiresAfterItsBorrow(t *testing.T) {
 		t.Fatal(err)
 	}
 	borrow := &destinationBorrowState{active: true}
-	binding := BearerTokenInstallerV2DestinationBinding{
+	binding := DestinationBinding{
 		issuer: successfulDestinationBindingIssuer, borrow: borrow, sourceDigest: [32]byte{1},
 		indexDocument: indexDocument, envelopeDocument: envelope,
 		controlDocument: controlDocument, executorDocument: executorDocument, signerKeyID: signerKeyID,
@@ -145,7 +131,7 @@ func TestDestinationBindingIsOpaqueAndExpiresAfterItsBorrow(t *testing.T) {
 	if err := transferred.Close(); !errors.Is(err, ErrInstallerProfile) {
 		t.Fatalf("unowned Close after destination transfer returned %v", err)
 	}
-	zeroLease := BearerTokenInstallerV2DestinationLease{}
+	zeroLease := DestinationLease{}
 	if !errors.Is(zeroLease.Validate(), ErrInstallerProfile) ||
 		!errors.Is(zeroLease.Close(), ErrInstallerProfile) {
 		t.Fatal("zero destination lease behaved as an ownership capability")
@@ -155,9 +141,9 @@ func TestDestinationBindingIsOpaqueAndExpiresAfterItsBorrow(t *testing.T) {
 	}
 }
 
-func stagedBearerTokenBootstrapPair() (config.Config, config.Config) {
+func stagedInstallerBootstrapPair() (config.Config, config.Config) {
 	control := config.Config{
-		SchemaVersion: config.BearerTokenSchemaVersion,
+		SchemaVersion: config.SchemaVersion,
 		Role:          config.RoleControl,
 		WorkerNodeID:  "worker-node-001",
 		OwnService:    config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},

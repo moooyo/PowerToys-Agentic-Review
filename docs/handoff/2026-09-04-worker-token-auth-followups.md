@@ -34,18 +34,18 @@ production storage lifecycle.
   successful replacement Token for the same prior version. Server and Dashboard boundaries reject
   Token-shaped display names before they can become persistent metadata.
 - Native bootstrap schema version 4 selects `agentic-review-worker-auth-v1`. Its Control document
-  requires the profile selector and forbids the three historical Worker client-certificate fields.
+  requires the profile selector, and strict parsing rejects Worker client-certificate properties.
   The fixed authentication file is a Control-only data-root closed-set member; Executor has no
   corresponding file, Token, or Server transport.
 - Native preflight schema v4 binds only the unchanged local Control-to-Executor CNG capability
   signer. The Worker Token is not preflight evidence, a digest input, runtime bootstrap data, or a
   local RPC field.
-- Windows production composition rejects schema v3 before opening a Worker credential, loads the
-  fixed schema-v4 authentication file for Control, and creates `NewBearerClient`. The platform
-  production graph contains no `wincert` import, `NewClient` call, or mTLS evidence input.
-- Signed outer-package v1 remains immutable schema-v3 history. Outer-package v2 and split installer
-  profile v2 bind only schema-v4 bootstraps, omit mTLS/package credential material, reject
-  `worker-auth-v1.json` as a payload, and require the retained staged-evidence typed gate.
+- Windows production composition accepts only schema 4, loads the fixed authentication file for
+  Control, and creates the fixed Bearer client. The platform production graph contains no Worker
+  client-certificate credential or evidence input.
+- The current outer-package v2 and split installer profile v2 bind only schema-4 bootstraps, contain
+  no Worker credential material, reject `worker-auth-v1.json` as a payload, and require the
+  staged-evidence typed gate. No earlier outer-package or bootstrap profile is accepted.
 - The Server storage runtime no longer imports, creates, opens, or closes the historical Server
   binding coordinator or signer. Token-only database startup preserves dormant migration-0012 rows
   without requiring a trusted receipt issuer; those rows remain inert and do not create Worker

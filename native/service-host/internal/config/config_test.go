@@ -2,27 +2,16 @@ package config
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-const (
-	historicalV3ControlCanonicalSHA256  = "d8097fcdb0c31710f1967d1011188f892902a1ad09ac53885724cb8cc49dc260"
-	historicalV3ExecutorCanonicalSHA256 = "8fc0e33c2241153277c2b7eb507a5469b2ea04225eed1570458d91c580385a85"
-)
-
 func TestCanonicalConfigurationRoundTrip(t *testing.T) {
-	for _, original := range []Config{
-		validConfig(), validExecutorConfig(), validBearerTokenConfig(), validBearerTokenExecutorConfig(),
-	} {
-		name := string(original.Role) + "-schema-" + strconv.Itoa(original.SchemaVersion)
-		t.Run(name, func(t *testing.T) {
+	for _, original := range []Config{validConfig(), validExecutorConfig()} {
+		t.Run(string(original.Role), func(t *testing.T) {
 			document, err := MarshalCanonical(original)
 			if err != nil {
 				t.Fatalf("MarshalCanonical returned an error: %v", err)
@@ -39,73 +28,53 @@ func TestCanonicalConfigurationRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHistoricalSchemaVersion3CanonicalBytesRemainImmutable(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		value    Config
-		expected string
-	}{
-		{name: "control", value: validConfig(), expected: historicalV3ControlCanonicalSHA256},
-		{name: "executor", value: validExecutorConfig(), expected: historicalV3ExecutorCanonicalSHA256},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			document := mustCanonical(t, test.value)
-			digest := sha256.Sum256(document)
-			if actual := hex.EncodeToString(digest[:]); actual != test.expected {
-				t.Fatalf("schemaVersion 3 canonical digest = %s, want immutable %s", actual, test.expected)
-			}
-		})
-	}
-}
-
-func TestBearerTokenSchemaIsCanonicalAndMutuallyExclusiveWithMTLS(t *testing.T) {
-	control := validBearerTokenConfig()
+func TestCurrentSchemaIsCanonicalAndTokenOnly(t *testing.T) {
+	control := validConfig()
 	document := mustCanonical(t, control)
 	if !bytes.Contains(document, []byte(`"workerAuthenticationProfile":"agentic-review-worker-auth-v1"`)) ||
 		bytes.Contains(document, []byte("clientCertificate")) ||
 		bytes.Contains(document, []byte("clientPrivateKey")) {
-		t.Fatalf("schemaVersion 4 Control document selected the wrong authentication fields: %s", document)
+		t.Fatalf("current Control document selected the wrong authentication fields: %s", document)
 	}
-	if parsed, err := Parse(document); err != nil || parsed.SchemaVersion != BearerTokenSchemaVersion ||
+	if parsed, err := Parse(document); err != nil || parsed.SchemaVersion != SchemaVersion ||
 		parsed.Control == nil || parsed.Control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 {
-		t.Fatalf("Parse schemaVersion 4 = %#v, %v", parsed, err)
+		t.Fatalf("Parse current schema = %#v, %v", parsed, err)
 	}
-	withEmptyLegacyField := bytes.Replace(
-		document,
-		[]byte(`"workerAuthenticationProfile":`),
-		[]byte(`"clientCertificateStore":"","workerAuthenticationProfile":`),
-		1,
-	)
-	_, err := Parse(withEmptyLegacyField)
-	assertConfigErrorCode(t, err, ErrorCanonical)
+	for _, field := range []string{
+		`"clientCertificateStore":"",`,
+		`"clientCertificateDerSha256":"",`,
+		`"clientPrivateKeySecurityDescriptorSha256":"",`,
+	} {
+		t.Run(field, func(t *testing.T) {
+			withLegacyField := bytes.Replace(
+				document,
+				[]byte(`"workerAuthenticationProfile":`),
+				[]byte(field+`"workerAuthenticationProfile":`),
+				1,
+			)
+			_, err := Parse(withLegacyField)
+			assertConfigErrorCode(t, err, ErrorFormat)
+		})
+	}
 
 	tests := []struct {
 		name   string
 		value  Config
 		mutate func(*Config)
 	}{
-		{name: "v4 missing profile", value: control, mutate: func(value *Config) {
+		{name: "missing profile", value: control, mutate: func(value *Config) {
 			value.Control.WorkerAuthenticationProfile = ""
 		}},
-		{name: "v4 wrong profile", value: control, mutate: func(value *Config) {
+		{name: "wrong profile", value: control, mutate: func(value *Config) {
 			value.Control.WorkerAuthenticationProfile = "other"
 		}},
-		{name: "v4 certificate store", value: control, mutate: func(value *Config) {
-			value.Control.ClientCertificateStore = WindowsCertificateStore
-		}},
-		{name: "v4 certificate digest", value: control, mutate: func(value *Config) {
-			value.Control.ClientCertificateDERSHA256 = strings.Repeat("f", 64)
-		}},
-		{name: "v4 private-key descriptor", value: control, mutate: func(value *Config) {
-			value.Control.ClientPrivateKeySecurityDescriptorSHA256 = strings.Repeat("0", 64)
-		}},
-		{name: "v4 alternate data root", value: control, mutate: func(value *Config) {
+		{name: "alternate data root", value: control, mutate: func(value *Config) {
 			value.Node.DataRoot = `D:\AgenticReview\Control`
 			value.Node.WorkingDirectory = value.Node.DataRoot + `\Work`
 			rewriteEnvironmentRoot(value.Node.Environment, `C:\ProgramData\AgenticReview\Control`, value.Node.DataRoot)
 		}},
-		{name: "v3 bearer profile", value: validConfig(), mutate: func(value *Config) {
-			value.Control.WorkerAuthenticationProfile = WorkerAuthenticationProfileBearerTokenV1
+		{name: "schema version 3", value: control, mutate: func(value *Config) {
+			value.SchemaVersion = 3
 		}},
 	}
 	for _, test := range tests {
@@ -138,7 +107,7 @@ func TestParseRejectsNonCanonicalAndDuplicateDocuments(t *testing.T) {
 		{name: "trailing newline", data: append(append([]byte(nil), document...), '\n'), code: ErrorCanonical},
 		{
 			name: "duplicate property",
-			data: bytes.Replace(document, []byte(`"schemaVersion":3`), []byte(`"schemaVersion":3,"schemaVersion":3`), 1),
+			data: bytes.Replace(document, []byte(`"schemaVersion":4`), []byte(`"schemaVersion":4,"schemaVersion":4`), 1),
 			code: ErrorCanonical,
 		},
 		{
@@ -158,7 +127,7 @@ func TestParseRejectsNonCanonicalAndDuplicateDocuments(t *testing.T) {
 	}
 }
 
-func TestParseRejectsMissingRequiredVersion3Fields(t *testing.T) {
+func TestParseRejectsMissingRequiredCurrentFields(t *testing.T) {
 	document := mustCanonical(t, validConfig())
 	tests := []struct {
 		name string
@@ -166,9 +135,9 @@ func TestParseRejectsMissingRequiredVersion3Fields(t *testing.T) {
 		new  []byte
 	}{
 		{
-			name: "schema version 2",
-			old:  []byte(`"schemaVersion":3`),
-			new:  []byte(`"schemaVersion":2`),
+			name: "schema version 3",
+			old:  []byte(`"schemaVersion":4`),
+			new:  []byte(`"schemaVersion":3`),
 		},
 		{name: "worker node ID", old: []byte(`"workerNodeId":"powertoys-node:01",`)},
 		{name: "force termination reserve", old: []byte(`,"forceTerminationReserveMilliseconds":15000`)},
@@ -207,14 +176,12 @@ func TestReadmeConfigurationExamplesAreCanonical(t *testing.T) {
 		if parseErr != nil {
 			t.Fatalf("README %s JSON example is invalid: %v", expectedRole, parseErr)
 		}
-		if parsed.Role != expectedRole || parsed.SchemaVersion != BearerTokenSchemaVersion {
+		if parsed.Role != expectedRole || parsed.SchemaVersion != SchemaVersion {
 			t.Fatalf("README JSON example role/schema = %s/%d, want %s/%d",
-				parsed.Role, parsed.SchemaVersion, expectedRole, BearerTokenSchemaVersion)
+				parsed.Role, parsed.SchemaVersion, expectedRole, SchemaVersion)
 		}
 		if expectedRole == RoleControl && (parsed.Control == nil ||
-			parsed.Control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 ||
-			parsed.Control.ClientCertificateStore != "" || parsed.Control.ClientCertificateDERSHA256 != "" ||
-			parsed.Control.ClientPrivateKeySecurityDescriptorSHA256 != "") {
+			parsed.Control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1) {
 			t.Fatalf("README Control JSON example does not select Token-only authentication: %#v", parsed.Control)
 		}
 		remaining = remaining[end+len("\n```"):]
@@ -229,7 +196,7 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{name: "old schema", mutate: func(value *Config) { value.SchemaVersion = 2 }},
+		{name: "old schema", mutate: func(value *Config) { value.SchemaVersion = 3 }},
 		{name: "unsupported role", mutate: func(value *Config) { value.Role = "combined" }},
 		{name: "missing worker node ID", mutate: func(value *Config) { value.WorkerNodeID = "" }},
 		{name: "worker node ID prefix", mutate: func(value *Config) { value.WorkerNodeID = ":node" }},
@@ -293,11 +260,6 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		{name: "server name mismatch", mutate: func(value *Config) { value.Control.ServerName = "other.example.test" }},
 		{name: "root certificate escape", mutate: func(value *Config) { value.Control.RootCertificatePath = `C:\ProgramData\root.cer` }},
 		{name: "root certificate digest", mutate: func(value *Config) { value.Control.RootCertificateSHA256 = strings.Repeat("A", 64) }},
-		{name: "wrong certificate store", mutate: func(value *Config) { value.Control.ClientCertificateStore = "ROOT" }},
-		{name: "client certificate digest", mutate: func(value *Config) { value.Control.ClientCertificateDERSHA256 = "missing" }},
-		{name: "client private key descriptor digest", mutate: func(value *Config) {
-			value.Control.ClientPrivateKeySecurityDescriptorSHA256 = "missing"
-		}},
 		{name: "noncanonical CNG key", mutate: func(value *Config) { value.Control.LocalAuthorityCNGKeyName += " " }},
 		{name: "local authority key descriptor digest", mutate: func(value *Config) {
 			value.Control.LocalAuthorityKeySecurityDescriptorSHA256 = "missing"
@@ -492,9 +454,7 @@ func validControlConfiguration() *ControlConfiguration {
 		ServerName:                                "review.example.test",
 		RootCertificatePath:                       `C:\ProgramData\AgenticReview\TrustedConfig\server-root.cer`,
 		RootCertificateSHA256:                     strings.Repeat("e", 64),
-		ClientCertificateStore:                    WindowsCertificateStore,
-		ClientCertificateDERSHA256:                strings.Repeat("f", 64),
-		ClientPrivateKeySecurityDescriptorSHA256:  strings.Repeat("0", 64),
+		WorkerAuthenticationProfile:               WorkerAuthenticationProfileBearerTokenV1,
 		LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 		LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("9", 64),
 		LocalAuthorityPublicKeySHA256:             strings.Repeat("1", 64),
@@ -539,22 +499,6 @@ func validExecutorConfig() Config {
 	value.Node.Environment["GCM_INTERACTIVE"] = "never"
 	value.Control = nil
 	value.Executor = validExecutorConfiguration()
-	return value
-}
-
-func validBearerTokenConfig() Config {
-	value := validConfig()
-	value.SchemaVersion = BearerTokenSchemaVersion
-	value.Control.WorkerAuthenticationProfile = WorkerAuthenticationProfileBearerTokenV1
-	value.Control.ClientCertificateStore = ""
-	value.Control.ClientCertificateDERSHA256 = ""
-	value.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	return value
-}
-
-func validBearerTokenExecutorConfig() Config {
-	value := validExecutorConfig()
-	value.SchemaVersion = BearerTokenSchemaVersion
 	return value
 }
 

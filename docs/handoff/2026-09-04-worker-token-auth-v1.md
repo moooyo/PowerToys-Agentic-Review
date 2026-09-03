@@ -6,9 +6,8 @@ Branch: `codex/worker-token-auth-v1`
 
 Base commit: `e9f393573c1c8eedbf6256b8e23b62d83203ef46`
 
-ADR 0025 replaces Worker mutual TLS, certificate binding, Server binding receipts, active-status
-assertions, and the dormant signer-host direction with one independently revocable long-lived
-Bearer Token per Worker node. The Server remains the online authority for Worker identity and
+ADR 0025 defines one independently revocable long-lived Bearer Token per Worker node as the only
+Worker authentication profile. The Server remains the online authority for Worker identity and
 revocation. The local Windows environment, Server, database, and authenticated operators are
 trusted under the selected profile.
 
@@ -16,11 +15,11 @@ trusted under the selected profile.
 
 Branch `codex/worker-token-followups` completes three items that were deferred by the initial
 handoff: the authenticated credential roster and Dashboard management flow, native ServiceHost
-bootstrap schema v4 and Bearer production composition, and removal of the superseded Server binding
-coordinator from the production storage lifecycle. The signed outer-package v1 and installer remain
-historical schema-v3 profiles. The later release follow-up adds outer-package v2 and split installer
-profile v2 contracts for schema v4 while leaving actual signed material and the production SCM
-installer deferred.
+bootstrap schema 4 and Bearer production composition, and removal of the superseded Server binding
+coordinator from the production storage lifecycle. The later release follow-up establishes the
+current outer-package v2 and split installer profile v2 contracts for schema 4. No earlier bootstrap
+or outer-package profile is accepted as a compatibility path. Actual signed material and the
+production SCM installer remain deferred.
 
 ## Completed Scope
 
@@ -43,8 +42,8 @@ installer deferred.
   Token-shaped path or host value. Authentication errors never return the Token, digest, header, or
   lookup detail.
 - Production Server configuration requires HTTPS. Explicit development HTTP is limited to a
-  loopback listener and does not bypass Token authentication. Legacy Server Worker-mTLS settings
-  are rejected.
+  loopback listener and does not bypass Token authentication. The Server accepts no alternate
+  Worker certificate-authentication configuration.
 - The TypeScript Windows Worker loads the Token and node ID only from the exact canonical UTF-8
   profile at `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, sends Bearer authorization
   on every Worker request, validates the Server certificate, and loads no client certificate,
@@ -58,8 +57,8 @@ installer deferred.
   roster, merges it with Worker runtime state, and provides create, rotate, revoke, one-time reveal,
   and clipboard-copy operations without using browser storage. Rotation uses the record's
   `updatedAt` as a compare-and-set precondition, and persistent display text rejects Token shapes.
-- Architecture, deployment, implementation-status, ADR, and historical handoff documentation now
-  identify receipt, signer-host, and Worker-mTLS material as superseded rather than future gates.
+- Architecture, deployment, implementation-status, ADR, and handoff documentation identify receipt,
+  signer-host, and Worker client-certificate material as non-product paths rather than future gates.
 
 ## Production Reachability Boundary
 
@@ -68,12 +67,11 @@ database-backed Bearer Token. The certificate fingerprint map and TLS client-CA 
 configured or accepted by the Server. The retained migration-0012 tables, receipt code, signer
 code, and signer-host code have no Server route or Worker-auth consumer.
 
-Native ServiceHost production composition now accepts only bootstrap schema v4. Control loads the
-fixed authentication file and constructs `NewBearerClient`; Executor has no Worker credential or
-Server transport. Historical schema v3 remains parseable for exact-byte compatibility but fails
-production startup before credential acquisition. Signed outer-package v1 still accepts only schema
-v3; outer-package v2 and installer profile v2 now bind schema v4, but actual signed release material,
-destination evidence, and the production SCM installer are still required before shipment.
+Native ServiceHost production composition accepts only bootstrap schema 4. Control loads the fixed
+authentication file and constructs the fixed Bearer client; Executor has no Worker credential or
+Server transport. Strict parsing rejects every other bootstrap schema. The current outer-package v2
+and installer profile v2 bind only schema 4, but actual signed release material, destination
+evidence, and the production SCM installer are still required before shipment.
 
 The production Server storage lifecycle no longer creates, opens, or closes the superseded Server
 binding coordinator. Database startup preserves migration-0012 rows without auditing or activating
@@ -124,9 +122,9 @@ engine warning, but lint, typecheck, build, and the recorded focused tests compl
 1. Produce actual signed outer-package-v2 release material and implement root materialization,
    atomic swap, and the production SCM installer. The later installer-destination slice completed
    the read-only typed-gate re-verification evidence for all three fixed post-swap roots, but no
-   production installer invokes it. Signed package v1 remains immutable schema-v3 history.
+   production installer invokes it.
 
-The later `codex/worker-token-release-recovery` change completed the executable historical-source
+The later `codex/worker-token-release-recovery` change completed the executable retired-source
 cleanup and the Token recovery exercises. Migration 0012 and its four-table upgrade compatibility
 coverage remain immutable history.
 

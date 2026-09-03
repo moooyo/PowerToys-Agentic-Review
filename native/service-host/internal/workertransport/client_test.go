@@ -3,7 +3,6 @@ package workertransport
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,8 +25,7 @@ import (
 
 func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://attacker.invalid:8080")
-	config, signer := validConfig(t)
-	originalLeafByte := config.ClientCertificate.Certificate[0][0]
+	config := validConfig(t)
 	originalRootByte := config.RootCertificateDER[0][0]
 	client, err := NewClient(config)
 	if err != nil {
@@ -38,11 +36,8 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewClient installed transport type %T", client.state.httpClient.Transport)
 	}
-	if transport.Proxy != nil {
-		t.Fatal("transport enabled proxy discovery")
-	}
-	if !transport.DisableCompression {
-		t.Fatal("transport enabled automatic response compression")
+	if transport.Proxy != nil || !transport.DisableCompression {
+		t.Fatal("transport enabled ambient proxying or compression")
 	}
 	if transport.MaxConnsPerHost != config.Limits.MaximumConcurrentRequests ||
 		transport.MaxIdleConnsPerHost != config.Limits.MaximumConcurrentRequests {
@@ -51,36 +46,17 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	if transport.MaxResponseHeaderBytes != maximumResponseHeaders {
 		t.Fatalf("unexpected response header limit: %d", transport.MaxResponseHeaderBytes)
 	}
-	if transport.TLSClientConfig == nil {
-		t.Fatal("transport has no TLS configuration")
-	}
 	tlsConfig := transport.TLSClientConfig
-	if tlsConfig.MinVersion != tls.VersionTLS13 || tlsConfig.InsecureSkipVerify {
-		t.Fatal("transport does not require verified TLS 1.3 or newer")
-	}
-	if tlsConfig.ServerName != config.ServerName {
-		t.Fatalf("unexpected ServerName: %q", tlsConfig.ServerName)
+	if tlsConfig == nil || tlsConfig.MinVersion != tls.VersionTLS13 || tlsConfig.InsecureSkipVerify ||
+		tlsConfig.ServerName != config.ServerName || len(tlsConfig.Certificates) != 0 ||
+		tlsConfig.GetClientCertificate != nil {
+		t.Fatal("transport does not use the fixed server-authenticated TLS profile")
 	}
 	if tlsConfig.RootCAs == nil || len(tlsConfig.RootCAs.Subjects()) != 1 {
 		t.Fatal("transport did not build one private pinned root pool")
 	}
 	rootSubjects := tlsConfig.RootCAs.Subjects()
-	if len(tlsConfig.Certificates) != 1 {
-		t.Fatal("transport did not install exactly one client certificate")
-	}
-	signerGate, ok := tlsConfig.Certificates[0].PrivateKey.(*clientSignerGate)
-	if !ok || signerGate.signer != signer {
-		t.Fatal("transport did not bind a gate around the supplied crypto.Signer")
-	}
-	if tlsConfig.Certificates[0].Leaf == nil {
-		t.Fatal("transport did not parse the client certificate leaf")
-	}
-
-	config.ClientCertificate.Certificate[0][0] ^= 0xff
 	config.RootCertificateDER[0][0] ^= 0xff
-	if tlsConfig.Certificates[0].Certificate[0][0] != originalLeafByte {
-		t.Fatal("transport retained mutable client certificate DER")
-	}
 	if config.RootCertificateDER[0][0] == originalRootByte {
 		t.Fatal("test did not mutate the caller root DER")
 	}
@@ -95,117 +71,8 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	}
 }
 
-func TestCloseReleasesTransportWithoutClosingBorrowedSigner(t *testing.T) {
-	config, privateKey := validConfig(t)
-	signer := &closableSigner{PrivateKey: privateKey}
-	config.ClientSigner = signer
-	client, err := NewClient(config)
-	if err != nil {
-		t.Fatalf("NewClient returned an error: %v", err)
-	}
-	transport := client.state.httpClient.Transport.(*http.Transport)
-	signerGate, ok := transport.TLSClientConfig.Certificates[0].PrivateKey.(*clientSignerGate)
-	if !ok || signerGate.signer != signer {
-		t.Fatal("transport did not borrow the configured signer")
-	}
-
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close returned an error: %v", err)
-	}
-	if signer.closeCalls.Load() != 0 {
-		t.Fatalf("Client closed the borrowed signer %d times", signer.closeCalls.Load())
-	}
-	if client.state.httpClient != nil || !client.state.transportReleased {
-		t.Fatal("Close retained the TLS transport after returning success")
-	}
-	if err := signer.Close(); err != nil || signer.closeCalls.Load() != 1 {
-		t.Fatalf("caller could not close signer after Client.Close: calls=%d error=%v", signer.closeCalls.Load(), err)
-	}
-}
-
-func TestCloseWaitsForActiveSignerAndFencesLateSignerCalls(t *testing.T) {
-	config, privateKey := validConfig(t)
-	signer := &blockingSigner{
-		PrivateKey: privateKey,
-		started:    make(chan struct{}),
-		release:    make(chan struct{}),
-	}
-	config.ClientSigner = signer
-	client, err := NewClient(config)
-	if err != nil {
-		t.Fatalf("NewClient returned an error: %v", err)
-	}
-	transport := client.state.httpClient.Transport.(*http.Transport)
-	gate, ok := transport.TLSClientConfig.Certificates[0].PrivateKey.(*clientSignerGate)
-	if !ok {
-		t.Fatalf("TLS private key type = %T, want client signer gate", transport.TLSClientConfig.Certificates[0].PrivateKey)
-	}
-
-	digest := make([]byte, 32)
-	signResult := make(chan error, 1)
-	go func() {
-		_, err := gate.Sign(rand.Reader, digest, crypto.SHA256)
-		signResult <- err
-	}()
-	select {
-	case <-signer.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("signer call did not start")
-	}
-
-	closeResult := make(chan error, 1)
-	go func() { closeResult <- client.Close() }()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		gate.mu.Lock()
-		gateClosed := gate.closed
-		gate.mu.Unlock()
-		if gateClosed {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Close did not fence the signer")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	if _, err := gate.Sign(rand.Reader, digest, crypto.SHA256); !errors.Is(err, ErrClosed) {
-		t.Fatalf("late Sign returned %v, want ErrClosed", err)
-	}
-	if publicKey := gate.Public(); publicKey == nil {
-		t.Fatal("closed gate did not return its detached public key")
-	}
-	if signer.publicCalls.Load() != 1 || signer.signCalls.Load() != 1 {
-		t.Fatalf("late gate calls reached signer: public=%d sign=%d", signer.publicCalls.Load(), signer.signCalls.Load())
-	}
-	select {
-	case err := <-closeResult:
-		t.Fatalf("Close returned before active Sign completed: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(signer.release)
-	if err := <-signResult; err != nil {
-		t.Fatalf("active Sign returned an error: %v", err)
-	}
-	if err := <-closeResult; err != nil {
-		t.Fatalf("Close returned an error: %v", err)
-	}
-	if _, err := gate.Sign(rand.Reader, digest, crypto.SHA256); !errors.Is(err, ErrClosed) {
-		t.Fatalf("post-close Sign returned %v, want ErrClosed", err)
-	}
-	if signer.signCalls.Load() != 1 {
-		t.Fatalf("post-close Sign reached borrowed signer; calls=%d", signer.signCalls.Load())
-	}
-	if client.state.signerGate != nil || client.state.httpClient != nil {
-		t.Fatal("Close retained signer gate or HTTP transport")
-	}
-}
-
 func TestNewClientRejectsUnsafeConfiguration(t *testing.T) {
-	base, _ := validConfig(t)
-	_, otherSigner := testCertificate(t, "other.worker.test")
-	var nilSigner *ecdsa.PrivateKey
+	base := validConfig(t)
 	tests := []struct {
 		name   string
 		mutate func(*Config)
@@ -223,10 +90,8 @@ func TestNewClientRejectsUnsafeConfiguration(t *testing.T) {
 		{name: "missing roots", mutate: func(value *Config) { value.RootCertificateDER = nil }},
 		{name: "empty root", mutate: func(value *Config) { value.RootCertificateDER = [][]byte{{}} }},
 		{name: "invalid root", mutate: func(value *Config) { value.RootCertificateDER = [][]byte{{1, 2, 3}} }},
-		{name: "missing certificate", mutate: func(value *Config) { value.ClientCertificate = tls.Certificate{} }},
-		{name: "missing signer", mutate: func(value *Config) { value.ClientSigner = nil }},
-		{name: "typed nil signer", mutate: func(value *Config) { value.ClientSigner = nilSigner }},
-		{name: "mismatched signer", mutate: func(value *Config) { value.ClientSigner = otherSigner }},
+		{name: "missing Worker auth", mutate: func(value *Config) { value.WorkerAuth = WorkerAuth{} }},
+		{name: "mismatched Worker auth", mutate: func(value *Config) { value.WorkerNodeID = "other-node" }},
 		{name: "zero request bytes", mutate: func(value *Config) { value.Limits.MaximumRequestBytes = 0 }},
 		{name: "excess response bytes", mutate: func(value *Config) { value.Limits.MaximumResponseBytes = maximumConfiguredBytes + 1 }},
 		{name: "zero request timeout", mutate: func(value *Config) { value.Limits.RequestTimeout = 0 }},
@@ -245,7 +110,7 @@ func TestNewClientRejectsUnsafeConfiguration(t *testing.T) {
 }
 
 func TestTransportHeaderTimeoutCoversEveryOperationDeadline(t *testing.T) {
-	config, _ := validConfig(t)
+	config := validConfig(t)
 	config.Limits.RequestTimeout = 2 * time.Minute
 	config.Limits.ClaimTimeout = 30 * time.Second
 	client, err := NewClient(config)
@@ -260,7 +125,7 @@ func TestTransportHeaderTimeoutCoversEveryOperationDeadline(t *testing.T) {
 
 func TestInvalidOriginErrorDoesNotEchoRawSecret(t *testing.T) {
 	secret := "do-not-log-this-token"
-	config, _ := validConfig(t)
+	config := validConfig(t)
 	config.Origin = "https://user:" + secret + "@api.worker.test/%zz?token=" + secret
 	_, err := NewClient(config)
 	if !errors.Is(err, ErrInvalidConfiguration) {
@@ -377,9 +242,10 @@ func TestTypedOperationsUseOnlyFixedOriginRoutesAndHeaders(t *testing.T) {
 			t.Errorf("request %d changed the request body", index)
 		}
 		expectedHeaders := http.Header{
-			"Accept":       {"application/json"},
-			"Content-Type": {"application/json"},
-			"User-Agent":   {workerUserAgent},
+			"Accept":        {"application/json"},
+			"Authorization": {"Bearer " + testWorkerToken},
+			"Content-Type":  {"application/json"},
+			"User-Agent":    {workerUserAgent},
 		}
 		if !headersEqual(got.headers, expectedHeaders) {
 			t.Errorf("request %d sent unexpected headers: %#v", index, got.headers)
@@ -945,12 +811,6 @@ func TestCloseIsIdempotentAndConcurrentSafe(t *testing.T) {
 func TestCloseFailureRetainsTransportForRetry(t *testing.T) {
 	sentinel := errors.New("close idle connections")
 	var attempts atomic.Int32
-	_, privateKey := validConfig(t)
-	signer := &closableSigner{PrivateKey: privateKey}
-	signerGate, err := newClientSignerGate(signer)
-	if err != nil {
-		t.Fatalf("newClientSignerGate returned an error: %v", err)
-	}
 	transport := &lifecycleRoundTripper{
 		closeIdle: func() error {
 			if attempts.Add(1) == 1 {
@@ -960,19 +820,12 @@ func TestCloseFailureRetainsTransportForRetry(t *testing.T) {
 		},
 	}
 	client := testClient(t, transport, testLimits())
-	client.state.signerGate = signerGate
 
-	if err := client.Close(); !errors.Is(err, sentinel) {
-		t.Fatalf("first Close returned %v, want transport failure", err)
+	if err := client.Close(); err == nil || strings.Contains(err.Error(), sentinel.Error()) {
+		t.Fatalf("first Close did not return a redacted transport failure: %v", err)
 	}
 	if client.state.httpClient == nil || client.state.transportReleased {
 		t.Fatal("failed Close discarded the retryable transport state")
-	}
-	if _, err := signerGate.Sign(rand.Reader, make([]byte, 32), crypto.SHA256); !errors.Is(err, ErrClosed) {
-		t.Fatalf("detached Sign after failed Close returned %v, want ErrClosed", err)
-	}
-	if signerGate.Public() == nil || signer.publicCalls.Load() != 1 || signer.signCalls.Load() != 0 {
-		t.Fatalf("detached gate reached signer after failed Close: public=%d sign=%d", signer.publicCalls.Load(), signer.signCalls.Load())
 	}
 	if _, err := client.Register(context.Background(), RegisterRequest{Body: json.RawMessage(`{}`)}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("request after failed Close returned %v, want ErrClosed", err)
@@ -981,7 +834,7 @@ func TestCloseFailureRetainsTransportForRetry(t *testing.T) {
 		t.Fatalf("second Close did not retry transport cleanup: %v", err)
 	}
 	if client.state.httpClient != nil || !client.state.transportReleased {
-		t.Fatal("successful Close retained the transport and signer reference")
+		t.Fatal("successful Close retained the transport")
 	}
 	if err := client.Close(); err != nil || attempts.Load() != 2 {
 		t.Fatalf("successful retry was not idempotent: attempts=%d error=%v", attempts.Load(), err)
@@ -1149,57 +1002,6 @@ func (b *contextBody) Close() error {
 	return nil
 }
 
-type closableSigner struct {
-	*ecdsa.PrivateKey
-	closeCalls  atomic.Int32
-	publicCalls atomic.Int32
-	signCalls   atomic.Int32
-}
-
-func (s *closableSigner) Public() crypto.PublicKey {
-	s.publicCalls.Add(1)
-	return s.PrivateKey.Public()
-}
-
-func (s *closableSigner) Sign(
-	random io.Reader,
-	digest []byte,
-	options crypto.SignerOpts,
-) ([]byte, error) {
-	s.signCalls.Add(1)
-	return s.PrivateKey.Sign(random, digest, options)
-}
-
-func (s *closableSigner) Close() error {
-	s.closeCalls.Add(1)
-	return nil
-}
-
-type blockingSigner struct {
-	*ecdsa.PrivateKey
-	started     chan struct{}
-	release     chan struct{}
-	startOnce   sync.Once
-	publicCalls atomic.Int32
-	signCalls   atomic.Int32
-}
-
-func (s *blockingSigner) Public() crypto.PublicKey {
-	s.publicCalls.Add(1)
-	return s.PrivateKey.Public()
-}
-
-func (s *blockingSigner) Sign(
-	random io.Reader,
-	digest []byte,
-	options crypto.SignerOpts,
-) ([]byte, error) {
-	s.signCalls.Add(1)
-	s.startOnce.Do(func() { close(s.started) })
-	<-s.release
-	return s.PrivateKey.Sign(random, digest, options)
-}
-
 type countingBody struct {
 	reader    *bytes.Reader
 	bytesRead atomic.Int64
@@ -1223,7 +1025,12 @@ func testClient(t *testing.T, roundTripper http.RoundTripper, limits Limits) *Cl
 	if err != nil {
 		t.Fatalf("parse test origin: %v", err)
 	}
-	return newClient(origin, roundTripper, nil, limits)
+	return newClient(
+		origin,
+		roundTripper,
+		parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),
+		limits,
+	)
 }
 
 func testLimits() Limits {
@@ -1263,15 +1070,15 @@ func headersEqual(left http.Header, right http.Header) bool {
 	return true
 }
 
-func validConfig(t *testing.T) (Config, *ecdsa.PrivateKey) {
+func validConfig(t *testing.T) Config {
 	t.Helper()
-	certificate, signer := testCertificate(t, "control.worker.test")
+	certificate := testCertificate(t, "control.worker.test")
 	return Config{
 		Origin:             "https://api.worker.test:8443/",
 		ServerName:         "api.worker.test",
 		RootCertificateDER: [][]byte{bytes.Clone(certificate.Certificate[0])},
-		ClientCertificate:  certificate,
-		ClientSigner:       signer,
+		WorkerNodeID:       "powertoys-node:01",
+		WorkerAuth:         parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),
 		Limits: Limits{
 			MaximumRequestBytes:       2*1024*1024 + 16*1024,
 			MaximumResponseBytes:      2 * 1024 * 1024,
@@ -1279,10 +1086,10 @@ func validConfig(t *testing.T) (Config, *ecdsa.PrivateKey) {
 			ClaimTimeout:              90 * time.Second,
 			MaximumConcurrentRequests: 8,
 		},
-	}, signer
+	}
 }
 
-func testCertificate(t *testing.T, commonName string) (tls.Certificate, *ecdsa.PrivateKey) {
+func testCertificate(t *testing.T, commonName string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -1303,7 +1110,7 @@ func testCertificate(t *testing.T, commonName string) (tls.Certificate, *ecdsa.P
 	if err != nil {
 		t.Fatalf("create certificate: %v", err)
 	}
-	return tls.Certificate{Certificate: [][]byte{der}}, key
+	return tls.Certificate{Certificate: [][]byte{der}}
 }
 
 var _ http.RoundTripper = roundTripFunc(nil)

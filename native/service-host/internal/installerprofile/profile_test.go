@@ -13,9 +13,9 @@ func TestWorkerAuthenticationPathMatchesRuntimeProfile(t *testing.T) {
 	}
 }
 
-func TestBearerTokenInstallerV2AcceptsFixedPackageAndBootstrapSelections(t *testing.T) {
+func TestCurrentProfileAcceptsFixedPackageAndBootstrapSelections(t *testing.T) {
 	if err := ValidatePackageRoots(
-		BearerTokenInstallerV2ID,
+		ProfileID,
 		"worker-package-001",
 		MetadataRootParent+`\worker-package-001`,
 		InstallationRoot,
@@ -24,12 +24,12 @@ func TestBearerTokenInstallerV2AcceptsFixedPackageAndBootstrapSelections(t *test
 		t.Fatal(err)
 	}
 	control, executor := validBootstrapPair()
-	if err := ValidateBearerTokenBootstrapPair(BearerTokenInstallerV2ID, control, executor); err != nil {
+	if err := ValidateBootstrapPair(ProfileID, control, executor); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredential(t *testing.T) {
+func TestCurrentProfileRejectsAlternateRootsAndBootstrapSelections(t *testing.T) {
 	packageTests := []struct {
 		name         string
 		profileID    string
@@ -38,9 +38,9 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 		trustedRoot  string
 	}{
 		{name: "profile", profileID: "other", metadataRoot: MetadataRootParent + `\worker-package-001`, installRoot: InstallationRoot, trustedRoot: TrustedConfigurationRoot},
-		{name: "metadata", profileID: BearerTokenInstallerV2ID, metadataRoot: MetadataRootParent + `\other`, installRoot: InstallationRoot, trustedRoot: TrustedConfigurationRoot},
-		{name: "installation", profileID: BearerTokenInstallerV2ID, metadataRoot: MetadataRootParent + `\worker-package-001`, installRoot: `D:\Worker`, trustedRoot: TrustedConfigurationRoot},
-		{name: "trusted", profileID: BearerTokenInstallerV2ID, metadataRoot: MetadataRootParent + `\worker-package-001`, installRoot: InstallationRoot, trustedRoot: `D:\Trusted`},
+		{name: "metadata", profileID: ProfileID, metadataRoot: MetadataRootParent + `\other`, installRoot: InstallationRoot, trustedRoot: TrustedConfigurationRoot},
+		{name: "installation", profileID: ProfileID, metadataRoot: MetadataRootParent + `\worker-package-001`, installRoot: `D:\Worker`, trustedRoot: TrustedConfigurationRoot},
+		{name: "trusted", profileID: ProfileID, metadataRoot: MetadataRootParent + `\worker-package-001`, installRoot: InstallationRoot, trustedRoot: `D:\Trusted`},
 	}
 	for _, test := range packageTests {
 		t.Run("package "+test.name, func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 	for _, packageID := range []string{".", "..", "con", "com1", "lpt9", "Worker-package", "worker:package", "worker.", "worker "} {
 		t.Run("package ID "+packageID, func(t *testing.T) {
 			if err := ValidatePackageRoots(
-				BearerTokenInstallerV2ID,
+				ProfileID,
 				packageID,
 				MetadataRootParent+`\`+packageID,
 				InstallationRoot,
@@ -67,10 +67,6 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 		name   string
 		mutate func(*config.Config, *config.Config)
 	}{
-		{name: "historical schema", mutate: func(control, executor *config.Config) {
-			control.SchemaVersion = config.SchemaVersion
-			executor.SchemaVersion = config.SchemaVersion
-		}},
 		{name: "Control data root", mutate: func(control, _ *config.Config) {
 			control.Node.DataRoot = `D:\Control`
 		}},
@@ -80,9 +76,6 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 		{name: "authentication profile", mutate: func(control, _ *config.Config) {
 			control.Control.WorkerAuthenticationProfile = "other"
 		}},
-		{name: "client certificate", mutate: func(control, _ *config.Config) {
-			control.Control.ClientCertificateStore = config.WindowsCertificateStore
-		}},
 		{name: "Token-shaped bootstrap key name", mutate: func(control, _ *config.Config) {
 			control.Control.LocalAuthorityCNGKeyName = `AgenticReview.arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
 		}},
@@ -91,7 +84,7 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 		t.Run("bootstrap "+test.name, func(t *testing.T) {
 			control, executor := validBootstrapPair()
 			test.mutate(&control, &executor)
-			if err := ValidateBearerTokenBootstrapPair(BearerTokenInstallerV2ID, control, executor); err == nil {
+			if err := ValidateBootstrapPair(ProfileID, control, executor); err == nil {
 				t.Fatal("invalid bootstrap pair was accepted")
 			}
 		})
@@ -100,7 +93,7 @@ func TestBearerTokenInstallerV2RejectsAlternateRootsSchemaAndHistoricalCredentia
 
 func validBootstrapPair() (config.Config, config.Config) {
 	control := config.Config{
-		SchemaVersion: config.BearerTokenSchemaVersion,
+		SchemaVersion: config.SchemaVersion,
 		Role:          config.RoleControl,
 		WorkerNodeID:  "worker-node-001",
 		OwnService:    config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID},

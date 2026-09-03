@@ -319,7 +319,7 @@ func TestPrepareRejectsNoncanonicalUnsafeAndUnreviewedInventory(t *testing.T) {
 			index := dependencyIndex(value.Dependencies, releasemanifest.RolePolicy)
 			value.Dependencies[index].Path = `policy\..\escape.json`
 		}, want: ErrInvalid},
-		{name: "legacy bundle", mutate: func(value *PrepareRequest) {
+		{name: "forbidden monolithic bundle", mutate: func(value *PrepareRequest) {
 			index := dependencyIndex(value.Dependencies, releasemanifest.RoleControlBundle)
 			value.Dependencies[index].Path = `app\dist\worker.mjs`
 		}, want: ErrInvalid},

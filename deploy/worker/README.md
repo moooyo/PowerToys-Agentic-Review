@@ -1,14 +1,14 @@
-# Legacy Windows Worker Deployment Scaffold
+# Retired Single-Service Windows Worker Scaffold
 
-This directory contains the older, single-service, execution-disabled deployment scaffold. It does
-not implement the ADR 0007 split Control/Executor installation or the ADR 0025 per-Worker Bearer
-Token profile. It must not be used for a current Worker deployment or to enable production
-execution.
+The only current product profile uses bootstrap schema 4, the split Control and Executor services,
+and the ADR 0025 fixed per-Worker Bearer Token configuration. The root-level single-service script
+and WinSW template in this directory are retired source artifacts. They are not a supported
+installation path and must not be used to deploy a Worker or enable production execution.
 
-The legacy script and WinSW template retain the superseded Worker mTLS inputs for historical
-reference. They cannot register against the selected Token-only Server authentication path. The
-selected Worker remains an outbound-only Windows client of the Linux Server's HTTPS API; it does
-not receive GitHub credentials and does not access the Server database.
+Their obsolete credential inputs do not define a compatibility profile and cannot register against
+the Token-only Server authentication path. The selected Worker remains an outbound-only Windows
+client of the Linux Server's HTTPS API; it does not receive GitHub credentials and does not access
+the Server database.
 
 ## Current Worker authentication boundary
 
@@ -63,11 +63,11 @@ release before enabling execution.
 
 ## Installation
 
-`install-worker.ps1` still requires the superseded client-certificate arguments and cannot write or
-validate `worker-auth-v1.json`. Do not invoke it as an ADR 0025 installation procedure. A supported
-installer must provision the fixed Control configuration file and must not offer a second Worker
-Token source through an environment variable, command-line argument, registry value, package
-field, or alternate path.
+`install-worker.ps1` does not implement the current schema-4 profile and cannot write or validate
+`worker-auth-v1.json`. Do not invoke it as an ADR 0025 installation procedure. A supported installer
+must provision the fixed Control configuration file and must not offer a second Worker Token source
+through an environment variable, command-line argument, registry value, package field, or alternate
+path.
 
 Execution is disabled, and this installer explicitly rejects `-EnableExecution`. The native Windows
 ServiceHost composition and split role bundle foundations now exist, but the role business
@@ -79,9 +79,7 @@ material, apply service and filesystem ACLs and firewall policy, and install mac
 policy. Package signing and Authenticode validation remain required. Native Windows x64 and arm64
 verification under ADR 0007 remains mandatory before Claim authority can be enabled.
 
-Historically, this legacy installer used the virtual service account
-`NT SERVICE\AgenticReview.Worker`, removed inherited access from its mTLS secret directory, and
-granted that account only the filesystem permissions needed by the disabled control loop. That is
-not the ADR 0025 Token-storage profile. The production design instead requires the distinct
-restricted `NT SERVICE\AgenticReview.Worker.Control` and
-`NT SERVICE\AgenticReview.Worker.Executor` identities.
+No migration or compatibility path is defined from the single-service scaffold. The current design
+requires the distinct restricted `NT SERVICE\AgenticReview.Worker.Control` and
+`NT SERVICE\AgenticReview.Worker.Executor` identities and the exact Token-storage profile described
+above.

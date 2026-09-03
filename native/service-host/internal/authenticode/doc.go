@@ -13,7 +13,7 @@
 // trust state; it does not claim to perform CRL or OCSP checking. The release
 // pipeline, installer, and signer-pin rotation process are responsible for
 // online code-signing revocation checks. The Server separately remains the
-// live revocation authority for Worker access through mTLS.
+// live revocation authority for Worker API access.
 //
 // The verifier supplies CERT_STRONG_SIGN_PARA_OS_CURRENT to WinVerifyTrust and
 // independently requires SHA-256 in both the selected primary SignerInfo and

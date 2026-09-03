@@ -1,24 +1,23 @@
 # Split Windows Worker Installation Inputs
 
-This directory contains dormant RoleConfig v2 source inputs for the future split Windows installer
-and a fixed-path local Worker credential provisioning helper. It is not a complete installer, a
-deployable package, or installation evidence. The legacy
-`deploy/worker/install-worker.ps1` remains unchanged and cannot install this profile or the ADR 0025
-per-Worker Bearer Token profile.
+This directory contains RoleConfig v2 source inputs for the current split Windows installation
+profile and a fixed-path local Worker credential provisioning helper. It is not a complete
+installer, a deployable package, or installation evidence. The retired root-level
+`deploy/worker/install-worker.ps1` cannot install the schema-4 ADR 0025 per-Worker Bearer Token
+profile.
 
-The first installation profile accepts only a host with no existing Worker service or runtime
-installation. Discovery of the legacy `AgenticReview.Worker` service, a legacy runtime root, or a
-partial legacy installation fails closed. Legacy-to-split migration requires a separate ADR and is
-not inferred from the upgrade procedure below. A previously committed split pair may use the
-split-to-split upgrade path.
+The current clean-install profile accepts only a host with no existing Worker service or runtime
+installation. Discovery of an unsupported single-service installation, an existing runtime root,
+or a partial installation fails closed. Migration from another layout is outside this profile. A
+previously committed split pair may use the split-to-split upgrade path.
 
 The design authority is ADR 0025 together with the still-applicable split-service, package,
-transaction, and SCM decisions in ADR 0007, ADRs 0009 through 0013, ADR 0015, and ADR 0016. The
-mTLS credential, Server binding receipt, and enrollment-record requirements in those earlier exact
-profiles are historical and must be replaced by explicitly versioned profiles rather than silently
-reinterpreted. The XML files only describe how the two WinSW wrappers launch ServiceHost. They do
-not provision services, accounts, restricted service SIDs, ACLs, the local capability-signing key,
-package trust material, firewall rules, machine policy, physical roots, or the Worker Bearer Token.
+transaction, and SCM decisions in ADR 0007, ADRs 0009 through 0013, ADR 0015, and ADR 0016. Earlier
+client-certificate, Server-binding-receipt, and enrollment-record requirements are superseded and
+do not define an alternate product profile. The XML files only describe how the two WinSW wrappers
+launch ServiceHost. They do not provision services, accounts, restricted service SIDs, ACLs, the
+local capability-signing key, package trust material, firewall rules, machine policy, physical
+roots, or the Worker Bearer Token.
 
 ## Source files
 
@@ -146,12 +145,12 @@ writing. It is a credential provisioning helper, not the deferred SCM/root trans
 The future privileged Go installer must:
 
 1. verify the expanded staging tree with `stagedpackage.Verify`;
-2. select `BearerTokenInstallerV2Package` from the retained evidence and consume only that typed v2
-   gate in the same process without serialization;
+2. select `InstallerPackage` from the verified evidence and consume only that current
+   typed gate in the same process without serialization;
 3. materialize and fully verify complete inactive metadata, installation, and
    trusted-configuration roots;
 4. for an upgrade, drain Control and wait for authenticated `Drained`; for an initial install,
-   prove that no legacy or split Worker installation exists;
+   prove that no unsupported single-service or split Worker installation exists;
 5. durably set each existing split service to demand-start with all failure actions disabled, then
    stop Control and Executor and prove both process trees absent; on a clean install, persist the
    verified absence as the maintenance fence without creating a service;
@@ -197,18 +196,18 @@ dynamic validation. Native Windows x64 and arm64 verification required by ADR 00
 
 ## Deferred production work
 
-Native bootstrap schema v4, Control data-root verification, preflight, production composition,
-signed outer-package v2, and installer profile v2 now select the fixed ADR 0025 authentication file
-and contain no Worker mTLS path. Signed package v1 deliberately remains historical schema v3.
-`stagedpackage.SelectBearerTokenInstallerV2` rejects v1 before the destination verifier can consume
-v2 evidence. The read-only `installerdestination.Verify` composition now implements step 7, but no
-production installer performs steps 3 through 6 or invokes it. The repository still lacks the
+Native bootstrap schema 4, Control data-root verification, preflight, production composition,
+signed outer-package v2, and installer profile v2 select the fixed ADR 0025 authentication file as
+the only Worker authentication path. `stagedpackage.SelectInstallerPackage` accepts only the
+current schema-4/package-v2 evidence before the destination verifier can consume it. The read-only
+`installerdestination.Verify` composition now implements step 7, but no production installer
+performs steps 3 through 6 or invokes it. The repository still lacks the
 production split installer, root materializer and atomic swap, transaction-journal schema v2 and
 its durable Windows store, the native SCM adapter, the
 complete final recovery and preshutdown policy, pinned WinSW release validation, native proof of the
 disabled-create intermediate DACL and failure-action clearing, authenticated installer-facing
 readiness observation, archive/extractor, and native Windows verification evidence.
-Legacy-to-split migration is separately deferred. Those items must be designed and reviewed before
-these inputs can become a supported installation path. Worker client-certificate enrollment,
-binding receipts, receipt trust, signer-host implementation, and signer-host Linux process tests are
-not deferred requirements.
+Migration from the unsupported single-service scaffold is not part of the current installation
+path. The remaining items must be designed and reviewed before these inputs can become a supported
+installation path. Worker client-certificate enrollment, binding receipts, receipt trust,
+signer-host implementation, and signer-host Linux process tests are not deferred requirements.

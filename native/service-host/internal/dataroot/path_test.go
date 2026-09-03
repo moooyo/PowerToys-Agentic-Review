@@ -20,14 +20,8 @@ func TestBuildRuntimePathPlanRequiresClosedPurposeLayout(t *testing.T) {
 	}
 }
 
-func TestBearerTokenSchemaAddsOnlyTheControlAuthenticationFile(t *testing.T) {
+func TestCurrentProfileAddsOnlyTheControlAuthenticationFile(t *testing.T) {
 	control, executor := pairedConfigs()
-	control.SchemaVersion = config.BearerTokenSchemaVersion
-	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	control.Control.ClientCertificateStore = ""
-	control.Control.ClientCertificateDERSHA256 = ""
-	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	executor.SchemaVersion = config.BearerTokenSchemaVersion
 
 	controlPlan, err := buildRuntimePathPlan(control)
 	if err != nil {
@@ -35,10 +29,10 @@ func TestBearerTokenSchemaAddsOnlyTheControlAuthenticationFile(t *testing.T) {
 	}
 	if len(controlPlan.files) != 1 || controlPlan.files[0].purpose != PurposeWorkerAuth ||
 		controlPlan.files[0].path != config.WorkerAuthenticationProfilePath {
-		t.Fatalf("Control schemaVersion 4 files = %#v", controlPlan.files)
+		t.Fatalf("Control current-profile files = %#v", controlPlan.files)
 	}
 	if len(controlPlan.closed) != 2 || len(controlPlan.closed[0].children) != 4 {
-		t.Fatalf("Control schemaVersion 4 closed layout = %#v", controlPlan.closed)
+		t.Fatalf("Control current-profile closed layout = %#v", controlPlan.closed)
 	}
 
 	executorPlan, err := buildRuntimePathPlan(executor)

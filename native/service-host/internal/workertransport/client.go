@@ -3,7 +3,6 @@ package workertransport
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -16,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,20 +62,8 @@ type Limits struct {
 	MaximumConcurrentRequests int
 }
 
+// Config selects the per-Worker Token transport.
 type Config struct {
-	Origin             string
-	ServerName         string
-	RootCertificateDER [][]byte
-	ClientCertificate  tls.Certificate
-	// ClientSigner is borrowed by a successfully constructed Client until Client.Close succeeds.
-	// The caller retains ownership and must close the signer only after that lifecycle barrier.
-	ClientSigner crypto.Signer
-	Limits       Limits
-}
-
-// BearerConfig is the configuration selected by bootstrap schema v4 for the per-Worker Token
-// transport.
-type BearerConfig struct {
 	Origin             string
 	ServerName         string
 	RootCertificateDER [][]byte
@@ -168,9 +154,7 @@ type clientState struct {
 	closeMu              sync.Mutex
 	closeIdleConnections func() error
 	transportReleased    bool
-	signerGate           *clientSignerGate
 	workerToken          []byte
-	bearerAuthentication bool
 }
 
 type executePolicy struct {
@@ -178,14 +162,6 @@ type executePolicy struct {
 	maximumResponseBytes int64
 	primarySuccessStatus int
 	secondSuccessStatus  int
-}
-
-type clientSignerGate struct {
-	mu           sync.Mutex
-	closed       bool
-	signer       crypto.Signer
-	publicKeyDER []byte
-	active       sync.WaitGroup
 }
 
 type errorIdleConnectionCloser interface {
@@ -196,45 +172,9 @@ type idleConnectionCloser interface {
 	CloseIdleConnections()
 }
 
-func NewClient(config Config) (*Client, error) {
-	origin, err := parseOrigin(config.Origin)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateServerName(config.ServerName); err != nil {
-		return nil, err
-	}
-	rootCAs, err := prepareRootCAs(config.RootCertificateDER)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateLimits(config.Limits); err != nil {
-		return nil, err
-	}
-
-	signerGate, err := newClientSignerGate(config.ClientSigner)
-	if err != nil {
-		return nil, err
-	}
-	certificate, err := prepareClientCertificate(config.ClientCertificate, signerGate)
-	if err != nil {
-		signerGate.closeAndWait()
-		return nil, err
-	}
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		ServerName:   config.ServerName,
-		RootCAs:      rootCAs,
-		Certificates: []tls.Certificate{certificate},
-	}
-	dialTimeout := min(config.Limits.RequestTimeout, 30*time.Second)
-	transport := newHTTPTransport(tlsConfig, config.Limits, dialTimeout)
-	return newClient(origin, transport, signerGate, config.Limits), nil
-}
-
-// NewBearerClient constructs an HTTPS client that authenticates every fixed Worker API operation
+// NewClient constructs an HTTPS client that authenticates every fixed Worker API operation
 // with one opaque per-Worker Bearer Token and presents no TLS client certificate.
-func NewBearerClient(config BearerConfig) (*Client, error) {
+func NewClient(config Config) (*Client, error) {
 	origin, err := parseOrigin(config.Origin)
 	if err != nil {
 		return nil, err
@@ -266,7 +206,7 @@ func NewBearerClient(config BearerConfig) (*Client, error) {
 	}
 	dialTimeout := min(config.Limits.RequestTimeout, 30*time.Second)
 	transport := newHTTPTransport(tlsConfig, config.Limits, dialTimeout)
-	return newBearerClient(origin, transport, config.WorkerAuth, config.Limits), nil
+	return newClient(origin, transport, config.WorkerAuth, config.Limits), nil
 }
 
 func newHTTPTransport(tlsConfig *tls.Config, limits Limits, dialTimeout time.Duration) *http.Transport {
@@ -370,8 +310,6 @@ func (c *Client) FailRun(ctx context.Context, request RunFailRequest) (RunFailRe
 
 // Close rejects new requests, cancels and waits for active requests, and releases the HTTP
 // transport's idle connections. A failed transport release may be retried by calling Close again.
-// After Close succeeds, the client no longer retains the transport that borrows ClientSigner; it
-// never closes that caller-owned signer.
 func (c *Client) Close() error {
 	if c == nil || c.state == nil {
 		return nil
@@ -384,19 +322,14 @@ func (c *Client) Close() error {
 		for _, cancel := range state.requests {
 			cancellations = append(cancellations, cancel)
 		}
-		signerGate := state.signerGate
 		state.lifecycleMu.Unlock()
-
-		signerGate.close()
 
 		for _, cancel := range cancellations {
 			cancel(ErrClosed)
 		}
 		state.active.Wait()
-		signerGate.waitAndRelease()
 
 		state.lifecycleMu.Lock()
-		state.signerGate = nil
 		clear(state.workerToken)
 		state.workerToken = nil
 		state.drained = true
@@ -426,10 +359,7 @@ func (c *Client) CloseIdleConnections() error {
 	state.lifecycleMu.Unlock()
 
 	if err := closeIdleConnections(); err != nil {
-		if state.bearerAuthentication {
-			return errors.New("close worker API idle connections")
-		}
-		return fmt.Errorf("close worker API idle connections: %w", err)
+		return errors.New("close worker API idle connections")
 	}
 	if finalRelease {
 		state.lifecycleMu.Lock()
@@ -444,26 +374,7 @@ func (c *Client) CloseIdleConnections() error {
 func newClient(
 	origin url.URL,
 	roundTripper http.RoundTripper,
-	signerGate *clientSignerGate,
-	limits Limits,
-) *Client {
-	return newClientState(origin, roundTripper, signerGate, nil, limits)
-}
-
-func newBearerClient(
-	origin url.URL,
-	roundTripper http.RoundTripper,
 	workerAuth WorkerAuth,
-	limits Limits,
-) *Client {
-	return newClientState(origin, roundTripper, nil, workerAuth.tokenBytes(), limits)
-}
-
-func newClientState(
-	origin url.URL,
-	roundTripper http.RoundTripper,
-	signerGate *clientSignerGate,
-	workerToken []byte,
 	limits Limits,
 ) *Client {
 	return &Client{
@@ -480,9 +391,7 @@ func newClientState(
 			concurrentRequests:   make(chan struct{}, limits.MaximumConcurrentRequests),
 			requests:             make(map[uint64]context.CancelCauseFunc),
 			closeIdleConnections: prepareIdleConnectionCloser(roundTripper),
-			signerGate:           signerGate,
-			workerToken:          bytes.Clone(workerToken),
-			bearerAuthentication: len(workerToken) != 0,
+			workerToken:          workerAuth.tokenBytes(),
 		},
 	}
 }
@@ -505,79 +414,6 @@ func prepareIdleConnectionCloser(roundTripper http.RoundTripper) func() error {
 		}
 	}
 	return func() error { return nil }
-}
-
-func newClientSignerGate(signer crypto.Signer) (*clientSignerGate, error) {
-	if isNilSigner(signer) {
-		return nil, configurationError("ClientSigner is required", nil)
-	}
-	publicKeyDER, err := x509.MarshalPKIXPublicKey(signer.Public())
-	if err != nil {
-		return nil, configurationError("ClientSigner public key is invalid", err)
-	}
-	if _, err := x509.ParsePKIXPublicKey(publicKeyDER); err != nil {
-		return nil, configurationError("ClientSigner public key is invalid", err)
-	}
-	return &clientSignerGate{
-		signer:       signer,
-		publicKeyDER: bytes.Clone(publicKeyDER),
-	}, nil
-}
-
-func (g *clientSignerGate) Public() crypto.PublicKey {
-	if g == nil {
-		return nil
-	}
-	publicKey, err := x509.ParsePKIXPublicKey(bytes.Clone(g.publicKeyDER))
-	if err != nil {
-		return nil
-	}
-	return publicKey
-}
-
-func (g *clientSignerGate) Sign(
-	random io.Reader,
-	digest []byte,
-	options crypto.SignerOpts,
-) ([]byte, error) {
-	if g == nil {
-		return nil, ErrClosed
-	}
-	g.mu.Lock()
-	if g.closed {
-		g.mu.Unlock()
-		return nil, ErrClosed
-	}
-	g.active.Add(1)
-	signer := g.signer
-	g.mu.Unlock()
-
-	defer g.active.Done()
-	return signer.Sign(random, digest, options)
-}
-
-func (g *clientSignerGate) close() {
-	if g == nil {
-		return
-	}
-	g.mu.Lock()
-	g.closed = true
-	g.mu.Unlock()
-}
-
-func (g *clientSignerGate) waitAndRelease() {
-	if g == nil {
-		return
-	}
-	g.active.Wait()
-	g.mu.Lock()
-	g.signer = nil
-	g.mu.Unlock()
-}
-
-func (g *clientSignerGate) closeAndWait() {
-	g.close()
-	g.waitAndRelease()
 }
 
 func rejectRedirect(*http.Request, []*http.Request) error {
@@ -666,12 +502,10 @@ func (c *clientState) executeWithPolicy(
 		return nil, fmt.Errorf("construct fixed-origin worker API request: %w", err)
 	}
 	request.Header = http.Header{
-		"Accept":       {"application/json"},
-		"Content-Type": {"application/json"},
-		"User-Agent":   {workerUserAgent},
-	}
-	if len(c.workerToken) != 0 {
-		request.Header.Set("Authorization", "Bearer "+string(c.workerToken))
+		"Accept":        {"application/json"},
+		"Authorization": {"Bearer " + string(c.workerToken)},
+		"Content-Type":  {"application/json"},
+		"User-Agent":    {workerUserAgent},
 	}
 	request.ContentLength = int64(len(requestBody))
 
@@ -915,67 +749,6 @@ func validateLimits(limits Limits) error {
 		return configurationError("MaximumConcurrentRequests is outside the supported range", nil)
 	}
 	return nil
-}
-
-func prepareClientCertificate(source tls.Certificate, signer crypto.Signer) (tls.Certificate, error) {
-	if isNilSigner(signer) {
-		return tls.Certificate{}, configurationError("ClientSigner is required", nil)
-	}
-	if len(source.Certificate) == 0 {
-		return tls.Certificate{}, configurationError("ClientCertificate must contain a certificate chain", nil)
-	}
-	certificate := source
-	certificate.Certificate = make([][]byte, len(source.Certificate))
-	for index, der := range source.Certificate {
-		if len(der) == 0 {
-			return tls.Certificate{}, configurationError("ClientCertificate chain contains an empty certificate", nil)
-		}
-		certificate.Certificate[index] = bytes.Clone(der)
-	}
-	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		return tls.Certificate{}, configurationError("ClientCertificate leaf is invalid", err)
-	}
-	leafPublicKey, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
-	if err != nil {
-		return tls.Certificate{}, configurationError("ClientCertificate public key is invalid", err)
-	}
-	signerPublicKey, err := x509.MarshalPKIXPublicKey(signer.Public())
-	if err != nil {
-		return tls.Certificate{}, configurationError("ClientSigner public key is invalid", err)
-	}
-	if !bytes.Equal(leafPublicKey, signerPublicKey) {
-		return tls.Certificate{}, configurationError(
-			"ClientSigner does not match the ClientCertificate leaf public key",
-			nil,
-		)
-	}
-
-	certificate.PrivateKey = signer
-	certificate.Leaf = leaf
-	certificate.OCSPStaple = bytes.Clone(source.OCSPStaple)
-	certificate.SignedCertificateTimestamps = make([][]byte, len(source.SignedCertificateTimestamps))
-	for index, timestamp := range source.SignedCertificateTimestamps {
-		certificate.SignedCertificateTimestamps[index] = bytes.Clone(timestamp)
-	}
-	certificate.SupportedSignatureAlgorithms = append(
-		[]tls.SignatureScheme(nil),
-		source.SupportedSignatureAlgorithms...,
-	)
-	return certificate, nil
-}
-
-func isNilSigner(signer crypto.Signer) bool {
-	if signer == nil {
-		return true
-	}
-	value := reflect.ValueOf(signer)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return value.IsNil()
-	default:
-		return false
-	}
 }
 
 func validateEntityID(value string) error {

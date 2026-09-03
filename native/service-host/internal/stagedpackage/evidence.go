@@ -162,26 +162,26 @@ func (evidence StagedPackageEvidence) Files() []FileSnapshot {
 	return cloneFileSnapshots(evidence.state.files)
 }
 
-// SelectBearerTokenInstallerV2 converts retained staged evidence into the only type that a future
-// Token-profile installer may accept. Historical schema-v3 packages fail this gate.
-func (evidence StagedPackageEvidence) SelectBearerTokenInstallerV2() (BearerTokenInstallerV2Package, error) {
+// SelectInstallerPackage converts retained staged evidence into the only type that the current
+// installer may accept.
+func (evidence StagedPackageEvidence) SelectInstallerPackage() (InstallerPackage, error) {
 	if err := evidence.Validate(); err != nil {
-		return BearerTokenInstallerV2Package{}, err
+		return InstallerPackage{}, err
 	}
 	evidence.state.mu.Lock()
 	defer evidence.state.mu.Unlock()
-	if evidence.state.closed || validateBearerTokenInstallerV2(
+	if evidence.state.closed || validateInstallerPackage(
 		evidence.state.index,
 		evidence.state.control,
 		evidence.state.executor,
 	) != nil {
-		return BearerTokenInstallerV2Package{}, ErrInstallerProfile
+		return InstallerPackage{}, ErrInstallerProfile
 	}
-	return BearerTokenInstallerV2Package{state: evidence.state, digest: evidence.state.digest}, nil
+	return InstallerPackage{state: evidence.state, digest: evidence.state.digest}, nil
 }
 
-// Validate rechecks the originating staged evidence and its exact v2 profile selection.
-func (selection BearerTokenInstallerV2Package) Validate() error {
+// Validate rechecks the originating staged evidence and its exact current profile selection.
+func (selection InstallerPackage) Validate() error {
 	if selection.state == nil || selection.digest == ([sha256.Size]byte{}) {
 		return ErrInstallerProfile
 	}
@@ -192,7 +192,7 @@ func (selection BearerTokenInstallerV2Package) Validate() error {
 	selection.state.mu.Lock()
 	defer selection.state.mu.Unlock()
 	if selection.state.closed || selection.state.digest != selection.digest ||
-		validateBearerTokenInstallerV2(
+		validateInstallerPackage(
 			selection.state.index,
 			selection.state.control,
 			selection.state.executor,
@@ -204,7 +204,7 @@ func (selection BearerTokenInstallerV2Package) Validate() error {
 
 // Close releases the retained staged-package handles. It is idempotent with closing the
 // originating StagedPackageEvidence.
-func (selection BearerTokenInstallerV2Package) Close() error {
+func (selection InstallerPackage) Close() error {
 	if selection.state == nil {
 		return ErrInstallerProfile
 	}
@@ -215,42 +215,42 @@ func (selection BearerTokenInstallerV2Package) Close() error {
 	return err
 }
 
-// WithDestinationBinding lends an immutable view of the exact admitted v2 documents to one
+// WithDestinationBinding lends an immutable view of the exact admitted current documents to one
 // synchronous destination-verification callback. The originating staged handles remain owned by
 // selection and must stay live for the complete callback. Success returns the exclusive close
 // lease; pre-existing evidence and selection aliases can no longer release the source handles.
-func (selection BearerTokenInstallerV2Package) WithDestinationBinding(
-	use func(BearerTokenInstallerV2DestinationBinding) error,
-) (result BearerTokenInstallerV2DestinationLease, resultErr error) {
+func (selection InstallerPackage) WithDestinationBinding(
+	use func(DestinationBinding) error,
+) (result DestinationLease, resultErr error) {
 	if use == nil {
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	if err := selection.Validate(); err != nil {
-		return BearerTokenInstallerV2DestinationLease{}, err
+		return DestinationLease{}, err
 	}
 	selection.state.mu.Lock()
 	if selection.state.closed || selection.state.digest != selection.digest ||
 		selection.state.destinationBorrowed || selection.state.destinationConsumed {
 		selection.state.mu.Unlock()
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	indexDocument, err := outerpackage.MarshalIndexCanonical(selection.state.index)
 	if err != nil {
 		selection.state.mu.Unlock()
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	controlDocument, err := config.MarshalCanonical(selection.state.control)
 	if err != nil {
 		selection.state.mu.Unlock()
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	executorDocument, err := config.MarshalCanonical(selection.state.executor)
 	if err != nil {
 		selection.state.mu.Unlock()
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	borrow := &destinationBorrowState{active: true}
-	binding := BearerTokenInstallerV2DestinationBinding{
+	binding := DestinationBinding{
 		issuer:           successfulDestinationBindingIssuer,
 		borrow:           borrow,
 		sourceDigest:     selection.digest,
@@ -278,23 +278,23 @@ func (selection BearerTokenInstallerV2Package) WithDestinationBinding(
 		selection.state.mu.Unlock()
 	}()
 	if binding.Validate() != nil {
-		return BearerTokenInstallerV2DestinationLease{}, ErrInstallerProfile
+		return DestinationLease{}, ErrInstallerProfile
 	}
 	if err := use(binding); err != nil {
-		return BearerTokenInstallerV2DestinationLease{}, err
+		return DestinationLease{}, err
 	}
 	if err := selection.Validate(); err != nil {
-		return BearerTokenInstallerV2DestinationLease{}, err
+		return DestinationLease{}, err
 	}
 	transferred = true
-	result = BearerTokenInstallerV2DestinationLease{
+	result = DestinationLease{
 		state: selection.state, digest: selection.digest, owner: ownership,
 	}
 	return result, nil
 }
 
 // Validate rejects zero, forged, or internally inconsistent destination bindings.
-func (binding BearerTokenInstallerV2DestinationBinding) Validate() error {
+func (binding DestinationBinding) Validate() error {
 	if binding.borrow == nil {
 		return ErrInstallerProfile
 	}
@@ -303,15 +303,15 @@ func (binding BearerTokenInstallerV2DestinationBinding) Validate() error {
 	return binding.validateActiveLocked()
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) validateActiveLocked() error {
+func (binding DestinationBinding) validateActiveLocked() error {
 	if binding.issuer != successfulDestinationBindingIssuer || !binding.borrow.active ||
 		binding.sourceDigest == ([sha256.Size]byte{}) || binding.digest == ([sha256.Size]byte{}) ||
 		binding.signerKeyID == "" || digestDestinationBinding(binding) != binding.digest {
 		return ErrInstallerProfile
 	}
 	index, err := outerpackage.ParseIndex(binding.indexDocument)
-	if err != nil || index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil {
+	if err != nil || index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		index.ProfileID != outerpackage.IndexProfileID {
 		return ErrInstallerProfile
 	}
 	envelope, err := outerpackage.ParseSignatureEnvelope(binding.envelopeDocument)
@@ -325,13 +325,13 @@ func (binding BearerTokenInstallerV2DestinationBinding) validateActiveLocked() e
 		return ErrInstallerProfile
 	}
 	executor, err := config.Parse(binding.executorDocument)
-	if err != nil || validateBearerTokenInstallerV2(index, control, executor) != nil {
+	if err != nil || validateInstallerPackage(index, control, executor) != nil {
 		return ErrInstallerProfile
 	}
 	return nil
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) IndexDocument() []byte {
+func (binding DestinationBinding) IndexDocument() []byte {
 	if binding.borrow == nil {
 		return nil
 	}
@@ -343,7 +343,7 @@ func (binding BearerTokenInstallerV2DestinationBinding) IndexDocument() []byte {
 	return bytes.Clone(binding.indexDocument)
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) SignatureEnvelopeDocument() []byte {
+func (binding DestinationBinding) SignatureEnvelopeDocument() []byte {
 	if binding.borrow == nil {
 		return nil
 	}
@@ -355,7 +355,7 @@ func (binding BearerTokenInstallerV2DestinationBinding) SignatureEnvelopeDocumen
 	return bytes.Clone(binding.envelopeDocument)
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) ControlDocument() []byte {
+func (binding DestinationBinding) ControlDocument() []byte {
 	if binding.borrow == nil {
 		return nil
 	}
@@ -367,7 +367,7 @@ func (binding BearerTokenInstallerV2DestinationBinding) ControlDocument() []byte
 	return bytes.Clone(binding.controlDocument)
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) ExecutorDocument() []byte {
+func (binding DestinationBinding) ExecutorDocument() []byte {
 	if binding.borrow == nil {
 		return nil
 	}
@@ -379,7 +379,7 @@ func (binding BearerTokenInstallerV2DestinationBinding) ExecutorDocument() []byt
 	return bytes.Clone(binding.executorDocument)
 }
 
-func (binding BearerTokenInstallerV2DestinationBinding) SignerKeyID() string {
+func (binding DestinationBinding) SignerKeyID() string {
 	if binding.borrow == nil {
 		return ""
 	}
@@ -391,12 +391,12 @@ func (binding BearerTokenInstallerV2DestinationBinding) SignerKeyID() string {
 	return binding.signerKeyID
 }
 
-func (BearerTokenInstallerV2DestinationBinding) MarshalJSON() ([]byte, error) {
+func (DestinationBinding) MarshalJSON() ([]byte, error) {
 	return nil, ErrSerialization
 }
 
 // Validate rechecks the exclusively transferred staged source handles.
-func (lease BearerTokenInstallerV2DestinationLease) Validate() error {
+func (lease DestinationLease) Validate() error {
 	validated := false
 	if err := lease.CommitIfValid(func() { validated = true }); err != nil || !validated {
 		if err == nil {
@@ -409,7 +409,7 @@ func (lease BearerTokenInstallerV2DestinationLease) Validate() error {
 
 // CommitIfValid linearizes one destination operation with the staged-package cleanup quarantine
 // while holding the exclusive source ownership state stable.
-func (lease BearerTokenInstallerV2DestinationLease) CommitIfValid(commit func()) error {
+func (lease DestinationLease) CommitIfValid(commit func()) error {
 	if lease.state == nil || lease.digest == ([sha256.Size]byte{}) || lease.owner == nil {
 		return ErrInstallerProfile
 	}
@@ -436,7 +436,7 @@ func (lease BearerTokenInstallerV2DestinationLease) CommitIfValid(commit func())
 }
 
 // Close is the only capability allowed to release a successfully transferred staged source.
-func (lease BearerTokenInstallerV2DestinationLease) Close() error {
+func (lease DestinationLease) Close() error {
 	if lease.state == nil || lease.owner == nil {
 		return ErrInstallerProfile
 	}
@@ -447,13 +447,13 @@ func (lease BearerTokenInstallerV2DestinationLease) Close() error {
 	return err
 }
 
-func (BearerTokenInstallerV2DestinationLease) MarshalJSON() ([]byte, error) {
+func (DestinationLease) MarshalJSON() ([]byte, error) {
 	return nil, ErrSerialization
 }
 
-func digestDestinationBinding(binding BearerTokenInstallerV2DestinationBinding) [sha256.Size]byte {
+func digestDestinationBinding(binding DestinationBinding) [sha256.Size]byte {
 	encoder := evidenceEncoder{hash: sha256.New()}
-	encoder.bytes([]byte("AgenticReview Bearer Token installer v2 destination binding v1\x00"))
+	encoder.bytes([]byte("AgenticReview installer destination binding v1\x00"))
 	encoder.bytes(binding.sourceDigest[:])
 	encoder.bytes(binding.indexDocument)
 	encoder.bytes(binding.envelopeDocument)
@@ -465,20 +465,20 @@ func digestDestinationBinding(binding BearerTokenInstallerV2DestinationBinding) 
 	return result
 }
 
-// MarshalJSON refuses to serialize the retained v2 installer profile gate.
-func (BearerTokenInstallerV2Package) MarshalJSON() ([]byte, error) { return nil, ErrSerialization }
+// MarshalJSON refuses to serialize the retained installer profile gate.
+func (InstallerPackage) MarshalJSON() ([]byte, error) { return nil, ErrSerialization }
 
-func validateBearerTokenInstallerV2(index outerpackage.Index, control config.Config, executor config.Config) error {
-	if index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		index.ProfileID != outerpackage.BearerTokenIndexProfileID || index.MTLSClientCredential != nil ||
+func validateInstallerPackage(index outerpackage.Index, control config.Config, executor config.Config) error {
+	if index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		index.ProfileID != outerpackage.IndexProfileID ||
 		installerprofile.ValidatePackageRoots(
-			installerprofile.BearerTokenInstallerV2ID,
+			installerprofile.ProfileID,
 			index.PackageID,
 			index.TargetRoots.Metadata,
 			index.TargetRoots.Installation,
 			index.TargetRoots.TrustedConfiguration,
-		) != nil || installerprofile.ValidateBearerTokenBootstrapPair(
-		installerprofile.BearerTokenInstallerV2ID,
+		) != nil || installerprofile.ValidateBootstrapPair(
+		installerprofile.ProfileID,
 		control,
 		executor,
 	) != nil {

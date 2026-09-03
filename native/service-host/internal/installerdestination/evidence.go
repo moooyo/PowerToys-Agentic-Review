@@ -148,8 +148,8 @@ func validateEvidenceState(state *evidenceState) error {
 	if state == nil || state.issuer != successfulEvidenceIssuer || state.closed || state.owner == nil ||
 		state.source.validate == nil || state.source.close == nil || state.source.commit == nil ||
 		state.digest == ([sha256.Size]byte{}) ||
-		state.plan.index.SchemaVersion != outerpackage.BearerTokenIndexSchemaVersion ||
-		state.plan.index.ProfileID != outerpackage.BearerTokenIndexProfileID || len(state.roots) != 3 ||
+		state.plan.index.SchemaVersion != outerpackage.IndexSchemaVersion ||
+		state.plan.index.ProfileID != outerpackage.IndexProfileID || len(state.roots) != 3 ||
 		len(state.files) != len(state.plan.index.Payloads)+2 || digestEvidenceState(state) != state.digest {
 		return ErrInvalidEvidence
 	}

@@ -110,7 +110,7 @@ type evidenceState struct {
 }
 
 // Evidence is opaque, process-local proof that all three post-swap destinations were reopened and
-// matched the live staged v2 gate. It owns both destination and staged handles until Close.
+// matched the live staged installer gate. It owns both destination and staged handles until Close.
 type Evidence struct {
 	state *evidenceState
 }

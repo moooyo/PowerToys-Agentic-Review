@@ -4,15 +4,14 @@
 transport package. It does not read a filesystem, sign with a private key, install files, provision
 CNG keys or certificates, or create Windows services.
 
-ADR 0025 leaves package v1 as immutable schema-v3 mTLS history; this follow-up defines package index
-schema 2 with profile `agentic-review-worker-outer-package-v2`. V2 omits `mtlsClientCredential`, selects the fixed
-split installer v2 roots, and binds only canonical schema-v4 bootstraps. `BuildIndex` remains the
-historical v1 builder; `BuildBearerTokenIndex` is the explicit non-secret v2 builder. Persistent
-plaintext Token storage exists only in
+The only supported package index contract is schema 2 with profile
+`agentic-review-worker-outer-package-v2`. `BuildIndex` builds that Token profile, selects the fixed
+split installer v2 roots, and binds only canonical schema-v4 bootstraps. Persistent plaintext Token
+storage exists only in
 `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, its SHA-256 digest exists only in the
-Server database, and neither value is a package input. V2 rejects that filename at every indexed
-path, has no Token, Token-digest, or mTLS field, and rejects complete Token-shaped values in every
-identity, key-name, root, and payload-path string written to the signed index.
+Server database, and neither value is a package input. The index rejects that filename at every
+indexed path, has no Token, Token-digest, or mTLS field, and rejects complete Token-shaped values in
+every identity, key-name, root, and payload-path string written to the signed index.
 
 ## Package closure
 
@@ -42,19 +41,18 @@ roles, omissions, and duplicates. Outer index normalization invokes that same va
 reconstructing the runtime manifest files. Wrapper payloads carry the index target architecture;
 configuration payloads never carry one.
 
-Both builders obtain one `releasepackage.AssemblySnapshot`. The snapshot revalidates and clones all
+The builder obtains one `releasepackage.AssemblySnapshot`. The snapshot revalidates and clones all
 six finalized documents inside the release and native-handle cleanup commit gates. The builder does
-not reconstruct reviewed metadata from caller-provided fields. `BuildOptions`, including bootstrap
-hashes, target roots, CNG identity, and mTLS identity, remains ordinary assembler input: this package
-commits it to signed data but does not verify its provenance. V2 instead accepts
-`BearerTokenBuildOptions`, which contains only the package/node IDs, local capability identity,
-fixed roots, and bootstrap hashes. Package and installation IDs are
-lowercase Windows path components; their eventual physical placement under signed target roots is
-left to the future filesystem assembly and bootstrap gate.
+not reconstruct reviewed metadata from caller-provided fields. `BuildOptions` contains only the
+package/node IDs, local CNG capability identity, fixed roots, and bootstrap hashes. This package
+commits those values to signed data but does not verify their provenance. The finalized package
+descriptor retains its reviewed Authenticode leaf signer certificate digest. Package and
+installation IDs are lowercase Windows path components; their eventual physical placement under
+signed target roots is left to the future filesystem assembly and bootstrap gate.
 
 ## Detached signature
 
-The signature envelope remains schema 1 for both index profiles and fixes
+The detached signature envelope uses schema 1 and fixes
 `ecdsa-p256-sha256-p1363-low-s`. Its signature is the canonical unpadded base64url encoding of a
 64-byte `r || s` value over:
 
@@ -66,8 +64,9 @@ Verification accepts only canonical P-256 SubjectPublicKeyInfo DER and rejects z
 or high-S scalars, DER signatures, padding, and algorithm substitution. `VerifyDetachedSignature`
 returns only an error. Its `trustedSPKI` input is not an authority source; a future production
 adapter must supply that key exclusively from compiled `outertrust` policy.
-The signed canonical index bytes already include schema/profile, so a signature produced for a v1
-index cannot be replayed over a v2 index or vice versa.
+`SigningDigest` and `VerifyDetachedSignature` accept only the current schema 2 package profile.
+Unsupported schemas, removed credential fields, and alternate package profiles are rejected before
+cryptographic acceptance.
 
 ## Authority boundary
 

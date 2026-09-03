@@ -318,7 +318,7 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 		if err != nil {
 			return nil, err
 		}
-		client, err := workertransport.NewBearerClient(workertransport.BearerConfig{
+		client, err := workertransport.NewClient(workertransport.Config{
 			Origin:             configuration.Control.ServerOrigin,
 			ServerName:         configuration.Control.ServerName,
 			RootCertificateDER: roots,

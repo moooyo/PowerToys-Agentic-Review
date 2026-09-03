@@ -23,15 +23,21 @@ func TestBuildIndexIsCanonicalDeterministicAndBoundToRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(first, second) || bytes.HasSuffix(first, []byte{'\n'}) {
-		t.Fatal("identical release inputs did not produce identical canonical index bytes")
+		t.Fatal("identical Token-profile inputs did not produce identical canonical index bytes")
 	}
 	parsed, err := ParseIndex(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.Payloads) != len(release.manifest.Files)+len(specialPayloadRules) ||
+	if parsed.SchemaVersion != IndexSchemaVersion || parsed.ProfileID != IndexProfileID ||
+		len(parsed.Payloads) != len(release.manifest.Files)+len(specialPayloadRules) ||
 		parsed.Payloads[0].Root != RootMetadata || parsed.TargetArchitecture != ArchitectureAMD64 {
 		t.Fatalf("unexpected package index: %#v", parsed)
+	}
+	if bytes.Contains(first, []byte("mtlsClientCredential")) ||
+		bytes.Contains(bytes.ToLower(first), []byte("worker-auth-v1.json")) ||
+		bytes.Contains(first, []byte("arw1_")) {
+		t.Fatalf("Token package index contains forbidden credential material: %s", first)
 	}
 	for _, path := range []string{
 		releasepackage.ControlServiceWrapperPath,
@@ -56,45 +62,11 @@ func TestBuildIndexIsCanonicalDeterministicAndBoundToRelease(t *testing.T) {
 	if err := validateAgainstRelease(first, release); err != nil {
 		t.Fatal(err)
 	}
-	if digest := sha256.Sum256(first); hex.EncodeToString(digest[:]) != outerIndexGoldenSHA256 {
-		t.Fatalf("outer index golden SHA-256 = %s, want %s", hex.EncodeToString(digest[:]), outerIndexGoldenSHA256)
-	}
 
 	parsed.Payloads[0].Path = "mutated.json"
 	reparsed, err := ParseIndex(first)
 	if err != nil || reparsed.Payloads[0].Path == "mutated.json" {
 		t.Fatal("ParseIndex returned aliased payload storage")
-	}
-}
-
-func TestBuildBearerTokenIndexIsCanonicalBoundAndContainsNoCredentialIdentity(t *testing.T) {
-	release := validFinalizedSource(t, "a", "b")
-	first, err := buildBearerTokenIndex(release, validBearerTokenBuildOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := buildBearerTokenIndex(release, validBearerTokenBuildOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(first, second) || bytes.HasSuffix(first, []byte{'\n'}) {
-		t.Fatal("identical Token-profile inputs did not produce identical canonical index bytes")
-	}
-	parsed := mustParseIndex(t, first)
-	if parsed.SchemaVersion != BearerTokenIndexSchemaVersion ||
-		parsed.ProfileID != BearerTokenIndexProfileID || parsed.MTLSClientCredential != nil {
-		t.Fatalf("unexpected Token package profile: %#v", parsed)
-	}
-	if bytes.Contains(first, []byte("mtlsClientCredential")) ||
-		bytes.Contains(bytes.ToLower(first), []byte("worker-auth-v1.json")) ||
-		bytes.Contains(first, []byte("arw1_")) {
-		t.Fatalf("Token package index contains a forbidden credential field or payload: %s", first)
-	}
-	if err := validateAgainstRelease(first, release); err != nil {
-		t.Fatal(err)
-	}
-	if digest := sha256.Sum256(first); hex.EncodeToString(digest[:]) != bearerTokenOuterIndexGoldenSHA256 {
-		t.Fatalf("Token outer index golden SHA-256 = %s, want %s", hex.EncodeToString(digest[:]), bearerTokenOuterIndexGoldenSHA256)
 	}
 }
 
@@ -105,74 +77,73 @@ func TestPublicReleaseEntryPointsRequireOpaqueFinalizedRelease(t *testing.T) {
 	if err := ValidateAgainstRelease([]byte(`{}`), releasepackage.FinalizedRelease{}); !errors.Is(err, releasepackage.ErrInvalid) {
 		t.Fatalf("ValidateAgainstRelease returned %v, want releasepackage.ErrInvalid", err)
 	}
-	if _, err := BuildBearerTokenIndex(
-		releasepackage.FinalizedRelease{},
-		validBearerTokenBuildOptions(),
-	); !errors.Is(err, releasepackage.ErrInvalid) {
-		t.Fatalf("BuildBearerTokenIndex returned %v, want releasepackage.ErrInvalid", err)
-	}
 }
 
-func TestIndexProfilesRejectCrossVersionCredentialAndLocalAuthenticationPayloads(t *testing.T) {
-	legacy := mustParseIndex(t, mustBuildIndex(t, validFinalizedSource(t, "a", "b")))
-	bearerDocument, err := buildBearerTokenIndex(validFinalizedSource(t, "a", "b"), validBearerTokenBuildOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	bearer := mustParseIndex(t, bearerDocument)
-	for _, field := range []string{`"mtlsClientCredential":null,`, `"mtlsClientCredential":{},`} {
-		candidate := bytes.Replace(
-			bearerDocument,
-			[]byte(`"nodeSpecificLocalAuthorityPublicKeySpki":`),
-			[]byte(field+`"nodeSpecificLocalAuthorityPublicKeySpki":`),
+func TestIndexRejectsUnsupportedSchemaMTLSLegacyProfileAndCredentialMaterial(t *testing.T) {
+	document := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
+	for name, candidate := range map[string][]byte{
+		"schema 3": bytes.Replace(
+			document,
+			[]byte(`"schemaVersion":2`),
+			[]byte(`"schemaVersion":3`),
 			1,
-		)
-		if _, err := ParseIndex(candidate); err == nil {
-			t.Fatalf("Token package accepted explicit historical credential field %s", field)
-		}
+		),
+		"mTLS field": bytes.Replace(
+			document,
+			[]byte(`"nodeSpecificLocalAuthorityPublicKeySpki":`),
+			[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"nodeSpecificLocalAuthorityPublicKeySpki":`),
+			1,
+		),
+		"legacy profile": bytes.Replace(
+			document,
+			[]byte(`"profileId":"`+IndexProfileID+`"`),
+			[]byte(`"profileId":"agentic-review-worker-outer-package-v1"`),
+			1,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseIndex(candidate); err == nil {
+				t.Fatal("ParseIndex accepted an unsupported package profile")
+			}
+			if _, err := SigningDigest(candidate); err == nil {
+				t.Fatal("SigningDigest accepted an unsupported package profile")
+			}
+		})
 	}
+
+	baseline := mustParseIndex(t, document)
 	tests := []struct {
 		name   string
-		value  Index
 		mutate func(*Index)
 	}{
-		{name: "legacy profile without mTLS identity", value: legacy, mutate: func(value *Index) {
-			value.MTLSClientCredential = nil
+		{name: "schema 3", mutate: func(value *Index) { value.SchemaVersion = 3 }},
+		{name: "legacy profile", mutate: func(value *Index) {
+			value.ProfileID = "agentic-review-worker-outer-package-v1"
 		}},
-		{name: "legacy profile with v2 schema", value: legacy, mutate: func(value *Index) {
-			value.SchemaVersion = BearerTokenIndexSchemaVersion
-		}},
-		{name: "v2 profile with v1 schema", value: bearer, mutate: func(value *Index) {
-			value.SchemaVersion = IndexSchemaVersion
-		}},
-		{name: "v2 profile with mTLS identity", value: bearer, mutate: func(value *Index) {
-			credential := validBuildOptions().MTLSClientCredential
-			value.MTLSClientCredential = &credential
-		}},
-		{name: "v2 alternate installation root", value: bearer, mutate: func(value *Index) {
+		{name: "alternate installation root", mutate: func(value *Index) {
 			value.TargetRoots.Installation = `D:\AgenticReview\Worker`
 		}},
-		{name: "v2 direct Worker auth payload", value: bearer, mutate: func(value *Index) {
+		{name: "direct Worker auth payload", mutate: func(value *Index) {
 			payload := findPayloadRole(value.Payloads, RolePolicy)
 			payload.Path = `worker-auth-v1.json`
 		}},
-		{name: "v2 nested case-aliased Worker auth payload", value: bearer, mutate: func(value *Index) {
+		{name: "nested case-aliased Worker auth payload", mutate: func(value *Index) {
 			payload := findPayloadRole(value.Payloads, RolePolicy)
 			payload.Path = `credentials\WORKER-AUTH-V1.JSON`
 		}},
-		{name: "v2 Token-shaped Worker identity", value: bearer, mutate: func(value *Index) {
+		{name: "Token-shaped Worker identity", mutate: func(value *Index) {
 			value.WorkerNodeID = `arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
 		}},
-		{name: "v2 Token-shaped CNG key name", value: bearer, mutate: func(value *Index) {
+		{name: "Token-shaped CNG key name", mutate: func(value *Index) {
 			value.LocalAuthorityCNG.KeyName = `AgenticReview.arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			value := cloneIndex(test.value)
+			value := cloneIndex(baseline)
 			test.mutate(&value)
 			if _, err := MarshalIndexCanonical(value); err == nil {
-				t.Fatal("cross-version or credential-bearing package index was accepted")
+				t.Fatal("unsupported or credential-bearing package index was accepted")
 			}
 		})
 	}
@@ -183,7 +154,7 @@ func TestParseIndexRejectsUnknownFieldsAndNoncanonicalEncoding(t *testing.T) {
 	for _, candidate := range [][]byte{
 		append(append([]byte(nil), document...), '\n'),
 		append([]byte{0xef, 0xbb, 0xbf}, document...),
-		[]byte(strings.Replace(string(document), `"schemaVersion":1`, `"unknown":true,"schemaVersion":1`, 1)),
+		[]byte(strings.Replace(string(document), `"schemaVersion":2`, `"unknown":true,"schemaVersion":2`, 1)),
 	} {
 		if _, err := ParseIndex(candidate); err == nil {
 			t.Fatalf("ParseIndex accepted noncanonical document %q", candidate)
@@ -245,7 +216,7 @@ func TestIndexRejectsPathRoleRootSizeAndArchitectureAttacks(t *testing.T) {
 			architecture := ArchitectureAMD64
 			findPayloadRole(value.Payloads, RoleRuntimeManifest).TargetArchitecture = &architecture
 		}},
-		{name: "legacy worker bundle", mutate: func(value *Index) {
+		{name: "obsolete worker bundle", mutate: func(value *Index) {
 			findPayloadRole(value.Payloads, RoleControlBundle).Path = `app\worker.mjs`
 		}},
 		{name: "package index alias", mutate: func(value *Index) {
@@ -369,7 +340,7 @@ func TestBuildIndexRejectsFinalizedManifestWithAlternateWinSWPath(t *testing.T) 
 	}
 }
 
-func TestBuildBearerTokenIndexRejectsWorkerAuthenticationFileWithoutChangingV1(t *testing.T) {
+func TestBuildIndexRejectsWorkerAuthenticationFile(t *testing.T) {
 	release := validFinalizedSource(t, "a", "b")
 	policy := findManifestFileRole(release.manifest.Files, releasemanifest.RolePolicy)
 	policy.Path = `credentials\WORKER-AUTH-V1.JSON`
@@ -384,11 +355,8 @@ func TestBuildBearerTokenIndexRejectsWorkerAuthenticationFileWithoutChangingV1(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildBearerTokenIndex(release, validBearerTokenBuildOptions()); err == nil {
-		t.Fatal("BuildBearerTokenIndex accepted worker-auth-v1.json as a signed payload")
-	}
-	if _, err := buildIndex(release, validBuildOptions()); err != nil {
-		t.Fatalf("historical package v1 acceptance changed: %v", err)
+	if _, err := buildIndex(release, validBuildOptions()); err == nil {
+		t.Fatal("buildIndex accepted worker-auth-v1.json as a signed payload")
 	}
 }
 
@@ -446,12 +414,6 @@ func TestIndexRejectsInvalidNodeAndInstallationIdentityBindings(t *testing.T) {
 		{name: "CNG name", mutate: func(value *Index) { value.LocalAuthorityCNG.KeyName += "\n" }},
 		{name: "CNG DACL", mutate: func(value *Index) {
 			value.LocalAuthorityCNG.SecurityDescriptorSHA256 = strings.Repeat("A", 64)
-		}},
-		{name: "mTLS store", mutate: func(value *Index) {
-			value.MTLSClientCredential.CertificateStore = "ROOT"
-		}},
-		{name: "mTLS key DACL", mutate: func(value *Index) {
-			value.MTLSClientCredential.PrivateKeySecurityDescriptorSHA256 = "invalid"
 		}},
 		{name: "absolute root", mutate: func(value *Index) {
 			value.TargetRoots.Installation = `c:\AgenticReview`
@@ -572,10 +534,6 @@ func validBuildOptions() BuildOptions {
 			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			SecurityDescriptorSHA256: strings.Repeat("1", 64),
 		},
-		MTLSClientCredential: MTLSCredentialIdentity{
-			CertificateDERSHA256: strings.Repeat("2", 64), CertificateStore: MTLSCertificateStore,
-			PrivateKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
-		},
 		TargetRoots: TargetRoots{
 			Installation:         `C:\Program Files\AgenticReview\Worker`,
 			Metadata:             `C:\ProgramData\AgenticReview\Packages\worker-package-2026.09.02.1`,
@@ -583,19 +541,6 @@ func validBuildOptions() BuildOptions {
 		},
 		ControlBootstrap:  BootstrapPayload{SHA256: strings.Repeat("4", 64), Size: "1024"},
 		ExecutorBootstrap: BootstrapPayload{SHA256: strings.Repeat("5", 64), Size: "1024"},
-	}
-}
-
-func validBearerTokenBuildOptions() BearerTokenBuildOptions {
-	legacy := validBuildOptions()
-	return BearerTokenBuildOptions{
-		PackageID:         legacy.PackageID,
-		InstallationID:    legacy.InstallationID,
-		WorkerNodeID:      legacy.WorkerNodeID,
-		LocalAuthorityCNG: legacy.LocalAuthorityCNG,
-		TargetRoots:       legacy.TargetRoots,
-		ControlBootstrap:  legacy.ControlBootstrap,
-		ExecutorBootstrap: legacy.ExecutorBootstrap,
 	}
 }
 
@@ -712,8 +657,3 @@ func removePayloadRole(payloads []Payload, role Role) []Payload {
 	}
 	return result
 }
-
-const (
-	outerIndexGoldenSHA256            = "42b96f5d707049414f622abdf52ccf332db62b4a4a8fb2729839cdafe7004f3d"
-	bearerTokenOuterIndexGoldenSHA256 = "c7436197d8be9f128b6104b850d1da19157130be050f34fa1de9da59e5f3926e"
-)

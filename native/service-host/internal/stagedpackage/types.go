@@ -25,7 +25,7 @@ var (
 	ErrCleanup             = errors.New("staged package cleanup failed")
 	ErrCleanupFatal        = errors.New("staged package handle cleanup is unresolved; process must exit")
 	ErrSerialization       = errors.New("staged package evidence cannot be serialized")
-	ErrInstallerProfile    = errors.New("staged package does not select the Bearer Token installer v2 profile")
+	ErrInstallerProfile    = errors.New("staged package does not select the current installer profile")
 )
 
 const (
@@ -110,9 +110,9 @@ type StagedPackageEvidence struct {
 	state *evidenceState
 }
 
-// BearerTokenInstallerV2Package is the non-forgeable profile gate required by a future v2
-// installer consumer. It retains no authority beyond the originating StagedPackageEvidence.
-type BearerTokenInstallerV2Package struct {
+// InstallerPackage is the non-forgeable profile gate required by the current installer consumer.
+// It retains no authority beyond the originating StagedPackageEvidence.
+type InstallerPackage struct {
 	state  *evidenceState
 	digest [sha256.Size]byte
 }
@@ -128,10 +128,10 @@ type destinationBorrowState struct {
 
 type destinationOwnership struct{ marker byte }
 
-// BearerTokenInstallerV2DestinationBinding is an opaque, detached view of the exact admitted
-// documents required to reverify a post-swap installer destination. It is minted only through a
-// live BearerTokenInstallerV2Package and is not accepted by any public installation entry point.
-type BearerTokenInstallerV2DestinationBinding struct {
+// DestinationBinding is an opaque, detached view of the admitted documents required to reverify a
+// post-swap installer destination. It is minted only through a live InstallerPackage and is not
+// accepted by any public installation entry point.
+type DestinationBinding struct {
 	issuer           *destinationBindingIssuer
 	borrow           *destinationBorrowState
 	sourceDigest     [sha256.Size]byte
@@ -143,9 +143,9 @@ type BearerTokenInstallerV2DestinationBinding struct {
 	digest           [sha256.Size]byte
 }
 
-// BearerTokenInstallerV2DestinationLease is the exclusive source-handle capability transferred to
-// a successful destination verifier. Existing staged-evidence aliases cannot close its handles.
-type BearerTokenInstallerV2DestinationLease struct {
+// DestinationLease is the exclusive source-handle capability transferred to a successful
+// destination verifier. Existing staged-evidence aliases cannot close its handles.
+type DestinationLease struct {
 	state  *evidenceState
 	digest [sha256.Size]byte
 	owner  *destinationOwnership

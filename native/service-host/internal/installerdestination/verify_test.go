@@ -13,7 +13,7 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winfile"
 )
 
-func TestVerifyWithDependenciesReopensCompleteV2DestinationAndOwnsSource(t *testing.T) {
+func TestVerifyWithDependenciesReopensCompleteDestinationAndOwnsSource(t *testing.T) {
 	resetCleanupForTest(t)
 	fixture := newDestinationFixture(t)
 	evidence := fixture.verify(t)
@@ -50,26 +50,12 @@ func TestVerifyWithDependenciesReopensCompleteV2DestinationAndOwnsSource(t *test
 	}
 }
 
-func TestSourcePlanRejectsHistoricalProfileRootAndSignatureDrift(t *testing.T) {
+func TestSourcePlanRejectsRootAndSignatureDrift(t *testing.T) {
 	fixture := newDestinationFixture(t)
 	tests := []struct {
 		name   string
 		mutate func(*sourcePlan)
 	}{
-		{
-			name: "historical profile",
-			mutate: func(plan *sourcePlan) {
-				plan.index.SchemaVersion = outerpackage.IndexSchemaVersion
-				plan.index.ProfileID = outerpackage.IndexProfileID
-				plan.index.MTLSClientCredential = &outerpackage.MTLSCredentialIdentity{
-					CertificateDERSHA256:               strings.Repeat("c", 64),
-					CertificateStore:                   outerpackage.MTLSCertificateStore,
-					PrivateKeySecurityDescriptorSHA256: strings.Repeat("d", 64),
-				}
-				document, _ := outerpackage.MarshalIndexCanonical(plan.index)
-				plan.indexDocument = document
-			},
-		},
 		{
 			name: "alternate installation root",
 			mutate: func(plan *sourcePlan) {

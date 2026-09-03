@@ -86,62 +86,19 @@ func TestVerifyWithDependenciesProducesOpaqueDetachedEvidence(t *testing.T) {
 	}
 }
 
-func TestVerifyWithDependenciesAcceptsSchemaVersion4BootstrapPair(t *testing.T) {
+func TestVerifyWithDependenciesRejectsBootstrapPairOutsideInstallerProfileRoots(t *testing.T) {
 	fixture := newInstallFixture(t)
-	controlPath := testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath
 	executorPath := testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
-	control, err := config.Parse(fixture.fs.mustNode(controlPath).data)
-	if err != nil {
-		t.Fatal(err)
-	}
 	executor, err := config.Parse(fixture.fs.mustNode(executorPath).data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	control.SchemaVersion = config.BearerTokenSchemaVersion
-	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	control.Control.ClientCertificateStore = ""
-	control.Control.ClientCertificateDERSHA256 = ""
-	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	executor.SchemaVersion = config.BearerTokenSchemaVersion
-	fixture.fs.mustNode(controlPath).data = mustConfigDocument(t, control)
-	fixture.fs.mustNode(executorPath).data = mustConfigDocument(t, executor)
-
-	evidence, err := verifyWithDependencies(context.Background(), fixture.options, fixture.authority, fixture.dependencies())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if evidence.ControlConfiguration().SchemaVersion != config.BearerTokenSchemaVersion ||
-		evidence.ExecutorConfiguration().SchemaVersion != config.BearerTokenSchemaVersion {
-		t.Fatal("installation evidence omitted the schemaVersion 4 bootstrap pair")
-	}
-}
-
-func TestVerifyWithDependenciesRejectsSchemaVersion4OutsideInstallerV2DataRoots(t *testing.T) {
-	fixture := newInstallFixture(t)
-	controlPath := testTrustedRoot + `\` + releasemanifest.ControlBootstrapConfigurationPath
-	executorPath := testTrustedRoot + `\` + releasemanifest.ExecutorBootstrapConfigurationPath
-	control, err := config.Parse(fixture.fs.mustNode(controlPath).data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor, err := config.Parse(fixture.fs.mustNode(executorPath).data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	control.SchemaVersion = config.BearerTokenSchemaVersion
-	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	control.Control.ClientCertificateStore = ""
-	control.Control.ClientCertificateDERSHA256 = ""
-	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	executor.SchemaVersion = config.BearerTokenSchemaVersion
 	oldRoot := executor.Node.DataRoot
 	executor.Node.DataRoot = `D:\AgenticReview\Executor`
 	executor.Node.WorkingDirectory = strings.Replace(executor.Node.WorkingDirectory, oldRoot, executor.Node.DataRoot, 1)
 	for name, value := range executor.Node.Environment {
 		executor.Node.Environment[name] = strings.Replace(value, oldRoot, executor.Node.DataRoot, 1)
 	}
-	fixture.fs.mustNode(controlPath).data = mustConfigDocument(t, control)
 	fixture.fs.mustNode(executorPath).data = mustConfigDocument(t, executor)
 
 	if _, err := verifyWithDependencies(
@@ -245,7 +202,7 @@ func TestValidateConfigurationPairRejectsSharedIdentityAndProtocolLimitMismatche
 		name   string
 		mutate func(*config.Config)
 	}{
-		{"schema version", func(value *config.Config) { value.SchemaVersion = config.BearerTokenSchemaVersion }},
+		{"schema version", func(value *config.Config) { value.SchemaVersion = config.SchemaVersion + 1 }},
 		{"worker node ID", func(value *config.Config) { value.WorkerNodeID = "powertoys-node:02" }},
 		{"maximum frame", func(value *config.Config) { value.Limits.MaximumFrameBytes-- }},
 		{"maximum queue", func(value *config.Config) { value.Limits.MaximumQueuedBytesPerDirection++ }},
@@ -439,9 +396,7 @@ func newInstallFixtureWithTrustedContent(
 		ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 		RootCertificatePath:                       testTrustedRoot + `\` + rootCA.Path,
 		RootCertificateSHA256:                     rootCA.SHA256,
-		ClientCertificateStore:                    config.WindowsCertificateStore,
-		ClientCertificateDERSHA256:                strings.Repeat("1", 64),
-		ClientPrivateKeySecurityDescriptorSHA256:  strings.Repeat("2", 64),
+		WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
 		LocalAuthorityCNGKeyName:                  "AgenticReview.Control.LocalAuthority",
 		LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
 		LocalAuthorityPublicKeySHA256:             publicKey.SHA256,

@@ -77,7 +77,7 @@ func buildRuntimePathPlan(current config.Config) (runtimePathPlan, error) {
 		newPlannedDirectory(PurposeLocalAppData, environment["LOCALAPPDATA"]),
 	}
 	files := []plannedPath{}
-	if current.Role == config.RoleControl && current.SchemaVersion == config.BearerTokenSchemaVersion {
+	if current.Role == config.RoleControl {
 		files = append(files, plannedPath{
 			purpose: PurposeWorkerAuth,
 			class:   PathClassFixedFile,
@@ -188,7 +188,7 @@ func buildRuntimePathPlan(current config.Config) (runtimePathPlan, error) {
 	if current.Role == config.RoleExecutor {
 		rootChildren = append(rootChildren, byPurpose[PurposeCodexHome])
 		profileChildren = append(profileChildren, byPurpose[PurposeGitConfigGlobal])
-	} else if current.SchemaVersion == config.BearerTokenSchemaVersion {
+	} else {
 		rootChildren = append(rootChildren, byPurpose[PurposeWorkerAuth])
 	}
 	closed := []closedDirectoryPlan{

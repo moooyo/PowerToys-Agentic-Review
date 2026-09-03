@@ -86,7 +86,7 @@ func newFakeFileSystem(current config.Config) *fakeFileSystem {
 	fs.addDirectory(current.Node.Environment["USERPROFILE"], winfile.SecurityModeManaged, 7, roleDirectorySecurity(current))
 	fs.addDirectory(current.Node.Environment["APPDATA"], winfile.SecurityModeManaged, 8, roleDirectorySecurity(current))
 	fs.addDirectory(current.Node.Environment["LOCALAPPDATA"], winfile.SecurityModeManaged, 9, roleDirectorySecurity(current))
-	if current.Role == config.RoleControl && current.SchemaVersion == config.BearerTokenSchemaVersion {
+	if current.Role == config.RoleControl {
 		fs.addFile(config.WorkerAuthenticationProfilePath, 12, roleFileSecurity(current))
 	}
 	if current.Role == config.RoleExecutor {
@@ -291,34 +291,6 @@ func pairedConfigs() (config.Config, config.Config) {
 	return control, executor
 }
 
-func bearerVerificationFixture(role config.Role) (
-	config.Config,
-	config.Config,
-	installationSnapshot,
-	*fakeFileSystem,
-) {
-	current, peer, installation, _ := verificationFixture(role)
-	control := current
-	executor := peer
-	if role == config.RoleExecutor {
-		control, executor = peer, current
-	}
-	control.SchemaVersion = config.BearerTokenSchemaVersion
-	control.Control.WorkerAuthenticationProfile = config.WorkerAuthenticationProfileBearerTokenV1
-	control.Control.ClientCertificateStore = ""
-	control.Control.ClientCertificateDERSHA256 = ""
-	control.Control.ClientPrivateKeySecurityDescriptorSHA256 = ""
-	executor.SchemaVersion = config.BearerTokenSchemaVersion
-	installation.control = cloneConfig(control)
-	installation.executor = cloneConfig(executor)
-	if role == config.RoleControl {
-		current, peer = control, executor
-	} else {
-		current, peer = executor, control
-	}
-	return current, peer, installation, newFakeFileSystem(current)
-}
-
 func baseConfig(role config.Role) config.Config {
 	controlService := config.ServiceIdentity{Name: config.ControlServiceName, SID: config.ControlServiceSID}
 	executorService := config.ServiceIdentity{Name: config.ExecutorServiceName, SID: config.ExecutorServiceSID}
@@ -361,8 +333,7 @@ func baseConfig(role config.Role) config.Config {
 		value.Control = &config.ControlConfiguration{
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath: testTrustedRoot + `\server-root.cer`, RootCertificateSHA256: strings.Repeat("e", 64),
-			ClientCertificateStore: config.WindowsCertificateStore, ClientCertificateDERSHA256: strings.Repeat("f", 64),
-			ClientPrivateKeySecurityDescriptorSHA256:  strings.Repeat("0", 64),
+			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
 			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
 			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("9", 64),
 			LocalAuthorityPublicKeySHA256:             strings.Repeat("1", 64),

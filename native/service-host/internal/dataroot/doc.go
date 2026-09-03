@@ -14,7 +14,7 @@
 // Runtime-created descendants must have the own virtual-service SID as owner
 // and the exact auto-inherited DACL, including OWNER RIGHTS protection against
 // implicit WRITE_DAC. Runtime verification never creates or repairs paths.
-// The fixed .gitconfig and schema-v4 Control Worker authentication files follow
+// The fixed .gitconfig and Control Worker authentication files follow
 // this inherited-file policy. The installer or an authorized local bootstrap
 // must create them before verification; runtime verification never creates or
 // rewrites either file.

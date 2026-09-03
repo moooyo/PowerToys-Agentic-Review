@@ -5,20 +5,16 @@ package outerpackage
 import "errors"
 
 const (
-	// IndexSchemaVersion and IndexProfileID are the immutable historical mTLS profile.
-	IndexSchemaVersion = uint32(1)
-	IndexProfileID     = "agentic-review-worker-outer-package-v1"
-	// BearerTokenIndexSchemaVersion and BearerTokenIndexProfileID select the Token-aware profile.
-	BearerTokenIndexSchemaVersion = uint32(2)
-	BearerTokenIndexProfileID     = "agentic-review-worker-outer-package-v2"
-	SignatureSchemaVersion        = uint32(1)
-	SignatureAlgorithm            = "ecdsa-p256-sha256-p1363-low-s"
-	MaximumIndexBytes             = 8 * 1024 * 1024
-	MaximumEnvelopeBytes          = 4 * 1024
-	MaximumPayloads               = 8_200
-	MaximumPathBytes              = 4_096
-	MaximumPayloadBytes           = uint64(8 * 1024 * 1024 * 1024)
-	MaximumTotalBytes             = uint64(32 * 1024 * 1024 * 1024)
+	IndexSchemaVersion     = uint32(2)
+	IndexProfileID         = "agentic-review-worker-outer-package-v2"
+	SignatureSchemaVersion = uint32(1)
+	SignatureAlgorithm     = "ecdsa-p256-sha256-p1363-low-s"
+	MaximumIndexBytes      = 8 * 1024 * 1024
+	MaximumEnvelopeBytes   = 4 * 1024
+	MaximumPayloads        = 8_200
+	MaximumPathBytes       = 4_096
+	MaximumPayloadBytes    = uint64(8 * 1024 * 1024 * 1024)
+	MaximumTotalBytes      = uint64(32 * 1024 * 1024 * 1024)
 
 	PackageIndexPath            = `package-index.json`
 	SignatureEnvelopePath       = `package-index.signature.json`
@@ -30,7 +26,6 @@ const (
 	RuntimeManifestPath         = `release-manifest.json`
 	ControlBootstrapPath        = `control-service-host.json`
 	ExecutorBootstrapPath       = `executor-service-host.json`
-	MTLSCertificateStore        = "MY"
 )
 
 var (
@@ -104,12 +99,6 @@ type LocalAuthorityCNGIdentity struct {
 	SecurityDescriptorSHA256 string `json:"securityDescriptorSha256"`
 }
 
-type MTLSCredentialIdentity struct {
-	CertificateDERSHA256               string `json:"certificateDerSha256"`
-	CertificateStore                   string `json:"certificateStore"`
-	PrivateKeySecurityDescriptorSHA256 string `json:"privateKeySecurityDescriptorSha256"`
-}
-
 type TargetRoots struct {
 	Installation         string `json:"installation"`
 	Metadata             string `json:"metadata"`
@@ -128,7 +117,6 @@ type Payload struct {
 type Index struct {
 	InstallationID                       string                    `json:"installationId"`
 	LocalAuthorityCNG                    LocalAuthorityCNGIdentity `json:"localAuthorityCng"`
-	MTLSClientCredential                 *MTLSCredentialIdentity   `json:"mtlsClientCredential,omitempty"`
 	NodeSpecificLocalAuthorityPublicSPKI NodeSpecificSPKI          `json:"nodeSpecificLocalAuthorityPublicKeySpki"`
 	PackageID                            string                    `json:"packageId"`
 	Payloads                             []Payload                 `json:"payloads"`
@@ -146,22 +134,9 @@ type BootstrapPayload struct {
 	Size   string
 }
 
-// BuildOptions contains ordinary assembler-supplied node and bootstrap facts. BuildIndex commits
-// them to the index but does not independently establish their filesystem or authority provenance.
+// BuildOptions contains the non-secret assembler-supplied inputs for the current Token profile.
+// BuildIndex commits them to the index but does not independently establish their provenance.
 type BuildOptions struct {
-	PackageID            string
-	InstallationID       string
-	WorkerNodeID         string
-	LocalAuthorityCNG    LocalAuthorityCNGIdentity
-	MTLSClientCredential MTLSCredentialIdentity
-	TargetRoots          TargetRoots
-	ControlBootstrap     BootstrapPayload
-	ExecutorBootstrap    BootstrapPayload
-}
-
-// BearerTokenBuildOptions contains the non-secret inputs for the schema-v4 package profile. The
-// profile has no credential field and rejects Token-shaped values in every signed string.
-type BearerTokenBuildOptions struct {
 	PackageID         string
 	InstallationID    string
 	WorkerNodeID      string

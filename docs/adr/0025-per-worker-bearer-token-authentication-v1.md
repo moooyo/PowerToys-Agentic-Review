@@ -2,21 +2,20 @@
 
 ## Status
 
-Accepted for implementation on 2026-09-03.
+Accepted for implementation on 2026-09-03. Amended on 2026-09-04 to adopt the current Token profile
+directly because no Worker package or bootstrap profile has been released.
 
-This decision replaces Worker-to-Server mutual TLS, certificate binding, Server binding receipts,
-active-status assertions, and the dormant Server binding signer-host with one long-lived Bearer
-Token per Worker node. The Server remains a Linux HTTPS control plane and Workers remain Windows
-clients.
+This decision defines one long-lived Bearer Token per Worker node as the sole Worker authentication
+profile. The Server remains a Linux HTTPS control plane and Workers remain Windows clients.
 
 ADR 0022, ADR 0023, ADR 0024, and the exact ADR 0014 enrollment-record profile are superseded.
 ADR 0003, ADR 0007, ADR 0008, ADR 0013, ADR 0015, and ADR 0021 are amended only where they require a
-Worker mTLS credential, certificate binding, or Server binding receipt. The exact ADR 0010 through
-ADR 0012 package profiles and the fixed ADR 0019 lab blocker tuple are not reinterpreted in place;
-their mTLS- or receipt-dependent versions are historical and require explicitly versioned
-replacements before production use. Lease tokens, package signatures, Authenticode, the
-Control-to-Executor local capability signer, artifact receipts, process isolation, and
-zero-execution policy remain separate and unchanged.
+Worker client certificate, certificate binding, or Server binding receipt. The implementation uses
+bootstrap schema 4, outer-package schema/profile v2, and split installer profile v2 as the only
+current path; earlier draft bootstrap and package formats are not supported compatibility surfaces.
+Lease tokens, package signatures, Authenticode, the Control-to-Executor local CNG capability signer,
+the Control/Executor service split, artifact receipts, process isolation, and zero-execution policy
+remain separate and unchanged. This amendment does not claim a complete production installer.
 
 ## Context
 
@@ -196,7 +195,7 @@ Authorization: Bearer <token>
 
 The Server accepts no Worker Token from a query, cookie, URL, request body, alternate scheme, or
 proxy identity header. The Token mapping is the authority for `workerNodeId`. Existing request body
-fields may continue carrying `workerNodeId` as a compatibility assertion, but a different value is
+fields may continue carrying `workerNodeId` as an identity cross-check, but a different value is
 rejected and can never select another identity.
 
 The first successful registration performs one database transaction that:
@@ -341,14 +340,14 @@ client certificate, CNG TLS key, receipt, or Server binding verifier.
   longer required.
 - A copied Token is sufficient to impersonate a Worker until rotation or revocation.
 - Plaintext local storage and database rollback risks are accepted by the selected trust model.
-- Removing exact mTLS fields from signed package and enrollment profiles requires new profile
-  versions or explicit supersession; existing exact formats are not silently reinterpreted.
+- The unreleased implementation adopts bootstrap schema 4 and the current package/installer
+  profiles directly, with no older bootstrap or package compatibility path.
 
 ## Non-Goals
 
 - anonymous Worker self-registration;
 - one shared Token for all Workers;
-- Worker client certificates or mutual TLS;
+- Worker client-certificate authentication;
 - signed Server binding receipts or active-status assertions;
 - KMS, HSM, PKCS#11, signer-host, or receipt trust management;
 - protecting a Token from trusted local Windows users or administrators;
