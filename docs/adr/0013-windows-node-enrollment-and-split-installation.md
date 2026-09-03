@@ -1,5 +1,9 @@
 # ADR 0013: Windows Node Enrollment and Split Installation
 
+> Amended by ADR 0025: Server registration uses a per-Worker Bearer Token and no longer provisions
+> an mTLS client credential or Server binding receipt. Local-authority, split-service, installation,
+> rollback, and zero-execution decisions remain unchanged.
+
 ## Status
 
 Accepted for the dormant RoleConfig v2 zero-execution installation foundation.

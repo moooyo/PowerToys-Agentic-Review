@@ -1,5 +1,8 @@
 # ADR 0008: Store and Complete Result Artifacts through a Fenced Content-Addressed Protocol
 
+> Amended by ADR 0025: authenticated `workerNodeId` now comes from a per-Worker Bearer Token mapping
+> instead of a client-certificate binding. Artifact, lease, and completion fencing are unchanged.
+
 - Status: Accepted
 - Date: 2026-09-02
 

@@ -1,5 +1,8 @@
 # ADR 0003: Coordinate Remote Windows Workers with Pull Leases
 
+> Amended by ADR 0025: Worker identity is authenticated by one per-Worker Bearer Token instead of a
+> client certificate. Lease-token generation fencing and pull-lease behavior remain unchanged.
+
 - Status: Accepted
 - Date: 2026-08-30
 
@@ -33,4 +36,3 @@ Jobs may also have a hard execution deadline and a phase-specific no-progress ti
 - Job state and attempt state remain separate, preserving retry history.
 - Worker machines require no inbound firewall rule and never receive GitHub or database credentials.
 - Protocol compatibility, certificate enrollment, revocation, and rotation become operational responsibilities.
-

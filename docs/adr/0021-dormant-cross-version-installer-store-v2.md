@@ -1,5 +1,9 @@
 # ADR 0021: Dormant Cross-Version Installer Store v2
 
+> Amended by ADR 0025: future migration prerequisites must use the selected Bearer Token enrollment
+> model instead of ADR 0014 mTLS and receipt evidence. Store ownership, publication ordering, and
+> crash recovery remain unchanged.
+
 ## Status
 
 Accepted as a source-only, dormant storage contract on 2026-09-03.

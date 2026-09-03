@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed as a dormant Server-side persistence contract on 2026-09-03.
+Superseded by ADR 0025 on 2026-09-03. Its receipt-signing aggregate remains inert migration history
+and is not a Worker authentication source.
 
 This documentation slice freezes the S1 SQLite schema, transaction boundaries, exact replay,
 asynchronous receipt-signing coordination, issuer bootstrap checks, monotonic revocation, storage

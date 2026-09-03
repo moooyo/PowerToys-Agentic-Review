@@ -2,6 +2,11 @@
 
 Status date: 2026-09-03
 
+> ADR 0025 now selects per-Worker Bearer Token authentication and supersedes the dormant Server
+> binding receipt, persistence, and signer-host direction. The currently implemented production
+> Worker transport still uses mTLS until the Token migration is implemented; this status document
+> therefore records both the selected target and the existing transition state.
+
 The repository currently implements the Phase 0 control-plane foundation, the Phase 1a
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
 execution components, and the split-service protocol and native Windows composition candidate

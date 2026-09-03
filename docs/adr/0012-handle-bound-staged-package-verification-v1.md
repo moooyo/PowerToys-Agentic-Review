@@ -1,5 +1,9 @@
 # ADR 0012: Handle-Bound Staged Package Verification v1
 
+> Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
+> design. This v1 staged-package profile is not reinterpreted; a new profile must replace its mTLS
+> evidence fields before production use. Filesystem and handle-bound verification remain valid.
+
 ## Status
 
 Accepted for the dormant RoleConfig v2 zero-execution package foundation.

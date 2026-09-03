@@ -1,5 +1,9 @@
 # Dormant Server Enrollment Binding Authority v1 S0 Handoff
 
+> Historical handoff. ADR 0025 supersedes this receipt and active-status authority. Its completed
+> tests remain historical evidence, but no deferred production activation or Linux verification is
+> required for the selected Bearer Token design.
+
 Status date: 2026-09-03
 
 Branch: `codex/server-binding-authority-v1-lab`

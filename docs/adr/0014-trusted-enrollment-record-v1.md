@@ -2,11 +2,9 @@
 
 ## Status
 
-Accepted for a non-authorizing, fail-closed RoleConfig v2 contract only. No production enrollment
-reader, writer, release consumer, installer consumer, or Server binding authority is available.
-This ADR supersedes only ADR 0013's deferral of the canonical record schema and its generation-one
-storage profile. Reader identity, receipt authentication, live evidence, rotation, revocation, and
-interrupted-enrollment implementation remain deferred.
+Superseded by ADR 0025 on 2026-09-03. Its exact mTLS credential and Server binding receipt record is
+not part of the selected Bearer Token design. Fixed-root, ordinary-data-versus-opaque-evidence, and
+fail-closed validation principles may be reused by a later simplified local configuration profile.
 
 ## Context
 
