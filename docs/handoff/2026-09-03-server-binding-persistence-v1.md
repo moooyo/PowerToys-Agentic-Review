@@ -1,8 +1,8 @@
 # Dormant Server Binding Persistence v1 S1 Handoff
 
 > Historical handoff. ADR 0025 supersedes this receipt-signing persistence aggregate. Its migration
-> and tests remain historical facts, but the aggregate will not become Worker authentication
-> authority.
+> and tests were removed in a pre-release schema reset; the details below describe the historical
+> branch and are not current production files or database compatibility requirements.
 
 Status date: 2026-09-03
 

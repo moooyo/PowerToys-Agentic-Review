@@ -39,13 +39,20 @@ and Token recovery work. It does not implement the complete production SCM insta
 - The retired Server-binding persistence, coordinator, signer, signer-host, state, trust, contracts,
   fixtures, native verifier, and old node-enrollment source were deleted. The database protocol no
   longer contains their nine operations; unknown operations fail closed generically.
-- Migration `0012_server_binding_persistence_v1.sql` remains byte-identical with SHA-256
-  `aeb61e4c1f2dedafe49977192a72ce7c626ae1bd1555cbe63cf5202ec23ded9f`.
-  Startup compatibility preserves representative rows from all four legacy tables across v12/v13
-  without creating a Worker credential.
-- `docs/operations/worker-token-recovery.md` and the six-case database matrix define recovery for
-  lost create/rotate responses, cross-restart revocation, accepted whole-database Token rollback,
-  post-backup node disappearance, and pre-v13 restoration.
+- Because the product is still unreleased, the later schema-reset follow-up deletes the dormant
+  Server-binding migration instead of preserving it or adding a DROP migration. The Worker Token
+  migration is now `0012_worker_token_auth_v1.sql`, the current schema version is 12, and none of
+  the four historical Server-binding tables exists in the production schema.
+- `docs/operations/worker-token-recovery.md` and the five-case database matrix define recovery for
+  lost create/rotate responses, cross-restart revocation, accepted same-schema whole-database Token
+  rollback, and post-backup node disappearance. Cross-version restore is unsupported.
+- The legacy database-adoption authorization was removed. Existing databases require this
+  version's initialization marker; databases from earlier unreleased schemas, including version 13,
+  are rejected and must be rebuilt.
+- Fresh databases still apply migrations 0001 through 0012 in order. Initialized databases must
+  already match every current migration filename and checksum; startup performs no forward
+  migration or automatic migration backup. The retired data-directory `backups` namespace and its
+  cleanup module were removed.
 - The follow-up recovery maintenance mode requires an exact loopback listener plus configured
   operator authentication, purges restored operator login state before listening, closes readiness
   and every Worker/worker-artifact route before authentication or storage access, and suppresses
@@ -92,9 +99,19 @@ The recovery-maintenance follow-up then passed all-workspace typecheck, build, a
 checking 316 files. Windows focused config/composition/health/route/direct-database tests passed 44
 cases with the one POSIX database Worker restart case skipped. The exact source in a native WSL ext4
 checkout passed all 850 Server tests in 51 files, including the database-only artifact sentinel,
-atomic purge rollback, clock preservation, cross-restart old-cookie rejection, and the six Worker
-Token recovery cases. The Worker zero-execution architecture check and all 19 role-bundle guards
+atomic purge rollback, clock preservation, cross-restart old-cookie rejection, and the then-current
+six Worker Token recovery cases. The Worker zero-execution architecture check and all 19 role-bundle guards
 also passed. No command used `test-env`.
+
+The final pre-release database schema reset was verified from a native WSL ext4 checkout with a
+task-local Node 24.20.0 toolchain. The focused database startup, Worker Token recovery, storage
+runtime, health, and artifact matrix passed 100/100; the complete Server suite passed 833/833 in 49
+files; and Contracts passed 8/8 in 2 files. All-workspace typecheck, build, and lint passed with
+Biome checking 312 files. The Worker zero-execution architecture check and all 19 role-bundle guards
+also passed. This verification covers fresh schema-12 construction, exact-current initialized
+database admission, rejection of lower and unknown applied migration sets before any upgrade or
+backup action, absence of the retired Server-binding tables and migration, removal of the legacy
+adoption marker, and same-schema-only credential backup recovery. No command used `test-env`.
 
 ## Remaining Release Work
 

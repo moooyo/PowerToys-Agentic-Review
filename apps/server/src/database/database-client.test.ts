@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -16,7 +16,6 @@ import {
   type SelfOrAllowlistPolicy,
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
-import { FormatRegistry } from "@sinclair/typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../dist/app.js";
 import {
@@ -42,7 +41,6 @@ import {
   DatabaseClient,
   type DatabaseWorkerTransport,
 } from "../../dist/database/database-client.js";
-import { ingestSchedulingEvent } from "../../dist/database/github-ingestion.js";
 import { runMigrations } from "../../dist/database/migrations.js";
 import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
 import {
@@ -3960,188 +3958,6 @@ describe("DatabaseClient lease integration", () => {
         result: validPrReviewResult("A conflicting result."),
       }),
     ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
-  });
-
-  it("preserves idempotent replay for a linked review completed before migration 0006", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "agentic-review-server-v5-replay-"));
-    const databasePath = join(directory, "data", "server.sqlite");
-    const versionFiveMigrations = join(directory, "migrations-v5");
-    await mkdir(versionFiveMigrations);
-    await Promise.all(
-      [1, 2, 3, 4, 5].map((version) => {
-        const filename = `${version.toString().padStart(4, "0")}_${
-          [
-            "initial",
-            "github_ingestion",
-            "operator_auth",
-            "github_polling_state",
-            "operator_browser_flows",
-          ][version - 1]
-        }.sql`;
-        return copyFile(join(migrationsDirectory, filename), join(versionFiveMigrations, filename));
-      }),
-    );
-
-    const leaseToken = "legacy-review-result-replay-token".padEnd(32, "x");
-    let result: unknown = "Completed under schema version five.";
-    for (let depth = 0; depth < 256; depth += 1) {
-      result = [result];
-    }
-    const resultJson = canonicalJson(result);
-    const resultDigest = sha256(resultJson);
-    const workerNodeId = "worker-legacy-review";
-    const workerInstanceId = "instance-legacy-review";
-    const workerId = "worker-id-legacy-review";
-    const runAttemptId = "attempt-legacy-review";
-    await mkdir(join(directory, "data"), { mode: 0o700 });
-    let jobId: string;
-    const versionFiveDatabase = new DatabaseSync(databasePath);
-    try {
-      expect(runMigrations(versionFiveDatabase, versionFiveMigrations)).toBe(5);
-      FormatRegistry.Set(
-        "date-time",
-        (value) =>
-          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value) &&
-          Number.isFinite(Date.parse(value)),
-      );
-      FormatRegistry.Set("uri", (value) => URL.canParse(value));
-      const ingestion = ingestSchedulingEvent(
-        versionFiveDatabase,
-        makeRequestOpenedInput("delivery-legacy-review-result"),
-      );
-      if (ingestion.jobId === null) {
-        throw new Error("Expected the version-five fixture to schedule a linked review job.");
-      }
-      jobId = ingestion.jobId;
-    } finally {
-      versionFiveDatabase.close();
-    }
-    if (process.platform !== "win32") {
-      await chmod(databasePath, 0o600);
-    }
-    await writeInitializationMarker(databasePath);
-    const seedDatabase = new DatabaseSync(databasePath);
-    try {
-      const now = new Date().toISOString();
-      const capabilitiesJson = canonicalJson(workerCapabilities);
-      seedDatabase
-        .prepare(`
-          INSERT INTO workers (
-            id,
-            node_id,
-            instance_id,
-            display_name,
-            version,
-            protocol_version,
-            max_slots,
-            capabilities_json,
-            capabilities_digest,
-            status,
-            registered_at,
-            last_seen_at,
-            updated_at
-          ) VALUES (?, ?, ?, ?, 'test', ?, 1, ?, ?, 'online', ?, ?, ?)
-        `)
-        .run(
-          workerId,
-          workerNodeId,
-          workerInstanceId,
-          workerInstanceId,
-          protocolVersion,
-          capabilitiesJson,
-          sha256(capabilitiesJson),
-          now,
-          now,
-          now,
-        );
-      seedDatabase
-        .prepare(`
-          INSERT INTO run_attempts (
-            id,
-            job_id,
-            attempt_number,
-            worker_id,
-            worker_node_id,
-            worker_instance_id,
-            status,
-            lease_token_hash,
-            lease_generation,
-            lease_expires_at,
-            execution_deadline_at,
-            no_progress_timeout_ms,
-            no_progress_deadline_at,
-            last_heartbeat_at,
-            phase,
-            result_digest,
-            result_json,
-            started_at,
-            ended_at
-          ) VALUES (?, ?, 1, ?, ?, ?, 'succeeded', ?, 1, ?, ?, 600000, ?, ?, 'completed', ?, ?, ?, ?)
-        `)
-        .run(
-          runAttemptId,
-          jobId,
-          workerId,
-          workerNodeId,
-          workerInstanceId,
-          sha256(leaseToken),
-          now,
-          now,
-          now,
-          now,
-          resultDigest,
-          resultJson,
-          now,
-          now,
-        );
-      seedDatabase
-        .prepare(`
-          UPDATE jobs
-          SET
-            status = 'succeeded',
-            attempt_count = 1,
-            lease_generation = 1,
-            current_run_attempt_id = NULL,
-            started_at = ?,
-            completed_at = ?,
-            updated_at = ?
-          WHERE id = ?
-        `)
-        .run(now, now, now, jobId);
-    } finally {
-      seedDatabase.close();
-    }
-
-    const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
-    const fixture = { client, directory, databasePath };
-    fixtures.push(fixture);
-    await expect(
-      client.request("completeLease", {
-        jobId,
-        runAttemptId,
-        workerNodeId,
-        workerInstanceId,
-        leaseToken,
-        leaseGeneration: 1,
-        resultDigest,
-        result,
-      }),
-    ).resolves.toEqual({
-      jobId,
-      runAttemptId,
-      jobState: "succeeded",
-      runState: "succeeded",
-    });
-    withFixtureDatabase(fixture, (database) => {
-      expect(
-        database
-          .prepare("SELECT result_digest, result_json FROM legacy_review_result_replays")
-          .get(),
-      ).toEqual({ result_digest: resultDigest, result_json: resultJson });
-      expect(database.prepare("SELECT COUNT(*) AS count FROM review_results").get()).toEqual({
-        count: 0,
-      });
-    });
   });
 
   it("rolls back the attempt and result when a projection insert fails", async () => {

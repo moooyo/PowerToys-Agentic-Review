@@ -136,7 +136,7 @@ The server contains the following logical modules:
 - `ApprovalService`: creates immutable publication drafts and approvals.
 - `GitHubPublisher`: processes an idempotent outbox and reconciles uncertain writes.
 - `DatabaseClient`: provides asynchronous RPC to the database Worker Thread.
-- `MaintenanceService`: runs backups, retention, WAL checkpoints, and reapers.
+- `MaintenanceService`: runs retention, WAL checkpoints, and reapers.
 
 ## 6. Database Architecture
 
@@ -181,15 +181,17 @@ PRAGMA busy_timeout = 5000;
 ```
 
 Schema changes are immutable SQL files recorded in `schema_migrations` with a version, filename,
-checksum, and application timestamp. The server backs up the database before applying migrations
-and does not become ready when migration validation fails.
+checksum, and application timestamp. A fresh database applies the complete current migration set.
+An initialized database must already match the exact current version, filenames, and checksums; the
+Server does not run cross-version migrations or create an automatic migration backup. It does not
+become ready when validation fails.
 
 All lease and outbox mutations use prepared statements and short `BEGIN IMMEDIATE` transactions.
 GitHub calls, Codex calls, schema validation, and artifact I/O never run inside a SQLite
 transaction.
 
 `node:sqlite` is currently a Node.js release-candidate API. The deployment pins an exact Node.js
-patch and image digest. Every Node upgrade requires database contract, migration, concurrency, and
+patch and image digest. Every Node upgrade requires database contract, concurrency, and external
 backup verification before rollout.
 
 ## 7. Worker Registration and Capabilities
@@ -514,9 +516,9 @@ Dependency rules:
 
 ## 19. Deployment
 
-The Linux server is deployed with systemd or as a single-replica container using a persistent local
-volume for SQLite, artifacts, and backups. The dashboard build is copied into the server image and
-served by Fastify.
+The Linux server is deployed with systemd or as a single-replica container using persistent local
+storage for SQLite and artifacts. Backups are retained externally, outside the active Server data
+directory. The dashboard build is copied into the server image and served by Fastify.
 
 Each Windows worker is installed as two WinSW-managed Windows Services under distinct restricted,
 non-administrator identities. Executor starts first; Control begins claiming only after their local
@@ -524,10 +526,12 @@ identity, protocol, package, ACL, sandbox, and credential preflight succeeds. Co
 mode before upgrade and stops claiming before either executable bundle is replaced. Production
 execution fails closed unless the split-service boundary in ADR 0007 is active.
 
-Server upgrades pause claims, create a database backup, apply checked SQL migrations, start the new
-server, run reconciliation, and then resume claims. Restoring a backup also restores its Worker
-Token hashes and `pending`/`active`/`revoked` state; anti-rollback protection is not part of this
-trust model. Worker and protocol versions are advertised at registration; the server can require a
+Before release, a Server with a non-current initialized database is replaced with a freshly
+initialized exact-schema database rather than upgraded in place. The Server creates no automatic
+migration backup and exposes no legacy-adoption path. Restoring an externally retained backup is
+supported only when it already matches the exact current schema and also restores its Worker Token
+hashes and `pending`/`active`/`revoked` state; anti-rollback protection is not part of this trust
+model. Worker and protocol versions are advertised at registration; the server can require a
 minimum compatible version.
 
 ## 20. Initial Delivery Plan

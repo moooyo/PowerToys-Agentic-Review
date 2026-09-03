@@ -47,9 +47,8 @@ production storage lifecycle.
   profile v2 bind only schema-v4 bootstraps, omit mTLS/package credential material, reject
   `worker-auth-v1.json` as a payload, and require the retained staged-evidence typed gate.
 - The Server storage runtime no longer imports, creates, opens, or closes the historical Server
-  binding coordinator or signer. Token-only database startup preserves dormant migration-0012 rows
-  without requiring a trusted receipt issuer; those rows remain inert and do not create Worker
-  credentials.
+  binding coordinator or signer. A later pre-release schema reset removes the dormant
+  Server-binding migration and tables entirely; the current Worker Token schema is version 12.
 - `DatabaseClient` no longer imports or exposes the old coordinator capability, and the production
   database Worker no longer imports receipt persistence or implements its nine mutation/read
   operations. Unknown internal database operations now fail closed through the generic unsupported
@@ -57,11 +56,10 @@ production storage lifecycle.
 - Credential and runtime roster projections replace any Token-shaped historical display name with
   `Redacted worker`, while every current create and registration path rejects such a value before
   persistence.
-- Migration `0012_server_binding_persistence_v1.sql` remains byte-identical history. The historical
-  persistence, coordinator, signer, signer-host, contracts, fixtures, and native verifier source
-  was subsequently deleted. ADRs and handoffs preserve the design record, while the startup
-  compatibility test preserves representative rows in all four legacy tables across v12/v13
-  startup without creating a Worker credential.
+- The historical persistence, coordinator, signer, signer-host, contracts, fixtures, native
+  verifier, migration, and four database tables were deleted before release. There is no v12/v13
+  compatibility or legacy-adoption path; databases from the retired unreleased schema must be
+  rebuilt.
 
 ## Verification
 
@@ -110,3 +108,5 @@ installation workstreams above remain. The later installer-destination slice com
 read-only typed-gate re-verification evidence for all three fixed post-swap roots; no production
 installer materializes or swaps those roots or invokes that verifier yet. The production installer
 still includes repository-local implementation as well as privileged environment validation.
+A subsequent pre-release schema reset removes the cross-version recovery case; the current matrix
+contains five same-schema operational recovery tests.

@@ -98,9 +98,13 @@ ADR 0025 intentionally accepts credential rollback with database rollback. A res
 - make the Token captured in the backup valid again;
 - invalidate a Token created by a later rotation;
 - revive a Worker that was revoked after the backup was taken;
-- remove a Worker node created after the backup was taken; and
-- contain no Worker credentials when it predates schema v13. Migration preserves older Worker
-  instance rows but does not create credentials for them.
+- remove a Worker node created after the backup was taken.
+
+This runbook supports only a backup from the current schema version 12 with the exact current
+migration filenames and checksums. It does not support cross-version restore, migration during
+restore, the retired schema version 13, or a database produced by an older unreleased build. Rebuild
+the Server database and recreate required Worker credentials when the backup is not an exact current
+schema backup.
 
 The repository does not provide a database restore API or CLI. For an in-place restore, perform the
 following storage operation:
@@ -112,8 +116,9 @@ following storage operation:
    `0600`. A verified standalone SQLite backup with the same private ownership may be retained
    instead.
 3. Only after that complete retention step, remove the sidecars from the active data directory.
-4. Replace the database file with the selected verified backup, keep the data directory at mode
-   `0700`, and restore the database file to mode `0600` with the Server owner.
+4. Verify that the selected backup is the exact current schema version 12, then replace the database
+   file. Keep the data directory at mode `0700`, restore the database file to mode `0600` with the
+   Server owner, and retain the current `.agentic-review-database-initialized` marker.
 5. Before starting the Server, configure the built-in recovery boundary:
    - set `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` exactly;
    - set `AGENTIC_REVIEW_HOST` to `127.0.0.1`, `::1`, or another accepted loopback spelling;
@@ -138,9 +143,10 @@ following storage operation:
    `/health/ready` returns 503, and a Worker endpoint returns 503 with `worker_api_maintenance`.
 
 Do not combine the restored database with newer SQLite sidecars. Restoring into a new data directory
-is not supported by this runbook or the current public tooling: a backup does not contain the
-initialization marker, startup requires explicit legacy adoption, and the repository exposes no
-public adoption CLI. Keep recovery blocked rather than inventing an authorization file or bypass.
+is not supported by this runbook or the current public tooling because a backup does not contain the
+current initialization marker. There is no legacy-adoption authorization, fallback, or public
+adoption CLI. A nonempty database without the current marker is rejected and must be rebuilt; do not
+invent an authorization file or bypass.
 
 After startup:
 
@@ -151,8 +157,7 @@ After startup:
 3. For every externally recorded post-backup revocation, revoke the node only when it is still
    present in the restored roster. If it is absent, leave it absent and do not recreate it merely to
    replay the revocation.
-4. Recreate only required non-revoked Worker nodes that were created after the backup or that came
-   from a pre-v13 database with no credential records.
+4. Recreate only required non-revoked Worker nodes that were created after the backup.
 5. Before restoring Worker traffic, rotate every restored `pending` or `active` Worker, install each
    newly returned Token in its Windows local configuration, and restart that Worker.
 6. Verify the intended `active` and `revoked` roster states.
@@ -190,8 +195,9 @@ boundary is covered by `apps/server/src/recovery-maintenance.test.ts`, and the a
 rollback, clock preservation, restart, old-cookie rejection, and fresh-login behavior are covered
 by `apps/server/src/database/operator-auth-recovery.test.ts`. The operator route suite separately
 proves one-time plaintext responses and `no-store` headers. The backup case restores a clean,
-closed SQLite snapshot so that the test isolates credential rollback behavior; the existing
-migration-backup suite separately verifies backup creation, validation, and durable publication.
+closed current-schema SQLite snapshot so that the test isolates credential rollback behavior.
+Backup creation and retention are deployment responsibilities; the Server does not create an
+automatic migration backup or maintain a data-directory backup namespace.
 
 Run from the repository root on Linux, or from a local WSL repository copy stored on its native
 Linux filesystem:
@@ -210,5 +216,6 @@ ownership. The configuration, route, health, direct atomic-purge, and rollback t
 Windows. A checkout mounted from NTFS into WSL is not a substitute for a native WSL filesystem copy
 and does not count as database Worker recovery verification.
 
-The complete maintenance and recovery set must pass before a Token-authenticated production rollout
-or after changing Worker credential or operator-session persistence semantics.
+The five current-schema Worker Token recovery tests plus the maintenance and operator-auth recovery
+set must pass before a Token-authenticated production rollout or after changing Worker credential or
+operator-session persistence semantics.

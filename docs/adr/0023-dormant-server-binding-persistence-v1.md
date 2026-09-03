@@ -2,8 +2,9 @@
 
 ## Status
 
-Superseded by ADR 0025 on 2026-09-03. Its receipt-signing aggregate remains inert migration history
-and is not a Worker authentication source.
+Superseded by ADR 0025 on 2026-09-03. The receipt-signing aggregate and migration were removed in a
+pre-release schema reset; the details below describe historical source only and are not present in
+the current production schema.
 
 This documentation slice freezes the S1 SQLite schema, transaction boundaries, exact replay,
 asynchronous receipt-signing coordination, issuer bootstrap checks, monotonic revocation, storage

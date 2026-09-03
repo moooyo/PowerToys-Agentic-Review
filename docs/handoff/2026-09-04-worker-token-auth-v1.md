@@ -24,7 +24,7 @@ installer deferred.
 
 ## Completed Scope
 
-- Migration `0013_worker_token_auth_v1.sql` adds the node-level credential record with a unique
+- Migration `0012_worker_token_auth_v1.sql` adds the node-level credential record with a unique
   lowercase SHA-256 Token digest, `pending`/`active`/`revoked` state, operator attribution, and
   activation, rotation, and revocation timestamps. The database-worker performs create,
   authenticate, rotate, revoke, registration activation, and active-state Claim rechecks inside
@@ -65,8 +65,9 @@ installer deferred.
 
 The Server and runnable TypeScript Worker have one positive Worker authentication source: the
 database-backed Bearer Token. The certificate fingerprint map and TLS client-CA listener are not
-configured or accepted by the Server. The retained migration-0012 tables, receipt code, signer
-code, and signer-host code have no Server route or Worker-auth consumer.
+configured or accepted by the Server. The receipt, signer, signer-host, and Server-binding database
+tables are absent from the current production source and schema. A pre-release schema reset reused
+migration version 12 for the Worker Token schema.
 
 Native ServiceHost production composition now accepts only bootstrap schema v4. Control loads the
 fixed authentication file and constructs `NewBearerClient`; Executor has no Worker credential or
@@ -76,9 +77,9 @@ v3; outer-package v2 and installer profile v2 now bind schema v4, but actual sig
 destination evidence, and the production SCM installer are still required before shipment.
 
 The production Server storage lifecycle no longer creates, opens, or closes the superseded Server
-binding coordinator. Database startup preserves migration-0012 rows without auditing or activating
-them as live receipt authority. Those rows do not participate in Worker authentication and do not
-create a Worker credential.
+binding coordinator. The current schema contains no Server-binding rows or tables and provides no
+legacy-adoption or schema-13 compatibility path. Databases from earlier unreleased builds must be
+rebuilt.
 
 This repository remains execution-disabled. Successful Worker authentication does not grant a
 Claim, lease, slot, package, installation, local capability, or execution authority.
@@ -127,8 +128,9 @@ engine warning, but lint, typecheck, build, and the recorded focused tests compl
    production installer invokes it. Signed package v1 remains immutable schema-v3 history.
 
 The later `codex/worker-token-release-recovery` change completed the executable historical-source
-cleanup and the Token recovery exercises. Migration 0012 and its four-table upgrade compatibility
-coverage remain immutable history.
+cleanup and the Token recovery exercises. A subsequent pre-release reset removed the dormant
+four-table migration, renumbered the Worker Token migration to version 12, and limited operational
+restore to exact current-schema backups.
 
 Linux signer-host signals, reaping, cgroups, parent-death behavior, HSM/KMS integration, candidate
 certificates, signed receipts, and active-status assertions are not deferred requirements under

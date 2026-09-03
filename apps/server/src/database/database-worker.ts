@@ -67,7 +67,6 @@ import {
   terminateArtifactUpload,
 } from "./artifacts.js";
 import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
-import { adoptLegacyDatabase } from "./database-initialization.js";
 import { completeDatabaseShutdown } from "./database-shutdown.js";
 import {
   LeaseLostError,
@@ -84,8 +83,7 @@ import {
   type WriteGitHubPollingProjectionInput,
   writeGitHubPollingProjection,
 } from "./github-polling-state.js";
-import { cleanupIncompleteMigrationBackups, createMigrationBackup } from "./migration-backup.js";
-import { inspectMigrationState, type MigrationState, runMigrations } from "./migrations.js";
+import { inspectMigrationState, runMigrations } from "./migrations.js";
 import {
   beginOperatorLogin,
   type CleanupExpiredOperatorAuthInput,
@@ -2305,48 +2303,7 @@ const handleRequest = (request: DatabaseRequest): unknown => {
 
 try {
   const storage = DatabaseStorageBinding.prepare(options.databasePath);
-  let migrationState: MigrationState | undefined;
-  if (storage.snapshot.initializationState === "legacy") {
-    storage.assertLegacyCandidate();
-    const legacyDatabase = new DatabaseSync(storage.databasePath, {
-      readOnly: true,
-      enableForeignKeyConstraints: true,
-      enableDoubleQuotedStringLiterals: false,
-    });
-    let adoptionError: unknown;
-    try {
-      migrationState = await adoptLegacyDatabase({
-        database: legacyDatabase,
-        databasePath: storage.databasePath,
-        migrationsDirectory: options.migrationsDirectory,
-        storage,
-      });
-    } catch (error) {
-      adoptionError = error;
-    }
-    let closeError: unknown;
-    try {
-      legacyDatabase.close();
-    } catch (error) {
-      closeError = error;
-    }
-    if (adoptionError !== undefined && closeError !== undefined) {
-      throw new AggregateError(
-        [adoptionError, closeError],
-        "Legacy database adoption and read-only close both failed.",
-        { cause: adoptionError },
-      );
-    }
-    if (adoptionError !== undefined) {
-      throw adoptionError;
-    }
-    if (closeError !== undefined) {
-      throw closeError;
-    }
-  } else {
-    cleanupIncompleteMigrationBackups(storage.databasePath);
-    storage.createDatabaseFile();
-  }
+  storage.createDatabaseFile();
   database = new DatabaseSync(storage.databasePath, {
     timeout: 5_000,
     enableForeignKeyConstraints: true,
@@ -2358,19 +2315,17 @@ try {
   database.exec("PRAGMA synchronous = FULL");
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
-  migrationState ??= inspectMigrationState(database, options.migrationsDirectory);
-  if (
-    storage.snapshot.initializationState === "initialized" &&
-    migrationState.pendingVersions.length > 0
-  ) {
-    await createMigrationBackup({
-      database,
-      databasePath: storage.databasePath,
-      currentVersion: migrationState.currentVersion,
-      targetVersion: migrationState.targetVersion,
-    });
+  const migrationState = inspectMigrationState(database, options.migrationsDirectory);
+  if (storage.snapshot.initializationState === "initialized") {
+    if (migrationState.pendingVersions.length > 0) {
+      throw new Error(
+        `Initialized database ${storage.databasePath} has schema version ${migrationState.currentVersion}; exact current schema version ${migrationState.targetVersion} is required. Rebuild the database.`,
+      );
+    }
+    schemaVersion = migrationState.currentVersion;
+  } else {
+    schemaVersion = runMigrations(database, options.migrationsDirectory);
   }
-  schemaVersion = runMigrations(database, options.migrationsDirectory);
   if (storage.snapshot.initializationState === "fresh") {
     storage.finalizeDatabaseInitialization();
   }

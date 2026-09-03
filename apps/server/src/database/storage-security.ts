@@ -11,7 +11,6 @@ import {
   openSync,
   readSync,
   renameSync,
-  unlinkSync,
   writeSync,
 } from "node:fs";
 import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
@@ -24,13 +23,10 @@ const groupOrOtherWriteBits = 0o022n;
 const otherWriteBit = 0o002n;
 const sqliteSidecarSuffixes = ["-journal", "-wal", "-shm"] as const;
 
-export const maximumDatabaseStorageEntries = 12;
+export const maximumDatabaseStorageEntries = 10;
 export const databaseInitializingMarkerFilename = ".agentic-review-database-initializing";
 export const databaseInitializationMarkerFilename = ".agentic-review-database-initialized";
-export const databaseInitializationMarkerContent = "agentic-review-database-initialization-v1\n";
-export const databaseLegacyAdoptionAuthorizationFilename = ".agentic-review-allow-legacy-adoption";
-export const databaseLegacyAdoptionAuthorizationContent =
-  "agentic-review-allow-legacy-adoption-v1\n";
+export const databaseInitializationMarkerContent = "agentic-review-database-initialization-v2\n";
 const safeDatabaseBasenamePattern = /^[A-Za-z0-9._-]+$/u;
 
 export interface FileIdentity {
@@ -41,7 +37,7 @@ export interface FileIdentity {
 export interface DatabaseStorageSnapshot {
   readonly databaseExisted: boolean;
   readonly databaseSize: bigint;
-  readonly initializationState: "fresh" | "initialized" | "legacy";
+  readonly initializationState: "fresh" | "initialized";
 }
 
 interface DirectorySnapshot {
@@ -58,12 +54,10 @@ interface PreparedPrivateDirectory {
 }
 
 interface DataDirectoryState {
-  readonly backupHistoryExists: boolean;
   readonly databaseSidecarExists: boolean;
   readonly databaseStats: BigIntStats | undefined;
   readonly initializedMarkerIdentity: FileIdentity | undefined;
   readonly initializingMarkerIdentity: FileIdentity | undefined;
-  readonly legacyAdoptionAuthorizationIdentity: FileIdentity | undefined;
 }
 
 export interface OpenPrivateRegularFile {
@@ -198,11 +192,7 @@ const lexicalDirectoryPaths = (directoryPath: string): readonly string[] => {
   return paths;
 };
 
-const preparePrivateDirectory = (
-  directoryPath: string,
-  name: string,
-  create: boolean,
-): PreparedPrivateDirectory | undefined => {
+const preparePrivateDirectory = (directoryPath: string, name: string): PreparedPrivateDirectory => {
   const resolvedPath = resolve(directoryPath);
   const paths = lexicalDirectoryPaths(resolvedPath);
   const missingPaths: string[] = [];
@@ -231,9 +221,6 @@ const preparePrivateDirectory = (
   }
 
   if (missing) {
-    if (!create) {
-      return undefined;
-    }
     mkdirSync(resolvedPath, { recursive: true, mode: Number(privateDirectoryMode) });
   }
 
@@ -493,19 +480,14 @@ export const databaseInitializationMarkerPath = (databasePath: string): string =
 export const databaseInitializingMarkerPath = (databasePath: string): string =>
   join(dirname(resolve(databasePath)), databaseInitializingMarkerFilename);
 
-export const databaseLegacyAdoptionAuthorizationPath = (databasePath: string): string =>
-  join(dirname(resolve(databasePath)), databaseLegacyAdoptionAuthorizationFilename);
-
 export const secureDatabaseBasename = (databasePath: string): string => {
   const databaseName = basename(databasePath);
   if (
     !safeDatabaseBasenamePattern.test(databaseName) ||
     databaseName === "." ||
     databaseName === ".." ||
-    databaseName === "backups" ||
     databaseName === databaseInitializingMarkerFilename ||
-    databaseName === databaseInitializationMarkerFilename ||
-    databaseName === databaseLegacyAdoptionAuthorizationFilename
+    databaseName === databaseInitializationMarkerFilename
   ) {
     throw new Error(
       `Database filename ${databaseName || "<empty>"} must match [A-Za-z0-9._-]+ and must not be reserved.`,
@@ -593,17 +575,6 @@ const assertDatabaseInitializationMarker = (
     expectedIdentity,
   );
 
-const assertLegacyAdoptionAuthorization = (
-  authorizationPath: string,
-  expectedIdentity?: FileIdentity,
-): FileIdentity | undefined =>
-  assertPrivateFixedContentFile(
-    authorizationPath,
-    "Legacy adoption authorization",
-    databaseLegacyAdoptionAuthorizationContent,
-    expectedIdentity,
-  );
-
 const createDatabaseInitializationMarker = (markerPath: string): FileIdentity => {
   let descriptor: number | undefined;
   let identity: FileIdentity | undefined;
@@ -658,37 +629,12 @@ const createDatabaseInitializationMarker = (markerPath: string): FileIdentity =>
   return identity;
 };
 
-const directoryHasEntries = (path: string): boolean => {
-  const directory = opendirSync(path);
-  let hasEntries = false;
-  let operationError: unknown;
-  try {
-    hasEntries = directory.readSync() !== null;
-  } catch (error) {
-    operationError = error;
-  }
-
-  let closeError: unknown;
-  try {
-    directory.closeSync();
-  } catch (error) {
-    closeError = error;
-  }
-  throwOperationAndCloseErrors(
-    operationError,
-    closeError,
-    `Unable to inspect and close database storage directory ${path}.`,
-  );
-  return hasEntries;
-};
-
 const inspectDataDirectory = (databasePath: string): DataDirectoryState => {
   const directoryPath = dirname(databasePath);
   const databaseName = secureDatabaseBasename(databasePath);
 
   const initializedMarkerPath = databaseInitializationMarkerPath(databasePath);
   const initializingMarkerPath = databaseInitializingMarkerPath(databasePath);
-  const legacyAdoptionAuthorizationPath = databaseLegacyAdoptionAuthorizationPath(databasePath);
   const ownerLockName = `${databaseName}.owner-lock.sqlite`;
   const databaseSidecarNames = sqliteSidecarSuffixes.map((suffix) => `${databaseName}${suffix}`);
   const ownerLockSidecarNames = sqliteSidecarSuffixes.map((suffix) => `${ownerLockName}${suffix}`);
@@ -699,19 +645,15 @@ const inspectDataDirectory = (databasePath: string): DataDirectoryState => {
     ...ownerLockSidecarNames,
     databaseInitializingMarkerFilename,
     databaseInitializationMarkerFilename,
-    databaseLegacyAdoptionAuthorizationFilename,
-    "backups",
   ]);
   if (allowedNames.size !== maximumDatabaseStorageEntries) {
     throw new Error("Database storage allowlist cardinality is invalid.");
   }
   const handle = opendirSync(directoryPath);
-  let backupHistoryExists = false;
   let databaseIdentity: FileIdentity | undefined;
   let databaseSidecarExists = false;
   let initializedMarkerIdentity: FileIdentity | undefined;
   let initializingMarkerIdentity: FileIdentity | undefined;
-  let legacyAdoptionAuthorizationIdentity: FileIdentity | undefined;
   let scanError: unknown;
   try {
     let entryCount = 0;
@@ -729,23 +671,12 @@ const inspectDataDirectory = (databasePath: string): DataDirectoryState => {
         );
       }
       const entryPath = join(directoryPath, entryName);
-      if (entryName === "backups") {
-        assertPrivateDirectory(entryPath);
-        backupHistoryExists = directoryHasEntries(entryPath);
-        continue;
-      }
       if (entryName === databaseInitializationMarkerFilename) {
         initializedMarkerIdentity = assertDatabaseInitializationMarker(initializedMarkerPath);
         continue;
       }
       if (entryName === databaseInitializingMarkerFilename) {
         initializingMarkerIdentity = assertDatabaseInitializationMarker(initializingMarkerPath);
-        continue;
-      }
-      if (entryName === databaseLegacyAdoptionAuthorizationFilename) {
-        legacyAdoptionAuthorizationIdentity = assertLegacyAdoptionAuthorization(
-          legacyAdoptionAuthorizationPath,
-        );
         continue;
       }
       const identity = assertPrivateRegularFile(entryPath, "Database storage entry");
@@ -780,12 +711,10 @@ const inspectDataDirectory = (databasePath: string): DataDirectoryState => {
     throw new Error(`Database ${databasePath} changed identity during storage validation.`);
   }
   return {
-    backupHistoryExists,
     databaseSidecarExists,
     databaseStats,
     initializedMarkerIdentity,
     initializingMarkerIdentity,
-    legacyAdoptionAuthorizationIdentity,
   };
 };
 
@@ -793,17 +722,6 @@ const classifyDatabaseState = (
   databasePath: string,
   state: DataDirectoryState,
 ): DatabaseStorageSnapshot["initializationState"] => {
-  if (
-    state.legacyAdoptionAuthorizationIdentity !== undefined &&
-    (state.initializingMarkerIdentity !== undefined ||
-      state.initializedMarkerIdentity !== undefined ||
-      state.databaseStats === undefined ||
-      state.databaseStats.size === 0n)
-  ) {
-    throw new Error(
-      `Database ${databasePath} has a contradictory legacy adoption authorization; recovery is required.`,
-    );
-  }
   if (state.initializingMarkerIdentity !== undefined) {
     throw new Error(
       `Database ${databasePath} has an incomplete initialization marker; recovery is required.`,
@@ -818,9 +736,9 @@ const classifyDatabaseState = (
     return "initialized";
   }
   if (state.databaseStats === undefined) {
-    if (state.databaseSidecarExists || state.backupHistoryExists) {
+    if (state.databaseSidecarExists) {
       throw new Error(
-        `Database ${databasePath} is missing while initialization or backup history exists; recovery is required.`,
+        `Database ${databasePath} is missing while SQLite sidecar history exists; recovery is required.`,
       );
     }
     return "fresh";
@@ -828,80 +746,14 @@ const classifyDatabaseState = (
   if (state.databaseStats.size === 0n) {
     throw new Error(`Uninitialized database ${databasePath} is empty; recovery is required.`);
   }
-  if (state.legacyAdoptionAuthorizationIdentity !== undefined) {
-    return "legacy";
-  }
   throw new Error(
-    `Database ${databasePath} requires an explicit legacy adoption authorization; recovery is required.`,
+    `Database ${databasePath} was not initialized by this Server version; rebuild is required.`,
   );
 };
 
 export const assertSecureDatabaseOwnerPlatform = (): void => {
   currentEffectiveUserId();
 };
-
-export class PrivateDirectoryBinding {
-  readonly #ancestors: readonly DirectorySnapshot[];
-  readonly #identity: FileIdentity;
-
-  public readonly directoryPath: string;
-
-  private constructor(
-    directoryPath: string,
-    stats: BigIntStats,
-    ancestors: readonly DirectorySnapshot[],
-  ) {
-    this.directoryPath = directoryPath;
-    this.#identity = identityOf(stats);
-    this.#ancestors = ancestors;
-  }
-
-  public static prepare(
-    directoryPath: string,
-    name: string,
-    create: boolean,
-  ): PrivateDirectoryBinding {
-    assertSecureDatabaseOwnerPlatform();
-    const prepared = preparePrivateDirectory(directoryPath, name, create);
-    if (prepared === undefined) {
-      throw new Error(`${name} ${resolve(directoryPath)} does not exist.`);
-    }
-    return new PrivateDirectoryBinding(prepared.path, prepared.stats, prepared.ancestors);
-  }
-
-  public static prepareIfExists(
-    directoryPath: string,
-    name: string,
-  ): PrivateDirectoryBinding | undefined {
-    assertSecureDatabaseOwnerPlatform();
-    const prepared = preparePrivateDirectory(directoryPath, name, false);
-    return prepared === undefined
-      ? undefined
-      : new PrivateDirectoryBinding(prepared.path, prepared.stats, prepared.ancestors);
-  }
-
-  public assertReady(): void {
-    assertAncestorChain(this.#ancestors);
-    const stats = assertPrivateDirectory(this.directoryPath);
-    if (!identitiesMatch(identityOf(stats), this.#identity)) {
-      throw new Error(`${this.directoryPath} changed identity after it was bound.`);
-    }
-  }
-
-  public sync(): void {
-    this.assertReady();
-    syncBoundDirectory(this.directoryPath, "Private database directory", this.#identity, true);
-  }
-
-  public syncParent(): void {
-    this.assertReady();
-    const parent = this.#ancestors.at(-1);
-    if (parent === undefined) {
-      throw new Error(`Private database directory ${this.directoryPath} has no parent.`);
-    }
-    syncBoundDirectory(parent.path, "Database storage parent", parent.identity, false);
-  }
-}
 
 /**
  * The storage boundary trusts root and same-euid processes. Lexical ancestor validation and the
@@ -913,8 +765,6 @@ export class DatabaseStorageBinding {
   readonly #ancestors: readonly DirectorySnapshot[];
   readonly #directoryIdentity: FileIdentity;
   #databaseIdentity: FileIdentity | undefined;
-  readonly #legacyAdoptionAuthorizationIdentity: FileIdentity | undefined;
-  #legacyAdoptionAuthorizationConsumed = false;
   #markerIdentity: FileIdentity | undefined;
   #markerState: "initialized" | "initializing" | undefined;
 
@@ -929,7 +779,6 @@ export class DatabaseStorageBinding {
     ancestors: readonly DirectorySnapshot[],
     databaseStats: BigIntStats | undefined,
     markerIdentity: FileIdentity | undefined,
-    legacyAdoptionAuthorizationIdentity: FileIdentity | undefined,
     initializationState: DatabaseStorageSnapshot["initializationState"],
   ) {
     this.databasePath = databasePath;
@@ -937,7 +786,6 @@ export class DatabaseStorageBinding {
     this.#ancestors = ancestors;
     this.#directoryIdentity = identityOf(directoryStats);
     this.#databaseIdentity = databaseStats === undefined ? undefined : identityOf(databaseStats);
-    this.#legacyAdoptionAuthorizationIdentity = legacyAdoptionAuthorizationIdentity;
     this.#markerIdentity = markerIdentity;
     this.#markerState = initializationState === "initialized" ? "initialized" : undefined;
     this.snapshot = {
@@ -955,11 +803,7 @@ export class DatabaseStorageBinding {
     const preparedDirectory = preparePrivateDirectory(
       requestedDirectory,
       "Database storage directory",
-      true,
     );
-    if (preparedDirectory === undefined) {
-      throw new Error(`Database storage directory ${requestedDirectory} could not be prepared.`);
-    }
     const canonicalDatabasePath = join(preparedDirectory.path, databaseName);
     const state = inspectDataDirectory(canonicalDatabasePath);
     const initializationState = classifyDatabaseState(canonicalDatabasePath, state);
@@ -971,7 +815,6 @@ export class DatabaseStorageBinding {
       preparedDirectory.ancestors,
       state.databaseStats,
       state.initializedMarkerIdentity,
-      state.legacyAdoptionAuthorizationIdentity,
       initializationState,
     );
   }
@@ -997,10 +840,6 @@ export class DatabaseStorageBinding {
       this.#markerIdentity = markerIdentity;
       return;
     }
-    if (this.snapshot.initializationState === "legacy") {
-      this.assertLegacyCandidate();
-      return;
-    }
     if (state.databaseStats !== undefined) {
       throw new Error(`Database ${this.databasePath} appeared after storage preparation.`);
     }
@@ -1018,66 +857,6 @@ export class DatabaseStorageBinding {
     this.#databaseIdentity = created.database;
   }
 
-  public assertLegacyCandidate(): void {
-    if (this.snapshot.initializationState !== "legacy" || this.#markerState !== undefined) {
-      throw new Error(`Database ${this.databasePath} is not a legacy adoption candidate.`);
-    }
-    this.assertDirectoryIdentity();
-    const state = inspectDataDirectory(this.databasePath);
-    if (classifyDatabaseState(this.databasePath, state) !== "legacy") {
-      throw new Error(`Database ${this.databasePath} changed legacy adoption state.`);
-    }
-    if (this.#legacyAdoptionAuthorizationIdentity === undefined) {
-      throw new Error(`Database ${this.databasePath} has no bound legacy adoption authorization.`);
-    }
-    assertLegacyAdoptionAuthorization(
-      databaseLegacyAdoptionAuthorizationPath(this.databasePath),
-      this.#legacyAdoptionAuthorizationIdentity,
-    );
-    this.#databaseIdentity = this.assertPreparedDatabaseIdentity();
-  }
-
-  public consumeLegacyAdoptionAuthorization(): void {
-    this.assertLegacyCandidate();
-    const authorizationPath = databaseLegacyAdoptionAuthorizationPath(this.databasePath);
-    assertLegacyAdoptionAuthorization(authorizationPath, this.#legacyAdoptionAuthorizationIdentity);
-    unlinkSync(authorizationPath);
-    this.syncDirectory();
-    this.#legacyAdoptionAuthorizationConsumed = true;
-  }
-
-  public adoptLegacyDatabase(): void {
-    if (
-      this.snapshot.initializationState !== "legacy" ||
-      !this.#legacyAdoptionAuthorizationConsumed ||
-      this.#markerState !== undefined
-    ) {
-      throw new Error(
-        `Database ${this.databasePath} has no consumed legacy adoption authorization.`,
-      );
-    }
-    this.assertDirectoryIdentity();
-    const state = inspectDataDirectory(this.databasePath);
-    if (
-      state.databaseStats === undefined ||
-      state.databaseStats.size === 0n ||
-      state.initializedMarkerIdentity !== undefined ||
-      state.initializingMarkerIdentity !== undefined ||
-      state.legacyAdoptionAuthorizationIdentity !== undefined
-    ) {
-      throw new Error(
-        `Database ${this.databasePath} changed after legacy authorization consumption.`,
-      );
-    }
-    this.#databaseIdentity = this.assertPreparedDatabaseIdentity();
-    this.#markerIdentity = createDatabaseInitializationMarker(
-      databaseInitializationMarkerPath(this.databasePath),
-    );
-    this.#markerState = "initialized";
-    this.syncDirectory();
-    this.assertReady();
-  }
-
   public assertDatabaseOpened(): void {
     this.assertDirectoryIdentity();
     const state = inspectDataDirectory(this.databasePath);
@@ -1090,8 +869,7 @@ export class DatabaseStorageBinding {
       if (
         markerIdentity === undefined ||
         state.initializingMarkerIdentity === undefined ||
-        state.initializedMarkerIdentity !== undefined ||
-        state.legacyAdoptionAuthorizationIdentity !== undefined
+        state.initializedMarkerIdentity !== undefined
       ) {
         throw new Error(`Database ${this.databasePath} changed its initialization marker state.`);
       }
@@ -1131,8 +909,7 @@ export class DatabaseStorageBinding {
     if (
       initializingIdentity === undefined ||
       state.initializingMarkerIdentity === undefined ||
-      state.initializedMarkerIdentity !== undefined ||
-      state.legacyAdoptionAuthorizationIdentity !== undefined
+      state.initializedMarkerIdentity !== undefined
     ) {
       throw new Error(`Database ${this.databasePath} changed its initialization marker state.`);
     }

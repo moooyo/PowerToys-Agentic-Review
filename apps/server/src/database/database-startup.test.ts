@@ -24,8 +24,6 @@ import {
   databaseInitializationMarkerContent,
   databaseInitializationMarkerPath,
   databaseInitializingMarkerPath,
-  databaseLegacyAdoptionAuthorizationContent,
-  databaseLegacyAdoptionAuthorizationPath,
   maximumDatabaseStorageEntries,
 } from "../../dist/database/storage-security.js";
 
@@ -64,107 +62,44 @@ describe("DatabaseClient startup", () => {
     expect(completed).toBe(true);
   });
 
-  it("adopts a valid legacy database after a verified backup and before pending migrations", async () => {
+  it("builds exact schema version 12 without retired Server-binding tables", async () => {
     const directory = await createTemporaryDirectory();
-    const versionOneDirectory = join(directory, "migrations-v1");
-    await mkdir(versionOneDirectory);
-    await copyFile(
-      join(migrationsDirectory, "0001_initial.sql"),
-      join(versionOneDirectory, "0001_initial.sql"),
-    );
-    const dataDirectory = join(directory, "data");
-    const databasePath = join(dataDirectory, "state.sqlite");
-    await mkdir(dataDirectory, { mode: 0o700 });
-    const seedDatabase = new DatabaseSync(databasePath);
+    const database = new DatabaseSync(join(directory, "schema.sqlite"));
     try {
-      expect(runMigrations(seedDatabase, versionOneDirectory)).toBe(1);
+      expect(runMigrations(database, migrationsDirectory)).toBe(12);
+      expect(
+        database.prepare("SELECT filename FROM schema_migrations WHERE version = 12").get(),
+      ).toEqual({ filename: "0012_worker_token_auth_v1.sql" });
+      expect(
+        database
+          .prepare(`
+            SELECT name
+            FROM sqlite_schema
+            WHERE type = 'table'
+              AND name IN (
+                'server_binding_receipt_issuer',
+                'server_binding_authorizations',
+                'server_bindings',
+                'server_binding_revocations'
+              )
+            ORDER BY name
+          `)
+          .all(),
+      ).toEqual([]);
+      expect(
+        database
+          .prepare(
+            "SELECT 1 AS present FROM sqlite_schema WHERE type = 'table' AND name = 'worker_node_credentials'",
+          )
+          .get(),
+      ).toEqual({ present: 1 });
     } finally {
-      seedDatabase.close();
-    }
-    if (process.platform !== "win32") {
-      await chmod(databasePath, 0o600);
-    }
-    await writeLegacyAdoptionAuthorization(databasePath);
-    const backupDirectory = join(dataDirectory, "backups");
-    await mkdir(backupDirectory, { mode: 0o700 });
-    const staleBackupStem =
-      "state.sqlite.v1-to-v7.2026-08-31T00-00-00-000Z.00000000-0000-4000-8000-000000000000.sqlite.partial";
-    await Promise.all([
-      writeFile(join(backupDirectory, staleBackupStem), "partial", { mode: 0o600 }),
-      writeFile(join(backupDirectory, `${staleBackupStem}-wal`), "partial", { mode: 0o600 }),
-    ]);
-
-    const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
-    await client.close();
-
-    const backupFiles = await readdir(backupDirectory);
-    expect(backupFiles).toHaveLength(1);
-    expect(backupFiles[0]).toMatch(/\.sqlite$/u);
-    const backupDatabase = new DatabaseSync(join(backupDirectory, backupFiles[0] as string), {
-      readOnly: true,
-    });
-    const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
-    try {
-      expect(readSchemaVersion(backupDatabase)).toBe(1);
-      expect(readSchemaVersion(migratedDatabase)).toBe(13);
-      expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
-        databaseInitializationMarkerContent,
-      );
-      await expect(
-        lstat(databaseLegacyAdoptionAuthorizationPath(databasePath)),
-      ).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      backupDatabase.close();
-      migratedDatabase.close();
+      database.close();
     }
   });
 
   it.skipIf(process.platform === "win32")(
-    "starts Token-only from schema v12 and v13 while preserving dormant Server binding rows",
-    async () => {
-      for (const startingSchemaVersion of [12, 13] as const) {
-        const directory = await createTemporaryDirectory();
-        const migrationPrefixDirectory = await createMigrationPrefixDirectory(
-          directory,
-          startingSchemaVersion,
-        );
-        const dataDirectory = join(directory, `data-v${startingSchemaVersion}`);
-        const databasePath = join(dataDirectory, "state.sqlite");
-        await mkdir(dataDirectory, { mode: 0o700 });
-        const expectedLegacyRows = (() => {
-          const seedDatabase = new DatabaseSync(databasePath);
-          try {
-            expect(runMigrations(seedDatabase, migrationPrefixDirectory)).toBe(
-              startingSchemaVersion,
-            );
-            return seedLegacyServerBindingRows(seedDatabase);
-          } finally {
-            seedDatabase.close();
-          }
-        })();
-        await chmod(databasePath, 0o600);
-        await writeInitializationMarker(databasePath);
-
-        const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
-        await expect(client.request("ping", {})).resolves.toMatchObject({ schemaVersion: 13 });
-        await client.close();
-
-        const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
-        try {
-          expect(readSchemaVersion(migratedDatabase)).toBe(13);
-          expect(readLegacyServerBindingRows(migratedDatabase)).toEqual(expectedLegacyRows);
-          expect(
-            migratedDatabase.prepare("SELECT COUNT(*) AS count FROM worker_node_credentials").get(),
-          ).toEqual({ count: 0 });
-        } finally {
-          migratedDatabase.close();
-        }
-      }
-    },
-  );
-
-  it.skipIf(process.platform === "win32")(
-    "backs up an initialized v7 database before applying migrations through v13",
+    "rejects an initialized v7 database instead of migrating it during startup",
     async () => {
       const directory = await createTemporaryDirectory();
       const versionSevenDirectory = await createMigrationPrefixDirectory(directory, 7);
@@ -183,25 +118,17 @@ describe("DatabaseClient startup", () => {
         databaseInitializationMarkerContent,
       );
 
-      const upgradedClient = await DatabaseClient.create({ databasePath, migrationsDirectory });
-      await upgradedClient.close();
-
-      const backupDirectory = join(directory, "data", "backups");
-      const backupFiles = await readdir(backupDirectory);
-      expect(backupFiles).toHaveLength(1);
-      const backupFilename = backupFiles[0] as string;
-      expect(backupFilename).toContain(".v7-to-v13.");
-
-      const migratedDatabase = new DatabaseSync(databasePath, { readOnly: true });
-      const backupDatabase = new DatabaseSync(join(backupDirectory, backupFilename), {
-        readOnly: true,
+      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
+        /schema version 7; exact current schema version 12 is required.*Rebuild the database/u,
+      );
+      await expect(lstat(join(directory, "data", "backups"))).rejects.toMatchObject({
+        code: "ENOENT",
       });
+      const unchangedDatabase = new DatabaseSync(databasePath, { readOnly: true });
       try {
-        expect(readSchemaVersion(migratedDatabase)).toBe(13);
-        expect(readSchemaVersion(backupDatabase)).toBe(7);
+        expect(readSchemaVersion(unchangedDatabase)).toBe(7);
       } finally {
-        migratedDatabase.close();
-        backupDatabase.close();
+        unchangedDatabase.close();
       }
     },
   );
@@ -359,20 +286,21 @@ describe("DatabaseClient startup", () => {
         { mode: 0o600 },
       );
       await writeInitializationMarker(overLimitDatabasePath);
-      await writeLegacyAdoptionAuthorization(overLimitDatabasePath);
-      await mkdir(join(overLimitDirectory, "backups"), { mode: 0o700 });
-      await writeFile(join(overLimitDirectory, "thirteenth-entry"), "extra", { mode: 0o600 });
-      expect(maximumDatabaseStorageEntries).toBe(12);
+      await writeFile(join(overLimitDirectory, "eleventh-entry"), "extra", { mode: 0o600 });
+      expect(maximumDatabaseStorageEntries).toBe(10);
       await expect(
         DatabaseClient.create({ databasePath: overLimitDatabasePath, migrationsDirectory }),
-      ).rejects.toThrow(/(?:exceeds its 12-entry allowlist|unexpected entry thirteenth-entry)/u);
+      ).rejects.toThrow(/(?:exceeds its 10-entry allowlist|unexpected entry eleventh-entry)/u);
 
-      const emptyLegacyDirectory = join(directory, "empty-legacy");
-      const emptyLegacyDatabasePath = join(emptyLegacyDirectory, "state.sqlite");
-      await mkdir(emptyLegacyDirectory, { mode: 0o700 });
-      await writeFile(emptyLegacyDatabasePath, "", { mode: 0o600 });
+      const emptyUninitializedDirectory = join(directory, "empty-uninitialized");
+      const emptyUninitializedDatabasePath = join(emptyUninitializedDirectory, "state.sqlite");
+      await mkdir(emptyUninitializedDirectory, { mode: 0o700 });
+      await writeFile(emptyUninitializedDatabasePath, "", { mode: 0o600 });
       await expect(
-        DatabaseClient.create({ databasePath: emptyLegacyDatabasePath, migrationsDirectory }),
+        DatabaseClient.create({
+          databasePath: emptyUninitializedDatabasePath,
+          migrationsDirectory,
+        }),
       ).rejects.toThrow(/uninitialized database.*empty.*recovery is required/iu);
 
       const wrongMarkerDirectory = join(directory, "wrong-marker");
@@ -381,7 +309,7 @@ describe("DatabaseClient startup", () => {
       await writeFile(wrongMarkerDatabasePath, "existing", { mode: 0o600 });
       await writeFile(
         databaseInitializationMarkerPath(wrongMarkerDatabasePath),
-        "x".repeat(databaseInitializationMarkerContent.length),
+        "agentic-review-database-initialization-v1\n",
         { mode: 0o600 },
       );
       await expect(
@@ -448,41 +376,26 @@ describe("DatabaseClient startup", () => {
       await expect(
         DatabaseClient.create({ databasePath: sidecarHistoryDatabasePath, migrationsDirectory }),
       ).rejects.toThrow(/missing.*recovery is required/u);
-
-      const backupHistoryDirectory = join(directory, "backup-history");
-      const backupHistoryDatabasePath = join(backupHistoryDirectory, "state.sqlite");
-      const backups = join(backupHistoryDirectory, "backups");
-      await mkdir(backups, { recursive: true, mode: 0o700 });
-      const backupStem =
-        "state.sqlite.v1-to-v2.2026-08-31T00-00-00-000Z.00000000-0000-4000-8000-000000000000.sqlite";
-      await Promise.all([
-        writeFile(join(backups, backupStem), "final", { mode: 0o600 }),
-        writeFile(join(backups, `${backupStem}.partial`), "partial", { mode: 0o600 }),
-      ]);
-      await expect(
-        DatabaseClient.create({ databasePath: backupHistoryDatabasePath, migrationsDirectory }),
-      ).rejects.toThrow(/missing.*recovery is required/u);
     },
   );
 
   it.skipIf(process.platform === "win32")(
-    "rejects a legacy database whose schema is not a known migration state",
+    "rejects every existing database without this version's initialization marker",
     async () => {
       const directory = await createTemporaryDirectory();
       const dataDirectory = join(directory, "data");
       const databasePath = join(dataDirectory, "state.sqlite");
       await mkdir(dataDirectory, { mode: 0o700 });
-      const legacyDatabase = new DatabaseSync(databasePath);
+      const unmarkedDatabase = new DatabaseSync(databasePath);
       try {
-        legacyDatabase.exec("CREATE TABLE unknown_legacy_table (value TEXT NOT NULL) STRICT");
+        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(12);
       } finally {
-        legacyDatabase.close();
+        unmarkedDatabase.close();
       }
       await chmod(databasePath, 0o600);
-      await writeLegacyAdoptionAuthorization(databasePath);
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /does not contain the known schema_migrations table/u,
+        /not initialized by this Server version.*rebuild is required/u,
       );
       await expect(lstat(databaseInitializationMarkerPath(databasePath))).rejects.toMatchObject({
         code: "ENOENT",
@@ -491,103 +404,29 @@ describe("DatabaseClient startup", () => {
   );
 
   it.skipIf(process.platform === "win32")(
-    "requires and consumes a one-time legacy adoption authorization",
+    "rejects an initialized database with any applied migration beyond the current deployment",
     async () => {
       const directory = await createTemporaryDirectory();
-      const dataDirectory = join(directory, "data");
-      const databasePath = join(dataDirectory, "state.sqlite");
-      await mkdir(dataDirectory, { mode: 0o700 });
-      const legacyDatabase = new DatabaseSync(databasePath);
+      const databasePath = join(directory, "data", "state.sqlite");
+      await mkdir(join(directory, "data"), { mode: 0o700 });
+      const newerDatabase = new DatabaseSync(databasePath);
       try {
-        runMigrations(legacyDatabase, migrationsDirectory);
+        expect(runMigrations(newerDatabase, migrationsDirectory)).toBe(12);
+        newerDatabase
+          .prepare(`
+            INSERT INTO schema_migrations (version, filename, checksum, applied_at)
+            VALUES (13, '0013_unknown.sql', ?, ?)
+          `)
+          .run("0".repeat(64), "2026-09-04T00:00:00.000Z");
       } finally {
-        legacyDatabase.close();
+        newerDatabase.close();
       }
       await chmod(databasePath, 0o600);
+      await writeInitializationMarker(databasePath);
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /requires an explicit legacy adoption authorization.*recovery is required/u,
+        /Applied migration 13 .* is missing from the deployment/u,
       );
-
-      const authorizationPath = databaseLegacyAdoptionAuthorizationPath(databasePath);
-      await writeFile(
-        authorizationPath,
-        "x".repeat(databaseLegacyAdoptionAuthorizationContent.length),
-        { mode: 0o600 },
-      );
-      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /legacy adoption authorization.*unsupported content/iu,
-      );
-      await rm(authorizationPath);
-
-      await writeLegacyAdoptionAuthorization(databasePath);
-      const adopted = await DatabaseClient.create({ databasePath, migrationsDirectory });
-      await adopted.close();
-      await expect(lstat(authorizationPath)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readFile(databaseInitializationMarkerPath(databasePath), "utf8")).toBe(
-        databaseInitializationMarkerContent,
-      );
-
-      await writeLegacyAdoptionAuthorization(databasePath);
-      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /contradictory legacy adoption authorization.*recovery is required/u,
-      );
-      await rm(authorizationPath);
-      await rm(databaseInitializationMarkerPath(databasePath));
-      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /requires an explicit legacy adoption authorization.*recovery is required/u,
-      );
-
-      const freshDirectory = join(directory, "fresh-with-authorization");
-      const freshDatabasePath = join(freshDirectory, "state.sqlite");
-      await mkdir(freshDirectory, { mode: 0o700 });
-      await writeLegacyAdoptionAuthorization(freshDatabasePath);
-      await expect(
-        DatabaseClient.create({ databasePath: freshDatabasePath, migrationsDirectory }),
-      ).rejects.toThrow(/contradictory legacy adoption authorization.*recovery is required/u);
-    },
-  );
-
-  it.skipIf(process.platform === "win32")(
-    "rejects legacy foreign-key violations before backup or authorization consumption",
-    async () => {
-      const directory = await createTemporaryDirectory();
-      const versionOneDirectory = join(directory, "migrations-v1");
-      await mkdir(versionOneDirectory);
-      await copyFile(
-        join(migrationsDirectory, "0001_initial.sql"),
-        join(versionOneDirectory, "0001_initial.sql"),
-      );
-      const dataDirectory = join(directory, "data");
-      const databasePath = join(dataDirectory, "state.sqlite");
-      await mkdir(dataDirectory, { mode: 0o700 });
-      const legacyDatabase = new DatabaseSync(databasePath);
-      try {
-        runMigrations(legacyDatabase, versionOneDirectory);
-        legacyDatabase.exec(`
-          PRAGMA foreign_keys = OFF;
-          CREATE TABLE orphan_parent (id INTEGER PRIMARY KEY) STRICT;
-          CREATE TABLE orphan_child (
-            parent_id INTEGER NOT NULL REFERENCES orphan_parent (id)
-          ) STRICT;
-          INSERT INTO orphan_child (parent_id) VALUES (1);
-        `);
-      } finally {
-        legacyDatabase.close();
-      }
-      await chmod(databasePath, 0o600);
-      await writeLegacyAdoptionAuthorization(databasePath);
-
-      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /foreign_key_check reported a violation/u,
-      );
-      expect(await readFile(databaseLegacyAdoptionAuthorizationPath(databasePath), "utf8")).toBe(
-        databaseLegacyAdoptionAuthorizationContent,
-      );
-      await expect(lstat(databaseInitializationMarkerPath(databasePath))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      await expect(lstat(join(dataDirectory, "backups"))).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 });
@@ -597,163 +436,6 @@ const readSchemaVersion = (database: DatabaseSync): number => {
     readonly version: number | null;
   };
   return row.version ?? 0;
-};
-
-interface LegacyServerBindingRows {
-  readonly authorization: unknown;
-  readonly binding: unknown;
-  readonly issuer: unknown;
-  readonly revocation: unknown;
-}
-
-const readLegacyServerBindingRows = (database: DatabaseSync): LegacyServerBindingRows => ({
-  authorization: database.prepare("SELECT * FROM server_binding_authorizations").get(),
-  binding: database.prepare("SELECT * FROM server_bindings").get(),
-  issuer: database.prepare("SELECT * FROM server_binding_receipt_issuer").get(),
-  revocation: database.prepare("SELECT * FROM server_binding_revocations").get(),
-});
-
-const seedLegacyServerBindingRows = (database: DatabaseSync): LegacyServerBindingRows => {
-  const authorizationId = "10000000-0000-4000-8000-000000000001";
-  const requestId = "10000000-0000-4000-8000-000000000002";
-  const bindingId = "10000000-0000-4000-8000-000000000003";
-  const revocationId = "10000000-0000-4000-8000-000000000004";
-  const issuerKeyId = "a".repeat(64);
-  const tokenSha256 = "b".repeat(64);
-  const issuanceRequestSha256 = "c".repeat(64);
-  const certificateDerSha256 = "d".repeat(64);
-  const statementDocumentSha256 = "e".repeat(64);
-  const revocationRequestSha256 = "f".repeat(64);
-  const createdAt = "2026-09-03T00:00:00.000Z";
-  const consumedAt = "2026-09-03T00:00:01.000Z";
-  const revokedAt = "2026-09-03T00:00:02.000Z";
-  const expiresAt = "2026-09-03T00:10:00.000Z";
-  const workerNodeId = "legacy-worker";
-  const installationId = "legacy-installation";
-  const statementJson = JSON.stringify({
-    bindingId,
-    bindingRevision: 1,
-    boundAt: consumedAt,
-    certificateDerSha256,
-    enrollmentGeneration: 1,
-    installationId,
-    statementType: "durable-binding-created",
-    workerNodeId,
-  });
-
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    database
-      .prepare(`
-        INSERT INTO server_binding_receipt_issuer (
-          singleton_id,
-          authority_schema_version,
-          issuer,
-          receipt_profile_id,
-          active_status_profile_id,
-          signature_algorithm,
-          issuer_key_id,
-          initialized_at
-        ) VALUES (1, 1, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
-        "agentic-review-server-enrollment-binding-authority-v1",
-        "agentic-review-server-binding-receipt-v1",
-        "agentic-review-server-binding-active-status-v1",
-        "ecdsa-p256-sha256-p1363-low-s",
-        issuerKeyId,
-        createdAt,
-      );
-    database
-      .prepare(`
-        INSERT INTO server_binding_authorizations (
-          authorization_id,
-          request_id,
-          token_sha256,
-          operator_issuer,
-          operator_subject,
-          worker_node_id,
-          installation_id,
-          enrollment_generation,
-          expected_certificate_der_sha256,
-          issuer_key_id,
-          created_at,
-          expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-      `)
-      .run(
-        authorizationId,
-        requestId,
-        tokenSha256,
-        "legacy-operator-issuer",
-        "legacy-operator-subject",
-        workerNodeId,
-        installationId,
-        certificateDerSha256,
-        issuerKeyId,
-        createdAt,
-        expiresAt,
-      );
-    database
-      .prepare(`
-        UPDATE server_binding_authorizations
-        SET
-          consumed_binding_id = ?,
-          consumed_issuance_request_sha256 = ?,
-          consumed_at = ?
-        WHERE authorization_id = ?
-      `)
-      .run(bindingId, issuanceRequestSha256, consumedAt, authorizationId);
-    database
-      .prepare(`
-        INSERT INTO server_bindings (
-          binding_id,
-          binding_revision,
-          authorization_id,
-          request_id,
-          issuance_request_sha256,
-          worker_node_id,
-          installation_id,
-          enrollment_generation,
-          certificate_der_sha256,
-          issuer_key_id,
-          phase,
-          bound_at,
-          statement_json,
-          statement_document_sha256
-        ) VALUES (?, 1, ?, ?, ?, ?, ?, 1, ?, ?, 'signing_pending', ?, ?, ?)
-      `)
-      .run(
-        bindingId,
-        authorizationId,
-        requestId,
-        issuanceRequestSha256,
-        workerNodeId,
-        installationId,
-        certificateDerSha256,
-        issuerKeyId,
-        consumedAt,
-        statementJson,
-        statementDocumentSha256,
-      );
-    database
-      .prepare(`
-        INSERT INTO server_binding_revocations (
-          revocation_id,
-          revocation_request_sha256,
-          binding_id,
-          prior_phase,
-          reason_code,
-          revoked_at
-        ) VALUES (?, ?, ?, 'signing_pending', 'operator_requested', ?)
-      `)
-      .run(revocationId, revocationRequestSha256, bindingId, revokedAt);
-    database.exec("COMMIT");
-  } catch (error) {
-    if (database.isTransaction) database.exec("ROLLBACK");
-    throw error;
-  }
-  return readLegacyServerBindingRows(database);
 };
 
 const createTemporaryDirectory = async (): Promise<string> => {
@@ -787,14 +469,6 @@ const writeInitializationMarker = async (databasePath: string): Promise<void> =>
   await writeFile(
     databaseInitializationMarkerPath(databasePath),
     databaseInitializationMarkerContent,
-    { mode: 0o600 },
-  );
-};
-
-const writeLegacyAdoptionAuthorization = async (databasePath: string): Promise<void> => {
-  await writeFile(
-    databaseLegacyAdoptionAuthorizationPath(databasePath),
-    databaseLegacyAdoptionAuthorizationContent,
     { mode: 0o600 },
   );
 };

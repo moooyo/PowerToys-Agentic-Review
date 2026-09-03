@@ -100,7 +100,7 @@ later profile rather than an implicit change to v1.
 
 ### Persistent Worker node state
 
-Migration `0013_worker_token_auth_v1.sql` adds one node-level credential table. The existing
+Migration `0012_worker_token_auth_v1.sql` adds one node-level credential table. The existing
 `workers` table remains the process-instance table and is not used as the long-lived credential
 store.
 
@@ -292,17 +292,23 @@ These are explicit product choices, not unimplemented security controls. A stron
 store, role model, anti-rollback epoch, independent credential authority, short-lived Token, or
 instant in-flight cancellation requires a later ADR.
 
-### Legacy transition
+### Pre-release schema reset
 
 The certificate map and Bearer Token authentication must not remain as two positive production
-authentication sources. Production rollout creates a Token for every retained Worker, updates its
-configuration, and then switches the Server to Token-only authentication.
+authentication sources. This software has not been released, so the superseded Server-binding
+migration was removed before shipment instead of being preserved or followed by a DROP migration.
+The Worker Token migration was renumbered from the unreleased version 13 to the current version 12.
 
-Migration `0012_server_binding_persistence_v1.sql` remains immutable migration history. Its dormant
-tables never become Worker authentication authority. The superseded receipt, signer, signer-host,
-compiled trust, node-enrollment record, and related executable source were deleted on 2026-09-04.
-The migration and its existing rows remain intact; a later forward cleanup migration may remove
-the tables only after proving that every deployed database contains no rows.
+The current production schema ends at version 12 and contains no Server-binding issuer,
+authorization, binding, or revocation table. There is no schema-13 compatibility path, legacy
+database adoption authorization, fallback, or migration for databases produced by earlier
+unreleased builds. Such databases must be rebuilt and required Worker credentials must be created
+again. The normal migration framework and migrations 0001 through 0011 remain intact for the
+current release line. Production startup applies them only while creating a fresh database; an
+initialized database must already contain the exact current filenames and checksums through version
+12. The internal automatic migration-backup and backup-directory cleanup path was removed.
+Operational restore supports only exact current-schema backups as documented in
+`docs/operations/worker-token-recovery.md`.
 
 ## Verification Requirements
 
@@ -324,7 +330,10 @@ Implementation verification must cover:
 - absence of Worker Tokens and Authorization headers from logs and errors;
 - Worker HTTPS validation without a client certificate;
 - production rejection of the old certificate map and absence of dual authentication; and
-- restored-backup tests documenting the accepted Token rollback behavior.
+- current schema version 12 with no Server-binding tables or migration;
+- rejection of the retired schema version 13 and every nonempty database without the current
+  initialization marker; and
+- exact-current-schema restored-backup tests documenting the accepted Token rollback behavior.
 
 Linux verification is limited to the actual Linux Server HTTPS, SQLite, and route integration. The
 superseded signer-host signal, reaping, cgroup, parent-death, and D-state matrix is cancelled.

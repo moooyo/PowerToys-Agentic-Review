@@ -135,8 +135,6 @@ describe("DatabaseOwnerLock", () => {
       "state?.sqlite",
       ".",
       "..",
-      "backups",
-      ".agentic-review-allow-legacy-adoption",
       ".agentic-review-database-initializing",
       ".agentic-review-database-initialized",
     ]) {
