@@ -18,16 +18,15 @@ disabled boundaries are tracked in [docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEM
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
 - `migrations`: forward-only SQLite schema for leases, GitHub projections, OIDC sessions, and
   polling checkpoints.
-- `deploy/worker`: split Windows Worker provisioning inputs; the native two-service clean installer
-  is pending.
+- `deploy/worker`: signed Windows Worker package and native two-service clean installer inputs.
 
 Phase 1a supports authenticated, read-only GitHub ingestion, immutable result projections, and
 Dashboard views. The native Windows ServiceHost composition is connected in zero-execution mode,
-but real Worker execution remains disabled until the TypeScript Control and Executor business
-runtimes, production release profile, dual-service installer and signing pipeline, and native
-Windows x64 and arm64 verification suite are complete. Phase 1b result artifacts, immutable diff
-validation, approval persistence, and GitHub publication also remain deliberately disabled. Dynamic
-validation remains a separate stronger-isolation milestone.
+but real Worker execution remains disabled until real signed payloads, elevated dual-service
+installation and lifecycle verification, and the native Windows x64 and arm64 validation suite are
+complete. Phase 1b result artifacts, immutable diff validation, approval persistence, and GitHub
+publication also remain deliberately disabled. Dynamic validation remains a separate
+stronger-isolation milestone.
 
 ## Database recovery maintenance
 

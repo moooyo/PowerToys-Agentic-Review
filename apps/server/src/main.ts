@@ -11,6 +11,7 @@ import { GitHubEventIngestionService } from "./github/ingestion-service.js";
 import { GitHubPollingCoordinator } from "./github/polling-coordinator.js";
 import { GitHubRestApiError, GitHubRestClient } from "./github/rest-client.js";
 import { createProductionServerLifecycle } from "./runtime/server-lifecycle.js";
+import { assertLinuxServerPlatform } from "./runtime/server-platform.js";
 import {
   createRecoveryMaintenanceStorageRuntime,
   createServerStorageRuntime,
@@ -31,6 +32,7 @@ const normalizeFailure = (error: unknown): Error =>
     : new Error("The server received a non-Error lifecycle failure.", { cause: error });
 
 const start = async (): Promise<void> => {
+  assertLinuxServerPlatform();
   const lifecycle = createProductionServerLifecycle({
     shutdownTimeoutMilliseconds: serverShutdownTimeoutMilliseconds,
   });

@@ -24,6 +24,7 @@ describe("production server composition", () => {
     const source = await readFile(sourcePath, "utf8");
 
     for (const required of [
+      "assertLinuxServerPlatform();",
       "createProductionServerLifecycle({",
       "await createRecoveryMaintenanceStorageRuntime({",
       "await createServerStorageRuntime({",
@@ -63,6 +64,8 @@ describe("production server composition", () => {
       expect(source).not.toContain(forbidden);
     }
 
+    const platformCheck = source.indexOf("assertLinuxServerPlatform();");
+    const lifecycleCreate = source.indexOf("createProductionServerLifecycle({");
     const storageCreate = source.indexOf("await createServerStorageRuntime({");
     const recoveryStorageCreate = source.indexOf("await createRecoveryMaintenanceStorageRuntime({");
     const storageAdoption = source.indexOf("lifecycle.adoptStorageRuntime(storageRuntime);");
@@ -73,6 +76,7 @@ describe("production server composition", () => {
     const backgroundTracking = source.indexOf("lifecycle.trackBackground(");
     const running = source.indexOf("lifecycle.markRunning();");
 
+    expect(platformCheck).toBeLessThan(lifecycleCreate);
     expect(storageCreate).toBeLessThan(storageAdoption);
     expect(recoveryStorageCreate).toBeLessThan(storageAdoption);
     expect(storageAdoption).toBeLessThan(recoveryPurge);
