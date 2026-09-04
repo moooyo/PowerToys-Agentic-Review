@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"golang.org/x/sys/windows"
 )
@@ -157,7 +156,7 @@ func TestWindowsBootstrapContextUsesEarlierListenerOrIODeadline(t *testing.T) {
 	cancelListener()
 }
 
-func TestWindowsAcceptEarlyFailuresTerminateProvidedGuardedNode(t *testing.T) {
+func TestWindowsAcceptEarlyFailuresTerminateAndCloseProvidedNode(t *testing.T) {
 	tests := []struct {
 		name        string
 		listener    *Listener
@@ -179,11 +178,18 @@ func TestWindowsAcceptEarlyFailuresTerminateProvidedGuardedNode(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			guarded := &launchguard.GuardedNodeProcess{}
-			owner, err := test.listener.Accept(test.ctx, guarded)
+			node := newFakeRetainedNode(testNodeIdentity())
+			owner, err := test.listener.Accept(test.ctx, node)
 			primaryMatches := test.wantPrimary == nil || errors.Is(err, test.wantPrimary)
-			if owner != nil || !primaryMatches || !errors.Is(err, launchguard.ErrInvalidAuthority) {
-				t.Fatalf("Accept = (%p, %v), want primary %v and guarded-node termination error", owner, err, test.wantPrimary)
+			if owner != nil || !primaryMatches || !node.terminated || !node.closed {
+				t.Fatalf(
+					"Accept = (%p, %v), terminated=%v closed=%v, want nil owner with primary %v",
+					owner,
+					err,
+					node.terminated,
+					node.closed,
+					test.wantPrimary,
+				)
 			}
 		})
 	}
