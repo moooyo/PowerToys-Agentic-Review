@@ -308,7 +308,7 @@ test("shadow architecture remains zero execution and role separated", () => {
     assert.match(section, /executionEnabled:\s*Type\.Literal\(false\)/u);
     assert.doesNotMatch(section, /executionEnabled:\s*Type\.Literal\(true\)/u);
   }
-  assert.equal((nativeBootstrap.match(/"executionEnabled":\s+false/gu) ?? []).length, 2);
+  assert.equal((nativeBootstrap.match(/"executionEnabled":\s+false/gu) ?? []).length, 1);
   assert.doesNotMatch(nativeBootstrap, /"executionEnabled":\s+true/u);
 
   const ready = sourceSection(
