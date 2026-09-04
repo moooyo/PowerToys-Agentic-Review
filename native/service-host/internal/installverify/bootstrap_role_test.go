@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 )
 
 func TestRoleFromBootstrapPathUsesCanonicalWindowsIdentity(t *testing.T) {
@@ -16,17 +15,17 @@ func TestRoleFromBootstrapPathUsesCanonicalWindowsIdentity(t *testing.T) {
 	}{
 		{
 			name: "Control",
-			path: `C:\ProgramData\AgenticReview\TrustedConfig\` + releasemanifest.ControlBootstrapConfigurationPath,
+			path: config.ControlBootstrapPath,
 			want: config.RoleControl,
 		},
 		{
 			name: "Executor",
-			path: `D:\Trusted\` + releasemanifest.ExecutorBootstrapConfigurationPath,
+			path: config.ExecutorBootstrapPath,
 			want: config.RoleExecutor,
 		},
 		{
-			name: "case-insensitive leaf identity",
-			path: `C:\trusted\CONTROL-SERVICE-HOST.JSON`,
+			name: "case-insensitive full path identity",
+			path: `c:\programdata\agenticreview\trustedconfig\CONTROL.JSON`,
 			want: config.RoleControl,
 		},
 	}
@@ -46,26 +45,22 @@ func TestRoleFromBootstrapPathRejectsAliasesAndNoncanonicalPaths(t *testing.T) {
 		path string
 	}{
 		{"empty", ""},
-		{"relative", releasemanifest.ControlBootstrapConfigurationPath},
-		{"root relative", `\Trusted\control-service-host.json`},
-		{"drive relative", `C:Trusted\control-service-host.json`},
-		{"lowercase drive", `c:\Trusted\control-service-host.json`},
-		{"volume root parent", `C:\control-service-host.json`},
-		{"UNC", `\\server\share\control-service-host.json`},
-		{"extended device", `\\?\C:\Trusted\control-service-host.json`},
-		{"DOS device", `\\.\C:\Trusted\control-service-host.json`},
-		{"alternate separator", `C:\Trusted/control-service-host.json`},
-		{"trailing separator", `C:\Trusted\control-service-host.json\`},
-		{"leaf alternate stream", `C:\Trusted\control-service-host.json:stream`},
-		{"parent alternate stream", `C:\Trusted:stream\control-service-host.json`},
-		{"short parent alias", `C:\PROGRA~1\control-service-host.json`},
-		{"short leaf alias", `C:\Trusted\CONTROL~1.JSON`},
-		{"relative component", `C:\Trusted\..\control-service-host.json`},
-		{"reserved component", `C:\CON\control-service-host.json`},
-		{"trailing dot", `C:\Trusted\control-service-host.json.`},
-		{"trailing space", `C:\Trusted\control-service-host.json `},
-		{"unknown leaf", `C:\Trusted\service-host.json`},
-		{"leaf suffix", `C:\Trusted\control-service-host.json.bak`},
+		{"relative", `control.json`},
+		{"root relative", `\ProgramData\AgenticReview\TrustedConfig\control.json`},
+		{"drive relative", `C:ProgramData\AgenticReview\TrustedConfig\control.json`},
+		{"volume root parent", `C:\control.json`},
+		{"UNC", `\\server\share\control.json`},
+		{"extended device", `\\?\C:\ProgramData\AgenticReview\TrustedConfig\control.json`},
+		{"DOS device", `\\.\C:\ProgramData\AgenticReview\TrustedConfig\control.json`},
+		{"alternate separator", `C:\ProgramData\AgenticReview\TrustedConfig/control.json`},
+		{"trailing separator", `C:\ProgramData\AgenticReview\TrustedConfig\control.json\`},
+		{"leaf alternate stream", `C:\ProgramData\AgenticReview\TrustedConfig\control.json:stream`},
+		{"parent alternate stream", `C:\ProgramData\AgenticReview\TrustedConfig:stream\control.json`},
+		{"short parent alias", `C:\PROGRA~1\AgenticReview\TrustedConfig\control.json`},
+		{"short leaf alias", `C:\ProgramData\AgenticReview\TrustedConfig\CONTROL~1.JSON`},
+		{"relative component", `C:\ProgramData\AgenticReview\TrustedConfig\..\control.json`},
+		{"other directory", `C:\ProgramData\AgenticReview\TrustedConfig\staged\control.json`},
+		{"leaf suffix", `C:\ProgramData\AgenticReview\TrustedConfig\control.json.bak`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -84,24 +79,23 @@ func TestNormalizeOptionsRequiresBootstrapSelectorRole(t *testing.T) {
 	tests := []struct {
 		name string
 		role config.Role
-		leaf string
+		path string
 		ok   bool
 	}{
-		{"matching Control", config.RoleControl, releasemanifest.ControlBootstrapConfigurationPath, true},
-		{"matching Executor", config.RoleExecutor, releasemanifest.ExecutorBootstrapConfigurationPath, true},
-		{"Control path with Executor role", config.RoleExecutor, releasemanifest.ControlBootstrapConfigurationPath, false},
-		{"Executor path with Control role", config.RoleControl, releasemanifest.ExecutorBootstrapConfigurationPath, false},
+		{"matching Control", config.RoleControl, config.ControlBootstrapPath, true},
+		{"matching Executor", config.RoleExecutor, config.ExecutorBootstrapPath, true},
+		{"Control path with Executor role", config.RoleExecutor, config.ControlBootstrapPath, false},
+		{"Executor path with Control role", config.RoleControl, config.ExecutorBootstrapPath, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := `C:\Trusted\` + test.leaf
-			selected, selectErr := RoleFromBootstrapPath(path)
+			selected, selectErr := RoleFromBootstrapPath(test.path)
 			if selectErr != nil {
-				t.Fatalf("RoleFromBootstrapPath(%q) returned an error: %v", path, selectErr)
+				t.Fatalf("RoleFromBootstrapPath(%q) returned an error: %v", test.path, selectErr)
 			}
-			normalized, err := normalizeOptions(Options{Role: test.role, ActualBootstrapPath: path})
+			normalized, err := normalizeOptions(Options{Role: test.role, ActualBootstrapPath: test.path})
 			if test.ok {
-				if err != nil || normalized.Role != selected || normalized.ActualBootstrapPath != path {
+				if err != nil || normalized.Role != selected || normalized.ActualBootstrapPath != test.path {
 					t.Fatalf("normalizeOptions returned (%#v, %v), selector role %q", normalized, err, selected)
 				}
 				return
