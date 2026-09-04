@@ -49,8 +49,6 @@ export const ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES = Object.freeze([
   "worker_claim_envelope_v2_consumer",
 ] as const);
 
-const absoluteEndPattern = "(?![\\s\\S])";
-
 const arwxSelectionSchema = () =>
   Type.Object(
     {

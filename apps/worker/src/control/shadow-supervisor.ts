@@ -33,6 +33,7 @@ import { HostControlShadowApi } from "./host-control-shadow-api.js";
 
 const executionDisabledReason = "EXECUTION_DISABLED" as const;
 const serviceStopReason = "SERVICE_STOP" as const;
+const shadowWorkerVersion = "0.1.0" as const;
 const maximumServerOperationMs = 15_000;
 const maximumRetryCount = 2;
 const retryDelayMs = 1_000;
@@ -222,8 +223,6 @@ class ControlZeroSlotShadowSupervisor {
       executorBootId: null,
       sessionId: randomUuidSource(),
       controlNonce: randomNonceSource(),
-      controlManifestSha256: activation.bootstrap.bootstrap.installationManifestSha256,
-      controlPreflightSha256: activation.bootstrap.bootstrap.preflightSha256,
     });
     this.done = this.#completion.promise;
     this.done.catch(() => undefined);
@@ -360,7 +359,6 @@ class ControlZeroSlotShadowSupervisor {
       helloAck.workerInstanceId !== this.#hello.workerInstanceId ||
       helloAck.sessionId !== this.#hello.sessionId ||
       helloAck.controlNonce !== this.#hello.controlNonce ||
-      helloAck.executorManifestSha256 !== this.#bootstrap.bootstrap.installationManifestSha256 ||
       helloAck.maximumSlots !== roleConfig.maximumSlots
     ) {
       throw shadowError(
@@ -557,7 +555,7 @@ class ControlZeroSlotShadowSupervisor {
       workerNodeId: bootstrap.workerNodeId,
       workerInstanceId: this.#workerInstanceId,
       displayName: bootstrap.workerNodeId,
-      workerVersion: bootstrap.releaseId,
+      workerVersion: shadowWorkerVersion,
       maxSlots: roleConfig.maximumSlots,
       capabilities: Object.freeze({
         operatingSystem: "windows" as const,
@@ -571,10 +569,6 @@ class ControlZeroSlotShadowSupervisor {
           "execution-mode": "zero-slot-shadow",
           "isolation-mode": ready.isolationMode,
           "executor-boot-id": ready.executorBootId,
-          "executor-manifest-sha256": ready.executorManifestSha256,
-          "executor-preflight-sha256": ready.executorPreflightSha256,
-          "node-bundle-sha256": bootstrap.nodeBundleSha256,
-          "release-id": bootstrap.releaseId,
         },
       }),
     });

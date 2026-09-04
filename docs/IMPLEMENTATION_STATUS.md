@@ -26,9 +26,14 @@ The repository currently implements the Phase 0 control-plane foundation, the Ph
 authenticated read-only GitHub and Dashboard slice, immutable result projections, the static-review
 execution components, and the split-service protocol and native Windows composition candidate
 described in `ARCHITECTURE.md`. Candidate zero-slot TypeScript role supervisors are now present and
-have passed remote Linux source and bundle verification. They have not passed native Windows
-verification. The repository remains intentionally fail-closed while execution-capable role
+have passed local source, bundle, and protocol verification on Windows. Native SCM and process
+integration remain unexercised. The repository remains intentionally fail-closed while execution-capable role
 runtimes, the release and installer pipeline, and native Windows runtime evidence are incomplete.
+Runtime cleanup is in place: ServiceHost runtime now uses fixed trusted role configs with
+service-bootstrap and peer-identity checks, and no longer runs or retains install verification,
+data-root verification, preflight, launchguard, or runtime install-tree hash/Authenticode/
+retained-handle revalidation. `winprocess` now launches Node directly while retaining root-Job,
+process-handle identity, and HostControl PID binding.
 
 ## Implemented
 
@@ -162,7 +167,7 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   reads back exact protected DACLs on the current ServiceHost process and primary token, closes its
   token handle, and retains no wrapper, image, SCM-status, or lifecycle evidence. Bootstrap schema 4
   selects the fixed canonical authentication profile and Bearer transport
-  for Control, keeps the Token out of preflight evidence and runtime bootstrap, and gives Executor
+  for Control, keeps the Token out of runtime bootstrap, and gives Executor
   no Server transport. Strict parsing and validation reject every other bootstrap schema and all
   Worker client-certificate properties. The current outer-package v2, installer profile v2, and
   staged-evidence typed gate accept only the matching schema-4 pair.
@@ -174,26 +179,21 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 - A per-launch, single-use HostControl Named Pipe prepared before Node starts and bound to the exact
   retained Node process, with a one-process bootstrap Job limit followed by verified activation of
   the configured process ceiling.
-- A production Authenticode verifier that uses the retained file handle, requires one embedded
-  SHA-256 primary signature, validates every timestamp countersigner and strong-signature chain,
-  binds the exact leaf certificate DER digest, disables network retrieval, and always closes the
-  WinTrust state.
-- Handle-bound closed-tree installation verification with exact directory re-enumeration, File ID,
-  hard-link, ADS, case-mode, reparse-point, content, manifest-role, and Authenticode checks.
+- A production Authenticode verifier and package-side closed-tree verification helpers remain for
+  the unpublished installer stack; the dedicated runtime `installverify` package is removed and
+  none of these helpers are invoked by ServiceHost startup.
 - Production Windows installation ACL policy composition. It proves the fixed restricted service
   identity before filesystem access, parses complete self-relative DACLs, applies exact per-role
   read/execute profiles, and accepts only the bounded ambient rights used by standard Windows
   `Program Files` and `ProgramData` ancestors.
-- Opaque preflight evidence that consumes concrete installation, data-root, and peer-identity
-  attestations rather than caller-assembled prerequisite booleans or
-  credential identity values. Local process security is completed before preflight and is not
-  recast as a detached bootstrap or current-image authority.
+- Runtime peer verification now binds SCM PID, pipe peer PID, retained process identity, and
+  restricted service SID/token directly in `peerverify`, without preflight attestations.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
   before a lease is committed; oversized stored jobs are dead-lettered without creating an attempt.
-- A Windows ServiceHost composition path that connects compiled release authority, one-shot local
-  service security, installation and role-data verification, role-specific credentials, preflight, peer
-  verification, runtime bootstrap, HostControl, guarded Node launch, role-local RPC, ARWX relay,
-  lifecycle supervision, and bounded cleanup.
+- A Windows ServiceHost composition path that connects fixed trusted-config selection,
+  one-shot local service bootstrap, role credentials, SCM-ready publication, peer verification,
+  runtime bootstrap, direct Node launch, HostControl, role-local RPC, ARWX relay, lifecycle
+  supervision, and bounded cleanup.
 - HostControl I/O ownership that keeps overlapped operations, buffers, events, handles, and terminal
   publication ordered through cancellation, ambiguous completion, shutdown, and quarantine paths.
 - Claim admission derived only from the role configuration sealed into the committed runtime
@@ -202,11 +202,11 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 - A full role-activation barrier that keeps runtime handlers and startup side effects dormant until
   the connector returns the exact promoted HostControl owner and passes bootstrap, role, and
   nominal-session validation.
-- Candidate Control and Executor zero-slot supervisors. They perform the signed local handshake,
-  bind manifest, policy, preflight, node, session, nonce, and boot evidence, and permit Executor to
-  publish only `ready=false`, `availableSlots=0`, and `reasonCode=EXECUTION_DISABLED`.
-- A claim-free Control shadow adapter that exposes only registration, instance heartbeat, and local
-  digest signing. Control registers a maximum of one slot but continuously advertises zero
+- Candidate Control and Executor zero-slot supervisors. They perform the unsigned local handshake,
+  bind session/attempt context with nonce, boot, sequence, and deadline constraints, and permit
+  Executor to publish only `ready=false`, `availableSlots=0`, and `reasonCode=EXECUTION_DISABLED`.
+- A claim-free Control shadow adapter that exposes only registration and instance heartbeat.
+  Control registers a maximum of one slot but continuously advertises zero
   available slots and an empty active-lease set.
 - Candidate post-dispatch shadow shutdown choreography: Control sends final `Drain`, Executor sends
   final `Drained`, and both role-local HostControl sessions arm and join their bounded transports.
@@ -736,7 +736,8 @@ Not yet verified:
 
 - The native two-service Worker clean installer has not been implemented or exercised on a Windows
   test machine.
-- Runtime verification cleanup is not complete and remains a follow-up before release.
+- Runtime cleanup for startup verification is complete; remaining release gates are installer
+  publication and native Windows execution evidence.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for

@@ -453,8 +453,6 @@ function handshakeHello(): HelloMessage {
     executorBootId: null,
     sessionId: session.sessionId,
     controlNonce: "8".repeat(64),
-    controlManifestSha256: "9".repeat(64),
-    controlPreflightSha256: "a".repeat(64),
   };
 }
 
@@ -469,8 +467,6 @@ function handshakeHelloAck(): HelloAckMessage {
     sessionId: session.sessionId,
     controlNonce: hello.controlNonce,
     executorNonce: "b".repeat(64),
-    executorManifestSha256: hello.controlManifestSha256,
-    executorPreflightSha256: "d".repeat(64),
     maximumSlots: 4,
   };
 }

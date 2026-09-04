@@ -9,10 +9,7 @@ import {
   RUNTIME_BOOTSTRAP_ROLE_CONFIG_MAXIMUM_BYTES,
   RuntimeBootstrapError,
 } from "./runtime-bootstrap.js";
-import {
-  bootstrapDocument,
-  foundationRoleConfig,
-} from "./runtime-bootstrap.test-helpers.js";
+import { bootstrapDocument, foundationRoleConfig } from "./runtime-bootstrap.test-helpers.js";
 
 type MutableJsonObject = Record<string, unknown>;
 

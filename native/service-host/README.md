@@ -4,22 +4,19 @@
 Windows Control and Executor services. It is a small Go adapter. Scheduling, leases, repository policy,
 prompt construction, result validation, and publication remain in TypeScript.
 
-This directory contains the fail-closed foundation and a composed Windows runtime candidate:
+This directory contains the fail-closed foundation and the composed Windows runtime:
 
 - a strict canonical JSON configuration contract;
-- a canonical dual-root release manifest and typed config-to-manifest binding evidence;
 - the structural 48-byte ARWX frame boundary;
 - a byte-bounded bidirectional relay core;
 - a first-instance, remote-rejecting message-mode Named Pipe endpoint;
-- handle-relative secure configuration traversal with owned AccessCheck tokens and final descriptor
-  reinspection;
-- exact restricted virtual-service identity and token preflight;
+- ordinary bounded reads of the two fixed trusted local configuration files;
+- exact restricted virtual-service identity, token construction, and process/token DACL application
+  in service bootstrap;
 - fixed SCM service identities, restricted service tokens, named-pipe peer PID binding, and
   role-separated local configuration without a local signing authority;
-- handle-bound NTFS object, volume, and protected-DACL evidence;
-- retained role-data verification with protected installer boundaries, exact inherited descendant
-  ACLs, closed fixed layout, bounded content traversal, and final pre-launch reinspection;
-- handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
+- fixed trusted-configuration selection per role (`control.json` or `executor.json`) under
+  `C:\ProgramData\AgenticReview\TrustedConfig`;
 - a production-composed fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
   `worker-auth-v1.json` profile, without a generic header or Token source;
 - stable SCM and pipe peer-PID binding with restricted service-token verification;
@@ -36,11 +33,16 @@ This directory contains the fail-closed foundation and a composed Windows runtim
   chain, plus an explicitly unavailable non-Windows factory; and
 - pure Go tests for those contracts.
 
-The Windows factory now prepares the fixed service identity and local process/token DACLs, then
-composes release authority, installation verification, role-owned data roots, role credentials,
-preflight, peer verification, runtime bootstrap, guarded Node launch, HostControl, role-specific
-RPC, ARWX relay, lifecycle supervision, and bounded cleanup. Ordinary builds intentionally contain no compiled production
-release profile and fail closed before using installed configuration. The current TypeScript role
+The Windows factory now reads the role's fixed trusted configuration, runs one-shot service bootstrap
+for restricted SID/token plus process/token DACL hardening, publishes SCM `SERVICE_RUNNING` after
+local identity and configuration plus Control Token/CA loading, then composes peer verification,
+runtime bootstrap, direct Node launch, HostControl, role-specific RPC, ARWX relay, lifecycle
+supervision, and bounded cleanup. Runtime no longer calls or retains
+`installverify`, `dataroot`, `preflight`, or `launchguard`, and it no longer performs install-tree
+hash checks, Authenticode revalidation, or retained-handle reinspection before launching Node.
+`winprocess` now starts Node directly and retains the root Job plus process-handle identity and
+HostControl PID binding for lifecycle enforcement.
+Runtime startup does not load a compiled release profile or installed manifest. The current TypeScript role
 payloads remain zero-execution foundations: Executor can emit only the authenticated disabled
 `Ready` state (`ready=false`, `availableSlots=0`, `reasonCode=EXECUTION_DISABLED`), and Control never
 claims work. This source must not be used to enable production execution. The non-Windows production
@@ -116,10 +118,10 @@ The immutable manifest, executables, Node payloads, and ProcessHost are strict d
 strict descendants of `installation.trustedConfigurationRoot`.
 That root, the installation tree, and `node.dataRoot` are pairwise disjoint. The working, temporary,
 profile, application-data, Codex, home, and Git configuration paths are strict descendants of that
-role's data root. Every `PATH` entry is inside the installation tree. Native preflight must
-additionally prove the configured ownership, DACL, volume, reparse-point, file identity, manifest
-membership, and Authenticode claims before use. The platform adapter must also prove that the
-actual `--config` file is below the configured trusted-configuration root after parsing it.
+role's data root. Every `PATH` entry is inside the installation tree. Runtime startup proves only
+that the selected `--config` file is one of the fixed role paths below
+`installation.trustedConfigurationRoot`; install-tree membership, hash/authenticode evidence, and
+retained-handle identity checks remain installer-time controls.
 
 The environment object is the eventual Node replacement environment, not an overlay on the
 ServiceHost environment. It uses a role-specific allowlist; unknown variables and variables that
@@ -173,7 +175,10 @@ bind `PATH` to manifest or trusted system directories, bind profile and temporar
 selected role's protected data root, and verify every directory by handle, volume identity, and
 DACL before launching Node.
 
-## Runtime Authenticode policy
+## Installer-side Authenticode implementation
+
+The verifier described below remains package/installer code and is not called by ServiceHost
+runtime startup. The simple installer may replace it with the package-level signature decision.
 
 The Windows Authenticode verifier consumes the same already-open file handle used for image
 identity and hashing. `WinVerifyTrust` receives `WTD_CHOICE_FILE`, that handle in
@@ -205,11 +210,13 @@ release. Independently, the Server remains the live Worker revocation authority.
 composition uses the per-Worker Token database state and can deny a revoked Worker regardless of
 its locally pinned executable signature.
 
-The Windows platform factory is composed, but an ordinary build rejects startup while loading its
-release authority because `compiled_unavailable.go` contains no production release template. A
-release build must receive that template through the controlled release pipeline and build tag; no
-runtime configuration, installed manifest, or environment variable can substitute for it. The
-ordinary `os.Open` reader exists only for non-Windows contract tests.
+The Windows platform factory uses ordinary bounded file reads for its fixed trusted local
+configuration and Control CA file. It does not load release authority or reverify installed payload
+bytes at runtime.
+
+`RuntimeBootstrap` and the local `Hello` handshake no longer carry release, manifest, preflight,
+node, or policy digests. Peer trust is bound directly to SCM PID, pipe peer PID, retained process
+identity, and restricted service SID/token checks in `peerverify`.
 
 ## Framing and relay
 

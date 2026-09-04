@@ -31,8 +31,6 @@ const hello: HelloMessage = {
   executorBootId: null,
   sessionId,
   controlNonce: hex("1"),
-  controlManifestSha256: hex("2"),
-  controlPreflightSha256: hex("3"),
 };
 
 const helloAck: HelloAckMessage = {
@@ -44,8 +42,6 @@ const helloAck: HelloAckMessage = {
   sessionId,
   controlNonce: hex("1"),
   executorNonce: hex("4"),
-  executorManifestSha256: hex("5"),
-  executorPreflightSha256: hex("7"),
   maximumSlots: 4,
 };
 

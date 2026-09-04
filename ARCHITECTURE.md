@@ -351,8 +351,10 @@ Each attempt runs through `AgenticReview.ProcessHost.exe`. The helper creates a 
 starts the target suspended, assigns it to the Job Object, and then resumes it. Lease loss,
 cancellation, hard timeout, worker termination, or control-channel failure closes the Job Object
 and terminates the complete process tree. Control and Executor exchange only the minimum required
-duplicated handles across the boundary, and the pipe peer is validated against the expected service
-PID/SID before accepting local authorization messages.
+duplicated handles across the boundary. Peer verification binds SCM service PID, pipe peer PID,
+retained process identity, and restricted service SID/token before accepting local authorization
+messages. Runtime bootstrap and `Hello` no longer carry release/manifest/preflight/node/policy
+digests.
 
 Dynamic validation is requested by recipe ID and typed parameters. A model cannot supply an
 executable command. Public fork validation requires explicit per-revision approval because a
@@ -533,8 +535,11 @@ storage for SQLite and artifacts. Backups are retained externally, outside the a
 directory. The dashboard build is copied into the server image and served by Fastify.
 
 Each Windows worker is installed as two native ServiceHost Windows Services under distinct
-restricted, non-administrator identities. Executor starts first, and Control begins claiming only after
-the selected local identity, protocol, release, ACL, sandbox, and credential preflight succeeds.
+restricted, non-administrator identities. Executor starts first. Each role reads only its fixed
+trusted configuration path under `C:\ProgramData\AgenticReview\TrustedConfig`, runs service
+bootstrap to construct the restricted service SID/token and process/token DACLs, and reports SCM
+ready only after local identity/configuration checks plus Control Token/CA loading. Control begins
+claiming only after this local-ready state and peer channel availability.
 Production execution fails closed unless the split-service boundary in ADR 0007 is active. The first
 published format has no Worker upgrade path; any future upgrade requires a new ADR.
 

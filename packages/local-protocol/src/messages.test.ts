@@ -205,8 +205,6 @@ describe("local protocol message schemas", () => {
       executorBootId: null,
       sessionId,
       controlNonce: hex("1"),
-      controlManifestSha256: hex("2"),
-      controlPreflightSha256: hex("3"),
     };
     expect(validateLocalMessagePayload(LocalMessageType.Hello, hello, nil)).toEqual(hello);
     expect(() =>
@@ -217,8 +215,6 @@ describe("local protocol message schemas", () => {
       ...session,
       controlNonce: hello.controlNonce,
       executorNonce: hex("4"),
-      executorManifestSha256: hello.controlManifestSha256,
-      executorPreflightSha256: hex("7"),
       maximumSlots: 4,
     };
     expect(validateLocalMessagePayload(LocalMessageType.HelloAck, helloAck, nil)).toEqual(helloAck);
@@ -227,8 +223,6 @@ describe("local protocol message schemas", () => {
       ...session,
       controlNonce: hex("1"),
       executorNonce: hex("2"),
-      executorManifestSha256: hex("3"),
-      executorPreflightSha256: hex("5"),
       isolationMode: "split-service-v1",
       ready: true,
       availableSlots: 4,

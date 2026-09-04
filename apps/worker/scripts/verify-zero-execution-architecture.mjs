@@ -88,9 +88,9 @@ const reviewedDormantLabExports = Object.freeze({
   ),
 });
 const reviewedDormantLabSourceSha256 = Object.freeze({
-  [dormantRoleConfigV3LabPath]: "44dcbb423c6f550dc47fd9acadcf4205cdb9359becd8f2b773721fb46df5e25a",
+  [dormantRoleConfigV3LabPath]: "61094272098a838a5494f7dde68241363077e35bb33a6392837f516e59875ea0",
   [dormantRuntimeBootstrapV2LabPath]:
-    "212517121f3a9ef23a6a1da28b0e11f4d58367861678a686192aeade9751c4e0",
+    "aba0abba97a67192065d7cc8f4997da416da10f7dbe07ca3d6feb114f2e7cac6",
 });
 const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
   [`${contractsSourceRoot}index.ts`]:
@@ -102,7 +102,7 @@ const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
   [`${localProtocolSourceRoot}index.ts`]:
     "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
   [`${localProtocolSourceRoot}messages.ts`]:
-    "7adccfe271d613b6a5eb6927441458bb78dd3d7ad862734f9f1e1f0bf8c007f3",
+    "343281b9d303183c693fadb67329cccb1ff01f7c45a73ff1b19ce8fe5937c043",
 });
 const reviewedRootBarrelExports = Object.freeze({
   [`${contractsSourceRoot}index.ts`]: Object.freeze([
@@ -126,10 +126,10 @@ const reviewedRootBarrelExports = Object.freeze({
   ]),
 });
 const reviewedProductionSourceSha256 = Object.freeze({
-  [executorRuntimePath]: "98f51844bcac2f542daa12f580cb3ff3e4dc5fc5b9a7eba49ab527f1f3876e2b",
-  [controlRuntimePath]: "f0ae3d9a159d36dbf3fca08644e81fd4374ea0595f3e04b5a43742b16a1eace3",
+  [executorRuntimePath]: "196c47f866270704cf23fc30a6c540c6bdbf61c82bbd2159527d9584ed831138",
+  [controlRuntimePath]: "7f77b65f7336e108a80006a2b689ad2d8a6448aadf8a7138d0377f9fbe28e88a",
   [`${workerSourceRoot}service-host/runtime-bootstrap.ts`]:
-    "6a06fc4a93a9b353718a04bfc2d8ba4544b41528f2fb235eb310460acc17d3d3",
+    "5d5678e4f2588d0bebe066cfc5b9ae52641c7f8cddbe87a577f7ce06b8113404",
   [`${contractsSourceRoot}worker.ts`]:
     "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
   [`${workerSourceRoot}control/host-control-worker-api.ts`]:

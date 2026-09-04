@@ -143,23 +143,24 @@ describe("Executor zero-slot shadow runtime", () => {
     }
   });
 
-  it.each([
-    ["worker node", { workerNodeId: "other-node" }],
-  ])("fails closed on a wrong Hello %s before emitting HelloAck", async (_name, mutation) => {
-    const harness = createHarness();
-    const hello = {
-      ...createHello(harness.bootstrap),
-      ...mutation,
-    };
+  it.each([["worker node", { workerNodeId: "other-node" }]])(
+    "fails closed on a wrong Hello %s before emitting HelloAck",
+    async (_name, mutation) => {
+      const harness = createHarness();
+      const hello = {
+        ...createHello(harness.bootstrap),
+        ...mutation,
+      };
 
-    sendControl(harness, LocalMessageType.Hello, hello, 1n);
+      sendControl(harness, LocalMessageType.Hello, hello, 1n);
 
-    await expect(harness.runtime.done).rejects.toMatchObject({
-      code: "HANDSHAKE_CONTEXT_INVALID",
-    });
-    await expect(harness.running).rejects.toBeDefined();
-    expect(harness.outputFrames).toHaveLength(0);
-  });
+      await expect(harness.runtime.done).rejects.toMatchObject({
+        code: "HANDSHAKE_CONTEXT_INVALID",
+      });
+      await expect(harness.running).rejects.toBeDefined();
+      expect(harness.outputFrames).toHaveLength(0);
+    },
+  );
 
   it("fails closed at the ARWX schema boundary on an unsupported protocol version", async () => {
     const harness = createHarness();

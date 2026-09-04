@@ -48,14 +48,9 @@ export function establishLocalSession(
     helloAck.workerInstanceId !== hello.workerInstanceId ||
     helloAck.sessionId !== hello.sessionId ||
     helloAck.controlNonce !== hello.controlNonce ||
-    helloAck.executorManifestSha256 !== hello.controlManifestSha256 ||
     hello.controlNonce === helloAck.executorNonce ||
     isZeroDigest(hello.controlNonce) ||
-    isZeroDigest(helloAck.executorNonce) ||
-    isZeroDigest(hello.controlManifestSha256) ||
-    isZeroDigest(hello.controlPreflightSha256) ||
-    isZeroDigest(helloAck.executorManifestSha256) ||
-    isZeroDigest(helloAck.executorPreflightSha256)
+    isZeroDigest(helloAck.executorNonce)
   ) {
     throw handshakeError(
       "HANDSHAKE_CONTEXT_MISMATCH",
@@ -88,8 +83,6 @@ export function validateReadyForEstablishedSession(
     ready.sessionId !== helloAck.sessionId ||
     ready.controlNonce !== helloAck.controlNonce ||
     ready.executorNonce !== helloAck.executorNonce ||
-    ready.executorManifestSha256 !== helloAck.executorManifestSha256 ||
-    ready.executorPreflightSha256 !== helloAck.executorPreflightSha256 ||
     ready.availableSlots > helloAck.maximumSlots
   ) {
     throw handshakeError(

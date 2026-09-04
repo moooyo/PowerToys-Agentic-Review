@@ -281,8 +281,6 @@ function helloMinor1() {
     executorBootId: null,
     sessionId,
     controlNonce: digest("1"),
-    controlManifestSha256: digest("2"),
-    controlPreflightSha256: digest("3"),
   };
 }
 

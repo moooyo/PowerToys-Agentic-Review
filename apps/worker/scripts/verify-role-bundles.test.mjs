@@ -39,7 +39,7 @@ const dormantVersionFoundationSha256 = Object.freeze({
   "packages/local-protocol/src/index.ts":
     "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
   "packages/local-protocol/src/messages.ts":
-    "7adccfe271d613b6a5eb6927441458bb78dd3d7ad862734f9f1e1f0bf8c007f3",
+    "343281b9d303183c693fadb67329cccb1ff01f7c45a73ff1b19ce8fe5937c043",
 });
 const reviewedRootBarrelExports = Object.freeze({
   "packages/contracts/src/index.ts": Object.freeze([
@@ -70,7 +70,7 @@ const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/worker/src/execution/trusted-installation-manifest.ts":
     "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   "apps/worker/src/service-host/runtime-bootstrap.ts":
-    "6a06fc4a93a9b353718a04bfc2d8ba4544b41528f2fb235eb310460acc17d3d3",
+    "5d5678e4f2588d0bebe066cfc5b9ae52641c7f8cddbe87a577f7ce06b8113404",
   "packages/contracts/src/worker.ts":
     "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
 });

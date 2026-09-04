@@ -639,8 +639,6 @@ function createEstablishedArtifactSession(): EstablishedLocalSession {
     executorBootId: null,
     sessionId: artifactSession.sessionId,
     controlNonce: "8".repeat(64),
-    controlManifestSha256: "9".repeat(64),
-    controlPreflightSha256: "a".repeat(64),
   };
   const helloAck: HelloAckMessage = {
     protocolMajor: artifactSession.protocolMajor,
@@ -651,8 +649,6 @@ function createEstablishedArtifactSession(): EstablishedLocalSession {
     sessionId: artifactSession.sessionId,
     controlNonce: hello.controlNonce,
     executorNonce: "b".repeat(64),
-    executorManifestSha256: hello.controlManifestSha256,
-    executorPreflightSha256: "d".repeat(64),
     maximumSlots: 4,
   };
   return establishLocalSession(hello, helloAck);

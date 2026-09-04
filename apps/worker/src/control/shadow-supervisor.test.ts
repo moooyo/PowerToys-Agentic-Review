@@ -35,7 +35,6 @@ import {
 
 const executorBootId = "20000000-0000-4000-8000-000000000002";
 const executorNonce = "2".repeat(64);
-const executorPreflightSha256 = "7".repeat(64);
 
 class FakeServerApi implements ControlShadowServerApi {
   public readonly registrations: WorkerRegistrationRequest[] = [];
@@ -277,6 +276,7 @@ describe("Control zero-slot shadow supervisor", () => {
       workerNodeId: hello.workerNodeId,
       workerInstanceId: hello.workerInstanceId,
       displayName: hello.workerNodeId,
+      workerVersion: "0.1.0",
       maxSlots: 1,
       capabilities: {
         operatingSystem: "windows",
@@ -286,6 +286,7 @@ describe("Control zero-slot shadow supervisor", () => {
         codexVersion: "disabled-zero-execution",
         recipeIds: [],
         labels: {
+          "executor-boot-id": executorBootId,
           "execution-enabled": "false",
           "execution-mode": "zero-slot-shadow",
           "isolation-mode": "split-service-v1",
@@ -358,13 +359,6 @@ describe("Control zero-slot shadow supervisor", () => {
       mutate: (value: HelloAckMessage) => ({ ...value, workerInstanceId: "control:replay" }),
     },
     {
-      name: "manifest digest",
-      mutate: (value: HelloAckMessage) => ({
-        ...value,
-        executorManifestSha256: "3".repeat(64),
-      }),
-    },
-    {
       name: "maximum slots",
       mutate: (value: HelloAckMessage) => ({ ...value, maximumSlots: 2 }),
     },
@@ -399,13 +393,6 @@ describe("Control zero-slot shadow supervisor", () => {
     {
       name: "replayed nonce",
       mutate: (value: ReadyMessage) => ({ ...value, executorNonce: "3".repeat(64) }),
-    },
-    {
-      name: "changed preflight digest",
-      mutate: (value: ReadyMessage) => ({
-        ...value,
-        executorPreflightSha256: "3".repeat(64),
-      }),
     },
   ])("rejects Ready with $name", async ({ mutate }) => {
     const harness = await createHarness();
@@ -676,7 +663,7 @@ async function readHello(harness: Harness): Promise<HelloMessage> {
   return frame.payload as unknown as HelloMessage;
 }
 
-function helloAck(harness: Harness, hello: Readonly<HelloMessage>): HelloAckMessage {
+function helloAck(_harness: Harness, hello: Readonly<HelloMessage>): HelloAckMessage {
   return {
     protocolMajor: hello.protocolMajor,
     protocolMinor: hello.minimumMinor,
@@ -686,8 +673,6 @@ function helloAck(harness: Harness, hello: Readonly<HelloMessage>): HelloAckMess
     sessionId: hello.sessionId,
     controlNonce: hello.controlNonce,
     executorNonce,
-    executorManifestSha256: harness.client.bootstrap.bootstrap.installationManifestSha256,
-    executorPreflightSha256,
     maximumSlots: 1,
   };
 }
@@ -703,8 +688,6 @@ function readyMessage(harness: Harness, hello: Readonly<HelloMessage>): ReadyMes
     sessionId: ack.sessionId,
     controlNonce: ack.controlNonce,
     executorNonce: ack.executorNonce,
-    executorManifestSha256: ack.executorManifestSha256,
-    executorPreflightSha256: ack.executorPreflightSha256,
     isolationMode: "split-service-v1",
     ready: false,
     availableSlots: 0,

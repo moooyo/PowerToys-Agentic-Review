@@ -18,8 +18,6 @@ const hello: HelloMessage = {
   executorBootId: null,
   sessionId: "10000000-0000-4000-8000-000000000001",
   controlNonce: hex("1"),
-  controlManifestSha256: hex("2"),
-  controlPreflightSha256: hex("3"),
 };
 
 const helloAck: HelloAckMessage = {
@@ -31,8 +29,6 @@ const helloAck: HelloAckMessage = {
   sessionId: hello.sessionId,
   controlNonce: hello.controlNonce,
   executorNonce: hex("4"),
-  executorManifestSha256: hello.controlManifestSha256,
-  executorPreflightSha256: hex("7"),
   maximumSlots: 4,
 };
 
@@ -46,7 +42,7 @@ describe("plain local handshake", () => {
     expect(Object.isFrozen(session.helloAck)).toBe(true);
   });
 
-  it("rejects mismatched protocol, identity, nonce, manifest, and empty evidence", () => {
+  it("rejects mismatched protocol, identity, nonce, and empty evidence", () => {
     const mutations: ReadonlyArray<Partial<HelloAckMessage>> = [
       { protocolMajor: 2 as 1 },
       { workerNodeId: "other-node" },
@@ -54,7 +50,6 @@ describe("plain local handshake", () => {
       { sessionId: "30000000-0000-4000-8000-000000000003" },
       { controlNonce: hex("8") },
       { executorNonce: hello.controlNonce },
-      { executorManifestSha256: hex("9") },
     ];
 
     for (const mutation of mutations) {
@@ -99,8 +94,6 @@ function readyMessage(): ReadyMessage {
     sessionId: helloAck.sessionId,
     controlNonce: helloAck.controlNonce,
     executorNonce: helloAck.executorNonce,
-    executorManifestSha256: helloAck.executorManifestSha256,
-    executorPreflightSha256: helloAck.executorPreflightSha256,
     isolationMode: "split-service-v1",
     ready: true,
     availableSlots: helloAck.maximumSlots,
