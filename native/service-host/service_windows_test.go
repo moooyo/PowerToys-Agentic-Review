@@ -11,7 +11,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/platform"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -132,14 +131,12 @@ func TestServiceNameFromBootstrapPathUsesFixedRoleIdentity(t *testing.T) {
 	}{
 		{
 			name: "Control",
-			path: `C:\ProgramData\AgenticReview\TrustedConfig\` +
-				releasemanifest.ControlBootstrapConfigurationPath,
+			path: config.ControlBootstrapPath,
 			want: config.ControlServiceName,
 		},
 		{
 			name: "Executor",
-			path: `D:\Worker\TrustedConfig\` +
-				releasemanifest.ExecutorBootstrapConfigurationPath,
+			path: config.ExecutorBootstrapPath,
 			want: config.ExecutorServiceName,
 		},
 	}
@@ -157,8 +154,7 @@ func TestServiceNameFromBootstrapPathUsesFixedRoleIdentity(t *testing.T) {
 }
 
 func TestWindowsServiceRunnerDerivesNameBeforeDispatchAndIgnoresStartArguments(t *testing.T) {
-	path := `C:\ProgramData\AgenticReview\TrustedConfig\` +
-		releasemanifest.ControlBootstrapConfigurationPath
+	path := config.ControlBootstrapPath
 	host := &fakeWindowsServiceHost{
 		started:    make(chan platform.BootstrapOptions, 1),
 		readyCalls: 1,

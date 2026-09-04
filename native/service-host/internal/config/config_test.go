@@ -405,6 +405,37 @@ func TestLoadRejectsNonFilesAndOversizedFiles(t *testing.T) {
 	assertConfigErrorCode(t, err, ErrorRead)
 }
 
+func TestRoleFromTrustedBootstrapPathAcceptsOnlyFixedLocations(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want Role
+		ok   bool
+	}{
+		{name: "Control", path: ControlBootstrapPath, want: RoleControl, ok: true},
+		{name: "Executor", path: ExecutorBootstrapPath, want: RoleExecutor, ok: true},
+		{name: "Control case-insensitive", path: `c:\programdata\agenticreview\trustedconfig\CONTROL.JSON`, want: RoleControl, ok: true},
+		{name: "relative", path: `control.json`},
+		{name: "short parent alias", path: `C:\PROGRA~1\AgenticReview\TrustedConfig\control.json`},
+		{name: "other directory", path: `C:\ProgramData\AgenticReview\TrustedConfig\staged\control.json`},
+		{name: "other file", path: `C:\ProgramData\AgenticReview\TrustedConfig\other.json`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			role, err := RoleFromTrustedBootstrapPath(test.path)
+			if test.ok {
+				if err != nil || role != test.want {
+					t.Fatalf("RoleFromTrustedBootstrapPath(%q) = (%q, %v), want (%q, nil)", test.path, role, err, test.want)
+				}
+				return
+			}
+			if err == nil || role != "" {
+				t.Fatalf("RoleFromTrustedBootstrapPath(%q) = (%q, %v), want empty role and error", test.path, role, err)
+			}
+		})
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		SchemaVersion: SchemaVersion,

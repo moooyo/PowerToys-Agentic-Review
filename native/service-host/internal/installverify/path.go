@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 )
 
 const maximumWindowsPathUnits = 32_767
@@ -95,18 +94,11 @@ func parentAndLeaf(path string) (string, string, error) {
 // process; Verify must independently prove the restricted service identity and
 // installation evidence before trusting bootstrap content.
 func RoleFromBootstrapPath(actualPath string) (config.Role, error) {
-	_, leaf, err := parentAndLeaf(actualPath)
+	role, err := config.RoleFromTrustedBootstrapPath(actualPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: bootstrap path is not canonical: %v", ErrInvalidOptions, err)
+		return "", fmt.Errorf("%w: bootstrap path does not name a fixed trusted role configuration", ErrInvalidOptions)
 	}
-	switch {
-	case windowsPathEqual(leaf, releasemanifest.ControlBootstrapConfigurationPath):
-		return config.RoleControl, nil
-	case windowsPathEqual(leaf, releasemanifest.ExecutorBootstrapConfigurationPath):
-		return config.RoleExecutor, nil
-	default:
-		return "", fmt.Errorf("%w: bootstrap path does not name a fixed role configuration", ErrInvalidOptions)
-	}
+	return role, nil
 }
 
 func relativePath(root, child string) (string, error) {

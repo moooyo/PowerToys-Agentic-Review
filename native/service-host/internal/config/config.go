@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -30,6 +29,8 @@ const (
 	ControlServiceSID                        = "S-1-5-80-2091717111-3815740202-2957909909-902494971-3397275836"
 	ExecutorServiceSID                       = "S-1-5-80-2741783613-3141871344-3258369507-3627446740-1359970993"
 	ControlExecutorPipeName                  = `\\.\pipe\AgenticReview.Worker.ControlExecutor.v1`
+	ControlBootstrapPath                     = `C:\ProgramData\AgenticReview\TrustedConfig\control.json`
+	ExecutorBootstrapPath                    = `C:\ProgramData\AgenticReview\TrustedConfig\executor.json`
 	minimumRootJobMemory                     = uint64(256 * 1024 * 1024)
 	maximumRootJobMemory                     = uint64(1 * 1024 * 1024 * 1024 * 1024)
 	maximumEnvironmentValues                 = 128
@@ -133,15 +134,9 @@ func Load(path string) (Config, error) {
 	if path == "" {
 		return Config{}, configError(ErrorRead, "configuration path is required", nil)
 	}
-	if runtime.GOOS == "windows" {
-		if err := validateWindowsPath(path, true); err != nil {
-			return Config{}, configError(ErrorRead, "configuration path is not a canonical local Windows path", nil)
-		}
-		return Config{}, configError(
-			ErrorRead,
-			"secure Windows configuration handle validation is not implemented",
-			nil,
-		)
+	role, err := RoleFromTrustedBootstrapPath(path)
+	if err != nil {
+		return Config{}, configError(ErrorRead, "configuration path does not select a trusted fixed role configuration", err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -167,7 +162,25 @@ func Load(path string) (Config, error) {
 	if len(document) > MaximumDocumentBytes {
 		return Config{}, configError(ErrorRead, "configuration file exceeds the byte limit", nil)
 	}
-	return Parse(document)
+	value, err := Parse(document)
+	if err != nil {
+		return Config{}, err
+	}
+	if value.Role != role {
+		return Config{}, configError(ErrorValidation, "configuration role does not match its fixed trusted path", nil)
+	}
+	return value, nil
+}
+
+func RoleFromTrustedBootstrapPath(path string) (Role, error) {
+	switch {
+	case strings.EqualFold(path, ControlBootstrapPath):
+		return RoleControl, nil
+	case strings.EqualFold(path, ExecutorBootstrapPath):
+		return RoleExecutor, nil
+	default:
+		return "", errors.New("path does not match a fixed trusted bootstrap location")
+	}
 }
 
 func Parse(document []byte) (Config, error) {
