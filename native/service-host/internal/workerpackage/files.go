@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // VerifyFiles checks each file listed in the manifest before any write operation is allowed.
@@ -19,6 +20,10 @@ func VerifyFiles(root string, manifest Manifest) error {
 	for _, entry := range normalized.Files {
 		relativeOSPath := filepath.FromSlash(entry.RelativePath)
 		filePath := filepath.Join(root, relativeOSPath)
+
+		if err := verifyDirectoryChain(root, relativeOSPath); err != nil {
+			return newError(ErrFiles, manifestPath(root, entry.RelativePath), "listed path traverses unsafe directory", err)
+		}
 
 		info, err := os.Lstat(filePath)
 		if err != nil {
@@ -36,6 +41,44 @@ func VerifyFiles(root string, manifest Manifest) error {
 		}
 		if actualHash != entry.SHA256 {
 			return newError(ErrFiles, manifestPath(root, entry.RelativePath), "file sha256 does not match manifest", nil)
+		}
+	}
+
+	return nil
+}
+
+func verifyDirectoryChain(root, relativePath string) error {
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("root is not a directory")
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || hasReparsePoint(rootInfo) {
+		return fmt.Errorf("root is a symlink or reparse point")
+	}
+
+	ancestorPath := filepath.Dir(relativePath)
+	if ancestorPath == "." {
+		return nil
+	}
+
+	currentPath := root
+	for _, segment := range strings.Split(ancestorPath, string(filepath.Separator)) {
+		if segment == "" || segment == "." {
+			continue
+		}
+		currentPath = filepath.Join(currentPath, segment)
+		info, err := os.Lstat(currentPath)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("ancestor is not a directory")
+		}
+		if info.Mode()&os.ModeSymlink != 0 || hasReparsePoint(info) {
+			return fmt.Errorf("ancestor is a symlink or reparse point")
 		}
 	}
 

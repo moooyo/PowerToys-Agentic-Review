@@ -88,7 +88,7 @@ func normalizeManifest(value Manifest) (Manifest, error) {
 		if !validSHA256(file.SHA256) {
 			return Manifest{}, newError(ErrManifest, file.RelativePath, "sha256 must be 64 lowercase hex characters", nil)
 		}
-		identity := asciiCaseFold(file.RelativePath)
+		identity := windowsCaseFold(file.RelativePath)
 		if _, exists := seen[identity]; exists {
 			return Manifest{}, newError(ErrManifest, file.RelativePath, "relativePath values must be case-insensitively unique", nil)
 		}
@@ -96,8 +96,8 @@ func normalizeManifest(value Manifest) (Manifest, error) {
 	}
 
 	sort.Slice(files, func(left, right int) bool {
-		leftKey := asciiCaseFold(files[left].RelativePath)
-		rightKey := asciiCaseFold(files[right].RelativePath)
+		leftKey := windowsCaseFold(files[left].RelativePath)
+		rightKey := windowsCaseFold(files[right].RelativePath)
 		if leftKey != rightKey {
 			return leftKey < rightKey
 		}
@@ -198,18 +198,16 @@ func reservedDeviceName(component string) bool {
 		base == "CONIN$" || base == "CONOUT$" || base == "CLOCK$" {
 		return true
 	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-		base[3] >= '1' && base[3] <= '9'
+	if !strings.HasPrefix(base, "COM") && !strings.HasPrefix(base, "LPT") {
+		return false
+	}
+	suffix := base[3:]
+	return len(suffix) == 1 && suffix[0] >= '1' && suffix[0] <= '9' ||
+		suffix == "¹" || suffix == "²" || suffix == "³"
 }
 
-func asciiCaseFold(value string) string {
-	buffer := []byte(value)
-	for index, character := range buffer {
-		if character >= 'A' && character <= 'Z' {
-			buffer[index] = character + ('a' - 'A')
-		}
-	}
-	return string(buffer)
+func windowsCaseFold(value string) string {
+	return strings.ToUpper(value)
 }
 
 func isASCIIAlphaNumeric(character byte) bool {

@@ -89,6 +89,27 @@ func TestVerifyFilesRejectsNonRegularPath(t *testing.T) {
 	}
 }
 
+func TestVerifyFilesRejectsSymlinkAncestor(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	mustWriteFile(t, filepath.Join(external, "worker.exe"), []byte("abc"))
+	if err := os.Symlink(external, filepath.Join(root, "bin")); err != nil {
+		t.Skipf("create directory symlink: %v", err)
+	}
+	manifest := Manifest{
+		ReleaseID:    "R-1",
+		Architecture: ArchitectureAMD64,
+		Files: []File{{
+			RelativePath: "bin/worker.exe",
+			Size:         3,
+			SHA256:       sha256Hex([]byte("abc")),
+		}},
+	}
+	if err := VerifyFiles(root, manifest); err == nil || !errors.Is(err, ErrFiles) {
+		t.Fatalf("VerifyFiles symlink ancestor error = %v, want ErrFiles", err)
+	}
+}
+
 func TestVerifyFilesRejectsSizeMismatch(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "bin", "worker.exe"), []byte("abc"))

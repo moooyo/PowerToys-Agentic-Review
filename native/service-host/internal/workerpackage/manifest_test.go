@@ -92,6 +92,8 @@ func TestManifestValidationRejectsInvalidPaths(t *testing.T) {
 		"dir//file.txt",
 		"dir/file.txt:ads",
 		"dir/con.txt",
+		"dir/COM¹.txt",
+		"dir/LPT³.log",
 		"dir/file?.txt",
 		"dir/trailing. ",
 		"dir/trailing.",
@@ -116,6 +118,20 @@ func TestManifestValidationRejectsCaseInsensitiveDuplicatePaths(t *testing.T) {
 	}
 	if _, err := MarshalManifestCanonical(manifest); err == nil || !errors.Is(err, ErrManifest) {
 		t.Fatalf("MarshalManifestCanonical duplicate path error = %v, want ErrManifest", err)
+	}
+}
+
+func TestManifestValidationRejectsUnicodeCaseDuplicatePaths(t *testing.T) {
+	manifest := Manifest{
+		ReleaseID:    "R-1",
+		Architecture: ArchitectureAMD64,
+		Files: []File{
+			{RelativePath: "bin/Ä.txt", Size: 1, SHA256: strings.Repeat("a", 64)},
+			{RelativePath: "BIN/ä.TXT", Size: 1, SHA256: strings.Repeat("b", 64)},
+		},
+	}
+	if _, err := MarshalManifestCanonical(manifest); err == nil || !errors.Is(err, ErrManifest) {
+		t.Fatalf("MarshalManifestCanonical Unicode duplicate path error = %v, want ErrManifest", err)
 	}
 }
 
