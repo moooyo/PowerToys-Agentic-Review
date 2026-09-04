@@ -16,10 +16,10 @@ trusted under the selected profile.
 Branch `codex/worker-token-followups` completes three items that were deferred by the initial
 handoff: the authenticated credential roster and Dashboard management flow, native ServiceHost
 bootstrap schema 4 and Bearer production composition, and removal of the superseded Server binding
-coordinator from the production storage lifecycle. The later release follow-up establishes the
-current outer-package v2 and split installer profile v2 contracts for schema 4. No earlier bootstrap
-or outer-package profile is accepted as a compatibility path. Actual signed material and the
-production SCM installer remain deferred.
+coordinator from the production storage lifecycle. A still later simplification deleted the
+outer-package and installer-profile designs and completed the repository-local clean SCM installer
+under ADR 0028. Actual production key material, release payloads, and elevated native lifecycle
+verification remain deferred.
 
 ## Completed Scope
 
@@ -118,12 +118,16 @@ matrix was not rerun.
 The local Node runtime was `26.1.0`, while the repository requires `>=24.20.0 <25`. pnpm emitted the
 engine warning, but lint, typecheck, build, and the recorded focused tests completed.
 
-## Deferred Work
+## Superseding completion and deferred release work
 
-1. Produce actual signed outer-package-v2 release material and implement root materialization,
-   atomic swap, and the production SCM installer. The later installer-destination slice completed
-   the read-only typed-gate re-verification evidence for all three fixed post-swap roots, but no
-   production installer invokes it.
+ADR 0028 and the later simple-installer work completed the repository-local clean installer and
+replaced the outer-package-v2, atomic-swap, installer-profile, retained-evidence, receipt, and
+transaction designs. The current release path is `workerpackage -> workerinstaller`, with local
+Server origin, Worker node ID, and Token input kept outside the signed package.
+
+Only external release work remains: provide the production Ed25519 key material and real amd64 and
+arm64 payloads, compile the matching public key into the installers, and run elevated native Windows
+installation and lifecycle verification.
 
 The later `codex/worker-token-release-recovery` change completed the executable historical-source
 cleanup and the Token recovery exercises. A subsequent pre-release reset removed the dormant

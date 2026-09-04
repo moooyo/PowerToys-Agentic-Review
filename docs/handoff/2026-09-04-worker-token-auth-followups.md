@@ -94,19 +94,18 @@ An exploratory native `go test ./...` also reached the repository's existing loc
 `winfile`. The same four package failures reproduce on base commit `52dc708`. The changed native
 packages, the updated source-pin guard, `go vet ./...`, and both Windows architecture builds pass.
 
-## Remaining Work
+## Superseding completion
 
-1. Produce actual signed outer-package-v2 release material.
-2. Build the production split-service SCM installer, root materializer/atomic swap, and privileged
-   activation path that provision the fixed authentication file separately from signed package
-   content.
+ADR 0028 and the later simple-installer work completed the repository-local release path and
+supersede the outer-package-v2, atomic-swap, installer-profile, receipt, and retained-evidence plans
+described by this historical handoff. The current release path is one canonical Worker manifest,
+one raw Ed25519 signature, and the clean-install-only Windows SCM installer. Local install input
+contains only the Server origin, Worker node ID, and Token.
 
-The later `codex/worker-token-release-recovery` change completed the v2 package and installer-profile
-contracts, deleted the retired Server-binding implementation island, and added the six-case Token
-recovery matrix plus `docs/operations/worker-token-recovery.md`. Only the two release and
-installation workstreams above remain. The later installer-destination slice completed the
-read-only typed-gate re-verification evidence for all three fixed post-swap roots; no production
-installer materializes or swaps those roots or invokes that verifier yet. The production installer
-still includes repository-local implementation as well as privileged environment validation.
-A subsequent pre-release schema reset removes the cross-version recovery case; the current matrix
+The remaining release work is external: provide the production Ed25519 key material and real amd64
+and arm64 payloads, compile the matching public key into each installer, and run elevated native
+Windows installation and lifecycle verification. No compatibility, migration, fallback, receipt,
+repair, resume, transaction, or rollback implementation remains.
+
+The pre-release schema reset also removed the cross-version recovery case; the current matrix
 contains five same-schema operational recovery tests.

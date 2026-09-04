@@ -538,8 +538,9 @@ Each Windows worker is installed as two native ServiceHost Windows Services unde
 restricted, non-administrator identities. Executor starts first. Each role reads only its fixed
 trusted configuration path under `C:\ProgramData\AgenticReview\TrustedConfig`, runs service
 bootstrap to construct the restricted service SID/token and process/token DACLs, and reports SCM
-ready only after local identity/configuration checks plus Control Token loading. Control begins
-claiming only after this local-ready state and peer channel availability.
+ready only after local identity/configuration checks plus Control Token loading. Control may begin
+claiming only after this local-ready state, peer channel availability, and a separate explicit
+execution-enablement decision; the current role bundles remain zero-slot and do not claim.
 Production execution fails closed unless the split-service boundary in ADR 0007 is active. The first
 published format has no Worker upgrade path; any future upgrade requires a new ADR.
 

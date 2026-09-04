@@ -26,8 +26,9 @@ authenticated read-only GitHub and Dashboard slice, immutable result projections
 execution components, and the split-service protocol and native Windows composition candidate
 described in `ARCHITECTURE.md`. Candidate zero-slot TypeScript role supervisors are now present and
 have passed local source, bundle, and protocol verification on Windows. Native SCM and process
-integration remain unexercised. The repository remains intentionally fail-closed while execution-capable role
-runtimes, the release and installer pipeline, and native Windows runtime evidence are incomplete.
+integration remain unexercised. The repository remains intentionally fail-closed while
+execution-capable role runtimes, production release material, and native Windows runtime evidence
+are incomplete; the repository-local package builder and clean installer are implemented.
 Runtime cleanup is in place: ServiceHost runtime now uses fixed trusted role configs with
 service-bootstrap and peer-identity checks, and no longer runs or retains install verification,
 data-root verification, preflight, launchguard, or runtime install-tree hash/Authenticode/
@@ -319,11 +320,11 @@ process-handle identity, and HostControl PID binding.
   `DisabledReadinessProjection` is not an ARWX Ready message and grants no Ready or Claim authority.
   Production RoleConfig v2, RuntimeBootstrapV1, RPC1, Claim derivation, entrypoints, bundles, and
   release manifests remain source- and graph-pinned.
-- The native ProcessHost and ServiceHost sources are present, but signed release binaries and native
-  Windows runtime verification are not part of this milestone. Windows `platform.NewHost()` now
-  selects the composed runtime. Ordinary builds still contain no compiled production release
-  profile and fail closed before using installed configuration; non-Windows builds remain
-  unavailable.
+- The native ProcessHost and ServiceHost sources are present, but production-signed release binaries
+  and native Windows runtime verification are not part of this milestone. Windows
+  `platform.NewHost()` selects the composed runtime. Runtime release profiles were deleted; release
+  trust is now confined to the installer, whose ordinary build fails closed unless the release
+  public key is injected. Non-Windows ServiceHost builds remain unavailable.
 - Dynamic validation of untrusted pull-request code remains disabled.
 - PR finding paths and line ranges are normalized but are not yet checked against an immutable
   server-side diff manifest; publication must remain disabled until that gate exists.
@@ -345,6 +346,13 @@ No upgrade, migration, fallback, rollback journal, receipt, repair, resume, or c
 is required for the first unpublished install format. Native Windows hosts must then pass the ADR
 0007 token, ACL, Named Pipe, sandbox, Job Object, cancellation, restart, and attack tests before any
 Claim authority is enabled.
+
+A local unprivileged integration probe assembled all eight required payload entries, generated a
+canonical manifest and raw Ed25519 signature with a temporary key, compiled the matching public key
+into the installer, and reached `EnsureClean` after all pre-mutation verification. It then failed at
+SCM access as expected because the session was not elevated. No fixed Worker root, service, or
+process remained after the probe. This is release-pipeline evidence, not elevated service-runtime
+evidence.
 
 The product data path can proceed in parallel by adding the Worker Control upload client while
 keeping claim selection default-off, then introducing a versioned claim envelope and rollout policy
@@ -709,9 +717,9 @@ Not yet verified:
   Windows source, bundle, protocol, and guard tests but have not run as installed services. The native Control-only
   relay asymmetry, Control HostControl half-close latch, and shutdown-request bridge also lack native
   Windows verification.
-  Executor's candidate emits only the disabled ARWX `Ready`; ordinary builds have no production
-  release profile, Claim remains denied, and the real Codex executor
-  remains disconnected from the production entrypoint.
+  Executor's candidate emits only the disabled ARWX `Ready`; production entrypoints remain
+  zero-execution, Claim remains denied, and the real Codex executor remains disconnected from the
+  production entrypoint.
 - Real GitHub and external OIDC-provider integration were not exercised; their HTTP boundaries are
   covered with controlled test doubles and the local runtime smoke used the development auth mode.
 - Browser-level visual and interaction testing was not run because the remote test environment has

@@ -6,8 +6,9 @@ Branch: `codex/worker-token-release-recovery`
 
 Base commit: `7bf218b0f055e36d0800249a14bab091c70d425a`
 
-This change completes the outer-package/installer-profile data contracts, retired-source cleanup,
-and Token recovery work. It does not implement the complete production SCM installer.
+This historical change completed the then-current outer-package/installer-profile data contracts,
+retired-source cleanup, and Token recovery work. It did not itself implement the production SCM
+installer; ADR 0028 and the later simple-installer work completed the repository-local replacement.
 
 ## Completed Scope
 
@@ -122,20 +123,20 @@ database admission, rejection of lower and unknown applied migration sets before
 backup action, absence of the retired Server-binding tables and migration, removal of the legacy
 adoption marker, and same-schema-only credential backup recovery. No command used `test-env`.
 
-## Remaining Release Work
+## Superseding completion and remaining release work
 
-Repository-local implementation remains for the Windows-only clean installer: selected release
-verification, root placement, local configuration, service creation/read-back, and
-Executor-before-Control start. The current node-specific package shape, CNG, and destination
-evidence may be reused or simplified by that implementation; WinSW has already been removed. No
-installer transaction recovery, upgrade, migration, or rollback implementation is required.
-Server database recovery maintenance ingress is implemented;
-deployment operators must still remove the ordinary reverse-proxy upstream and unsupported bridge
-container exposure while it is active.
+ADR 0028 and the later simple-installer work completed the repository-local Windows clean installer.
+It verifies the canonical manifest and raw Ed25519 signature, checks architecture and every required
+file before mutation, writes the fixed roots and minimal local configuration, creates the two
+restricted virtual-account services, starts Executor before Control, and finally selects automatic
+start. The earlier node-specific package, CNG, outer-package, compiled release-profile,
+outer-trust, destination-evidence, and receipt mechanisms were deleted rather than reused.
 
-External release work remains to produce the authenticated artifacts selected by the final clean
-installer. Under the current composition those include the Authenticode-signed ServiceHost, role
-bundles, outer-package-v2 signature, compiled release profile, and compiled outer-trust material;
-a later simplification may reduce that list. The resulting path must pass the clean-install matrix
-on privileged Windows amd64 and arm64 hosts. Real artifacts and machine-level results cannot be
-replaced by placeholder credentials or unit tests.
+External release work remains: provide the production Ed25519 key material and real amd64 and arm64
+payloads, compile the matching public key into each installer, and run the clean-install and native
+lifecycle matrix from elevated Windows hosts. No installer transaction recovery, upgrade,
+migration, fallback, rollback, receipt, repair, or resume implementation is required.
+
+Server database recovery maintenance ingress is implemented. Deployment operators must still
+remove the ordinary reverse-proxy upstream and unsupported bridge-container exposure while recovery
+maintenance is active.
