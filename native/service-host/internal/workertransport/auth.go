@@ -54,6 +54,32 @@ func (auth WorkerAuth) Format(state fmt.State, _ rune) {
 	_, _ = state.Write([]byte(auth.String()))
 }
 
+// MarshalWorkerAuth validates the fixed profile fields and returns the only accepted canonical
+// JSON encoding for the Worker authentication profile.
+func MarshalWorkerAuth(workerNodeID string, token string) ([]byte, error) {
+	if err := validateEntityID(workerNodeID); err != nil {
+		return nil, workerAuthError("Worker node ID is invalid")
+	}
+	if !validWorkerToken(token) {
+		return nil, workerAuthError("Token is invalid")
+	}
+
+	document := make([]byte, 0, len(WorkerAuthProfileID)+len(workerNodeID)+len(token)+48)
+	document = append(document, `{"profileId":"`...)
+	document = append(document, WorkerAuthProfileID...)
+	document = append(document, `","token":"`...)
+	document = append(document, token...)
+	document = append(document, `","workerNodeId":"`...)
+	document = append(document, workerNodeID...)
+	document = append(document, `"}`...)
+
+	if _, err := parseWorkerAuth(document); err != nil {
+		clear(document)
+		return nil, err
+	}
+	return document, nil
+}
+
 // LoadWorkerAuth loads the only production Worker Token source. It accepts no alternate path,
 // environment variable, command-line value, package field, or registry source.
 func LoadWorkerAuth() (WorkerAuth, error) {
