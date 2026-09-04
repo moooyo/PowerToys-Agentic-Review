@@ -326,11 +326,7 @@ export class WorkerService {
         await this.#ensureRegistered(`claim_response:${response.reason}`);
         return;
       }
-      if (
-        response.reason === "draining" ||
-        response.reason === "disabled" ||
-        response.reason === "upgrade_required"
-      ) {
+      if (response.reason === "draining" || response.reason === "disabled") {
         this.requestDrain(`claim_response:${response.reason}`);
       }
       await delay(response.retryAfterMs ?? this.config.idleDelayMilliseconds, stopSignal).catch(

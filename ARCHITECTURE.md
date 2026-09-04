@@ -557,8 +557,8 @@ initialized exact-schema database rather than upgraded in place. The Server crea
 migration backup and exposes no legacy-adoption path. Restoring an externally retained backup is
 supported only when it already matches the exact current schema and also restores its Worker Token
 hashes and `pending`/`active`/`revoked` state; anti-rollback protection is not part of this trust
-model. Worker and protocol versions are advertised at registration; the server can require a
-minimum compatible version.
+model. Worker and protocol versions are advertised at registration, and the Server accepts only the
+exact current protocol version. No upgrade-required compatibility action exists before publication.
 
 ## 20. Initial Delivery Plan
 

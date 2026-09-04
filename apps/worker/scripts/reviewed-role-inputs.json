@@ -22,7 +22,7 @@
     "apps/worker/src/service-host/typebox-value-check.ts": "57c3e570c043b577ef15072391a586e2000ef641ad0f9d4afac2f8e04dcaf33e",
     "packages/contracts/src/common.ts": "cee535e74bb94d9c059fce70cb8ed964182cf35830e5ba36b2ae3050992baf25",
     "packages/contracts/src/states.ts": "5aedaa07d2d7ead3a747007bb1a229d9a804b4a55a24e8d960bde8d384fd092b",
-    "packages/contracts/src/worker.ts": "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
+    "packages/contracts/src/worker.ts": "312abd6df2de9c12e4d0b68f5453bb4b05a6189bb161d97e02a4f94023e80ddd",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/system/policy.mjs": "82af624c1ff0215defb4176a1d285df58af6cede9ca634dbc83b4d0d34b065f3",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs": "94469550566190a21230c34496b493407678e92ec64a9025f91f32b69265485c",
     "node_modules/.pnpm/@sinclair+typebox@0.34.52/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs": "833dee6d67adffd0f57e156f71b38b5a327288e6b3d805edf4f174b78a214df2",

@@ -33,7 +33,7 @@ const dormantVersionFoundationSha256 = Object.freeze({
   "packages/contracts/src/index.ts":
     "b5ec1e3a50525a2228979cf5b73afb423c804822c94f4dede91117e3d8f7944b",
   "packages/contracts/src/job-envelope.ts":
-    "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
+    "de19ce253c9aa9c96a3f517bdf92916332f20a5780495bbc2a576d549cae6525",
   "packages/local-protocol/src/framing.ts":
     "4f701c4e19bb1ebacaae8ad5f1e891029bd7a57feb35a9cc2a86d233019cc806",
   "packages/local-protocol/src/index.ts":
@@ -64,7 +64,7 @@ const reviewedRootBarrelExports = Object.freeze({
 });
 const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/server/src/database/database-worker.ts":
-    "b0d6eb99cfa1ccd45fbf2582bcaa2ab69205634f13c423e7a504abc99291763d",
+    "58c9cedaae1578d888603867d41e1c43da90263d470d618fcebcb2a5eb9919b3",
   "apps/worker/src/control/host-control-worker-api.ts":
     "30330b3954d0484ba95b6a6d70d74dcfb992aaeb08db689f56411a432d8c7189",
   "apps/worker/src/execution/trusted-installation-manifest.ts":
@@ -72,7 +72,7 @@ const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/worker/src/service-host/runtime-bootstrap.ts":
     "5d5678e4f2588d0bebe066cfc5b9ae52641c7f8cddbe87a577f7ce06b8113404",
   "packages/contracts/src/worker.ts":
-    "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
+    "312abd6df2de9c12e4d0b68f5453bb4b05a6189bb161d97e02a4f94023e80ddd",
 });
 
 test("clean build removes polluted output before producing role artifacts", async () => {

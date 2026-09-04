@@ -135,11 +135,12 @@ construction, and runtime-supervision construction succeed.
   attempt, and job together. Exact terminal replay rebuilds the stored response through the strict
   public schema and does not reread storage.
 - A production identity-boundary decision that represents one logical Worker as separate Control
-  and Executor Windows services connected by signed short-lived capabilities over a protected
-  Named Pipe.
+  and Executor Windows services connected by unsigned typed authorizations over an identity-checked
+  protected Named Pipe.
 - A strict Control-Executor local protocol package with bounded ARWX framing, canonical JSON,
-  lease-token-free Executor envelopes, P-256 low-S capabilities, exact renewal chains, boot-lifetime
-  replay tombstones, streamed artifacts, terminal disposition, and attempt-level resource limits.
+  lease-token-free Executor envelopes, unsigned execution capabilities, exact renewal chains,
+  boot-lifetime replay tombstones, streamed artifacts, terminal disposition, and attempt-level
+  resource limits.
 - A Control-side local execution boundary that projects Server envelopes into deeply frozen,
   lease-token-free Executor envelopes; snapshots the lease authority basis; binds artifact streams
   to the complete session and attempt context; and maps identity-checked Server terminal responses

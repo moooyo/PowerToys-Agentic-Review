@@ -189,7 +189,6 @@ export type ClaimLeaseResult =
         | "not_online"
         | "draining"
         | "disabled"
-        | "upgrade_required"
         | "capabilities_changed"
         | "no_available_slots";
       readonly retryAfterMs?: number;

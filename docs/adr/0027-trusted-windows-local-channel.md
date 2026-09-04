@@ -29,12 +29,12 @@ In the trusted-local deployment, Windows local environment and local administrat
      - `nonce`
      - `bootId`
      - `sessionId`
-     - `attemptId`
-     - `configDigest`
-     - `resourceEnvelope`
-     - `deadline`
-     - `sequence`
-     - replay constraints
+     - attempt, job, and lease identity
+     - reviewed input digests
+     - resource limits
+     - hard deadlines
+     - grant and heartbeat sequences
+     - replay constraints and renewal-chain binding
 
 4. Crypto scope reduction:
    - Do not use CNG key generation, local key storage, SPKI exchange, or local signatures for this channel.

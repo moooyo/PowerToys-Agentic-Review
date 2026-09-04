@@ -1086,7 +1086,7 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
     if (registeredProtocol.protocol_version !== input.protocolVersion) {
       return {
         outcome: "worker_unavailable",
-        reason: "upgrade_required",
+        reason: "not_registered",
       };
     }
     if (worker.capabilities_digest !== input.capabilitiesDigest) {

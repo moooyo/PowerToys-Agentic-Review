@@ -96,7 +96,7 @@ const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
   [`${contractsSourceRoot}index.ts`]:
     "b5ec1e3a50525a2228979cf5b73afb423c804822c94f4dede91117e3d8f7944b",
   [`${contractsSourceRoot}job-envelope.ts`]:
-    "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
+    "de19ce253c9aa9c96a3f517bdf92916332f20a5780495bbc2a576d549cae6525",
   [`${localProtocolSourceRoot}framing.ts`]:
     "4f701c4e19bb1ebacaae8ad5f1e891029bd7a57feb35a9cc2a86d233019cc806",
   [`${localProtocolSourceRoot}index.ts`]:
@@ -131,13 +131,13 @@ const reviewedProductionSourceSha256 = Object.freeze({
   [`${workerSourceRoot}service-host/runtime-bootstrap.ts`]:
     "5d5678e4f2588d0bebe066cfc5b9ae52641c7f8cddbe87a577f7ce06b8113404",
   [`${contractsSourceRoot}worker.ts`]:
-    "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
+    "312abd6df2de9c12e4d0b68f5453bb4b05a6189bb161d97e02a4f94023e80ddd",
   [`${workerSourceRoot}control/host-control-worker-api.ts`]:
     "30330b3954d0484ba95b6a6d70d74dcfb992aaeb08db689f56411a432d8c7189",
   [`${workerSourceRoot}execution/trusted-installation-manifest.ts`]:
     "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   [pinnedServerClaimProducerPath]:
-    "b0d6eb99cfa1ccd45fbf2582bcaa2ab69205634f13c423e7a504abc99291763d",
+    "58c9cedaae1578d888603867d41e1c43da90263d470d618fcebcb2a5eb9919b3",
 });
 const reviewedDormantExecutionSourceSha256 = Object.freeze({
   [dormantExecutorAttemptReducerPath]:

@@ -119,7 +119,6 @@ export const LeaseCommandActionSchema = Type.Union([
   Type.Literal("cancel"),
   Type.Literal("stale"),
   Type.Literal("drain"),
-  Type.Literal("upgrade_required"),
 ]);
 export type LeaseCommandAction = Static<typeof LeaseCommandActionSchema>;
 

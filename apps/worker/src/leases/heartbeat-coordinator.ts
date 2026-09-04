@@ -280,9 +280,6 @@ export class HeartbeatCoordinator {
       return;
     }
 
-    if (command.action === "upgrade_required") {
-      this.#onDrainRequested(command.reasonCode ?? "server_command:upgrade_required");
-    }
     const leaseLoss = new LeaseLostError(
       `Server ended lease with command ${command.action}.`,
       command.reasonCode ?? command.action,

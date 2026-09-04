@@ -168,7 +168,6 @@ export const ClaimLeaseUnavailableSchema = Type.Object(
       Type.Literal("no_available_slots"),
       Type.Literal("draining"),
       Type.Literal("disabled"),
-      Type.Literal("upgrade_required"),
     ]),
     retryAfterMs: Type.Optional(NonNegativeIntegerSchema),
   },
