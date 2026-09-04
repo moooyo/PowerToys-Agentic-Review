@@ -20,9 +20,9 @@ func isNativeHandleOwnershipFatal(err error) bool {
 	return errors.Is(err, ErrNativeHandleOwnershipFatal) || errors.Is(err, windows.ERROR_INVALID_HANDLE)
 }
 
-// verifyPreflightWindows retains the opposing service process identified by
+// verifyWindowsProduction retains the opposing service process identified by
 // matching stable SCM and named-pipe PID observations.
-func verifyPreflightWindows(options productionOptions) (*Session, error) {
+func verifyWindowsProduction(options productionOptions) (*Session, error) {
 	return verifyWindowsEndpoint(options, options.PipeEndpoint, windowsVerificationPlatformImpl{})
 }
 

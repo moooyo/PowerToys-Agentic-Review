@@ -3,22 +3,16 @@ package peerverify
 import (
 	"context"
 	"errors"
-	"runtime"
-	"strings"
 	"sync"
-
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 )
 
 var (
-	ErrUnsupportedPlatform          = errors.New("ServiceHost peer verification requires Windows")
-	ErrInvalidOptions               = errors.New("invalid ServiceHost peer verification options")
-	ErrPreflightVerifierUnavailable = errors.New("preflight Windows peer verifier authority is unavailable")
-	ErrNativeHandleOwnershipFatal   = errors.New("peer verifier native handle ownership is unresolved; the current ServiceHost process must exit")
-	ErrPeerUnstable                 = errors.New("peer service process is not stable")
-	ErrTokenMismatch                = errors.New("peer process token does not have the expected restricted service SID")
-	ErrClosed                       = errors.New("verified peer session is closed")
+	ErrUnsupportedPlatform        = errors.New("ServiceHost peer verification requires Windows")
+	ErrInvalidOptions             = errors.New("invalid ServiceHost peer verification options")
+	ErrNativeHandleOwnershipFatal = errors.New("peer verifier native handle ownership is unresolved; the current ServiceHost process must exit")
+	ErrPeerUnstable               = errors.New("peer service process is not stable")
+	ErrTokenMismatch              = errors.New("peer process token does not have the expected restricted service SID")
+	ErrClosed                     = errors.New("verified peer session is closed")
 )
 
 // PipePeer selects which endpoint process ID is observed. Control verifies a
@@ -105,72 +99,6 @@ type PeerProcess interface {
 	TokenSnapshot() (TokenSnapshot, error)
 	Wait(context.Context) error
 	Close() error
-}
-
-type productionOptions struct {
-	Role         config.Role
-	PipeEndpoint *winpipe.Endpoint
-}
-
-// PreflightWindowsVerifier is the opaque process-wide authority for native
-// Windows peer verification. Its zero value fails closed.
-type PreflightWindowsVerifier struct {
-	verify func(productionOptions) (*Session, error)
-}
-
-var preflightWindowsVerifierClaim struct {
-	sync.Mutex
-	claimed bool
-}
-
-const (
-	preflightPlanPackagePath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
-	preflightPlanClaimFunc   = preflightPlanPackagePath + ".claimProductionPeerWindowsVerifier"
-	preflightPlanSourcePath  = "/internal/preflight/peer_plan.go"
-)
-
-// ClaimPreflightWindowsVerifier transfers the sole process-wide verification
-// authority to preflight's fixed plan bridge.
-//
-//go:noinline
-func ClaimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
-	programCounter, source, _, ok := runtime.Caller(1)
-	caller := runtime.FuncForPC(programCounter)
-	if !ok || caller == nil || caller.Name() != preflightPlanClaimFunc ||
-		!strings.HasSuffix(strings.ReplaceAll(source, `\`, "/"), preflightPlanSourcePath) {
-		return PreflightWindowsVerifier{}, errors.Join(
-			ErrPreflightVerifierUnavailable,
-			errors.New("caller is not preflight's reviewed package initializer"),
-		)
-	}
-	return claimPreflightWindowsVerifier()
-}
-
-func claimPreflightWindowsVerifier() (PreflightWindowsVerifier, error) {
-	preflightWindowsVerifierClaim.Lock()
-	defer preflightWindowsVerifierClaim.Unlock()
-	if preflightWindowsVerifierClaim.claimed {
-		return PreflightWindowsVerifier{}, errors.Join(
-			ErrPreflightVerifierUnavailable,
-			errors.New("preflight Windows peer verifier authority was already claimed"),
-		)
-	}
-	preflightWindowsVerifierClaim.claimed = true
-	return PreflightWindowsVerifier{verify: verifyPreflightWindows}, nil
-}
-
-// Verify enters the fixed native verifier with the role and connected pipe.
-func (verifier PreflightWindowsVerifier) Verify(
-	role config.Role,
-	endpoint *winpipe.Endpoint,
-) (*Session, error) {
-	if verifier.verify == nil {
-		return nil, ErrPreflightVerifierUnavailable
-	}
-	if fatal := rejectedNativeOwners.fatalError(); fatal != nil {
-		return nil, fatal
-	}
-	return verifier.verify(productionOptions{Role: role, PipeEndpoint: endpoint})
 }
 
 type verificationOptions struct {
