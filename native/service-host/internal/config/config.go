@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	// SchemaVersion is the current per-Worker Bearer Token bootstrap schema.
 	SchemaVersion                            = 4
 	WorkerAuthenticationProfileBearerTokenV1 = "agentic-review-worker-auth-v1"
 	WorkerAuthenticationProfilePath          = `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`
@@ -31,10 +30,17 @@ const (
 	ControlExecutorPipeName                  = `\\.\pipe\AgenticReview.Worker.ControlExecutor.v1`
 	ControlBootstrapPath                     = `C:\ProgramData\AgenticReview\TrustedConfig\control.json`
 	ExecutorBootstrapPath                    = `C:\ProgramData\AgenticReview\TrustedConfig\executor.json`
-	minimumRootJobMemory                     = uint64(256 * 1024 * 1024)
-	maximumRootJobMemory                     = uint64(1 * 1024 * 1024 * 1024 * 1024)
-	maximumEnvironmentValues                 = 128
-	maximumEnvironmentUnits                  = 32_767
+
+	InstallationRoot         = `C:\Program Files\AgenticReview\Worker`
+	TrustedConfigurationRoot = `C:\ProgramData\AgenticReview\TrustedConfig`
+	ControlDataRoot          = `C:\ProgramData\AgenticReview\Control`
+	ExecutorDataRoot         = `C:\ProgramData\AgenticReview\Executor`
+
+	NodeExecutablePath      = InstallationRoot + `\runtime\node.exe`
+	ControlBundlePath       = InstallationRoot + `\app\control.mjs`
+	ExecutorBundlePath      = InstallationRoot + `\app\executor.mjs`
+	ExecutorProcessHostPath = InstallationRoot + `\bin\AgenticReview.ProcessHost.exe`
+	ExecutorCodexPolicyPath = TrustedConfigurationRoot + `\codex-requirements.toml`
 )
 
 type Role string
@@ -45,66 +51,53 @@ const (
 )
 
 type ServiceIdentity struct {
-	Name string `json:"name"`
-	SID  string `json:"sid"`
+	Name string
+	SID  string
 }
 
 type Installation struct {
-	Root                                           string `json:"root"`
-	TrustedConfigurationRoot                       string `json:"trustedConfigurationRoot"`
-	ReleaseID                                      string `json:"releaseId"`
-	ManifestPath                                   string `json:"manifestPath"`
-	ManifestSHA256                                 string `json:"manifestSha256"`
-	ApprovedAuthenticodeSignerCertificateDERSHA256 string `json:"approvedAuthenticodeSignerCertificateDerSha256"`
+	Root                     string
+	TrustedConfigurationRoot string
 }
 
 type Node struct {
-	ExecutablePath   string            `json:"executablePath"`
-	ExecutableSHA256 string            `json:"executableSha256"`
-	BundlePath       string            `json:"bundlePath"`
-	BundleSHA256     string            `json:"bundleSha256"`
-	DataRoot         string            `json:"dataRoot"`
-	WorkingDirectory string            `json:"workingDirectory"`
-	Environment      map[string]string `json:"environment"`
-}
-
-type ControlConfiguration struct {
-	ServerOrigin                string `json:"serverOrigin"`
-	ServerName                  string `json:"serverName"`
-	RootCertificatePath         string `json:"rootCertificatePath"`
-	RootCertificateSHA256       string `json:"rootCertificateSha256"`
-	WorkerAuthenticationProfile string `json:"workerAuthenticationProfile"`
+	ExecutablePath   string
+	BundlePath       string
+	DataRoot         string
+	WorkingDirectory string
+	Environment      map[string]string
 }
 
 type ExecutorConfiguration struct {
-	CodexPolicyPath   string `json:"codexPolicyPath"`
-	CodexPolicySHA256 string `json:"codexPolicySha256"`
-	ProcessHostPath   string `json:"processHostPath"`
-	ProcessHostSHA256 string `json:"processHostSha256"`
+	CodexPolicyPath string
+	ProcessHostPath string
 }
 
 type Limits struct {
-	RootJobMaximumProcesses             uint32 `json:"rootJobMaximumProcesses"`
-	RootJobMaximumMemoryBytes           string `json:"rootJobMaximumMemoryBytes"`
-	MaximumFrameBytes                   uint32 `json:"maximumFrameBytes"`
-	MaximumQueuedBytesPerDirection      uint32 `json:"maximumQueuedBytesPerDirection"`
-	ConnectTimeoutMilliseconds          uint32 `json:"connectTimeoutMilliseconds"`
-	ShutdownTimeoutMilliseconds         uint32 `json:"shutdownTimeoutMilliseconds"`
-	ForceTerminationReserveMilliseconds uint32 `json:"forceTerminationReserveMilliseconds"`
+	RootJobMaximumProcesses             uint32
+	RootJobMaximumMemoryBytes           string
+	MaximumFrameBytes                   uint32
+	MaximumQueuedBytesPerDirection      uint32
+	ConnectTimeoutMilliseconds          uint32
+	ShutdownTimeoutMilliseconds         uint32
+	ForceTerminationReserveMilliseconds uint32
+}
+
+type RuntimeConfig struct {
+	OwnService   ServiceIdentity
+	PeerService  ServiceIdentity
+	PipeName     string
+	Installation Installation
+	Node         Node
+	Executor     *ExecutorConfiguration
+	Limits       Limits
 }
 
 type Config struct {
-	SchemaVersion int                    `json:"schemaVersion"`
-	Role          Role                   `json:"role"`
-	WorkerNodeID  string                 `json:"workerNodeId"`
-	OwnService    ServiceIdentity        `json:"ownService"`
-	PeerService   ServiceIdentity        `json:"peerService"`
-	PipeName      string                 `json:"pipeName"`
-	Installation  Installation           `json:"installation"`
-	Node          Node                   `json:"node"`
-	Control       *ControlConfiguration  `json:"control"`
-	Executor      *ExecutorConfiguration `json:"executor"`
-	Limits        Limits                 `json:"limits"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Role          Role   `json:"role"`
+	WorkerNodeID  string `json:"workerNodeId"`
+	ServerOrigin  string `json:"serverOrigin,omitempty"`
 }
 
 type ErrorCode string
@@ -247,496 +240,144 @@ func (c Config) Validate() error {
 		return invalid("workerNodeId must be a canonical entity identifier")
 	}
 
-	expectedOwnName := ControlServiceName
-	expectedPeerName := ExecutorServiceName
-	expectedOwnSID := ControlServiceSID
-	expectedPeerSID := ExecutorServiceSID
-	if c.Role == RoleExecutor {
-		expectedOwnName, expectedPeerName = expectedPeerName, expectedOwnName
-		expectedOwnSID, expectedPeerSID = expectedPeerSID, expectedOwnSID
-	}
-	if c.OwnService.Name != expectedOwnName || c.PeerService.Name != expectedPeerName {
-		return invalid("service names do not match the selected role")
-	}
-	if c.OwnService.SID != expectedOwnSID || c.PeerService.SID != expectedPeerSID {
-		return invalid("service SIDs do not match the fixed service names")
-	}
-	if c.OwnService.SID == c.PeerService.SID {
-		return invalid("ownService.sid and peerService.sid must differ")
-	}
-	if c.PipeName != ControlExecutorPipeName {
-		return invalid("pipeName must be the version 1 Control-Executor endpoint")
-	}
-
-	if err := validateWindowsPath(c.Installation.Root, false); err != nil {
-		return invalid("installation.root: " + err.Error())
-	}
-	if err := validateWindowsPath(c.Installation.TrustedConfigurationRoot, false); err != nil {
-		return invalid("installation.trustedConfigurationRoot: " + err.Error())
-	}
-	if pathsOverlap(c.Installation.Root, c.Installation.TrustedConfigurationRoot) {
-		return invalid("installation.root and installation.trustedConfigurationRoot must not overlap")
-	}
-	if !validIdentifier(c.Installation.ReleaseID, 128) {
-		return invalid("installation.releaseId must be a canonical release identifier")
-	}
-	if err := validateWindowsPath(c.Installation.ManifestPath, true); err != nil {
-		return invalid("installation.manifestPath: " + err.Error())
-	}
-	if !isStrictDescendant(c.Installation.Root, c.Installation.ManifestPath) {
-		return invalid("installation.manifestPath must be below installation.root")
-	}
-	if !validSHA256(c.Installation.ManifestSHA256) {
-		return invalid("installation.manifestSha256 must be a lowercase SHA-256 digest")
-	}
-	if !validSHA256(c.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256) {
-		return invalid("installation.approvedAuthenticodeSignerCertificateDerSha256 must be a lowercase SHA-256 digest")
-	}
-
-	if err := validateWindowsPath(c.Node.ExecutablePath, true); err != nil {
-		return invalid("node.executablePath: " + err.Error())
-	}
-	if !strings.EqualFold(extension(c.Node.ExecutablePath), ".exe") {
-		return invalid("node.executablePath must identify an .exe file")
-	}
-	if !isStrictDescendant(c.Installation.Root, c.Node.ExecutablePath) {
-		return invalid("node.executablePath must be below installation.root")
-	}
-	if !validSHA256(c.Node.ExecutableSHA256) {
-		return invalid("node.executableSha256 must be a lowercase SHA-256 digest")
-	}
-	if err := validateWindowsPath(c.Node.BundlePath, true); err != nil {
-		return invalid("node.bundlePath: " + err.Error())
-	}
-	if !strings.EqualFold(extension(c.Node.BundlePath), ".mjs") {
-		return invalid("node.bundlePath must identify an .mjs file")
-	}
-	if !isStrictDescendant(c.Installation.Root, c.Node.BundlePath) {
-		return invalid("node.bundlePath must be below installation.root")
-	}
-	if !validSHA256(c.Node.BundleSHA256) {
-		return invalid("node.bundleSha256 must be a lowercase SHA-256 digest")
-	}
-	if strings.EqualFold(c.Node.ExecutablePath, c.Node.BundlePath) {
-		return invalid("node executable and bundle paths must differ")
-	}
-	if err := validateWindowsPath(c.Node.DataRoot, false); err != nil {
-		return invalid("node.dataRoot: " + err.Error())
-	}
-	if pathsOverlap(c.Installation.Root, c.Node.DataRoot) {
-		return invalid("node.dataRoot and installation.root must not overlap")
-	}
-	if pathsOverlap(c.Installation.TrustedConfigurationRoot, c.Node.DataRoot) {
-		return invalid("node.dataRoot and installation.trustedConfigurationRoot must not overlap")
-	}
-	if err := validateWindowsPath(c.Node.WorkingDirectory, false); err != nil {
-		return invalid("node.workingDirectory: " + err.Error())
-	}
-	if !isStrictDescendant(c.Node.DataRoot, c.Node.WorkingDirectory) {
-		return invalid("node.workingDirectory must be below node.dataRoot")
-	}
-	if err := validateEnvironment(
-		c.Role,
-		c.Node.Environment,
-		c.Installation.Root,
-		c.Node.DataRoot,
-	); err != nil {
-		return invalid("node.environment: " + err.Error())
-	}
-	if err := c.validateRoleConfiguration(); err != nil {
-		return err
-	}
-
-	if c.Limits.RootJobMaximumProcesses < 1 || c.Limits.RootJobMaximumProcesses > 4_096 {
-		return invalid("limits.rootJobMaximumProcesses must be from 1 through 4096")
-	}
-	memoryBytes, err := parseCanonicalUint(c.Limits.RootJobMaximumMemoryBytes)
-	if err != nil || memoryBytes < minimumRootJobMemory || memoryBytes > maximumRootJobMemory {
-		return invalid("limits.rootJobMaximumMemoryBytes is outside the allowed range")
-	}
-	if c.Limits.MaximumFrameBytes != MaximumFrameBytes {
-		return invalid("limits.maximumFrameBytes must be 1048576")
-	}
-	if c.Limits.MaximumQueuedBytesPerDirection < c.Limits.MaximumFrameBytes ||
-		c.Limits.MaximumQueuedBytesPerDirection > 64*1024*1024 {
-		return invalid("limits.maximumQueuedBytesPerDirection is outside the allowed range")
-	}
-	if c.Limits.ConnectTimeoutMilliseconds < 1_000 || c.Limits.ConnectTimeoutMilliseconds > 300_000 {
-		return invalid("limits.connectTimeoutMilliseconds is outside the allowed range")
-	}
-	if c.Limits.ShutdownTimeoutMilliseconds < 1_000 || c.Limits.ShutdownTimeoutMilliseconds > 300_000 {
-		return invalid("limits.shutdownTimeoutMilliseconds is outside the allowed range")
-	}
-	if c.Limits.ForceTerminationReserveMilliseconds == 0 ||
-		c.Limits.ForceTerminationReserveMilliseconds >= c.Limits.ShutdownTimeoutMilliseconds {
-		return invalid("limits.forceTerminationReserveMilliseconds must be positive and less than shutdownTimeoutMilliseconds")
-	}
-	return nil
-}
-
-func (c Config) validateRoleConfiguration() error {
 	if c.Role == RoleControl {
-		if c.Control == nil || c.Executor != nil {
-			return invalid("control must be an object and executor must be null for the control role")
+		if err := validateHTTPSOrigin(c.ServerOrigin); err != nil {
+			return invalid("serverOrigin: " + err.Error())
 		}
-		return c.validateControlConfiguration(*c.Control)
+		return nil
 	}
-	if c.Control != nil || c.Executor == nil {
-		return invalid("control must be null and executor must be an object for the executor role")
+	if c.ServerOrigin != "" {
+		return invalid("serverOrigin must be empty for the executor role")
 	}
-	return c.validateExecutorConfiguration(*c.Executor)
+	return nil
 }
 
-func (c Config) validateControlConfiguration(control ControlConfiguration) error {
-	if err := validateHTTPSOrigin(control.ServerOrigin, control.ServerName); err != nil {
-		return invalid("control.serverOrigin: " + err.Error())
+func Runtime(value Config) (RuntimeConfig, error) {
+	if err := value.Validate(); err != nil {
+		return RuntimeConfig{}, err
 	}
-	if err := validateTrustedFile(
-		c.Installation.TrustedConfigurationRoot,
-		"installation.trustedConfigurationRoot",
-		control.RootCertificatePath,
-		control.RootCertificateSHA256,
-		"control.rootCertificatePath",
-		"control.rootCertificateSha256",
-	); err != nil {
-		return err
+	resolved, err := resolveRoleRuntime(value.Role)
+	if err != nil {
+		return RuntimeConfig{}, err
 	}
-	if control.WorkerAuthenticationProfile != WorkerAuthenticationProfileBearerTokenV1 {
-		return invalid("control.workerAuthenticationProfile must select agentic-review-worker-auth-v1")
-	}
-	if !isDirectChild(c.Node.DataRoot, WorkerAuthenticationProfilePath) {
-		return invalid("schemaVersion 4 requires the fixed Worker authentication profile below node.dataRoot")
-	}
-	return assertDistinctFilePaths(
-		c.Installation.ManifestPath,
-		c.Node.ExecutablePath,
-		c.Node.BundlePath,
-		control.RootCertificatePath,
-	)
-}
-
-func (c Config) validateExecutorConfiguration(executor ExecutorConfiguration) error {
-	for _, file := range []struct {
-		pathName   string
-		digestName string
-		path       string
-		digest     string
-	}{
-		{
-			pathName:   "executor.codexPolicyPath",
-			digestName: "executor.codexPolicySha256",
-			path:       executor.CodexPolicyPath,
-			digest:     executor.CodexPolicySHA256,
+	result := RuntimeConfig{
+		OwnService:  resolved.own,
+		PeerService: resolved.peer,
+		PipeName:    ControlExecutorPipeName,
+		Installation: Installation{
+			Root:                     InstallationRoot,
+			TrustedConfigurationRoot: TrustedConfigurationRoot,
 		},
-	} {
-		if err := validateTrustedFile(
-			c.Installation.TrustedConfigurationRoot,
-			"installation.trustedConfigurationRoot",
-			file.path,
-			file.digest,
-			file.pathName,
-			file.digestName,
-		); err != nil {
-			return err
-		}
+		Node: Node{
+			ExecutablePath:   NodeExecutablePath,
+			BundlePath:       resolved.bundlePath,
+			DataRoot:         resolved.dataRoot,
+			WorkingDirectory: resolved.dataRoot + `\Work`,
+			Environment:      resolved.environment(),
+		},
+		Executor: resolved.executorConfiguration(),
+		Limits:   fixedLimits(),
 	}
-	if err := validateTrustedFile(
-		c.Installation.Root,
-		"installation.root",
-		executor.ProcessHostPath,
-		executor.ProcessHostSHA256,
-		"executor.processHostPath",
-		"executor.processHostSha256",
-	); err != nil {
-		return err
-	}
-	if !strings.EqualFold(extension(executor.ProcessHostPath), ".exe") {
-		return invalid("executor.processHostPath must identify an .exe file")
-	}
-	return assertDistinctFilePaths(
-		c.Installation.ManifestPath,
-		c.Node.ExecutablePath,
-		c.Node.BundlePath,
-		executor.CodexPolicyPath,
-		executor.ProcessHostPath,
-	)
+	return result, nil
 }
 
-func validateTrustedFile(
-	root string,
-	rootName string,
-	path string,
-	digest string,
-	pathName string,
-	digestName string,
-) error {
-	if err := validateWindowsPath(path, true); err != nil {
-		return invalid(pathName + ": " + err.Error())
-	}
-	if !isStrictDescendant(root, path) {
-		return invalid(pathName + " must be below " + rootName)
-	}
-	if !validSHA256(digest) {
-		return invalid(digestName + " must be a lowercase SHA-256 digest")
-	}
-	return nil
+func (c Config) RuntimeConfig() (RuntimeConfig, error) {
+	return Runtime(c)
 }
 
-func validateWindowsPath(value string, file bool) error {
-	if !validText(value, 32_767) || len(value) < 3 {
-		return errors.New("must be a bounded, well-formed path")
-	}
-	if value[0] < 'A' || value[0] > 'Z' || value[1] != ':' || value[2] != '\\' {
-		return errors.New("must be an absolute local Windows drive path with an uppercase drive letter")
-	}
-	if strings.Contains(value, "/") || strings.Contains(value[2:], ":") {
-		return errors.New("must not contain alternate separators or data streams")
-	}
-	if len(value) == 3 {
-		return errors.New("must not be a filesystem root")
-	}
-	if strings.HasSuffix(value, `\`) {
-		return errors.New("must not have a trailing separator")
-	}
-	for _, component := range strings.Split(value[3:], `\`) {
-		if err := validatePathComponent(component); err != nil {
-			return err
-		}
-	}
-	if file && strings.HasSuffix(value, ".") {
-		return errors.New("file path is invalid")
-	}
-	return nil
+func (c Config) Runtime() (RuntimeConfig, error) {
+	return Runtime(c)
 }
 
-func validatePathComponent(component string) error {
-	if component == "" || component == "." || component == ".." {
-		return errors.New("contains an empty or relative component")
-	}
-	if strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
-		return errors.New("contains a component with a trailing dot or space")
-	}
-	for _, character := range component {
-		if character < 32 || strings.ContainsRune(`<>:"|?*`, character) {
-			return errors.New("contains an invalid Windows path character")
-		}
-	}
-	base := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
-	baseRunes := []rune(base)
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
-		base == "CONIN$" || base == "CONOUT$" || base == "CLOCK$" ||
-		(len(baseRunes) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-			isReservedDeviceDigit(baseRunes[3])) {
-		return errors.New("contains a reserved Windows device name")
-	}
-	return nil
+type roleRuntime struct {
+	own        ServiceIdentity
+	peer       ServiceIdentity
+	bundlePath string
+	dataRoot   string
+	isExecutor bool
 }
 
-func isReservedDeviceDigit(value rune) bool {
-	return value >= '1' && value <= '9' || value == '\u00b9' || value == '\u00b2' || value == '\u00b3'
-}
-
-func validateEnvironment(
-	role Role,
-	environment map[string]string,
-	installationRoot string,
-	dataRoot string,
-) error {
-	if environment == nil {
-		return errors.New("must be an object")
-	}
-	if len(environment) > maximumEnvironmentValues {
-		return errors.New("contains too many values")
-	}
-	allowed := allowedEnvironmentNames(role)
-	seen := make(map[string]struct{}, len(environment))
-	units := 1
-	for name, value := range environment {
-		if !validEnvironmentName(name) {
-			return fmt.Errorf("variable name %q is invalid", name)
-		}
-		folded := strings.ToUpper(name)
-		if name != folded {
-			return errors.New("variable names must use canonical uppercase spelling")
-		}
-		if _, exists := seen[folded]; exists {
-			return errors.New("variable names must be case-insensitively unique")
-		}
-		seen[folded] = struct{}{}
-		if _, permitted := allowed[folded]; !permitted {
-			return fmt.Errorf("variable %s is not permitted for the %s role", name, role)
-		}
-		if !validOptionalText(value, 32_767) || containsControl(value) {
-			return fmt.Errorf("variable %s has an invalid value", name)
-		}
-		units += len(utf16.Encode([]rune(name))) + 1 + len(utf16.Encode([]rune(value))) + 1
-		if units > maximumEnvironmentUnits {
-			return errors.New("replacement environment exceeds the Windows environment block limit")
-		}
-		if err := validateEnvironmentValue(folded, value); err != nil {
-			return fmt.Errorf("variable %s: %w", name, err)
-		}
-		if err := validateEnvironmentBoundary(folded, value, installationRoot, dataRoot); err != nil {
-			return fmt.Errorf("variable %s: %w", name, err)
-		}
-	}
-	for _, required := range []string{
-		"APPDATA", "LOCALAPPDATA", "NODE_ENV", "PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
-	} {
-		if _, exists := seen[required]; !exists {
-			return fmt.Errorf("required variable %s is missing", required)
-		}
-	}
-	if role == RoleExecutor {
-		for _, required := range []string{
-			"CODEX_HOME", "GCM_INTERACTIVE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
-			"GIT_TERMINAL_PROMPT", "HOME",
-		} {
-			if _, exists := seen[required]; !exists {
-				return fmt.Errorf("required Executor variable %s is missing", required)
-			}
-		}
-		if !isDirectChild(environment["HOME"], environment["GIT_CONFIG_GLOBAL"]) {
-			return errors.New("GIT_CONFIG_GLOBAL must be a direct HOME child file")
-		}
-	}
-	if windir, exists := environment["WINDIR"]; exists && !strings.EqualFold(windir, environment["SYSTEMROOT"]) {
-		return errors.New("WINDIR must identify the same directory as SYSTEMROOT")
-	}
-	return nil
-}
-
-func validateEnvironmentBoundary(
-	name string,
-	value string,
-	installationRoot string,
-	dataRoot string,
-) error {
-	switch name {
-	case "PATH":
-		for _, directory := range strings.Split(value, ";") {
-			if !isStrictDescendant(installationRoot, directory) {
-				return errors.New("must contain only directories below installation.root")
-			}
-		}
-	case "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOME", "CODEX_HOME", "GIT_CONFIG_GLOBAL":
-		if !isStrictDescendant(dataRoot, value) {
-			return errors.New("must be below node.dataRoot")
-		}
-	case "SYSTEMROOT", "WINDIR":
-		if pathsOverlap(installationRoot, value) || pathsOverlap(dataRoot, value) {
-			return errors.New("must be outside installation.root and node.dataRoot")
-		}
-	case "PROGRAMDATA":
-		if !isStrictDescendant(value, dataRoot) {
-			return errors.New("must be a strict ancestor of node.dataRoot")
-		}
-	}
-	return nil
-}
-
-func allowedEnvironmentNames(role Role) map[string]struct{} {
-	allowed := map[string]struct{}{
-		"APPDATA": {}, "LOCALAPPDATA": {}, "NODE_ENV": {}, "PATH": {}, "PROGRAMDATA": {},
-		"SYSTEMROOT": {}, "TEMP": {}, "TMP": {}, "USERPROFILE": {}, "WINDIR": {},
-	}
-	if role == RoleExecutor {
-		for _, name := range []string{
-			"CODEX_HOME", "GCM_INTERACTIVE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
-			"GIT_TERMINAL_PROMPT", "HOME",
-		} {
-			allowed[name] = struct{}{}
-		}
-	}
-	return allowed
-}
-
-func validateEnvironmentValue(name string, value string) error {
-	switch name {
-	case "NODE_ENV":
-		if value != "production" {
-			return errors.New("must be production")
-		}
-	case "PATH":
-		parts := strings.Split(value, ";")
-		if len(parts) == 0 || len(parts) > 32 {
-			return errors.New("must contain from 1 through 32 trusted directories")
-		}
-		seen := make(map[string]struct{}, len(parts))
-		for _, part := range parts {
-			if err := validateWindowsPath(part, false); err != nil {
-				return errors.New("contains a noncanonical directory")
-			}
-			folded := strings.ToLower(part)
-			if _, exists := seen[folded]; exists {
-				return errors.New("contains a duplicate directory")
-			}
-			seen[folded] = struct{}{}
-		}
-	case "GIT_CONFIG_NOSYSTEM":
-		if value != "1" {
-			return errors.New("must be 1")
-		}
-	case "GIT_TERMINAL_PROMPT":
-		if value != "0" {
-			return errors.New("must be 0")
-		}
-	case "GCM_INTERACTIVE":
-		if value != "never" {
-			return errors.New("must be never")
-		}
-	case "GIT_CONFIG_GLOBAL":
-		if err := validateWindowsPath(value, true); err != nil {
-			return errors.New("must be a canonical local file path")
-		}
+func resolveRoleRuntime(role Role) (roleRuntime, error) {
+	switch role {
+	case RoleControl:
+		return roleRuntime{
+			own:        ServiceIdentity{Name: ControlServiceName, SID: ControlServiceSID},
+			peer:       ServiceIdentity{Name: ExecutorServiceName, SID: ExecutorServiceSID},
+			bundlePath: ControlBundlePath,
+			dataRoot:   ControlDataRoot,
+		}, nil
+	case RoleExecutor:
+		return roleRuntime{
+			own:        ServiceIdentity{Name: ExecutorServiceName, SID: ExecutorServiceSID},
+			peer:       ServiceIdentity{Name: ControlServiceName, SID: ControlServiceSID},
+			bundlePath: ExecutorBundlePath,
+			dataRoot:   ExecutorDataRoot,
+			isExecutor: true,
+		}, nil
 	default:
-		if err := validateWindowsPath(value, false); err != nil {
-			return errors.New("must be a canonical local directory path")
-		}
+		return roleRuntime{}, invalid("role must be control or executor")
 	}
-	return nil
 }
 
-func validEnvironmentName(value string) bool {
-	if len(value) == 0 || len(value) > 128 || !validText(value, 128) {
-		return false
+func (r roleRuntime) environment() map[string]string {
+	if r.isExecutor {
+		return executorEnvironment()
 	}
-	for index, character := range value {
-		if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || character == '_' {
-			continue
-		}
-		if index > 0 && character >= '0' && character <= '9' {
-			continue
-		}
-		return false
-	}
-	return true
+	return controlEnvironment()
 }
 
-func validText(value string, maximumUnits int) bool {
-	return value != "" && utf8.ValidString(value) && !strings.ContainsRune(value, utf8.RuneError) &&
-		!strings.ContainsRune(value, '\x00') && len(utf16.Encode([]rune(value))) <= maximumUnits
+func (r roleRuntime) executorConfiguration() *ExecutorConfiguration {
+	if !r.isExecutor {
+		return nil
+	}
+	return &ExecutorConfiguration{
+		CodexPolicyPath: ExecutorCodexPolicyPath,
+		ProcessHostPath: ExecutorProcessHostPath,
+	}
 }
 
-func validOptionalText(value string, maximumUnits int) bool {
-	return utf8.ValidString(value) && !strings.ContainsRune(value, utf8.RuneError) &&
-		!strings.ContainsRune(value, '\x00') && len(utf16.Encode([]rune(value))) <= maximumUnits
+func fixedLimits() Limits {
+	return Limits{
+		RootJobMaximumProcesses:             128,
+		RootJobMaximumMemoryBytes:           "17179869184",
+		MaximumFrameBytes:                   MaximumFrameBytes,
+		MaximumQueuedBytesPerDirection:      4 * 1024 * 1024,
+		ConnectTimeoutMilliseconds:          30_000,
+		ShutdownTimeoutMilliseconds:         120_000,
+		ForceTerminationReserveMilliseconds: 15_000,
+	}
 }
 
-func validIdentifier(value string, maximumBytes int) bool {
-	if len(value) == 0 || len(value) > maximumBytes {
-		return false
+func controlEnvironment() map[string]string {
+	return map[string]string{
+		"APPDATA":      ControlDataRoot + `\Profile\AppData`,
+		"LOCALAPPDATA": ControlDataRoot + `\Profile\LocalAppData`,
+		"NODE_ENV":     "production",
+		"PATH":         InstallationRoot + `\runtime`,
+		"SYSTEMROOT":   `C:\Windows`,
+		"TEMP":         ControlDataRoot + `\Temp`,
+		"TMP":          ControlDataRoot + `\Temp`,
+		"USERPROFILE":  ControlDataRoot + `\Profile`,
 	}
-	for index, character := range []byte(value) {
-		if character >= 'A' && character <= 'Z' ||
-			character >= 'a' && character <= 'z' ||
-			character >= '0' && character <= '9' ||
-			index > 0 && (character == '.' || character == '_' || character == '+' || character == '-') {
-			continue
-		}
-		return false
+}
+
+func executorEnvironment() map[string]string {
+	return map[string]string{
+		"APPDATA":             ExecutorDataRoot + `\Profile\AppData`,
+		"CODEX_HOME":          ExecutorDataRoot + `\Codex`,
+		"GCM_INTERACTIVE":     "never",
+		"GIT_CONFIG_GLOBAL":   ExecutorDataRoot + `\Profile\.gitconfig`,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"HOME":                ExecutorDataRoot + `\Profile`,
+		"LOCALAPPDATA":        ExecutorDataRoot + `\Profile\LocalAppData`,
+		"NODE_ENV":            "production",
+		"PATH":                InstallationRoot + `\runtime`,
+		"SYSTEMROOT":          `C:\Windows`,
+		"TEMP":                ExecutorDataRoot + `\Temp`,
+		"TMP":                 ExecutorDataRoot + `\Temp`,
+		"USERPROFILE":         ExecutorDataRoot + `\Profile`,
 	}
-	return true
 }
 
 func validEntityID(value string) bool {
@@ -759,25 +400,6 @@ func asciiAlphaNumeric(value byte) bool {
 		value >= '0' && value <= '9'
 }
 
-// deriveServiceSID implements the Windows SERVICE SID derivation for the fixed ASCII service
-// names. SHA-1 is required by the Windows identifier algorithm and is not used as a trust digest.
-func deriveServiceSID(serviceName string) string {
-	units := utf16.Encode([]rune(strings.ToUpper(serviceName)))
-	encoded := make([]byte, len(units)*2)
-	for index, unit := range units {
-		binary.LittleEndian.PutUint16(encoded[index*2:], unit)
-	}
-	digest := sha1.Sum(encoded)
-	return fmt.Sprintf(
-		"S-1-5-80-%d-%d-%d-%d-%d",
-		binary.LittleEndian.Uint32(digest[0:4]),
-		binary.LittleEndian.Uint32(digest[4:8]),
-		binary.LittleEndian.Uint32(digest[8:12]),
-		binary.LittleEndian.Uint32(digest[12:16]),
-		binary.LittleEndian.Uint32(digest[16:20]),
-	)
-}
-
 func containsControl(value string) bool {
 	for _, character := range value {
 		if character < 32 || character == 127 {
@@ -787,19 +409,12 @@ func containsControl(value string) bool {
 	return false
 }
 
-func validSHA256(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	for _, character := range value {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
+func validText(value string, maximumUnits int) bool {
+	return value != "" && utf8.ValidString(value) && !strings.ContainsRune(value, utf8.RuneError) &&
+		!strings.ContainsRune(value, '\x00') && len(utf16.Encode([]rune(value))) <= maximumUnits
 }
 
-func validateHTTPSOrigin(origin string, serverName string) error {
+func validateHTTPSOrigin(origin string) error {
 	if !validText(origin, 2_048) || containsControl(origin) {
 		return errors.New("must be bounded canonical text")
 	}
@@ -830,9 +445,6 @@ func validateHTTPSOrigin(origin string, serverName string) error {
 	}
 	if origin != canonicalOrigin || parsed.String() != origin {
 		return errors.New("must use the canonical HTTPS origin representation")
-	}
-	if serverName != hostname || !validCanonicalHost(serverName) {
-		return errors.New("serverName must exactly match the canonical origin host")
 	}
 	return nil
 }
@@ -867,48 +479,23 @@ func validCanonicalHost(value string) bool {
 	return true
 }
 
-func assertDistinctFilePaths(paths ...string) error {
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		folded := strings.ToLower(path)
-		if _, exists := seen[folded]; exists {
-			return invalid("trusted file paths must be pairwise distinct")
-		}
-		seen[folded] = struct{}{}
+// deriveServiceSID implements the Windows SERVICE SID derivation for fixed ASCII
+// service names. SHA-1 is required by the Windows identifier algorithm.
+func deriveServiceSID(serviceName string) string {
+	units := utf16.Encode([]rune(strings.ToUpper(serviceName)))
+	encoded := make([]byte, len(units)*2)
+	for index, unit := range units {
+		binary.LittleEndian.PutUint16(encoded[index*2:], unit)
 	}
-	return nil
-}
-
-func parseCanonicalUint(value string) (uint64, error) {
-	if value == "" || (len(value) > 1 && value[0] == '0') {
-		return 0, errors.New("not a canonical unsigned integer")
-	}
-	return strconv.ParseUint(value, 10, 64)
-}
-
-func extension(value string) string {
-	name := value[strings.LastIndex(value, `\`)+1:]
-	index := strings.LastIndex(name, ".")
-	if index < 0 {
-		return ""
-	}
-	return name[index:]
-}
-
-func isStrictDescendant(parent string, child string) bool {
-	return strings.HasPrefix(strings.ToLower(child), strings.ToLower(parent)+`\`)
-}
-
-func isDirectChild(parent string, child string) bool {
-	prefix := parent + `\`
-	if len(child) <= len(prefix) || !strings.EqualFold(child[:len(prefix)], prefix) {
-		return false
-	}
-	return !strings.Contains(child[len(prefix):], `\`)
-}
-
-func pathsOverlap(left string, right string) bool {
-	return strings.EqualFold(left, right) || isStrictDescendant(left, right) || isStrictDescendant(right, left)
+	digest := sha1.Sum(encoded)
+	return fmt.Sprintf(
+		"S-1-5-80-%d-%d-%d-%d-%d",
+		binary.LittleEndian.Uint32(digest[0:4]),
+		binary.LittleEndian.Uint32(digest[4:8]),
+		binary.LittleEndian.Uint32(digest[8:12]),
+		binary.LittleEndian.Uint32(digest[12:16]),
+		binary.LittleEndian.Uint32(digest[16:20]),
+	)
 }
 
 func invalid(message string) error {
