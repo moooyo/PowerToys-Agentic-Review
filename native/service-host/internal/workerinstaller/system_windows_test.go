@@ -3,6 +3,7 @@
 package workerinstaller
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -30,6 +31,27 @@ func TestServiceDefinitionsUseRestrictedVirtualAccountsAndDependency(t *testing.
 func TestFixedACLGrantsUseNumericServiceSIDs(t *testing.T) {
 	if got := sidGrant(config.ControlServiceSID, "R"); got != "*"+config.ControlServiceSID+":(OI)(CI)R" {
 		t.Fatalf("sidGrant = %q", got)
+	}
+}
+
+func TestApplyACLRemovesInheritanceBeforeChildrenAreCreated(t *testing.T) {
+	var name string
+	var arguments []string
+	system := &windowsSystem{run: func(_ context.Context, executable string, values ...string) error {
+		name = executable
+		arguments = append([]string(nil), values...)
+		return nil
+	}}
+	if err := system.applyACL(`C:\fixed`, []string{sidGrant(config.ControlServiceSID, "R")}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`C:\fixed`, "/inheritance:r", "/grant:r",
+		sidGrant("S-1-5-18", "F"), sidGrant("S-1-5-32-544", "F"),
+		sidGrant(config.ControlServiceSID, "R"),
+	}
+	if name != "icacls.exe" || !reflect.DeepEqual(arguments, want) {
+		t.Fatalf("ACL command = %q %v, want icacls.exe %v", name, arguments, want)
 	}
 }
 

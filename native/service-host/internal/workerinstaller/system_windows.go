@@ -78,6 +78,21 @@ func (system *windowsSystem) EnsureClean() error {
 }
 
 func (system *windowsSystem) InstallFiles(files []InstallFile) error {
+	for _, root := range []string{config.InstallationRoot, config.TrustedConfigurationRoot} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return fmt.Errorf("create destination root %s: %w", root, err)
+		}
+	}
+	if err := system.applyACL(config.InstallationRoot, []string{
+		sidGrant(config.ControlServiceSID, "RX"), sidGrant(config.ExecutorServiceSID, "RX"),
+	}); err != nil {
+		return err
+	}
+	if err := system.applyACL(config.TrustedConfigurationRoot, []string{
+		sidGrant(config.ControlServiceSID, "R"), sidGrant(config.ExecutorServiceSID, "R"),
+	}); err != nil {
+		return err
+	}
 	for _, file := range files {
 		if !allowedDestination(file.DestinationPath) {
 			return fmt.Errorf("installer destination is outside fixed roots: %s", file.DestinationPath)
@@ -97,13 +112,21 @@ func (system *windowsSystem) WriteLocalConfig(value LocalConfig) error {
 		value.WorkerAuthPath != config.WorkerAuthenticationProfilePath {
 		return errors.New("local configuration paths are not fixed")
 	}
-	for _, path := range requiredRuntimeDirectories() {
+	for _, path := range []string{config.ControlDataRoot, config.ExecutorDataRoot} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return fmt.Errorf("create runtime directory %s: %w", path, err)
 		}
 	}
-	if err := system.applyRootACLs(); err != nil {
+	if err := system.applyACL(config.ControlDataRoot, []string{sidGrant(config.ControlServiceSID, "F")}); err != nil {
 		return err
+	}
+	if err := system.applyACL(config.ExecutorDataRoot, []string{sidGrant(config.ExecutorServiceSID, "F")}); err != nil {
+		return err
+	}
+	for _, path := range requiredRuntimeSubdirectories() {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("create runtime directory %s: %w", path, err)
+		}
 	}
 	for _, file := range []struct {
 		path     string
@@ -195,30 +218,19 @@ func (system *windowsSystem) StopAndDisable() error {
 	return errors.Join(failures...)
 }
 
-func (system *windowsSystem) applyRootACLs() error {
-	for _, policy := range []struct {
-		path   string
-		grants []string
-	}{
-		{path: config.InstallationRoot, grants: []string{sidGrant(config.ControlServiceSID, "RX"), sidGrant(config.ExecutorServiceSID, "RX")}},
-		{path: config.TrustedConfigurationRoot, grants: []string{sidGrant(config.ControlServiceSID, "R"), sidGrant(config.ExecutorServiceSID, "R")}},
-		{path: config.ControlDataRoot, grants: []string{sidGrant(config.ControlServiceSID, "F")}},
-		{path: config.ExecutorDataRoot, grants: []string{sidGrant(config.ExecutorServiceSID, "F")}},
-	} {
-		ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-		arguments := []string{
-			policy.path,
-			"/inheritance:r",
-			"/grant:r",
-			sidGrant("S-1-5-18", "F"),
-			sidGrant("S-1-5-32-544", "F"),
-		}
-		arguments = append(arguments, policy.grants...)
-		err := system.run(ctx, "icacls.exe", arguments...)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("apply fixed ACL to %s: %w", policy.path, err)
-		}
+func (system *windowsSystem) applyACL(path string, grants []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	arguments := []string{
+		path,
+		"/inheritance:r",
+		"/grant:r",
+		sidGrant("S-1-5-18", "F"),
+		sidGrant("S-1-5-32-544", "F"),
+	}
+	arguments = append(arguments, grants...)
+	if err := system.run(ctx, "icacls.exe", arguments...); err != nil {
+		return fmt.Errorf("apply fixed ACL to %s: %w", path, err)
 	}
 	return nil
 }
@@ -227,15 +239,12 @@ func sidGrant(sid, rights string) string {
 	return "*" + sid + ":(OI)(CI)" + rights
 }
 
-func requiredRuntimeDirectories() []string {
+func requiredRuntimeSubdirectories() []string {
 	return []string{
-		config.TrustedConfigurationRoot,
-		config.ControlDataRoot,
 		config.ControlDataRoot + `\Work`,
 		config.ControlDataRoot + `\Temp`,
 		config.ControlDataRoot + `\Profile\AppData`,
 		config.ControlDataRoot + `\Profile\LocalAppData`,
-		config.ExecutorDataRoot,
 		config.ExecutorDataRoot + `\Work`,
 		config.ExecutorDataRoot + `\Temp`,
 		config.ExecutorDataRoot + `\Profile\AppData`,
