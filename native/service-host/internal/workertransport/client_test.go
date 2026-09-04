@@ -3,17 +3,11 @@ package workertransport
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"reflect"
 	"strings"
@@ -26,7 +20,6 @@ import (
 func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://attacker.invalid:8080")
 	config := validConfig(t)
-	originalRootByte := config.RootCertificateDER[0][0]
 	client, err := NewClient(config)
 	if err != nil {
 		t.Fatalf("NewClient returned an error: %v", err)
@@ -48,20 +41,12 @@ func TestNewClientPinsTLSOriginAndTransportPolicy(t *testing.T) {
 	}
 	tlsConfig := transport.TLSClientConfig
 	if tlsConfig == nil || tlsConfig.MinVersion != tls.VersionTLS13 || tlsConfig.InsecureSkipVerify ||
-		tlsConfig.ServerName != config.ServerName || len(tlsConfig.Certificates) != 0 ||
+		tlsConfig.ServerName != "" || len(tlsConfig.Certificates) != 0 ||
 		tlsConfig.GetClientCertificate != nil {
 		t.Fatal("transport does not use the fixed server-authenticated TLS profile")
 	}
-	if tlsConfig.RootCAs == nil || len(tlsConfig.RootCAs.Subjects()) != 1 {
-		t.Fatal("transport did not build one private pinned root pool")
-	}
-	rootSubjects := tlsConfig.RootCAs.Subjects()
-	config.RootCertificateDER[0][0] ^= 0xff
-	if config.RootCertificateDER[0][0] == originalRootByte {
-		t.Fatal("test did not mutate the caller root DER")
-	}
-	if !reflect.DeepEqual(tlsConfig.RootCAs.Subjects(), rootSubjects) {
-		t.Fatal("transport root pool changed after caller DER mutation")
+	if tlsConfig.RootCAs != nil {
+		t.Fatal("transport overrode the system root trust store")
 	}
 	if client.state.origin.String() != "https://api.worker.test:8443" {
 		t.Fatalf("client stored the wrong origin: %s", client.state.origin.String())
@@ -85,11 +70,6 @@ func TestNewClientRejectsUnsafeConfiguration(t *testing.T) {
 		{name: "empty origin fragment", mutate: func(value *Config) { value.Origin = "https://api.worker.test/#" }},
 		{name: "empty origin port", mutate: func(value *Config) { value.Origin = "https://api.worker.test:" }},
 		{name: "noncanonical port", mutate: func(value *Config) { value.Origin = "https://api.worker.test:0443" }},
-		{name: "empty ServerName", mutate: func(value *Config) { value.ServerName = "" }},
-		{name: "ServerName with port", mutate: func(value *Config) { value.ServerName = "api.worker.test:443" }},
-		{name: "missing roots", mutate: func(value *Config) { value.RootCertificateDER = nil }},
-		{name: "empty root", mutate: func(value *Config) { value.RootCertificateDER = [][]byte{{}} }},
-		{name: "invalid root", mutate: func(value *Config) { value.RootCertificateDER = [][]byte{{1, 2, 3}} }},
 		{name: "missing Worker auth", mutate: func(value *Config) { value.WorkerAuth = WorkerAuth{} }},
 		{name: "mismatched Worker auth", mutate: func(value *Config) { value.WorkerNodeID = "other-node" }},
 		{name: "zero request bytes", mutate: func(value *Config) { value.Limits.MaximumRequestBytes = 0 }},
@@ -1072,13 +1052,10 @@ func headersEqual(left http.Header, right http.Header) bool {
 
 func validConfig(t *testing.T) Config {
 	t.Helper()
-	certificate := testCertificate(t, "control.worker.test")
 	return Config{
-		Origin:             "https://api.worker.test:8443/",
-		ServerName:         "api.worker.test",
-		RootCertificateDER: [][]byte{bytes.Clone(certificate.Certificate[0])},
-		WorkerNodeID:       "powertoys-node:01",
-		WorkerAuth:         parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),
+		Origin:       "https://api.worker.test:8443/",
+		WorkerNodeID: "powertoys-node:01",
+		WorkerAuth:   parseTestWorkerAuth(t, "powertoys-node:01", testWorkerToken),
 		Limits: Limits{
 			MaximumRequestBytes:       2*1024*1024 + 16*1024,
 			MaximumResponseBytes:      2 * 1024 * 1024,
@@ -1087,30 +1064,6 @@ func validConfig(t *testing.T) Config {
 			MaximumConcurrentRequests: 8,
 		},
 	}
-}
-
-func testCertificate(t *testing.T, commonName string) tls.Certificate {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: commonName},
-		DNSNames:              []string{commonName},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	return tls.Certificate{Certificate: [][]byte{der}}
 }
 
 var _ http.RoundTripper = roundTripFunc(nil)
