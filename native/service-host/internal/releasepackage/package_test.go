@@ -48,7 +48,8 @@ func TestPrepareIsDeterministicCanonicalAndRoundTrips(t *testing.T) {
 
 	receipt := first.ReceiptDocument()
 	if bytes.HasSuffix(receipt, []byte{'\n'}) ||
-		!bytes.Contains(receipt, []byte(`"packageProfile":"role-config-v2-node-specific"`)) ||
+		!bytes.Contains(receipt, []byte(`"packageProfile":"worker-release-v1"`)) ||
+		bytes.Contains(receipt, []byte("nodeSpecificLocalAuthorityPublicKeySpki")) ||
 		!bytes.Contains(receipt, []byte(`"foundationVersion":2`)) ||
 		!bytes.Contains(receipt, []byte(`"executionAuthority":false`)) {
 		t.Fatalf("prepare receipt is not the expected zero-authority canonical document: %s", receipt)
@@ -89,7 +90,6 @@ func TestFinalizeBuildsCanonicalManifestAndZeroAuthorityDescriptor(t *testing.T)
 	if descriptor.ExecutionAuthority || descriptor.FoundationVersion != FoundationVersion ||
 		descriptor.PackageProfile != PackageProfile || descriptor.RuntimeManifestSHA256 != hexDigest(finalized.ManifestSHA256()) ||
 		descriptor.CompiledReleaseTemplateSHA256 != hexDigest(prepared.CompiledTemplateSHA256()) ||
-		descriptor.NodeSpecificSPKI != request.NodeSpecificSPKI ||
 		descriptor.ServiceHostBuildReceiptSHA256 != hexDigest(request.ServiceHostBuild.state.sha256) ||
 		descriptor.ReviewedClosureSHA256 != hexDigest(prepared.state.closure.SHA256()) {
 		t.Fatalf("unexpected package descriptor: %#v", descriptor)
@@ -214,7 +214,6 @@ func TestFinalizeRejectsMixedPhaseContextAndServiceHost(t *testing.T) {
 		{name: "signer", mutate: func(value *FinalizeRequest) {
 			value.AuthenticodeLeafSignerCertificateDERSHA256 = strings.Repeat("1", 64)
 		}},
-		{name: "SPKI", mutate: func(value *FinalizeRequest) { value.NodeSpecificSPKI.SHA256 = strings.Repeat("1", 64) }},
 		{name: "ServiceHost release", mutate: func(value *FinalizeRequest) {
 			mutateVerifiedServiceHost(value, func(metadata *serviceHostMetadata) {
 				metadata.ReleaseID = "other-release"
@@ -328,9 +327,6 @@ func TestPrepareRejectsNoncanonicalUnsafeAndUnreviewedInventory(t *testing.T) {
 				Root: releasemanifest.RootInstallation, Path: `assets\extra.json`,
 				Role: releasemanifest.RoleRuntimeData, SHA256: strings.Repeat("e", 64), Size: "1",
 			})
-		}, want: ErrMismatch},
-		{name: "SPKI digest", mutate: func(value *PrepareRequest) {
-			value.NodeSpecificSPKI.SHA256 = strings.Repeat("f", 64)
 		}, want: ErrMismatch},
 	}
 	for _, test := range tests {
@@ -488,7 +484,6 @@ func validFinalization(t *testing.T) (PreparedRelease, FinalizeRequest) {
 		TargetArchitecture: prepare.TargetArchitecture,
 		Source:             prepare.Source,
 		AuthenticodeLeafSignerCertificateDERSHA256: prepare.AuthenticodeLeafSignerCertificateDERSHA256,
-		NodeSpecificSPKI: prepare.NodeSpecificSPKI,
 		Dependencies:     cloneDependencies(prepare.Dependencies),
 		ServiceHostBuild: build,
 		ServiceHost:      verifiedServiceHostFixture(t, prepared, build, metadata),
@@ -503,9 +498,6 @@ func validPrepareRequest(t *testing.T) PrepareRequest {
 		TargetArchitecture: ArchitectureAMD64,
 		Source:             SourceReceipt{Commit: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40)},
 		AuthenticodeLeafSignerCertificateDERSHA256: strings.Repeat("e", 64),
-		NodeSpecificSPKI: NodeSpecificSPKI{
-			Path: `keys\local-authority.spki`, SHA256: strings.Repeat("c", 64),
-		},
 		ReviewedClosure: validReviewedClosure(t, dependencies),
 		Dependencies:    dependencies,
 	}
@@ -668,7 +660,6 @@ func validDependencies() []releaseprofile.Dependency {
 		file(`native\AgenticReview.ProcessHost.exe`, releasemanifest.RoleProcessHost, "7"),
 		file(`runtime\node.exe`, releasemanifest.RoleNodeRuntime, "8"),
 		trusted(`certificates\server-root.cer`, releasemanifest.RoleCABundle, "b"),
-		trusted(`keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, "c"),
 		trusted(`policy\codex-requirements.toml`, releasemanifest.RolePolicy, "d"),
 	}
 }
@@ -713,9 +704,9 @@ func cloneFinalizeRequest(value FinalizeRequest) FinalizeRequest {
 func hexDigest(value [sha256.Size]byte) string { return hex.EncodeToString(value[:]) }
 
 const (
-	compiledTemplateGoldenSHA256  = "006c9cff43ce1793f794388f30d6ebe25d4eab5416dc943c3e2fb0cabc966949"
-	reviewedClosureGoldenSHA256   = "0a3281e5c431c7c7ecb6b39057f70cfa09776353005ec79ba9c813c99f4360d3"
-	prepareReceiptGoldenSHA256    = "ccc1e776bc1d441544873d13ea0db8500020e1133349a6bd0c76905861ea1805"
-	runtimeManifestGoldenSHA256   = "fb94e7685a6b42ed816cd0fc7957406db2b8dce97c143de04ab46986d98d4d35"
-	packageDescriptorGoldenSHA256 = "1e7da6e50b488cc507f8f5d630d9822c055fc674e7d675b238541861f06377fe"
+	compiledTemplateGoldenSHA256  = "8af7a79ba5cba7e011bb471d678cb5d16981db7c8bce1dfb2ea480d7a06ffb9d"
+	reviewedClosureGoldenSHA256   = "67eafb61d2a849d605e7d5132b1d626c45d1b8ad9bf5cc91a6fe5b7ce80079d6"
+	prepareReceiptGoldenSHA256    = "b8c7ebb71ca19980e04f63f46951a49711000a00b1a24078f0268465d85d2087"
+	runtimeManifestGoldenSHA256   = "d8e19e11f60e27e060267d07a2f815d9746e0b1135397c301e32f4f3b9971e11"
+	packageDescriptorGoldenSHA256 = "00bea5d59559b4b95098dc1bc98416a62122c4979b467de35ff03c5083ce6cbf"
 )

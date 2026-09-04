@@ -17,7 +17,7 @@ import (
 
 const (
 	SchemaVersion        = uint32(1)
-	PackageProfile       = "role-config-v2-node-specific"
+	PackageProfile       = "worker-release-v1"
 	MaximumDocumentBytes = uint64(64 * 1024)
 )
 

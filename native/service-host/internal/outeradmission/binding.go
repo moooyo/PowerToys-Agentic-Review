@@ -65,20 +65,7 @@ func bindBootstrapPair(
 			outerpackage.RoleRuntimeManifest, control.Installation.ManifestSHA256) != nil {
 		return ErrMismatch
 	}
-	if control.Control == nil || executor.Executor == nil ||
-		control.Control.LocalAuthorityCNGKeyName != index.LocalAuthorityCNG.KeyName ||
-		control.Control.LocalAuthorityKeySecurityDescriptorSHA256 != index.LocalAuthorityCNG.SecurityDescriptorSHA256 ||
-		control.Control.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 ||
-		executor.Executor.LocalAuthorityPublicKeySHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 {
-		return ErrMismatch
-	}
-	spkiRelative, err := relativeWindowsPath(
-		index.TargetRoots.TrustedConfiguration,
-		executor.Executor.LocalAuthorityPublicKeyPath,
-	)
-	if err != nil || !strings.EqualFold(spkiRelative, index.NodeSpecificLocalAuthorityPublicSPKI.Path) ||
-		requirePayload(index, outerpackage.RootTrustedConfiguration, spkiRelative,
-			outerpackage.RoleTrustedConfig, executor.Executor.LocalAuthorityPublicKeySHA256) != nil {
+	if control.Control == nil || executor.Executor == nil {
 		return ErrMismatch
 	}
 
@@ -120,7 +107,6 @@ func validateConfigurationPair(control, executor config.Config) error {
 			executor.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256 ||
 		windowsPathsOverlap(control.Node.DataRoot, executor.Node.DataRoot) ||
 		control.Control == nil || executor.Executor == nil ||
-		control.Control.LocalAuthorityPublicKeySHA256 != executor.Executor.LocalAuthorityPublicKeySHA256 ||
 		control.Limits.MaximumFrameBytes != executor.Limits.MaximumFrameBytes ||
 		control.Limits.MaximumQueuedBytesPerDirection != executor.Limits.MaximumQueuedBytesPerDirection ||
 		control.Limits.ConnectTimeoutMilliseconds != executor.Limits.ConnectTimeoutMilliseconds ||

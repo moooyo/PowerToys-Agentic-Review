@@ -43,7 +43,7 @@ type finalizedReleaseSource interface {
 }
 
 // BuildIndex constructs canonical package-index.json bytes for the current Token profile from one
-// finalized release and the node-specific non-secret inputs outside the runtime manifest.
+// finalized release and the non-secret installation inputs outside the runtime manifest.
 func BuildIndex(finalized releasepackage.FinalizedRelease, options BuildOptions) ([]byte, error) {
 	snapshot, err := finalized.SnapshotForAssembly()
 	if err != nil {
@@ -83,14 +83,12 @@ func buildIndex(finalized finalizedReleaseSource, options BuildOptions) ([]byte,
 		payloads = append(payloads, payload)
 	}
 	return MarshalIndexCanonical(Index{
-		InstallationID:                       options.InstallationID,
-		LocalAuthorityCNG:                    options.LocalAuthorityCNG,
-		NodeSpecificLocalAuthorityPublicSPKI: NodeSpecificSPKI(descriptor.NodeSpecificSPKI),
-		PackageID:                            options.PackageID,
-		Payloads:                             payloads,
-		ProfileID:                            IndexProfileID,
-		ReleaseID:                            descriptor.ReleaseID,
-		SchemaVersion:                        IndexSchemaVersion,
+		InstallationID: options.InstallationID,
+		PackageID:      options.PackageID,
+		Payloads:       payloads,
+		ProfileID:      IndexProfileID,
+		ReleaseID:      descriptor.ReleaseID,
+		SchemaVersion:  IndexSchemaVersion,
 		Source: SourceIdentity{
 			Commit: descriptor.Source.Commit,
 			Tree:   descriptor.Source.Tree,
@@ -129,7 +127,6 @@ func validateAgainstRelease(document []byte, finalized finalizedReleaseSource) e
 		PackageID:         index.PackageID,
 		InstallationID:    index.InstallationID,
 		WorkerNodeID:      index.WorkerNodeID,
-		LocalAuthorityCNG: index.LocalAuthorityCNG,
 		TargetRoots:       index.TargetRoots,
 		ControlBootstrap:  BootstrapPayload{SHA256: control.SHA256, Size: control.Size},
 		ExecutorBootstrap: BootstrapPayload{SHA256: executor.SHA256, Size: executor.Size},
@@ -202,15 +199,6 @@ func captureFinalizedRelease(
 	if !found || serviceHost != descriptor.ServiceHost {
 		return finalizedDocuments{}, releasepackage.PackageDescriptor{}, releasemanifest.Manifest{},
 			fmt.Errorf("%w: finalized ServiceHost binding is invalid", ErrInvalid)
-	}
-	spki, found := manifest.LookupFile(
-		releasemanifest.RootTrustedConfiguration,
-		descriptor.NodeSpecificSPKI.Path,
-	)
-	if !found || spki.Role != releasemanifest.RoleTrustedConfig ||
-		spki.SHA256 != descriptor.NodeSpecificSPKI.SHA256 {
-		return finalizedDocuments{}, releasepackage.PackageDescriptor{}, releasemanifest.Manifest{},
-			fmt.Errorf("%w: finalized node-specific SPKI binding is invalid", ErrInvalid)
 	}
 	return documents, descriptor, manifest, nil
 }

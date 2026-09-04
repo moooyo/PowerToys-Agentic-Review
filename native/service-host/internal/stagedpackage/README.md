@@ -39,7 +39,6 @@ The verifier retains every directory and file handle and proves:
   from the bootstrap-pinned leaf certificate; PE parsing uses stable positional reads rather than
   buffering a complete image;
 - the ServiceHost signing invariant matches the controlled build receipt;
-- the node-specific SPKI is canonical P-256 PKIX DER and matches its signed path and digest; and
 - the package descriptor, prepare receipt, reviewed closure, compiled template, build receipt, and
   runtime manifest form one internally consistent finalized release whose runtime entries exactly
   match the index.
@@ -52,12 +51,12 @@ and later validation are also linearized with the `winfile` process cleanup quar
 ## Authority boundary
 
 The evidence is a retained observation of staged bytes. Its sole production consumer is the
-read-only post-swap destination verifier. It is not filesystem mutation, CNG, certificate, SCM,
+read-only post-swap destination verifier. It is not filesystem mutation, local credential, SCM,
 Claim, readiness, or execution evidence and refuses JSON serialization. Signed `packageId`,
-`installationId`, target roots, CNG identity, and authentication selection are cross-bound to the
-bootstrap fields that exist, but this verifier does not inspect the target filesystem, CNG
-provider, or private-key ACL. It therefore cannot claim that staged directories already occupy the
-signed target roots.
+`installationId`, target roots, and authentication selection are cross-bound to the bootstrap
+fields that exist, but local capability-key identity and public-key material are not package
+inputs. This verifier does not inspect the target filesystem or any local credential provider. It
+therefore cannot claim that staged directories already occupy the signed target roots.
 
 Ordinary builds contain no compiled outer signer and fail closed during admission. Native Windows
 Lab A remains blocked until a provisioned fixed-NTFS staging fixture exists with the exact managed
@@ -65,4 +64,4 @@ ACLs, real canonical package bytes, signed AMD64 and ARM64 PE payloads, and the 
 chain. Cross-compilation checks the Windows adapter, but it cannot replace that lab.
 
 This package performs no archive extraction, download, file or ACL write, bootstrap generation,
-CNG or certificate provisioning, SCM operation, root swap, rollback, launch, or Claim change.
+local credential provisioning, SCM operation, root swap, rollback, launch, or Claim change.

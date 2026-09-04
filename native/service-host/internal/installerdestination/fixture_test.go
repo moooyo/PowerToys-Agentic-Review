@@ -49,7 +49,6 @@ func newDestinationFixture(t testing.TB) *destinationFixture {
 		{outerpackage.RootInstallation, `native\AgenticReview.ProcessHost.exe`, outerpackage.RoleProcessHost, true},
 		{outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, true},
 		{outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, true},
-		{outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, false},
 	}
 	for _, spec := range specs {
 		data[fileKey(string(spec.root), spec.path)] = []byte("destination fixture: " + string(spec.root) + ":" + spec.path)
@@ -82,16 +81,9 @@ func newDestinationFixture(t testing.TB) *destinationFixture {
 		}
 		payloads = append(payloads, payload)
 	}
-	spkiDigest := sha256.Sum256(data[fileKey(string(outerpackage.RootTrustedConfiguration), `keys\local-authority.spki`)])
 	index := outerpackage.Index{
 		InstallationID: "installation-node-001",
-		LocalAuthorityCNG: outerpackage.LocalAuthorityCNGIdentity{
-			KeyName: "AgenticReview.Worker.Control.LocalAuthority", SecurityDescriptorSHA256: strings.Repeat("5", 64),
-		},
-		NodeSpecificLocalAuthorityPublicSPKI: outerpackage.NodeSpecificSPKI{
-			Path: `keys\local-authority.spki`, SHA256: hex.EncodeToString(spkiDigest[:]),
-		},
-		PackageID: "worker-package-001", Payloads: payloads,
+		PackageID:      "worker-package-001", Payloads: payloads,
 		ProfileID: outerpackage.IndexProfileID, ReleaseID: "worker-2026.09.04.1",
 		SchemaVersion:      outerpackage.IndexSchemaVersion,
 		Source:             outerpackage.SourceIdentity{Commit: strings.Repeat("8", 40), Tree: strings.Repeat("9", 40)},
@@ -441,7 +433,7 @@ func fixtureBootstrapPair(manifestSHA256 string) (config.Config, config.Config) 
 	executor.Node = fixtureNode(installerprofile.ExecutorDataRoot, `app\executor.mjs`, true)
 	executor.Control = nil
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath: installerprofile.TrustedConfigurationRoot + `\keys\local-authority.spki`, LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
+		LocalAuthorityPublicKeyPath: installerprofile.TrustedConfigurationRoot + `\keys\runtime-authority.der`, LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
 		CodexPolicyPath: installerprofile.TrustedConfigurationRoot + `\policy\codex-requirements.toml`, CodexPolicySHA256: strings.Repeat("6", 64),
 		ProcessHostPath: installerprofile.InstallationRoot + `\native\AgenticReview.ProcessHost.exe`, ProcessHostSHA256: strings.Repeat("7", 64),
 	}

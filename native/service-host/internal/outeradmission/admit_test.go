@@ -70,10 +70,6 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 	}{
 		{name: "index worker node", mutate: func(value *admissionFixture) { value.index.WorkerNodeID = "worker-node-002" }},
 		{name: "index release", mutate: func(value *admissionFixture) { value.index.ReleaseID = "worker-2026.09.02.2" }},
-		{name: "CNG key name", mutate: func(value *admissionFixture) { value.index.LocalAuthorityCNG.KeyName += ".Other" }},
-		{name: "CNG security descriptor", mutate: func(value *admissionFixture) {
-			value.index.LocalAuthorityCNG.SecurityDescriptorSHA256 = strings.Repeat("6", 64)
-		}},
 		{name: "manifest digest", mutate: func(value *admissionFixture) {
 			value.control.Installation.ManifestSHA256 = strings.Repeat("6", 64)
 			value.executor.Installation.ManifestSHA256 = strings.Repeat("6", 64)
@@ -91,7 +87,7 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 		}},
 		{name: "pair trusted root", mutate: func(value *admissionFixture) {
 			value.executor.Installation.TrustedConfigurationRoot = `D:\AgenticReview\Trusted`
-			value.executor.Executor.LocalAuthorityPublicKeyPath = `D:\AgenticReview\Trusted\keys\local-authority.spki`
+			value.executor.Executor.LocalAuthorityPublicKeyPath = `D:\AgenticReview\Trusted\keys\runtime-authority.der`
 			value.executor.Executor.CodexPolicyPath = `D:\AgenticReview\Trusted\policy\codex-requirements.toml`
 		}},
 		{name: "manifest path", mutate: func(value *admissionFixture) {
@@ -106,10 +102,6 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 		{name: "Control bundle", mutate: func(value *admissionFixture) { value.control.Node.BundleSHA256 = strings.Repeat("6", 64) }},
 		{name: "Executor bundle", mutate: func(value *admissionFixture) { value.executor.Node.BundleSHA256 = strings.Repeat("6", 64) }},
 		{name: "root CA", mutate: func(value *admissionFixture) { value.control.Control.RootCertificateSHA256 = strings.Repeat("6", 64) }},
-		{name: "local authority key", mutate: func(value *admissionFixture) {
-			value.control.Control.LocalAuthorityPublicKeySHA256 = strings.Repeat("6", 64)
-			value.executor.Executor.LocalAuthorityPublicKeySHA256 = strings.Repeat("6", 64)
-		}},
 		{name: "Executor policy", mutate: func(value *admissionFixture) { value.executor.Executor.CodexPolicySHA256 = strings.Repeat("6", 64) }},
 		{name: "ProcessHost", mutate: func(value *admissionFixture) { value.executor.Executor.ProcessHostSHA256 = strings.Repeat("6", 64) }},
 		{name: "pair worker node", mutate: func(value *admissionFixture) { value.executor.WorkerNodeID = "worker-node-002" }},
@@ -130,7 +122,7 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 	}
 }
 
-func TestAdmissionRejectsBootstrapBytesMixNodeMixRoleAndSPKIMismatch(t *testing.T) {
+func TestAdmissionRejectsBootstrapBytesMixNodeAndMixRole(t *testing.T) {
 	t.Run("unindexed valid bootstrap bytes", func(t *testing.T) {
 		fixture := newAdmissionFixture(t)
 		fixture.control.Control.ServerOrigin = "https://other.example.test"
@@ -155,22 +147,6 @@ func TestAdmissionRejectsBootstrapBytesMixNodeMixRoleAndSPKIMismatch(t *testing.
 	t.Run("mixed roles", func(t *testing.T) {
 		fixture := newAdmissionFixture(t)
 		fixture.controlDocument, fixture.executorDocument = fixture.executorDocument, fixture.controlDocument
-		assertFixtureRejected(t, fixture)
-	})
-
-	t.Run("index SPKI identity", func(t *testing.T) {
-		fixture := newAdmissionFixture(t)
-		fixture.index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 = strings.Repeat("6", 64)
-		findFixturePayload(fixture.index.Payloads, outerpackage.RoleTrustedConfig).SHA256 = strings.Repeat("6", 64)
-		fixture.rebuild(t)
-		assertFixtureRejected(t, fixture)
-	})
-
-	t.Run("index SPKI path", func(t *testing.T) {
-		fixture := newAdmissionFixture(t)
-		fixture.index.NodeSpecificLocalAuthorityPublicSPKI.Path = `keys\other-authority.spki`
-		findFixturePayload(fixture.index.Payloads, outerpackage.RoleTrustedConfig).Path = `keys\other-authority.spki`
-		fixture.rebuild(t)
 		assertFixtureRejected(t, fixture)
 	})
 }
@@ -505,14 +481,7 @@ func validAdmissionIndex() outerpackage.Index {
 		return value
 	}
 	return outerpackage.Index{
-		InstallationID: "installation-node-001",
-		LocalAuthorityCNG: outerpackage.LocalAuthorityCNGIdentity{
-			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			SecurityDescriptorSHA256: strings.Repeat("1", 64),
-		},
-		NodeSpecificLocalAuthorityPublicSPKI: outerpackage.NodeSpecificSPKI{
-			Path: `keys\local-authority.spki`, SHA256: strings.Repeat("c", 64),
-		},
+		InstallationID:     "installation-node-001",
 		PackageID:          "worker-package-2026.09.02.1",
 		ProfileID:          outerpackage.IndexProfileID,
 		ReleaseID:          "worker-2026.09.02.1",
@@ -542,7 +511,6 @@ func validAdmissionIndex() outerpackage.Index {
 			payload(outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, "f", true),
 			payload(outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, "8", true),
 			payload(outerpackage.RootTrustedConfiguration, `certificates\server-root.cer`, outerpackage.RoleCABundle, "b", false),
-			payload(outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, "c", false),
 			payload(outerpackage.RootTrustedConfiguration, `policy\codex-requirements.toml`, outerpackage.RolePolicy, "d", false),
 		},
 	}
@@ -590,7 +558,7 @@ func validAdmissionExecutorConfig() config.Config {
 	value.Node.Environment = admissionEnvironment(value.Node.DataRoot, true)
 	value.Control = nil
 	value.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\keys\local-authority.spki`,
+		LocalAuthorityPublicKeyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\keys\runtime-authority.der`,
 		LocalAuthorityPublicKeySHA256: strings.Repeat("c", 64),
 		CodexPolicyPath:               `C:\ProgramData\AgenticReview\TrustedConfig\policy\codex-requirements.toml`,
 		CodexPolicySHA256:             strings.Repeat("d", 64),

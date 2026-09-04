@@ -1,13 +1,14 @@
 # ADR 0009: Node-Specific Two-Phase Worker Release Packages
 
 > ADR 0026 makes this unpublished node-specific release and receipt composition a historical
-> implementation record. A future clean installer may replace it with a simpler node-neutral,
-> architecture-specific signed package and is not required to preserve its phases, receipts,
-> retained handles, or CNG bindings.
+> implementation record. The current release contract removed its node-local CNG/SPKI binding and
+> uses the node-neutral `worker-release-v1` profile. The historical phases and receipts below are
+> not compatibility inputs.
 
 ## Status
 
-Historical implementation record; not a production-installer prerequisite after ADR 0026.
+Historical implementation record; superseded before publication by the node-neutral release
+profile selected under ADR 0026.
 
 ## Context
 

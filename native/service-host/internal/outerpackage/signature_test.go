@@ -33,7 +33,7 @@ func TestDetachedP256SignatureVerifiesCanonicalIndex(t *testing.T) {
 	}
 }
 
-func TestSignaturePolicyRejectsSchema3MTLSAndLegacyProfile(t *testing.T) {
+func TestSignaturePolicyRejectsSchema3RemovedFieldsAndLegacyProfile(t *testing.T) {
 	index := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
 	tests := []struct {
 		name     string
@@ -49,11 +49,11 @@ func TestSignaturePolicyRejectsSchema3MTLSAndLegacyProfile(t *testing.T) {
 			),
 		},
 		{
-			name: "mTLS field",
+			name: "removed mTLS field",
 			document: bytes.Replace(
 				index,
-				[]byte(`"nodeSpecificLocalAuthorityPublicKeySpki":`),
-				[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"nodeSpecificLocalAuthorityPublicKeySpki":`),
+				[]byte(`"packageId":`),
+				[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"packageId":`),
 				1,
 			),
 		},

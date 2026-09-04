@@ -10,7 +10,6 @@ import (
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/authenticode"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outerpackage"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/outertrust"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peimage"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -242,13 +241,6 @@ func (v *verifier) verifyExpectedFile(
 			}
 			signature = &verified
 		}
-		if payload.Root == outerpackage.RootTrustedConfiguration &&
-			payload.Path == v.plan.index.NodeSpecificLocalAuthorityPublicSPKI.Path &&
-			payload.Role == outerpackage.RoleTrustedConfig {
-			if err := v.verifyNodeSPKI(file, payload, hash.SHA256); err != nil {
-				return err
-			}
-		}
 	}
 	if err := file.handle.VerifyUnchanged(); err != nil {
 		return ErrFile
@@ -370,25 +362,6 @@ func (v *verifier) verifyPortableExecutable(
 		return authenticode.Evidence{}, ErrFile
 	}
 	return signature, nil
-}
-
-func (v *verifier) verifyNodeSPKI(
-	file *openedFile,
-	payload outerpackage.Payload,
-	digest [sha256.Size]byte,
-) error {
-	if file.object.Evidence.Size > outertrust.MaximumSPKIBytes {
-		return ErrDocuments
-	}
-	document, err := file.handle.ReadAll(outertrust.MaximumSPKIBytes)
-	if err != nil || uint64(len(document)) != file.object.Evidence.Size || sha256.Sum256(document) != digest ||
-		outertrust.ValidateSignerSPKI(document) != nil {
-		return ErrDocuments
-	}
-	if payload.SHA256 != v.plan.index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 {
-		return ErrDocuments
-	}
-	return nil
 }
 
 func maximumBytesForExpected(expected expectedFile) uint64 {

@@ -1,4 +1,4 @@
-// Package releasepackage defines the canonical, node-specific Worker release contract and the
+// Package releasepackage defines the canonical Worker release contract and the
 // Windows evidence boundaries that bind independently approved build lineage to signed bytes.
 package releasepackage
 
@@ -17,7 +17,7 @@ const (
 	ReviewedClosurePolicyVersion   = uint32(1)
 	PrepareReceiptSchemaVersion    = uint32(1)
 	PackageDescriptorSchemaVersion = uint32(2)
-	PackageProfile                 = "role-config-v2-node-specific"
+	PackageProfile                 = "worker-release-v1"
 	FoundationVersion              = uint32(2)
 	MaximumCanonicalDocumentBytes  = releasemanifest.MaximumDocumentBytes
 
@@ -81,13 +81,6 @@ type ServiceHostBuildEvidence struct {
 	state *serviceHostBuildState
 }
 
-// NodeSpecificSPKI binds the per-node local-authority public key deliberately retained in this
-// node-specific release manifest.
-type NodeSpecificSPKI struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-}
-
 // PrepareRequest supplies an independently reviewed closure and separately observed file metadata.
 // Dependencies must match the reviewed identities exactly and in canonical order.
 type PrepareRequest struct {
@@ -95,7 +88,6 @@ type PrepareRequest struct {
 	TargetArchitecture                         TargetArchitecture
 	Source                                     SourceReceipt
 	AuthenticodeLeafSignerCertificateDERSHA256 string
-	NodeSpecificSPKI                           NodeSpecificSPKI
 	ReviewedClosure                            ReviewedClosureEvidence
 	Dependencies                               []releaseprofile.Dependency
 }
@@ -117,13 +109,12 @@ type VerifiedServiceHostEvidence struct {
 }
 
 // FinalizeRequest repeats every mutable phase input so finalize can reject mixed releases,
-// architectures, source identities, node keys, inventories, and ServiceHost artifacts.
+// architectures, source identities, inventories, and ServiceHost artifacts.
 type FinalizeRequest struct {
 	ReleaseID                                  string
 	TargetArchitecture                         TargetArchitecture
 	Source                                     SourceReceipt
 	AuthenticodeLeafSignerCertificateDERSHA256 string
-	NodeSpecificSPKI                           NodeSpecificSPKI
 	Dependencies                               []releaseprofile.Dependency
 	ServiceHostBuild                           ServiceHostBuildEvidence
 	ServiceHost                                VerifiedServiceHostEvidence
@@ -136,7 +127,6 @@ type PackageDescriptor struct {
 	CompiledReleaseTemplateSHA256              string               `json:"compiledReleaseTemplateSha256"`
 	ExecutionAuthority                         bool                 `json:"executionAuthority"`
 	FoundationVersion                          uint32               `json:"foundationVersion"`
-	NodeSpecificSPKI                           NodeSpecificSPKI     `json:"nodeSpecificLocalAuthorityPublicKeySpki"`
 	PackageProfile                             string               `json:"packageProfile"`
 	PrepareReceiptSHA256                       string               `json:"prepareReceiptSha256"`
 	ReleaseID                                  string               `json:"releaseId"`
@@ -157,7 +147,6 @@ type prepareReceiptDocument struct {
 	Dependencies                               []releaseprofile.Dependency `json:"dependencies"`
 	ExecutionAuthority                         bool                        `json:"executionAuthority"`
 	FoundationVersion                          uint32                      `json:"foundationVersion"`
-	NodeSpecificSPKI                           NodeSpecificSPKI            `json:"nodeSpecificLocalAuthorityPublicKeySpki"`
 	PackageProfile                             string                      `json:"packageProfile"`
 	ReleaseID                                  string                      `json:"releaseId"`
 	ReviewedClosurePolicyID                    string                      `json:"reviewedClosurePolicyId"`
