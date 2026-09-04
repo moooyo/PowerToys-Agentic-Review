@@ -26,3 +26,16 @@ code running under the same Windows token. A same-token process may be able to o
 duplicate handles despite the creation-time inheritance allowlist. Dynamic execution of untrusted
 code must remain disabled unless a separate restricted identity or stronger isolation boundary is
 enforced outside ProcessHost.
+
+## Windows verification
+
+Run the module tests serially on Windows:
+
+```powershell
+go test -count=1 -p 1 -timeout 5m ./...
+go vet -p 1 ./...
+```
+
+The Windows integration test launches the Go test helper through the production `CreateProcessW`
+path, observes it in the configured Job Object while it is blocked on standard input, then verifies
+standard-I/O closure, process exit, Job drain, and handle cleanup.

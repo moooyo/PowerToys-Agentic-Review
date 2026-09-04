@@ -354,6 +354,11 @@ SCM access as expected because the session was not elevated. No fixed Worker roo
 process remained after the probe. This is release-pipeline evidence, not elevated service-runtime
 evidence.
 
+The ProcessHost module now also has local Windows amd64 helper-process evidence for the production
+`CreateProcessW` path, atomic Job Object association, restricted standard-I/O transport, root exit,
+Job drain, and cleanup. Its complete serial test matrix and `go vet` pass locally. This does not
+replace arm64 or installed-service lifecycle evidence.
+
 The product data path can proceed in parallel by adding the Worker Control upload client while
 keeping claim selection default-off, then introducing a versioned claim envelope and rollout policy
 before any artifact-mode canary. Immutable server-side diff manifests, publication drafts,
@@ -705,9 +710,10 @@ Not yet verified:
   signed payload from an elevated Windows session.
 - Runtime cleanup for startup verification is complete; remaining release gates are installer
   publication and native Windows execution evidence.
-- The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
-  Windows process creation, Job Object, descendant termination, and resource limits have not been
-  exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
+- The native ProcessHost has local Windows amd64 helper-process verification for process creation,
+  Job Object association, standard I/O, root exit, and Job drain. Descendant termination, resource
+  enforcement, and native arm64 execution remain unexercised. ServiceHost contracts and Windows
+  building blocks compile for
   x64 and arm64, but their Named Pipe, filesystem, process/token DACL,
   root Job, peer service PID/token check, fixed Worker authentication profile, system Server-certificate verification,
   role-local RPC, and fixed-origin HTTPS behavior has not been exercised on a native Windows test
