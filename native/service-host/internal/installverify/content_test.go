@@ -63,7 +63,6 @@ func TestVerifiedContentIsRoleScopedAndCopyOnly(t *testing.T) {
 			role releasemanifest.FileRole
 			data []byte
 		}{
-			{`keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, []byte("public-key")},
 			{`policy\codex.toml`, releasemanifest.RolePolicy, []byte("sandbox='required'")},
 		} {
 			content, contentErr := evidence.VerifiedContent(releasemanifest.RootTrustedConfiguration, expected.path)
@@ -72,6 +71,7 @@ func TestVerifiedContentIsRoleScopedAndCopyOnly(t *testing.T) {
 			}
 		}
 		assertContentUnavailable(t, evidence, releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`)
+		assertContentUnavailable(t, evidence, releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`)
 	})
 
 	if _, err := (Evidence{}).VerifiedContent(
@@ -112,12 +112,6 @@ func TestVerifiedContentEnforcesFixedPerPurposeBounds(t *testing.T) {
 			name: "Control root certificate", role: config.RoleControl,
 			rootCA:     bytes.Repeat([]byte{'c'}, int(maximumControlRootCertificateBytes+1)),
 			publicSPKI: []byte("public-key"), policy: []byte("sandbox='required'"),
-		},
-		{
-			name: "Executor public SPKI", role: config.RoleExecutor,
-			rootCA:     []byte("certificate"),
-			publicSPKI: bytes.Repeat([]byte{'k'}, int(maximumExecutorPublicSPKIBytes+1)),
-			policy:     []byte("sandbox='required'"),
 		},
 		{
 			name: "Executor Codex policy", role: config.RoleExecutor,

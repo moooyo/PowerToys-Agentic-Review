@@ -23,20 +23,13 @@ func TestServerDispatchesConcurrentTypedCallsAndCorrelatesResponses(t *testing.T
 	harness.send(t, callDocument(t, "register:1", OperationRegister, map[string]any{
 		"body": map[string]any{"workerNodeId": "node:1"},
 	}))
-	harness.send(t, callDocument(t, "sign:1", OperationSignLocalDigest, map[string]any{
-		"digestSha256": strings.Repeat("a", 64),
+	harness.send(t, callDocument(t, "heartbeat:1", OperationInstanceHeartbeat, map[string]any{
+		"body": map[string]any{"heartbeatSequence": 1}, "workerInstanceId": "worker:instance",
 	}))
 
 	responses := harness.readResponses(t, 2, MaximumFrameBytes)
-	if responses["register:1"]["outcome"] != "ok" || responses["sign:1"]["outcome"] != "ok" {
+	if responses["register:1"]["outcome"] != "ok" || responses["heartbeat:1"]["outcome"] != "ok" {
 		t.Fatalf("unexpected responses: %#v", responses)
-	}
-	signBody := responses["sign:1"]["body"].(map[string]any)
-	if signature, ok := signBody["signatureP1363"].(string); !ok || len(signature) != 86 {
-		t.Fatalf("signature response = %#v", signBody)
-	}
-	if dispatcher.signDigest != strings.Repeat("aa", 32) {
-		t.Fatalf("dispatcher digest = %q", dispatcher.signDigest)
 	}
 }
 
@@ -929,7 +922,6 @@ type fakeControlDispatcher struct {
 	claim       func(context.Context, json.RawMessage) (json.RawMessage, error)
 	completeRun func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	failRun     func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	signDigest  string
 	mu          sync.Mutex
 }
 
@@ -963,23 +955,6 @@ func (d *fakeControlDispatcher) FailRun(ctx context.Context, id string, body jso
 		return d.failRun(ctx, id, body)
 	}
 	return json.RawMessage(`{"runState":"failed"}`), nil
-}
-
-func (d *fakeControlDispatcher) SignLocalDigest(_ context.Context, digest [32]byte) ([]byte, error) {
-	d.mu.Lock()
-	d.signDigest = bytesToHex(digest[:])
-	d.mu.Unlock()
-	return bytes.Repeat([]byte{1}, 64), nil
-}
-
-func bytesToHex(value []byte) string {
-	const alphabet = "0123456789abcdef"
-	result := make([]byte, len(value)*2)
-	for index, item := range value {
-		result[index*2] = alphabet[item>>4]
-		result[index*2+1] = alphabet[item&0x0f]
-	}
-	return string(result)
 }
 
 func defaultServerOptions() ServerOptions {

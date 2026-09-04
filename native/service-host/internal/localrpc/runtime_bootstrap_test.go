@@ -185,52 +185,17 @@ func TestFoundationRuntimeBootstrapUsesPrivateEntropyAndFailsClosed(t *testing.T
 	}
 }
 
-func TestFoundationRuntimeBootstrapRejectsUntrustedRoleFactsBeforeEntropy(t *testing.T) {
+func TestFoundationRuntimeBootstrapRejectsInvalidPolicyDigestBeforeEntropy(t *testing.T) {
 	tests := []struct {
 		name   string
 		role   Role
 		mutate func(*FoundationRuntimeBootstrapOptions)
 	}{
 		{
-			name: "invalid local-authority key ID",
-			role: RoleControl,
-			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.LocalAuthorityKeyID = "invalid"
-			},
-		},
-		{
 			name: "invalid Executor policy digest",
 			role: RoleControl,
 			mutate: func(value *FoundationRuntimeBootstrapOptions) {
 				value.ExecutorPolicySHA256 = "invalid"
-			},
-		},
-		{
-			name: "Control public-key bytes",
-			role: RoleControl,
-			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.LocalAuthorityPublicKeySPKI = []byte("forbidden")
-			},
-		},
-		{
-			name: "missing Executor public key",
-			role: RoleExecutor,
-			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.LocalAuthorityPublicKeySPKI = nil
-			},
-		},
-		{
-			name: "mismatched Executor public key",
-			role: RoleExecutor,
-			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.LocalAuthorityPublicKeySPKI[0] ^= 0xff
-			},
-		},
-		{
-			name: "oversized Executor public key",
-			role: RoleExecutor,
-			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.LocalAuthorityPublicKeySPKI = make([]byte, foundationPublicKeyMaximumBytes+1)
 			},
 		},
 	}
@@ -321,11 +286,7 @@ func TestRuntimeBootstrapLaunchBindingMatchesEveryExpectedFact(t *testing.T) {
 		}},
 		{"preflight", func(value *FoundationRuntimeBootstrapOptions) { value.PreflightSHA256 = strings.Repeat("a", 64) }},
 		{"bundle", func(value *FoundationRuntimeBootstrapOptions) { value.NodeBundleSHA256 = strings.Repeat("a", 64) }},
-		{"local authority key", func(value *FoundationRuntimeBootstrapOptions) { value.LocalAuthorityKeyID = strings.Repeat("a", 64) }},
 		{"Executor policy", func(value *FoundationRuntimeBootstrapOptions) { value.ExecutorPolicySHA256 = strings.Repeat("a", 64) }},
-		{"Control public key bytes", func(value *FoundationRuntimeBootstrapOptions) {
-			value.LocalAuthorityPublicKeySPKI = []byte("forbidden")
-		}},
 		{"queue", func(value *FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
 		{"shutdown", func(value *FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},
 		{"reserve", func(value *FoundationRuntimeBootstrapOptions) { value.ForceTerminationReserveMS++ }},
@@ -772,16 +733,7 @@ func validRuntimeBootstrapOptions() runtimeBootstrapOptions {
 }
 
 func validFoundationRuntimeBootstrapOptions(role Role) FoundationRuntimeBootstrapOptions {
-	publicKey, err := hex.DecodeString(
-		"3059301306072a8648ce3d020106082a8648ce3d03010703420004" +
-			"6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296" +
-			"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
-	)
-	if err != nil {
-		panic(err)
-	}
-	publicKeyDigest := sha256.Sum256(publicKey)
-	options := FoundationRuntimeBootstrapOptions{
+	return FoundationRuntimeBootstrapOptions{
 		Role:                           role,
 		WorkerNodeID:                   "powertoys-node:01",
 		ReleaseID:                      "2026.08.31-test+1",
@@ -789,16 +741,11 @@ func validFoundationRuntimeBootstrapOptions(role Role) FoundationRuntimeBootstra
 		InstallationManifestSHA256:     strings.Repeat("2", 64),
 		PreflightSHA256:                strings.Repeat("3", 64),
 		NodeBundleSHA256:               strings.Repeat("4", 64),
-		LocalAuthorityKeyID:            hex.EncodeToString(publicKeyDigest[:]),
 		ExecutorPolicySHA256:           strings.Repeat("6", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,
 	}
-	if role == RoleExecutor {
-		options.LocalAuthorityPublicKeySPKI = publicKey
-	}
-	return options
 }
 
 type countingRuntimeBootstrapEntropy struct {

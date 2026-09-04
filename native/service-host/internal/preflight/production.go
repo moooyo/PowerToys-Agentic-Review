@@ -1,21 +1,16 @@
 package preflight
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"reflect"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 )
 
-// Compose validates opaque installation evidence, binds the role-specific live
-// local-authority signer, and then delegates to the side-effect-free snapshot
-// composer.
+// Compose validates opaque installation and data-root evidence and then delegates to the
+// side-effect-free snapshot composer.
 func Compose(input Input) (Evidence, error) {
 	if err := input.Installation.Validate(); err != nil {
 		return Evidence{}, preflightError(ErrorInstallation, "installation evidence is invalid", err)
@@ -37,19 +32,10 @@ func Compose(input Input) (Evidence, error) {
 		return Evidence{}, err
 	}
 	installation.contents = cloneRuntimeContents(contents)
-	credentials, err := bindRoleCredentials(
-		input.Role,
-		installation.controlConfig,
-		input.LocalAuthoritySigner,
-	)
-	if err != nil {
-		return Evidence{}, err
-	}
 	return composeSnapshots(snapshotInput{
 		role:                input.Role,
 		actualBootstrapPath: input.ActualBootstrapPath,
 		installation:        installation,
-		credentials:         credentials,
 		dataRoot:            dataRoot,
 	})
 }
@@ -223,135 +209,4 @@ func captureRuntimeContents(
 		})
 	}
 	return result, nil
-}
-
-// BindControlCredentials obtains an atomic attestation from the concrete live
-// local-authority signer selected by the current bootstrap schema.
-func BindControlCredentials(
-	configuration config.Config,
-	localAuthority *cng.Signer,
-) (ControlCredentialEvidence, error) {
-	if err := configuration.Validate(); err != nil ||
-		configuration.Role != config.RoleControl || configuration.Control == nil {
-		return ControlCredentialEvidence{}, preflightError(
-			ErrorCredentialIdentity,
-			"Control credential binding requires a valid Control configuration",
-			err,
-		)
-	}
-	if localAuthority == nil {
-		return ControlCredentialEvidence{}, preflightError(
-			ErrorCredentialIdentity,
-			"Control credential binding requires the local-authority signer",
-			nil,
-		)
-	}
-	localAttestation, err := localAuthority.Attestation()
-	if err != nil {
-		return ControlCredentialEvidence{}, preflightError(ErrorCredentialIdentity, "read local-authority attestation", err)
-	}
-	localFacts := localCredentialFactsFrom(localAttestation)
-	if err := validateControlCredentialFacts(configuration, localFacts); err != nil {
-		return ControlCredentialEvidence{}, err
-	}
-	return ControlCredentialEvidence{
-		localAuthority:        localAttestation,
-		localFacts:            localFacts,
-		authenticationProfile: configuration.Control.WorkerAuthenticationProfile,
-		bound:                 true,
-		attested:              true,
-	}, nil
-}
-
-func bindRoleCredentials(
-	role config.Role,
-	controlConfig config.Config,
-	localAuthority *cng.Signer,
-) (*ControlCredentialEvidence, error) {
-	if role == config.RoleExecutor {
-		if localAuthority != nil {
-			return nil, preflightError(
-				ErrorCredentialIdentity,
-				"Executor preflight must not receive the Control local-authority signer",
-				nil,
-			)
-		}
-		return nil, nil
-	}
-	evidence, err := BindControlCredentials(controlConfig, localAuthority)
-	if err != nil {
-		return nil, err
-	}
-	return &evidence, nil
-}
-
-type localCredentialFacts struct {
-	keyName                    string
-	keySecurityDescriptor      [sha256.Size]byte
-	identity                   cng.KeyIdentity
-	publicKeySPKI              [sha256.Size]byte
-	validatedControlServiceSID string
-	validatedExecutorSID       string
-	algorithm                  string
-	keyLengthBits              uint32
-	exportPolicy               uint32
-	keyUsage                   uint32
-}
-
-func localCredentialFactsFrom(attestation cng.Attestation) localCredentialFacts {
-	return localCredentialFacts{
-		keyName:                    attestation.KeyName(),
-		keySecurityDescriptor:      attestation.KeySecurityDescriptorSHA256(),
-		identity:                   attestation.KeyIdentity(),
-		publicKeySPKI:              attestation.PublicKeySPKISHA256(),
-		validatedControlServiceSID: attestation.ValidatedControlServiceSID(),
-		validatedExecutorSID:       attestation.ValidatedExecutorServiceSID(),
-		algorithm:                  attestation.Algorithm(),
-		keyLengthBits:              attestation.KeyLengthBits(),
-		exportPolicy:               attestation.ExportPolicy(),
-		keyUsage:                   attestation.KeyUsage(),
-	}
-}
-
-func validateControlCredentialFacts(
-	configuration config.Config,
-	local localCredentialFacts,
-) error {
-	if configuration.SchemaVersion != config.SchemaVersion || configuration.Control == nil ||
-		configuration.Control.WorkerAuthenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 {
-		return preflightError(ErrorCredentialIdentity, "Control credential facts require the current Bearer Token profile", nil)
-	}
-	return validateLocalCredentialFacts(configuration, local)
-}
-
-func validateLocalCredentialFacts(configuration config.Config, local localCredentialFacts) error {
-	control := configuration.Control
-	if control == nil {
-		return preflightError(ErrorCredentialIdentity, "Control credential configuration is absent", nil)
-	}
-	if local.keyName != control.LocalAuthorityCNGKeyName ||
-		!digestMatchesHex(local.keySecurityDescriptor, control.LocalAuthorityKeySecurityDescriptorSHA256) ||
-		!digestMatchesHex(local.publicKeySPKI, control.LocalAuthorityPublicKeySHA256) {
-		return preflightError(ErrorCredentialIdentity, "local-authority attestation differs from configuration", nil)
-	}
-	if local.validatedControlServiceSID != configuration.OwnService.SID ||
-		local.validatedExecutorSID != configuration.PeerService.SID {
-		return preflightError(ErrorCredentialIdentity, "local-authority attestation used different service SID inputs", nil)
-	}
-	if !validCredentialIdentity(local.identity) {
-		return preflightError(ErrorCredentialIdentity, "local-authority attestation contains an invalid key identity", nil)
-	}
-	if local.algorithm != "ECDSA_P256" || local.keyLengthBits != 256 || local.exportPolicy != 0 || local.keyUsage != 2 {
-		return preflightError(ErrorCredentialIdentity, "local-authority attestation key properties are invalid", nil)
-	}
-	return nil
-}
-
-func validCredentialIdentity(identity cng.KeyIdentity) bool {
-	return identity.ProviderName == ApprovedCNGProvider && identity.UniqueName != "" && identity.MachineKey
-}
-
-func digestMatchesHex(actual [sha256.Size]byte, expected string) bool {
-	decoded, err := hex.DecodeString(expected)
-	return err == nil && len(decoded) == sha256.Size && subtle.ConstantTimeCompare(actual[:], decoded) == 1
 }

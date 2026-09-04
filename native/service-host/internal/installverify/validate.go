@@ -160,9 +160,8 @@ func validateConfigurationPair(control, executor config.Config) error {
 	if windowsPathsOverlap(control.Node.DataRoot, executor.Node.DataRoot) {
 		return mismatch("distinct data roots")
 	}
-	if control.Control == nil || executor.Executor == nil ||
-		control.Control.LocalAuthorityPublicKeySHA256 != executor.Executor.LocalAuthorityPublicKeySHA256 {
-		return mismatch("local authority public key digest")
+	if control.Control == nil || executor.Executor == nil {
+		return mismatch("role configuration")
 	}
 	if control.Limits.MaximumFrameBytes != executor.Limits.MaximumFrameBytes {
 		return mismatch("limits.maximumFrameBytes")

@@ -2,12 +2,6 @@ package roleconfigv3lab
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	cryptorand "crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"os"
 	"strings"
@@ -16,16 +10,13 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 )
 
-const testLocalAuthorityPublicKeySPKIBase64URL = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q"
-
 func TestSharedGoldenRoundTripsRoleConfigsAndBootstraps(t *testing.T) {
 	lines := goldenLines(t)
-	publicKey := testPublicKeySPKI(t)
-	control, err := NewControlRoleConfig(strings.Repeat("6", 64), "5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3")
+	control, err := NewControlRoleConfig(strings.Repeat("6", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
-	executor, err := NewExecutorRoleConfig(strings.Repeat("6", 64), publicKey)
+	executor, err := NewExecutorRoleConfig(strings.Repeat("6", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +80,7 @@ func TestLegalOppositeRoleIsDistinctFromMalformedRole(t *testing.T) {
 		malformedKey string
 		parse        func([]byte) error
 	}{
-		{"RoleConfig", lines[0], lines[1], "localAuthorityPublicKeySpki", func(document []byte) error {
+		{"RoleConfig", lines[0], lines[1], "executorPolicySha256", func(document []byte) error {
 			_, err := ParseRoleConfig(document, RoleControl)
 			return err
 		}},
@@ -231,13 +222,6 @@ func TestGoDecodersRejectNullForEveryScalarZeroValueField(t *testing.T) {
 			t.Errorf("RoleConfig null mutation %d was accepted", index)
 		}
 	}
-	executorNullLength := mutateCanonical(t, lines[1], func(value map[string]any) {
-		nestedObject(t, value, "localAuthorityPublicKeySpki")["byteLength"] = nil
-	})
-	if _, err := ParseRoleConfig(executorNullLength, RoleExecutor); err == nil {
-		t.Error("Executor accepted null public-key byteLength")
-	}
-
 	bootstrapMutations := []func(map[string]any){
 		func(value map[string]any) { value["bootstrapVersion"] = nil },
 		func(value map[string]any) { value["executionAuthority"] = nil },
@@ -255,65 +239,6 @@ func TestGoDecodersRejectNullForEveryScalarZeroValueField(t *testing.T) {
 		if _, err := ParseRuntimeBootstrap(mutateCanonical(t, lines[2], mutate), RoleControl); err == nil {
 			t.Errorf("RuntimeBootstrap null mutation %d was accepted", index)
 		}
-	}
-}
-
-func TestExecutorRequiresCanonicalP256SPKIAndRoleSeparation(t *testing.T) {
-	lines := goldenLines(t)
-	control := canonicalMap(t, lines[0])
-	executor := canonicalMap(t, lines[1])
-	control["localAuthorityPublicKeySpki"] = executor["localAuthorityPublicKeySpki"]
-	if _, err := ParseRoleConfig(marshalCanonical(t, control, RoleConfigMaximumBytes), RoleControl); err == nil {
-		t.Fatal("Control accepted public-key bytes")
-	}
-	delete(executor, "localAuthorityPublicKeySpki")
-	if _, err := ParseRoleConfig(marshalCanonical(t, executor, RoleConfigMaximumBytes), RoleExecutor); err == nil {
-		t.Fatal("Executor accepted a missing public key")
-	}
-	for index, mutate := range []func(map[string]any){
-		func(value map[string]any) {
-			descriptor := nestedObject(t, value, "localAuthorityPublicKeySpki")
-			descriptor["base64Url"] = descriptor["base64Url"].(string) + "="
-		},
-		func(value map[string]any) { nestedObject(t, value, "localAuthorityPublicKeySpki")["byteLength"] = 90 },
-		func(value map[string]any) {
-			nestedObject(t, value, "localAuthorityPublicKeySpki")["sha256"] = strings.Repeat("0", 64)
-		},
-		func(value map[string]any) { value["localAuthorityKeyId"] = strings.Repeat("0", 64) },
-	} {
-		value := canonicalMap(t, lines[1])
-		mutate(value)
-		if _, err := ParseRoleConfig(marshalCanonical(t, value, RoleConfigMaximumBytes), RoleExecutor); err == nil {
-			t.Errorf("Executor descriptor mutation %d was accepted", index)
-		}
-	}
-
-	rsaKey, err := rsa.GenerateKey(cryptorand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p384Key, err := ecdsa.GenerateKey(elliptic.P384(), cryptorand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []any{&rsaKey.PublicKey, &p384Key.PublicKey} {
-		document, err := x509.MarshalPKIXPublicKey(key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := NewExecutorRoleConfig(strings.Repeat("6", 64), document); !errors.Is(err, ErrInvalidPublicKey) {
-			t.Fatalf("non-P256 key returned %v", err)
-		}
-	}
-	if _, err := NewExecutorRoleConfig(
-		strings.Repeat("6", 64),
-		testCompressedPublicKeySPKI(t),
-	); !errors.Is(err, ErrInvalidPublicKey) {
-		t.Fatalf("compressed P-256 key returned %v", err)
-	}
-	noncanonical := append(testPublicKeySPKI(t), 0)
-	if _, err := NewExecutorRoleConfig(strings.Repeat("6", 64), noncanonical); !errors.Is(err, ErrInvalidPublicKey) {
-		t.Fatalf("noncanonical P-256 key returned %v", err)
 	}
 }
 
@@ -358,12 +283,10 @@ func TestCanonicalSizeDuplicateAndAliasBoundaries(t *testing.T) {
 		})
 	}
 
-	publicKey := testPublicKeySPKI(t)
-	executor, err := NewExecutorRoleConfig(strings.Repeat("6", 64), publicKey)
+	executor, err := NewExecutorRoleConfig(strings.Repeat("6", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey[0] ^= 0xff
 	first, err := executor.CanonicalJSON()
 	if err != nil {
 		t.Fatal(err)
@@ -478,32 +401,6 @@ func goldenBootstrapFacts(role Role, bootstrapID string, config RoleConfig) Runt
 		RoleConfig:                     config,
 		WorkerNodeID:                   "powertoys-node:01",
 	}
-}
-
-func testPublicKeySPKI(t *testing.T) []byte {
-	t.Helper()
-	document, err := base64.RawURLEncoding.DecodeString(testLocalAuthorityPublicKeySPKIBase64URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return document
-}
-
-func testCompressedPublicKeySPKI(t *testing.T) []byte {
-	t.Helper()
-	document, err := os.ReadFile("testdata/p256_compressed_spki.base64url")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(document) < 2 || document[len(document)-1] != '\n' || document[len(document)-2] == '\r' {
-		t.Fatal("compressed P-256 SPKI fixture must end in one LF")
-	}
-	encoded := string(document[:len(document)-1])
-	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
-		t.Fatalf("decode compressed P-256 SPKI fixture: %v", err)
-	}
-	return decoded
 }
 
 func canonicalMap(t *testing.T, document []byte) map[string]any {

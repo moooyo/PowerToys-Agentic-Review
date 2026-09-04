@@ -3,7 +3,6 @@ package preflight
 import (
 	"errors"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
@@ -14,27 +13,22 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winidentity"
 )
 
-const (
-	ApprovedCNGProvider = "Microsoft Software Key Storage Provider"
-)
-
 type ErrorCode string
 
 const (
-	ErrorInput              ErrorCode = "PREFLIGHT_INPUT_INVALID"
-	ErrorConfiguration      ErrorCode = "PREFLIGHT_CONFIGURATION_INVALID"
-	ErrorConfigurationPair  ErrorCode = "PREFLIGHT_CONFIGURATION_PAIR_MISMATCH"
-	ErrorBootstrapBinding   ErrorCode = "PREFLIGHT_BOOTSTRAP_BINDING_MISMATCH"
-	ErrorInstallation       ErrorCode = "PREFLIGHT_INSTALLATION_EVIDENCE_INVALID"
-	ErrorManifest           ErrorCode = "PREFLIGHT_MANIFEST_INVALID"
-	ErrorManifestBinding    ErrorCode = "PREFLIGHT_MANIFEST_BINDING_MISMATCH"
-	ErrorReleaseAuthority   ErrorCode = "PREFLIGHT_RELEASE_AUTHORITY_INVALID"
-	ErrorCompatibility      ErrorCode = "PREFLIGHT_COMPATIBILITY_MISMATCH"
-	ErrorCredentialIdentity ErrorCode = "PREFLIGHT_CREDENTIAL_IDENTITY_MISMATCH"
-	ErrorDataRoot           ErrorCode = "PREFLIGHT_DATA_ROOT_MISMATCH"
-	ErrorRuntimeContent     ErrorCode = "PREFLIGHT_RUNTIME_CONTENT_MISMATCH"
-	ErrorEvidence           ErrorCode = "PREFLIGHT_EVIDENCE_INVALID"
-	ErrorPeerVerification   ErrorCode = "PREFLIGHT_PEER_VERIFICATION_PLAN_INVALID"
+	ErrorInput             ErrorCode = "PREFLIGHT_INPUT_INVALID"
+	ErrorConfiguration     ErrorCode = "PREFLIGHT_CONFIGURATION_INVALID"
+	ErrorConfigurationPair ErrorCode = "PREFLIGHT_CONFIGURATION_PAIR_MISMATCH"
+	ErrorBootstrapBinding  ErrorCode = "PREFLIGHT_BOOTSTRAP_BINDING_MISMATCH"
+	ErrorInstallation      ErrorCode = "PREFLIGHT_INSTALLATION_EVIDENCE_INVALID"
+	ErrorManifest          ErrorCode = "PREFLIGHT_MANIFEST_INVALID"
+	ErrorManifestBinding   ErrorCode = "PREFLIGHT_MANIFEST_BINDING_MISMATCH"
+	ErrorReleaseAuthority  ErrorCode = "PREFLIGHT_RELEASE_AUTHORITY_INVALID"
+	ErrorCompatibility     ErrorCode = "PREFLIGHT_COMPATIBILITY_MISMATCH"
+	ErrorDataRoot          ErrorCode = "PREFLIGHT_DATA_ROOT_MISMATCH"
+	ErrorRuntimeContent    ErrorCode = "PREFLIGHT_RUNTIME_CONTENT_MISMATCH"
+	ErrorEvidence          ErrorCode = "PREFLIGHT_EVIDENCE_INVALID"
+	ErrorPeerVerification  ErrorCode = "PREFLIGHT_PEER_VERIFICATION_PLAN_INVALID"
 )
 
 var (
@@ -74,15 +68,12 @@ type VerifiedFile struct {
 	Object       secureconfig.ObjectEvidence
 }
 
-// Input accepts opaque installation and retained data-root verifier evidence,
-// plus the concrete local authority signer. Control requires
-// LocalAuthoritySigner, and Executor must leave it nil.
+// Input accepts opaque installation and retained data-root verifier evidence.
 type Input struct {
-	Role                 config.Role
-	ActualBootstrapPath  string
-	Installation         installverify.Evidence
-	DataRoot             dataroot.Evidence
-	LocalAuthoritySigner *cng.Signer
+	Role                config.Role
+	ActualBootstrapPath string
+	Installation        installverify.Evidence
+	DataRoot            dataroot.Evidence
 }
 
 type releaseBindingSnapshot struct {
@@ -96,25 +87,6 @@ type releaseBindingSnapshot struct {
 	dependencies          []releasemanifest.File
 	serviceHost           releasemanifest.File
 	bound                 bool
-}
-
-// ControlCredentialEvidence contains only the attestation returned atomically
-// by the concrete validated local-authority signer. Its fields cannot be
-// populated by callers, and the value exposes only copy-returning accessors.
-type ControlCredentialEvidence struct {
-	localAuthority        cng.Attestation
-	localFacts            localCredentialFacts
-	authenticationProfile string
-	bound                 bool
-	attested              bool
-}
-
-func (e ControlCredentialEvidence) LocalAuthorityAttestation() cng.Attestation {
-	return e.localAuthority
-}
-
-func (e ControlCredentialEvidence) WorkerAuthenticationProfile() string {
-	return e.authenticationProfile
 }
 
 // DataRootBinding retains only detached role, installation-root identity, and
@@ -189,7 +161,6 @@ type snapshotInput struct {
 	role                config.Role
 	actualBootstrapPath string
 	installation        *installationSnapshot
-	credentials         *ControlCredentialEvidence
 	dataRoot            DataRootBinding
 }
 
@@ -229,7 +200,6 @@ type Evidence struct {
 	files               []VerifiedFile
 	release             releaseBindingSnapshot
 	bindings            []FileBindingEvidence
-	controlCredentials  *ControlCredentialEvidence
 	dataRoot            DataRootBinding
 	contents            []VerifiedRuntimeContent
 	digest              [32]byte
@@ -268,13 +238,6 @@ func (e Evidence) ReleaseTemplateDigest() [32]byte { return e.release.templateDi
 
 func (e Evidence) ApprovedSignerCertificateDERSHA256() string { return e.release.signerPin }
 
-func (e Evidence) ControlCredentials() (ControlCredentialEvidence, bool) {
-	if e.controlCredentials == nil || !e.controlCredentials.bound {
-		return ControlCredentialEvidence{}, false
-	}
-	return *e.controlCredentials, true
-}
-
 func (e Evidence) DataRootBinding() (DataRootBinding, bool) {
 	if !e.dataRoot.bound {
 		return DataRootBinding{}, false
@@ -303,7 +266,6 @@ type RuntimeBootstrapAuthority struct {
 }
 
 type runtimeBootstrapTrust struct {
-	localAuthorityKeyID  string
 	executorPolicySHA256 string
 }
 

@@ -28,8 +28,6 @@ const (
 	testProcessHost    = testRoot + `\native\AgenticReview.ProcessHost.exe`
 )
 
-var testLocalAuthorityPublicKeySPKI = mustDecodeTestPublicKey()
-
 type fakeDirectoryNode struct {
 	path          string
 	evidence      winfile.Evidence
@@ -302,9 +300,6 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 			ForceTerminationReserveMilliseconds: 5000,
 		},
 	}
-	publicKey := append([]byte(nil), testLocalAuthorityPublicKeySPKI...)
-	publicKeyDigest := sha256.Sum256(publicKey)
-	localAuthorityKeyID := hex.EncodeToString(publicKeyDigest[:])
 	executorPolicySHA256 := strings.Repeat("6", 64)
 	if role == config.RoleExecutor {
 		configuration.OwnService, configuration.PeerService = configuration.PeerService, configuration.OwnService
@@ -312,15 +307,12 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		configuration.Node.BundleSHA256 = digestOf(fs.file(testExecutorBundle).data)
 		configuration.Node.WorkingDirectory = `C:\ProgramData\AgenticReview\Executor\Work`
 		configuration.Executor = &config.ExecutorConfiguration{
-			LocalAuthorityPublicKeySHA256: localAuthorityKeyID,
-			CodexPolicySHA256:             executorPolicySHA256,
-			ProcessHostPath:               testProcessHost,
-			ProcessHostSHA256:             digestOf(fs.file(testProcessHost).data),
+			CodexPolicySHA256: executorPolicySHA256,
+			ProcessHostPath:   testProcessHost,
+			ProcessHostSHA256: digestOf(fs.file(testProcessHost).data),
 		}
 	} else {
-		configuration.Control = &config.ControlConfiguration{
-			LocalAuthorityPublicKeySHA256: localAuthorityKeyID,
-		}
+		configuration.Control = &config.ControlConfiguration{}
 	}
 	root := preflight.VerifiedRoot{
 		Root: releasemanifest.RootInstallation,
@@ -358,14 +350,10 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 		InstallationManifestSHA256:     configuration.Installation.ManifestSHA256,
 		PreflightSHA256:                hex.EncodeToString(preflightDigest[:]),
 		NodeBundleSHA256:               configuration.Node.BundleSHA256,
-		LocalAuthorityKeyID:            localAuthorityKeyID,
 		ExecutorPolicySHA256:           executorPolicySHA256,
 		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
 		TotalShutdownTimeoutMS:         int(configuration.Limits.ShutdownTimeoutMilliseconds),
 		ForceTerminationReserveMS:      int(configuration.Limits.ForceTerminationReserveMilliseconds),
-	}
-	if role == config.RoleExecutor {
-		bootstrapOptions.LocalAuthorityPublicKeySPKI = publicKey
 	}
 	fixture := &guardFixture{
 		authority: authoritySnapshot{
@@ -416,20 +404,7 @@ func (fixture *guardFixture) newRuntimeBootstrap(t *testing.T) localrpc.RuntimeB
 func (fixture *guardFixture) runtimeBootstrapOptions(t *testing.T) localrpc.FoundationRuntimeBootstrapOptions {
 	t.Helper()
 	options := fixture.authority.bootstrapOptions
-	options.LocalAuthorityPublicKeySPKI = append([]byte(nil), options.LocalAuthorityPublicKeySPKI...)
 	return options
-}
-
-func mustDecodeTestPublicKey() []byte {
-	value, err := hex.DecodeString(
-		"3059301306072a8648ce3d020106082a8648ce3d03010703420004" +
-			"6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296" +
-			"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
-	)
-	if err != nil {
-		panic(err)
-	}
-	return value
 }
 
 func (fs *fakeFilesystem) directory(path string) *fakeDirectoryNode {

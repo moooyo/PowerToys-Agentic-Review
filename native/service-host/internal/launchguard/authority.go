@@ -152,25 +152,20 @@ func validBootstrapOptions(value authoritySnapshot) bool {
 		options.ReleaseTemplateSHA256 != fmt.Sprintf("%x", value.releaseDigest) ||
 		options.InstallationManifestSHA256 != value.configuration.Installation.ManifestSHA256 ||
 		options.NodeBundleSHA256 != value.configuration.Node.BundleSHA256 ||
-		!validSHA256(options.LocalAuthorityKeyID) || !validSHA256(options.ExecutorPolicySHA256) ||
+		!validSHA256(options.ExecutorPolicySHA256) ||
 		options.MaximumQueuedBytesPerDirection != int(value.configuration.Limits.MaximumQueuedBytesPerDirection) ||
 		options.TotalShutdownTimeoutMS != int(value.configuration.Limits.ShutdownTimeoutMilliseconds) ||
 		options.ForceTerminationReserveMS != int(value.configuration.Limits.ForceTerminationReserveMilliseconds) {
 		return false
 	}
 	if value.role == config.RoleControl {
-		return value.configuration.Control != nil &&
-			options.LocalAuthorityKeyID == value.configuration.Control.LocalAuthorityPublicKeySHA256 &&
-			len(options.LocalAuthorityPublicKeySPKI) == 0
+		return value.configuration.Control != nil
 	}
 	if value.configuration.Executor == nil ||
-		options.LocalAuthorityKeyID != value.configuration.Executor.LocalAuthorityPublicKeySHA256 ||
-		options.ExecutorPolicySHA256 != value.configuration.Executor.CodexPolicySHA256 ||
-		len(options.LocalAuthorityPublicKeySPKI) == 0 {
+		options.ExecutorPolicySHA256 != value.configuration.Executor.CodexPolicySHA256 {
 		return false
 	}
-	digest := sha256.Sum256(options.LocalAuthorityPublicKeySPKI)
-	return fmt.Sprintf("%x", digest) == options.LocalAuthorityKeyID
+	return true
 }
 
 func selectInstallationRoot(values []preflight.VerifiedRoot) (preflight.VerifiedRoot, error) {

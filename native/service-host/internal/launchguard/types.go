@@ -169,10 +169,6 @@ func (guard *Guard) PreflightDigest() [32]byte {
 
 func cloneAuthority(value authoritySnapshot) authoritySnapshot {
 	value.configuration = cloneConfig(value.configuration)
-	value.bootstrapOptions.LocalAuthorityPublicKeySPKI = append(
-		[]byte(nil),
-		value.bootstrapOptions.LocalAuthorityPublicKeySPKI...,
-	)
 	value.root = cloneRoot(value.root)
 	value.targets = append([]launchTarget(nil), value.targets...)
 	for index := range value.targets {

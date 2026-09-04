@@ -267,7 +267,6 @@ func TestLaunchNodeRejectsEveryMismatchedBootstrapFactWithoutConsumingGuard(t *t
 	}{
 		{"role", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
 			value.Role = localrpc.RoleExecutor
-			value.LocalAuthorityPublicKeySPKI = append([]byte(nil), testLocalAuthorityPublicKeySPKI...)
 		}},
 		{"worker node", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.WorkerNodeID = "powertoys-node:02" }},
 		{"release", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.ReleaseID = "other-release" }},
@@ -282,9 +281,6 @@ func TestLaunchNodeRejectsEveryMismatchedBootstrapFactWithoutConsumingGuard(t *t
 		}},
 		{"bundle", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
 			value.NodeBundleSHA256 = strings.Repeat("c", 64)
-		}},
-		{"local authority key", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.LocalAuthorityKeyID = strings.Repeat("c", 64)
 		}},
 		{"Executor policy", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
 			value.ExecutorPolicySHA256 = strings.Repeat("c", 64)

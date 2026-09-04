@@ -27,7 +27,6 @@ func validateConfigurationSecurityPaths(value config.Config) error {
 	}
 	if value.Executor != nil {
 		paths = append(paths,
-			namedSecurityPath{"executor.localAuthorityPublicKeyPath", value.Executor.LocalAuthorityPublicKeyPath},
 			namedSecurityPath{"executor.codexPolicyPath", value.Executor.CodexPolicyPath},
 			namedSecurityPath{"executor.processHostPath", value.Executor.ProcessHostPath},
 		)

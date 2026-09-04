@@ -68,23 +68,18 @@ type Node struct {
 }
 
 type ControlConfiguration struct {
-	ServerOrigin                              string `json:"serverOrigin"`
-	ServerName                                string `json:"serverName"`
-	RootCertificatePath                       string `json:"rootCertificatePath"`
-	RootCertificateSHA256                     string `json:"rootCertificateSha256"`
-	WorkerAuthenticationProfile               string `json:"workerAuthenticationProfile"`
-	LocalAuthorityCNGKeyName                  string `json:"localAuthorityCngKeyName"`
-	LocalAuthorityKeySecurityDescriptorSHA256 string `json:"localAuthorityKeySecurityDescriptorSha256"`
-	LocalAuthorityPublicKeySHA256             string `json:"localAuthorityPublicKeySha256"`
+	ServerOrigin                string `json:"serverOrigin"`
+	ServerName                  string `json:"serverName"`
+	RootCertificatePath         string `json:"rootCertificatePath"`
+	RootCertificateSHA256       string `json:"rootCertificateSha256"`
+	WorkerAuthenticationProfile string `json:"workerAuthenticationProfile"`
 }
 
 type ExecutorConfiguration struct {
-	LocalAuthorityPublicKeyPath   string `json:"localAuthorityPublicKeyPath"`
-	LocalAuthorityPublicKeySHA256 string `json:"localAuthorityPublicKeySha256"`
-	CodexPolicyPath               string `json:"codexPolicyPath"`
-	CodexPolicySHA256             string `json:"codexPolicySha256"`
-	ProcessHostPath               string `json:"processHostPath"`
-	ProcessHostSHA256             string `json:"processHostSha256"`
+	CodexPolicyPath   string `json:"codexPolicyPath"`
+	CodexPolicySHA256 string `json:"codexPolicySha256"`
+	ProcessHostPath   string `json:"processHostPath"`
+	ProcessHostSHA256 string `json:"processHostSha256"`
 }
 
 type Limits struct {
@@ -399,15 +394,6 @@ func (c Config) validateControlConfiguration(control ControlConfiguration) error
 	if !isDirectChild(c.Node.DataRoot, WorkerAuthenticationProfilePath) {
 		return invalid("schemaVersion 4 requires the fixed Worker authentication profile below node.dataRoot")
 	}
-	if !validCNGName(control.LocalAuthorityCNGKeyName) {
-		return invalid("control.localAuthorityCngKeyName must be bounded canonical text")
-	}
-	if !validSHA256(control.LocalAuthorityKeySecurityDescriptorSHA256) {
-		return invalid("control.localAuthorityKeySecurityDescriptorSha256 must be a lowercase SHA-256 digest")
-	}
-	if !validSHA256(control.LocalAuthorityPublicKeySHA256) {
-		return invalid("control.localAuthorityPublicKeySha256 must be a lowercase SHA-256 digest")
-	}
 	return assertDistinctFilePaths(
 		c.Installation.ManifestPath,
 		c.Node.ExecutablePath,
@@ -423,12 +409,6 @@ func (c Config) validateExecutorConfiguration(executor ExecutorConfiguration) er
 		path       string
 		digest     string
 	}{
-		{
-			pathName:   "executor.localAuthorityPublicKeyPath",
-			digestName: "executor.localAuthorityPublicKeySha256",
-			path:       executor.LocalAuthorityPublicKeyPath,
-			digest:     executor.LocalAuthorityPublicKeySHA256,
-		},
 		{
 			pathName:   "executor.codexPolicyPath",
 			digestName: "executor.codexPolicySha256",
@@ -464,7 +444,6 @@ func (c Config) validateExecutorConfiguration(executor ExecutorConfiguration) er
 		c.Installation.ManifestPath,
 		c.Node.ExecutablePath,
 		c.Node.BundlePath,
-		executor.LocalAuthorityPublicKeyPath,
 		executor.CodexPolicyPath,
 		executor.ProcessHostPath,
 	)
@@ -784,10 +763,6 @@ func deriveServiceSID(serviceName string) string {
 		binary.LittleEndian.Uint32(digest[12:16]),
 		binary.LittleEndian.Uint32(digest[16:20]),
 	)
-}
-
-func validCNGName(value string) bool {
-	return validText(value, 256) && !containsControl(value) && strings.TrimSpace(value) == value
 }
 
 func containsControl(value string) bool {

@@ -97,15 +97,15 @@ func TestFrameValidationRejectsInvalidHeaders(t *testing.T) {
 	}
 }
 
-func TestFrameValidationAcceptsControlProofMessageType(t *testing.T) {
-	value := testFrame([]byte(`{"signedProof":{}}`))
-	binary.LittleEndian.PutUint16(value[10:12], 20)
+func TestFrameValidationAcceptsMaximumMessageType(t *testing.T) {
+	value := testFrame([]byte(`{"message":{}}`))
+	binary.LittleEndian.PutUint16(value[10:12], 19)
 	header, err := ValidateFrame(value, MaximumFrameBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if header.MessageType != 20 {
-		t.Fatalf("message type = %d, want 20", header.MessageType)
+	if header.MessageType != 19 {
+		t.Fatalf("message type = %d, want 19", header.MessageType)
 	}
 }
 

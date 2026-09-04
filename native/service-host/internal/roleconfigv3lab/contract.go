@@ -12,7 +12,6 @@ import (
 
 const (
 	RoleConfigMaximumBytes                    = 16 * 1024
-	PublicKeyMaximumBytes                     = 4 * 1024
 	RoleConfigProfile                         = "disabled-execution-lab-v1"
 	DisabledReasonCode                        = "EXECUTION_DISABLED"
 	FoundationVersion                         = 3
@@ -34,8 +33,6 @@ const (
 	RuntimeBootstrapMinimumTerminationReserve = 1
 )
 
-const canonicalP256SPKIPrefixHex = "3059301306072a8648ce3d020106082a8648ce3d03010703420004"
-
 type Role string
 
 const (
@@ -45,7 +42,6 @@ const (
 
 var (
 	ErrInvalidRoleConfig       = errors.New("invalid RoleConfig v3 lab document")
-	ErrInvalidPublicKey        = errors.New("invalid RoleConfig v3 lab public key")
 	ErrRoleMismatch            = errors.New("RoleConfig v3 lab role mismatch")
 	ErrInvalidRuntimeBootstrap = errors.New("invalid RuntimeBootstrapV2 lab document")
 
@@ -67,20 +63,12 @@ var hostControlOperations = [...]string{
 var missingPrerequisites = [...]string{
 	"artifact_readiness_attestation",
 	"arwx_1_1_semantic_verifiers",
-	"enrollment_live_evidence",
 	"hostcontrol_v2_production_composition",
 	"job_execution_envelope_v2_claim_selection",
-	"migration_inventory_gate_off_rollback_binary",
-	"persistent_exact_node_allowlist",
-	"release_compatibility_profile_v2",
 	"role_config_v3_production_authority",
 	"runtime_bootstrap_v2_production_exchange",
 	"server_global_rollout_gate_default_off",
-	"server_binding_receipt",
 	"signed_matching_packages",
-	"signed_node_attestation",
-	"windows_arm64_signed_install_attack_rollback_evidence",
-	"windows_x64_signed_install_attack_rollback_evidence",
 	"worker_api_1_1",
 	"worker_claim_envelope_v2_consumer",
 }
@@ -94,12 +82,6 @@ type arwxSelection struct {
 type hostControlSelection struct {
 	Operations      []string `json:"operations"`
 	ProtocolVersion string   `json:"protocolVersion"`
-}
-
-type publicKeyDescriptor struct {
-	Base64URL  string `json:"base64Url"`
-	ByteLength int    `json:"byteLength"`
-	SHA256     string `json:"sha256"`
 }
 
 type bodyDescriptor struct {

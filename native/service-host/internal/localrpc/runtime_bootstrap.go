@@ -5,7 +5,6 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,7 +29,6 @@ const (
 	RuntimeBootstrapMinimumForceTerminationReserve = 1
 	foundationRoleConfigVersion                    = 2
 	foundationMaximumSlots                         = 1
-	foundationPublicKeyMaximumBytes                = 4 * 1024
 )
 
 var (
@@ -54,9 +52,7 @@ type FoundationRuntimeBootstrapOptions struct {
 	InstallationManifestSHA256     string
 	PreflightSHA256                string
 	NodeBundleSHA256               string
-	LocalAuthorityKeyID            string
 	ExecutorPolicySHA256           string
-	LocalAuthorityPublicKeySPKI    []byte
 	MaximumQueuedBytesPerDirection int
 	TotalShutdownTimeoutMS         int
 	ForceTerminationReserveMS      int
@@ -196,51 +192,16 @@ func newFoundationRuntimeBootstrap(
 
 func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
 	if !validRuntimeBootstrapRole(options.Role) ||
-		!validRuntimeBootstrapDigest(options.LocalAuthorityKeyID) ||
 		!validRuntimeBootstrapDigest(options.ExecutorPolicySHA256) {
 		return nil, fmt.Errorf("%w: foundation role configuration facts", ErrInvalidRuntimeBootstrap)
 	}
-	switch options.Role {
-	case RoleControl:
-		if len(options.LocalAuthorityPublicKeySPKI) != 0 {
-			return nil, fmt.Errorf("%w: Control foundation contains public-key bytes", ErrInvalidRuntimeBootstrap)
-		}
-		return MarshalCanonicalJSON(map[string]any{
-			"executionEnabled":     false,
-			"executorPolicySha256": options.ExecutorPolicySHA256,
-			"foundationVersion":    foundationRoleConfigVersion,
-			"localAuthorityKeyId":  options.LocalAuthorityKeyID,
-			"maximumSlots":         foundationMaximumSlots,
-			"role":                 string(options.Role),
-		}, RuntimeBootstrapRoleConfigMaximumBytes)
-	case RoleExecutor:
-		publicKey := bytes.Clone(options.LocalAuthorityPublicKeySPKI)
-		if len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes {
-			return nil, fmt.Errorf("%w: Executor foundation public key", ErrInvalidRuntimeBootstrap)
-		}
-		digest := sha256.Sum256(publicKey)
-		if subtle.ConstantTimeCompare(
-			[]byte(hex.EncodeToString(digest[:])),
-			[]byte(options.LocalAuthorityKeyID),
-		) != 1 {
-			return nil, fmt.Errorf("%w: Executor foundation public-key identity", ErrInvalidRuntimeBootstrap)
-		}
-		return MarshalCanonicalJSON(map[string]any{
-			"executionEnabled":     false,
-			"executorPolicySha256": options.ExecutorPolicySHA256,
-			"foundationVersion":    foundationRoleConfigVersion,
-			"localAuthorityKeyId":  options.LocalAuthorityKeyID,
-			"localAuthorityPublicKeySpki": map[string]any{
-				"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
-				"byteLength": len(publicKey),
-				"sha256":     options.LocalAuthorityKeyID,
-			},
-			"maximumSlots": foundationMaximumSlots,
-			"role":         string(options.Role),
-		}, RuntimeBootstrapRoleConfigMaximumBytes)
-	default:
-		return nil, fmt.Errorf("%w: foundation role", ErrInvalidRuntimeBootstrap)
-	}
+	return MarshalCanonicalJSON(map[string]any{
+		"executionEnabled":     false,
+		"executorPolicySha256": options.ExecutorPolicySHA256,
+		"foundationVersion":    foundationRoleConfigVersion,
+		"maximumSlots":         foundationMaximumSlots,
+		"role":                 string(options.Role),
+	}, RuntimeBootstrapRoleConfigMaximumBytes)
 }
 
 func newRuntimeBootstrapUUIDV4(random io.Reader) (string, error) {

@@ -115,14 +115,6 @@ func cloneBindings(values []FileBindingEvidence) []FileBindingEvidence {
 	return result
 }
 
-func cloneControlCredentials(value *ControlCredentialEvidence) *ControlCredentialEvidence {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
-}
-
 func cloneDataRootBinding(value DataRootBinding) DataRootBinding {
 	roots := value.installationRoots
 	value.installationRoots = make([]dataRootInstallationBinding, len(roots))
@@ -149,9 +141,5 @@ func cloneRuntimeContents(values []VerifiedRuntimeContent) []VerifiedRuntimeCont
 }
 
 func cloneRuntimeBootstrapAuthority(value RuntimeBootstrapAuthority) RuntimeBootstrapAuthority {
-	value.options.LocalAuthorityPublicKeySPKI = append(
-		[]byte(nil),
-		value.options.LocalAuthorityPublicKeySPKI...,
-	)
 	return value
 }

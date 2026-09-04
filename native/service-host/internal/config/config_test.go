@@ -44,12 +44,31 @@ func TestCurrentSchemaIsCanonicalAndTokenOnly(t *testing.T) {
 		`"clientCertificateStore":"",`,
 		`"clientCertificateDerSha256":"",`,
 		`"clientPrivateKeySecurityDescriptorSha256":"",`,
+		`"localAuthorityCngKeyName":"legacy",`,
+		`"localAuthorityKeySecurityDescriptorSha256":"9999999999999999999999999999999999999999999999999999999999999999",`,
+		`"localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111",`,
 	} {
 		t.Run(field, func(t *testing.T) {
 			withLegacyField := bytes.Replace(
 				document,
 				[]byte(`"workerAuthenticationProfile":`),
 				[]byte(field+`"workerAuthenticationProfile":`),
+				1,
+			)
+			_, err := Parse(withLegacyField)
+			assertConfigErrorCode(t, err, ErrorFormat)
+		})
+	}
+	executorDocument := mustCanonical(t, validExecutorConfig())
+	for _, field := range []string{
+		`"localAuthorityPublicKeyPath":"C:\\ProgramData\\AgenticReview\\TrustedConfig\\local-authority.spki",`,
+		`"localAuthorityPublicKeySha256":"1111111111111111111111111111111111111111111111111111111111111111",`,
+	} {
+		t.Run(field, func(t *testing.T) {
+			withLegacyField := bytes.Replace(
+				executorDocument,
+				[]byte(`"codexPolicyPath":`),
+				[]byte(field+`"codexPolicyPath":`),
 				1,
 			)
 			_, err := Parse(withLegacyField)
@@ -260,11 +279,6 @@ func TestConfigurationValidationRejectsUnsafeValues(t *testing.T) {
 		{name: "server name mismatch", mutate: func(value *Config) { value.Control.ServerName = "other.example.test" }},
 		{name: "root certificate escape", mutate: func(value *Config) { value.Control.RootCertificatePath = `C:\ProgramData\root.cer` }},
 		{name: "root certificate digest", mutate: func(value *Config) { value.Control.RootCertificateSHA256 = strings.Repeat("A", 64) }},
-		{name: "noncanonical CNG key", mutate: func(value *Config) { value.Control.LocalAuthorityCNGKeyName += " " }},
-		{name: "local authority key descriptor digest", mutate: func(value *Config) {
-			value.Control.LocalAuthorityKeySecurityDescriptorSHA256 = "missing"
-		}},
-		{name: "local authority public key digest", mutate: func(value *Config) { value.Control.LocalAuthorityPublicKeySHA256 = "invalid" }},
 		{name: "process limit", mutate: func(value *Config) { value.Limits.RootJobMaximumProcesses = 0 }},
 		{name: "noncanonical memory", mutate: func(value *Config) { value.Limits.RootJobMaximumMemoryBytes = "0268435456" }},
 		{name: "small memory", mutate: func(value *Config) { value.Limits.RootJobMaximumMemoryBytes = "1" }},
@@ -361,8 +375,6 @@ func TestExecutorConfigurationRejectsUnsafeValues(t *testing.T) {
 	}{
 		{name: "nil executor", mutate: func(value *Config) { value.Executor = nil }},
 		{name: "control object", mutate: func(value *Config) { value.Control = validControlConfiguration() }},
-		{name: "public key escape", mutate: func(value *Config) { value.Executor.LocalAuthorityPublicKeyPath = `C:\ProgramData\authority.spki` }},
-		{name: "public key digest", mutate: func(value *Config) { value.Executor.LocalAuthorityPublicKeySHA256 = "invalid" }},
 		{name: "policy escape", mutate: func(value *Config) { value.Executor.CodexPolicyPath = `D:\policy.toml` }},
 		{name: "policy digest", mutate: func(value *Config) { value.Executor.CodexPolicySHA256 = strings.Repeat("F", 64) }},
 		{name: "process host escape", mutate: func(value *Config) { value.Executor.ProcessHostPath = `C:\ProcessHost.exe` }},
@@ -370,7 +382,6 @@ func TestExecutorConfigurationRejectsUnsafeValues(t *testing.T) {
 			value.Executor.ProcessHostPath = `C:\Program Files\AgenticReview\Worker\bin\ProcessHost.com`
 		}},
 		{name: "process host digest", mutate: func(value *Config) { value.Executor.ProcessHostSHA256 = "invalid" }},
-		{name: "duplicate trusted path", mutate: func(value *Config) { value.Executor.CodexPolicyPath = value.Executor.LocalAuthorityPublicKeyPath }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -450,25 +461,20 @@ func validConfig() Config {
 
 func validControlConfiguration() *ControlConfiguration {
 	return &ControlConfiguration{
-		ServerOrigin:                              "https://review.example.test",
-		ServerName:                                "review.example.test",
-		RootCertificatePath:                       `C:\ProgramData\AgenticReview\TrustedConfig\server-root.cer`,
-		RootCertificateSHA256:                     strings.Repeat("e", 64),
-		WorkerAuthenticationProfile:               WorkerAuthenticationProfileBearerTokenV1,
-		LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-		LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("9", 64),
-		LocalAuthorityPublicKeySHA256:             strings.Repeat("1", 64),
+		ServerOrigin:                "https://review.example.test",
+		ServerName:                  "review.example.test",
+		RootCertificatePath:         `C:\ProgramData\AgenticReview\TrustedConfig\server-root.cer`,
+		RootCertificateSHA256:       strings.Repeat("e", 64),
+		WorkerAuthenticationProfile: WorkerAuthenticationProfileBearerTokenV1,
 	}
 }
 
 func validExecutorConfiguration() *ExecutorConfiguration {
 	return &ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\local-authority.spki`,
-		LocalAuthorityPublicKeySHA256: strings.Repeat("1", 64),
-		CodexPolicyPath:               `C:\ProgramData\AgenticReview\TrustedConfig\codex-requirements.toml`,
-		CodexPolicySHA256:             strings.Repeat("2", 64),
-		ProcessHostPath:               `C:\Program Files\AgenticReview\Worker\bin\AgenticReview.ProcessHost.exe`,
-		ProcessHostSHA256:             strings.Repeat("3", 64),
+		CodexPolicyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\codex-requirements.toml`,
+		CodexPolicySHA256: strings.Repeat("2", 64),
+		ProcessHostPath:   `C:\Program Files\AgenticReview\Worker\bin\AgenticReview.ProcessHost.exe`,
+		ProcessHostSHA256: strings.Repeat("3", 64),
 	}
 }
 

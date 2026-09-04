@@ -8,9 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"unsafe"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
@@ -124,16 +122,7 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 			digest:            dataRootDigest, bound: true,
 		},
 	}
-	if role == config.RoleControl {
-		localFacts := localCredentialFactFixture(t, control)
-		input.credentials = &ControlCredentialEvidence{
-			localAuthority:        cngAttestationFixture(localFacts),
-			localFacts:            localFacts,
-			authenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
-			bound:                 true,
-			attested:              true,
-		}
-	} else {
+	if role == config.RoleExecutor {
 		input.actualBootstrapPath = executorRead.File.Path
 		installation.actualBootstrapPath = executorRead.File.Path
 	}
@@ -141,36 +130,6 @@ func newCompositionFixture(t *testing.T, role config.Role) compositionFixture {
 		input: input, control: control, executor: executor,
 		manifest: parsedManifest, installation: installation, factory: factory,
 	}
-}
-
-// These layouts exist only in tests because the production packages
-// deliberately expose no detached attestation constructor.
-func cngAttestationFixture(facts localCredentialFacts) cng.Attestation {
-	type layout struct {
-		keyName                     string
-		keySecurityDescriptorSHA256 [cng.DigestSize]byte
-		keyIdentity                 cng.KeyIdentity
-		publicKeySPKISHA256         [cng.DigestSize]byte
-		validatedControlServiceSID  string
-		validatedExecutorServiceSID string
-		algorithm                   string
-		keyLengthBits               uint32
-		exportPolicy                uint32
-		keyUsage                    uint32
-		validated                   bool
-	}
-	value := layout{
-		keyName: facts.keyName, keySecurityDescriptorSHA256: facts.keySecurityDescriptor,
-		keyIdentity: facts.identity, publicKeySPKISHA256: facts.publicKeySPKI,
-		validatedControlServiceSID:  facts.validatedControlServiceSID,
-		validatedExecutorServiceSID: facts.validatedExecutorSID,
-		algorithm:                   facts.algorithm, keyLengthBits: facts.keyLengthBits,
-		exportPolicy: facts.exportPolicy, keyUsage: facts.keyUsage, validated: true,
-	}
-	if unsafe.Sizeof(value) != unsafe.Sizeof(cng.Attestation{}) {
-		panic("cng attestation fixture layout changed")
-	}
-	return *(*cng.Attestation)(unsafe.Pointer(&value))
 }
 
 func identityFixture(role config.Role, control config.Config, executor config.Config) winidentity.Evidence {
@@ -317,7 +276,6 @@ func configurationFixtures(
 	controlBundle := requireManifestFixture(manifest, releasemanifest.RoleControlBundle, `app\control.mjs`)
 	executorBundle := requireManifestFixture(manifest, releasemanifest.RoleExecutorBundle, `app\executor.mjs`)
 	rootCA := requireManifestFixture(manifest, releasemanifest.RoleCABundle, `server-root.cer`)
-	spki := requireManifestFixture(manifest, releasemanifest.RoleTrustedConfig, `local-authority.spki`)
 	policy := requireManifestFixture(manifest, releasemanifest.RolePolicy, `codex-requirements.toml`)
 	processHost := requireManifestFixture(manifest, releasemanifest.RoleProcessHost, `native\AgenticReview.ProcessHost.exe`)
 	control := config.Config{
@@ -341,12 +299,9 @@ func configurationFixtures(
 		),
 		Control: &config.ControlConfiguration{
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
-			RootCertificatePath:                       testTrustedRoot + `\` + rootCA.Path,
-			RootCertificateSHA256:                     rootCA.SHA256,
-			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
-			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("7", 64),
-			LocalAuthorityPublicKeySHA256:             spki.SHA256,
+			RootCertificatePath:         testTrustedRoot + `\` + rootCA.Path,
+			RootCertificateSHA256:       rootCA.SHA256,
+			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 		},
 		Limits: limitsFixture(),
 	}
@@ -361,12 +316,10 @@ func configurationFixtures(
 	)
 	executor.Control = nil
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   testTrustedRoot + `\` + spki.Path,
-		LocalAuthorityPublicKeySHA256: spki.SHA256,
-		CodexPolicyPath:               testTrustedRoot + `\` + policy.Path,
-		CodexPolicySHA256:             policy.SHA256,
-		ProcessHostPath:               testInstallationRoot + `\` + processHost.Path,
-		ProcessHostSHA256:             processHost.SHA256,
+		CodexPolicyPath:   testTrustedRoot + `\` + policy.Path,
+		CodexPolicySHA256: policy.SHA256,
+		ProcessHostPath:   testInstallationRoot + `\` + processHost.Path,
+		ProcessHostSHA256: processHost.SHA256,
 	}
 	return control, executor
 }

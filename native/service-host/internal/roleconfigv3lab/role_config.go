@@ -2,15 +2,9 @@ package roleconfigv3lab
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
-	"crypto/subtle"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 )
@@ -28,8 +22,6 @@ type roleConfigWire struct {
 	GlobalRolloutDefault            string               `json:"globalRolloutDefault"`
 	HostControl                     hostControlSelection `json:"hostControl"`
 	JobExecutionEnvelopeVersion     int                  `json:"jobExecutionEnvelopeVersion"`
-	LocalAuthorityKeyID             string               `json:"localAuthorityKeyId"`
-	LocalAuthorityPublicKeySPKI     *publicKeyDescriptor `json:"localAuthorityPublicKeySpki,omitempty"`
 	PhysicalSlots                   int                  `json:"maximumSlots"`
 	MissingPrerequisites            []string             `json:"missingPrerequisites"`
 	Profile                         string               `json:"profile"`
@@ -48,30 +40,18 @@ type roleConfigState struct {
 	role     Role
 }
 
-func NewControlRoleConfig(executorPolicySHA256, localAuthorityKeyID string) (RoleConfig, error) {
-	if !validDigest(executorPolicySHA256) || !validDigest(localAuthorityKeyID) {
-		return RoleConfig{}, ErrInvalidRoleConfig
-	}
-	return newRoleConfig(roleConfigValue(RoleControl, executorPolicySHA256, localAuthorityKeyID), RoleControl)
-}
-
-func NewExecutorRoleConfig(executorPolicySHA256 string, publicKeySPKI []byte) (RoleConfig, error) {
+func NewControlRoleConfig(executorPolicySHA256 string) (RoleConfig, error) {
 	if !validDigest(executorPolicySHA256) {
 		return RoleConfig{}, ErrInvalidRoleConfig
 	}
-	publicKey := bytes.Clone(publicKeySPKI)
-	if err := validateP256SPKI(publicKey); err != nil {
-		return RoleConfig{}, err
+	return newRoleConfig(roleConfigValue(RoleControl, executorPolicySHA256), RoleControl)
+}
+
+func NewExecutorRoleConfig(executorPolicySHA256 string) (RoleConfig, error) {
+	if !validDigest(executorPolicySHA256) {
+		return RoleConfig{}, ErrInvalidRoleConfig
 	}
-	digest := sha256.Sum256(publicKey)
-	keyID := hex.EncodeToString(digest[:])
-	value := roleConfigValue(RoleExecutor, executorPolicySHA256, keyID)
-	value["localAuthorityPublicKeySpki"] = map[string]any{
-		"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
-		"byteLength": len(publicKey),
-		"sha256":     keyID,
-	}
-	return newRoleConfig(value, RoleExecutor)
+	return newRoleConfig(roleConfigValue(RoleExecutor, executorPolicySHA256), RoleExecutor)
 }
 
 func ParseRoleConfig(document []byte, expectedRole Role) (RoleConfig, error) {
@@ -108,12 +88,9 @@ func validateParsedRoleConfig(document []byte, object map[string]any, role Role)
 	expectedKeys := []string{
 		"activationState", "arwx", "availableSlots", "completionMode", "disabledReasonCode",
 		"executionAuthority", "executionEnabled", "executorPolicySha256", "foundationVersion",
-		"globalRolloutDefault", "hostControl", "jobExecutionEnvelopeVersion", "localAuthorityKeyId",
+		"globalRolloutDefault", "hostControl", "jobExecutionEnvelopeVersion",
 		"maximumSlots", "missingPrerequisites", "profile", "requiredRuntimeBootstrapVersion",
 		"requiredWorkerApiVersion", "role",
-	}
-	if role == RoleExecutor {
-		expectedKeys = append(expectedKeys, "localAuthorityPublicKeySpki")
 	}
 	validated, ok := exactObject(object, expectedKeys...)
 	if !ok {
@@ -126,13 +103,6 @@ func validateParsedRoleConfig(document []byte, object map[string]any, role Role)
 	if _, valid := exactObject(object["hostControl"], "operations", "protocolVersion"); !valid {
 		return ErrInvalidRoleConfig
 	}
-	if role == RoleExecutor {
-		if _, valid := exactObject(
-			object["localAuthorityPublicKeySpki"], "base64Url", "byteLength", "sha256",
-		); !valid {
-			return ErrInvalidRoleConfig
-		}
-	}
 	if !validRoleConfigJSONTypes(object, role) {
 		return ErrInvalidRoleConfig
 	}
@@ -140,13 +110,6 @@ func validateParsedRoleConfig(document []byte, object map[string]any, role Role)
 	var wire roleConfigWire
 	if err := decodeExact(document, &wire); err != nil || !validRoleConfigWire(wire, role) {
 		return errors.Join(ErrInvalidRoleConfig, err)
-	}
-	if role == RoleExecutor {
-		if err := validateExecutorDescriptor(wire); err != nil {
-			return err
-		}
-	} else if wire.LocalAuthorityPublicKeySPKI != nil {
-		return ErrInvalidRoleConfig
 	}
 	return nil
 }
@@ -180,7 +143,7 @@ func newRoleConfig(value map[string]any, role Role) (RoleConfig, error) {
 	return ParseRoleConfig(document, role)
 }
 
-func roleConfigValue(role Role, executorPolicySHA256, localAuthorityKeyID string) map[string]any {
+func roleConfigValue(role Role, executorPolicySHA256 string) map[string]any {
 	return map[string]any{
 		"activationState": "blocked",
 		"arwx": map[string]any{
@@ -201,7 +164,6 @@ func roleConfigValue(role Role, executorPolicySHA256, localAuthorityKeyID string
 			"protocolVersion": HostControlProtocolVersion,
 		},
 		"jobExecutionEnvelopeVersion":     JobExecutionEnvelopeVersion,
-		"localAuthorityKeyId":             localAuthorityKeyID,
 		"maximumSlots":                    1,
 		"missingPrerequisites":            stringsAsAny(missingPrerequisites[:]),
 		"profile":                         RoleConfigProfile,
@@ -227,7 +189,6 @@ func validRoleConfigWire(wire roleConfigWire, role Role) bool {
 		wire.HostControl.ProtocolVersion == HostControlProtocolVersion &&
 		equalStrings(wire.HostControl.Operations, hostControlOperations[:]) &&
 		wire.JobExecutionEnvelopeVersion == JobExecutionEnvelopeVersion &&
-		validDigest(wire.LocalAuthorityKeyID) &&
 		wire.PhysicalSlots == 1 &&
 		equalStrings(wire.MissingPrerequisites, missingPrerequisites[:]) &&
 		wire.Profile == RoleConfigProfile &&
@@ -239,7 +200,7 @@ func validRoleConfigWire(wire roleConfigWire, role Role) bool {
 func validRoleConfigJSONTypes(object map[string]any, role Role) bool {
 	for _, key := range []string{
 		"activationState", "completionMode", "disabledReasonCode", "executorPolicySha256",
-		"globalRolloutDefault", "localAuthorityKeyId", "profile", "requiredWorkerApiVersion", "role",
+		"globalRolloutDefault", "profile", "requiredWorkerApiVersion", "role",
 	} {
 		if _, ok := object[key].(string); !ok {
 			return false
@@ -272,59 +233,5 @@ func validRoleConfigJSONTypes(object map[string]any, role Role) bool {
 		!isJSONStringArray(hostControl["operations"]) {
 		return false
 	}
-	if role == RoleExecutor {
-		descriptor, _ := object["localAuthorityPublicKeySpki"].(map[string]any)
-		if _, ok := descriptor["base64Url"].(string); !ok {
-			return false
-		}
-		if !isJSONNumber(descriptor["byteLength"]) {
-			return false
-		}
-		if _, ok := descriptor["sha256"].(string); !ok {
-			return false
-		}
-	}
 	return true
-}
-
-func validateExecutorDescriptor(wire roleConfigWire) error {
-	descriptor := wire.LocalAuthorityPublicKeySPKI
-	if descriptor == nil || descriptor.ByteLength < 1 || descriptor.ByteLength > PublicKeyMaximumBytes ||
-		!validDigest(descriptor.SHA256) || descriptor.SHA256 != wire.LocalAuthorityKeyID {
-		return ErrInvalidPublicKey
-	}
-	publicKey, err := base64.RawURLEncoding.DecodeString(descriptor.Base64URL)
-	if err != nil || base64.RawURLEncoding.EncodeToString(publicKey) != descriptor.Base64URL ||
-		len(publicKey) != descriptor.ByteLength {
-		return ErrInvalidPublicKey
-	}
-	digest := sha256.Sum256(publicKey)
-	decodedDigest, err := hex.DecodeString(descriptor.SHA256)
-	if err != nil || subtle.ConstantTimeCompare(digest[:], decodedDigest) != 1 {
-		return ErrInvalidPublicKey
-	}
-	return validateP256SPKI(publicKey)
-}
-
-func validateP256SPKI(document []byte) error {
-	prefix, err := hex.DecodeString(canonicalP256SPKIPrefixHex)
-	if err != nil || len(document) != 91 || !bytes.HasPrefix(document, prefix) {
-		return ErrInvalidPublicKey
-	}
-	parsed, err := x509.ParsePKIXPublicKey(document)
-	if err != nil {
-		return errors.Join(ErrInvalidPublicKey, err)
-	}
-	publicKey, ok := parsed.(*ecdsa.PublicKey)
-	if !ok || publicKey.Curve != elliptic.P256() {
-		return ErrInvalidPublicKey
-	}
-	canonical, err := x509.MarshalPKIXPublicKey(publicKey)
-	if err != nil {
-		return errors.Join(ErrInvalidPublicKey, fmt.Errorf("marshal P-256 DER SPKI: %w", err))
-	}
-	if !bytes.Equal(canonical, document) {
-		return fmt.Errorf("%w: public key is not canonical P-256 DER SPKI", ErrInvalidPublicKey)
-	}
-	return nil
 }

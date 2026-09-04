@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -30,19 +29,15 @@ func TestComposeReturnsDetachedProductionEvidenceForBothRoles(t *testing.T) {
 				t.Fatal("Compose omitted installation evidence")
 			}
 			bindings := evidence.FileBindings()
-			wantBindings := 8 + len(fixture.manifest.Files)
+			wantBindings := 7 + len(fixture.manifest.Files)
 			if len(bindings) != wantBindings {
 				t.Fatalf("binding count = %d, want %d", len(bindings), wantBindings)
 			}
 			for index, file := range fixture.manifest.Files {
-				profileBinding := bindings[8+index]
+				profileBinding := bindings[7+index]
 				if profileBinding.Manifest.File != file {
 					t.Fatalf("profile binding %d = %#v, want manifest file %#v", index, profileBinding.Manifest.File, file)
 				}
-			}
-			_, hasCredentials := evidence.ControlCredentials()
-			if hasCredentials != (role == config.RoleControl) {
-				t.Fatal("Compose returned key evidence for the wrong role")
 			}
 		})
 	}
@@ -58,7 +53,6 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 	fixture.input.installation.controlBootstrap.Data[0] ^= 0xff
 	fixture.installation.release.dependencies[0].Path = `changed\dependency.exe`
 	fixture.installation.files[0].Object.Evidence.Security.SelfRelativeDescriptor[0] ^= 0xff
-	fixture.input.credentials.bound = false
 
 	control := evidence.ControlConfiguration()
 	originalByte := control.Read.Data[0]
@@ -88,9 +82,6 @@ func TestEvidenceAccessorsReturnDetachedCopies(t *testing.T) {
 		evidence.FileBindings()[0].VerifiedFile.Object.Evidence.Security.SelfRelativeDescriptor[1] != originalBindingDescriptorByte {
 		t.Fatal("Evidence accessor exposed mutable internal storage")
 	}
-	if _, exists := evidence.ControlCredentials(); !exists {
-		t.Fatal("Evidence retained an aliased credential binding")
-	}
 }
 
 func TestValidateConfigurationPairRejectsEveryCrossConfigurationMismatch(t *testing.T) {
@@ -115,9 +106,6 @@ func TestValidateConfigurationPairRejectsEveryCrossConfigurationMismatch(t *test
 			executor.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256 = strings.Repeat("b", 64)
 		}},
 		{"data root", func(control *config.Config, executor *config.Config) { executor.Node.DataRoot = control.Node.DataRoot }},
-		{"local authority", func(_ *config.Config, executor *config.Config) {
-			executor.Executor.LocalAuthorityPublicKeySHA256 = strings.Repeat("c", 64)
-		}},
 		{"maximum frame", func(_ *config.Config, executor *config.Config) { executor.Limits.MaximumFrameBytes-- }},
 		{"maximum queue", func(_ *config.Config, executor *config.Config) {
 			executor.Limits.MaximumQueuedBytesPerDirection++
@@ -163,9 +151,6 @@ func TestComposeRejectsIndividuallyValidCrossConfigurationMismatches(t *testing.
 				requireManifestFixture(f.manifest, releasemanifest.RoleExecutorBundle, `app\executor.mjs`),
 				f.control.Node.DataRoot,
 			)
-		}},
-		{"local authority", func(f *compositionFixture) {
-			f.executor.Executor.LocalAuthorityPublicKeySHA256 = strings.Repeat("c", 64)
 		}},
 		{"maximum queue", func(f *compositionFixture) { f.executor.Limits.MaximumQueuedBytesPerDirection++ }},
 		{"connect timeout", func(f *compositionFixture) { f.executor.Limits.ConnectTimeoutMilliseconds++ }},
@@ -391,90 +376,11 @@ func TestReleaseBindingCoversFutureRolesAndBindsInManifestOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profileBindings := evidence.FileBindings()[8:]
+	profileBindings := evidence.FileBindings()[7:]
 	for index, file := range fixture.manifest.Files {
 		if profileBindings[index].Manifest.File != file {
 			t.Fatalf("profile binding %d is not in canonical manifest order", index)
 		}
-	}
-}
-
-func TestValidateControlCredentialFactsBindsLocalAuthorityPins(t *testing.T) {
-	fixture := newCompositionFixture(t, config.RoleControl)
-	valid := localCredentialFactFixture(t, fixture.control)
-	tests := []struct {
-		name   string
-		mutate func(*localCredentialFacts)
-	}{
-		{"key name", func(local *localCredentialFacts) { local.keyName += ".other" }},
-		{"descriptor", func(local *localCredentialFacts) { local.keySecurityDescriptor[0] ^= 0xff }},
-		{"public key", func(local *localCredentialFacts) { local.publicKeySPKI[0] ^= 0xff }},
-		{"Control SID", func(local *localCredentialFacts) {
-			local.validatedControlServiceSID = config.ExecutorServiceSID
-		}},
-		{"Executor SID", func(local *localCredentialFacts) {
-			local.validatedExecutorSID = config.ControlServiceSID
-		}},
-		{"wrong provider", func(local *localCredentialFacts) {
-			local.identity.ProviderName = "Other Provider"
-		}},
-		{"user key", func(local *localCredentialFacts) { local.identity.MachineKey = false }},
-		{"empty unique name", func(local *localCredentialFacts) { local.identity.UniqueName = "" }},
-		{"algorithm", func(local *localCredentialFacts) { local.algorithm = "RSA" }},
-		{"key length", func(local *localCredentialFacts) { local.keyLengthBits = 384 }},
-		{"key usage", func(local *localCredentialFacts) { local.keyUsage = 1 }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			local := valid
-			test.mutate(&local)
-			err := validateControlCredentialFacts(fixture.control, local)
-			assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
-		})
-	}
-	if err := validateControlCredentialFacts(fixture.control, valid); err != nil {
-		t.Fatalf("valid credential facts were rejected: %v", err)
-	}
-}
-
-func TestCurrentSchemaPreflightBindsOnlyTheLocalCapabilitySigner(t *testing.T) {
-	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
-		t.Run(string(role), func(t *testing.T) {
-			fixture := newCompositionFixture(t, role)
-			evidence, err := composeSnapshots(fixture.input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			credentials, exists := evidence.ControlCredentials()
-			if role == config.RoleExecutor {
-				if exists {
-					t.Fatal("Executor evidence contains Control credentials")
-				}
-				return
-			}
-			if !exists || credentials.WorkerAuthenticationProfile() !=
-				config.WorkerAuthenticationProfileBearerTokenV1 {
-				t.Fatalf("current-schema credentials = %#v, exists=%v", credentials, exists)
-			}
-		})
-	}
-}
-
-func TestCurrentSchemaPreflightRejectsCredentialProfileMismatch(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*ControlCredentialEvidence)
-	}{
-		{name: "missing profile", mutate: func(value *ControlCredentialEvidence) { value.authenticationProfile = "" }},
-		{name: "wrong profile", mutate: func(value *ControlCredentialEvidence) { value.authenticationProfile = "other" }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newCompositionFixture(t, config.RoleControl)
-			test.mutate(fixture.input.credentials)
-			_, err := composeSnapshots(fixture.input)
-			assertPreflightErrorCode(t, err, ErrorEvidence)
-		})
 	}
 }
 
@@ -485,44 +391,9 @@ func TestConfigurationPairRejectsMixedBootstrapSchemaVersions(t *testing.T) {
 	assertPreflightErrorCode(t, err, ErrorConfigurationPair)
 }
 
-func TestComposeSnapshotsRequiresRoleAppropriateCredentials(t *testing.T) {
-	control := newCompositionFixture(t, config.RoleControl)
-	control.input.credentials = nil
-	_, err := composeSnapshots(control.input)
-	assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
-
-	executor := newCompositionFixture(t, config.RoleExecutor)
-	executor.input.credentials = &ControlCredentialEvidence{bound: true}
-	_, err = composeSnapshots(executor.input)
-	assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
-}
-
 func TestPublicComposeRejectsZeroInstallationEvidenceFirst(t *testing.T) {
 	_, err := Compose(Input{Role: config.RoleControl, ActualBootstrapPath: `C:\trusted\control-service-host.json`})
 	assertPreflightErrorCode(t, err, ErrorInstallation)
-}
-
-func TestBindControlCredentialsRejectsMissingLocalAuthoritySigner(t *testing.T) {
-	fixture := newCompositionFixture(t, config.RoleControl)
-	_, err := BindControlCredentials(fixture.control, nil)
-	assertPreflightErrorCode(t, err, ErrorCredentialIdentity)
-}
-
-func localCredentialFactFixture(t *testing.T, configuration config.Config) localCredentialFacts {
-	t.Helper()
-	localSPKI := mustDecodeDigest(t, configuration.Control.LocalAuthorityPublicKeySHA256)
-	localDescriptor := mustDecodeDigest(t, configuration.Control.LocalAuthorityKeySecurityDescriptorSHA256)
-	return localCredentialFacts{
-		keyName:                    configuration.Control.LocalAuthorityCNGKeyName,
-		keySecurityDescriptor:      localDescriptor,
-		identity:                   cng.KeyIdentity{ProviderName: ApprovedCNGProvider, UniqueName: "local-authority", MachineKey: true},
-		publicKeySPKI:              localSPKI,
-		validatedControlServiceSID: configuration.OwnService.SID,
-		validatedExecutorSID:       configuration.PeerService.SID,
-		algorithm:                  "ECDSA_P256",
-		keyLengthBits:              256,
-		keyUsage:                   2,
-	}
 }
 
 func TestCompiledCompatibilityMatchesReleaseAndRuntimeConstants(t *testing.T) {

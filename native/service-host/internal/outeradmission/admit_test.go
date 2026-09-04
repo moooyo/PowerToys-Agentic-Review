@@ -87,7 +87,6 @@ func TestAdmissionRejectsEveryIndexAndBootstrapBindingMismatch(t *testing.T) {
 		}},
 		{name: "pair trusted root", mutate: func(value *admissionFixture) {
 			value.executor.Installation.TrustedConfigurationRoot = `D:\AgenticReview\Trusted`
-			value.executor.Executor.LocalAuthorityPublicKeyPath = `D:\AgenticReview\Trusted\keys\runtime-authority.der`
 			value.executor.Executor.CodexPolicyPath = `D:\AgenticReview\Trusted\policy\codex-requirements.toml`
 		}},
 		{name: "manifest path", mutate: func(value *admissionFixture) {
@@ -538,10 +537,7 @@ func validAdmissionControlConfig() config.Config {
 		Control: &config.ControlConfiguration{
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath: `C:\ProgramData\AgenticReview\TrustedConfig\certificates\server-root.cer`, RootCertificateSHA256: strings.Repeat("b", 64),
-			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
-			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("1", 64),
-			LocalAuthorityPublicKeySHA256:             strings.Repeat("c", 64),
+			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 		},
 		Limits: admissionLimits(),
 	}
@@ -558,12 +554,10 @@ func validAdmissionExecutorConfig() config.Config {
 	value.Node.Environment = admissionEnvironment(value.Node.DataRoot, true)
 	value.Control = nil
 	value.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\keys\runtime-authority.der`,
-		LocalAuthorityPublicKeySHA256: strings.Repeat("c", 64),
-		CodexPolicyPath:               `C:\ProgramData\AgenticReview\TrustedConfig\policy\codex-requirements.toml`,
-		CodexPolicySHA256:             strings.Repeat("d", 64),
-		ProcessHostPath:               `C:\Program Files\AgenticReview\Worker\native\AgenticReview.ProcessHost.exe`,
-		ProcessHostSHA256:             strings.Repeat("7", 64),
+		CodexPolicyPath:   `C:\ProgramData\AgenticReview\TrustedConfig\policy\codex-requirements.toml`,
+		CodexPolicySHA256: strings.Repeat("d", 64),
+		ProcessHostPath:   `C:\Program Files\AgenticReview\Worker\native\AgenticReview.ProcessHost.exe`,
+		ProcessHostSHA256: strings.Repeat("7", 64),
 	}
 	return value
 }

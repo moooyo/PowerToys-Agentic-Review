@@ -1579,10 +1579,6 @@ func (*roleTestDispatcher) CompleteRun(context.Context, string, json.RawMessage)
 func (*roleTestDispatcher) FailRun(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
 }
-func (*roleTestDispatcher) SignLocalDigest(context.Context, [32]byte) ([]byte, error) {
-	return nil, nil
-}
-
 func TestRoleRuntimeComponentsKeepExecutorFreeOfControlDependencies(t *testing.T) {
 	for _, role := range []config.Role{config.RoleControl, config.RoleExecutor} {
 		t.Run(string(role), func(t *testing.T) {
