@@ -10,13 +10,13 @@ var (
 	ErrWindowsAdapterMissing = errors.New("ServiceHost Windows security adapter is not implemented")
 )
 
-// BootstrapOptions contains only the path selector allowed before native,
-// handle-bound installation verification. Parsed configuration must come from
-// installverify evidence inside the Windows Host implementation.
+// BootstrapOptions selects one of the two fixed trusted local role
+// configuration files used by the Windows Host implementation.
 type BootstrapOptions struct {
 	ActualBootstrapPath string
-	// Ready is called at most once after the local preflight has completed and
-	// before the host starts waiting for its peer service.
+	// Ready is called at most once after local identity, process security,
+	// configuration, and role credentials have been validated and before the
+	// host starts waiting for its peer service.
 	Ready func()
 }
 

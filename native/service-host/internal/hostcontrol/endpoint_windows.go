@@ -15,7 +15,6 @@ import (
 	"unsafe"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 	"golang.org/x/sys/windows"
 )
 
@@ -442,8 +441,8 @@ func (l *Listener) PipeName() string {
 // errors.
 func (l *Listener) Accept(
 	ctx context.Context,
-	node winprocess.NodeProcess,
-	bootstrap ...localrpc.LaunchRuntimeBootstrap,
+	node NodeProcess,
+	bootstrap localrpc.LaunchRuntimeBootstrap,
 ) (*Connection, error) {
 	if isNilInterface(node) {
 		return nil, errors.New("Node process is required")
@@ -475,15 +474,6 @@ func (l *Listener) Accept(
 			l.markTerminal(err)
 		}, l.Close)
 	}
-	boundBootstrap, err := resolveLaunchRuntimeBootstrap(bootstrap)
-	if err != nil {
-		finish()
-		bootstrapErr := fmt.Errorf("resolve HostControl launch bootstrap binding: %w", err)
-		return rejectAcceptFailure(nil, bootstrapErr, node, func() {
-			l.markTerminal(bootstrapErr)
-		}, l.Close)
-	}
-
 	connection, err := l.acceptConnected(ctx, node)
 	finish()
 	if err != nil {
@@ -498,7 +488,7 @@ func (l *Listener) Accept(
 		l.options.IOTimeout,
 	)
 	committedBootstrap, err := completeRuntimeBootstrap(
-		bootstrapContext, connection, node, connection.Evidence(), boundBootstrap,
+		bootstrapContext, connection, node, connection.Evidence(), bootstrap,
 	)
 	cancelBootstrap()
 	if err != nil {
@@ -551,7 +541,7 @@ func (l *Listener) beginAccept() (func(), error) {
 	return l.active.begin(), nil
 }
 
-func (l *Listener) acceptConnected(ctx context.Context, node winprocess.NodeProcess) (*Connection, error) {
+func (l *Listener) acceptConnected(ctx context.Context, node NodeProcess) (*Connection, error) {
 	if err := l.waitForConnect(ctx); err != nil {
 		return nil, err
 	}

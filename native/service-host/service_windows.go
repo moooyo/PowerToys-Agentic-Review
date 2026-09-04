@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/installverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/platform"
 	"golang.org/x/sys/windows/svc"
 )
@@ -111,7 +110,7 @@ func (runner windowsServiceRunner) RunIfService(
 }
 
 func serviceNameFromBootstrapPath(path string) (string, error) {
-	role, err := installverify.RoleFromBootstrapPath(path)
+	role, err := config.RoleFromTrustedBootstrapPath(path)
 	if err != nil {
 		return "", fmt.Errorf("derive Windows service name from bootstrap path: %w", err)
 	}

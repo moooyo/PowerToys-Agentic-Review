@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
 
 const testOwnServiceSID = "S-1-5-80-1-2-3-4-5"
@@ -24,15 +23,15 @@ const testOwnServiceSID = "S-1-5-80-1-2-3-4-5"
 func TestAcceptRequiresNodeAndExplicitBootstrapBinding(t *testing.T) {
 	method := reflect.TypeOf((*Listener).Accept)
 	wantContext := reflect.TypeOf((*context.Context)(nil)).Elem()
-	wantNode := reflect.TypeOf((*winprocess.NodeProcess)(nil)).Elem()
-	wantBootstrapSlice := reflect.TypeOf([]localrpc.LaunchRuntimeBootstrap{})
+	wantNode := reflect.TypeOf((*NodeProcess)(nil)).Elem()
+	wantBootstrap := reflect.TypeOf(localrpc.LaunchRuntimeBootstrap{})
 	if method.NumIn() != 4 || method.In(1) != wantContext || method.In(2) != wantNode ||
-		method.In(3) != wantBootstrapSlice || !method.IsVariadic() {
+		method.In(3) != wantBootstrap || method.IsVariadic() {
 		t.Fatalf("Listener.Accept signature = %v", method)
 	}
 }
 
-func TestAcceptResolvesBootstrapBeforeConnectionWorkAndRejectsByNodeTermination(t *testing.T) {
+func TestAcceptConnectsBeforeBootstrapAndRejectsThroughNodeOwnership(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve HostControl test source")
@@ -58,7 +57,6 @@ func TestAcceptResolvesBootstrapBeforeConnectionWorkAndRejectsByNodeTermination(
 		t.Fatal("Windows Listener.Accept declaration is unavailable")
 	}
 	positions := make(map[string][]token.Pos)
-	rejectPositions := []token.Pos{}
 	ast.Inspect(accept.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -72,69 +70,23 @@ func TestAcceptResolvesBootstrapBeforeConnectionWorkAndRejectsByNodeTermination(
 			name = function.Sel.Name
 		}
 		switch name {
-		case "beginAccept", "resolveLaunchRuntimeBootstrap", "finish", "rejectAcceptFailure", "acceptConnected", "completeRuntimeBootstrap", "rejectPostTransferAcceptFailure":
+		case "beginAccept", "finish", "rejectAcceptFailure", "acceptConnected", "completeRuntimeBootstrap", "rejectPostTransferAcceptFailure":
 			positions[name] = append(positions[name], call.Pos())
-		}
-		if name == "rejectAcceptFailure" {
-			rejectPositions = append(rejectPositions, call.Pos())
 		}
 		return true
 	})
-	for _, name := range []string{"beginAccept", "resolveLaunchRuntimeBootstrap", "acceptConnected", "completeRuntimeBootstrap"} {
+	for _, name := range []string{"beginAccept", "acceptConnected", "completeRuntimeBootstrap", "rejectPostTransferAcceptFailure"} {
 		if len(positions[name]) != 1 {
 			t.Fatalf("Listener.Accept %s call count = %d, want 1", name, len(positions[name]))
 		}
 	}
-	if len(rejectPositions) != 7 {
-		t.Fatalf(
-			"Listener.Accept rejection calls = %d, want 7",
-			len(rejectPositions),
-		)
-	}
 	begin := positions["beginAccept"][0]
-	resolveBootstrap := positions["resolveLaunchRuntimeBootstrap"][0]
 	acceptConnected := positions["acceptConnected"][0]
 	bootstrap := positions["completeRuntimeBootstrap"][0]
-	if len(positions["rejectPostTransferAcceptFailure"]) != 1 ||
-		positions["rejectPostTransferAcceptFailure"][0] < bootstrap {
-		t.Fatal("Listener.Accept no longer rejects post-transfer bootstrap failure through the Connection owner")
-	}
-	preAcceptRejects := 0
-	bootstrapFailureRejects := []token.Pos{}
-	connectionRejects := []token.Pos{}
-	for _, position := range rejectPositions {
-		if position < begin {
-			preAcceptRejects++
-		}
-		if resolveBootstrap < position && position < acceptConnected {
-			bootstrapFailureRejects = append(bootstrapFailureRejects, position)
-		}
-		if acceptConnected < position && position < bootstrap {
-			connectionRejects = append(connectionRejects, position)
-		}
-	}
-	if preAcceptRejects != 5 || len(bootstrapFailureRejects) != 1 || len(connectionRejects) != 1 {
-		t.Fatalf(
-			"Listener.Accept rejection stages pre/bootstrap/connection = %d/%d/%d, want 5/1/1",
-			preAcceptRejects,
-			len(bootstrapFailureRejects),
-			len(connectionRejects),
-		)
-	}
-	bootstrapReject := bootstrapFailureRejects[0]
-	connectionReject := connectionRejects[0]
-	finishBeforeReject := false
-	finishBeforeConnectionReject := false
-	for _, position := range positions["finish"] {
-		finishBeforeReject = finishBeforeReject ||
-			resolveBootstrap < position && position < bootstrapReject
-		finishBeforeConnectionReject = finishBeforeConnectionReject ||
-			acceptConnected < position && position < connectionReject
-	}
-	if !(begin < resolveBootstrap && resolveBootstrap < bootstrapReject && bootstrapReject < acceptConnected &&
-		acceptConnected < connectionReject && connectionReject < bootstrap) || !finishBeforeReject ||
-		!finishBeforeConnectionReject || len(positions["finish"]) != 2 {
-		t.Fatal("Listener.Accept no longer resolves bootstrap before connection work or rejects through the exact Node owner")
+	rejectBootstrap := positions["rejectPostTransferAcceptFailure"][0]
+	if !(begin < acceptConnected && acceptConnected < bootstrap && bootstrap < rejectBootstrap) ||
+		len(positions["finish"]) != 1 {
+		t.Fatal("Listener.Accept no longer transfers the connection before bootstrap or rejects through the exact Node owner")
 	}
 }
 

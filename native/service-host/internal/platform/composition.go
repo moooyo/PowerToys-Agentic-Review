@@ -25,17 +25,12 @@ var (
 
 type compositionBuilder interface {
 	selectRole(context.Context, BootstrapOptions) error
-	loadReleaseAuthority(context.Context) error
 	prepareServiceSecurity(context.Context) error
-	verifyInstallation(context.Context) error
-	verifyDataRoot(context.Context) error
+	loadConfiguration(context.Context) error
 	openRoleCredentials(context.Context) error
-	composePreflight(context.Context) error
 	connectPeer(context.Context) error
 	verifyPeer(context.Context) error
-	finalizeRuntimePlan(context.Context) error
 	createRuntimeBootstrap(context.Context) error
-	openLaunchGuard(context.Context) error
 	prepareHostControl(context.Context) error
 	launchNode(context.Context) error
 	takeNodeStandardIO(context.Context) error
@@ -101,17 +96,12 @@ func runComposition(
 
 	steps := []compositionStep{
 		{name: "select service role", run: func(ctx context.Context) error { return builder.selectRole(ctx, options) }},
-		{name: "load release authority", run: builder.loadReleaseAuthority},
 		{name: "prepare service security", run: builder.prepareServiceSecurity},
-		{name: "verify installation", run: builder.verifyInstallation},
-		{name: "verify data root", run: builder.verifyDataRoot},
-		{name: "open role credentials", run: builder.openRoleCredentials},
-		{name: "compose preflight", run: builder.composePreflight, reportsReady: true},
+		{name: "load role configuration", run: builder.loadConfiguration},
+		{name: "open role credentials", run: builder.openRoleCredentials, reportsReady: true},
 		{name: "connect peer pipe", run: builder.connectPeer},
 		{name: "verify peer", run: builder.verifyPeer},
-		{name: "finalize runtime plan", run: builder.finalizeRuntimePlan},
 		{name: "create runtime bootstrap", run: builder.createRuntimeBootstrap},
-		{name: "open launch guard", run: builder.openLaunchGuard},
 		{name: "prepare HostControl", run: builder.prepareHostControl},
 		{name: "launch Node", run: builder.launchNode},
 		{name: "take Node standard I/O", run: builder.takeNodeStandardIO},

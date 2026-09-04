@@ -94,9 +94,9 @@ type RuntimeBootstrapV1 struct {
 	issuance         *runtimeBootstrapIssuance
 }
 
-// LaunchRuntimeBootstrap is opaque, copy-safe authority for one bootstrap that
-// has been bound to the exact reviewed launch facts. Only the launch guard may
-// create this authority; the HostControl exchange consumes it once.
+// LaunchRuntimeBootstrap is opaque, copy-safe authority for one bootstrap
+// bound to the exact local launch options. The HostControl exchange consumes
+// it once.
 type LaunchRuntimeBootstrap struct {
 	state *launchRuntimeBootstrapState
 }
@@ -263,7 +263,7 @@ func EncodeRuntimeBootstrap(value RuntimeBootstrapV1) ([]byte, error) {
 }
 
 // BindRuntimeBootstrapToLaunch validates an unchanged factory issuance and
-// atomically binds it to one exact guarded launch. A failed validation leaves
+// atomically binds it to one exact local launch. A failed validation leaves
 // the issuance unbound; a successful binding permanently invalidates all
 // RuntimeBootstrapV1 copies as exchange authority.
 func BindRuntimeBootstrapToLaunch(
@@ -280,7 +280,7 @@ func BindRuntimeBootstrapToLaunch(
 		value.Shutdown.GracefulTimeoutMS != expected.TotalShutdownTimeoutMS ||
 		value.Shutdown.ForceTerminationReserveMS != expected.ForceTerminationReserveMS ||
 		!bytes.Equal(value.roleConfigJSON, expectedRoleConfig) {
-		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: guarded launch facts", ErrRuntimeBootstrapBinding)
+		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: local launch facts", ErrRuntimeBootstrapBinding)
 	}
 	if !value.issuance.phase.CompareAndSwap(runtimeBootstrapIssued, runtimeBootstrapLaunchBound) {
 		return LaunchRuntimeBootstrap{}, fmt.Errorf("%w: bootstrap issuance is not available for launch binding", ErrRuntimeBootstrapBinding)

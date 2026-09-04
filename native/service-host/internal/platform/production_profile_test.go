@@ -98,18 +98,23 @@ func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *tes
 		})
 	}
 
-	expected := productionReference{
-		path: "internal/platform/production_windows.go", function: "buildRoleRuntime",
+	expected := map[string]productionReference{
+		"LoadWorkerAuth": {
+			path: "internal/platform/production_windows.go", function: "openRoleCredentials",
+		},
+		"NewClient": {
+			path: "internal/platform/production_windows.go", function: "buildRoleRuntime",
+		},
 	}
 	for _, name := range []string{"LoadWorkerAuth", "NewClient"} {
 		observed := references[name]
-		if len(observed) != 1 || observed[0] != expected {
-			t.Fatalf("production %s references = %v, want exactly %v", name, observed, expected)
+		if len(observed) != 1 || observed[0] != expected[name] {
+			t.Fatalf("production %s references = %v, want exactly %v", name, observed, expected[name])
 		}
 	}
 }
 
-func TestProductionCredentialStageOnlyValidatesTheTokenProfile(t *testing.T) {
+func TestProductionCredentialStageLoadsOnlyTheFixedTokenAfterProfileValidation(t *testing.T) {
 	_, files := parseProductionSource(t)
 	var source *productionSourceFile
 	for index := range files {
@@ -136,12 +141,17 @@ func TestProductionCredentialStageOnlyValidatesTheTokenProfile(t *testing.T) {
 	}
 
 	gateIndex := -1
-	credentialAliases := map[string]struct{}{}
+	retiredAliases := map[string]struct{}{}
+	workerAliases := map[string]struct{}{}
 	for alias, imported := range source.imports {
-		if imported == cngImport || imported == winCertImport || imported == workerTransportImport {
-			credentialAliases[alias] = struct{}{}
+		if imported == cngImport || imported == winCertImport {
+			retiredAliases[alias] = struct{}{}
+		}
+		if imported == workerTransportImport {
+			workerAliases[alias] = struct{}{}
 		}
 	}
+	loadCalls := 0
 	for index, statement := range method.Body.List {
 		if isFailClosedProductionProfileGate(statement) {
 			if gateIndex >= 0 {
@@ -158,19 +168,25 @@ func TestProductionCredentialStageOnlyValidatesTheTokenProfile(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if _, credentialAction := credentialAliases[owner.Name]; !credentialAction {
+			if _, retired := retiredAliases[owner.Name]; retired {
+				t.Fatalf("credential stage invokes retired credential action %s.%s", owner.Name, selector.Sel.Name)
+			}
+			if _, worker := workerAliases[owner.Name]; !worker || selector.Sel.Name != "LoadWorkerAuth" {
 				return true
 			}
-			if index <= gateIndex || gateIndex < 0 {
+			loadCalls++
+			if gateIndex < 0 || index <= gateIndex {
 				t.Fatalf("credential action %s.%s appears before the fail-closed profile gate",
 					owner.Name, selector.Sel.Name)
 			}
-			t.Fatalf("credential stage invokes retired credential action %s.%s", owner.Name, selector.Sel.Name)
 			return true
 		})
 	}
 	if gateIndex < 0 {
 		t.Fatal("openRoleCredentials lacks the exact fail-closed production profile gate")
+	}
+	if loadCalls != 1 {
+		t.Fatalf("openRoleCredentials LoadWorkerAuth calls = %d, want 1", loadCalls)
 	}
 }
 

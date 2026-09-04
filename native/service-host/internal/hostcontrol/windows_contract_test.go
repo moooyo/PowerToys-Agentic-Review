@@ -179,7 +179,7 @@ func TestWindowsAcceptEarlyFailuresTerminateAndCloseProvidedNode(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			node := newFakeRetainedNode(testNodeIdentity())
-			owner, err := test.listener.Accept(test.ctx, node)
+			owner, err := test.listener.Accept(test.ctx, node, localrpc.LaunchRuntimeBootstrap{})
 			primaryMatches := test.wantPrimary == nil || errors.Is(err, test.wantPrimary)
 			if owner != nil || !primaryMatches || !node.terminated || !node.closed {
 				t.Fatalf(

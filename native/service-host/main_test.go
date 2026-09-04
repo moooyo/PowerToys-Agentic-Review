@@ -119,7 +119,7 @@ func TestRunDelegatesConfigurationPathToFailClosedPlatform(t *testing.T) {
 	); code != exitPreflight {
 		t.Fatalf("run returned exit code %d", code)
 	}
-	if !strings.Contains(standardError.String(), "preflight failed") {
+	if !strings.Contains(standardError.String(), "runtime startup failed") {
 		t.Fatalf("run returned the wrong error: %q", standardError.String())
 	}
 	if services.calls != 1 || services.command.configPath != path || host.calls != 1 ||

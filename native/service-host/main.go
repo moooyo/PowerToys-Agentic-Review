@@ -89,7 +89,7 @@ func runPreparedCommand(
 	if err := host.Run(ctx, platform.BootstrapOptions{
 		ActualBootstrapPath: command.configPath,
 	}); err != nil {
-		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: preflight failed: %v\n", err)
+		_, _ = fmt.Fprintf(standardError, "AgenticReview.ServiceHost: runtime startup failed: %v\n", err)
 		return exitPreflight
 	}
 	return exitSuccess

@@ -50,35 +50,6 @@ func TestRoleConfigV3LabHasNoProductionConsumer(t *testing.T) {
 	}
 }
 
-func TestProductionBootstrapAndClaimAuthoritySourcesRemainExact(t *testing.T) {
-	root := serviceHostRoot(t)
-	want := map[string]string{
-		"internal/localrpc/protocol.go":                   "c7b347037aa8d58b6f6294ac4de2c876ef6cfe8fd0d9d603101578fb28c33e9c",
-		"internal/localrpc/runtime_bootstrap.go":          "4cc3abc73f06b9cd705d6771964d30319a547c12334a3c134a8d15ab82adcfb4",
-		"internal/localrpc/runtime_bootstrap_exchange.go": "ef0d45fbedd15093d351c1206f6fff9680e8c0e21ac0d26b35e033fd090c5c2d",
-		"internal/localrpc/server.go":                     "6e71b8daf0b9fc36f885eb065f9ac224b604a02893ed3a56f1ced0c5c5d04819",
-		"internal/platform/production_windows.go":         "53257a54a58859481f7b02f8f3be7781b8397d8d2c0e6b7b7dda96ad0b4b211f",
-		"internal/preflight/compose.go":                   "9006f189b32034a200e0cf385fd8a396a215391649054cc01a977197fc73c0c1",
-		"internal/releasemanifest/manifest.go":            "15930884496392fdd8f1fbbbb55f43b87cab1a6254c65c30babcf587b09dc007",
-		"internal/releaseprofile/profile.go":              "e1049d6425c3d8c148cef79583849b9f6b8cef9e7cc61d471ebe6d0544397491",
-	}
-	for relative, expected := range want {
-		document, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		normalized, ok := normalizeSource(document)
-		if !ok {
-			t.Errorf("%s has a noncanonical source encoding", relative)
-			continue
-		}
-		digest := sha256.Sum256(normalized)
-		if actual := hex.EncodeToString(digest[:]); actual != expected {
-			t.Errorf("%s SHA-256 = %s, want %s", relative, actual, expected)
-		}
-	}
-}
-
 func TestLabImplementationSourcesRemainExact(t *testing.T) {
 	root := serviceHostRoot(t)
 	want := map[string]string{

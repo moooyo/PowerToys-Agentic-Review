@@ -115,9 +115,17 @@ type retainedNode interface {
 	RootJobActiveProcessCount() (uint32, error)
 }
 
-type runtimeBootstrapNode interface {
-	retainedNode
+// NodeProcess is the exact retained-process surface HostControl needs. The
+// concrete winprocess.NodeProcess also owns standard I/O and lifecycle waits,
+// but those capabilities remain outside this channel.
+type NodeProcess interface {
+	ProcessID() uint32
+	StableIdentity() winprocess.NodeIdentity
+	ObserveIdentity() (winprocess.NodeIdentity, error)
+	RootJobActiveProcessCount() (uint32, error)
 	ActivateAfterHostControl() error
+	Terminate() error
+	Close() error
 }
 
 type activityGroup struct {
@@ -353,7 +361,7 @@ func verifyConnectedNode(
 func completeRuntimeBootstrap(
 	ctx context.Context,
 	channel localrpc.RuntimeBootstrapChannel,
-	node runtimeBootstrapNode,
+	node NodeProcess,
 	evidence VerificationEvidence,
 	bootstrap localrpc.LaunchRuntimeBootstrap,
 ) (localrpc.CommittedRuntimeBootstrap, error) {
@@ -381,19 +389,6 @@ func completeRuntimeBootstrap(
 		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("commit RuntimeBootstrapV1: %w", err)
 	}
 	return committed, nil
-}
-
-func resolveLaunchRuntimeBootstrap(
-	values []localrpc.LaunchRuntimeBootstrap,
-) (localrpc.LaunchRuntimeBootstrap, error) {
-	switch len(values) {
-	case 1:
-		return values[0], nil
-	case 0:
-		return localrpc.LaunchRuntimeBootstrap{}, errors.New("HostControl launch bootstrap binding is required")
-	default:
-		return localrpc.LaunchRuntimeBootstrap{}, errors.New("HostControl launch bootstrap binding must be supplied exactly once")
-	}
 }
 
 func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence) error {

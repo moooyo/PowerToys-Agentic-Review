@@ -18,17 +18,12 @@ import (
 
 var compositionTestStages = []string{
 	"select-role",
-	"load-release",
 	"prepare-service-security",
-	"verify-installation",
-	"verify-data-root",
+	"load-configuration",
 	"open-credentials",
-	"compose-preflight",
 	"connect-peer",
 	"verify-peer",
-	"finalize-plan",
 	"create-bootstrap",
-	"open-guard",
 	"prepare-host-control",
 	"launch-node",
 	"take-node-stdio",
@@ -75,23 +70,14 @@ func (builder *fakeCompositionBuilder) selectRole(ctx context.Context, _ Bootstr
 	builder.mu.Unlock()
 	return builder.step(ctx, "select-role")
 }
-func (builder *fakeCompositionBuilder) loadReleaseAuthority(ctx context.Context) error {
-	return builder.step(ctx, "load-release")
-}
 func (builder *fakeCompositionBuilder) prepareServiceSecurity(ctx context.Context) error {
 	return builder.step(ctx, "prepare-service-security")
 }
-func (builder *fakeCompositionBuilder) verifyInstallation(ctx context.Context) error {
-	return builder.step(ctx, "verify-installation")
-}
-func (builder *fakeCompositionBuilder) verifyDataRoot(ctx context.Context) error {
-	return builder.step(ctx, "verify-data-root")
+func (builder *fakeCompositionBuilder) loadConfiguration(ctx context.Context) error {
+	return builder.step(ctx, "load-configuration")
 }
 func (builder *fakeCompositionBuilder) openRoleCredentials(ctx context.Context) error {
 	return builder.step(ctx, "open-credentials")
-}
-func (builder *fakeCompositionBuilder) composePreflight(ctx context.Context) error {
-	return builder.step(ctx, "compose-preflight")
 }
 func (builder *fakeCompositionBuilder) connectPeer(ctx context.Context) error {
 	return builder.step(ctx, "connect-peer")
@@ -99,14 +85,8 @@ func (builder *fakeCompositionBuilder) connectPeer(ctx context.Context) error {
 func (builder *fakeCompositionBuilder) verifyPeer(ctx context.Context) error {
 	return builder.step(ctx, "verify-peer")
 }
-func (builder *fakeCompositionBuilder) finalizeRuntimePlan(ctx context.Context) error {
-	return builder.step(ctx, "finalize-plan")
-}
 func (builder *fakeCompositionBuilder) createRuntimeBootstrap(ctx context.Context) error {
 	return builder.step(ctx, "create-bootstrap")
-}
-func (builder *fakeCompositionBuilder) openLaunchGuard(ctx context.Context) error {
-	return builder.step(ctx, "open-guard")
 }
 func (builder *fakeCompositionBuilder) prepareHostControl(ctx context.Context) error {
 	return builder.step(ctx, "prepare-host-control")
@@ -203,7 +183,7 @@ func TestCompositionRunsFixedStagesAndCleansEveryFailure(t *testing.T) {
 	}
 }
 
-func TestCompositionReportsReadyOnceBetweenPreflightAndPeerConnection(t *testing.T) {
+func TestCompositionReportsReadyOnceBetweenLocalSetupAndPeerConnection(t *testing.T) {
 	builder := &fakeCompositionBuilder{
 		failAt:  "connect-peer",
 		failure: errors.New("stop after ready"),
@@ -232,15 +212,15 @@ func TestCompositionReportsReadyOnceBetweenPreflightAndPeerConnection(t *testing
 			break
 		}
 	}
-	if readyCalls != 1 || readyAfter != "compose-preflight" || connectIndex < 0 {
+	if readyCalls != 1 || readyAfter != "open-credentials" || connectIndex < 0 {
 		t.Fatalf("ready calls=%d after=%q events=%v", readyCalls, readyAfter, events)
 	}
 }
 
-func TestCompositionDoesNotReportReadyWhenPreflightFails(t *testing.T) {
+func TestCompositionDoesNotReportReadyWhenLocalSetupFails(t *testing.T) {
 	builder := &fakeCompositionBuilder{
-		failAt:  "compose-preflight",
-		failure: errors.New("preflight failed"),
+		failAt:  "open-credentials",
+		failure: errors.New("local setup failed"),
 	}
 	readyCalls := 0
 	err := runComposition(context.Background(), BootstrapOptions{
