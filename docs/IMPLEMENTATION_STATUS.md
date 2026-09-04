@@ -359,8 +359,9 @@ evidence.
 
 The ProcessHost module now also has local Windows amd64 helper-process evidence for the production
 `CreateProcessW` path, atomic Job Object association, restricted standard-I/O transport, root exit,
-Job drain, and cleanup. Its complete serial test matrix and `go vet` pass locally. This does not
-replace arm64 or installed-service lifecycle evidence.
+descendant termination, Job drain, and cleanup. Its complete serial test matrix and `go vet` pass
+locally, and its Windows arm64 test binary compiles. This does not replace native arm64 execution or
+installed-service lifecycle evidence.
 
 The product data path can proceed in parallel by adding the Worker Control upload client while
 keeping claim selection default-off, then introducing a versioned claim envelope and rollout policy
@@ -714,8 +715,8 @@ Not yet verified:
 - Runtime cleanup for startup verification is complete; remaining release gates are installer
   publication and native Windows execution evidence.
 - The native ProcessHost has local Windows amd64 helper-process verification for process creation,
-  Job Object association, standard I/O, root exit, and Job drain. Descendant termination, resource
-  enforcement, and native arm64 execution remain unexercised. ServiceHost contracts and Windows
+  Job Object association, standard I/O, root exit, descendant termination, and Job drain. Resource
+  enforcement and native arm64 execution remain unexercised. ServiceHost contracts and Windows
   building blocks compile for
   x64 and arm64, but their Named Pipe, filesystem, process/token DACL,
   root Job, peer service PID/token check, fixed Worker authentication profile, system Server-certificate verification,

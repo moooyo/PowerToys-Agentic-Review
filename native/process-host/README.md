@@ -38,4 +38,6 @@ go vet -p 1 ./...
 
 The Windows integration test launches the Go test helper through the production `CreateProcessW`
 path, observes it in the configured Job Object while it is blocked on standard input, then verifies
-standard-I/O closure, process exit, Job drain, and handle cleanup.
+standard-I/O closure, process exit, Job drain, and handle cleanup. A second test has that helper
+spawn a real descendant, verifies both PIDs belong to the Job, terminates the Job, and confirms the
+root, descendant, and Job all reach their terminal state without a residual process.
