@@ -17,7 +17,6 @@ import (
 func TestNewClientPinsServerTLSWithoutAClientCertificate(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://attacker.invalid:8080")
 	configuration := validBearerConfig(t)
-	originalRootByte := configuration.RootCertificateDER[0][0]
 	client, err := NewClient(configuration)
 	if err != nil {
 		t.Fatalf("NewClient returned an error: %v", err)
@@ -32,20 +31,12 @@ func TestNewClientPinsServerTLSWithoutAClientCertificate(t *testing.T) {
 		transport.TLSClientConfig.MinVersion != tls.VersionTLS13 || transport.TLSClientConfig.InsecureSkipVerify {
 		t.Fatal("Bearer transport did not require direct verified TLS 1.3")
 	}
-	if transport.TLSClientConfig.ServerName != configuration.ServerName ||
-		len(transport.TLSClientConfig.RootCAs.Subjects()) != 1 {
-		t.Fatal("Bearer transport did not retain the fixed Server name and private root pool")
+	if transport.TLSClientConfig.ServerName != "" || transport.TLSClientConfig.RootCAs != nil {
+		t.Fatal("Bearer transport did not preserve URL-host verification with system root trust")
 	}
 	if len(transport.TLSClientConfig.Certificates) != 0 ||
 		transport.TLSClientConfig.GetClientCertificate != nil {
 		t.Fatal("Bearer transport installed a TLS client credential")
-	}
-	configuration.RootCertificateDER[0][0] ^= 0xff
-	if configuration.RootCertificateDER[0][0] == originalRootByte {
-		t.Fatal("test did not mutate caller-owned root DER")
-	}
-	if len(transport.TLSClientConfig.RootCAs.Subjects()) != 1 {
-		t.Fatal("Bearer transport root pool changed after caller mutation")
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,9 +34,6 @@ const (
 	maximumConfiguredTimeout     = 10 * time.Minute
 	maximumConfiguredConcurrency = 1024
 	maximumResponseHeaders       = 64 * 1024
-	maximumRootCertificates      = 32
-	maximumRootCertificateBytes  = 64 * 1024
-	maximumRootCertificatesBytes = 512 * 1024
 )
 
 var (
@@ -64,12 +60,10 @@ type Limits struct {
 
 // Config selects the per-Worker Token transport.
 type Config struct {
-	Origin             string
-	ServerName         string
-	RootCertificateDER [][]byte
-	WorkerNodeID       string
-	WorkerAuth         WorkerAuth
-	Limits             Limits
+	Origin       string
+	WorkerNodeID string
+	WorkerAuth   WorkerAuth
+	Limits       Limits
 }
 
 type RegisterRequest struct {
@@ -179,13 +173,6 @@ func NewClient(config Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateServerName(config.ServerName); err != nil {
-		return nil, err
-	}
-	rootCAs, err := prepareRootCAs(config.RootCertificateDER)
-	if err != nil {
-		return nil, err
-	}
 	if err := validateLimits(config.Limits); err != nil {
 		return nil, err
 	}
@@ -201,8 +188,7 @@ func NewClient(config Config) (*Client, error) {
 
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS13,
-		ServerName: config.ServerName,
-		RootCAs:    rootCAs,
+		RootCAs:    nil,
 	}
 	dialTimeout := min(config.Limits.RequestTimeout, 30*time.Second)
 	transport := newHTTPTransport(tlsConfig, config.Limits, dialTimeout)
@@ -680,55 +666,6 @@ func parseOrigin(raw string) (url.URL, error) {
 	}
 	origin.Path = ""
 	return *origin, nil
-}
-
-func prepareRootCAs(encoded [][]byte) (*x509.CertPool, error) {
-	if len(encoded) == 0 || len(encoded) > maximumRootCertificates {
-		return nil, configurationError("RootCertificateDER count is outside the supported range", nil)
-	}
-	pool := x509.NewCertPool()
-	totalBytes := 0
-	for _, der := range encoded {
-		if len(der) == 0 || len(der) > maximumRootCertificateBytes {
-			return nil, configurationError("RootCertificateDER contains an invalid certificate size", nil)
-		}
-		totalBytes += len(der)
-		if totalBytes > maximumRootCertificatesBytes {
-			return nil, configurationError("RootCertificateDER exceeds its aggregate byte limit", nil)
-		}
-		certificate, err := x509.ParseCertificate(bytes.Clone(der))
-		if err != nil {
-			return nil, configurationError("RootCertificateDER contains an invalid certificate", nil)
-		}
-		pool.AddCert(certificate)
-	}
-	return pool, nil
-}
-
-func validateServerName(value string) error {
-	if value == "" || len(value) > 253 || strings.TrimSpace(value) != value {
-		return configurationError("ServerName must be a bounded DNS name or IP address", nil)
-	}
-	if net.ParseIP(value) != nil {
-		return nil
-	}
-	if strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
-		return configurationError("ServerName must use canonical DNS spelling", nil)
-	}
-	for _, label := range strings.Split(value, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return configurationError("ServerName contains an invalid DNS label", nil)
-		}
-		for _, character := range label {
-			if (character >= 'A' && character <= 'Z') ||
-				(character >= 'a' && character <= 'z') ||
-				(character >= '0' && character <= '9') || character == '-' {
-				continue
-			}
-			return configurationError("ServerName contains an invalid DNS character", nil)
-		}
-	}
-	return nil
 }
 
 func validateLimits(limits Limits) error {
