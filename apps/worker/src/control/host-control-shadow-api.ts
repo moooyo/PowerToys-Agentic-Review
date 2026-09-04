@@ -14,25 +14,19 @@ import {
   assertHostControlRouteIdentity,
   callHostControlOperation,
   encodeHostControlRequest,
-  type LocalAuthorityDigestSigner,
   validateHostControlResponse,
 } from "./host-control-api-common.js";
 
-type ControlShadowRpcClient = Pick<
-  ControlHostControlClient,
-  "instanceHeartbeat" | "register" | "signLocalDigest"
->;
+type ControlShadowRpcClient = Pick<ControlHostControlClient, "instanceHeartbeat" | "register">;
 
-/** Exposes only the three HostControl operations needed by a zero-slot shadow. */
-export class HostControlShadowApi implements LocalAuthorityDigestSigner {
+/** Exposes only the HostControl operations needed by a zero-slot shadow. */
+export class HostControlShadowApi {
   readonly #register: ControlShadowRpcClient["register"];
   readonly #instanceHeartbeat: ControlShadowRpcClient["instanceHeartbeat"];
-  readonly #signLocalDigest: ControlShadowRpcClient["signLocalDigest"];
 
   public constructor(client: ControlShadowRpcClient) {
     this.#register = client.register.bind(client);
     this.#instanceHeartbeat = client.instanceHeartbeat.bind(client);
-    this.#signLocalDigest = client.signLocalDigest.bind(client);
   }
 
   public async register(
@@ -78,12 +72,6 @@ export class HostControlShadowApi implements LocalAuthorityDigestSigner {
       WorkerHeartbeatResponseSchema,
       response,
       "heartbeat response",
-    );
-  }
-
-  public async signLocalDigest(digestSha256: string, signal?: AbortSignal): Promise<string> {
-    return await callHostControlOperation(() =>
-      this.#signLocalDigest(digestSha256, signal === undefined ? {} : { signal }),
     );
   }
 }

@@ -8,10 +8,6 @@ import {
   type HostControlOpaqueJsonDescriptor,
 } from "../service-host/opaque-json.js";
 
-export interface LocalAuthorityDigestSigner {
-  signLocalDigest(digestSha256: string, signal?: AbortSignal): Promise<string>;
-}
-
 registerWorkerContractFormats();
 
 export async function callHostControlOperation<T>(operation: () => Promise<T>): Promise<T> {

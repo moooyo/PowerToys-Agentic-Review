@@ -1,11 +1,4 @@
-import {
-  createHash,
-  createPublicKey,
-  type KeyObject,
-  sign as nodeSign,
-  verify as nodeVerify,
-  timingSafeEqual,
-} from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -20,13 +13,7 @@ import {
 export const EXECUTION_CAPABILITY_VERSION = 1 as const;
 export const RENEWAL_GRANT_VERSION = 1 as const;
 export const LOCAL_CAPABILITY_AUDIENCE = "agentic-review/windows-executor/v1" as const;
-export const LOCAL_CAPABILITY_SIGNATURE_ALGORITHM = "ECDSA_P256_SHA256_P1363_LOW_S" as const;
 export const LOCAL_GRANT_MAXIMUM_DURATION_MS = 45_000;
-
-export type LocalAuthoritySigningDomain =
-  | "ExecutionCapabilityV1"
-  | "RenewalGrantV1"
-  | "HandshakeTranscriptV1";
 
 export const localCapabilityResourceBounds = Object.freeze({
   maximumProcesses: Object.freeze({ minimum: 1, maximum: 1_024 }),
@@ -44,9 +31,6 @@ const sha256Pattern = "^[a-f0-9]{64}$";
 const decimalPattern = "^(?:0|[1-9][0-9]{0,20})$";
 const repositoryPattern = "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$";
 const recipeComponentPattern = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$";
-const p1363SignaturePattern = "^[A-Za-z0-9_-]{86}$";
-const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-const p256HalfOrder = p256Order >> 1n;
 
 const SafeNonNegativeIntegerSchema = Type.Integer({ minimum: 0, maximum: safeIntegerMaximum });
 const SafePositiveIntegerSchema = Type.Integer({ minimum: 1, maximum: safeIntegerMaximum });
@@ -54,12 +38,6 @@ const UuidV4Schema = Type.String({ minLength: 36, maxLength: 36, pattern: uuidV4
 const Sha256Schema = Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 const Random256BitSchema = Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 const DecimalSchema = Type.String({ minLength: 1, maxLength: 21, pattern: decimalPattern });
-
-export const LocalAuthoritySignatureSchema = Type.String({
-  minLength: 86,
-  maxLength: 86,
-  pattern: p1363SignaturePattern,
-});
 
 export const LocalCapabilityResourceLimitsSchema = Type.Object(
   {
@@ -136,8 +114,6 @@ export const ExecutionCapabilityV1Schema = Type.Object(
   {
     capabilityVersion: Type.Literal(EXECUTION_CAPABILITY_VERSION),
     canonicalizationVersion: Type.Literal(LOCAL_CANONICAL_JSON_VERSION),
-    signatureAlgorithm: Type.Literal(LOCAL_CAPABILITY_SIGNATURE_ALGORITHM),
-    keyId: Sha256Schema,
     audience: Type.Literal(LOCAL_CAPABILITY_AUDIENCE),
     capabilityId: Random256BitSchema,
     nonce: Random256BitSchema,
@@ -172,8 +148,6 @@ export const RenewalGrantV1Schema = Type.Object(
   {
     renewalVersion: Type.Literal(RENEWAL_GRANT_VERSION),
     canonicalizationVersion: Type.Literal(LOCAL_CANONICAL_JSON_VERSION),
-    signatureAlgorithm: Type.Literal(LOCAL_CAPABILITY_SIGNATURE_ALGORITHM),
-    keyId: Sha256Schema,
     audience: Type.Literal(LOCAL_CAPABILITY_AUDIENCE),
     renewalId: Random256BitSchema,
     capabilityId: Random256BitSchema,
@@ -204,24 +178,6 @@ export const RenewalGrantV1Schema = Type.Object(
 );
 export type RenewalGrantV1 = Static<typeof RenewalGrantV1Schema>;
 
-export const SignedExecutionCapabilityV1Schema = Type.Object(
-  {
-    capability: ExecutionCapabilityV1Schema,
-    signature: LocalAuthoritySignatureSchema,
-  },
-  { additionalProperties: false },
-);
-export type SignedExecutionCapabilityV1 = Static<typeof SignedExecutionCapabilityV1Schema>;
-
-export const SignedRenewalGrantV1Schema = Type.Object(
-  {
-    grant: RenewalGrantV1Schema,
-    signature: LocalAuthoritySignatureSchema,
-  },
-  { additionalProperties: false },
-);
-export type SignedRenewalGrantV1 = Static<typeof SignedRenewalGrantV1Schema>;
-
 export class LocalCapabilityError extends Error {
   public constructor(
     public readonly code:
@@ -229,8 +185,6 @@ export class LocalCapabilityError extends Error {
       | "CAPABILITY_LIMIT_INVALID"
       | "CAPABILITY_TIME_INVALID"
       | "CAPABILITY_CONTEXT_MISMATCH"
-      | "CAPABILITY_KEY_INVALID"
-      | "CAPABILITY_SIGNATURE_INVALID"
       | "CAPABILITY_EXPIRED"
       | "RENEWAL_SEQUENCE_INVALID",
     message: string,
@@ -240,8 +194,7 @@ export class LocalCapabilityError extends Error {
   }
 }
 
-export interface CapabilityVerificationContext {
-  readonly expectedKeyId: string;
+export interface CapabilityValidationContext {
   readonly expectedWorkerNodeId: string;
   readonly expectedWorkerInstanceId: string;
   readonly expectedExecutorBootId: string;
@@ -250,36 +203,36 @@ export interface CapabilityVerificationContext {
   readonly maximumClockSkewMs?: number;
 }
 
-export interface RenewalVerificationContext extends CapabilityVerificationContext {
-  readonly capability: VerifiedExecutionCapability;
+export interface RenewalValidationContext extends CapabilityValidationContext {
+  readonly capability: ValidatedExecutionCapability;
   readonly expectedPreviousGrantSha256: string;
   readonly expectedPreviousGrantSequence: number;
   readonly expectedGrantSequence: number;
   readonly expectedPreviousServerHeartbeatSequence: number;
 }
 
-declare const verifiedExecutionCapabilityBrand: unique symbol;
-declare const verifiedRenewalGrantBrand: unique symbol;
+declare const validatedExecutionCapabilityBrand: unique symbol;
+declare const validatedRenewalGrantBrand: unique symbol;
 
-export type VerifiedExecutionCapability = DeepReadonly<ExecutionCapabilityV1> & {
-  readonly [verifiedExecutionCapabilityBrand]: true;
+export type ValidatedExecutionCapability = DeepReadonly<ExecutionCapabilityV1> & {
+  readonly [validatedExecutionCapabilityBrand]: true;
 };
 
-export type VerifiedRenewalGrant = DeepReadonly<RenewalGrantV1> & {
-  readonly [verifiedRenewalGrantBrand]: true;
+export type ValidatedRenewalGrant = DeepReadonly<RenewalGrantV1> & {
+  readonly [validatedRenewalGrantBrand]: true;
 };
 
-const verifiedExecutionCapabilities = new WeakSet<object>();
-const verifiedRenewalGrants = new WeakSet<object>();
+const validatedExecutionCapabilities = new WeakSet<object>();
+const validatedRenewalGrants = new WeakSet<object>();
 
-export function isVerifiedExecutionCapability(
+export function isValidatedExecutionCapability(
   value: unknown,
-): value is VerifiedExecutionCapability {
-  return typeof value === "object" && value !== null && verifiedExecutionCapabilities.has(value);
+): value is ValidatedExecutionCapability {
+  return typeof value === "object" && value !== null && validatedExecutionCapabilities.has(value);
 }
 
-export function isVerifiedRenewalGrant(value: unknown): value is VerifiedRenewalGrant {
-  return typeof value === "object" && value !== null && verifiedRenewalGrants.has(value);
+export function isValidatedRenewalGrant(value: unknown): value is ValidatedRenewalGrant {
+  return typeof value === "object" && value !== null && validatedRenewalGrants.has(value);
 }
 
 export function validateExecutionCapability(value: unknown): DeepReadonly<ExecutionCapabilityV1> {
@@ -297,7 +250,7 @@ export function validateExecutionCapability(value: unknown): DeepReadonly<Execut
   ) {
     throw capabilityError(
       "CAPABILITY_TIME_INVALID",
-      "Capability hard deadline exceeds its signed timeout ceiling.",
+      "Capability hard deadline exceeds its declared timeout ceiling.",
     );
   }
   if (
@@ -352,75 +305,31 @@ export function digestRenewalGrant(grant: unknown): string {
   return createCanonicalJsonDocument(validateRenewalGrant(grant)).sha256;
 }
 
-export function signExecutionCapability(
-  capabilityValue: unknown,
-  privateKey: KeyObject,
-): DeepReadonly<SignedExecutionCapabilityV1> {
-  const capability = validateExecutionCapability(capabilityValue);
-  assertP256PrivateKey(privateKey);
-  assertLocalAuthorityKeyIdMatches(capability.keyId, privateKey);
-  const signature = signLowS(
-    createLocalAuthoritySigningBytes("ExecutionCapabilityV1", capability),
-    privateKey,
-  );
-  return deepFreezeJson({ capability, signature });
-}
-
-export function signRenewalGrant(
-  grantValue: unknown,
-  privateKey: KeyObject,
-): DeepReadonly<SignedRenewalGrantV1> {
-  const grant = validateRenewalGrant(grantValue);
-  assertP256PrivateKey(privateKey);
-  assertLocalAuthorityKeyIdMatches(grant.keyId, privateKey);
-  const signature = signLowS(createLocalAuthoritySigningBytes("RenewalGrantV1", grant), privateKey);
-  return deepFreezeJson({ grant, signature });
-}
-
-export function verifyExecutionCapability(
-  signedValue: unknown,
-  publicKey: KeyObject,
-  context: CapabilityVerificationContext,
-): VerifiedExecutionCapability {
-  const signed = normalizeSchemaValue<SignedExecutionCapabilityV1>(
-    signedValue,
-    SignedExecutionCapabilityV1Schema,
-    "CAPABILITY_SCHEMA_INVALID",
-  );
-  const capability = validateExecutionCapability(signed.capability);
-  assertP256PublicKey(publicKey);
-  assertLocalAuthorityKeyIdMatches(capability.keyId, publicKey);
-  verifyLocalAuthoritySignature("ExecutionCapabilityV1", capability, signed.signature, publicKey);
+export function validateExecutionCapabilityForContext(
+  value: unknown,
+  context: CapabilityValidationContext,
+): ValidatedExecutionCapability {
+  const capability = validateExecutionCapability(value);
   validateContext(capability, context);
-  verifiedExecutionCapabilities.add(capability);
-  return capability as VerifiedExecutionCapability;
+  validatedExecutionCapabilities.add(capability);
+  return capability as ValidatedExecutionCapability;
 }
 
-export function verifyRenewalGrant(
-  signedValue: unknown,
-  publicKey: KeyObject,
-  context: RenewalVerificationContext,
-): VerifiedRenewalGrant {
-  const signed = normalizeSchemaValue<SignedRenewalGrantV1>(
-    signedValue,
-    SignedRenewalGrantV1Schema,
-    "CAPABILITY_SCHEMA_INVALID",
-  );
-  const grant = validateRenewalGrant(signed.grant);
-  assertP256PublicKey(publicKey);
-  assertLocalAuthorityKeyIdMatches(grant.keyId, publicKey);
-  verifyLocalAuthoritySignature("RenewalGrantV1", grant, signed.signature, publicKey);
+export function validateRenewalGrantForContext(
+  value: unknown,
+  context: RenewalValidationContext,
+): ValidatedRenewalGrant {
+  const grant = validateRenewalGrant(value);
   validateContext(grant, context);
   const capability = context.capability;
-  if (!isVerifiedExecutionCapability(capability)) {
+  if (!isValidatedExecutionCapability(capability)) {
     throw capabilityError(
       "CAPABILITY_CONTEXT_MISMATCH",
-      "Renewal verification requires an authenticated initial capability.",
+      "Renewal validation requires a context-validated initial capability.",
     );
   }
   for (const key of [
     "capabilityId",
-    "keyId",
     "workerNodeId",
     "workerInstanceId",
     "executorBootId",
@@ -463,89 +372,8 @@ export function verifyRenewalGrant(
       "Renewal grant does not bind the initial capability.",
     );
   }
-  verifiedRenewalGrants.add(grant);
-  return grant as VerifiedRenewalGrant;
-}
-
-export function deriveCapabilityPublicKey(privateKey: KeyObject): KeyObject {
-  assertP256PrivateKey(privateKey);
-  return createPublicKey(privateKey);
-}
-
-export function deriveCapabilityKeyId(key: KeyObject): string {
-  const publicKey = key.type === "private" ? deriveCapabilityPublicKey(key) : key;
-  assertP256PublicKey(publicKey);
-  const spki = publicKey.export({ format: "der", type: "spki" });
-  return createHash("sha256").update(spki).digest("hex");
-}
-
-export function createExecutionCapabilitySigningBytes(capability: unknown): Buffer {
-  return createLocalAuthoritySigningBytes(
-    "ExecutionCapabilityV1",
-    validateExecutionCapability(capability),
-  );
-}
-
-export function createRenewalGrantSigningBytes(grant: unknown): Buffer {
-  return createLocalAuthoritySigningBytes("RenewalGrantV1", validateRenewalGrant(grant));
-}
-
-// Native CNG adapters sign this 32-byte digest directly with ECDSA P-256. They must not request
-// CNG to hash this digest again. Node's sign helper instead hashes the corresponding signing bytes.
-export function createExecutionCapabilitySigningDigest(capability: unknown): Buffer {
-  return createLocalAuthoritySigningDigest(
-    "ExecutionCapabilityV1",
-    validateExecutionCapability(capability),
-  );
-}
-
-export function createRenewalGrantSigningDigest(grant: unknown): Buffer {
-  return createLocalAuthoritySigningDigest("RenewalGrantV1", validateRenewalGrant(grant));
-}
-
-export function createLocalAuthoritySigningBytes(
-  type: LocalAuthoritySigningDomain,
-  value: unknown,
-): Buffer {
-  const domain = Buffer.from(
-    `AgenticReview.LocalAuthority/${type}/ECDSA-P256-SHA256/P1363/1`,
-    "ascii",
-  );
-  const payload = Buffer.from(serializeCanonicalJson(value), "utf8");
-  const lengths = Buffer.allocUnsafe(8);
-  lengths.writeUInt32BE(domain.byteLength, 0);
-  lengths.writeUInt32BE(payload.byteLength, 4);
-  return Buffer.concat([lengths, domain, payload]);
-}
-
-export function createLocalAuthoritySigningDigest(
-  type: LocalAuthoritySigningDomain,
-  value: unknown,
-): Buffer {
-  return createHash("sha256").update(createLocalAuthoritySigningBytes(type, value)).digest();
-}
-
-/** Encodes a ServiceHost signature only when it is already canonical 64-byte P1363 low-S. */
-export function encodeLocalAuthoritySignature(signature: Uint8Array): string {
-  if (!(signature instanceof Uint8Array) || signature.byteLength !== 64) {
-    throw capabilityError(
-      "CAPABILITY_SIGNATURE_INVALID",
-      "Local authority signature must be exactly 64 bytes.",
-    );
-  }
-  const encoded = Buffer.from(signature).toString("base64url");
-  decodeCanonicalSignature(encoded);
-  return encoded;
-}
-
-export function verifyLocalAuthoritySignature(
-  type: LocalAuthoritySigningDomain,
-  value: unknown,
-  signature: string,
-  publicKey: KeyObject,
-): void {
-  assertP256PublicKey(publicKey);
-  verifyLowS(createLocalAuthoritySigningBytes(type, value), signature, publicKey);
+  validatedRenewalGrants.add(grant);
+  return grant as ValidatedRenewalGrant;
 }
 
 function normalizeSchemaValue<T>(
@@ -557,11 +385,11 @@ function normalizeSchemaValue<T>(
   try {
     canonical = serializeCanonicalJson(value);
   } catch {
-    throw capabilityError(code, "Signed local authority has an invalid canonical value.");
+    throw capabilityError(code, "Local authorization has an invalid canonical value.");
   }
   const normalized = JSON.parse(canonical) as unknown;
   if (!Value.Check(schema, normalized)) {
-    throw capabilityError(code, "Signed local authority does not match its strict schema.");
+    throw capabilityError(code, "Local authorization does not match its strict schema.");
   }
   return normalized as T;
 }
@@ -620,7 +448,6 @@ function validateGrantTimes(value: {
 
 function validateContext(
   value: {
-    readonly keyId: string;
     readonly workerNodeId: string;
     readonly workerInstanceId: string;
     readonly executorBootId: string;
@@ -628,7 +455,7 @@ function validateContext(
     readonly issuedAtUnixMs: number;
     readonly grantExpiresAtUnixMs: number;
   },
-  context: CapabilityVerificationContext,
+  context: CapabilityValidationContext,
 ): void {
   const maximumClockSkewMs = context.maximumClockSkewMs ?? 5_000;
   if (
@@ -637,134 +464,29 @@ function validateContext(
     maximumClockSkewMs < 0 ||
     maximumClockSkewMs > LOCAL_GRANT_MAXIMUM_DURATION_MS
   ) {
-    throw new TypeError("Capability verification time context is invalid");
+    throw new TypeError("Capability validation time context is invalid");
   }
   if (
-    value.keyId !== context.expectedKeyId ||
     value.workerNodeId !== context.expectedWorkerNodeId ||
     value.workerInstanceId !== context.expectedWorkerInstanceId ||
     value.executorBootId !== context.expectedExecutorBootId ||
     value.sessionId !== context.expectedSessionId
   ) {
-    throw capabilityError(
-      "CAPABILITY_CONTEXT_MISMATCH",
-      "Signed local authority context is invalid.",
-    );
+    throw capabilityError("CAPABILITY_CONTEXT_MISMATCH", "Local authorization context is invalid.");
   }
   if (value.issuedAtUnixMs > context.nowUnixMs + maximumClockSkewMs) {
     throw capabilityError(
       "CAPABILITY_TIME_INVALID",
-      "Signed local authority was issued in the future.",
+      "Local authorization was issued in the future.",
     );
   }
   if (value.grantExpiresAtUnixMs <= context.nowUnixMs) {
-    throw capabilityError("CAPABILITY_EXPIRED", "Signed local authority has expired.");
+    throw capabilityError("CAPABILITY_EXPIRED", "Local authorization has expired.");
   }
   if (value.grantExpiresAtUnixMs - context.nowUnixMs > LOCAL_GRANT_MAXIMUM_DURATION_MS) {
     throw capabilityError(
       "CAPABILITY_TIME_INVALID",
-      "Signed local authority exceeds the maximum receipt-to-expiry duration.",
-    );
-  }
-}
-
-function signLowS(bytes: Uint8Array, privateKey: KeyObject): string {
-  const raw = nodeSign("sha256", bytes, { key: privateKey, dsaEncoding: "ieee-p1363" });
-  if (raw.byteLength !== 64) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "Signer returned an invalid signature.");
-  }
-  const canonical = canonicalizeLowS(raw);
-  return canonical.toString("base64url");
-}
-
-function verifyLowS(bytes: Uint8Array, encoded: string, publicKey: KeyObject): void {
-  const signature = decodeCanonicalSignature(encoded);
-  if (!nodeVerify("sha256", bytes, { key: publicKey, dsaEncoding: "ieee-p1363" }, signature)) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "Local authority signature is invalid.");
-  }
-}
-
-function canonicalizeLowS(signature: Uint8Array): Buffer {
-  const result = Buffer.from(signature);
-  const r = readUnsignedBigEndian(result.subarray(0, 32));
-  let s = readUnsignedBigEndian(result.subarray(32));
-  if (r <= 0n || r >= p256Order || s <= 0n || s >= p256Order) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "ECDSA signature scalars are invalid.");
-  }
-  if (s > p256HalfOrder) {
-    s = p256Order - s;
-    writeUnsignedBigEndian(s, result, 32, 32);
-  }
-  return result;
-}
-
-function decodeCanonicalSignature(encoded: string): Buffer {
-  if (!new RegExp(p1363SignaturePattern, "u").test(encoded)) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "Signature encoding is invalid.");
-  }
-  const signature = Buffer.from(encoded, "base64url");
-  if (signature.byteLength !== 64 || signature.toString("base64url") !== encoded) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "Signature encoding is not canonical.");
-  }
-  const r = readUnsignedBigEndian(signature.subarray(0, 32));
-  const s = readUnsignedBigEndian(signature.subarray(32));
-  if (r <= 0n || r >= p256Order || s <= 0n || s > p256HalfOrder) {
-    throw capabilityError(
-      "CAPABILITY_SIGNATURE_INVALID",
-      "Signature is not canonical low-S ECDSA.",
-    );
-  }
-  return signature;
-}
-
-function readUnsignedBigEndian(bytes: Uint8Array): bigint {
-  let value = 0n;
-  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
-  return value;
-}
-
-function writeUnsignedBigEndian(
-  value: bigint,
-  target: Uint8Array,
-  offset: number,
-  length: number,
-): void {
-  let remaining = value;
-  for (let index = offset + length - 1; index >= offset; index -= 1) {
-    target[index] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
-  if (remaining !== 0n) {
-    throw capabilityError("CAPABILITY_SIGNATURE_INVALID", "ECDSA scalar does not fit.");
-  }
-}
-
-function assertP256PrivateKey(key: KeyObject): void {
-  if (key.type !== "private" || !isP256EcKey(key)) {
-    throw capabilityError("CAPABILITY_KEY_INVALID", "A P-256 private key is required.");
-  }
-}
-
-function assertP256PublicKey(key: KeyObject): void {
-  if (key.type !== "public" || !isP256EcKey(key)) {
-    throw capabilityError("CAPABILITY_KEY_INVALID", "A P-256 public key is required.");
-  }
-}
-
-function isP256EcKey(key: KeyObject): boolean {
-  return (
-    key.asymmetricKeyType === "ec" &&
-    (key.asymmetricKeyDetails?.namedCurve === "prime256v1" ||
-      key.asymmetricKeyDetails?.namedCurve === "P-256")
-  );
-}
-
-export function assertLocalAuthorityKeyIdMatches(keyId: string, key: KeyObject): void {
-  const derived = deriveCapabilityKeyId(key);
-  if (!secureHexEqual(keyId, derived)) {
-    throw capabilityError(
-      "CAPABILITY_KEY_INVALID",
-      "Signed authority keyId does not match the P-256 SubjectPublicKeyInfo digest.",
+      "Local authorization exceeds the maximum receipt-to-expiry duration.",
     );
   }
 }

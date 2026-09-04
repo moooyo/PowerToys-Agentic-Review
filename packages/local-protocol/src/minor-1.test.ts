@@ -2,7 +2,6 @@ import type { TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { LOCAL_CAPABILITY_SIGNATURE_ALGORITHM } from "./capability.js";
 import {
   decodeLocalFrame,
   encodeLocalFrame,
@@ -15,17 +14,10 @@ import {
   LocalMessageType,
   LocalProtocolError,
 } from "./framing.js";
-import {
-  CompleteMessageSchema,
-  ControlProofMessageSchema,
-  HelloMessageSchema,
-  LOCAL_HANDSHAKE_AUDIENCE,
-  localMessageSchemas,
-} from "./messages.js";
+import { CompleteMessageSchema, HelloMessageSchema, localMessageSchemas } from "./messages.js";
 import {
   type CompleteMessageMinor1,
   CompleteMessageMinor1Schema,
-  ControlProofMessageMinor1Schema,
   decodeLocalFrameMinor1,
   encodeLocalFrameMinor1,
   HelloMessageMinor1Schema,
@@ -59,7 +51,7 @@ describe("dormant ARWX protocol minor 1 profile", () => {
   it("pins an exact minor-one schema for every message type", () => {
     expect(LOCAL_PROTOCOL_MINOR_VERSION).toBe(0);
     expect(LOCAL_PROTOCOL_MINOR_1_VERSION).toBe(1);
-    expect(Object.keys(localMessageSchemasMinor1)).toHaveLength(20);
+    expect(Object.keys(localMessageSchemasMinor1)).toHaveLength(19);
 
     for (const [messageType, schema] of Object.entries(localMessageSchemasMinor1)) {
       const properties = (schema as { readonly properties: Record<string, unknown> }).properties;
@@ -82,8 +74,7 @@ describe("dormant ARWX protocol minor 1 profile", () => {
         if (
           name === "protocolMinor" ||
           (Number(messageType) === LocalMessageType.Hello &&
-            (name === "minimumMinor" || name === "maximumMinor")) ||
-          (Number(messageType) === LocalMessageType.ControlProof && name === "signedProof")
+            (name === "minimumMinor" || name === "maximumMinor"))
         ) {
           continue;
         }
@@ -120,7 +111,7 @@ describe("dormant ARWX protocol minor 1 profile", () => {
     expect(minorZeroReason.anyOf).toHaveLength(originalLength);
   });
 
-  it("accepts a generated witness and rejects the opposite profile for all 20 messages", () => {
+  it("accepts a generated witness and rejects the opposite profile for all 19 messages", () => {
     for (const [messageType, minorOneSchema] of Object.entries(localMessageSchemasMinor1)) {
       const minorZeroSchema =
         localMessageSchemas[Number(messageType) as keyof typeof localMessageSchemas];
@@ -142,37 +133,11 @@ describe("dormant ARWX protocol minor 1 profile", () => {
     }
   });
 
-  it("keeps minor-zero and minor-one Hello and ControlProof schemas disjoint", () => {
+  it("keeps minor-zero and minor-one Hello schemas disjoint", () => {
     const hello = helloMinor1();
-    const helloAck = {
-      ...session,
-      controlNonce: hello.controlNonce,
-      executorNonce: digest("4"),
-      executorManifestSha256: hello.controlManifestSha256,
-      executorPolicySha256: digest("6"),
-      executorPreflightSha256: digest("7"),
-      maximumSlots: 4,
-    };
-    const controlProof = {
-      ...session,
-      signedProof: {
-        transcript: {
-          transcriptVersion: 1,
-          canonicalizationVersion: 1,
-          signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-          keyId: digest("8"),
-          audience: LOCAL_HANDSHAKE_AUDIENCE,
-          hello,
-          helloAck,
-        },
-        signature: "A".repeat(86),
-      },
-    };
 
     expect(Value.Check(HelloMessageMinor1Schema, hello)).toBe(true);
     expect(Value.Check(HelloMessageSchema, hello)).toBe(false);
-    expect(Value.Check(ControlProofMessageMinor1Schema, controlProof)).toBe(true);
-    expect(Value.Check(ControlProofMessageSchema, controlProof)).toBe(false);
 
     for (const [minimumMinor, maximumMinor] of [
       [0, 0],

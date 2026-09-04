@@ -967,18 +967,6 @@ describe("HostControl client", () => {
     await expect(connecting).rejects.toMatchObject({ code: "CONNECT_TIMEOUT" });
     expect(connectorCancellation?.aborted).toBe(true);
   });
-
-  it("validates the signing digest and low-S response", async () => {
-    const { client, host } = await connect();
-    await expect(client.signLocalDigest("A".repeat(64))).rejects.toMatchObject({
-      code: "REQUEST_INVALID",
-    });
-    const signing = client.signLocalDigest("a".repeat(64));
-    await waitForWrites(host, 1);
-    host.respond(success("call:1", { signatureP1363: Buffer.alloc(64, 1).toString("base64url") }));
-    await expect(signing).resolves.toHaveLength(86);
-    await client.close();
-  });
 });
 
 function success(requestId: string, body: object): Record<string, unknown> {

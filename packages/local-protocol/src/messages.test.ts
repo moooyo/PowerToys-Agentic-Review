@@ -1,19 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createCanonicalJsonDocument, serializeCanonicalJson } from "./canonical.js";
-import {
-  type ExecutionCapabilityV1,
-  LOCAL_CAPABILITY_AUDIENCE,
-  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-  sha256Hex,
-} from "./capability.js";
+import { type ExecutionCapabilityV1, LOCAL_CAPABILITY_AUDIENCE, sha256Hex } from "./capability.js";
 import { LocalMessageType } from "./framing.js";
 import {
   assertLocalMessageSender,
   type ExecutorJobEnvelopeV1,
   encodeArtifactChunkData,
-  HANDSHAKE_TRANSCRIPT_VERSION,
   LOCAL_ARTIFACT_CHUNK_MAXIMUM_BYTES,
-  LOCAL_HANDSHAKE_AUDIENCE,
   LocalMessageValidationError,
   validateLocalMessagePayload,
 } from "./messages.js";
@@ -124,8 +117,6 @@ function capability(localEnvelope: ExecutorJobEnvelopeV1): ExecutionCapabilityV1
   return {
     capabilityVersion: 1,
     canonicalizationVersion: 1,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId: hex("a"),
     audience: LOCAL_CAPABILITY_AUDIENCE,
     capabilityId: hex("1"),
     nonce: hex("2"),
@@ -176,10 +167,6 @@ describe("local protocol message schemas", () => {
     expect(() => assertLocalMessageSender(LocalMessageType.StartAttempt, "executor")).toThrow(
       LocalMessageValidationError,
     );
-    expect(() => assertLocalMessageSender(LocalMessageType.ControlProof, "control")).not.toThrow();
-    expect(() => assertLocalMessageSender(LocalMessageType.ControlProof, "executor")).toThrow(
-      LocalMessageValidationError,
-    );
     expect(() => assertLocalMessageSender(LocalMessageType.Ping, "control")).not.toThrow();
     expect(() => assertLocalMessageSender(LocalMessageType.Ping, "executor")).not.toThrow();
   });
@@ -196,10 +183,7 @@ describe("local protocol message schemas", () => {
           LocalMessageType.StartAttempt,
           {
             ...attempt,
-            signedAuthorization: {
-              capability: capability(localEnvelope),
-              signature: "A".repeat(86),
-            },
+            authorization: capability(localEnvelope),
             executorEnvelope: {
               ...localEnvelope,
               policy: { ...localEnvelope.policy, requiredCapabilityLabels },
@@ -238,41 +222,7 @@ describe("local protocol message schemas", () => {
       executorPreflightSha256: hex("7"),
       maximumSlots: 4,
     };
-    const controlProof = {
-      ...session,
-      signedProof: {
-        transcript: {
-          transcriptVersion: HANDSHAKE_TRANSCRIPT_VERSION,
-          canonicalizationVersion: 1,
-          signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-          keyId: hex("8"),
-          audience: LOCAL_HANDSHAKE_AUDIENCE,
-          hello,
-          helloAck,
-        },
-        signature: "A".repeat(86),
-      },
-    };
-    expect(validateLocalMessagePayload(LocalMessageType.ControlProof, controlProof, nil)).toEqual(
-      controlProof,
-    );
-    expect(() =>
-      validateLocalMessagePayload(
-        LocalMessageType.ControlProof,
-        { ...controlProof, sessionId: "90000000-0000-4000-8000-000000000009" },
-        nil,
-      ),
-    ).toThrowError(expect.objectContaining({ code: "MESSAGE_CONTEXT_MISMATCH" }));
-    expect(() =>
-      validateLocalMessagePayload(
-        LocalMessageType.ControlProof,
-        {
-          ...controlProof,
-          signedProof: { ...controlProof.signedProof, privateKey: "must-not-cross" },
-        },
-        nil,
-      ),
-    ).toThrowError(expect.objectContaining({ code: "MESSAGE_SCHEMA_INVALID" }));
+    expect(validateLocalMessagePayload(LocalMessageType.HelloAck, helloAck, nil)).toEqual(helloAck);
 
     const ready = {
       ...session,
@@ -292,13 +242,10 @@ describe("local protocol message schemas", () => {
     ).toThrowError(expect.objectContaining({ code: "MESSAGE_CONTEXT_MISMATCH" }));
   });
 
-  it("binds StartAttempt identities and every signed digest", () => {
+  it("binds StartAttempt identities and every authorization digest", () => {
     const localEnvelope = envelope();
-    const signedAuthorization = {
-      capability: capability(localEnvelope),
-      signature: "A".repeat(86),
-    };
-    const start = { ...attempt, signedAuthorization, executorEnvelope: localEnvelope };
+    const authorization = capability(localEnvelope);
+    const start = { ...attempt, authorization, executorEnvelope: localEnvelope };
     expect(validateLocalMessagePayload(LocalMessageType.StartAttempt, start, runAttemptId)).toEqual(
       start,
     );
@@ -321,10 +268,7 @@ describe("local protocol message schemas", () => {
     const localEnvelope = envelope();
     const start = {
       ...attempt,
-      signedAuthorization: {
-        capability: capability(localEnvelope),
-        signature: "A".repeat(86),
-      },
+      authorization: capability(localEnvelope),
       executorEnvelope: localEnvelope,
     };
     const validated = validateLocalMessagePayload(
@@ -334,8 +278,8 @@ describe("local protocol message schemas", () => {
     ) as typeof start;
 
     expect(Object.isFrozen(validated)).toBe(true);
-    expect(Object.isFrozen(validated.signedAuthorization.capability.resources)).toBe(true);
-    expect(Object.isFrozen(validated.signedAuthorization.capability.digests)).toBe(true);
+    expect(Object.isFrozen(validated.authorization.resources)).toBe(true);
+    expect(Object.isFrozen(validated.authorization.digests)).toBe(true);
     expect(Object.isFrozen(validated.executorEnvelope.policy.allowedRecipeIds)).toBe(true);
     expect(() => {
       (validated.executorEnvelope.policy.allowedRecipeIds as string[]).push("changed");
@@ -369,10 +313,7 @@ describe("local protocol message schemas", () => {
       };
       const start = {
         ...attempt,
-        signedAuthorization: {
-          capability: capability(changedEnvelope),
-          signature: "A".repeat(86),
-        },
+        authorization: capability(changedEnvelope),
         executorEnvelope: changedEnvelope,
       };
       expect(() =>
@@ -391,10 +332,7 @@ describe("local protocol message schemas", () => {
     const localEnvelope = envelope();
     const start = {
       ...attempt,
-      signedAuthorization: {
-        capability: capability(localEnvelope),
-        signature: "A".repeat(86),
-      },
+      authorization: capability(localEnvelope),
       executorEnvelope: localEnvelope,
     };
     const tooDeep = `${'{"value":'.repeat(66)}0${"}".repeat(66)}`;
@@ -466,7 +404,7 @@ describe("local protocol message schemas", () => {
     };
     const start = {
       ...attempt,
-      signedAuthorization: { capability: issueCapability, signature: "A".repeat(86) },
+      authorization: issueCapability,
       executorEnvelope: issueEnvelope,
     };
     expect(validateLocalMessagePayload(LocalMessageType.StartAttempt, start, runAttemptId)).toEqual(
@@ -477,12 +415,9 @@ describe("local protocol message schemas", () => {
         LocalMessageType.StartAttempt,
         {
           ...start,
-          signedAuthorization: {
-            ...start.signedAuthorization,
-            capability: {
-              ...issueCapability,
-              targetRevision: { kind: "issue", revisionDigest: hex("e") },
-            },
+          authorization: {
+            ...start.authorization,
+            targetRevision: { kind: "issue", revisionDigest: hex("e") },
           },
         },
         runAttemptId,

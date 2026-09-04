@@ -1,30 +1,16 @@
-import { createHash, generateKeyPairSync, type KeyObject, sign as nodeSign } from "node:crypto";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { ArtifactStreamProtocolError, ArtifactStreamVerifier } from "./artifact-stream.js";
 import { createCanonicalJsonDocument } from "./canonical.js";
 import {
-  deriveCapabilityKeyId,
   type ExecutionCapabilityV1,
   LOCAL_CAPABILITY_AUDIENCE,
-  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-  signExecutionCapability,
-  type VerifiedExecutionCapability,
-  verifyExecutionCapability,
+  type ValidatedExecutionCapability,
+  validateExecutionCapabilityForContext,
 } from "./capability.js";
-import {
-  createHandshakeTranscriptSigningBytes,
-  createHandshakeTranscriptV1,
-  createSignedHandshakeProofV1,
-  type VerifiedHandshakeTranscriptV1,
-  verifySignedHandshakeProofV1,
-} from "./handshake.js";
-import {
-  encodeArtifactChunkData,
-  type HandshakeTranscriptV1,
-  type HelloAckMessage,
-  type HelloMessage,
-} from "./messages.js";
+import { type EstablishedLocalSession, establishLocalSession } from "./handshake.js";
+import { encodeArtifactChunkData, type HelloAckMessage, type HelloMessage } from "./messages.js";
 
 const runAttemptId = "30000000-0000-4000-8000-000000000003";
 const attemptCorrelationId = "40000000-0000-4000-8000-000000000004";
@@ -41,11 +27,7 @@ const session = {
 const artifactId = "60000000-0000-4000-8000-000000000006";
 const expectedOutputSchemaSha256 = "a".repeat(64);
 const now = 1_800_000_000_000;
-const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-const p256HalfOrder = p256Order >> 1n;
-const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-const keyId = deriveCapabilityKeyId(keys.publicKey);
-const verifiedHandshake = createVerifiedHandshake();
+const establishedSession = createEstablishedSession();
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -60,8 +42,8 @@ function createVerifier(
   capabilityOverrides: Partial<ExecutionCapabilityV1> = {},
 ): ArtifactStreamVerifier {
   return new ArtifactStreamVerifier(
-    createVerifiedCapability(maximumArtifactBytes, capabilityOverrides),
-    verifiedHandshake,
+    createValidatedCapability(maximumArtifactBytes, capabilityOverrides),
+    establishedSession,
     options,
   );
 }
@@ -257,7 +239,7 @@ describe("ArtifactStreamVerifier", () => {
     ).toMatchObject({ artifactId, sha256: sha256(content) });
   });
 
-  it("fails closed at count, concurrency, signed byte, and incomplete-stream limits", () => {
+  it("fails closed at count, concurrency, authorized byte, and incomplete-stream limits", () => {
     const verifier = createVerifier(4n, {
       maximumArtifactCount: 1,
       maximumConcurrentArtifacts: 1,
@@ -273,7 +255,7 @@ describe("ArtifactStreamVerifier", () => {
     );
   });
 
-  it("enforces the signed byte ceiling across every artifact in the attempt", () => {
+  it("enforces the authorized byte ceiling across every artifact in the attempt", () => {
     const verifier = createVerifier(8n, {
       maximumConcurrentArtifacts: 2,
     });
@@ -351,19 +333,18 @@ describe("ArtifactStreamVerifier", () => {
     }
   });
 
-  it("rejects unverified authority and every capability-to-handshake context mismatch", () => {
-    const capability = createVerifiedCapability(64n);
-    const unverifiedCapability = createCapability(64n) as VerifiedExecutionCapability;
-    const unverifiedHandshake = createHandshakeTranscriptV1(
-      handshakeHello(),
-      handshakeHelloAck(),
-      keyId,
-    ) as VerifiedHandshakeTranscriptV1;
+  it("rejects unvalidated authority and every capability-to-session context mismatch", () => {
+    const capability = createValidatedCapability(64n);
+    const unvalidatedCapability = createCapability(64n) as ValidatedExecutionCapability;
+    const unestablishedSession = {
+      hello: handshakeHello(),
+      helloAck: handshakeHelloAck(),
+    } as EstablishedLocalSession;
 
-    expect(() => new ArtifactStreamVerifier(unverifiedCapability, verifiedHandshake)).toThrowError(
-      expect.objectContaining({ code: "ARTIFACT_AUTHORITY_INVALID" }),
-    );
-    expect(() => new ArtifactStreamVerifier(capability, unverifiedHandshake)).toThrowError(
+    expect(
+      () => new ArtifactStreamVerifier(unvalidatedCapability, establishedSession),
+    ).toThrowError(expect.objectContaining({ code: "ARTIFACT_AUTHORITY_INVALID" }));
+    expect(() => new ArtifactStreamVerifier(capability, unestablishedSession)).toThrowError(
       expect.objectContaining({ code: "ARTIFACT_AUTHORITY_INVALID" }),
     );
 
@@ -375,7 +356,7 @@ describe("ArtifactStreamVerifier", () => {
     ]) {
       expect(
         () =>
-          new ArtifactStreamVerifier(createVerifiedCapability(64n, overrides), verifiedHandshake),
+          new ArtifactStreamVerifier(createValidatedCapability(64n, overrides), establishedSession),
       ).toThrowError(expect.objectContaining({ code: "ARTIFACT_CONTEXT_MISMATCH" }));
     }
   });
@@ -410,8 +391,6 @@ function createCapability(
   return {
     capabilityVersion: 1,
     canonicalizationVersion: 1,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId,
     audience: LOCAL_CAPABILITY_AUDIENCE,
     capabilityId: "1".repeat(64),
     nonce: "2".repeat(64),
@@ -450,23 +429,18 @@ function createCapability(
   };
 }
 
-function createVerifiedCapability(
+function createValidatedCapability(
   maximumArtifactBytes: bigint,
   overrides: Partial<ExecutionCapabilityV1> = {},
-): VerifiedExecutionCapability {
+): ValidatedExecutionCapability {
   const capability = createCapability(maximumArtifactBytes, overrides);
-  return verifyExecutionCapability(
-    signExecutionCapability(capability, keys.privateKey),
-    keys.publicKey,
-    {
-      expectedKeyId: keyId,
-      expectedWorkerNodeId: capability.workerNodeId,
-      expectedWorkerInstanceId: capability.workerInstanceId,
-      expectedExecutorBootId: capability.executorBootId,
-      expectedSessionId: capability.sessionId,
-      nowUnixMs: now + 1_000,
-    },
-  );
+  return validateExecutionCapabilityForContext(capability, {
+    expectedWorkerNodeId: capability.workerNodeId,
+    expectedWorkerInstanceId: capability.workerInstanceId,
+    expectedExecutorBootId: capability.executorBootId,
+    expectedSessionId: capability.sessionId,
+    nowUnixMs: now + 1_000,
+  });
 }
 
 function handshakeHello(): HelloMessage {
@@ -502,42 +476,8 @@ function handshakeHelloAck(): HelloAckMessage {
   };
 }
 
-function createVerifiedHandshake(): VerifiedHandshakeTranscriptV1 {
+function createEstablishedSession(): EstablishedLocalSession {
   const hello = handshakeHello();
   const helloAck = handshakeHelloAck();
-  const transcript = createHandshakeTranscriptV1(hello, helloAck, keyId);
-  const proof = createSignedHandshakeProofV1(
-    transcript,
-    signTranscript(transcript, keys.privateKey),
-  );
-  return verifySignedHandshakeProofV1(proof, keys.publicKey, {
-    expectedKeyId: keyId,
-    expectedHello: hello,
-    expectedHelloAck: helloAck,
-  });
-}
-
-function signTranscript(transcript: HandshakeTranscriptV1, privateKey: KeyObject): Buffer {
-  const signature = nodeSign("sha256", createHandshakeTranscriptSigningBytes(transcript), {
-    key: privateKey,
-    dsaEncoding: "ieee-p1363",
-  });
-  const result = Buffer.from(signature);
-  const s = readUnsigned(result.subarray(32));
-  if (s > p256HalfOrder) writeUnsigned(p256Order - s, result, 32);
-  return result;
-}
-
-function readUnsigned(bytes: Uint8Array): bigint {
-  let value = 0n;
-  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
-  return value;
-}
-
-function writeUnsigned(value: bigint, target: Uint8Array, offset: number): void {
-  let remaining = value;
-  for (let index = offset + 31; index >= offset; index -= 1) {
-    target[index] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
+  return establishLocalSession(hello, helloAck);
 }

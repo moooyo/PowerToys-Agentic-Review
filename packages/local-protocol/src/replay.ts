@@ -2,14 +2,14 @@ import type { DeepReadonly } from "./canonical.js";
 import {
   digestExecutionCapability,
   digestRenewalGrant,
-  isVerifiedExecutionCapability,
-  isVerifiedRenewalGrant,
-  type VerifiedExecutionCapability,
-  type VerifiedRenewalGrant,
+  isValidatedExecutionCapability,
+  isValidatedRenewalGrant,
+  type ValidatedExecutionCapability,
+  type ValidatedRenewalGrant,
 } from "./capability.js";
 
 interface AuthorityState {
-  readonly capability: VerifiedExecutionCapability;
+  readonly capability: ValidatedExecutionCapability;
   readonly initialCapabilitySha256: string;
   active: boolean;
   grantSequence: number;
@@ -26,7 +26,7 @@ export type LocalAuthorityFenceReason =
   | "shutdown";
 
 export interface ExpectedRenewalChain {
-  readonly capability: VerifiedExecutionCapability;
+  readonly capability: ValidatedExecutionCapability;
   readonly expectedPreviousGrantSha256: string;
   readonly expectedPreviousGrantSequence: number;
   readonly expectedGrantSequence: number;
@@ -38,12 +38,12 @@ export class LocalAuthorityReplayError extends Error {
     public readonly code:
       | "REPLAY_CAPACITY_EXCEEDED"
       | "CAPABILITY_REPLAYED"
-      | "CAPABILITY_UNVERIFIED"
+      | "CAPABILITY_UNVALIDATED"
       | "ATTEMPT_REPLAYED"
       | "CAPABILITY_UNKNOWN"
       | "CAPABILITY_TERMINAL"
       | "RENEWAL_REPLAYED"
-      | "RENEWAL_UNVERIFIED"
+      | "RENEWAL_UNVALIDATED"
       | "RENEWAL_CHAIN_INVALID"
       | "RENEWAL_CONTEXT_MISMATCH",
     message: string,
@@ -72,13 +72,13 @@ export class LocalAuthorityReplayGuard {
     this.#maximumCapabilities = maximumCapabilities;
   }
 
-  public reserveVerifiedCapability(
-    capability: VerifiedExecutionCapability,
-  ): VerifiedExecutionCapability {
-    if (!isVerifiedExecutionCapability(capability)) {
+  public reserveValidatedCapability(
+    capability: ValidatedExecutionCapability,
+  ): ValidatedExecutionCapability {
+    if (!isValidatedExecutionCapability(capability)) {
       throw replayError(
-        "CAPABILITY_UNVERIFIED",
-        "Execution capability was not authenticated by this protocol runtime.",
+        "CAPABILITY_UNVALIDATED",
+        "Execution capability was not context-validated by this protocol runtime.",
       );
     }
     if (this.#states.has(capability.capabilityId)) {
@@ -131,11 +131,11 @@ export class LocalAuthorityReplayGuard {
 
   // This synchronous commit is the replay reservation point and must precede extending the
   // monotonic execution deadline.
-  public acceptVerifiedRenewal(grant: VerifiedRenewalGrant): VerifiedRenewalGrant {
-    if (!isVerifiedRenewalGrant(grant)) {
+  public acceptValidatedRenewal(grant: ValidatedRenewalGrant): ValidatedRenewalGrant {
+    if (!isValidatedRenewalGrant(grant)) {
       throw replayError(
-        "RENEWAL_UNVERIFIED",
-        "Renewal grant was not authenticated by this protocol runtime.",
+        "RENEWAL_UNVALIDATED",
+        "Renewal grant was not context-validated by this protocol runtime.",
       );
     }
     const state = this.#requireActive(grant.capabilityId);

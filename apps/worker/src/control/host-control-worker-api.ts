@@ -29,14 +29,11 @@ import {
   assertHostControlRouteIdentity,
   callHostControlOperation,
   encodeHostControlRequest,
-  type LocalAuthorityDigestSigner,
   validateHostControlResponse,
 } from "./host-control-api-common.js";
 
-export type { LocalAuthorityDigestSigner } from "./host-control-api-common.js";
-
 /** Maps the fixed Control HostControl RPC surface to the existing Worker control-plane API. */
-export class HostControlWorkerApi implements WorkerApi, LocalAuthorityDigestSigner {
+export class HostControlWorkerApi implements WorkerApi {
   public constructor(private readonly client: ControlHostControlClient) {}
 
   public async register(
@@ -148,12 +145,6 @@ export class HostControlWorkerApi implements WorkerApi, LocalAuthorityDigestSign
       this.client.failRun(runAttemptId, body, signal === undefined ? {} : { signal }),
     );
     return validateTerminalResponse(response, submission.jobId, runAttemptId, "failure response");
-  }
-
-  public async signLocalDigest(digestSha256: string, signal?: AbortSignal): Promise<string> {
-    return await callHostControlOperation(() =>
-      this.client.signLocalDigest(digestSha256, signal === undefined ? {} : { signal }),
-    );
   }
 }
 

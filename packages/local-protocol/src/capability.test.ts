@@ -1,52 +1,39 @@
-import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-
 import {
-  createExecutionCapabilitySigningDigest,
-  deriveCapabilityKeyId,
   digestExecutionCapability,
   digestRenewalGrant,
   type ExecutionCapabilityV1,
+  isValidatedExecutionCapability,
+  isValidatedRenewalGrant,
   LOCAL_CAPABILITY_AUDIENCE,
-  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
   LocalCapabilityError,
-  signExecutionCapability,
-  signRenewalGrant,
+  type RenewalGrantV1,
+  serializeExecutionCapability,
   validateExecutionCapability,
-  verifyExecutionCapability,
-  verifyRenewalGrant,
+  validateExecutionCapabilityForContext,
+  validateRenewalGrantForContext,
 } from "./capability.js";
 
 const now = 1_800_000_000_000;
-const workerInstanceId = "10000000-0000-4000-8000-000000000001";
-const executorBootId = "20000000-0000-4000-8000-000000000002";
-const runAttemptId = "30000000-0000-4000-8000-000000000003";
-const jobId = "40000000-0000-4000-8000-000000000004";
-const sessionId = "50000000-0000-4000-8000-000000000005";
 const hex = (character: string): string => character.repeat(64);
 
-function capability(keyId = hex("a")): ExecutionCapabilityV1 {
+function capability(overrides: Partial<ExecutionCapabilityV1> = {}): ExecutionCapabilityV1 {
   return {
     capabilityVersion: 1,
     canonicalizationVersion: 1,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId,
     audience: LOCAL_CAPABILITY_AUDIENCE,
     capabilityId: hex("1"),
     nonce: hex("2"),
     workerNodeId: "powertoys-node-01",
-    workerInstanceId,
-    executorBootId,
-    sessionId,
-    attemptCorrelationId: runAttemptId,
-    runAttemptId,
-    jobId,
+    workerInstanceId: "worker-instance:7",
+    executorBootId: "10000000-0000-4000-8000-000000000001",
+    sessionId: "20000000-0000-4000-8000-000000000002",
+    attemptCorrelationId: "30000000-0000-4000-8000-000000000003",
+    runAttemptId: "run-attempt-1",
+    jobId: "job-1",
     leaseGeneration: 7,
     grantSequence: 1,
-    repository: {
-      githubRepositoryId: 184456251,
-      fullName: "microsoft/PowerToys",
-    },
+    repository: { githubRepositoryId: 184456251, fullName: "microsoft/PowerToys" },
     targetRevision: {
       kind: "pull_request",
       baseSha: "a".repeat(40),
@@ -72,335 +59,153 @@ function capability(keyId = hex("a")): ExecutionCapabilityV1 {
     serverLeaseExpiresAtUnixMs: now + 90_000,
     grantExpiresAtUnixMs: now + 45_000,
     hardDeadlineUnixMs: now + 1_800_000,
+    ...overrides,
   };
 }
 
-function context(expectedKeyId = hex("a")) {
+function context(overrides: Record<string, unknown> = {}) {
   return {
-    expectedKeyId,
     expectedWorkerNodeId: "powertoys-node-01",
-    expectedWorkerInstanceId: workerInstanceId,
-    expectedExecutorBootId: executorBootId,
-    expectedSessionId: sessionId,
+    expectedWorkerInstanceId: "worker-instance:7",
+    expectedExecutorBootId: "10000000-0000-4000-8000-000000000001",
+    expectedSessionId: "20000000-0000-4000-8000-000000000002",
     nowUnixMs: now + 1_000,
-  } as const;
+    ...overrides,
+  };
 }
 
-describe("execution capabilities", () => {
-  it("pins the cross-language capability signing digest", () => {
-    const vector: ExecutionCapabilityV1 = {
-      ...capability(),
-      workerInstanceId: "worker-instance:restart-7",
-      runAttemptId: "attempt:pr:7",
-      jobId: "job:pr:42",
-      targetRevision: {
-        kind: "pull_request",
-        baseSha: "b".repeat(40),
-        headSha: "c".repeat(64),
-      },
-      resources: {
-        maximumProcesses: 8,
-        memoryBytes: "1073741824",
-        outputBytes: 1_048_576,
-        artifactBytes: "2097152",
-        diskBytes: "1073741824",
-        hardTimeoutMs: 60_000,
-      },
-      serverLeaseExpiresAtUnixMs: now + 90_000,
-      grantExpiresAtUnixMs: now + 30_000,
-      hardDeadlineUnixMs: now + 60_000,
-    };
+function renewal(
+  initial: ExecutionCapabilityV1,
+  overrides: Partial<RenewalGrantV1> = {},
+): RenewalGrantV1 {
+  return {
+    renewalVersion: 1,
+    canonicalizationVersion: 1,
+    audience: LOCAL_CAPABILITY_AUDIENCE,
+    renewalId: hex("8"),
+    capabilityId: initial.capabilityId,
+    nonce: hex("9"),
+    workerNodeId: initial.workerNodeId,
+    workerInstanceId: initial.workerInstanceId,
+    executorBootId: initial.executorBootId,
+    sessionId: initial.sessionId,
+    attemptCorrelationId: initial.attemptCorrelationId,
+    runAttemptId: initial.runAttemptId,
+    jobId: initial.jobId,
+    leaseGeneration: initial.leaseGeneration,
+    grantSequence: 2,
+    previousGrantSequence: 1,
+    serverHeartbeatSequence: 5,
+    initialCapabilitySha256: digestExecutionCapability(initial),
+    previousGrantSha256: digestExecutionCapability(initial),
+    issuedAtUnixMs: now + 2_000,
+    serverLeaseExpiresAtUnixMs: now + 90_000,
+    grantExpiresAtUnixMs: now + 47_000,
+    hardDeadlineUnixMs: initial.hardDeadlineUnixMs,
+    ...overrides,
+  };
+}
 
-    expect(createExecutionCapabilitySigningDigest(vector).toString("hex")).toBe(
-      "8015fc8eed1746d31de5c250d13be33d732131da4c7a02899c6d9f697b32b139",
+describe("plain local execution authorization", () => {
+  it("normalizes strict canonical data without signature metadata or wrappers", () => {
+    const value = capability();
+    const validated = validateExecutionCapability(value);
+
+    expect(validated).toEqual(value);
+    expect(isValidatedExecutionCapability(validated)).toBe(false);
+    expect(serializeExecutionCapability(value)).not.toContain("signature");
+    expect(() => validateExecutionCapability({ ...value, keyId: hex("a") })).toThrowError(
+      expect.objectContaining({ code: "CAPABILITY_SCHEMA_INVALID" }),
     );
+    expect(() => validateExecutionCapability({ capability: value })).toThrow(LocalCapabilityError);
   });
 
-  it("supports issue revisions, future Git object widths, and non-UUID Server entity IDs", () => {
-    const base = capability();
-    expect(
-      validateExecutionCapability({
-        ...base,
-        workerInstanceId: "worker-instance:restart-7",
-        runAttemptId: "attempt:issue:7",
-        jobId: "job:issue:42",
-        targetRevision: { kind: "issue", revisionDigest: hex("d") },
-      }),
-    ).toMatchObject({
-      runAttemptId: "attempt:issue:7",
-      targetRevision: { kind: "issue", revisionDigest: hex("d") },
-    });
-    expect(
-      validateExecutionCapability({
-        ...base,
-        targetRevision: {
-          kind: "pull_request",
-          baseSha: "a".repeat(64),
-          headSha: "b".repeat(64),
-        },
-      }).targetRevision,
-    ).toEqual({ kind: "pull_request", baseSha: "a".repeat(64), headSha: "b".repeat(64) });
-  });
+  it("brands only capabilities validated against the active local session and time", () => {
+    const value = capability();
+    const validated = validateExecutionCapabilityForContext(value, context());
 
-  it("validates, canonically digests, signs, and verifies a capability", () => {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(publicKey);
-    const value = capability(keyId);
-    const signed = signExecutionCapability(value, privateKey);
+    expect(validated).toEqual(value);
+    expect(isValidatedExecutionCapability(validated)).toBe(true);
+    expect(Object.isFrozen(validated.resources)).toBe(true);
 
-    expect(signed.signature).toMatch(/^[A-Za-z0-9_-]{86}$/u);
-    expect(verifyExecutionCapability(signed, publicKey, context(keyId))).toEqual(value);
-    expect(digestExecutionCapability(value)).toMatch(/^[a-f0-9]{64}$/u);
-  });
-
-  it("rejects tampering, wrong keys, high-S signatures, and malformed signatures", () => {
-    const first = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const second = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(first.publicKey);
-    const signed = signExecutionCapability(capability(keyId), first.privateKey);
-    const altered = {
-      ...signed,
-      capability: { ...signed.capability, leaseGeneration: 8 },
-    };
-    expect(() => verifyExecutionCapability(altered, first.publicKey, context(keyId))).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_SIGNATURE_INVALID" }),
-    );
-    expect(() => verifyExecutionCapability(signed, second.publicKey, context(keyId))).toThrow(
-      LocalCapabilityError,
-    );
-
-    const raw = Buffer.from(signed.signature, "base64url");
-    const order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-    let lowS = 0n;
-    for (const byte of raw.subarray(32)) lowS = (lowS << 8n) | BigInt(byte);
-    let highS = order - lowS;
-    for (let index = 63; index >= 32; index -= 1) {
-      raw[index] = Number(highS & 0xffn);
-      highS >>= 8n;
+    for (const override of [
+      { expectedWorkerNodeId: "other-node" },
+      { expectedWorkerInstanceId: "other-instance" },
+      { expectedExecutorBootId: "40000000-0000-4000-8000-000000000004" },
+      { expectedSessionId: "50000000-0000-4000-8000-000000000005" },
+    ]) {
+      expect(() => validateExecutionCapabilityForContext(value, context(override))).toThrowError(
+        expect.objectContaining({ code: "CAPABILITY_CONTEXT_MISMATCH" }),
+      );
     }
-    expect(() =>
-      verifyExecutionCapability(
-        { ...signed, signature: raw.toString("base64url") },
-        first.publicKey,
-        context(keyId),
-      ),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_SIGNATURE_INVALID" }));
-    expect(() =>
-      verifyExecutionCapability(
-        { ...signed, signature: `${signed.signature}=` },
-        first.publicKey,
-        context(keyId),
-      ),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_SCHEMA_INVALID" }));
   });
 
-  it("rejects unknown fields, forbidden lease material, bad bounds, and invalid deadlines", () => {
-    expect(() => validateExecutionCapability({ ...capability(), leaseToken: "secret" })).toThrow(
-      LocalCapabilityError,
+  it("enforces replay identifiers, resource ceilings, hard deadlines, and 45-second grants", () => {
+    expect(() => validateExecutionCapability(capability({ nonce: hex("1") }))).toThrowError(
+      expect.objectContaining({ code: "CAPABILITY_CONTEXT_MISMATCH" }),
     );
     expect(() =>
-      validateExecutionCapability({
-        ...capability(),
-        resources: { ...capability().resources, memoryBytes: "01" },
-      }),
-    ).toThrow(LocalCapabilityError);
-    expect(() =>
-      validateExecutionCapability({
-        ...capability(),
-        resources: { ...capability().resources, diskBytes: "1024" },
-      }),
+      validateExecutionCapability(
+        capability({ resources: { ...capability().resources, artifactBytes: "17179869185" } }),
+      ),
     ).toThrowError(expect.objectContaining({ code: "CAPABILITY_LIMIT_INVALID" }));
     expect(() =>
-      validateExecutionCapability({ ...capability(), grantExpiresAtUnixMs: now + 45_001 }),
+      validateExecutionCapability(capability({ grantExpiresAtUnixMs: now + 45_001 })),
     ).toThrowError(expect.objectContaining({ code: "CAPABILITY_TIME_INVALID" }));
-  });
-
-  it("binds key, worker, instance, boot, and expiry context", () => {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(publicKey);
-    const signed = signExecutionCapability(capability(keyId), privateKey);
-    for (const override of [
-      { expectedKeyId: "wrong" },
-      { expectedWorkerNodeId: "wrong" },
-      { expectedWorkerInstanceId: "50000000-0000-4000-8000-000000000005" },
-      { expectedExecutorBootId: "60000000-0000-4000-8000-000000000006" },
-      { expectedSessionId: "70000000-0000-4000-8000-000000000007" },
-    ]) {
-      expect(() =>
-        verifyExecutionCapability(signed, publicKey, { ...context(keyId), ...override }),
-      ).toThrowError(expect.objectContaining({ code: "CAPABILITY_CONTEXT_MISMATCH" }));
-    }
     expect(() =>
-      verifyExecutionCapability(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now + 45_000,
-      }),
+      validateExecutionCapabilityForContext(
+        capability({ issuedAtUnixMs: now + 10_000, grantExpiresAtUnixMs: now + 20_000 }),
+        context({ maximumClockSkewMs: 1_000 }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_TIME_INVALID" }));
+    expect(() =>
+      validateExecutionCapabilityForContext(valueAt(now - 45_000, now - 1), context()),
     ).toThrowError(expect.objectContaining({ code: "CAPABILITY_EXPIRED" }));
   });
 
-  it("chains and verifies exact renewal grants", () => {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(publicKey);
-    const original = capability(keyId);
-    const verifiedOriginal = verifyExecutionCapability(
-      signExecutionCapability(original, privateKey),
-      publicKey,
-      context(keyId),
-    );
-    const previousGrantSha256 = digestExecutionCapability(original);
-    const grant = {
-      renewalVersion: 1 as const,
-      canonicalizationVersion: 1 as const,
-      signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-      keyId: original.keyId,
-      audience: LOCAL_CAPABILITY_AUDIENCE,
-      renewalId: hex("8"),
-      capabilityId: original.capabilityId,
-      nonce: hex("9"),
-      workerNodeId: original.workerNodeId,
-      workerInstanceId: original.workerInstanceId,
-      executorBootId: original.executorBootId,
-      sessionId: original.sessionId,
-      attemptCorrelationId: original.attemptCorrelationId,
-      runAttemptId: original.runAttemptId,
-      jobId: original.jobId,
-      leaseGeneration: original.leaseGeneration,
-      grantSequence: 2,
-      previousGrantSequence: 1,
-      serverHeartbeatSequence: 10,
-      initialCapabilitySha256: previousGrantSha256,
-      previousGrantSha256,
-      issuedAtUnixMs: now + 30_000,
-      serverLeaseExpiresAtUnixMs: now + 120_000,
-      grantExpiresAtUnixMs: now + 75_000,
-      hardDeadlineUnixMs: original.hardDeadlineUnixMs,
-    };
-    const signed = signRenewalGrant(grant, privateKey);
-    expect(
-      verifyRenewalGrant(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now + 31_000,
-        capability: verifiedOriginal,
-        expectedPreviousGrantSha256: previousGrantSha256,
-        expectedPreviousGrantSequence: 1,
-        expectedGrantSequence: 2,
-        expectedPreviousServerHeartbeatSequence: -1,
-      }),
-    ).toEqual(grant);
-    expect(digestRenewalGrant(grant)).toMatch(/^[a-f0-9]{64}$/u);
+  it("validates renewal context, chain, heartbeat sequence, and deadline", () => {
+    const initialValue = capability();
+    const initial = validateExecutionCapabilityForContext(initialValue, context());
+    const grantValue = renewal(initialValue);
+    const validated = validateRenewalGrantForContext(grantValue, {
+      ...context({ nowUnixMs: now + 3_000 }),
+      capability: initial,
+      expectedPreviousGrantSha256: digestExecutionCapability(initial),
+      expectedPreviousGrantSequence: 1,
+      expectedGrantSequence: 2,
+      expectedPreviousServerHeartbeatSequence: 4,
+    });
+
+    expect(validated).toEqual(grantValue);
+    expect(isValidatedRenewalGrant(validated)).toBe(true);
+    expect(digestRenewalGrant(validated)).toMatch(/^[a-f0-9]{64}$/u);
 
     expect(() =>
-      verifyRenewalGrant(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now + 31_000,
-        capability: verifiedOriginal,
-        expectedPreviousGrantSha256: previousGrantSha256,
-        expectedPreviousGrantSequence: 1,
-        expectedGrantSequence: 3,
-        expectedPreviousServerHeartbeatSequence: -1,
-      }),
+      validateRenewalGrantForContext(
+        { ...grantValue, serverHeartbeatSequence: 4 },
+        {
+          ...context({ nowUnixMs: now + 3_000 }),
+          capability: initial,
+          expectedPreviousGrantSha256: digestExecutionCapability(initial),
+          expectedPreviousGrantSequence: 1,
+          expectedGrantSequence: 2,
+          expectedPreviousServerHeartbeatSequence: 4,
+        },
+      ),
     ).toThrowError(expect.objectContaining({ code: "RENEWAL_SEQUENCE_INVALID" }));
   });
 
-  it("accepts heartbeat sequence zero once and requires later renewals to advance", () => {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(publicKey);
-    const original = capability(keyId);
-    const verifiedOriginal = verifyExecutionCapability(
-      signExecutionCapability(original, privateKey),
-      publicKey,
-      context(keyId),
-    );
-    const previousGrantSha256 = digestExecutionCapability(original);
-    const grant = {
-      renewalVersion: 1 as const,
-      canonicalizationVersion: 1 as const,
-      signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-      keyId,
-      audience: LOCAL_CAPABILITY_AUDIENCE,
-      renewalId: hex("8"),
-      capabilityId: original.capabilityId,
-      nonce: hex("9"),
-      workerNodeId: original.workerNodeId,
-      workerInstanceId: original.workerInstanceId,
-      executorBootId: original.executorBootId,
-      sessionId: original.sessionId,
-      attemptCorrelationId: original.attemptCorrelationId,
-      runAttemptId: original.runAttemptId,
-      jobId: original.jobId,
-      leaseGeneration: original.leaseGeneration,
-      grantSequence: 2,
-      previousGrantSequence: 1,
-      serverHeartbeatSequence: 0,
-      initialCapabilitySha256: previousGrantSha256,
-      previousGrantSha256,
-      issuedAtUnixMs: now + 1_000,
-      serverLeaseExpiresAtUnixMs: now + 90_000,
-      grantExpiresAtUnixMs: now + 30_000,
-      hardDeadlineUnixMs: original.hardDeadlineUnixMs,
-    };
-    const signed = signRenewalGrant(grant, privateKey);
-    expect(
-      verifyRenewalGrant(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now + 2_000,
-        capability: verifiedOriginal,
-        expectedPreviousGrantSha256: previousGrantSha256,
-        expectedPreviousGrantSequence: 1,
-        expectedGrantSequence: 2,
-        expectedPreviousServerHeartbeatSequence: -1,
-      }).serverHeartbeatSequence,
-    ).toBe(0);
-    expect(() =>
-      verifyRenewalGrant(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now + 2_000,
-        capability: verifiedOriginal,
-        expectedPreviousGrantSha256: previousGrantSha256,
-        expectedPreviousGrantSequence: 1,
-        expectedGrantSequence: 2,
-        expectedPreviousServerHeartbeatSequence: 0,
-      }),
-    ).toThrowError(expect.objectContaining({ code: "RENEWAL_SEQUENCE_INVALID" }));
-  });
-
-  it("does not let allowed future clock skew extend receipt-to-expiry beyond 45 seconds", () => {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const keyId = deriveCapabilityKeyId(publicKey);
-    const futureIssued = {
-      ...capability(keyId),
-      issuedAtUnixMs: now + 5_000,
-      grantExpiresAtUnixMs: now + 50_000,
-    };
-    const signed = signExecutionCapability(futureIssued, privateKey);
-
-    expect(() =>
-      verifyExecutionCapability(signed, publicKey, {
-        ...context(keyId),
-        nowUnixMs: now,
-        maximumClockSkewMs: 5_000,
-      }),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_TIME_INVALID" }));
-  });
-
-  it("deeply freezes normalized execution capabilities", () => {
-    const validated = validateExecutionCapability(capability());
-    expect(Object.isFrozen(validated)).toBe(true);
-    expect(Object.isFrozen(validated.resources)).toBe(true);
-    expect(Object.isFrozen(validated.digests)).toBe(true);
-    expect(() => {
-      (validated.resources as { memoryBytes: string }).memoryBytes = "67108864";
-    }).toThrow();
-  });
-
-  it("rejects non-P256 and private/public key role confusion", () => {
-    const p256 = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const p384 = generateKeyPairSync("ec", { namedCurve: "secp384r1" });
-    expect(() => signExecutionCapability(capability(), p384.privateKey)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_KEY_INVALID" }),
-    );
-    expect(() => signExecutionCapability(capability(), p256.publicKey)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_KEY_INVALID" }),
+  it("changes digests when authorization data changes", () => {
+    expect(digestExecutionCapability(capability())).not.toBe(
+      digestExecutionCapability(capability({ jobId: "job-2" })),
     );
   });
 });
+
+function valueAt(issuedAtUnixMs: number, grantExpiresAtUnixMs: number): ExecutionCapabilityV1 {
+  return capability({
+    issuedAtUnixMs,
+    grantExpiresAtUnixMs,
+    hardDeadlineUnixMs: issuedAtUnixMs + 1_800_000,
+  });
+}

@@ -1,18 +1,17 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
-  type ControlProofMessage,
-  createHandshakeTranscriptV1,
   type DeepReadonly,
   type DrainedMessage,
   type DrainMessage,
+  type EstablishedLocalSession,
+  establishLocalSession,
   type HelloAckMessage,
   type HelloMessage,
   LOCAL_PROTOCOL_NIL_CORRELATION_ID,
   LocalMessageType,
   type ReadyMessage,
   validateLocalMessagePayload,
-  validateReadyAfterHandshakeProofV1,
-  verifyControlProofMessageV1,
+  validateReadyForEstablishedSession,
 } from "@agentic-review/local-protocol";
 import type {
   ArwxDispatchScope,
@@ -32,12 +31,7 @@ import type { RuntimeBootstrapArwxRuntimeOwner } from "./runtime-bootstrap-hands
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const nonceBytes = 32;
 
-type ExecutorShadowPhase =
-  | "awaiting_hello"
-  | "awaiting_control_proof"
-  | "ready_disabled"
-  | "draining"
-  | "terminal";
+type ExecutorShadowPhase = "awaiting_hello" | "ready_disabled" | "draining" | "terminal";
 
 export interface ExecutorShadowRuntimeOptions {
   readonly createBootId?: () => string;
@@ -53,7 +47,6 @@ export class ExecutorShadowRuntimeError extends Error {
       | "EXECUTION_DISABLED"
       | "HANDSHAKE_CONTEXT_INVALID"
       | "HANDSHAKE_ORDER_INVALID"
-      | "HANDSHAKE_PROOF_INVALID"
       | "RUNTIME_CANCELLED"
       | "RUNTIME_CLOSING"
       | "SESSION_MISMATCH"
@@ -73,7 +66,7 @@ interface NormalizedExecutorShadowRuntimeOptions {
   readonly nowMonotonicMs: () => number;
 }
 
-/** Installs the authenticated, zero-slot Executor shadow state machine. */
+/** Installs the locally validated, zero-slot Executor shadow state machine. */
 export function installExecutorShadowRuntime(
   activation: Readonly<ServiceHostRoleRuntimeActivation<"executor", ExecutorHostControlSession>>,
   options: ExecutorShadowRuntimeOptions = {},
@@ -126,8 +119,7 @@ class ExecutorShadowSupervisor {
   readonly #executorBootId: string;
   readonly #executorNonce: string;
   #phase: ExecutorShadowPhase = "awaiting_hello";
-  #hello: DeepReadonly<HelloMessage> | undefined;
-  #helloAck: DeepReadonly<HelloAckMessage> | undefined;
+  #session: EstablishedLocalSession | undefined;
   #closeRequested = false;
   #shutdownDeadline: number | undefined;
   #activeShutdownDeadline: number | undefined;
@@ -147,8 +139,7 @@ class ExecutorShadowSupervisor {
       activation.bootstrap.roleConfig.role !== "executor" ||
       activation.bootstrap.roleConfig.executionEnabled !== false ||
       activation.bootstrap.roleConfig.foundationVersion !== 2 ||
-      activation.bootstrap.roleConfig.maximumSlots !== 1 ||
-      activation.bootstrap.localAuthorityPublicKey === null
+      activation.bootstrap.roleConfig.maximumSlots !== 1
     ) {
       throw runtimeError("BOOTSTRAP_INVALID", "Executor shadow bootstrap authority is invalid.");
     }
@@ -200,9 +191,6 @@ class ExecutorShadowSupervisor {
 
       if (this.#phase === "awaiting_hello") {
         return await this.#handleHello(message);
-      }
-      if (this.#phase === "awaiting_control_proof") {
-        return await this.#handleControlProof(message);
       }
       if (this.#phase === "ready_disabled") {
         if (message.messageType !== LocalMessageType.Drain) {
@@ -290,8 +278,9 @@ class ExecutorShadowSupervisor {
         maximumSlots: this.#bootstrap.roleConfig.maximumSlots,
       },
     });
+    let session: EstablishedLocalSession;
     try {
-      createHandshakeTranscriptV1(hello, helloAck, this.#bootstrap.roleConfig.localAuthorityKeyId);
+      session = establishLocalSession(hello, helloAck);
     } catch (error) {
       throw runtimeError(
         "HANDSHAKE_CONTEXT_INVALID",
@@ -300,46 +289,12 @@ class ExecutorShadowSupervisor {
       );
     }
 
-    this.#hello = hello;
-    this.#helloAck = helloAck;
+    this.#session = session;
     await this.#arwx.send({
       messageType: LocalMessageType.HelloAck,
       correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
       payload: helloAck,
     });
-    if (this.#closeRequested) {
-      throw runtimeError(
-        "RUNTIME_CLOSING",
-        "Executor shadow runtime closed before Control proof verification.",
-      );
-    }
-    this.#phase = "awaiting_control_proof";
-  }
-
-  async #handleControlProof(message: Readonly<ArwxInboundMessage>): Promise<void> {
-    if (message.messageType !== LocalMessageType.ControlProof) {
-      throw runtimeError(
-        "HANDSHAKE_ORDER_INVALID",
-        "Executor shadow runtime requires ControlProof after HelloAck.",
-      );
-    }
-    const hello = required(this.#hello, "Control Hello");
-    const helloAck = required(this.#helloAck, "Executor HelloAck");
-    const proof = normalizePayload<ControlProofMessage>(message);
-    let verified: ReturnType<typeof verifyControlProofMessageV1>;
-    try {
-      verified = verifyControlProofMessageV1(
-        proof,
-        required(this.#bootstrap.localAuthorityPublicKey, "pinned Executor public key"),
-        {
-          expectedKeyId: this.#bootstrap.roleConfig.localAuthorityKeyId,
-          expectedHello: hello,
-          expectedHelloAck: helloAck,
-        },
-      );
-    } catch (error) {
-      throw runtimeError("HANDSHAKE_PROOF_INVALID", "Control handshake proof is invalid.", error);
-    }
     if (this.#closeRequested) {
       throw runtimeError(
         "RUNTIME_CLOSING",
@@ -364,7 +319,7 @@ class ExecutorShadowSupervisor {
       availableSlots: 0,
       reasonCode: "EXECUTION_DISABLED",
     };
-    const ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);
+    const ready = validateReadyForEstablishedSession(readyCandidate, session);
     await this.#arwx.send({
       messageType: LocalMessageType.Ready,
       correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
@@ -445,7 +400,7 @@ class ExecutorShadowSupervisor {
   }
 
   #assertSession(message: DeepReadonly<DrainMessage>): void {
-    const helloAck = required(this.#helloAck, "Executor HelloAck");
+    const helloAck = required(this.#session, "established local session").helloAck;
     if (
       message.protocolMajor !== helloAck.protocolMajor ||
       message.protocolMinor !== helloAck.protocolMinor ||

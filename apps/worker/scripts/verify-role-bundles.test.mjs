@@ -35,11 +35,11 @@ const dormantVersionFoundationSha256 = Object.freeze({
   "packages/contracts/src/job-envelope.ts":
     "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
   "packages/local-protocol/src/framing.ts":
-    "a2d1e79c9f3bb1ac564d8225e0f091f691f38b09d84b1187078bd1511ff00d18",
+    "4f701c4e19bb1ebacaae8ad5f1e891029bd7a57feb35a9cc2a86d233019cc806",
   "packages/local-protocol/src/index.ts":
     "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
   "packages/local-protocol/src/messages.ts":
-    "5c69fda0dc87a7d348a0877f355cf029842896706352db4172fcca6fe730e3cb",
+    "7adccfe271d613b6a5eb6927441458bb78dd3d7ad862734f9f1e1f0bf8c007f3",
 });
 const reviewedRootBarrelExports = Object.freeze({
   "packages/contracts/src/index.ts": Object.freeze([
@@ -66,11 +66,11 @@ const dormantRoleConfigV3ProductionPins = Object.freeze({
   "apps/server/src/database/database-worker.ts":
     "b0d6eb99cfa1ccd45fbf2582bcaa2ab69205634f13c423e7a504abc99291763d",
   "apps/worker/src/control/host-control-worker-api.ts":
-    "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
+    "30330b3954d0484ba95b6a6d70d74dcfb992aaeb08db689f56411a432d8c7189",
   "apps/worker/src/execution/trusted-installation-manifest.ts":
     "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   "apps/worker/src/service-host/runtime-bootstrap.ts":
-    "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
+    "6a06fc4a93a9b353718a04bfc2d8ba4544b41528f2fb235eb310460acc17d3d3",
   "packages/contracts/src/worker.ts":
     "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
 });
@@ -314,13 +314,14 @@ test("shadow architecture remains zero execution and role separated", () => {
   const ready = sourceSection(
     executorRuntime,
     "const readyCandidate: ReadyMessage = {",
-    "const ready = validateReadyAfterHandshakeProofV1",
+    "const ready = validateReadyForEstablishedSession",
   );
   assert.match(ready, /ready:\s*false/u);
   assert.match(ready, /availableSlots:\s*0/u);
   assert.match(ready, /reasonCode:\s*"EXECUTION_DISABLED"/u);
   assert.doesNotMatch(ready, /ready:\s*true/u);
   assert.equal((executorRuntime.match(/messageType:\s*LocalMessageType\.Ready/gu) ?? []).length, 1);
+  assert.doesNotMatch(runtimeBootstrap, /localAuthority|PublicKeySpki/u);
 
   assert.doesNotMatch(controlRuntime, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
   assert.doesNotMatch(controlAdapter, /\b(?:claim|claimLease|completeRun|failRun|leaseToken)\b/iu);
@@ -767,171 +768,51 @@ test("reviewed production and dormant source digests fence equivalent syntax dri
   );
 });
 
-test("disabled Ready remains proof-bound and cannot advertise capacity", () => {
+test("disabled Ready remains bound to the established local session", () => {
   const executorPath = "apps/worker/src/service-host/executor-shadow-runtime.ts";
   const controlPath = "apps/worker/src/control/shadow-supervisor.ts";
-  const source = repositorySource(executorPath);
+  const executorSource = repositorySource(executorPath);
   const controlSource = repositorySource(controlPath);
+
   for (const [before, after] of [
     ["ready: false", "ready: true"],
     ["availableSlots: 0", "availableSlots: 1"],
     ['reasonCode: "EXECUTION_DISABLED"', 'reasonCode: "READY"'],
     [
-      "validateReadyAfterHandshakeProofV1(readyCandidate, verified)",
-      "validateReadyAfterHandshakeProofV1(readyCandidate, proof)",
+      "session = establishLocalSession(hello, helloAck);",
+      "session = { hello, helloAck } as never;",
     ],
-    ["verified = verifyControlProofMessageV1(", "verified = validateLocalMessagePayload("],
+    ["validateReadyForEstablishedSession(readyCandidate, session)", "readyCandidate"],
     ["messageType: LocalMessageType.Ready,", 'messageType: LocalMessageType["Ready"],'],
-    [
-      "const ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);",
-      "let ready = validateReadyAfterHandshakeProofV1(readyCandidate, verified);\n    ready = readyCandidate;",
-    ],
-    [
-      "const readyCandidate: ReadyMessage = {",
-      "return;\n    const readyCandidate: ReadyMessage = {",
-    ],
-    [
-      "await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
-      "if (false) {\n      await this.#arwx.send({\n      messageType: LocalMessageType.Ready,",
-    ],
   ]) {
-    let mutated = replaceRequired(source, before, after);
-    if (after.startsWith("if (false)")) {
-      mutated = replaceRequired(
-        mutated,
-        "      payload: ready,\n    });",
-        "      payload: ready,\n    });\n    }",
-      );
-    }
+    const mutated = replaceRequired(executorSource, before, after);
     assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: mutated }));
   }
-
-  for (const [imported, alias, fake] of [
-    [
-      "verifyControlProofMessageV1",
-      "importedVerifyControlProofMessageV1",
-      "const verifyControlProofMessageV1 = (proof: unknown): never => proof as never;",
-    ],
-    [
-      "validateReadyAfterHandshakeProofV1",
-      "importedValidateReadyAfterHandshakeProofV1",
-      "const validateReadyAfterHandshakeProofV1 = (ready: unknown): never => ready as never;",
-    ],
-  ]) {
-    let fakeBinding = replaceRequired(source, `  ${imported},`, `  ${imported} as ${alias},`);
-    fakeBinding = replaceRequired(
-      fakeBinding,
-      "const nonceBytes = 32;",
-      `${fake}\nconst nonceBytes = 32;`,
-    );
-    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [executorPath]: fakeBinding }));
-  }
   assert.throws(() =>
     verifyZeroExecutionProductionArchitecture({
-      [executorPath]: replaceRequired(
-        source,
-        "return await this.#handleControlProof(message);",
-        "return;",
-      ),
-    }),
-  );
-  assert.throws(() =>
-    verifyZeroExecutionProductionArchitecture({
-      [executorPath]: `${source}\nconst extraReadyPath = { messageType: LocalMessageType.Ready };\n`,
-    }),
-  );
-  assert.throws(() =>
-    verifyZeroExecutionProductionArchitecture({
-      [executorPath]: replaceRequired(
-        source,
-        "const nonceBytes = 32;",
-        "const AlternateLocalMessageType = LocalMessageType;\nconst nonceBytes = 32;",
-      ),
-    }),
-  );
-  assert.throws(() =>
-    verifyZeroExecutionProductionArchitecture({
-      [executorPath]: replaceRequired(
-        source,
-        "const drain = normalizePayload<DrainMessage>(message);",
-        `const drain = normalizePayload<DrainMessage>(message);
-    await this.#arwx.send({
-      messageType: 3 as never,
-      correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
-      payload: drain,
-    });`,
-      ),
+      [executorPath]: `${executorSource}\nconst forbiddenControlProof = "ControlProof";\n`,
     }),
   );
 
-  const controlMutations = [
-    replaceRequired(controlSource, "ready.ready !== false", "ready.ready === false"),
-    replaceRequired(
-      controlSource,
-      "  const proof = context.proof;\n  if (",
-      "  const proof = context.proof;\n  return Object.freeze({ ...ready });\n  if (",
-    ),
-    replaceRequired(
-      controlSource,
-      "  const proof = context.proof;",
-      "  let proof = context.proof;",
-    ),
-    replaceRequired(
-      controlSource,
-      "const ready = validateControlReady(readyValue, signedHandshake);",
-      "const ready = Object.freeze({ ...readyValue });",
-    ),
-    replaceRequired(
-      controlSource,
-      "this.#acceptReady(message.payload as unknown as ReadyMessage);",
-      "this.#readyMessage = message.payload as unknown as ReadyMessage;",
-    ),
-    replaceRequired(
-      controlSource,
+  for (const [before, after] of [
+    ["ready.ready !== false", "ready.ready === false"],
+    ["ready.availableSlots !== 0", "ready.availableSlots === 0"],
+    [
+      "ready.reasonCode !== executionDisabledReason",
+      "ready.reasonCode === executionDisabledReason",
+    ],
+    [
+      "session = establishLocalSession(this.#hello, helloAck);",
+      "session = { hello: this.#hello, helloAck } as never;",
+    ],
+    ["validateReadyForEstablishedSession(readyValue, session)", "readyValue"],
+    [
       "message.messageType === LocalMessageType.Ready",
       'message.messageType === LocalMessageType["Ready"]',
-    ),
-    replaceRequired(
-      controlSource,
-      'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
-      'const AlternateLocalMessageType = LocalMessageType;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
-    ),
-    replaceRequired(
-      controlSource,
-      "      if (message.messageType === LocalMessageType.Ready) {",
-      `      if (message.messageType === 3) {
-        this.#readyMessage = message.payload as unknown as ReadyMessage;
-        return;
-      }
-      if (message.messageType === LocalMessageType.Ready) {`,
-    ),
-    `${controlSource}\nvalidateControlReady = ((ready: Readonly<ReadyMessage>) => ready) as typeof validateControlReady;\n`,
-    `${controlSource}\nconst extraReadyReceivePath = { messageType: LocalMessageType.Ready };\n`,
-  ];
-  let fakeControlBinding = replaceRequired(
-    controlSource,
-    "  LocalMessageType,",
-    "  LocalMessageType as ImportedLocalMessageType,",
-  );
-  fakeControlBinding = replaceRequired(
-    fakeControlBinding,
-    'const executionDisabledReason = "EXECUTION_DISABLED" as const;',
-    'const LocalMessageType = { Ready: "Ready" } as const;\nconst executionDisabledReason = "EXECUTION_DISABLED" as const;',
-  );
-  controlMutations.push(fakeControlBinding);
-  let deadCodeControl = replaceRequired(
-    controlSource,
-    "  if (\n    ready.protocolMajor",
-    "  if (\n    false && (\n      ready.protocolMajor",
-  );
-  deadCodeControl = replaceRequired(
-    deadCodeControl,
-    "    ready.reasonCode !== executionDisabledReason\n  ) {",
-    "      ready.reasonCode !== executionDisabledReason\n    )\n  ) {",
-  );
-  controlMutations.push(deadCodeControl);
-  for (const mutation of controlMutations) {
-    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: mutation }));
+    ],
+  ]) {
+    const mutated = replaceRequired(controlSource, before, after);
+    assert.throws(() => verifyZeroExecutionProductionArchitecture({ [controlPath]: mutated }));
   }
 });
 

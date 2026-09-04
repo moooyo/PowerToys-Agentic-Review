@@ -8,18 +8,16 @@ import type {
   WorkerState,
 } from "@agentic-review/contracts";
 import {
-  type ControlProofMessage,
-  createControlProofMessageV1,
-  createHandshakeTranscriptSigningDigest,
-  createHandshakeTranscriptV1,
-  createSignedHandshakeProofV1,
   type DeepReadonly,
   type DrainedMessage,
+  type EstablishedLocalSession,
+  establishLocalSession,
   type HelloAckMessage,
   type HelloMessage,
   LOCAL_PROTOCOL_NIL_CORRELATION_ID,
   LocalMessageType,
   type ReadyMessage,
+  validateReadyForEstablishedSession,
 } from "@agentic-review/local-protocol";
 import { WorkerApiError } from "../server-client/errors.js";
 import type {
@@ -56,7 +54,6 @@ export interface ControlShadowServerApi {
     request: WorkerHeartbeatRequest,
     signal?: AbortSignal,
   ): Promise<WorkerHeartbeatResponse>;
-  signLocalDigest(digestSha256: string, signal?: AbortSignal): Promise<string>;
 }
 
 export interface ControlShadowSupervisorDependencies {
@@ -83,11 +80,6 @@ export class ControlShadowSupervisorError extends Error {
     super(message, options);
     this.name = "ControlShadowSupervisorError";
   }
-}
-
-interface ControlSignedHandshakeContext {
-  readonly helloAck: Readonly<HelloAckMessage>;
-  readonly proof: Readonly<ControlProofMessage>;
 }
 
 /**
@@ -155,14 +147,13 @@ class ControlZeroSlotShadowSupervisor {
   #phase:
     | "created"
     | "hello-sent"
-    | "signing-proof"
-    | "proof-sent"
+    | "acknowledged"
     | "ready"
     | "registered"
     | "closing"
     | "closed"
     | "failed" = "created";
-  #signedHandshake: ControlSignedHandshakeContext | undefined;
+  #session: EstablishedLocalSession | undefined;
   #readyMessage: Readonly<ReadyMessage> | undefined;
   #heartbeatSequence = 0;
   readonly #activeServerOperations = new Set<Promise<unknown>>();
@@ -344,21 +335,16 @@ class ControlZeroSlotShadowSupervisor {
   }
 
   async #acceptHelloAck(helloAck: HelloAckMessage): Promise<void> {
-    if (this.#phase !== "hello-sent" || this.#signedHandshake !== undefined) {
+    if (this.#phase !== "hello-sent" || this.#session !== undefined) {
       throw shadowError(
         "CONTROL_SHADOW_HANDSHAKE_INVALID",
         "Control received HelloAck out of order or more than once.",
       );
     }
-    this.#phase = "signing-proof";
     const roleConfig = this.#bootstrap.roleConfig;
-    let transcript: ReturnType<typeof createHandshakeTranscriptV1>;
+    let session: EstablishedLocalSession;
     try {
-      transcript = createHandshakeTranscriptV1(
-        this.#hello,
-        helloAck,
-        roleConfig.localAuthorityKeyId,
-      );
+      session = establishLocalSession(this.#hello, helloAck);
     } catch (error) {
       throw shadowError(
         "CONTROL_SHADOW_HANDSHAKE_INVALID",
@@ -383,46 +369,19 @@ class ControlZeroSlotShadowSupervisor {
         "Executor HelloAck evidence does not match the committed Control bootstrap.",
       );
     }
-    const digest = createHandshakeTranscriptSigningDigest(transcript).toString("hex");
-    const signature = await this.#callBounded(
-      (operationSignal) => this.#api.signLocalDigest(digest, operationSignal),
-      AbortSignal.any([this.#lifecycleSignal, this.#serverCancellation.signal]),
-      true,
-    );
-    let proof: Readonly<ControlProofMessage>;
-    try {
-      proof = createControlProofMessageV1(
-        createSignedHandshakeProofV1(transcript, decodeSignature(signature)),
-      );
-    } catch (error) {
-      throw shadowError(
-        "CONTROL_SHADOW_HANDSHAKE_INVALID",
-        "HostControl returned an invalid handshake proof.",
-        error,
-      );
-    }
-    this.#signedHandshake = Object.freeze({ helloAck, proof });
-    this.#phase = "proof-sent";
-    await this.#callBounded(
-      () =>
-        this.#arwx.send({
-          messageType: LocalMessageType.ControlProof,
-          correlationId: LOCAL_PROTOCOL_NIL_CORRELATION_ID,
-          payload: proof,
-        }),
-      AbortSignal.any([this.#lifecycleSignal, this.#serverCancellation.signal]),
-    );
+    this.#session = session;
+    this.#phase = "acknowledged";
   }
 
   #acceptReady(readyValue: ReadyMessage): void {
-    const signedHandshake = this.#signedHandshake;
-    if (this.#phase !== "proof-sent" || signedHandshake === undefined) {
+    const session = this.#session;
+    if (this.#phase !== "acknowledged" || session === undefined) {
       throw shadowError(
         "CONTROL_SHADOW_HANDSHAKE_INVALID",
-        "Control received Ready before completing its signed handshake.",
+        "Control received Ready before establishing its local session.",
       );
     }
-    const ready = validateControlReady(readyValue, signedHandshake);
+    const ready = validateControlReady(readyValue, session);
     this.#readyMessage = ready;
     this.#phase = "ready";
     this.#ready.resolve(ready);
@@ -792,27 +751,20 @@ function monotonicDeadlineToUnixMilliseconds(absoluteDeadline: number): number {
 }
 
 function validateControlReady(
-  ready: Readonly<ReadyMessage>,
-  context: Readonly<ControlSignedHandshakeContext>,
+  readyValue: Readonly<ReadyMessage>,
+  session: EstablishedLocalSession,
 ): Readonly<ReadyMessage> {
-  const helloAck = context.helloAck;
-  const proof = context.proof;
+  let ready: Readonly<ReadyMessage>;
+  try {
+    ready = validateReadyForEstablishedSession(readyValue, session);
+  } catch (error) {
+    throw shadowError(
+      "CONTROL_SHADOW_HANDSHAKE_INVALID",
+      "Executor Ready does not match the established local session.",
+      error,
+    );
+  }
   if (
-    ready.protocolMajor !== helloAck.protocolMajor ||
-    ready.protocolMinor !== helloAck.protocolMinor ||
-    ready.workerNodeId !== helloAck.workerNodeId ||
-    ready.workerInstanceId !== helloAck.workerInstanceId ||
-    ready.executorBootId !== helloAck.executorBootId ||
-    ready.sessionId !== helloAck.sessionId ||
-    ready.controlNonce !== helloAck.controlNonce ||
-    ready.executorNonce !== helloAck.executorNonce ||
-    ready.executorManifestSha256 !== helloAck.executorManifestSha256 ||
-    ready.executorPolicySha256 !== helloAck.executorPolicySha256 ||
-    ready.executorPreflightSha256 !== helloAck.executorPreflightSha256 ||
-    ready.workerNodeId !== proof.workerNodeId ||
-    ready.workerInstanceId !== proof.workerInstanceId ||
-    ready.executorBootId !== proof.executorBootId ||
-    ready.sessionId !== proof.sessionId ||
     ready.isolationMode !== "split-service-v1" ||
     ready.ready !== false ||
     ready.availableSlots !== 0 ||
@@ -820,7 +772,7 @@ function validateControlReady(
   ) {
     throw shadowError(
       "CONTROL_SHADOW_HANDSHAKE_INVALID",
-      "Executor Ready does not match the Control-signed zero-slot handshake.",
+      "Executor Ready does not match the zero-slot local session.",
     );
   }
   return Object.freeze({ ...ready });
@@ -833,8 +785,6 @@ function createDefaultServerApi(client: ControlHostControlClient): ControlShadow
       api.register(request, signal),
     heartbeat: (workerInstanceId: string, request: WorkerHeartbeatRequest, signal?: AbortSignal) =>
       api.heartbeat(workerInstanceId, request, signal),
-    signLocalDigest: (digestSha256: string, signal?: AbortSignal) =>
-      api.signLocalDigest(digestSha256, signal),
   });
 }
 
@@ -843,33 +793,14 @@ function freezeServerApi(api: ControlShadowServerApi): ControlShadowServerApi {
     api === null ||
     typeof api !== "object" ||
     typeof api.register !== "function" ||
-    typeof api.heartbeat !== "function" ||
-    typeof api.signLocalDigest !== "function"
+    typeof api.heartbeat !== "function"
   ) {
     throw new TypeError("Control shadow server API is invalid.");
   }
   return Object.freeze({
     register: api.register.bind(api),
     heartbeat: api.heartbeat.bind(api),
-    signLocalDigest: api.signLocalDigest.bind(api),
   });
-}
-
-function decodeSignature(value: string): Buffer {
-  if (!/^[A-Za-z0-9_-]{86}$/u.test(value)) {
-    throw shadowError(
-      "CONTROL_SHADOW_HANDSHAKE_INVALID",
-      "HostControl handshake signature is not canonical P1363 base64url.",
-    );
-  }
-  const bytes = Buffer.from(value, "base64url");
-  if (bytes.byteLength !== 64 || bytes.toString("base64url") !== value) {
-    throw shadowError(
-      "CONTROL_SHADOW_HANDSHAKE_INVALID",
-      "HostControl handshake signature has invalid canonical bytes.",
-    );
-  }
-  return bytes;
 }
 
 function sessionPayload<T extends Readonly<Record<string, unknown>>>(

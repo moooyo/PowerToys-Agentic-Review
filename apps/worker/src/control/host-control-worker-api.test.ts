@@ -84,10 +84,6 @@ class FakeControlClient implements ControlHostControlClient {
     return this.terminalResponse;
   }
 
-  public async signLocalDigest(): Promise<string> {
-    return "signature";
-  }
-
   public async armArwxShutdown(): Promise<never> {
     throw new Error("Worker API adapter does not arm ARWX shutdown.");
   }
@@ -105,7 +101,6 @@ describe("HostControlWorkerApi opaque Worker API boundary", () => {
     const api = new HostControlShadowApi({
       register: client.register.bind(client),
       instanceHeartbeat: client.instanceHeartbeat.bind(client),
-      signLocalDigest: client.signLocalDigest.bind(client),
     });
 
     expect(api).not.toHaveProperty("claimLease");
@@ -115,7 +110,6 @@ describe("HostControlWorkerApi opaque Worker API boundary", () => {
     await expect(api.heartbeat("worker:instance", heartbeatRequest())).resolves.toEqual(
       validHeartbeatResponse(),
     );
-    await expect(api.signLocalDigest("a".repeat(64))).resolves.toBe("signature");
     expect(client.calls.map((call) => call.operation)).toEqual(["Register", "InstanceHeartbeat"]);
   });
 

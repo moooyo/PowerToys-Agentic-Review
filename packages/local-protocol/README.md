@@ -37,53 +37,37 @@ Artifact data is base64url without padding. Each decoded chunk is at most 256 Ki
 results use the artifact stream and `Complete` references the completed result artifact, so the
 Server's 2 MiB result limit does not conflict with the 1 MiB local frame limit.
 
-## Local authority
+## Local authorization
 
-`ExecutionCapabilityV1` is a short-lived, lease-token-free authorization. It binds the Control and
-Executor boot/session identities, attempt and job identities, an issue revision digest or pull
-request base/head commits, canonical data
-digests, operation, ceilings, deadlines, and replay identifiers. `RenewalGrantV1` chains the initial
-capability and previous grant with an exact next sequence and Server heartbeat sequence.
+`ExecutionCapabilityV1` is a short-lived, lease-token-free authorization. It binds the Worker,
+Executor boot/session, attempt and job identities, the target revision, canonical input digests,
+operation, resource ceilings, deadlines, and independent replay identifiers. `RenewalGrantV1`
+chains the initial capability and previous grant with an exact next sequence and a fresh successful
+Server heartbeat sequence. Grants remain limited to 45 seconds and never extend the hard deadline.
 
-Before Executor may report `Ready`, Control proves possession of the installed local-authority key.
-The session sequence is `Hello` (Control), `HelloAck` (Executor), `ControlProof` (Control), then
-`Ready` (Executor). `ControlProof` is appended message type 20; message IDs 1 through 19 are unchanged.
-It is a Control-sent session message and therefore uses the nil correlation UUID.
+The Windows local environment is trusted. The protocol therefore carries no local ECDSA key,
+`keyId`, signature algorithm, signature wrapper, or `ControlProof`. The session sequence is
+`Hello` (Control), `HelloAck` (Executor), then `Ready` (Executor); message type IDs are exactly
+1 through 19.
 
-`HandshakeTranscriptV1` embeds the strict normalized `Hello` and `HelloAck` values in full. Its
-signature consequently binds the negotiated protocol, both nonces, worker node and Control instance,
-session and Executor boot IDs, matching Control/Executor package-manifest attestations, both preflight attestations, the Executor
-policy digest, and `maximumSlots`. It also binds canonicalization version 1, the
-`ECDSA_P256_SHA256_P1363_LOW_S` algorithm, the installed local-authority SPKI `keyId`, and the fixed
-`agentic-review/windows-executor-handshake/v1` audience. A transcript cannot be replayed into another
-session because the expected `Hello` and `HelloAck` are supplied again during proof verification.
+`establishLocalSession` validates and runtime-brands the exact `Hello` and `HelloAck` pair. The
+established session binds the negotiated protocol, both nonces, Worker node and Control instance,
+session and Executor boot IDs, the shared installation manifest, both preflight digests, the Executor
+policy digest, and `maximumSlots`. `validateReadyForEstablishedSession` accepts `Ready` only when
+all Executor session fields match that branded session. The brand proves in-process validation, not
+cryptographic authentication.
 
-Signatures use ECDSA P-256 with SHA-256 over length-prefixed, domain-separated canonical bytes. The
-`keyId` is the lowercase SHA-256 digest of the public key's DER SubjectPublicKeyInfo. The wire encoding is
-exactly 64-byte IEEE P1363 `r || s`, base64url without padding, with low-S normalization. DER,
-high-S, wrong-curve, malformed, and noncanonical encodings are rejected. Production signing remains
-the responsibility of the current Control-only non-exportable CNG adapter. If that candidate is
-retained, it signs the exported 32-byte signing digest directly and must not hash it a second time.
-ADR 0026 permits replacing this local mechanism without changing Worker-to-Server Token
-authentication. The Node helpers hash the domain-separated signing bytes internally and are the
-shared contract implementation and test oracle.
+`StartAttempt` carries the plain `ExecutionCapabilityV1` in its `authorization` field together
+with a from-zero allowlisted local envelope containing all execution inputs but no Server lease
+identity. The message validator cross-checks every authorization digest, revision, session, attempt,
+job, deadline, and resource field. `RenewGrant` carries the plain `RenewalGrantV1` authorization.
 
-For the handshake, Control calls `createHandshakeTranscriptV1`, sends the exact 32-byte result of
-`createHandshakeTranscriptSigningDigest` to the narrow ServiceHost signing operation, and passes the
-returned 64-byte P1363 low-S signature to `createSignedHandshakeProofV1`. Executor calls
-`verifyControlProofMessageV1` with its pinned P-256 public key and the exact expected peer messages.
-Only the returned `VerifiedHandshakeTranscriptV1` may be supplied to
-`validateReadyAfterHandshakeProofV1`. Framing and schema validation alone do not authenticate a
-`ControlProof`; connection state machines must reject `Ready` before proof verification and must
-reject duplicate or out-of-order handshake messages.
-
-`StartAttempt` carries a from-zero allowlisted local envelope containing all execution inputs but no
-Server lease identity: job metadata, repository identity, issue or pull-request resource metadata,
-a bounded canonical snapshot, prompt, output schema, and execution policy. It is cross-checked
-against every signed capability digest and revision field. `TerminalDisposition` and `TerminalAck`
-form a final handshake so Executor cleanup follows a definitive Server terminal outcome.
+Only values returned by `validateExecutionCapabilityForContext` and
+`validateRenewalGrantForContext` receive runtime brands accepted by replay and artifact
+verification. Replay reservations, heartbeat ordering, generation fencing, single-use
+authorizations, monotonic deadlines, resource ceilings, and terminal cleanup remain mandatory.
 
 The package never defines a field for a Server lease token, authorization header, executable path,
-or free-form command. Callers must still verify signatures, apply installed policy ceilings, reserve
-replay state atomically, convert accepted wall-clock durations to monotonic deadlines, and terminate
-all attempt processes when the pipe or local grant is lost.
+or free-form command. Callers must reserve replay state atomically, apply installed policy ceilings,
+convert accepted wall-clock durations to monotonic deadlines, and terminate all attempt processes
+when the pipe or local grant is lost.

@@ -15,7 +15,6 @@ import {
   HostControlProtocolError,
   parseHostControlInbound,
   parseHostControlResponse,
-  validP256LowSSignature,
 } from "./host-control-protocol.js";
 import { decodeHostControlOpaqueJson, encodeHostControlOpaqueJson } from "./opaque-json.js";
 
@@ -67,11 +66,9 @@ describe("HostControl role-local RPC protocol", () => {
         url: "https://arbitrary.invalid",
       }),
     ).toThrow(HostControlProtocolError);
-    expect(() =>
-      encodeHostControlCall("SignLocalDigest", "request:1", {
-        digestSha256: "A".repeat(64),
-      }),
-    ).toThrow(HostControlProtocolError);
+    expect(() => encodeHostControlCall("SignLocalDigest" as never, "request:1", {})).toThrow(
+      HostControlProtocolError,
+    );
   });
 
   it("keeps finite fractional JSON opaque inside the canonical envelope", () => {
@@ -210,16 +207,6 @@ describe("HostControl role-local RPC protocol", () => {
         HostControlProtocolError,
       );
     }
-  });
-
-  it("requires canonical P1363 low-S signing responses", () => {
-    const valid = Buffer.alloc(64, 1).toString("base64url");
-    const highS = Buffer.concat([Buffer.alloc(32, 1), Buffer.alloc(32, 0xff)]).toString(
-      "base64url",
-    );
-    expect(validP256LowSSignature(valid)).toBe(true);
-    expect(validP256LowSSignature(highS)).toBe(false);
-    expect(validP256LowSSignature(`${valid}=`)).toBe(false);
   });
 });
 
