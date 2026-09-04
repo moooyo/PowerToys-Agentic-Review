@@ -341,12 +341,6 @@ func isExactFoundationOptionsLiteral(literal *ast.CompositeLit, parents map[ast.
 	return runtimeBootstrapNodeMatches(literal, `localrpc.FoundationRuntimeBootstrapOptions{
 		Role: role,
 		WorkerNodeID: configuration.WorkerNodeID,
-		ReleaseID: configuration.Installation.ReleaseID,
-		ReleaseTemplateSHA256: hex.EncodeToString(e.release.templateDigest[:]),
-		InstallationManifestSHA256: configuration.Installation.ManifestSHA256,
-		PreflightSHA256: hex.EncodeToString(e.digest[:]),
-		NodeBundleSHA256: configuration.Node.BundleSHA256,
-		ExecutorPolicySHA256: executor.CodexPolicySHA256,
 		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
 		TotalShutdownTimeoutMS: int(configuration.Limits.ShutdownTimeoutMilliseconds),
 		ForceTerminationReserveMS: int(configuration.Limits.ForceTerminationReserveMilliseconds),

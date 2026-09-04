@@ -65,11 +65,10 @@ type runtimeOperationPolicy struct {
 }
 
 type foundationRoleConfig struct {
-	ExecutionEnabled     bool   `json:"executionEnabled"`
-	ExecutorPolicySHA256 string `json:"executorPolicySha256"`
-	FoundationVersion    int    `json:"foundationVersion"`
-	MaximumSlots         int    `json:"maximumSlots"`
-	Role                 Role   `json:"role"`
+	ExecutionEnabled  bool `json:"executionEnabled"`
+	FoundationVersion int  `json:"foundationVersion"`
+	MaximumSlots      int  `json:"maximumSlots"`
+	Role              Role `json:"role"`
 }
 
 // BeginRuntimeBootstrapExchange sends one canonical bootstrap frame and validates exactly one
@@ -188,8 +187,7 @@ func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfi
 		return foundationRoleConfig{}, err
 	}
 	expectedKeys := []string{
-		"executionEnabled", "executorPolicySha256", "foundationVersion",
-		"maximumSlots", "role",
+		"executionEnabled", "foundationVersion", "maximumSlots", "role",
 	}
 	object, ok := exactRuntimeBootstrapObject(parsed, expectedKeys...)
 	if !ok || !runtimeBootstrapJSONNumber(object["foundationVersion"]) ||
@@ -199,8 +197,7 @@ func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfi
 	var config foundationRoleConfig
 	if err := decodeExact(document, &config); err != nil ||
 		config.ExecutionEnabled || config.FoundationVersion != foundationRoleConfigVersion ||
-		config.MaximumSlots != foundationMaximumSlots || config.Role != role ||
-		!validRuntimeBootstrapDigest(config.ExecutorPolicySHA256) {
+		config.MaximumSlots != foundationMaximumSlots || config.Role != role {
 		return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
 	}
 	return config, nil

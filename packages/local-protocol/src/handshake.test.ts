@@ -32,7 +32,6 @@ const helloAck: HelloAckMessage = {
   controlNonce: hello.controlNonce,
   executorNonce: hex("4"),
   executorManifestSha256: hello.controlManifestSha256,
-  executorPolicySha256: hex("6"),
   executorPreflightSha256: hex("7"),
   maximumSlots: 4,
 };
@@ -56,7 +55,6 @@ describe("plain local handshake", () => {
       { controlNonce: hex("8") },
       { executorNonce: hello.controlNonce },
       { executorManifestSha256: hex("9") },
-      { executorPolicySha256: hex("0") },
     ];
 
     for (const mutation of mutations) {
@@ -74,7 +72,6 @@ describe("plain local handshake", () => {
     for (const invalid of [
       { ...ready, executorBootId: "30000000-0000-4000-8000-000000000003" },
       { ...ready, executorNonce: hex("8") },
-      { ...ready, executorPolicySha256: hex("9") },
       { ...ready, availableSlots: helloAck.maximumSlots + 1 },
     ]) {
       expect(() => validateReadyForEstablishedSession(invalid, session)).toThrowError(
@@ -103,7 +100,6 @@ function readyMessage(): ReadyMessage {
     controlNonce: helloAck.controlNonce,
     executorNonce: helloAck.executorNonce,
     executorManifestSha256: helloAck.executorManifestSha256,
-    executorPolicySha256: helloAck.executorPolicySha256,
     executorPreflightSha256: helloAck.executorPreflightSha256,
     isolationMode: "split-service-v1",
     ready: true,

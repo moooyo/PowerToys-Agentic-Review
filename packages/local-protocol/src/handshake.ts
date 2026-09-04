@@ -55,7 +55,6 @@ export function establishLocalSession(
     isZeroDigest(hello.controlManifestSha256) ||
     isZeroDigest(hello.controlPreflightSha256) ||
     isZeroDigest(helloAck.executorManifestSha256) ||
-    isZeroDigest(helloAck.executorPolicySha256) ||
     isZeroDigest(helloAck.executorPreflightSha256)
   ) {
     throw handshakeError(
@@ -90,7 +89,6 @@ export function validateReadyForEstablishedSession(
     ready.controlNonce !== helloAck.controlNonce ||
     ready.executorNonce !== helloAck.executorNonce ||
     ready.executorManifestSha256 !== helloAck.executorManifestSha256 ||
-    ready.executorPolicySha256 !== helloAck.executorPolicySha256 ||
     ready.executorPreflightSha256 !== helloAck.executorPreflightSha256 ||
     ready.availableSlots > helloAck.maximumSlots
   ) {

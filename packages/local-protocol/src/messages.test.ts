@@ -218,7 +218,6 @@ describe("local protocol message schemas", () => {
       controlNonce: hello.controlNonce,
       executorNonce: hex("4"),
       executorManifestSha256: hello.controlManifestSha256,
-      executorPolicySha256: hex("6"),
       executorPreflightSha256: hex("7"),
       maximumSlots: 4,
     };
@@ -229,7 +228,6 @@ describe("local protocol message schemas", () => {
       controlNonce: hex("1"),
       executorNonce: hex("2"),
       executorManifestSha256: hex("3"),
-      executorPolicySha256: hex("4"),
       executorPreflightSha256: hex("5"),
       isolationMode: "split-service-v1",
       ready: true,

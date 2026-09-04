@@ -234,9 +234,9 @@ describe("dormant RuntimeBootstrapV2 lab", () => {
     const facts = bootstrapFacts("control", Buffer.from(roleConfig));
 
     const accessor = { ...facts };
-    Object.defineProperty(accessor, "releaseId", {
+    Object.defineProperty(accessor, "role", {
       enumerable: true,
-      get: () => facts.releaseId,
+      get: () => facts.role,
     });
     expect(() => createRuntimeBootstrapV2Lab(accessor)).toThrow(TypeError);
 

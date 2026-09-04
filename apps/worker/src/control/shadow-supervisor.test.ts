@@ -365,13 +365,6 @@ describe("Control zero-slot shadow supervisor", () => {
       }),
     },
     {
-      name: "policy digest",
-      mutate: (value: HelloAckMessage) => ({
-        ...value,
-        executorPolicySha256: "3".repeat(64),
-      }),
-    },
-    {
       name: "maximum slots",
       mutate: (value: HelloAckMessage) => ({ ...value, maximumSlots: 2 }),
     },
@@ -694,7 +687,6 @@ function helloAck(harness: Harness, hello: Readonly<HelloMessage>): HelloAckMess
     controlNonce: hello.controlNonce,
     executorNonce,
     executorManifestSha256: harness.client.bootstrap.bootstrap.installationManifestSha256,
-    executorPolicySha256: harness.client.bootstrap.roleConfig.executorPolicySha256,
     executorPreflightSha256,
     maximumSlots: 1,
   };
@@ -712,7 +704,6 @@ function readyMessage(harness: Harness, hello: Readonly<HelloMessage>): ReadyMes
     controlNonce: ack.controlNonce,
     executorNonce: ack.executorNonce,
     executorManifestSha256: ack.executorManifestSha256,
-    executorPolicySha256: ack.executorPolicySha256,
     executorPreflightSha256: ack.executorPreflightSha256,
     isolationMode: "split-service-v1",
     ready: false,

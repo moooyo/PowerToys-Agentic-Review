@@ -45,7 +45,6 @@ const helloAck: HelloAckMessage = {
   controlNonce: hex("1"),
   executorNonce: hex("4"),
   executorManifestSha256: hex("5"),
-  executorPolicySha256: hex("6"),
   executorPreflightSha256: hex("7"),
   maximumSlots: 4,
 };

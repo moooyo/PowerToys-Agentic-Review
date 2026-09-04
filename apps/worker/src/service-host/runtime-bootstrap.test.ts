@@ -12,7 +12,6 @@ import {
 import {
   bootstrapDocument,
   foundationRoleConfig,
-  testExecutorPolicySha256,
 } from "./runtime-bootstrap.test-helpers.js";
 
 type MutableJsonObject = Record<string, unknown>;
@@ -90,7 +89,7 @@ describe("RuntimeBootstrapV1", () => {
   it("binds ACK identity to opaque roleConfig bytes, not only parsed semantics", () => {
     const compact = Buffer.from(JSON.stringify(foundationRoleConfig("control")), "utf8");
     const spaced = Buffer.from(
-      ` { "executionEnabled" : false, "executorPolicySha256" : "${testExecutorPolicySha256}", "foundationVersion" : 2, "maximumSlots" : 1, "role" : "control" } `,
+      ` { "executionEnabled" : false, "foundationVersion" : 2, "maximumSlots" : 1, "role" : "control" } `,
       "utf8",
     );
     const first = parseRuntimeBootstrap(withRoleConfig(compact), "control");

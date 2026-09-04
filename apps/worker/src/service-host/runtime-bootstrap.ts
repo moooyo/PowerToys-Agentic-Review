@@ -26,7 +26,6 @@ const protocolVersion = "1.0" as const;
 const absoluteEndPattern = "(?![\\s\\S])";
 const uuidV4Pattern = `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}${absoluteEndPattern}`;
 const entityIdPattern = `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}${absoluteEndPattern}`;
-const releaseIdPattern = `^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}${absoluteEndPattern}`;
 const sha256Pattern = `^[a-f0-9]{64}${absoluteEndPattern}`;
 const base64UrlPattern = `^[A-Za-z0-9_-]+${absoluteEndPattern}`;
 
@@ -50,7 +49,6 @@ const RoleConfigDescriptorSchema = Type.Object(
 export const ControlFoundationRoleConfigV2Schema = Type.Object(
   {
     executionEnabled: Type.Literal(false),
-    executorPolicySha256: Sha256Schema,
     foundationVersion: Type.Literal(2),
     maximumSlots: Type.Literal(1),
     role: Type.Literal("control"),
@@ -61,7 +59,6 @@ export const ControlFoundationRoleConfigV2Schema = Type.Object(
 export const ExecutorFoundationRoleConfigV2Schema = Type.Object(
   {
     executionEnabled: Type.Literal(false),
-    executorPolicySha256: Sha256Schema,
     foundationVersion: Type.Literal(2),
     maximumSlots: Type.Literal(1),
     role: Type.Literal("executor"),
@@ -81,11 +78,6 @@ export const RuntimeBootstrapV1Schema = Type.Object(
     bootstrapId: Type.String({ minLength: 36, maxLength: 36, pattern: uuidV4Pattern }),
     role: Type.Union([Type.Literal("control"), Type.Literal("executor")]),
     workerNodeId: Type.String({ minLength: 1, maxLength: 128, pattern: entityIdPattern }),
-    releaseId: Type.String({ minLength: 1, maxLength: 128, pattern: releaseIdPattern }),
-    releaseTemplateSha256: Sha256Schema,
-    installationManifestSha256: Sha256Schema,
-    preflightSha256: Sha256Schema,
-    nodeBundleSha256: Sha256Schema,
     arwx: Type.Object(
       {
         protocolMajor: Type.Literal(RUNTIME_BOOTSTRAP_ARWX_PROTOCOL_MAJOR),

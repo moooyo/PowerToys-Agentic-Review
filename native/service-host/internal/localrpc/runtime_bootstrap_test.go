@@ -185,17 +185,17 @@ func TestFoundationRuntimeBootstrapUsesPrivateEntropyAndFailsClosed(t *testing.T
 	}
 }
 
-func TestFoundationRuntimeBootstrapRejectsInvalidPolicyDigestBeforeEntropy(t *testing.T) {
+func TestFoundationRuntimeBootstrapRejectsInvalidFactsBeforeEntropy(t *testing.T) {
 	tests := []struct {
 		name   string
 		role   Role
 		mutate func(*FoundationRuntimeBootstrapOptions)
 	}{
 		{
-			name: "invalid Executor policy digest",
+			name: "invalid role",
 			role: RoleControl,
 			mutate: func(value *FoundationRuntimeBootstrapOptions) {
-				value.ExecutorPolicySHA256 = "invalid"
+				value.Role = Role("invalid")
 			},
 		},
 	}
@@ -257,7 +257,6 @@ func TestRuntimeBootstrapOutboundAuthorityRejectsDecodedOrMutatedValues(t *testi
 		mutate func(*RuntimeBootstrapV1)
 	}{
 		{"worker node", func(value *RuntimeBootstrapV1) { value.WorkerNodeID = "other-node" }},
-		{"release", func(value *RuntimeBootstrapV1) { value.ReleaseID = "other-release" }},
 		{"queue", func(value *RuntimeBootstrapV1) { value.ARWX.MaximumQueuedBytesPerDirection++ }},
 		{"role config", func(value *RuntimeBootstrapV1) { value.RoleConfig = otherRoleConfig }},
 	}
@@ -279,14 +278,6 @@ func TestRuntimeBootstrapLaunchBindingMatchesEveryExpectedFact(t *testing.T) {
 	}{
 		{"role", func(value *FoundationRuntimeBootstrapOptions) { value.Role = RoleExecutor }},
 		{"worker node", func(value *FoundationRuntimeBootstrapOptions) { value.WorkerNodeID = "other-node" }},
-		{"release", func(value *FoundationRuntimeBootstrapOptions) { value.ReleaseID = "other-release" }},
-		{"release template", func(value *FoundationRuntimeBootstrapOptions) { value.ReleaseTemplateSHA256 = strings.Repeat("a", 64) }},
-		{"manifest", func(value *FoundationRuntimeBootstrapOptions) {
-			value.InstallationManifestSHA256 = strings.Repeat("a", 64)
-		}},
-		{"preflight", func(value *FoundationRuntimeBootstrapOptions) { value.PreflightSHA256 = strings.Repeat("a", 64) }},
-		{"bundle", func(value *FoundationRuntimeBootstrapOptions) { value.NodeBundleSHA256 = strings.Repeat("a", 64) }},
-		{"Executor policy", func(value *FoundationRuntimeBootstrapOptions) { value.ExecutorPolicySHA256 = strings.Repeat("a", 64) }},
 		{"queue", func(value *FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
 		{"shutdown", func(value *FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},
 		{"reserve", func(value *FoundationRuntimeBootstrapOptions) { value.ForceTerminationReserveMS++ }},
@@ -430,11 +421,6 @@ func TestRuntimeBootstrapRejectsEveryWireFieldMutation(t *testing.T) {
 		{"bootstrap ID", func(v *RuntimeBootstrapV1) { v.BootstrapID = "123e4567-e89b-12d3-a456-426614174000" }},
 		{"role", func(v *RuntimeBootstrapV1) { v.Role = Role("other") }},
 		{"worker node ID", func(v *RuntimeBootstrapV1) { v.WorkerNodeID = "bad node" }},
-		{"release ID", func(v *RuntimeBootstrapV1) { v.ReleaseID = "bad release" }},
-		{"release template digest", func(v *RuntimeBootstrapV1) { v.ReleaseTemplateSHA256 = strings.Repeat("A", 64) }},
-		{"installation manifest digest", func(v *RuntimeBootstrapV1) { v.InstallationManifestSHA256 = strings.Repeat("A", 64) }},
-		{"preflight digest", func(v *RuntimeBootstrapV1) { v.PreflightSHA256 = strings.Repeat("A", 64) }},
-		{"Node bundle digest", func(v *RuntimeBootstrapV1) { v.NodeBundleSHA256 = strings.Repeat("A", 64) }},
 		{"ARWX protocol major", func(v *RuntimeBootstrapV1) { v.ARWX.ProtocolMajor = 2 }},
 		{"ARWX minimum minor", func(v *RuntimeBootstrapV1) { v.ARWX.MinimumMinor = 1 }},
 		{"ARWX maximum minor", func(v *RuntimeBootstrapV1) { v.ARWX.MaximumMinor = 1 }},
@@ -514,11 +500,6 @@ func TestRuntimeBootstrapRejectsEveryMissingWireField(t *testing.T) {
 		{key: "bootstrapId"},
 		{key: "role"},
 		{key: "workerNodeId"},
-		{key: "releaseId"},
-		{key: "releaseTemplateSha256"},
-		{key: "installationManifestSha256"},
-		{key: "preflightSha256"},
-		{key: "nodeBundleSha256"},
 		{key: "arwx"},
 		{key: "shutdown"},
 		{key: "roleConfig"},
@@ -589,7 +570,6 @@ func TestRuntimeBootstrapRejectsAmbiguousOrOversizedDocuments(t *testing.T) {
 	valid := validRuntimeBootstrapOptions()
 	valid.Role = RoleExecutor
 	valid.WorkerNodeID = "n" + strings.Repeat("a", 127)
-	valid.ReleaseID = "r" + strings.Repeat("a", 127)
 	valid.MaximumQueuedBytesPerDirection = RuntimeBootstrapARWXMaximumQueuedBytes
 	valid.GracefulTimeoutMS = RuntimeBootstrapMaximumGracefulTimeoutMS
 	valid.ForceTerminationReserveMS = RuntimeBootstrapMaximumGracefulTimeoutMS - 1
@@ -720,11 +700,6 @@ func validRuntimeBootstrapOptions() runtimeBootstrapOptions {
 		BootstrapID:                    "123e4567-e89b-42d3-a456-426614174000",
 		Role:                           RoleControl,
 		WorkerNodeID:                   "powertoys-node:01",
-		ReleaseID:                      "2026.08.31-test+1",
-		ReleaseTemplateSHA256:          strings.Repeat("1", 64),
-		InstallationManifestSHA256:     strings.Repeat("2", 64),
-		PreflightSHA256:                strings.Repeat("3", 64),
-		NodeBundleSHA256:               strings.Repeat("4", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		GracefulTimeoutMS:              120_000,
 		ForceTerminationReserveMS:      15_000,
@@ -736,12 +711,6 @@ func validFoundationRuntimeBootstrapOptions(role Role) FoundationRuntimeBootstra
 	return FoundationRuntimeBootstrapOptions{
 		Role:                           role,
 		WorkerNodeID:                   "powertoys-node:01",
-		ReleaseID:                      "2026.08.31-test+1",
-		ReleaseTemplateSHA256:          strings.Repeat("1", 64),
-		InstallationManifestSHA256:     strings.Repeat("2", 64),
-		PreflightSHA256:                strings.Repeat("3", 64),
-		NodeBundleSHA256:               strings.Repeat("4", 64),
-		ExecutorPolicySHA256:           strings.Repeat("6", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
 		ForceTerminationReserveMS:      15_000,

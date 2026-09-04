@@ -53,15 +53,8 @@ func TestRuntimePlanBuildsRoleBoundFoundationBootstrap(t *testing.T) {
 				t.Fatal(err)
 			}
 			configuration := plan.Configuration()
-			templateDigest := plan.ReleaseTemplateDigest()
-			preflightDigest := plan.PreflightDigest()
 			if bootstrap.Role != test.localRole ||
-				bootstrap.WorkerNodeID != configuration.WorkerNodeID ||
-				bootstrap.ReleaseID != configuration.Installation.ReleaseID ||
-				bootstrap.ReleaseTemplateSHA256 != hex.EncodeToString(templateDigest[:]) ||
-				bootstrap.InstallationManifestSHA256 != configuration.Installation.ManifestSHA256 ||
-				bootstrap.PreflightSHA256 != hex.EncodeToString(preflightDigest[:]) ||
-				bootstrap.NodeBundleSHA256 != plan.Bundle().SHA256() {
+				bootstrap.WorkerNodeID != configuration.WorkerNodeID {
 				t.Fatalf("bootstrap facts differ from finalized plan: %#v", bootstrap)
 			}
 			if !testRuntimeBootstrapUUIDV4.MatchString(bootstrap.BootstrapID) {
@@ -76,11 +69,10 @@ func TestRuntimePlanBuildsRoleBoundFoundationBootstrap(t *testing.T) {
 				t.Fatalf("bootstrap limits differ from finalized plan: %#v", bootstrap)
 			}
 			expectedRoleConfig := map[string]any{
-				"executionEnabled":     false,
-				"executorPolicySha256": fixture.executor.Executor.CodexPolicySHA256,
-				"foundationVersion":    2,
-				"maximumSlots":         1,
-				"role":                 string(test.localRole),
+				"executionEnabled":  false,
+				"foundationVersion": 2,
+				"maximumSlots":      1,
+				"role":              string(test.localRole),
 			}
 			expectedRoleConfigJSON, err := localrpc.MarshalCanonicalJSON(
 				expectedRoleConfig,

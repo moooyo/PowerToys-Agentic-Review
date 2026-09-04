@@ -269,22 +269,6 @@ func TestLaunchNodeRejectsEveryMismatchedBootstrapFactWithoutConsumingGuard(t *t
 			value.Role = localrpc.RoleExecutor
 		}},
 		{"worker node", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.WorkerNodeID = "powertoys-node:02" }},
-		{"release", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.ReleaseID = "other-release" }},
-		{"release template", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.ReleaseTemplateSHA256 = strings.Repeat("c", 64)
-		}},
-		{"manifest", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.InstallationManifestSHA256 = strings.Repeat("c", 64)
-		}},
-		{"preflight", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.PreflightSHA256 = strings.Repeat("c", 64)
-		}},
-		{"bundle", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.NodeBundleSHA256 = strings.Repeat("c", 64)
-		}},
-		{"Executor policy", func(value *localrpc.FoundationRuntimeBootstrapOptions) {
-			value.ExecutorPolicySHA256 = strings.Repeat("c", 64)
-		}},
 		{"queue", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.MaximumQueuedBytesPerDirection++ }},
 		{"shutdown", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.TotalShutdownTimeoutMS++ }},
 		{"reserve", func(value *localrpc.FoundationRuntimeBootstrapOptions) { value.ForceTerminationReserveMS++ }},
