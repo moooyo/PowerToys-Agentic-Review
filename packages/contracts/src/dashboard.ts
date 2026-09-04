@@ -330,7 +330,6 @@ export const DashboardSystemReadSchema = Type.Object(
     nodeVersion: Type.String({ minLength: 1, maxLength: 128 }),
     sqliteVersion: Type.String({ minLength: 1, maxLength: 128 }),
     databaseSizeBytes: NonNegativeIntegerSchema,
-    artifactSizeBytes: NonNegativeIntegerSchema,
     oldestQueuedAt: NullableDateTimeSchema,
     activeWorkers: NonNegativeIntegerSchema,
     activeLeases: NonNegativeIntegerSchema,

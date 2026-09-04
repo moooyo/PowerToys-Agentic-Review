@@ -13,10 +13,7 @@
   },
   "formatter": {
     "enabled": true,
-    "includes": [
-      "**",
-      "!!native/service-host/internal/localrpc/testdata/runtime_bootstrap_v1.json"
-    ],
+    "includes": ["**"],
     "indentStyle": "space",
     "indentWidth": 2,
     "lineWidth": 100

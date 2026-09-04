@@ -279,7 +279,7 @@ function createBudget(
 }
 
 describe("ProductionWorkspaceDiskBudget", () => {
-  it("fails closed before admission or cleanup without the native security adapter", async () => {
+  it("supports trusted-code workspace accounting without a native security adapter", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
     const budget = new ProductionWorkspaceDiskBudget({
       workspaceRootDirectory: workspaceRoot,
@@ -292,12 +292,10 @@ describe("ProductionWorkspaceDiskBudget", () => {
       clock: new FakeWorkspaceDiskClock(),
     });
 
-    await expect(budget.admit(attempt("a"))).rejects.toMatchObject({
-      code: "NATIVE_SECURITY_ADAPTER_REQUIRED",
-    });
-    await expect(budget.sweepOrphans()).rejects.toMatchObject({
-      code: "NATIVE_SECURITY_ADAPTER_REQUIRED",
-    });
+    const reservation = await budget.admit(attempt("a"));
+    expect(reservation.attemptDirectory).toBe(attempt("a"));
+    await reservation.release();
+    await expect(budget.sweepOrphans()).resolves.toMatchObject({ scanned: 0, removed: 0 });
   });
 
   it("drains when the native adapter loses its process-lifetime exclusive lock", async () => {

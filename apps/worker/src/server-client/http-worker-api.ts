@@ -26,7 +26,7 @@ import { ProtocolError, WorkerApiError } from "./errors.js";
 import type { WorkerApi } from "./worker-api.js";
 
 // A claim can contain both a bounded 1 MiB GitHub snapshot and a rendered prompt whose JSON
-// representation contains escaped untrusted data. Keep this aligned with ServiceHost transport.
+// representation contains escaped repository data.
 const maximumResponseBytes = maximumClaimLeaseResponseUtf8Bytes;
 
 type RequestFactory = (

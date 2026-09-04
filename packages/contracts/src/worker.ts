@@ -173,26 +173,8 @@ export const InlineRunCompletionSubmissionSchema = Type.Composite(
 );
 export type InlineRunCompletionSubmission = Static<typeof InlineRunCompletionSubmissionSchema>;
 
-export const ArtifactRunCompletionSubmissionSchema = Type.Composite(
-  [
-    LeaseIdentitySchema,
-    Type.Object(
-      {
-        artifactId: EntityIdSchema,
-        resultDigest: Sha256Schema,
-      },
-      { additionalProperties: false },
-    ),
-  ],
-  { additionalProperties: false },
-);
-export type ArtifactRunCompletionSubmission = Static<typeof ArtifactRunCompletionSubmissionSchema>;
-
-export const RunCompletionSubmissionSchema = Type.Union([
-  InlineRunCompletionSubmissionSchema,
-  ArtifactRunCompletionSubmissionSchema,
-]);
-export type RunCompletionSubmission = Static<typeof RunCompletionSubmissionSchema>;
+export const RunCompletionSubmissionSchema = InlineRunCompletionSubmissionSchema;
+export type RunCompletionSubmission = InlineRunCompletionSubmission;
 
 // The Worker reads the final Codex result from a file with the same byte ceiling.
 // The HTTP request allowance includes bounded lease-envelope and JSON framing overhead.

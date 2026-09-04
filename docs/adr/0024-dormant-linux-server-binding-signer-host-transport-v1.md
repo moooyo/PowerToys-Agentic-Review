@@ -1,5 +1,7 @@
 # ADR 0024: Dormant Linux Server Binding Signer Host Transport v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 ## Status
 
 Superseded by ADR 0025 on 2026-09-03. Production Worker authentication no longer requires a receipt

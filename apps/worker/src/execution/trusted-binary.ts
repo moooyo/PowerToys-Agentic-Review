@@ -118,9 +118,8 @@ const defaultFileIO: TrustedBinaryFileIO = {
   },
 };
 
-// ACL hardening and Authenticode verification remain installer and Windows release duties. This
-// verifier relies on the trusted executable root being read-only to the service account to close
-// the remaining name-to-open TOCTOU window.
+// Deployment must make the trusted executable root read-only to the Worker identity. This verifier
+// relies on that property to close the remaining name-to-open TOCTOU window.
 export async function verifyTrustedExecutionBinaries(
   options: VerifyTrustedExecutionBinariesOptions,
 ): Promise<Readonly<VerifiedTrustedExecutionBinaries>> {

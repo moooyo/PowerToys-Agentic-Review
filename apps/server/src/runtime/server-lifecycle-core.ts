@@ -74,7 +74,7 @@ export class ServerLifecycleCore {
     read: () => this.#accepting,
   });
 
-  readonly onArtifactFailStop = (error: Error): void => {
+  readonly onFatalError = (error: Error): void => {
     this.#requestFailStop(error);
   };
 

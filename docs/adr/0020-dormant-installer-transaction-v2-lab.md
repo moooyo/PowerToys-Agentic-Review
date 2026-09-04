@@ -1,5 +1,7 @@
 # ADR 0020: Dormant installer transaction schema v2 lab
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Withdrawn before publication by ADR 0026. Its source package was deleted and is not a future
 > installer prerequisite.
 >

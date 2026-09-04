@@ -82,7 +82,7 @@ describe("production source boundaries", () => {
     const migrations = readdirSync(migrationsDirectory)
       .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
       .sort();
-    expect(migrations).toContain("0012_worker_token_auth_v1.sql");
+    expect(migrations).toContain("0008_worker_token_auth_v1.sql");
     expect(migrations).not.toContain("0012_server_binding_persistence_v1.sql");
     expect(migrations).not.toContain("0013_worker_token_auth_v1.sql");
     for (const migration of migrations) {
@@ -177,11 +177,6 @@ describe("production source boundaries", () => {
 
   it("permits only the exact reviewed Worker and child-process launch sites", () => {
     const allowed = [
-      {
-        fileName: resolve("test-fixtures/apps/server/src/artifacts/artifact-storage-client.ts"),
-        source:
-          'import { Worker, type WorkerOptions } from "node:worker_threads"; const defaultWorkerFactory = (filename, options) => new Worker(filename, options) as ArtifactStorageWorkerTransport;',
-      },
       {
         fileName: resolve("test-fixtures/apps/server/src/database/database-client.ts"),
         source:
@@ -491,11 +486,11 @@ function inspectProductionSourceFile(
     });
   };
   visit(sourceFile);
-  const expectedWorkerCalls =
-    normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-client.ts") ||
-    normalizedFileName.endsWith("/apps/server/src/database/database-client.ts")
-      ? 1
-      : 0;
+  const expectedWorkerCalls = normalizedFileName.endsWith(
+    "/apps/server/src/database/database-client.ts",
+  )
+    ? 1
+    : 0;
   const expectedSpawnSyncCalls = normalizedFileName.endsWith(
     "/apps/worker/scripts/build-worker-bundles.mjs",
   )
@@ -936,16 +931,11 @@ function inspectLoaderImport(
     }
   }
   if (moduleName === "node:worker_threads" || moduleName === "worker_threads") {
-    const expected = normalizedFileName.endsWith(
-      "/apps/server/src/artifacts/artifact-storage-client.ts",
-    )
-      ? "Worker:Worker:value,WorkerOptions:WorkerOptions:type"
-      : normalizedFileName.endsWith("/apps/server/src/database/database-client.ts")
-        ? "Worker:Worker:value"
-        : normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-worker.ts") ||
-            normalizedFileName.endsWith("/apps/server/src/database/database-worker.ts")
-          ? "parentPort:parentPort:value,workerData:workerData:value"
-          : undefined;
+    const expected = normalizedFileName.endsWith("/apps/server/src/database/database-client.ts")
+      ? "Worker:Worker:value"
+      : normalizedFileName.endsWith("/apps/server/src/database/database-worker.ts")
+        ? "parentPort:parentPort:value,workerData:workerData:value"
+        : undefined;
     if (expected === undefined || importedBindingSignature(declaration) !== expected) {
       violations.add("worker_threads import outside exact allowlist");
     }
@@ -980,23 +970,6 @@ function isAllowedWorkerCall(
   sourceFile: ts.SourceFile,
   normalizedFileName: string,
 ): boolean {
-  if (
-    normalizedFileName.endsWith("/apps/server/src/artifacts/artifact-storage-client.ts") &&
-    compactNodeText(expression, sourceFile) === "newWorker(filename,options)"
-  ) {
-    const arrow = findAncestor(expression, ts.isArrowFunction);
-    const declaration = arrow?.parent;
-    return (
-      arrow !== undefined &&
-      declaration !== undefined &&
-      ts.isVariableDeclaration(declaration) &&
-      ts.isIdentifier(declaration.name) &&
-      declaration.name.text === "defaultWorkerFactory" &&
-      declaration.initializer === arrow &&
-      compactNodeText(arrow, sourceFile) ===
-        "(filename,options)=>newWorker(filename,options)asArtifactStorageWorkerTransport"
-    );
-  }
   if (
     normalizedFileName.endsWith("/apps/server/src/database/database-client.ts") &&
     compactNodeText(expression, sourceFile) === "newWorker(workerUrl,{workerData:options})"

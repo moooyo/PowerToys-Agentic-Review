@@ -22,10 +22,9 @@ The Job Object applies both per-process and total-job memory limits, an active p
 stopped and the Job Object reports no active processes.
 
 A Job Object is a lifetime and resource-control mechanism, not a security boundary for malicious
-code running under the same Windows token. A same-token process may be able to open ProcessHost and
-duplicate handles despite the creation-time inheritance allowlist. Dynamic execution of untrusted
-code must remain disabled unless a separate restricted identity or stronger isolation boundary is
-enforced outside ProcessHost.
+code running under the same Windows token. The current Worker therefore admits only code that the
+deployment treats as trusted. ProcessHost still provides deterministic cleanup and resource limits,
+but it must not be described as hostile-code containment.
 
 ## Windows verification
 

@@ -1,46 +1,73 @@
 # PowerToys Agentic Review
 
-PowerToys Agentic Review is a TypeScript control plane and remote Windows worker system for
-GitHub issue triage and pull request review with Codex CLI.
+PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for GitHub
+issue triage and pull request review with Codex CLI. The project is pre-release and intentionally
+does not preserve compatibility with the earlier split-worker or artifact-storage prototypes.
 
-The repository is an early implementation. See [ARCHITECTURE.md](./ARCHITECTURE.md) and the
-architecture decision records in [docs/adr](./docs/adr). The exact implemented and deliberately
-disabled boundaries are tracked in [docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEMENTATION_STATUS.md).
+See [ARCHITECTURE.md](./ARCHITECTURE.md),
+[docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEMENTATION_STATUS.md), and
+[ADR 0029](./docs/adr/0029-trusted-code-single-worker-and-shared-worktrees.md) for the current
+baseline.
 
 ## Workspace
 
-- `apps/server`: Linux control plane, GitHub integration, scheduling, leases, and SQLite.
-- `apps/worker`: remote Windows worker, Codex CLI execution, heartbeats, and artifacts.
+- `apps/server`: Linux control plane, GitHub ingestion, scheduling, fenced leases, operator
+  authentication, and SQLite persistence.
+- `apps/worker`: one outbound-only Windows Worker that prepares worktrees, runs Codex and validation,
+  and submits an inline structured result.
 - `apps/dashboard`: React and Ant Design Pro operator dashboard.
 - `packages/contracts`: runtime schemas and shared protocol types.
-- `packages/domain`: pure state transition and policy logic.
+- `packages/domain`: pure state-transition and scheduling policy logic.
 - `packages/codex`: shell-free Codex launch specifications, JSONL parsing, and result schemas.
+- `native/process-host`: Windows Job Object process-tree and resource-control adapter.
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
-- `migrations`: forward-only SQLite schema for leases, GitHub projections, OIDC sessions, and
-  polling checkpoints.
-- `deploy/worker`: signed Windows Worker package and native two-service clean installer inputs.
+- `migrations`: the current eight-step SQLite schema.
+- `deploy/worker`: manual trusted deployment guidance for the unpublished Worker.
 
-Phase 1a supports authenticated, read-only GitHub ingestion, immutable result projections, and
-Dashboard views. The native Windows ServiceHost composition is connected in zero-execution mode,
-but real Worker execution remains disabled until real signed payloads, elevated dual-service
-installation and lifecycle verification, and the native Windows x64 and arm64 validation suite are
-complete. Phase 1b result artifacts, immutable diff validation, approval persistence, and GitHub
-publication also remain deliberately disabled. Dynamic validation remains a separate
-stronger-isolation milestone.
+## Current execution model
+
+Admitted repository revisions are trusted execution inputs. Pull request jobs use one persistent
+shared Git object store per configured public repository. Before each job, the Worker fetches the
+current `main` and exact pull request head, verifies the expected SHAs and merge base, and creates a
+detached per-attempt worktree. Repeated reviews therefore transfer only missing Git objects.
+
+Codex runs with workspace write access and outbound network access so it can inspect, edit, build,
+and test inside the disposable worktree. ProcessHost and Windows Job Objects still enforce lifetime,
+process-count, memory, timeout, and output limits. Worker and Server credentials are not propagated
+to child processes.
+
+The MVP has one result channel: an inline, schema-validated completion payload. There is no result
+artifact upload or Server artifact store.
+
+## Authentication
+
+Each Worker uses a node-scoped Bearer Token. Operator authentication supports either:
+
+- `loopback` for a loopback-only local deployment; or
+- `oidc` for externally reachable deployments.
+
+GitHub OIDC is not required. GitHub webhook verification and/or a read token are separate ingestion
+credentials.
+
+## Development
+
+The repository requires Node.js 24.20.x and pnpm 11.24.x.
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm lint
+```
+
+The Windows Worker deployment and credential-file layout are documented in
+[apps/worker/README.md](./apps/worker/README.md) and
+[deploy/worker/README.md](./deploy/worker/README.md).
 
 ## Database recovery maintenance
 
-Whole-Server database rollback uses `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` with a loopback-only
-listener and configured operator authentication. On each maintenance start, the Server atomically
-invalidates restored operator login transactions, sessions, and browser bindings before listening;
-it keeps liveness available, reports not-ready, rejects every Worker API route, and leaves local
-operator credential reconciliation and Dashboard reads available. GitHub ingestion and the lease
-reaper remain stopped until normal mode returns. A database-only maintenance runtime owns SQLite
-without opening, enumerating, creating, or reconciling the artifact root.
-
-The listener is not a network isolation boundary by itself. Remove the ordinary reverse-proxy
-upstream and any container published port, then use only the designated local terminal or an SSH
-tunnel to the loopback listener. For containers, use host networking or a local tunnel sidecar in
-the same network namespace; ordinary bridged-container recovery is unsupported. Follow
-[`docs/operations/worker-token-recovery.md`](./docs/operations/worker-token-recovery.md) for the
-complete sequence.
+Whole-database rollback uses `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` with a loopback-only
+listener. The Server keeps liveness available, reports not-ready, rejects Worker routes, suppresses
+GitHub ingestion and lease reaping, and exposes only the operator recovery surface. Follow
+[docs/operations/worker-token-recovery.md](./docs/operations/worker-token-recovery.md).

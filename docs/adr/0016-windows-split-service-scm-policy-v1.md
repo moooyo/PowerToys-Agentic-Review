@@ -1,5 +1,7 @@
 # ADR 0016: Windows Split-Service SCM Policy v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Superseded before publication by ADR 0026. ServiceHost now integrates directly with SCM; the WinSW
 > binary, XML, wrapper lifecycle, and wrapper-specific timing values below are historical only. The
 > journal-coupled maintenance fence, upgrade, rollback, and blocked final-policy lifecycle are

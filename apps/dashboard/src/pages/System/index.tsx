@@ -51,11 +51,6 @@ function ControlPlaneSummary({ snapshot }: { snapshot: SystemSnapshot }) {
           label: "Database",
           children: `${snapshot.databaseSizeMb.toFixed(1)} MB`,
         },
-        {
-          key: "artifactSizeGb",
-          label: "Artifacts",
-          children: `${snapshot.artifactSizeGb.toFixed(1)} GB`,
-        },
         { key: "activeWorkers", label: "Active workers", children: snapshot.activeWorkers },
         { key: "activeLeases", label: "Active leases", children: snapshot.activeLeases },
         {

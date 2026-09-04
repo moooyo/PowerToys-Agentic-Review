@@ -1,5 +1,7 @@
 # ADR 0007: Isolate Windows Worker Control and Execution Identities
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Superseded in part by ADR 0027 for current production requirements.
 > The current requirement set is trusted local Windows, two SCM-managed service identities,
 > pipe peer PID/SID verification, and unsigned typed local authorization envelopes.

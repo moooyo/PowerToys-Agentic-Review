@@ -127,7 +127,7 @@ export function isPermanentWorkerClientError(error: unknown): boolean {
   return false;
 }
 
-export function isFatalWorkerControlError(error: unknown): boolean {
+export function isFatalWorkerError(error: unknown): boolean {
   return (
     error instanceof ProtocolError ||
     (error instanceof WorkerApiError && !error.isRetryable && !error.isWorkerRegistrationLost) ||

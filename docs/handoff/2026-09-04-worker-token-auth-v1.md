@@ -1,5 +1,8 @@
 # Per-Worker Bearer Token Authentication v1 Handoff
 
+> Historical implementation handoff. ADR 0029 and the amended ADR 0025 define the current
+> single-Worker path and schema version.
+
 Status date: 2026-09-04
 
 Branch: `codex/worker-token-auth-v1`

@@ -1,5 +1,4 @@
 import type {
-  ArtifactRunCompletionSubmission,
   DashboardJobListQuery,
   DashboardJobListResponse,
   DashboardSystemRead,
@@ -29,43 +28,6 @@ import type {
   FindOperatorSessionInput,
   OperatorSession,
 } from "../security/operator-auth.js";
-import type {
-  CommitArtifactCompletionInput,
-  PrepareArtifactCompletionResult,
-} from "./artifact-completion.js";
-import type {
-  ArtifactHealthAccounting,
-  ArtifactReconciliationCursor,
-  ClassifyArtifactNamespacePageInput,
-  ClassifyArtifactNamespacePageResult,
-  CommitArtifactChunkInput,
-  CommitArtifactChunkResult,
-  CommitArtifactFinalizeInput,
-  CommitArtifactFinalizeResult,
-  CompleteArtifactCleanupInput,
-  CompleteArtifactCleanupResult,
-  CompleteArtifactNamespaceCleanupInput,
-  CompleteArtifactNamespaceCleanupResult,
-  CreateArtifactUploadInput,
-  CreateArtifactUploadResult,
-  ListDueArtifactCleanupsInput,
-  ListDueArtifactCleanupsResult,
-  ListDueArtifactNamespaceCleanupsInput,
-  ListDueArtifactNamespaceCleanupsResult,
-  PrepareArtifactChunkInput,
-  PrepareArtifactChunkResult,
-  PrepareArtifactFinalizeInput,
-  PrepareArtifactFinalizeResult,
-  ProbeArtifactUploadCreateResult,
-  RecordArtifactCleanupFailureInput,
-  RecordArtifactCleanupFailureResult,
-  RecordArtifactNamespaceCleanupFailureInput,
-  RecordArtifactNamespaceCleanupFailureResult,
-  TerminalizeInactiveArtifactUploadsInput,
-  TerminalizeInactiveArtifactUploadsResult,
-  TerminateArtifactUploadInput,
-  TerminateArtifactUploadResult,
-} from "./artifacts.js";
 import type {
   CommitGitHubPollingReconciliationInput,
   CommitGitHubPollingReconciliationResult,
@@ -330,82 +292,6 @@ export interface DatabaseOperationMap {
   readonly heartbeatLease: {
     readonly input: HeartbeatLeaseInput;
     readonly output: HeartbeatLeaseResult;
-  };
-  readonly createArtifactUpload: {
-    readonly input: CreateArtifactUploadInput;
-    readonly output: CreateArtifactUploadResult;
-  };
-  readonly probeArtifactUploadCreate: {
-    readonly input: CreateArtifactUploadInput;
-    readonly output: ProbeArtifactUploadCreateResult;
-  };
-  readonly prepareArtifactChunk: {
-    readonly input: PrepareArtifactChunkInput;
-    readonly output: PrepareArtifactChunkResult;
-  };
-  readonly commitArtifactChunk: {
-    readonly input: CommitArtifactChunkInput;
-    readonly output: CommitArtifactChunkResult;
-  };
-  readonly prepareArtifactFinalize: {
-    readonly input: PrepareArtifactFinalizeInput;
-    readonly output: PrepareArtifactFinalizeResult;
-  };
-  readonly commitArtifactFinalize: {
-    readonly input: CommitArtifactFinalizeInput;
-    readonly output: CommitArtifactFinalizeResult;
-  };
-  readonly terminateArtifactUpload: {
-    readonly input: TerminateArtifactUploadInput;
-    readonly output: TerminateArtifactUploadResult;
-  };
-  readonly terminalizeInactiveArtifactUploads: {
-    readonly input: TerminalizeInactiveArtifactUploadsInput;
-    readonly output: TerminalizeInactiveArtifactUploadsResult;
-  };
-  readonly listDueArtifactCleanups: {
-    readonly input: ListDueArtifactCleanupsInput;
-    readonly output: ListDueArtifactCleanupsResult;
-  };
-  readonly completeArtifactCleanup: {
-    readonly input: CompleteArtifactCleanupInput;
-    readonly output: CompleteArtifactCleanupResult;
-  };
-  readonly recordArtifactCleanupFailure: {
-    readonly input: RecordArtifactCleanupFailureInput;
-    readonly output: RecordArtifactCleanupFailureResult;
-  };
-  readonly classifyArtifactNamespacePageAndAdvanceCursor: {
-    readonly input: ClassifyArtifactNamespacePageInput;
-    readonly output: ClassifyArtifactNamespacePageResult;
-  };
-  readonly listDueArtifactNamespaceCleanups: {
-    readonly input: ListDueArtifactNamespaceCleanupsInput;
-    readonly output: ListDueArtifactNamespaceCleanupsResult;
-  };
-  readonly completeArtifactNamespaceCleanup: {
-    readonly input: CompleteArtifactNamespaceCleanupInput;
-    readonly output: CompleteArtifactNamespaceCleanupResult;
-  };
-  readonly recordArtifactNamespaceCleanupFailure: {
-    readonly input: RecordArtifactNamespaceCleanupFailureInput;
-    readonly output: RecordArtifactNamespaceCleanupFailureResult;
-  };
-  readonly readArtifactHealthAccounting: {
-    readonly input: Record<string, never>;
-    readonly output: ArtifactHealthAccounting;
-  };
-  readonly readArtifactReconciliationCursor: {
-    readonly input: Record<string, never>;
-    readonly output: ArtifactReconciliationCursor;
-  };
-  readonly prepareArtifactCompletion: {
-    readonly input: ArtifactRunCompletionSubmission;
-    readonly output: PrepareArtifactCompletionResult;
-  };
-  readonly commitArtifactCompletion: {
-    readonly input: CommitArtifactCompletionInput;
-    readonly output: LeaseTerminalResult;
   };
   readonly completeLease: {
     readonly input: LeaseCompletionInput;

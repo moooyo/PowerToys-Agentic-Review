@@ -13,11 +13,10 @@ import type { JobExecutor } from "./execution/job-executor.js";
 import type { ProcessHostClient } from "./execution/process-host-protocol.js";
 import { ExecutionTimeoutError, LeaseLostError } from "./leases/errors.js";
 import { HeartbeatCoordinator } from "./leases/heartbeat-coordinator.js";
-import { mapRunTerminalResponseOutcome } from "./local/local-execution-run.js";
 import type { Logger } from "./logging/logger.js";
 import { digestCapabilities } from "./server-client/capabilities.js";
 import {
-  isFatalWorkerControlError,
+  isFatalWorkerError,
   isPermanentWorkerClientError,
   ProtocolError,
   WorkerApiError,
@@ -271,7 +270,7 @@ export class WorkerService {
         responseReceivedAt = performance.now();
       } catch (error) {
         if (!claimController.signal.aborted && !stopSignal.aborted) {
-          if (isFatalWorkerControlError(error)) {
+          if (isFatalWorkerError(error)) {
             this.#signalFatal(error);
           } else {
             this.logger.warn("Lease claim failed.", { error });
@@ -727,6 +726,27 @@ export class WorkerService {
 function nodeHealthFaultReason(error: Error): string {
   const candidate = "code" in error && typeof error.code === "string" ? error.code : error.name;
   return `node_health_fault:${/^[A-Z][A-Z0-9_]{0,63}$/u.test(candidate) ? candidate : "UNCLASSIFIED"}`;
+}
+
+function mapRunTerminalResponseOutcome(
+  response: RunTerminalResponse,
+): "committed" | "retry_scheduled" | "cancelled" {
+  if (response.jobState === "succeeded" && response.runState === "succeeded") {
+    return "committed";
+  }
+  if (response.jobState === "retry_waiting" && response.runState === "failed") {
+    return "retry_scheduled";
+  }
+  if (response.jobState === "cancelled" && response.runState === "cancelled") {
+    return "cancelled";
+  }
+  if (
+    (response.jobState === "failed" || response.jobState === "dead_letter") &&
+    response.runState === "failed"
+  ) {
+    return "committed";
+  }
+  throw new TypeError("Server terminal job and run states are inconsistent.");
 }
 
 function validateEnvelopeOwnership(

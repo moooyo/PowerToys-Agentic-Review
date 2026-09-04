@@ -1,5 +1,7 @@
 # ADR 0013: Windows Node Enrollment and Split Installation
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Superseded before publication by ADR 0026. The upgrade, migration, rollback, journal, WinSW, and
 > recovery lifecycle in this document is not a production direction. Its remaining package and
 > filesystem mechanisms are optional input only where a future ADR 0026 installer explicitly reuses

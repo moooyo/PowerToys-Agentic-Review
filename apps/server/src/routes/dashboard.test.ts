@@ -13,7 +13,6 @@ const systemSnapshot = {
   nodeVersion: "24.20.0",
   sqliteVersion: "3.50.4",
   databaseSizeBytes: 1_024,
-  artifactSizeBytes: 2_048,
   oldestQueuedAt: null,
   activeWorkers: 1,
   activeLeases: 0,

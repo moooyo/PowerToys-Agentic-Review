@@ -20,7 +20,7 @@ export interface ServerLifecycle {
   readonly signal: AbortSignal;
   readonly admission: ServerLifecycleAdmission;
   readonly completion: Promise<void>;
-  readonly onArtifactFailStop: (error: Error) => void;
+  readonly onFatalError: (error: Error) => void;
   adoptApplication(application: ServerLifecycleApplication): void;
   adoptStorageRuntime(storageRuntime: ServerLifecycleStorageRuntime): void;
   trackBackground(name: string, completion: Promise<void>): void;
@@ -62,7 +62,7 @@ export const createProductionServerLifecycle = (
     signal: core.signal,
     admission: core.admission,
     completion: core.completion,
-    onArtifactFailStop: core.onArtifactFailStop,
+    onFatalError: core.onFatalError,
     adoptApplication: (application: ServerLifecycleApplication) =>
       core.adoptApplication(application),
     adoptStorageRuntime: (storageRuntime: ServerLifecycleStorageRuntime) =>

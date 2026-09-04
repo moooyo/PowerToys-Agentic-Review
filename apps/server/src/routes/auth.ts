@@ -131,8 +131,8 @@ const isAllowedRequest = (request: FastifyRequest, auth: OperatorAuthRouteServic
 
 const sendLoopbackDenied = (reply: FastifyReply): FastifyReply =>
   noStore(reply).code(403).send({
-    code: "loopback_development_bypass_denied",
-    message: "Development authentication bypass is restricted to loopback requests.",
+    code: "loopback_operator_auth_denied",
+    message: "Loopback operator authentication is restricted to loopback requests.",
     retryable: false,
   });
 

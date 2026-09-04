@@ -1,8 +1,20 @@
 import { mkdir } from "node:fs/promises";
+import { win32 } from "node:path";
 import process from "node:process";
 import { loadWorkerConfig } from "./config.js";
-import { PlaceholderJobExecutor } from "./execution/job-executor.js";
-import { UnavailableProcessHostClient } from "./execution/process-host-protocol.js";
+import {
+  type JobExecutor,
+  PlaceholderJobExecutor,
+  ReviewJobExecutor,
+} from "./execution/job-executor.js";
+import { ProductionDisposableJobWorkspaceProvider } from "./execution/job-workspace.js";
+import { StdioProcessHostClient } from "./execution/process-host-client.js";
+import {
+  type ProcessHostClient,
+  UnavailableProcessHostClient,
+} from "./execution/process-host-protocol.js";
+import { verifyTrustedExecutionBinaries } from "./execution/trusted-binary.js";
+import { ProductionWorkspaceDiskBudget } from "./execution/workspace-disk-budget.js";
 import { ConsoleJsonLogger } from "./logging/logger.js";
 import { WorkerApiError } from "./server-client/errors.js";
 import { HttpWorkerApi } from "./server-client/http-worker-api.js";
@@ -14,19 +26,14 @@ async function main(): Promise<void> {
   }
 
   const config = loadWorkerConfig();
-  if (config.executionEnabled) {
-    throw new Error(
-      "Worker execution remains disabled until the control/executor identity boundary and Windows runtime preflight are connected.",
-    );
-  }
   await mkdir(config.dataDirectory, { recursive: true });
   const logger = new ConsoleJsonLogger(config.logLevel, {
     component: "worker",
     workerNodeId: config.workerNodeId,
   });
   const api = new HttpWorkerApi(config, logger);
-  const processHost = new UnavailableProcessHostClient();
-  const executor = new PlaceholderJobExecutor();
+  const runtime = await createExecutionRuntime(config, logger);
+  const { processHost, executor } = runtime;
   const service = new WorkerService(config, api, executor, processHost, logger);
   let shutdownRequested = false;
 
@@ -64,6 +71,103 @@ async function main(): Promise<void> {
       logger.error("Cleanup after fatal error failed.", { error: shutdownError });
     });
   }
+}
+
+async function createExecutionRuntime(
+  config: ReturnType<typeof loadWorkerConfig>,
+  logger: ConsoleJsonLogger,
+): Promise<{ readonly processHost: ProcessHostClient; readonly executor: JobExecutor }> {
+  if (!config.executionEnabled) {
+    return {
+      processHost: new UnavailableProcessHostClient(),
+      executor: new PlaceholderJobExecutor(),
+    };
+  }
+  const execution = config.execution;
+  if (execution === undefined) {
+    throw new Error("Execution is enabled without an execution configuration.");
+  }
+
+  const gitWorkingDirectory = win32.join(config.dataDirectory, "GitRuntime");
+  await Promise.all([
+    mkdir(execution.gitSharedRootDirectory, { recursive: true }),
+    mkdir(execution.workspaceRootDirectory, { recursive: true }),
+    mkdir(execution.tempDirectory, { recursive: true }),
+    mkdir(execution.profileDirectory, { recursive: true }),
+    mkdir(gitWorkingDirectory, { recursive: true }),
+  ]);
+
+  const binaries = await verifyTrustedExecutionBinaries({
+    trustedExecutableRoot: execution.trustedExecutableRoot,
+    processHost: {
+      path: execution.processHostPath,
+      expectedSha256: execution.processHostSha256,
+    },
+    codex: { path: execution.codexExecutablePath, expectedSha256: execution.codexSha256 },
+    git: { path: execution.gitExecutablePath, expectedSha256: execution.gitSha256 },
+  });
+  const systemRoot = requiredEnvironment("SYSTEMROOT");
+  const comSpec = requiredEnvironment("COMSPEC");
+  const path = requiredEnvironment("PATH");
+  const pathExt = requiredEnvironment("PATHEXT");
+  const processHost = await StdioProcessHostClient.create({
+    processHostPath: binaries.processHostPath,
+    maximumConcurrentRequests: Math.max(1, config.maxSlots * 2),
+    requestTimeoutMs: execution.processHostRequestTimeoutMs,
+    startTimeoutMs: execution.processHostStartTimeoutMs,
+    shutdownTimeoutMs: execution.processHostShutdownTimeoutMs,
+  });
+  const diskBudget = new ProductionWorkspaceDiskBudget({
+    workspaceRootDirectory: execution.workspaceRootDirectory,
+    perAttemptDiskBytes: BigInt(execution.perAttemptDiskBytes),
+    totalWorkspaceDiskBytes: BigInt(execution.totalWorkspaceDiskBytes),
+    minimumFreeDiskBytes: BigInt(execution.minimumFreeDiskBytes),
+    orphanRetentionMilliseconds: BigInt(execution.orphanRetentionHours) * 60n * 60n * 1_000n,
+    orphanScanLimit: execution.orphanScanLimit,
+  });
+  const orphanSweep = await diskBudget.sweepOrphans();
+  logger.info("Worker workspace startup sweep completed.", {
+    ...orphanSweep,
+    removedBytes: orphanSweep.removedBytes?.toString() ?? null,
+  });
+  const workspaceProvider = new ProductionDisposableJobWorkspaceProvider({
+    workspaceRootDirectory: execution.workspaceRootDirectory,
+    gitSharedRootDirectory: execution.gitSharedRootDirectory,
+    gitExecutable: binaries.gitPath,
+    gitWorkingDirectory,
+    gitEnvironment: { SYSTEMROOT: systemRoot, COMSPEC: comSpec, PATH: path, PATHEXT: pathExt },
+    gitLimits: {
+      hardTimeoutMs: execution.gitHardTimeoutMs,
+      maximumProcessCount: execution.gitResourceLimits.maximumProcessCount,
+      maximumMemoryBytes: execution.gitResourceLimits.maximumMemoryBytes,
+      maximumOutputBytes: execution.gitResourceLimits.maximumOutputBytes,
+    },
+    diskBudget,
+  });
+  return {
+    processHost,
+    executor: new ReviewJobExecutor({
+      workspaceProvider,
+      codexExecutablePath: binaries.codexPath,
+      systemRoot,
+      comSpec,
+      path,
+      pathExt,
+      maximumHardTimeoutMs: execution.codexMaximumHardTimeoutMs,
+      maximumProcessCount: execution.codexResourceLimits.maximumProcessCount,
+      maximumMemoryBytes: execution.codexResourceLimits.maximumMemoryBytes,
+      maximumOutputBytes: execution.codexResourceLimits.maximumOutputBytes,
+      logger,
+    }),
+  };
+}
+
+function requiredEnvironment(name: "SYSTEMROOT" | "COMSPEC" | "PATH" | "PATHEXT"): string {
+  const value = process.env[name]?.trim();
+  if (value === undefined || value === "") {
+    throw new Error(`Worker execution requires the ${name} environment variable.`);
+  }
+  return value;
 }
 
 await main().catch((error: unknown) => {

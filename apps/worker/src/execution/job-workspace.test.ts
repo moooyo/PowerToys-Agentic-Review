@@ -26,6 +26,7 @@ import {
 const workspaceRoot = "C:\\AgenticReview\\workspaces";
 const gitExecutable = "C:\\Program Files\\Git\\cmd\\git.exe";
 const gitWorkingDirectory = "C:\\AgenticReview\\git-cwd";
+const gitSharedRootDirectory = "C:\\AgenticReview\\repositories";
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const digest = "0".repeat(64);
@@ -45,6 +46,7 @@ class FakeWorkspaceFileSystem implements JobWorkspaceFileSystem {
   public constructor(root = workspaceRoot) {
     this.addDirectory(root);
     this.addDirectory(gitWorkingDirectory);
+    this.addDirectory(gitSharedRootDirectory);
   }
 
   public async lstat(path: string): Promise<WorkspacePathState | null> {
@@ -126,10 +128,12 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
   }> = [];
   public failAtCall: number | undefined;
   public failureCode: ManagedProcessRunFailureCode = "NON_ZERO_EXIT";
-  public headOutput = `${headSha}\n`;
-  public baseOutput = `${baseSha}\n`;
+  public pullRequestHeadOutput = `${headSha}\n`;
+  public worktreeHeadOutput = `${headSha}\n`;
+  public mergeBaseOutput = `${baseSha}\n`;
   public onRun: ((spec: ProcessLaunchSpec, context: ManagedProcessRunContext) => void) | undefined;
   public waitForRun: Promise<void> | undefined;
+  public fileSystem: FakeWorkspaceFileSystem | undefined;
 
   public async run(
     spec: ProcessLaunchSpec,
@@ -148,10 +152,20 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
     }
 
     const command = commandName(spec.arguments);
+    if (command === "init") {
+      const repositoryDirectory = spec.arguments.at(-1);
+      if (repositoryDirectory === undefined) {
+        throw new Error("The fake Git init command is missing its repository directory.");
+      }
+      this.fileSystem?.addDirectory(repositoryDirectory);
+    }
     let stdout = "";
     if (command === "cat-file") stdout = "commit\n";
+    if (command === "merge-base") stdout = this.mergeBaseOutput;
     if (command === "rev-parse") {
-      stdout = spec.arguments.includes("HEAD^{commit}") ? this.headOutput : this.baseOutput;
+      stdout = spec.arguments.includes("HEAD^{commit}")
+        ? this.worktreeHeadOutput
+        : this.pullRequestHeadOutput;
     }
     return { exitCode: 0, stdout, stderr: "" };
   }
@@ -231,7 +245,15 @@ function fileSystemError(code: string, message: string): Error {
 }
 
 function commandName(argumentsList: readonly string[]): string | undefined {
-  const commands = new Set(["init", "fetch", "cat-file", "checkout", "rev-parse"]);
+  const commands = new Set([
+    "init",
+    "config",
+    "fetch",
+    "cat-file",
+    "merge-base",
+    "worktree",
+    "rev-parse",
+  ]);
   return argumentsList.find((argument) => commands.has(argument));
 }
 
@@ -246,7 +268,11 @@ function validGitEnvironment(): Record<string, string> {
 
 function envelope(
   kind: "issue" | "pull_request",
-  options: { readonly runAttemptId?: string; readonly repository?: string } = {},
+  options: {
+    readonly runAttemptId?: string;
+    readonly repository?: string;
+    readonly repositoryId?: number;
+  } = {},
 ): JobExecutionEnvelope {
   const commonResource = {
     githubNodeId: "WI_node",
@@ -294,7 +320,7 @@ function envelope(
       semanticKey: "semantic-42",
     },
     repository: {
-      githubRepositoryId: 1844564,
+      githubRepositoryId: options.repositoryId ?? 1844564,
       fullName: options.repository ?? "microsoft/PowerToys",
     },
     resource,
@@ -325,8 +351,10 @@ function provider(
     readonly diskBudget?: WorkspaceDiskBudget;
   } = {},
 ): ProductionDisposableJobWorkspaceProvider {
+  processRunner.fileSystem = fileSystem;
   return new ProductionDisposableJobWorkspaceProvider({
     workspaceRootDirectory: workspaceRoot,
+    gitSharedRootDirectory,
     gitExecutable,
     gitWorkingDirectory: options.gitWorkingDirectory ?? gitWorkingDirectory,
     gitEnvironment: options.gitEnvironment ?? validGitEnvironment(),
@@ -374,7 +402,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     vi.useRealTimers();
   });
 
-  it("initializes an empty Git repository for issue triage", async () => {
+  it("creates an isolated non-repository workspace for issue triage", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
     const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
@@ -385,8 +413,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       progress.context,
     );
 
-    expect(processRunner.calls.map((call) => commandName(call.spec.arguments))).toEqual(["init"]);
-    expect(processRunner.calls[0]?.spec.arguments).not.toContain("--skip-git-repo-check");
+    expect(processRunner.calls).toEqual([]);
     expect(win32.dirname(workspace.checkoutDirectory)).toBe(workspace.attemptDirectory);
     expect(win32.dirname(workspace.controlDirectory)).toBe(workspace.attemptDirectory);
     expect(win32.dirname(workspace.codexHomeDirectory)).toBe(workspace.attemptDirectory);
@@ -401,9 +428,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
         workspace.userProfileDirectory,
       ]).size,
     ).toBe(5);
-    expect(progress.processCounts).toEqual([0, 1, 0]);
+    expect(progress.processCounts).toEqual([0]);
     expect(diskBudget.admitted).toEqual([workspace.attemptDirectory]);
-    expect(diskBudget.monitored).toEqual([workspace.attemptDirectory]);
+    expect(diskBudget.monitored).toEqual([]);
 
     await workspace.cleanup();
     expect(fileSystem.removed).toEqual([workspace.attemptDirectory]);
@@ -423,21 +450,30 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
 
     expect(processRunner.calls.map((call) => commandName(call.spec.arguments))).toEqual([
       "init",
+      "config",
+      "worktree",
       "fetch",
-      "fetch",
+      "rev-parse",
       "cat-file",
       "cat-file",
-      "checkout",
+      "merge-base",
+      "worktree",
       "rev-parse",
-      "rev-parse",
+      "cat-file",
     ]);
     const fetches = processRunner.calls.filter(
       (call) => commandName(call.spec.arguments) === "fetch",
     );
-    expect(fetches).toHaveLength(2);
-    expect(fetches[0]?.spec.arguments).toContain("https://github.com/microsoft/PowerToys.git");
-    expect(fetches[0]?.spec.arguments).toContain(`+${baseSha}:refs/agentic-review/base`);
-    expect(fetches[1]?.spec.arguments).toContain(`+${headSha}:refs/agentic-review/head`);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.spec.arguments).toContain("+refs/heads/main:refs/remotes/origin/main");
+    expect(fetches[0]?.spec.arguments).toContain(
+      "+refs/pull/42/head:refs/agentic-review/latest-head",
+    );
+    expect(
+      processRunner.calls.some((call) =>
+        call.spec.arguments.includes("refs/remotes/origin/main^{commit}"),
+      ),
+    ).toBe(false);
     expect(fetches.every((call) => call.spec.arguments.includes("--quiet"))).toBe(true);
     expect(
       processRunner.calls.some((call) => call.spec.arguments.includes("--no-recurse-submodules")),
@@ -449,8 +485,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       expect(call.spec.executable).toBe(gitExecutable);
       expect(call.spec.workingDirectory).toBe(gitWorkingDirectory);
       const changeDirectoryIndex = call.spec.arguments.indexOf("-C");
-      expect(changeDirectoryIndex).toBeGreaterThan(0);
-      expect(call.spec.arguments[changeDirectoryIndex + 1]).toBe(workspace.checkoutDirectory);
+      if (changeDirectoryIndex !== -1) {
+        expect(call.spec.arguments[changeDirectoryIndex + 1]).toBe(workspace.checkoutDirectory);
+      }
       expect(call.spec.environmentMode).toBe("replace");
       expect(call.spec.environment).toMatchObject({
         SYSTEMROOT: "C:\\Windows",
@@ -465,15 +502,103 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       expect(call.spec.arguments).not.toContain("cmd.exe");
       expect(call.spec.arguments).not.toContain("powershell.exe");
     }
-    expect(progress.processCounts).toEqual([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
+    expect(progress.processCounts).toEqual([
+      0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+    ]);
 
     await workspace.cleanup();
+  });
+
+  it("serializes shared-repository mutation for two attempts of the same repository", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    let releaseFirstCommand!: () => void;
+    processRunner.waitForRun = new Promise<void>((resolve) => {
+      releaseFirstCommand = resolve;
+    });
+    const workspaceProvider = provider(fileSystem, processRunner);
+
+    const firstPreparation = workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-1" }),
+      preparationContext().context,
+    );
+    await vi.waitFor(() => expect(processRunner.calls).toHaveLength(1));
+    const secondPreparation = workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-2" }),
+      preparationContext().context,
+    );
+    await Promise.resolve();
+    expect(processRunner.calls).toHaveLength(1);
+
+    releaseFirstCommand();
+    const [first, second] = await Promise.all([firstPreparation, secondPreparation]);
+    await Promise.all([first.cleanup(), second.cleanup()]);
+  });
+
+  it("prepares different shared repositories concurrently", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    let releaseCommands!: () => void;
+    processRunner.waitForRun = new Promise<void>((resolve) => {
+      releaseCommands = resolve;
+    });
+    const workspaceProvider = provider(fileSystem, processRunner);
+
+    const firstPreparation = workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-1" }),
+      preparationContext().context,
+    );
+    const secondPreparation = workspaceProvider.prepare(
+      envelope("pull_request", {
+        runAttemptId: "run-2",
+        repository: "microsoft/terminal",
+        repositoryId: 2,
+      }),
+      preparationContext().context,
+    );
+    await vi.waitFor(() => expect(processRunner.calls).toHaveLength(2));
+    expect(processRunner.calls.every((call) => commandName(call.spec.arguments) === "init")).toBe(
+      true,
+    );
+
+    releaseCommands();
+    const [first, second] = await Promise.all([firstPreparation, secondPreparation]);
+    await Promise.all([first.cleanup(), second.cleanup()]);
+  });
+
+  it("cancels an attempt while it waits for the repository lock", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    let releaseFirstCommand!: () => void;
+    processRunner.waitForRun = new Promise<void>((resolve) => {
+      releaseFirstCommand = resolve;
+    });
+    const workspaceProvider = provider(fileSystem, processRunner);
+    const firstPreparation = workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-1" }),
+      preparationContext().context,
+    );
+    await vi.waitFor(() => expect(processRunner.calls).toHaveLength(1));
+
+    const waiting = preparationContext();
+    const secondPreparation = workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-2" }),
+      waiting.context,
+    );
+    await Promise.resolve();
+    waiting.controller.abort(new Error("lease lost"));
+    await expect(secondPreparation).rejects.toMatchObject({ code: "ABORTED" });
+    expect(processRunner.calls).toHaveLength(1);
+
+    releaseFirstCommand();
+    const first = await firstPreparation;
+    await first.cleanup();
   });
 
   it("rejects revision mismatches and removes only the failed attempt", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
-    processRunner.headOutput = `${"c".repeat(40)}\n`;
+    processRunner.pullRequestHeadOutput = `${"c".repeat(40)}\n`;
 
     await expect(
       provider(fileSystem, processRunner).prepare(
@@ -486,6 +611,57 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(fileSystem.has(workspaceRoot)).toBe(true);
   });
 
+  it("rejects a prepared worktree whose HEAD differs from the admitted revision", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    processRunner.worktreeHeadOutput = `${"c".repeat(40)}\n`;
+
+    await expect(
+      provider(fileSystem, processRunner).prepare(
+        envelope("pull_request"),
+        preparationContext().context,
+      ),
+    ).rejects.toMatchObject({ code: "GIT_REVISION_MISMATCH" });
+    expect(
+      processRunner.calls.some(
+        (call) =>
+          commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("remove"),
+      ),
+    ).toBe(true);
+    expect(fileSystem.removed).toHaveLength(1);
+  });
+
+  it("rejects an existing shared repository that is a reparse point", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    fileSystem.addDirectory(repositoryDirectory);
+    fileSystem.setReparsePoint(repositoryDirectory, true);
+
+    await expect(
+      provider(fileSystem, processRunner).prepare(
+        envelope("pull_request"),
+        preparationContext().context,
+      ),
+    ).rejects.toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
+    expect(processRunner.calls).toHaveLength(0);
+    expect(fileSystem.removed).toHaveLength(1);
+  });
+
+  it("rejects a pull request without a shared merge base", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    processRunner.mergeBaseOutput = "";
+
+    await expect(
+      provider(fileSystem, processRunner).prepare(
+        envelope("pull_request"),
+        preparationContext().context,
+      ),
+    ).rejects.toMatchObject({ code: "GIT_LOCAL_OR_REVISION_FAILED" });
+    expect(fileSystem.removed).toHaveLength(1);
+  });
+
   it.each([
     ["NON_ZERO_EXIT", "GIT_COMMAND_FAILED"],
     ["OUTPUT_TRUNCATED", "GIT_POLICY_LIMIT_EXCEEDED"],
@@ -494,7 +670,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     async (failureCode, expectedCode) => {
       const fileSystem = new FakeWorkspaceFileSystem();
       const processRunner = new FakeManagedProcessRunner();
-      processRunner.failAtCall = 2;
+      processRunner.failAtCall = 4;
       processRunner.failureCode = failureCode;
 
       await expect(
@@ -511,7 +687,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
     const progress = preparationContext();
-    processRunner.failAtCall = 4;
+    processRunner.failAtCall = 7;
     processRunner.failureCode = "NON_ZERO_EXIT";
 
     await expect(
@@ -520,7 +696,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.healthFaults).toEqual([]);
   });
 
-  it("treats git init non-zero exit as node infrastructure and requests drain", async () => {
+  it("treats shared repository initialization failure as node infrastructure", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
     const progress = preparationContext();
@@ -528,7 +704,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     processRunner.failureCode = "NON_ZERO_EXIT";
 
     await expect(
-      provider(fileSystem, processRunner).prepare(envelope("issue"), progress.context),
+      provider(fileSystem, processRunner).prepare(envelope("pull_request"), progress.context),
     ).rejects.toMatchObject({ code: "GIT_INFRASTRUCTURE_FAILED" });
     expect(progress.healthFaults).toHaveLength(1);
     expect(progress.healthFaults[0]).toMatchObject({ code: "GIT_INFRASTRUCTURE_FAILED" });
@@ -614,7 +790,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     };
 
     await expect(
-      provider(fileSystem, processRunner).prepare(envelope("issue"), progress.context),
+      provider(fileSystem, processRunner).prepare(envelope("pull_request"), progress.context),
     ).rejects.toMatchObject({ code: "ABORTED" });
     expect(progress.processCounts).toEqual([0, 1, 0, 0]);
     expect(fileSystem.removed).toHaveLength(1);
@@ -665,7 +841,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
 
       await expect(
         provider(fileSystem, processRunner, { diskBudget }).prepare(
-          envelope("issue"),
+          envelope("pull_request"),
           preparationContext().context,
         ),
       ).rejects.toMatchObject({ code: workspaceCode });
@@ -687,7 +863,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     const progress = preparationContext();
 
     const preparation = provider(fileSystem, processRunner).prepare(
-      envelope("issue"),
+      envelope("pull_request"),
       progress.context,
     );
     await vi.waitFor(() => expect(processRunner.calls).toHaveLength(1));
@@ -697,7 +873,8 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.processCounts).toEqual([0, 1, 1]);
     releaseRun();
     await preparation;
-    expect(progress.processCounts).toEqual([0, 1, 1, 0]);
+    expect(progress.processCounts.slice(0, 3)).toEqual([0, 1, 1]);
+    expect(progress.processCounts.at(-1)).toBe(0);
   });
 
   it("rejects attempt reuse, unsafe identities, and redirected roots", async () => {
@@ -759,6 +936,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       () =>
         new ProductionDisposableJobWorkspaceProvider({
           workspaceRootDirectory: "C:\\",
+          gitSharedRootDirectory,
           gitExecutable,
           gitWorkingDirectory,
           gitEnvironment: validGitEnvironment(),
@@ -777,6 +955,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       () =>
         new ProductionDisposableJobWorkspaceProvider({
           workspaceRootDirectory: workspaceRoot,
+          gitSharedRootDirectory,
           gitExecutable,
           gitWorkingDirectory,
           gitEnvironment: { API_TOKEN: "secret" },

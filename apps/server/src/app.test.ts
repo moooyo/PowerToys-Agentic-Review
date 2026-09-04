@@ -11,7 +11,7 @@ describe("Server application Worker authentication wiring", () => {
     expect(source).toContain("url: sanitizeRequestLogUrl(request.url)");
     expect(source).toContain("registerWorkerCredentialRoutes(credentialScope");
     expect(source).toContain("registerWorkerRoutes(workerScope");
-    expect(source).toContain("registerWorkerArtifactRoutes(workerScope");
+    expect(source).not.toContain("registerWorkerArtifactRoutes(workerScope");
     expect(source).toContain("isWorkerApiRoute(request.routeOptions.url)");
     expect(source).toContain('code: "worker_api_maintenance"');
     expect(source).toContain("database: dependencies.database");

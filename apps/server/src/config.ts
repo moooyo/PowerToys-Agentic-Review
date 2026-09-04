@@ -1,12 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { ServerOptions as HttpsServerOptions } from "node:https";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { maximumResultArtifactBytes, type SelfOrAllowlistPolicy } from "@agentic-review/contracts";
-import {
-  artifactCapacityEntriesPerUpload,
-  artifactCapacityFixedLayoutEntries,
-} from "./artifacts/capacity.js";
-import type { ArtifactCapacityLimits } from "./artifacts/index.js";
+import { isAbsolute, resolve } from "node:path";
+import type { SelfOrAllowlistPolicy } from "@agentic-review/contracts";
 import type { OperatorAuthConfig } from "./security/operator-auth.js";
 import type { OperatorOidcClientConfig } from "./security/operator-auth-oidc.js";
 
@@ -43,18 +38,12 @@ export interface OperatorAuthRuntimeConfig {
   readonly oidc: OperatorOidcClientConfig | undefined;
 }
 
-export interface ArtifactRuntimeConfig {
-  readonly rootPath: string;
-  readonly capacity: ArtifactCapacityLimits;
-}
-
 export interface ServerConfig {
   readonly host: string;
   readonly port: number;
   readonly recoveryMaintenance: boolean;
   readonly databasePath: string;
   readonly migrationsDirectory: string;
-  readonly artifactStorage: ArtifactRuntimeConfig;
   readonly protocolVersion: string;
   readonly heartbeatIntervalSeconds: number;
   readonly leaseTtlSeconds: number;
@@ -70,43 +59,6 @@ export interface ServerConfig {
   readonly operatorAuth: OperatorAuthRuntimeConfig | undefined;
   readonly dashboardDirectory: string | undefined;
 }
-
-const gibibyte = 1_024n * 1_024n * 1_024n;
-const maximumArtifactHardBytes = 1_024n * gibibyte;
-const maximumArtifactMetadataHeadroomBytes = 1_024n * 1_024n;
-const maximumArtifactHardEntries = 1_000_000;
-const maximumArtifactCleanupBacklogHighWaterEntries = 4_096;
-const minimumArtifactHardEntries =
-  artifactCapacityFixedLayoutEntries + artifactCapacityEntriesPerUpload;
-
-const readBoundedBigInt = (
-  environment: NodeJS.ProcessEnv,
-  name: string,
-  fallback: bigint,
-  minimum: bigint,
-  maximum: bigint,
-): bigint => {
-  const raw = environment[name]?.trim();
-  if (raw === undefined || raw === "") {
-    return fallback;
-  }
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(raw)) {
-    throw new Error(`${name} must be a canonical non-negative base-10 integer.`);
-  }
-  const value = BigInt(raw);
-  if (value < minimum || value > maximum) {
-    throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
-  }
-  return value;
-};
-
-const pathContains = (parentPath: string, candidatePath: string): boolean => {
-  const displacement = relative(parentPath, candidatePath);
-  return (
-    displacement === "" ||
-    (!isAbsolute(displacement) && displacement !== ".." && !displacement.startsWith(`..${sep}`))
-  );
-};
 
 const readPositiveInteger = (
   environment: NodeJS.ProcessEnv,
@@ -160,93 +112,6 @@ const readStrictBoolean = (
     return false;
   }
   throw new Error(`${name} must be true or false.`);
-};
-
-const readArtifactRuntimeConfig = (
-  environment: NodeJS.ProcessEnv,
-  databasePath: string,
-  repositoryRoot: string,
-  databasePathIsExplicit: boolean,
-): ArtifactRuntimeConfig => {
-  const configuredRoot = environment.AGENTIC_REVIEW_ARTIFACT_ROOT?.trim();
-  const artifactRootIsExplicit = configuredRoot !== undefined && configuredRoot !== "";
-  if (databasePathIsExplicit && !artifactRootIsExplicit) {
-    throw new Error(
-      "AGENTIC_REVIEW_ARTIFACT_ROOT is required when AGENTIC_REVIEW_DATABASE_PATH is configured.",
-    );
-  }
-  if (configuredRoot !== undefined && configuredRoot !== "" && !isAbsolute(configuredRoot)) {
-    throw new Error("AGENTIC_REVIEW_ARTIFACT_ROOT must be an absolute path.");
-  }
-  const rootPath = resolve(
-    artifactRootIsExplicit ? configuredRoot : resolve(repositoryRoot, "artifacts"),
-  );
-  const databaseDirectory = dirname(databasePath);
-  if (pathContains(databaseDirectory, rootPath) || pathContains(rootPath, databaseDirectory)) {
-    throw new Error(
-      "The database directory and artifact root must be disjoint closed directory trees.",
-    );
-  }
-
-  const hardBytes = readBoundedBigInt(
-    environment,
-    "AGENTIC_REVIEW_ARTIFACT_HARD_BYTES",
-    10n * gibibyte,
-    1n,
-    maximumArtifactHardBytes,
-  );
-  const emergencyReserveBytes = readBoundedBigInt(
-    environment,
-    "AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES",
-    gibibyte,
-    0n,
-    maximumArtifactHardBytes - 1n,
-  );
-  const perUploadMetadataHeadroomBytes = readBoundedBigInt(
-    environment,
-    "AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES",
-    64n * 1_024n,
-    0n,
-    maximumArtifactMetadataHeadroomBytes,
-  );
-  const hardEntries = readPositiveInteger(
-    environment,
-    "AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES",
-    100_000,
-    maximumArtifactHardEntries,
-  );
-  const cleanupBacklogHighWaterEntries = readPositiveInteger(
-    environment,
-    "AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES",
-    1_024,
-    maximumArtifactCleanupBacklogHighWaterEntries,
-  );
-  const maximumUploadReservation =
-    BigInt(maximumResultArtifactBytes) * 2n + perUploadMetadataHeadroomBytes;
-  if (
-    emergencyReserveBytes >= hardBytes ||
-    hardBytes - emergencyReserveBytes < maximumUploadReservation
-  ) {
-    throw new Error(
-      "Artifact byte capacity must preserve its emergency reserve and one maximum logical artifact reservation.",
-    );
-  }
-  if (hardEntries < minimumArtifactHardEntries || cleanupBacklogHighWaterEntries > hardEntries) {
-    throw new Error(
-      "Artifact entry capacity must cover one upload and its cleanup backlog high-water mark.",
-    );
-  }
-
-  return Object.freeze({
-    rootPath,
-    capacity: Object.freeze({
-      hardBytes,
-      hardEntries,
-      emergencyReserveBytes,
-      perUploadMetadataHeadroomBytes,
-      cleanupBacklogHighWaterEntries,
-    }),
-  });
 };
 
 const readRequired = (environment: NodeJS.ProcessEnv, name: string): string => {
@@ -471,7 +336,9 @@ const readOperatorAuthConfig = (
   const runtimeEnvironment = environment.NODE_ENV?.trim().toLowerCase() || "development";
   if (mode === undefined || mode === "") {
     if (runtimeEnvironment === "production") {
-      throw new Error("AGENTIC_REVIEW_OPERATOR_AUTH_MODE=oidc is required in production.");
+      throw new Error(
+        "AGENTIC_REVIEW_OPERATOR_AUTH_MODE must be explicitly set to oidc or loopback in production.",
+      );
     }
     return undefined;
   }
@@ -495,17 +362,23 @@ const readOperatorAuthConfig = (
     postLoginRedirectPath: environment.AGENTIC_REVIEW_OPERATOR_POST_LOGIN_PATH ?? "/work-items",
   } as const;
 
-  if (mode === "loopback-development-bypass") {
-    if (runtimeEnvironment !== "development") {
-      throw new Error("Operator authentication bypass is allowed only in development.");
-    }
+  if (mode === "loopback") {
     if (!isLoopbackHost(host)) {
-      throw new Error("Operator authentication bypass requires a loopback server listener.");
+      throw new Error("Loopback operator authentication requires a loopback server listener.");
+    }
+    const publicOrigin = new URL(common.publicOrigin);
+    if (!isLoopbackHost(publicOrigin.hostname)) {
+      throw new Error("Loopback operator authentication requires a loopback public origin.");
+    }
+    if (runtimeEnvironment !== "development" && publicOrigin.protocol !== "https:") {
+      throw new Error(
+        "Production loopback operator authentication requires an HTTPS public origin.",
+      );
     }
     return Object.freeze({
       service: {
         ...common,
-        mode: "loopback-development-bypass" as const,
+        mode: "loopback" as const,
         developmentIdentity: {
           issuer: "urn:agentic-review:development",
           subject: readRequired(environment, "AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT"),
@@ -519,9 +392,7 @@ const readOperatorAuthConfig = (
   }
 
   if (mode !== "oidc") {
-    throw new Error(
-      "AGENTIC_REVIEW_OPERATOR_AUTH_MODE must be oidc or loopback-development-bypass.",
-    );
+    throw new Error("AGENTIC_REVIEW_OPERATOR_AUTH_MODE must be oidc or loopback.");
   }
 
   const origin = new URL(publicOrigin);
@@ -603,8 +474,6 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     throw new Error("Recovery maintenance requires a loopback server listener.");
   }
   const configuredDatabasePath = environment.AGENTIC_REVIEW_DATABASE_PATH?.trim();
-  const databasePathIsExplicit =
-    configuredDatabasePath !== undefined && configuredDatabasePath !== "";
   const databasePath = resolve(
     configuredDatabasePath === undefined || configuredDatabasePath === ""
       ? resolve(repositoryRoot, ".data", "agentic-review.db")
@@ -670,12 +539,6 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     databasePath,
     migrationsDirectory: resolve(
       environment.AGENTIC_REVIEW_MIGRATIONS_DIRECTORY ?? resolve(repositoryRoot, "migrations"),
-    ),
-    artifactStorage: readArtifactRuntimeConfig(
-      environment,
-      databasePath,
-      repositoryRoot,
-      databasePathIsExplicit,
     ),
     protocolVersion: "1.0",
     heartbeatIntervalSeconds: readPositiveInteger(

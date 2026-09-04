@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../dist/app.js";
-import type { ArtifactCompletionPort, ArtifactTransactionPort } from "../dist/artifacts/index.js";
 import type { ServerConfig } from "../dist/config.js";
 import type { DatabaseClient } from "../dist/database/database-client.js";
 import type { OperatorAuthRouteService } from "../dist/routes/auth.js";
@@ -40,16 +39,6 @@ const baseConfig: ServerConfig = {
   recoveryMaintenance: true,
   databasePath: "unused.sqlite",
   migrationsDirectory: "unused",
-  artifactStorage: {
-    rootPath: "/unused/artifacts",
-    capacity: {
-      hardBytes: 10n * 1_024n * 1_024n,
-      hardEntries: 1_000,
-      emergencyReserveBytes: 1_024n * 1_024n,
-      perUploadMetadataHeadroomBytes: 64n * 1_024n,
-      cleanupBacklogHighWaterEntries: 100,
-    },
-  },
   protocolVersion: "1.0",
   heartbeatIntervalSeconds: 20,
   leaseTtlSeconds: 120,
@@ -87,7 +76,7 @@ const baseConfig: ServerConfig = {
       loginTransactionTtlSeconds: 600,
       sessionTtlSeconds: 28_800,
       postLoginRedirectPath: "/work-items",
-      mode: "loopback-development-bypass",
+      mode: "loopback",
       developmentIdentity: {
         issuer: operatorSession.issuer,
         subject: operatorSession.subject,
@@ -106,7 +95,6 @@ const systemSnapshot = {
   nodeVersion: "24.20.0",
   sqliteVersion: "3.50.4",
   databaseSizeBytes: 1_024,
-  artifactSizeBytes: 2_048,
   oldestQueuedAt: null,
   activeWorkers: 0,
   activeLeases: 0,
@@ -141,44 +129,14 @@ const createDatabaseRequest = () =>
     }
   });
 
-const createArtifactTransactions = () =>
-  Object.freeze({
-    createArtifactUpload: vi.fn(async () => {
-      throw new Error("Unexpected artifact upload create.");
-    }),
-    putArtifactChunk: vi.fn(async () => {
-      throw new Error("Unexpected artifact chunk upload.");
-    }),
-    finalizeArtifactUpload: vi.fn(async () => {
-      throw new Error("Unexpected artifact finalization.");
-    }),
-    terminateArtifactUpload: vi.fn(async () => {
-      throw new Error("Unexpected artifact termination.");
-    }),
-  }) satisfies ArtifactTransactionPort;
-
-const createArtifactCompletion = () =>
-  Object.freeze({
-    completeArtifactRun: vi.fn(async () => {
-      throw new Error("Unexpected artifact-backed completion.");
-    }),
-  }) satisfies ArtifactCompletionPort;
-
 const createDependencies = (
   config: ServerConfig,
   request = createDatabaseRequest(),
-  artifactTransactions = createArtifactTransactions(),
-  artifactCompletion = createArtifactCompletion(),
   operatorAuth?: OperatorAuthRouteService,
 ) => ({
   config,
   database: { request } as unknown as DatabaseClient,
   shutdownSignal: new AbortController().signal,
-  artifactReadiness: {
-    read: vi.fn(() => ({ ready: true })),
-  },
-  artifactTransactions,
-  artifactCompletion,
   serverAdmission: { read: () => true },
   ...(operatorAuth === undefined ? {} : { operatorAuth }),
 });
@@ -190,19 +148,6 @@ const workerRoutes = [
   { method: "PUT", url: "/api/v1/worker/leases/run/heartbeat" },
   { method: "POST", url: "/api/v1/worker/runs/run/complete" },
   { method: "POST", url: "/api/v1/worker/runs/run/fail" },
-  { method: "POST", url: "/api/v1/worker/runs/run/artifacts" },
-  {
-    method: "PUT",
-    url: "/api/v1/worker/artifact-uploads/10000000-0000-4000-8000-000000000001/chunks/0",
-  },
-  {
-    method: "POST",
-    url: "/api/v1/worker/artifact-uploads/10000000-0000-4000-8000-000000000001/complete",
-  },
-  {
-    method: "POST",
-    url: "/api/v1/worker/artifact-uploads/10000000-0000-4000-8000-000000000001/terminate",
-  },
 ] as const;
 
 const settleStartupCleanup = async (request: ReturnType<typeof createDatabaseRequest>) => {
@@ -213,14 +158,10 @@ const settleStartupCleanup = async (request: ReturnType<typeof createDatabaseReq
 };
 
 describe("recovery maintenance application boundary", () => {
-  it("rejects every Worker route before authentication, database, or artifact work", async () => {
+  it("rejects every Worker route before authentication or database work", async () => {
     const request = createDatabaseRequest();
-    const artifactTransactions = createArtifactTransactions();
-    const artifactCompletion = createArtifactCompletion();
     const futureWorkerHandler = vi.fn(async () => ({ reached: true }));
-    const app = buildApp(
-      createDependencies(baseConfig, request, artifactTransactions, artifactCompletion),
-    );
+    const app = buildApp(createDependencies(baseConfig, request));
     app.get("/api/v1/worker/future-route", futureWorkerHandler);
 
     try {
@@ -246,11 +187,6 @@ describe("recovery maintenance application boundary", () => {
 
       expect(request).not.toHaveBeenCalled();
       expect(futureWorkerHandler).not.toHaveBeenCalled();
-      expect(artifactCompletion.completeArtifactRun).not.toHaveBeenCalled();
-      expect(artifactTransactions.createArtifactUpload).not.toHaveBeenCalled();
-      expect(artifactTransactions.putArtifactChunk).not.toHaveBeenCalled();
-      expect(artifactTransactions.finalizeArtifactUpload).not.toHaveBeenCalled();
-      expect(artifactTransactions.terminateArtifactUpload).not.toHaveBeenCalled();
 
       const webhook = await app.inject({
         method: "POST",
@@ -266,9 +202,7 @@ describe("recovery maintenance application boundary", () => {
 
   it("keeps health liveness, operator credentials, and Dashboard reads available locally", async () => {
     const request = createDatabaseRequest();
-    const app = buildApp(
-      createDependencies(baseConfig, request, undefined, undefined, operatorService),
-    );
+    const app = buildApp(createDependencies(baseConfig, request, operatorService));
 
     try {
       await app.ready();

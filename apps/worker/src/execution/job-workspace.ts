@@ -64,6 +64,7 @@ export interface JobWorkspaceFileSystem {
 
 export interface ProductionDisposableJobWorkspaceProviderOptions {
   readonly workspaceRootDirectory: string;
+  readonly gitSharedRootDirectory: string;
   readonly gitExecutable: string;
   readonly gitWorkingDirectory: string;
   readonly gitEnvironment: Readonly<Record<string, string>>;
@@ -142,6 +143,11 @@ interface WorkspaceLayout {
   readonly userProfileDirectory: string;
 }
 
+interface SharedRepositoryLayout {
+  readonly key: string;
+  readonly gitDirectory: string;
+}
+
 const enforcedGitEnvironment = Object.freeze({
   GIT_CONFIG_GLOBAL: "NUL",
   GIT_CONFIG_NOSYSTEM: "1",
@@ -217,6 +223,7 @@ const gitProgressIntervalMilliseconds = 30_000;
 
 export class ProductionDisposableJobWorkspaceProvider implements JobWorkspaceProvider {
   readonly #workspaceRootDirectory: string;
+  readonly #gitSharedRootDirectory: string;
   readonly #gitExecutable: string;
   readonly #gitWorkingDirectory: string;
   readonly #gitEnvironment: Readonly<Record<string, string>>;
@@ -224,6 +231,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
   readonly #diskBudget: WorkspaceDiskBudget;
   readonly #fileSystem: JobWorkspaceFileSystem;
   readonly #processRunner: ManagedProcessRunner;
+  readonly #repositoryTails = new Map<string, Promise<void>>();
 
   public constructor(options: ProductionDisposableJobWorkspaceProviderOptions) {
     try {
@@ -250,6 +258,28 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       if (windowsPathsOverlap(this.#workspaceRootDirectory, gitInstallationDirectory)) {
         throw new Error("workspaceRootDirectory must not overlap the trusted Git installation.");
       }
+      assertWindowsLocalAbsolutePath(
+        options.gitSharedRootDirectory,
+        "gitSharedRootDirectory",
+        false,
+      );
+      this.#gitSharedRootDirectory = normalizeDirectory(options.gitSharedRootDirectory);
+      if (
+        sameWindowsPath(
+          this.#gitSharedRootDirectory,
+          win32.parse(this.#gitSharedRootDirectory).root,
+        )
+      ) {
+        throw new Error("gitSharedRootDirectory must not be a filesystem root.");
+      }
+      if (
+        windowsPathsOverlap(this.#gitSharedRootDirectory, this.#workspaceRootDirectory) ||
+        windowsPathsOverlap(this.#gitSharedRootDirectory, gitInstallationDirectory)
+      ) {
+        throw new Error(
+          "gitSharedRootDirectory must not overlap workspaceRootDirectory or the Git installation.",
+        );
+      }
       assertWindowsLocalAbsolutePath(options.gitWorkingDirectory, "gitWorkingDirectory", false);
       this.#gitWorkingDirectory = normalizeDirectory(options.gitWorkingDirectory);
       if (sameWindowsPath(this.#gitWorkingDirectory, win32.parse(this.#gitWorkingDirectory).root)) {
@@ -257,10 +287,11 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       }
       if (
         windowsPathsOverlap(this.#gitWorkingDirectory, this.#workspaceRootDirectory) ||
+        windowsPathsOverlap(this.#gitWorkingDirectory, this.#gitSharedRootDirectory) ||
         windowsPathsOverlap(this.#gitWorkingDirectory, gitInstallationDirectory)
       ) {
         throw new Error(
-          "gitWorkingDirectory must not overlap workspaceRootDirectory or the Git installation.",
+          "gitWorkingDirectory must not overlap workspaceRootDirectory, gitSharedRootDirectory, or the Git installation.",
         );
       }
       this.#gitEnvironment = buildGitEnvironment(
@@ -295,8 +326,16 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     };
 
     let layout: WorkspaceLayout;
+    let repository: SharedRepositoryLayout | undefined;
     try {
       layout = deriveWorkspaceLayout(this.#workspaceRootDirectory, envelope.lease.runAttemptId);
+      repository =
+        envelope.resource.kind === "pull_request"
+          ? deriveSharedRepositoryLayout(
+              this.#gitSharedRootDirectory,
+              envelope.repository.githubRepositoryId,
+            )
+          : undefined;
     } catch (error) {
       throw new JobWorkspaceError("INVALID_ENVELOPE", "Job workspace identity is invalid.", {
         cause: error,
@@ -305,9 +344,11 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
 
     const guard = new WorkspaceGuard(this.#fileSystem, layout);
     let attemptCreated = false;
+    let worktreeRegistered = false;
     let diskReservation: WorkspaceDiskReservation | undefined;
     try {
       await this.#validateGitWorkingDirectory();
+      await this.#validateGitSharedRootDirectory();
       throwIfAborted(context.signal);
       await guard.validateRoot();
       throwIfAborted(context.signal);
@@ -360,7 +401,28 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       await guard.validateAll();
       throwIfAborted(context.signal);
 
-      await this.#initializeRepository(layout, guard, admittedDiskReservation, envelope, context);
+      await this.#initializeRepository(
+        layout,
+        guard,
+        admittedDiskReservation,
+        repository,
+        envelope,
+        context,
+        () => {
+          worktreeRegistered = true;
+        },
+      );
+      await guard.validateAll();
+      if (repository !== undefined && envelope.resource.kind === "pull_request") {
+        await this.#verifyPreparedWorktree(
+          layout,
+          guard,
+          admittedDiskReservation,
+          envelope.resource.baseSha,
+          envelope.resource.headSha,
+          context,
+        );
+      }
       let cleaned = false;
       return Object.freeze({
         attemptDirectory: layout.attemptDirectory,
@@ -375,6 +437,16 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           if (cleaned) return;
           let cleanupError: unknown;
           try {
+            if (repository !== undefined && worktreeRegistered) {
+              await this.#removeRegisteredWorktree(
+                layout,
+                guard,
+                admittedDiskReservation,
+                repository,
+                context.processHost,
+              );
+              worktreeRegistered = false;
+            }
             await removeReservedAttempt(admittedDiskReservation);
           } catch (error) {
             admittedDiskReservation.abandon();
@@ -408,6 +480,16 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         try {
           if (diskReservation === undefined) {
             throw new Error("Attempt creation lost its disk reservation.");
+          }
+          if (repository !== undefined && worktreeRegistered) {
+            await this.#removeRegisteredWorktree(
+              layout,
+              guard,
+              diskReservation,
+              repository,
+              context.processHost,
+            );
+            worktreeRegistered = false;
           }
           await removeReservedAttempt(diskReservation);
         } catch (cleanupError) {
@@ -467,70 +549,160 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     layout: WorkspaceLayout,
     guard: WorkspaceGuard,
     diskReservation: WorkspaceDiskReservation,
+    repository: SharedRepositoryLayout | undefined,
     envelope: JobExecutionEnvelope,
     context: WorkspacePreparationContext,
+    onWorktreeRegistered: () => void,
   ): Promise<void> {
-    await this.#runGit(
-      layout,
-      guard,
-      diskReservation,
-      ["-c", "init.defaultBranch=agentic-review", "init", "--quiet"],
-      "node_infrastructure",
-      context,
-    );
     if (envelope.resource.kind === "issue") return;
+    if (repository === undefined) {
+      throw new JobWorkspaceError(
+        "INVALID_ENVELOPE",
+        "Pull request workspaces require a shared repository identity.",
+      );
+    }
 
     const repositoryUrl = buildAnonymousGitHubUrl(envelope.repository.fullName);
     const baseSha = validateGitObjectId(envelope.resource.baseSha, "baseSha");
     const headSha = validateGitObjectId(envelope.resource.headSha, "headSha");
-    const baseReference = "refs/agentic-review/base";
-    const headReference = "refs/agentic-review/head";
+    const pullRequestNumber = envelope.resource.number;
+    if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
+      throw new JobWorkspaceError(
+        "INVALID_ENVELOPE",
+        "Pull request number must be a positive integer.",
+      );
+    }
+    await this.#withRepositoryLock(repository.key, context.signal, async () => {
+      await this.#validateSharedRepositoryDirectory(repository, false);
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        ["init", "--bare", "--quiet", repository.gitDirectory],
+        "node_infrastructure",
+        context,
+        null,
+      );
+      await this.#validateSharedRepositoryDirectory(repository, true);
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [
+          `--git-dir=${repository.gitDirectory}`,
+          "config",
+          "--local",
+          "remote.origin.url",
+          repositoryUrl,
+        ],
+        "deterministic_local",
+        context,
+        null,
+      );
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [`--git-dir=${repository.gitDirectory}`, "worktree", "prune", "--expire", "now"],
+        "deterministic_local",
+        context,
+        null,
+      );
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [
+          `--git-dir=${repository.gitDirectory}`,
+          "fetch",
+          "--quiet",
+          "--force",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--no-recurse-submodules",
+          "origin",
+          "+refs/heads/main:refs/remotes/origin/main",
+          `+refs/pull/${pullRequestNumber}/head:refs/agentic-review/latest-head`,
+        ],
+        "ambiguous_remote",
+        context,
+        null,
+      );
+      const currentHead = await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [
+          `--git-dir=${repository.gitDirectory}`,
+          "rev-parse",
+          "--verify",
+          "refs/agentic-review/latest-head^{commit}",
+        ],
+        "deterministic_local",
+        context,
+        null,
+      );
+      assertExactGitObjectId(currentHead.stdout, headSha, "pull request head");
+      const baseType = await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [`--git-dir=${repository.gitDirectory}`, "cat-file", "-t", baseSha],
+        "deterministic_local",
+        context,
+        null,
+      );
+      assertExactGitOutput(baseType.stdout, "commit", "base object type");
+      const headType = await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [`--git-dir=${repository.gitDirectory}`, "cat-file", "-t", headSha],
+        "deterministic_local",
+        context,
+        null,
+      );
+      assertExactGitOutput(headType.stdout, "commit", "head object type");
+      const mergeBase = await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [`--git-dir=${repository.gitDirectory}`, "merge-base", "--all", baseSha, headSha],
+        "deterministic_local",
+        context,
+        null,
+      );
+      assertGitObjectIdList(mergeBase.stdout, "pull request merge base");
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [
+          `--git-dir=${repository.gitDirectory}`,
+          "worktree",
+          "add",
+          "--detach",
+          "--force",
+          layout.checkoutDirectory,
+          headSha,
+        ],
+        "deterministic_local",
+        context,
+        null,
+        true,
+        onWorktreeRegistered,
+      );
+    });
+  }
 
-    await this.#fetchRevision(
-      layout,
-      guard,
-      diskReservation,
-      repositoryUrl,
-      baseSha,
-      baseReference,
-      context,
-    );
-    await this.#fetchRevision(
-      layout,
-      guard,
-      diskReservation,
-      repositoryUrl,
-      headSha,
-      headReference,
-      context,
-    );
-    const baseType = await this.#runGit(
-      layout,
-      guard,
-      diskReservation,
-      ["cat-file", "-t", baseSha],
-      "deterministic_local",
-      context,
-    );
-    assertExactGitOutput(baseType.stdout, "commit", "base object type");
-    const headType = await this.#runGit(
-      layout,
-      guard,
-      diskReservation,
-      ["cat-file", "-t", headSha],
-      "deterministic_local",
-      context,
-    );
-    assertExactGitOutput(headType.stdout, "commit", "head object type");
-    await this.#runGit(
-      layout,
-      guard,
-      diskReservation,
-      ["checkout", "--detach", "--force", headSha, "--"],
-      "deterministic_local",
-      context,
-    );
-
+  async #verifyPreparedWorktree(
+    layout: WorkspaceLayout,
+    guard: WorkspaceGuard,
+    diskReservation: WorkspaceDiskReservation,
+    baseSha: string,
+    headSha: string,
+    context: WorkspacePreparationContext,
+  ): Promise<void> {
     const actualHead = await this.#runGit(
       layout,
       guard,
@@ -540,44 +712,77 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       context,
     );
     assertExactGitObjectId(actualHead.stdout, headSha, "HEAD");
-    const actualBase = await this.#runGit(
+    const baseType = await this.#runGit(
       layout,
       guard,
       diskReservation,
-      ["rev-parse", "--verify", `${baseReference}^{commit}`],
+      ["cat-file", "-t", baseSha],
       "deterministic_local",
       context,
     );
-    assertExactGitObjectId(actualBase.stdout, baseSha, "base");
+    assertExactGitOutput(baseType.stdout, "commit", "base object type");
   }
 
-  async #fetchRevision(
+  async #removeRegisteredWorktree(
     layout: WorkspaceLayout,
     guard: WorkspaceGuard,
     diskReservation: WorkspaceDiskReservation,
-    repositoryUrl: string,
-    objectId: string,
-    destinationReference: string,
-    context: WorkspacePreparationContext,
+    repository: SharedRepositoryLayout,
+    processHost: ProcessHostClient,
   ): Promise<void> {
-    await this.#runGit(
-      layout,
-      guard,
-      diskReservation,
-      [
-        "fetch",
-        "--quiet",
-        "--depth=1",
-        "--force",
-        "--no-tags",
-        "--no-write-fetch-head",
-        "--no-recurse-submodules",
-        repositoryUrl,
-        `+${objectId}:${destinationReference}`,
-      ],
-      "ambiguous_remote",
-      context,
+    const cleanupContext: WorkspacePreparationContext = {
+      signal: AbortSignal.timeout(this.#gitLimits.hardTimeoutMs),
+      processHost,
+      reportProcessCount: () => undefined,
+      reportNodeHealthFault: () => undefined,
+    };
+    await this.#withRepositoryLock(repository.key, cleanupContext.signal, async () => {
+      await this.#runGit(
+        layout,
+        guard,
+        diskReservation,
+        [
+          `--git-dir=${repository.gitDirectory}`,
+          "worktree",
+          "remove",
+          "--force",
+          layout.checkoutDirectory,
+        ],
+        "deterministic_local",
+        cleanupContext,
+        null,
+        false,
+      );
+    });
+  }
+
+  async #withRepositoryLock<T>(
+    key: string,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#repositoryTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(
+      () => current,
+      () => current,
     );
+    this.#repositoryTails.set(key, tail);
+    try {
+      await waitForRepositoryTurn(previous, signal);
+      throwIfAborted(signal);
+      return await operation();
+    } finally {
+      release();
+      void tail.then(() => {
+        if (this.#repositoryTails.get(key) === tail) {
+          this.#repositoryTails.delete(key);
+        }
+      });
+    }
   }
 
   async #runGit(
@@ -587,6 +792,9 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     commandArguments: readonly string[],
     failurePolicy: "ambiguous_remote" | "deterministic_local" | "node_infrastructure",
     context: WorkspacePreparationContext,
+    commandDirectory: string | null = layout.checkoutDirectory,
+    validateWorkspaceAfter = true,
+    onProcessSuccess?: () => void,
   ): Promise<ManagedProcessRunResult> {
     throwIfAborted(context.signal);
     await this.#validateGitWorkingDirectory();
@@ -604,8 +812,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
             executable: this.#gitExecutable,
             arguments: [
               ...gitConfigurationArguments,
-              "-C",
-              layout.checkoutDirectory,
+              ...(commandDirectory === null ? [] : ["-C", commandDirectory]),
               ...commandArguments,
             ],
             workingDirectory: this.#gitWorkingDirectory,
@@ -620,6 +827,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           },
           { processHost: context.processHost, signal: monitor.signal },
         );
+        onProcessSuccess?.();
       } catch (error) {
         processError = error;
       }
@@ -636,7 +844,9 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         throw new Error("Managed Git execution completed without a result.");
       }
       await this.#validateGitWorkingDirectory();
-      await guard.validateAll();
+      if (validateWorkspaceAfter) {
+        await guard.validateAll();
+      }
       throwIfAborted(context.signal);
       return result;
     } catch (error) {
@@ -681,6 +891,53 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       throw new JobWorkspaceError(
         "WORKSPACE_PATH_UNSAFE",
         "The trusted Git working directory must remain empty.",
+      );
+    }
+  }
+
+  async #validateGitSharedRootDirectory(): Promise<void> {
+    const state = await this.#fileSystem.lstat(this.#gitSharedRootDirectory);
+    if (state === null || state.kind !== "directory" || state.reparsePoint) {
+      throw new JobWorkspaceError(
+        "WORKSPACE_PATH_UNSAFE",
+        "The shared Git repository root is missing or unsafe.",
+      );
+    }
+    const realPath = await this.#fileSystem.realpath(this.#gitSharedRootDirectory);
+    if (!sameWindowsPath(realPath, this.#gitSharedRootDirectory)) {
+      throw new JobWorkspaceError(
+        "WORKSPACE_PATH_UNSAFE",
+        "The shared Git repository root resolves through a reparse point.",
+      );
+    }
+  }
+
+  async #validateSharedRepositoryDirectory(
+    repository: SharedRepositoryLayout,
+    required: boolean,
+  ): Promise<void> {
+    await this.#validateGitSharedRootDirectory();
+    const state = await this.#fileSystem.lstat(repository.gitDirectory);
+    if (state === null) {
+      if (required) {
+        throw new JobWorkspaceError(
+          "WORKSPACE_PATH_UNSAFE",
+          "The shared Git repository directory is missing.",
+        );
+      }
+      return;
+    }
+    if (state.kind !== "directory" || state.reparsePoint) {
+      throw new JobWorkspaceError(
+        "WORKSPACE_PATH_UNSAFE",
+        "The shared Git repository path must be a non-reparse directory.",
+      );
+    }
+    const realPath = await this.#fileSystem.realpath(repository.gitDirectory);
+    if (!sameWindowsPath(realPath, repository.gitDirectory)) {
+      throw new JobWorkspaceError(
+        "WORKSPACE_PATH_UNSAFE",
+        "The shared Git repository path resolves outside its configured location.",
       );
     }
   }
@@ -780,6 +1037,22 @@ class WorkspaceGuard {
 
 async function removeReservedAttempt(reservation: WorkspaceDiskReservation): Promise<void> {
   await reservation.removeAttempt();
+}
+
+function deriveSharedRepositoryLayout(
+  rootDirectory: string,
+  githubRepositoryId: number,
+): SharedRepositoryLayout {
+  if (!Number.isSafeInteger(githubRepositoryId) || githubRepositoryId < 1) {
+    throw new JobWorkspaceError(
+      "INVALID_ENVELOPE",
+      "GitHub repository identity must be a positive integer.",
+    );
+  }
+  const key = `repository-${githubRepositoryId}`;
+  const gitDirectory = win32.join(rootDirectory, `${key}.git`);
+  assertStrictDescendant(rootDirectory, gitDirectory, "shared repository");
+  return Object.freeze({ key, gitDirectory });
 }
 
 function deriveWorkspaceLayout(rootDirectory: string, runAttemptId: string): WorkspaceLayout {
@@ -1002,6 +1275,19 @@ function assertExactGitObjectId(output: string, expected: string, name: string):
   assertExactGitOutput(output, expected, `${name} revision`);
 }
 
+function assertGitObjectIdList(output: string, name: string): void {
+  const objectIds = output.trim().split(/\r?\n/u).filter(Boolean);
+  if (
+    objectIds.length === 0 ||
+    objectIds.some((objectId) => !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(objectId))
+  ) {
+    throw new JobWorkspaceError(
+      "GIT_LOCAL_OR_REVISION_FAILED",
+      `Git ${name} is missing or invalid for the requested revision.`,
+    );
+  }
+}
+
 function assertExactGitOutput(output: string, expected: string, name: string): void {
   if (output === `${expected}\n` || output === `${expected}\r\n`) return;
   throw new JobWorkspaceError(
@@ -1075,6 +1361,31 @@ function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
   throw new JobWorkspaceError("ABORTED", "Workspace preparation was aborted.", {
     cause: signal.reason,
+  });
+}
+
+async function waitForRepositoryTurn(previous: Promise<void>, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(
+        new JobWorkspaceError("ABORTED", "Workspace preparation was aborted.", {
+          cause: signal.reason,
+        }),
+      );
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void previous.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+    );
   });
 }
 

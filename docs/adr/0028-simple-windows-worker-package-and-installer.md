@@ -1,5 +1,7 @@
 # ADR 0028: Simple Windows Worker Package and Clean Installer
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 ## Status
 
 Accepted on 2026-09-04.

@@ -37,7 +37,6 @@ const start = async (): Promise<void> => {
     shutdownTimeoutMilliseconds: serverShutdownTimeoutMilliseconds,
   });
   let running = false;
-  let artifactFailStopLogged = false;
 
   const requestSigintShutdown = (): void => lifecycle.requestGracefulShutdown("SIGINT");
   const requestSigtermShutdown = (): void => lifecycle.requestGracefulShutdown("SIGTERM");
@@ -74,25 +73,6 @@ const start = async (): Promise<void> => {
       : await createServerStorageRuntime({
           databasePath: config.databasePath,
           migrationsDirectory: config.migrationsDirectory,
-          artifactStorage: config.artifactStorage,
-          onFailStop: (error) => {
-            lifecycle.onArtifactFailStop(error);
-            if (!artifactFailStopLogged) {
-              artifactFailStopLogged = true;
-              try {
-                console.error(
-                  JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    level: "fatal",
-                    message: "Artifact storage requested a fail-stop.",
-                    code: error.code,
-                  }),
-                );
-              } catch {
-                // Logging failure cannot delay process-wide fail-stop.
-              }
-            }
-          },
         });
     lifecycle.adoptStorageRuntime(storageRuntime);
     lifecycle.signal.throwIfAborted();
@@ -123,9 +103,6 @@ const start = async (): Promise<void> => {
       config,
       database,
       shutdownSignal: lifecycle.signal,
-      artifactReadiness: storageRuntime.artifactReadiness,
-      artifactTransactions: storageRuntime.artifactTransactions,
-      artifactCompletion: storageRuntime.artifactCompletion,
       serverAdmission: lifecycle.admission,
       ...(githubIngestion === undefined ? {} : { githubIngestion }),
       ...(operatorAuth === undefined ? {} : { operatorAuth }),
@@ -239,15 +216,13 @@ const start = async (): Promise<void> => {
     const startupWasStopped =
       !running && lifecycle.signal.aborted && error === lifecycle.signal.reason;
     if (startupWasStopped) {
-      if (!artifactFailStopLogged) {
-        console.info(
-          JSON.stringify({
-            timestamp: new Date().toISOString(),
-            level: "info",
-            message: "Agentic Review server startup was stopped.",
-          }),
-        );
-      }
+      console.info(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          message: "Agentic Review server startup was stopped.",
+        }),
+      );
     } else {
       console.error(
         JSON.stringify({
@@ -261,7 +236,7 @@ const start = async (): Promise<void> => {
       );
     }
     if (running) {
-      lifecycle.onArtifactFailStop(normalizeFailure(error));
+      lifecycle.onFatalError(normalizeFailure(error));
     } else if (startupWasStopped) {
       lifecycle.sealStartupShutdown();
     } else {

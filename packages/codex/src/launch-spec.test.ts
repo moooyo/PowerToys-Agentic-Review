@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  type BuildReadOnlyCodexExecLaunchSpecOptions,
-  buildReadOnlyCodexExecLaunchSpec,
+  type BuildCodexExecLaunchSpecOptions,
+  buildCodexExecLaunchSpec,
   type CodexProcessResourceLimits,
   codexProcessResourceLimitBounds,
 } from "./launch-spec.js";
@@ -24,7 +24,7 @@ const validLimits = (): CodexProcessResourceLimits => ({
   maximumOutputBytes: 67_108_864,
 });
 
-const validOptions = (): BuildReadOnlyCodexExecLaunchSpecOptions => ({
+const validOptions = (): BuildCodexExecLaunchSpecOptions => ({
   executable: "C:\\Tools\\Codex\\codex.exe",
   workingDirectory: "C:\\Work\\Checkout",
   processWorkingDirectory: "C:\\Service\\Runs\\attempt-1\\control",
@@ -36,8 +36,8 @@ const validOptions = (): BuildReadOnlyCodexExecLaunchSpecOptions => ({
   limits: validLimits(),
 });
 
-describe("buildReadOnlyCodexExecLaunchSpec", () => {
-  it("builds an ephemeral, non-interactive, read-only invocation with a replacement environment", () => {
+describe("buildCodexExecLaunchSpec", () => {
+  it("builds an ephemeral, non-interactive workspace execution with a replacement environment", () => {
     const options = {
       ...validOptions(),
       environment: {
@@ -50,7 +50,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
         userprofile: "C:\\Service\\Profile",
       },
     };
-    const spec = buildReadOnlyCodexExecLaunchSpec(options);
+    const spec = buildCodexExecLaunchSpec(options);
 
     expect(spec).toEqual({
       executable: "C:\\Tools\\Codex\\codex.exe",
@@ -65,7 +65,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
         "never",
         "--ephemeral",
         "--sandbox",
-        "read-only",
+        "workspace-write",
         "--output-schema",
         "C:\\Service\\Runs\\attempt-1\\control\\schema.json",
         "--output-last-message",
@@ -98,7 +98,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
       maximumMemoryBytes: number;
       maximumOutputBytes: number;
     };
-    const spec = buildReadOnlyCodexExecLaunchSpec(options);
+    const spec = buildCodexExecLaunchSpec(options);
 
     environment.CODEX_HOME = "C:\\Changed";
     limits.hardTimeoutMs = 10_000;
@@ -122,9 +122,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     "C:\\Tools\\CLOCK$\\codex.exe",
     "C:\\Work\\Checkout\\codex.exe",
   ])("rejects unsafe executable path %s", (executable) => {
-    expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), executable })).toThrow(
-      TypeError,
-    );
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), executable })).toThrow(TypeError);
   });
 
   it.each([
@@ -138,12 +136,12 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     { field: "outputLastMessagePath", value: "C:\\Other\\result.json" },
     { field: "outputLastMessagePath", value: "C:\\Service\\Runs\\attempt-1\\control\\result.txt" },
   ] as const)("rejects unsafe or out-of-bound $field", ({ field, value }) => {
-    expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), [field]: value })).toThrow();
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), [field]: value })).toThrow();
   });
 
   it("rejects overlapping control and checkout roots or aliased result files", () => {
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         controlRootDirectory: "C:\\Work",
         outputSchemaPath: "C:\\Work\\schema.json",
@@ -152,7 +150,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     ).toThrow(TypeError);
 
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         outputLastMessagePath: "c:\\service\\runs\\attempt-1\\control\\SCHEMA.json",
       }),
@@ -164,7 +162,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     (missingName) => {
       const environment = validEnvironment();
       delete environment[missingName];
-      expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), environment })).toThrow(
+      expect(() => buildCodexExecLaunchSpec({ ...validOptions(), environment })).toThrow(
         new TypeError(`environment must define ${missingName} for replace mode`),
       );
     },
@@ -178,7 +176,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     "WORKER_TLS_CERT_PATH",
   ])("rejects secret-bearing environment name %s", (name) => {
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), [name]: "sensitive" },
       }),
@@ -187,35 +185,35 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
 
   it("rejects unknown, duplicate, malformed, and checkout-relative environment entries", () => {
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), CI: "true" },
       }),
     ).toThrow(/allowlist/u);
 
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), Path: "C:\\Other" },
       }),
     ).toThrow(/duplicate case-insensitive/u);
 
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), PATH: "relative;C:\\Tools" },
       }),
     ).toThrow(/absolute local Windows drive path/u);
 
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), TEMP: "C:\\Work\\Checkout\\temp" },
       }),
     ).toThrow(/must not reference workingDirectory/u);
 
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), PATHEXT: ".EXE;.exe" },
       }),
@@ -234,7 +232,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     ["maximumOutputBytes", 4_096.5],
   ] as const)("rejects out-of-range limit %s=%s", (name, value) => {
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         limits: { ...validLimits(), [name]: value },
       }),
@@ -244,7 +242,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
   it("accepts every exact resource-limit boundary", () => {
     for (const edge of ["minimum", "maximum"] as const) {
       expect(() =>
-        buildReadOnlyCodexExecLaunchSpec({
+        buildCodexExecLaunchSpec({
           ...validOptions(),
           limits: {
             hardTimeoutMs: codexProcessResourceLimitBounds.hardTimeoutMs[edge],
@@ -261,7 +259,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     const limits = validLimits() as Partial<CodexProcessResourceLimits>;
     delete limits.maximumOutputBytes;
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         limits: limits as CodexProcessResourceLimits,
       }),
@@ -269,9 +267,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
   });
 
   it.each(["", "   ", "review\0outside"])("rejects invalid prompt %j", (prompt) => {
-    expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(
-      TypeError,
-    );
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(TypeError);
   });
 
   it.each([
@@ -291,11 +287,11 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
       }),
     },
   ])("rejects malformed surrogate input in $name", ({ options }) => {
-    expect(() => buildReadOnlyCodexExecLaunchSpec(options())).toThrow(/well-formed Unicode/u);
+    expect(() => buildCodexExecLaunchSpec(options())).toThrow(/well-formed Unicode/u);
   });
 
   it("accepts an ASCII prompt at the exact raw limit when the complete start frame fits", () => {
-    const spec = buildReadOnlyCodexExecLaunchSpec({
+    const spec = buildCodexExecLaunchSpec({
       ...validOptions(),
       prompt: "x".repeat(512 * 1024),
     });
@@ -311,7 +307,7 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
 
   it("rejects an ASCII prompt one byte beyond the 512 KiB UTF-8 boundary", () => {
     expect(() =>
-      buildReadOnlyCodexExecLaunchSpec({
+      buildCodexExecLaunchSpec({
         ...validOptions(),
         prompt: "x".repeat(512 * 1024 + 1),
       }),
@@ -323,16 +319,14 @@ describe("buildReadOnlyCodexExecLaunchSpec", () => {
     expect(prompt.length).toBeLessThan(512 * 1024);
     expect(Buffer.byteLength(prompt, "utf8")).toBeGreaterThan(512 * 1024);
 
-    expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(
-      RangeError,
-    );
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(RangeError);
   });
 
   it("rejects a highly escaped prompt when the complete start frame exceeds 1 MiB", () => {
     const prompt = "\\".repeat(512 * 1024);
     expect(Buffer.byteLength(prompt, "utf8")).toBe(512 * 1024);
 
-    expect(() => buildReadOnlyCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(
       /ProcessHost start request must not exceed 1048576 UTF-8 bytes/u,
     );
   });

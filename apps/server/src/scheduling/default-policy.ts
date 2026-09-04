@@ -34,9 +34,9 @@ export const defaultTrustedSchedulingPolicy: TrustedSchedulingPolicy = {
     maxAttempts: 3,
     requiredCapabilities: staticReviewCapabilities,
     executionPolicy: {
-      hardTimeoutMs: 20 * 60 * 1_000,
-      noProgressTimeoutMs: 3 * 60 * 1_000,
-      maxCodexTurns: 1,
+      hardTimeoutMs: 60 * 60 * 1_000,
+      noProgressTimeoutMs: 10 * 60 * 1_000,
+      maxCodexTurns: 16,
       allowedRecipeIds: [],
       requiredCapabilityLabels: staticReviewCapabilityLabels,
     },

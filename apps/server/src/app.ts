@@ -1,7 +1,6 @@
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import type { ArtifactCompletionPort, ArtifactTransactionPort } from "./artifacts/index.js";
 import { startLeaseReaper } from "./background/lease-reaper.js";
 import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
 import type { ServerConfig } from "./config.js";
@@ -18,8 +17,7 @@ import {
 } from "./routes/auth.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
-import { type ArtifactReadinessProbe, registerHealthRoutes } from "./routes/health.js";
-import { registerWorkerArtifactRoutes } from "./routes/worker-artifacts.js";
+import { registerHealthRoutes } from "./routes/health.js";
 import { registerWorkerCredentialRoutes } from "./routes/worker-credentials.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
 
@@ -27,9 +25,6 @@ export interface AppDependencies {
   readonly config: ServerConfig;
   readonly database: DatabaseClient;
   readonly shutdownSignal: AbortSignal;
-  readonly artifactReadiness: ArtifactReadinessProbe;
-  readonly artifactTransactions: ArtifactTransactionPort;
-  readonly artifactCompletion: ArtifactCompletionPort;
   readonly serverAdmission: {
     read(): boolean;
   };
@@ -226,8 +221,7 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   registerHealthRoutes(
     app,
     dependencies.database,
-    dependencies.artifactReadiness,
-    dependencies.shutdownSignal,
+    dependencies.serverAdmission,
     dependencies.config.recoveryMaintenance,
   );
   app.register(async (workerScope) => {
@@ -245,12 +239,6 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     registerWorkerRoutes(workerScope, {
       config: dependencies.config,
       database: dependencies.database,
-      artifactCompletion: dependencies.artifactCompletion,
-      shutdownSignal: dependencies.shutdownSignal,
-    });
-    registerWorkerArtifactRoutes(workerScope, {
-      database: dependencies.database,
-      transactions: dependencies.artifactTransactions,
       shutdownSignal: dependencies.shutdownSignal,
     });
   });

@@ -1,161 +1,91 @@
 # Agentic Review Windows Worker
 
-The Worker is a headless, outbound-only Windows service. It registers with the central Server, long-polls for work, maintains fenced leases through instance heartbeats, and delegates all job execution to an injected `JobExecutor`.
+The Worker is one headless, outbound-only Windows process that can be managed as a service. It
+registers with the Server, claims
+fenced leases, prepares an isolated Git worktree, runs Codex and approved validation commands, and
+submits one inline structured result.
 
-The Worker never receives GitHub credentials and never opens the Server SQLite database.
+The admitted repositories and revisions are trusted execution inputs. Process and disk limits are
+retained as reliability controls rather than hostile-code containment. The Worker receives no
+GitHub publication credential and never opens the Server database.
 
-## Current state
+## Runtime
 
-Implemented boundaries:
+The production entry point is `src/main.ts`, bundled as `dist/worker.mjs`. When execution is
+enabled it composes:
 
-- HTTPS Worker API client with one long-lived Bearer Token per Worker node.
-- Stable node identity and per-process instance identity.
-- Capability registration and deterministic capability digest.
-- Capacity-aware long-poll claim loop.
-- Batched instance heartbeat for every active lease.
-- Lease generation fencing and local self-abort before lease expiry.
-- Server command handling for cancel, stale, drain, and upgrade requests.
-- Absolute execution deadlines and graceful service drain.
-- Injectable `JobExecutor` and a strict, versioned ProcessHost NDJSON client.
-- Negotiated ProcessHost concurrency, bounded frames and output, replacement environments,
-  timeout/cancellation race handling, and fail-closed control-channel behavior.
-- Native Go ProcessHost source with Windows Job Object process-tree supervision.
-- Disposable exact-revision workspaces, static Codex execution, strict structured results,
-  disk-budget enforcement, deferred cleanup, and immutable installation-manifest contracts.
-- Separate reviewed Control and Executor bundles with strict ServiceHost launch contracts,
-  HostControl bootstrap clients, and bounded ARWX standard-I/O channels.
-- Candidate zero-slot Control and Executor supervisors with a validated local session, disabled
-  `Ready` attestation, one-slot maximum registration with zero advertised availability, and a
-  bounded graceful-drain choreography that still requires native Windows verification.
-- A source-only, import-free single-attempt lifecycle reducer under `src/execution`. It snapshots
-  attempt identity, latches the first stop, joins terminal evidence with a zero process tree, and
-  orders disposition and cleanup without performing I/O or granting execution authority.
+- `WorkerService` for registration, claims, heartbeats, lease fencing, drain, and terminal replay;
+- `ReviewJobExecutor` for Codex review and validation jobs;
+- `StdioProcessHostClient` and the native ProcessHost for Job Object process-tree supervision;
+- `ProductionWorkspaceDiskBudget` for bounded attempt storage and orphan cleanup; and
+- `ProductionDisposableJobWorkspaceProvider` for shared repositories and per-attempt worktrees.
 
-The legacy single-process build still uses `PlaceholderJobExecutor` and advertises execution as
-disabled. The reviewed Control and Executor bundles now install candidate zero-slot supervisors.
-After the local session handshake, Executor can emit only `ready=false`, `availableSlots=0`,
-and `reasonCode=EXECUTION_DISABLED`; Control registers with a one-slot maximum but advertises zero
-available slots and never claims work. The source and reviewed role bundles have passed the remote
-Linux test, typecheck, build, and lint gates; they have not passed native Windows verification. A
-static production-reachability guard fixes both main-module import lists and runtime installer
-targets, and rejects any path from those entrypoints into `apps/worker/src/execution`. The milestone
-continues to reject `WORKER_EXECUTION_ENABLED=true` until the Windows service composition and real
-execution runtime are complete.
+The historical Control and Executor role bundles are not production entry points. ADR 0029
+replaces their credential-isolation threat model with one trusted-code Worker process.
 
-The architecture guard also pins the LF-normalized SHA-256 of the complete candidate Control and
-Executor runtime sources. This is an accidental scope-drift and review fence: any source change must
-be reviewed as a whole before its pinned digest is updated with the guard tests. It is not a defense
-against a malicious repository author who can change the runtime, guard, and digest in one patch.
-The dormant attempt reducer is independently hash-pinned and scanned for imports, callbacks, async
-constructs, runtime loaders, and authority-adjacent globals. It has no barrel export, role-bundle
-input, production entrypoint consumer, runtime adapter, or effect executor. It does not interpret
-RoleConfig, admit a Claim, advertise capacity, verify a capability, or launch a process. Its unit and
-guard additions passed the Linux `test-env` focused, full Worker, repository test, typecheck, build,
-and lint matrices. Native Windows evidence remains intentionally out of scope for this source-only
-module.
+## Shared repositories and worktrees
 
-Reducer callers must supply ordinary non-Proxy structured-data objects. The reducer rejects
-non-plain prototypes, accessors, symbols, non-enumerable properties, and extra fields, then copies
-only data-property descriptor values into frozen snapshots. Hostile Proxy objects are outside this
-zero-import calling contract because JavaScript cannot identify them without invoking traps or an
-additional runtime dependency.
+Each configured public GitHub repository has one persistent bare repository beneath
+`WORKER_GIT_SHARED_ROOT_DIRECTORY`. Before a pull request job starts, the Worker fetches the current
+`main` ref and the GitHub pull request head ref into that shared object store, verifies the
+envelope's base and head SHAs, and requires a valid merge base. It then creates a detached worktree
+for the exact head SHA beneath `WORKER_WORKSPACE_ROOT_DIRECTORY`.
 
-## Role bundle trust boundary
+The current Git environment disables credential helpers and uses an anonymous GitHub HTTPS URL, so
+private repositories are not supported by this MVP.
 
-The role-bundle AST scanner is a review-time hazard lint for known runtime-loader patterns. It is
-defense in depth, not a JavaScript sandbox and not authority for hostile source. Production
-authority must come from the exact path and SHA-256 input manifest inside a trusted, signed release
-build, together with the ServiceHost and Windows identity, ACL, Job Object, and pipe boundaries.
+Git fetch and worktree metadata operations are serialized per repository. Different repositories
+can prepare concurrently, and prepared worktrees can execute concurrently. Task cleanup removes
+the registered worktree and then removes the complete attempt directory. The next preparation also
+prunes stale worktree metadata left by an interrupted process.
 
-The bounded `RuntimeBootstrapV1` foundation starts the ARWX router before acknowledgement, accepts
-the bootstrap-bound commit, transfers the exact HostControl owner, and resolves a role-level
-`activated` barrier only after the connector result passes owner, bootstrap, role, and nominal
-session validation. The candidate supervisors create no identities, timers, API facades, or ARWX
-messages before that barrier. The trusted local handshake is `Hello`, `HelloAck`, then `Ready`.
-Both sides validate a runtime-branded session that binds protocol selection, nonces, identities,
-manifest, preflight, policy, and slot values. It uses no local CNG key, SPKI, signature operation, or
-`ControlProof`. Control keeps every heartbeat at zero available slots with no active leases.
+The shared object store is not recreated for every attempt, so repeated reviews download only
+missing Git objects. Do not run Git garbage collection while attempts for that repository are
+active.
 
-The role bundles contain a candidate bounded, one-shot `ArmArwxShutdownV1` lifecycle choreography.
-Control sends the final `Drain`; Executor returns the exact final `Drained`; and each side arms
-HostControl only from its own post-dispatch final-frame receipt before joining both EOF directions.
-The Control-only native relay path can forward the validated `Drain` before Control EOF while
-retaining an immutable copy for later HostControl authorization; Executor `Drained` remains held
-until its authorized EOF. A compromised Control payload can therefore force a bounded Executor
-shutdown, but this path grants no Claim, lease, or execution authority; the native attack matrix
-must cover that denial-of-service tradeoff before any execution-enabled release. The Linux
-`test-env` source, bundle, activation, and lifecycle matrices have passed. The candidate includes a
-Control-only, single-use `ShutdownRequested` HostControl notification bound to the committed
-bootstrap. Go serializes it with responses and keeps relay, HostControl, ARWX standard I/O, and Node
-alive under one absolute deadline while Control initiates runtime close. Executor treats that
-notification as a protocol failure and remains driven only by authenticated Control `Drain`; Go
-never synthesizes an ARWX business frame. The candidate is not publishable until an actual signed
-dual-role package, a production installer, physical installation evidence, and the paired native
-Windows x64 and arm64 shutdown and attack matrices are complete. The
-role-local `shutdownId` does not claim cross-role transaction identity. Before ServiceHost enables
-either payload, its fixed Node launch contract must include `--disallow-code-generation-from-strings`
-and `--no-addons`; neither flag replaces the operating system boundaries above.
+## Worker authentication
 
-The ServiceHost role-local RPC server derives Claim authority only from the exact role configuration
-sealed into that committed bootstrap. Both current role configurations set
-`executionEnabled=false`, so Claim terminates the local RPC session with
-`OPERATION_NOT_ALLOWED` before dispatcher or request resources are acquired.
-
-## Worker API
-
-The Worker currently calls:
+Every Worker API request uses the node-specific Token loaded from:
 
 ```text
-POST /api/v1/worker/instances
-POST /api/v1/worker/leases/claim
-PUT  /api/v1/worker/instances/{instanceId}/heartbeat
-POST /api/v1/worker/runs/{runAttemptId}/complete
-POST /api/v1/worker/runs/{runAttemptId}/fail
+C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json
 ```
 
-Registration, claim, heartbeat, lease identity, execution envelopes, and terminal submissions all
-use runtime-validated schemas from `@agentic-review/contracts`. Every Worker API request sends the
-same node-specific Token in the `Authorization: Bearer <token>` header. The Token and
-`workerNodeId` are loaded only from:
-
-```text
-C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
-```
-
-The UTF-8 file is at most 4 KiB and contains exactly these canonical `JSON.stringify` bytes, with
-the shown member order and no BOM, extra whitespace, or trailing newline:
+The file contains exactly one compact JSON object:
 
 ```json
 {"profileId":"agentic-review-worker-auth-v1","token":"arw1_<43-base64url-characters>","workerNodeId":"<entity-id>"}
 ```
 
-The local Windows environment is trusted under ADR 0025, so this file contains the Token in
-plaintext. Do not commit, package, diagnose, or log it. Environment variables and command-line
-arguments are not alternate Token or Worker identity sources.
+The parent Worker process owns this Token. Git, Codex, ProcessHost children, repository commands,
+and validation commands receive replacement environments that do not contain it.
 
 ## Development launch
 
-Use a development-only HTTP endpoint explicitly:
+From an elevated PowerShell session at the repository root, provision the authentication profile.
+The Token prompt is masked, and the script removes inherited ACLs before granting access only to the
+Worker identity, `SYSTEM`, and local administrators:
 
 ```powershell
-$workerToken = Read-Host 'Worker Token returned by the Server operator API'
-$workerNodeId = Read-Host 'Worker node ID returned by the Server operator API'
-$authDirectory = 'C:\ProgramData\AgenticReview\Control'
-$authPath = Join-Path $authDirectory 'worker-auth-v1.json'
-$authProfile = [ordered]@{
-  profileId = 'agentic-review-worker-auth-v1'
-  token = $workerToken
-  workerNodeId = $workerNodeId
-} | ConvertTo-Json -Compress
-New-Item -ItemType Directory -Force -Path $authDirectory | Out-Null
-[System.IO.File]::WriteAllText($authPath, $authProfile, [System.Text.UTF8Encoding]::new($false))
+.\deploy\worker\provision-worker-auth.ps1 `
+  -WorkerNodeId 'worker:<uuid>' `
+  -WorkerIdentity "$env:USERDOMAIN\$env:USERNAME"
+```
 
+Then configure the execution tools and launch the Worker:
+
+```powershell
 $env:WORKER_SERVER_URL = 'http://127.0.0.1:3000'
 $env:WORKER_ALLOW_INSECURE_HTTP = 'true'
-$env:WORKER_EXECUTION_ENABLED = 'false'
+$env:WORKER_EXECUTION_ENABLED = 'true'
+$env:WORKER_DATA_DIR = 'D:\AgenticReview\Data'
+$env:WORKER_GIT_SHARED_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Repositories'
+$env:WORKER_WORKSPACE_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Workspaces'
+$env:WORKER_EXECUTION_TEMP_DIRECTORY = 'D:\AgenticReview\Data\Temp'
+$env:WORKER_EXECUTION_PROFILE_DIRECTORY = 'D:\AgenticReview\Data\Profile'
+# Configure the trusted executable paths, versions, digests, and resource limits here.
 node --enable-source-maps .\dist\worker.mjs
 ```
 
-Production deployments must use HTTPS. `WORKER_TLS_CA_PATH` may load a fixed Server CA, and
-`WORKER_TLS_SERVER_NAME` may override the validated Server name. Client certificates, private
-keys, PFX files, and client-key passphrases are not loaded.
+Production Server connections use HTTPS. Package signing is a deployment concern only when Worker
+bundles are distributed automatically; it is not required for a manual trusted deployment.

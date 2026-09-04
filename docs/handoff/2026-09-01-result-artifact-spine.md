@@ -1,5 +1,7 @@
 # Result Artifact Spine Handoff
 
+> Historical only. ADR 0029 removed the unpublished artifact architecture.
+
 Status date: 2026-09-01
 
 Branch: `codex/artifact-spine`

@@ -16,7 +16,7 @@ describe("WorkerApiError", () => {
 
   it("honors a trusted retryability override instead of the status fallback", () => {
     expect(
-      new WorkerApiError("Storage integrity failed.", 503, "artifact_storage_integrity", {
+      new WorkerApiError("Server integrity failed.", 503, "server_integrity_failure", {
         retryable: false,
       }).isRetryable,
     ).toBe(false);

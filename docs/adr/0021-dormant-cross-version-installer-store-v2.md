@@ -1,5 +1,7 @@
 # ADR 0021: Dormant Cross-Version Installer Store v2
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Withdrawn before publication by ADR 0026. Its source package was deleted and no production
 > installer will read or migrate this store format.
 >

@@ -10,7 +10,7 @@ import {
 
 const mebibyte = 1024 * 1024;
 const gibibyte = 1024 * mebibyte;
-const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Control\\worker-auth-v1.json";
+const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Worker\\worker-auth-v1.json";
 const workerNodeId = "worker-config:test";
 const workerToken = `arw1_${"A".repeat(43)}`;
 
@@ -320,6 +320,7 @@ describe("loadWorkerConfig execution mode", () => {
       codexVersion: "codex-cli 1.2.3",
       gitExecutablePath: "C:\\AgenticReview\\Bin\\Git\\git.exe",
       gitSha256: "c".repeat(64),
+      gitSharedRootDirectory: "D:\\AgenticReview\\Data\\Repositories",
       workspaceRootDirectory: "D:\\AgenticReview\\Data\\Workspaces",
       tempDirectory: "D:\\AgenticReview\\Data\\Temp",
       profileDirectory: "D:\\AgenticReview\\Data\\Profile",
@@ -463,6 +464,7 @@ describe("Worker execution path policy", () => {
   it.each([
     ["WORKER_TRUSTED_EXECUTABLE_ROOT", "C:\\"],
     ["WORKER_DATA_DIR", "D:\\"],
+    ["WORKER_GIT_SHARED_ROOT_DIRECTORY", "D:\\"],
     ["WORKER_WORKSPACE_ROOT_DIRECTORY", "D:\\"],
     ["WORKER_EXECUTION_TEMP_DIRECTORY", "D:\\"],
     ["WORKER_EXECUTION_PROFILE_DIRECTORY", "D:\\"],
@@ -473,6 +475,13 @@ describe("Worker execution path policy", () => {
   });
 
   it("requires mutable execution directories to be disjoint children of the data root", () => {
+    expect(() =>
+      loadWorkerConfig({
+        ...enabledEnvironment(),
+        WORKER_GIT_SHARED_ROOT_DIRECTORY: "E:\\Outside\\Repositories",
+      }),
+    ).toThrow(/WORKER_GIT_SHARED_ROOT_DIRECTORY must be contained beneath/u);
+
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
@@ -509,13 +518,13 @@ describe("Worker execution identity policy", () => {
     },
   );
 
-  it("rejects validation recipe advertisement until dynamic validation exists", () => {
+  it("rejects obsolete validation recipe advertisement", () => {
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
         WORKER_RECIPE_IDS: "powertoys.build.x64",
       }),
-    ).toThrow(/must remain empty/u);
+    ).toThrow(/not used by the trusted-code Worker/u);
   });
 });
 

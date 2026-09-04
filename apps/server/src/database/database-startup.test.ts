@@ -62,14 +62,14 @@ describe("DatabaseClient startup", () => {
     expect(completed).toBe(true);
   });
 
-  it("builds exact schema version 12 without retired Server-binding tables", async () => {
+  it("builds exact schema version 8 without retired pre-release tables", async () => {
     const directory = await createTemporaryDirectory();
     const database = new DatabaseSync(join(directory, "schema.sqlite"));
     try {
-      expect(runMigrations(database, migrationsDirectory)).toBe(12);
+      expect(runMigrations(database, migrationsDirectory)).toBe(8);
       expect(
-        database.prepare("SELECT filename FROM schema_migrations WHERE version = 12").get(),
-      ).toEqual({ filename: "0012_worker_token_auth_v1.sql" });
+        database.prepare("SELECT filename FROM schema_migrations WHERE version = 8").get(),
+      ).toEqual({ filename: "0008_worker_token_auth_v1.sql" });
       expect(
         database
           .prepare(`
@@ -80,7 +80,11 @@ describe("DatabaseClient startup", () => {
                 'server_binding_receipt_issuer',
                 'server_binding_authorizations',
                 'server_bindings',
-                'server_binding_revocations'
+                'server_binding_revocations',
+                'artifact_uploads',
+                'artifact_upload_chunks',
+                'run_artifacts',
+                'artifact_completion_bindings'
               )
             ORDER BY name
           `)
@@ -119,7 +123,7 @@ describe("DatabaseClient startup", () => {
       );
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /schema version 7; exact current schema version 12 is required.*Rebuild the database/u,
+        /schema version 7; exact current schema version 8 is required.*Rebuild the database/u,
       );
       await expect(lstat(join(directory, "data", "backups"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -388,7 +392,7 @@ describe("DatabaseClient startup", () => {
       await mkdir(dataDirectory, { mode: 0o700 });
       const unmarkedDatabase = new DatabaseSync(databasePath);
       try {
-        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(12);
+        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(8);
       } finally {
         unmarkedDatabase.close();
       }
@@ -411,11 +415,11 @@ describe("DatabaseClient startup", () => {
       await mkdir(join(directory, "data"), { mode: 0o700 });
       const newerDatabase = new DatabaseSync(databasePath);
       try {
-        expect(runMigrations(newerDatabase, migrationsDirectory)).toBe(12);
+        expect(runMigrations(newerDatabase, migrationsDirectory)).toBe(8);
         newerDatabase
           .prepare(`
             INSERT INTO schema_migrations (version, filename, checksum, applied_at)
-            VALUES (13, '0013_unknown.sql', ?, ?)
+            VALUES (9, '0009_unknown.sql', ?, ?)
           `)
           .run("0".repeat(64), "2026-09-04T00:00:00.000Z");
       } finally {
@@ -425,7 +429,7 @@ describe("DatabaseClient startup", () => {
       await writeInitializationMarker(databasePath);
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /Applied migration 13 .* is missing from the deployment/u,
+        /Applied migration 9 .* is missing from the deployment/u,
       );
     },
   );

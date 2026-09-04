@@ -1,138 +1,81 @@
 # ADR 0025: Per-Worker Bearer Token Authentication and Direct Registration v1
 
-> Superseded in part by ADR 0027 for current production requirements.
-> Worker API authentication in this ADR remains current; historical local CNG/SPKI/signed-grant
-> notes are superseded by trusted-local PID/SID checks and typed unsigned local authorization.
-
-> ADR 0026 later withdrew the unpublished installer journal, upgrade, migration, and cross-version
-> store directions. This ADR remains authoritative for Worker Token authentication only.
-
 ## Status
 
-Accepted for implementation on 2026-09-03. Amended on 2026-09-04 to adopt the current Token profile
-directly because no Worker package or bootstrap profile has been released.
+Accepted on 2026-09-03 and amended on 2026-09-05 by ADR 0029 for the single-Worker layout.
 
-This decision defines one long-lived Bearer Token per Worker node as the sole Worker authentication
-profile. The Server remains a Linux HTTPS control plane and Workers remain Windows clients.
-
-ADR 0022, ADR 0023, ADR 0024, and the exact ADR 0014 enrollment-record profile are superseded.
-ADR 0003, ADR 0007, ADR 0008, ADR 0013, ADR 0015, and ADR 0021 are amended only where they require a
-Worker client certificate, certificate binding, or Server binding receipt. The implementation uses
-bootstrap schema 4, outer-package schema/profile v2, and split installer profile v2 as the only
-current path; earlier draft bootstrap and package formats are not supported compatibility surfaces.
-Lease tokens, package authentication, Control-to-Executor local authorization, the Control/Executor
-service split, artifact receipts, process isolation, and zero-execution policy remain separate from
-Worker API authentication. Current local authorization is trusted-local and unsigned-typed; this
-ADR does not define runtime signer keys, SPKI binding, or runtime Authenticode tree verification.
-This amendment does not claim a complete production installer.
+This ADR remains authoritative for Worker-to-Server authentication. Earlier client-certificate,
+Server-binding receipt, Control/Executor, package, and artifact assumptions are not part of this
+decision.
 
 ## Context
 
-The existing Worker API authenticates a TLS client certificate, maps its SHA-256 fingerprint to a
-configured `workerNodeId`, and then checks that identity against the request body. Later dormant
-decisions added a signed Server binding receipt, active-status assertions, durable receipt
-persistence, and a killable Linux signer-host process.
+The Server needs to authenticate each Windows Worker node independently. The selected deployment
+trusts the Server host, database administrators, and local Windows Worker environment. It does not
+need a Worker client certificate, signed Server-binding receipt, offline identity proof, KMS/HSM,
+or hardware-backed local key.
 
-The selected deployment has a simpler trust model:
-
-- the Server host, Server process, database, deployment administrators, and local Windows Worker
-  environment are trusted;
-- every authenticated dashboard user has equal authority to create, rotate, and revoke Worker
-  credentials;
-- Workers do not need offline proof of a Server binding;
-- the Server database is the online authority for Worker identity and revocation;
-- restoring an older database backup intentionally restores the Token state contained in that
-  backup; and
-- a local Windows configuration file may contain the Worker Token in plaintext.
-
-Under this model, a dedicated receipt issuer, signer key, KMS or HSM, signer child process, compiled
-receipt trust, and Linux signer-host verification do not protect a required boundary. They add
-operational and review cost without changing the accepted trust assumptions.
+The Server database is the online identity and revocation authority. Restoring an older database
+backup intentionally restores the credential state contained in that backup.
 
 ## Decision
 
 ### Credential boundaries
 
-The system keeps the following credentials distinct:
+The system keeps these credentials distinct:
 
 1. A long-lived Worker Bearer Token authenticates one Worker node to the Server Worker API.
-2. A short-lived lease token fences one run attempt and remains unchanged.
-3. A short-lived Control-to-Executor typed authorization envelope remains a Windows-local
-   authorization boundary, bound to trusted local peer identity checks.
-4. Package authentication, GitHub, Codex, and operator OIDC credentials remain separate.
+2. A short-lived lease token fences one run attempt.
+3. GitHub ingestion credentials remain on the Server.
+4. Operator sessions and optional operator OIDC credentials remain Server-side.
 
-The Worker Bearer Token is never used as a lease token, local authorization envelope, package credential,
-operator session, GitHub credential, or Codex credential.
+The Worker Token is never used as a lease token, operator credential, GitHub credential, or Codex
+credential. It is not propagated to Git, Codex, validation, or ProcessHost child processes.
 
-### Worker node credential
+### Token profile
 
-Each Worker node has exactly one current Token. The Token is:
+Each Worker node has exactly one current Token:
 
 ```text
 "arw1_" || BASE64URL_NO_PADDING(CSPRNG(32 bytes))
 ```
 
-The random component therefore contains 256 bits of entropy and the complete Token contains only
-ASCII characters. The Token is long-lived until an authenticated user explicitly rotates or
-revokes it. There is no access-token, refresh-token, automatic expiry, automatic rotation, overlap
-window, password KDF, salt, pepper, JWT, or Token introspection service.
+The Server returns plaintext only after a successful create or rotate operation and uses
+`Cache-Control: private, no-store`. It stores only the lowercase SHA-256 digest of the exact ASCII
+Token, with a unique constraint over the digest.
 
-The Server returns the plaintext Token only from a successful create or rotate operation. Those
-responses use `Cache-Control: private, no-store`. The Server never stores the plaintext Token. It
-stores the lowercase SHA-256 of the exact ASCII Token and a unique index over that digest. Token
-entropy, not a password-hardening function, provides brute-force resistance.
+There is no refresh token, automatic expiry, automatic rotation, overlap window, JWT, password
+KDF, salt, pepper, or introspection service. Rotation immediately replaces the current digest.
 
-The Windows Worker stores `workerNodeId` and the plaintext Token in exactly one ordinary local
-configuration file:
+### Windows storage
+
+The single Worker process reads exactly one canonical UTF-8 JSON file:
 
 ```text
-C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
+C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json
 ```
-
-The file is the exact UTF-8 JSON object below, occupies at most 4 KiB, and contains no BOM,
-insignificant whitespace, alternate member order, duplicate member, or trailing byte:
 
 ```json
 {"profileId":"agentic-review-worker-auth-v1","token":"arw1_<43-base64url-characters>","workerNodeId":"<entity-id>"}
 ```
 
-The Worker parses the document, validates the three values, reserializes them in the order above,
-and requires exact byte equality. Missing, extra, duplicate, wrongly typed, noncanonical, or
-malformed members are rejected. Production accepts no environment variable, command-line
-argument, package field, registry value, or alternate file path as a second Worker Token source.
-Tests may inject an in-memory reader without changing the production path.
+The parser rejects missing, extra, duplicate, wrongly typed, noncanonical, malformed, BOM-prefixed,
+or trailing bytes. Production accepts no environment variable, command-line argument, registry
+value, package field, or alternate path as a second Token source.
 
-This profile does not require DPAPI, Credential Manager, CNG, a protected hardware key, or a
-special local reader identity. The file must not be committed to source control, included in a
-release package, copied into diagnostics, or printed in logs. Stronger local storage requires a
-later profile rather than an implicit change to v1.
+The file ACL must grant access only to the Windows identity that runs the Worker, `SYSTEM`, and
+local deployment administrators. It must not be committed, packaged, copied into diagnostics, or
+printed in logs. This v1 profile intentionally does not require DPAPI, Credential Manager, CNG, or
+a hardware key.
 
-### Persistent Worker node state
+### Persistent state
 
-Migration `0012_worker_token_auth_v1.sql` adds one node-level credential table. The existing
-`workers` table remains the process-instance table and is not used as the long-lived credential
-store.
+Migration `0008_worker_token_auth_v1.sql` adds the node credential table. The existing `workers`
+table continues to represent process instances.
 
-The new table records at least:
-
-```text
-worker_node_id
-display_name
-token_sha256
-auth_state
-created_by_issuer
-created_by_subject
-updated_by_issuer
-updated_by_subject
-created_at
-activated_at
-rotated_at
-revoked_at
-updated_at
-```
-
-`worker_node_id` and `token_sha256` are independently unique. `auth_state` is exactly `pending`,
-`active`, or `revoked`. The only state transitions are:
+The credential record contains the Worker node ID, display name, Token digest, lifecycle state,
+operator audit identities, and lifecycle timestamps. The lifecycle states are `pending`, `active`,
+and `revoked`, with these forward transitions:
 
 ```text
 pending -> active
@@ -140,237 +83,110 @@ pending -> revoked
 active -> revoked
 ```
 
-Rotation changes only `token_sha256`, `rotated_at`, `updated_at`, and the two last-operator fields;
-it does not change the state. `revoked` is terminal. Reusing a revoked node requires creating a new
-Worker node identity.
+Rotation changes the Token digest and rotation/audit timestamps without changing lifecycle state.
+`revoked` is terminal in the current database history. Returning a machine to service requires a
+new Worker node identity.
 
-The database stores the creator and the last operator to rotate or revoke the credential for
-ordinary accountability. It does not introduce a second administrator role because every
-authenticated dashboard user has equal Token management authority. State-transition admission is
-enforced by the sole `database-worker` API inside `BEGIN IMMEDIATE` transactions. Direct SQL writes
-by a trusted administrator are outside this profile's threat model; migration `0013` therefore
-uses ordinary `CHECK` and `UNIQUE` constraints rather than a second trigger policy layer.
+### Operator management API
 
-### Operator Token management
+Any authenticated operator may:
 
-Any user with a valid existing operator session may:
-
-- create a pending Worker node and receive its Token once;
-- rotate the current Token for a pending or active Worker; or
+- list Worker credential metadata;
+- create a pending Worker and receive its Token once;
+- rotate a pending or active Worker using an `expectedUpdatedAt` compare-and-set; or
 - idempotently revoke a pending or active Worker.
 
-Mutation routes require the existing operator session and an exact same-origin `Origin` header.
-They return no credential through a URL, redirect, cookie, log field, metric label, or error body.
-The Worker node ID is generated by the Server. Caller-supplied display text is descriptive only.
-
-The management API is:
-
 ```text
-GET  /api/v1/operator/worker-nodes?page=<positive-integer>&pageSize=<1-through-200>[&sort=identity]
+GET  /api/v1/operator/worker-nodes
 POST /api/v1/operator/worker-nodes
-POST /api/v1/operator/worker-nodes/:workerNodeId/token/rotate
-POST /api/v1/operator/worker-nodes/:workerNodeId/revoke
+POST /api/v1/operator/worker-nodes/{workerNodeId}/token/rotate
+POST /api/v1/operator/worker-nodes/{workerNodeId}/revoke
 ```
 
-The authenticated GET roster is paginated and returns only lifecycle metadata; it never returns a
-Token, Token digest, or operator identity. Display text must not contain a complete Worker
-Token-shaped value. Rotation requires the roster record's exact canonical `updatedAt` as an
-`expectedUpdatedAt` compare-and-set precondition. A concurrent rotation that already advanced the
-record returns the ordinary credential-conflict response rather than returning a second successful
-Token. Credential update timestamps advance monotonically even when operations occur in the same
-millisecond.
-
-The default roster order is latest update followed by Worker node ID. A caller that must aggregate
-multiple pages while credentials may change requests `sort=identity`, which orders by immutable
-Worker node ID and prevents lifecycle updates from moving records across offset pages.
-
-The authenticated credential-route scope permits 300 requests per minute. A bounded Dashboard
-inventory load uses at most 50 requests for 10,000 records, leaving capacity for an operation-driven
-reload and an operator refresh without weakening the separate anonymous login or Worker request
-limits.
+Mutation routes require an operator session and exact same-origin protection. Roster responses
+never expose plaintext Tokens, Token digests, or operator identities. A lost create or rotate
+response is recovered by rotating again; plaintext cannot be replayed.
 
 ### Worker registration and authentication
 
-The existing Worker instance registration endpoint remains:
-
-```text
-POST /api/v1/worker/instances
-```
-
-The Worker sends its Token only in:
+Workers send the Token only in:
 
 ```http
 Authorization: Bearer <token>
 ```
 
 The Server accepts no Worker Token from a query, cookie, URL, request body, alternate scheme, or
-proxy identity header. The Token mapping is the authority for `workerNodeId`. Existing request body
-fields may continue carrying `workerNodeId` as an identity cross-check, but a different value is
-rejected and can never select another identity.
+proxy identity header. The Token mapping is authoritative for `workerNodeId`; any body identity is
+only a cross-check.
 
-The first successful registration performs one database transaction that:
+A pending Token may call only `POST /api/v1/worker/instances`. The first successful registration
+atomically validates the registration, transitions the node to `active`, and records the Worker
+process instance. All other Worker routes require an active credential.
 
-1. verifies the Token digest and a `pending` node;
-2. verifies the complete registration request and protocol version;
-3. transitions the node to `active`; and
-4. upserts the existing Worker process instance.
+Every request authenticates against SQLite; there is no long-lived positive Token cache. Rotation
+and revocation affect authentication performed after their transactions commit. Requests already
+authenticated may finish and remain subject to lease fencing.
 
-No failed request activates the node. A repeated request with the same Token and
-`workerInstanceId` returns the existing instance result. A new `workerInstanceId` for the same
-Token remains the same Worker node and uses the existing instance-supersession behavior.
+### Public failures
 
-A pending Token may call only the registration endpoint. Every other Worker route requires an
-`active` node. Every Worker route, including artifact upload, completion, heartbeat, claim, and
-terminal submission, derives the node identity from the Token mapping.
-
-### Revocation, rotation, and request races
-
-Rotation atomically installs one new digest and invalidates the old Token. There is no overlap.
-The rotation transaction checks `expectedUpdatedAt` before replacing the digest, so concurrent
-operators cannot both receive successful replacement Tokens for the same prior credential version.
-The operator places the new Token in the Windows configuration file and restarts the Worker. If a
-rotate response is lost, the operator performs another rotation and uses the last Token actually
-received; the Server never retains plaintext to replay a response.
-
-Revocation is idempotent and rejects all later Worker requests. Existing process-instance rows may
-be marked disabled or offline. A request that completed authentication before revocation may finish;
-revocation applies to subsequent authentication. Existing leases remain governed by their current
-lease token and TTL, but the claim transaction rechecks that the node remains active before granting
-new work.
-
-Rotation invalidates the old Token for subsequent requests. A request authenticated before the
-rotation transaction may finish with the already-established node identity, including an existing
-long poll. This request-level race is accepted and is not a second active Token.
-
-The Server authenticates each request against the database and does not use a long-lived Token
-cache. Database unavailability fails closed. Basic request-rate limiting protects the authentication
-lookup from denial-of-service traffic; account-style lockout is unnecessary for a 256-bit Token.
-
-### Failure responses
-
-Missing, malformed, unknown, rotated, and revoked Tokens share one public response:
+Missing, malformed, unknown, rotated, and revoked Tokens share:
 
 ```text
 401 worker_authentication_failed
 WWW-Authenticate: Bearer
 ```
 
-An otherwise valid pending Token on a non-registration route receives:
+A valid pending Token on a non-registration route receives
+`403 worker_registration_required`. A body identity mismatch receives
+`403 worker_identity_mismatch`. Database unavailability receives
+`503 worker_authentication_unavailable`.
 
-```text
-403 worker_registration_required
-```
+Errors and logs never contain the Token, digest, or Authorization header.
 
-A body identity that differs from the Token mapping receives:
+### Transport
 
-```text
-403 worker_identity_mismatch
-```
+Production Worker traffic uses HTTPS with normal Server certificate validation. There is no Worker
+client certificate. Explicit loopback development may use HTTP, but Bearer Token authentication
+remains mandatory.
 
-An unavailable authentication database receives:
+## Accepted limits
 
-```text
-503 worker_authentication_unavailable
-```
+- Anyone who can read the local credential file can impersonate that Worker.
+- Any authenticated operator can create, rotate, or revoke Worker credentials.
+- A compromised Server process or database can alter Worker identities.
+- Database rollback can restore an older Token or revive a later-revoked credential state.
+- Bearer revocation cannot cancel a request that already authenticated.
 
-Errors never contain the Token, its digest, the Authorization header, or a database lookup detail.
+These are selected trust assumptions. Stronger local storage, operator roles, anti-rollback epochs,
+short-lived credentials, or instant in-flight cancellation require a later ADR.
 
-### HTTPS and Server configuration
+## Pre-release schema rule
 
-Production Worker traffic continues to require HTTPS and normal Server certificate validation.
-Worker client certificates are removed. The Server no longer loads a Worker client CA, requests a
-client certificate, or loads a static certificate-fingerprint map. The Worker TLS client retains
-the Server CA and optional fixed server name but no longer loads a client certificate, private key,
-PFX, or client-key passphrase.
-
-Loopback HTTP may remain an explicit development-only transport. It does not bypass Bearer Token
-authentication.
-
-### Accepted trust and recovery limits
-
-This profile accepts all of the following:
-
-- anyone who can read a Worker's local configuration may impersonate that Worker;
-- any authenticated dashboard user may create, rotate, or revoke any Worker Token;
-- a compromised Server process or database can create or alter Worker identities;
-- restoring an old database backup may restore an old Token, revive a later-revoked Token, or
-  invalidate a later-rotated Token; and
-- bearer revocation cannot cancel a request that already passed authentication.
-
-These are explicit product choices, not unimplemented security controls. A stronger local secret
-store, role model, anti-rollback epoch, independent credential authority, short-lived Token, or
-instant in-flight cancellation requires a later ADR.
-
-### Pre-release schema reset
-
-The certificate map and Bearer Token authentication must not remain as two positive production
-authentication sources. This software has not been released, so the superseded Server-binding
-migration was removed before shipment instead of being preserved or followed by a DROP migration.
-The Worker Token migration was renumbered from the unreleased version 13 to the current version 12.
-
-The current production schema ends at version 12 and contains no Server-binding issuer,
-authorization, binding, or revocation table. There is no schema-13 compatibility path, legacy
-database adoption authorization, fallback, or migration for databases produced by earlier
-unreleased builds. Such databases must be rebuilt and required Worker credentials must be created
-again. The normal migration framework and migrations 0001 through 0011 remain intact for the
-current release line. Production startup applies them only while creating a fresh database; an
-initialized database must already contain the exact current filenames and checksums through version
-12. The internal automatic migration-backup and backup-directory cleanup path was removed.
-Operational restore supports only exact current-schema backups as documented in
+The current schema ends at version 8. There is no compatibility path for older unpublished Worker
+certificate, Server-binding, package, artifact, or Token migration sequences. Such databases must
+be rebuilt, or restored only from an exact current-schema backup as documented in
 `docs/operations/worker-token-recovery.md`.
 
-## Verification Requirements
+## Verification requirements
 
-Implementation verification must cover:
+Verification covers:
 
-- exact Token syntax and 32-byte CSPRNG generation;
-- plaintext returned only on create and rotate with `no-store`;
-- database storage containing only the Token digest;
-- pending registration, active authentication, revoked rejection, and atomic rotation;
-- exact registration replay and process-instance supersession;
-- body identity mismatch rejection on every Worker request shape;
-- missing, malformed, unknown, rotated, and revoked Token indistinguishability;
-- database-unavailable fail-closed behavior;
-- all Worker and artifact routes using the same Token identity source;
-- operator session and same-origin enforcement for every Token mutation;
-- complete paginated credential roster reads without Token or digest disclosure;
-- stale concurrent rotation rejection through the `expectedUpdatedAt` compare-and-set;
-- rejection of Token-shaped values in persistent Worker display text;
-- absence of Worker Tokens and Authorization headers from logs and errors;
-- Worker HTTPS validation without a client certificate;
-- production rejection of the old certificate map and absence of dual authentication; and
-- current schema version 12 with no Server-binding tables or migration;
-- rejection of the retired schema version 13 and every nonempty database without the current
-  initialization marker; and
-- exact-current-schema restored-backup tests documenting the accepted Token rollback behavior.
-
-Linux verification is limited to the actual Linux Server HTTPS, SQLite, and route integration. The
-superseded signer-host signal, reaping, cgroup, parent-death, and D-state matrix is cancelled.
-Windows verification covers configuration loading and Bearer header behavior; it does not require a
-client certificate, CNG TLS key, receipt, or Server binding verifier.
+- exact Token syntax and CSPRNG generation;
+- one-time plaintext create/rotate responses with `no-store`;
+- digest-only persistence;
+- pending registration and atomic activation;
+- active authentication, rotation, revocation, and conflict handling;
+- identical public failures for invalid credential states;
+- identity mismatch rejection across Worker routes;
+- same-origin operator mutation protection;
+- absence of secrets from logs and errors;
+- HTTPS without a Worker client certificate; and
+- schema version 8 plus exact-backup rollback behavior.
 
 ## Consequences
 
-- Worker registration and authentication become ordinary database-backed Bearer authentication.
-- One Worker can be rotated or revoked without affecting other Workers.
-- Existing Worker instance, lease, heartbeat, artifact, and completion protocols remain largely
-  unchanged.
-- The private-key, receipt, active-status, signer-host, and Linux process-supervision design is no
-  longer required.
-- A copied Token is sufficient to impersonate a Worker until rotation or revocation.
-- Plaintext local storage and database rollback risks are accepted by the selected trust model.
-- The unreleased implementation adopts bootstrap schema 4 and the current package/installer
-  profiles directly, with no older bootstrap or package compatibility path.
-
-## Non-Goals
-
-- anonymous Worker self-registration;
-- one shared Token for all Workers;
-- Worker client-certificate authentication;
-- signed Server binding receipts or active-status assertions;
-- KMS, HSM, PKCS#11, signer-host, or receipt trust management;
-- protecting a Token from trusted local Windows users or administrators;
-- differentiating operator roles;
-- preventing credential rollback after database restore;
-- changing lease tokens, package signatures, local authorization semantics, or execution policy; or
-- enabling execution merely because a Worker authenticated successfully.
+- Worker authentication is an ordinary database-backed Bearer Token flow.
+- One Worker can be rotated or revoked without affecting other nodes.
+- The local plaintext Token and accepted database rollback behavior are explicit operational risks.
+- Worker authentication does not itself authorize a job; claims, leases, capabilities, and fencing
+  remain separate checks.

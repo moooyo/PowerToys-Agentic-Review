@@ -1,5 +1,7 @@
 # ADR 0011: Signed Package Admission v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 admission profile is not reinterpreted; a new profile must replace its mTLS
 > bindings before production use. ADR 0026 makes compiled package trust, node-specific admission,

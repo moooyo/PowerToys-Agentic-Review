@@ -319,7 +319,6 @@ export const systemSnapshot: SystemSnapshot = {
   nodeVersion: "24.20.0",
   sqliteVersion: "3.50.4",
   databaseSizeMb: 18.6,
-  artifactSizeGb: 3.7,
   oldestQueuedAt: ago(23),
   activeWorkers: 3,
   activeLeases: 2,
@@ -345,13 +344,6 @@ export const systemSnapshot: SystemSnapshot = {
       status: "degraded",
       summary: "One registered worker is offline; three remain available.",
       checkedAt: ago(0),
-    },
-    {
-      id: "artifacts",
-      name: "Artifact storage",
-      status: "healthy",
-      summary: "Retention and capacity thresholds are within policy.",
-      checkedAt: ago(2),
     },
   ],
 };

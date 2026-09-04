@@ -32,7 +32,7 @@ const maximumTotalWorkspaceDiskBytes = 64 * maximumPerAttemptDiskBytes;
 const maximumTlsCaBytes = mebibyte;
 const maximumWorkerAuthProfileBytes = 4 * kibibyte;
 const workerAuthProfileId = "agentic-review-worker-auth-v1";
-const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Control\\worker-auth-v1.json";
+const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Worker\\worker-auth-v1.json";
 const workerTokenPattern = /^arw1_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 const fileTypeModeMask = 0o170000n;
 const regularFileMode = 0o100000n;
@@ -90,6 +90,7 @@ export interface WorkerExecutionConfig {
   readonly codexVersion: string;
   readonly gitExecutablePath: string;
   readonly gitSha256: string;
+  readonly gitSharedRootDirectory: string;
   readonly workspaceRootDirectory: string;
   readonly tempDirectory: string;
   readonly profileDirectory: string;
@@ -184,12 +185,13 @@ export function loadWorkerConfig(
   const executionEnabled = readBoolean(environment, "WORKER_EXECUTION_ENABLED", false);
   const recipeIds = readStringArray(environment.WORKER_RECIPE_IDS);
   if (recipeIds.length !== 0) {
-    throw new Error("WORKER_RECIPE_IDS must remain empty until dynamic validation is implemented.");
+    throw new Error(
+      "WORKER_RECIPE_IDS is not used by the trusted-code Worker; Codex executes repository commands directly.",
+    );
   }
 
-  // These checks are lexical only. Before registration, the startup verifier must resolve the
-  // real paths, reject reparse points, confirm file identity, and compare binary digests. The
-  // executor must also pass its runtime isolation gate before any untrusted job can start.
+  // These checks are lexical only. Before registration, the startup verifier resolves the real
+  // paths, rejects reparse points, confirms file identity, and compares binary digests.
   const execution = executionEnabled
     ? loadExecutionConfig(environment, dataDirectory, maxSlots)
     : undefined;
@@ -305,6 +307,12 @@ function loadExecutionConfig(
     "directory",
   );
   assertNotFileSystemRoot(workspaceRootDirectory, "WORKER_WORKSPACE_ROOT_DIRECTORY");
+  const gitSharedRootDirectory = readWindowsPath(
+    environment.WORKER_GIT_SHARED_ROOT_DIRECTORY ?? win32.join(dataDirectory, "Repositories"),
+    "WORKER_GIT_SHARED_ROOT_DIRECTORY",
+    "directory",
+  );
+  assertNotFileSystemRoot(gitSharedRootDirectory, "WORKER_GIT_SHARED_ROOT_DIRECTORY");
   const tempDirectory = readRequiredWindowsPath(
     environment,
     "WORKER_EXECUTION_TEMP_DIRECTORY",
@@ -318,10 +326,12 @@ function loadExecutionConfig(
   );
   assertNotFileSystemRoot(profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
   assertDisjoint(trustedExecutableRoot, dataDirectory, "trusted executable root", "data root");
+  assertStrictDescendant(dataDirectory, gitSharedRootDirectory, "WORKER_GIT_SHARED_ROOT_DIRECTORY");
   assertStrictDescendant(dataDirectory, workspaceRootDirectory, "WORKER_WORKSPACE_ROOT_DIRECTORY");
   assertStrictDescendant(dataDirectory, tempDirectory, "WORKER_EXECUTION_TEMP_DIRECTORY");
   assertStrictDescendant(dataDirectory, profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
   assertPairwiseDisjoint(
+    [gitSharedRootDirectory, "WORKER_GIT_SHARED_ROOT_DIRECTORY"],
     [workspaceRootDirectory, "WORKER_WORKSPACE_ROOT_DIRECTORY"],
     [tempDirectory, "WORKER_EXECUTION_TEMP_DIRECTORY"],
     [profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY"],
@@ -418,6 +428,7 @@ function loadExecutionConfig(
     codexVersion,
     gitExecutablePath,
     gitSha256: readSha256(environment, "WORKER_GIT_SHA256"),
+    gitSharedRootDirectory,
     workspaceRootDirectory,
     tempDirectory,
     profileDirectory,

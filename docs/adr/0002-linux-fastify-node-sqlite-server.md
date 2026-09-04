@@ -21,7 +21,8 @@ The database will use:
 - Prepared statements and short `BEGIN IMMEDIATE` transactions for lease-critical operations.
 - The built-in SQLite backup API plus externally retained backups.
 
-The deployment supports one active Server process. SQLite stores state and artifact metadata; large logs and artifacts are stored as files or in an artifact service.
+The deployment supports one active Server process. SQLite stores control-plane state and bounded
+inline review results. ADR 0029 removed the unpublished artifact metadata and file-storage path.
 
 ## Consequences
 
@@ -30,4 +31,3 @@ The deployment supports one active Server process. SQLite stores state and artif
 - Node.js patch versions must be pinned because `node:sqlite` behavior is part of the persistence boundary.
 - Horizontal Server replicas and shared-disk active-active operation are out of scope. A different database would be required before adding them.
 - Database Worker Thread failure makes the Server unready and prevents new lease claims.
-

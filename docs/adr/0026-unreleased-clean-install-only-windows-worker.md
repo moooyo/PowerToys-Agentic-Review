@@ -1,5 +1,7 @@
 # ADR 0026: Unreleased Clean-Install-Only Windows Worker
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Superseded in part by ADR 0027 for current production requirements.
 > The current requirement set is trusted local Windows with dual SCM services, pipe PID/SID peer
 > verification, typed unsigned local authorization, and schema-4 clean-install-only behavior.

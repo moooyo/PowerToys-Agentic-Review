@@ -55,7 +55,7 @@ describe("ServerLifecycleCore", () => {
         "adoptStorageRuntime",
         "completion",
         "markRunning",
-        "onArtifactFailStop",
+        "onFatalError",
         "requestGracefulShutdown",
         "sealStartupFailure",
         "sealStartupShutdown",
@@ -165,7 +165,7 @@ describe("ServerLifecycleCore", () => {
 
   it("lets an early startup fatal wait for an explicit partial-owner seal", async () => {
     const harness = createServerLifecycleTestingHarness();
-    harness.lifecycle.onArtifactFailStop(new Error("storage failed during startup"));
+    harness.lifecycle.onFatalError(new Error("storage failed during startup"));
     harness.runQueuedTeardown();
     await settle();
     expect(harness.hardExitCodes).toEqual([]);
@@ -200,7 +200,7 @@ describe("ServerLifecycleCore", () => {
     expect(Object.isFrozen(harness.lifecycle.admission)).toBe(true);
     expect(harness.lifecycle.admission.read()).toBe(true);
 
-    harness.lifecycle.onArtifactFailStop(new Error("artifact storage failed"));
+    harness.lifecycle.onFatalError(new Error("runtime failed"));
 
     expect(harness.lifecycle.signal.aborted).toBe(true);
     expect(harness.lifecycle.admission.read()).toBe(false);
@@ -225,8 +225,8 @@ describe("ServerLifecycleCore", () => {
     harness.lifecycle.adoptStorageRuntime({ close: storageClose });
     harness.lifecycle.markRunning();
 
-    harness.lifecycle.onArtifactFailStop(new Error("first fatal"));
-    harness.lifecycle.onArtifactFailStop(new Error("second fatal"));
+    harness.lifecycle.onFatalError(new Error("first fatal"));
+    harness.lifecycle.onFatalError(new Error("second fatal"));
     harness.lifecycle.requestGracefulShutdown("SIGTERM");
 
     expect(harness.armedDeadlineCount).toBe(1);
@@ -247,7 +247,7 @@ describe("ServerLifecycleCore", () => {
     harness.lifecycle.adoptStorageRuntime({ close: storageClose });
     harness.lifecycle.markRunning();
 
-    harness.lifecycle.onArtifactFailStop(new Error("fatal"));
+    harness.lifecycle.onFatalError(new Error("fatal"));
     harness.runQueuedTeardown();
     await settle();
     expect(storageClose).not.toHaveBeenCalled();
@@ -302,7 +302,7 @@ describe("ServerLifecycleCore", () => {
     harness.lifecycle.adoptStorageRuntime({ close: storageClose });
     harness.lifecycle.markRunning();
 
-    harness.lifecycle.onArtifactFailStop(new Error("fatal"));
+    harness.lifecycle.onFatalError(new Error("fatal"));
     harness.runQueuedTeardown();
 
     await vi.waitFor(() => expect(harness.hardExitCodes).toEqual([1]));
@@ -317,7 +317,7 @@ describe("ServerLifecycleCore", () => {
     harness.lifecycle.adoptStorageRuntime({ close: storageClose });
     harness.lifecycle.markRunning();
 
-    harness.lifecycle.onArtifactFailStop(new Error("fatal"));
+    harness.lifecycle.onFatalError(new Error("fatal"));
     harness.runQueuedTeardown();
     await settle();
     harness.fireHardDeadline();
@@ -401,7 +401,7 @@ describe("ServerLifecycleCore", () => {
     harness.lifecycle.requestGracefulShutdown("SIGTERM");
     harness.runQueuedTeardown();
     await settle();
-    harness.lifecycle.onArtifactFailStop(new Error("fatal during drain"));
+    harness.lifecycle.onFatalError(new Error("fatal during drain"));
 
     expect(harness.lifecycle.state).toBe("fail-stopping");
     expect(harness.armedDeadlineCount).toBe(1);

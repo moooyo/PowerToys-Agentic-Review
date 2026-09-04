@@ -1,5 +1,7 @@
 # ADR 0010: Canonical Signed Outer Worker Packages
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 package schema is not reinterpreted; a new package profile must replace its mTLS
 > fields before production use. ADR 0026 further makes the node-specific index, compiled trust,

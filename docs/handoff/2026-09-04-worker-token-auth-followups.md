@@ -1,5 +1,7 @@
 # Worker Token Authentication Follow-up Handoff
 
+> Historical implementation handoff. ADR 0029 removed the package and split-service follow-ups.
+
 Status date: 2026-09-04
 
 Branch: `codex/worker-token-followups`

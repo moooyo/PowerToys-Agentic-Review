@@ -1,5 +1,7 @@
 # ADR 0018: Stage Exact ARWX 1.1 and Job Execution Envelope v2 Contracts
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 - Status: Accepted
 - Date: 2026-09-03
 

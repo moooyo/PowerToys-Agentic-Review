@@ -221,7 +221,7 @@ describe("operator authentication recovery purge", () => {
             loginTransactionTtlSeconds: 600,
             sessionTtlSeconds: 3_600,
             postLoginRedirectPath: "/work-items",
-            mode: "loopback-development-bypass",
+            mode: "loopback",
             developmentIdentity: {
               issuer: "urn:agentic-review:development",
               subject: "recovery-operator",

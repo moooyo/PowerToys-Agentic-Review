@@ -52,9 +52,9 @@ export class PlaceholderJobExecutor implements JobExecutor {
 }
 
 export {
-  buildStaticReviewCodexConfig,
-  type StaticReviewFileHandle,
-  type StaticReviewFileIO,
-  StaticReviewJobExecutor,
-  type StaticReviewJobExecutorOptions,
-} from "./static-review-executor.js";
+  buildReviewCodexConfig,
+  type ReviewFileHandle,
+  type ReviewFileIO,
+  ReviewJobExecutor,
+  type ReviewJobExecutorOptions,
+} from "./review-executor.js";

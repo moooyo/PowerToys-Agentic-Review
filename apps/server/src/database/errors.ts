@@ -26,24 +26,6 @@ export class ResultDigestMismatchError extends Error {
   }
 }
 
-export class ArtifactResultEncodingInvalidError extends Error {
-  public readonly code = "ARTIFACT_RESULT_ENCODING_INVALID";
-
-  public constructor() {
-    super("The result artifact is not strict UTF-8 text.");
-    this.name = "ArtifactResultEncodingInvalidError";
-  }
-}
-
-export class ArtifactResultJsonInvalidError extends Error {
-  public readonly code = "ARTIFACT_RESULT_JSON_INVALID";
-
-  public constructor() {
-    super("The result artifact does not contain exactly one JSON value.");
-    this.name = "ArtifactResultJsonInvalidError";
-  }
-}
-
 export class ReviewResultInvalidError extends Error {
   public readonly code = "REVIEW_RESULT_INVALID";
 
@@ -68,69 +50,6 @@ export class TerminalSubmissionConflictError extends Error {
   public constructor() {
     super("The run attempt already has a different terminal submission.");
     this.name = "TerminalSubmissionConflictError";
-  }
-}
-
-export class ArtifactUploadConflictError extends Error {
-  public readonly code = "ARTIFACT_UPLOAD_CONFLICT";
-
-  public constructor(message = "The artifact upload already has different immutable state.") {
-    super(message);
-    this.name = "ArtifactUploadConflictError";
-  }
-}
-
-export class ArtifactUploadQuotaExceededError extends Error {
-  public readonly code = "ARTIFACT_UPLOAD_QUOTA_EXCEEDED";
-
-  public constructor(message: string) {
-    super(message);
-    this.name = "ArtifactUploadQuotaExceededError";
-  }
-}
-
-export class ArtifactCompletionModeMismatchError extends Error {
-  public readonly code = "ARTIFACT_COMPLETION_MODE_MISMATCH";
-
-  public constructor() {
-    super("The run attempt does not permit result artifact operations.");
-    this.name = "ArtifactCompletionModeMismatchError";
-  }
-}
-
-export class ArtifactCompletionStateInvalidError extends Error {
-  public readonly code = "ARTIFACT_COMPLETION_STATE_INVALID";
-
-  public constructor() {
-    super("The durable artifact completion state is inconsistent.");
-    this.name = "ArtifactCompletionStateInvalidError";
-  }
-}
-
-export class ArtifactReconciliationInvalidRequestError extends Error {
-  public readonly code = "ARTIFACT_RECONCILIATION_INVALID_REQUEST";
-
-  public constructor() {
-    super("The artifact reconciliation request is invalid.");
-    this.name = "ArtifactReconciliationInvalidRequestError";
-  }
-}
-
-export class ArtifactReconciliationConflictError extends Error {
-  public readonly code = "ARTIFACT_RECONCILIATION_CONFLICT";
-
-  public constructor() {
-    super("The artifact reconciliation state changed before the operation could commit.");
-    this.name = "ArtifactReconciliationConflictError";
-  }
-}
-
-export class ArtifactReconciliationStateError extends Error {
-  public readonly code = "ARTIFACT_RECONCILIATION_STATE_INVALID";
-
-  public constructor() {
-    super("The durable artifact reconciliation state is invalid.");
-    this.name = "ArtifactReconciliationStateError";
   }
 }
 

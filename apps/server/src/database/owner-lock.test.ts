@@ -210,21 +210,6 @@ describe("DatabaseOwnerLock", () => {
   });
 
   it.skipIf(process.platform === "win32")(
-    "revokes an unconsumed artifact transaction handle before normal close",
-    async () => {
-      const directory = await createTemporaryDirectory();
-      const lock = await DatabaseOwnerLock.acquire(join(directory, "state.sqlite"));
-      await writeFile(lock.databasePath, "initialized", { mode: 0o600 });
-      await writeInitializationMarker(lock.databasePath);
-      const handle = lock.createArtifactTransactionOwnerLockHandle();
-
-      expect(Reflect.ownKeys(handle)).toEqual([]);
-      expect(() => lock.createArtifactTransactionOwnerLockHandle()).toThrow(/already issued/u);
-      await expect(lock.close()).resolves.toBeUndefined();
-    },
-  );
-
-  it.skipIf(process.platform === "win32")(
     "keeps a normal owner close retriable until its bounded close retries succeed",
     async () => {
       const directory = await createTemporaryDirectory();

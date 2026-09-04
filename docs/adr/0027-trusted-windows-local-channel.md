@@ -1,5 +1,7 @@
 # ADR 0027: Trusted Windows Local Channel Without Local Signatures
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 ## Status
 
 Accepted

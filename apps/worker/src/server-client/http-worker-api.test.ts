@@ -440,8 +440,8 @@ describe("HttpWorkerApi transport and authentication", () => {
           callback,
           {
             error: {
-              code: "artifact_storage_integrity",
-              message: "Artifact storage integrity failed.",
+              code: "server_integrity_failure",
+              message: "Server integrity validation failed.",
               retryable: false,
             },
             requestBody: { leaseToken },
@@ -456,7 +456,7 @@ describe("HttpWorkerApi transport and authentication", () => {
 
     expect(failure).toMatchObject({
       statusCode: 503,
-      errorCode: "artifact_storage_integrity",
+      errorCode: "server_integrity_failure",
       isRetryable: false,
     });
     expect(failure).not.toHaveProperty("body");

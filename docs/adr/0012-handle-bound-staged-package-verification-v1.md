@@ -1,5 +1,7 @@
 # ADR 0012: Handle-Bound Staged Package Verification v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Historical exact profile note: ADR 0025 removes Worker mTLS credentials from the selected product
 > design. This v1 staged-package profile is not reinterpreted; a new profile must replace its mTLS
 > evidence fields before production use. ADR 0026 makes this retained-handle and opaque-evidence

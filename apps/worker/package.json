@@ -7,24 +7,21 @@
     "node": ">=24.20.0 <25"
   },
   "scripts": {
-    "prepare:workspace-dependencies": "pnpm --filter @agentic-review/codex build && pnpm --filter @agentic-review/contracts build && pnpm --filter @agentic-review/local-protocol build",
+    "prepare:workspace-dependencies": "pnpm --filter @agentic-review/codex build && pnpm --filter @agentic-review/contracts build",
     "prebuild": "pnpm run prepare:workspace-dependencies",
     "build": "node scripts/build-worker-bundles.mjs",
     "start": "node --enable-source-maps dist/worker.mjs",
     "pretest": "pnpm run prepare:workspace-dependencies",
-    "test": "vitest run src && node --test scripts/verify-role-bundles.test.mjs",
+    "test": "vitest run src",
     "pretypecheck": "pnpm run prepare:workspace-dependencies",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentic-review/codex": "workspace:*",
     "@agentic-review/contracts": "workspace:*",
-    "@agentic-review/local-protocol": "workspace:*",
     "@sinclair/typebox": "0.34.52"
   },
   "devDependencies": {
-    "@babel/parser": "7.29.8",
-    "@babel/traverse": "7.29.8",
     "@types/node": "24.13.3",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"

@@ -1,15 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import type { DatabaseClient } from "../database/database-client.js";
 
-export interface ArtifactReadinessProbe {
-  read(): Readonly<{ readonly ready: boolean }>;
+export interface ServerAdmissionProbe {
+  read(): boolean;
 }
 
 export const registerHealthRoutes = (
   app: FastifyInstance,
   database: DatabaseClient,
-  artifactReadiness: ArtifactReadinessProbe,
-  shutdownSignal: AbortSignal,
+  serverAdmission: ServerAdmissionProbe,
   recoveryMaintenance = false,
 ): void => {
   app.get("/health/live", async () => ({
@@ -24,11 +23,8 @@ export const registerHealthRoutes = (
         serverTime: new Date().toISOString(),
       });
     const isReady = (): boolean => {
-      if (shutdownSignal.aborted) {
-        return false;
-      }
       try {
-        return artifactReadiness.read().ready === true;
+        return serverAdmission.read() === true;
       } catch {
         return false;
       }

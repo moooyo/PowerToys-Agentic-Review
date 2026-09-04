@@ -100,12 +100,12 @@ export interface OidcOperatorAuthConfig extends BaseOperatorAuthConfig {
   readonly authorizedSubjects: readonly string[];
 }
 
-export interface LoopbackDevelopmentOperatorAuthConfig extends BaseOperatorAuthConfig {
-  readonly mode: "loopback-development-bypass";
+export interface LoopbackOperatorAuthConfig extends BaseOperatorAuthConfig {
+  readonly mode: "loopback";
   readonly developmentIdentity: OperatorIdentity;
 }
 
-export type OperatorAuthConfig = OidcOperatorAuthConfig | LoopbackDevelopmentOperatorAuthConfig;
+export type OperatorAuthConfig = OidcOperatorAuthConfig | LoopbackOperatorAuthConfig;
 
 export interface OperatorAuthServiceDependencies {
   readonly config: OperatorAuthConfig;
@@ -185,7 +185,12 @@ const isValidIdentity = (identity: OperatorIdentity): boolean =>
 
 const isLoopbackHostname = (hostname: string): boolean => {
   const normalized = hostname.toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]";
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "[::1]"
+  );
 };
 
 const readPublicOrigin = (value: string): URL => {
@@ -234,18 +239,18 @@ const validateConfig = (config: OperatorAuthConfig, oidc: OperatorOidcClient | u
   const loopback = isLoopbackHostname(publicOrigin.hostname);
   if (publicOrigin.protocol !== "https:" && (environment !== "development" || !loopback)) {
     throw new Error(
-      "Operator authentication requires HTTPS except for an explicit loopback development origin.",
+      "Operator authentication requires HTTPS except for an explicit loopback origin.",
     );
   }
 
-  if (config.mode === "loopback-development-bypass") {
-    if (environment !== "development" || !loopback) {
+  if (config.mode === "loopback") {
+    if (!loopback) {
       throw new Error(
-        "The operator authentication bypass is restricted to an explicit loopback development configuration.",
+        "The loopback operator authentication mode is restricted to an explicit loopback configuration.",
       );
     }
     if (oidc !== undefined) {
-      throw new Error("An OIDC client must not be configured when development bypass is enabled.");
+      throw new Error("An OIDC client must not be configured when loopback mode is enabled.");
     }
     if (!isValidIdentity(config.developmentIdentity)) {
       throw new Error("developmentIdentity contains invalid operator identity fields.");
@@ -314,8 +319,7 @@ export class OperatorAuthService {
     this.postLoginRedirectPath = dependencies.config.postLoginRedirectPath;
     this.secureCookies = publicOrigin.protocol === "https:";
     this.usesBrowserBinding = dependencies.config.mode === "oidc";
-    this.requiresLoopbackRequest =
-      dependencies.config.mode === "loopback-development-bypass" || !this.secureCookies;
+    this.requiresLoopbackRequest = dependencies.config.mode === "loopback" || !this.secureCookies;
   }
 
   public ensureBrowserBinding(browserBindingToken?: string): OperatorBrowserBinding | undefined {
@@ -334,7 +338,7 @@ export class OperatorAuthService {
   }
 
   public async startLogin(browserBindingToken?: string): Promise<OperatorLoginStart> {
-    if (this.#config.mode === "loopback-development-bypass") {
+    if (this.#config.mode === "loopback") {
       const completed = await this.#createSession(this.#config.developmentIdentity);
       return { kind: "session", ...completed };
     }
@@ -387,7 +391,7 @@ export class OperatorAuthService {
       throw new OperatorAuthError(
         "unsupported_auth_flow",
         400,
-        "The OIDC callback is unavailable while development bypass is enabled.",
+        "The OIDC callback is unavailable while loopback mode is enabled.",
       );
     }
     if (

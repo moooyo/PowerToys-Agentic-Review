@@ -1,5 +1,7 @@
 # ADR 0015: Split Installer Transaction Journal v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 > Withdrawn before publication by ADR 0026. No production installer may read, write, migrate, or
 > recreate this journal format.
 >

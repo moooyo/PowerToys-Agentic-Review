@@ -754,7 +754,7 @@ describe("OperatorAuthService", () => {
     ).toThrow(/must not contain a template/u);
   });
 
-  it("fails closed for incomplete production OIDC and non-loopback development bypass", () => {
+  it("fails closed for incomplete production OIDC and non-loopback loopback configuration", () => {
     expect(
       () =>
         new OperatorAuthService({
@@ -774,7 +774,7 @@ describe("OperatorAuthService", () => {
       () =>
         new OperatorAuthService({
           config: {
-            mode: "loopback-development-bypass",
+            mode: "loopback",
             environment: "production",
             publicOrigin: "https://review.example.com",
             loginTransactionTtlSeconds: 300,
@@ -784,14 +784,14 @@ describe("OperatorAuthService", () => {
           },
           persistence: new MemoryAuthPersistence(),
         }),
-    ).toThrow("restricted to an explicit loopback development configuration");
+    ).toThrow("restricted to an explicit loopback configuration");
   });
 
-  it("creates an ordinary server-side session for explicit loopback development bypass", async () => {
+  it("creates an ordinary server-side session for explicit loopback mode", async () => {
     const persistence = new MemoryAuthPersistence();
     const auth = new OperatorAuthService({
       config: {
-        mode: "loopback-development-bypass",
+        mode: "loopback",
         environment: "development",
         publicOrigin: "http://127.0.0.1:8080",
         loginTransactionTtlSeconds: 300,

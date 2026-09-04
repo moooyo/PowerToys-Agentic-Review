@@ -738,7 +738,6 @@ const systemKeys = [
   "nodeVersion",
   "sqliteVersion",
   "databaseSizeBytes",
-  "artifactSizeBytes",
   "oldestQueuedAt",
   "activeWorkers",
   "activeLeases",
@@ -752,7 +751,6 @@ export const mapSystemSnapshotResponse = (
 ): SystemSnapshot => {
   const item = asObject(value, operation, "$", systemKeys);
   const databaseSizeBytes = readInteger(item, "databaseSizeBytes", operation, "$", 0);
-  const artifactSizeBytes = readInteger(item, "artifactSizeBytes", operation, "$", 0);
   const oldestQueuedAt = readNullableDateTime(item, "oldestQueuedAt", operation, "$");
   const health = item.health;
   if (!Array.isArray(health) || health.length > 128) {
@@ -766,7 +764,6 @@ export const mapSystemSnapshotResponse = (
     nodeVersion: readString(item, "nodeVersion", operation, "$", 1, 128),
     sqliteVersion: readString(item, "sqliteVersion", operation, "$", 1, 128),
     databaseSizeMb: databaseSizeBytes / 1_048_576,
-    artifactSizeGb: artifactSizeBytes / 1_073_741_824,
     ...(oldestQueuedAt === null ? {} : { oldestQueuedAt }),
     activeWorkers: readInteger(item, "activeWorkers", operation, "$", 0),
     activeLeases: readInteger(item, "activeLeases", operation, "$", 0),

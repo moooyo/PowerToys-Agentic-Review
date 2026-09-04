@@ -146,7 +146,6 @@ export interface SystemSnapshot {
   nodeVersion: string;
   sqliteVersion: string;
   databaseSizeMb: number;
-  artifactSizeGb: number;
   oldestQueuedAt?: string;
   activeWorkers: number;
   activeLeases: number;

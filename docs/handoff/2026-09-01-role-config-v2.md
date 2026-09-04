@@ -1,5 +1,7 @@
 # RoleConfig v2 Authority Handoff
 
+> Historical only. ADR 0029 removed the unpublished Control/Executor and RoleConfig architecture.
+
 Status date: 2026-09-01
 
 Branch: `main`

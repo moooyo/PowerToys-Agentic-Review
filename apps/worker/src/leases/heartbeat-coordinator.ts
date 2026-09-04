@@ -10,7 +10,7 @@ import type {
 } from "@agentic-review/contracts";
 import type { WorkerConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
-import { isFatalWorkerControlError, WorkerApiError } from "../server-client/errors.js";
+import { isFatalWorkerError, WorkerApiError } from "../server-client/errors.js";
 import type { WorkerApi } from "../server-client/worker-api.js";
 import { delay } from "../util/async.js";
 import { LeaseLostError } from "./errors.js";
@@ -188,7 +188,7 @@ export class HeartbeatCoordinator {
           if (error instanceof WorkerApiError && error.isWorkerRegistrationLost) {
             this.#onRegistrationLost(error);
             this.#abortLeasesNearExpiry();
-          } else if (isFatalWorkerControlError(error)) {
+          } else if (isFatalWorkerError(error)) {
             this.#stopController.abort(error);
             this.#onFatalError(error);
           } else {

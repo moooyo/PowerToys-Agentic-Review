@@ -6,9 +6,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../../packages/codex" },
-    { "path": "../../packages/contracts" },
-    { "path": "../../packages/local-protocol" }
-  ]
+  "references": [{ "path": "../../packages/codex" }, { "path": "../../packages/contracts" }]
 }

@@ -659,7 +659,6 @@ export const getSystemSnapshot = (
       nodeVersion: process.versions.node,
       sqliteVersion: row.sqliteVersion,
       databaseSizeBytes: row.databaseSizeBytes,
-      artifactSizeBytes: 0,
       oldestQueuedAt: row.oldestQueuedAt,
       activeWorkers: row.activeWorkers,
       activeLeases: row.activeLeases,

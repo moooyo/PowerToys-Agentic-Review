@@ -1,10 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
 import {
-  type ArtifactTransactionOwnerLockHandle,
-  registerArtifactTransactionOwnerLockHandle,
-  revokeArtifactTransactionOwnerLockHandle,
-} from "../artifacts/artifact-transaction-coordinator.js";
-import {
   assertPrivateRegularFile,
   assertPrivateSqliteSidecars,
   assertSecureDatabaseOwnerPlatform,
@@ -83,8 +78,6 @@ export class DatabaseOwnerLock {
   readonly #storage: DatabaseStorageBinding;
   #closed = false;
   #readyValidated = false;
-  #artifactTransactionHandleIssued = false;
-  #artifactTransactionHandle: ArtifactTransactionOwnerLockHandle | undefined;
 
   public readonly databasePath: string;
 
@@ -156,34 +149,7 @@ export class DatabaseOwnerLock {
     this.#readyValidated = true;
   }
 
-  public createArtifactTransactionOwnerLockHandle(): ArtifactTransactionOwnerLockHandle {
-    if (this.#closed) {
-      throw new Error("Database owner lock is already closed.");
-    }
-    if (this.#artifactTransactionHandleIssued) {
-      throw new Error("Database owner lock artifact transaction handle was already issued.");
-    }
-    this.assertReady();
-    const handle = registerArtifactTransactionOwnerLockHandle(this, {
-      close: () => this.#close(),
-    });
-    this.#artifactTransactionHandleIssued = true;
-    this.#artifactTransactionHandle = handle;
-    return handle;
-  }
-
   public close(): Promise<void> {
-    if (this.#artifactTransactionHandleIssued && !this.#closed) {
-      const handle = this.#artifactTransactionHandle;
-      if (handle === undefined || !revokeArtifactTransactionOwnerLockHandle(handle)) {
-        return Promise.reject(
-          new Error(
-            "Database owner lock close requires artifact transaction coordinator authority.",
-          ),
-        );
-      }
-      this.#artifactTransactionHandle = undefined;
-    }
     return this.#close();
   }
 

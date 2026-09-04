@@ -1,5 +1,7 @@
 # ADR 0023: Dormant Server Binding Persistence v1
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 ## Status
 
 Superseded by ADR 0025 on 2026-09-03. The receipt-signing aggregate and migration were removed in a

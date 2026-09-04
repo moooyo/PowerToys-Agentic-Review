@@ -1,7 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import {
   type ActiveLeaseHeartbeat,
-  type ArtifactRunCompletionSubmission,
   type ClaimLeaseRequest,
   ClaimLeaseRequestSchema,
   ExecutionPhaseSchema,
@@ -21,7 +20,6 @@ import {
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { type ArtifactCompletionPort, ArtifactServiceError } from "../artifacts/index.js";
 import type { ServerConfig } from "../config.js";
 import type { DatabaseClient } from "../database/database-client.js";
 import { DatabaseRequestError } from "../database/errors.js";
@@ -35,7 +33,6 @@ import {
 interface RouteDependencies {
   readonly config: ServerConfig;
   readonly database: DatabaseClient;
-  readonly artifactCompletion: ArtifactCompletionPort;
   readonly shutdownSignal: AbortSignal;
 }
 
@@ -152,88 +149,6 @@ const handleTerminalDatabaseError = (error: unknown, reply: FastifyReply): Fasti
   throw error;
 };
 
-const handleArtifactCompletionError = (error: unknown, reply: FastifyReply): FastifyReply => {
-  if (!(error instanceof ArtifactServiceError)) {
-    throw error;
-  }
-  switch (error.code) {
-    case "ARTIFACT_COMPLETION_TERMINAL_CONFLICT":
-      return reply.code(409).send({
-        code: "terminal_submission_conflict",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_TRANSACTION_COMPLETION_MODE_MISMATCH":
-      return reply.code(409).send({
-        code: "artifact_completion_mode_mismatch",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_TRANSACTION_LEASE_LOST":
-      return reply.code(409).send({
-        code: "lease_lost",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_COMPLETION_RESULT_DIGEST_MISMATCH":
-      return reply.code(400).send({
-        code: "result_digest_mismatch",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_COMPLETION_RESULT_ENCODING_INVALID":
-      return reply.code(422).send({
-        code: "artifact_result_encoding_invalid",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_COMPLETION_RESULT_JSON_INVALID":
-      return reply.code(422).send({
-        code: "artifact_result_json_invalid",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_COMPLETION_RESULT_INVALID":
-      return reply.code(422).send({
-        code: "review_result_invalid",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_COMPLETION_STORED_TEMPLATE_INVALID":
-      return reply.code(422).send({
-        code: "stored_execution_template_invalid",
-        message: error.message,
-        retryable: false,
-      });
-    case "ARTIFACT_TRANSACTION_BUSY":
-      return reply.code(429).send({
-        code: "artifact_transaction_busy",
-        message: error.message,
-        retryable: true,
-      });
-    case "ARTIFACT_TRANSACTION_CANCELLED":
-    case "ARTIFACT_TRANSACTION_NOT_READY":
-    case "ARTIFACT_TRANSACTION_TIMEOUT":
-      return reply.code(503).send({
-        code: error.code.toLowerCase(),
-        message: error.message,
-        retryable: true,
-      });
-    case "ARTIFACT_TRANSACTION_STORAGE_INTEGRITY":
-      return reply.code(503).send({
-        code: "artifact_storage_integrity",
-        message: error.message,
-        retryable: false,
-      });
-    default:
-      return reply.code(503).send({
-        code: "artifact_service_unavailable",
-        message: "Artifact completion is unavailable.",
-        retryable: false,
-      });
-  }
-};
-
 const exceedsReviewResultLimit = (result: unknown): boolean => {
   try {
     const serialized = JSON.stringify(result);
@@ -329,7 +244,7 @@ export const registerWorkerRoutes = (
   app: FastifyInstance,
   dependencies: RouteDependencies,
 ): void => {
-  const { config, database, artifactCompletion, shutdownSignal } = dependencies;
+  const { config, database, shutdownSignal } = dependencies;
   const authenticateRegistration = createWorkerAuthenticationHooks(database, "registration");
   const authenticateWorker = createWorkerAuthenticationHooks(database);
   const authenticateTerminalWorker = createWorkerAuthenticationHooks(database);
@@ -523,41 +438,21 @@ export const registerWorkerRoutes = (
         });
       }
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
-      if ("result" in request.body) {
-        if (exceedsReviewResultLimit(request.body.result)) {
-          return reply.code(413).send({
-            code: "review_result_too_large",
-            message: "The review result exceeds the permitted UTF-8 byte size.",
-            retryable: false,
-          });
-        }
-        try {
-          return await database.request("completeLease", {
-            ...request.body,
-            runAttemptId: request.params.runAttemptId,
-            workerNodeId,
-          });
-        } catch (error) {
-          return handleTerminalDatabaseError(error, reply);
-        }
+      if (exceedsReviewResultLimit(request.body.result)) {
+        return reply.code(413).send({
+          code: "review_result_too_large",
+          message: "The review result exceeds the permitted UTF-8 byte size.",
+          retryable: false,
+        });
       }
-      const body = request.body as ArtifactRunCompletionSubmission;
       try {
-        return await artifactCompletion.completeArtifactRun(
-          {
-            jobId: body.jobId,
-            runAttemptId: request.params.runAttemptId,
-            workerNodeId,
-            workerInstanceId: body.workerInstanceId,
-            leaseToken: body.leaseToken,
-            leaseGeneration: body.leaseGeneration,
-            artifactId: body.artifactId,
-            resultDigest: body.resultDigest,
-          },
-          shutdownSignal,
-        );
+        return await database.request("completeLease", {
+          ...request.body,
+          runAttemptId: request.params.runAttemptId,
+          workerNodeId,
+        });
       } catch (error) {
-        return handleArtifactCompletionError(error, reply);
+        return handleTerminalDatabaseError(error, reply);
       }
     },
   );

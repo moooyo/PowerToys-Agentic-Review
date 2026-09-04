@@ -204,7 +204,7 @@ describe("loadTrustedSchedulingConfig", () => {
     ).rejects.toThrow(/policy is invalid/u);
   });
 
-  it("rejects policies that cannot cross the Control-Executor boundary", async () => {
+  it("rejects policies outside the Worker execution contract", async () => {
     const fixture = await createPromptFixture();
     const mutations: Array<(policy: TrustedSchedulingPolicy) => void> = [
       (policy) => {

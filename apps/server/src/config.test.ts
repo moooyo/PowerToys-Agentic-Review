@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../dist/config.js";
 
@@ -27,127 +27,16 @@ describe("loadConfig Phase 1 integrations", () => {
     expect(config.operatorAuth).toBeUndefined();
     expect(config.recoveryMaintenance).toBe(false);
     expect(config.dashboardDirectory).toBeUndefined();
-    expect(config.databasePath).toBe(
-      resolve(dirname(config.artifactStorage.rootPath), ".data", "agentic-review.db"),
-    );
-    expect(config.artifactStorage).toEqual({
-      rootPath: resolve(dirname(dirname(config.databasePath)), "artifacts"),
-      capacity: {
-        hardBytes: 10n * 1_024n * 1_024n * 1_024n,
-        hardEntries: 100_000,
-        emergencyReserveBytes: 1_024n * 1_024n * 1_024n,
-        perUploadMetadataHeadroomBytes: 64n * 1_024n,
-        cleanupBacklogHighWaterEntries: 1_024,
-      },
-    });
+    expect(config.databasePath).toMatch(/[\\/]\.data[\\/]agentic-review\.db$/u);
   });
 
-  it("loads bounded artifact capacity without converting byte values through Number", async () => {
-    const directory = await temporaryDirectory();
-    const databasePath = join(directory, "database", "server.sqlite");
-    const artifactRoot = join(directory, "artifact-root");
-    const config = loadConfig({
-      ...developmentEnvironment(),
-      AGENTIC_REVIEW_DATABASE_PATH: databasePath,
-      AGENTIC_REVIEW_ARTIFACT_ROOT: artifactRoot,
-      AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1099511627776",
-      AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "1000000",
-      AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES: "1073741824",
-      AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES: "1048576",
-      AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "4096",
-    });
-
-    expect(config.artifactStorage).toEqual({
-      rootPath: artifactRoot,
-      capacity: {
-        hardBytes: 1_099_511_627_776n,
-        hardEntries: 1_000_000,
-        emergencyReserveBytes: 1_073_741_824n,
-        perUploadMetadataHeadroomBytes: 1_048_576n,
-        cleanupBacklogHighWaterEntries: 4_096,
-      },
-    });
-
-    const minimumEntries = loadConfig({
-      ...developmentEnvironment(),
-      AGENTIC_REVIEW_DATABASE_PATH: databasePath,
-      AGENTIC_REVIEW_ARTIFACT_ROOT: artifactRoot,
-      AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "7",
-      AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "1",
-    });
-    expect(minimumEntries.artifactStorage.capacity.hardEntries).toBe(7);
-  });
-
-  it("rejects unsafe artifact paths, malformed bytes, and inconsistent capacity", async () => {
-    const directory = await temporaryDirectory();
-    const base = {
-      ...developmentEnvironment(),
-      AGENTIC_REVIEW_DATABASE_PATH: join(directory, "database", "server.sqlite"),
-      AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "artifacts"),
-    };
-    const invalid: NodeJS.ProcessEnv[] = [
-      {
-        ...developmentEnvironment(),
-        AGENTIC_REVIEW_DATABASE_PATH: join(directory, "database", "server.sqlite"),
-      },
-      { ...base, AGENTIC_REVIEW_ARTIFACT_ROOT: "relative/artifacts" },
-      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "10000000junk" },
-      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1099511627777" },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_HARD_BYTES: "1073741824",
-        AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES: "1073741824",
-      },
-      { ...base, AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "6" },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES: "100",
-        AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "101",
-      },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES: "1048577",
-      },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES: "4097",
-      },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "database", "server.sqlite"),
-      },
-      {
-        ...base,
-        AGENTIC_REVIEW_ARTIFACT_ROOT: join(directory, "database", "artifacts"),
-      },
-      {
-        ...base,
-        AGENTIC_REVIEW_DATABASE_PATH: join(directory, "artifacts", "database", "server.sqlite"),
-      },
-    ];
-
-    for (const environment of invalid) {
-      expect(() => loadConfig(environment)).toThrow();
-    }
-  });
-
-  it("documents the disjoint production layout and every artifact capacity control", async () => {
+  it("documents the production database layout and operator modes", async () => {
     const example = await readFile(resolve(import.meta.dirname, "..", ".env.example"), "utf8");
     expect(example).toContain(
       "AGENTIC_REVIEW_DATABASE_PATH=/var/lib/agentic-review/database/agentic-review.db",
     );
-    expect(example).toContain("AGENTIC_REVIEW_ARTIFACT_ROOT=/var/lib/agentic-review/artifacts");
-    for (const name of [
-      "AGENTIC_REVIEW_ARTIFACT_HARD_BYTES",
-      "AGENTIC_REVIEW_ARTIFACT_HARD_ENTRIES",
-      "AGENTIC_REVIEW_ARTIFACT_EMERGENCY_RESERVE_BYTES",
-      "AGENTIC_REVIEW_ARTIFACT_PER_UPLOAD_METADATA_HEADROOM_BYTES",
-      "AGENTIC_REVIEW_ARTIFACT_CLEANUP_BACKLOG_HIGH_WATER_ENTRIES",
-    ]) {
-      expect(example).toContain(`${name}=`);
-    }
-    expect(example).toContain("Neither tree may equal or");
     expect(example).toContain("AGENTIC_REVIEW_ALLOW_INSECURE_HTTP=true");
+    expect(example).toContain("AGENTIC_REVIEW_OPERATOR_AUTH_MODE=loopback");
     expect(example).toContain("AGENTIC_REVIEW_RECOVERY_MAINTENANCE=false");
     expect(example).not.toContain("AGENTIC_REVIEW_TLS_CLIENT_CA_PATH");
     expect(example).not.toContain("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON");
@@ -221,17 +110,17 @@ describe("loadConfig Phase 1 integrations", () => {
     ).toThrow(/absolute path/u);
   });
 
-  it("loads an explicit loopback-only development operator bypass", () => {
+  it("loads explicit loopback operator authentication", () => {
     const config = loadConfig({
       ...developmentEnvironment(),
-      AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback-development-bypass",
+      AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
       AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
       AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "developer-1",
     });
 
     expect(config.operatorAuth).toMatchObject({
       service: {
-        mode: "loopback-development-bypass",
+        mode: "loopback",
         publicOrigin: "http://127.0.0.1:8080",
         developmentIdentity: { subject: "developer-1" },
       },
@@ -242,7 +131,7 @@ describe("loadConfig Phase 1 integrations", () => {
   it("loads recovery maintenance only from a canonical boolean with loopback operator auth", () => {
     const operatorEnvironment = {
       ...developmentEnvironment(),
-      AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback-development-bypass",
+      AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
       AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
       AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "recovery-operator",
     } satisfies NodeJS.ProcessEnv;
@@ -257,7 +146,7 @@ describe("loadConfig Phase 1 integrations", () => {
       host: "127.0.0.1",
       recoveryMaintenance: true,
       github: undefined,
-      operatorAuth: { service: { mode: "loopback-development-bypass" } },
+      operatorAuth: { service: { mode: "loopback" } },
     });
     expect(
       loadConfig({
@@ -289,7 +178,7 @@ describe("loadConfig Phase 1 integrations", () => {
     ).toThrow(/loopback server listener/u);
   });
 
-  it("requires OIDC operator authentication in production", async () => {
+  it("requires an explicit operator authentication mode in production", async () => {
     const directory = await temporaryDirectory();
     const keyPath = join(directory, "server.key");
     const certPath = join(directory, "server.crt");
@@ -302,7 +191,62 @@ describe("loadConfig Phase 1 integrations", () => {
         AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
         AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
       }),
-    ).toThrow(/OPERATOR_AUTH_MODE=oidc/u);
+    ).toThrow(/explicitly set to oidc or loopback/u);
+  });
+
+  it("allows loopback mode in production only when listener and public origin are loopback", async () => {
+    const directory = await temporaryDirectory();
+    const keyPath = join(directory, "server.key");
+    const certPath = join(directory, "server.crt");
+    await Promise.all([writeFile(keyPath, "key", "utf8"), writeFile(certPath, "cert", "utf8")]);
+
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "production",
+        AGENTIC_REVIEW_HOST: "127.0.0.1",
+        AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
+        AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
+        AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
+        AGENTIC_REVIEW_PUBLIC_ORIGIN: "https://127.0.0.1:8080",
+        AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "production-loopback",
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "production",
+        AGENTIC_REVIEW_HOST: "0.0.0.0",
+        AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
+        AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
+        AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
+        AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
+        AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "production-loopback",
+      }),
+    ).toThrow(/loopback server listener/u);
+
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "production",
+        AGENTIC_REVIEW_HOST: "127.0.0.1",
+        AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
+        AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
+        AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
+        AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
+        AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "production-loopback",
+      }),
+    ).toThrow(/HTTPS public origin/u);
+
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "production",
+        AGENTIC_REVIEW_HOST: "127.0.0.1",
+        AGENTIC_REVIEW_TLS_KEY_PATH: keyPath,
+        AGENTIC_REVIEW_TLS_CERT_PATH: certPath,
+        AGENTIC_REVIEW_OPERATOR_AUTH_MODE: "loopback",
+        AGENTIC_REVIEW_PUBLIC_ORIGIN: "http://operator.example.com:8080",
+        AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT: "production-loopback",
+      }),
+    ).toThrow(/loopback public origin/u);
   });
 
   it("requires explicit loopback development HTTP and never configures client TLS", async () => {

@@ -2,6 +2,7 @@ import {
   lstat as nodeLstat,
   opendir as nodeOpenDirectory,
   realpath as nodeRealpath,
+  rm as nodeRemove,
   statfs as nodeStatFileSystem,
 } from "node:fs/promises";
 import { win32 } from "node:path";
@@ -368,7 +369,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     return this.#runExclusive(
       async () => {
         throwIfAborted(signal);
-        await this.#assertNativeSecurityReady(signal, deadline);
+        await this.#assertWorkspaceAccessReady(signal, deadline);
         if (this.#reservations.has(attempt.name)) {
           throw new WorkspaceDiskBudgetError(
             "ATTEMPT_ALREADY_EXISTS",
@@ -419,16 +420,13 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     );
   }
 
-  /**
-   * Run during startup before job claims begin. Node path deletion is not a substitute for
-   * service-owned ACLs or native handle-bound deletion against a concurrent same-token writer.
-   */
+  /** Run during startup before job claims begin. */
   public async sweepOrphans(): Promise<WorkspaceOrphanSweepResult> {
     const sweepDeadline = this.#newScanDeadline();
     return this.#runExclusive(
       async () => {
         try {
-          await this.#assertNativeSecurityReady(undefined, sweepDeadline);
+          await this.#assertWorkspaceAccessReady(undefined, sweepDeadline);
           let rootState = await this.#validateRoot(undefined, undefined, sweepDeadline);
           const listing = await this.#fileSystem.readDirectoryBounded(
             this.#workspaceRootDirectory,
@@ -576,7 +574,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
             "Cannot remove an attempt after its disk reservation was released.",
           );
         }
-        await this.#assertNativeSecurityReady(undefined, deadline);
+        await this.#assertWorkspaceAccessReady(undefined, deadline);
         const rootState = await this.#validateRoot(undefined, undefined, deadline);
         const attemptState = await this.#validatedPathState(
           record.attemptDirectory,
@@ -634,7 +632,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     await this.#runExclusive(
       async () => {
         throwIfAborted(signal);
-        await this.#assertNativeSecurityReady(signal, deadline);
+        await this.#assertWorkspaceAccessReady(signal, deadline);
         const current = this.#reservations.get(record.attemptName);
         if (current?.identity !== record.identity) {
           throw new WorkspaceDiskBudgetError(
@@ -1025,16 +1023,14 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     }
   }
 
-  async #assertNativeSecurityReady(
+  async #assertWorkspaceAccessReady(
     signal?: AbortSignal,
     deadline = this.#newScanDeadline(),
-  ): Promise<NativeWorkspaceSecurityAdapter> {
+  ): Promise<NativeWorkspaceSecurityAdapter | undefined> {
     const adapter = this.#securityAdapter;
     if (adapter === undefined) {
-      throw new WorkspaceDiskBudgetError(
-        "NATIVE_SECURITY_ADAPTER_REQUIRED",
-        "Production workspace operations require the native workspace security adapter.",
-      );
+      this.#assertScanActive(signal, deadline);
+      return undefined;
     }
     this.#assertScanActive(signal, deadline);
     try {
@@ -1061,7 +1057,24 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     attemptState: WorkspaceDiskPathState,
     deadline: bigint,
   ): Promise<{ readonly removedBytes: bigint | null }> {
-    const adapter = await this.#assertNativeSecurityReady(undefined, deadline);
+    const adapter = await this.#assertWorkspaceAccessReady(undefined, deadline);
+    if (adapter === undefined) {
+      try {
+        await nodeRemove(attemptDirectory, {
+          recursive: true,
+          force: false,
+          maxRetries: 3,
+          retryDelay: 100,
+        });
+        return { removedBytes: null };
+      } catch (error) {
+        throw new WorkspaceDiskBudgetError(
+          "HANDLE_BOUND_DELETE_FAILED",
+          "The trusted workspace directory could not be removed.",
+          { cause: error },
+        );
+      }
+    }
     try {
       const result = await adapter.quarantineAndRemoveAttempt({
         workspaceRootDirectory: this.#workspaceRootDirectory,

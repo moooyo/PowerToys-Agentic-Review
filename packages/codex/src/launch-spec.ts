@@ -32,7 +32,7 @@ export interface CodexProcessLaunchSpec {
   readonly limits: CodexProcessResourceLimits;
 }
 
-export interface BuildReadOnlyCodexExecLaunchSpecOptions {
+export interface BuildCodexExecLaunchSpecOptions {
   readonly executable: string;
   readonly workingDirectory: string;
   readonly processWorkingDirectory: string;
@@ -97,8 +97,8 @@ const sensitiveEnvironmentNameFragments = [
   "WORKER_TLS",
 ] as const;
 
-export function buildReadOnlyCodexExecLaunchSpec(
-  options: BuildReadOnlyCodexExecLaunchSpecOptions,
+export function buildCodexExecLaunchSpec(
+  options: BuildCodexExecLaunchSpecOptions,
 ): CodexProcessLaunchSpec {
   const executable = normalizeLocalWindowsExecutable(options.executable, "executable");
   const repositoryWorkingDirectory = normalizeLocalWindowsDirectory(
@@ -135,7 +135,7 @@ export function buildReadOnlyCodexExecLaunchSpec(
     throw new TypeError("outputSchemaPath and outputLastMessagePath must be different files");
   }
   if (isSameOrDescendant(repositoryWorkingDirectory, executable)) {
-    throw new TypeError("executable must not be inside the untrusted workingDirectory");
+    throw new TypeError("executable must not be inside the task workingDirectory");
   }
 
   assertPrompt(options.prompt);
@@ -152,7 +152,7 @@ export function buildReadOnlyCodexExecLaunchSpec(
     "never",
     "--ephemeral",
     "--sandbox",
-    "read-only",
+    "workspace-write",
     "--output-schema",
     outputSchemaPath,
     "--output-last-message",

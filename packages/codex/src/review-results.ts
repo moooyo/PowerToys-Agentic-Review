@@ -177,5 +177,5 @@ export const IssueTriageV1ModelOutputSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const StaticReviewResultV1Schema = Type.Union([PrReviewPlanV1Schema, IssueTriageV1Schema]);
-export type StaticReviewResultV1 = Static<typeof StaticReviewResultV1Schema>;
+export const ReviewResultV1Schema = Type.Union([PrReviewPlanV1Schema, IssueTriageV1Schema]);
+export type ReviewResultV1 = Static<typeof ReviewResultV1Schema>;

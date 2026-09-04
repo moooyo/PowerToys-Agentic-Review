@@ -1,5 +1,7 @@
 # ADR 0017: Stage Artifact HostControl v2 as a Dormant Fixed-Origin Contract
 
+> Superseded by ADR 0029 before publication. Retained as a historical design record only.
+
 - Status: Accepted
 - Date: 2026-09-03
 
