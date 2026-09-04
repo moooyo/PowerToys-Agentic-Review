@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 )
@@ -41,8 +40,10 @@ type fakeRetainedNode struct {
 	countError       error
 	activationError  error
 	terminationError error
+	closeError       error
 	activated        bool
 	terminated       bool
+	closed           bool
 	events           *[]string
 	observeIndex     int
 	countIndex       int
@@ -121,6 +122,14 @@ func (n *fakeRetainedNode) Terminate() error {
 	}
 	n.terminated = true
 	return n.terminationError
+}
+
+func (n *fakeRetainedNode) Close() error {
+	if n.events != nil {
+		*n.events = append(*n.events, "close-node")
+	}
+	n.closed = true
+	return n.closeError
 }
 
 func TestVerifyConnectedNodeBindsExactPIDAndSingleProcessRootJob(t *testing.T) {
@@ -489,6 +498,7 @@ func TestPreTransferFailureNeverReturnsConnectionOwner(t *testing.T) {
 	node := newFakeRetainedNode(testNodeIdentity())
 	node.events = &events
 	node.terminationError = errors.New("termination failed")
+	node.closeError = errors.New("Node close failed")
 	primary := errors.New("accept failed before transfer")
 	closeError := errors.New("listener close failed")
 	connection, err := rejectAcceptFailure(nil, primary, node, func() {
@@ -500,20 +510,22 @@ func TestPreTransferFailureNeverReturnsConnectionOwner(t *testing.T) {
 	if connection != nil {
 		t.Fatalf("pre-transfer failure returned connection %p", connection)
 	}
-	if strings.Join(events, ",") != "terminate,mark-terminal,close" {
+	if strings.Join(events, ",") != "terminate,close-node,mark-terminal,close" {
 		t.Fatalf("cleanup events = %v", events)
 	}
-	if !errors.Is(err, primary) || !errors.Is(err, node.terminationError) || !errors.Is(err, closeError) {
+	if !errors.Is(err, primary) || !errors.Is(err, node.terminationError) ||
+		!errors.Is(err, node.closeError) || !errors.Is(err, closeError) {
 		t.Fatalf("cleanup error = %v", err)
 	}
 }
 
-func TestRejectedHostControlClaimTerminatesBeforeClosingListener(t *testing.T) {
+func TestRejectedBootstrapBindingTerminatesBeforeClosingListener(t *testing.T) {
 	events := []string{}
 	node := newFakeRetainedNode(testNodeIdentity())
 	node.events = &events
-	node.terminationError = errors.New("claim rejection termination failed")
-	claimErr := errors.Join(launchguard.ErrHostControlClaim, errors.New("launch binding was replayed"))
+	node.terminationError = errors.New("bootstrap rejection termination failed")
+	node.closeError = errors.New("bootstrap rejection close failed")
+	claimErr := errors.New("launch bootstrap binding was replayed")
 	listenerCloseErr := errors.New("listener close failed")
 	connection, err := rejectAcceptFailure(nil, claimErr, node, func() {
 		events = append(events, "mark-terminal")
@@ -524,11 +536,11 @@ func TestRejectedHostControlClaimTerminatesBeforeClosingListener(t *testing.T) {
 	if connection != nil {
 		t.Fatalf("claim rejection returned connection %p", connection)
 	}
-	if strings.Join(events, ",") != "terminate,mark-terminal,close" {
+	if strings.Join(events, ",") != "terminate,close-node,mark-terminal,close" {
 		t.Fatalf("claim rejection cleanup events = %v", events)
 	}
 	if !errors.Is(err, claimErr) || !errors.Is(err, node.terminationError) ||
-		!errors.Is(err, listenerCloseErr) {
+		!errors.Is(err, node.closeError) || !errors.Is(err, listenerCloseErr) {
 		t.Fatalf("claim rejection error = %v", err)
 	}
 }

@@ -21,8 +21,6 @@ const peerverifyImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/
 
 const localRPCImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 
-const launchguardImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
-
 const preflightImportPath = "github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/preflight"
 
 const cryptoRandImportPath = "crypto/rand"
@@ -473,17 +471,12 @@ func TestRuntimeBootstrapLaunchBindingHasOneProductionChain(t *testing.T) {
 			importPath: localRPCImportPath, definingPackage: "localrpc",
 			file: "internal/launchguard/lifecycle.go", function: "*Guard.LaunchNode",
 		},
-		"ClaimHostControlLaunch": {
-			importPath: launchguardImportPath, definingPackage: "launchguard",
-			file: "internal/hostcontrol/endpoint_windows.go", function: "*Listener.Accept",
-		},
 		"BeginRuntimeBootstrapExchange": {
 			importPath: localRPCImportPath, definingPackage: "localrpc",
 			file: "internal/hostcontrol/contract.go", function: "completeRuntimeBootstrap",
 		},
 	}
 	counts := make(map[string]int, len(expected))
-	combinedCommitCalls := 0
 	rawActivationCalls := 0
 	foundationOptionsCalls := 0
 	_, source, _, ok := runtime.Caller(0)
@@ -518,7 +511,7 @@ func TestRuntimeBootstrapLaunchBindingHasOneProductionChain(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if importPath != localRPCImportPath && importPath != launchguardImportPath &&
+			if importPath != localRPCImportPath &&
 				importPath != preflightImportPath {
 				continue
 			}
@@ -567,20 +560,9 @@ func TestRuntimeBootstrapLaunchBindingHasOneProductionChain(t *testing.T) {
 					t.Errorf("%s:%d consumes foundation options outside launchguard capture", relative, fileSet.Position(selector.Pos()).Line)
 				}
 				foundationOptionsCalls++
-			case "ActivateAndCommitRuntimeBootstrap":
-				if !isReviewedRuntimeBootstrapBindingCall(
-					selector,
-					parents,
-					relative,
-					"internal/hostcontrol/contract.go",
-					"completeRuntimeBootstrap",
-				) {
-					t.Errorf("%s:%d calls combined bootstrap activation outside HostControl", relative, fileSet.Position(selector.Pos()).Line)
-				}
-				combinedCommitCalls++
 			case "ActivateAfterHostControl":
 				if !isReviewedPermittedRawActivation(selector, parents, relative) {
-					t.Errorf("%s:%d calls raw Node activation outside the claimed combined commit", relative, fileSet.Position(selector.Pos()).Line)
+					t.Errorf("%s:%d calls raw Node activation outside HostControl bootstrap commit", relative, fileSet.Position(selector.Pos()).Line)
 				}
 				rawActivationCalls++
 			}
@@ -625,10 +607,9 @@ func TestRuntimeBootstrapLaunchBindingHasOneProductionChain(t *testing.T) {
 			t.Errorf("production %s call count = %d, want 1", name, counts[name])
 		}
 	}
-	if combinedCommitCalls != 1 || rawActivationCalls != 1 || foundationOptionsCalls != 1 {
+	if rawActivationCalls != 1 || foundationOptionsCalls != 1 {
 		t.Errorf(
-			"production authority calls = combined:%d raw:%d foundation-options:%d, want 1, 1, and 1",
-			combinedCommitCalls,
+			"production authority calls = raw:%d foundation-options:%d, want 1 and 1",
 			rawActivationCalls,
 			foundationOptionsCalls,
 		)
@@ -679,34 +660,11 @@ func isReviewedPermittedRawActivation(
 ) bool {
 	call, direct := parents[selector].(*ast.CallExpr)
 	owner, insideFunctionLiteral := runtimeBootstrapBindingOwner(selector, parents)
-	if actualFile != "internal/launchguard/lifecycle.go" || !direct || call.Fun != selector ||
-		owner != "*claimedGuardedNodeProcess.ActivateAndCommitRuntimeBootstrap" || !insideFunctionLiteral {
-		return false
-	}
-	var callback *ast.FuncLit
-	for current := parents[selector]; current != nil; current = parents[current] {
-		if function, ok := current.(*ast.FuncLit); ok {
-			callback = function
-			break
-		}
-	}
-	if callback == nil {
-		return false
-	}
-	permitCall, ok := parents[callback].(*ast.CallExpr)
-	if !ok || len(permitCall.Args) != 1 || permitCall.Args[0] != callback {
-		return false
-	}
-	permitSelector, ok := permitCall.Fun.(*ast.SelectorExpr)
-	if !ok || permitSelector.Sel.Name != "commit" {
-		return false
-	}
-	permitOwner, ok := permitSelector.X.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	state, stateOK := permitOwner.X.(*ast.Ident)
-	return stateOK && state.Name == "state" && permitOwner.Sel.Name == "permit"
+	return actualFile == "internal/hostcontrol/contract.go" &&
+		direct &&
+		call.Fun == selector &&
+		owner == "completeRuntimeBootstrap" &&
+		!insideFunctionLiteral
 }
 
 func isReviewedRuntimeBootstrapBindingCall(

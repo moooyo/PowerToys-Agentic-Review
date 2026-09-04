@@ -14,7 +14,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/launchguard"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
 	"golang.org/x/sys/windows"
@@ -434,18 +433,20 @@ func (l *Listener) PipeName() string {
 	return l.pipeName
 }
 
-// Accept claims the guarded Node's launch-bound bootstrap before observing the
+// Accept validates one explicit launch-bound bootstrap before observing the
 // connection, verifies the retained Node, completes the RuntimeBootstrapV1
 // exchange, and raises the root Job process limit. Failures before pipe-handle
-// transfer return a nil Connection. After transfer, Accept terminates Node and
-// tries to close the Connection; if that close fails, it returns the still-owning
-// Connection with the joined primary and cleanup errors.
+// transfer return a nil Connection. After transfer, Accept terminates and then
+// closes Node before trying to close the Connection; if that close fails, it
+// returns the still-owning Connection with the joined primary and cleanup
+// errors.
 func (l *Listener) Accept(
 	ctx context.Context,
-	node *launchguard.GuardedNodeProcess,
+	node winprocess.NodeProcess,
+	bootstrap ...localrpc.LaunchRuntimeBootstrap,
 ) (*Connection, error) {
-	if node == nil {
-		return nil, errors.New("guarded Node process is required")
+	if isNilInterface(node) {
+		return nil, errors.New("Node process is required")
 	}
 	if ctx == nil {
 		return rejectAcceptFailure(
@@ -474,19 +475,19 @@ func (l *Listener) Accept(
 			l.markTerminal(err)
 		}, l.Close)
 	}
-	claimedNode, bootstrap, err := launchguard.ClaimHostControlLaunch(node)
+	boundBootstrap, err := resolveLaunchRuntimeBootstrap(bootstrap)
 	if err != nil {
 		finish()
-		claimErr := fmt.Errorf("claim guarded Node HostControl launch binding: %w", err)
-		return rejectAcceptFailure(nil, claimErr, node, func() {
-			l.markTerminal(claimErr)
+		bootstrapErr := fmt.Errorf("resolve HostControl launch bootstrap binding: %w", err)
+		return rejectAcceptFailure(nil, bootstrapErr, node, func() {
+			l.markTerminal(bootstrapErr)
 		}, l.Close)
 	}
 
-	connection, err := l.acceptConnected(ctx, claimedNode)
+	connection, err := l.acceptConnected(ctx, node)
 	finish()
 	if err != nil {
-		return rejectAcceptFailure(nil, err, claimedNode, func() {
+		return rejectAcceptFailure(nil, err, node, func() {
 			l.markTerminal(err)
 		}, l.Close)
 	}
@@ -497,11 +498,11 @@ func (l *Listener) Accept(
 		l.options.IOTimeout,
 	)
 	committedBootstrap, err := completeRuntimeBootstrap(
-		bootstrapContext, connection, claimedNode, connection.Evidence(), bootstrap,
+		bootstrapContext, connection, node, connection.Evidence(), boundBootstrap,
 	)
 	cancelBootstrap()
 	if err != nil {
-		return rejectPostTransferAcceptFailure(connection, err, claimedNode)
+		return rejectPostTransferAcceptFailure(connection, err, node)
 	}
 	connection.setCommittedRuntimeBootstrap(committedBootstrap)
 	return connection, nil
@@ -513,7 +514,10 @@ func (l *Listener) Accept(
 func rejectPostTransferAcceptFailure(
 	connection *Connection,
 	primary error,
-	node interface{ Terminate() error },
+	node interface {
+		Terminate() error
+		Close() error
+	},
 ) (*Connection, error) {
 	if connection == nil || connection.state == nil {
 		return rejectAcceptFailure(nil, errors.Join(primary, ErrClosed), node, func() {}, func() error {

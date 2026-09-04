@@ -117,11 +117,7 @@ type retainedNode interface {
 
 type runtimeBootstrapNode interface {
 	retainedNode
-	ActivateAndCommitRuntimeBootstrap(
-		context.Context,
-		*localrpc.PendingRuntimeBootstrapCommit,
-	) (localrpc.CommittedRuntimeBootstrap, error)
-	Terminate() error
+	ActivateAfterHostControl() error
 }
 
 type activityGroup struct {
@@ -374,11 +370,30 @@ func completeRuntimeBootstrap(
 	if cause := context.Cause(ctx); cause != nil {
 		return localrpc.CommittedRuntimeBootstrap{}, cause
 	}
-	committed, err := node.ActivateAndCommitRuntimeBootstrap(ctx, pendingCommit)
+	if err := node.ActivateAfterHostControl(); err != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("activate Node after HostControl: %w", err)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return localrpc.CommittedRuntimeBootstrap{}, cause
+	}
+	committed, err := pendingCommit.Commit(ctx)
 	if err != nil {
-		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("activate Node and commit RuntimeBootstrapV1: %w", err)
+		return localrpc.CommittedRuntimeBootstrap{}, fmt.Errorf("commit RuntimeBootstrapV1: %w", err)
 	}
 	return committed, nil
+}
+
+func resolveLaunchRuntimeBootstrap(
+	values []localrpc.LaunchRuntimeBootstrap,
+) (localrpc.LaunchRuntimeBootstrap, error) {
+	switch len(values) {
+	case 1:
+		return values[0], nil
+	case 0:
+		return localrpc.LaunchRuntimeBootstrap{}, errors.New("HostControl launch bootstrap binding is required")
+	default:
+		return localrpc.LaunchRuntimeBootstrap{}, errors.New("HostControl launch bootstrap binding must be supplied exactly once")
+	}
 }
 
 func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence) error {
@@ -413,13 +428,16 @@ func verifyNodeBeforeActivation(node retainedNode, evidence VerificationEvidence
 func rejectAcceptFailure(
 	connection *Connection,
 	primary error,
-	node interface{ Terminate() error },
+	node interface {
+		Terminate() error
+		Close() error
+	},
 	markTerminal func(),
 	closeEndpoint func() error,
 ) (*Connection, error) {
-	terminateErr, closeErr := terminateBeforeClose(node, markTerminal, closeEndpoint)
+	terminateErr, nodeCloseErr, closeErr := terminateBeforeClose(node, markTerminal, closeEndpoint)
 	resultErr := primary
-	if cleanupErr := errors.Join(terminateErr, closeErr); cleanupErr != nil {
+	if cleanupErr := errors.Join(terminateErr, nodeCloseErr, closeErr); cleanupErr != nil {
 		resultErr = errors.Join(primary, cleanupErr)
 	}
 	if connection != nil && closeErr != nil {
@@ -429,14 +447,18 @@ func rejectAcceptFailure(
 }
 
 func terminateBeforeClose(
-	node interface{ Terminate() error },
+	node interface {
+		Terminate() error
+		Close() error
+	},
 	markTerminal func(),
 	closeEndpoint func() error,
-) (error, error) {
+) (error, error, error) {
 	terminateErr := node.Terminate()
+	nodeCloseErr := node.Close()
 	markTerminal()
 	closeErr := closeEndpoint()
-	return terminateErr, closeErr
+	return terminateErr, nodeCloseErr, closeErr
 }
 
 func sameIdentity(left, right winprocess.NodeIdentity) bool {
