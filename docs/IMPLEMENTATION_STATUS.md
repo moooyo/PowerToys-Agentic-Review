@@ -67,8 +67,6 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   the fixed canonical plaintext Control configuration file, plus registration, long polling,
   bounded slots, heartbeat commands, monotonic lease watchdogs, drain, and shutdown behavior. The
   Worker no longer loads or presents a TLS client certificate.
-- Legacy WinSW deployment templates and a least-privilege, execution-disabled PowerShell installer
-  skeleton.
 - React and Ant Design Pro operations dashboard for work items, jobs, workers, approvals,
   publications, and system health.
 - GitHub webhook HMAC verification, action-specific actor/target normalization, delivery
@@ -155,8 +153,8 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
 - Reviewed Windows ServiceHost building blocks for first-instance, remote-rejecting Named Pipes;
   handle-relative configuration traversal; exact restricted virtual-service token verification;
   persisted non-exportable CNG P-256 local-capability signing; strict fixed-profile Worker Bearer
-  loading; stable pipe-peer process and token verification; canonical role-local RPC; fixed-origin
-  TLS 1.3 transport; stable peer-wrapper observation; and suspended Node launch into a non-breakaway
+  loading; stable SCM and pipe peer-PID plus token verification; canonical role-local RPC;
+  fixed-origin TLS 1.3 transport; and suspended Node launch into a non-breakaway
   root Job. A one-shot local service bootstrap verifies the fixed restricted identities, applies and
   reads back exact protected DACLs on the current ServiceHost process and primary token, closes its
   token handle, and retains no wrapper, image, SCM-status, or lifecycle evidence. Bootstrap schema 4
@@ -351,8 +349,9 @@ workspace, ProcessHost, Codex, or Git capability in this shadow milestone.
 After the shadow runtime is verified and any findings are closed, the release pipeline must produce
 authenticated role bundles and native binaries, and the ADR 0026 path must install the selected two
 service identities, roots, ACLs, and fixed plaintext Control authentication profile. The current
-compiled release profile, outer package, WinSW, CNG, destination evidence, and machine-policy
-components may be reused or simplified before that installer is implemented.
+compiled release profile, outer package, CNG, destination evidence, and machine-policy components
+may be reused or simplified before that installer is implemented. WinSW and its package slots have
+already been removed.
 The repository still needs actual authenticated release material, root placement, the production
 Windows installer, its selected service adapter, and a practical readiness check. No upgrade,
 migration, fallback, rollback journal, cross-version store, or final recovery schedule is required
@@ -730,7 +729,7 @@ Not yet verified:
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
   x64 and arm64, but their Named Pipe, CNG local-capability signer, filesystem, process/token DACL,
-  root Job, peer-wrapper watch, fixed Worker authentication profile, Server-certificate verification,
+  root Job, peer service PID/token check, fixed Worker authentication profile, Server-certificate verification,
   role-local RPC, and fixed-origin HTTPS behavior has not been exercised on a native Windows test
   machine. The production Authenticode and
   installation-verification code has only fake-provider execution plus Windows cross-compilation;

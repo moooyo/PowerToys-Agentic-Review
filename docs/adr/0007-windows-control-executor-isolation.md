@@ -2,8 +2,10 @@
 
 > Amended by ADR 0026 before publication of a Worker installer. The permanent product boundary is
 > two distinct Windows service identities, Control-only Server credentials, an authenticated local
-> channel, and Executor-before-Control start. WinSW, persistent CNG, node-specific packages,
-> destination evidence, and their exact installation mechanics are current replaceable candidates.
+> channel, and Executor-before-Control start. ServiceHost now runs directly under Windows SCM;
+> WinSW, its parent-process checks, and its package slots were removed. Persistent CNG,
+> node-specific packages, destination evidence, and their exact installation mechanics remain
+> replaceable candidates.
 > The first supported installer is clean-install-only; no Worker upgrade, migration, fallback, or
 > rollback path is selected.
 >
@@ -36,9 +38,8 @@ identity.
 
 ## Decision
 
-Represent one physical Windows machine as one logical Worker node, but install two independently
-supervised Windows services with different Windows identities. The current candidate uses WinSW,
-which a later clean-installer decision may replace:
+Represent one physical Windows machine as one logical Worker node, but install two native
+ServiceHost Windows services with different Windows identities:
 
 - `AgenticReview.Worker.Control` owns the Worker Bearer Token, Server communication, registration, claims, lease
   renewal, fencing, and result upload. It cannot read execution workspaces, Codex state, Codex
@@ -60,12 +61,11 @@ the same pipe. Each ServiceHost also owns one separate, per-launch HostControl p
 own Node child; that private bootstrap/RPC channel is not an inter-service transport.
 
 `WORKER_EXECUTION_ENABLED=true` is invalid in production unless `split-service-v1` isolation and
-all preflight checks in this ADR succeed. The current single-process mode may remain available for
-contract development with execution disabled; it is not a production fallback.
+all preflight checks in this ADR succeed. There is no single-service production or fallback mode.
 
 This ADR supersedes ADR 0004 only where ADR 0004 describes one Worker service identity. ProcessHost,
-Job Object, drain, and headless-execution isolation remain applicable to Executor. WinSW hosting is
-a current candidate rather than a permanent requirement.
+Job Object, drain, and headless-execution isolation remain applicable to Executor. ServiceHost owns
+the SCM service lifecycle directly.
 
 ## Security Objective and Threat Model
 
@@ -137,11 +137,10 @@ same-machine process and token ACLs are not the sole enforcement mechanism.
 ### Native service bootstrap
 
 Node.js does not expose all Windows primitives required here, including exact Named Pipe security
-attributes, endpoint PID checks, token inspection, and restricted handle inheritance. The current
-candidate has WinSW launch a small signed `AgenticReview.ServiceHost.exe`; ADR 0026 permits a direct
-ServiceHost SCM implementation instead. ServiceHost is a Go platform adapter, not a Node addon or
-third Windows service. It contains no scheduling, lease, repository, prompt, result, or publication
-policy.
+attributes, endpoint PID checks, token inspection, and restricted handle inheritance.
+`AgenticReview.ServiceHost.exe` therefore integrates directly with SCM for both service roles. It is
+a Go platform adapter, not a Node addon or third Windows service. It contains no scheduling, lease,
+repository, prompt, result, or publication policy.
 
 ServiceHost performs only these duties:
 
@@ -181,15 +180,15 @@ ProcessHost, recipes, or any other child. Executor's ProcessHost Job Objects are
 Executor service-root Job Object.
 ServiceHost is the sole long-lived owner of the root Job handle and never leaks it to Node. Process
 exit closes that handle automatically. A service-stop path immediately terminates the root Job,
-waits for zero active processes, closes the Job handle, and exits. The local bootstrap does not
-inspect or supervise its own wrapper. This bounds even processes started directly by the Executor
+waits for zero active processes, closes the Job handle, and exits. The local bootstrap retains no
+parent-process or self-image evidence. This bounds even processes started directly by the Executor
 coordinator. All application contracts and decisions remain TypeScript.
 
 ## Local Topology
 
 ```mermaid
 flowchart LR
-    S[Agentic Review Server] <-->|HTTPS mTLS and lease token| C[Worker Control service]
+    S[Agentic Review Server] <-->|HTTPS Bearer Token and lease token| C[Worker Control service]
     C <-->|ACL Named Pipe and signed local grants| E[Worker Executor service]
     E --> P[ProcessHost]
     P --> X[Codex, Git, and approved recipes]
@@ -232,54 +231,32 @@ create another server instance.
 
 The Control ServiceHost owns the pipe object, so an Executor child that shares the Executor SID
 cannot become the object owner or change its DACL. Only one verified and accepted Executor peer
-connection is accepted. Another Executor process can pass the initial pipe ACL, so the PID and
-image checks below are mandatory, and additional or invalid clients are rejected and audited. After
-any disconnect, Executor terminates all attempt children before it is allowed to reconnect.
+connection is accepted. Another process with the same service SID can pass the initial pipe ACL, so
+the peer PID and token checks below are required. After any disconnect, Executor terminates all
+attempt children before it is allowed to reconnect.
 
 ### Mutual peer verification
 
 An ACL alone is insufficient because an Executor child shares the Executor SID and could connect as
 a client. Before exchanging job data:
 
-1. Executor ServiceHost obtains the Control WinSW wrapper PID from the Service Control Manager using
-   only `SERVICE_QUERY_STATUS`, then obtains the pipe-server ServiceHost PID with
-   `GetNamedPipeServerProcessId`.
-2. Control ServiceHost obtains the Executor WinSW wrapper PID from the Service Control Manager,
-   then obtains the pipe-client ServiceHost PID with `GetNamedPipeClientProcessId`.
-3. For each SCM or Named Pipe PID, the verifier reads the source PID, opens
-   `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, reads the source PID again, requires
-   `GetProcessId(handle)` to match, verifies the process is active and records its creation time,
-   then retains the handle for the full session. SCM PIDs are accepted only in a stable
-   `SERVICE_RUNNING` state; paused, startup, and stop-pending states fail closed. Each side requires
-   ServiceHost to be the wrapper's direct child. It verifies the exact restricted service SID on the ServiceHost token
-   plus the manifest-pinned paths and SHA-256 hashes of the WinSW wrapper, ServiceHost, Node
-   launcher, Worker bundle, and protected configuration; PE files must also have the approved
-   Authenticode signer. Neither peer impersonates the other. This wrapper-to-ServiceHost check is
-   required because SCM reports the WinSW PID, while the Named Pipe APIs report the ServiceHost PID.
-4. Both peers exchange random 256-bit nonces, boot IDs, supported protocol ranges, and package
-   digests. Control signs the transcript with its non-exportable local capability key. Executor
-   verifies the pinned public key installed by the administrator.
+1. Each side reads the opposing service PID from SCM, opens that process with
+   `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, and reads SCM again. The service may move from
+   `SERVICE_START_PENDING` to `SERVICE_RUNNING`, but its nonzero PID must remain unchanged.
+2. Each side reads the Named Pipe peer PID before and after process acquisition. Both pipe reads,
+   both SCM reads, and `GetProcessId` on the retained handle must identify the same process and must
+   not identify the local ServiceHost.
+3. The retained peer process must remain active. Its primary token is queried with `TOKEN_QUERY`
+   and must contain the exact expected restricted service SID with no administrative or built-in
+   service identity. The process handle remains open for the session to prevent PID reuse.
+4. Both peers exchange random nonces, boot IDs, supported protocol ranges, and package digests. The
+   current capability mechanism authenticates Control's short-lived grants to Executor; persistent
+   CNG is replaceable under ADR 0026.
 
-The SCM PID, pipe PID, parent relationship, SID, image, and hash checks are mandatory
-defense-in-depth and fail closed, but they are not cryptographic peer authentication. Windows
-allows a process with `PROCESS_CREATE_PROCESS` access to select a parent through
-`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, and same-token processes are not a secret boundary. The
-transcript signature cryptographically authenticates Control to Executor only. Control's judgment
-that its peer is the intended Executor still relies on the OS, service, process, token, image, and
-lineage checks above. If a malicious Executor-side process defeats those checks, it has the already
-documented compromised-Executor capability: it can receive a valid attempt authorization, falsify
-that authorized attempt's result or artifacts, and consume its resource grant. It still cannot read
-Control credentials, mint a capability, authorize another attempt, or bypass Server fencing.
-
-Any PID, SID, signature, image, nonce, version, or manifest mismatch closes the pipe and disables
-claims. Peer process checks are repeated after every reconnect. The threat model does not attempt to
-defend against a local Administrator that can replace services or inspect both processes.
-
-The direct-child relationship is mandatory, not a check for any descendant of WinSW. Protected
-WinSW configuration names one pinned ServiceHost without credential arguments. Protected
-ServiceHost configuration names one pinned Node executable and one pinned Worker bundle with fixed
-arguments. If a supported WinSW version inserts an intermediate process, preflight fails until the
-installed relationship has an equivalently strong handle-bound identity design.
+Any PID, SID, nonce, version, or protocol mismatch closes the pipe and disables claims. Peer process
+checks repeat after every reconnect. Runtime peer verification does not re-authenticate trusted
+local files, require a wrapper parent, or repeat package signature checks. The threat model trusts
+the local Windows administrator and installed environment.
 
 ### Framing and messages
 
@@ -409,9 +386,8 @@ stops local grant renewal.
 - Orphan attempt directories are never treated as resumable state. Executor's bounded startup
   janitor removes only validated, non-reparse attempt roots after the retention interval.
 
-The current WinSW candidate applies bounded restart recovery independently to both services.
-Control depends on Executor readiness, not merely the Windows service `RUNNING` state. A direct
-ServiceHost SCM implementation may replace WinSW. The first supported format has no upgrade or
+SCM may apply bounded restart recovery independently to both native ServiceHost services. Control
+depends on Executor readiness, not merely the Windows service `RUNNING` state. The first supported format has no upgrade or
 rollback path; any later design requires a new ADR and must never re-enable the single-identity
 execution path.
 
@@ -510,8 +486,8 @@ must use an authenticated egress proxy or enterprise firewall rather than a broa
 
 ## Current Candidate Installer Responsibilities
 
-The mechanism list below documents the pre-ADR-0026 candidate. The clean installer may simplify or
-replace WinSW, persistent CNG, package layout, destination evidence, firewall details, and machine
+The mechanism list below documents the remaining implementation candidate. The clean installer may
+simplify or replace persistent CNG, package layout, destination evidence, firewall details, and machine
 policy. It must preserve the distinct Control/Executor identities, Control-only Server credential,
 authenticated release input, and Executor-before-Control start boundary.
 
@@ -519,7 +495,7 @@ The signed Windows installer or privileged provisioning script must complete all
 before either service can advertise execution:
 
 1. Verify the package signature and a complete immutable installation manifest covering Node.js,
-   both Worker bundles, WinSW, ServiceHost, Codex, Git and its helpers and DLLs, ProcessHost, CA
+   both Worker bundles, ServiceHost, Codex, Git and its helpers and DLLs, ProcessHost, CA
    material, and all validation tools. Hashing only the primary executables is insufficient.
 2. Install to a local NTFS volume whose parent directories are not user-writable. Reject reparse
    points, alternate data streams, hard-link aliases, writable DLL search paths, and unexpected
@@ -616,8 +592,8 @@ include:
   the Server API;
 - reciprocal tests proving Control cannot open Executor workspaces, Codex home, Codex credentials,
   Git data, or executable directories;
-- pipe name-squatting, remote-pipe, second-client, wrong-SID, wrong-wrapper, non-direct-child,
-  PID-reuse, wrong-image, transcript-replay, duplicate-frame, oversized-frame, partial-frame, and
+- pipe name-squatting, remote-pipe, second-client, wrong-SID, SCM/pipe PID mismatch, PID change,
+  PID-reuse, transcript-replay, duplicate-frame, oversized-frame, partial-frame, and
   version-downgrade attacks;
 - expired, replayed, altered, wrong-boot, wrong-generation, wrong-digest, and excessive-resource
   execution capabilities;
@@ -638,8 +614,7 @@ include:
   attempts by a compromised Executor payload to create a process outside the service-root Job.
 
 Tests must inspect the final Windows tokens, process and token-object DACLs, service SDDL, firewall
-policy, process trees, Job Object active-process counts, and event logs. If WinSW remains selected,
-they must also inspect its wrapper-to-payload parent relationships. A passing functional review
+policy, process trees, Job Object active-process counts, and event logs. A passing functional review
 alone does not authorize production execution.
 
 ## Historical Migration Sequence

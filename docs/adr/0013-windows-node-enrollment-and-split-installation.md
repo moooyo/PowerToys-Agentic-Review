@@ -1,15 +1,16 @@
 # ADR 0013: Windows Node Enrollment and Split Installation
 
-> Partially superseded before publication by ADR 0026. The upgrade, migration, rollback, journal,
-> and recovery lifecycle in this document is not a production direction. Its remaining mechanisms
-> are optional implementation input only where a future ADR 0026 installer explicitly reuses them.
+> Superseded before publication by ADR 0026. The upgrade, migration, rollback, journal, WinSW, and
+> recovery lifecycle in this document is not a production direction. Its remaining package and
+> filesystem mechanisms are optional input only where a future ADR 0026 installer explicitly reuses
+> them. The current ServiceHost integrates directly with SCM.
 >
 > Historical note: ADR 0025 replaced Worker mTLS and Server binding receipts before ADR 0026
 > superseded this unpublished installer lifecycle.
 
 ## Status
 
-Partially superseded before publication by ADR 0026.
+Historical implementation record; superseded before publication by ADR 0026.
 
 ## Context
 

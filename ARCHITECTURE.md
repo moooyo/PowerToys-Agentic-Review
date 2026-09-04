@@ -2,14 +2,15 @@
 
 Status: Accepted for initial implementation
 
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 > Amended by ADR 0026 before the first Worker installer was published. The required product boundary
 > is two distinct Windows service identities with Control-only Server credentials and
-> Executor-before-Control start. WinSW, persistent CNG, node-specific packages, retained-handle
-> destination evidence, and their exact root layout are current implementation candidates that may
-> be simplified or replaced. The first supported installer is clean-install-only; no Worker upgrade,
-> migration, fallback, or rollback format currently exists.
+> Executor-before-Control start. ServiceHost now runs directly under Windows SCM; WinSW, its wrapper
+> process model, and its package slots were removed. Persistent CNG, node-specific packages,
+> retained-handle destination evidence, and their exact root layout remain replaceable candidates.
+> The first supported installer is clean-install-only; no Worker upgrade, migration, fallback, or
+> rollback format currently exists.
 
 ## 1. Purpose
 
@@ -31,7 +32,7 @@ Workers run on Windows, and the dashboard uses React and Ant Design Pro.
 | Database | Node built-in `node:sqlite` in a dedicated Worker Thread |
 | Database topology | One server instance is the only SQLite owner |
 | Workers | Remote TypeScript processes on Windows |
-| Worker hosting | Two distinct Windows Services per logical node; the current candidate uses WinSW |
+| Worker hosting | Two native ServiceHost Windows Services per logical node |
 | Process supervision | Native `AgenticReview.ProcessHost.exe` using Windows Job Objects |
 | Native adapters | Go 1.24 ProcessHost and ServiceHost, cross-compiled for Windows x64/arm64 |
 | Worker transport | Outbound HTTPS with one long-lived Bearer Token per Worker node |
@@ -91,9 +92,8 @@ ephemeral container layer. A SQLite deployment has exactly one active server rep
 
 ### 4.2 Remote Windows Workers
 
-Each logical worker node uses two services with distinct restricted Windows identities, as specified
-by ADR 0007. The current implementation candidate hosts them through WinSW, but ADR 0026 permits a
-direct ServiceHost SCM implementation or another simpler wrapper:
+Each logical worker node uses two native ServiceHost services with distinct restricted Windows
+identities, as specified by ADR 0007:
 
 - `AgenticReview.Worker.Control` owns the fixed local Worker authentication profile, registration,
   claims, leases, and Server uploads. The standard data path uses a fixed-origin, route-limited
@@ -108,8 +108,8 @@ Executor boundary. Each worker machine installs:
 
 - A pinned Node.js 24 LTS runtime.
 - The compiled Control and Executor TypeScript worker bundles.
-- The selected Windows Service integration; the current candidate uses WinSW.
-- `AgenticReview.ServiceHost.exe` for the local identity channel, the selected local-capability
+- `AgenticReview.ServiceHost.exe` as the native Windows SCM service host, for the local identity
+  channel, the selected local-capability
   mechanism, Control-only fixed-origin HTTPS transport, and service-root Job Object. Persistent CNG
   is a current candidate rather than a permanent product requirement.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
@@ -531,9 +531,8 @@ The Linux server is deployed with systemd or as a single-replica container using
 storage for SQLite and artifacts. Backups are retained externally, outside the active Server data
 directory. The dashboard build is copied into the server image and served by Fastify.
 
-Each Windows worker is installed as two Windows Services under distinct restricted,
-non-administrator identities. The current candidate uses WinSW; the final clean installer may use a
-direct ServiceHost SCM implementation. Executor starts first, and Control begins claiming only after
+Each Windows worker is installed as two native ServiceHost Windows Services under distinct
+restricted, non-administrator identities. Executor starts first, and Control begins claiming only after
 the selected local identity, protocol, release, ACL, sandbox, and credential preflight succeeds.
 Production execution fails closed unless the split-service boundary in ADR 0007 is active. The first
 published format has no Worker upgrade path; any future upgrade requires a new ADR.
@@ -611,6 +610,5 @@ approvals, the GitHub outbox, and Dashboard write actions.
 - Codex non-interactive mode: https://learn.chatgpt.com/docs/non-interactive-mode
 - Windows services: https://learn.microsoft.com/en-us/windows/win32/services/services
 - Windows Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
-- WinSW: https://github.com/winsw/winsw
 - Ant Design Pro: https://github.com/ant-design/ant-design-pro
 - Umi Max: https://umijs.org/docs/max/introduce

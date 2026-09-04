@@ -6,8 +6,8 @@ Accepted on 2026-09-04.
 
 This decision replaces the unpublished installer lifecycle in ADRs 0013, 0015, 0016, 0020, and
 0021. ADRs 0015, 0020, and 0021 are withdrawn before publication. ADRs 0013 and 0016 are historical
-input only; this decision does not permanently select their WinSW, node-specific package,
-destination-evidence, or SCM-policy mechanisms.
+input only. ServiceHost now integrates directly with SCM; their WinSW wrapper model and package
+slots are removed. Node-specific package and destination-evidence mechanisms remain replaceable.
 
 ## Context
 
@@ -41,7 +41,7 @@ retain support for an older format.
 ### Clean-host admission
 
 An ordinary install starts only when the two fixed split services and every fixed Worker runtime,
-trusted-configuration, role-data, wrapper-log, and package destination owned by the installer are
+trusted-configuration, role-data, and package destination owned by the installer are
 absent. Any existing or partial object makes ordinary installation fail closed before mutation.
 
 The installer does not infer ownership from a familiar path, service display name, file content, or
@@ -71,7 +71,8 @@ hard failure and requires explicit manual remediation.
 
 The future clean installer must preserve these product-level properties:
 
-- distinct Control and Executor Windows service identities and Executor-before-Control start order;
+- distinct native ServiceHost Control and Executor Windows service identities and
+  Executor-before-Control start order;
 - Control-only access to the Worker Bearer Token and no Server credential in Executor;
 - authenticated release content before either service is created or started;
 - fixed installer-owned runtime and role-data destinations for the selected implementation;
@@ -79,11 +80,11 @@ The future clean installer must preserve these product-level properties:
   Linux Server; and
 - the local named-pipe service-identity boundary and the zero-execution runtime posture.
 
-The existing split WinSW inputs, outer-package verifier, retained staging handles, destination
-evidence, node-specific package fields, and CNG local-authority path are implementation candidates,
-not permanent requirements of this ADR. A later simplification may replace or remove them without
-creating an upgrade or compatibility obligation, provided the product-level properties above still
-hold.
+The outer-package verifier, retained staging handles, destination evidence, node-specific package
+fields, and CNG local-authority path are implementation candidates, not permanent requirements of
+this ADR. The unpublished WinSW inputs and four wrapper/config package slots have already been
+removed. Later simplification may replace or remove the remaining candidates without creating an
+upgrade or compatibility obligation, provided the product-level properties above still hold.
 
 The first installer does not require Worker mutual TLS, a candidate certificate, a Server binding
 receipt, an enrollment receipt, an installer receipt, a rollback receipt, or Linux Worker testing.

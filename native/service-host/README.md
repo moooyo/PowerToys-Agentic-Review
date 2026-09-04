@@ -1,7 +1,7 @@
 # AgenticReview ServiceHost
 
-`AgenticReview.ServiceHost.exe` is the native platform boundary planned for the split Windows
-Control and Executor services. It is a small Go adapter. Scheduling, leases, repository policy,
+`AgenticReview.ServiceHost.exe` is the native platform boundary and SCM service binary for the split
+Windows Control and Executor services. It is a small Go adapter. Scheduling, leases, repository policy,
 prompt construction, result validation, and publication remain in TypeScript.
 
 This directory contains the fail-closed foundation and a composed Windows runtime candidate:
@@ -22,7 +22,7 @@ This directory contains the fail-closed foundation and a composed Windows runtim
 - handle-bound, embedded-only Authenticode verification with an exact leaf-certificate pin;
 - a production-composed fixed-origin TLS 1.3 Bearer client and strict reader for the fixed per-Worker
   `worker-auth-v1.json` profile, without a generic header or Token source;
-- stable pipe-peer process, lineage, token, image-file, and signer-pin verification contracts;
+- stable SCM and pipe peer-PID binding with restricted service-token verification;
 - bounded canonical role-local RPC with cancellation, timeouts, and sanitized errors;
 - suspended Node launch with an inherited-handle allowlist, a non-breakaway root Job, exact
   pre-resume process and primary-token DACLs;
@@ -161,7 +161,7 @@ The local provisioning helper at `deploy/worker/split/provision-worker-auth.ps1`
 secure-string Token or an interactive secure prompt, writes only the fixed path through a
 same-directory write-through replacement, and rereads the exact canonical bytes. It requires the
 installer-owned Control data root to exist and does not substitute for the still-deferred
-clean-install root placement and SCM implementation.
+clean-install root placement and service registration.
 
 Both roles require `APPDATA` and `LOCALAPPDATA` below their role-owned profile. Executor also
 requires `HOME`, `CODEX_HOME`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM=1`,

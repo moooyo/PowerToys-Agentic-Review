@@ -126,8 +126,8 @@ adoption marker, and same-schema-only credential backup recovery. No command use
 
 Repository-local implementation remains for the Windows-only clean installer: selected release
 verification, root placement, local configuration, service creation/read-back, and
-Executor-before-Control start. WinSW, the current node-specific package shape, CNG, and destination
-evidence may be reused or simplified by that implementation; ADR 0026 does not freeze them. No
+Executor-before-Control start. The current node-specific package shape, CNG, and destination
+evidence may be reused or simplified by that implementation; WinSW has already been removed. No
 installer transaction recovery, upgrade, migration, or rollback implementation is required.
 Server database recovery maintenance ingress is implemented;
 deployment operators must still remove the ordinary reverse-proxy upstream and unsupported bridge
