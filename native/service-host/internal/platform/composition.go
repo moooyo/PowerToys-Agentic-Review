@@ -25,6 +25,7 @@ var (
 
 type compositionBuilder interface {
 	selectRole(context.Context, BootstrapOptions) error
+	reportsReadyBeforePeer() bool
 	prepareServiceSecurity(context.Context) error
 	loadConfiguration(context.Context) error
 	openRoleCredentials(context.Context) error
@@ -59,9 +60,9 @@ func (host compositionHost) Run(ctx context.Context, options BootstrapOptions) e
 }
 
 type compositionStep struct {
-	name         string
-	run          func(context.Context) error
-	reportsReady bool
+	name             string
+	run              func(context.Context) error
+	allowsEarlyReady bool
 }
 
 func runComposition(
@@ -98,7 +99,7 @@ func runComposition(
 		{name: "select service role", run: func(ctx context.Context) error { return builder.selectRole(ctx, options) }},
 		{name: "prepare service security", run: builder.prepareServiceSecurity},
 		{name: "load role configuration", run: builder.loadConfiguration},
-		{name: "open role credentials", run: builder.openRoleCredentials, reportsReady: true},
+		{name: "open role credentials", run: builder.openRoleCredentials, allowsEarlyReady: true},
 		{name: "connect peer pipe", run: builder.connectPeer},
 		{name: "verify peer", run: builder.verifyPeer},
 		{name: "create runtime bootstrap", run: builder.createRuntimeBootstrap},
@@ -108,7 +109,16 @@ func runComposition(
 		{name: "accept HostControl", run: builder.acceptHostControl},
 		{name: "build role runtime", run: builder.buildRoleRuntime},
 	}
-	var readyOnce sync.Once
+	reportedReady := false
+	reportReady := func() {
+		if reportedReady {
+			return
+		}
+		reportedReady = true
+		if options.Ready != nil {
+			options.Ready()
+		}
+	}
 	for _, step := range steps {
 		if cause := context.Cause(setupContext); cause != nil {
 			return finish(cause)
@@ -120,19 +130,21 @@ func runComposition(
 		if err := step.run(stepContext); err != nil {
 			return finish(fmt.Errorf("%s: %w", step.name, err))
 		}
-		if step.reportsReady {
+		if step.allowsEarlyReady && builder.reportsReadyBeforePeer() {
 			if cause := context.Cause(setupContext); cause != nil {
 				return finish(cause)
 			}
-			if options.Ready != nil {
-				readyOnce.Do(options.Ready)
-			}
+			reportReady()
 		}
 	}
 	runtime, err := builder.runtimeSupervision()
 	if err != nil {
 		return finish(fmt.Errorf("construct runtime supervision: %w", err))
 	}
+	if cause := context.Cause(setupContext); cause != nil {
+		return finish(cause)
+	}
+	reportReady()
 	return finish(superviseRuntime(lifetime, cancelLifetime, runtime))
 }
 

@@ -14,9 +14,9 @@ var (
 // configuration files used by the Windows Host implementation.
 type BootstrapOptions struct {
 	ActualBootstrapPath string
-	// Ready is called at most once after local identity, process security,
-	// configuration, and role credentials have been validated and before the
-	// host starts waiting for its peer service.
+	// Ready is called at most once. Executor reports after local setup so SCM
+	// can start its dependent Control service. Control reports only after the
+	// peer, Node, HostControl, role runtime, and supervision are constructed.
 	Ready func()
 }
 

@@ -69,6 +69,10 @@ func (composition *windowsComposition) selectRole(
 	return nil
 }
 
+func (composition *windowsComposition) reportsReadyBeforePeer() bool {
+	return composition.role == config.RoleExecutor
+}
+
 func (composition *windowsComposition) prepareServiceSecurity(ctx context.Context) error {
 	if cause := context.Cause(ctx); cause != nil {
 		return cause

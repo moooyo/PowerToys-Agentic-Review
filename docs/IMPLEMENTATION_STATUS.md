@@ -34,6 +34,9 @@ service-bootstrap and peer-identity checks, and no longer runs or retains instal
 data-root verification, preflight, launchguard, or runtime install-tree hash/Authenticode/
 retained-handle revalidation. `winprocess` now launches Node directly while retaining root-Job,
 process-handle identity, and HostControl PID binding.
+SCM readiness is role-aware: Executor reports after local setup so its dependent Control service can
+start, while Control reports only after peer verification, Node/HostControl connection, role-runtime
+construction, and runtime-supervision construction succeed.
 
 ## Implemented
 

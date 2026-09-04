@@ -49,6 +49,7 @@ type fakeCompositionBuilder struct {
 	cleanupExitCount int
 	coordinator      *supervisionCoordinator
 	nodeOwner        *nodeShutdownOwner
+	readyBeforePeer  bool
 }
 
 func (builder *fakeCompositionBuilder) step(ctx context.Context, name string) error {
@@ -69,6 +70,9 @@ func (builder *fakeCompositionBuilder) selectRole(ctx context.Context, _ Bootstr
 	builder.serviceStop = ctx
 	builder.mu.Unlock()
 	return builder.step(ctx, "select-role")
+}
+func (builder *fakeCompositionBuilder) reportsReadyBeforePeer() bool {
+	return builder.readyBeforePeer
 }
 func (builder *fakeCompositionBuilder) prepareServiceSecurity(ctx context.Context) error {
 	return builder.step(ctx, "prepare-service-security")
@@ -183,10 +187,11 @@ func TestCompositionRunsFixedStagesAndCleansEveryFailure(t *testing.T) {
 	}
 }
 
-func TestCompositionReportsReadyOnceBetweenLocalSetupAndPeerConnection(t *testing.T) {
+func TestCompositionReportsExecutorReadyBeforePeerConnection(t *testing.T) {
 	builder := &fakeCompositionBuilder{
-		failAt:  "connect-peer",
-		failure: errors.New("stop after ready"),
+		failAt:          "connect-peer",
+		failure:         errors.New("stop after executor ready"),
+		readyBeforePeer: true,
 	}
 	readyCalls := 0
 	readyAfter := ""
@@ -204,16 +209,74 @@ func TestCompositionReportsReadyOnceBetweenLocalSetupAndPeerConnection(t *testin
 	if !errors.Is(err, builder.failure) {
 		t.Fatalf("runComposition error = %v", err)
 	}
-	events, _, _ := builder.snapshot()
-	connectIndex := -1
-	for index, event := range events {
-		if event == "connect-peer" {
-			connectIndex = index
-			break
-		}
+	if readyCalls != 1 || readyAfter != "open-credentials" {
+		t.Fatalf("ready calls=%d after=%q", readyCalls, readyAfter)
 	}
-	if readyCalls != 1 || readyAfter != "open-credentials" || connectIndex < 0 {
+}
+
+func TestCompositionReportsReadyAfterRuntimeConstruction(t *testing.T) {
+	runtimeFailure := errors.New("runtime stopped after ready")
+	waitForCancellation := func(ctx context.Context) error {
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}
+	nodeOwner := mustNodeOwner(t, &fakeSupervisedNode{})
+	builder := &fakeCompositionBuilder{
+		nodeOwner: nodeOwner,
+		runtime: runtimeSupervision{
+			node: nodeOwner,
+			serveLocalRPC: func(context.Context) error {
+				return runtimeFailure
+			},
+			runRelay:     waitForCancellation,
+			waitPeerHost: waitForCancellation,
+			waitStderr:   waitForCancellation,
+		},
+	}
+	readyCalls := 0
+	readyAfter := ""
+	err := runComposition(context.Background(), BootstrapOptions{
+		ActualBootstrapPath: `C:\trusted.json`,
+		Ready: func() {
+			readyCalls++
+			builder.mu.Lock()
+			defer builder.mu.Unlock()
+			if len(builder.events) != 0 {
+				readyAfter = builder.events[len(builder.events)-1]
+			}
+		},
+	}, builder)
+	if !errors.Is(err, runtimeFailure) {
+		t.Fatalf("runComposition error = %v", err)
+	}
+	events, _, _ := builder.snapshot()
+	if readyCalls != 1 || readyAfter != "runtime-supervision" {
 		t.Fatalf("ready calls=%d after=%q events=%v", readyCalls, readyAfter, events)
+	}
+}
+
+func TestControlDoesNotReportReadyWhenRuntimeSetupFails(t *testing.T) {
+	failure := errors.New("control runtime setup failed")
+	for _, stage := range []string{
+		"connect-peer",
+		"verify-peer",
+		"launch-node",
+		"accept-host-control",
+		"build-role-runtime",
+	} {
+		t.Run(stage, func(t *testing.T) {
+			builder := &fakeCompositionBuilder{failAt: stage, failure: failure}
+			readyCalls := 0
+			err := runComposition(context.Background(), BootstrapOptions{
+				Ready: func() { readyCalls++ },
+			}, builder)
+			if !errors.Is(err, failure) {
+				t.Fatalf("runComposition error = %v", err)
+			}
+			if readyCalls != 0 {
+				t.Fatalf("ready calls = %d, want 0", readyCalls)
+			}
+		})
 	}
 }
 
@@ -241,10 +304,14 @@ func TestCompositionRuntimeConstructionAndCleanupErrorsAreJoined(t *testing.T) {
 		runtimeError: runtimeFailure,
 		cleanupError: cleanupFailure,
 	}
-	err := runComposition(context.Background(), BootstrapOptions{}, builder)
+	readyCalls := 0
+	err := runComposition(context.Background(), BootstrapOptions{Ready: func() { readyCalls++ }}, builder)
 	if !errors.Is(err, runtimeFailure) || !errors.Is(err, cleanupFailure) ||
 		!errors.Is(err, errHostCleanupFatal) {
 		t.Fatalf("joined error = %v", err)
+	}
+	if readyCalls != 0 {
+		t.Fatalf("ready calls = %d, want 0", readyCalls)
 	}
 	events, cleanupCalls, _ := builder.snapshot()
 	want := append(append([]string(nil), compositionTestStages...), "runtime-supervision", "cleanup")
