@@ -1597,7 +1597,7 @@ func TestProductionRuntimeLimitsAndShutdownBudgetAreFixed(t *testing.T) {
 		productionMaximumConcurrency != 16 || productionMaximumRequestsPerSession != 1_000_000 {
 		t.Fatal("production local RPC or Worker transport limits changed")
 	}
-	configuration := config.Config{Limits: config.Limits{
+	configuration := config.RuntimeConfig{Limits: config.Limits{
 		ShutdownTimeoutMilliseconds:         120_000,
 		ForceTerminationReserveMilliseconds: 15_000,
 	}}

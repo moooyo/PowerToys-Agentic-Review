@@ -6,8 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strconv"
 	"time"
 
@@ -17,7 +15,6 @@ import (
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/peerverify"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/relay"
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/rootcert"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/servicebootstrap"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winpipe"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/winprocess"
@@ -29,8 +26,8 @@ type windowsComposition struct {
 	role    config.Role
 
 	configuration    config.Config
+	runtime          config.RuntimeConfig
 	workerAuth       workertransport.WorkerAuth
-	rootCertificates [][]byte
 	peerPipe         *winpipe.Endpoint
 	peerSession      *peerverify.Session
 	runtimeBootstrap localrpc.LaunchRuntimeBootstrap
@@ -90,7 +87,12 @@ func (composition *windowsComposition) loadConfiguration(ctx context.Context) er
 	if configuration.Role != composition.role {
 		return errors.New("role configuration does not match the selected service role")
 	}
+	runtimeConfiguration, err := configuration.Runtime()
+	if err != nil {
+		return err
+	}
 	composition.configuration = configuration
+	composition.runtime = runtimeConfiguration
 	return nil
 }
 
@@ -101,9 +103,6 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 	if composition.role != config.RoleControl {
 		return nil
 	}
-	if err := requireProductionBearerProfile(composition.configuration); err != nil {
-		return err
-	}
 	authentication, err := workertransport.LoadWorkerAuth()
 	if err != nil {
 		return err
@@ -111,17 +110,12 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 	if authentication.WorkerNodeID() != composition.configuration.WorkerNodeID {
 		return errors.New("Worker authentication profile belongs to another Worker node")
 	}
-	roots, err := loadRootCertificates(composition.configuration.Control.RootCertificatePath)
-	if err != nil {
-		return err
-	}
 	composition.workerAuth = authentication
-	composition.rootCertificates = roots
 	return nil
 }
 
 func (composition *windowsComposition) connectPeer(ctx context.Context) error {
-	configuration := composition.configuration
+	configuration := composition.runtime
 	var endpoint *winpipe.Endpoint
 	var err error
 	switch composition.role {
@@ -161,9 +155,9 @@ func (composition *windowsComposition) createRuntimeBootstrap(ctx context.Contex
 	options := localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           role,
 		WorkerNodeID:                   composition.configuration.WorkerNodeID,
-		MaximumQueuedBytesPerDirection: int(composition.configuration.Limits.MaximumQueuedBytesPerDirection),
-		TotalShutdownTimeoutMS:         int(composition.configuration.Limits.ShutdownTimeoutMilliseconds),
-		ForceTerminationReserveMS:      int(composition.configuration.Limits.ForceTerminationReserveMilliseconds),
+		MaximumQueuedBytesPerDirection: int(composition.runtime.Limits.MaximumQueuedBytesPerDirection),
+		TotalShutdownTimeoutMS:         int(composition.runtime.Limits.ShutdownTimeoutMilliseconds),
+		ForceTerminationReserveMS:      int(composition.runtime.Limits.ForceTerminationReserveMilliseconds),
 	}
 	bootstrap, err := localrpc.NewFoundationRuntimeBootstrap(options)
 	if err != nil {
@@ -178,7 +172,7 @@ func (composition *windowsComposition) prepareHostControl(ctx context.Context) e
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	configuration := composition.configuration
+	configuration := composition.runtime
 	listener, err := hostcontrol.Prepare(hostcontrol.Options{
 		OwnServiceSID:  configuration.OwnService.SID,
 		ConnectTimeout: durationMilliseconds(configuration.Limits.ConnectTimeoutMilliseconds),
@@ -196,7 +190,7 @@ func (composition *windowsComposition) launchNode(ctx context.Context) error {
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	memory, err := strconv.ParseUint(composition.configuration.Limits.RootJobMaximumMemoryBytes, 10, 64)
+	memory, err := strconv.ParseUint(composition.runtime.Limits.RootJobMaximumMemoryBytes, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parse root Job memory limit: %w", err)
 	}
@@ -205,18 +199,18 @@ func (composition *windowsComposition) launchNode(ctx context.Context) error {
 		role = winprocess.RoleExecutor
 	}
 	node, err := winprocess.LaunchNode(winprocess.NodeLaunchSpec{
-		ExecutablePath:      composition.configuration.Node.ExecutablePath,
-		BundlePath:          composition.configuration.Node.BundlePath,
-		WorkingDirectory:    composition.configuration.Node.WorkingDirectory,
+		ExecutablePath:      composition.runtime.Node.ExecutablePath,
+		BundlePath:          composition.runtime.Node.BundlePath,
+		WorkingDirectory:    composition.runtime.Node.WorkingDirectory,
 		HostControlPipeName: composition.hostListener.PipeName(),
 		Role:                role,
-		OwnServiceSID:       composition.configuration.OwnService.SID,
-		PeerServiceSID:      composition.configuration.PeerService.SID,
-		Environment:         cloneEnvironment(composition.configuration.Node.Environment),
-		MaximumProcesses:    composition.configuration.Limits.RootJobMaximumProcesses,
+		OwnServiceSID:       composition.runtime.OwnService.SID,
+		PeerServiceSID:      composition.runtime.PeerService.SID,
+		Environment:         cloneEnvironment(composition.runtime.Node.Environment),
+		MaximumProcesses:    composition.runtime.Limits.RootJobMaximumProcesses,
 		MaximumMemoryBytes:  memory,
 		ShutdownTimeout: durationMilliseconds(
-			composition.configuration.Limits.ForceTerminationReserveMilliseconds,
+			composition.runtime.Limits.ForceTerminationReserveMilliseconds,
 		),
 	})
 	composition.node = node
@@ -238,7 +232,7 @@ func (composition *windowsComposition) takeNodeStandardIO(ctx context.Context) e
 	if err != nil {
 		return err
 	}
-	configuration := composition.configuration
+	configuration := composition.runtime
 	endpoint, err := newNodeARWXEndpoint(owner, configuration.Limits.MaximumFrameBytes)
 	if err != nil {
 		return err
@@ -270,18 +264,15 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 	if composition.hostConnection == nil {
 		return errors.New("committed HostControl connection is unavailable")
 	}
-	configuration := composition.configuration
+	runtimeConfiguration := composition.runtime
 	return buildRoleRuntimeComponents(composition.role, func() (localrpc.ControlDispatcher, error) {
-		if requireProductionBearerProfile(configuration) != nil ||
-			configuration.Control.WorkerAuthenticationProfile != workertransport.WorkerAuthProfileID {
+		if composition.role != config.RoleControl || composition.configuration.ServerOrigin == "" {
 			return nil, errors.New("Control runtime credentials are unavailable")
 		}
 		client, err := workertransport.NewClient(workertransport.Config{
-			Origin:             configuration.Control.ServerOrigin,
-			ServerName:         configuration.Control.ServerName,
-			RootCertificateDER: composition.rootCertificates,
-			WorkerNodeID:       configuration.WorkerNodeID,
-			WorkerAuth:         composition.workerAuth,
+			Origin:       composition.configuration.ServerOrigin,
+			WorkerNodeID: composition.configuration.WorkerNodeID,
+			WorkerAuth:   composition.workerAuth,
 			Limits: workertransport.Limits{
 				MaximumRequestBytes:       localrpc.MaximumRunCompletionRequestBodyBytes,
 				MaximumResponseBytes:      localrpc.MaximumClaimResponseBodyBytes,
@@ -305,7 +296,7 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 			(composition.workerClient != nil || composition.dispatcher != nil) {
 			return errors.New("Executor runtime received Control-only dependencies")
 		}
-		shutdownTimeout, err := gracefulShutdownTimeout(configuration)
+		shutdownTimeout, err := gracefulShutdownTimeout(runtimeConfiguration)
 		if err != nil {
 			return err
 		}
@@ -331,7 +322,7 @@ func (composition *windowsComposition) runtimeSupervision() (runtimeSupervision,
 		composition.rpcServer == nil || composition.lifetime == nil || composition.serviceStop == nil {
 		return runtimeSupervision{}, errInvalidComposition
 	}
-	configuration := composition.configuration
+	configuration := composition.runtime
 	_, relayRole, err := runtimeRoles(composition.role)
 	if err != nil {
 		return runtimeSupervision{}, err
@@ -429,31 +420,6 @@ func (composition *windowsComposition) cleanup() error {
 		add("close peer verification session", composition.peerSession.Close())
 	}
 	return errors.Join(failures...)
-}
-
-const maximumRootCertificateDocumentBytes = 1024 * 1024
-
-func loadRootCertificates(path string) ([][]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open Control root CA bundle: %w", err)
-	}
-	info, err := file.Stat()
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("inspect Control root CA bundle: %w", err), file.Close())
-	}
-	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumRootCertificateDocumentBytes {
-		return nil, errors.Join(errors.New("Control root CA bundle must be a bounded regular file"), file.Close())
-	}
-	content, readErr := io.ReadAll(io.LimitReader(file, maximumRootCertificateDocumentBytes+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || len(content) == 0 || len(content) > maximumRootCertificateDocumentBytes {
-		clear(content)
-		return nil, errors.Join(errors.New("read Control root CA bundle"), readErr, closeErr)
-	}
-	roots, err := rootcert.Parse(content)
-	clear(content)
-	return roots, err
 }
 
 func cloneEnvironment(source map[string]string) map[string]string {

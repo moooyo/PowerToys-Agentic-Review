@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 )
 
 const (
@@ -29,28 +27,6 @@ type productionSourceFile struct {
 type productionReference struct {
 	path     string
 	function string
-}
-
-func TestProductionProfileAcceptsOnlySchemaVersion4BearerTokenConfiguration(t *testing.T) {
-	configuration := config.Config{
-		SchemaVersion: config.SchemaVersion,
-		Control: &config.ControlConfiguration{
-			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
-		},
-	}
-	if err := requireProductionBearerProfile(configuration); err != nil {
-		t.Fatalf("schemaVersion 4 Bearer Token profile was rejected: %v", err)
-	}
-
-	configuration.SchemaVersion = 3
-	if err := requireProductionBearerProfile(configuration); err == nil {
-		t.Fatal("historical schemaVersion 3 remained a positive production authentication path")
-	}
-	configuration.SchemaVersion = config.SchemaVersion
-	configuration.Control.WorkerAuthenticationProfile = ""
-	if err := requireProductionBearerProfile(configuration); err == nil {
-		t.Fatal("schemaVersion 4 without the exact Bearer Token profile was accepted")
-	}
 }
 
 func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *testing.T) {
@@ -111,82 +87,6 @@ func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *tes
 		if len(observed) != 1 || observed[0] != expected[name] {
 			t.Fatalf("production %s references = %v, want exactly %v", name, observed, expected[name])
 		}
-	}
-}
-
-func TestProductionCredentialStageLoadsOnlyTheFixedTokenAfterProfileValidation(t *testing.T) {
-	_, files := parseProductionSource(t)
-	var source *productionSourceFile
-	for index := range files {
-		if files[index].path == "internal/platform/production_windows.go" {
-			source = &files[index]
-			break
-		}
-	}
-	if source == nil {
-		t.Fatal("production_windows.go was not parsed")
-	}
-	var method *ast.FuncDecl
-	for _, declaration := range source.file.Decls {
-		candidate, ok := declaration.(*ast.FuncDecl)
-		if ok && candidate.Recv != nil && candidate.Name.Name == "openRoleCredentials" {
-			if method != nil {
-				t.Fatal("openRoleCredentials is declared more than once")
-			}
-			method = candidate
-		}
-	}
-	if method == nil || method.Body == nil {
-		t.Fatal("openRoleCredentials production method is unavailable")
-	}
-
-	gateIndex := -1
-	retiredAliases := map[string]struct{}{}
-	workerAliases := map[string]struct{}{}
-	for alias, imported := range source.imports {
-		if imported == cngImport || imported == winCertImport {
-			retiredAliases[alias] = struct{}{}
-		}
-		if imported == workerTransportImport {
-			workerAliases[alias] = struct{}{}
-		}
-	}
-	loadCalls := 0
-	for index, statement := range method.Body.List {
-		if isFailClosedProductionProfileGate(statement) {
-			if gateIndex >= 0 {
-				t.Fatal("openRoleCredentials contains more than one production profile gate")
-			}
-			gateIndex = index
-		}
-		ast.Inspect(statement, func(node ast.Node) bool {
-			selector, ok := node.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			owner, ok := selector.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			if _, retired := retiredAliases[owner.Name]; retired {
-				t.Fatalf("credential stage invokes retired credential action %s.%s", owner.Name, selector.Sel.Name)
-			}
-			if _, worker := workerAliases[owner.Name]; !worker || selector.Sel.Name != "LoadWorkerAuth" {
-				return true
-			}
-			loadCalls++
-			if gateIndex < 0 || index <= gateIndex {
-				t.Fatalf("credential action %s.%s appears before the fail-closed profile gate",
-					owner.Name, selector.Sel.Name)
-			}
-			return true
-		})
-	}
-	if gateIndex < 0 {
-		t.Fatal("openRoleCredentials lacks the exact fail-closed production profile gate")
-	}
-	if loadCalls != 1 {
-		t.Fatalf("openRoleCredentials LoadWorkerAuth calls = %d, want 1", loadCalls)
 	}
 }
 
@@ -251,38 +151,4 @@ func enclosingFunction(file *ast.File, position token.Pos) string {
 		}
 	}
 	return ""
-}
-
-func isFailClosedProductionProfileGate(statement ast.Stmt) bool {
-	conditional, ok := statement.(*ast.IfStmt)
-	if !ok || conditional.Else != nil || len(conditional.Body.List) != 1 {
-		return false
-	}
-	assignment, ok := conditional.Init.(*ast.AssignStmt)
-	if !ok || assignment.Tok != token.DEFINE || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
-		return false
-	}
-	errName, ok := assignment.Lhs[0].(*ast.Ident)
-	if !ok || errName.Name != "err" {
-		return false
-	}
-	call, ok := assignment.Rhs[0].(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 {
-		return false
-	}
-	function, ok := call.Fun.(*ast.Ident)
-	if !ok || function.Name != "requireProductionBearerProfile" {
-		return false
-	}
-	condition, ok := conditional.Cond.(*ast.BinaryExpr)
-	if !ok || condition.Op != token.NEQ || !isIdentifier(condition.X, "err") || !isIdentifier(condition.Y, "nil") {
-		return false
-	}
-	result, ok := conditional.Body.List[0].(*ast.ReturnStmt)
-	return ok && len(result.Results) == 1 && isIdentifier(result.Results[0], "err")
-}
-
-func isIdentifier(expression ast.Expr, name string) bool {
-	identifier, ok := expression.(*ast.Ident)
-	return ok && identifier.Name == name
 }
