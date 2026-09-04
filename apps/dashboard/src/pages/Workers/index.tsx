@@ -209,7 +209,7 @@ export default function WorkersPage() {
     {
       title: "Worker",
       dataIndex: "workerNodeId",
-      width: 300,
+      width: 280,
       search: false,
       render: (_, row) => (
         <Space className="worker-inventory__identity" direction="vertical" size={0}>
@@ -255,6 +255,7 @@ export default function WorkersPage() {
     {
       title: "Location",
       dataIndex: ["runtime", "location"],
+      key: "location",
       width: 120,
       search: false,
       renderText: (value) => value ?? "—",
@@ -262,6 +263,7 @@ export default function WorkersPage() {
     {
       title: "Slots",
       dataIndex: ["runtime", "activeSlots"],
+      key: "slots",
       width: 150,
       search: false,
       render: (_, row) =>
@@ -278,6 +280,8 @@ export default function WorkersPage() {
     {
       title: "Capabilities",
       dataIndex: ["runtime", "capabilities"],
+      key: "capabilities",
+      width: 240,
       search: false,
       render: (_, row) =>
         row.runtime === undefined ? (
@@ -293,6 +297,7 @@ export default function WorkersPage() {
     {
       title: "Current jobs",
       dataIndex: ["runtime", "currentJobs"],
+      key: "currentJobs",
       width: 180,
       search: false,
       render: (_, row) =>
@@ -313,6 +318,7 @@ export default function WorkersPage() {
     {
       title: "Disk free",
       dataIndex: ["runtime", "diskFreeGb"],
+      key: "diskFreeGb",
       width: 104,
       search: false,
       renderText: (value) => (value === undefined ? "—" : `${value} GB`),
@@ -320,6 +326,7 @@ export default function WorkersPage() {
     {
       title: "Heartbeat",
       dataIndex: ["runtime", "lastHeartbeatAt"],
+      key: "lastHeartbeatAt",
       valueType: "dateTime",
       width: 168,
       search: false,
@@ -328,6 +335,7 @@ export default function WorkersPage() {
     {
       title: "Credential updated",
       dataIndex: ["credential", "updatedAt"],
+      key: "credentialUpdatedAt",
       valueType: "dateTime",
       width: 168,
       search: false,
@@ -336,12 +344,14 @@ export default function WorkersPage() {
     {
       title: "Version",
       dataIndex: ["runtime", "version"],
+      key: "version",
       width: 92,
       search: false,
       renderText: (value) => value ?? "—",
     },
     {
       title: "Actions",
+      key: "actions",
       valueType: "option",
       fixed: "right",
       width: 96,
@@ -404,6 +414,17 @@ export default function WorkersPage() {
         cardBordered={false}
         className="operational-table"
         columns={columns}
+        columnsState={{
+          defaultValue: {
+            capabilities: { show: false },
+            credentialUpdatedAt: { show: false },
+            diskFreeGb: { show: false },
+            lastHeartbeatAt: { show: false },
+            version: { show: false },
+          },
+          persistenceKey: "agentic-review:workers:columns:v1",
+          persistenceType: "localStorage",
+        }}
         headerTitle={
           <Space size={8}>
             <SafetyCertificateOutlined />
@@ -426,7 +447,7 @@ export default function WorkersPage() {
           return { data: page.items, success: true, total: page.total };
         }}
         rowKey="workerNodeId"
-        scroll={{ x: 1900 }}
+        scroll={{ x: true }}
         search={{ labelWidth: "auto" }}
         size="small"
         toolBarRender={() => [

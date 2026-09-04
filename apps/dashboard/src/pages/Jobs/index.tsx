@@ -32,7 +32,7 @@ export default function JobsPage() {
     {
       title: "Work item",
       dataIndex: "workItemRef",
-      width: 152,
+      width: 220,
       search: false,
       render: (_, record) => (
         <Space direction="vertical" size={0}>
@@ -127,6 +127,15 @@ export default function JobsPage() {
         cardBordered={false}
         className="operational-table"
         columns={columns}
+        columnsState={{
+          defaultValue: {
+            attempt: { show: false },
+            leaseExpiresAt: { show: false },
+            targetSha: { show: false },
+          },
+          persistenceKey: "agentic-review:jobs:columns:v1",
+          persistenceType: "localStorage",
+        }}
         headerTitle="Execution queue"
         options={{ density: true, fullScreen: true, reload: true, setting: true }}
         pagination={{ defaultPageSize: 20, showSizeChanger: true }}
@@ -143,7 +152,7 @@ export default function JobsPage() {
           return { data: result.items, success: true, total: result.total };
         }}
         rowKey="id"
-        scroll={{ x: 1540 }}
+        scroll={{ x: true }}
         search={{ labelWidth: "auto" }}
         size="small"
       />

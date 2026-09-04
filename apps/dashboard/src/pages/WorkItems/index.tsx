@@ -58,6 +58,7 @@ export default function WorkItemsPage() {
       title: "Work item",
       dataIndex: "title",
       ellipsis: true,
+      width: 360,
       search: false,
       render: (_, record) => (
         <Space direction="vertical" size={0}>
@@ -141,6 +142,7 @@ export default function WorkItemsPage() {
     },
     {
       title: "Actions",
+      key: "actions",
       valueType: "option",
       width: 64,
       fixed: "right",
@@ -170,6 +172,14 @@ export default function WorkItemsPage() {
         cardBordered={false}
         className="operational-table"
         columns={columns}
+        columnsState={{
+          defaultValue: {
+            headSha: { show: false },
+            workerNodeId: { show: false },
+          },
+          persistenceKey: "agentic-review:work-items:columns:v1",
+          persistenceType: "localStorage",
+        }}
         dateFormatter="string"
         headerTitle="Tracked work"
         options={{ density: true, fullScreen: true, reload: true, setting: true }}
@@ -189,7 +199,7 @@ export default function WorkItemsPage() {
           return { data: result.items, success: true, total: result.total };
         }}
         rowKey="id"
-        scroll={{ x: 1420 }}
+        scroll={{ x: true }}
         search={{ labelWidth: "auto" }}
         size="small"
       />

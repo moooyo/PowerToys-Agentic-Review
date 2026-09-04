@@ -78,6 +78,7 @@ export default function PublicationsPage() {
       title: "Last result",
       dataIndex: "lastError",
       ellipsis: true,
+      width: 280,
       search: false,
       render: (_, record) => (
         <Typography.Text type={record.lastError ? "danger" : "secondary"}>
@@ -94,6 +95,7 @@ export default function PublicationsPage() {
     },
     {
       title: "Actions",
+      key: "actions",
       valueType: "option",
       fixed: "right",
       width: 104,
@@ -133,6 +135,14 @@ export default function PublicationsPage() {
         cardBordered={false}
         className="operational-table"
         columns={columns}
+        columnsState={{
+          defaultValue: {
+            attempts: { show: false },
+            targetSha: { show: false },
+          },
+          persistenceKey: "agentic-review:publications:columns:v1",
+          persistenceType: "localStorage",
+        }}
         headerTitle="GitHub outbox"
         options={{ density: true, fullScreen: true, reload: true, setting: true }}
         pagination={{ defaultPageSize: 20, showSizeChanger: true }}
@@ -149,7 +159,7 @@ export default function PublicationsPage() {
           return { data: result.items, success: true, total: result.total };
         }}
         rowKey="id"
-        scroll={{ x: 1220 }}
+        scroll={{ x: true }}
         search={{ labelWidth: "auto" }}
         size="small"
       />

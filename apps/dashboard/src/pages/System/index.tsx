@@ -129,6 +129,7 @@ export default function SystemPage() {
             options={false}
             pagination={false}
             rowKey="id"
+            scroll={{ x: true }}
             search={false}
             size="small"
           />

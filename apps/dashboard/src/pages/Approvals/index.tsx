@@ -58,6 +58,7 @@ export default function ApprovalsPage() {
       title: "Request",
       dataIndex: "summary",
       ellipsis: true,
+      width: 320,
       search: false,
     },
     {
@@ -120,6 +121,7 @@ export default function ApprovalsPage() {
     },
     {
       title: "Actions",
+      key: "actions",
       valueType: "option",
       fixed: "right",
       width: 106,
@@ -159,6 +161,14 @@ export default function ApprovalsPage() {
         cardBordered={false}
         className="operational-table"
         columns={columns}
+        columnsState={{
+          defaultValue: {
+            decidedBy: { show: false },
+            targetSha: { show: false },
+          },
+          persistenceKey: "agentic-review:approvals:columns:v1",
+          persistenceType: "localStorage",
+        }}
         headerTitle="Decision inbox"
         options={{ density: true, fullScreen: true, reload: true, setting: true }}
         pagination={{ defaultPageSize: 20, showSizeChanger: true }}
@@ -176,7 +186,7 @@ export default function ApprovalsPage() {
           return { data: result.items, success: true, total: result.total };
         }}
         rowKey="id"
-        scroll={{ x: 1280 }}
+        scroll={{ x: true }}
         search={{ labelWidth: "auto" }}
         size="small"
       />
