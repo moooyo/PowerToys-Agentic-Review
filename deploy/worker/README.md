@@ -1,16 +1,12 @@
 # Windows Worker Deployment
 
-The supported Worker direction is the unpublished split Control/Executor Windows profile under
-`deploy/worker/split`. All WinSW templates and the former single-service mTLS deployment inputs
-were removed before publication and are not compatibility inputs.
+The Worker runs only on Windows as two native SCM services:
 
-The current Worker authenticates to the Linux Server with one per-Worker Bearer Token. It has no
-Worker client certificate, Server binding receipt, candidate certificate, signer host, or Linux
-Worker deployment path.
+- `AgenticReview.Worker.Executor`
+- `AgenticReview.Worker.Control`, which depends on Executor
 
-There is not yet a production installer. ADR 0026 defines the next installer as clean-install-only:
-it accepts only the current split profile, refuses every existing or partial installation, and has
-no upgrade, migration, fallback parser, rollback generation, or transaction journal.
+The clean installer is `native/service-host/cmd/workerinstaller`. It accepts one signed Worker
+package plus one local install-input JSON file. No Worker client certificate, CNG key, receipt,
+journal, upgrade, migration, fallback, repair, or rollback format exists.
 
-ServiceHost is the native Windows service binary for both roles. See `split/README.md` for the
-remaining Token provisioning helper and clean-installer direction.
+See `split/README.md` for the package and install commands.

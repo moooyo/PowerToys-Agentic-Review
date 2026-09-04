@@ -7,15 +7,14 @@ Status date: 2026-09-04
 > is simplified in place: it keeps the fixed Worker authentication file as a Control-only data-root
 > member and selects the fixed Bearer client; strict parsing and validation reject every other
 > bootstrap schema, and there is no compatibility, migration, or fallback profile path. The current
-> signed outer-package schema/profile v2 and split installer profile v2 bind only the schema-4
-> Control/Executor pair and contain no Worker credential material. Release and outer-package
-> documents no longer contain node-local CNG identity, ControlProof payloads, signed grants/key
-> material, or local-authority SPKI binding. Trust remains Windows-local and identity-separated:
+> Worker package is one canonical manifest plus one raw Ed25519 signature and contains no Worker
+> credential material. Schema 4 contains only role, Worker node ID, and the Control Server origin.
+> Trust remains Windows-local and identity-separated:
 > the two-service Control/Executor boundary, SCM and pipe peer PID/SID checks, and Job Object
 > containment remain selected. Package-signature handling remains an install-time concern, not a
 > runtime Worker credential surface. WinSW launch inputs have been removed; ServiceHost is the
-> selected native service binary for both roles. Actual signed release material and the production
-> Windows clean installer remain incomplete.
+> selected native service binary for both roles. The clean installer is implemented; actual signed
+> release material and an elevated end-to-end installation smoke test remain incomplete.
 >
 > ADR 0026 selects an unpublished clean-install-only Windows installer. The former transaction v1
 > model, transaction v2 lab, cross-version store lab, and legacy single-service mTLS deployment
@@ -154,23 +153,21 @@ process-handle identity, and HostControl PID binding.
 - A fail-closed Go ServiceHost foundation with canonical role configuration, role-specific
   replacement environments, structural ARWX framing, byte-bounded bidirectional relay, bounded
   shutdown, a composed Windows platform adapter, and an explicitly unavailable non-Windows adapter.
-- A schema-v2 dual-root release manifest shared by TypeScript and Go, with canonical cross-language
-  digests, closed installation and trusted-configuration trees, separately hashed bootstrap
-  configurations, strict role/root/content rules, and typed config-binding evidence.
+- A minimal schema-4 local configuration containing only role, Worker node ID, and the Control
+  Server origin. Fixed identities, paths, environments, and limits are derived in Go.
 - Reviewed Windows ServiceHost building blocks for first-instance, remote-rejecting Named Pipes;
-  handle-relative configuration traversal; exact restricted virtual-service token verification;
+  bounded fixed-path configuration reads; exact restricted virtual-service token verification;
   strict fixed-profile Worker Bearer loading; stable SCM and pipe peer-PID plus token verification;
   typed unsigned local authorization with context, deadline, resource, sequence, and replay binding;
   canonical role-local RPC;
-  fixed-origin TLS 1.3 transport; and suspended Node launch into a non-breakaway
+  fixed-origin TLS 1.3 transport using the Windows system trust store; and suspended Node launch into a non-breakaway
   root Job. A one-shot local service bootstrap verifies the fixed restricted identities, applies and
   reads back exact protected DACLs on the current ServiceHost process and primary token, closes its
   token handle, and retains no wrapper, image, SCM-status, or lifecycle evidence. Bootstrap schema 4
   selects the fixed canonical authentication profile and Bearer transport
   for Control, keeps the Token out of runtime bootstrap, and gives Executor
   no Server transport. Strict parsing and validation reject every other bootstrap schema and all
-  Worker client-certificate properties. The current outer-package v2, installer profile v2, and
-  staged-evidence typed gate accept only the matching schema-4 pair.
+  Worker client-certificate and historical release-binding properties.
 - No local capability key, CNG lifecycle, SPKI exchange, `ControlProof`, or signed-grant wrapper.
   The authenticated Windows service channel is the local authority boundary.
 - Pre-resume Node process and primary-token protected DACL application with exact readback, plus
@@ -179,13 +176,8 @@ process-handle identity, and HostControl PID binding.
 - A per-launch, single-use HostControl Named Pipe prepared before Node starts and bound to the exact
   retained Node process, with a one-process bootstrap Job limit followed by verified activation of
   the configured process ceiling.
-- A production Authenticode verifier and package-side closed-tree verification helpers remain for
-  the unpublished installer stack; the dedicated runtime `installverify` package is removed and
-  none of these helpers are invoked by ServiceHost startup.
-- Production Windows installation ACL policy composition. It proves the fixed restricted service
-  identity before filesystem access, parses complete self-relative DACLs, applies exact per-role
-  read/execute profiles, and accepts only the bounded ambient rights used by standard Windows
-  `Program Files` and `ProgramData` ancestors.
+- A clean Windows installer that applies fixed root ACLs for SYSTEM, Administrators, Control, and
+  Executor, then creates restricted virtual-account services and starts Executor before Control.
 - Runtime peer verification now binds SCM PID, pipe peer PID, retained process identity, and
   restricted service SID/token directly in `peerverify`, without preflight attestations.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
@@ -222,8 +214,8 @@ process-handle identity, and HostControl PID binding.
   Control `Drain`.
 - The native two-service ServiceHost direction and the ADR 0026 clean-install-only policy. WinSW
   source inputs, wrapper binaries, and service XML package roles were removed before publication.
-  Both Windows services use the same per-architecture ServiceHost payload; the future clean
-  installer creates their distinct SCM records and starts Executor before Control.
+  Both Windows services use the same per-architecture ServiceHost payload; the clean installer
+  creates their distinct restricted SCM records and starts Executor before Control.
 - The ADR 0014 trusted-enrollment-record and ADR 0022 through ADR 0024 Server-binding designs remain
   as historical decision records, but their executable TypeScript and Go contracts, persistence,
   coordinator, signer, signer-host, fixtures, and native node-enrollment/verifier packages were
@@ -238,11 +230,9 @@ process-handle identity, and HostControl PID binding.
   Server-binding contract test now live in `production-source-boundaries.test.ts`. They retain the
   general zero-execution protections while removing the obsolete signer-host spawn allowance and
   every executable Server-binding contract test.
-- The node-neutral `worker-release-v1` profile with exactly one per-architecture ServiceHost PE
-  payload and no wrapper executable, service XML, node-local CNG identity, or local-authority SPKI
-  binding. Release preparation, finalized-document inspection,
-  outer-index parsing, signing-digest construction, admission, and staged verification retain the
-  generic role, root, hash, size, architecture, ACL, and Authenticode checks for supported payloads.
+- The node-neutral `workerpackage` contract: one canonical
+  `{releaseId, architecture, files}` manifest, one raw Ed25519 signature, safe relative paths, and
+  exact file size/SHA-256 verification before installation.
 - A source-only, dormant Control result-artifact upload session. It binds one authenticated local
   attempt context to one private Server lease, accepts only the five result lifecycle facts, and
   drives a frozen `create`/`put`/`finalize`/`terminate` port with stable application identities,
@@ -254,7 +244,8 @@ process-handle identity, and HostControl PID binding.
 - The selected split-service SCM direction includes fixed service records, virtual accounts,
   restricted service SIDs, a Control dependency on Executor, and Executor-before-Control start
   order. Both records target the same native ServiceHost binary with role-specific configuration.
-  The earlier WinSW and journal-coupled lifecycle is retired; the clean installer is still missing.
+  The clean installer now implements this sequence without a journal, rollback, receipt, repair, or
+  resume mode.
 - A source-only Artifact HostControl v2 contract and fixed-origin native transport capability. ADR
   0017 closes the surface to create, chunk, finalize, terminate, and artifact-backed run completion;
   Node supplies only route identities and opaque bounded bodies, while Go derives the exact method,
@@ -288,12 +279,11 @@ process-handle identity, and HostControl PID binding.
   slots. A static guard locks both production entrypoints to those supervisors and rejects any
   production import path into the dormant execution modules. The source-only attempt reducer is not
   exported or included in either role bundle and cannot make the zero-execution configuration
-  effective. Its focused, full Worker, repository test, typecheck, build, and lint matrices passed on
-  Linux `test-env`; this does not substitute for native Windows evidence. Production enablement still
-  requires a compiled release profile, split-service packaging and installation, signing, and native
-  Windows preflight and attack-test evidence.
+  effective. Its focused and full Worker tests, typecheck, build, lint, and architecture guards pass
+  locally on Windows. Production enablement still requires real signed amd64/arm64 payloads, an
+  elevated clean-install smoke test, and native Windows attack-test evidence.
 - The shadow candidate remains unpublishable. The Go-to-Node shutdown-request bridge and zero-slot
-  activation and lifecycle choreography have passed the Linux `test-env` matrices, but not the
+  activation and lifecycle choreography have passed local source and protocol matrices, but not the
   paired native Windows x64 and arm64 service-stop, deadline, partial-frame, race, and
   forced-termination matrix. Go does not synthesize ARWX business frames; Executor shutdown remains
   subordinate to authenticated Control `Drain`.
@@ -348,21 +338,12 @@ That verification must keep
 alone owns the fixed Worker Token and Server transport while Executor has no Server, lease,
 workspace, ProcessHost, Codex, or Git capability in this shadow milestone.
 
-After the shadow runtime is verified and any findings are closed, the release pipeline must produce
-authenticated role bundles and native binaries, and the ADR 0026 path must install the selected two
-service identities, roots, ACLs, and fixed plaintext Control authentication profile. The current
-compiled release profile, outer package, destination evidence, and machine-policy components
-may be reused or simplified before that installer is implemented. WinSW and its package slots have
-already been removed.
-The repository still needs actual authenticated release material, root placement, the production
-Windows installer, its selected service adapter, and a practical readiness check. No upgrade,
-migration, fallback, rollback journal, cross-version store, or final recovery schedule is required
-for the first unpublished install format. The ADR 0014 receipt reader, withdrawn ADR 0015/0020/0021
-installer models, Server binding signer and trust material,
-receipt authority, privileged enrollment writer, and ADR 0024 Linux signer-host matrix are
-superseded historical work and are not future gates.
-Native Windows x64 and arm64 hosts must then pass the ADR 0007 installation, token, ACL, Named Pipe,
-Authenticode, sandbox, Job Object, disk, cancellation, tamper, restart, and attack tests before any
+The release pipeline now consists of `cmd/workerpackage` and `cmd/workerinstaller`. The next release
+work is to supply an external Ed25519 private key, compile the matching public key into the
+installer, assemble real amd64 and arm64 payloads, and run an elevated clean-install smoke test.
+No upgrade, migration, fallback, rollback journal, receipt, repair, resume, or cross-version store
+is required for the first unpublished install format. Native Windows hosts must then pass the ADR
+0007 token, ACL, Named Pipe, sandbox, Job Object, cancellation, restart, and attack tests before any
 Claim authority is enabled.
 
 The product data path can proceed in parallel by adding the Worker Control upload client while
@@ -373,37 +354,15 @@ validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
 
-On 2026-09-04, the unpublished release/package stack removed its node-local CNG identity and
-local-authority SPKI fields. The generic `worker-release-v1` descriptor and prepare receipt retain
-source, architecture, dependency, package-signature, hash/size, and Authenticode bindings without
-requiring a per-node public-key payload. Outer admission and staged verification no longer compare
-or parse local capability-key material; the detached outer signature and compiled `outertrust`
-signer remain unchanged.
-The same direction also removes ControlProof and signed grants/key payloads from the current
-release/package path.
-
-On 2026-09-04, ADR 0026 withdrew the unpublished installer transaction v1 model, transaction v2
-lab, and cross-version store v2 lab. Their 50 files were deleted together with the three legacy
-single-service mTLS deployment files. Current production source contains no import or reference to
-the deleted packages, and the retained Token helper remains under `deploy/worker/split`. Local
-verification passed `git diff --check`, the focused current package/admission/staging/destination/
-installation-verification Go matrix, `go vet ./...`, and Windows amd64 and arm64 `go build ./...`.
-No command used `test-env`. Historical verification entries below remain provenance for deleted
-experiments, not current implementation or future prerequisites.
-
-On 2026-09-04, the installer destination slice added the only production consumer of
-`InstallerPackage`. The read-only composition accepts no caller-supplied path or
-detached authority, borrows an exact one-shot view of the admitted index, envelope, and schema-v4
-bootstraps, and reopens all three profile-fixed roots after a future installer swap. It validates
-exact path casing, complete tree closure, every signed payload digest and size, exact metadata
-index/signature bytes, exact bootstrap bytes, repeated compiled outer admission, role-scoped PE
-Authenticode, and retained filesystem
-identity/security evidence. The opaque result owns both source and destination handles, refuses
-serialization, rejects repeated or post-close use, and propagates staged, native, and destination
-cleanup-fatal state. Focused `installerdestination` and `stagedpackage` tests passed locally. This
-does not implement archive extraction, candidate materialization, ACL writes, root swap, SCM, CNG
-provisioning, or readiness. The withdrawn installer transaction recovery model is not required by
-ADR 0026.
+On 2026-09-04, ADR 0028 replaced the entire unpublished release-profile, outer-package,
+outer-trust, admission, staged/destination evidence, receipt, Authenticode, and installer-profile
+stack. `workerpackage` now verifies one canonical manifest, one raw Ed25519 signature, architecture,
+safe paths, and exact file size/SHA-256 values. `workerinstaller` validates all package and local
+configuration inputs before its first mutation, then creates fixed roots/ACLs and restricted
+services, starts Executor before Control, and selects automatic start. A failure makes one
+best-effort stop/disable attempt and leaves residue for explicit cleanup. Focused package,
+installer, config, transport, and platform tests passed locally; `go vet -p 1 ./...` and Windows
+amd64/arm64 `go build -p 1 ./...` passed. No command used `test-env`.
 
 On 2026-09-04, the recovery maintenance follow-up added the strict loopback-only Server mode,
 pre-listen atomic operator-auth purge, database-only storage runtime, Worker route fence, not-ready
@@ -425,7 +384,7 @@ Server suite passed 833/833 in 49 files, and Contracts passed 8/8 in 2 files. Al
 typecheck, build, and lint passed with Biome checking 312 files, and the Worker zero-execution
 architecture check plus all 19 role-bundle guards passed. No command used `test-env`.
 
-On 2026-09-04, the Worker Token release/recovery cleanup added outer-package index/profile v2,
+Historical intermediate work on 2026-09-04 added outer-package index/profile v2,
 split installer profile v2, schema-4 admission, the retained staged-evidence typed installer gate,
 and the fixed-path SecureString provisioning helper while keeping signature envelope/domain v1. It
 deleted 47 tracked files from the retired Server-binding, signer-host, contracts, native verifier,
@@ -734,21 +693,20 @@ Runtime smoke results:
   ready; the owner then released the lock during a clean SIGTERM shutdown.
 Not yet verified:
 
-- The native two-service Worker clean installer has not been implemented or exercised on a Windows
-  test machine.
+- The native two-service Worker clean installer has not yet been exercised end to end with a real
+  signed payload from an elevated Windows session.
 - Runtime cleanup for startup verification is complete; remaining release gates are installer
   publication and native Windows execution evidence.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
   x64 and arm64, but their Named Pipe, filesystem, process/token DACL,
-  root Job, peer service PID/token check, fixed Worker authentication profile, Server-certificate verification,
+  root Job, peer service PID/token check, fixed Worker authentication profile, system Server-certificate verification,
   role-local RPC, and fixed-origin HTTPS behavior has not been exercised on a native Windows test
-  machine. The production Authenticode and
-  installation-verification code has only fake-provider execution plus Windows cross-compilation;
-  real signed PE fixtures and Windows ABI checks remain release gates. The native platform
-  composition is connected, and the TypeScript zero-slot supervisors have passed the remote Linux
-  source and bundle matrix but have not been exercised on native Windows. The native Control-only
+  machine. The package and installer code has focused execution plus Windows cross-compilation;
+  a real signed package and elevated service/ACL smoke test remain release gates. The native
+  platform composition is connected, and the TypeScript zero-slot supervisors have passed local
+  Windows source, bundle, protocol, and guard tests but have not run as installed services. The native Control-only
   relay asymmetry, Control HostControl half-close latch, and shutdown-request bridge also lack native
   Windows verification.
   Executor's candidate emits only the disabled ARWX `Ready`; ordinary builds have no production

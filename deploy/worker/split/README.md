@@ -1,73 +1,61 @@
-# Split Windows Worker Installation Inputs
+# Clean Windows Worker Installation
 
-This directory contains the fixed-path Worker Token provisioning helper for the split
-Control/Executor Windows Worker. The WinSW launch templates were removed before publication.
-`AgenticReview.ServiceHost.exe` is the native service binary for both roles.
+The only supported installation is a clean install on Windows. The installer refuses to start if
+either fixed service or any fixed Worker root already exists.
 
-ADR 0026 selects a clean-install-only Windows installer. The withdrawn transaction and store
-packages are not future prerequisites. No supported path reads an old installer record, upgrades or
-migrates an existing Worker, resumes an interrupted transaction, or rolls back to an earlier
-generation. An ordinary install must reject any existing or partial Worker service or fixed root.
+## Package
 
-## Retained files
+`worker-package.json` contains only:
 
-```text
-deploy/worker/split/
-  README.md
-  provision-worker-auth.ps1
+```json
+{"releaseId":"2026.09.04.1","architecture":"amd64","files":[{"relativePath":"app/control.mjs","size":1234,"sha256":"<lowercase-sha256>"}]}
 ```
 
-The fixed services are `AgenticReview.Worker.Control` and
-`AgenticReview.Worker.Executor`. Both services run
-`C:\Program Files\AgenticReview\Worker\native\AgenticReview.ServiceHost.exe`. Control uses
-`C:\ProgramData\AgenticReview\TrustedConfig\control-service-host.json`, Executor uses the matching
-`executor-service-host.json`, and Control depends on Executor.
+`worker-package.sig` is the raw 64-byte Ed25519 signature over the exact canonical manifest. The
+installer public key is compiled into the release build. The package contains no Worker node ID,
+Server origin, Token, certificate, local key, target root, or receipt.
 
-The future clean installer must create the exact virtual service accounts and restricted service
-SIDs, place and verify the selected release roots, create the role data roots, register the two
-native services against the same ServiceHost payload with their role-specific configuration, and
-start Executor before Control. It must not recreate the withdrawn journal, cross-version store,
-upgrade fence, fallback parser, or rollback plan.
-
-## Worker Token
-
-The Linux Server stores only the SHA-256 digest of the per-Worker Token. Plaintext storage on the
-Windows Worker is the fixed local Control file:
-
-```text
-C:\ProgramData\AgenticReview\Control\worker-auth-v1.json
-```
-
-The Token is ordinary local configuration. It is not a signed package payload, command-line value,
-environment variable, registry value, client certificate, receipt, or Executor input.
-
-After a future installer creates the fixed Control data root, provision or rotate the file with:
+Build a package with an external Ed25519 private key:
 
 ```powershell
-$token = Read-Host 'Worker Token' -AsSecureString
-.\provision-worker-auth.ps1 -WorkerNodeId 'worker-node-001' -Token $token
+go run ./cmd/workerpackage -root D:\release\worker -release-id 2026.09.04.1 -architecture amd64 -private-key D:\release-secrets\worker-ed25519.key -manifest D:\release\worker\worker-package.json -signature D:\release\worker\worker-package.sig
 ```
 
-If `-Token` is omitted, the helper prompts securely. `-ValidateOnly` validates input without
-writing. The helper writes canonical UTF-8 without a BOM or trailing newline, performs a
-same-directory write-through replacement, verifies the fixed owner and inherited DACL, and never
-prints the Token. The caller must serialize provisioning operations.
+The manifest must include the fixed ServiceHost, Node, Control and Executor bundles, ProcessHost,
+Codex, Git, and `trusted/codex-requirements.toml` entries.
 
-## Remaining implementation
+## Local install input
 
-The repository still needs a Windows-only clean installer. Its minimum flow is:
+Create an administrator-readable local file that is not part of the package:
 
-1. proves the fixed services and roots are absent;
-2. verifies the expanded current staging tree and selects the current typed package gate;
-3. materializes the three fixed roots and calls `installerdestination.Verify`;
-4. creates the Control and Executor data roots;
-5. provisions local configuration, including the Token file before Control starts;
-6. creates and reads back the two native ServiceHost services; and
-7. starts Executor and then Control.
+```json
+{"serverOrigin":"https://review.example.com","workerNodeId":"worker-node-001","token":"arw1_<43-base64url-characters>"}
+```
 
-A future narrow run marker may authorize best-effort cleanup of objects created by the same failed
-invocation. It is not a transaction journal and cannot authorize resume, adoption, upgrade,
-rollback, or service start. Residue without that marker remains a hard failure.
+The Token is written only to
+`C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`. Executor cannot read the Control data
+root and receives no Server client.
 
-Actual authenticated release material and privileged Windows amd64/arm64 install verification
-remain external release work. No Linux Worker or installer validation is required.
+## Installer
+
+Build the Windows installer with the 32-byte Ed25519 public key encoded as 64 lowercase hex
+characters:
+
+```powershell
+go build -trimpath -ldflags "-X main.compiledReleasePublicKeyHex=<public-key-hex>" -o AgenticReview.WorkerInstaller.exe ./cmd/workerinstaller
+```
+
+Run it from an elevated PowerShell session:
+
+```powershell
+.\AgenticReview.WorkerInstaller.exe -package D:\release\worker -config D:\local\worker-install.json
+```
+
+The installer verifies the manifest signature, architecture, required entries, sizes, and hashes
+before the first write. It then creates the fixed roots and ACLs, writes the minimal schema-4 role
+configs and Token, creates both services as disabled restricted virtual-account services, switches
+them to manual start, starts Executor then Control, and finally selects automatic start.
+
+If a mutation fails, the installer makes one best-effort attempt to stop and disable any created
+services. It deliberately leaves files and service records for explicit administrator cleanup; a
+normal rerun refuses that partial state.

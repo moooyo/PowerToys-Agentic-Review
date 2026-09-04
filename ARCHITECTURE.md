@@ -4,11 +4,11 @@ Status: Accepted for initial implementation
 
 Last updated: 2026-09-04
 
-> Amended by ADR 0026 and ADR 0027 before the first Worker installer was published. The required product boundary
+> Amended by ADR 0026, ADR 0027, and ADR 0028 before the first Worker installer was published. The required product boundary
 > is two distinct Windows service identities with Control-only Server credentials and
 > Executor-before-Control start. ServiceHost now runs directly under Windows SCM; WinSW, its wrapper
-> process model, and its package slots were removed. Node-specific packages, retained-handle
-> destination evidence, and their exact root layout remain replaceable candidates.
+> process model, node-specific packages, retained-handle destination evidence, and receipt stack
+> were removed. The current package is one canonical manifest plus one Ed25519 signature.
 > The first supported installer is clean-install-only; no Worker upgrade, migration, fallback, or
 > rollback format currently exists.
 
@@ -538,10 +538,16 @@ Each Windows worker is installed as two native ServiceHost Windows Services unde
 restricted, non-administrator identities. Executor starts first. Each role reads only its fixed
 trusted configuration path under `C:\ProgramData\AgenticReview\TrustedConfig`, runs service
 bootstrap to construct the restricted service SID/token and process/token DACLs, and reports SCM
-ready only after local identity/configuration checks plus Control Token/CA loading. Control begins
+ready only after local identity/configuration checks plus Control Token loading. Control begins
 claiming only after this local-ready state and peer channel availability.
 Production execution fails closed unless the split-service boundary in ADR 0007 is active. The first
 published format has no Worker upgrade path; any future upgrade requires a new ADR.
+
+The Windows clean installer verifies the package signature, architecture, required entries, sizes,
+and hashes before its first write. It creates fixed roots and ACLs, writes the minimal schema-4
+configs and Control-only Token, creates disabled restricted virtual-account services, switches them
+to manual start, starts Executor then Control, and finally selects automatic start. HTTPS uses the
+Windows system trust store.
 
 Before release, a Server with a non-current initialized database is replaced with a freshly
 initialized exact-schema database rather than upgraded in place. The Server creates no automatic
@@ -583,11 +589,10 @@ approvals, the GitHub outbox, and Dashboard write actions.
 ### Windows Zero-Slot Shadow Runtime
 
 - Install the TypeScript Control and Executor business supervisors behind their existing role
-  entrypoints and complete authenticated handshake, `Ready`, reconnect, drain, and preflight flows.
+  entrypoints and complete authenticated handshake, `Ready`, reconnect, and drain flows.
 - Keep `executionEnabled=false`, advertise zero slots, and reject Claim before dispatcher ownership.
-- Build the selected authenticated release format and clean dual-service installer only after the
-  shadow runtime is complete. The current release-profile/package/destination composition may be
-  reused or simplified.
+- Produce a real signed payload with `cmd/workerpackage` and run the implemented clean dual-service
+  installer in an elevated Windows smoke test.
 - Run the ADR 0007 native Windows x64 and arm64 verification and attack suite before enabling any
   Claim authority.
 
