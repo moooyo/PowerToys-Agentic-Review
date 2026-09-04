@@ -652,7 +652,6 @@ function createEstablishedArtifactSession(): EstablishedLocalSession {
     controlNonce: hello.controlNonce,
     executorNonce: "b".repeat(64),
     executorManifestSha256: hello.controlManifestSha256,
-    executorPolicySha256: "c".repeat(64),
     executorPreflightSha256: "d".repeat(64),
     maximumSlots: 4,
   };

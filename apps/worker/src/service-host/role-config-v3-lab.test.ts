@@ -9,13 +9,13 @@ import {
   ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES,
   RoleConfigV3LabError,
 } from "./role-config-v3-lab.js";
-import { labFixtureLines, testExecutorPolicySha256 } from "./role-config-v3-lab.test-helpers.js";
+import { labFixtureLines } from "./role-config-v3-lab.test-helpers.js";
 
 describe("RoleConfig v3 lab", () => {
   it("matches shared Control and Executor fixtures without local key material", () => {
     const [control, executor] = goldens();
-    expect(createControlRoleConfigV3Lab(testExecutorPolicySha256)).toEqual(control);
-    expect(createExecutorRoleConfigV3Lab(testExecutorPolicySha256)).toEqual(executor);
+    expect(createControlRoleConfigV3Lab()).toEqual(control);
+    expect(createExecutorRoleConfigV3Lab()).toEqual(executor);
 
     for (const [document, role] of [
       [control, "control"],

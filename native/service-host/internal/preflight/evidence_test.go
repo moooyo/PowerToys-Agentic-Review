@@ -87,7 +87,7 @@ func TestRuntimePlanRejectsMutatedBootstrapTrustAndContent(t *testing.T) {
 				{
 					name: "bootstrap authority policy",
 					mutate: func(plan *RuntimePlan) {
-						plan.bootstrapAuthority.options.ExecutorPolicySHA256 = strings.Repeat("d", 64)
+						plan.bootstrapAuthority.options.WorkerNodeID = "powertoys-node:02"
 					},
 				},
 			}

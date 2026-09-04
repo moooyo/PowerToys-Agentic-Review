@@ -24,8 +24,6 @@ interface BootstrapHostState {
   ack: Buffer | undefined;
 }
 
-export const testExecutorPolicySha256 = "6".repeat(64);
-
 const bootstrapHosts = new WeakMap<object, BootstrapHostState>();
 
 export function installBootstrapTestHost(
@@ -198,7 +196,6 @@ export function foundationRoleConfig(
 ): Readonly<Record<string, unknown>> {
   const common = {
     executionEnabled: false,
-    executorPolicySha256: testExecutorPolicySha256,
     foundationVersion: 2,
     maximumSlots: 1,
     role,

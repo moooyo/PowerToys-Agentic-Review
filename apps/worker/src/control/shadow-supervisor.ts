@@ -361,7 +361,6 @@ class ControlZeroSlotShadowSupervisor {
       helloAck.sessionId !== this.#hello.sessionId ||
       helloAck.controlNonce !== this.#hello.controlNonce ||
       helloAck.executorManifestSha256 !== this.#bootstrap.bootstrap.installationManifestSha256 ||
-      helloAck.executorPolicySha256 !== roleConfig.executorPolicySha256 ||
       helloAck.maximumSlots !== roleConfig.maximumSlots
     ) {
       throw shadowError(
@@ -573,7 +572,6 @@ class ControlZeroSlotShadowSupervisor {
           "isolation-mode": ready.isolationMode,
           "executor-boot-id": ready.executorBootId,
           "executor-manifest-sha256": ready.executorManifestSha256,
-          "executor-policy-sha256": ready.executorPolicySha256,
           "executor-preflight-sha256": ready.executorPreflightSha256,
           "node-bundle-sha256": bootstrap.nodeBundleSha256,
           "release-id": bootstrap.releaseId,

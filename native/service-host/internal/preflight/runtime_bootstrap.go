@@ -3,7 +3,6 @@ package preflight
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
@@ -37,11 +36,8 @@ func (e Evidence) RuntimeBootstrapAuthority() (RuntimeBootstrapAuthority, error)
 // Validate rejects a zero or internally inconsistent bootstrap authority.
 func (authority RuntimeBootstrapAuthority) Validate() error {
 	options := authority.options
-	if !authority.valid || !validSHA256(options.ReleaseTemplateSHA256) ||
-		!validSHA256(options.InstallationManifestSHA256) ||
-		!validSHA256(options.PreflightSHA256) || !validSHA256(options.NodeBundleSHA256) ||
-		!validSHA256(options.ExecutorPolicySHA256) ||
-		options.WorkerNodeID == "" || options.ReleaseID == "" ||
+	if !authority.valid ||
+		options.WorkerNodeID == "" ||
 		options.MaximumQueuedBytesPerDirection < localrpc.RuntimeBootstrapARWXMinimumQueuedBytes ||
 		options.MaximumQueuedBytesPerDirection > localrpc.RuntimeBootstrapARWXMaximumQueuedBytes ||
 		options.TotalShutdownTimeoutMS < localrpc.RuntimeBootstrapMinimumGracefulTimeoutMS ||
@@ -89,22 +85,9 @@ func newRuntimeBootstrapAuthority(
 	if err != nil {
 		return RuntimeBootstrapAuthority{}, err
 	}
-	executor := e.executor.Configuration.Executor
-	if executor == nil {
-		return RuntimeBootstrapAuthority{}, invalidEvidenceError(
-			"runtime bootstrap trust configuration is incomplete",
-			nil,
-		)
-	}
 	options := localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           role,
 		WorkerNodeID:                   configuration.WorkerNodeID,
-		ReleaseID:                      configuration.Installation.ReleaseID,
-		ReleaseTemplateSHA256:          hex.EncodeToString(e.release.templateDigest[:]),
-		InstallationManifestSHA256:     configuration.Installation.ManifestSHA256,
-		PreflightSHA256:                hex.EncodeToString(e.digest[:]),
-		NodeBundleSHA256:               configuration.Node.BundleSHA256,
-		ExecutorPolicySHA256:           executor.CodexPolicySHA256,
 		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
 		TotalShutdownTimeoutMS:         int(configuration.Limits.ShutdownTimeoutMilliseconds),
 		ForceTerminationReserveMS:      int(configuration.Limits.ForceTerminationReserveMilliseconds),
@@ -125,16 +108,8 @@ func (authority RuntimeBootstrapAuthority) validateFor(plan RuntimePlan) error {
 	if err != nil {
 		return err
 	}
-	releaseDigest := hex.EncodeToString(plan.releaseTemplateDigest[:])
-	preflightDigest := hex.EncodeToString(plan.preflightDigest[:])
 	options := authority.options
 	if options.Role != role || options.WorkerNodeID != configuration.WorkerNodeID ||
-		options.ReleaseID != configuration.Installation.ReleaseID ||
-		options.ReleaseTemplateSHA256 != releaseDigest ||
-		options.InstallationManifestSHA256 != configuration.Installation.ManifestSHA256 ||
-		options.PreflightSHA256 != preflightDigest ||
-		options.NodeBundleSHA256 != plan.bundle.sha256 ||
-		options.ExecutorPolicySHA256 != plan.bootstrapTrust.executorPolicySHA256 ||
 		options.MaximumQueuedBytesPerDirection != int(configuration.Limits.MaximumQueuedBytesPerDirection) ||
 		options.TotalShutdownTimeoutMS != int(configuration.Limits.ShutdownTimeoutMilliseconds) ||
 		options.ForceTerminationReserveMS != int(configuration.Limits.ForceTerminationReserveMilliseconds) {
@@ -202,12 +177,6 @@ func reflectRuntimeBootstrapOptionsEqual(
 	right localrpc.FoundationRuntimeBootstrapOptions,
 ) bool {
 	return left.Role == right.Role && left.WorkerNodeID == right.WorkerNodeID &&
-		left.ReleaseID == right.ReleaseID &&
-		left.ReleaseTemplateSHA256 == right.ReleaseTemplateSHA256 &&
-		left.InstallationManifestSHA256 == right.InstallationManifestSHA256 &&
-		left.PreflightSHA256 == right.PreflightSHA256 &&
-		left.NodeBundleSHA256 == right.NodeBundleSHA256 &&
-		left.ExecutorPolicySHA256 == right.ExecutorPolicySHA256 &&
 		left.MaximumQueuedBytesPerDirection == right.MaximumQueuedBytesPerDirection &&
 		left.TotalShutdownTimeoutMS == right.TotalShutdownTimeoutMS &&
 		left.ForceTerminationReserveMS == right.ForceTerminationReserveMS

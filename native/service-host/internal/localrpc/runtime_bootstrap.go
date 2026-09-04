@@ -38,8 +38,7 @@ var (
 	ErrRuntimeBootstrapBinding = errors.New("RuntimeBootstrapAckV1 does not bind the expected bootstrap")
 	ErrRuntimeBootstrapCommit  = errors.New("invalid RuntimeBootstrapCommitV1 document")
 
-	runtimeBootstrapUUIDV4    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	runtimeBootstrapReleaseID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+	runtimeBootstrapUUIDV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
 
 // FoundationRuntimeBootstrapOptions contains only verified deployment facts. The bootstrap ID,
@@ -47,12 +46,6 @@ var (
 type FoundationRuntimeBootstrapOptions struct {
 	Role                           Role
 	WorkerNodeID                   string
-	ReleaseID                      string
-	ReleaseTemplateSHA256          string
-	InstallationManifestSHA256     string
-	PreflightSHA256                string
-	NodeBundleSHA256               string
-	ExecutorPolicySHA256           string
 	MaximumQueuedBytesPerDirection int
 	TotalShutdownTimeoutMS         int
 	ForceTerminationReserveMS      int
@@ -62,11 +55,6 @@ type runtimeBootstrapOptions struct {
 	BootstrapID                    string
 	Role                           Role
 	WorkerNodeID                   string
-	ReleaseID                      string
-	ReleaseTemplateSHA256          string
-	InstallationManifestSHA256     string
-	PreflightSHA256                string
-	NodeBundleSHA256               string
 	MaximumQueuedBytesPerDirection int
 	GracefulTimeoutMS              int
 	ForceTerminationReserveMS      int
@@ -93,22 +81,17 @@ type RuntimeBootstrapRoleConfigV1 struct {
 }
 
 type RuntimeBootstrapV1 struct {
-	ProtocolVersion            string                       `json:"protocolVersion"`
-	Type                       string                       `json:"type"`
-	BootstrapVersion           int                          `json:"bootstrapVersion"`
-	BootstrapID                string                       `json:"bootstrapId"`
-	Role                       Role                         `json:"role"`
-	WorkerNodeID               string                       `json:"workerNodeId"`
-	ReleaseID                  string                       `json:"releaseId"`
-	ReleaseTemplateSHA256      string                       `json:"releaseTemplateSha256"`
-	InstallationManifestSHA256 string                       `json:"installationManifestSha256"`
-	PreflightSHA256            string                       `json:"preflightSha256"`
-	NodeBundleSHA256           string                       `json:"nodeBundleSha256"`
-	ARWX                       RuntimeBootstrapARWXV1       `json:"arwx"`
-	Shutdown                   RuntimeBootstrapShutdownV1   `json:"shutdown"`
-	RoleConfig                 RuntimeBootstrapRoleConfigV1 `json:"roleConfig"`
-	roleConfigJSON             []byte
-	issuance                   *runtimeBootstrapIssuance
+	ProtocolVersion  string                       `json:"protocolVersion"`
+	Type             string                       `json:"type"`
+	BootstrapVersion int                          `json:"bootstrapVersion"`
+	BootstrapID      string                       `json:"bootstrapId"`
+	Role             Role                         `json:"role"`
+	WorkerNodeID     string                       `json:"workerNodeId"`
+	ARWX             RuntimeBootstrapARWXV1       `json:"arwx"`
+	Shutdown         RuntimeBootstrapShutdownV1   `json:"shutdown"`
+	RoleConfig       RuntimeBootstrapRoleConfigV1 `json:"roleConfig"`
+	roleConfigJSON   []byte
+	issuance         *runtimeBootstrapIssuance
 }
 
 // LaunchRuntimeBootstrap is opaque, copy-safe authority for one bootstrap that
@@ -178,11 +161,6 @@ func newFoundationRuntimeBootstrap(
 		BootstrapID:                    bootstrapID,
 		Role:                           options.Role,
 		WorkerNodeID:                   options.WorkerNodeID,
-		ReleaseID:                      options.ReleaseID,
-		ReleaseTemplateSHA256:          options.ReleaseTemplateSHA256,
-		InstallationManifestSHA256:     options.InstallationManifestSHA256,
-		PreflightSHA256:                options.PreflightSHA256,
-		NodeBundleSHA256:               options.NodeBundleSHA256,
 		MaximumQueuedBytesPerDirection: options.MaximumQueuedBytesPerDirection,
 		GracefulTimeoutMS:              options.TotalShutdownTimeoutMS,
 		ForceTerminationReserveMS:      options.ForceTerminationReserveMS,
@@ -191,16 +169,14 @@ func newFoundationRuntimeBootstrap(
 }
 
 func foundationRoleConfigJSON(options FoundationRuntimeBootstrapOptions) ([]byte, error) {
-	if !validRuntimeBootstrapRole(options.Role) ||
-		!validRuntimeBootstrapDigest(options.ExecutorPolicySHA256) {
+	if !validRuntimeBootstrapRole(options.Role) {
 		return nil, fmt.Errorf("%w: foundation role configuration facts", ErrInvalidRuntimeBootstrap)
 	}
 	return MarshalCanonicalJSON(map[string]any{
-		"executionEnabled":     false,
-		"executorPolicySha256": options.ExecutorPolicySHA256,
-		"foundationVersion":    foundationRoleConfigVersion,
-		"maximumSlots":         foundationMaximumSlots,
-		"role":                 string(options.Role),
+		"executionEnabled":  false,
+		"foundationVersion": foundationRoleConfigVersion,
+		"maximumSlots":      foundationMaximumSlots,
+		"role":              string(options.Role),
 	}, RuntimeBootstrapRoleConfigMaximumBytes)
 }
 
@@ -238,17 +214,12 @@ func newRuntimeBootstrap(options runtimeBootstrapOptions) (RuntimeBootstrapV1, e
 		return RuntimeBootstrapV1{}, runtimeBootstrapError(err)
 	}
 	value := RuntimeBootstrapV1{
-		ProtocolVersion:            ProtocolVersion,
-		Type:                       "runtimeBootstrap",
-		BootstrapVersion:           RuntimeBootstrapVersion,
-		BootstrapID:                options.BootstrapID,
-		Role:                       options.Role,
-		WorkerNodeID:               options.WorkerNodeID,
-		ReleaseID:                  options.ReleaseID,
-		ReleaseTemplateSHA256:      options.ReleaseTemplateSHA256,
-		InstallationManifestSHA256: options.InstallationManifestSHA256,
-		PreflightSHA256:            options.PreflightSHA256,
-		NodeBundleSHA256:           options.NodeBundleSHA256,
+		ProtocolVersion:  ProtocolVersion,
+		Type:             "runtimeBootstrap",
+		BootstrapVersion: RuntimeBootstrapVersion,
+		BootstrapID:      options.BootstrapID,
+		Role:             options.Role,
+		WorkerNodeID:     options.WorkerNodeID,
 		ARWX: RuntimeBootstrapARWXV1{
 			ProtocolMajor:                  RuntimeBootstrapARWXProtocolMajor,
 			MinimumMinor:                   RuntimeBootstrapARWXMinimumMinor,
@@ -305,11 +276,6 @@ func BindRuntimeBootstrapToLaunch(
 	}
 	expectedRoleConfig, err := foundationRoleConfigJSON(expected)
 	if err != nil || value.Role != expected.Role || value.WorkerNodeID != expected.WorkerNodeID ||
-		value.ReleaseID != expected.ReleaseID ||
-		subtle.ConstantTimeCompare([]byte(value.ReleaseTemplateSHA256), []byte(expected.ReleaseTemplateSHA256)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(value.InstallationManifestSHA256), []byte(expected.InstallationManifestSHA256)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(value.PreflightSHA256), []byte(expected.PreflightSHA256)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(value.NodeBundleSHA256), []byte(expected.NodeBundleSHA256)) != 1 ||
 		value.ARWX.MaximumQueuedBytesPerDirection != expected.MaximumQueuedBytesPerDirection ||
 		value.Shutdown.GracefulTimeoutMS != expected.TotalShutdownTimeoutMS ||
 		value.Shutdown.ForceTerminationReserveMS != expected.ForceTerminationReserveMS ||
@@ -601,12 +567,7 @@ func validateRuntimeBootstrapCommit(value RuntimeBootstrapCommitV1) error {
 func validateRuntimeBootstrap(value RuntimeBootstrapV1) ([]byte, error) {
 	if value.ProtocolVersion != ProtocolVersion || value.Type != "runtimeBootstrap" ||
 		value.BootstrapVersion != RuntimeBootstrapVersion || !runtimeBootstrapUUIDV4.MatchString(value.BootstrapID) ||
-		!validRuntimeBootstrapRole(value.Role) || validateEntityID(value.WorkerNodeID) != nil ||
-		!runtimeBootstrapReleaseID.MatchString(value.ReleaseID) ||
-		!validRuntimeBootstrapDigest(value.ReleaseTemplateSHA256) ||
-		!validRuntimeBootstrapDigest(value.InstallationManifestSHA256) ||
-		!validRuntimeBootstrapDigest(value.PreflightSHA256) ||
-		!validRuntimeBootstrapDigest(value.NodeBundleSHA256) {
+		!validRuntimeBootstrapRole(value.Role) || validateEntityID(value.WorkerNodeID) != nil {
 		return nil, ErrInvalidRuntimeBootstrap
 	}
 	if value.ARWX.ProtocolMajor != RuntimeBootstrapARWXProtocolMajor ||
@@ -665,15 +626,10 @@ func runtimeBootstrapMap(value RuntimeBootstrapV1) map[string]any {
 			"minimumMinor":                   value.ARWX.MinimumMinor,
 			"protocolMajor":                  value.ARWX.ProtocolMajor,
 		},
-		"bootstrapId":                value.BootstrapID,
-		"bootstrapVersion":           value.BootstrapVersion,
-		"installationManifestSha256": value.InstallationManifestSHA256,
-		"nodeBundleSha256":           value.NodeBundleSHA256,
-		"preflightSha256":            value.PreflightSHA256,
-		"protocolVersion":            value.ProtocolVersion,
-		"releaseId":                  value.ReleaseID,
-		"releaseTemplateSha256":      value.ReleaseTemplateSHA256,
-		"role":                       string(value.Role),
+		"bootstrapId":      value.BootstrapID,
+		"bootstrapVersion": value.BootstrapVersion,
+		"protocolVersion":  value.ProtocolVersion,
+		"role":             string(value.Role),
 		"roleConfig": map[string]any{
 			"base64Url":  value.RoleConfig.Base64URL,
 			"byteLength": value.RoleConfig.ByteLength,
@@ -694,9 +650,8 @@ func validRuntimeBootstrapRole(role Role) bool {
 
 func validRuntimeBootstrapShape(value any) bool {
 	object, ok := exactRuntimeBootstrapObject(value,
-		"arwx", "bootstrapId", "bootstrapVersion", "installationManifestSha256",
-		"nodeBundleSha256", "preflightSha256", "protocolVersion", "releaseId",
-		"releaseTemplateSha256", "role", "roleConfig", "shutdown", "type", "workerNodeId",
+		"arwx", "bootstrapId", "bootstrapVersion", "protocolVersion", "role",
+		"roleConfig", "shutdown", "type", "workerNodeId",
 	)
 	if !ok {
 		return false

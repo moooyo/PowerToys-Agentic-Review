@@ -3,7 +3,6 @@ package launchguard
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -300,14 +299,13 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 			ForceTerminationReserveMilliseconds: 5000,
 		},
 	}
-	executorPolicySHA256 := strings.Repeat("6", 64)
 	if role == config.RoleExecutor {
 		configuration.OwnService, configuration.PeerService = configuration.PeerService, configuration.OwnService
 		configuration.Node.BundlePath = testExecutorBundle
 		configuration.Node.BundleSHA256 = digestOf(fs.file(testExecutorBundle).data)
 		configuration.Node.WorkingDirectory = `C:\ProgramData\AgenticReview\Executor\Work`
 		configuration.Executor = &config.ExecutorConfiguration{
-			CodexPolicySHA256: executorPolicySHA256,
+			CodexPolicySHA256: strings.Repeat("6", 64),
 			ProcessHostPath:   testProcessHost,
 			ProcessHostSHA256: digestOf(fs.file(testProcessHost).data),
 		}
@@ -345,12 +343,6 @@ func newGuardFixture(t *testing.T, role config.Role) *guardFixture {
 	bootstrapOptions := localrpc.FoundationRuntimeBootstrapOptions{
 		Role:                           bootstrapRole,
 		WorkerNodeID:                   configuration.WorkerNodeID,
-		ReleaseID:                      configuration.Installation.ReleaseID,
-		ReleaseTemplateSHA256:          hex.EncodeToString(releaseDigest[:]),
-		InstallationManifestSHA256:     configuration.Installation.ManifestSHA256,
-		PreflightSHA256:                hex.EncodeToString(preflightDigest[:]),
-		NodeBundleSHA256:               configuration.Node.BundleSHA256,
-		ExecutorPolicySHA256:           executorPolicySHA256,
 		MaximumQueuedBytesPerDirection: int(configuration.Limits.MaximumQueuedBytesPerDirection),
 		TotalShutdownTimeoutMS:         int(configuration.Limits.ShutdownTimeoutMilliseconds),
 		ForceTerminationReserveMS:      int(configuration.Limits.ForceTerminationReserveMilliseconds),

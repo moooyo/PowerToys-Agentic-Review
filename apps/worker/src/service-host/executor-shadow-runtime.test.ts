@@ -119,9 +119,6 @@ describe("Executor zero-slot shadow runtime", () => {
         sessionId: hello.sessionId,
         controlNonce: hello.controlNonce,
         executorNonce: executorNonce.toString("hex"),
-        executorManifestSha256: harness.bootstrap.bootstrap.installationManifestSha256,
-        executorPolicySha256: harness.bootstrap.roleConfig.executorPolicySha256,
-        executorPreflightSha256: harness.bootstrap.bootstrap.preflightSha256,
         maximumSlots: 1,
       });
 
@@ -136,9 +133,6 @@ describe("Executor zero-slot shadow runtime", () => {
         sessionId: helloAck.sessionId,
         controlNonce: helloAck.controlNonce,
         executorNonce: helloAck.executorNonce,
-        executorManifestSha256: helloAck.executorManifestSha256,
-        executorPolicySha256: helloAck.executorPolicySha256,
-        executorPreflightSha256: helloAck.executorPreflightSha256,
         isolationMode: "split-service-v1",
         ready: false,
         availableSlots: 0,
@@ -151,7 +145,6 @@ describe("Executor zero-slot shadow runtime", () => {
 
   it.each([
     ["worker node", { workerNodeId: "other-node" }],
-    ["package manifest", { controlManifestSha256: "9".repeat(64) }],
   ])("fails closed on a wrong Hello %s before emitting HelloAck", async (_name, mutation) => {
     const harness = createHarness();
     const hello = {
@@ -514,8 +507,6 @@ function createHello(bootstrap: Readonly<ParsedRuntimeBootstrapV1>): HelloMessag
     executorBootId: null,
     sessionId,
     controlNonce,
-    controlManifestSha256: bootstrap.bootstrap.installationManifestSha256,
-    controlPreflightSha256: "7".repeat(64),
   };
 }
 
@@ -530,9 +521,6 @@ function syntheticAck(bootstrap: Readonly<ParsedRuntimeBootstrapV1>): HelloAckMe
     sessionId: hello.sessionId,
     controlNonce: hello.controlNonce,
     executorNonce: executorNonce.toString("hex"),
-    executorManifestSha256: bootstrap.bootstrap.installationManifestSha256,
-    executorPolicySha256: bootstrap.roleConfig.executorPolicySha256,
-    executorPreflightSha256: bootstrap.bootstrap.preflightSha256,
     maximumSlots: 1,
   };
 }

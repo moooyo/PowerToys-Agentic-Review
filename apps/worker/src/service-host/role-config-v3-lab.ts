@@ -50,9 +50,6 @@ export const ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES = Object.freeze([
 ] as const);
 
 const absoluteEndPattern = "(?![\\s\\S])";
-const sha256Pattern = `^[a-f0-9]{64}${absoluteEndPattern}`;
-
-const sha256Schema = () => Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 
 const arwxSelectionSchema = () =>
   Type.Object(
@@ -112,7 +109,6 @@ const commonRoleConfigProperties = () => ({
   disabledReasonCode: Type.Literal(ROLE_CONFIG_V3_LAB_DISABLED_REASON_CODE),
   executionAuthority: Type.Literal(false),
   executionEnabled: Type.Literal(false),
-  executorPolicySha256: sha256Schema(),
   foundationVersion: Type.Literal(ROLE_CONFIG_V3_LAB_FOUNDATION_VERSION),
   globalRolloutDefault: Type.Literal("off"),
   hostControl: hostControlSelectionSchema(),
@@ -174,15 +170,13 @@ export class RoleConfigV3LabError extends Error {
 const parsedRoleConfigs = new WeakSet<object>();
 
 /** Creates one canonical disabled Control role configuration. */
-export function createControlRoleConfigV3Lab(executorPolicySha256: string): Buffer {
-  assertSha256(executorPolicySha256, "executorPolicySha256");
-  return encodeRoleConfig(fixedRoleConfig("control", executorPolicySha256), "control");
+export function createControlRoleConfigV3Lab(): Buffer {
+  return encodeRoleConfig(fixedRoleConfig("control"), "control");
 }
 
 /** Creates one canonical disabled Executor role configuration. */
-export function createExecutorRoleConfigV3Lab(executorPolicySha256: string): Buffer {
-  assertSha256(executorPolicySha256, "executorPolicySha256");
-  return encodeRoleConfig(fixedRoleConfig("executor", executorPolicySha256), "executor");
+export function createExecutorRoleConfigV3Lab(): Buffer {
+  return encodeRoleConfig(fixedRoleConfig("executor"), "executor");
 }
 
 /** Parses one exact canonical v3 lab document and preserves its permanently disabled authority. */
@@ -235,11 +229,10 @@ export function isParsedRoleConfigV3Lab(value: unknown): value is Readonly<Parse
   return typeof value === "object" && value !== null && parsedRoleConfigs.has(value);
 }
 
-function fixedRoleConfig(role: "control", executorPolicySha256: string): ControlRoleConfigV3Lab;
-function fixedRoleConfig(role: "executor", executorPolicySha256: string): ExecutorRoleConfigV3Lab;
+function fixedRoleConfig(role: "control"): ControlRoleConfigV3Lab;
+function fixedRoleConfig(role: "executor"): ExecutorRoleConfigV3Lab;
 function fixedRoleConfig(
   role: RoleConfigV3LabRole,
-  executorPolicySha256: string,
 ): Omit<ControlRoleConfigV3Lab, "role"> & { readonly role: RoleConfigV3LabRole } {
   return {
     activationState: "blocked",
@@ -253,7 +246,6 @@ function fixedRoleConfig(
     disabledReasonCode: ROLE_CONFIG_V3_LAB_DISABLED_REASON_CODE,
     executionAuthority: false,
     executionEnabled: false,
-    executorPolicySha256,
     foundationVersion: ROLE_CONFIG_V3_LAB_FOUNDATION_VERSION,
     globalRolloutDefault: "off",
     hostControl: {
@@ -284,12 +276,6 @@ function isExactRoleConfigForRole(value: unknown, role: RoleConfigV3LabRole): bo
 function assertRole(value: RoleConfigV3LabRole): void {
   if (value !== "control" && value !== "executor") {
     throw new TypeError("RoleConfig v3 lab role must be control or executor.");
-  }
-}
-
-function assertSha256(value: string, name: string): void {
-  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
-    throw new TypeError(`${name} must be one lowercase SHA-256 digest.`);
   }
 }
 

@@ -2,7 +2,6 @@ package launchguard
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"reflect"
 	"strings"
 
@@ -147,12 +146,6 @@ func validBootstrapOptions(value authoritySnapshot) bool {
 	expectedRole, err := launchRuntimeBootstrapRole(value.role)
 	if err != nil || options.Role != expectedRole ||
 		options.WorkerNodeID != value.configuration.WorkerNodeID ||
-		options.ReleaseID != value.configuration.Installation.ReleaseID ||
-		options.PreflightSHA256 != fmt.Sprintf("%x", value.preflightDigest) ||
-		options.ReleaseTemplateSHA256 != fmt.Sprintf("%x", value.releaseDigest) ||
-		options.InstallationManifestSHA256 != value.configuration.Installation.ManifestSHA256 ||
-		options.NodeBundleSHA256 != value.configuration.Node.BundleSHA256 ||
-		!validSHA256(options.ExecutorPolicySHA256) ||
 		options.MaximumQueuedBytesPerDirection != int(value.configuration.Limits.MaximumQueuedBytesPerDirection) ||
 		options.TotalShutdownTimeoutMS != int(value.configuration.Limits.ShutdownTimeoutMilliseconds) ||
 		options.ForceTerminationReserveMS != int(value.configuration.Limits.ForceTerminationReserveMilliseconds) {
@@ -161,8 +154,7 @@ func validBootstrapOptions(value authoritySnapshot) bool {
 	if value.role == config.RoleControl {
 		return value.configuration.Control != nil
 	}
-	if value.configuration.Executor == nil ||
-		options.ExecutorPolicySHA256 != value.configuration.Executor.CodexPolicySHA256 {
+	if value.configuration.Executor == nil {
 		return false
 	}
 	return true

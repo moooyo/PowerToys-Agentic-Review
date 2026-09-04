@@ -251,8 +251,7 @@ class ExecutorShadowSupervisor {
       hello.protocolMajor !== bootstrap.arwx.protocolMajor ||
       hello.minimumMinor !== bootstrap.arwx.minimumMinor ||
       hello.maximumMinor !== bootstrap.arwx.maximumMinor ||
-      hello.workerNodeId !== bootstrap.workerNodeId ||
-      hello.controlManifestSha256 !== bootstrap.installationManifestSha256
+      hello.workerNodeId !== bootstrap.workerNodeId
     ) {
       throw runtimeError(
         "HANDSHAKE_CONTEXT_INVALID",
@@ -272,9 +271,6 @@ class ExecutorShadowSupervisor {
         sessionId: hello.sessionId,
         controlNonce: hello.controlNonce,
         executorNonce: this.#executorNonce,
-        executorManifestSha256: bootstrap.installationManifestSha256,
-        executorPolicySha256: this.#bootstrap.roleConfig.executorPolicySha256,
-        executorPreflightSha256: bootstrap.preflightSha256,
         maximumSlots: this.#bootstrap.roleConfig.maximumSlots,
       },
     });
@@ -311,9 +307,6 @@ class ExecutorShadowSupervisor {
       sessionId: helloAck.sessionId,
       controlNonce: helloAck.controlNonce,
       executorNonce: helloAck.executorNonce,
-      executorManifestSha256: helloAck.executorManifestSha256,
-      executorPolicySha256: helloAck.executorPolicySha256,
-      executorPreflightSha256: helloAck.executorPreflightSha256,
       isolationMode: "split-service-v1",
       ready: false,
       availableSlots: 0,

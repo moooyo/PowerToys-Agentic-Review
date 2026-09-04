@@ -106,12 +106,7 @@ export interface RuntimeBootstrapV2LabFacts {
   readonly bootstrapId: string;
   readonly forceTerminationReserveMs: number;
   readonly gracefulTimeoutMs: number;
-  readonly installationManifestSha256: string;
   readonly maximumQueuedBytesPerDirection: number;
-  readonly nodeBundleSha256: string;
-  readonly preflightSha256: string;
-  readonly releaseId: string;
-  readonly releaseTemplateSha256: string;
   readonly role: RoleConfigV3LabRole;
   readonly roleConfigDocument: Uint8Array;
   readonly workerNodeId: string;
@@ -181,13 +176,8 @@ export function createRuntimeBootstrapV2Lab(input: RuntimeBootstrapV2LabFacts): 
       ],
       protocolVersion: ROLE_CONFIG_V3_LAB_HOST_CONTROL_PROTOCOL_VERSION,
     },
-    installationManifestSha256: facts.installationManifestSha256,
     jobExecutionEnvelopeVersion: ROLE_CONFIG_V3_LAB_JOB_ENVELOPE_VERSION,
-    nodeBundleSha256: facts.nodeBundleSha256,
-    preflightSha256: facts.preflightSha256,
     protocolVersion: RUNTIME_BOOTSTRAP_V2_LAB_HOST_CONTROL_RPC_PROTOCOL_VERSION,
-    releaseId: facts.releaseId,
-    releaseTemplateSha256: facts.releaseTemplateSha256,
     role: facts.role,
     roleConfig: {
       base64Url: roleConfigDocument.toString("base64url"),
@@ -292,12 +282,7 @@ function snapshotFacts(input: RuntimeBootstrapV2LabFacts): RuntimeBootstrapV2Lab
     "bootstrapId",
     "forceTerminationReserveMs",
     "gracefulTimeoutMs",
-    "installationManifestSha256",
     "maximumQueuedBytesPerDirection",
-    "nodeBundleSha256",
-    "preflightSha256",
-    "releaseId",
-    "releaseTemplateSha256",
     "role",
     "roleConfigDocument",
     "workerNodeId",
@@ -328,12 +313,7 @@ function snapshotFacts(input: RuntimeBootstrapV2LabFacts): RuntimeBootstrapV2Lab
     bootstrapId: value("bootstrapId"),
     forceTerminationReserveMs: value("forceTerminationReserveMs"),
     gracefulTimeoutMs: value("gracefulTimeoutMs"),
-    installationManifestSha256: value("installationManifestSha256"),
     maximumQueuedBytesPerDirection: value("maximumQueuedBytesPerDirection"),
-    nodeBundleSha256: value("nodeBundleSha256"),
-    preflightSha256: value("preflightSha256"),
-    releaseId: value("releaseId"),
-    releaseTemplateSha256: value("releaseTemplateSha256"),
     role: value("role"),
     roleConfigDocument: Buffer.from(roleConfigDocument),
     workerNodeId: value("workerNodeId"),
