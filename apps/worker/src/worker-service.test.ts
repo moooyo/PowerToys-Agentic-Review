@@ -1129,7 +1129,6 @@ function createEnvelope(
     executionPolicy: {
       hardTimeoutMs: options.hardTimeoutMs ?? 10_000,
       noProgressTimeoutMs: 10_000,
-      maxCodexTurns: 1,
       allowedRecipeIds: [],
       requiredCapabilityLabels: {},
     },

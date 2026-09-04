@@ -349,6 +349,12 @@ describe("loadWorkerConfig execution mode", () => {
       minimumFreeDiskBytes: 10 * gibibyte,
       orphanRetentionHours: 24,
       orphanScanLimit: 100,
+      gitSharedCacheMaxBytes: 64 * gibibyte,
+      gitSharedMinimumFreeDiskBytes: 10 * gibibyte,
+      gitSharedScanEntryLimit: 250_000,
+      gitSharedScanTimeoutMs: 30_000,
+      gitSharedGcMinimumIntervalMinutes: 60,
+      gitSharedGcPruneAgeHours: 168,
     });
     expect(config.shutdownGraceSeconds).toBe(90);
     expect(config.capabilities).toMatchObject({
@@ -691,6 +697,12 @@ describe("Worker execution disk policy", () => {
     ["WORKER_EXECUTION_MINIMUM_FREE_DISK_BYTES", String(gibibyte - 1)],
     ["WORKER_EXECUTION_ORPHAN_RETENTION_HOURS", "0"],
     ["WORKER_EXECUTION_ORPHAN_SCAN_LIMIT", "10001"],
+    ["WORKER_GIT_SHARED_CACHE_MAX_BYTES", String(gibibyte - 1)],
+    ["WORKER_GIT_SHARED_MINIMUM_FREE_DISK_BYTES", String(gibibyte - 1)],
+    ["WORKER_GIT_SHARED_SCAN_ENTRY_LIMIT", "99"],
+    ["WORKER_GIT_SHARED_SCAN_TIMEOUT_MS", "99"],
+    ["WORKER_GIT_SHARED_GC_MINIMUM_INTERVAL_MINUTES", "10081"],
+    ["WORKER_GIT_SHARED_GC_PRUNE_AGE_HOURS", "0"],
   ])("rejects unsafe disk or orphan setting %s", (name, value) => {
     expect(() => loadWorkerConfig({ ...enabledEnvironment(), [name]: value })).toThrow(
       new RegExp(name, "u"),
@@ -714,6 +726,12 @@ describe("Worker execution disk policy", () => {
       WORKER_EXECUTION_MINIMUM_FREE_DISK_BYTES: String(12 * gibibyte),
       WORKER_EXECUTION_ORPHAN_RETENTION_HOURS: "48",
       WORKER_EXECUTION_ORPHAN_SCAN_LIMIT: "250",
+      WORKER_GIT_SHARED_CACHE_MAX_BYTES: String(96 * gibibyte),
+      WORKER_GIT_SHARED_MINIMUM_FREE_DISK_BYTES: String(14 * gibibyte),
+      WORKER_GIT_SHARED_SCAN_ENTRY_LIMIT: "500000",
+      WORKER_GIT_SHARED_SCAN_TIMEOUT_MS: "45000",
+      WORKER_GIT_SHARED_GC_MINIMUM_INTERVAL_MINUTES: "15",
+      WORKER_GIT_SHARED_GC_PRUNE_AGE_HOURS: "336",
     });
 
     expect(config.execution).toMatchObject({
@@ -722,6 +740,12 @@ describe("Worker execution disk policy", () => {
       minimumFreeDiskBytes: 12 * gibibyte,
       orphanRetentionHours: 48,
       orphanScanLimit: 250,
+      gitSharedCacheMaxBytes: 96 * gibibyte,
+      gitSharedMinimumFreeDiskBytes: 14 * gibibyte,
+      gitSharedScanEntryLimit: 500_000,
+      gitSharedScanTimeoutMs: 45_000,
+      gitSharedGcMinimumIntervalMinutes: 15,
+      gitSharedGcPruneAgeHours: 336,
     });
   });
 });

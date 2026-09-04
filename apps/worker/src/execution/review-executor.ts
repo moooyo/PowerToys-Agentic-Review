@@ -663,24 +663,19 @@ function isProcessHardTimeout(error: unknown): boolean {
 }
 
 /**
- * Keeps the lease alive while the Worker drains Codex. Timer pulses prove Worker liveness, not
- * model or child progress; the ProcessHost hard timeout remains the hang boundary.
+ * Reports throttled progress only when Codex emits stdout or stderr activity.
+ * Silent runs must age out under the Server no-progress deadline.
  */
 class CodexProgressPulse {
-  readonly #intervalMs: number;
   readonly #activityThrottleMs: number;
-  readonly #timer: NodeJS.Timeout;
-  #lastReportAt = Date.now();
+  #lastReportAt = 0;
   #stopped = false;
 
   public constructor(
     private readonly context: JobExecutionContext,
     noProgressTimeoutMs: number,
   ) {
-    this.#intervalMs = Math.min(30_000, Math.max(5_000, Math.floor(noProgressTimeoutMs / 3)));
-    this.#activityThrottleMs = Math.min(5_000, this.#intervalMs);
-    this.#timer = setInterval(() => this.#report(), this.#intervalMs);
-    this.#timer.unref();
+    this.#activityThrottleMs = Math.min(5_000, Math.max(250, Math.floor(noProgressTimeoutMs / 4)));
   }
 
   public observeActivity(): void {
@@ -694,7 +689,6 @@ class CodexProgressPulse {
       return;
     }
     this.#stopped = true;
-    clearInterval(this.#timer);
   }
 
   #report(): void {
@@ -710,7 +704,7 @@ async function settleCodexProcess(managed: ManagedProcess, reportActivity: () =>
   return Promise.allSettled([
     managed.completed,
     collectCodexRecords(managed.stdout, reportActivity),
-    drainStream(managed.stderr),
+    drainStream(managed.stderr, reportActivity),
   ] as const);
 }
 
@@ -740,25 +734,28 @@ async function collectCodexRecords(
 
   for await (const chunk of stdout) {
     if (typeof chunk === "string" || chunk instanceof Uint8Array) {
-      const parsed = parser.push(chunk);
-      retain(parsed);
-      if (parsed.length > 0) {
+      if (chunk.length > 0) {
         reportActivity();
       }
+      const parsed = parser.push(chunk);
+      retain(parsed);
     } else {
       throw new TypeError("Codex stdout emitted an unsupported chunk type.");
     }
   }
   const finalRecords = parser.finish();
   retain(finalRecords);
-  if (finalRecords.length > 0) {
-    reportActivity();
-  }
   return { records, limitExceeded };
 }
 
-async function drainStream(stream: Readable): Promise<void> {
-  for await (const _chunk of stream) {
+async function drainStream(stream: Readable, reportActivity: () => void): Promise<void> {
+  for await (const chunk of stream) {
+    if (
+      (typeof chunk === "string" && chunk.length > 0) ||
+      (chunk instanceof Uint8Array && chunk.byteLength > 0)
+    ) {
+      reportActivity();
+    }
     // Deliberately discard stderr while draining it to avoid backpressure and data disclosure.
   }
 }

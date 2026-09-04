@@ -23,7 +23,6 @@ export const defaultTrustedSchedulingPolicy: TrustedSchedulingPolicy = {
     executionPolicy: {
       hardTimeoutMs: 10 * 60 * 1_000,
       noProgressTimeoutMs: 2 * 60 * 1_000,
-      maxCodexTurns: 1,
       allowedRecipeIds: [],
       requiredCapabilityLabels: staticReviewCapabilityLabels,
     },
@@ -36,7 +35,6 @@ export const defaultTrustedSchedulingPolicy: TrustedSchedulingPolicy = {
     executionPolicy: {
       hardTimeoutMs: 60 * 60 * 1_000,
       noProgressTimeoutMs: 10 * 60 * 1_000,
-      maxCodexTurns: 16,
       allowedRecipeIds: [],
       requiredCapabilityLabels: staticReviewCapabilityLabels,
     },

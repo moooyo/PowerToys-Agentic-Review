@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
+  deriveWorkerProcessHostInstanceKey,
   type ProcessHostSpawn,
   type ProcessHostSpawnOptions,
   StdioProcessHostClient,
@@ -104,6 +105,8 @@ const readyEvent = (maximumConcurrentRequests = 4): ProcessHostEvent => ({
   },
 });
 
+const defaultInstanceKey = "a".repeat(64);
+
 interface TestTimeoutOptions {
   readonly requestTimeoutMs?: number;
   readonly startTimeoutMs?: number;
@@ -135,6 +138,7 @@ async function connect(
   };
   const connected = StdioProcessHostClient.create({
     processHostPath: "C:\\Program Files\\AgenticReview\\AgenticReview.ProcessHost.exe",
+    instanceKey: defaultInstanceKey,
     maximumConcurrentRequests,
     hostEnvironment: {
       SystemRoot: "C:\\Windows",
@@ -194,6 +198,22 @@ async function closeNormally(
 }
 
 describe("StdioProcessHostClient", () => {
+  it("derives a deterministic instance key from worker identity roots", () => {
+    const first = deriveWorkerProcessHostInstanceKey({
+      dataDirectory: "D:/AgenticReview/Data/",
+    });
+    const second = deriveWorkerProcessHostInstanceKey({
+      dataDirectory: "d:\\agenticreview\\data",
+    });
+    const different = deriveWorkerProcessHostInstanceKey({
+      dataDirectory: "E:\\AgenticReview\\Data",
+    });
+
+    expect(first).toMatch(/^[a-f0-9]{64}$/u);
+    expect(second).toBe(first);
+    expect(different).not.toBe(first);
+  });
+
   it.each([
     "C:\\AgenticReview\\..\\Other\\ProcessHost.exe",
     "C:\\AgenticReview\\ProcessHost.exe:payload",
@@ -206,6 +226,7 @@ describe("StdioProcessHostClient", () => {
     await expect(
       StdioProcessHostClient.create({
         processHostPath,
+        instanceKey: defaultInstanceKey,
         maximumConcurrentRequests: 1,
         spawnProcess: () => {
           spawned = true;
@@ -216,10 +237,37 @@ describe("StdioProcessHostClient", () => {
     expect(spawned).toBe(false);
   });
 
+  it.each(["", "A".repeat(64), `${"a".repeat(63)}g`])(
+    "rejects invalid instance keys before spawn: %s",
+    async (instanceKey) => {
+      const child = new FakeProcessHost();
+      let spawned = false;
+
+      await expect(
+        StdioProcessHostClient.create({
+          processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+          instanceKey,
+          maximumConcurrentRequests: 1,
+          spawnProcess: () => {
+            spawned = true;
+            return child.asChild();
+          },
+        }),
+      ).rejects.toBeInstanceOf(RangeError);
+      expect(spawned).toBe(false);
+    },
+  );
+
   it("uses a minimal spawn boundary and multiplexes sequenced output", async () => {
     const { child, client, spawn } = await connect();
     expect(spawn.path).toMatch(/ProcessHost\.exe$/u);
-    expect(spawn.argumentsList).toEqual(["--stdio", "--max-concurrent-requests", "4"]);
+    expect(spawn.argumentsList).toEqual([
+      "--stdio",
+      "--max-concurrent-requests",
+      "4",
+      "--instance-key",
+      defaultInstanceKey,
+    ]);
     expect(spawn.options).toMatchObject({ shell: false, windowsHide: true, detached: false });
     expect(spawn.options.env.SECRET_TOKEN).toBeUndefined();
 
@@ -317,6 +365,7 @@ describe("StdioProcessHostClient", () => {
       await expect(
         StdioProcessHostClient.create({
           processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+          instanceKey: defaultInstanceKey,
           maximumConcurrentRequests,
           spawnProcess: () => {
             spawned = true;
@@ -355,6 +404,7 @@ describe("StdioProcessHostClient", () => {
     const mismatched = new FakeProcessHost();
     const connecting = StdioProcessHostClient.create({
       processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+      instanceKey: defaultInstanceKey,
       maximumConcurrentRequests: 4,
       spawnProcess: () => mismatched.asChild(),
     });
@@ -785,6 +835,7 @@ describe("StdioProcessHostClient", () => {
     const child = new FakeProcessHost();
     const connecting = StdioProcessHostClient.create({
       processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+      instanceKey: defaultInstanceKey,
       maximumConcurrentRequests: 4,
       spawnProcess: () => child.asChild(),
     });

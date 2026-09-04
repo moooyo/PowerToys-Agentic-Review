@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-linux:
+    name: Node Linux Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.x
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Lint
+        run: pnpm lint
+
+  process-host-linux:
+    name: ProcessHost Linux Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: native/process-host
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/process-host/go.mod
+          cache-dependency-path: native/process-host/go.sum
+
+      - name: Run go test
+        run: go test -count=1 ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Cross-compile Windows binaries
+        run: |
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -trimpath -o dist/AgenticReview.ProcessHost-windows-amd64.exe .
+          GOOS=windows GOARCH=arm64 go build -trimpath -o dist/AgenticReview.ProcessHost-windows-arm64.exe .
+
+  process-host-windows:
+    name: Windows Worker Checks
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.x
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck Windows Worker
+        run: pnpm --filter @agentic-review/worker typecheck
+
+      - name: Test Windows Worker
+        run: pnpm --filter @agentic-review/worker test
+
+      - name: Build Windows Worker bundle
+        run: pnpm --filter @agentic-review/worker build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/process-host/go.mod
+          cache-dependency-path: native/process-host/go.sum
+
+      - name: Run Windows go test serially
+        working-directory: native/process-host
+        run: go test -count=1 -p 1 -timeout 5m ./...
+
+      - name: Run Windows go vet serially
+        working-directory: native/process-host
+        run: go vet -p 1 ./...
+
+      - name: Build Windows ProcessHost binary
+        working-directory: native/process-host
+        run: go build -trimpath -o AgenticReview.ProcessHost.exe .
+
+      - name: Validate deploy worker PowerShell script syntax
+        run: |
+          $scriptPaths = @(Get-ChildItem -Path (Join-Path $PWD "deploy/worker") -Filter "*.ps1" -File | Select-Object -ExpandProperty FullName)
+          if ($scriptPaths.Count -eq 0) {
+            throw "No deploy/worker PowerShell scripts found to validate."
+          }
+
+          $hasErrors = $false
+          foreach ($scriptPath in $scriptPaths) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              $hasErrors = $true
+              $parseErrors | ForEach-Object { Write-Error "${scriptPath}: $($_.Message)" }
+            }
+          }
+
+          if ($hasErrors) {
+            throw "PowerShell syntax validation failed for deploy/worker scripts."
+          }

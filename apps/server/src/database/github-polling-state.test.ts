@@ -168,7 +168,6 @@ const reconciliationEntry = (
         executionPolicy: {
           hardTimeoutMs: 600_000,
           noProgressTimeoutMs: 600_000,
-          maxCodexTurns: 3,
           allowedRecipeIds: ["issue-triage"],
           requiredCapabilityLabels: {},
         },

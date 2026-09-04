@@ -10,6 +10,7 @@ import type {
 } from "@agentic-review/contracts";
 import type { ReviewControlAdapter } from "./adapter";
 import {
+  ReviewControlHttpError,
   ReviewControlProtocolError,
   ReviewControlRequestError,
   ReviewControlUnsupportedOperationError,
@@ -17,6 +18,7 @@ import {
 import { DashboardHttpClient, type DashboardHttpClientOptions } from "./http-client";
 import {
   mapCreatedWorkerCredentialResponse,
+  mapJobDetailsResponse,
   mapJobListResponse,
   mapRevokedWorkerCredentialResponse,
   mapRotatedWorkerCredentialResponse,
@@ -29,6 +31,7 @@ import type {
   Approval,
   ApprovalDecision,
   Job,
+  JobDetails,
   ListQuery,
   PageResult,
   Publication,
@@ -41,6 +44,7 @@ import type {
 } from "./types";
 
 const endpoints = {
+  jobById: "/api/v1/dashboard/jobs",
   jobs: "/api/v1/dashboard/jobs",
   system: "/api/v1/dashboard/system",
   workerCredentials: "/api/v1/operator/worker-nodes",
@@ -260,6 +264,13 @@ const buildJobPath = (query: ListQuery, operation: string): string => {
   return withQuery(endpoints.jobs, parameters);
 };
 
+const buildJobByIdPath = (jobId: string, operation: string): string => {
+  if (jobId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(jobId)) {
+    invalidRequest(operation, "jobId", "a valid entity identifier");
+  }
+  return `${endpoints.jobById}/${jobId}`;
+};
+
 const buildWorkerPath = (query: ListQuery, operation: string): string => {
   assertKnownFilters(query.filters, ["status"], operation);
   const parameters = baseQuery(query, operation);
@@ -382,6 +393,23 @@ export class HttpReviewControlAdapter implements ReviewControlAdapter {
     const operation = "listJobs";
     const response = await this.client.get(buildJobPath(query, operation), operation);
     return mapJobListResponse(response, operation);
+  }
+
+  async getJob(jobId: string): Promise<JobDetails | null> {
+    const operation = "getJob";
+    try {
+      const response = await this.client.get(buildJobByIdPath(jobId, operation), operation);
+      return mapJobDetailsResponse(response, operation);
+    } catch (error) {
+      if (
+        error instanceof ReviewControlHttpError &&
+        error.status === 404 &&
+        error.serverCode === "dashboard_job_not_found"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async cancelJob(_jobId: string): Promise<void> {

@@ -16,6 +16,7 @@ The HTTP adapter reads these same-origin endpoints:
 
 - `GET /api/v1/dashboard/work-items`
 - `GET /api/v1/dashboard/jobs`
+- `GET /api/v1/dashboard/jobs/:jobId`
 - `GET /api/v1/dashboard/workers`
 - `GET /api/v1/dashboard/system`
 - `GET /api/v1/operator/worker-nodes`
@@ -42,6 +43,10 @@ the route budget. Requests use
 deadline. Response bodies are streamed through a 2 MiB limit before JSON is
 parsed. Every successful response is structurally validated and explicitly
 mapped from the shared Server contract into the page-facing model.
+
+The Job detail response exposes only the structured persisted result projection. It does not repeat
+the canonical raw result JSON, so the detail endpoint remains inside the same bounded response
+channel and does not introduce an artifact store.
 
 The Workers table paginates the cached merged snapshot locally with 50 rows by
 default and a hard maximum of 200 rows. Page and filter changes do not repeat

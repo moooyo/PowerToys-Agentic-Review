@@ -105,13 +105,15 @@ At startup the Worker:
 
 1. loads its fixed Bearer Token profile;
 2. validates configured executable paths and SHA-256 digests;
-3. starts ProcessHost over its NDJSON standard-I/O protocol;
+3. starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
 4. sweeps abandoned attempt directories;
 5. registers one Worker instance; and
 6. enters the claim, heartbeat, execute, and terminal-report loop.
 
 Only one Worker process may use a node's data, shared-repository, and workspace directories at a
-time. The external service manager is responsible for preventing overlapping local instances.
+time. ProcessHost holds a Windows global named mutex derived from the resolved Worker data root for
+its complete lifetime. A service manager may restart the Worker, but it is not the exclusivity
+boundary.
 
 ## Git repository and worktree lifecycle
 
@@ -140,9 +142,18 @@ The current Worker uses an anonymous GitHub HTTPS URL and disables credential he
 repository checkout is not supported by this MVP.
 
 Worktrees live below the attempt workspace root. The bare repository persists across jobs, so
-subsequent fetches transfer only missing objects. Repository locks are per repository within the
-single Worker process: attempts for the same repository serialize setup and cleanup, while different
-repositories can prepare concurrently.
+subsequent fetches transfer only missing objects. A cancellable shared-cache mutation lock serializes
+global accounting and bare-repository setup or cleanup across repositories; per-repository locks
+preserve ordering for each repository. Once prepared, worktrees for different jobs can execute
+concurrently.
+
+The shared repository root has a separate total-byte limit and minimum-free-disk guard. Accounting
+is bounded by entry count and wall-clock time and fails closed on reparse points or unstable paths.
+The Worker checks the budget before and after fetch and after worktree cleanup. When the budget is
+violated, it first prunes stale worktree metadata, verifies that no registered or in-memory worktree
+is active, expires reflogs only to the configured conservative age, and runs repository-local GC
+with the same prune age. A cache that remains over budget is reported as a node infrastructure
+fault so the Worker drains instead of accepting more work.
 
 Issue-triage jobs currently use an isolated non-repository workspace because their envelope contains
 an issue snapshot rather than a repository revision.
@@ -178,6 +189,10 @@ The Worker validates the model output against the job schema, canonicalizes it, 
 and submits the inline result. The Server revalidates the result before the fenced database
 transaction completes the attempt.
 
+Operators can read the structured persisted result through the authenticated Dashboard job-detail
+endpoint. The response projects the validated PR findings or issue-triage fields and does not create
+or expose a second raw-result or artifact channel.
+
 There are no artifact-create, chunk-upload, artifact-finalize, or artifact-backed-completion routes.
 Optional log or artifact retention may be designed later without becoming a second authoritative
 result channel.
@@ -202,8 +217,8 @@ stopped while operators reconcile the restored database and Worker credentials. 
 
 - Windows-native end-to-end validation must still cover the actual Worker, Git worktree, Codex, and
   ProcessHost composition.
-- Shared bare repositories do not yet have a separate cache-size or garbage-collection policy.
-- The external Windows service-management and single-instance mechanism is deployment-owned.
+- Automatic Windows service installation, restart policy, and upgrade management remain
+  deployment-owned.
 - The current pull request fetch policy assumes the configured base branch is `main`.
 - Repository checkout currently supports only anonymously readable public GitHub repositories.
 - GitHub publication, approval workflows, and optional execution-log retention are not implemented.

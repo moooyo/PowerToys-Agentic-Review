@@ -2,9 +2,13 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   type ActiveAuthorizedRequestEpoch,
   type AuthorizationDecision,
+  type DashboardJobDetailRead,
+  DashboardJobDetailReadSchema,
   type DashboardJobListQuery,
   type DashboardJobListResponse,
   DashboardJobListResponseSchema,
+  type DashboardJobReadQuery,
+  DashboardJobReadQuerySchema,
   type DashboardJobStage,
   type DashboardSystemRead,
   DashboardSystemReadSchema,
@@ -353,6 +357,43 @@ interface JobRow {
   readonly updatedAt: string;
 }
 
+interface JobDetailsRow extends JobRow {
+  readonly resultDigest: string | null;
+  readonly failureMessage: string | null;
+  readonly reviewResultId: string | null;
+  readonly reviewResultSchemaId: "IssueTriageV1" | "PrReviewPlanV1" | null;
+  readonly reviewResultDigest: string | null;
+  readonly reviewResultSummary: string | null;
+  readonly reviewRequestedRecipeIdsJson: string | null;
+  readonly reviewResultCreatedAt: string | null;
+  readonly prReviewAssessment: "approve" | "comment" | "request_changes" | null;
+  readonly issueCategory:
+    | "bug"
+    | "feature_request"
+    | "documentation"
+    | "question"
+    | "support"
+    | "other"
+    | null;
+  readonly issuePriority: number | null;
+  readonly issueConfidence: number | null;
+  readonly issueSuggestedLabelsJson: string | null;
+  readonly issueMissingInformationJson: string | null;
+  readonly issueDuplicateCandidatesJson: string | null;
+}
+
+interface ReviewFindingRow {
+  readonly findingId: string;
+  readonly ordinal: number;
+  readonly priority: number;
+  readonly title: string;
+  readonly body: string;
+  readonly path: string;
+  readonly line: number;
+  readonly endLine: number | null;
+  readonly confidence: number;
+}
+
 const jobSql = `
   SELECT
     job.id,
@@ -389,6 +430,72 @@ const jobSql = `
       ) LIKE ? ESCAPE '\\'
     )
   ORDER BY job.created_at DESC, job.id
+`;
+
+const jobByIdSql = `
+  SELECT
+    job.id,
+    job.work_item_id AS "workItemId",
+    repository.full_name || '#' || item.github_number AS "workItemRef",
+    CASE job.job_kind
+      WHEN 'issue_triage' THEN 'Issue triage'
+      WHEN 'pull_request_review' THEN 'PR review'
+    END AS title,
+    job.generation,
+    job.status,
+    job.current_step AS phase,
+    job.attempt_count AS attempt,
+    job.max_attempts AS "maxAttempts",
+    attempt.worker_node_id AS "workerNodeId",
+    job.lease_generation AS "leaseGeneration",
+    attempt.lease_expires_at AS "leaseExpiresAt",
+    attempt.last_heartbeat_at AS "progressUpdatedAt",
+    job.resource_revision AS "targetRevisionKey",
+    job.failure_code AS "failureCode",
+    review_result.result_digest AS "resultDigest",
+    job.failure_message AS "failureMessage",
+    review_result.id AS "reviewResultId",
+    review_result.schema_id AS "reviewResultSchemaId",
+    review_result.result_digest AS "reviewResultDigest",
+    review_result.summary AS "reviewResultSummary",
+    review_result.requested_recipe_ids_json AS "reviewRequestedRecipeIdsJson",
+    review_result.created_at AS "reviewResultCreatedAt",
+    pr_review.assessment AS "prReviewAssessment",
+    issue_triage.category AS "issueCategory",
+    issue_triage.priority AS "issuePriority",
+    issue_triage.confidence AS "issueConfidence",
+    issue_triage.suggested_labels_json AS "issueSuggestedLabelsJson",
+    issue_triage.missing_information_json AS "issueMissingInformationJson",
+    issue_triage.duplicate_candidates_json AS "issueDuplicateCandidatesJson",
+    job.started_at AS "startedAt",
+    job.completed_at AS "completedAt",
+    job.created_at AS "createdAt",
+    job.updated_at AS "updatedAt"
+  FROM jobs AS job
+  JOIN work_items AS item ON item.id = job.work_item_id
+  JOIN repositories AS repository ON repository.id = item.repository_id
+  LEFT JOIN run_attempts AS attempt ON attempt.id = job.current_run_attempt_id
+  LEFT JOIN review_results AS review_result ON review_result.job_id = job.id
+  LEFT JOIN pr_review_results AS pr_review ON pr_review.review_result_id = review_result.id
+  LEFT JOIN issue_triage_results AS issue_triage ON issue_triage.review_result_id = review_result.id
+  WHERE job.id = ?
+  LIMIT 1
+`;
+
+const reviewFindingsSql = `
+  SELECT
+    finding.finding_id AS "findingId",
+    finding.ordinal,
+    finding.priority,
+    finding.title,
+    finding.body,
+    finding.path,
+    finding.line,
+    finding.end_line AS "endLine",
+    finding.confidence
+  FROM pr_review_findings AS finding
+  WHERE finding.review_result_id = ?
+  ORDER BY finding.ordinal ASC
 `;
 
 const elapsedSeconds = (row: JobRow, now: number): number => {
@@ -471,6 +578,242 @@ export const listJobs = (
     return result;
   });
 };
+
+const parseStringArray = (value: string): string[] => {
+  const parsed = parseJson<unknown>(value);
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new GitHubIngestionInvariantError(
+      "The persisted JSON value must be an array of strings.",
+    );
+  }
+  return [...parsed];
+};
+
+const requirePersistedValue = <T>(value: T | null, message: string): T => {
+  if (value === null) {
+    throw new GitHubIngestionInvariantError(message);
+  }
+  return value;
+};
+
+const parseIssueDuplicateCandidates = (
+  value: string,
+): Array<{ readonly number: number; readonly reason: string }> => {
+  const parsed = parseJson<unknown>(value);
+  if (!Array.isArray(parsed)) {
+    throw new GitHubIngestionInvariantError(
+      "The persisted duplicate-candidates projection must be an array.",
+    );
+  }
+  return parsed.map((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new GitHubIngestionInvariantError(
+        "The persisted duplicate-candidates projection contains an invalid item.",
+      );
+    }
+    const candidate = item as Record<string, unknown>;
+    const number = candidate.number;
+    const reason = candidate.reason;
+    if (
+      typeof number !== "number" ||
+      !Number.isSafeInteger(number) ||
+      number < 1 ||
+      number > 2_147_483_647 ||
+      typeof reason !== "string" ||
+      reason.length < 1 ||
+      reason.length > 2_048
+    ) {
+      throw new GitHubIngestionInvariantError(
+        "The persisted duplicate-candidates projection contains an invalid item.",
+      );
+    }
+    return {
+      number,
+      reason,
+    };
+  });
+};
+
+const mapReviewFinding = (finding: ReviewFindingRow) => {
+  if (finding.endLine !== null && finding.endLine < finding.line) {
+    throw new GitHubIngestionInvariantError(
+      "The persisted review finding end line must be greater than or equal to line.",
+    );
+  }
+  return {
+    findingId: finding.findingId,
+    ordinal: finding.ordinal,
+    priority: finding.priority,
+    title: finding.title,
+    body: finding.body,
+    path: finding.path,
+    line: finding.line,
+    endLine: finding.endLine,
+    confidence: finding.confidence,
+  };
+};
+
+export const getJob = (
+  database: DatabaseSync,
+  input: DashboardJobReadQuery,
+): DashboardJobDetailRead | null =>
+  withReadTransaction(database, () => {
+    if (!Value.Check(DashboardJobReadQuerySchema, input)) {
+      throw new GitHubIngestionInvariantError(
+        "The dashboard job lookup input does not match DashboardJobReadQuerySchema.",
+      );
+    }
+    const row = database.prepare(jobByIdSql).get(input.jobId) as unknown as
+      | JobDetailsRow
+      | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    const prReviewFindings: ReviewFindingRow[] =
+      row.reviewResultId !== null && row.prReviewAssessment !== null
+        ? (database
+            .prepare(reviewFindingsSql)
+            .all(row.reviewResultId) as unknown as ReviewFindingRow[])
+        : [];
+
+    if (
+      row.reviewResultId !== null &&
+      (row.reviewResultSchemaId === null ||
+        row.reviewResultDigest === null ||
+        row.reviewResultSummary === null ||
+        row.reviewRequestedRecipeIdsJson === null ||
+        row.reviewResultCreatedAt === null)
+    ) {
+      throw new GitHubIngestionInvariantError("The persisted review result row is incomplete.");
+    }
+
+    if (row.reviewResultSchemaId === "PrReviewPlanV1" && row.prReviewAssessment === null) {
+      throw new GitHubIngestionInvariantError(
+        "The persisted PR review result is missing its projection assessment.",
+      );
+    }
+
+    if (
+      row.reviewResultSchemaId === "IssueTriageV1" &&
+      (row.issueCategory === null ||
+        row.issuePriority === null ||
+        row.issueConfidence === null ||
+        row.issueSuggestedLabelsJson === null ||
+        row.issueMissingInformationJson === null ||
+        row.issueDuplicateCandidatesJson === null)
+    ) {
+      throw new GitHubIngestionInvariantError(
+        "The persisted issue triage result is missing its projection payload.",
+      );
+    }
+
+    const issueTriage =
+      row.reviewResultSchemaId !== "IssueTriageV1"
+        ? null
+        : {
+            category: requirePersistedValue(
+              row.issueCategory,
+              "The persisted issue triage result is missing its category.",
+            ),
+            priority: requirePersistedValue(
+              row.issuePriority,
+              "The persisted issue triage result is missing its priority.",
+            ),
+            confidence: requirePersistedValue(
+              row.issueConfidence,
+              "The persisted issue triage result is missing its confidence.",
+            ),
+            suggestedLabels: parseStringArray(
+              requirePersistedValue(
+                row.issueSuggestedLabelsJson,
+                "The persisted issue triage result is missing suggested labels.",
+              ),
+            ),
+            missingInformation: parseStringArray(
+              requirePersistedValue(
+                row.issueMissingInformationJson,
+                "The persisted issue triage result is missing information requirements.",
+              ),
+            ),
+            duplicateCandidates: parseIssueDuplicateCandidates(
+              requirePersistedValue(
+                row.issueDuplicateCandidatesJson,
+                "The persisted issue triage result is missing duplicate candidates.",
+              ),
+            ),
+          };
+
+    const reviewResult =
+      row.reviewResultId === null
+        ? null
+        : {
+            reviewResultId: row.reviewResultId,
+            schemaId: requirePersistedValue(
+              row.reviewResultSchemaId,
+              "The persisted review result is missing its schema identifier.",
+            ),
+            resultDigest: requirePersistedValue(
+              row.reviewResultDigest,
+              "The persisted review result is missing its digest.",
+            ),
+            summary: requirePersistedValue(
+              row.reviewResultSummary,
+              "The persisted review result is missing its summary.",
+            ),
+            requestedRecipeIds: parseStringArray(
+              requirePersistedValue(
+                row.reviewRequestedRecipeIdsJson,
+                "The persisted review result is missing requested recipes.",
+              ),
+            ),
+            createdAt: requirePersistedValue(
+              row.reviewResultCreatedAt,
+              "The persisted review result is missing its creation timestamp.",
+            ),
+            prReview:
+              row.reviewResultSchemaId !== "PrReviewPlanV1"
+                ? null
+                : {
+                    assessment: requirePersistedValue(
+                      row.prReviewAssessment,
+                      "The persisted PR review result is missing its assessment.",
+                    ),
+                    findings: prReviewFindings.map(mapReviewFinding),
+                  },
+            issueTriage,
+          };
+
+    const result: DashboardJobDetailRead = {
+      id: row.id,
+      workItemId: row.workItemId,
+      workItemRef: row.workItemRef,
+      title: row.title,
+      generation: row.generation,
+      status: row.status,
+      phase: row.phase,
+      attempt: row.attempt,
+      maxAttempts: row.maxAttempts,
+      workerNodeId: row.workerNodeId,
+      leaseGeneration: row.leaseGeneration > 0 ? row.leaseGeneration : null,
+      leaseExpiresAt: row.leaseExpiresAt,
+      progressUpdatedAt: row.progressUpdatedAt,
+      elapsedSeconds: elapsedSeconds(row, Date.now()),
+      targetRevisionKey: row.targetRevisionKey,
+      outcome: jobOutcome(row),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      failureCode: row.failureCode,
+      failureMessage: row.failureMessage,
+      resultDigest: row.resultDigest,
+      reviewResult,
+    };
+    if (!Value.Check(DashboardJobDetailReadSchema, result)) {
+      throw new GitHubIngestionInvariantError(
+        "The database job projection does not match DashboardJobDetailReadSchema.",
+      );
+    }
+    return result;
+  });
 
 interface WorkerRow {
   readonly id: string;

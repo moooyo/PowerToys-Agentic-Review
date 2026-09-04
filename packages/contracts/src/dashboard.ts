@@ -30,6 +30,15 @@ const NullableDateTimeSchema = Type.Union([DateTimeSchema, Type.Null()]);
 const NullableEntityIdSchema = Type.Union([EntityIdSchema, Type.Null()]);
 const NullableActorSchema = Type.Union([GitHubActorSchema, Type.Null()]);
 
+const DashboardSourceLineSchema = Type.Integer({ minimum: 1, maximum: 10_000_000 });
+const DashboardRequestedRecipeIdSchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[a-z0-9][a-z0-9._-]*$",
+});
+const DashboardIssueLabelSchema = Type.String({ minLength: 1, maxLength: 100 });
+const DashboardMissingInformationSchema = Type.String({ minLength: 1, maxLength: 2_048 });
+
 export const DashboardAuthorizationValues = ["self", "allowlisted", "denied"] as const;
 export const DashboardAuthorizationSchema = Type.Union(
   DashboardAuthorizationValues.map((value) => Type.Literal(value)),
@@ -216,6 +225,105 @@ export const DashboardJobReadSchema = Type.Object(
   { additionalProperties: false },
 );
 export type DashboardJobRead = Static<typeof DashboardJobReadSchema>;
+
+export const DashboardJobReadQuerySchema = Type.Object(
+  {
+    jobId: EntityIdSchema,
+  },
+  { additionalProperties: false },
+);
+export type DashboardJobReadQuery = Static<typeof DashboardJobReadQuerySchema>;
+
+export const DashboardPrReviewFindingSchema = Type.Object(
+  {
+    findingId: Type.String({ minLength: 1, maxLength: 128 }),
+    ordinal: NonNegativeIntegerSchema,
+    priority: Type.Integer({ minimum: 0, maximum: 3 }),
+    title: Type.String({ minLength: 1, maxLength: 256 }),
+    body: Type.String({ minLength: 1, maxLength: 8_192 }),
+    path: Type.String({ minLength: 1, maxLength: 1_024 }),
+    line: DashboardSourceLineSchema,
+    endLine: Type.Union([DashboardSourceLineSchema, Type.Null()]),
+    confidence: Type.Number({ minimum: 0, maximum: 1 }),
+  },
+  { additionalProperties: false },
+);
+export type DashboardPrReviewFinding = Static<typeof DashboardPrReviewFindingSchema>;
+
+export const DashboardIssueTriageProjectionSchema = Type.Object(
+  {
+    category: Type.Union([
+      Type.Literal("bug"),
+      Type.Literal("feature_request"),
+      Type.Literal("documentation"),
+      Type.Literal("question"),
+      Type.Literal("support"),
+      Type.Literal("other"),
+    ]),
+    priority: Type.Integer({ minimum: 0, maximum: 3 }),
+    confidence: Type.Number({ minimum: 0, maximum: 1 }),
+    suggestedLabels: Type.Array(DashboardIssueLabelSchema, {
+      maxItems: 32,
+      uniqueItems: true,
+    }),
+    missingInformation: Type.Array(DashboardMissingInformationSchema, {
+      maxItems: 32,
+      uniqueItems: true,
+    }),
+    duplicateCandidates: Type.Array(
+      Type.Object(
+        {
+          number: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+          reason: Type.String({ minLength: 1, maxLength: 2_048 }),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: 20 },
+    ),
+  },
+  { additionalProperties: false },
+);
+export type DashboardIssueTriageProjection = Static<typeof DashboardIssueTriageProjectionSchema>;
+
+export const DashboardReviewResultReadSchema = Type.Object(
+  {
+    reviewResultId: EntityIdSchema,
+    schemaId: Type.Union([Type.Literal("IssueTriageV1"), Type.Literal("PrReviewPlanV1")]),
+    resultDigest: Sha256Schema,
+    summary: Type.String({ minLength: 1, maxLength: 8_192 }),
+    requestedRecipeIds: Type.Array(DashboardRequestedRecipeIdSchema, {
+      maxItems: 32,
+      uniqueItems: true,
+    }),
+    createdAt: DateTimeSchema,
+    prReview: Type.Union([
+      Type.Object(
+        {
+          assessment: Type.Union([
+            Type.Literal("approve"),
+            Type.Literal("comment"),
+            Type.Literal("request_changes"),
+          ]),
+          findings: Type.Array(DashboardPrReviewFindingSchema, { maxItems: 100 }),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Null(),
+    ]),
+    issueTriage: Type.Union([DashboardIssueTriageProjectionSchema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+export type DashboardReviewResultRead = Static<typeof DashboardReviewResultReadSchema>;
+
+export const DashboardJobDetailReadSchema = Type.Object(
+  {
+    ...DashboardJobReadSchema.properties,
+    reviewResult: Type.Union([DashboardReviewResultReadSchema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+export type DashboardJobDetailRead = Static<typeof DashboardJobDetailReadSchema>;
 
 export const DashboardJobListQuerySchema = Type.Object(
   {

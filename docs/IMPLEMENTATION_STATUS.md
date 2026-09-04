@@ -1,6 +1,6 @@
 # Implementation Status
 
-Current as of 2026-09-05 on branch `codex/trusted-single-worker`.
+Current as of 2026-09-05 on branch `main`.
 
 ## Implemented baseline
 
@@ -14,6 +14,7 @@ Current as of 2026-09-05 on branch `codex/trusted-single-worker`.
 - Inline result validation and immutable result persistence.
 - Per-Worker Bearer Token creation, rotation, revocation, and authentication.
 - Operator Dashboard APIs and static Dashboard serving.
+- Authenticated Job detail reads with structured PR-review and issue-triage result projections.
 - Explicit `loopback` or `oidc` operator authentication.
 - Loopback-only database recovery-maintenance mode.
 - Current database schema migrations `0001` through `0008`.
@@ -27,9 +28,14 @@ Current as of 2026-09-05 on branch `codex/trusted-single-worker`.
 - Pinned Git, Codex, and ProcessHost executable paths and SHA-256 verification.
 - Replacement child environments that exclude the Worker Bearer Token.
 - Native ProcessHost supervision with Windows Job Object lifetime and resource limits.
+- A Windows global named mutex, held by ProcessHost, that prevents two execution Workers from using
+  the same resolved data root concurrently.
 - Per-attempt disk reservation, monitoring, cleanup, and startup orphan sweep.
 - One persistent shared bare Git repository per configured public GitHub repository.
-- Per-repository serialization of fetch and worktree metadata operations.
+- Bounded shared-repository accounting with a total cache limit, minimum-free-disk guard, bounded
+  scans, conservative age-based reflog expiry and GC, and node drain when reclamation is insufficient.
+- A cancellable global shared-cache mutation lock for whole-root accounting and bare-repository
+  setup/cleanup, plus per-repository operation ordering.
 - Full-history fetch of `main` and the GitHub pull request head ref.
 - Immutable base/head commit checks, merge-base validation, detached worktree creation, and final
   `HEAD` verification.
@@ -37,6 +43,18 @@ Current as of 2026-09-05 on branch `codex/trusted-single-worker`.
 - Pull request prompt authorization to inspect, edit, build, and test inside the disposable
   worktree.
 - Inline schema-validated result submission.
+- Progress deadline refreshes only on observed Codex stdout/stderr activity; silent execution no
+  longer receives synthetic keepalive progress.
+
+### Dashboard and repository gates
+
+- The Jobs page exposes an on-demand detail drawer for execution state, failures, result digests,
+  PR findings, and issue-triage projections.
+- Repository CI runs Node typecheck, tests, builds, and lint on Linux; ProcessHost tests, vet, and
+  Windows cross-builds on Linux; and Worker typecheck/tests/build, ProcessHost tests, and
+  deployment-script checks on Windows.
+- Manual Windows deployment has a complete configuration template, guarded launch helper, and an
+  explicit E2E evidence runbook. The evidence helper does not claim to execute the E2E workflow.
 
 ### Removed unpublished prototypes
 
@@ -57,6 +75,9 @@ ADR 0029 is the current architecture decision for these removals.
   `C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json`.
 - Operator authentication: explicit `loopback` or `oidc` mode.
 - Pull request repository cache: `<git-shared-root>\repository-<githubRepositoryId>.git`.
+- Shared repository policy: bounded total bytes and free-space guard with conservative Worker-owned
+  maintenance only when worktree metadata is inactive.
+- Local execution singleton: one global ProcessHost mutex per resolved Worker data root.
 - Task checkout: detached worktree below the per-attempt workspace directory.
 - Completion: inline `{ resultDigest, result }` only.
 - GitHub credentials: owned by the Server; not sent to the Worker or child processes.
@@ -65,13 +86,12 @@ ADR 0029 is the current architecture decision for these removals.
 
 - Automatic Worker package distribution, installer, upgrade, repair, rollback, or signature
   verification.
-- A repository-cache size limit or automatic Git garbage-collection policy.
 - A repository base branch other than `main`.
 - Private repository checkout credentials.
 - GitHub review publication or merge operations.
 - Optional execution-log and artifact retention.
 - A repository checkout for issue-triage jobs.
-- A repository-managed Windows service wrapper and cross-process single-instance lock.
+- A repository-managed Windows service wrapper, automatic restart policy, or service installer.
 
 ## Verification requirements
 
@@ -92,16 +112,16 @@ service-manager, Job Object, path, ACL, Git, or Codex runtime behavior.
 
 ## Latest verification
 
-On 2026-09-05, the complete staged snapshot passed on `test-env` with Node.js 24.20.0 and pnpm
+On 2026-09-05, the current staged `main` snapshot passed on `test-env` with Node.js 24.20.0 and pnpm
 11.24.0:
 
 - workspace typecheck;
-- 61 test files and 924 tests: Codex 86, Contracts 4, Domain 21, Dashboard 48, Worker 366, and
-  Server 399;
+- 63 test files and 961 tests: Codex 86, Contracts 8, Domain 21, Dashboard 53, Worker 387, and
+  Server 406;
 - all workspace builds, including the Dashboard production bundle and single Worker bundle; and
-- Biome lint/format checks across 196 files.
+- Biome checks across 198 files.
 
 ProcessHost passed `go test ./...` and `go vet ./...` with Go 1.26.7. The same source cross-compiled
-for Windows amd64 and arm64. A separate real-Git exercise created an origin, fetched `main` and a
-GitHub-style pull request ref into a persistent bare cache, verified the immutable SHAs and merge
-base, created a detached worktree, and removed its registration successfully.
+for Windows amd64 and arm64. The repository CI additionally runs ProcessHost tests and deployment
+PowerShell parser checks on a native Windows runner. The remaining release-level validation is the
+operator-driven Windows E2E exercise described above.

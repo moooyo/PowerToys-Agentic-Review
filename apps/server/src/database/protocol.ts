@@ -1,6 +1,8 @@
 import type {
+  DashboardJobDetailRead,
   DashboardJobListQuery,
   DashboardJobListResponse,
+  DashboardJobReadQuery,
   DashboardSystemRead,
   DashboardWorkerListQuery,
   DashboardWorkerListResponse,
@@ -316,6 +318,10 @@ export interface DatabaseOperationMap {
   readonly listJobs: {
     readonly input: DashboardJobListQuery;
     readonly output: DashboardJobListResponse;
+  };
+  readonly getJob: {
+    readonly input: DashboardJobReadQuery;
+    readonly output: DashboardJobDetailRead | null;
   };
   readonly listWorkers: {
     readonly input: DashboardWorkerListQuery;

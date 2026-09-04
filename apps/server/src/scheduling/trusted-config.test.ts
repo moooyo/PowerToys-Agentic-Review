@@ -220,9 +220,6 @@ describe("loadTrustedSchedulingConfig", () => {
         policy.issueTriage.executionPolicy.noProgressTimeoutMs = 300_001;
       },
       (policy) => {
-        policy.issueTriage.executionPolicy.maxCodexTurns = 129;
-      },
-      (policy) => {
         policy.pullRequestReview.executionPolicy.allowedRecipeIds = ["invalid recipe id"];
       },
       (policy) => {
@@ -265,7 +262,6 @@ function createPolicy(): TrustedSchedulingPolicy {
       executionPolicy: {
         hardTimeoutMs: 300_000,
         noProgressTimeoutMs: 60_000,
-        maxCodexTurns: 4,
         allowedRecipeIds: [],
         requiredCapabilityLabels: {
           execution: "enabled",
@@ -284,7 +280,6 @@ function createPolicy(): TrustedSchedulingPolicy {
       executionPolicy: {
         hardTimeoutMs: 600_000,
         noProgressTimeoutMs: 90_000,
-        maxCodexTurns: 6,
         allowedRecipeIds: ["static-pull-request-review"],
         requiredCapabilityLabels: {
           execution: "enabled",

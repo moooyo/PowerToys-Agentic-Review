@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import {
   type DashboardJobListQuery,
+  type DashboardJobReadQuery,
   type DashboardWorkerListQuery,
   type DashboardWorkItemListQuery,
   type JobExecutionEnvelope,
@@ -27,7 +28,13 @@ import type {
   FinalizeOperatorLoginInput,
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
-import { getSystemSnapshot, listJobs, listWorkers, listWorkItems } from "./dashboard-queries.js";
+import {
+  getJob,
+  getSystemSnapshot,
+  listJobs,
+  listWorkers,
+  listWorkItems,
+} from "./dashboard-queries.js";
 import { completeDatabaseShutdown } from "./database-shutdown.js";
 import {
   LeaseLostError,
@@ -2156,6 +2163,8 @@ const handleRequest = (request: DatabaseRequest): unknown => {
       return listWorkItems(database, request.input as DashboardWorkItemListQuery);
     case "listJobs":
       return listJobs(database, request.input as DashboardJobListQuery);
+    case "getJob":
+      return getJob(database, request.input as DashboardJobReadQuery);
     case "listWorkers":
       return listWorkers(database, request.input as DashboardWorkerListQuery);
     case "getSystemSnapshot":

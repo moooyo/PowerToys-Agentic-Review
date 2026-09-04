@@ -681,7 +681,6 @@ function largeClaimResponse(config: WorkerConfig) {
       executionPolicy: {
         hardTimeoutMs: 300_000,
         noProgressTimeoutMs: 60_000,
-        maxCodexTurns: 4,
         allowedRecipeIds: [],
         requiredCapabilityLabels: {},
       },

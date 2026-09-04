@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { win32 } from "node:path";
 import process from "node:process";
 import { loadWorkerConfig } from "./config.js";
@@ -8,7 +8,10 @@ import {
   ReviewJobExecutor,
 } from "./execution/job-executor.js";
 import { ProductionDisposableJobWorkspaceProvider } from "./execution/job-workspace.js";
-import { StdioProcessHostClient } from "./execution/process-host-client.js";
+import {
+  deriveWorkerProcessHostInstanceKey,
+  StdioProcessHostClient,
+} from "./execution/process-host-client.js";
 import {
   type ProcessHostClient,
   UnavailableProcessHostClient,
@@ -87,6 +90,7 @@ async function createExecutionRuntime(
   if (execution === undefined) {
     throw new Error("Execution is enabled without an execution configuration.");
   }
+  const dataDirectoryIdentity = await realpath(config.dataDirectory);
 
   const gitWorkingDirectory = win32.join(config.dataDirectory, "GitRuntime");
   await Promise.all([
@@ -112,6 +116,9 @@ async function createExecutionRuntime(
   const pathExt = requiredEnvironment("PATHEXT");
   const processHost = await StdioProcessHostClient.create({
     processHostPath: binaries.processHostPath,
+    instanceKey: deriveWorkerProcessHostInstanceKey({
+      dataDirectory: dataDirectoryIdentity,
+    }),
     maximumConcurrentRequests: Math.max(1, config.maxSlots * 2),
     requestTimeoutMs: execution.processHostRequestTimeoutMs,
     startTimeoutMs: execution.processHostStartTimeoutMs,
@@ -141,6 +148,14 @@ async function createExecutionRuntime(
       maximumProcessCount: execution.gitResourceLimits.maximumProcessCount,
       maximumMemoryBytes: execution.gitResourceLimits.maximumMemoryBytes,
       maximumOutputBytes: execution.gitResourceLimits.maximumOutputBytes,
+    },
+    gitSharedCachePolicy: {
+      maximumTotalBytes: BigInt(execution.gitSharedCacheMaxBytes),
+      minimumFreeBytes: BigInt(execution.gitSharedMinimumFreeDiskBytes),
+      maximumScanEntries: execution.gitSharedScanEntryLimit,
+      maximumScanDurationMs: execution.gitSharedScanTimeoutMs,
+      gcMinimumIntervalMs: execution.gitSharedGcMinimumIntervalMinutes * 60_000,
+      gcPruneAgeHours: execution.gitSharedGcPruneAgeHours,
     },
     diskBudget,
   });

@@ -2,7 +2,7 @@ import {
   type ChildProcessWithoutNullStreams,
   spawn as spawnChildProcess,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import {
@@ -40,6 +40,7 @@ export type ProcessHostSpawn = (
 
 export interface StdioProcessHostClientOptions {
   readonly processHostPath: string;
+  readonly instanceKey: string;
   readonly maximumConcurrentRequests: number;
   readonly hostEnvironment?: Readonly<NodeJS.ProcessEnv>;
   readonly hostSignal?: AbortSignal;
@@ -58,6 +59,18 @@ export class ProcessHostRequestError extends Error {
     super(message);
     this.name = "ProcessHostRequestError";
   }
+}
+
+export interface WorkerProcessHostInstanceIdentity {
+  readonly dataDirectory: string;
+}
+
+export function deriveWorkerProcessHostInstanceKey(
+  identity: WorkerProcessHostInstanceIdentity,
+): string {
+  const dataDirectory = normalizeInstanceIdentityPath(identity.dataDirectory, "dataDirectory");
+  const canonicalIdentity = `agentic-review-worker-data-root-v1\n${dataDirectory}`;
+  return createHash("sha256").update(canonicalIdentity, "utf8").digest("hex");
 }
 
 type HostState =
@@ -145,6 +158,7 @@ const defaultRequestTimeoutMs = 10_000;
 const defaultStartTimeoutMs = 30_000;
 const defaultShutdownTimeoutMs = 15_000;
 const maximumClientBufferedOutputBytes = 8 * 1_024 * 1_024;
+const instanceKeyPattern = /^[a-f0-9]{64}$/u;
 
 export class StdioProcessHostClient implements ProcessHostClient {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -171,6 +185,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
 
   private constructor(options: StdioProcessHostClientOptions) {
     const processHostPath = validateProcessHostPath(options.processHostPath);
+    const instanceKey = validateInstanceKey(options.instanceKey);
     const handshakeTimeoutMs = validateTimeout(
       options.handshakeTimeoutMs ?? defaultHandshakeTimeoutMs,
       "handshakeTimeoutMs",
@@ -199,7 +214,13 @@ export class StdioProcessHostClient implements ProcessHostClient {
     const spawnProcess = options.spawnProcess ?? defaultSpawnProcess;
     this.#child = spawnProcess(
       processHostPath,
-      ["--stdio", "--max-concurrent-requests", String(this.#maximumConcurrentRequests)],
+      [
+        "--stdio",
+        "--max-concurrent-requests",
+        String(this.#maximumConcurrentRequests),
+        "--instance-key",
+        instanceKey,
+      ],
       {
         cwd: win32.dirname(processHostPath),
         env: buildMinimalHostEnvironment(options.hostEnvironment ?? process.env),
@@ -1037,6 +1058,21 @@ export class StdioProcessHostClient implements ProcessHostClient {
 function validateProcessHostPath(value: string): string {
   assertWindowsLocalAbsolutePath(value, "processHostPath", true);
   return win32.normalize(value);
+}
+
+function validateInstanceKey(value: string): string {
+  if (!instanceKeyPattern.test(value)) {
+    throw new RangeError("instanceKey must be exactly 64 lowercase hexadecimal characters.");
+  }
+  return value;
+}
+
+function normalizeInstanceIdentityPath(path: string, name: string): string {
+  assertWindowsLocalAbsolutePath(path, name, false);
+  const normalized = win32.normalize(path.replaceAll("/", "\\"));
+  const trimmed =
+    normalized.length > 3 && normalized.endsWith("\\") ? normalized.slice(0, -1) : normalized;
+  return trimmed.toLowerCase();
 }
 
 function validateMaximumConcurrentRequests(value: number): number {

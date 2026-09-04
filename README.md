@@ -30,11 +30,17 @@ Admitted repository revisions are trusted execution inputs. Pull request jobs us
 shared Git object store per configured public repository. Before each job, the Worker fetches the
 current `main` and exact pull request head, verifies the expected SHAs and merge base, and creates a
 detached per-attempt worktree. Repeated reviews therefore transfer only missing Git objects.
+The Worker enforces a separate shared-cache byte limit and free-space guard, performs conservative
+age-based Git maintenance only when worktree metadata is inactive, and drains if reclamation cannot
+restore the configured budget.
 
 Codex runs with workspace write access and outbound network access so it can inspect, edit, build,
 and test inside the disposable worktree. ProcessHost and Windows Job Objects still enforce lifetime,
 process-count, memory, timeout, and output limits. Worker and Server credentials are not propagated
 to child processes.
+
+ProcessHost also holds a Windows global mutex derived from the resolved Worker data root, preventing
+overlapping execution Workers from mutating the same cache or workspace tree.
 
 The MVP has one result channel: an inline, schema-validated completion payload. There is no result
 artifact upload or Server artifact store.

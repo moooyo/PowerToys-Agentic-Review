@@ -3,6 +3,7 @@ import type {
   Approval,
   ApprovalDecision,
   Job,
+  JobDetails,
   ListQuery,
   PageResult,
   Publication,
@@ -144,6 +145,77 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
         selected(job.stage, query.filters?.stage),
     );
     return page(filtered, query);
+  }
+
+  async getJob(jobId: string): Promise<JobDetails | null> {
+    await wait();
+    const job = this.jobs.find((candidate) => candidate.id === jobId);
+    if (job === undefined) {
+      return null;
+    }
+    const reviewResult =
+      job.status !== "succeeded"
+        ? null
+        : job.title.toLowerCase().includes("issue")
+          ? {
+              reviewResultId: `result-${job.id}`,
+              schemaId: "IssueTriageV1" as const,
+              resultDigest: "a".repeat(64),
+              summary: "The issue is actionable and ready for triage publication.",
+              requestedRecipeIds: [],
+              createdAt: job.createdAt,
+              prReview: null,
+              issueTriage: {
+                category: "bug" as const,
+                priority: 1 as const,
+                confidence: 0.92,
+                suggestedLabels: ["Issue-Bug"],
+                missingInformation: ["Collect a complete repro video on latest main."],
+                duplicateCandidates: [
+                  {
+                    number: 41720,
+                    reason: "The symptom and module match a recent report.",
+                  },
+                ],
+              },
+            }
+          : {
+              reviewResultId: `result-${job.id}`,
+              schemaId: "PrReviewPlanV1" as const,
+              resultDigest: "b".repeat(64),
+              summary: "The PR needs one medium-severity fix before approval.",
+              requestedRecipeIds: ["powertoys.static-check"],
+              createdAt: job.createdAt,
+              prReview: {
+                assessment: "request_changes" as const,
+                findings: [
+                  {
+                    findingId: `${job.id}-finding-1`,
+                    ordinal: 0,
+                    priority: 2 as const,
+                    title: "Guard null monitor handles",
+                    body: "The code path can dereference a missing monitor handle after resume.",
+                    path: "src/modules/FancyZones/LayoutRestore.cs",
+                    line: 233,
+                    endLine: 239,
+                    confidence: 0.88,
+                  },
+                ],
+              },
+              issueTriage: null,
+            };
+
+    return {
+      ...clone(job),
+      updatedAt: job.createdAt,
+      failureCode: job.outcome === "failed" || job.outcome === "timed_out" ? "mock_failure" : null,
+      failureMessage:
+        job.outcome === "failed" || job.outcome === "timed_out"
+          ? "Mock failure detail for dashboard rendering."
+          : null,
+      resultDigest: reviewResult?.resultDigest ?? null,
+      reviewResult,
+    };
   }
 
   async cancelJob(jobId: string): Promise<void> {

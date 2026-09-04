@@ -10,9 +10,12 @@ Build the Windows binary from this module:
 go build -trimpath -o AgenticReview.ProcessHost.exe .
 ```
 
-The worker starts the binary with an absolute path and the required `--stdio` flag. Every `start`
-request supplies a replacement environment and explicit timeout, process-count, memory, and
-combined-output limits. ProcessHost does not invoke a shell or inherit its own environment.
+The worker starts the binary with an absolute path, the required `--stdio` flag, and a validated
+`--instance-key` derived from the resolved Worker data root. On Windows, ProcessHost holds
+`Global\AgenticReview.Worker.<instance-key>` for its lifetime and exits deterministically if another
+ProcessHost already owns that key. Every `start` request supplies a replacement environment and
+explicit timeout, process-count, memory, and combined-output limits. ProcessHost does not invoke a
+shell or inherit its own environment.
 
 On Windows, ProcessHost creates the target with `CREATE_SUSPENDED`, restricts inherited handles to
 the three standard-I/O pipes, and uses `PROC_THREAD_ATTRIBUTE_JOB_LIST` to place the process in its

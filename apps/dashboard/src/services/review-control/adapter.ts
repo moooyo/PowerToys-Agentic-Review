@@ -2,6 +2,7 @@ import type {
   Approval,
   ApprovalDecision,
   Job,
+  JobDetails,
   ListQuery,
   PageResult,
   Publication,
@@ -17,6 +18,7 @@ export interface ReviewControlAdapter {
   listWorkItems(query?: ListQuery): Promise<PageResult<WorkItem>>;
   requeueWorkItem(workItemId: string): Promise<void>;
   listJobs(query?: ListQuery): Promise<PageResult<Job>>;
+  getJob(jobId: string): Promise<JobDetails | null>;
   cancelJob(jobId: string): Promise<void>;
   listWorkers(query?: ListQuery): Promise<PageResult<WorkerNode>>;
   listAllWorkers(): Promise<PageResult<WorkerNode>>;

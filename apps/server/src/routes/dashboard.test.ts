@@ -28,10 +28,56 @@ const systemSnapshot = {
   ],
 };
 
-const createApp = (authenticate?: DashboardAuthenticationPreHandler) => {
+const jobDetailSnapshot = {
+  id: "job-1",
+  workItemId: "item-1",
+  workItemRef: "microsoft/PowerToys#501",
+  title: "PR review",
+  generation: 1,
+  status: "succeeded" as const,
+  phase: null,
+  attempt: 1,
+  maxAttempts: 3,
+  workerNodeId: null,
+  leaseGeneration: null,
+  leaseExpiresAt: null,
+  progressUpdatedAt: null,
+  elapsedSeconds: 42,
+  targetRevisionKey: "revision-1",
+  outcome: "success" as const,
+  createdAt: "2026-08-30T04:05:06.000Z",
+  updatedAt: "2026-08-30T04:06:06.000Z",
+  failureCode: null,
+  failureMessage: null,
+  resultDigest: "a".repeat(64),
+  reviewResult: {
+    reviewResultId: "result-1",
+    schemaId: "PrReviewPlanV1",
+    resultDigest: "a".repeat(64),
+    summary: "The change is ready.",
+    requestedRecipeIds: ["pull-request-review"],
+    createdAt: "2026-08-30T04:06:06.000Z",
+    prReview: {
+      assessment: "comment" as const,
+      findings: [],
+    },
+    issueTriage: null,
+  },
+};
+
+const dashboardJobPath = (jobId: string): string =>
+  DASHBOARD_API_PATHS.jobById.replace(":jobId", jobId);
+
+const createApp = (
+  authenticate?: DashboardAuthenticationPreHandler,
+  options?: { readonly jobDetail?: typeof jobDetailSnapshot | null },
+) => {
   const request = vi.fn(async (operation: string, _input: unknown) => {
     if (operation === "getSystemSnapshot") {
       return systemSnapshot;
+    }
+    if (operation === "getJob") {
+      return options?.jobDetail === undefined ? jobDetailSnapshot : options.jobDetail;
     }
     return { items: [], total: 0 };
   });
@@ -152,16 +198,76 @@ describe("dashboard read routes", () => {
     }
   });
 
+  it("returns one job detail with structured review result projections", async () => {
+    const { app, request } = createApp();
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: dashboardJobPath("job-1"),
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(jobDetailSnapshot);
+      expect(request).toHaveBeenCalledWith("getJob", { jobId: "job-1" });
+    } finally {
+      await close(app);
+    }
+  });
+
+  it("returns 404 when the requested job does not exist", async () => {
+    const { app, request } = createApp(undefined, { jobDetail: null });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: dashboardJobPath("job-404"),
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        code: "dashboard_job_not_found",
+        message: "The dashboard job does not exist.",
+        retryable: false,
+      });
+      expect(request).toHaveBeenCalledWith("getJob", { jobId: "job-404" });
+    } finally {
+      await close(app);
+    }
+  });
+
+  it("rejects an invalid dashboard job identifier before database access", async () => {
+    const { app, request } = createApp();
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: dashboardJobPath("_job-1"),
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await close(app);
+    }
+  });
+
   it("runs the injected authentication hook on every dashboard endpoint", async () => {
     const authenticate = vi.fn(async () => undefined);
     const { app } = createApp(authenticate);
 
     try {
-      for (const url of Object.values(DASHBOARD_API_PATHS)) {
+      for (const url of [
+        DASHBOARD_API_PATHS.workItems,
+        DASHBOARD_API_PATHS.jobs,
+        dashboardJobPath("job-1"),
+        DASHBOARD_API_PATHS.workers,
+        DASHBOARD_API_PATHS.system,
+      ]) {
         const response = await app.inject({ method: "GET", url });
         expect(response.statusCode).toBe(200);
       }
-      expect(authenticate).toHaveBeenCalledTimes(4);
+      expect(authenticate).toHaveBeenCalledTimes(5);
     } finally {
       await close(app);
     }
@@ -258,6 +364,22 @@ describe("dashboard read routes", () => {
       const response = await app.inject({
         method: "GET",
         url: `${DASHBOARD_API_PATHS.system}?details=true`,
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await close(app);
+    }
+  });
+
+  it("rejects query parameters on the dashboard job detail endpoint", async () => {
+    const { app, request } = createApp();
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: `${dashboardJobPath("job-1")}?details=true`,
       });
 
       expect(response.statusCode).toBe(400);

@@ -23,6 +23,8 @@ const dashboardReadPathnames = new Set([
   "/api/v1/dashboard/work-items",
   "/api/v1/dashboard/workers",
 ]);
+const dashboardJobByIdPathPattern =
+  /^\/api\/v1\/dashboard\/jobs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 export type DashboardFetch = typeof globalThis.fetch;
 
@@ -87,6 +89,9 @@ const isCanonicalDashboardRead = (path: string): boolean => {
     return false;
   }
   const pathname = queryIndex === -1 ? path : path.slice(0, queryIndex);
+  if (dashboardJobByIdPathPattern.test(pathname)) {
+    return queryIndex === -1;
+  }
   if (!dashboardReadPathnames.has(pathname)) {
     return false;
   }

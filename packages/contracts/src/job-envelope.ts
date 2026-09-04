@@ -78,7 +78,6 @@ export const ExecutionPolicySchema = Type.Object(
   {
     hardTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 86_400_000 }),
     noProgressTimeoutMs: Type.Integer({ minimum: 1_000, maximum: 86_400_000 }),
-    maxCodexTurns: Type.Integer({ minimum: 1, maximum: 128 }),
     allowedRecipeIds: Type.Array(
       Type.String({
         minLength: 1,

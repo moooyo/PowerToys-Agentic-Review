@@ -420,7 +420,6 @@ const policy: TrustedSchedulingPolicy = {
     executionPolicy: {
       hardTimeoutMs: 300_000,
       noProgressTimeoutMs: 60_000,
-      maxCodexTurns: 4,
       allowedRecipeIds: [],
       requiredCapabilityLabels: { execution: "enabled", processHost: "available" },
     },
@@ -436,7 +435,6 @@ const policy: TrustedSchedulingPolicy = {
     executionPolicy: {
       hardTimeoutMs: 600_000,
       noProgressTimeoutMs: 90_000,
-      maxCodexTurns: 6,
       allowedRecipeIds: ["static-pull-request-review"],
       requiredCapabilityLabels: { execution: "enabled", pool: "review" },
     },

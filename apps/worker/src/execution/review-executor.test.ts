@@ -148,7 +148,6 @@ const createEnvelope = (kind: "pull_request_review" | "issue_triage"): JobExecut
     executionPolicy: {
       hardTimeoutMs: 600_000,
       noProgressTimeoutMs: 120_000,
-      maxCodexTurns: 1,
       allowedRecipeIds: ["powertoys.static-check"],
       requiredCapabilityLabels: {},
     },
@@ -636,6 +635,7 @@ describe("ReviewJobExecutor trust validation", () => {
     ["GIT_REVISION_MISMATCH", false],
     ["GIT_LOCAL_OR_REVISION_FAILED", false],
     ["GIT_POLICY_LIMIT_EXCEEDED", false],
+    ["GIT_SHARED_CACHE_LIMIT_EXCEEDED", true],
     ["WORKSPACE_CREATE_FAILED", true],
     ["GIT_COMMAND_FAILED", true],
     ["WORKSPACE_CLEANUP_FAILED", true],
@@ -918,7 +918,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     expect(stderrStarted).toBe(true);
   });
 
-  it("refreshes progress periodically and on throttled JSONL activity, then clears the timer", async () => {
+  it("reports progress only on throttled stdout and stderr activity", async () => {
     vi.useFakeTimers();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -938,7 +938,9 @@ describe("ReviewJobExecutor process and result handling", () => {
         .length;
     expect(activeReports()).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(activeReports()).toBe(1);
+
     stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "thread-1" })}\n`);
     await flushAsyncWork();
     expect(activeReports()).toBe(2);
@@ -946,10 +948,16 @@ describe("ReviewJobExecutor process and result handling", () => {
     await flushAsyncWork();
     expect(activeReports()).toBe(2);
 
-    await vi.advanceTimersByTimeAsync(25_000);
+    stderr.write("discarded diagnostic\n");
+    await flushAsyncWork();
+    expect(activeReports()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    stderr.write("later diagnostic\n");
+    await flushAsyncWork();
     expect(activeReports()).toBe(3);
     stdout.end(`${JSON.stringify({ type: "turn.completed" })}\n`);
-    stderr.end("discarded diagnostic");
+    stderr.end();
     resolveCompletion(exitEvent());
     await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
 

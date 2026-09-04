@@ -405,7 +405,6 @@ function assertJobPolicyNumbers(policy: TrustedJobPolicy, path: string): void {
     maxAttempts: policy.maxAttempts,
     hardTimeoutMs: policy.executionPolicy.hardTimeoutMs,
     noProgressTimeoutMs: policy.executionPolicy.noProgressTimeoutMs,
-    maxCodexTurns: policy.executionPolicy.maxCodexTurns,
   };
   for (const [name, value] of Object.entries(numericPolicy)) {
     if (!Number.isSafeInteger(value)) {

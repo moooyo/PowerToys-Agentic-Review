@@ -17,6 +17,7 @@ enabled it composes:
 - `WorkerService` for registration, claims, heartbeats, lease fencing, drain, and terminal replay;
 - `ReviewJobExecutor` for Codex review and validation jobs;
 - `StdioProcessHostClient` and the native ProcessHost for Job Object process-tree supervision;
+- the ProcessHost global named mutex for one execution Worker per resolved data root;
 - `ProductionWorkspaceDiskBudget` for bounded attempt storage and orphan cleanup; and
 - `ProductionDisposableJobWorkspaceProvider` for shared repositories and per-attempt worktrees.
 
@@ -34,14 +35,17 @@ for the exact head SHA beneath `WORKER_WORKSPACE_ROOT_DIRECTORY`.
 The current Git environment disables credential helpers and uses an anonymous GitHub HTTPS URL, so
 private repositories are not supported by this MVP.
 
-Git fetch and worktree metadata operations are serialized per repository. Different repositories
-can prepare concurrently, and prepared worktrees can execute concurrently. Task cleanup removes
-the registered worktree and then removes the complete attempt directory. The next preparation also
-prunes stale worktree metadata left by an interrupted process.
+Git fetch, worktree metadata mutation, and whole-cache accounting use a cancellable global
+shared-cache lock plus per-repository ordering. This prevents another repository's fetch from
+changing the cache during a bounded whole-root scan. Prepared worktrees can still execute
+concurrently. Task cleanup removes the registered worktree and then removes the complete attempt
+directory. The next preparation also prunes stale worktree metadata left by an interrupted process.
 
 The shared object store is not recreated for every attempt, so repeated reviews download only
-missing Git objects. Do not run Git garbage collection while attempts for that repository are
-active.
+missing Git objects. Shared repository cleanup and conservative Git garbage collection are
+performed by the Worker runtime using the shared-Git policy variables in
+`worker-config.template.psd1`. Manual repository-wide GC procedures are out of scope for this
+deployment profile.
 
 ## Worker authentication
 
@@ -75,17 +79,19 @@ Worker identity, `SYSTEM`, and local administrators:
 Then configure the execution tools and launch the Worker:
 
 ```powershell
-$env:WORKER_SERVER_URL = 'http://127.0.0.1:3000'
-$env:WORKER_ALLOW_INSECURE_HTTP = 'true'
-$env:WORKER_EXECUTION_ENABLED = 'true'
-$env:WORKER_DATA_DIR = 'D:\AgenticReview\Data'
-$env:WORKER_GIT_SHARED_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Repositories'
-$env:WORKER_WORKSPACE_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Workspaces'
-$env:WORKER_EXECUTION_TEMP_DIRECTORY = 'D:\AgenticReview\Data\Temp'
-$env:WORKER_EXECUTION_PROFILE_DIRECTORY = 'D:\AgenticReview\Data\Profile'
-# Configure the trusted executable paths, versions, digests, and resource limits here.
-node --enable-source-maps .\dist\worker.mjs
+Copy-Item .\deploy\worker\worker-config.template.psd1 .\deploy\worker\worker-config.psd1
+# Fill in pinned executable paths, SHA-256 digests, and URL-specific values.
+.\deploy\worker\start-worker.ps1 -ConfigPath .\deploy\worker\worker-config.psd1
 ```
+
+`worker-config.template.psd1` includes all supported `WORKER_*` environment values for
+`loadWorkerConfig()` and `loadExecutionConfig()`, including the Worker-side execution budgets and
+Worker-side shared Git cache and conservative GC controls. Process-level values such as `NODE_ENV`
+remain service-manager configuration.
+
+For manual acceptance on Windows, follow `deploy/worker/worker-e2e-runbook.md` and capture evidence
+with `deploy/worker/invoke-worker-e2e.ps1`. That script is an evidence collector and does not run
+an automated end-to-end workflow.
 
 Production Server connections use HTTPS. Package signing is a deployment concern only when Worker
 bundles are distributed automatically; it is not required for a manual trusted deployment.

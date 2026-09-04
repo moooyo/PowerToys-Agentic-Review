@@ -67,6 +67,52 @@ export interface Job {
   createdAt: string;
 }
 
+export interface PrReviewFinding {
+  findingId: string;
+  ordinal: number;
+  priority: 0 | 1 | 2 | 3;
+  title: string;
+  body: string;
+  path: string;
+  line: number;
+  endLine: number | null;
+  confidence: number;
+}
+
+export interface IssueDuplicateCandidate {
+  number: number;
+  reason: string;
+}
+
+export interface JobReviewResult {
+  reviewResultId: string;
+  schemaId: "IssueTriageV1" | "PrReviewPlanV1";
+  resultDigest: string;
+  summary: string;
+  requestedRecipeIds: string[];
+  createdAt: string;
+  prReview: {
+    assessment: "approve" | "comment" | "request_changes";
+    findings: PrReviewFinding[];
+  } | null;
+  issueTriage: {
+    category: "bug" | "feature_request" | "documentation" | "question" | "support" | "other";
+    priority: 0 | 1 | 2 | 3;
+    confidence: number;
+    suggestedLabels: string[];
+    missingInformation: string[];
+    duplicateCandidates: IssueDuplicateCandidate[];
+  } | null;
+}
+
+export interface JobDetails extends Job {
+  updatedAt: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  resultDigest: string | null;
+  reviewResult: JobReviewResult | null;
+}
+
 export interface WorkerNode {
   id: string;
   serverId: string;

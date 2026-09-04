@@ -29,6 +29,7 @@ const maximumTotalMemoryBytes = 64 * processHostResourceBounds.maximumMemoryByte
 const maximumTotalOutputBytes = 64 * processHostResourceBounds.maximumOutputBytes.maximum;
 const maximumPerAttemptDiskBytes = tebibyte;
 const maximumTotalWorkspaceDiskBytes = 64 * maximumPerAttemptDiskBytes;
+const maximumTotalGitSharedCacheBytes = 8 * tebibyte;
 const maximumTlsCaBytes = mebibyte;
 const maximumWorkerAuthProfileBytes = 4 * kibibyte;
 const workerAuthProfileId = "agentic-review-worker-auth-v1";
@@ -107,6 +108,12 @@ export interface WorkerExecutionConfig {
   readonly minimumFreeDiskBytes: number;
   readonly orphanRetentionHours: number;
   readonly orphanScanLimit: number;
+  readonly gitSharedCacheMaxBytes: number;
+  readonly gitSharedMinimumFreeDiskBytes: number;
+  readonly gitSharedScanEntryLimit: number;
+  readonly gitSharedScanTimeoutMs: number;
+  readonly gitSharedGcMinimumIntervalMinutes: number;
+  readonly gitSharedGcPruneAgeHours: number;
 }
 
 export interface WorkerConfig {
@@ -418,6 +425,48 @@ function loadExecutionConfig(
     1,
     10_000,
   );
+  const gitSharedCacheMaxBytes = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_CACHE_MAX_BYTES",
+    64 * gibibyte,
+    gibibyte,
+    maximumTotalGitSharedCacheBytes,
+  );
+  const gitSharedMinimumFreeDiskBytes = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_MINIMUM_FREE_DISK_BYTES",
+    10 * gibibyte,
+    gibibyte,
+    maximumTotalGitSharedCacheBytes,
+  );
+  const gitSharedScanEntryLimit = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_SCAN_ENTRY_LIMIT",
+    250_000,
+    100,
+    1_000_000,
+  );
+  const gitSharedScanTimeoutMs = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_SCAN_TIMEOUT_MS",
+    30_000,
+    100,
+    300_000,
+  );
+  const gitSharedGcMinimumIntervalMinutes = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_GC_MINIMUM_INTERVAL_MINUTES",
+    60,
+    0,
+    10_080,
+  );
+  const gitSharedGcPruneAgeHours = readInteger(
+    environment,
+    "WORKER_GIT_SHARED_GC_PRUNE_AGE_HOURS",
+    168,
+    1,
+    8_760,
+  );
 
   return {
     trustedExecutableRoot,
@@ -457,6 +506,12 @@ function loadExecutionConfig(
     minimumFreeDiskBytes,
     orphanRetentionHours,
     orphanScanLimit,
+    gitSharedCacheMaxBytes,
+    gitSharedMinimumFreeDiskBytes,
+    gitSharedScanEntryLimit,
+    gitSharedScanTimeoutMs,
+    gitSharedGcMinimumIntervalMinutes,
+    gitSharedGcPruneAgeHours,
   };
 }
 

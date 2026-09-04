@@ -40,6 +40,7 @@ class FakeWorkspaceFileSystem implements JobWorkspaceFileSystem {
   readonly #entries = new Map<string, FakePathEntry>();
   public readonly created: string[] = [];
   public readonly removed: string[] = [];
+  public availableBytesValue = 500n * 1024n * 1024n * 1024n;
   public createFailureAt: number | undefined;
   #createCalls = 0;
 
@@ -51,7 +52,9 @@ class FakeWorkspaceFileSystem implements JobWorkspaceFileSystem {
 
   public async lstat(path: string): Promise<WorkspacePathState | null> {
     const entry = this.#entries.get(key(path));
-    return entry === undefined ? null : { kind: entry.kind, reparsePoint: entry.reparsePoint };
+    return entry === undefined
+      ? null
+      : { kind: entry.kind, reparsePoint: entry.reparsePoint, size: entry.size };
   }
 
   public async realpath(path: string): Promise<string> {
@@ -81,6 +84,11 @@ class FakeWorkspaceFileSystem implements JobWorkspaceFileSystem {
     this.created.push(path);
   }
 
+  public async availableBytes(path: string): Promise<bigint> {
+    if (!this.#entries.has(key(path))) throw fileSystemError("ENOENT", `Missing path ${path}`);
+    return this.availableBytesValue;
+  }
+
   public async removeTree(path: string): Promise<void> {
     const target = key(path);
     this.removed.push(path);
@@ -97,8 +105,27 @@ class FakeWorkspaceFileSystem implements JobWorkspaceFileSystem {
       path,
       kind: "directory",
       reparsePoint: false,
+      size: 0n,
       realPath: path,
     });
+  }
+
+  public addFile(path: string, size: bigint): void {
+    const parent = key(win32.dirname(path));
+    if (!this.#entries.has(parent)) {
+      throw new Error(`Missing parent for file ${path}`);
+    }
+    this.#entries.set(key(path), {
+      path,
+      kind: "file",
+      reparsePoint: false,
+      size,
+      realPath: path,
+    });
+  }
+
+  public removePath(path: string): void {
+    this.#entries.delete(key(path));
   }
 
   public setReparsePoint(path: string, reparsePoint: boolean): void {
@@ -249,6 +276,8 @@ function commandName(argumentsList: readonly string[]): string | undefined {
     "init",
     "config",
     "fetch",
+    "reflog",
+    "gc",
     "cat-file",
     "merge-base",
     "worktree",
@@ -335,7 +364,6 @@ function envelope(
     executionPolicy: {
       hardTimeoutMs: 1_200_000,
       noProgressTimeoutMs: 300_000,
-      maxCodexTurns: 1,
       allowedRecipeIds: [],
       requiredCapabilityLabels: {},
     },
@@ -349,6 +377,12 @@ function provider(
     readonly gitEnvironment?: Readonly<Record<string, string>>;
     readonly gitWorkingDirectory?: string;
     readonly diskBudget?: WorkspaceDiskBudget;
+    readonly gitSharedCacheMaxBytes?: bigint;
+    readonly gitSharedMinimumFreeBytes?: bigint;
+    readonly gitSharedScanEntryLimit?: number;
+    readonly gitSharedScanTimeoutMs?: number;
+    readonly gitSharedGcMinimumIntervalMs?: number;
+    readonly gitSharedGcPruneAgeHours?: number;
   } = {},
 ): ProductionDisposableJobWorkspaceProvider {
   processRunner.fileSystem = fileSystem;
@@ -363,6 +397,14 @@ function provider(
       maximumProcessCount: 4,
       maximumMemoryBytes: 536_870_912,
       maximumOutputBytes: 1_048_576,
+    },
+    gitSharedCachePolicy: {
+      maximumTotalBytes: options.gitSharedCacheMaxBytes ?? 64n * 1024n * 1024n * 1024n,
+      minimumFreeBytes: options.gitSharedMinimumFreeBytes ?? 10n * 1024n * 1024n * 1024n,
+      maximumScanEntries: options.gitSharedScanEntryLimit ?? 250_000,
+      maximumScanDurationMs: options.gitSharedScanTimeoutMs ?? 30_000,
+      gcMinimumIntervalMs: options.gitSharedGcMinimumIntervalMs ?? 60_000,
+      gcPruneAgeHours: options.gitSharedGcPruneAgeHours ?? 168,
     },
     diskBudget: options.diskBudget ?? new FakeWorkspaceDiskBudget(fileSystem),
     fileSystem,
@@ -535,7 +577,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     await Promise.all([first.cleanup(), second.cleanup()]);
   });
 
-  it("prepares different shared repositories concurrently", async () => {
+  it("serializes shared-cache mutation for different repositories", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
     let releaseCommands!: () => void;
@@ -556,10 +598,8 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       }),
       preparationContext().context,
     );
-    await vi.waitFor(() => expect(processRunner.calls).toHaveLength(2));
-    expect(processRunner.calls.every((call) => commandName(call.spec.arguments) === "init")).toBe(
-      true,
-    );
+    await vi.waitFor(() => expect(processRunner.calls).toHaveLength(1));
+    expect(commandName(processRunner.calls[0]?.spec.arguments ?? [])).toBe("init");
 
     releaseCommands();
     const [first, second] = await Promise.all([firstPreparation, secondPreparation]);
@@ -593,6 +633,282 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     releaseFirstCommand();
     const first = await firstPreparation;
     await first.cleanup();
+  });
+
+  it("fails closed when shared cache exceeds limits while a same-repo worktree is active", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const workspaceProvider = provider(fileSystem, processRunner, {
+      gitSharedCacheMaxBytes: 1_024n,
+      gitSharedMinimumFreeBytes: 0n,
+      gitSharedGcMinimumIntervalMs: 0,
+    });
+
+    const first = await workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "run-1" }),
+      preparationContext().context,
+    );
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    fileSystem.addDirectory(objectsDirectory);
+    fileSystem.addDirectory(packDirectory);
+    fileSystem.addFile(`${packDirectory}\\oversized.pack`, 4_096n);
+
+    const progress = preparationContext();
+    await expect(
+      workspaceProvider.prepare(
+        envelope("pull_request", { runAttemptId: "run-2" }),
+        progress.context,
+      ),
+    ).rejects.toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(progress.healthFaults[0]).toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+    expect(processRunner.calls.some((call) => commandName(call.spec.arguments) === "gc")).toBe(
+      false,
+    );
+
+    fileSystem.removePath(`${packDirectory}\\oversized.pack`);
+    await first.cleanup();
+  });
+
+  it("runs bounded same-repo gc and proceeds when cache returns within limits", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    const oversizedPack = `${packDirectory}\\stale.pack`;
+    processRunner.onRun = (spec) => {
+      const command = commandName(spec.arguments);
+      if (command === "worktree" && spec.arguments.includes("prune")) {
+        fileSystem.addDirectory(objectsDirectory);
+        fileSystem.addDirectory(packDirectory);
+        fileSystem.addFile(oversizedPack, 8_192n);
+      }
+      if (command === "gc") {
+        fileSystem.removePath(oversizedPack);
+      }
+    };
+
+    const workspace = await provider(fileSystem, processRunner, {
+      gitSharedCacheMaxBytes: 1_024n,
+      gitSharedMinimumFreeBytes: 0n,
+      gitSharedGcMinimumIntervalMs: 0,
+      gitSharedGcPruneAgeHours: 336,
+    }).prepare(envelope("pull_request"), preparationContext().context);
+
+    const gcCall = processRunner.calls.find((call) => commandName(call.spec.arguments) === "gc");
+    const reflogCall = processRunner.calls.find(
+      (call) => commandName(call.spec.arguments) === "reflog",
+    );
+    const pruneCallIndices = processRunner.calls
+      .map((call, index) => ({ call, index }))
+      .filter(
+        ({ call }) =>
+          commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("prune"),
+      )
+      .map(({ index }) => index);
+    const gcIndex = processRunner.calls.findIndex(
+      (call) => commandName(call.spec.arguments) === "gc",
+    );
+
+    expect(gcCall).toBeDefined();
+    expect(reflogCall).toBeDefined();
+    expect(reflogCall?.spec.arguments).toContain("expire");
+    expect(reflogCall?.spec.arguments).toContain("--all");
+    expect(reflogCall?.spec.arguments).toContain("--expire=336.hours.ago");
+    expect(reflogCall?.spec.arguments).toContain("--expire-unreachable=336.hours.ago");
+    expect(gcCall?.spec.arguments).toContain("--prune=336.hours.ago");
+    expect(pruneCallIndices.length).toBeGreaterThanOrEqual(2);
+    expect(gcIndex).toBeGreaterThan(0);
+    expect(pruneCallIndices[pruneCallIndices.length - 1]).toBeLessThan(gcIndex);
+
+    await workspace.cleanup();
+  });
+
+  it("skips same-repo gc when bare-repo worktree metadata is still non-empty", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    const metadataDirectory = `${repositoryDirectory}\\worktrees`;
+    const metadataEntry = `${metadataDirectory}\\active-checkout`;
+    fileSystem.addDirectory(repositoryDirectory);
+    fileSystem.addDirectory(objectsDirectory);
+    fileSystem.addDirectory(packDirectory);
+    fileSystem.addFile(`${packDirectory}\\oversized.pack`, 16_384n);
+    fileSystem.addDirectory(metadataDirectory);
+    fileSystem.addDirectory(metadataEntry);
+    const progress = preparationContext();
+
+    await expect(
+      provider(fileSystem, processRunner, {
+        gitSharedCacheMaxBytes: 1_024n,
+        gitSharedMinimumFreeBytes: 0n,
+        gitSharedGcMinimumIntervalMs: 0,
+      }).prepare(envelope("pull_request"), progress.context),
+    ).rejects.toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(progress.healthFaults[0]).toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+    expect(processRunner.calls.some((call) => commandName(call.spec.arguments) === "gc")).toBe(
+      false,
+    );
+  });
+
+  it("falls back to prune and still runs post-cleanup gc when checkout was removed", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    const oversizedPack = `${packDirectory}\\cleanup-oversized.pack`;
+    processRunner.onRun = (spec) => {
+      const command = commandName(spec.arguments);
+      if (
+        command === "worktree" &&
+        spec.arguments.includes("remove") &&
+        !fileSystem.has(spec.arguments[spec.arguments.length - 1] ?? "")
+      ) {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "missing checkout during cleanup", {
+          exitCode: 1,
+        });
+      }
+      if (command === "gc") {
+        fileSystem.removePath(oversizedPack);
+      }
+    };
+
+    const workspace = await provider(fileSystem, processRunner, {
+      gitSharedCacheMaxBytes: 1_024n,
+      gitSharedMinimumFreeBytes: 0n,
+      gitSharedGcMinimumIntervalMs: 0,
+    }).prepare(envelope("pull_request"), preparationContext().context);
+
+    fileSystem.addDirectory(objectsDirectory);
+    fileSystem.addDirectory(packDirectory);
+    fileSystem.addFile(oversizedPack, 8_192n);
+    fileSystem.removePath(workspace.checkoutDirectory);
+
+    const callsBeforeCleanup = processRunner.calls.length;
+    await workspace.cleanup();
+    const cleanupCalls = processRunner.calls.slice(callsBeforeCleanup);
+    expect(
+      cleanupCalls.some(
+        (call) =>
+          commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("remove"),
+      ),
+    ).toBe(true);
+    expect(
+      cleanupCalls.some(
+        (call) =>
+          commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("prune"),
+      ),
+    ).toBe(true);
+    expect(cleanupCalls.some((call) => commandName(call.spec.arguments) === "gc")).toBe(true);
+  });
+
+  it("attempts post-cleanup gc for low free space without blocking attempt removal", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const workspace = await provider(fileSystem, processRunner, {
+      gitSharedMinimumFreeBytes: 1n,
+      gitSharedGcMinimumIntervalMs: 0,
+    }).prepare(envelope("pull_request"), preparationContext().context);
+
+    fileSystem.availableBytesValue = 0n;
+    const callsBeforeCleanup = processRunner.calls.length;
+
+    await expect(workspace.cleanup()).resolves.toBeUndefined();
+    const cleanupCalls = processRunner.calls.slice(callsBeforeCleanup);
+    expect(cleanupCalls.some((call) => commandName(call.spec.arguments) === "gc")).toBe(true);
+    expect(fileSystem.removed).toContain(workspace.attemptDirectory);
+  });
+
+  it("best-effort removes attempt when cleanup maintenance fails", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const progress = preparationContext();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    const oversizedPack = `${packDirectory}\\cleanup-failure.pack`;
+    processRunner.onRun = (spec) => {
+      if (commandName(spec.arguments) === "gc") {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "injected cleanup gc failure", {
+          exitCode: 1,
+        });
+      }
+    };
+
+    const workspace = await provider(fileSystem, processRunner, {
+      gitSharedCacheMaxBytes: 1_024n,
+      gitSharedMinimumFreeBytes: 0n,
+      gitSharedGcMinimumIntervalMs: 0,
+    }).prepare(envelope("pull_request"), progress.context);
+
+    fileSystem.addDirectory(objectsDirectory);
+    fileSystem.addDirectory(packDirectory);
+    fileSystem.addFile(oversizedPack, 8_192n);
+
+    await expect(workspace.cleanup()).rejects.toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
+    expect(fileSystem.removed).toContain(workspace.attemptDirectory);
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(progress.healthFaults[0]).toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
+  });
+
+  it("surfaces a classifiable shared-cache limit error and reports node drain intent", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    fileSystem.addDirectory(repositoryDirectory);
+    fileSystem.addDirectory(objectsDirectory);
+    fileSystem.addDirectory(packDirectory);
+    fileSystem.addFile(`${packDirectory}\\oversized.pack`, 16_384n);
+    const progress = preparationContext();
+
+    await expect(
+      provider(fileSystem, processRunner, {
+        gitSharedCacheMaxBytes: 1_024n,
+        gitSharedMinimumFreeBytes: 0n,
+        gitSharedGcMinimumIntervalMs: 0,
+      }).prepare(envelope("pull_request"), progress.context),
+    ).rejects.toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(progress.healthFaults[0]).toMatchObject({ code: "GIT_SHARED_CACHE_LIMIT_EXCEEDED" });
+  });
+
+  it("fails closed when shared-cache scan sees reparse points outside the target repository", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const untrustedRepositoryDirectory = `${gitSharedRootDirectory}\\repository-999.git`;
+    fileSystem.addDirectory(untrustedRepositoryDirectory);
+    fileSystem.setReparsePoint(untrustedRepositoryDirectory, true);
+
+    await expect(
+      provider(fileSystem, processRunner).prepare(
+        envelope("pull_request", { runAttemptId: "reparse-scan" }),
+        preparationContext().context,
+      ),
+    ).rejects.toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
+  });
+
+  it("fails closed when shared-cache scan exceeds its entry boundary", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    fileSystem.addDirectory(`${gitSharedRootDirectory}\\repository-2.git`);
+
+    await expect(
+      provider(fileSystem, processRunner, {
+        gitSharedScanEntryLimit: 1,
+      }).prepare(
+        envelope("pull_request", { runAttemptId: "entry-boundary" }),
+        preparationContext().context,
+      ),
+    ).rejects.toMatchObject({ code: "GIT_INFRASTRUCTURE_FAILED" });
   });
 
   it("rejects revision mismatches and removes only the failed attempt", async () => {
@@ -629,6 +945,42 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       ),
     ).toBe(true);
     expect(fileSystem.removed).toHaveLength(1);
+  });
+
+  it("best-effort removes attempt when preparation cleanup maintenance fails", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const progress = preparationContext();
+    const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    const objectsDirectory = `${repositoryDirectory}\\objects`;
+    const packDirectory = `${objectsDirectory}\\pack`;
+    const oversizedPack = `${packDirectory}\\prepare-failure.pack`;
+    processRunner.worktreeHeadOutput = `${"c".repeat(40)}\n`;
+    processRunner.onRun = (spec) => {
+      const command = commandName(spec.arguments);
+      if (command === "worktree" && spec.arguments.includes("add")) {
+        fileSystem.addDirectory(objectsDirectory);
+        fileSystem.addDirectory(packDirectory);
+        fileSystem.addFile(oversizedPack, 8_192n);
+      }
+      if (command === "gc") {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "injected prepare cleanup gc failure", {
+          exitCode: 1,
+        });
+      }
+    };
+
+    await expect(
+      provider(fileSystem, processRunner, {
+        gitSharedCacheMaxBytes: 1_024n,
+        gitSharedMinimumFreeBytes: 0n,
+        gitSharedGcMinimumIntervalMs: 0,
+      }).prepare(envelope("pull_request"), progress.context),
+    ).rejects.toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
+    expect(fileSystem.removed).toHaveLength(1);
+    expect(fileSystem.removed[0]).toMatch(/\\attempt-[a-f0-9]{64}$/u);
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(progress.healthFaults[0]).toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
   });
 
   it("rejects an existing shared repository that is a reparse point", async () => {
@@ -852,7 +1204,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     },
   );
 
-  it("reports periodic progress while a managed Git operation remains active", async () => {
+  it("does not emit synthetic progress while a managed Git operation is silent", async () => {
     vi.useFakeTimers();
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
@@ -870,10 +1222,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.processCounts).toEqual([0, 1]);
 
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(progress.processCounts).toEqual([0, 1, 1]);
+    expect(progress.processCounts).toEqual([0, 1]);
     releaseRun();
     await preparation;
-    expect(progress.processCounts.slice(0, 3)).toEqual([0, 1, 1]);
     expect(progress.processCounts.at(-1)).toBe(0);
   });
 
@@ -946,6 +1297,14 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
             maximumMemoryBytes: 536_870_912,
             maximumOutputBytes: 1_048_576,
           },
+          gitSharedCachePolicy: {
+            maximumTotalBytes: 64n * 1024n * 1024n * 1024n,
+            minimumFreeBytes: 10n * 1024n * 1024n * 1024n,
+            maximumScanEntries: 250_000,
+            maximumScanDurationMs: 30_000,
+            gcMinimumIntervalMs: 60_000,
+            gcPruneAgeHours: 168,
+          },
           diskBudget: new FakeWorkspaceDiskBudget(fileSystem),
           fileSystem,
           processRunner,
@@ -964,6 +1323,14 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
             maximumProcessCount: 4,
             maximumMemoryBytes: 536_870_912,
             maximumOutputBytes: 1_048_576,
+          },
+          gitSharedCachePolicy: {
+            maximumTotalBytes: 64n * 1024n * 1024n * 1024n,
+            minimumFreeBytes: 10n * 1024n * 1024n * 1024n,
+            maximumScanEntries: 250_000,
+            maximumScanDurationMs: 30_000,
+            gcMinimumIntervalMs: 60_000,
+            gcPruneAgeHours: 168,
           },
           diskBudget: new FakeWorkspaceDiskBudget(fileSystem),
           fileSystem,

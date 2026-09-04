@@ -48,7 +48,6 @@ const maximumPromptUtf8Bytes = 512 * 1024;
 const maximumProcessHostFrameBytes = 1_048_576;
 const maximumProcessHostRequestId = "R".repeat(128);
 const maximumEnvironmentValueLength = 32_767;
-
 const allowedEnvironmentNames = new Set([
   "APPDATA",
   "CODEX_HOME",

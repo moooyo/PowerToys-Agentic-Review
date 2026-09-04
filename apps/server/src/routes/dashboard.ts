@@ -1,8 +1,12 @@
 import {
+  type DashboardJobDetailRead,
+  DashboardJobDetailReadSchema,
   type DashboardJobListQuery,
   DashboardJobListQuerySchema,
   type DashboardJobListResponse,
   DashboardJobListResponseSchema,
+  type DashboardJobReadQuery,
+  DashboardJobReadQuerySchema,
   type DashboardSystemRead,
   DashboardSystemReadSchema,
   type DashboardWorkerListQuery,
@@ -14,11 +18,14 @@ import {
   type DashboardWorkItemListResponse,
   DashboardWorkItemListResponseSchema,
   EntityIdSchema,
+  type ErrorDetails,
+  ErrorDetailsSchema,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import type { FastifyInstance, FastifyRequest, onRequestAsyncHookHandler } from "fastify";
 
 export const DASHBOARD_API_PATHS = {
+  jobById: "/api/v1/dashboard/jobs/:jobId",
   jobs: "/api/v1/dashboard/jobs",
   system: "/api/v1/dashboard/system",
   workers: "/api/v1/dashboard/workers",
@@ -31,6 +38,10 @@ export interface DashboardReadStore {
     input: DashboardWorkItemListQuery,
   ): Promise<DashboardWorkItemListResponse>;
   request(operation: "listJobs", input: DashboardJobListQuery): Promise<DashboardJobListResponse>;
+  request(
+    operation: "getJob",
+    input: DashboardJobReadQuery,
+  ): Promise<DashboardJobDetailRead | null>;
   request(
     operation: "listWorkers",
     input: DashboardWorkerListQuery,
@@ -231,7 +242,7 @@ const normalizeQueryPreValidation =
     request.query = normalizeQuery(request.query, limits);
   };
 
-const rejectSystemQuery = async (request: FastifyRequest): Promise<void> => {
+const rejectEmptyQuery = async (request: FastifyRequest): Promise<void> => {
   const raw = queryRecord(request.query);
   const field = Object.keys(raw)[0];
   if (field !== undefined) {
@@ -243,9 +254,12 @@ const workItemQuerySchema = inlineSchema(DashboardWorkItemListQuerySchema);
 const workItemResponseSchema = inlineSchema(DashboardWorkItemListResponseSchema);
 const jobQuerySchema = inlineSchema(DashboardJobListQuerySchema);
 const jobResponseSchema = inlineSchema(DashboardJobListResponseSchema);
+const jobPathParamsSchema = inlineSchema(DashboardJobReadQuerySchema);
+const jobDetailsResponseSchema = inlineSchema(DashboardJobDetailReadSchema);
 const workerQuerySchema = inlineSchema(DashboardWorkerListQuerySchema);
 const workerResponseSchema = inlineSchema(DashboardWorkerListResponseSchema);
 const systemResponseSchema = inlineSchema(DashboardSystemReadSchema);
+const errorDetailsSchema = inlineSchema(ErrorDetailsSchema);
 const emptyQuerySchema = {
   type: "object",
   additionalProperties: false,
@@ -289,6 +303,37 @@ export const registerDashboardRoutes = (
     async (request) => database.request("listJobs", request.query),
   );
 
+  app.get<{
+    Params: DashboardJobReadQuery;
+    Querystring: Record<string, never>;
+    Reply: DashboardJobDetailRead | ErrorDetails;
+  }>(
+    DASHBOARD_API_PATHS.jobById,
+    {
+      preValidation: rejectEmptyQuery,
+      onRequest: authenticate,
+      schema: {
+        params: jobPathParamsSchema,
+        querystring: emptyQuerySchema,
+        response: {
+          200: jobDetailsResponseSchema,
+          404: errorDetailsSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const job = await database.request("getJob", request.params);
+      if (job === null) {
+        return reply.code(404).send({
+          code: "dashboard_job_not_found",
+          message: "The dashboard job does not exist.",
+          retryable: false,
+        });
+      }
+      return job;
+    },
+  );
+
   app.get<{ Querystring: DashboardWorkerListQuery; Reply: DashboardWorkerListResponse }>(
     DASHBOARD_API_PATHS.workers,
     {
@@ -308,7 +353,7 @@ export const registerDashboardRoutes = (
   app.get<{ Querystring: Record<string, never>; Reply: DashboardSystemRead }>(
     DASHBOARD_API_PATHS.system,
     {
-      preValidation: rejectSystemQuery,
+      preValidation: rejectEmptyQuery,
       onRequest: authenticate,
       schema: {
         querystring: emptyQuerySchema,

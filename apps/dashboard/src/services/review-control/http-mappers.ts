@@ -17,6 +17,8 @@ import { ReviewControlProtocolError } from "./errors";
 import type {
   HealthComponent,
   Job,
+  JobDetails,
+  JobReviewResult,
   JobStage,
   PageResult,
   SystemSnapshot,
@@ -136,6 +138,15 @@ const workerStates = {
   online: true,
 } satisfies Record<WorkerState, true>;
 
+const issueCategories = {
+  bug: true,
+  documentation: true,
+  feature_request: true,
+  other: true,
+  question: true,
+  support: true,
+} as const;
+
 const healthStates = {
   degraded: true,
   healthy: true,
@@ -156,6 +167,9 @@ const workerTokenPattern = /^arw1_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 const gitObjectIdPattern = /^[a-f0-9]{40,64}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const requestedRecipeIdPattern = /^[a-z0-9][a-z0-9._-]*$/;
+const maxSourceLine = 10_000_000;
+const maxInt32 = 2_147_483_647;
 
 const fail = (operation: string, path: string, expectation: string): never => {
   throw new ReviewControlProtocolError(
@@ -224,10 +238,11 @@ const readInteger = (
   operation: string,
   path: string,
   minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
 ): number => {
   const value = object[key];
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
-    return fail(operation, `${path}.${key}`, `an integer greater than or equal to ${minimum}`);
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    return fail(operation, `${path}.${key}`, `an integer from ${minimum} through ${maximum}`);
   }
   return value as number;
 };
@@ -238,11 +253,25 @@ const readNullableInteger = (
   operation: string,
   path: string,
   minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
 ): number | null => {
   if (object[key] === null) {
     return null;
   }
-  return readInteger(object, key, operation, path, minimum);
+  return readInteger(object, key, operation, path, minimum, maximum);
+};
+
+const readPriority = (
+  object: JsonObject,
+  key: string,
+  operation: string,
+  path: string,
+): 0 | 1 | 2 | 3 => {
+  const priority = readInteger(object, key, operation, path, 0, 3);
+  if (priority === 0 || priority === 1 || priority === 2 || priority === 3) {
+    return priority;
+  }
+  return fail(operation, `${path}.${key}`, "an integer from 0 through 3");
 };
 
 const readEnum = <TValue extends string>(
@@ -320,14 +349,29 @@ const readNullableEntityId = (
   return readEntityId(object, key, operation, path);
 };
 
+interface ReadStringArrayOptions {
+  readonly entityIds?: boolean;
+  readonly maximumItemLength?: number;
+  readonly minimumItemLength?: number;
+  readonly pattern?: RegExp;
+  readonly uniqueItems?: boolean;
+}
+
 const readStringArray = (
   object: JsonObject,
   key: string,
   operation: string,
   path: string,
   maximumItems: number,
-  entityIds = false,
+  options: ReadStringArrayOptions = {},
 ): string[] => {
+  const {
+    entityIds = false,
+    maximumItemLength = 128,
+    minimumItemLength = 1,
+    pattern,
+    uniqueItems = true,
+  } = options;
   const value = object[key];
   if (!Array.isArray(value) || value.length > maximumItems) {
     return fail(operation, `${path}.${key}`, `an array with at most ${maximumItems} items`);
@@ -335,18 +379,38 @@ const readStringArray = (
   const result = value.map((item, index) => {
     if (
       typeof item !== "string" ||
-      item.length === 0 ||
-      item.length > 128 ||
+      item.length < minimumItemLength ||
+      item.length > maximumItemLength ||
+      (pattern !== undefined && !pattern.test(item)) ||
       (entityIds && !entityIdPattern.test(item))
     ) {
       return fail(operation, `${path}.${key}[${index}]`, "a valid string");
     }
     return item;
   });
-  if (new Set(result).size !== result.length) {
+  if (uniqueItems && new Set(result).size !== result.length) {
     return fail(operation, `${path}.${key}`, "an array of unique strings");
   }
   return result;
+};
+
+const readUnknownArray = (
+  value: unknown,
+  operation: string,
+  path: string,
+  maximumItems: number,
+): unknown[] => {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    return fail(operation, path, `an array with at most ${maximumItems} items`);
+  }
+  return value;
+};
+
+const readUnitIntervalNumber = (value: unknown, operation: string, path: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    return fail(operation, path, "a number from 0 through 1");
+  }
+  return value;
 };
 
 const actorKeys = ["githubUserId", "login", "accountType", "githubNodeId", "avatarUrl"] as const;
@@ -634,6 +698,241 @@ const mapJob = (value: unknown, operation: string, path: string): Job => {
   };
 };
 
+const reviewFindingKeys = [
+  "findingId",
+  "ordinal",
+  "priority",
+  "title",
+  "body",
+  "path",
+  "line",
+  "endLine",
+  "confidence",
+] as const;
+
+const mapReviewFinding = (value: unknown, operation: string, path: string) => {
+  const finding = asObject(value, operation, path, reviewFindingKeys);
+  const line = readInteger(finding, "line", operation, path, 1, maxSourceLine);
+  const endLine = readNullableInteger(finding, "endLine", operation, path, 1, maxSourceLine);
+  if (endLine !== null && endLine < line) {
+    fail(operation, `${path}.endLine`, "a value greater than or equal to line");
+  }
+  return {
+    findingId: readString(finding, "findingId", operation, path, 1, 128),
+    ordinal: readInteger(finding, "ordinal", operation, path, 0),
+    priority: readPriority(finding, "priority", operation, path),
+    title: readString(finding, "title", operation, path, 1, 256),
+    body: readString(finding, "body", operation, path, 1, 8_192),
+    path: readString(finding, "path", operation, path, 1, 1_024),
+    line,
+    endLine,
+    confidence: (() => {
+      const confidence = finding.confidence;
+      if (
+        typeof confidence !== "number" ||
+        !Number.isFinite(confidence) ||
+        confidence < 0 ||
+        confidence > 1
+      ) {
+        return fail(operation, `${path}.confidence`, "a number from 0 through 1");
+      }
+      return confidence;
+    })(),
+  };
+};
+
+const mapJobReviewResult = (value: unknown, operation: string, path: string) => {
+  if (value === null) {
+    return null;
+  }
+  const result = asObject(value, operation, path, [
+    "reviewResultId",
+    "schemaId",
+    "resultDigest",
+    "summary",
+    "requestedRecipeIds",
+    "createdAt",
+    "prReview",
+    "issueTriage",
+  ]);
+  const schemaId = readEnum(result, "schemaId", operation, path, {
+    IssueTriageV1: true,
+    PrReviewPlanV1: true,
+  });
+  const requestedRecipeIds = readStringArray(result, "requestedRecipeIds", operation, path, 32, {
+    pattern: requestedRecipeIdPattern,
+  });
+  const prReviewValue = result.prReview;
+  const issueTriageValue = result.issueTriage;
+
+  let prReview: JobReviewResult["prReview"];
+  if (prReviewValue === null) {
+    prReview = null;
+  } else {
+    const prReviewObject = asObject(prReviewValue, operation, `${path}.prReview`, [
+      "assessment",
+      "findings",
+    ]);
+    const findingsValue = readUnknownArray(
+      prReviewObject.findings,
+      operation,
+      `${path}.prReview.findings`,
+      100,
+    );
+    prReview = {
+      assessment: readEnum(prReviewObject, "assessment", operation, `${path}.prReview`, {
+        approve: true,
+        comment: true,
+        request_changes: true,
+      }),
+      findings: findingsValue.map((finding, index) =>
+        mapReviewFinding(finding, operation, `${path}.prReview.findings[${index}]`),
+      ),
+    };
+  }
+
+  let issueTriage: JobReviewResult["issueTriage"];
+  if (issueTriageValue === null) {
+    issueTriage = null;
+  } else {
+    const issue = asObject(issueTriageValue, operation, `${path}.issueTriage`, [
+      "category",
+      "priority",
+      "confidence",
+      "suggestedLabels",
+      "missingInformation",
+      "duplicateCandidates",
+    ]);
+    const confidence = readUnitIntervalNumber(
+      issue.confidence,
+      operation,
+      `${path}.issueTriage.confidence`,
+    );
+    const duplicateCandidates = readUnknownArray(
+      issue.duplicateCandidates,
+      operation,
+      `${path}.issueTriage.duplicateCandidates`,
+      20,
+    );
+    issueTriage = {
+      category: readEnum(issue, "category", operation, `${path}.issueTriage`, issueCategories),
+      priority: readPriority(issue, "priority", operation, `${path}.issueTriage`),
+      confidence,
+      suggestedLabels: readStringArray(
+        issue,
+        "suggestedLabels",
+        operation,
+        `${path}.issueTriage`,
+        32,
+        {
+          maximumItemLength: 100,
+        },
+      ),
+      missingInformation: readStringArray(
+        issue,
+        "missingInformation",
+        operation,
+        `${path}.issueTriage`,
+        32,
+        { maximumItemLength: 2_048 },
+      ),
+      duplicateCandidates: duplicateCandidates.map((candidate, index) => {
+        const item = asObject(
+          candidate,
+          operation,
+          `${path}.issueTriage.duplicateCandidates[${index}]`,
+          ["number", "reason"],
+        );
+        return {
+          number: readInteger(
+            item,
+            "number",
+            operation,
+            `${path}.issueTriage.duplicateCandidates[${index}]`,
+            1,
+            maxInt32,
+          ),
+          reason: readString(
+            item,
+            "reason",
+            operation,
+            `${path}.issueTriage.duplicateCandidates[${index}]`,
+            1,
+            2_048,
+          ),
+        };
+      }),
+    };
+  }
+
+  if (
+    (schemaId === "PrReviewPlanV1") !== (prReview !== null) ||
+    (schemaId === "IssueTriageV1") !== (issueTriage !== null)
+  ) {
+    fail(operation, `${path}.schemaId`, "a value consistent with the projected review result");
+  }
+
+  return {
+    reviewResultId: readEntityId(result, "reviewResultId", operation, path),
+    schemaId,
+    resultDigest: readString(result, "resultDigest", operation, path, 64, 64, sha256Pattern),
+    summary: readString(result, "summary", operation, path, 1, 8_192),
+    requestedRecipeIds,
+    createdAt: readDateTime(result, "createdAt", operation, path),
+    prReview,
+    issueTriage,
+  };
+};
+
+const mapJobDetails = (value: unknown, operation: string): JobDetails => {
+  const item = asObject(value, operation, "$", [
+    ...jobKeys,
+    "failureCode",
+    "failureMessage",
+    "resultDigest",
+    "reviewResult",
+  ]);
+  const status = readEnum(item, "status", operation, "$", jobStates);
+  const phase = readNullableEnum(item, "phase", operation, "$", executionPhases);
+  return {
+    id: readEntityId(item, "id", operation, "$"),
+    workItemId: readEntityId(item, "workItemId", operation, "$"),
+    workItemRef: readString(item, "workItemRef", operation, "$", 1, 256),
+    title: readString(item, "title", operation, "$", 1, 256),
+    generation: readInteger(item, "generation", operation, "$", 1),
+    status,
+    stage: mapJobStage(status, phase, operation, "$"),
+    attempt: readInteger(item, "attempt", operation, "$", 0),
+    maxAttempts: readInteger(item, "maxAttempts", operation, "$", 1),
+    ...(item.workerNodeId === null
+      ? {}
+      : { workerNodeId: readEntityId(item, "workerNodeId", operation, "$") }),
+    ...(item.leaseGeneration === null
+      ? {}
+      : { leaseGeneration: readInteger(item, "leaseGeneration", operation, "$", 1) }),
+    ...(item.leaseExpiresAt === null
+      ? {}
+      : { leaseExpiresAt: readDateTime(item, "leaseExpiresAt", operation, "$") }),
+    ...(item.progressUpdatedAt === null
+      ? {}
+      : { progressUpdatedAt: readDateTime(item, "progressUpdatedAt", operation, "$") }),
+    elapsedSeconds: readInteger(item, "elapsedSeconds", operation, "$", 0),
+    targetSha: readString(item, "targetRevisionKey", operation, "$", 1, 128),
+    ...(item.outcome === null
+      ? {}
+      : { outcome: readEnum(item, "outcome", operation, "$", jobOutcomes) }),
+    createdAt: readDateTime(item, "createdAt", operation, "$"),
+    updatedAt: readDateTime(item, "updatedAt", operation, "$"),
+    failureCode: readNullableString(item, "failureCode", operation, "$", 128),
+    failureMessage: readNullableString(item, "failureMessage", operation, "$", 2_048),
+    resultDigest:
+      item.resultDigest === null
+        ? null
+        : readString(item, "resultDigest", operation, "$", 64, 64, sha256Pattern),
+    reviewResult: mapJobReviewResult(item.reviewResult, operation, "$.reviewResult"),
+  };
+};
+
 const workerKeys = [
   "id",
   "workerNodeId",
@@ -665,7 +964,9 @@ const mapWorker = (value: unknown, operation: string, path: string): WorkerNode 
     fail(operation, `${path}.activeSlots`, "a value no greater than maxSlots");
   }
   const capabilities = readStringArray(item, "capabilities", operation, path, 512);
-  const currentJobs = readStringArray(item, "currentJobIds", operation, path, 64, true);
+  const currentJobs = readStringArray(item, "currentJobIds", operation, path, 64, {
+    entityIds: true,
+  });
   const lastHeartbeatAt = readDateTime(item, "lastHeartbeatAt", operation, path);
   const diskFreeBytes = readInteger(item, "diskFreeBytes", operation, path, 0);
 
@@ -800,6 +1101,9 @@ export const mapWorkItemListResponse = (
 
 export const mapJobListResponse = (value: unknown, operation = "listJobs"): PageResult<Job> =>
   mapPage(value, operation, mapJob);
+
+export const mapJobDetailsResponse = (value: unknown, operation = "getJob"): JobDetails =>
+  mapJobDetails(value, operation);
 
 export const mapWorkerListResponse = (
   value: unknown,

@@ -93,7 +93,6 @@ const executionTemplate = {
   executionPolicy: {
     hardTimeoutMs: 600_000,
     noProgressTimeoutMs: 600_000,
-    maxCodexTurns: 3,
     allowedRecipeIds: ["pull-request-review"],
     requiredCapabilityLabels: {},
   },
@@ -209,7 +208,6 @@ const makeJobSchedule = (
       executionPolicy: {
         hardTimeoutMs: 600_000,
         noProgressTimeoutMs: 600_000,
-        maxCodexTurns: 3,
         allowedRecipeIds: ["pull-request-review"],
         requiredCapabilityLabels: {},
       },
@@ -296,7 +294,6 @@ const makeIssueRequestOpenedInput = (deliveryId: string): IngestSchedulingEventI
         executionPolicy: {
           hardTimeoutMs: 600_000,
           noProgressTimeoutMs: 600_000,
-          maxCodexTurns: 1,
           allowedRecipeIds: ["issue-triage"],
           requiredCapabilityLabels: {},
         },
@@ -2701,6 +2698,106 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     expect(system.sqliteVersion).toMatch(/^\d+\.\d+\.\d+$/u);
     expect(system.databaseSizeBytes).toBeGreaterThan(0);
     expect(system.oldestQueuedAt).not.toBeNull();
+  });
+
+  it("reads one dashboard job with immutable structured review result details", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-job-detail"),
+      "detail",
+    );
+    const reviewResult = validPrReviewResult("Persisted dashboard detail review result.");
+    const resultDigest = sha256(canonicalJson(reviewResult));
+    await fixture.client.request("completeLease", {
+      ...claim.envelope.lease,
+      resultDigest,
+      result: reviewResult,
+    });
+
+    const job = await fixture.client.request("getJob", {
+      jobId: claim.envelope.lease.jobId,
+    });
+
+    expect(job).not.toBeNull();
+    expect(job).toMatchObject({
+      id: claim.envelope.lease.jobId,
+      status: "succeeded",
+      failureCode: null,
+      failureMessage: null,
+      resultDigest,
+      reviewResult: {
+        schemaId: "PrReviewPlanV1",
+        resultDigest,
+        summary: reviewResult.summary,
+        requestedRecipeIds: reviewResult.requestedRecipeIds,
+        prReview: {
+          assessment: reviewResult.assessment,
+          findings: reviewResult.findings.map((finding, ordinal) => ({
+            findingId: finding.findingId,
+            ordinal,
+            priority: finding.priority,
+            title: finding.title,
+            body: finding.body,
+            path: finding.path,
+            line: finding.line,
+            endLine: finding.endLine,
+            confidence: finding.confidence,
+          })),
+        },
+        issueTriage: null,
+      },
+    });
+    expect(job).not.toHaveProperty("leaseToken");
+    expect(job).not.toHaveProperty("executionJson");
+  });
+
+  it("rejects dashboard review findings where endLine is before line", async () => {
+    const fixture = await createFixture(false);
+    const claim = await scheduleAndClaimReview(
+      fixture,
+      makeRequestOpenedInput("delivery-job-detail-end-line"),
+      "detail",
+    );
+    const reviewResult = validPrReviewResult("Persisted dashboard detail review result.");
+    const resultDigest = sha256(canonicalJson(reviewResult));
+    await fixture.client.request("completeLease", {
+      ...claim.envelope.lease,
+      resultDigest,
+      result: reviewResult,
+    });
+
+    withFixtureDatabase(fixture, (database) => {
+      database.exec(`
+        DROP TRIGGER tr_pr_review_findings_immutable_update;
+        PRAGMA ignore_check_constraints = ON;
+      `);
+      database
+        .prepare(
+          `
+          UPDATE pr_review_findings
+          SET end_line = line - 1
+          WHERE review_result_id = (
+            SELECT id
+            FROM review_results
+            WHERE job_id = ?
+            LIMIT 1
+          )
+          `,
+        )
+        .run(claim.envelope.lease.jobId);
+      database.exec("PRAGMA ignore_check_constraints = OFF");
+    });
+
+    await expect(
+      fixture.client.request("getJob", { jobId: claim.envelope.lease.jobId }),
+    ).rejects.toThrow("end line must be greater than or equal to line");
+  });
+
+  it("returns null when a dashboard job identifier does not exist", async () => {
+    const { client } = await createFixture(false);
+
+    await expect(client.request("getJob", { jobId: "job-missing" })).resolves.toBeNull();
   });
 
   it("rejects reuse of a webhook delivery identifier with a different payload", async () => {
