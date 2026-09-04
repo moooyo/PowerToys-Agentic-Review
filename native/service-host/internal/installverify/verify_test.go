@@ -362,7 +362,6 @@ func newInstallFixtureWithTrustedContent(
 	executorBundle := lookup(releasemanifest.RootInstallation, `app\executor.mjs`)
 	processHost := lookup(releasemanifest.RootInstallation, `native\processhost.exe`)
 	rootCA := lookup(releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`)
-	publicKey := lookup(releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`)
 	policy := lookup(releasemanifest.RootTrustedConfiguration, `policy\codex.toml`)
 
 	base := config.Config{
@@ -390,12 +389,9 @@ func newInstallFixtureWithTrustedContent(
 	control.Node = fixtureNode(`Control`, node, controlBundle)
 	control.Control = &config.ControlConfiguration{
 		ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
-		RootCertificatePath:                       testTrustedRoot + `\` + rootCA.Path,
-		RootCertificateSHA256:                     rootCA.SHA256,
-		WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
-		LocalAuthorityCNGKeyName:                  "AgenticReview.Control.LocalAuthority",
-		LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("3", 64),
-		LocalAuthorityPublicKeySHA256:             publicKey.SHA256,
+		RootCertificatePath:         testTrustedRoot + `\` + rootCA.Path,
+		RootCertificateSHA256:       rootCA.SHA256,
+		WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 	}
 	executor := base
 	executor.Role = config.RoleExecutor
@@ -403,12 +399,10 @@ func newInstallFixtureWithTrustedContent(
 	executor.PeerService = control.OwnService
 	executor.Node = fixtureNode(`Executor`, node, executorBundle)
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   testTrustedRoot + `\` + publicKey.Path,
-		LocalAuthorityPublicKeySHA256: publicKey.SHA256,
-		CodexPolicyPath:               testTrustedRoot + `\` + policy.Path,
-		CodexPolicySHA256:             policy.SHA256,
-		ProcessHostPath:               testInstallationRoot + `\` + processHost.Path,
-		ProcessHostSHA256:             processHost.SHA256,
+		CodexPolicyPath:   testTrustedRoot + `\` + policy.Path,
+		CodexPolicySHA256: policy.SHA256,
+		ProcessHostPath:   testInstallationRoot + `\` + processHost.Path,
+		ProcessHostSHA256: processHost.SHA256,
 	}
 	controlDocument, err := config.MarshalCanonical(control)
 	if err != nil {

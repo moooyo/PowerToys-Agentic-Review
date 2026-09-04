@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"regexp"
@@ -80,17 +79,8 @@ func TestRuntimePlanBuildsRoleBoundFoundationBootstrap(t *testing.T) {
 				"executionEnabled":     false,
 				"executorPolicySha256": fixture.executor.Executor.CodexPolicySHA256,
 				"foundationVersion":    2,
-				"localAuthorityKeyId":  fixture.control.Control.LocalAuthorityPublicKeySHA256,
 				"maximumSlots":         1,
 				"role":                 string(test.localRole),
-			}
-			if test.role == config.RoleExecutor {
-				publicKey := localSPKIFixtureBytes()
-				expectedRoleConfig["localAuthorityPublicKeySpki"] = map[string]any{
-					"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
-					"byteLength": len(publicKey),
-					"sha256":     fixture.control.Control.LocalAuthorityPublicKeySHA256,
-				}
 			}
 			expectedRoleConfigJSON, err := localrpc.MarshalCanonicalJSON(
 				expectedRoleConfig,

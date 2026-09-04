@@ -14,7 +14,7 @@ const (
 	MinorVersion      = 0
 	MaximumFrameBytes = 1_048_576
 	minimumMessageID  = 1
-	maximumMessageID  = 20
+	maximumMessageID  = 19
 )
 
 var (

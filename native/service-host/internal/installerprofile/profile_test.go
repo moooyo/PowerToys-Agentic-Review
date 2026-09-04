@@ -76,9 +76,6 @@ func TestCurrentProfileRejectsAlternateRootsAndBootstrapSelections(t *testing.T)
 		{name: "authentication profile", mutate: func(control, _ *config.Config) {
 			control.Control.WorkerAuthenticationProfile = "other"
 		}},
-		{name: "Token-shaped bootstrap key name", mutate: func(control, _ *config.Config) {
-			control.Control.LocalAuthorityCNGKeyName = `AgenticReview.arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
-		}},
 	}
 	for _, test := range bootstrapTests {
 		t.Run("bootstrap "+test.name, func(t *testing.T) {
@@ -109,14 +106,11 @@ func validBootstrapPair() (config.Config, config.Config) {
 		},
 		Node: installerProfileNode(ControlDataRoot, `app\control.mjs`, false),
 		Control: &config.ControlConfiguration{
-			ServerOrigin:                              "https://review.example.test",
-			ServerName:                                "review.example.test",
-			RootCertificatePath:                       TrustedConfigurationRoot + `\certificates\server-root.cer`,
-			RootCertificateSHA256:                     strings.Repeat("3", 64),
-			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
-			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("4", 64),
-			LocalAuthorityPublicKeySHA256:             strings.Repeat("5", 64),
+			ServerOrigin:                "https://review.example.test",
+			ServerName:                  "review.example.test",
+			RootCertificatePath:         TrustedConfigurationRoot + `\certificates\server-root.cer`,
+			RootCertificateSHA256:       strings.Repeat("3", 64),
+			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 		},
 		Limits: installerProfileLimits(),
 	}
@@ -126,12 +120,10 @@ func validBootstrapPair() (config.Config, config.Config) {
 	executor.Node = installerProfileNode(ExecutorDataRoot, `app\executor.mjs`, true)
 	executor.Control = nil
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   TrustedConfigurationRoot + `\keys\local-authority.spki`,
-		LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
-		CodexPolicyPath:               TrustedConfigurationRoot + `\policy\codex-requirements.toml`,
-		CodexPolicySHA256:             strings.Repeat("6", 64),
-		ProcessHostPath:               InstallationRoot + `\native\AgenticReview.ProcessHost.exe`,
-		ProcessHostSHA256:             strings.Repeat("7", 64),
+		CodexPolicyPath:   TrustedConfigurationRoot + `\policy\codex-requirements.toml`,
+		CodexPolicySHA256: strings.Repeat("6", 64),
+		ProcessHostPath:   InstallationRoot + `\native\AgenticReview.ProcessHost.exe`,
+		ProcessHostSHA256: strings.Repeat("7", 64),
 	}
 	return control, executor
 }

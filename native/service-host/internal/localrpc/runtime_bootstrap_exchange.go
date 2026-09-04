@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -67,19 +65,11 @@ type runtimeOperationPolicy struct {
 }
 
 type foundationRoleConfig struct {
-	ExecutionEnabled            bool                           `json:"executionEnabled"`
-	ExecutorPolicySHA256        string                         `json:"executorPolicySha256"`
-	FoundationVersion           int                            `json:"foundationVersion"`
-	LocalAuthorityKeyID         string                         `json:"localAuthorityKeyId"`
-	LocalAuthorityPublicKeySPKI *foundationPublicKeyDescriptor `json:"localAuthorityPublicKeySpki,omitempty"`
-	MaximumSlots                int                            `json:"maximumSlots"`
-	Role                        Role                           `json:"role"`
-}
-
-type foundationPublicKeyDescriptor struct {
-	Base64URL  string `json:"base64Url"`
-	ByteLength int    `json:"byteLength"`
-	SHA256     string `json:"sha256"`
+	ExecutionEnabled     bool   `json:"executionEnabled"`
+	ExecutorPolicySHA256 string `json:"executorPolicySha256"`
+	FoundationVersion    int    `json:"foundationVersion"`
+	MaximumSlots         int    `json:"maximumSlots"`
+	Role                 Role   `json:"role"`
 }
 
 // BeginRuntimeBootstrapExchange sends one canonical bootstrap frame and validates exactly one
@@ -199,49 +189,18 @@ func decodeFoundationRoleConfig(role Role, document []byte) (foundationRoleConfi
 	}
 	expectedKeys := []string{
 		"executionEnabled", "executorPolicySha256", "foundationVersion",
-		"localAuthorityKeyId", "maximumSlots", "role",
-	}
-	if role == RoleExecutor {
-		expectedKeys = append(expectedKeys, "localAuthorityPublicKeySpki")
+		"maximumSlots", "role",
 	}
 	object, ok := exactRuntimeBootstrapObject(parsed, expectedKeys...)
 	if !ok || !runtimeBootstrapJSONNumber(object["foundationVersion"]) ||
 		!runtimeBootstrapJSONNumber(object["maximumSlots"]) {
 		return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
 	}
-	if role == RoleExecutor {
-		descriptor, valid := exactRuntimeBootstrapObject(
-			object["localAuthorityPublicKeySpki"],
-			"base64Url", "byteLength", "sha256",
-		)
-		if !valid || !runtimeBootstrapJSONNumber(descriptor["byteLength"]) {
-			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
-		}
-	}
 	var config foundationRoleConfig
 	if err := decodeExact(document, &config); err != nil ||
 		config.ExecutionEnabled || config.FoundationVersion != foundationRoleConfigVersion ||
 		config.MaximumSlots != foundationMaximumSlots || config.Role != role ||
-		!validRuntimeBootstrapDigest(config.LocalAuthorityKeyID) ||
 		!validRuntimeBootstrapDigest(config.ExecutorPolicySHA256) {
-		return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
-	}
-	if role == RoleExecutor {
-		if config.LocalAuthorityPublicKeySPKI == nil {
-			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
-		}
-		publicKey, err := base64.RawURLEncoding.DecodeString(
-			config.LocalAuthorityPublicKeySPKI.Base64URL,
-		)
-		digest := sha256.Sum256(publicKey)
-		if err != nil || len(publicKey) == 0 || len(publicKey) > foundationPublicKeyMaximumBytes ||
-			len(publicKey) != config.LocalAuthorityPublicKeySPKI.ByteLength ||
-			base64.RawURLEncoding.EncodeToString(publicKey) != config.LocalAuthorityPublicKeySPKI.Base64URL ||
-			config.LocalAuthorityPublicKeySPKI.SHA256 != config.LocalAuthorityKeyID ||
-			hex.EncodeToString(digest[:]) != config.LocalAuthorityKeyID {
-			return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
-		}
-	} else if config.LocalAuthorityPublicKeySPKI != nil {
 		return foundationRoleConfig{}, ErrInvalidRuntimeBootstrap
 	}
 	return config, nil

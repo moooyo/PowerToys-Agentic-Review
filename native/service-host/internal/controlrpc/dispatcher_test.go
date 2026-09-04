@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
 )
@@ -74,17 +73,7 @@ func TestDispatcherForwardsEveryOperationWithDetachedExactBodies(t *testing.T) {
 		return workertransport.RunFailResponse{Body: failResponse}, nil
 	}
 
-	signatureSource := validTestSignature()
-	signer := &fakeLocalAuthoritySigner{
-		sign: func(digest []byte) ([]byte, error) {
-			if !bytes.Equal(digest, bytes.Repeat([]byte{0x5a}, cng.DigestSize)) {
-				t.Fatalf("unexpected digest: %x", digest)
-			}
-			digest[0] = 0
-			return signatureSource, nil
-		},
-	}
-	dispatcher := mustTestDispatcher(t, client, signer)
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	registered, err := dispatcher.Register(context.Background(), registerBody)
@@ -108,24 +97,13 @@ func TestDispatcherForwardsEveryOperationWithDetachedExactBodies(t *testing.T) {
 		t.Fatalf("FailRun returned (%s, %v)", failed, err)
 	}
 
-	var digest [cng.DigestSize]byte
-	for index := range digest {
-		digest[index] = 0x5a
-	}
-	signature, err := dispatcher.SignLocalDigest(context.Background(), digest)
-	if err != nil || !bytes.Equal(signature, signatureSource) {
-		t.Fatalf("SignLocalDigest returned (%x, %v)", signature, err)
-	}
-
 	registerResponse[0] = '['
 	claimResponse[0] = '['
 	heartbeatResponse[0] = '['
 	completeResponse[0] = '['
 	failResponse[0] = '['
-	signatureSource[0] = 0xff
 	if registered[0] != ' ' || claimed[0] != ' ' || heartbeat[0] != ' ' ||
-		completed[0] != ' ' || failed[0] != ' ' ||
-		signature[0] != 0 {
+		completed[0] != ' ' || failed[0] != ' ' {
 		t.Fatal("dispatcher returned storage aliased to a dependency")
 	}
 	for _, body := range []json.RawMessage{registerBody, claimBody, heartbeatBody, completeBody, failBody} {
@@ -149,7 +127,7 @@ func TestDispatcherAppliesIndependentRequestAndResponseLimits(t *testing.T) {
 	client.claim = func(context.Context, workertransport.ClaimRequest) (workertransport.ClaimResponse, error) {
 		return workertransport.ClaimResponse{Body: largeClaim}, nil
 	}
-	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	noncanonical := json.RawMessage(` { "z" : 1.0, "a" : 2e0 } `)
@@ -218,7 +196,7 @@ func TestCompleteRunUsesTheDedicatedBodyBudgetAndValidatesTerminalResponse(t *te
 			return workertransport.RunFailResponse{Body: json.RawMessage(`[]`)}, nil
 		},
 	}
-	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	response, err := dispatcher.CompleteRun(context.Background(), "run:large", maximumBody)
@@ -244,7 +222,7 @@ func TestCompleteRunUsesTheDedicatedBodyBudgetAndValidatesTerminalResponse(t *te
 	assertPublicError(t, err, upstreamErrorSpec)
 }
 
-func TestDispatcherHonorsContextBeforeTransportAndAfterSigning(t *testing.T) {
+func TestDispatcherHonorsContextBeforeTransport(t *testing.T) {
 	var transportCalls atomic.Int32
 	client := &fakeWorkerClient{
 		register: func(context.Context, workertransport.RegisterRequest) (workertransport.RegisterResponse, error) {
@@ -252,48 +230,20 @@ func TestDispatcherHonorsContextBeforeTransportAndAfterSigning(t *testing.T) {
 			return workertransport.RegisterResponse{}, nil
 		},
 	}
-	var signCalls atomic.Int32
-	signer := &fakeLocalAuthoritySigner{
-		sign: func([]byte) ([]byte, error) {
-			signCalls.Add(1)
-			return validTestSignature(), nil
-		},
-	}
-	dispatcher := mustTestDispatcher(t, client, signer)
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := dispatcher.Register(cancelled, json.RawMessage(`{}`))
 	assertPublicError(t, err, requestCancelledSpec)
-	_, err = dispatcher.SignLocalDigest(cancelled, [cng.DigestSize]byte{})
-	assertPublicError(t, err, requestCancelledSpec)
-
 	expired, expire := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer expire()
 	_, err = dispatcher.Register(expired, json.RawMessage(`{}`))
 	assertPublicError(t, err, requestTimeoutSpec)
-	if transportCalls.Load() != 0 || signCalls.Load() != 0 {
+	if transportCalls.Load() != 0 {
 		t.Fatal("a pre-cancelled operation reached a dependency")
 	}
-
-	started := make(chan struct{})
-	release := make(chan struct{})
-	signer.sign = func([]byte) ([]byte, error) {
-		close(started)
-		<-release
-		return validTestSignature(), nil
-	}
-	postContext, postCancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, signErr := dispatcher.SignLocalDigest(postContext, [cng.DigestSize]byte{})
-		result <- signErr
-	}()
-	<-started
-	postCancel()
-	close(release)
-	assertPublicError(t, <-result, requestCancelledSpec)
 }
 
 func TestDispatcherPropagatesCancellationIntoWorkerTransport(t *testing.T) {
@@ -305,7 +255,7 @@ func TestDispatcherPropagatesCancellationIntoWorkerTransport(t *testing.T) {
 			return workertransport.RegisterResponse{}, ctx.Err()
 		},
 	}
-	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -405,12 +355,6 @@ func TestDependencyErrorsAreClassifiedWithoutSensitiveText(t *testing.T) {
 		{name: "content encoding", err: workertransport.ErrContentEncoded, expected: upstreamErrorSpec},
 		{name: "redirect", err: workertransport.ErrRedirect, expected: upstreamErrorSpec},
 		{name: "network", err: fmt.Errorf("request to %s: %w", secret, networkError), expected: upstreamUnavailableSpec},
-		{name: "local CNG failure wrapped as URL error", err: &url.Error{
-			Op: "Post", URL: secret, Err: fmt.Errorf("TLS signer: %w", cng.ErrClosed),
-		}, expected: internalErrorSpec},
-		{name: "local CNG status wrapped as URL error", err: &url.Error{
-			Op: "Post", URL: secret, Err: &cng.StatusError{Operation: "NCryptSignHash", Code: 0x80090016},
-		}, expected: internalErrorSpec},
 		{name: "unknown", err: errors.New("unknown path and key " + secret), expected: internalErrorSpec},
 	}
 	for _, test := range tests {
@@ -424,38 +368,7 @@ func TestDependencyErrorsAreClassifiedWithoutSensitiveText(t *testing.T) {
 	}
 }
 
-func TestSignerErrorsAndInvalidSignaturesAreSanitized(t *testing.T) {
-	secret := `C:\ProgramData\AgenticReview\Keys\local-authority`
-	signer := &fakeLocalAuthoritySigner{
-		sign: func([]byte) ([]byte, error) {
-			return nil, fmt.Errorf("NCrypt key %s failed: %w", secret, &cng.StatusError{
-				Operation: "NCryptSignHash", Code: 0x80090016,
-			})
-		},
-	}
-	dispatcher := mustTestDispatcher(t, &fakeWorkerClient{}, signer)
-	t.Cleanup(func() { _ = dispatcher.Close() })
-
-	_, err := dispatcher.SignLocalDigest(context.Background(), [cng.DigestSize]byte{})
-	assertPublicError(t, err, internalErrorSpec)
-	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "NCrypt") {
-		t.Fatal("signing error exposed key or native operation details")
-	}
-
-	signer.sign = func([]byte) ([]byte, error) { return make([]byte, cng.SignatureSize-1), nil }
-	_, err = dispatcher.SignLocalDigest(context.Background(), [cng.DigestSize]byte{})
-	assertPublicError(t, err, internalErrorSpec)
-
-	highS := validTestSignature()
-	for index := cng.DigestSize; index < len(highS); index++ {
-		highS[index] = 0xff
-	}
-	signer.sign = func([]byte) ([]byte, error) { return highS, nil }
-	_, err = dispatcher.SignLocalDigest(context.Background(), [cng.DigestSize]byte{})
-	assertPublicError(t, err, internalErrorSpec)
-}
-
-func TestCloseCancelsCallsClosesOnlyTheOwnedSignerAndIsIdempotent(t *testing.T) {
+func TestCloseCancelsCallsLeavesBorrowedClientOpenAndIsIdempotent(t *testing.T) {
 	started := make(chan struct{})
 	client := &fakeWorkerClient{
 		register: func(ctx context.Context, _ workertransport.RegisterRequest) (workertransport.RegisterResponse, error) {
@@ -464,8 +377,7 @@ func TestCloseCancelsCallsClosesOnlyTheOwnedSignerAndIsIdempotent(t *testing.T) 
 			return workertransport.RegisterResponse{}, ctx.Err()
 		},
 	}
-	signer := &fakeLocalAuthoritySigner{}
-	dispatcher := mustTestDispatcher(t, client, signer)
+	dispatcher := mustTestDispatcher(t, client)
 
 	operationResult := make(chan error, 1)
 	go func() {
@@ -480,70 +392,14 @@ func TestCloseCancelsCallsClosesOnlyTheOwnedSignerAndIsIdempotent(t *testing.T) 
 	if err := <-closeResult; err != nil {
 		t.Fatalf("Close returned an error: %v", err)
 	}
-	if signer.closeCalls.Load() != 1 {
-		t.Fatalf("signer closed %d times", signer.closeCalls.Load())
-	}
 	if client.closeCalls.Load() != 0 {
 		t.Fatalf("borrowed Worker API client closed %d times", client.closeCalls.Load())
 	}
-	if err := dispatcher.Close(); err != nil || signer.closeCalls.Load() != 1 {
-		t.Fatalf("repeated Close returned %v or closed the signer again", err)
+	if err := dispatcher.Close(); err != nil {
+		t.Fatalf("repeated Close returned %v", err)
 	}
 	_, err := dispatcher.Register(context.Background(), json.RawMessage(`{}`))
 	assertPublicError(t, err, internalErrorSpec)
-}
-
-func TestCloseSanitizesSignerCloseFailure(t *testing.T) {
-	secret := `C:\secret\local-authority.key`
-	var attempts atomic.Int32
-	dispatcher := mustTestDispatcher(t, &fakeWorkerClient{}, &fakeLocalAuthoritySigner{
-		close: func() error {
-			if attempts.Add(1) == 1 {
-				return errors.New("close " + secret)
-			}
-			return nil
-		},
-	})
-	err := dispatcher.Close()
-	assertPublicError(t, err, internalErrorSpec)
-	if strings.Contains(err.Error(), secret) {
-		t.Fatal("Close exposed signer details")
-	}
-	if err := dispatcher.Close(); err != nil {
-		t.Fatalf("second Close did not retry signer cleanup: %v", err)
-	}
-	if err := dispatcher.Close(); err != nil || attempts.Load() != 2 {
-		t.Fatalf("successful signer cleanup was not idempotent: attempts=%d error=%v", attempts.Load(), err)
-	}
-}
-
-func TestConcurrentCloseCallsReleaseTheSignerOnce(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	signer := &fakeLocalAuthoritySigner{
-		close: func() error {
-			close(entered)
-			<-release
-			return nil
-		},
-	}
-	dispatcher := mustTestDispatcher(t, &fakeWorkerClient{}, signer)
-
-	const callers = 16
-	results := make(chan error, callers)
-	for range callers {
-		go func() { results <- dispatcher.Close() }()
-	}
-	<-entered
-	close(release)
-	for range callers {
-		if err := <-results; err != nil {
-			t.Fatalf("concurrent Close returned an error: %v", err)
-		}
-	}
-	if signer.closeCalls.Load() != 1 {
-		t.Fatalf("concurrent Close released the signer %d times", signer.closeCalls.Load())
-	}
 }
 
 func TestWorkerResponseExactCopyRejectsInvalidUnicode(t *testing.T) {
@@ -581,7 +437,7 @@ func TestDispatcherPanicsAreRecoveredByLocalRPCServer(t *testing.T) {
 			panic("sensitive dependency panic")
 		},
 	}
-	dispatcher := mustTestDispatcher(t, client, &fakeLocalAuthoritySigner{})
+	dispatcher := mustTestDispatcher(t, client)
 	t.Cleanup(func() { _ = dispatcher.Close() })
 	serverConnection, clientConnection := net.Pipe()
 	t.Cleanup(func() {
@@ -714,7 +570,6 @@ func committedRuntimeBootstrapForDispatcherTest(
 		InstallationManifestSHA256:     strings.Repeat("2", 64),
 		PreflightSHA256:                strings.Repeat("3", 64),
 		NodeBundleSHA256:               strings.Repeat("4", 64),
-		LocalAuthorityKeyID:            strings.Repeat("5", 64),
 		ExecutorPolicySHA256:           strings.Repeat("6", 64),
 		MaximumQueuedBytesPerDirection: 4 * 1024 * 1024,
 		TotalShutdownTimeoutMS:         120_000,
@@ -771,46 +626,12 @@ func committedRuntimeBootstrapForDispatcherTest(
 }
 
 func TestDependencyValidationRejectsNilInterfaces(t *testing.T) {
-	if _, err := New(nil, nil); !errors.Is(err, ErrInvalidDependencies) {
+	if _, err := New(nil); !errors.Is(err, ErrInvalidDependencies) {
 		t.Fatalf("New returned %v", err)
 	}
 	var client *fakeWorkerClient
-	var signer *fakeLocalAuthoritySigner
-	if _, err := newDispatcher(client, &fakeLocalAuthoritySigner{}); !errors.Is(err, ErrInvalidDependencies) {
+	if _, err := newDispatcher(client); !errors.Is(err, ErrInvalidDependencies) {
 		t.Fatalf("newDispatcher accepted a typed nil client: %v", err)
-	}
-	if _, err := newDispatcher(&fakeWorkerClient{}, signer); !errors.Is(err, ErrInvalidDependencies) {
-		t.Fatalf("newDispatcher accepted a typed nil signer: %v", err)
-	}
-}
-
-func TestProductionValidationRejectsAClosedLocalAuthoritySigner(t *testing.T) {
-	client := &fakeWorkerClient{}
-	signer := &fakeLocalAuthoritySigner{
-		identity: cng.KeyIdentity{
-			ProviderName: "Microsoft Software Key Storage Provider",
-			UniqueName:   "local-authority-test-key",
-			MachineKey:   true,
-		},
-		open: false,
-	}
-	if _, err := newProductionDispatcher(client, signer); !errors.Is(err, ErrInvalidDependencies) {
-		t.Fatalf("closed production signer was accepted: %v", err)
-	}
-	if signer.closeCalls.Load() != 0 {
-		t.Fatal("rejected signer ownership was transferred")
-	}
-
-	signer.open = true
-	dispatcher, err := newProductionDispatcher(client, signer)
-	if err != nil {
-		t.Fatalf("open production signer was rejected: %v", err)
-	}
-	if err := dispatcher.Close(); err != nil {
-		t.Fatalf("Close returned an error: %v", err)
-	}
-	if signer.closeCalls.Load() != 1 {
-		t.Fatal("accepted signer ownership was not transferred")
 	}
 }
 
@@ -847,20 +668,13 @@ func assertPublicError(t *testing.T, err error, expected publicErrorSpec) {
 	}
 }
 
-func mustTestDispatcher(t *testing.T, client workerClient, signer localAuthoritySigner) *Dispatcher {
+func mustTestDispatcher(t *testing.T, client workerClient) *Dispatcher {
 	t.Helper()
-	dispatcher, err := newDispatcher(client, signer)
+	dispatcher, err := newDispatcher(client)
 	if err != nil {
 		t.Fatalf("newDispatcher returned an error: %v", err)
 	}
 	return dispatcher
-}
-
-func validTestSignature() []byte {
-	signature := make([]byte, cng.SignatureSize)
-	signature[cng.DigestSize-1] = 1
-	signature[cng.SignatureSize-1] = 1
-	return signature
 }
 
 type fakeWorkerClient struct {
@@ -925,31 +739,4 @@ func (client *fakeWorkerClient) FailRun(
 func (client *fakeWorkerClient) Close() error {
 	client.closeCalls.Add(1)
 	return nil
-}
-
-type fakeLocalAuthoritySigner struct {
-	sign       func([]byte) ([]byte, error)
-	close      func() error
-	closeCalls atomic.Int32
-	identity   cng.KeyIdentity
-	open       bool
-}
-
-func (signer *fakeLocalAuthoritySigner) Identity() cng.KeyIdentity { return signer.identity }
-
-func (signer *fakeLocalAuthoritySigner) IsOpen() bool { return signer.open }
-
-func (signer *fakeLocalAuthoritySigner) SignDigest(digest []byte) ([]byte, error) {
-	if signer.sign == nil {
-		panic("unexpected SignDigest call")
-	}
-	return signer.sign(digest)
-}
-
-func (signer *fakeLocalAuthoritySigner) Close() error {
-	signer.closeCalls.Add(1)
-	if signer.close == nil {
-		return nil
-	}
-	return signer.close()
 }

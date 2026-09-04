@@ -3,9 +3,6 @@ package localrpc
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -141,49 +138,6 @@ func TestRuntimeOperationPolicyRequiresExactFoundationRoleConfig(t *testing.T) {
 		if _, err := deriveRuntimeOperationPolicy(bootstrap); !errors.Is(err, ErrRuntimeBootstrapBinding) {
 			t.Fatalf("non-foundation roleConfig %s returned %v", roleConfig, err)
 		}
-	}
-}
-
-func TestFoundationRoleConfigDecoderEnforcesExecutorPublicKeyBounds(t *testing.T) {
-	tests := []struct {
-		name      string
-		byteCount int
-		wantError bool
-	}{
-		{name: "empty", byteCount: 0, wantError: true},
-		{name: "maximum", byteCount: foundationPublicKeyMaximumBytes},
-		{name: "above maximum", byteCount: foundationPublicKeyMaximumBytes + 1, wantError: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			publicKey := bytes.Repeat([]byte{0x42}, test.byteCount)
-			digest := sha256.Sum256(publicKey)
-			keyID := hex.EncodeToString(digest[:])
-			document := canonicalForTest(t, map[string]any{
-				"executionEnabled":     false,
-				"executorPolicySha256": strings.Repeat("6", 64),
-				"foundationVersion":    foundationRoleConfigVersion,
-				"localAuthorityKeyId":  keyID,
-				"localAuthorityPublicKeySpki": map[string]any{
-					"base64Url":  base64.RawURLEncoding.EncodeToString(publicKey),
-					"byteLength": len(publicKey),
-					"sha256":     keyID,
-				},
-				"maximumSlots": foundationMaximumSlots,
-				"role":         string(RoleExecutor),
-			})
-			config, err := decodeFoundationRoleConfig(RoleExecutor, document)
-			if test.wantError {
-				if !errors.Is(err, ErrInvalidRuntimeBootstrap) {
-					t.Fatalf("decode error = %v, want ErrInvalidRuntimeBootstrap", err)
-				}
-				return
-			}
-			if err != nil || config.LocalAuthorityPublicKeySPKI == nil ||
-				config.LocalAuthorityPublicKeySPKI.ByteLength != test.byteCount {
-				t.Fatalf("decoded config = %#v, error %v", config, err)
-			}
-		})
 	}
 }
 

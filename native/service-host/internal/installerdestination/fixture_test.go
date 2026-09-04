@@ -431,7 +431,6 @@ func fixtureBootstrapPair(manifestSHA256 string) (config.Config, config.Config) 
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath: installerprofile.TrustedConfigurationRoot + `\certificates\server-root.cer`, RootCertificateSHA256: strings.Repeat("3", 64),
 			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
-			LocalAuthorityCNGKeyName:    "AgenticReview.Worker.Control.LocalAuthority", LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("4", 64), LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
 		},
 		Limits: fixtureLimits(),
 	}
@@ -441,7 +440,6 @@ func fixtureBootstrapPair(manifestSHA256 string) (config.Config, config.Config) 
 	executor.Node = fixtureNode(installerprofile.ExecutorDataRoot, `app\executor.mjs`, true)
 	executor.Control = nil
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath: installerprofile.TrustedConfigurationRoot + `\keys\local-authority.spki`, LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
 		CodexPolicyPath: installerprofile.TrustedConfigurationRoot + `\policy\codex-requirements.toml`, CodexPolicySHA256: strings.Repeat("6", 64),
 		ProcessHostPath: installerprofile.InstallationRoot + `\native\AgenticReview.ProcessHost.exe`, ProcessHostSHA256: strings.Repeat("7", 64),
 	}

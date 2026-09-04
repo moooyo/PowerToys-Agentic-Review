@@ -53,13 +53,13 @@ func TestRoleConfigV3LabHasNoProductionConsumer(t *testing.T) {
 func TestProductionBootstrapAndClaimAuthoritySourcesRemainExact(t *testing.T) {
 	root := serviceHostRoot(t)
 	want := map[string]string{
-		"internal/localrpc/protocol.go":                   "1f5528122fa62bf2abb6e81c1fe3cd3a223fdfa04df940076a1ead4d3c5a5e0f",
-		"internal/localrpc/runtime_bootstrap.go":          "a854417104b2587d6535dc6503f17d638a191c0b8a9d15defc00ad20ac739fe9",
-		"internal/localrpc/runtime_bootstrap_exchange.go": "732a4079aca6cfc3f40a8ac2f72c6263c0ac12dbbfa0471d0f443937e12b81a1",
-		"internal/localrpc/server.go":                     "33031fe40dd5b7ff50b632ba3e619166bcea4f0f7e69ee1983cd64480f12f007",
-		"internal/platform/production_windows.go":         "1b0c39d080b41182452db60be0512353f39e3e6df65c3a466bc1979826562eb4",
-		"internal/preflight/compose.go":                   "5b563da95ba48c31d8f9ee82a866b7dbff1fd9c8898a95d569fb15c14198cb5a",
-		"internal/releasemanifest/manifest.go":            "161d7144da7b0d91a134d97f32368cb2b5bf9e8b9706fd0870be1aee4b4bd86d",
+		"internal/localrpc/protocol.go":                   "c7b347037aa8d58b6f6294ac4de2c876ef6cfe8fd0d9d603101578fb28c33e9c",
+		"internal/localrpc/runtime_bootstrap.go":          "4cc3abc73f06b9cd705d6771964d30319a547c12334a3c134a8d15ab82adcfb4",
+		"internal/localrpc/runtime_bootstrap_exchange.go": "ef0d45fbedd15093d351c1206f6fff9680e8c0e21ac0d26b35e033fd090c5c2d",
+		"internal/localrpc/server.go":                     "6e71b8daf0b9fc36f885eb065f9ac224b604a02893ed3a56f1ced0c5c5d04819",
+		"internal/platform/production_windows.go":         "53257a54a58859481f7b02f8f3be7781b8397d8d2c0e6b7b7dda96ad0b4b211f",
+		"internal/preflight/compose.go":                   "9006f189b32034a200e0cf385fd8a396a215391649054cc01a977197fc73c0c1",
+		"internal/releasemanifest/manifest.go":            "15930884496392fdd8f1fbbbb55f43b87cab1a6254c65c30babcf587b09dc007",
 		"internal/releaseprofile/profile.go":              "e1049d6425c3d8c148cef79583849b9f6b8cef9e7cc61d471ebe6d0544397491",
 	}
 	for relative, expected := range want {
@@ -82,8 +82,8 @@ func TestProductionBootstrapAndClaimAuthoritySourcesRemainExact(t *testing.T) {
 func TestLabImplementationSourcesRemainExact(t *testing.T) {
 	root := serviceHostRoot(t)
 	want := map[string]string{
-		"internal/roleconfigv3lab/contract.go":          "183776db7973be99fdf1e18cc49cf7ae6afc3e03cac05b32484c3f63d79546ba",
-		"internal/roleconfigv3lab/role_config.go":       "13788538db62376c153a0aa0728977354bd1827c1953d04b7c7a00f1cd59e9c4",
+		"internal/roleconfigv3lab/contract.go":          "9c08fdcd2b7e10f23645be7dc82493d8ca94329ead030986c4877174b052304d",
+		"internal/roleconfigv3lab/role_config.go":       "0890cf2d2e48c1b15aca208da2e3bdc18fdfc1eee160cdb6f2151d3a198d33d2",
 		"internal/roleconfigv3lab/runtime_bootstrap.go": "98b8e2fb8a618e024b8d13bb43695aaf58a02db9c07c8be45eb4b9f0c83d3b62",
 	}
 	directory := filepath.Join(root, "internal", "roleconfigv3lab")
@@ -167,11 +167,11 @@ func TestLabPackageExposesOnlyExactReviewedAPI(t *testing.T) {
 		"type:DisabledReadinessProjection", "type:Role", "type:RoleConfig",
 		"type:RuntimeBootstrap", "type:RuntimeBootstrapFacts",
 		"value:ARWXProtocolMajor", "value:ARWXProtocolMinor", "value:CompletionMode",
-		"value:DisabledReasonCode", "value:ErrInvalidPublicKey", "value:ErrInvalidRoleConfig",
+		"value:DisabledReasonCode", "value:ErrInvalidRoleConfig",
 		"value:ErrInvalidRuntimeBootstrap", "value:ErrRoleMismatch", "value:FoundationVersion",
 		"value:HostControlProtocolVersion", "value:JobExecutionEnvelopeVersion",
 		"value:NewControlRoleConfig", "value:NewExecutorRoleConfig", "value:NewRuntimeBootstrap",
-		"value:ParseRoleConfig", "value:ParseRuntimeBootstrap", "value:PublicKeyMaximumBytes",
+		"value:ParseRoleConfig", "value:ParseRuntimeBootstrap",
 		"value:RequiredRuntimeBootstrapVersion", "value:RequiredWorkerAPIVersion",
 		"value:RoleConfigMaximumBytes", "value:RoleConfigProfile", "value:RoleControl",
 		"value:RoleExecutor", "value:RuntimeBootstrapARWXMaximumFrameBytes",

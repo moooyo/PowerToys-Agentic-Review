@@ -56,9 +56,6 @@ func TestEvidenceDigestAndRuntimePlanAreRoleLocal(t *testing.T) {
 			}
 			contents := plan.RuntimeContents()
 			wantContents := 1
-			if role == config.RoleExecutor {
-				wantContents = 2
-			}
 			if len(contents) != wantContents {
 				t.Fatalf("RuntimePlan content count = %d, want %d", len(contents), wantContents)
 			}
@@ -69,9 +66,6 @@ func TestEvidenceDigestAndRuntimePlanAreRoleLocal(t *testing.T) {
 				if role == config.RoleExecutor && content.Role() == releasemanifest.RoleCABundle {
 					t.Fatal("Executor RuntimePlan contains Control root CA content")
 				}
-			}
-			if _, hasCredentials := evidence.ControlCredentials(); hasCredentials != (role == config.RoleControl) {
-				t.Fatal("local-authority attestation is present for the wrong role")
 			}
 		})
 	}
@@ -85,12 +79,6 @@ func TestRuntimePlanRejectsMutatedBootstrapTrustAndContent(t *testing.T) {
 				mutate func(*RuntimePlan)
 			}{
 				{
-					name: "local authority key identity",
-					mutate: func(plan *RuntimePlan) {
-						plan.bootstrapTrust.localAuthorityKeyID = strings.Repeat("f", 64)
-					},
-				},
-				{
 					name: "Executor policy identity",
 					mutate: func(plan *RuntimePlan) {
 						plan.bootstrapTrust.executorPolicySHA256 = strings.Repeat("e", 64)
@@ -103,40 +91,8 @@ func TestRuntimePlanRejectsMutatedBootstrapTrustAndContent(t *testing.T) {
 					},
 				},
 			}
-			if role == config.RoleControl {
-				tests = append(tests, struct {
-					name   string
-					mutate func(*RuntimePlan)
-				}{
-					name: "Control public key bytes",
-					mutate: func(plan *RuntimePlan) {
-						plan.bootstrapAuthority.options.LocalAuthorityPublicKeySPKI = []byte("forbidden")
-					},
-				})
-			} else {
+			if role == config.RoleExecutor {
 				tests = append(tests,
-					struct {
-						name   string
-						mutate func(*RuntimePlan)
-					}{
-						name: "Executor authority public key bytes",
-						mutate: func(plan *RuntimePlan) {
-							plan.bootstrapAuthority.options.LocalAuthorityPublicKeySPKI[0] ^= 0xff
-						},
-					},
-					struct {
-						name   string
-						mutate func(*RuntimePlan)
-					}{
-						name: "Executor runtime public key bytes",
-						mutate: func(plan *RuntimePlan) {
-							for index := range plan.runtimeContents {
-								if plan.runtimeContents[index].role == releasemanifest.RoleTrustedConfig {
-									plan.runtimeContents[index].data[0] ^= 0xff
-								}
-							}
-						},
-					},
 					struct {
 						name   string
 						mutate func(*RuntimePlan)
@@ -170,7 +126,7 @@ func TestRuntimePlanRejectsMutatedBootstrapTrustAndContent(t *testing.T) {
 	}
 }
 
-func TestRuntimeBootstrapAuthorityCopiesDoNotAliasPublicKeyBytes(t *testing.T) {
+func TestRuntimeBootstrapAuthorityCopiesMatchRuntimePlan(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleExecutor)
 	evidence, err := composeSnapshots(fixture.input)
 	if err != nil {
@@ -181,10 +137,6 @@ func TestRuntimeBootstrapAuthorityCopiesDoNotAliasPublicKeyBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := first.Copy()
-	first.options.LocalAuthorityPublicKeySPKI[0] ^= 0xff
-	if second.options.LocalAuthorityPublicKeySPKI[0] == first.options.LocalAuthorityPublicKeySPKI[0] {
-		t.Fatal("RuntimeBootstrapAuthority copies alias public-key storage")
-	}
 	plan := evidence.RuntimePlanMustForTest(t)
 	if !second.Matches(plan.RuntimeBootstrapAuthority()) {
 		t.Fatal("detached RuntimeBootstrapAuthority copy differs from its runtime plan")
@@ -380,7 +332,6 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 		{"data root", func(value *Evidence) { value.dataRoot.digest[0] ^= 0xff }},
 		{"data-root installation target", func(value *Evidence) { value.dataRoot.installationRoots[0].target.FileID[0] ^= 0xff }},
 		{"data-root installation ancestor", func(value *Evidence) { value.dataRoot.installationRoots[0].ancestors[0].FileID[0] ^= 0xff }},
-		{"credential identity", func(value *Evidence) { value.controlCredentials.localFacts.identity.UniqueName += ".other" }},
 		{"runtime content", func(value *Evidence) { value.contents[0].data[0] ^= 0xff }},
 	}
 	for _, test := range tests {
@@ -428,7 +379,7 @@ func TestEvidenceDigestBindsEverySecurityInputAndIgnoresDiagnostics(t *testing.T
 	}
 }
 
-func TestEvidenceValidateRejectsSecureReadAndAttestationDrift(t *testing.T) {
+func TestEvidenceValidateRejectsSecureReadDrift(t *testing.T) {
 	fixture := newCompositionFixture(t, config.RoleControl)
 	evidence, err := composeSnapshots(fixture.input)
 	if err != nil {
@@ -452,11 +403,6 @@ func TestEvidenceValidateRejectsSecureReadAndAttestationDrift(t *testing.T) {
 		}},
 		{"release template digest", func(value *Evidence) { value.release.templateDigest[0] ^= 0xff }},
 		{"release self", func(value *Evidence) { value.release.serviceHost.SHA256 = strings.Repeat("a", 64) }},
-		{"local attestation getters", func(value *Evidence) {
-			facts := value.controlCredentials.localFacts
-			facts.identity.UniqueName += ".other"
-			value.controlCredentials.localAuthority = cngAttestationFixture(facts)
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -605,7 +551,6 @@ func cloneEvidenceForDigestTest(value Evidence) Evidence {
 	value.files = cloneFiles(value.files)
 	value.release = cloneReleaseBinding(value.release)
 	value.bindings = cloneBindings(value.bindings)
-	value.controlCredentials = cloneControlCredentials(value.controlCredentials)
 	value.dataRoot = cloneDataRootBinding(value.dataRoot)
 	value.contents = cloneRuntimeContents(value.contents)
 	return value

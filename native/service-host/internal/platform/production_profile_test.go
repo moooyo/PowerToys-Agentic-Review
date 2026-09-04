@@ -66,8 +66,8 @@ func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *tes
 		}
 		if strings.HasPrefix(source.path, "internal/platform/") {
 			for _, imported := range source.imports {
-				if imported == winCertImport {
-					t.Fatalf("production platform file %s imports the historical Worker mTLS package", source.path)
+				if imported == winCertImport || imported == cngImport {
+					t.Fatalf("production platform file %s imports a retired credential package", source.path)
 				}
 			}
 		}
@@ -109,7 +109,7 @@ func TestProductionSourceHasOneBearerPathAndNoLegacyWorkerClientReference(t *tes
 	}
 }
 
-func TestProductionCredentialProfileGatePrecedesCredentialActions(t *testing.T) {
+func TestProductionCredentialStageOnlyValidatesTheTokenProfile(t *testing.T) {
 	_, files := parseProductionSource(t)
 	var source *productionSourceFile
 	for index := range files {
@@ -136,7 +136,6 @@ func TestProductionCredentialProfileGatePrecedesCredentialActions(t *testing.T) 
 	}
 
 	gateIndex := -1
-	cngOpenIndexes := []int{}
 	credentialAliases := map[string]struct{}{}
 	for alias, imported := range source.imports {
 		if imported == cngImport || imported == winCertImport || imported == workerTransportImport {
@@ -166,17 +165,12 @@ func TestProductionCredentialProfileGatePrecedesCredentialActions(t *testing.T) 
 				t.Fatalf("credential action %s.%s appears before the fail-closed profile gate",
 					owner.Name, selector.Sel.Name)
 			}
-			if source.imports[owner.Name] == cngImport && selector.Sel.Name == "Open" {
-				cngOpenIndexes = append(cngOpenIndexes, index)
-			}
+			t.Fatalf("credential stage invokes retired credential action %s.%s", owner.Name, selector.Sel.Name)
 			return true
 		})
 	}
 	if gateIndex < 0 {
 		t.Fatal("openRoleCredentials lacks the exact fail-closed production profile gate")
-	}
-	if len(cngOpenIndexes) != 1 || cngOpenIndexes[0] <= gateIndex {
-		t.Fatalf("cng.Open statement indexes = %v, gate index = %d", cngOpenIndexes, gateIndex)
 	}
 }
 

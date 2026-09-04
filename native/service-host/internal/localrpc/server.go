@@ -26,14 +26,13 @@ var (
 )
 
 // ControlDispatcher exposes the complete privileged v1 surface. Implementations map these typed
-// operations to fixed Worker API routes or the one configured non-exportable signing key.
+// operations to fixed Worker API routes.
 type ControlDispatcher interface {
 	Register(context.Context, json.RawMessage) (json.RawMessage, error)
 	Claim(context.Context, json.RawMessage) (json.RawMessage, error)
 	InstanceHeartbeat(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	CompleteRun(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	FailRun(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	SignLocalDigest(context.Context, [32]byte) ([]byte, error)
 }
 
 type ServerOptions struct {
@@ -341,12 +340,6 @@ serveLoop:
 					}
 					return
 				}
-				if request.Operation == OperationSignLocalDigest {
-					if err := writer.writeCanonicalSuccess(request.ID, body); err != nil {
-						reportFatal(err)
-					}
-					return
-				}
 				bodyMaximum := MaximumWorkerAPIBodyBytes
 				frameMaximum := MaximumFrameBytes
 				if request.Operation == OperationClaim {
@@ -504,12 +497,6 @@ func (s *Server) dispatch(ctx context.Context, request CallRequest) (json.RawMes
 		return s.dispatcher.CompleteRun(ctx, request.RunAttemptID, body)
 	case OperationFailRun:
 		return s.dispatcher.FailRun(ctx, request.RunAttemptID, body)
-	case OperationSignLocalDigest:
-		signature, err := s.dispatcher.SignLocalDigest(ctx, request.Digest)
-		if err != nil {
-			return nil, err
-		}
-		return signatureBody(signature)
 	default:
 		return nil, ErrUnknownOperation
 	}

@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"unicode/utf8"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
 )
@@ -166,9 +165,6 @@ func classifyWorkerError(ctx context.Context, operation localrpc.Operation, err 
 		errors.Is(err, workertransport.ErrRedirect) {
 		return upstreamProtocolError()
 	}
-	if isLocalCredentialError(err) {
-		return internalError()
-	}
 	if isCertificateError(err) {
 		return upstreamProtocolError()
 	}
@@ -259,28 +255,6 @@ func isCertificateError(err error) bool {
 	}
 	var certificateInvalid x509.CertificateInvalidError
 	return errors.As(err, &certificateInvalid)
-}
-
-func isLocalCredentialError(err error) bool {
-	var statusError *cng.StatusError
-	if errors.As(err, &statusError) {
-		return true
-	}
-	localErrors := []error{
-		cng.ErrUnsupported,
-		cng.ErrInvalidOptions,
-		cng.ErrInvalidDigest,
-		cng.ErrInvalidKey,
-		cng.ErrInvalidKeySecurity,
-		cng.ErrInvalidSignature,
-		cng.ErrClosed,
-	}
-	for _, target := range localErrors {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
 }
 
 func contextError(ctx context.Context) error {

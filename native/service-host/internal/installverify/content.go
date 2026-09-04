@@ -14,7 +14,6 @@ import (
 
 const (
 	maximumControlRootCertificateBytes = uint64(64 * 1024)
-	maximumExecutorPublicSPKIBytes     = uint64(4 * 1024)
 	maximumExecutorCodexPolicyBytes    = uint64(1024 * 1024)
 )
 
@@ -187,14 +186,6 @@ func requiredVerifiedContentTargets(
 			return nil, errors.New("Executor runtime content configuration is absent")
 		}
 		executor := executorConfig.Executor
-		if err := add(
-			executor.LocalAuthorityPublicKeyPath,
-			releasemanifest.RoleTrustedConfig,
-			executor.LocalAuthorityPublicKeySHA256,
-			maximumExecutorPublicSPKIBytes,
-		); err != nil {
-			return nil, err
-		}
 		if err := add(
 			executor.CodexPolicyPath,
 			releasemanifest.RolePolicy,

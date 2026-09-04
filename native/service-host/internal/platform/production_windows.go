@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/controlrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/dataroot"
@@ -35,8 +34,6 @@ type windowsComposition struct {
 	releaseAuthority releaseprofile.Evidence
 	installation     installverify.Evidence
 	dataRoot         dataroot.Evidence
-
-	localAuthority *cng.Signer
 
 	preflightEvidence preflight.Evidence
 	peerPlan          preflight.PeerVerificationPlan
@@ -123,30 +120,15 @@ func (composition *windowsComposition) openRoleCredentials(ctx context.Context) 
 	if err := requireProductionBearerProfile(configuration); err != nil {
 		return err
 	}
-	if composition.role == config.RoleExecutor {
-		return nil
-	}
-	if composition.role != config.RoleControl {
-		return errors.New("unsupported credential role")
-	}
-	control := configuration.Control
-	localAuthority, err := cng.Open(cng.Options{
-		KeyName:                          control.LocalAuthorityCNGKeyName,
-		ExpectedSecurityDescriptorSHA256: control.LocalAuthorityKeySecurityDescriptorSHA256,
-		ControlServiceSID:                configuration.OwnService.SID,
-		ExecutorServiceSID:               configuration.PeerService.SID,
-	})
-	composition.localAuthority = localAuthority
-	return err
+	return nil
 }
 
 func (composition *windowsComposition) composePreflight(context.Context) error {
 	evidence, err := preflight.Compose(preflight.Input{
-		Role:                 composition.role,
-		ActualBootstrapPath:  composition.options.ActualBootstrapPath,
-		Installation:         composition.installation,
-		DataRoot:             composition.dataRoot,
-		LocalAuthoritySigner: composition.localAuthority,
+		Role:                composition.role,
+		ActualBootstrapPath: composition.options.ActualBootstrapPath,
+		Installation:        composition.installation,
+		DataRoot:            composition.dataRoot,
 	})
 	composition.preflightEvidence = evidence
 	if err != nil {
@@ -289,7 +271,7 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 		if err != nil {
 			return nil, err
 		}
-		if composition.localAuthority == nil || requireProductionBearerProfile(configuration) != nil ||
+		if requireProductionBearerProfile(configuration) != nil ||
 			configuration.Control.WorkerAuthenticationProfile != workertransport.WorkerAuthProfileID {
 			return nil, errors.New("Control runtime credentials are unavailable")
 		}
@@ -315,17 +297,15 @@ func (composition *windowsComposition) buildRoleRuntime(ctx context.Context) err
 		if err != nil {
 			return nil, err
 		}
-		controlDispatcher, err := controlrpc.New(client, composition.localAuthority)
+		controlDispatcher, err := controlrpc.New(client)
 		composition.dispatcher = controlDispatcher
 		if err != nil {
 			return nil, err
 		}
-		composition.localAuthority = nil
 		return controlDispatcher, nil
 	}, func(localRole localrpc.Role, dispatcher localrpc.ControlDispatcher) error {
 		if composition.role == config.RoleExecutor &&
-			(composition.workerClient != nil || composition.dispatcher != nil ||
-				composition.localAuthority != nil) {
+			(composition.workerClient != nil || composition.dispatcher != nil) {
 			return errors.New("Executor runtime received Control-only dependencies")
 		}
 		shutdownTimeout, err := gracefulShutdownTimeout(configuration)
@@ -453,9 +433,6 @@ func (composition *windowsComposition) cleanup() error {
 	}
 	if composition.peerSession != nil && peerPipeClosed {
 		add("close peer verification session", composition.peerSession.Close())
-	}
-	if composition.localAuthority != nil {
-		add("close local-authority signer", composition.localAuthority.Close())
 	}
 	// FinalizeRuntimePlan closes this evidence on every path, but a native close
 	// failure deliberately retains the exact handles for this cleanup retry.

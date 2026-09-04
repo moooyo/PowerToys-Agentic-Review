@@ -1,15 +1,11 @@
-// Package preflight composes detached configuration, installation, data-root,
-// and key evidence into the fail-closed ServiceHost production preflight
-// contract.
+// Package preflight composes detached configuration, installation, and data-root evidence into
+// the fail-closed ServiceHost production preflight contract.
 //
 // Evidence composition and plan construction perform no filesystem, network,
-// process, or key-opening operations. A dedicated installation verifier must
-// obtain handle-bound evidence first. Compose accepts opaque installation
-// Evidence plus the concrete live local-capability signer. The current schema
-// binds its CNG attestation and deliberately excludes the ordinary Worker
-// Token. It cross-binds the compiled release authority, verified installation
-// files, service identities, and cached atomic attestation into an immutable
-// detached value.
+// process, or key-opening operations. A dedicated installation verifier must obtain handle-bound
+// evidence first. Compose cross-binds the compiled release authority, verified installation files,
+// service identities, and role data-root evidence into an immutable detached value. The Worker
+// Token remains a Control-local runtime input and is not copied into preflight evidence.
 //
 // Lexical path validation rejects tilde-bearing DOS short-name forms as an
 // early defense. That check is not filesystem isolation evidence: custom short

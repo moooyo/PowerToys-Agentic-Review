@@ -32,7 +32,6 @@ const (
 	OperationCompleteRun       Operation = "CompleteRun"
 	OperationFailRun           Operation = "FailRun"
 	OperationArmArwxShutdown   Operation = "ArmArwxShutdown"
-	OperationSignLocalDigest   Operation = "SignLocalDigest"
 )
 
 var (
@@ -60,7 +59,6 @@ type CallRequest struct {
 	Body             json.RawMessage
 	WorkerInstanceID string
 	RunAttemptID     string
-	Digest           [32]byte
 	ArwxShutdown     ArmArwxShutdownV1
 }
 
@@ -171,10 +169,6 @@ type runPayload struct {
 	RunAttemptID string          `json:"runAttemptId"`
 }
 
-type digestPayload struct {
-	DigestSHA256 string `json:"digestSha256"`
-}
-
 type armArwxShutdownPayload struct {
 	BootstrapID         string `json:"bootstrapId"`
 	ShutdownID          string `json:"shutdownId"`
@@ -219,8 +213,6 @@ func decodeCall(document []byte, extractedRequestID string, role Role) (Message,
 		maximumFrameBytes = MaximumRequestFrameBytes
 	} else if wire.Operation == OperationArmArwxShutdown {
 		maximumFrameBytes = MaximumArmArwxShutdownBytes
-	} else if wire.Operation == OperationSignLocalDigest {
-		maximumFrameBytes = MaximumCanonicalControlFrameBytes
 	}
 	if len(document) > maximumFrameBytes {
 		return nil, requestTooLargeError(wire.RequestID)
@@ -287,19 +279,6 @@ func decodeCall(document []byte, extractedRequestID string, role Role) (Message,
 		}
 		request.Body = body
 		request.RunAttemptID = payload.RunAttemptID
-	case OperationSignLocalDigest:
-		if !hasExactObjectKeys(wire.Payload, maximumFrameBytes, "digestSha256") {
-			return nil, protocolError("INVALID_PAYLOAD", "Local signing payload is invalid.", wire.RequestID, ErrInvalidMessage)
-		}
-		var payload digestPayload
-		if err := decodeExact(wire.Payload, &payload); err != nil {
-			return nil, protocolError("INVALID_PAYLOAD", "Local signing payload is invalid.", wire.RequestID, ErrInvalidMessage)
-		}
-		digest, err := decodeDigest(payload.DigestSHA256)
-		if err != nil {
-			return nil, protocolError("INVALID_PAYLOAD", "Local signing digest must be exactly 32 bytes.", wire.RequestID, err)
-		}
-		request.Digest = digest
 	case OperationArmArwxShutdown:
 		if !hasExactObjectKeys(
 			wire.Payload,
@@ -487,52 +466,6 @@ func MarshalErrorResponse(requestID string, publicError errorBody) ([]byte, erro
 func successBooleanBody(name string, value bool) json.RawMessage {
 	document, _ := MarshalCanonicalJSON(map[string]any{name: value}, MaximumCanonicalControlFrameBytes)
 	return document
-}
-
-func signatureBody(signature []byte) (json.RawMessage, error) {
-	if !validP256LowSSignature(signature) {
-		return nil, ErrInvalidHandlerResult
-	}
-	document, err := MarshalCanonicalJSON(map[string]any{
-		"signatureP1363": base64.RawURLEncoding.EncodeToString(signature),
-	}, MaximumCanonicalControlFrameBytes)
-	return json.RawMessage(document), err
-}
-
-var p256Order = [32]byte{
-	0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
-	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-	0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
-	0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
-}
-
-var p256HalfOrder = [32]byte{
-	0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
-	0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-	0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42,
-	0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8,
-}
-
-func validP256LowSSignature(signature []byte) bool {
-	if len(signature) != 64 {
-		return false
-	}
-	r := signature[:32]
-	s := signature[32:]
-	return validP256Scalar(r, p256Order[:], false) && validP256Scalar(s, p256HalfOrder[:], true)
-}
-
-func validP256Scalar(value, maximum []byte, inclusive bool) bool {
-	comparison := bytes.Compare(value, maximum)
-	if comparison > 0 || comparison == 0 && !inclusive {
-		return false
-	}
-	for _, octet := range value {
-		if octet != 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func sanitizeOperationError(err error) errorBody {

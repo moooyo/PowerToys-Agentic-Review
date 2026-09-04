@@ -8,7 +8,6 @@ import (
 	"hash"
 	"reflect"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/config"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/releasemanifest"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/secureconfig"
@@ -21,7 +20,7 @@ import (
 func (e Evidence) Validate() error {
 	if e.role != config.RoleControl && e.role != config.RoleExecutor ||
 		e.actualBootstrapPath == "" || e.digest == ([32]byte{}) ||
-		len(e.roots) != 2 || len(e.files) == 0 || len(e.bindings) != 8+len(e.manifest.Manifest.Files) {
+		len(e.roots) != 2 || len(e.files) == 0 || len(e.bindings) != 7+len(e.manifest.Manifest.Files) {
 		return invalidEvidenceError("preflight evidence is empty or incomplete", nil)
 	}
 	controlConfiguration, err := parseConfigurationRead("Control", e.control.Read)
@@ -148,25 +147,6 @@ func (e Evidence) Validate() error {
 	); err != nil {
 		return invalidEvidenceError("runtime content binding is invalid", err)
 	}
-	if e.role == config.RoleControl {
-		if e.controlCredentials == nil || !e.controlCredentials.bound || !e.controlCredentials.attested {
-			return invalidEvidenceError("Control credential evidence is absent", nil)
-		}
-		if localCredentialFactsFrom(e.controlCredentials.localAuthority) != e.controlCredentials.localFacts {
-			return invalidEvidenceError("stored local-authority attestation differs from its bound facts", nil)
-		}
-		if e.controlCredentials.authenticationProfile != config.WorkerAuthenticationProfileBearerTokenV1 {
-			return invalidEvidenceError("Control credential evidence selects the wrong authentication profile", nil)
-		}
-		if err := validateControlCredentialFacts(
-			e.control.Configuration,
-			e.controlCredentials.localFacts,
-		); err != nil {
-			return invalidEvidenceError("Control credential attestation is inconsistent", err)
-		}
-	} else if e.controlCredentials != nil || len(e.contents) != 2 {
-		return invalidEvidenceError("Executor evidence contains forbidden Control material or wrong content", nil)
-	}
 	computed, err := digestEvidence(e)
 	if err != nil || computed != e.digest {
 		return invalidEvidenceError("preflight evidence digest is inconsistent", err)
@@ -208,7 +188,6 @@ func (e Evidence) runtimePlan() (RuntimePlan, error) {
 	}
 	configuration := e.Configuration()
 	bootstrapTrust := runtimeBootstrapTrust{
-		localAuthorityKeyID:  e.control.Configuration.Control.LocalAuthorityPublicKeySHA256,
 		executorPolicySHA256: e.executor.Configuration.Executor.CodexPolicySHA256,
 	}
 	bootstrapAuthority, err := newRuntimeBootstrapAuthority(e, configuration)
@@ -267,7 +246,7 @@ func (plan RuntimePlan) Validate() error {
 	} else if plan.processHost == nil || plan.configuration.Executor == nil ||
 		plan.processHost.path != plan.configuration.Executor.ProcessHostPath ||
 		plan.processHost.sha256 != plan.configuration.Executor.ProcessHostSHA256 ||
-		len(plan.runtimeContents) != 2 {
+		len(plan.runtimeContents) != 1 || plan.runtimeContents[0].role != releasemanifest.RolePolicy {
 		return invalidEvidenceError("Executor runtime plan is incomplete", nil)
 	}
 	return nil
@@ -340,12 +319,6 @@ func digestEvidence(e Evidence) ([32]byte, error) {
 		}
 	}
 	encoder.bytes(e.dataRoot.digest[:])
-	if e.controlCredentials == nil {
-		encoder.boolean(false)
-	} else {
-		encoder.boolean(true)
-		encodeControlCredentials(&encoder, *e.controlCredentials)
-	}
 	encoder.u64(uint64(len(e.contents)))
 	for _, content := range e.contents {
 		encoder.text(string(content.root))
@@ -459,21 +432,6 @@ func encodeSecureRead(encoder *preflightDigestEncoder, read secureconfig.Result)
 	}
 }
 
-func encodeControlCredentials(encoder *preflightDigestEncoder, evidence ControlCredentialEvidence) {
-	local := evidence.localFacts
-	encoder.text(local.keyName)
-	encoder.digest(local.keySecurityDescriptor)
-	encodeKeyIdentity(encoder, local.identity)
-	encoder.digest(local.publicKeySPKI)
-	encoder.text(local.validatedControlServiceSID)
-	encoder.text(local.validatedExecutorSID)
-	encoder.text(local.algorithm)
-	encoder.u32(local.keyLengthBits)
-	encoder.u32(local.exportPolicy)
-	encoder.u32(local.keyUsage)
-	encoder.text(evidence.authenticationProfile)
-}
-
 func encodeManifestFile(encoder *preflightDigestEncoder, file releasemanifest.File) {
 	encoder.text(string(file.Root))
 	encoder.text(file.Path)
@@ -498,12 +456,6 @@ func encodeObjectIdentity(encoder *preflightDigestEncoder, object secureconfig.O
 	encoder.bytes(object.Evidence.Identity.FileID[:])
 	encoder.bytes(object.EvidenceSHA256[:])
 	encoder.bytes(object.SecurityDescriptorSHA256[:])
-}
-
-func encodeKeyIdentity(encoder *preflightDigestEncoder, identity cng.KeyIdentity) {
-	encoder.text(identity.ProviderName)
-	encoder.text(identity.UniqueName)
-	encoder.boolean(identity.MachineKey)
 }
 
 func encodeFileIdentity(encoder *preflightDigestEncoder, identity winfile.FileIdentity) {

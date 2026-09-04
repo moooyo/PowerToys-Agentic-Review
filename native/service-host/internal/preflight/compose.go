@@ -208,14 +208,6 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		return Evidence{}, err
 	}
 
-	if input.role == config.RoleControl {
-		if input.credentials == nil || !input.credentials.bound {
-			return Evidence{}, preflightError(ErrorCredentialIdentity, "Control credential binding is absent", nil)
-		}
-	} else if input.credentials != nil {
-		return Evidence{}, preflightError(ErrorCredentialIdentity, "Executor snapshot contains Control credentials", nil)
-	}
-
 	result := Evidence{
 		role:                input.role,
 		actualBootstrapPath: input.actualBootstrapPath,
@@ -227,7 +219,6 @@ func composeSnapshots(input snapshotInput) (Evidence, error) {
 		files:               cloneFiles(files),
 		release:             cloneReleaseBinding(input.installation.release),
 		bindings:            cloneBindings(bindings),
-		controlCredentials:  cloneControlCredentials(input.credentials),
 		dataRoot:            cloneDataRootBinding(input.dataRoot),
 		contents:            cloneRuntimeContents(contents),
 	}
@@ -293,9 +284,8 @@ func validateConfigurationPair(control config.Config, executor config.Config) er
 	if windowsPathsOverlap(control.Node.DataRoot, executor.Node.DataRoot) {
 		return mismatch("distinct non-overlapping node.dataRoot values")
 	}
-	if control.Control == nil || executor.Executor == nil ||
-		control.Control.LocalAuthorityPublicKeySHA256 != executor.Executor.LocalAuthorityPublicKeySHA256 {
-		return mismatch("local authority public key digest")
+	if control.Control == nil || executor.Executor == nil {
+		return mismatch("role configuration")
 	}
 	if control.Limits.MaximumFrameBytes != executor.Limits.MaximumFrameBytes {
 		return mismatch("limits.maximumFrameBytes")
@@ -563,7 +553,6 @@ func bindConfiguredFiles(
 		{"executor/bundle", releasemanifest.RootInstallation, executor.Node.BundlePath, releasemanifest.RoleExecutorBundle, executor.Node.BundleSHA256},
 		{"executor/process-host", releasemanifest.RootInstallation, executor.Executor.ProcessHostPath, releasemanifest.RoleProcessHost, executor.Executor.ProcessHostSHA256},
 		{"control/root-ca", releasemanifest.RootTrustedConfiguration, control.Control.RootCertificatePath, releasemanifest.RoleCABundle, control.Control.RootCertificateSHA256},
-		{"executor/local-authority-spki", releasemanifest.RootTrustedConfiguration, executor.Executor.LocalAuthorityPublicKeyPath, releasemanifest.RoleTrustedConfig, executor.Executor.LocalAuthorityPublicKeySHA256},
 		{"executor/codex-policy", releasemanifest.RootTrustedConfiguration, executor.Executor.CodexPolicyPath, releasemanifest.RolePolicy, executor.Executor.CodexPolicySHA256},
 	}
 	result := make([]FileBindingEvidence, 0, len(requirements))

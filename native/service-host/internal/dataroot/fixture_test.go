@@ -333,10 +333,7 @@ func baseConfig(role config.Role) config.Config {
 		value.Control = &config.ControlConfiguration{
 			ServerOrigin: "https://review.example.test", ServerName: "review.example.test",
 			RootCertificatePath: testTrustedRoot + `\server-root.cer`, RootCertificateSHA256: strings.Repeat("e", 64),
-			WorkerAuthenticationProfile:               config.WorkerAuthenticationProfileBearerTokenV1,
-			LocalAuthorityCNGKeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			LocalAuthorityKeySecurityDescriptorSHA256: strings.Repeat("9", 64),
-			LocalAuthorityPublicKeySHA256:             strings.Repeat("1", 64),
+			WorkerAuthenticationProfile: config.WorkerAuthenticationProfileBearerTokenV1,
 		}
 	} else {
 		environment["HOME"] = environment["USERPROFILE"]
@@ -346,9 +343,7 @@ func baseConfig(role config.Role) config.Config {
 		environment["GIT_TERMINAL_PROMPT"] = "0"
 		environment["GCM_INTERACTIVE"] = "never"
 		value.Executor = &config.ExecutorConfiguration{
-			LocalAuthorityPublicKeyPath:   testTrustedRoot + `\local-authority.spki`,
-			LocalAuthorityPublicKeySHA256: strings.Repeat("1", 64),
-			CodexPolicyPath:               testTrustedRoot + `\codex-requirements.toml`, CodexPolicySHA256: strings.Repeat("2", 64),
+			CodexPolicyPath: testTrustedRoot + `\codex-requirements.toml`, CodexPolicySHA256: strings.Repeat("2", 64),
 			ProcessHostPath: testInstallationRoot + `\bin\AgenticReview.ProcessHost.exe`, ProcessHostSHA256: strings.Repeat("3", 64),
 		}
 	}

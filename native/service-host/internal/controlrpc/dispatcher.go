@@ -1,15 +1,12 @@
 package controlrpc
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"math/big"
 	"reflect"
 	"sync"
 
-	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/cng"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/localrpc"
 	"github.com/moooyo/PowerToys-Agentic-Review/native/service-host/internal/workertransport"
 )
@@ -32,26 +29,11 @@ type workerClient interface {
 	FailRun(context.Context, workertransport.RunFailRequest) (workertransport.RunFailResponse, error)
 }
 
-type localAuthoritySigner interface {
-	SignDigest([]byte) ([]byte, error)
-	Close() error
-}
-
-type productionLocalAuthoritySigner interface {
-	localAuthoritySigner
-	Identity() cng.KeyIdentity
-	IsOpen() bool
-}
-
-// Dispatcher is safe for concurrent operation calls and Close calls.
-//
-// New borrows the Worker API client and takes ownership of the local-authority signer. Close
-// cancels and waits for this dispatcher's active operations, then releases the signer. A failed
-// signer release may be retried by calling Close again; a successful release is final. The caller
-// retains ownership of the Worker API client and its process-scoped HTTP transport.
+// Dispatcher is safe for concurrent operation calls and Close calls. New borrows the Worker API
+// client. Close cancels and waits for active operations without closing that client or its
+// process-scoped HTTP transport.
 type Dispatcher struct {
 	client workerClient
-	signer localAuthoritySigner
 
 	mu         sync.Mutex
 	closed     bool
@@ -59,36 +41,21 @@ type Dispatcher struct {
 	nextID     uint64
 	active     sync.WaitGroup
 	closeOnce  sync.Once
-	closeMu    sync.Mutex
-	signerGone bool
 }
 
 var _ localrpc.ControlDispatcher = (*Dispatcher)(nil)
 
-// New constructs the production adapter around one fixed-origin Worker API client and one
-// validated local-authority CNG signer. Ownership of the signer transfers only on success.
-func New(client *workertransport.Client, localAuthority *cng.Signer) (*Dispatcher, error) {
-	return newProductionDispatcher(client, localAuthority)
+// New constructs the production adapter around one fixed-origin Worker API client.
+func New(client *workertransport.Client) (*Dispatcher, error) {
+	return newDispatcher(client)
 }
 
-func newProductionDispatcher(client workerClient, localAuthority productionLocalAuthoritySigner) (*Dispatcher, error) {
-	if isNilDependency(client) || isNilDependency(localAuthority) || !localAuthority.IsOpen() {
-		return nil, ErrInvalidDependencies
-	}
-	identity := localAuthority.Identity()
-	if !identity.MachineKey || identity.ProviderName == "" || identity.UniqueName == "" {
-		return nil, ErrInvalidDependencies
-	}
-	return newDispatcher(client, localAuthority)
-}
-
-func newDispatcher(client workerClient, signer localAuthoritySigner) (*Dispatcher, error) {
-	if isNilDependency(client) || isNilDependency(signer) {
+func newDispatcher(client workerClient) (*Dispatcher, error) {
+	if isNilDependency(client) {
 		return nil, ErrInvalidDependencies
 	}
 	return &Dispatcher{
 		client:     client,
-		signer:     signer,
 		operations: make(map[uint64]context.CancelCauseFunc),
 	}, nil
 }
@@ -222,30 +189,8 @@ func (d *Dispatcher) FailRun(
 	return copyWorkerAPIResponse(response.Body, localrpc.MaximumWorkerAPIBodyBytes)
 }
 
-func (d *Dispatcher) SignLocalDigest(ctx context.Context, digest [cng.DigestSize]byte) ([]byte, error) {
-	operationContext, finish, err := d.begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer finish()
-
-	if err := contextError(operationContext); err != nil {
-		return nil, err
-	}
-	digestSnapshot := make([]byte, cng.DigestSize)
-	copy(digestSnapshot, digest[:])
-	signature, signErr := d.signer.SignDigest(digestSnapshot)
-	if err := contextError(operationContext); err != nil {
-		return nil, err
-	}
-	if signErr != nil || !validP256LowSSignature(signature) {
-		return nil, internalError()
-	}
-	return bytes.Clone(signature), nil
-}
-
-// Close cancels active calls, waits for them to leave the adapter, and releases the owned signer.
-// It never closes the borrowed Worker API client or its HTTP transport.
+// Close cancels active calls and waits for them to leave the adapter. It never closes the borrowed
+// Worker API client or its HTTP transport.
 func (d *Dispatcher) Close() error {
 	if d == nil {
 		return nil
@@ -264,16 +209,6 @@ func (d *Dispatcher) Close() error {
 		}
 		d.active.Wait()
 	})
-
-	d.closeMu.Lock()
-	defer d.closeMu.Unlock()
-	if d.signerGone {
-		return nil
-	}
-	if err := d.signer.Close(); err != nil {
-		return internalError()
-	}
-	d.signerGone = true
 	return nil
 }
 
@@ -322,22 +257,6 @@ func copyWorkerAPIResponse(body json.RawMessage, maximumBytes int) (json.RawMess
 		return nil, upstreamProtocolError()
 	}
 	return snapshot, nil
-}
-
-func validP256LowSSignature(signature []byte) bool {
-	if len(signature) != cng.SignatureSize {
-		return false
-	}
-	order := new(big.Int).SetBytes([]byte{
-		0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
-		0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
-	})
-	r := new(big.Int).SetBytes(signature[:cng.DigestSize])
-	s := new(big.Int).SetBytes(signature[cng.DigestSize:])
-	halfOrder := new(big.Int).Rsh(new(big.Int).Set(order), 1)
-	return r.Sign() > 0 && r.Cmp(order) < 0 && s.Sign() > 0 && s.Cmp(halfOrder) <= 0
 }
 
 func isNilDependency(value any) bool {

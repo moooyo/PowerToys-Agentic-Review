@@ -37,13 +37,6 @@ func TestDecodeControlOperations(t *testing.T) {
 		{OperationFailRun, map[string]any{
 			"runAttemptId": "run:2",
 		}, []byte(`{"code":"FAILED"}`), nil},
-		{OperationSignLocalDigest, map[string]any{
-			"digestSha256": strings.Repeat("a", 64),
-		}, nil, func(t *testing.T, request CallRequest) {
-			if !bytes.Equal(request.Digest[:], bytes.Repeat([]byte{0xaa}, 32)) {
-				t.Fatalf("digest = %x", request.Digest)
-			}
-		}},
 	}
 
 	for _, test := range tests {
@@ -124,10 +117,10 @@ func TestDecodeFailsClosedForRoleOperationAndShape(t *testing.T) {
 			descriptor := rawBodyDescriptorForTest([]byte(`{}`))
 			value["payload"] = map[string]any{"Body": descriptor, "body": descriptor}
 		}, ErrInvalidMessage},
-		{"signing key handle", RoleControl, func(value map[string]any) {
-			value["operation"] = OperationSignLocalDigest
-			value["payload"] = map[string]any{"digestSha256": strings.Repeat("a", 64), "keyHandle": 1}
-		}, ErrInvalidMessage},
+		{"retired signing operation", RoleControl, func(value map[string]any) {
+			value["operation"] = "SignLocalDigest"
+			value["payload"] = map[string]any{"digestSha256": strings.Repeat("a", 64)}
+		}, ErrUnknownOperation},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -143,19 +136,6 @@ func TestDecodeFailsClosedForRoleOperationAndShape(t *testing.T) {
 	nonCanonical := []byte(`{"operation":"Register", "payload":{"body":{"base64Url":"e30","byteLength":2,"sha256":"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}},"protocolVersion":"1.0","requestId":"request:1","type":"call"}`)
 	if _, err := DecodeMessage(nonCanonical, RoleControl); !errors.Is(err, ErrInvalidCanonicalJSON) {
 		t.Fatalf("noncanonical error = %v", err)
-	}
-}
-
-func TestDecodeSigningDigestIsExactlyCanonical32Bytes(t *testing.T) {
-	for _, digest := range []string{strings.Repeat("a", 63), strings.Repeat("a", 65), strings.Repeat("A", 64), strings.Repeat("z", 64)} {
-		document := canonicalForTest(t, map[string]any{
-			"operation":       OperationSignLocalDigest,
-			"payload":         map[string]any{"digestSha256": digest},
-			"protocolVersion": ProtocolVersion, "requestId": "sign:1", "type": "call",
-		})
-		if _, err := DecodeMessage(document, RoleControl); err == nil {
-			t.Errorf("DecodeMessage accepted digest %q", digest)
-		}
 	}
 }
 
@@ -380,34 +360,6 @@ func TestWorkerAPIBodyDescriptorRejectsTampering(t *testing.T) {
 	}
 }
 
-func TestSigningResponseRequiresCanonicalP1363LowS(t *testing.T) {
-	valid := bytes.Repeat([]byte{1}, 64)
-	if _, err := signatureBody(valid); err != nil {
-		t.Fatalf("valid low-S signature was rejected: %v", err)
-	}
-	zeroR := bytes.Clone(valid)
-	clear(zeroR[:32])
-	orderR := bytes.Clone(valid)
-	copy(orderR[:32], p256Order[:])
-	halfOrderS := bytes.Clone(valid)
-	copy(halfOrderS[32:], p256HalfOrder[:])
-	if _, err := signatureBody(halfOrderS); err != nil {
-		t.Fatalf("s == half order was rejected: %v", err)
-	}
-	highS := bytes.Clone(halfOrderS)
-	for index := len(highS) - 1; index >= 32; index-- {
-		highS[index]++
-		if highS[index] != 0 {
-			break
-		}
-	}
-	for _, invalid := range [][]byte{nil, make([]byte, 64), zeroR, orderR, highS} {
-		if _, err := signatureBody(invalid); !errors.Is(err, ErrInvalidHandlerResult) {
-			t.Errorf("signatureBody error = %v, want ErrInvalidHandlerResult", err)
-		}
-	}
-}
-
 func TestCanonicalControlResponseWireFormatRemainsInline(t *testing.T) {
 	cancel, err := marshalCanonicalSuccessResponse("cancel:1", successBooleanBody("cancelled", true))
 	if err != nil {
@@ -429,22 +381,6 @@ func TestCanonicalControlResponseWireFormatRemainsInline(t *testing.T) {
 		t.Fatalf("error response = %s", errorResponse)
 	}
 
-	signature, err := signatureBody(bytes.Repeat([]byte{1}, 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	signResponse, err := marshalCanonicalSuccessResponse("sign:1", signature)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := ParseCanonicalJSON(signResponse, MaximumCanonicalControlFrameBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := value.(map[string]any)["body"].(map[string]any)
-	if _, hasSignature := body["signatureP1363"]; !hasSignature || body["base64Url"] != nil {
-		t.Fatalf("sign response body = %#v", body)
-	}
 }
 
 func canonicalForTest(t *testing.T, value any) []byte {

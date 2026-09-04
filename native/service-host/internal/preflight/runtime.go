@@ -31,16 +31,10 @@ func runtimeContentTargetsFor(
 			return nil, preflightError(ErrorRuntimeContent, "Executor content configuration is absent", nil)
 		}
 		executor := executorConfig.Executor
-		return []runtimeContentTarget{
-			{
-				path: executor.LocalAuthorityPublicKeyPath, role: releasemanifest.RoleTrustedConfig,
-				sha256: executor.LocalAuthorityPublicKeySHA256,
-			},
-			{
-				path: executor.CodexPolicyPath, role: releasemanifest.RolePolicy,
-				sha256: executor.CodexPolicySHA256,
-			},
-		}, nil
+		return []runtimeContentTarget{{
+			path: executor.CodexPolicyPath, role: releasemanifest.RolePolicy,
+			sha256: executor.CodexPolicySHA256,
+		}}, nil
 	default:
 		return nil, preflightError(ErrorRuntimeContent, "runtime content role is unsupported", nil)
 	}

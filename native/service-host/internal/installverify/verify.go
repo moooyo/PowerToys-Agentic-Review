@@ -598,7 +598,6 @@ func validateConfiguredBindings(control, executor config.Config, manifest releas
 		{releasemanifest.RootInstallation, executor.Installation.Root, executor.Node.BundlePath, releasemanifest.RoleExecutorBundle, executor.Node.BundleSHA256},
 		{releasemanifest.RootInstallation, executor.Installation.Root, executor.Executor.ProcessHostPath, releasemanifest.RoleProcessHost, executor.Executor.ProcessHostSHA256},
 		{releasemanifest.RootTrustedConfiguration, control.Installation.TrustedConfigurationRoot, control.Control.RootCertificatePath, releasemanifest.RoleCABundle, control.Control.RootCertificateSHA256},
-		{releasemanifest.RootTrustedConfiguration, executor.Installation.TrustedConfigurationRoot, executor.Executor.LocalAuthorityPublicKeyPath, releasemanifest.RoleTrustedConfig, executor.Executor.LocalAuthorityPublicKeySHA256},
 		{releasemanifest.RootTrustedConfiguration, executor.Installation.TrustedConfigurationRoot, executor.Executor.CodexPolicyPath, releasemanifest.RolePolicy, executor.Executor.CodexPolicySHA256},
 	}
 	for _, candidate := range requirements {
