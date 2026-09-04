@@ -1,5 +1,11 @@
 # ADR 0007: Isolate Windows Worker Control and Execution Identities
 
+> Superseded in part by ADR 0027 for current production requirements.
+> The current requirement set is trusted local Windows, two SCM-managed service identities,
+> pipe peer PID/SID verification, and unsigned typed local authorization envelopes.
+> Historical CNG/SPKI/ControlProof/signed-grant/runtime Authenticode-tree requirements remain
+> background only where explicitly marked superseded.
+
 > Amended by ADR 0026 before publication of a Worker installer. The permanent product boundary is
 > two distinct Windows service identities, Control-only Server credentials, an authenticated local
 > channel, and Executor-before-Control start. ServiceHost now runs directly under Windows SCM;
@@ -11,7 +17,8 @@
 >
 > Historical note: ADR 0025 replaced Worker-to-Server mTLS with a per-Worker Bearer Token. ADR 0026
 > later made the persistent CNG local signer an implementation candidate rather than a permanent
-> installer requirement; the Control/Executor identity boundary remains current.
+> installer requirement; ADR 0027 superseded signed local grants with unsigned typed authorization
+> bound to trusted local peer identity.
 
 - Status: Accepted
 - Date: 2026-08-31
@@ -55,8 +62,8 @@ Executor boot ID, local protocol version, installation-manifest digest, and pref
 capability metadata. These fields do not create a second schedulable Worker.
 
 The services communicate with each other only through one local, ACL-restricted Windows Named
-Pipe. Control sends typed, signed, short-lived execution capabilities instead of forwarding the
-Server lease token. Executor streams bounded progress, artifacts, and terminal results back over
+Pipe. Control sends typed, unsigned, short-lived local authorization envelopes instead of
+forwarding the Server lease token. Executor streams bounded progress, artifacts, and terminal results back over
 the same pipe. Each ServiceHost also owns one separate, per-launch HostControl pipe used only by its
 own Node child; that private bootstrap/RPC channel is not an inter-service transport.
 
@@ -78,9 +85,9 @@ attacker must not be able to:
 - renew, complete, fail, or release a Server lease directly;
 - claim another job or manufacture a locally authorized job;
 - access GitHub publication or ingestion credentials;
-- read the Control Worker Token, current local signing key, Control memory, or Control state;
+- read the Control Worker Token, current local authorization state, Control memory, or Control state;
 - change trusted Worker executables, manifests, service configuration, or ACLs; or
-- renew local authority after the last signed grant or make a stale result acceptable to the
+- renew local authority after the last local authorization grant or make a stale result acceptable to the
   Server.
 
 Executor compromise can falsify the result or artifacts of an already authorized attempt and can
@@ -189,7 +196,7 @@ coordinator. All application contracts and decisions remain TypeScript.
 ```mermaid
 flowchart LR
     S[Agentic Review Server] <-->|HTTPS Bearer Token and lease token| C[Worker Control service]
-    C <-->|ACL Named Pipe and signed local grants| E[Worker Executor service]
+    C <-->|ACL Named Pipe and typed local authorization| E[Worker Executor service]
     E --> P[ProcessHost]
     P --> X[Codex, Git, and approved recipes]
     E --> W[Disposable workspaces]
@@ -249,9 +256,9 @@ a client. Before exchanging job data:
 3. The retained peer process must remain active. Its primary token is queried with `TOKEN_QUERY`
    and must contain the exact expected restricted service SID with no administrative or built-in
    service identity. The process handle remains open for the session to prevent PID reuse.
-4. Both peers exchange random nonces, boot IDs, supported protocol ranges, and package digests. The
-   current capability mechanism authenticates Control's short-lived grants to Executor; persistent
-   CNG is replaceable under ADR 0026.
+4. Both peers exchange random nonces, boot IDs, supported protocol ranges, and package digests.
+   Current local authorization is derived from the verified trusted-local session and typed
+   envelope checks; no signer key, SPKI, or ControlProof artifact is required at runtime.
 
 Any PID, SID, nonce, version, or protocol mismatch closes the pipe and disables claims. Peer process
 checks repeat after every reconnect. Runtime peer verification does not re-authenticate trusted
@@ -287,14 +294,14 @@ Drain, Drained, Ping, Pong
 
 All messages carry the negotiated protocol version, `workerNodeId`, Control `workerInstanceId`,
 Executor boot ID, and correlation ID either directly or through the verified local session context.
-Logs must never include complete frame payloads, signatures, capabilities, prompts, credentials, or
+Logs must never include complete frame payloads, authorization envelopes, prompts, credentials, or
 artifact bytes.
 
-## Execution Capabilities
+## Local Attempt Authorization
 
 Control never sends the Server's random lease token, Worker Token, Authorization header, or raw
-Server response to Executor. After a successful Server claim, Control creates a signed local
-`ExecutionCapabilityV1` containing only:
+Server response to Executor. After a successful Server claim, Control creates a typed local
+`ExecutionAuthorizationV1` envelope containing only:
 
 - a random 256-bit `capabilityId`;
 - `workerNodeId`, Control `workerInstanceId`, and current Executor boot ID;
@@ -307,25 +314,22 @@ Server response to Executor. After a successful Server claim, Control creates a 
 - issue time, maximum Server lease time, and a local grant duration no longer than 45 seconds; and
 - a nonce and protocol audience.
 
-The current candidate serializes the capability with the shared canonical representation and signs
-it with ECDSA P-256 and SHA-256 through a non-exportable CNG key available only to Control. Executor
-has only the public key. The required boundary is Control-only grant authority and complete
-Executor-side verification; ADR 0026 permits replacing persistent CNG and its package binding.
-Executor verifies the signature, audience, boot ID, schema digest, limits, and full envelope digest
-before creating a workspace. It accepts each `capabilityId` once.
+The current requirement is Control-only grant authority via trusted-local peer identity and typed
+envelope validation. Executor verifies audience, boot ID, schema digest, limits, and full envelope
+digest before creating a workspace. It accepts each `capabilityId` once.
 
-The capability never contains a free-form command. Executor maps a typed operation to a locally
-installed, signed, manifest-pinned executable and fixed argument builder. A recipe ID is not an
+The authorization envelope never contains a free-form command. Executor maps a typed operation to a locally
+installed, manifest-pinned executable and fixed argument builder. A recipe ID is not an
 executable path. Repository URLs and identities must match administrator-installed allowlists.
 
-Executor treats a capability as authority only for local resource use. It does not make the result
+Executor treats an authorization envelope as authority only for local resource use. It does not make the result
 acceptable to the Server. Control can upload a result only while it still holds the matching live
 Server lease token and fencing generation.
 
 ## Lease Renewal and Cancellation
 
 Control sends `RenewGrant` only after the Server successfully renews the matching attempt. A renewal
-is signed, increments the local grant sequence, and grants at most another 45 seconds. Executor uses
+increments the local grant sequence and grants at most another 45 seconds. Executor uses
 a monotonic timer for enforcement and clamps every renewal to the earlier of the Server-provided
 lease deadline, job hard deadline, and local policy maximum. Wall-clock changes cannot extend a
 running attempt.
@@ -361,11 +365,11 @@ configuration. The typed HostControl path pins the Server origin, SNI, TLS polic
 limits, deadlines, and concurrency; callers cannot supply arbitrary URLs, redirects, proxies, or
 hop-by-hop headers.
 
-The current implementation uses a non-exportable CNG P-256 key available only to Control for local
-capability signatures. That mechanism preserves the asymmetric Control-to-Executor grant boundary,
-but ADR 0026 does not require persistent CNG, its security-descriptor digest, or node-specific
-package binding. A later implementation may replace it with a simpler mechanism while keeping the
-Control-only authority and Executor verification properties.
+Superseded historical note: earlier drafts used a non-exportable CNG P-256 key available only to
+Control for local capability signatures. ADR 0027 replaced that runtime requirement with
+trusted-local PID/SID identity checks plus typed unsigned authorization envelopes. Persistent CNG,
+security-descriptor digests, node-specific key binding, and local signature verification are not
+part of the current design.
 
 The HostControl pipe remains independent of the ARWX stream, and an ARWX frame cannot select a
 HostControl operation. Losing the selected native transport makes Control advertise zero slots and
@@ -458,12 +462,12 @@ restricted service SIDs.
 | Resource | Control | Executor | Administrator / SYSTEM |
 |---|---|---|---|
 | Authenticated release files and selected service configuration | Read; execute Control only | Read; execute Executor only | Full control |
-| Trusted policy: capability public keys, Codex requirements, repository and recipe allowlists | Read | Read | Full control |
-| Codex, Git, ProcessHost, and validation-tool program files | Read for complete-tree integrity verification; no execute | Read/execute | Full control |
+| Trusted policy: local authorization policy, Codex requirements, repository and recipe allowlists | Read | Read | Full control |
+| Codex, Git, ProcessHost, and validation-tool program files | Read for startup presence/version checks; no execute | Read/execute | Full control |
 | Control configuration and state | Modify | Deny | Full control |
 | Control logs | Append/read | Deny | Full control |
 | Worker Bearer Token configuration | Read | Deny | Full control |
-| Current local capability private-key candidate | Sign/use, non-exportable | Deny | Recovery policy only |
+| Local authorization policy state (typed schema and limits) | Read | Read | Full control |
 | Executor runtime state and logs | Deny | Modify | Full control |
 | Executor Codex home and authentication state | Deny | Modify | Full control |
 | Attempt workspaces, temp, and Git object data | Deny | Modify | Full control |
@@ -487,7 +491,7 @@ must use an authenticated egress proxy or enterprise firewall rather than a broa
 ## Current Candidate Installer Responsibilities
 
 The mechanism list below documents the remaining implementation candidate. The clean installer may
-simplify or replace persistent CNG, package layout, destination evidence, firewall details, and machine
+simplify or replace package layout, destination evidence, firewall details, and machine
 policy. It must preserve the distinct Control/Executor identities, Control-only Server credential,
 authenticated release input, and Executor-before-Control start boundary.
 
@@ -507,8 +511,8 @@ before either service can advertise execution:
    services. Workspace and temp roots must be disjoint from program and Control data roots.
 5. Provision the fixed Worker Bearer Token configuration for Control only; do not place Server
    credentials in Executor.
-6. Create the non-exportable local capability-signing key for Control, export only its public key to
-   the read-only trusted-configuration root, and record its key ID for rotation.
+6. Write the local authorization policy inputs in the read-only trusted-configuration root,
+   including typed schema/version and limits used for Control-to-Executor authorization.
 7. Provision the selected Executor-only Codex authentication mode. Rotate any Codex credential that
    was shared with the former Worker identity.
 8. Apply process-specific or service-specific firewall policy, including an explicit Executor deny
@@ -516,9 +520,8 @@ before either service can advertise execution:
 9. Install machine-enforced Codex requirements, repository and recipe allowlists, and other policy
    in the read-only trusted-configuration root. The policy requires the elevated native sandbox and
    disables unapproved features. Repository files and Executor runtime state must not override it.
-10. Run the privileged installation preflight, write its signed report and package digest, start
-    Executor, wait for local readiness, then start Control. An installation report is evidence, not
-    a substitute for runtime verification.
+10. Complete package verification before the first installation write, start Executor, wait for
+    local readiness, and then start Control. No receipt or signed installation report is required.
 
 No uninstall or upgrade operation is selected for the first unpublished format. A future upgrade or
 uninstall design requires a new ADR and must not infer compatibility from this historical mechanism
@@ -535,7 +538,6 @@ Control requires:
 - the expected non-admin Control token and restricted service SID;
 - a valid fixed Worker Token configuration and route-limited Server transport unavailable to
   Executor;
-- a valid local signing key whose ACL excludes Executor;
 - a trusted complete package manifest and protected Control directories;
 - the expected firewall posture and Server TLS policy;
 - a verified and accepted pipe peer with a compatible protocol and fresh Executor boot ID; and
@@ -547,7 +549,7 @@ Executor requires:
 - absence of Server, GitHub, operator, cloud, SSH, and package-manager credentials in its files,
   credential stores, inherited environment, and reachable Control paths;
 - a trusted complete package manifest and protected executable roots;
-- an administrator-owned trusted-configuration root whose capability public key, Codex
+- an administrator-owned trusted-configuration root whose local authorization policy, Codex
   requirements, repository allowlist, recipe allowlist, and policy digests match the signed
   manifest;
 - protected, disjoint, local workspace, temp, Codex home, and Git working directories;
@@ -557,19 +559,20 @@ Executor requires:
   and selected authentication mode;
 - disk, process, memory, output, and artifact budgets; and
 - the exact inter-service and HostControl pipe ACLs, first-instance ownership, bound peer/child
-  identities, and capability public key.
+  identities, and typed local authorization schema.
 
-Preflight is rerun at service start, after pipe reconnect, after credential rotation, and
-periodically for drift. A configuration request to enable production execution while the
-reported isolation mode is missing or single-process is a startup error, not a warning.
+Each service validates its own fixed role configuration at startup. Peer PID/SID checks repeat after
+every pipe reconnect. Package integrity is verified by the installer and is not reverified as a
+runtime trust ceremony. A configuration request to enable production execution while the reported
+isolation mode is missing or single-process is a startup error, not a warning.
 
 ## Protocol and Package Versioning
 
 The local protocol has independent major and minor versions. A major version changes framing,
-identity, capability, or required-message semantics and requires an explicitly compatible package
+identity, local authorization envelope semantics, or required-message semantics and requires an explicitly compatible package
 pair. A minor version may add optional fields or messages negotiated through `Hello`; strict schema
-validation still rejects an unnegotiated feature. Capability type, canonicalization version,
-signature algorithm, and key ID are versioned separately.
+validation still rejects an unnegotiated feature. Authorization envelope type and
+canonicalization version are versioned separately.
 
 [ADR 0018](0018-dormant-arwx-minor-1-and-job-envelope-v2.md) narrowly supersedes the optional-only
 minor rule for its exact-negotiated ARWX 1.1 profile. That profile is not rolling-compatible with
@@ -588,7 +591,7 @@ include:
 
 - positive clean installation, registration, claim, static review, artifact, completion, and drain;
 - access tests proving Executor and an Executor child cannot open the Worker Token configuration,
-  capability private key, Control state, Control logs, or Control process memory, and cannot reach
+  Control state, Control logs, or Control process memory, and cannot reach
   the Server API;
 - reciprocal tests proving Control cannot open Executor workspaces, Codex home, Codex credentials,
   Git data, or executable directories;
@@ -596,7 +599,7 @@ include:
   PID-reuse, transcript-replay, duplicate-frame, oversized-frame, partial-frame, and
   version-downgrade attacks;
 - expired, replayed, altered, wrong-boot, wrong-generation, wrong-digest, and excessive-resource
-  execution capabilities;
+  local authorization envelopes;
 - lease loss, Server partition, Control crash, Executor crash, ProcessHost crash, broken pipe,
   service stop, hard timeout, and machine reboot, each proving descendants are terminated and stale
   results are fenced;
@@ -607,7 +610,7 @@ include:
 - proof that the configured elevated native sandbox is active and cannot fall back to unelevated or
   unsandboxed command execution;
 - release tamper, signer mismatch, unexpected file, writable parent, ACL drift, firewall drift,
-  Worker Token rotation, selected local-capability rotation, and broker revocation tests; and
+  Worker Token rotation, local authorization policy rotation, and broker revocation tests; and
 - multi-slot cancellation and resource-exhaustion tests showing one attempt cannot extend another
   attempt's grant or starve the cancellation watchdog; and
 - ServiceHost death, inherited-handle leakage, root-Job breakaway, nested-Job compatibility, and
@@ -626,10 +629,10 @@ not a production requirement for the first clean install.
 2. Extract and version the Control-Executor contracts while the existing Worker remains a disabled
    control-loop implementation.
 3. Build separate Control and Executor bundles plus the native ServiceHost adapter, then add the
-   signed capability and framed Named Pipe transport. No Server contract needs a second Worker
+   typed local authorization envelope and framed Named Pipe transport. No Server contract needs a second Worker
    identity.
-4. Extend the installer with the complete manifest, two services, identities, ACLs, firewall rules,
-   keys, machine-enforced Codex policy, and preflight reporting.
+4. Extend the installer with the package manifest, two services, identities, ACLs, firewall rules,
+   machine-enforced Codex policy, and direct startup checks.
 5. Install in shadow mode. Control registers zero slots and exercises handshake, reconnect, drain,
    and preflight without claiming jobs.
 6. Run the full Windows verification and attack suite. Remediate every identity, pipe, manifest,
@@ -650,7 +653,7 @@ not a production requirement for the first clean install.
 - Control can fence and kill local execution without reading the checkout or running Codex.
 - Clean installation, credential rotation, Windows testing, and support become more involved. Any
   future upgrade support requires a new ADR.
-- A local signed capability protocol and two coordinated service lifecycles must be maintained.
+- A typed local authorization protocol and two coordinated service lifecycles must be maintained.
 - ServiceHost adds a second small Go platform adapter but no Node ABI-specific addon or application
   policy outside TypeScript.
 - Static review can avoid Hyper-V after the documented Windows boundary passes verification.

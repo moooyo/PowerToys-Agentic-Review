@@ -4,16 +4,18 @@ Status date: 2026-09-04
 
 > ADR 0025 selects the sole per-Worker Bearer Token authentication profile. The Server, runnable
 > TypeScript Worker, and native ServiceHost accept only that profile. Native bootstrap schema 4
-> makes the fixed Worker authentication file a Control-only data-root member and selects the fixed
-> Bearer client; every other bootstrap schema is rejected by strict parsing and validation. The
-> current signed outer-package schema/profile v2 and split installer profile v2 bind only the
-> schema-4 Control/Executor pair and contain no Worker credential material. No earlier outer-package
-> or bootstrap profile is retained as a compatibility surface. Release and outer-package documents
-> no longer contain a node-local CNG identity or local-authority SPKI binding. Authenticode checks
-> and verify-only destination evidence remain replaceable current candidates. WinSW launch inputs have been removed;
-> ServiceHost is the selected native service binary for both roles. The two-service
-> Control/Executor isolation remains the selected Windows Worker boundary. Actual signed release
-> material and the production Windows clean installer remain incomplete.
+> is simplified in place: it keeps the fixed Worker authentication file as a Control-only data-root
+> member and selects the fixed Bearer client; strict parsing and validation reject every other
+> bootstrap schema, and there is no compatibility, migration, or fallback profile path. The current
+> signed outer-package schema/profile v2 and split installer profile v2 bind only the schema-4
+> Control/Executor pair and contain no Worker credential material. Release and outer-package
+> documents no longer contain node-local CNG identity, ControlProof payloads, signed grants/key
+> material, or local-authority SPKI binding. Trust remains Windows-local and identity-separated:
+> the two-service Control/Executor boundary, SCM and pipe peer PID/SID checks, and Job Object
+> containment remain selected. Package-signature handling remains an install-time concern, not a
+> runtime Worker credential surface. WinSW launch inputs have been removed; ServiceHost is the
+> selected native service binary for both roles. Actual signed release material and the production
+> Windows clean installer remain incomplete.
 >
 > ADR 0026 selects an unpublished clean-install-only Windows installer. The former transaction v1
 > model, transaction v2 lab, cross-version store lab, and legacy single-service mTLS deployment
@@ -134,7 +136,7 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   lease-token-free Executor envelopes; snapshots the lease authority basis; binds artifact streams
   to the complete session and attempt context; and maps identity-checked Server terminal responses
   to local terminal dispositions.
-- Runtime-authenticated local capability and renewal proofs, monotonic hard-deadline budgeting,
+- Runtime-bound unsigned local execution and renewal authorizations, monotonic hard-deadline budgeting,
   permanent stale/cancel/terminal fences, strict snapshot projections, attempt-opaque issue revision
   bindings, verified terminal artifact provenance, and cancellation facades that cannot expose an
   `AbortSignal` reason to the local transport.
@@ -152,8 +154,9 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   configurations, strict role/root/content rules, and typed config-binding evidence.
 - Reviewed Windows ServiceHost building blocks for first-instance, remote-rejecting Named Pipes;
   handle-relative configuration traversal; exact restricted virtual-service token verification;
-  persisted non-exportable CNG P-256 local-capability signing; strict fixed-profile Worker Bearer
-  loading; stable SCM and pipe peer-PID plus token verification; canonical role-local RPC;
+  strict fixed-profile Worker Bearer loading; stable SCM and pipe peer-PID plus token verification;
+  typed unsigned local authorization with context, deadline, resource, sequence, and replay binding;
+  canonical role-local RPC;
   fixed-origin TLS 1.3 transport; and suspended Node launch into a non-breakaway
   root Job. A one-shot local service bootstrap verifies the fixed restricted identities, applies and
   reads back exact protected DACLs on the current ServiceHost process and primary token, closes its
@@ -163,10 +166,8 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   no Server transport. Strict parsing and validation reject every other bootstrap schema and all
   Worker client-certificate properties. The current outer-package v2, installer profile v2, and
   staged-evidence typed gate accept only the matching schema-4 pair.
-- Exact private-key security-descriptor digests, fixed machine-scope Software KSP policy,
-  Control-only key ACL semantics, detached key identities, key-reuse detection inputs, and canonical
-  public-SPKI digests for the local Control-to-Executor capability signer. This local CNG authority
-  remains separate from Worker authentication.
+- No local capability key, CNG lifecycle, SPKI exchange, `ControlProof`, or signed-grant wrapper.
+  The authenticated Windows service channel is the local authority boundary.
 - Pre-resume Node process and primary-token protected DACL application with exact readback, plus
   root-Job drain semantics that retain the lifetime handle whenever zero active processes cannot be
   confirmed.
@@ -183,8 +184,8 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   identity before filesystem access, parses complete self-relative DACLs, applies exact per-role
   read/execute profiles, and accepts only the bounded ambient rights used by standard Windows
   `Program Files` and `ProgramData` ancestors.
-- Opaque preflight evidence that consumes concrete installation, data-root, and
-  local-capability-signing attestations rather than caller-assembled prerequisite booleans or
+- Opaque preflight evidence that consumes concrete installation, data-root, and peer-identity
+  attestations rather than caller-assembled prerequisite booleans or
   credential identity values. Local process security is completed before preflight and is not
   recast as a detached bootstrap or current-image authority.
 - A shared 16 MiB claim-response ceiling enforced by both Worker HTTP transport and the Server
@@ -378,6 +379,8 @@ source, architecture, dependency, package-signature, hash/size, and Authenticode
 requiring a per-node public-key payload. Outer admission and staged verification no longer compare
 or parse local capability-key material; the detached outer signature and compiled `outertrust`
 signer remain unchanged.
+The same direction also removes ControlProof and signed grants/key payloads from the current
+release/package path.
 
 On 2026-09-04, ADR 0026 withdrew the unpublished installer transaction v1 model, transaction v2
 lab, and cross-version store v2 lab. Their 50 files were deleted together with the three legacy
@@ -733,10 +736,11 @@ Not yet verified:
 
 - The native two-service Worker clean installer has not been implemented or exercised on a Windows
   test machine.
+- Runtime verification cleanup is not complete and remains a follow-up before release.
 - The native ProcessHost has compile-time and non-Windows protocol/lifecycle verification, but its
   Windows process creation, Job Object, descendant termination, and resource limits have not been
   exercised on a Windows test machine. ServiceHost contracts and Windows building blocks compile for
-  x64 and arm64, but their Named Pipe, CNG local-capability signer, filesystem, process/token DACL,
+  x64 and arm64, but their Named Pipe, filesystem, process/token DACL,
   root Job, peer service PID/token check, fixed Worker authentication profile, Server-certificate verification,
   role-local RPC, and fixed-origin HTTPS behavior has not been exercised on a native Windows test
   machine. The production Authenticode and

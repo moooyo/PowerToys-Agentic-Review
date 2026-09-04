@@ -1,5 +1,9 @@
 # ADR 0026: Unreleased Clean-Install-Only Windows Worker
 
+> Superseded in part by ADR 0027 for current production requirements.
+> The current requirement set is trusted local Windows with dual SCM services, pipe PID/SID peer
+> verification, typed unsigned local authorization, and schema-4 clean-install-only behavior.
+
 ## Status
 
 Accepted on 2026-09-04.
@@ -7,8 +11,9 @@ Accepted on 2026-09-04.
 This decision replaces the unpublished installer lifecycle in ADRs 0013, 0015, 0016, 0020, and
 0021. ADRs 0015, 0020, and 0021 are withdrawn before publication. ADRs 0013 and 0016 are historical
 input only. ServiceHost now integrates directly with SCM; their WinSW wrapper model and package
-slots are removed. The release and outer-package contracts no longer bind a node-local CNG identity
-or local-authority SPKI. Destination-evidence mechanisms remain replaceable.
+slots are removed. Node-local CNG identity, local-authority SPKI binding, signed local grants, and
+runtime Authenticode tree verification are superseded historical mechanisms. Destination-evidence
+mechanisms remain replaceable.
 
 ## Context
 
@@ -38,6 +43,9 @@ format. It will not:
 Existing schema and profile numbers may remain stable identifiers in source, but production code
 must accept only the current Bearer Token package and bootstrap profile. Retaining a number does not
 retain support for an older format.
+
+For the first released line, this means schema 4 in place only, with no migration parser,
+compatibility loader, or fallback profile.
 
 ### Clean-host admission
 
@@ -79,12 +87,14 @@ The future clean installer must preserve these product-level properties:
 - fixed installer-owned runtime and role-data destinations for the selected implementation;
 - the fixed Control-only `worker-auth-v1.json` file and direct Bearer Token registration with the
   Linux Server; and
-- the local named-pipe service-identity boundary and the zero-execution runtime posture.
+- the local named-pipe service-identity boundary with PID/SID peer checks, typed unsigned local
+  authorization, and the zero-execution runtime posture.
 
 The outer-package verifier, retained staging handles, and destination evidence are implementation
 candidates, not permanent requirements of this ADR. The unpublished WinSW inputs, four
-wrapper/config package slots, node-local CNG identity, and local-authority SPKI package binding have
-already been removed. Later simplification may replace or remove the remaining candidates without
+wrapper/config package slots, node-local CNG identity, local-authority SPKI package binding,
+ControlProof evidence, and signed local grant requirements are superseded before publication.
+Later simplification may replace or remove the remaining candidates without
 creating an upgrade or compatibility obligation, provided the product-level properties above still
 hold.
 

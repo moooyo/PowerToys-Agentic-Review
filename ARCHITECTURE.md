@@ -4,11 +4,11 @@ Status: Accepted for initial implementation
 
 Last updated: 2026-09-04
 
-> Amended by ADR 0026 before the first Worker installer was published. The required product boundary
+> Amended by ADR 0026 and ADR 0027 before the first Worker installer was published. The required product boundary
 > is two distinct Windows service identities with Control-only Server credentials and
 > Executor-before-Control start. ServiceHost now runs directly under Windows SCM; WinSW, its wrapper
-> process model, and its package slots were removed. Persistent CNG, node-specific packages,
-> retained-handle destination evidence, and their exact root layout remain replaceable candidates.
+> process model, and its package slots were removed. Node-specific packages, retained-handle
+> destination evidence, and their exact root layout remain replaceable candidates.
 > The first supported installer is clean-install-only; no Worker upgrade, migration, fallback, or
 > rollback format currently exists.
 
@@ -57,9 +57,9 @@ flowchart LR
     W1C[Worker 1 Control] -->|HTTPS plus Bearer Token| S
     W2C[Worker 2 Control] -->|HTTPS plus Bearer Token| S
     WNC[Worker N Control] -->|HTTPS plus Bearer Token| S
-    W1C <-->|Signed local grants| W1E[Worker 1 Executor]
-    W2C <-->|Signed local grants| W2E[Worker 2 Executor]
-    WNC <-->|Signed local grants| WNE[Worker N Executor]
+    W1C <-->|Authenticated pipe authorizations| W1E[Worker 1 Executor]
+    W2C <-->|Authenticated pipe authorizations| W2E[Worker 2 Executor]
+    WNC <-->|Authenticated pipe authorizations| WNE[Worker N Executor]
     W1E --> C1[Codex CLI]
     W2E --> C2[Codex CLI]
     WNE --> CN[Codex CLI]
@@ -102,16 +102,16 @@ identities, as specified by ADR 0007:
 - `AgenticReview.Worker.Executor` owns Codex, Git, ProcessHost, validation tools, and disposable
   workspaces. It has no Server, GitHub, database, webhook, or publication credential.
 
-The services exchange typed, signed, short-lived local execution grants over an ACL-restricted
-Named Pipe. The Server still sees one `workerNodeId`; a raw Server lease token never enters the
-Executor boundary. Each worker machine installs:
+The services exchange typed, unsigned, short-lived local execution authorizations over an
+ACL-restricted Named Pipe. The authorization envelope remains bound to context, expiry,
+resource scope, per-channel sequence, and replay rejection. The Server still sees one
+`workerNodeId`; a raw Server lease token never enters the Executor boundary. Each worker machine
+installs:
 
 - A pinned Node.js 24 LTS runtime.
 - The compiled Control and Executor TypeScript worker bundles.
 - `AgenticReview.ServiceHost.exe` as the native Windows SCM service host, for the local identity
-  channel, the selected local-capability
-  mechanism, Control-only fixed-origin HTTPS transport, and service-root Job Object. Persistent CNG
-  is a current candidate rather than a permanent product requirement.
+  channel, Control-only fixed-origin HTTPS transport, and service-root Job Object.
 - `AgenticReview.ProcessHost.exe` for Job Object supervision.
 - A pinned Codex CLI version.
 - PowerToys build tools required by its advertised recipes.
@@ -350,7 +350,9 @@ and artifact, parses JSONL incrementally, and validates the final result again w
 Each attempt runs through `AgenticReview.ProcessHost.exe`. The helper creates a Windows Job Object,
 starts the target suspended, assigns it to the Job Object, and then resumes it. Lease loss,
 cancellation, hard timeout, worker termination, or control-channel failure closes the Job Object
-and terminates the complete process tree.
+and terminates the complete process tree. Control and Executor exchange only the minimum required
+duplicated handles across the boundary, and the pipe peer is validated against the expected service
+PID/SID before accepting local authorization messages.
 
 Dynamic validation is requested by recipe ID and typed parameters. A model cannot supply an
 executable command. Public fork validation requires explicit per-revision approval because a
@@ -457,8 +459,7 @@ The Linux server uses an approved secret store, container secrets, or systemd cr
 remaining deployment credentials. The Worker Bearer Token is intentionally stored as plaintext in
 the fixed Control configuration file because the local Windows environment is trusted; it still
 must not enter source control, packages, diagnostics, logs, command-line arguments, or environment
-variables. The local Control-to-Executor capability signer and package/Authenticode signing remain
-separate key boundaries.
+variables. Package signature verification is an install-time requirement only.
 
 ## 17. Observability
 

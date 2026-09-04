@@ -1,5 +1,9 @@
 # ADR 0025: Per-Worker Bearer Token Authentication and Direct Registration v1
 
+> Superseded in part by ADR 0027 for current production requirements.
+> Worker API authentication in this ADR remains current; historical local CNG/SPKI/signed-grant
+> notes are superseded by trusted-local PID/SID checks and typed unsigned local authorization.
+
 > ADR 0026 later withdrew the unpublished installer journal, upgrade, migration, and cross-version
 > store directions. This ADR remains authoritative for Worker Token authentication only.
 
@@ -18,8 +22,9 @@ bootstrap schema 4, outer-package schema/profile v2, and split installer profile
 current path; earlier draft bootstrap and package formats are not supported compatibility surfaces.
 Lease tokens, package authentication, Control-to-Executor local authorization, the Control/Executor
 service split, artifact receipts, process isolation, and zero-execution policy remain separate from
-Worker API authentication. ADR 0026 permits replacing the current CNG, Authenticode, and package
-composition. This amendment does not claim a complete production installer.
+Worker API authentication. Current local authorization is trusted-local and unsigned-typed; this
+ADR does not define runtime signer keys, SPKI binding, or runtime Authenticode tree verification.
+This amendment does not claim a complete production installer.
 
 ## Context
 
@@ -52,11 +57,11 @@ The system keeps the following credentials distinct:
 
 1. A long-lived Worker Bearer Token authenticates one Worker node to the Server Worker API.
 2. A short-lived lease token fences one run attempt and remains unchanged.
-3. A short-lived Control-to-Executor capability remains a Windows-local authorization boundary. The
-   current implementation uses a CNG signer, but ADR 0026 permits replacing that mechanism.
+3. A short-lived Control-to-Executor typed authorization envelope remains a Windows-local
+   authorization boundary, bound to trusted local peer identity checks.
 4. Package authentication, GitHub, Codex, and operator OIDC credentials remain separate.
 
-The Worker Bearer Token is never used as a lease token, local capability, package credential,
+The Worker Bearer Token is never used as a lease token, local authorization envelope, package credential,
 operator session, GitHub credential, or Codex credential.
 
 ### Worker node credential
@@ -367,5 +372,5 @@ client certificate, CNG TLS key, receipt, or Server binding verifier.
 - protecting a Token from trusted local Windows users or administrators;
 - differentiating operator roles;
 - preventing credential rollback after database restore;
-- changing lease tokens, package signatures, local capability signatures, or execution policy; or
+- changing lease tokens, package signatures, local authorization semantics, or execution policy; or
 - enabling execution merely because a Worker authenticated successfully.
