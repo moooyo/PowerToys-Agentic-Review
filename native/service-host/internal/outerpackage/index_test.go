@@ -35,6 +35,8 @@ func TestBuildIndexIsCanonicalDeterministicAndBoundToRelease(t *testing.T) {
 		t.Fatalf("unexpected package index: %#v", parsed)
 	}
 	if bytes.Contains(first, []byte("mtlsClientCredential")) ||
+		bytes.Contains(first, []byte("localAuthorityCng")) ||
+		bytes.Contains(first, []byte("nodeSpecificLocalAuthorityPublicKeySpki")) ||
 		bytes.Contains(bytes.ToLower(first), []byte("worker-auth-v1.json")) ||
 		bytes.Contains(first, []byte("arw1_")) {
 		t.Fatalf("Token package index contains forbidden credential material: %s", first)
@@ -59,7 +61,7 @@ func TestPublicReleaseEntryPointsRequireOpaqueFinalizedRelease(t *testing.T) {
 	}
 }
 
-func TestIndexRejectsUnsupportedSchemaMTLSLegacyProfileAndCredentialMaterial(t *testing.T) {
+func TestIndexRejectsUnsupportedSchemaRemovedFieldsLegacyProfileAndCredentialMaterial(t *testing.T) {
 	document := mustBuildIndex(t, validFinalizedSource(t, "a", "b"))
 	for name, candidate := range map[string][]byte{
 		"schema 3": bytes.Replace(
@@ -68,10 +70,10 @@ func TestIndexRejectsUnsupportedSchemaMTLSLegacyProfileAndCredentialMaterial(t *
 			[]byte(`"schemaVersion":3`),
 			1,
 		),
-		"mTLS field": bytes.Replace(
+		"removed mTLS field": bytes.Replace(
 			document,
-			[]byte(`"nodeSpecificLocalAuthorityPublicKeySpki":`),
-			[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"nodeSpecificLocalAuthorityPublicKeySpki":`),
+			[]byte(`"packageId":`),
+			[]byte(`"mtlsClientCredential":{"certificateDerSha256":"`+strings.Repeat("1", 64)+`","certificateStore":"MY","privateKeySecurityDescriptorSha256":"`+strings.Repeat("2", 64)+`"},"packageId":`),
 			1,
 		),
 		"legacy profile": bytes.Replace(
@@ -113,9 +115,6 @@ func TestIndexRejectsUnsupportedSchemaMTLSLegacyProfileAndCredentialMaterial(t *
 		}},
 		{name: "Token-shaped Worker identity", mutate: func(value *Index) {
 			value.WorkerNodeID = `arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
-		}},
-		{name: "Token-shaped CNG key name", mutate: func(value *Index) {
-			value.LocalAuthorityCNG.KeyName = `AgenticReview.arw1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
 		}},
 	}
 	for _, test := range tests {
@@ -297,16 +296,6 @@ func TestIndexRejectsInvalidNodeAndInstallationIdentityBindings(t *testing.T) {
 		{name: "installation ID colon", mutate: func(value *Index) { value.InstallationID = "installation:node" }},
 		{name: "worker node ID", mutate: func(value *Index) { value.WorkerNodeID = "" }},
 		{name: "source", mutate: func(value *Index) { value.Source.Commit = strings.Repeat("A", 40) }},
-		{name: "SPKI path", mutate: func(value *Index) {
-			value.NodeSpecificLocalAuthorityPublicSPKI.Path = `keys\authority.pem`
-		}},
-		{name: "SPKI payload digest", mutate: func(value *Index) {
-			value.NodeSpecificLocalAuthorityPublicSPKI.SHA256 = strings.Repeat("9", 64)
-		}},
-		{name: "CNG name", mutate: func(value *Index) { value.LocalAuthorityCNG.KeyName += "\n" }},
-		{name: "CNG DACL", mutate: func(value *Index) {
-			value.LocalAuthorityCNG.SecurityDescriptorSHA256 = strings.Repeat("A", 64)
-		}},
 		{name: "absolute root", mutate: func(value *Index) {
 			value.TargetRoots.Installation = `c:\AgenticReview`
 		}},
@@ -359,19 +348,16 @@ func validFinalizedSource(t *testing.T, commitDigit, treeDigit string) *fakeFina
 		CompiledReleaseTemplateSHA256:              hex.EncodeToString(templateDigest[:]),
 		ExecutionAuthority:                         false,
 		FoundationVersion:                          releasepackage.FoundationVersion,
-		NodeSpecificSPKI: releasepackage.NodeSpecificSPKI{
-			Path: `keys\local-authority.spki`, SHA256: strings.Repeat("c", 64),
-		},
-		PackageProfile:                releasepackage.PackageProfile,
-		PrepareReceiptSHA256:          hex.EncodeToString(prepareDigest[:]),
-		ReleaseID:                     releaseID,
-		ReviewedClosurePolicyID:       releasepackage.ReviewedClosurePolicyID,
-		ReviewedClosurePolicyVersion:  releasepackage.ReviewedClosurePolicyVersion,
-		ReviewedClosureSHA256:         hex.EncodeToString(reviewedDigest[:]),
-		RuntimeManifestSHA256:         hex.EncodeToString(manifestDigest[:]),
-		SchemaVersion:                 releasepackage.PackageDescriptorSchemaVersion,
-		ServiceHost:                   serviceHost,
-		ServiceHostBuildReceiptSHA256: hex.EncodeToString(buildDigest[:]),
+		PackageProfile:                             releasepackage.PackageProfile,
+		PrepareReceiptSHA256:                       hex.EncodeToString(prepareDigest[:]),
+		ReleaseID:                                  releaseID,
+		ReviewedClosurePolicyID:                    releasepackage.ReviewedClosurePolicyID,
+		ReviewedClosurePolicyVersion:               releasepackage.ReviewedClosurePolicyVersion,
+		ReviewedClosureSHA256:                      hex.EncodeToString(reviewedDigest[:]),
+		RuntimeManifestSHA256:                      hex.EncodeToString(manifestDigest[:]),
+		SchemaVersion:                              releasepackage.PackageDescriptorSchemaVersion,
+		ServiceHost:                                serviceHost,
+		ServiceHostBuildReceiptSHA256:              hex.EncodeToString(buildDigest[:]),
 		Source: releasepackage.SourceReceipt{
 			Commit: strings.Repeat(commitDigit, 40), Tree: strings.Repeat(treeDigit, 40),
 		},
@@ -407,7 +393,6 @@ func validRuntimeManifest(releaseID string) releasemanifest.Manifest {
 			file(releasemanifest.RootInstallation, `runtime\node.exe`, releasemanifest.RoleNodeRuntime, "8", "1"),
 			file(releasemanifest.RootInstallation, `data\runtime.json`, releasemanifest.RoleRuntimeData, "0", "1"),
 			file(releasemanifest.RootTrustedConfiguration, `certificates\server-root.cer`, releasemanifest.RoleCABundle, "b", "1"),
-			file(releasemanifest.RootTrustedConfiguration, `keys\local-authority.spki`, releasemanifest.RoleTrustedConfig, "c", "1"),
 			file(releasemanifest.RootTrustedConfiguration, `policy\codex-requirements.toml`, releasemanifest.RolePolicy, "d", "1"),
 		},
 	}
@@ -418,10 +403,6 @@ func validBuildOptions() BuildOptions {
 		PackageID:      "worker-package-2026.09.02.1",
 		InstallationID: "installation-node-001",
 		WorkerNodeID:   "worker-node-001",
-		LocalAuthorityCNG: LocalAuthorityCNGIdentity{
-			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			SecurityDescriptorSHA256: strings.Repeat("1", 64),
-		},
 		TargetRoots: TargetRoots{
 			Installation:         `C:\Program Files\AgenticReview\Worker`,
 			Metadata:             `C:\ProgramData\AgenticReview\Packages\worker-package-2026.09.02.1`,

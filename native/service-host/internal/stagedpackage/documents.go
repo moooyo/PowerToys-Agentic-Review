@@ -37,8 +37,6 @@ func validateDocumentBindings(
 	if descriptor.ReleaseID != index.ReleaseID ||
 		string(descriptor.TargetArchitecture) != string(index.TargetArchitecture) ||
 		descriptor.Source.Commit != index.Source.Commit || descriptor.Source.Tree != index.Source.Tree ||
-		descriptor.NodeSpecificSPKI.Path != index.NodeSpecificLocalAuthorityPublicSPKI.Path ||
-		descriptor.NodeSpecificSPKI.SHA256 != index.NodeSpecificLocalAuthorityPublicSPKI.SHA256 ||
 		descriptor.AuthenticodeLeafSignerCertificateDERSHA256 !=
 			control.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256 ||
 		descriptor.AuthenticodeLeafSignerCertificateDERSHA256 !=

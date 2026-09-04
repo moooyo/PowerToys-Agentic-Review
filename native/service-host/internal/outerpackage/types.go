@@ -87,16 +87,6 @@ type SourceIdentity struct {
 	Tree   string `json:"tree"`
 }
 
-type NodeSpecificSPKI struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-}
-
-type LocalAuthorityCNGIdentity struct {
-	KeyName                  string `json:"keyName"`
-	SecurityDescriptorSHA256 string `json:"securityDescriptorSha256"`
-}
-
 type TargetRoots struct {
 	Installation         string `json:"installation"`
 	Metadata             string `json:"metadata"`
@@ -113,18 +103,16 @@ type Payload struct {
 }
 
 type Index struct {
-	InstallationID                       string                    `json:"installationId"`
-	LocalAuthorityCNG                    LocalAuthorityCNGIdentity `json:"localAuthorityCng"`
-	NodeSpecificLocalAuthorityPublicSPKI NodeSpecificSPKI          `json:"nodeSpecificLocalAuthorityPublicKeySpki"`
-	PackageID                            string                    `json:"packageId"`
-	Payloads                             []Payload                 `json:"payloads"`
-	ProfileID                            string                    `json:"profileId"`
-	ReleaseID                            string                    `json:"releaseId"`
-	SchemaVersion                        uint32                    `json:"schemaVersion"`
-	Source                               SourceIdentity            `json:"source"`
-	TargetArchitecture                   TargetArchitecture        `json:"targetArchitecture"`
-	TargetRoots                          TargetRoots               `json:"targetRoots"`
-	WorkerNodeID                         string                    `json:"workerNodeId"`
+	InstallationID     string             `json:"installationId"`
+	PackageID          string             `json:"packageId"`
+	Payloads           []Payload          `json:"payloads"`
+	ProfileID          string             `json:"profileId"`
+	ReleaseID          string             `json:"releaseId"`
+	SchemaVersion      uint32             `json:"schemaVersion"`
+	Source             SourceIdentity     `json:"source"`
+	TargetArchitecture TargetArchitecture `json:"targetArchitecture"`
+	TargetRoots        TargetRoots        `json:"targetRoots"`
+	WorkerNodeID       string             `json:"workerNodeId"`
 }
 
 type BootstrapPayload struct {
@@ -138,7 +126,6 @@ type BuildOptions struct {
 	PackageID         string
 	InstallationID    string
 	WorkerNodeID      string
-	LocalAuthorityCNG LocalAuthorityCNGIdentity
 	TargetRoots       TargetRoots
 	ControlBootstrap  BootstrapPayload
 	ExecutorBootstrap BootstrapPayload

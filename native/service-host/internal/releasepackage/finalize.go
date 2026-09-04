@@ -27,15 +27,13 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 		request.TargetArchitecture,
 		request.Source,
 		request.AuthenticodeLeafSignerCertificateDERSHA256,
-		request.NodeSpecificSPKI,
 	); err != nil {
 		return FinalizedRelease{}, err
 	}
 	if request.ReleaseID != state.receipt.ReleaseID ||
 		request.TargetArchitecture != state.receipt.TargetArchitecture ||
 		request.Source != state.receipt.Source ||
-		request.AuthenticodeLeafSignerCertificateDERSHA256 != state.receipt.AuthenticodeLeafSignerCertificateDERSHA256 ||
-		request.NodeSpecificSPKI != state.receipt.NodeSpecificSPKI {
+		request.AuthenticodeLeafSignerCertificateDERSHA256 != state.receipt.AuthenticodeLeafSignerCertificateDERSHA256 {
 		return FinalizedRelease{}, fmt.Errorf("%w: finalization context differs from prepare receipt", ErrMismatch)
 	}
 	current, err := validateCanonicalDependencies(request.ReleaseID, request.Dependencies)
@@ -44,9 +42,6 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 	}
 	if !sameDependencies(current, state.receipt.Dependencies) {
 		return FinalizedRelease{}, fmt.Errorf("%w: dependency inventory changed after prepare", ErrMismatch)
-	}
-	if err := requireNodeSpecificSPKI(current, request.NodeSpecificSPKI); err != nil {
-		return FinalizedRelease{}, err
 	}
 	serviceHostBuild, err := validateServiceHostBuild(request.ServiceHostBuild)
 	if err != nil || !buildReceiptMatchesPrepared(serviceHostBuild, state) {
@@ -90,7 +85,6 @@ func Finalize(prepared PreparedRelease, request FinalizeRequest) (FinalizedRelea
 		CompiledReleaseTemplateSHA256:              state.receipt.CompiledReleaseTemplateSHA256,
 		ExecutionAuthority:                         false,
 		FoundationVersion:                          FoundationVersion,
-		NodeSpecificSPKI:                           state.receipt.NodeSpecificSPKI,
 		PackageProfile:                             PackageProfile,
 		PrepareReceiptSHA256:                       hex.EncodeToString(state.receiptSHA256[:]),
 		ReleaseID:                                  state.receipt.ReleaseID,
@@ -150,7 +144,6 @@ func parsePackageDescriptor(document []byte) (PackageDescriptor, error) {
 		descriptor.ReviewedClosurePolicyID != ReviewedClosurePolicyID ||
 		descriptor.ReviewedClosurePolicyVersion != ReviewedClosurePolicyVersion ||
 		!validSHA256(descriptor.ReviewedClosureSHA256) ||
-		validateNodeSpecificSPKI(descriptor.NodeSpecificSPKI) != nil ||
 		!validSHA256(descriptor.ServiceHostBuildReceiptSHA256) ||
 		descriptor.ServiceHost.Root != releasemanifest.RootInstallation ||
 		descriptor.ServiceHost.Path != releaseprofile.ServiceHostRelativePath ||

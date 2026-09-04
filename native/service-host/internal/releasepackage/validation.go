@@ -14,7 +14,6 @@ func validateDependencyClosure(
 	releaseID string,
 	reviewed *reviewedClosureState,
 	dependencies []releaseprofile.Dependency,
-	nodeSPKI NodeSpecificSPKI,
 ) ([]releaseprofile.Dependency, error) {
 	if reviewed == nil {
 		return nil, fmt.Errorf("%w: reviewed closure evidence is absent", ErrInvalid)
@@ -33,9 +32,6 @@ func validateDependencyClosure(
 		if identity.Root != dependency.Root || identity.Path != dependency.Path || identity.Role != dependency.Role {
 			return nil, fmt.Errorf("%w: dependency %d differs from the reviewed closure", ErrMismatch, index)
 		}
-	}
-	if err := requireNodeSpecificSPKI(canonical, nodeSPKI); err != nil {
-		return nil, err
 	}
 	return canonical, nil
 }
@@ -118,33 +114,14 @@ func forbiddenReleaseDependency(dependency releaseprofile.Dependency) bool {
 	}
 }
 
-func requireNodeSpecificSPKI(dependencies []releaseprofile.Dependency, expected NodeSpecificSPKI) error {
-	matches := 0
-	for _, dependency := range dependencies {
-		if dependency.Root == releasemanifest.RootTrustedConfiguration &&
-			dependency.Path == expected.Path && dependency.Role == releasemanifest.RoleTrustedConfig &&
-			dependency.SHA256 == expected.SHA256 {
-			matches++
-		}
-	}
-	if matches != 1 {
-		return fmt.Errorf(
-			"%w: dependency closure lacks the exact node-specific local-authority SPKI",
-			ErrMismatch,
-		)
-	}
-	return nil
-}
-
 func validateContext(
 	releaseID string,
 	architecture TargetArchitecture,
 	source SourceReceipt,
 	signerPin string,
-	nodeSPKI NodeSpecificSPKI,
 ) error {
 	if !validReleaseID(releaseID) || !validArchitecture(architecture) || validateSource(source) != nil ||
-		!validSHA256(signerPin) || validateNodeSpecificSPKI(nodeSPKI) != nil {
+		!validSHA256(signerPin) {
 		return fmt.Errorf("%w: release context is invalid", ErrInvalid)
 	}
 	return nil
@@ -155,45 +132,6 @@ func validateSource(value SourceReceipt) error {
 		return fmt.Errorf("%w: source receipt is invalid", ErrInvalid)
 	}
 	return nil
-}
-
-func validateNodeSpecificSPKI(value NodeSpecificSPKI) error {
-	if value.Path == "" || !strings.HasSuffix(strings.ToLower(value.Path), ".spki") ||
-		!validRelativeWindowsPath(value.Path) || !validSHA256(value.SHA256) {
-		return fmt.Errorf("%w: node-specific SPKI binding is invalid", ErrInvalid)
-	}
-	return nil
-}
-
-func validRelativeWindowsPath(value string) bool {
-	if len(value) == 0 || len(value) > releasemanifest.MaximumPathBytes || strings.HasPrefix(value, "\\") ||
-		strings.HasSuffix(value, "\\") || strings.Contains(value, "/") || strings.Contains(value, ":") ||
-		strings.Contains(value, "\x00") {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x20 || character > 0x7e {
-			return false
-		}
-	}
-	for _, component := range strings.Split(value, "\\") {
-		if component == "" || component == "." || component == ".." || strings.HasSuffix(component, ".") ||
-			strings.HasSuffix(component, " ") || strings.ContainsAny(component, `<>"|?*`) ||
-			reservedWindowsDeviceName(component) {
-			return false
-		}
-	}
-	return true
-}
-
-func reservedWindowsDeviceName(component string) bool {
-	base := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" ||
-		base == "CONIN$" || base == "CONOUT$" || base == "CLOCK$" {
-		return true
-	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
-		base[3] >= '1' && base[3] <= '9'
 }
 
 func validArchitecture(value TargetArchitecture) bool {
@@ -276,7 +214,7 @@ func sameReceipt(left, right prepareReceiptDocument) bool {
 	return left.AuthenticodeLeafSignerCertificateDERSHA256 == right.AuthenticodeLeafSignerCertificateDERSHA256 &&
 		left.CompiledReleaseTemplateSHA256 == right.CompiledReleaseTemplateSHA256 &&
 		left.ExecutionAuthority == right.ExecutionAuthority && left.FoundationVersion == right.FoundationVersion &&
-		left.NodeSpecificSPKI == right.NodeSpecificSPKI && left.PackageProfile == right.PackageProfile &&
+		left.PackageProfile == right.PackageProfile &&
 		left.ReleaseID == right.ReleaseID &&
 		left.ReviewedClosurePolicyID == right.ReviewedClosurePolicyID &&
 		left.ReviewedClosurePolicyVersion == right.ReviewedClosurePolicyVersion &&

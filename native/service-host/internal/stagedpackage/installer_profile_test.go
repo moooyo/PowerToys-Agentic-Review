@@ -176,7 +176,7 @@ func stagedInstallerBootstrapPair() (config.Config, config.Config) {
 	executor.Node = stagedInstallerNode(installerprofile.ExecutorDataRoot, `app\executor.mjs`, true)
 	executor.Control = nil
 	executor.Executor = &config.ExecutorConfiguration{
-		LocalAuthorityPublicKeyPath:   installerprofile.TrustedConfigurationRoot + `\keys\local-authority.spki`,
+		LocalAuthorityPublicKeyPath:   installerprofile.TrustedConfigurationRoot + `\keys\runtime-authority.der`,
 		LocalAuthorityPublicKeySHA256: strings.Repeat("5", 64),
 		CodexPolicyPath:               installerprofile.TrustedConfigurationRoot + `\policy\codex-requirements.toml`,
 		CodexPolicySHA256:             strings.Repeat("6", 64),

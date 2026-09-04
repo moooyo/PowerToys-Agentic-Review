@@ -88,8 +88,6 @@ func normalizeIndex(value Index) (Index, error) {
 		!validPackageComponentID(value.InstallationID) ||
 		!validEntityID(value.WorkerNodeID) || !validReleaseID(value.ReleaseID) ||
 		!validArchitecture(value.TargetArchitecture) || validateSource(value.Source) != nil ||
-		validateNodeSPKI(value.NodeSpecificLocalAuthorityPublicSPKI) != nil ||
-		validateCNGIdentity(value.LocalAuthorityCNG) != nil ||
 		validateTargetRoots(value.TargetRoots) != nil {
 		return Index{}, fmt.Errorf("%w: package index identity fields are invalid", ErrInvalid)
 	}
@@ -103,7 +101,6 @@ func normalizeIndex(value Index) (Index, error) {
 	seen := make(map[string]struct{}, len(payloads))
 	specialCounts := make(map[Role]int, len(specialPayloadRules))
 	runtimeFiles := make([]releasemanifest.File, 0, len(payloads))
-	nodeSPKIMatches := 0
 	var totalBytes uint64
 	for index := range payloads {
 		payload := &payloads[index]
@@ -148,18 +145,11 @@ func normalizeIndex(value Index) (Index, error) {
 			Root: releasemanifest.FileRoot(payload.Root), Path: payload.Path,
 			Role: manifestRole, SHA256: payload.SHA256, Size: payload.Size,
 		})
-		if payload.Root == RootTrustedConfiguration && payload.Path == value.NodeSpecificLocalAuthorityPublicSPKI.Path &&
-			payload.Role == RoleTrustedConfig && payload.SHA256 == value.NodeSpecificLocalAuthorityPublicSPKI.SHA256 {
-			nodeSPKIMatches++
-		}
 	}
 	for role := range specialPayloadRules {
 		if specialCounts[role] != 1 {
 			return Index{}, fmt.Errorf("%w: fixed package payload closure is incomplete", ErrInvalid)
 		}
-	}
-	if nodeSPKIMatches != 1 {
-		return Index{}, fmt.Errorf("%w: node-specific SPKI payload binding is absent", ErrInvalid)
 	}
 	if _, err := releasemanifest.MarshalCanonical(releasemanifest.Manifest{
 		Compatibility:   releasemanifest.RequiredCompatibility(),
@@ -185,8 +175,6 @@ func normalizeIndex(value Index) (Index, error) {
 func indexContainsTokenShape(value Index) bool {
 	values := []string{
 		value.InstallationID,
-		value.LocalAuthorityCNG.KeyName,
-		value.NodeSpecificLocalAuthorityPublicSPKI.Path,
 		value.PackageID,
 		value.ReleaseID,
 		value.TargetRoots.Installation,
@@ -242,22 +230,6 @@ func validArchitecture(value TargetArchitecture) bool {
 
 func validateSource(value SourceIdentity) error {
 	if !validGitObjectID(value.Commit) || !validGitObjectID(value.Tree) || len(value.Commit) != len(value.Tree) {
-		return ErrInvalid
-	}
-	return nil
-}
-
-func validateNodeSPKI(value NodeSpecificSPKI) error {
-	if validateRelativePath(value.Path) != nil || !strings.HasSuffix(asciiCaseFold(value.Path), ".spki") ||
-		!validSHA256(value.SHA256) {
-		return ErrInvalid
-	}
-	return nil
-}
-
-func validateCNGIdentity(value LocalAuthorityCNGIdentity) error {
-	if !validBoundedASCIIText(value.KeyName, 256) || strings.TrimSpace(value.KeyName) != value.KeyName ||
-		!validSHA256(value.SecurityDescriptorSHA256) {
 		return ErrInvalid
 	}
 	return nil

@@ -22,7 +22,6 @@ func TestOuterPackagePublicEntryPointUsesRealFinalizedReleaseSnapshot(t *testing
 	}
 	if index.SchemaVersion != outerpackage.IndexSchemaVersion ||
 		index.ProfileID != outerpackage.IndexProfileID ||
-		index.LocalAuthorityCNG != options.LocalAuthorityCNG ||
 		index.ReleaseID != finalized.Descriptor().ReleaseID ||
 		index.Source.Commit != finalized.Descriptor().Source.Commit ||
 		index.Source.Tree != finalized.Descriptor().Source.Tree {
@@ -62,10 +61,6 @@ func outerPackageBuildOptions() outerpackage.BuildOptions {
 		PackageID:      "worker-package-2026.09.02.1",
 		InstallationID: "installation-node-001",
 		WorkerNodeID:   "worker-node-001",
-		LocalAuthorityCNG: outerpackage.LocalAuthorityCNGIdentity{
-			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			SecurityDescriptorSHA256: strings.Repeat("1", 64),
-		},
 		TargetRoots: outerpackage.TargetRoots{
 			Installation:         `C:\Program Files\AgenticReview\Worker`,
 			Metadata:             `C:\ProgramData\AgenticReview\Packages\worker-package-2026.09.02.1`,

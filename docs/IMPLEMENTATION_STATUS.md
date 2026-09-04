@@ -8,9 +8,9 @@ Status date: 2026-09-04
 > Bearer client; every other bootstrap schema is rejected by strict parsing and validation. The
 > current signed outer-package schema/profile v2 and split installer profile v2 bind only the
 > schema-4 Control/Executor pair and contain no Worker credential material. No earlier outer-package
-> or bootstrap profile is retained as a compatibility surface. The separate Control-to-Executor
-> local CNG capability signer, node-specific packaging, Authenticode checks, and verify-only
-> destination evidence are replaceable current candidates. WinSW launch inputs have been removed;
+> or bootstrap profile is retained as a compatibility surface. Release and outer-package documents
+> no longer contain a node-local CNG identity or local-authority SPKI binding. Authenticode checks
+> and verify-only destination evidence remain replaceable current candidates. WinSW launch inputs have been removed;
 > ServiceHost is the selected native service binary for both roles. The two-service
 > Control/Executor isolation remains the selected Windows Worker boundary. Actual signed release
 > material and the production Windows clean installer remain incomplete.
@@ -237,8 +237,9 @@ runtimes, the release and installer pipeline, and native Windows runtime evidenc
   Server-binding contract test now live in `production-source-boundaries.test.ts`. They retain the
   general zero-execution protections while removing the obsolete signer-host spawn allowance and
   every executable Server-binding contract test.
-- A current package profile with exactly one per-architecture ServiceHost PE payload and no wrapper
-  executable or service XML payload roles. Release preparation, finalized-document inspection,
+- The node-neutral `worker-release-v1` profile with exactly one per-architecture ServiceHost PE
+  payload and no wrapper executable, service XML, node-local CNG identity, or local-authority SPKI
+  binding. Release preparation, finalized-document inspection,
   outer-index parsing, signing-digest construction, admission, and staged verification retain the
   generic role, root, hash, size, architecture, ACL, and Authenticode checks for supported payloads.
 - A source-only, dormant Control result-artifact upload session. It binds one authenticated local
@@ -349,7 +350,7 @@ workspace, ProcessHost, Codex, or Git capability in this shadow milestone.
 After the shadow runtime is verified and any findings are closed, the release pipeline must produce
 authenticated role bundles and native binaries, and the ADR 0026 path must install the selected two
 service identities, roots, ACLs, and fixed plaintext Control authentication profile. The current
-compiled release profile, outer package, CNG, destination evidence, and machine-policy components
+compiled release profile, outer package, destination evidence, and machine-policy components
 may be reused or simplified before that installer is implemented. WinSW and its package slots have
 already been removed.
 The repository still needs actual authenticated release material, root placement, the production
@@ -370,6 +371,13 @@ digest-bound approvals, GitHub outbox reconciliation, and Dashboard write action
 validation remains a separate stronger-isolation milestone.
 
 ## Verification Evidence
+
+On 2026-09-04, the unpublished release/package stack removed its node-local CNG identity and
+local-authority SPKI fields. The generic `worker-release-v1` descriptor and prepare receipt retain
+source, architecture, dependency, package-signature, hash/size, and Authenticode bindings without
+requiring a per-node public-key payload. Outer admission and staged verification no longer compare
+or parse local capability-key material; the detached outer signature and compiled `outertrust`
+signer remain unchanged.
 
 On 2026-09-04, ADR 0026 withdrew the unpublished installer transaction v1 model, transaction v2
 lab, and cross-version store v2 lab. Their 50 files were deleted together with the three legacy

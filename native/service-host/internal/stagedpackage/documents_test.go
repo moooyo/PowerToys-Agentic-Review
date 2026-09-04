@@ -32,9 +32,6 @@ func TestDocumentBindingsCoverReleaseManifestSignerAndBuildLineage(t *testing.T)
 		{name: "architecture", mutate: func(_ *outerpackage.Index, _ *config.Config, _ *config.Config, value *releasepackage.FinalizedDocumentFacts) {
 			value.Descriptor.TargetArchitecture = releasepackage.ArchitectureARM64
 		}},
-		{name: "node SPKI", mutate: func(_ *outerpackage.Index, _ *config.Config, _ *config.Config, value *releasepackage.FinalizedDocumentFacts) {
-			value.Descriptor.NodeSpecificSPKI.SHA256 = strings.Repeat("a", 64)
-		}},
 		{name: "bootstrap signer", mutate: func(_ *outerpackage.Index, control *config.Config, _ *config.Config, _ *releasepackage.FinalizedDocumentFacts) {
 			control.Installation.ApprovedAuthenticodeSignerCertificateDERSHA256 = strings.Repeat("a", 64)
 		}},
@@ -100,14 +97,10 @@ func validDocumentBindingFixture(
 	descriptor := releasepackage.PackageDescriptor{
 		AuthenticodeLeafSignerCertificateDERSHA256: signer,
 		CompiledReleaseTemplateSHA256:              strings.Repeat("c", 64),
-		NodeSpecificSPKI: releasepackage.NodeSpecificSPKI{
-			Path:   index.NodeSpecificLocalAuthorityPublicSPKI.Path,
-			SHA256: index.NodeSpecificLocalAuthorityPublicSPKI.SHA256,
-		},
-		ReleaseID:          index.ReleaseID,
-		ServiceHost:        serviceHost,
-		Source:             releasepackage.SourceReceipt{Commit: index.Source.Commit, Tree: index.Source.Tree},
-		TargetArchitecture: releasepackage.TargetArchitecture(index.TargetArchitecture),
+		ReleaseID:                                  index.ReleaseID,
+		ServiceHost:                                serviceHost,
+		Source:                                     releasepackage.SourceReceipt{Commit: index.Source.Commit, Tree: index.Source.Tree},
+		TargetArchitecture:                         releasepackage.TargetArchitecture(index.TargetArchitecture),
 	}
 	build := servicehostreceipt.Receipt{
 		CompiledReleaseTemplateSHA256: descriptor.CompiledReleaseTemplateSHA256,

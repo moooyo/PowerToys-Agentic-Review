@@ -17,7 +17,6 @@ func Prepare(request PrepareRequest) (PreparedRelease, error) {
 		request.TargetArchitecture,
 		request.Source,
 		request.AuthenticodeLeafSignerCertificateDERSHA256,
-		request.NodeSpecificSPKI,
 	); err != nil {
 		return PreparedRelease{}, err
 	}
@@ -29,7 +28,6 @@ func Prepare(request PrepareRequest) (PreparedRelease, error) {
 		request.ReleaseID,
 		closure,
 		request.Dependencies,
-		request.NodeSpecificSPKI,
 	)
 	if err != nil {
 		return PreparedRelease{}, err
@@ -49,7 +47,6 @@ func Prepare(request PrepareRequest) (PreparedRelease, error) {
 		Dependencies:                               cloneDependencies(dependencies),
 		ExecutionAuthority:                         false,
 		FoundationVersion:                          FoundationVersion,
-		NodeSpecificSPKI:                           request.NodeSpecificSPKI,
 		PackageProfile:                             PackageProfile,
 		ReleaseID:                                  request.ReleaseID,
 		ReviewedClosurePolicyID:                    closure.value.PolicyID,
@@ -109,7 +106,6 @@ func preparedFromReceipt(
 		receipt.TargetArchitecture,
 		receipt.Source,
 		receipt.AuthenticodeLeafSignerCertificateDERSHA256,
-		receipt.NodeSpecificSPKI,
 	); err != nil {
 		return PreparedRelease{}, err
 	}
@@ -117,7 +113,6 @@ func preparedFromReceipt(
 		receipt.ReleaseID,
 		closure,
 		receipt.Dependencies,
-		receipt.NodeSpecificSPKI,
 	)
 	if err != nil {
 		return PreparedRelease{}, err

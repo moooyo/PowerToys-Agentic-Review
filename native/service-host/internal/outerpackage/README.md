@@ -2,7 +2,7 @@
 
 `outerpackage` defines the data-only contract used to assemble and verify a node-specific Worker
 transport package. It does not read a filesystem, sign with a private key, install files, provision
-CNG keys or certificates, or create Windows services.
+local credentials, or create Windows services.
 
 The only supported package index contract is schema 2 with profile
 `agentic-review-worker-outer-package-v2`. `BuildIndex` builds that Token profile, selects the fixed
@@ -11,7 +11,7 @@ storage exists only in
 `C:\ProgramData\AgenticReview\Control\worker-auth-v1.json`, its SHA-256 digest exists only in the
 Server database, and neither value is a package input. The index rejects that filename at every
 indexed path, has no Token, Token-digest, or mTLS field, and rejects complete Token-shaped values in
-every identity, key-name, root, and payload-path string written to the signed index.
+every identity, root, and payload-path string written to the signed index.
 
 ## Package closure
 
@@ -40,9 +40,10 @@ there are no wrapper binaries or service XML payloads in the package.
 The builder obtains one `releasepackage.AssemblySnapshot`. The snapshot revalidates and clones all
 six finalized documents inside the release and native-handle cleanup commit gates. The builder does
 not reconstruct reviewed metadata from caller-provided fields. `BuildOptions` contains only the
-package/node IDs, local CNG capability identity, fixed roots, and bootstrap hashes. This package
-commits those values to signed data but does not verify their provenance. The finalized package
-descriptor retains its reviewed Authenticode leaf signer certificate digest. Package and
+package/node IDs, fixed roots, and bootstrap hashes. A local capability key name, security
+descriptor, public-key path, or public-key digest is not part of the release or outer-package
+contract. The finalized package descriptor retains its reviewed Authenticode leaf signer
+certificate digest. Package and
 installation IDs are lowercase Windows path components; their eventual physical placement under
 signed target roots is left to the future filesystem assembly and bootstrap gate.
 

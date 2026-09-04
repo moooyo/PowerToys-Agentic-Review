@@ -7,7 +7,8 @@ Accepted on 2026-09-04.
 This decision replaces the unpublished installer lifecycle in ADRs 0013, 0015, 0016, 0020, and
 0021. ADRs 0015, 0020, and 0021 are withdrawn before publication. ADRs 0013 and 0016 are historical
 input only. ServiceHost now integrates directly with SCM; their WinSW wrapper model and package
-slots are removed. Node-specific package and destination-evidence mechanisms remain replaceable.
+slots are removed. The release and outer-package contracts no longer bind a node-local CNG identity
+or local-authority SPKI. Destination-evidence mechanisms remain replaceable.
 
 ## Context
 
@@ -80,11 +81,12 @@ The future clean installer must preserve these product-level properties:
   Linux Server; and
 - the local named-pipe service-identity boundary and the zero-execution runtime posture.
 
-The outer-package verifier, retained staging handles, destination evidence, node-specific package
-fields, and CNG local-authority path are implementation candidates, not permanent requirements of
-this ADR. The unpublished WinSW inputs and four wrapper/config package slots have already been
-removed. Later simplification may replace or remove the remaining candidates without creating an
-upgrade or compatibility obligation, provided the product-level properties above still hold.
+The outer-package verifier, retained staging handles, and destination evidence are implementation
+candidates, not permanent requirements of this ADR. The unpublished WinSW inputs, four
+wrapper/config package slots, node-local CNG identity, and local-authority SPKI package binding have
+already been removed. Later simplification may replace or remove the remaining candidates without
+creating an upgrade or compatibility obligation, provided the product-level properties above still
+hold.
 
 The first installer does not require Worker mutual TLS, a candidate certificate, a Server binding
 receipt, an enrollment receipt, an installer receipt, a rollback receipt, or Linux Worker testing.

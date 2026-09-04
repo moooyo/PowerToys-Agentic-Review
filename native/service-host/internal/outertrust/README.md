@@ -1,8 +1,8 @@
 # Compiled Outer Package Trust
 
 `outertrust` is the only production source of the public key that authenticates signed outer
-Worker package indexes. It is deliberately separate from the per-node local-authority SPKI carried
-inside a Worker package.
+Worker package indexes. Local runtime credentials and capability-key material are not package
+signing inputs and cannot replace this compiled release trust.
 
 Ordinary builds compile `compiled_unavailable.go`. `Production` returns `ErrUnavailable`, and no
 environment variable, command-line option, runtime configuration, package file, or network input

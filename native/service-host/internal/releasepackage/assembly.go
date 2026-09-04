@@ -134,7 +134,6 @@ func validatedFinalizedState(state *finalizedState) (*finalizedState, error) {
 		CompiledReleaseTemplateSHA256:              hex.EncodeToString(cloned.compiledTemplateSHA256[:]),
 		ExecutionAuthority:                         false,
 		FoundationVersion:                          FoundationVersion,
-		NodeSpecificSPKI:                           prepared.state.receipt.NodeSpecificSPKI,
 		PackageProfile:                             PackageProfile,
 		PrepareReceiptSHA256:                       hex.EncodeToString(cloned.prepareReceiptSHA256[:]),
 		ReleaseID:                                  prepared.state.receipt.ReleaseID,

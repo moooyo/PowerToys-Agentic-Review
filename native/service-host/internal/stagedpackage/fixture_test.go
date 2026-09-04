@@ -25,17 +25,9 @@ func validTestIndex(t testing.TB) outerpackage.Index {
 		testPayload(outerpackage.RootInstallation, `native\AgenticReview.ProcessHost.exe`, outerpackage.RoleProcessHost, "f", true),
 		testPayload(outerpackage.RootInstallation, `native\AgenticReview.ServiceHost.exe`, outerpackage.RoleServiceHost, "0", true),
 		testPayload(outerpackage.RootInstallation, `runtime\node.exe`, outerpackage.RoleNodeRuntime, "1", true),
-		testPayload(outerpackage.RootTrustedConfiguration, `keys\local-authority.spki`, outerpackage.RoleTrustedConfig, "4", false),
 	}
 	value := outerpackage.Index{
-		InstallationID: "installation-node-001",
-		LocalAuthorityCNG: outerpackage.LocalAuthorityCNGIdentity{
-			KeyName:                  "AgenticReview.Worker.Control.LocalAuthority",
-			SecurityDescriptorSHA256: strings.Repeat("5", 64),
-		},
-		NodeSpecificLocalAuthorityPublicSPKI: outerpackage.NodeSpecificSPKI{
-			Path: `keys\local-authority.spki`, SHA256: strings.Repeat("4", 64),
-		},
+		InstallationID:     "installation-node-001",
 		PackageID:          "worker-package-001",
 		Payloads:           payloads,
 		ProfileID:          outerpackage.IndexProfileID,
