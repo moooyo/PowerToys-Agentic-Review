@@ -29,6 +29,20 @@ type windowsVerificationPlatform interface {
 	OpenPeerService(string) (serviceStatusSource, error)
 }
 
+type productionOptions struct {
+	Role         config.Role
+	PipeEndpoint *winpipe.Endpoint
+}
+
+// VerifyWindows retains and verifies the opposing fixed service process behind
+// the connected Control/Executor named pipe.
+func VerifyWindows(role config.Role, endpoint *winpipe.Endpoint) (*Session, error) {
+	if fatal := rejectedNativeOwners.fatalError(); fatal != nil {
+		return nil, fatal
+	}
+	return verifyWindowsProduction(productionOptions{Role: role, PipeEndpoint: endpoint})
+}
+
 type productionPipeEndpoint interface {
 	winpipe.ProcessIDObserver
 	LocalSide() (winpipe.EndpointSide, error)

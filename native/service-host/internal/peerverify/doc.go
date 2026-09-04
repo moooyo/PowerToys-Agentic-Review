@@ -5,6 +5,8 @@
 // the pipe before and after opening a process handle. All observations and the
 // retained handle must identify one process. SCM may report START_PENDING or
 // RUNNING because service status publication has no completion acknowledgement.
+// Call VerifyWindows with the current role and connected endpoint to enter the
+// production verifier.
 // It then requires the peer's
 // primary token to match the exact restricted service SID policy. The process
 // handle remains open for the full pipe session and supports WaitPeer and Close.
