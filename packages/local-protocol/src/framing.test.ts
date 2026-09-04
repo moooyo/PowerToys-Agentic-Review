@@ -28,7 +28,6 @@ const sessionMessageTypes = new Set<LocalMessageTypeValue>([
   LocalMessageType.Drained,
   LocalMessageType.Ping,
   LocalMessageType.Pong,
-  LocalMessageType.ControlProof,
 ]);
 
 function correlationIdFor(messageType: LocalMessageTypeValue): string {
@@ -98,10 +97,9 @@ describe("local protocol framing constants", () => {
       Pong: 17,
       TerminalDisposition: 18,
       TerminalAck: 19,
-      ControlProof: 20,
     });
     expect(Object.values(LocalMessageType)).toEqual(
-      Array.from({ length: 20 }, (_, index) => index + 1),
+      Array.from({ length: 19 }, (_, index) => index + 1),
     );
   });
 });

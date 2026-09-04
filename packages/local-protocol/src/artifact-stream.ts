@@ -1,12 +1,9 @@
 import { createHash, type Hash } from "node:crypto";
 
 import { createCanonicalJsonDocument, type DeepReadonly, deepFreezeJson } from "./canonical.js";
-import { isVerifiedExecutionCapability, type VerifiedExecutionCapability } from "./capability.js";
+import { isValidatedExecutionCapability, type ValidatedExecutionCapability } from "./capability.js";
 import { LocalMessageType } from "./framing.js";
-import {
-  isVerifiedHandshakeTranscriptV1,
-  type VerifiedHandshakeTranscriptV1,
-} from "./handshake.js";
+import { type EstablishedLocalSession, isEstablishedLocalSession } from "./handshake.js";
 import {
   type ArtifactChunkMessage,
   type ArtifactEndMessage,
@@ -124,40 +121,39 @@ export class ArtifactStreamVerifier {
   #aborted = false;
 
   public constructor(
-    capability: VerifiedExecutionCapability,
-    handshake: VerifiedHandshakeTranscriptV1,
+    capability: ValidatedExecutionCapability,
+    session: EstablishedLocalSession,
     options: ArtifactStreamVerifierOptions = {},
   ) {
-    if (!isVerifiedExecutionCapability(capability)) {
+    if (!isValidatedExecutionCapability(capability)) {
       throw artifactError(
         "ARTIFACT_AUTHORITY_INVALID",
-        "Artifact verification requires a cryptographically verified execution capability.",
+        "Artifact verification requires a context-validated execution capability.",
       );
     }
-    if (!isVerifiedHandshakeTranscriptV1(handshake)) {
+    if (!isEstablishedLocalSession(session)) {
       throw artifactError(
         "ARTIFACT_AUTHORITY_INVALID",
-        "Artifact verification requires a cryptographically verified handshake transcript.",
+        "Artifact verification requires an established local session.",
       );
     }
-    const session = handshake.helloAck;
+    const peer = session.helloAck;
     if (
-      capability.keyId !== handshake.keyId ||
-      capability.workerNodeId !== session.workerNodeId ||
-      capability.workerInstanceId !== session.workerInstanceId ||
-      capability.executorBootId !== session.executorBootId ||
-      capability.sessionId !== session.sessionId
+      capability.workerNodeId !== peer.workerNodeId ||
+      capability.workerInstanceId !== peer.workerInstanceId ||
+      capability.executorBootId !== peer.executorBootId ||
+      capability.sessionId !== peer.sessionId
     ) {
       throw artifactError(
         "ARTIFACT_CONTEXT_MISMATCH",
-        "Verified execution capability and handshake transcript identify different sessions.",
+        "Validated execution capability and established session identify different contexts.",
       );
     }
     const maximumArtifactBytes = BigInt(capability.resources.artifactBytes);
     if (maximumArtifactBytes < 1n || maximumArtifactBytes > LOCAL_ARTIFACT_MAXIMUM_BYTES) {
       throw artifactError(
         "ARTIFACT_AUTHORITY_INVALID",
-        "Verified execution capability has an invalid artifact byte ceiling.",
+        "Validated execution capability has an invalid artifact byte ceiling.",
       );
     }
     this.#maximumArtifactBytes = maximumArtifactBytes;
@@ -178,8 +174,8 @@ export class ArtifactStreamVerifier {
       throw new RangeError("maximumConcurrentArtifacts cannot exceed maximumArtifactCount");
     }
     this.#context = Object.freeze({
-      protocolMajor: session.protocolMajor,
-      protocolMinor: session.protocolMinor,
+      protocolMajor: peer.protocolMajor,
+      protocolMinor: peer.protocolMinor,
       workerNodeId: capability.workerNodeId,
       workerInstanceId: capability.workerInstanceId,
       executorBootId: capability.executorBootId,

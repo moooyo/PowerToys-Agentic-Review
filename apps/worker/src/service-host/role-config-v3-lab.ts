@@ -1,4 +1,4 @@
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   type DeepReadonly,
   deepFreezeJson,
@@ -9,7 +9,6 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "./typebox-value-check.js";
 
 export const ROLE_CONFIG_V3_LAB_MAXIMUM_BYTES = 16 * 1_024;
-export const ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES = 4 * 1_024;
 export const ROLE_CONFIG_V3_LAB_PROFILE = "disabled-execution-lab-v1" as const;
 export const ROLE_CONFIG_V3_LAB_DISABLED_REASON_CODE = "EXECUTION_DISABLED" as const;
 export const ROLE_CONFIG_V3_LAB_FOUNDATION_VERSION = 3 as const;
@@ -52,11 +51,6 @@ export const ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES = Object.freeze([
 
 const absoluteEndPattern = "(?![\\s\\S])";
 const sha256Pattern = `^[a-f0-9]{64}${absoluteEndPattern}`;
-const base64UrlPattern = `^[A-Za-z0-9_-]+${absoluteEndPattern}`;
-const canonicalP256SpkiPrefix = Buffer.from(
-  "3059301306072a8648ce3d020106082a8648ce3d03010703420004",
-  "hex",
-);
 
 const sha256Schema = () => Type.String({ minLength: 64, maxLength: 64, pattern: sha256Pattern });
 
@@ -110,23 +104,6 @@ const missingPrerequisitesSchema = () =>
     Type.Literal("worker_claim_envelope_v2_consumer"),
   ]);
 
-const publicKeyDescriptorSchema = () =>
-  Type.Object(
-    {
-      base64Url: Type.String({
-        minLength: 2,
-        maxLength: Math.ceil((ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES * 4) / 3),
-        pattern: base64UrlPattern,
-      }),
-      byteLength: Type.Integer({
-        minimum: 1,
-        maximum: ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES,
-      }),
-      sha256: sha256Schema(),
-    },
-    { additionalProperties: false },
-  );
-
 const commonRoleConfigProperties = () => ({
   activationState: Type.Literal("blocked"),
   arwx: arwxSelectionSchema(),
@@ -140,7 +117,6 @@ const commonRoleConfigProperties = () => ({
   globalRolloutDefault: Type.Literal("off"),
   hostControl: hostControlSelectionSchema(),
   jobExecutionEnvelopeVersion: Type.Literal(ROLE_CONFIG_V3_LAB_JOB_ENVELOPE_VERSION),
-  localAuthorityKeyId: sha256Schema(),
   maximumSlots: Type.Literal(1),
   missingPrerequisites: missingPrerequisitesSchema(),
   profile: Type.Literal(ROLE_CONFIG_V3_LAB_PROFILE),
@@ -167,7 +143,6 @@ export const ExecutorRoleConfigV3LabSchema = freezeSchema(
   Type.Object(
     {
       ...commonRoleConfigProperties(),
-      localAuthorityPublicKeySpki: publicKeyDescriptorSchema(),
       role: Type.Literal("executor"),
     },
     { additionalProperties: false },
@@ -187,7 +162,7 @@ export interface ParsedRoleConfigV3Lab {
 
 export class RoleConfigV3LabError extends Error {
   public constructor(
-    public readonly code: "INVALID_DOCUMENT" | "ROLE_MISMATCH" | "INVALID_PUBLIC_KEY",
+    public readonly code: "INVALID_DOCUMENT" | "ROLE_MISMATCH",
     message: string,
   ) {
     super(message);
@@ -198,38 +173,16 @@ export class RoleConfigV3LabError extends Error {
 
 const parsedRoleConfigs = new WeakSet<object>();
 
-/** Creates one canonical disabled Control role configuration without public-key bytes. */
-export function createControlRoleConfigV3Lab(
-  executorPolicySha256: string,
-  localAuthorityKeyId: string,
-): Buffer {
+/** Creates one canonical disabled Control role configuration. */
+export function createControlRoleConfigV3Lab(executorPolicySha256: string): Buffer {
   assertSha256(executorPolicySha256, "executorPolicySha256");
-  assertSha256(localAuthorityKeyId, "localAuthorityKeyId");
-  return encodeRoleConfig(
-    fixedRoleConfig("control", executorPolicySha256, localAuthorityKeyId),
-    "control",
-  );
+  return encodeRoleConfig(fixedRoleConfig("control", executorPolicySha256), "control");
 }
 
-/** Creates one canonical disabled Executor role configuration bound to exact P-256 SPKI bytes. */
-export function createExecutorRoleConfigV3Lab(
-  executorPolicySha256: string,
-  localAuthorityPublicKeySpki: Uint8Array,
-): Buffer {
+/** Creates one canonical disabled Executor role configuration. */
+export function createExecutorRoleConfigV3Lab(executorPolicySha256: string): Buffer {
   assertSha256(executorPolicySha256, "executorPolicySha256");
-  const publicKey = validateP256Spki(localAuthorityPublicKeySpki);
-  const localAuthorityKeyId = createHash("sha256").update(publicKey).digest("hex");
-  return encodeRoleConfig(
-    {
-      ...fixedRoleConfig("executor", executorPolicySha256, localAuthorityKeyId),
-      localAuthorityPublicKeySpki: {
-        base64Url: publicKey.toString("base64url"),
-        byteLength: publicKey.byteLength,
-        sha256: localAuthorityKeyId,
-      },
-    },
-    "executor",
-  );
+  return encodeRoleConfig(fixedRoleConfig("executor", executorPolicySha256), "executor");
 }
 
 /** Parses one exact canonical v3 lab document and preserves its permanently disabled authority. */
@@ -268,7 +221,6 @@ export function parseRoleConfigV3Lab(
     throw roleConfigError("INVALID_DOCUMENT", "RoleConfig v3 lab document has an invalid shape.");
   }
   const config = candidate as RoleConfigV3Lab;
-  if (config.role === "executor") validateExecutorDescriptor(config);
 
   const parsed = Object.freeze({
     config: deepFreezeJson(config),
@@ -283,20 +235,11 @@ export function isParsedRoleConfigV3Lab(value: unknown): value is Readonly<Parse
   return typeof value === "object" && value !== null && parsedRoleConfigs.has(value);
 }
 
-function fixedRoleConfig(
-  role: "control",
-  executorPolicySha256: string,
-  localAuthorityKeyId: string,
-): ControlRoleConfigV3Lab;
-function fixedRoleConfig(
-  role: "executor",
-  executorPolicySha256: string,
-  localAuthorityKeyId: string,
-): Omit<ExecutorRoleConfigV3Lab, "localAuthorityPublicKeySpki">;
+function fixedRoleConfig(role: "control", executorPolicySha256: string): ControlRoleConfigV3Lab;
+function fixedRoleConfig(role: "executor", executorPolicySha256: string): ExecutorRoleConfigV3Lab;
 function fixedRoleConfig(
   role: RoleConfigV3LabRole,
   executorPolicySha256: string,
-  localAuthorityKeyId: string,
 ): Omit<ControlRoleConfigV3Lab, "role"> & { readonly role: RoleConfigV3LabRole } {
   return {
     activationState: "blocked",
@@ -318,7 +261,6 @@ function fixedRoleConfig(
       protocolVersion: ROLE_CONFIG_V3_LAB_HOST_CONTROL_PROTOCOL_VERSION,
     },
     jobExecutionEnvelopeVersion: ROLE_CONFIG_V3_LAB_JOB_ENVELOPE_VERSION,
-    localAuthorityKeyId,
     maximumSlots: 1,
     missingPrerequisites: [...ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES],
     profile: ROLE_CONFIG_V3_LAB_PROFILE,
@@ -334,73 +276,9 @@ function encodeRoleConfig(value: RoleConfigV3Lab, role: RoleConfigV3LabRole): Bu
   return document;
 }
 
-function validateExecutorDescriptor(config: ExecutorRoleConfigV3Lab): void {
-  const descriptor = config.localAuthorityPublicKeySpki;
-  let publicKey: Buffer;
-  try {
-    publicKey = Buffer.from(descriptor.base64Url, "base64url");
-  } catch {
-    throw roleConfigError("INVALID_PUBLIC_KEY", "Executor public-key encoding is invalid.");
-  }
-  const digest = createHash("sha256").update(publicKey).digest("hex");
-  if (
-    publicKey.byteLength !== descriptor.byteLength ||
-    publicKey.toString("base64url") !== descriptor.base64Url ||
-    digest !== descriptor.sha256 ||
-    digest !== config.localAuthorityKeyId
-  ) {
-    throw roleConfigError("INVALID_PUBLIC_KEY", "Executor public-key descriptor is inconsistent.");
-  }
-  validateP256Spki(publicKey);
-}
-
 function isExactRoleConfigForRole(value: unknown, role: RoleConfigV3LabRole): boolean {
   const schema = role === "control" ? ControlRoleConfigV3LabSchema : ExecutorRoleConfigV3LabSchema;
-  if (!Value.Check(schema, value)) return false;
-  try {
-    if (role === "executor") validateExecutorDescriptor(value as ExecutorRoleConfigV3Lab);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function validateP256Spki(value: Uint8Array): Buffer {
-  if (!(value instanceof Uint8Array)) {
-    throw roleConfigError("INVALID_PUBLIC_KEY", "Executor public key must be a byte array.");
-  }
-  const snapshot = Buffer.from(value);
-  if (
-    snapshot.byteLength !== 91 ||
-    snapshot.byteLength > ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES
-  ) {
-    throw roleConfigError("INVALID_PUBLIC_KEY", "Executor public key is outside its byte limit.");
-  }
-  if (!snapshot.subarray(0, canonicalP256SpkiPrefix.byteLength).equals(canonicalP256SpkiPrefix)) {
-    throw roleConfigError(
-      "INVALID_PUBLIC_KEY",
-      "Executor public key must use the canonical uncompressed P-256 SPKI prefix.",
-    );
-  }
-  try {
-    const publicKey = createPublicKey({ key: snapshot, format: "der", type: "spki" });
-    const exported = publicKey.export({ format: "der", type: "spki" });
-    if (
-      publicKey.type !== "public" ||
-      publicKey.asymmetricKeyType !== "ec" ||
-      (publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1" &&
-        publicKey.asymmetricKeyDetails?.namedCurve !== "P-256") ||
-      !Buffer.from(exported).equals(snapshot)
-    ) {
-      throw new Error("not canonical P-256 SPKI");
-    }
-  } catch {
-    throw roleConfigError(
-      "INVALID_PUBLIC_KEY",
-      "Executor public key must be canonical P-256 DER SPKI.",
-    );
-  }
-  return snapshot;
+  return Value.Check(schema, value);
 }
 
 function assertRole(value: RoleConfigV3LabRole): void {

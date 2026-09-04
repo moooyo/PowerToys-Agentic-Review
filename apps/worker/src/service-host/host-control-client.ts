@@ -29,7 +29,6 @@ import {
   type ParsedHostControlShutdownRequested,
   parseHostControlInbound,
   validHostControlEntityId,
-  validP256LowSSignature,
 } from "./host-control-protocol.js";
 import type { HostControlSession, HostControlShutdownRequest } from "./host-control-session.js";
 import { type HostControlPipeSelector, isHostControlPipeSelector } from "./launch-contract.js";
@@ -103,7 +102,6 @@ export interface ControlHostControlClient extends HostControlSession<"control"> 
     body: HostControlOpaqueJsonDescriptor,
     options?: HostControlCallOptions,
   ): Promise<unknown>;
-  signLocalDigest(digestSha256: string, options?: HostControlCallOptions): Promise<string>;
   waitForIdle(absoluteDeadline: number): Promise<void>;
   armArwxShutdown(receipt: ArwxFinalFrameReceipt): Promise<Readonly<ArmArwxShutdownResultV1>>;
 }
@@ -344,26 +342,6 @@ class HostControlRpcClient implements ControlHostControlClient {
     return this.#call("FailRun", { body, runAttemptId }, "opaque-json", options.signal);
   }
 
-  public async signLocalDigest(
-    digestSha256: string,
-    options: HostControlCallOptions = {},
-  ): Promise<string> {
-    if (!/^[a-f0-9]{64}$/u.test(digestSha256)) {
-      throw clientError("REQUEST_INVALID", "Local signing digest must be lowercase SHA-256.");
-    }
-    const body = await this.#call("SignLocalDigest", { digestSha256 }, "canonical", options.signal);
-    if (
-      !isRecord(body) ||
-      !hasExactKeys(body, ["signatureP1363"]) ||
-      typeof body.signatureP1363 !== "string" ||
-      !validP256LowSSignature(body.signatureP1363)
-    ) {
-      this.#fail(clientError("PROTOCOL_FAILURE", "HostControl signing response is invalid."));
-      throw this.#terminalError;
-    }
-    return body.signatureP1363;
-  }
-
   public armArwxShutdown(
     receipt: ArwxFinalFrameReceipt,
   ): Promise<Readonly<ArmArwxShutdownResultV1>> {
@@ -576,9 +554,7 @@ class HostControlRpcClient implements ControlHostControlClient {
           ? HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_FRAME_BYTES
           : operation === "ArmArwxShutdown"
             ? HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES
-            : operation === "SignLocalDigest"
-              ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
-              : HOST_CONTROL_MAXIMUM_FRAME_BYTES,
+            : HOST_CONTROL_MAXIMUM_FRAME_BYTES,
       decodedResponseMaximumBytes:
         operation === "Claim"
           ? HOST_CONTROL_MAXIMUM_CLAIM_RESPONSE_BODY_BYTES
@@ -1247,10 +1223,6 @@ function hasExactKeys(
     actual.length === sortedExpected.length &&
     actual.every((key, index) => key === sortedExpected[index])
   );
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {

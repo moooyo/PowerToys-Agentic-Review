@@ -1,27 +1,19 @@
-import { generateKeyPairSync, type KeyObject, sign as nodeSign } from "node:crypto";
 import type { JobExecutionEnvelope, RunTerminalResponse } from "@agentic-review/contracts";
 import {
   ArtifactStreamVerifier,
   createCanonicalJsonDocument,
-  createHandshakeTranscriptSigningBytes,
-  createHandshakeTranscriptV1,
-  createSignedHandshakeProofV1,
-  deriveCapabilityKeyId,
+  type EstablishedLocalSession,
   type ExecutionCapabilityV1,
-  type HandshakeTranscriptV1,
+  establishLocalSession,
   type HelloAckMessage,
   type HelloMessage,
   LOCAL_CAPABILITY_AUDIENCE,
-  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
   LOCAL_GRANT_MAXIMUM_DURATION_MS,
   sha256Hex,
-  signExecutionCapability,
-  type VerifiedExecutionCapability,
-  type VerifiedHandshakeTranscriptV1,
-  verifyExecutionCapability,
-  verifySignedHandshakeProofV1,
+  type ValidatedExecutionCapability,
+  validateExecutionCapabilityForContext,
 } from "@agentic-review/local-protocol";
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   type PreparedLocalExecutionStart,
@@ -40,13 +32,9 @@ import {
 } from "./local-execution-run.js";
 
 const identity = { jobId: "job-1", runAttemptId: "run-1" } as const;
-const startSignedPayloadSha256 = "f".repeat(64);
-const renewalSignedPayloadSha256 = "d".repeat(64);
+const startAuthorizationSha256 = "f".repeat(64);
+const renewalAuthorizationSha256 = "d".repeat(64);
 const authorityNow = 1_800_000_000_000;
-const p256Order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-const p256HalfOrder = p256Order >> 1n;
-const authorityKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-const authorityKeyId = deriveCapabilityKeyId(authorityKeys.publicKey);
 const artifactSession = {
   protocolMajor: 1 as const,
   protocolMinor: 0 as const,
@@ -56,7 +44,7 @@ const artifactSession = {
   sessionId: "30000000-0000-4000-8000-000000000003",
   attemptCorrelationId: "40000000-0000-4000-8000-000000000004",
 };
-const artifactHandshake = createVerifiedArtifactHandshake();
+const artifactHandshake = createEstablishedArtifactSession();
 
 describe("mapRunTerminalResponseOutcome", () => {
   it.each([
@@ -227,46 +215,32 @@ describe("LocalExecutionMonotonicAuthority", () => {
     expect(() => createLocalExecutionMonotonicAuthority(start)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_START_ALREADY_CONSUMED" }),
     );
-    const dateNow = vi.spyOn(Date, "now").mockReturnValue(9_000_000_000_000);
-    try {
-      const ticket = authority.consumeStart(100.1);
-      expect(ticket).toMatchObject({
-        generation: 1,
-        deadlineMonotonicMilliseconds: 200,
-        validForMilliseconds: 99,
-      });
-      expect(() =>
-        authority.consumeUse(ticket as never, startSignedPayloadSha256, 100.1),
-      ).toThrowError(expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }));
-      const use = authority.commitStart(ticket, startSignedPayloadSha256, 100.1);
-      expect(use).toMatchObject({
-        kind: "start",
-        generation: 1,
-        attemptCorrelationId: start.attemptCorrelationId,
-        runAttemptId: start.executorEnvelope.runAttemptId,
-        leaseGeneration: start.authorityBasis.leaseGeneration,
-        signedPayloadSha256: startSignedPayloadSha256,
-        deadlineMonotonicMilliseconds: 200,
-        validForMilliseconds: 99,
-        serverHeartbeatSequence: null,
-      });
-      const other = createLocalExecutionMonotonicAuthority(preparedAuthorityStart());
-      expect(() => other.authority.consumeUse(use, startSignedPayloadSha256, 100.1)).toThrowError(
-        expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
-      );
-      expect(() => authority.consumeUse(use, "0".repeat(64), 100.1)).toThrowError(
-        expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
-      );
-      authority.consumeUse(use, startSignedPayloadSha256, 100.1);
-      expect(() => authority.consumeUse(use, startSignedPayloadSha256, 100.1)).toThrowError(
-        expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
-      );
-      expect(() => authority.consumeStart(101)).toThrowError(
-        expect.objectContaining({ code: "AUTHORITY_START_ALREADY_CONSUMED" }),
-      );
-    } finally {
-      dateNow.mockRestore();
-    }
+    const use = authority.issueStart(startAuthorizationSha256, 100.1);
+    expect(use).toMatchObject({
+      kind: "start",
+      generation: 1,
+      attemptCorrelationId: start.attemptCorrelationId,
+      runAttemptId: start.executorEnvelope.runAttemptId,
+      leaseGeneration: start.authorityBasis.leaseGeneration,
+      authorizationSha256: startAuthorizationSha256,
+      deadlineMonotonicMilliseconds: 200,
+      validForMilliseconds: 99,
+      serverHeartbeatSequence: null,
+    });
+    const other = createLocalExecutionMonotonicAuthority(preparedAuthorityStart());
+    expect(() => other.authority.consumeUse(use, startAuthorizationSha256, 100.1)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
+    );
+    expect(() => authority.consumeUse(use, "0".repeat(64), 100.1)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
+    );
+    authority.consumeUse(use, startAuthorizationSha256, 100.1);
+    expect(() => authority.consumeUse(use, startAuthorizationSha256, 100.1)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
+    );
+    expect(() => authority.issueStart(startAuthorizationSha256, 101)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_START_ALREADY_CONSUMED" }),
+    );
   });
 
   it("rejects a queued start after its monotonic lease deadline", () => {
@@ -277,23 +251,22 @@ describe("LocalExecutionMonotonicAuthority", () => {
         remainingHardDeadlineMilliseconds: 1_000,
       }),
     );
-    expect(() => authority.consumeStart(110)).toThrowError(
+    expect(() => authority.issueStart(startAuthorizationSha256, 110)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_EXPIRED" }),
     );
-    expect(() => authority.consumeStart(109)).toThrowError(
+    expect(() => authority.issueStart(startAuthorizationSha256, 109)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_FENCED" }),
     );
   });
 
-  it("rechecks start tickets after signing and invalidates them on expiry or fence", () => {
+  it("expires and fences issued start authority without ticket state", () => {
     const expiringStart = preparedAuthorityStart({
       observedAtMonotonicMilliseconds: 100,
       remainingLeaseMilliseconds: 10,
       remainingHardDeadlineMilliseconds: 1_000,
     });
     const { authority: expiring } = createLocalExecutionMonotonicAuthority(expiringStart);
-    const expiringTicket = expiring.consumeStart(100);
-    expect(() => expiring.commitStart(expiringTicket, startSignedPayloadSha256, 110)).toThrowError(
+    expect(() => expiring.issueStart(startAuthorizationSha256, 110)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_EXPIRED" }),
     );
 
@@ -304,39 +277,35 @@ describe("LocalExecutionMonotonicAuthority", () => {
     });
     const { authority: expiringUseAuthority } =
       createLocalExecutionMonotonicAuthority(expiringUseStart);
-    const expiringUse = expiringUseAuthority.commitStart(
-      expiringUseAuthority.consumeStart(100),
-      startSignedPayloadSha256,
-      100,
-    );
+    const expiringUse = expiringUseAuthority.issueStart(startAuthorizationSha256, 100);
     expect(() =>
-      expiringUseAuthority.consumeUse(expiringUse, startSignedPayloadSha256, 110),
+      expiringUseAuthority.consumeUse(expiringUse, startAuthorizationSha256, 110),
     ).toThrowError(expect.objectContaining({ code: "AUTHORITY_EXPIRED" }));
 
     const cancelledStart = preparedAuthorityStart();
     const { authority: cancelled } = createLocalExecutionMonotonicAuthority(cancelledStart);
-    const cancelledTicket = cancelled.consumeStart(100);
+    const cancelledUse = cancelled.issueStart(startAuthorizationSha256, 100);
     cancelled.fence("cancelled");
-    expect(() =>
-      cancelled.commitStart(cancelledTicket, startSignedPayloadSha256, 101),
-    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_FENCED" }));
+    expect(() => cancelled.consumeUse(cancelledUse, startAuthorizationSha256, 101)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_FENCED" }),
+    );
 
     const forgedStart = preparedAuthorityStart();
     const { authority: forged } = createLocalExecutionMonotonicAuthority(forgedStart);
-    forged.consumeStart(100);
+    forged.issueStart(startAuthorizationSha256, 100);
     expect(() =>
-      forged.commitStart({ generation: 1 } as never, startSignedPayloadSha256, 101),
-    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_TICKET_INVALID" }));
+      forged.consumeUse({ generation: 1 } as never, startAuthorizationSha256, 101),
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }));
   });
 
-  it("deducts renewal age and clamps the ticket to the fixed hard deadline and 45 seconds", () => {
+  it("deducts renewal age and clamps authorization to the hard deadline and 45 seconds", () => {
     const start = preparedAuthorityStart({
       observedAtMonotonicMilliseconds: 100.9,
       remainingLeaseMilliseconds: 45_000.9,
       remainingHardDeadlineMilliseconds: 50_000.9,
     });
     const { authority, renewalRegistrar } = createLocalExecutionMonotonicAuthority(start);
-    authority.commitStart(authority.consumeStart(100.1), startSignedPayloadSha256, 100.1);
+    authority.issueStart(startAuthorizationSha256, 100.1);
     const renewal = renewalRegistrar.prepare({
       runAttemptId: start.executorEnvelope.runAttemptId,
       leaseGeneration: start.authorityBasis.leaseGeneration,
@@ -346,59 +315,50 @@ describe("LocalExecutionMonotonicAuthority", () => {
       action: "continue",
     });
 
-    const ticket = authority.beginRenewal(renewal, 10_001.1);
-    expect(ticket).toMatchObject({
+    const issued = authority.issueRenewal(renewal, renewalAuthorizationSha256, 10_001.1);
+    expect(issued).toMatchObject({
+      kind: "renewal",
       generation: 2,
       serverHeartbeatSequence: 1,
       deadlineMonotonicMilliseconds: 50_100,
       validForMilliseconds: 40_098,
+      authorizationSha256: renewalAuthorizationSha256,
     });
-    const committed = authority.commitRenewal(ticket, renewalSignedPayloadSha256, 10_002.1);
-    expect(committed).toMatchObject({
-      kind: "renewal",
-      generation: ticket.generation,
-      serverHeartbeatSequence: 1,
-      deadlineMonotonicMilliseconds: 50_100,
-      validForMilliseconds: 40_097,
-    });
-    authority.consumeUse(committed, renewalSignedPayloadSha256, 10_002.1);
-    expect(() =>
-      authority.consumeUse(committed, renewalSignedPayloadSha256, 10_002.1),
-    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }));
+    authority.consumeUse(issued, renewalAuthorizationSha256, 10_002.1);
+    expect(() => authority.consumeUse(issued, renewalAuthorizationSha256, 10_002.1)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
+    );
   });
 
-  it("never revives authority when the current grant expires during asynchronous signing", () => {
+  it("never revives authority after the current grant expires", () => {
     const start = preparedAuthorityStart({
       observedAtMonotonicMilliseconds: 100,
       remainingLeaseMilliseconds: 10,
       remainingHardDeadlineMilliseconds: 1_000,
     });
     const { authority, renewalRegistrar } = createLocalExecutionMonotonicAuthority(start);
-    authority.commitStart(authority.consumeStart(100), startSignedPayloadSha256, 100);
-    const ticket = authority.beginRenewal(
-      renewalRegistrar.prepare({
-        runAttemptId: start.executorEnvelope.runAttemptId,
-        leaseGeneration: start.authorityBasis.leaseGeneration,
-        serverHeartbeatSequence: 1,
-        observedAtMonotonicMilliseconds: 105,
-        remainingLeaseMilliseconds: 100,
-        action: "continue",
-      }),
-      105,
-    );
+    authority.issueStart(startAuthorizationSha256, 100);
+    const renewal = renewalRegistrar.prepare({
+      runAttemptId: start.executorEnvelope.runAttemptId,
+      leaseGeneration: start.authorityBasis.leaseGeneration,
+      serverHeartbeatSequence: 1,
+      observedAtMonotonicMilliseconds: 105,
+      remainingLeaseMilliseconds: 100,
+      action: "continue",
+    });
 
-    expect(() => authority.commitRenewal(ticket, renewalSignedPayloadSha256, 110)).toThrowError(
+    expect(() => authority.issueRenewal(renewal, renewalAuthorizationSha256, 110)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_EXPIRED" }),
     );
-    expect(() => authority.beginRenewal(ticket as never, 111)).toThrowError(
+    expect(() => authority.issueRenewal(renewal, renewalAuthorizationSha256, 111)).toThrowError(
       expect.objectContaining({ code: "AUTHORITY_FENCED" }),
     );
   });
 
-  it("rejects reused heartbeats, superseded generations, and forged tickets", () => {
+  it("rejects reused heartbeats, superseded generations, and forged uses", () => {
     const start = preparedAuthorityStart();
     const { authority, renewalRegistrar } = createLocalExecutionMonotonicAuthority(start);
-    authority.commitStart(authority.consumeStart(100), startSignedPayloadSha256, 100);
+    authority.issueStart(startAuthorizationSha256, 100);
     const renewal = (sequence: number, observedAt: number) =>
       renewalRegistrar.prepare({
         runAttemptId: start.executorEnvelope.runAttemptId,
@@ -408,24 +368,24 @@ describe("LocalExecutionMonotonicAuthority", () => {
         remainingLeaseMilliseconds: 100_000,
         action: "continue",
       });
-    const first = authority.beginRenewal(renewal(5, 200), 200);
+    const first = authority.issueRenewal(renewal(5, 200), renewalAuthorizationSha256, 200);
     expect(first.validForMilliseconds).toBe(LOCAL_GRANT_MAXIMUM_DURATION_MS);
-    expect(() => authority.beginRenewal(renewal(5, 201), 201)).toThrowError(
-      expect.objectContaining({ code: "AUTHORITY_HEARTBEAT_REPLAYED" }),
-    );
-    expect(() => authority.beginRenewal(renewal(4, 201), 201)).toThrowError(
-      expect.objectContaining({ code: "AUTHORITY_HEARTBEAT_REPLAYED" }),
-    );
-    expect(() => authority.beginRenewal(renewal(6, 199), 201)).toThrowError(
-      expect.objectContaining({ code: "AUTHORITY_TIME_INVALID" }),
-    );
-    expect(() => authority.beginRenewal({ ...renewal(6, 202) } as never, 202)).toThrowError(
-      expect.objectContaining({ code: "AUTHORITY_RENEWAL_INVALID" }),
-    );
+    expect(() =>
+      authority.issueRenewal(renewal(5, 201), renewalAuthorizationSha256, 201),
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_HEARTBEAT_REPLAYED" }));
+    expect(() =>
+      authority.issueRenewal(renewal(4, 201), renewalAuthorizationSha256, 201),
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_HEARTBEAT_REPLAYED" }));
+    expect(() =>
+      authority.issueRenewal(renewal(6, 199), renewalAuthorizationSha256, 201),
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_TIME_INVALID" }));
+    expect(() =>
+      authority.issueRenewal({ ...renewal(6, 202) } as never, renewalAuthorizationSha256, 202),
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_RENEWAL_INVALID" }));
     const otherStart = preparedAuthorityStart();
     const otherBinding = createLocalExecutionMonotonicAuthority(otherStart);
     expect(() =>
-      authority.beginRenewal(
+      authority.issueRenewal(
         otherBinding.renewalRegistrar.prepare({
           runAttemptId: otherStart.executorEnvelope.runAttemptId,
           leaseGeneration: otherStart.authorityBasis.leaseGeneration,
@@ -434,23 +394,22 @@ describe("LocalExecutionMonotonicAuthority", () => {
           remainingLeaseMilliseconds: 100_000,
           action: "continue",
         }),
+        renewalAuthorizationSha256,
         202,
       ),
     ).toThrowError(expect.objectContaining({ code: "AUTHORITY_RENEWAL_INVALID" }));
-    const second = authority.beginRenewal(renewal(6, 202), 202);
-    expect(() => authority.commitRenewal(first, renewalSignedPayloadSha256, 203)).toThrowError(
-      expect.objectContaining({ code: "AUTHORITY_TICKET_INVALID" }),
+    const second = authority.issueRenewal(renewal(6, 202), renewalAuthorizationSha256, 202);
+    expect(() => authority.consumeUse(first, renewalAuthorizationSha256, 203)).toThrowError(
+      expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }),
     );
     expect(() =>
-      authority.commitRenewal(
+      authority.consumeUse(
         { generation: second.generation } as never,
-        renewalSignedPayloadSha256,
+        renewalAuthorizationSha256,
         203,
       ),
-    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_TICKET_INVALID" }));
-    expect(
-      authority.commitRenewal(second, renewalSignedPayloadSha256, 203).serverHeartbeatSequence,
-    ).toBe(6);
+    ).toThrowError(expect.objectContaining({ code: "AUTHORITY_USE_INVALID" }));
+    expect(second.serverHeartbeatSequence).toBe(6);
   });
 
   it.each([
@@ -459,16 +418,12 @@ describe("LocalExecutionMonotonicAuthority", () => {
     "terminal",
     "close",
   ] as const satisfies readonly LocalExecutionAuthorityFenceReason[])(
-    "synchronously invalidates an in-flight ticket when fenced as %s",
+    "synchronously invalidates issued authority when fenced as %s",
     (reason) => {
       const start = preparedAuthorityStart();
       const { authority, renewalRegistrar } = createLocalExecutionMonotonicAuthority(start);
-      const currentUse = authority.commitStart(
-        authority.consumeStart(100),
-        startSignedPayloadSha256,
-        100,
-      );
-      const ticket = authority.beginRenewal(
+      const currentUse = authority.issueStart(startAuthorizationSha256, 100);
+      const renewalUse = authority.issueRenewal(
         renewalRegistrar.prepare({
           runAttemptId: start.executorEnvelope.runAttemptId,
           leaseGeneration: start.authorityBasis.leaseGeneration,
@@ -477,14 +432,15 @@ describe("LocalExecutionMonotonicAuthority", () => {
           remainingLeaseMilliseconds: 100_000,
           action: "drain",
         }),
+        renewalAuthorizationSha256,
         200,
       );
       authority.fence(reason);
 
-      expect(() => authority.consumeUse(currentUse, startSignedPayloadSha256, 201)).toThrowError(
+      expect(() => authority.consumeUse(currentUse, startAuthorizationSha256, 201)).toThrowError(
         expect.objectContaining({ code: "AUTHORITY_FENCED" }),
       );
-      expect(() => authority.commitRenewal(ticket, renewalSignedPayloadSha256, 201)).toThrowError(
+      expect(() => authority.consumeUse(renewalUse, renewalAuthorizationSha256, 201)).toThrowError(
         expect.objectContaining({ code: "AUTHORITY_FENCED" }),
       );
     },
@@ -625,12 +581,10 @@ function verifiedFailure(runAttemptId: string = identity.runAttemptId) {
   return verified;
 }
 
-function createVerifiedArtifactCapability(runAttemptId: string): VerifiedExecutionCapability {
+function createVerifiedArtifactCapability(runAttemptId: string): ValidatedExecutionCapability {
   const capability: ExecutionCapabilityV1 = {
     capabilityVersion: 1,
     canonicalizationVersion: 1,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId: authorityKeyId,
     audience: LOCAL_CAPABILITY_AUDIENCE,
     capabilityId: "1".repeat(64),
     nonce: "2".repeat(64),
@@ -666,21 +620,16 @@ function createVerifiedArtifactCapability(runAttemptId: string): VerifiedExecuti
     grantExpiresAtUnixMs: authorityNow + 30_000,
     hardDeadlineUnixMs: authorityNow + 60_000,
   };
-  return verifyExecutionCapability(
-    signExecutionCapability(capability, authorityKeys.privateKey),
-    authorityKeys.publicKey,
-    {
-      expectedKeyId: authorityKeyId,
-      expectedWorkerNodeId: capability.workerNodeId,
-      expectedWorkerInstanceId: capability.workerInstanceId,
-      expectedExecutorBootId: capability.executorBootId,
-      expectedSessionId: capability.sessionId,
-      nowUnixMs: authorityNow + 1_000,
-    },
-  );
+  return validateExecutionCapabilityForContext(capability, {
+    expectedWorkerNodeId: capability.workerNodeId,
+    expectedWorkerInstanceId: capability.workerInstanceId,
+    expectedExecutorBootId: capability.executorBootId,
+    expectedSessionId: capability.sessionId,
+    nowUnixMs: authorityNow + 1_000,
+  });
 }
 
-function createVerifiedArtifactHandshake(): VerifiedHandshakeTranscriptV1 {
+function createEstablishedArtifactSession(): EstablishedLocalSession {
   const hello: HelloMessage = {
     protocolMajor: artifactSession.protocolMajor,
     minimumMinor: artifactSession.protocolMinor,
@@ -707,40 +656,5 @@ function createVerifiedArtifactHandshake(): VerifiedHandshakeTranscriptV1 {
     executorPreflightSha256: "d".repeat(64),
     maximumSlots: 4,
   };
-  const transcript = createHandshakeTranscriptV1(hello, helloAck, authorityKeyId);
-  const proof = createSignedHandshakeProofV1(
-    transcript,
-    signArtifactTranscript(transcript, authorityKeys.privateKey),
-  );
-  return verifySignedHandshakeProofV1(proof, authorityKeys.publicKey, {
-    expectedKeyId: authorityKeyId,
-    expectedHello: hello,
-    expectedHelloAck: helloAck,
-  });
-}
-
-function signArtifactTranscript(transcript: HandshakeTranscriptV1, privateKey: KeyObject): Buffer {
-  const result = Buffer.from(
-    nodeSign("sha256", createHandshakeTranscriptSigningBytes(transcript), {
-      key: privateKey,
-      dsaEncoding: "ieee-p1363",
-    }),
-  );
-  const s = readUnsigned(result.subarray(32));
-  if (s > p256HalfOrder) writeUnsigned(p256Order - s, result, 32);
-  return result;
-}
-
-function readUnsigned(bytes: Uint8Array): bigint {
-  let value = 0n;
-  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
-  return value;
-}
-
-function writeUnsigned(value: bigint, target: Uint8Array, offset: number): void {
-  let remaining = value;
-  for (let index = offset + 31; index >= offset; index -= 1) {
-    target[index] = Number(remaining & 0xffn);
-    remaining >>= 8n;
-  }
+  return establishLocalSession(hello, helloAck);
 }

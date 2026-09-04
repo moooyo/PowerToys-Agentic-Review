@@ -54,7 +54,6 @@ const reviewedDormantLabExports = Object.freeze({
       "value:ROLE_CONFIG_V3_LAB_MAXIMUM_BYTES",
       "value:ROLE_CONFIG_V3_LAB_MISSING_PREREQUISITES",
       "value:ROLE_CONFIG_V3_LAB_PROFILE",
-      "value:ROLE_CONFIG_V3_LAB_PUBLIC_KEY_MAXIMUM_BYTES",
       "value:ROLE_CONFIG_V3_LAB_REQUIRED_RUNTIME_BOOTSTRAP_VERSION",
       "value:ROLE_CONFIG_V3_LAB_REQUIRED_WORKER_API_VERSION",
       "value:RoleConfigV3LabArwxSelectionSchema",
@@ -89,7 +88,7 @@ const reviewedDormantLabExports = Object.freeze({
   ),
 });
 const reviewedDormantLabSourceSha256 = Object.freeze({
-  [dormantRoleConfigV3LabPath]: "ce19cb3fc149d3ea1dc836472d9059bdad7b3c66195f9f1ae25dbd48067e75d5",
+  [dormantRoleConfigV3LabPath]: "44dcbb423c6f550dc47fd9acadcf4205cdb9359becd8f2b773721fb46df5e25a",
   [dormantRuntimeBootstrapV2LabPath]:
     "212517121f3a9ef23a6a1da28b0e11f4d58367861678a686192aeade9751c4e0",
 });
@@ -99,11 +98,11 @@ const reviewedDormantVersionFoundationSourceSha256 = Object.freeze({
   [`${contractsSourceRoot}job-envelope.ts`]:
     "ba50a125b17446d6a8d42b871fb7f324f67f9ad383ec0c5d039d79a3beea69d3",
   [`${localProtocolSourceRoot}framing.ts`]:
-    "a2d1e79c9f3bb1ac564d8225e0f091f691f38b09d84b1187078bd1511ff00d18",
+    "4f701c4e19bb1ebacaae8ad5f1e891029bd7a57feb35a9cc2a86d233019cc806",
   [`${localProtocolSourceRoot}index.ts`]:
     "1ba75fe66385d3867731de3f91d2071e38ad4e127ca82ed17717b39a1ac75841",
   [`${localProtocolSourceRoot}messages.ts`]:
-    "5c69fda0dc87a7d348a0877f355cf029842896706352db4172fcca6fe730e3cb",
+    "7adccfe271d613b6a5eb6927441458bb78dd3d7ad862734f9f1e1f0bf8c007f3",
 });
 const reviewedRootBarrelExports = Object.freeze({
   [`${contractsSourceRoot}index.ts`]: Object.freeze([
@@ -127,14 +126,14 @@ const reviewedRootBarrelExports = Object.freeze({
   ]),
 });
 const reviewedProductionSourceSha256 = Object.freeze({
-  [executorRuntimePath]: "ad7435ddf526263c6d337de2601cadbb2c3964fbb7cdc00d1d77549f728b8ff1",
-  [controlRuntimePath]: "6b795bc2d5d5d46ecf3581fe50f2590e730f4bdf49b20f09d8347c03f7e8c005",
+  [executorRuntimePath]: "98f51844bcac2f542daa12f580cb3ff3e4dc5fc5b9a7eba49ab527f1f3876e2b",
+  [controlRuntimePath]: "f0ae3d9a159d36dbf3fca08644e81fd4374ea0595f3e04b5a43742b16a1eace3",
   [`${workerSourceRoot}service-host/runtime-bootstrap.ts`]:
-    "4dece27373d4d4f5a19246855011b9317e7701fef4106f4ff6b8476eb6bb4871",
+    "6a06fc4a93a9b353718a04bfc2d8ba4544b41528f2fb235eb310460acc17d3d3",
   [`${contractsSourceRoot}worker.ts`]:
     "aba5d6f2a19f24f6ed00687685c627f604781c5d8aa3bdfd753b320d1b2bb074",
   [`${workerSourceRoot}control/host-control-worker-api.ts`]:
-    "de893b9f65b8e44d177a9be5842a97a232e905b5c602e087776c1c655c3da699",
+    "30330b3954d0484ba95b6a6d70d74dcfb992aaeb08db689f56411a432d8c7189",
   [`${workerSourceRoot}execution/trusted-installation-manifest.ts`]:
     "00d80ae43e7a14e36aa50fa05215153b7b6c074c96b0a11aeb37a9f7f2b32321",
   [pinnedServerClaimProducerPath]:
@@ -252,7 +251,7 @@ export function verifyZeroExecutionProductionArchitecture(sourceOverrides = {}) 
   }
   const executorSource = readSource(executorRuntimePath);
   const controlSource = readSource(controlRuntimePath);
-  verifyAuthenticatedDisabledReady(executorSource, controlSource);
+  verifyPlainLocalSession(executorSource, controlSource);
 }
 
 export function verifyDormantLabAPISurfaceForTest(sourcePath, source) {
@@ -775,639 +774,113 @@ function verifyProductionImportGraph(entrypoint, readSource) {
   }
 }
 
-function verifyAuthenticatedDisabledReady(executorSource, controlSource) {
-  const sourceFile = parseTypeScript(executorSource, executorRuntimePath);
-  verifyExactImportBindings(sourceFile.program, "@agentic-review/local-protocol", [
-    "type:ControlProofMessage:ControlProofMessage",
-    "value:createHandshakeTranscriptV1:createHandshakeTranscriptV1",
+function verifyPlainLocalSession(executorSource, controlSource) {
+  const executor = parseTypeScript(executorSource, executorRuntimePath);
+  verifyExactImportBindings(executor.program, "@agentic-review/local-protocol", [
     "type:DeepReadonly:DeepReadonly",
     "type:DrainedMessage:DrainedMessage",
     "type:DrainMessage:DrainMessage",
+    "type:EstablishedLocalSession:EstablishedLocalSession",
+    "value:establishLocalSession:establishLocalSession",
     "type:HelloAckMessage:HelloAckMessage",
     "type:HelloMessage:HelloMessage",
     "value:LOCAL_PROTOCOL_NIL_CORRELATION_ID:LOCAL_PROTOCOL_NIL_CORRELATION_ID",
     "value:LocalMessageType:LocalMessageType",
     "type:ReadyMessage:ReadyMessage",
     "value:validateLocalMessagePayload:validateLocalMessagePayload",
-    "value:validateReadyAfterHandshakeProofV1:validateReadyAfterHandshakeProofV1",
-    "value:verifyControlProofMessageV1:verifyControlProofMessageV1",
+    "value:validateReadyForEstablishedSession:validateReadyForEstablishedSession",
   ]);
-  verifyLocalMessageTypeReferences(sourceFile.program, {
-    ControlProof: 1,
+  verifyLocalMessageTypeReferences(executor.program, {
     Drain: 2,
     Drained: 1,
     Hello: 1,
     HelloAck: 2,
     Ready: 1,
   });
-  const executorPublications = verifyExactMessagePublications(sourceFile.program, [
+  verifyExactMessagePublications(executor.program, [
     ["send", "private:arwx", "HelloAck"],
     ["send", "private:arwx", "Ready"],
     ["sendFinal", "identifier:dispatch", "Drained"],
   ]);
-  verifyPrivateTransportReferences(sourceFile.program);
-  verifyExecutorProofDispatch(sourceFile.program);
-  const methods = collectSyntax(sourceFile.program, (node) =>
-    node.type === "ClassPrivateMethod" && privateName(node.key) === "handleControlProof"
-      ? node
-      : undefined,
-  );
-  const method = methods[0];
-  if (
-    methods.length !== 1 ||
-    !method.async ||
-    method.generator ||
-    method.params.length !== 1 ||
-    !isIdentifier(method.params[0], "message") ||
-    (method.body.directives?.length ?? 0) !== 0 ||
-    method.body.body.length !== 11
-  ) {
-    throw new Error("Executor disabled Ready must have one private Control-proof handler.");
-  }
+  verifyPrivateTransportReferences(executor.program);
+  verifyPlainSessionCalls(executor.program, executorSource, "Executor");
 
-  const [
-    messageGuard,
-    helloStatement,
-    helloAckStatement,
-    proofStatement,
-    verifiedStatement,
-    proofTry,
-    closeGuard,
-    readyCandidateStatement,
-    readyStatement,
-    sendStatement,
-    phaseStatement,
-  ] = method.body.body;
-  if (
-    !isExactMessageTypeGuard(messageGuard, "ControlProof") ||
-    !isExactConstCall(helloStatement, "hello", "required", [
-      isThisPrivateMemberNamed("hello"),
-      isStringNamed("Control Hello"),
-    ]) ||
-    !isExactConstCall(helloAckStatement, "helloAck", "required", [
-      isThisPrivateMemberNamed("helloAck"),
-      isStringNamed("Executor HelloAck"),
-    ]) ||
-    !isExactConstCall(proofStatement, "proof", "normalizePayload", [
-      isIdentifierNamed("message"),
-    ]) ||
-    verifiedStatement?.type !== "VariableDeclaration" ||
-    verifiedStatement.kind !== "let" ||
-    verifiedStatement.declarations.length !== 1 ||
-    !isIdentifier(verifiedStatement.declarations[0]?.id, "verified") ||
-    verifiedStatement.declarations[0].init !== null ||
-    !isExactCloseGuard(closeGuard)
-  ) {
-    throw new Error("Executor Control-proof handler statement sequence changed.");
-  }
-
-  const records = collectSyntaxRecords(method.body);
-  const proofAssignment =
-    proofTry?.type === "TryStatement" && proofTry.block.body.length === 1
-      ? proofTry.block.body[0]
-      : undefined;
-  const assigned =
-    proofAssignment?.type === "ExpressionStatement" ? proofAssignment.expression : undefined;
-  const verifyCall = assigned?.type === "AssignmentExpression" ? assigned.right : undefined;
-  const proofFailure = proofTry?.type === "TryStatement" ? proofTry.handler : undefined;
-  const failureStatement = proofFailure?.body.body[0];
-  const failureCall =
-    failureStatement?.type === "ThrowStatement" ? failureStatement.argument : undefined;
-  const authorityKey = verifyCall?.type === "CallExpression" ? verifyCall.arguments[1] : undefined;
-  const verifyOptions =
-    verifyCall?.type === "CallExpression" && verifyCall.arguments[2]?.type === "ObjectExpression"
-      ? exactObjectProperties(verifyCall.arguments[2], "Executor proof verification")
-      : undefined;
-  if (
-    proofTry?.type !== "TryStatement" ||
-    proofTry.finalizer !== null ||
-    proofTry.block.body.length !== 1 ||
-    assigned?.type !== "AssignmentExpression" ||
-    assigned.operator !== "=" ||
-    !isIdentifier(assigned.left, "verified") ||
-    verifyCall?.type !== "CallExpression" ||
-    !isIdentifier(verifyCall.callee, "verifyControlProofMessageV1") ||
-    verifyCall.arguments.length !== 3 ||
-    !isIdentifier(verifyCall.arguments[0], "proof") ||
-    authorityKey?.type !== "CallExpression" ||
-    !isIdentifier(authorityKey.callee, "required") ||
-    authorityKey.arguments.length !== 2 ||
-    !isThisPrivatePropertyChain(
-      authorityKey.arguments[0],
-      "bootstrap",
-      "localAuthorityPublicKey",
-    ) ||
-    authorityKey.arguments[1]?.type !== "StringLiteral" ||
-    authorityKey.arguments[1].value !== "pinned Executor public key" ||
-    verifyOptions?.size !== 3 ||
-    !isThisPrivatePropertyChain(
-      verifyOptions.get("expectedKeyId"),
-      "bootstrap",
-      "roleConfig",
-      "localAuthorityKeyId",
-    ) ||
-    !isIdentifier(verifyOptions.get("expectedHello"), "hello") ||
-    !isIdentifier(verifyOptions.get("expectedHelloAck"), "helloAck") ||
-    proofFailure?.type !== "CatchClause" ||
-    !isIdentifier(proofFailure.param, "error") ||
-    proofFailure.body.body.length !== 1 ||
-    failureCall?.type !== "CallExpression" ||
-    !isIdentifier(failureCall.callee, "runtimeError") ||
-    failureCall.arguments.length !== 3 ||
-    failureCall.arguments[0]?.type !== "StringLiteral" ||
-    failureCall.arguments[0].value !== "HANDSHAKE_PROOF_INVALID" ||
-    failureCall.arguments[1]?.type !== "StringLiteral" ||
-    failureCall.arguments[1].value !== "Control handshake proof is invalid." ||
-    !isIdentifier(failureCall.arguments[2], "error")
-  ) {
-    throw new Error("Executor Ready is not preceded by one authenticated Control-proof result.");
-  }
-
-  const readyCandidateDeclaration = singleDeclaration(
-    readyCandidateStatement,
-    "const",
-    "readyCandidate",
-  );
-  if (readyCandidateDeclaration?.init?.type !== "ObjectExpression") {
-    throw new Error("Executor disabled Ready candidate declaration changed.");
-  }
-  const readyFields = exactObjectProperties(
-    readyCandidateDeclaration.init,
-    "Executor disabled Ready",
-  );
-  if (
-    readyFields.size !== 15 ||
-    !isNamedMember(readyFields.get("protocolMajor"), "helloAck", "protocolMajor") ||
-    !isNamedMember(readyFields.get("protocolMinor"), "helloAck", "protocolMinor") ||
-    !isNamedMember(readyFields.get("workerNodeId"), "helloAck", "workerNodeId") ||
-    !isNamedMember(readyFields.get("workerInstanceId"), "helloAck", "workerInstanceId") ||
-    !isNamedMember(readyFields.get("executorBootId"), "helloAck", "executorBootId") ||
-    !isNamedMember(readyFields.get("sessionId"), "helloAck", "sessionId") ||
-    !isNamedMember(readyFields.get("controlNonce"), "helloAck", "controlNonce") ||
-    !isNamedMember(readyFields.get("executorNonce"), "helloAck", "executorNonce") ||
-    !isNamedMember(
-      readyFields.get("executorManifestSha256"),
-      "helloAck",
-      "executorManifestSha256",
-    ) ||
-    !isNamedMember(readyFields.get("executorPolicySha256"), "helloAck", "executorPolicySha256") ||
-    !isNamedMember(
-      readyFields.get("executorPreflightSha256"),
-      "helloAck",
-      "executorPreflightSha256",
-    ) ||
-    readyFields.get("isolationMode")?.type !== "StringLiteral" ||
-    readyFields.get("isolationMode").value !== "split-service-v1" ||
-    readyFields.get("ready")?.type !== "BooleanLiteral" ||
-    readyFields.get("ready").value !== false ||
-    readyFields.get("availableSlots")?.type !== "NumericLiteral" ||
-    readyFields.get("availableSlots").value !== 0 ||
-    readyFields.get("reasonCode")?.type !== "StringLiteral" ||
-    readyFields.get("reasonCode").value !== "EXECUTION_DISABLED"
-  ) {
-    throw new Error("Executor Ready is not the exact disabled zero-slot attestation.");
-  }
-
-  const readyDeclaration = singleDeclaration(readyStatement, "const", "ready");
-  const validationCall = readyDeclaration?.init;
-  if (
-    validationCall?.type !== "CallExpression" ||
-    !isIdentifier(validationCall.callee, "validateReadyAfterHandshakeProofV1") ||
-    validationCall.arguments.length !== 2 ||
-    !isIdentifier(validationCall.arguments[0], "readyCandidate") ||
-    !isIdentifier(validationCall.arguments[1], "verified")
-  ) {
-    throw new Error("Executor disabled Ready is not bound to the verified handshake proof.");
-  }
-
-  const awaited =
-    sendStatement?.type === "ExpressionStatement" ? sendStatement.expression : undefined;
-  const send = awaited?.type === "AwaitExpression" ? awaited.argument : undefined;
-  const sendFields =
-    send?.type === "CallExpression" && send.arguments[0]?.type === "ObjectExpression"
-      ? exactObjectProperties(send.arguments[0], "Executor Ready send")
-      : undefined;
-  const phaseAssignment =
-    phaseStatement?.type === "ExpressionStatement" ? phaseStatement.expression : undefined;
-  if (
-    send?.type !== "CallExpression" ||
-    !isDirectMember(send.callee, "send") ||
-    !isThisPrivateMember(send.callee.object, "arwx") ||
-    send.arguments.length !== 1 ||
-    sendFields?.size !== 3 ||
-    !isNamedMember(sendFields.get("messageType"), "LocalMessageType", "Ready") ||
-    !isIdentifier(sendFields.get("correlationId"), "LOCAL_PROTOCOL_NIL_CORRELATION_ID") ||
-    !isIdentifier(sendFields.get("payload"), "ready") ||
-    phaseAssignment?.type !== "AssignmentExpression" ||
-    phaseAssignment.operator !== "=" ||
-    !isThisPrivateMember(phaseAssignment.left, "phase") ||
-    phaseAssignment.right?.type !== "StringLiteral" ||
-    phaseAssignment.right.value !== "ready_disabled"
-  ) {
-    throw new Error("Executor disabled Ready publication is not ordered after authentication.");
-  }
-
-  const readyMembers = collectSyntax(sourceFile.program, (node) =>
-    isNamedMember(node, "LocalMessageType", "Ready") ? node : undefined,
-  );
-  if (
-    readyMembers.length !== 1 ||
-    readyMembers[0] !== sendFields.get("messageType") ||
-    executorPublications.get("Ready") !== send
-  ) {
-    throw new Error("Executor has another Ready publication path.");
-  }
-
-  const namedCalls = (name) =>
-    records.filter(({ node }) => node.type === "CallExpression" && isIdentifier(node.callee, name));
-  const sendCalls = records.filter(
-    ({ node }) => node.type === "CallExpression" && isDirectMember(node.callee, "send"),
-  );
-  if (
-    namedCalls("verifyControlProofMessageV1").length !== 1 ||
-    namedCalls("validateReadyAfterHandshakeProofV1").length !== 1 ||
-    sendCalls.length !== 1 ||
-    collectSyntax(method.body, (node) => (node.type === "ReturnStatement" ? node : undefined))
-      .length !== 0 ||
-    bindingWriteCount(records, "hello") !== 1 ||
-    bindingWriteCount(records, "helloAck") !== 1 ||
-    bindingWriteCount(records, "proof") !== 1 ||
-    bindingWriteCount(records, "verified") !== 2 ||
-    bindingWriteCount(records, "readyCandidate") !== 1 ||
-    bindingWriteCount(records, "ready") !== 1
-  ) {
-    throw new Error("Executor disabled Ready bindings or control flow changed.");
-  }
-
-  verifyControlDisabledReadyAcceptance(controlSource);
-}
-
-function verifyControlDisabledReadyAcceptance(source) {
-  const sourceFile = parseTypeScript(source, controlRuntimePath);
-  verifyExactImportBindings(sourceFile.program, "@agentic-review/local-protocol", [
-    "type:ControlProofMessage:ControlProofMessage",
-    "value:createControlProofMessageV1:createControlProofMessageV1",
-    "value:createHandshakeTranscriptSigningDigest:createHandshakeTranscriptSigningDigest",
-    "value:createHandshakeTranscriptV1:createHandshakeTranscriptV1",
-    "value:createSignedHandshakeProofV1:createSignedHandshakeProofV1",
+  const control = parseTypeScript(controlSource, controlRuntimePath);
+  verifyExactImportBindings(control.program, "@agentic-review/local-protocol", [
     "type:DeepReadonly:DeepReadonly",
     "type:DrainedMessage:DrainedMessage",
+    "type:EstablishedLocalSession:EstablishedLocalSession",
+    "value:establishLocalSession:establishLocalSession",
     "type:HelloAckMessage:HelloAckMessage",
     "type:HelloMessage:HelloMessage",
     "value:LOCAL_PROTOCOL_NIL_CORRELATION_ID:LOCAL_PROTOCOL_NIL_CORRELATION_ID",
     "value:LocalMessageType:LocalMessageType",
     "type:ReadyMessage:ReadyMessage",
+    "value:validateReadyForEstablishedSession:validateReadyForEstablishedSession",
   ]);
-  verifyLocalMessageTypeReferences(sourceFile.program, {
-    ControlProof: 1,
+  verifyLocalMessageTypeReferences(control.program, {
     Drain: 1,
     Drained: 1,
     Hello: 1,
     HelloAck: 1,
     Ready: 1,
   });
-  verifyExactMessagePublications(sourceFile.program, [
+  verifyExactMessagePublications(control.program, [
     ["send", "private:arwx", "Hello"],
-    ["send", "private:arwx", "ControlProof"],
     ["sendFinal", "private:arwx", "Drain"],
   ]);
-  verifyPrivateTransportReferences(sourceFile.program);
-  const sourceRecords = collectSyntaxRecords(sourceFile.program);
-  const constants = sourceRecords.filter(
-    ({ node }) =>
-      node.type === "VariableDeclarator" && isIdentifier(node.id, "executionDisabledReason"),
-  );
-  const constant = constants[0];
-  if (
-    constants.length !== 1 ||
-    constant.parent?.type !== "VariableDeclaration" ||
-    constant.parent.kind !== "const" ||
-    constant.parent.declarations.length !== 1 ||
-    constant.node.init?.type !== "TSAsExpression" ||
-    constant.node.init.expression?.type !== "StringLiteral" ||
-    constant.node.init.expression.value !== "EXECUTION_DISABLED" ||
-    bindingWriteCount(sourceRecords, "executionDisabledReason") !== 1 ||
-    bindingWriteCount(sourceRecords, "validateControlReady") !== 1
-  ) {
-    throw new Error("Control disabled Ready reason constant changed.");
-  }
-  const functions = collectSyntax(sourceFile.program, (node) =>
-    node.type === "FunctionDeclaration" && node.id?.name === "validateControlReady"
-      ? node
-      : undefined,
-  );
-  const validator = functions[0];
-  if (
-    functions.length !== 1 ||
-    validator.async ||
-    validator.generator ||
-    validator.params.length !== 2 ||
-    !isIdentifier(validator.params[0], "ready") ||
-    !isIdentifier(validator.params[1], "context") ||
-    (validator.body.directives?.length ?? 0) !== 0 ||
-    validator.body.body.length !== 4
-  ) {
-    throw new Error("Control disabled Ready validator changed.");
-  }
-
-  const [helloAckStatement, proofStatement, rejection, accepted] = validator.body.body;
-  const helloAck = singleDeclaration(helloAckStatement, "const", "helloAck");
-  const proof = singleDeclaration(proofStatement, "const", "proof");
-  const rejectionStatements =
-    rejection?.type === "IfStatement" && rejection.consequent?.type === "BlockStatement"
-      ? rejection.consequent.body
-      : undefined;
-  const rejectionCall =
-    rejectionStatements?.[0]?.type === "ThrowStatement"
-      ? rejectionStatements[0].argument
-      : undefined;
-  const acceptedCall = accepted?.type === "ReturnStatement" ? accepted.argument : undefined;
-  const acceptedArgument =
-    acceptedCall?.type === "CallExpression" ? acceptedCall.arguments[0] : undefined;
-  if (
-    !isNamedMember(helloAck?.init, "context", "helloAck") ||
-    !isNamedMember(proof?.init, "context", "proof") ||
-    rejection?.type !== "IfStatement" ||
-    rejection.alternate !== null ||
-    rejection.consequent?.type !== "BlockStatement" ||
-    rejectionStatements?.length !== 1 ||
-    rejectionCall?.type !== "CallExpression" ||
-    !isIdentifier(rejectionCall.callee, "shadowError") ||
-    rejectionCall.arguments.length !== 2 ||
-    rejectionCall.arguments[0]?.type !== "StringLiteral" ||
-    rejectionCall.arguments[0].value !== "CONTROL_SHADOW_HANDSHAKE_INVALID" ||
-    rejectionCall.arguments[1]?.type !== "StringLiteral" ||
-    rejectionCall.arguments[1].value !==
-      "Executor Ready does not match the Control-signed zero-slot handshake." ||
-    acceptedCall?.type !== "CallExpression" ||
-    !isNamedMember(acceptedCall.callee, "Object", "freeze") ||
-    acceptedCall.arguments.length !== 1 ||
-    acceptedArgument?.type !== "ObjectExpression" ||
-    acceptedArgument.properties.length !== 1 ||
-    acceptedArgument.properties[0]?.type !== "SpreadElement" ||
-    !isIdentifier(acceptedArgument.properties[0].argument, "ready")
-  ) {
-    throw new Error("Control disabled Ready rejection or return order changed.");
-  }
-
-  const comparisons = flattenLogicalOr(rejection.test);
-  const expectedComparisons = [
-    ["ready", "protocolMajor", "helloAck", "protocolMajor"],
-    ["ready", "protocolMinor", "helloAck", "protocolMinor"],
-    ["ready", "workerNodeId", "helloAck", "workerNodeId"],
-    ["ready", "workerInstanceId", "helloAck", "workerInstanceId"],
-    ["ready", "executorBootId", "helloAck", "executorBootId"],
-    ["ready", "sessionId", "helloAck", "sessionId"],
-    ["ready", "controlNonce", "helloAck", "controlNonce"],
-    ["ready", "executorNonce", "helloAck", "executorNonce"],
-    ["ready", "executorManifestSha256", "helloAck", "executorManifestSha256"],
-    ["ready", "executorPolicySha256", "helloAck", "executorPolicySha256"],
-    ["ready", "executorPreflightSha256", "helloAck", "executorPreflightSha256"],
-    ["ready", "workerNodeId", "proof", "workerNodeId"],
-    ["ready", "workerInstanceId", "proof", "workerInstanceId"],
-    ["ready", "executorBootId", "proof", "executorBootId"],
-    ["ready", "sessionId", "proof", "sessionId"],
-  ];
-  if (
-    comparisons.length !== 19 ||
-    !expectedComparisons.every(([leftObject, leftProperty, rightObject, rightProperty], index) =>
-      isExactMemberInequality(
-        comparisons[index],
-        leftObject,
-        leftProperty,
-        rightObject,
-        rightProperty,
-      ),
-    ) ||
-    !isExactRightInequality(
-      comparisons[15],
-      "ready",
-      "isolationMode",
-      isStringNamed("split-service-v1"),
-    ) ||
-    !isExactRightInequality(comparisons[16], "ready", "ready", (node) => isBoolean(node, false)) ||
-    !isExactRightInequality(comparisons[17], "ready", "availableSlots", (node) =>
-      isNumber(node, 0),
-    ) ||
-    !isExactRightInequality(
-      comparisons[18],
-      "ready",
-      "reasonCode",
-      isIdentifierNamed("executionDisabledReason"),
-    )
-  ) {
-    throw new Error("Control no longer enforces the exact disabled Ready fields.");
-  }
-  verifyControlReadyCallChain(sourceFile.program);
+  verifyPrivateTransportReferences(control.program);
+  verifyPlainSessionCalls(control.program, controlSource, "Control");
 }
 
-function verifyExecutorProofDispatch(program) {
-  const handles = collectSyntax(program, (node) =>
-    node.type === "ClassMethod" && !node.computed && isIdentifier(node.key, "handle")
-      ? node
-      : undefined,
-  );
-  const handle = handles[0];
-  const tryStatement = handle?.body.body[0];
-  const branch = tryStatement?.type === "TryStatement" ? tryStatement.block.body[3] : undefined;
-  const returned =
-    branch?.type === "IfStatement" && branch.consequent?.type === "BlockStatement"
-      ? branch.consequent.body[0]
-      : undefined;
-  const awaited = returned?.type === "ReturnStatement" ? returned.argument : undefined;
-  const call = awaited?.type === "AwaitExpression" ? awaited.argument : undefined;
+function verifyPlainSessionCalls(program, source, role) {
   const calls = collectSyntax(program, (node) =>
-    node.type === "CallExpression" && isThisPrivateMember(node.callee, "handleControlProof")
-      ? node
-      : undefined,
-  );
-  const references = collectSyntax(program, (node) =>
-    isThisPrivateMember(node, "handleControlProof") ? node : undefined,
-  );
-  if (
-    handles.length !== 1 ||
-    handle.accessibility !== "public" ||
-    !handle.async ||
-    handle.generator ||
-    handle.body.body.length !== 1 ||
-    tryStatement?.type !== "TryStatement" ||
-    tryStatement.block.body.length !== 6 ||
-    branch?.type !== "IfStatement" ||
-    branch.alternate !== null ||
-    branch.test?.type !== "BinaryExpression" ||
-    branch.test.operator !== "===" ||
-    !isThisPrivateMember(branch.test.left, "phase") ||
-    branch.test.right?.type !== "StringLiteral" ||
-    branch.test.right.value !== "awaiting_control_proof" ||
-    branch.consequent?.type !== "BlockStatement" ||
-    branch.consequent.body.length !== 1 ||
-    call?.type !== "CallExpression" ||
-    !isThisPrivateMember(call.callee, "handleControlProof") ||
-    call.arguments.length !== 1 ||
-    !isIdentifier(call.arguments[0], "message") ||
-    calls.length !== 1 ||
-    calls[0] !== call ||
-    references.length !== 1 ||
-    references[0] !== call.callee
-  ) {
-    throw new Error("Executor public dispatch no longer uniquely reaches Control-proof handling.");
-  }
-}
-
-function verifyControlReadyCallChain(program) {
-  const handles = collectSyntax(program, (node) =>
-    node.type === "ClassMethod" && !node.computed && isIdentifier(node.key, "handle")
-      ? node
-      : undefined,
-  );
-  const handle = handles[0];
-  const tryStatement = handle?.body.body[1];
-  const branch = tryStatement?.type === "TryStatement" ? tryStatement.block.body[1] : undefined;
-  const branchStatements =
-    branch?.type === "IfStatement" && branch.consequent?.type === "BlockStatement"
-      ? branch.consequent.body
-      : undefined;
-  const acceptExpression =
-    branchStatements?.[0]?.type === "ExpressionStatement"
-      ? branchStatements[0].expression
-      : undefined;
-  const acceptCall = acceptExpression?.type === "CallExpression" ? acceptExpression : undefined;
-  const acceptCalls = collectSyntax(program, (node) =>
-    node.type === "CallExpression" && isThisPrivateMember(node.callee, "acceptReady")
-      ? node
-      : undefined,
-  );
-  const acceptReferences = collectSyntax(program, (node) =>
-    isThisPrivateMember(node, "acceptReady") ? node : undefined,
-  );
-  const readyMembers = collectSyntax(program, (node) =>
-    isNamedMember(node, "LocalMessageType", "Ready") ? node : undefined,
-  );
-
-  const acceptMethods = collectSyntax(program, (node) =>
-    node.type === "ClassPrivateMethod" && privateName(node.key) === "acceptReady"
-      ? node
-      : undefined,
-  );
-  const acceptMethod = acceptMethods[0];
-  const statements = acceptMethod?.body.body;
-  const signedHandshake = singleDeclaration(statements?.[0], "const", "signedHandshake");
-  const signedGuard = statements?.[1];
-  const guardTerms = signedGuard?.type === "IfStatement" ? flattenLogicalOr(signedGuard.test) : [];
-  const guardStatements =
-    signedGuard?.type === "IfStatement" && signedGuard.consequent?.type === "BlockStatement"
-      ? signedGuard.consequent.body
-      : undefined;
-  const readyDeclaration = singleDeclaration(statements?.[2], "const", "ready");
-  const validateCall = readyDeclaration?.init;
-  const readyAssignment = expressionAssignment(statements?.[3]);
-  const phaseAssignment = expressionAssignment(statements?.[4]);
-  const resolveExpression =
-    statements?.[5]?.type === "ExpressionStatement" ? statements[5].expression : undefined;
-  const validateCalls = collectSyntax(program, (node) =>
-    node.type === "CallExpression" && isIdentifier(node.callee, "validateControlReady")
-      ? node
+    node.type === "CallExpression" &&
+    node.callee?.type === "Identifier" &&
+    (node.callee.name === "establishLocalSession" ||
+      node.callee.name === "validateReadyForEstablishedSession")
+      ? node.callee.name
       : undefined,
   );
   if (
-    handles.length !== 1 ||
-    handle.accessibility !== "public" ||
-    !handle.async ||
-    handle.body.body.length !== 2 ||
-    tryStatement?.type !== "TryStatement" ||
-    tryStatement.block.body.length !== 4 ||
-    branch?.type !== "IfStatement" ||
-    branch.alternate !== null ||
-    branch.test?.type !== "BinaryExpression" ||
-    branch.test.operator !== "===" ||
-    !isNamedMember(branch.test.left, "message", "messageType") ||
-    !isNamedMember(branch.test.right, "LocalMessageType", "Ready") ||
-    branchStatements?.length !== 2 ||
-    acceptCall?.type !== "CallExpression" ||
-    !isThisPrivateMember(acceptCall.callee, "acceptReady") ||
-    acceptCall.arguments.length !== 1 ||
-    !isNamedMember(unwrapTypeAssertions(acceptCall.arguments[0]), "message", "payload") ||
-    branchStatements[1]?.type !== "ReturnStatement" ||
-    branchStatements[1].argument !== null ||
-    acceptCalls.length !== 1 ||
-    acceptCalls[0] !== acceptCall ||
-    acceptReferences.length !== 1 ||
-    acceptReferences[0] !== acceptCall.callee ||
-    readyMembers.length !== 1 ||
-    readyMembers[0] !== branch.test.right ||
-    acceptMethods.length !== 1 ||
-    acceptMethod.async ||
-    acceptMethod.generator ||
-    acceptMethod.params.length !== 1 ||
-    !isIdentifier(acceptMethod.params[0], "readyValue") ||
-    (acceptMethod.body.directives?.length ?? 0) !== 0 ||
-    statements.length !== 6 ||
-    !isThisPrivateMember(signedHandshake?.init, "signedHandshake") ||
-    signedGuard?.type !== "IfStatement" ||
-    signedGuard.alternate !== null ||
-    guardTerms.length !== 2 ||
-    guardTerms[0]?.type !== "BinaryExpression" ||
-    guardTerms[0].operator !== "!==" ||
-    !isThisPrivateMember(guardTerms[0].left, "phase") ||
-    guardTerms[0].right?.type !== "StringLiteral" ||
-    guardTerms[0].right.value !== "proof-sent" ||
-    guardTerms[1]?.type !== "BinaryExpression" ||
-    guardTerms[1].operator !== "===" ||
-    !isIdentifier(guardTerms[1].left, "signedHandshake") ||
-    !isIdentifier(guardTerms[1].right, "undefined") ||
-    guardStatements?.length !== 1 ||
-    !isExactShadowErrorThrow(
-      guardStatements[0],
-      "CONTROL_SHADOW_HANDSHAKE_INVALID",
-      "Control received Ready before completing its signed handshake.",
-    ) ||
-    validateCall?.type !== "CallExpression" ||
-    !isIdentifier(validateCall.callee, "validateControlReady") ||
-    validateCall.arguments.length !== 2 ||
-    !isIdentifier(validateCall.arguments[0], "readyValue") ||
-    !isIdentifier(validateCall.arguments[1], "signedHandshake") ||
-    validateCalls.length !== 1 ||
-    validateCalls[0] !== validateCall ||
-    readyAssignment?.operator !== "=" ||
-    !isThisPrivateMember(readyAssignment.left, "readyMessage") ||
-    !isIdentifier(readyAssignment.right, "ready") ||
-    phaseAssignment?.operator !== "=" ||
-    !isThisPrivateMember(phaseAssignment.left, "phase") ||
-    phaseAssignment.right?.type !== "StringLiteral" ||
-    phaseAssignment.right.value !== "ready" ||
-    resolveExpression?.type !== "CallExpression" ||
-    !isDirectMember(resolveExpression.callee, "resolve") ||
-    !isThisPrivateMember(resolveExpression.callee.object, "ready") ||
-    resolveExpression.arguments.length !== 1 ||
-    !isIdentifier(resolveExpression.arguments[0], "ready")
+    calls.filter((name) => name === "establishLocalSession").length !== 1 ||
+    calls.filter((name) => name === "validateReadyForEstablishedSession").length !== 1
   ) {
-    throw new Error("Control public dispatch no longer commits the validated disabled Ready.");
+    throw new Error(`${role} must establish and validate exactly one plain local session.`);
   }
-}
-
-function isExactMessageTypeGuard(statement, messageType) {
-  const test = statement?.type === "IfStatement" ? statement.test : undefined;
-  const statements =
-    statement?.type === "IfStatement" && statement.consequent?.type === "BlockStatement"
-      ? statement.consequent.body
-      : undefined;
-  const thrown = statements?.[0]?.type === "ThrowStatement" ? statements[0].argument : undefined;
-  return (
-    statement?.type === "IfStatement" &&
-    statement.alternate === null &&
-    test?.type === "BinaryExpression" &&
-    test.operator === "!==" &&
-    isNamedMember(test.left, "message", "messageType") &&
-    isNamedMember(test.right, "LocalMessageType", messageType) &&
-    statements?.length === 1 &&
-    thrown?.type === "CallExpression" &&
-    isIdentifier(thrown.callee, "runtimeError") &&
-    thrown.arguments.length === 2 &&
-    thrown.arguments[0]?.type === "StringLiteral" &&
-    thrown.arguments[0].value === "HANDSHAKE_ORDER_INVALID" &&
-    thrown.arguments[1]?.type === "StringLiteral" &&
-    thrown.arguments[1].value === "Executor shadow runtime requires ControlProof after HelloAck."
-  );
+  for (const forbidden of [
+    "ControlProof",
+    "signLocalDigest",
+    "localAuthorityKeyId",
+    "localAuthorityPublicKey",
+    "awaiting_control_proof",
+    "HANDSHAKE_PROOF_INVALID",
+  ]) {
+    if (source.includes(forbidden)) {
+      throw new Error(`${role} local session retains forbidden cryptographic state: ${forbidden}`);
+    }
+  }
+  const requiredFragments =
+    role === "Executor"
+      ? [
+          "session = establishLocalSession(hello, helloAck);",
+          "validateReadyForEstablishedSession(readyCandidate, session)",
+          "ready: false",
+          "availableSlots: 0",
+          'reasonCode: "EXECUTION_DISABLED"',
+        ]
+      : [
+          "session = establishLocalSession(this.#hello, helloAck);",
+          "validateReadyForEstablishedSession(readyValue, session)",
+          "ready.ready !== false",
+          "ready.availableSlots !== 0",
+          "ready.reasonCode !== executionDisabledReason",
+        ];
+  for (const fragment of requiredFragments) {
+    if (!source.includes(fragment)) {
+      throw new Error(`${role} local session validation changed: ${fragment}`);
+    }
+  }
 }
 
 function verifyExactImportBindings(program, source, expected) {
@@ -1533,156 +1006,6 @@ function verifyPrivateTransportReferences(program) {
       }
     }
   }
-}
-
-function expressionAssignment(statement) {
-  const expression = statement?.type === "ExpressionStatement" ? statement.expression : undefined;
-  return expression?.type === "AssignmentExpression" ? expression : undefined;
-}
-
-function unwrapTypeAssertions(expression) {
-  let current = expression;
-  while (
-    current?.type === "TSAsExpression" ||
-    current?.type === "TSTypeAssertion" ||
-    current?.type === "TSNonNullExpression"
-  ) {
-    current = current.expression;
-  }
-  return current;
-}
-
-function isExactShadowErrorThrow(statement, code, message) {
-  const call = statement?.type === "ThrowStatement" ? statement.argument : undefined;
-  return (
-    call?.type === "CallExpression" &&
-    isIdentifier(call.callee, "shadowError") &&
-    call.arguments.length === 2 &&
-    call.arguments[0]?.type === "StringLiteral" &&
-    call.arguments[0].value === code &&
-    call.arguments[1]?.type === "StringLiteral" &&
-    call.arguments[1].value === message
-  );
-}
-
-function isExactCloseGuard(statement) {
-  const statements =
-    statement?.type === "IfStatement" && statement.consequent?.type === "BlockStatement"
-      ? statement.consequent.body
-      : undefined;
-  const thrown = statements?.[0]?.type === "ThrowStatement" ? statements[0].argument : undefined;
-  return (
-    statement?.type === "IfStatement" &&
-    statement.alternate === null &&
-    isThisPrivateMember(statement.test, "closeRequested") &&
-    statements?.length === 1 &&
-    thrown?.type === "CallExpression" &&
-    isIdentifier(thrown.callee, "runtimeError") &&
-    thrown.arguments.length === 2 &&
-    thrown.arguments[0]?.type === "StringLiteral" &&
-    thrown.arguments[0].value === "RUNTIME_CLOSING" &&
-    thrown.arguments[1]?.type === "StringLiteral" &&
-    thrown.arguments[1].value === "Executor shadow runtime closed before Ready publication."
-  );
-}
-
-function isExactConstCall(statement, binding, callee, argumentPredicates) {
-  const declaration = singleDeclaration(statement, "const", binding);
-  const call = declaration?.init;
-  return (
-    call?.type === "CallExpression" &&
-    isIdentifier(call.callee, callee) &&
-    call.arguments.length === argumentPredicates.length &&
-    argumentPredicates.every((predicate, index) => predicate(call.arguments[index]))
-  );
-}
-
-function singleDeclaration(statement, kind, binding) {
-  if (
-    statement?.type !== "VariableDeclaration" ||
-    statement.kind !== kind ||
-    statement.declarations.length !== 1 ||
-    !isIdentifier(statement.declarations[0]?.id, binding)
-  ) {
-    return undefined;
-  }
-  return statement.declarations[0];
-}
-
-function bindingWriteCount(records, binding) {
-  return records.filter(({ node }) => {
-    if (node.type === "FunctionDeclaration") return isIdentifier(node.id, binding);
-    if (node.type === "VariableDeclarator") return patternBindsName(node.id, binding);
-    if (node.type === "AssignmentExpression") return patternBindsName(node.left, binding);
-    if (node.type === "UpdateExpression") return isIdentifier(node.argument, binding);
-    if (node.type === "ForInStatement" || node.type === "ForOfStatement") {
-      return patternBindsName(node.left, binding);
-    }
-    return false;
-  }).length;
-}
-
-function patternBindsName(pattern, binding) {
-  if (isIdentifier(pattern, binding)) return true;
-  if (pattern?.type === "RestElement") return patternBindsName(pattern.argument, binding);
-  if (pattern?.type === "AssignmentPattern") return patternBindsName(pattern.left, binding);
-  if (pattern?.type === "ArrayPattern") {
-    return pattern.elements.some((element) => patternBindsName(element, binding));
-  }
-  if (pattern?.type === "ObjectPattern") {
-    return pattern.properties.some((property) =>
-      property.type === "RestElement"
-        ? patternBindsName(property.argument, binding)
-        : patternBindsName(property.value, binding),
-    );
-  }
-  return false;
-}
-
-function flattenLogicalOr(expression) {
-  if (expression?.type !== "LogicalExpression" || expression.operator !== "||") {
-    return [expression];
-  }
-  return [...flattenLogicalOr(expression.left), ...flattenLogicalOr(expression.right)];
-}
-
-function isExactMemberInequality(expression, leftObject, leftProperty, rightObject, rightProperty) {
-  return (
-    expression?.type === "BinaryExpression" &&
-    expression.operator === "!==" &&
-    isNamedMember(expression.left, leftObject, leftProperty) &&
-    isNamedMember(expression.right, rightObject, rightProperty)
-  );
-}
-
-function isExactRightInequality(expression, leftObject, leftProperty, rightPredicate) {
-  return (
-    expression?.type === "BinaryExpression" &&
-    expression.operator === "!==" &&
-    isNamedMember(expression.left, leftObject, leftProperty) &&
-    rightPredicate(expression.right)
-  );
-}
-
-function isIdentifierNamed(name) {
-  return (node) => isIdentifier(node, name);
-}
-
-function isStringNamed(value) {
-  return (node) => node?.type === "StringLiteral" && node.value === value;
-}
-
-function isThisPrivateMemberNamed(name) {
-  return (node) => isThisPrivateMember(node, name);
-}
-
-function isThisPrivatePropertyChain(node, privateRoot, ...properties) {
-  let current = node;
-  for (let index = properties.length - 1; index >= 0; index -= 1) {
-    if (!isDirectMember(current, properties[index])) return false;
-    current = current.object;
-  }
-  return isThisPrivateMember(current, privateRoot);
 }
 
 function productionSourceReader(overrides) {
@@ -1866,12 +1189,4 @@ function isThisPrivateMember(node, property) {
     node.object?.type === "ThisExpression" &&
     privateName(node.property) === property
   );
-}
-
-function isBoolean(node, value) {
-  return node?.type === "BooleanLiteral" && node.value === value;
-}
-
-function isNumber(node, value) {
-  return node?.type === "NumericLiteral" && node.value === value;
 }

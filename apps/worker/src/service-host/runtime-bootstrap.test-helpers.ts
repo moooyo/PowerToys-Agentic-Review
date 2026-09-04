@@ -24,10 +24,6 @@ interface BootstrapHostState {
   ack: Buffer | undefined;
 }
 
-export const testLocalAuthorityPublicKeySpkiBase64Url =
-  "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q";
-export const testLocalAuthorityKeyId =
-  "5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3";
 export const testExecutorPolicySha256 = "6".repeat(64);
 
 const bootstrapHosts = new WeakMap<object, BootstrapHostState>();
@@ -204,19 +200,10 @@ export function foundationRoleConfig(
     executionEnabled: false,
     executorPolicySha256: testExecutorPolicySha256,
     foundationVersion: 2,
-    localAuthorityKeyId: testLocalAuthorityKeyId,
     maximumSlots: 1,
     role,
   } as const;
-  if (role === "control") return Object.freeze(common);
-  return Object.freeze({
-    ...common,
-    localAuthorityPublicKeySpki: Object.freeze({
-      base64Url: testLocalAuthorityPublicKeySpkiBase64Url,
-      byteLength: 91,
-      sha256: testLocalAuthorityKeyId,
-    }),
-  });
+  return Object.freeze(common);
 }
 
 export function commitDocument(role: ServiceHostPayloadRole, bootstrap: Uint8Array): Buffer {

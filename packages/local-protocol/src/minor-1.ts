@@ -17,11 +17,9 @@ import {
   CancelAckMessageSchema,
   CancelAttemptMessageSchema,
   CompleteMessageSchema,
-  ControlProofMessageSchema,
   DrainedMessageSchema,
   DrainMessageSchema,
   FailedMessageSchema,
-  HandshakeTranscriptV1Schema,
   HelloAckMessageSchema,
   HelloMessageSchema,
   PingMessageSchema,
@@ -29,7 +27,6 @@ import {
   ProgressMessageSchema,
   ReadyMessageSchema,
   RenewGrantMessageSchema,
-  SignedHandshakeProofV1Schema,
   StartAttemptMessageSchema,
   TerminalAckMessageSchema,
   TerminalDispositionMessageSchema,
@@ -76,51 +73,6 @@ export type HelloMessageMinor1 = Static<typeof HelloMessageMinor1Schema>;
 
 export const HelloAckMessageMinor1Schema = withProtocolMinorOne(HelloAckMessageSchema);
 export type HelloAckMessageMinor1 = Static<typeof HelloAckMessageMinor1Schema>;
-
-export const HandshakeTranscriptMinor1Schema = freezeSchema(
-  Type.Composite(
-    [
-      Type.Omit(CloneType(HandshakeTranscriptV1Schema), ["hello", "helloAck"]),
-      Type.Object(
-        {
-          hello: HelloMessageMinor1Schema,
-          helloAck: HelloAckMessageMinor1Schema,
-        },
-        { additionalProperties: false },
-      ),
-    ],
-    { additionalProperties: false },
-  ),
-);
-export type HandshakeTranscriptMinor1 = Static<typeof HandshakeTranscriptMinor1Schema>;
-
-export const SignedHandshakeProofMinor1Schema = freezeSchema(
-  Type.Composite(
-    [
-      Type.Omit(CloneType(SignedHandshakeProofV1Schema), ["transcript"]),
-      Type.Object({ transcript: HandshakeTranscriptMinor1Schema }, { additionalProperties: false }),
-    ],
-    { additionalProperties: false },
-  ),
-);
-export type SignedHandshakeProofMinor1 = Static<typeof SignedHandshakeProofMinor1Schema>;
-
-export const ControlProofMessageMinor1Schema = freezeSchema(
-  Type.Composite(
-    [
-      Type.Omit(CloneType(ControlProofMessageSchema), ["protocolMinor", "signedProof"]),
-      Type.Object(
-        {
-          protocolMinor: Type.Literal(LOCAL_PROTOCOL_MINOR_1_VERSION),
-          signedProof: SignedHandshakeProofMinor1Schema,
-        },
-        { additionalProperties: false },
-      ),
-    ],
-    { additionalProperties: false },
-  ),
-);
-export type ControlProofMessageMinor1 = Static<typeof ControlProofMessageMinor1Schema>;
 
 export const ReadyMessageMinor1Schema = withProtocolMinorOne(ReadyMessageSchema);
 export const StartAttemptMessageMinor1Schema = withProtocolMinorOne(StartAttemptMessageSchema);
@@ -179,7 +131,6 @@ export const localMessageSchemasMinor1 = Object.freeze({
   [LocalMessageType.Pong]: PongMessageMinor1Schema,
   [LocalMessageType.TerminalDisposition]: TerminalDispositionMessageMinor1Schema,
   [LocalMessageType.TerminalAck]: TerminalAckMessageMinor1Schema,
-  [LocalMessageType.ControlProof]: ControlProofMessageMinor1Schema,
 } satisfies Record<LocalMessageTypeId, TSchema>);
 
 export type LocalMessagePayloadMinor1 = Static<

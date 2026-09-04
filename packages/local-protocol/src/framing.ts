@@ -30,7 +30,6 @@ export const LocalMessageType = Object.freeze({
   Pong: 17,
   TerminalDisposition: 18,
   TerminalAck: 19,
-  ControlProof: 20,
 } as const);
 
 export type LocalMessageType = (typeof LocalMessageType)[keyof typeof LocalMessageType];
@@ -86,7 +85,6 @@ const SESSION_MESSAGE_TYPES = new Set<LocalMessageType>([
   LocalMessageType.Drained,
   LocalMessageType.Ping,
   LocalMessageType.Pong,
-  LocalMessageType.ControlProof,
 ]);
 
 interface ParsedHeader {

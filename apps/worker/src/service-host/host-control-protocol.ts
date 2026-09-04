@@ -25,8 +25,7 @@ export type HostControlOperation =
   | "InstanceHeartbeat"
   | "CompleteRun"
   | "FailRun"
-  | "ArmArwxShutdown"
-  | "SignLocalDigest";
+  | "ArmArwxShutdown";
 
 export type HostControlJsonObject = Readonly<Record<string, unknown>>;
 export type HostControlResponseBody = DeepReadonly<Record<string, unknown>>;
@@ -101,9 +100,7 @@ export function encodeHostControlCall(
       ? HOST_CONTROL_MAXIMUM_REQUEST_FRAME_BYTES
       : operation === "ArmArwxShutdown"
         ? HOST_CONTROL_MAXIMUM_ARM_ARWX_SHUTDOWN_BYTES
-        : operation === "SignLocalDigest"
-          ? HOST_CONTROL_MAXIMUM_CANONICAL_FRAME_BYTES
-          : HOST_CONTROL_MAXIMUM_FRAME_BYTES;
+        : HOST_CONTROL_MAXIMUM_FRAME_BYTES;
   if (document.byteLength > maximum) {
     throw new HostControlProtocolError("HostControl request exceeds its operation limit.");
   }
@@ -313,16 +310,6 @@ export function validHostControlEntityId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/u.test(value);
 }
 
-export function validP256LowSSignature(value: string): boolean {
-  if (!/^[A-Za-z0-9_-]{86}$/u.test(value)) return false;
-  const bytes = Buffer.from(value, "base64url");
-  if (bytes.byteLength !== 64 || bytes.toString("base64url") !== value) return false;
-  const r = BigInt(`0x${bytes.subarray(0, 32).toString("hex")}`);
-  const s = BigInt(`0x${bytes.subarray(32).toString("hex")}`);
-  const order = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-  return r > 0n && r < order && s > 0n && s <= order >> 1n;
-}
-
 function encodeLengthPrefixedFrame(document: Buffer, maximumBytes: number): Buffer {
   if (document.byteLength === 0 || document.byteLength > maximumBytes) {
     throw new HostControlProtocolError("HostControl frame is outside its byte limit.");
@@ -360,15 +347,6 @@ function validateOperationPayload(
       return;
     case "ArmArwxShutdown":
       assertArmArwxShutdownPayload(payload);
-      return;
-    case "SignLocalDigest":
-      if (
-        !hasExactKeys(payload, ["digestSha256"]) ||
-        typeof payload.digestSha256 !== "string" ||
-        !/^[a-f0-9]{64}$/u.test(payload.digestSha256)
-      ) {
-        throw new HostControlProtocolError("HostControl signing payload is invalid.");
-      }
       return;
     default:
       throw new HostControlProtocolError("HostControl operation is not supported.");

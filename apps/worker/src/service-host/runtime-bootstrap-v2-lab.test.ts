@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { serializeCanonicalJson } from "@agentic-review/local-protocol";
 import { describe, expect, it } from "vitest";
-import { bootstrapFacts, sharedLabGoldenLines } from "./role-config-v3-lab.test-helpers.js";
+import { bootstrapFacts, labFixtureLines } from "./role-config-v3-lab.test-helpers.js";
 import { RuntimeBootstrapV1Schema } from "./runtime-bootstrap.js";
 import {
   createRuntimeBootstrapV2Lab,
@@ -16,7 +16,7 @@ import { Value } from "./typebox-value-check.js";
 describe("dormant RuntimeBootstrapV2 lab", () => {
   it("round-trips both native-to-Node golden documents without authority", () => {
     const [controlRoleConfig, executorRoleConfig, controlGolden, executorGolden] =
-      sharedLabGoldenLines();
+      labFixtureLines();
     for (const [role, roleConfig, golden] of [
       ["control", controlRoleConfig, controlGolden],
       ["executor", executorRoleConfig, executorGolden],
@@ -155,8 +155,8 @@ describe("dormant RuntimeBootstrapV2 lab", () => {
 
   it("binds the exact canonical RoleConfig descriptor and role", () => {
     const control = bootstrapValue(2);
-    const controlRoleConfig = sharedLabGoldenLines()[0];
-    const executorRoleConfig = sharedLabGoldenLines()[1];
+    const controlRoleConfig = labFixtureLines()[0];
+    const executorRoleConfig = labFixtureLines()[1];
     if (controlRoleConfig === undefined || executorRoleConfig === undefined) {
       throw new Error("Missing RoleConfig v3 lab golden.");
     }
@@ -206,7 +206,7 @@ describe("dormant RuntimeBootstrapV2 lab", () => {
   });
 
   it("rejects noncanonical, invalid UTF-8, and exact size-boundary documents", () => {
-    const golden = sharedLabGoldenLines()[2];
+    const golden = labFixtureLines()[2];
     if (golden === undefined) throw new Error("Missing Control RuntimeBootstrapV2 lab golden.");
     for (const candidate of [
       Buffer.concat([golden, Buffer.of(0x20)]),
@@ -227,8 +227,8 @@ describe("dormant RuntimeBootstrapV2 lab", () => {
   });
 
   it("rejects accessors, custom prototypes, extra facts, and input aliasing", () => {
-    const roleConfig = sharedLabGoldenLines()[0];
-    const golden = sharedLabGoldenLines()[2];
+    const roleConfig = labFixtureLines()[0];
+    const golden = labFixtureLines()[2];
     if (roleConfig === undefined || golden === undefined)
       throw new Error("Missing Control golden.");
     const facts = bootstrapFacts("control", Buffer.from(roleConfig));
@@ -265,7 +265,7 @@ describe("dormant RuntimeBootstrapV2 lab", () => {
 type RuntimeBootstrapV2LabFactsForTest = Parameters<typeof createRuntimeBootstrapV2Lab>[0];
 
 function bootstrapValue(index: 2 | 3): Record<string, unknown> {
-  const document = sharedLabGoldenLines()[index];
+  const document = labFixtureLines()[index];
   if (document === undefined) throw new Error(`Missing RuntimeBootstrapV2 lab golden ${index}.`);
   return JSON.parse(document.toString("utf8")) as Record<string, unknown>;
 }

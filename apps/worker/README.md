@@ -24,7 +24,7 @@ Implemented boundaries:
   disk-budget enforcement, deferred cleanup, and immutable installation-manifest contracts.
 - Separate reviewed Control and Executor bundles with strict ServiceHost launch contracts,
   HostControl bootstrap clients, and bounded ARWX standard-I/O channels.
-- Candidate zero-slot Control and Executor supervisors with a signed local handshake, disabled
+- Candidate zero-slot Control and Executor supervisors with a validated local session, disabled
   `Ready` attestation, one-slot maximum registration with zero advertised availability, and a
   bounded graceful-drain choreography that still requires native Windows verification.
 - A source-only, import-free single-attempt lifecycle reducer under `src/execution`. It snapshots
@@ -33,15 +33,14 @@ Implemented boundaries:
 
 The legacy single-process build still uses `PlaceholderJobExecutor` and advertises execution as
 disabled. The reviewed Control and Executor bundles now install candidate zero-slot supervisors.
-After the authenticated local handshake, Executor can emit only `ready=false`, `availableSlots=0`,
+After the local session handshake, Executor can emit only `ready=false`, `availableSlots=0`,
 and `reasonCode=EXECUTION_DISABLED`; Control registers with a one-slot maximum but advertises zero
 available slots and never claims work. The source and reviewed role bundles have passed the remote
 Linux test, typecheck, build, and lint gates; they have not passed native Windows verification. A
 static production-reachability guard fixes both main-module import lists and runtime installer
 targets, and rejects any path from those entrypoints into `apps/worker/src/execution`. The milestone
-continues to reject `WORKER_EXECUTION_ENABLED=true` until the production release profile,
-dual-service installer and signing pipeline, and native Windows x64 and arm64 preflight and
-attack-test evidence described by ADR 0007 are complete.
+continues to reject `WORKER_EXECUTION_ENABLED=true` until the Windows service composition and real
+execution runtime are complete.
 
 The architecture guard also pins the LF-normalized SHA-256 of the complete candidate Control and
 Executor runtime sources. This is an accidental scope-drift and review fence: any source change must
@@ -72,10 +71,10 @@ The bounded `RuntimeBootstrapV1` foundation starts the ARWX router before acknow
 the bootstrap-bound commit, transfers the exact HostControl owner, and resolves a role-level
 `activated` barrier only after the connector result passes owner, bootstrap, role, and nominal
 session validation. The candidate supervisors create no identities, timers, API facades, or ARWX
-messages before that barrier. Control signs the exact handshake transcript through HostControl;
-Executor verifies it with the pinned local-authority public key before publishing its disabled
-`Ready` attestation. Control does not receive lease capacity from that attestation and keeps every
-heartbeat at zero available slots with no active leases.
+messages before that barrier. The trusted local handshake is `Hello`, `HelloAck`, then `Ready`.
+Both sides validate a runtime-branded session that binds protocol selection, nonces, identities,
+manifest, preflight, policy, and slot values. It uses no local CNG key, SPKI, signature operation, or
+`ControlProof`. Control keeps every heartbeat at zero available slots with no active leases.
 
 The role bundles contain a candidate bounded, one-shot `ArmArwxShutdownV1` lifecycle choreography.
 Control sends the final `Drain`; Executor returns the exact final `Drained`; and each side arms

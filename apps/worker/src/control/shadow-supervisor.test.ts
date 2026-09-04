@@ -36,22 +36,14 @@ import {
 const executorBootId = "20000000-0000-4000-8000-000000000002";
 const executorNonce = "2".repeat(64);
 const executorPreflightSha256 = "7".repeat(64);
-const signature = (() => {
-  const bytes = Buffer.alloc(64);
-  bytes[31] = 1;
-  bytes[63] = 1;
-  return bytes.toString("base64url");
-})();
 
 class FakeServerApi implements ControlShadowServerApi {
   public readonly registrations: WorkerRegistrationRequest[] = [];
   public readonly heartbeats: WorkerHeartbeatRequest[] = [];
-  public readonly signingDigests: string[] = [];
   public registrationHandler: (signal?: AbortSignal) => Promise<WorkerRegistrationResponse> =
     async () => registrationResponse();
   public heartbeatHandler: (signal?: AbortSignal) => Promise<WorkerHeartbeatResponse> = async () =>
     heartbeatResponse();
-  public signingResult = signature;
 
   public async register(
     request: WorkerRegistrationRequest,
@@ -69,11 +61,6 @@ class FakeServerApi implements ControlShadowServerApi {
     expect(workerInstanceId).toBe(request.workerInstanceId);
     this.heartbeats.push(request);
     return await this.heartbeatHandler(signal);
-  }
-
-  public async signLocalDigest(digestSha256: string): Promise<string> {
-    this.signingDigests.push(digestSha256);
-    return this.signingResult;
   }
 }
 
@@ -127,10 +114,6 @@ class FakeControlClient implements ControlHostControlClient {
   public async failRun(): Promise<never> {
     this.failCalls += 1;
     throw new Error("Failure submission is forbidden in zero-slot shadow mode.");
-  }
-
-  public async signLocalDigest(): Promise<never> {
-    throw new Error("Raw HostControl signing should be behind the server facade.");
   }
 
   public async armArwxShutdown(
@@ -272,15 +255,14 @@ async function createHarness(
 }
 
 describe("Control zero-slot shadow supervisor", () => {
-  it("authenticates before registration and advertises only zero execution", async () => {
+  it("establishes the local session before registration and advertises only zero execution", async () => {
     const harness = await createHarness();
     const hello = await readHello(harness);
     expect(harness.api.registrations).toHaveLength(0);
 
     harness.send(LocalMessageType.HelloAck, helloAck(harness, hello));
-    await waitFor(() => harness.frames.length === 2);
-    expect(harness.frames[1]?.messageType).toBe(LocalMessageType.ControlProof);
-    expect(harness.api.signingDigests).toHaveLength(1);
+    await nextTurn();
+    expect(harness.frames).toHaveLength(1);
     expect(harness.api.registrations).toHaveLength(0);
 
     harness.send(LocalMessageType.Ready, readyMessage(harness, hello));
@@ -331,7 +313,6 @@ describe("Control zero-slot shadow supervisor", () => {
 
     await nextTurn();
     expect(harness.frames).toHaveLength(0);
-    expect(harness.api.signingDigests).toHaveLength(0);
     expect(harness.api.registrations).toHaveLength(0);
     expect(harness.startupCalls).toEqual({
       randomNonce: 0,
@@ -404,18 +385,6 @@ describe("Control zero-slot shadow supervisor", () => {
     expect(harness.api.registrations).toHaveLength(0);
   });
 
-  it("rejects a malformed HostControl proof response", async () => {
-    const harness = await createHarness((api) => {
-      api.signingResult = "not-a-signature";
-    });
-    const hello = await readHello(harness);
-
-    harness.send(LocalMessageType.HelloAck, helloAck(harness, hello));
-
-    await expect(harness.running).rejects.toMatchObject({ code: "DISPATCH_FAILED" });
-    expect(harness.api.registrations).toHaveLength(0);
-  });
-
   it.each([
     {
       name: "ready execution",
@@ -447,7 +416,7 @@ describe("Control zero-slot shadow supervisor", () => {
     },
   ])("rejects Ready with $name", async ({ mutate }) => {
     const harness = await createHarness();
-    const hello = await advanceToProof(harness);
+    const hello = await advanceToAcknowledged(harness);
 
     harness.send(LocalMessageType.Ready, mutate(readyMessage(harness, hello)));
 
@@ -455,9 +424,9 @@ describe("Control zero-slot shadow supervisor", () => {
     expect(harness.api.registrations).toHaveLength(0);
   });
 
-  it("rejects replayed HelloAck after sending ControlProof", async () => {
+  it("rejects replayed HelloAck after establishing the session", async () => {
     const harness = await createHarness();
-    const hello = await advanceToProof(harness);
+    const hello = await advanceToAcknowledged(harness);
 
     harness.send(LocalMessageType.HelloAck, helloAck(harness, hello));
 
@@ -770,10 +739,10 @@ function drainedMessage(harness: Harness) {
   };
 }
 
-async function advanceToProof(harness: Harness): Promise<HelloMessage> {
+async function advanceToAcknowledged(harness: Harness): Promise<HelloMessage> {
   const hello = await readHello(harness);
   harness.send(LocalMessageType.HelloAck, helloAck(harness, hello));
-  await waitFor(() => hasOutbound(harness, LocalMessageType.ControlProof));
+  await nextTurn();
   return hello;
 }
 
@@ -781,7 +750,7 @@ async function completeHandshake(
   harness: Harness,
   waitForRegistration = true,
 ): Promise<HelloMessage> {
-  const hello = await advanceToProof(harness);
+  const hello = await advanceToAcknowledged(harness);
   harness.send(LocalMessageType.Ready, readyMessage(harness, hello));
   if (waitForRegistration) {
     await waitFor(

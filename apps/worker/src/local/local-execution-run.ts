@@ -39,8 +39,6 @@ export type LocalExecutionCancelReason = CancelAttemptMessage["reason"];
 
 declare const preparedLocalExecutionRenewalBrand: unique symbol;
 declare const localExecutionAuthorityUseBrand: unique symbol;
-declare const localExecutionStartTicketBrand: unique symbol;
-declare const localExecutionRenewalTicketBrand: unique symbol;
 
 export interface SuccessfulServerLeaseRenewalObservation {
   readonly runAttemptId: string;
@@ -75,56 +73,26 @@ export type LocalExecutionAuthorityUse = DeepReadonly<
     readonly attemptCorrelationId: string;
     readonly runAttemptId: string;
     readonly leaseGeneration: number;
-    readonly signedPayloadSha256: string;
+    readonly authorizationSha256: string;
     readonly deadlineMonotonicMilliseconds: number;
     readonly validForMilliseconds: number;
     readonly serverHeartbeatSequence: number | null;
   } & { readonly [localExecutionAuthorityUseBrand]: true }
 >;
 
-export type LocalExecutionStartTicket = DeepReadonly<
-  {
-    readonly generation: number;
-    readonly attemptCorrelationId: string;
-    readonly runAttemptId: string;
-    readonly leaseGeneration: number;
-    readonly deadlineMonotonicMilliseconds: number;
-    readonly validForMilliseconds: number;
-  } & { readonly [localExecutionStartTicketBrand]: true }
->;
-
-export type LocalExecutionRenewalTicket = DeepReadonly<
-  {
-    readonly generation: number;
-    readonly attemptCorrelationId: string;
-    readonly runAttemptId: string;
-    readonly leaseGeneration: number;
-    readonly serverHeartbeatSequence: number;
-    readonly action: "continue" | "drain";
-    readonly deadlineMonotonicMilliseconds: number;
-    readonly validForMilliseconds: number;
-  } & { readonly [localExecutionRenewalTicketBrand]: true }
->;
-
 export interface LocalExecutionMonotonicAuthority {
-  consumeStart(nowMonotonicMilliseconds: number): LocalExecutionStartTicket;
-  commitStart(
-    ticket: LocalExecutionStartTicket,
-    signedPayloadSha256: string,
+  issueStart(
+    authorizationSha256: string,
     nowMonotonicMilliseconds: number,
   ): LocalExecutionAuthorityUse;
-  beginRenewal(
+  issueRenewal(
     renewal: PreparedLocalExecutionRenewal,
-    nowMonotonicMilliseconds: number,
-  ): LocalExecutionRenewalTicket;
-  commitRenewal(
-    ticket: LocalExecutionRenewalTicket,
-    signedPayloadSha256: string,
+    authorizationSha256: string,
     nowMonotonicMilliseconds: number,
   ): LocalExecutionAuthorityUse;
   consumeUse(
     use: LocalExecutionAuthorityUse,
-    signedPayloadSha256: string,
+    authorizationSha256: string,
     nowMonotonicMilliseconds: number,
   ): void;
   fence(reason: LocalExecutionAuthorityFenceReason): void;
@@ -151,7 +119,6 @@ export class LocalExecutionAuthorityError extends Error {
       | "AUTHORITY_RENEWAL_INVALID"
       | "AUTHORITY_START_ALREADY_CONSUMED"
       | "AUTHORITY_START_INVALID"
-      | "AUTHORITY_TICKET_INVALID"
       | "AUTHORITY_TIME_INVALID"
       | "AUTHORITY_USE_INVALID",
     message: string,
@@ -161,30 +128,15 @@ export class LocalExecutionAuthorityError extends Error {
   }
 }
 
-interface RenewalTicketState {
-  readonly owner: StatefulLocalExecutionMonotonicAuthority;
-  readonly generation: number;
-  readonly deadlineMonotonicMilliseconds: number;
-  readonly serverHeartbeatSequence: number;
-}
-
-interface StartTicketState {
-  readonly owner: StatefulLocalExecutionMonotonicAuthority;
-  readonly generation: number;
-  readonly deadlineMonotonicMilliseconds: number;
-}
-
 interface AuthorityUseState {
   readonly owner: StatefulLocalExecutionMonotonicAuthority;
   readonly generation: number;
   readonly deadlineMonotonicMilliseconds: number;
-  readonly signedPayloadSha256: string;
+  readonly authorizationSha256: string;
   consumed: boolean;
 }
 
 const localExecutionAuthorityUses = new WeakMap<object, AuthorityUseState>();
-const localExecutionStartTickets = new WeakMap<object, StartTicketState>();
-const localExecutionRenewalTickets = new WeakMap<object, RenewalTicketState>();
 const preparedLocalExecutionRenewalSources = new WeakMap<
   object,
   StatefulLocalExecutionMonotonicAuthority
@@ -357,8 +309,6 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
   #generation = 0;
   #startConsumed = false;
   #fenceReason: LocalExecutionAuthorityFenceReason | undefined;
-  #pendingStartTicket: LocalExecutionStartTicket | undefined;
-  #pendingTicket: LocalExecutionRenewalTicket | undefined;
 
   public constructor(start: PreparedLocalExecutionStart) {
     const observedAt = start.authorityBasis.observedAtMonotonicMilliseconds;
@@ -377,8 +327,12 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
     );
   }
 
-  public consumeStart(nowMonotonicMilliseconds: number): LocalExecutionStartTicket {
+  public issueStart(
+    authorizationSha256Value: string,
+    nowMonotonicMilliseconds: number,
+  ): LocalExecutionAuthorityUse {
     this.#assertActive();
+    const authorizationSha256 = normalizeAuthorizationSha256(authorizationSha256Value);
     if (this.#startConsumed) {
       throw authorityError(
         "AUTHORITY_START_ALREADY_CONSUMED",
@@ -398,72 +352,29 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
     }
     const validForMilliseconds = Math.min(effectiveDeadline - now, LOCAL_GRANT_MAXIMUM_DURATION_MS);
     const deadlineMonotonicMilliseconds = now + validForMilliseconds;
-    const ticket = Object.freeze({
-      generation: this.#generation,
-      attemptCorrelationId: this.#attemptCorrelationId,
-      runAttemptId: this.#runAttemptId,
-      leaseGeneration: this.#leaseGeneration,
-      deadlineMonotonicMilliseconds,
-      validForMilliseconds,
-    }) as LocalExecutionStartTicket;
-    this.#pendingStartTicket = ticket;
-    localExecutionStartTickets.set(ticket, {
-      owner: this,
-      generation: this.#generation,
-      deadlineMonotonicMilliseconds,
-    });
-    return ticket;
-  }
-
-  public commitStart(
-    ticket: LocalExecutionStartTicket,
-    signedPayloadSha256Value: string,
-    nowMonotonicMilliseconds: number,
-  ): LocalExecutionAuthorityUse {
-    this.#assertActive();
-    const signedPayloadSha256 = normalizeSignedPayloadSha256(signedPayloadSha256Value);
-    const ticketState =
-      typeof ticket === "object" && ticket !== null
-        ? localExecutionStartTickets.get(ticket)
-        : undefined;
-    if (
-      ticketState === undefined ||
-      ticketState.owner !== this ||
-      ticketState.generation !== this.#generation ||
-      this.#pendingStartTicket !== ticket
-    ) {
-      throw authorityError(
-        "AUTHORITY_TICKET_INVALID",
-        "Start commit requires the current ticket issued by this monotonic authority.",
-      );
-    }
-    const now = this.#consumeNow(nowMonotonicMilliseconds);
-    if (now >= ticketState.deadlineMonotonicMilliseconds) {
-      this.#expire();
-      throw authorityError("AUTHORITY_EXPIRED", "Local start authority expired while signing.");
-    }
-    this.#pendingStartTicket = undefined;
     const use = createAuthorityUse(
       this,
       "start",
-      ticketState.generation,
+      this.#generation,
       null,
       this.#attemptCorrelationId,
       this.#runAttemptId,
       this.#leaseGeneration,
-      signedPayloadSha256,
-      ticketState.deadlineMonotonicMilliseconds,
+      authorizationSha256,
+      deadlineMonotonicMilliseconds,
       now,
     );
     this.#currentGrantDeadlineMonotonicMilliseconds = use.deadlineMonotonicMilliseconds;
     return use;
   }
 
-  public beginRenewal(
+  public issueRenewal(
     renewal: PreparedLocalExecutionRenewal,
+    authorizationSha256Value: string,
     nowMonotonicMilliseconds: number,
-  ): LocalExecutionRenewalTicket {
+  ): LocalExecutionAuthorityUse {
     this.#assertActive();
+    const authorizationSha256 = normalizeAuthorizationSha256(authorizationSha256Value);
     if (!this.#startConsumed || this.#currentGrantDeadlineMonotonicMilliseconds === undefined) {
       throw authorityError(
         "AUTHORITY_NOT_STARTED",
@@ -523,73 +434,16 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
     this.#generation += 1;
     const validForMilliseconds = Math.min(effectiveDeadline - now, LOCAL_GRANT_MAXIMUM_DURATION_MS);
     const deadlineMonotonicMilliseconds = now + validForMilliseconds;
-    const ticket = Object.freeze({
-      generation: this.#generation,
-      attemptCorrelationId: this.#attemptCorrelationId,
-      runAttemptId: this.#runAttemptId,
-      leaseGeneration: this.#leaseGeneration,
-      serverHeartbeatSequence: observation.serverHeartbeatSequence,
-      action: observation.action,
-      deadlineMonotonicMilliseconds,
-      validForMilliseconds,
-    }) as LocalExecutionRenewalTicket;
-    this.#pendingTicket = ticket;
-    localExecutionRenewalTickets.set(ticket, {
-      owner: this,
-      generation: this.#generation,
-      deadlineMonotonicMilliseconds,
-      serverHeartbeatSequence: observation.serverHeartbeatSequence,
-    });
-    return ticket;
-  }
-
-  public commitRenewal(
-    ticket: LocalExecutionRenewalTicket,
-    signedPayloadSha256Value: string,
-    nowMonotonicMilliseconds: number,
-  ): LocalExecutionAuthorityUse {
-    this.#assertActive();
-    const signedPayloadSha256 = normalizeSignedPayloadSha256(signedPayloadSha256Value);
-    const ticketState =
-      typeof ticket === "object" && ticket !== null
-        ? localExecutionRenewalTickets.get(ticket)
-        : undefined;
-    if (ticketState === undefined || ticketState.owner !== this) {
-      throw authorityError(
-        "AUTHORITY_TICKET_INVALID",
-        "Renewal commit requires a ticket issued by this monotonic authority.",
-      );
-    }
-    if (
-      ticketState.generation !== this.#generation ||
-      this.#pendingTicket !== ticket ||
-      ticketState.serverHeartbeatSequence !== ticket.serverHeartbeatSequence
-    ) {
-      throw authorityError(
-        "AUTHORITY_TICKET_INVALID",
-        "Renewal ticket was superseded or invalidated by an authority state change.",
-      );
-    }
-    const now = this.#consumeNow(nowMonotonicMilliseconds);
-    if (
-      this.#currentGrantDeadlineMonotonicMilliseconds === undefined ||
-      now >= this.#currentGrantDeadlineMonotonicMilliseconds ||
-      now >= ticketState.deadlineMonotonicMilliseconds
-    ) {
-      this.#expire();
-      throw authorityError("AUTHORITY_EXPIRED", "Local execution authority expired while signing.");
-    }
-    this.#pendingTicket = undefined;
     const use = createAuthorityUse(
       this,
       "renewal",
-      ticketState.generation,
-      ticketState.serverHeartbeatSequence,
+      this.#generation,
+      observation.serverHeartbeatSequence,
       this.#attemptCorrelationId,
       this.#runAttemptId,
       this.#leaseGeneration,
-      signedPayloadSha256,
-      ticketState.deadlineMonotonicMilliseconds,
+      authorizationSha256,
+      deadlineMonotonicMilliseconds,
       now,
     );
     this.#currentGrantDeadlineMonotonicMilliseconds = use.deadlineMonotonicMilliseconds;
@@ -598,18 +452,18 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
 
   public consumeUse(
     use: LocalExecutionAuthorityUse,
-    signedPayloadSha256Value: string,
+    authorizationSha256Value: string,
     nowMonotonicMilliseconds: number,
   ): void {
     this.#assertActive();
-    const signedPayloadSha256 = normalizeSignedPayloadSha256(signedPayloadSha256Value);
+    const authorizationSha256 = normalizeAuthorizationSha256(authorizationSha256Value);
     const state =
       typeof use === "object" && use !== null ? localExecutionAuthorityUses.get(use) : undefined;
     if (
       state === undefined ||
       state.owner !== this ||
       state.consumed ||
-      state.signedPayloadSha256 !== signedPayloadSha256 ||
+      state.authorizationSha256 !== authorizationSha256 ||
       use.attemptCorrelationId !== this.#attemptCorrelationId ||
       use.runAttemptId !== this.#runAttemptId ||
       use.leaseGeneration !== this.#leaseGeneration
@@ -643,8 +497,6 @@ class StatefulLocalExecutionMonotonicAuthority implements LocalExecutionMonotoni
     if (this.#fenceReason !== undefined) return;
     this.#fenceReason = reason;
     this.#generation += 1;
-    this.#pendingStartTicket = undefined;
-    this.#pendingTicket = undefined;
   }
 
   #assertActive(): void {
@@ -687,7 +539,7 @@ export interface LocalExecutionRun {
   cancel(reason: LocalExecutionCancelReason): Promise<DeepReadonly<CancelAckMessage>>;
 
   /**
-   * Signs and applies the exact next grant from one matching successful Server heartbeat.
+   * Applies the exact next grant from one matching successful Server heartbeat.
    * Implementations must serialize grant creation, reject reused heartbeat sequences, and reject
    * every renewal after stale, cancel, terminal, or close has synchronously fenced the run.
    */
@@ -877,7 +729,7 @@ function createAuthorityUse(
   attemptCorrelationId: string,
   runAttemptId: string,
   leaseGeneration: number,
-  signedPayloadSha256: string,
+  authorizationSha256: string,
   effectiveDeadline: number,
   now: number,
 ): LocalExecutionAuthorityUse {
@@ -891,7 +743,7 @@ function createAuthorityUse(
     attemptCorrelationId,
     runAttemptId,
     leaseGeneration,
-    signedPayloadSha256,
+    authorizationSha256,
     deadlineMonotonicMilliseconds: now + validForMilliseconds,
     validForMilliseconds,
     serverHeartbeatSequence,
@@ -900,17 +752,17 @@ function createAuthorityUse(
     owner,
     generation,
     deadlineMonotonicMilliseconds: use.deadlineMonotonicMilliseconds,
-    signedPayloadSha256,
+    authorizationSha256,
     consumed: false,
   });
   return use;
 }
 
-function normalizeSignedPayloadSha256(value: string): string {
+function normalizeAuthorizationSha256(value: string): string {
   if (!/^[a-f0-9]{64}$/u.test(value)) {
     throw authorityError(
       "AUTHORITY_USE_INVALID",
-      "Signed local authority payload digest must be lowercase SHA-256.",
+      "Local authorization digest must be lowercase SHA-256.",
     );
   }
   return value;

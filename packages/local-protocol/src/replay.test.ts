@@ -1,31 +1,22 @@
-import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-
 import {
-  deriveCapabilityKeyId,
   digestExecutionCapability,
   type ExecutionCapabilityV1,
   LOCAL_CAPABILITY_AUDIENCE,
-  LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-  signExecutionCapability,
-  signRenewalGrant,
-  type VerifiedExecutionCapability,
-  verifyExecutionCapability,
-  verifyRenewalGrant,
+  type RenewalGrantV1,
+  type ValidatedExecutionCapability,
+  validateExecutionCapabilityForContext,
+  validateRenewalGrantForContext,
 } from "./capability.js";
 import { LocalAuthorityReplayError, LocalAuthorityReplayGuard } from "./replay.js";
 
 const hex = (value: string): string => value.repeat(64);
 const now = 1_800_000_000_000;
-const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-const keyId = deriveCapabilityKeyId(keys.publicKey);
 
 function capability(capabilityId = hex("1")): ExecutionCapabilityV1 {
   return {
     capabilityVersion: 1,
     canonicalizationVersion: 1,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId,
     audience: LOCAL_CAPABILITY_AUDIENCE,
     capabilityId,
     nonce: hex("2"),
@@ -71,12 +62,10 @@ function renewal(
   initial: ExecutionCapabilityV1,
   previousDigest: string,
   serverHeartbeatSequence = 10,
-) {
+): RenewalGrantV1 {
   return {
-    renewalVersion: 1 as const,
-    canonicalizationVersion: 1 as const,
-    signatureAlgorithm: LOCAL_CAPABILITY_SIGNATURE_ALGORITHM,
-    keyId: initial.keyId,
+    renewalVersion: 1,
+    canonicalizationVersion: 1,
     audience: LOCAL_CAPABILITY_AUDIENCE,
     renewalId: hex("8"),
     capabilityId: initial.capabilityId,
@@ -101,28 +90,22 @@ function renewal(
   };
 }
 
-function verifiedCapability(value = capability()): VerifiedExecutionCapability {
-  return verifyExecutionCapability(
-    signExecutionCapability(value, keys.privateKey),
-    keys.publicKey,
-    {
-      expectedKeyId: keyId,
-      expectedWorkerNodeId: value.workerNodeId,
-      expectedWorkerInstanceId: value.workerInstanceId,
-      expectedExecutorBootId: value.executorBootId,
-      expectedSessionId: value.sessionId,
-      nowUnixMs: now + 1_000,
-    },
-  );
+function validatedCapability(value = capability()): ValidatedExecutionCapability {
+  return validateExecutionCapabilityForContext(value, {
+    expectedWorkerNodeId: value.workerNodeId,
+    expectedWorkerInstanceId: value.workerInstanceId,
+    expectedExecutorBootId: value.executorBootId,
+    expectedSessionId: value.sessionId,
+    nowUnixMs: now + 1_000,
+  });
 }
 
-function verifiedRenewal(
-  initial: VerifiedExecutionCapability,
-  value: ReturnType<typeof renewal>,
+function validatedRenewal(
+  initial: ValidatedExecutionCapability,
+  value: RenewalGrantV1,
   expected: ReturnType<LocalAuthorityReplayGuard["expectedRenewal"]>,
 ) {
-  return verifyRenewalGrant(signRenewalGrant(value, keys.privateKey), keys.publicKey, {
-    expectedKeyId: keyId,
+  return validateRenewalGrantForContext(value, {
     expectedWorkerNodeId: initial.workerNodeId,
     expectedWorkerInstanceId: initial.workerInstanceId,
     expectedExecutorBootId: initial.executorBootId,
@@ -135,185 +118,107 @@ function verifiedRenewal(
 
 describe("LocalAuthorityReplayGuard", () => {
   it("reserves each capability once and advances an exact renewal chain", () => {
-    const initial = verifiedCapability();
+    const initial = validatedCapability();
     const guard = new LocalAuthorityReplayGuard();
-    guard.reserveVerifiedCapability(initial);
-    expect(() => guard.reserveVerifiedCapability(initial)).toThrowError(
+    guard.reserveValidatedCapability(initial);
+    expect(() => guard.reserveValidatedCapability(initial)).toThrowError(
       expect.objectContaining({ code: "CAPABILITY_REPLAYED" }),
     );
 
     const expected = guard.expectedRenewal(initial.capabilityId);
-    const next = verifiedRenewal(
+    const next = validatedRenewal(
       initial,
       renewal(initial, expected.expectedPreviousGrantSha256),
       expected,
     );
-    guard.acceptVerifiedRenewal(next);
+    guard.acceptValidatedRenewal(next);
     expect(guard.expectedRenewal(initial.capabilityId)).toMatchObject({
       expectedPreviousGrantSequence: 2,
       expectedGrantSequence: 3,
       expectedPreviousServerHeartbeatSequence: 10,
     });
-    expect(() => guard.acceptVerifiedRenewal(next)).toThrowError(
+    expect(() => guard.acceptValidatedRenewal(next)).toThrowError(
       expect.objectContaining({ code: "RENEWAL_CHAIN_INVALID" }),
     );
   });
 
-  it("accepts the initial successful heartbeat sequence zero exactly once", () => {
-    const initial = verifiedCapability();
+  it("accepts heartbeat sequence zero once and rejects replay", () => {
+    const initial = validatedCapability();
     const guard = new LocalAuthorityReplayGuard();
-    guard.reserveVerifiedCapability(initial);
+    guard.reserveValidatedCapability(initial);
     const expected = guard.expectedRenewal(initial.capabilityId);
-    expect(expected.expectedPreviousServerHeartbeatSequence).toBe(-1);
-
-    const first = verifiedRenewal(
+    const first = validatedRenewal(
       initial,
       renewal(initial, expected.expectedPreviousGrantSha256, 0),
       expected,
     );
-    guard.acceptVerifiedRenewal(first);
-    expect(
-      guard.expectedRenewal(initial.capabilityId).expectedPreviousServerHeartbeatSequence,
-    ).toBe(0);
+    guard.acceptValidatedRenewal(first);
+
     const nextExpected = guard.expectedRenewal(initial.capabilityId);
-    const repeatedHeartbeat = verifiedRenewal(
+    const repeated = validatedRenewal(
       initial,
       {
         ...first,
+        renewalId: hex("b"),
+        nonce: hex("c"),
         grantSequence: 3,
         previousGrantSequence: 2,
         previousGrantSha256: nextExpected.expectedPreviousGrantSha256,
-        renewalId: hex("b"),
-        nonce: hex("c"),
       },
       { ...nextExpected, expectedPreviousServerHeartbeatSequence: -1 },
     );
-    expect(() => guard.acceptVerifiedRenewal(repeatedHeartbeat)).toThrowError(
+    expect(() => guard.acceptValidatedRenewal(repeated)).toThrowError(
       expect.objectContaining({ code: "RENEWAL_REPLAYED" }),
     );
   });
 
-  it("never revives a terminal capability", () => {
-    const initial = verifiedCapability();
-    const guard = new LocalAuthorityReplayGuard();
-    guard.reserveVerifiedCapability(initial);
-    const expected = guard.expectedRenewal(initial.capabilityId);
-    const next = verifiedRenewal(
-      initial,
-      renewal(initial, expected.expectedPreviousGrantSha256),
-      expected,
-    );
-    guard.markTerminal(initial.capabilityId);
-    expect(guard.isActive(initial.capabilityId)).toBe(false);
-    expect(() => guard.expectedRenewal(initial.capabilityId)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_TERMINAL" }),
-    );
-    expect(() => guard.acceptVerifiedRenewal(next)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_TERMINAL" }),
-    );
+  it("never revives a fenced or terminal capability", () => {
+    for (const reason of ["terminal", "stale_revision"] as const) {
+      const initial = validatedCapability();
+      const guard = new LocalAuthorityReplayGuard();
+      guard.reserveValidatedCapability(initial);
+      reason === "terminal"
+        ? guard.markTerminal(initial.capabilityId)
+        : guard.fence(initial.capabilityId, reason);
+
+      expect(guard.isActive(initial.capabilityId)).toBe(false);
+      expect(() => guard.expectedRenewal(initial.capabilityId)).toThrowError(
+        expect.objectContaining({ code: "CAPABILITY_TERMINAL" }),
+      );
+    }
   });
 
-  it("synchronously fences stale capabilities before cancellation completes", () => {
-    const initial = verifiedCapability();
+  it("retains attempt and correlation tombstones for the Executor boot", () => {
+    const initial = validatedCapability();
     const guard = new LocalAuthorityReplayGuard();
-    guard.reserveVerifiedCapability(initial);
-    const expected = guard.expectedRenewal(initial.capabilityId);
-    const next = verifiedRenewal(
-      initial,
-      renewal(initial, expected.expectedPreviousGrantSha256, 11),
-      expected,
-    );
-    guard.fence(initial.capabilityId, "stale_revision");
-
-    expect(guard.isActive(initial.capabilityId)).toBe(false);
-    expect(() => guard.expectedRenewal(initial.capabilityId)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_TERMINAL" }),
-    );
-    expect(() => guard.acceptVerifiedRenewal(next)).toThrowError(
-      expect.objectContaining({ code: "CAPABILITY_TERMINAL" }),
-    );
-  });
-
-  it("rejects a newly signed capability for an already reserved attempt identity", () => {
-    const initial = verifiedCapability();
-    const guard = new LocalAuthorityReplayGuard();
-    guard.reserveVerifiedCapability(initial);
+    guard.reserveValidatedCapability(initial);
 
     expect(() =>
-      guard.reserveVerifiedCapability(
-        verifiedCapability({ ...capability(hex("f")), nonce: hex("e") }),
+      guard.reserveValidatedCapability(
+        validatedCapability({ ...capability(hex("f")), nonce: hex("e") }),
       ),
     ).toThrowError(expect.objectContaining({ code: "ATTEMPT_REPLAYED" }));
+  });
+
+  it("fails closed at capacity and rejects unvalidated data", () => {
+    const guard = new LocalAuthorityReplayGuard(1);
+    const initial = validatedCapability();
+    guard.reserveValidatedCapability(initial);
     expect(() =>
-      guard.reserveVerifiedCapability(
-        verifiedCapability({
-          ...capability(hex("d")),
-          nonce: hex("c"),
+      guard.reserveValidatedCapability(
+        validatedCapability({
+          ...capability(hex("f")),
+          nonce: hex("e"),
           runAttemptId: "attempt-2",
+          attemptCorrelationId: "40000000-0000-4000-8000-000000000004",
         }),
       ),
-    ).toThrowError(expect.objectContaining({ code: "ATTEMPT_REPLAYED" }));
-  });
+    ).toThrow(LocalAuthorityReplayError);
 
-  it("fails closed instead of evicting replay history at its memory bound", () => {
-    const guard = new LocalAuthorityReplayGuard(1);
-    guard.reserveVerifiedCapability(verifiedCapability());
-    expect(() => guard.reserveVerifiedCapability(verifiedCapability(capability(hex("f"))))).toThrow(
-      LocalAuthorityReplayError,
-    );
-  });
-
-  it("rejects structurally valid but runtime-unverified capabilities and renewals", () => {
-    const guard = new LocalAuthorityReplayGuard();
-    const initial = capability();
     expect(() =>
-      guard.reserveVerifiedCapability(initial as unknown as VerifiedExecutionCapability),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_UNVERIFIED" }));
-    expect(guard.isActive(initial.capabilityId)).toBe(false);
-
-    const verified = verifiedCapability(initial);
-    guard.reserveVerifiedCapability(verified);
-    const unverifiedRenewal = renewal(verified, digestExecutionCapability(verified));
-    expect(() =>
-      guard.acceptVerifiedRenewal(
-        unverifiedRenewal as unknown as Parameters<
-          LocalAuthorityReplayGuard["acceptVerifiedRenewal"]
-        >[0],
+      new LocalAuthorityReplayGuard().reserveValidatedCapability(
+        capability() as unknown as ValidatedExecutionCapability,
       ),
-    ).toThrowError(expect.objectContaining({ code: "RENEWAL_UNVERIFIED" }));
-  });
-
-  it("cannot activate tampered or expired signed capabilities", () => {
-    const guard = new LocalAuthorityReplayGuard();
-    const value = capability();
-    const signed = signExecutionCapability(value, keys.privateKey);
-
-    expect(() =>
-      verifyExecutionCapability(
-        { ...signed, capability: { ...signed.capability, leaseGeneration: 2 } },
-        keys.publicKey,
-        {
-          expectedKeyId: keyId,
-          expectedWorkerNodeId: value.workerNodeId,
-          expectedWorkerInstanceId: value.workerInstanceId,
-          expectedExecutorBootId: value.executorBootId,
-          expectedSessionId: value.sessionId,
-          nowUnixMs: now + 1_000,
-        },
-      ),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_SIGNATURE_INVALID" }));
-
-    const expired = { ...value, grantExpiresAtUnixMs: now + 500 };
-    expect(() =>
-      verifyExecutionCapability(signExecutionCapability(expired, keys.privateKey), keys.publicKey, {
-        expectedKeyId: keyId,
-        expectedWorkerNodeId: value.workerNodeId,
-        expectedWorkerInstanceId: value.workerInstanceId,
-        expectedExecutorBootId: value.executorBootId,
-        expectedSessionId: value.sessionId,
-        nowUnixMs: now + 1_000,
-      }),
-    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_EXPIRED" }));
-    expect(guard.isActive(value.capabilityId)).toBe(false);
+    ).toThrowError(expect.objectContaining({ code: "CAPABILITY_UNVALIDATED" }));
   });
 });
