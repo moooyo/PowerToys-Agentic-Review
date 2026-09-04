@@ -235,9 +235,9 @@ process-lifetime quarantine and the current ServiceHost must exit; no goroutine 
 by closing the same handle.
 
 Relay shutdown has a hard deadline. A shutdown timeout is host-fatal: the process must exit and let
-WinSW recovery create a fresh host; the same process must never reconnect or reuse endpoints whose
-closure was not confirmed. The timeout result retains the primary transport failure and every
-close failure observed before the deadline.
+the Windows Service Control Manager recovery policy create a fresh host; the same process must
+never reconnect or reuse endpoints whose closure was not confirmed. The timeout result retains the
+primary transport failure and every close failure observed before the deadline.
 
 ## Verification
 

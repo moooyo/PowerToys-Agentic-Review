@@ -83,42 +83,7 @@ type NodeProcess interface {
 	Close() error
 }
 
-// WrapperWatcher retains a stable process handle to the WinSW wrapper.
-type WrapperWatcher interface {
-	ProcessID() uint32
-	CreationTime() time.Time
-	// Wait returns nil only when the retained wrapper process handle signals.
-	Wait(context.Context) error
-	// Close consumes the retained raw handle once. Any close failure is fatal
-	// for the host process and must never be retried against the numeric value.
-	Close() error
-}
-
-// RootTerminator is implemented by NodeProcess and kept small for supervision
-// tests and future service-stop integration.
-type RootTerminator interface {
-	Terminate() error
-}
-
 var (
 	ErrUnsupportedPlatform = errors.New("ServiceHost process supervision requires Windows")
 	ErrJobDrainTimeout     = errors.New("service-root Job did not become empty before the shutdown deadline")
-	ErrWrapperUnstable     = errors.New("WinSW wrapper identity is not stable")
 )
-
-// WatchWrapper waits for the verified wrapper handle or cancellation and then
-// always terminates the root Job. A monitoring failure is fail-closed too.
-func WatchWrapper(ctx context.Context, watcher WrapperWatcher, root RootTerminator) error {
-	if ctx == nil {
-		return errors.New("wrapper watch context is required")
-	}
-	if watcher == nil {
-		return errors.New("wrapper watcher is required")
-	}
-	if root == nil {
-		return errors.New("root Job terminator is required")
-	}
-	waitErr := watcher.Wait(ctx)
-	terminateErr := root.Terminate()
-	return errors.Join(waitErr, terminateErr)
-}

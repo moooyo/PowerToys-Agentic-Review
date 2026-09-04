@@ -52,7 +52,6 @@ var expectedWinprocessLaunchNodeIdentifiers = map[string]int{
 	"internal/winprocess/stdio_pipe_windows.go": 0,
 	"internal/winprocess/stdio_windows.go":      0,
 	"internal/winprocess/winprocess.go":         0,
-	"internal/winprocess/wrapper_windows.go":    0,
 }
 
 var expectedWinprocessExportedAPI = map[string][]string{
@@ -62,7 +61,7 @@ var expectedWinprocessExportedAPI = map[string][]string{
 	"internal/winprocess/doc.go":                {},
 	"internal/winprocess/launcher_windows.go":   {"func:LaunchNode"},
 	"internal/winprocess/logic.go":              {},
-	"internal/winprocess/platform_other.go":     {"func:LaunchNode", "func:OpenWrapperWatcher"},
+	"internal/winprocess/platform_other.go":     {"func:LaunchNode"},
 	"internal/winprocess/quarantine_windows.go": {},
 	"internal/winprocess/stdio.go": {
 		"method:NodeStandardIO.Close", "method:NodeStandardIO.StandardError",
@@ -74,12 +73,9 @@ var expectedWinprocessExportedAPI = map[string][]string{
 	"internal/winprocess/stdio_pipe_windows.go": {},
 	"internal/winprocess/stdio_windows.go":      {},
 	"internal/winprocess/winprocess.go": {
-		"const:RoleControl", "const:RoleExecutor", "func:WatchWrapper", "type:NodeIdentity",
-		"type:NodeLaunchSpec", "type:NodeProcess", "type:Role", "type:RootTerminator",
-		"type:WrapperWatcher", "var:ErrJobDrainTimeout", "var:ErrUnsupportedPlatform",
-		"var:ErrWrapperUnstable",
+		"const:RoleControl", "const:RoleExecutor", "type:NodeIdentity", "type:NodeLaunchSpec",
+		"type:NodeProcess", "type:Role", "var:ErrJobDrainTimeout", "var:ErrUnsupportedPlatform",
 	},
-	"internal/winprocess/wrapper_windows.go": {"func:OpenWrapperWatcher"},
 }
 
 var expectedWinprocessExportedTypeMembers = map[string][]string{
@@ -116,11 +112,6 @@ var expectedWinprocessExportedTypeMembers = map[string][]string{
 		"interface:NodeProcess.Terminate",
 		"interface:NodeProcess.Wait",
 		"interface:NodeProcess.WaitContext",
-		"interface:RootTerminator.Terminate",
-		"interface:WrapperWatcher.Close",
-		"interface:WrapperWatcher.CreationTime",
-		"interface:WrapperWatcher.ProcessID",
-		"interface:WrapperWatcher.Wait",
 	},
 }
 
@@ -139,10 +130,6 @@ var expectedWinprocessExportedMethods = map[string][]string{
 		"method:windowsNodeProcess.WaitContext",
 	},
 	"internal/winprocess/logic.go": {
-		"method:stableWrapper.Close",
-		"method:stableWrapper.CreationTime",
-		"method:stableWrapper.ProcessID",
-		"method:stableWrapper.Wait",
 		"method:wallDrainClock.Now",
 		"method:wallDrainClock.Sleep",
 	},
@@ -160,15 +147,6 @@ var expectedWinprocessExportedMethods = map[string][]string{
 		"method:windowsStandardIOStream.Write",
 		"method:windowsStandardIOStream.WriteContext",
 	},
-	"internal/winprocess/wrapper_windows.go": {
-		"method:scmServiceStatusSource.Status",
-		"method:windowsWrapperProcess.Close",
-		"method:windowsWrapperProcess.QueryCreationTime",
-		"method:windowsWrapperProcess.QueryProcessID",
-		"method:windowsWrapperProcess.StillActive",
-		"method:windowsWrapperProcess.Wait",
-		"method:windowsWrapperProcessOpener.Open",
-	},
 }
 
 var expectedWinprocessExportedSurfaceDigests = map[string]string{
@@ -177,15 +155,14 @@ var expectedWinprocessExportedSurfaceDigests = map[string]string{
 	"internal/winprocess/dacl_windows.go":       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/doc.go":                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/launcher_windows.go":   "cd3d48e7ff146e219dc6cd0c8864e8bc442fa168695c4659f9b3bbc3f60c34be",
-	"internal/winprocess/logic.go":              "dcd96c0a8dff976be674d0cdbaaceb80d5fe7d99dfb68eb5e31192b6c0f9384d",
-	"internal/winprocess/platform_other.go":     "47c834f8acc5396050ebf481b07930f6053b3e2b4e9c15f7ad01bc22ab07f33b",
+	"internal/winprocess/logic.go":              "983aa8155e51ca07b3d5802810b662c0b9b32bf95151f8df4ad812853220f43d",
+	"internal/winprocess/platform_other.go":     "fb565d87352c21ab59f57fa8eac321c5d86418dfe64e8fdf6217ee3b0d5819dc",
 	"internal/winprocess/quarantine_windows.go": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/stdio.go":              "c211ea27a23740b1963034e437ee1db66275f9637f40367186bb8b7a254e3bb1",
 	"internal/winprocess/stdio_pipe.go":         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/stdio_pipe_windows.go": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	"internal/winprocess/stdio_windows.go":      "7237adfa7268973a9cb23e808c993f0d4ad8acb40440130965173c7b5012db78",
-	"internal/winprocess/winprocess.go":         "c2d7876c75bb324dbbc256c45a4005763e4ef61108d21cad0a036032ca274585",
-	"internal/winprocess/wrapper_windows.go":    "20ceda2e0f03d709e6fdd8b7fac8ed974b4c313ea97475f9c9f8bffaa2bc4fc7",
+	"internal/winprocess/winprocess.go":         "878faa317fe92197b8d29f98d1a494cfcd48ca91b9e1425058d0eb1f4d46fde4",
 }
 
 func TestRawNodeLaunchHasOneGuardedProductionBridge(t *testing.T) {

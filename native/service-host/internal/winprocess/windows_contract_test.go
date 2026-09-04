@@ -104,65 +104,6 @@ func TestFixedNodeCommandLinesRemainWithinWindowsLimit(t *testing.T) {
 
 func TestWindowsImplementationsSatisfyStableInterfaces(t *testing.T) {
 	var _ NodeProcess = (*windowsNodeProcess)(nil)
-	var _ WrapperWatcher = (*stableWrapper)(nil)
-	var _ wrapperProcessHandle = (*windowsWrapperProcess)(nil)
-}
-
-func TestWindowsWrapperCloseFailureTombstonesWithoutRetry(t *testing.T) {
-	closeFailure := errors.New("injected CloseHandle failure")
-	quarantine := &processLifetimeQuarantine{}
-	closeCalls := 0
-	process := &windowsWrapperProcess{
-		process:    windows.Handle(123),
-		quarantine: quarantine,
-		closeHandle: func(handle windows.Handle) error {
-			closeCalls++
-			if handle != windows.Handle(123) {
-				t.Fatalf("close handle = %d, want 123", handle)
-			}
-			if closeCalls == 1 {
-				return closeFailure
-			}
-			return nil
-		},
-	}
-	if err := process.Close(); !errors.Is(err, closeFailure) || !errors.Is(err, ErrLaunchCleanupFatal) {
-		t.Fatalf("first Close error = %v", err)
-	}
-	if process.process != 0 || quarantine.count() != 1 {
-		t.Fatalf("process handle = %d, quarantine = %d", process.process, quarantine.count())
-	}
-	if err := process.Close(); !errors.Is(err, ErrLaunchCleanupFatal) {
-		t.Fatalf("sticky Close error = %v", err)
-	}
-	if process.process != 0 || closeCalls != 1 {
-		t.Fatalf("process handle = %d, close calls = %d", process.process, closeCalls)
-	}
-}
-
-func TestInvalidWrapperProcessHandleIsStickyPoison(t *testing.T) {
-	quarantine := &processLifetimeQuarantine{}
-	closeCalls := 0
-	process := &windowsWrapperProcess{
-		process:    windows.Handle(124),
-		quarantine: quarantine,
-		closeHandle: func(windows.Handle) error {
-			closeCalls++
-			return nil
-		},
-	}
-	process.mu.Lock()
-	err := process.poisonInvalidHandleLocked("test wrapper query", windows.ERROR_INVALID_HANDLE)
-	process.mu.Unlock()
-	if !errors.Is(err, ErrLaunchCleanupFatal) || process.process != 0 || quarantine.count() != 1 {
-		t.Fatalf("error=%v process=%d quarantine=%d", err, process.process, quarantine.count())
-	}
-	if err := process.Close(); !errors.Is(err, ErrLaunchCleanupFatal) {
-		t.Fatalf("Close after poison error = %v", err)
-	}
-	if closeCalls != 0 {
-		t.Fatalf("CloseHandle calls after invalid-handle tombstone = %d", closeCalls)
-	}
 }
 
 func TestInvalidNodeTokenIsTombstonedWithoutClose(t *testing.T) {
