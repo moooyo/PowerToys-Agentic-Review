@@ -42,7 +42,7 @@ $empty = Get-WorkerProcessPath -NodeDirectory 'C:\Selected Node' -InheritedPath 
 Assert-Equal $empty 'C:\Selected Node' 'An empty inherited PATH must retain the selected Node directory.'
 Assert-Equal $env:PATH $originalPath 'The PATH helper must not modify the test process environment.'
 
-$expectedNode = (Get-Command -Name $NodeExecutable -CommandType Application -ErrorAction Stop).Path
+$expectedNode = (Get-Command -Name $NodeExecutable -CommandType Application -ErrorAction Stop | Select-Object -First 1).Path
 $resolvedNode = Resolve-WorkerNodeApplication -Executable $NodeExecutable
 Assert-Equal $resolvedNode ([System.IO.Path]::GetFullPath($expectedNode)) 'Node must resolve to its actual application path without running it.'
 
