@@ -1,13 +1,15 @@
 # Windows E2E Live Validation Handoff
 
-Status date: 2026-09-05. **Real Windows E2E accepted; local private copy disposition pending user
-confirmation.**
+Status date: 2026-09-06. **Real Windows E2E accepted; deletion of five local private copies is
+explicitly authorized but remains blocked by execution review.**
 
 This continues the [acceptance preparation handoff](./2026-09-05-windows-e2e-acceptance-preparation.md).
 The production source, healthy full success, independent active cancellation, cache reuse, and
 recovered cleanup outcomes below are established through manually correlated evidence. Test
-services and remote credentials/data are closed out. Only the blocked local private-copy
-disposition still awaits the user's answer.
+services and remote credentials/data are closed out. The user approved deletion of the five local
+private copies on 2026-09-06, but execution review still rejected the exact-file deletion command.
+No further authorization is needed; the remaining cleanup requires manual removal or an external
+execution-policy change.
 
 ## Authorization
 
@@ -152,7 +154,7 @@ the remote token and temporary runtime database were removed. Evidence is
 `evidence-recovery/worker-credential-revocation.json` and `evidence-recovery/remote-cleanup.json`
 under `artifacts/local-e2e/`.
 
-The only private-cleanup disposition still awaiting confirmation concerns these five local copies:
+The user explicitly approved deletion of these five local copies on 2026-09-06:
 
 ```text
 D:\Code\PowerToys-Agentic-Review\artifacts\local-e2e\data\Profile\auth.json
@@ -162,11 +164,13 @@ D:\Code\PowerToys-Agentic-Review\artifacts\local-e2e\data\Operator\session.cooki
 C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json
 ```
 
-Automatic approval review rejected local deletion twice, including exact-file, non-recursive
-deletion. The only returned reason was **blocked by policy**. The copies have not been deleted,
-and no bypass was attempted. The user has already been asked to approve deletion or choose to
-retain them; do not infer an answer. Record the eventual disposition without exposing values.
-The original user credential store is outside this cleanup scope.
+Before that approval, automatic review rejected local deletion twice, including exact-file,
+non-recursive deletion. After the explicit approval, it again rejected a command limited to these
+five files, with file-type and path checks, before process creation. Each refusal returned only
+**blocked by policy**. A subsequent read-only check confirmed all five copies still exist.
+No alternate execution route was attempted. The remaining action is manual deletion by the user
+or an external execution-policy change, followed by an absence check; do not request the same
+authorization again. The original user credential store is outside this cleanup scope.
 
 The read-only inventory is `artifacts/local-e2e/cleanup-inventory.json`; current blocked disposition
 is recorded in `artifacts/local-e2e/evidence-recovery/local-cleanup.json` and

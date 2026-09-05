@@ -160,5 +160,6 @@ The independent native audit reports no required runtime evidence gaps. The coll
 [live validation handoff](./handoff/2026-09-05-windows-e2e-live-validation.md).
 
 Test processes are stopped, the test Worker credential is revoked, and remote token/database
-cleanup is complete. The handoff records the remaining local private-copy disposition separately
-from the completed runtime acceptance.
+cleanup is complete. The handoff records the local private-copy cleanup outcome separately from
+the completed runtime acceptance, including the execution-policy block after explicit deletion
+approval.
