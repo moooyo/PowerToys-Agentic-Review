@@ -67,6 +67,22 @@ export interface NativeWorkspaceSecurityAdapter extends WorkspaceDiskFileSystem 
     readonly attemptInode: bigint;
     readonly deadlineEpochMilliseconds: bigint;
   }): Promise<{ readonly removedBytes: bigint | null }>;
+  /**
+   * Removes only the literal checkout child of the exact reserved attempt, using the same
+   * handle-bound ownership and no-follow guarantees. Older adapters must fail closed if absent.
+   */
+  quarantineAndRemoveCheckout?(request: {
+    readonly workspaceRootDirectory: string;
+    readonly workspaceRootDevice: bigint;
+    readonly workspaceRootInode: bigint;
+    readonly attemptDirectory: string;
+    readonly attemptDevice: bigint;
+    readonly attemptInode: bigint;
+    readonly checkoutDirectory: string;
+    readonly checkoutDevice: bigint;
+    readonly checkoutInode: bigint;
+    readonly deadlineEpochMilliseconds: bigint;
+  }): Promise<{ readonly removedBytes: bigint | null }>;
   /** Releases the process-lifetime exclusive lock during orderly Worker shutdown. */
   close(): Promise<void>;
 }
@@ -93,6 +109,7 @@ export interface WorkspaceDiskMonitor {
 export interface WorkspaceDiskReservation {
   readonly attemptDirectory: string;
   startMonitoring(parentSignal: AbortSignal): Promise<WorkspaceDiskMonitor>;
+  removeCheckout(): Promise<void>;
   removeAttempt(): Promise<void>;
   abandon(): void;
   release(): Promise<void>;
@@ -616,6 +633,99 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     );
   }
 
+  public async removeCheckout(record: ReservationRecord): Promise<void> {
+    const deadline = this.#newScanDeadline();
+    await this.#runExclusive(
+      async () => {
+        const current = this.#reservations.get(record.attemptName);
+        if (current?.identity !== record.identity) {
+          throw new WorkspaceDiskBudgetError(
+            "RESERVATION_RELEASED",
+            "Cannot remove a checkout after its disk reservation was released.",
+          );
+        }
+        await this.#assertWorkspaceAccessReady(undefined, deadline);
+        const rootState = await this.#validateRoot(undefined, undefined, deadline);
+        const attemptState = await this.#validatedPathState(
+          record.attemptDirectory,
+          "directory",
+          undefined,
+          deadline,
+        );
+        if (attemptState === null) {
+          throw new WorkspaceDiskBudgetError(
+            "WORKSPACE_PATH_UNSAFE",
+            "The reserved attempt is missing before checkout removal.",
+          );
+        }
+        const checkoutDirectory = win32.join(record.attemptDirectory, "checkout");
+        const checkoutState = await this.#validatedPathState(
+          checkoutDirectory,
+          "directory",
+          undefined,
+          deadline,
+        );
+        if (checkoutState === null) return;
+
+        await this.#validateRoot(rootState, undefined, deadline);
+        const finalAttempt = await this.#validatedPathState(
+          record.attemptDirectory,
+          "directory",
+          undefined,
+          deadline,
+        );
+        const finalCheckout = await this.#validatedPathState(
+          checkoutDirectory,
+          "directory",
+          undefined,
+          deadline,
+        );
+        if (
+          finalAttempt === null ||
+          finalCheckout === null ||
+          !sameStablePathState(attemptState, finalAttempt) ||
+          !sameStablePathState(checkoutState, finalCheckout)
+        ) {
+          throw snapshotUnstableError();
+        }
+        await this.#quarantineAndRemoveCheckout(
+          record.attemptDirectory,
+          checkoutDirectory,
+          rootState,
+          finalAttempt,
+          finalCheckout,
+          deadline,
+        );
+        await this.#validateRoot(rootState, undefined, deadline);
+        const remainingAttempt = await this.#validatedPathState(
+          record.attemptDirectory,
+          "directory",
+          undefined,
+          deadline,
+        );
+        if (remainingAttempt === null || !samePathIdentity(attemptState, remainingAttempt)) {
+          throw new WorkspaceDiskBudgetError(
+            "WORKSPACE_PATH_UNSAFE",
+            "The reserved attempt changed identity during checkout removal.",
+          );
+        }
+        const remainingCheckout = await this.#fileSystem.lstat(
+          checkoutDirectory,
+          ioContext(undefined, deadline),
+        );
+        this.#assertScanActive(undefined, deadline);
+        if (remainingCheckout !== null) {
+          throw new WorkspaceDiskBudgetError(
+            "HANDLE_BOUND_DELETE_FAILED",
+            "The checkout path still exists after reserved checkout removal.",
+          );
+        }
+      },
+      undefined,
+      deadline,
+    );
+  }
+
   public abandon(record: ReservationRecord): void {
     const current = this.#reservations.get(record.attemptName);
     if (current?.identity === record.identity) {
@@ -943,6 +1053,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     this.#assertScanActive(signal, deadline);
     this.#assertContained(path);
     const state = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
+    this.#assertScanActive(signal, deadline);
     if (state === null) return null;
     if (
       (state.reparsePoint && allowedLinkRootDirectory === undefined) ||
@@ -1139,21 +1250,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
   ): Promise<{ readonly removedBytes: bigint | null }> {
     const adapter = await this.#assertWorkspaceAccessReady(undefined, deadline);
     if (adapter === undefined) {
-      try {
-        await nodeRemove(attemptDirectory, {
-          recursive: true,
-          force: false,
-          maxRetries: 3,
-          retryDelay: 100,
-        });
-        return { removedBytes: null };
-      } catch (error) {
-        throw new WorkspaceDiskBudgetError(
-          "HANDLE_BOUND_DELETE_FAILED",
-          "The trusted workspace directory could not be removed.",
-          { cause: error },
-        );
-      }
+      return this.#removeTrustedDirectory(attemptDirectory);
     }
     try {
       const result = await adapter.quarantineAndRemoveAttempt({
@@ -1178,6 +1275,73 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
       throw new WorkspaceDiskBudgetError(
         "HANDLE_BOUND_DELETE_FAILED",
         "The native adapter could not quarantine and remove the exact attempt identity.",
+        { cause: error },
+      );
+    }
+  }
+
+  async #quarantineAndRemoveCheckout(
+    attemptDirectory: string,
+    checkoutDirectory: string,
+    rootState: WorkspaceDiskPathState,
+    attemptState: WorkspaceDiskPathState,
+    checkoutState: WorkspaceDiskPathState,
+    deadline: bigint,
+  ): Promise<{ readonly removedBytes: bigint | null }> {
+    const adapter = await this.#assertWorkspaceAccessReady(undefined, deadline);
+    if (adapter === undefined) return this.#removeTrustedDirectory(checkoutDirectory);
+    if (adapter.quarantineAndRemoveCheckout === undefined) {
+      throw new WorkspaceDiskBudgetError(
+        "NATIVE_SECURITY_ADAPTER_REQUIRED",
+        "The configured native adapter does not support reserved checkout removal.",
+      );
+    }
+    try {
+      const result = await adapter.quarantineAndRemoveCheckout({
+        workspaceRootDirectory: this.#workspaceRootDirectory,
+        workspaceRootDevice: rootState.device,
+        workspaceRootInode: rootState.inode,
+        attemptDirectory,
+        attemptDevice: attemptState.device,
+        attemptInode: attemptState.inode,
+        checkoutDirectory,
+        checkoutDevice: checkoutState.device,
+        checkoutInode: checkoutState.inode,
+        deadlineEpochMilliseconds: deadline,
+      });
+      if (result.removedBytes !== null && result.removedBytes < 0n) {
+        throw new WorkspaceDiskBudgetError(
+          "HANDLE_BOUND_DELETE_FAILED",
+          "The native adapter returned an invalid checkout removed-byte count.",
+        );
+      }
+      this.#assertScanActive(undefined, deadline);
+      return result;
+    } catch (error) {
+      if (error instanceof WorkspaceDiskBudgetError) throw error;
+      throw new WorkspaceDiskBudgetError(
+        "HANDLE_BOUND_DELETE_FAILED",
+        "The native adapter could not quarantine and remove the exact checkout identity.",
+        { cause: error },
+      );
+    }
+  }
+
+  async #removeTrustedDirectory(
+    directory: string,
+  ): Promise<{ readonly removedBytes: bigint | null }> {
+    try {
+      await nodeRemove(directory, {
+        recursive: true,
+        force: false,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
+      return { removedBytes: null };
+    } catch (error) {
+      throw new WorkspaceDiskBudgetError(
+        "HANDLE_BOUND_DELETE_FAILED",
+        "The trusted workspace directory could not be removed.",
         { cause: error },
       );
     }
@@ -1306,6 +1470,16 @@ class ProductionWorkspaceDiskReservation implements WorkspaceDiskReservation {
       );
     }
     await this.owner.removeAttempt(this.record);
+  }
+
+  public async removeCheckout(): Promise<void> {
+    if (this.#released) {
+      throw new WorkspaceDiskBudgetError(
+        "RESERVATION_RELEASED",
+        "Cannot remove a checkout after its disk reservation was released.",
+      );
+    }
+    await this.owner.removeCheckout(this.record);
   }
 
   public abandon(): void {

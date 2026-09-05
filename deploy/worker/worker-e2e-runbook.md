@@ -253,6 +253,13 @@ process cleanup. A terminal Server status can precede cleanup completion. Fixed 
 maintenance commands retain cleanup path guards, managed timeouts and resource limits, and shared
 Git accounting. They do not run execution-phase attempt scans while removing link targets; pnpm
 store links can temporarily dangle until final attempt deletion, which must not follow the links.
+Git for Windows can also fail on long junction targets. For a completed nonzero Git removal,
+the Worker may recover through reservation-owned checkout deletion, prune, explicit registration
+absence, and shared-cache checks. Retain any `Git worktree removal recovered through reserved
+checkout cleanup.` warning with its bounded, redacted stderr and the subsequent healthy heartbeat;
+the warning alone does not establish that final attempt cleanup completed. The default trusted
+backend uses Node deletion inside the disk-budget layer; optional native adapters retain their own
+handle-bound guarantees and cannot silently fall back when checkout removal is unsupported.
 Retain an after snapshot and correlate it with the active snapshot:
 
 - Every captured descendant of that attempt must be gone by PID and creation time. Match both

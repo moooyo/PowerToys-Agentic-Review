@@ -65,6 +65,14 @@ accounting remains enforced, and final attempt deletion does not follow links in
 The Worker passes `core.longpaths=true` to every Git command so Git for Windows can remove deeply
 nested dependency paths without relying on the execution account's global configuration.
 
+If Git cannot remove a checkout, only a completed nonzero exit permits recovery: the active disk
+reservation removes its fixed `checkout` child, preserves the other attempt directories, and
+confirms deletion before Git prunes and lists registrations. Recovery succeeds only after the
+checkout registration is absent and shared-cache checks pass; its warning retains bounded,
+redacted Git stderr. The default trusted deployment uses the disk-budget layer's Node deletion
+backend. An explicitly supplied native security adapter must implement checkout quarantine with
+its handle-bound guarantees; missing support fails closed instead of falling back to Node.
+
 ## Worker authentication
 
 Every Worker API request uses the node-specific Token loaded from:

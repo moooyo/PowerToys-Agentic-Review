@@ -53,6 +53,12 @@ class FileSystemGitRunner implements ManagedProcessRunner {
         context: ManagedProcessRunContext,
       ) => Promise<ManagedProcessRunResult>)
     | undefined;
+  public recoveryImplementation:
+    | ((
+        spec: ProcessLaunchSpec,
+        context: ManagedProcessRunContext,
+      ) => Promise<ManagedProcessRunResult>)
+    | undefined;
 
   public constructor(private readonly fixtureRoot: string) {}
 
@@ -64,6 +70,21 @@ class FileSystemGitRunner implements ManagedProcessRunner {
     this.latestSpec = spec;
     const command = spec.arguments.find((argument) => gitCommands.has(argument));
     if (command === undefined) throw new Error("Unexpected fake Git command.");
+    if (
+      command === "worktree" &&
+      (spec.arguments.includes("prune") || spec.arguments.includes("list")) &&
+      this.recoveryImplementation !== undefined
+    ) {
+      const result = await this.recoveryImplementation(spec, context);
+      if (result.exitCode !== 0) {
+        throw new ManagedProcessRunError(
+          "NON_ZERO_EXIT",
+          "Real Git recovery command failed.",
+          result,
+        );
+      }
+      return result;
+    }
     if (command === "init") {
       const repository = requiredArgument(spec.arguments.at(-1));
       await mkdir(assertOwnedPath(this.fixtureRoot, repository));
@@ -122,6 +143,10 @@ async function createFixture(gitExecutable?: string) {
   await mkdir(sharedRoot);
   await mkdir(gitWorkingDirectory);
   const runner = new FileSystemGitRunner(root);
+  const warnings: Array<{
+    readonly message: string;
+    readonly fields: Readonly<Record<string, unknown>> | undefined;
+  }> = [];
   const diskBudget = new ProductionWorkspaceDiskBudget({
     workspaceRootDirectory: workspaceRoot,
     perAttemptDiskBytes: 1024n * 1024n,
@@ -159,8 +184,14 @@ async function createFixture(gitExecutable?: string) {
     },
     diskBudget,
     processRunner: runner,
+    logger: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message, fields) => warnings.push({ message, fields }),
+      error: () => undefined,
+    },
   });
-  return { root, sharedRoot, runner, diskBudget, provider };
+  return { root, sharedRoot, runner, diskBudget, provider, warnings };
 }
 
 afterEach(async () => {
@@ -230,105 +261,162 @@ describe.skipIf(process.platform !== "win32")(
       },
     );
 
-    it("runs production Git cleanup arguments against a real worktree with long pnpm paths", async () => {
-      const executable = await findGitExecutable();
-      const fixture = await createFixture(executable);
-      const healthFaults: JobWorkspaceError[] = [];
-      const workspace = await fixture.provider.prepare(envelope(), {
-        signal: new AbortController().signal,
-        processHost: unusedProcessHost,
-        reportProcessCount: () => undefined,
-        reportNodeHealthFault: (error) => healthFaults.push(error),
-      });
-      const preparationSpec = fixture.runner.latestSpec;
-      if (preparationSpec === undefined)
-        throw new Error("Preparation did not produce a Git launch.");
-      const localGit = async (argumentsList: readonly string[]): Promise<void> => {
-        const result = await runRealGit({ ...preparationSpec, arguments: argumentsList });
-        expect(result, result.stderr).toMatchObject({ exitCode: 0 });
-      };
-      const seed = join(fixture.root, "seed");
-      const sharedRepository = join(fixture.sharedRoot, "repository-1844564.git");
-      await localGit(["init", "--quiet", seed]);
-      await writeFile(join(seed, "README.md"), "Local seed commit.\n");
-      await localGit(["-C", seed, "add", "README.md"]);
-      await localGit([
-        "-C",
-        seed,
-        "-c",
-        "user.name=Cleanup fixture",
-        "-c",
-        "user.email=cleanup-fixture@example.invalid",
-        "-c",
-        "core.hooksPath=NUL",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "--quiet",
-        "-m",
-        "Local cleanup fixture",
-      ]);
-      await localGit(["init", "--bare", "--quiet", sharedRepository]);
-      await localGit([
-        `--git-dir=${sharedRepository}`,
-        "-c",
-        "protocol.file.allow=always",
-        "fetch",
-        "--quiet",
-        "--no-tags",
-        seed,
-        "HEAD:refs/heads/fixture",
-      ]);
-      await rm(assertOwnedPath(fixture.root, workspace.checkoutDirectory), {
-        recursive: true,
-        force: false,
-      });
-      await localGit([
-        `--git-dir=${sharedRepository}`,
-        "worktree",
-        "add",
-        "--quiet",
-        "--detach",
-        "--force",
-        workspace.checkoutDirectory,
-        "refs/heads/fixture",
-      ]);
-      const deepDirectory = join(
-        workspace.checkoutDirectory,
-        "node_modules",
-        ".pnpm",
-        `@fixture+package@1.0.0_${"dependency".repeat(8)}`,
-        "node_modules",
-        "@fixture",
-        "package",
-        "dist",
-        `generated-${"nested".repeat(12)}`,
-      );
-      await mkdir(deepDirectory, { recursive: true });
-      const deepFile = join(deepDirectory, "types.d.ts");
-      await writeFile(deepFile, "export type Fixture = string;\n");
-      expect(deepFile.length).toBeGreaterThan(260);
-      const outsideDirectory = join(fixture.root, "external-target");
-      await mkdir(outsideDirectory);
-      const marker = join(outsideDirectory, "marker.txt");
-      await writeFile(marker, "Preserve the external target.");
-      await symlink(outsideDirectory, join(workspace.tempDirectory, "external-link"), "junction");
-      let removalResult: ManagedProcessRunResult | undefined;
-      fixture.runner.removeImplementation = async (spec, context) => {
-        removalResult = await runRealGit(spec, context.signal);
-        return removalResult;
-      };
+    it.each(["directory", "long_junction", "forced_nonzero"] as const)(
+      "runs production Git cleanup and recovery for a real worktree: %s",
+      async (mode) => {
+        const executable = await findGitExecutable();
+        const fixture = await createFixture(executable);
+        const healthFaults: JobWorkspaceError[] = [];
+        const workspace = await fixture.provider.prepare(envelope(), {
+          signal: new AbortController().signal,
+          processHost: unusedProcessHost,
+          reportProcessCount: () => undefined,
+          reportNodeHealthFault: (error) => healthFaults.push(error),
+        });
+        const preparationSpec = fixture.runner.latestSpec;
+        if (preparationSpec === undefined)
+          throw new Error("Preparation did not produce a Git launch.");
+        const localGit = async (argumentsList: readonly string[]): Promise<void> => {
+          const result = await runRealGit({ ...preparationSpec, arguments: argumentsList });
+          expect(result, result.stderr).toMatchObject({ exitCode: 0 });
+        };
+        const seed = join(fixture.root, "seed");
+        const sharedRepository = join(fixture.sharedRoot, "repository-1844564.git");
+        await localGit(["init", "--quiet", seed]);
+        await writeFile(join(seed, "README.md"), "Local seed commit.\n");
+        await localGit(["-C", seed, "add", "README.md"]);
+        await localGit([
+          "-C",
+          seed,
+          "-c",
+          "user.name=Cleanup fixture",
+          "-c",
+          "user.email=cleanup-fixture@example.invalid",
+          "-c",
+          "core.hooksPath=NUL",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--quiet",
+          "-m",
+          "Local cleanup fixture",
+        ]);
+        await localGit(["init", "--bare", "--quiet", sharedRepository]);
+        await localGit([
+          `--git-dir=${sharedRepository}`,
+          "-c",
+          "protocol.file.allow=always",
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          seed,
+          "HEAD:refs/heads/fixture",
+        ]);
+        await rm(assertOwnedPath(fixture.root, workspace.checkoutDirectory), {
+          recursive: true,
+          force: false,
+        });
+        await localGit([
+          `--git-dir=${sharedRepository}`,
+          "worktree",
+          "add",
+          "--quiet",
+          "--detach",
+          "--force",
+          workspace.checkoutDirectory,
+          "refs/heads/fixture",
+        ]);
+        const deepDirectory = join(
+          workspace.checkoutDirectory,
+          "node_modules",
+          ".pnpm",
+          `@fixture+package@1.0.0_${"dependency".repeat(8)}`,
+          "node_modules",
+          "@fixture",
+          "package",
+          "dist",
+          `generated-${"nested".repeat(12)}`,
+        );
+        await mkdir(deepDirectory, { recursive: true });
+        const deepFile = join(deepDirectory, "types.d.ts");
+        await writeFile(deepFile, "export type Fixture = string;\n");
+        expect(deepFile.length).toBeGreaterThan(260);
+        if (mode !== "directory") {
+          expect(deepDirectory.length).toBeGreaterThan(260);
+          await symlink(
+            deepDirectory,
+            join(workspace.checkoutDirectory, "long-target-link"),
+            "junction",
+          );
+        }
+        const outsideDirectory = join(fixture.root, "external-target");
+        await mkdir(outsideDirectory);
+        const marker = join(outsideDirectory, "marker.txt");
+        await writeFile(marker, "Preserve the external target.");
+        await symlink(outsideDirectory, join(workspace.tempDirectory, "external-link"), "junction");
+        let removalResult: ManagedProcessRunResult | undefined;
+        const recoveryOperations: string[] = [];
+        let registrationOutput: string | undefined;
+        fixture.runner.removeImplementation = async (spec, context) => {
+          removalResult =
+            mode === "forced_nonzero"
+              ? { exitCode: 255, stdout: "", stderr: "Synthetic worktree removal failure." }
+              : await runRealGit(spec, context.signal);
+          return removalResult;
+        };
+        fixture.runner.recoveryImplementation = async (spec, context) => {
+          const operation = spec.arguments.includes("prune") ? "prune" : "list";
+          recoveryOperations.push(operation);
+          await expect(lstat(workspace.checkoutDirectory)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+          for (const directory of [
+            workspace.controlDirectory,
+            workspace.tempDirectory,
+            workspace.userProfileDirectory,
+          ]) {
+            expect((await lstat(directory)).isDirectory()).toBe(true);
+          }
+          const result = await runRealGit(spec, context.signal);
+          if (operation === "list") registrationOutput = result.stdout;
+          return result;
+        };
 
-      assertOwnedPath(fixture.root, workspace.attemptDirectory);
-      await expect(workspace.cleanup()).resolves.toBeUndefined();
+        assertOwnedPath(fixture.root, workspace.attemptDirectory);
+        await expect(workspace.cleanup()).resolves.toBeUndefined();
 
-      expect(removalResult, removalResult?.stderr).toMatchObject({ exitCode: 0 });
-      expect(healthFaults).toEqual([]);
-      await expect(lstat(workspace.checkoutDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(lstat(workspace.attemptDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readFile(marker, "utf8")).toBe("Preserve the external target.");
-      expect((await lstat(sharedRepository)).isDirectory()).toBe(true);
-    }, 120_000);
+        if (mode === "directory") {
+          expect(removalResult, removalResult?.stderr).toMatchObject({ exitCode: 0 });
+        } else if (mode === "forced_nonzero") {
+          expect(removalResult).toMatchObject({ exitCode: 255 });
+        } else {
+          expect([0, 255], removalResult?.stderr).toContain(removalResult?.exitCode);
+        }
+        if (removalResult?.exitCode === 255) {
+          expect(recoveryOperations).toEqual(["prune", "list"]);
+          expect(registrationOutput?.replaceAll("\\", "/")).toBe(
+            `worktree ${sharedRepository.replaceAll("\\", "/")}\0bare\0\0`,
+          );
+          expect(fixture.warnings).toEqual([
+            {
+              message: "Git worktree removal recovered through reserved checkout cleanup.",
+              fields: { exitCode: 255, stderrSummary: expect.any(String) },
+            },
+          ]);
+        } else {
+          expect(recoveryOperations).toEqual([]);
+          expect(fixture.warnings).toEqual([]);
+        }
+        expect(healthFaults).toEqual([]);
+        await expect(lstat(workspace.checkoutDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lstat(workspace.attemptDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await readFile(marker, "utf8")).toBe("Preserve the external target.");
+        expect((await lstat(sharedRepository)).isDirectory()).toBe(true);
+        const readmitted = await fixture.diskBudget.admit(workspace.attemptDirectory);
+        await readmitted.release();
+      },
+      120_000,
+    );
   },
 );
 

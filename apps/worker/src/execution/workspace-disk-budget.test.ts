@@ -26,9 +26,14 @@ interface FakeDiskEntry {
   changedAtMs: bigint;
 }
 
+type CheckoutRemovalRequest = Parameters<
+  NonNullable<NativeWorkspaceSecurityAdapter["quarantineAndRemoveCheckout"]>
+>[0];
+
 class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
   readonly #entries = new Map<string, FakeDiskEntry>();
   public readonly removed: string[] = [];
+  public readonly checkoutRemovalRequests: CheckoutRemovalRequest[] = [];
   public freeBytes = 1_000n * mebibyte;
   public exclusiveOwnership = true;
   public reportUnknownRemovedBytes = false;
@@ -139,6 +144,38 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
     return { removedBytes: this.reportUnknownRemovedBytes ? null : removedBytes };
   }
 
+  public async quarantineAndRemoveCheckout(
+    request: CheckoutRemovalRequest,
+  ): Promise<{ readonly removedBytes: bigint | null }> {
+    this.checkoutRemovalRequests.push(request);
+    if (
+      key(request.workspaceRootDirectory) !== key(workspaceRoot) ||
+      key(win32.dirname(request.attemptDirectory)) !== key(workspaceRoot) ||
+      !isStrictAttemptDirectoryName(win32.basename(request.attemptDirectory)) ||
+      key(request.checkoutDirectory) !== key(win32.join(request.attemptDirectory, "checkout"))
+    ) {
+      throw new Error("unexpected checkout removal path");
+    }
+    for (const [path, device, inode] of [
+      [request.workspaceRootDirectory, request.workspaceRootDevice, request.workspaceRootInode],
+      [request.attemptDirectory, request.attemptDevice, request.attemptInode],
+      [request.checkoutDirectory, request.checkoutDevice, request.checkoutInode],
+    ] as const) {
+      const entry = this.#entry(path);
+      if (
+        entry.kind !== "directory" ||
+        entry.reparsePoint ||
+        key(entry.realPath) !== key(path) ||
+        entry.device !== device ||
+        entry.inode !== inode
+      ) {
+        throw new Error("workspace identity changed");
+      }
+    }
+    await this.removeTree(request.checkoutDirectory);
+    return { removedBytes: null };
+  }
+
   public async close(): Promise<void> {}
 
   public async removeTree(path: string): Promise<void> {
@@ -185,6 +222,10 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
 
   public setFileSize(path: string, size: bigint): void {
     this.#entry(path).size = size;
+  }
+
+  public changeIdentity(path: string): void {
+    this.#entry(path).inode += 1n;
   }
 
   public touch(path: string): void {
@@ -392,6 +433,339 @@ describe("ProductionWorkspaceDiskBudget", () => {
     expect(fileSystem.has(attemptDirectory)).toBe(false);
     await reservation.release();
   });
+
+  it("removes only its fixed checkout identity and keeps the reservation active", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 2 });
+    const attemptDirectory = attempt("a");
+    const reservation = await budget.admit(attemptDirectory);
+    const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+      fileSystem,
+      attemptDirectory,
+    );
+    const otherAttempt = attempt("b");
+    const otherAttemptMarker = win32.join(otherAttempt, "marker.txt");
+    fileSystem.addDirectory(otherAttempt, clock.now);
+    fileSystem.addFile(otherAttemptMarker, 5n, clock.now);
+    const rootState = await fileSystem.lstat(workspaceRoot);
+    const attemptState = await fileSystem.lstat(attemptDirectory);
+    const checkoutState = await fileSystem.lstat(checkoutDirectory);
+
+    expect(reservation.removeCheckout).toHaveLength(0);
+    await Reflect.apply(reservation.removeCheckout, reservation, ["D:\\outside"]);
+
+    expect(fileSystem.checkoutRemovalRequests).toEqual([
+      {
+        workspaceRootDirectory: workspaceRoot,
+        workspaceRootDevice: rootState?.device,
+        workspaceRootInode: rootState?.inode,
+        attemptDirectory,
+        attemptDevice: attemptState?.device,
+        attemptInode: attemptState?.inode,
+        checkoutDirectory,
+        checkoutDevice: checkoutState?.device,
+        checkoutInode: checkoutState?.inode,
+        deadlineEpochMilliseconds: 40_000n,
+      },
+    ]);
+    expect(fileSystem.removed).toEqual([checkoutDirectory]);
+    expect(fileSystem.has(checkoutDirectory)).toBe(false);
+    for (const path of preservedPaths) expect(fileSystem.has(path)).toBe(true);
+    expect(fileSystem.has(otherAttemptMarker)).toBe(true);
+    await expect(budget.sweepOrphans()).resolves.toMatchObject({ active: 1, removed: 0 });
+
+    await reservation.removeCheckout();
+    expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
+    await reservation.removeAttempt();
+    expect(fileSystem.removed).toEqual([checkoutDirectory, attemptDirectory]);
+    expect(fileSystem.has("D:\\outside\\marker.txt")).toBe(true);
+    expect(fileSystem.has(otherAttemptMarker)).toBe(true);
+    await reservation.release();
+  });
+
+  it.each(["release", "abandon"] as const)(
+    "refuses checkout removal after reservation %s",
+    async (lifecycle) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const reservation = await createBudget(fileSystem).admit(attempt("a"));
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
+        reservation.attemptDirectory,
+      );
+      await reservation[lifecycle]();
+
+      await expect(reservation.removeCheckout()).rejects.toMatchObject({
+        code: "RESERVATION_RELEASED",
+      });
+      expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+      expect(fileSystem.removed).toEqual([]);
+      for (const path of [checkoutDirectory, ...preservedPaths]) {
+        expect(fileSystem.has(path)).toBe(true);
+      }
+    },
+  );
+
+  it("rejects checkout removal when its active record is abandoned before queue entry", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const reservation = await createBudget(fileSystem).admit(attempt("a"));
+    const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+      fileSystem,
+      reservation.attemptDirectory,
+    );
+
+    const removal = reservation.removeCheckout();
+    reservation.abandon();
+
+    await expect(removal).rejects.toMatchObject({ code: "RESERVATION_RELEASED" });
+    expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+    expect(fileSystem.removed).toEqual([]);
+    for (const path of [checkoutDirectory, ...preservedPaths]) {
+      expect(fileSystem.has(path)).toBe(true);
+    }
+  });
+
+  it("makes checkout removal idempotent when checkout is already missing", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const reservation = await createBudget(fileSystem).admit(attempt("a"));
+    fileSystem.addDirectory(reservation.attemptDirectory);
+
+    await reservation.removeCheckout();
+    await reservation.removeCheckout();
+
+    expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+    expect(fileSystem.removed).toEqual([]);
+    expect(fileSystem.has(workspaceRoot)).toBe(true);
+    expect(fileSystem.has(reservation.attemptDirectory)).toBe(true);
+    await reservation.release();
+  });
+
+  it("rejects a missing checkout result that arrives after its removal deadline", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const reservation = await createBudget(fileSystem, clock).admit(attempt("a"));
+    fileSystem.addDirectory(reservation.attemptDirectory);
+    const checkoutDirectory = win32.join(reservation.attemptDirectory, "checkout");
+    fileSystem.onLstat = (path) => {
+      if (key(path) === key(checkoutDirectory)) clock.advance(30_001);
+    };
+
+    await expect(reservation.removeCheckout()).rejects.toMatchObject({
+      code: "ACCOUNTING_TIMED_OUT",
+    });
+    expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+    expect(fileSystem.removed).toEqual([]);
+    expect(fileSystem.has(reservation.attemptDirectory)).toBe(true);
+    await reservation.release();
+  });
+
+  it("rejects a final missing checkout result that arrives after native removal expires", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const reservation = await createBudget(fileSystem, clock).admit(attempt("a"));
+    const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+      fileSystem,
+      reservation.attemptDirectory,
+    );
+    fileSystem.onLstat = (path) => {
+      if (key(path) === key(checkoutDirectory) && fileSystem.removed.includes(checkoutDirectory)) {
+        clock.advance(30_001);
+      }
+    };
+
+    await expect(reservation.removeCheckout()).rejects.toMatchObject({
+      code: "ACCOUNTING_TIMED_OUT",
+    });
+    expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
+    expect(fileSystem.removed).toEqual([checkoutDirectory]);
+    expect(fileSystem.has(checkoutDirectory)).toBe(false);
+    for (const path of preservedPaths) expect(fileSystem.has(path)).toBe(true);
+    await reservation.release();
+  });
+
+  it("rejects checkout removal when the reserved attempt is missing", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const reservation = await createBudget(fileSystem).admit(attempt("a"));
+
+    await expect(reservation.removeCheckout()).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+    expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+    expect(fileSystem.removed).toEqual([]);
+    expect(fileSystem.has(workspaceRoot)).toBe(true);
+    await reservation.release();
+  });
+
+  it.each(["root", "attempt", "checkout"] as const)(
+    "rejects checkout removal through an unsafe %s directory",
+    async (unsafeDirectory) => {
+      for (const unsafeKind of ["reparse", "alias", "file"] as const) {
+        const fileSystem = new FakeWorkspaceDiskFileSystem();
+        const reservation = await createBudget(fileSystem).admit(attempt("a"));
+        const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+          fileSystem,
+          reservation.attemptDirectory,
+        );
+        const path =
+          unsafeDirectory === "root"
+            ? workspaceRoot
+            : unsafeDirectory === "attempt"
+              ? reservation.attemptDirectory
+              : checkoutDirectory;
+        if (unsafeKind === "reparse") fileSystem.setReparsePoint(path);
+        else if (unsafeKind === "alias") fileSystem.setRealPath(path, "D:\\outside");
+        else fileSystem.addFile(path, 1n);
+
+        await expect(reservation.removeCheckout()).rejects.toMatchObject({
+          code: unsafeDirectory === "root" ? "WORKSPACE_ROOT_UNSAFE" : "WORKSPACE_PATH_UNSAFE",
+        });
+        expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+        expect(fileSystem.removed).toEqual([]);
+        for (const preservedPath of [checkoutDirectory, ...preservedPaths]) {
+          expect(fileSystem.has(preservedPath)).toBe(true);
+        }
+        await reservation.release();
+      }
+    },
+  );
+
+  it.each(["root", "attempt", "checkout"] as const)(
+    "fails closed when the %s identity changes during checkout validation",
+    async (changedDirectory) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const reservation = await createBudget(fileSystem).admit(attempt("a"));
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
+        reservation.attemptDirectory,
+      );
+      const path =
+        changedDirectory === "root"
+          ? workspaceRoot
+          : changedDirectory === "attempt"
+            ? reservation.attemptDirectory
+            : checkoutDirectory;
+      let reads = 0;
+      fileSystem.onLstat = (candidate) => {
+        if (key(candidate) === key(path) && ++reads === 2) fileSystem.changeIdentity(path);
+      };
+
+      await expect(reservation.removeCheckout()).rejects.toMatchObject({
+        code: changedDirectory === "root" ? "WORKSPACE_ROOT_UNSAFE" : "SNAPSHOT_UNSTABLE",
+      });
+      expect(fileSystem.checkoutRemovalRequests).toEqual([]);
+      expect(fileSystem.removed).toEqual([]);
+      for (const preservedPath of [checkoutDirectory, ...preservedPaths]) {
+        expect(fileSystem.has(preservedPath)).toBe(true);
+      }
+      await reservation.release();
+    },
+  );
+
+  it.each(["root", "attempt", "checkout"] as const)(
+    "binds checkout removal to the %s identity passed to the native adapter",
+    async (changedDirectory) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const reservation = await createBudget(fileSystem).admit(attempt("a"));
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
+        reservation.attemptDirectory,
+      );
+      const removeCheckout = fileSystem.quarantineAndRemoveCheckout.bind(fileSystem);
+      fileSystem.quarantineAndRemoveCheckout = async (request) => {
+        const path =
+          changedDirectory === "root"
+            ? request.workspaceRootDirectory
+            : changedDirectory === "attempt"
+              ? request.attemptDirectory
+              : request.checkoutDirectory;
+        fileSystem.changeIdentity(path);
+        return removeCheckout(request);
+      };
+
+      await expect(reservation.removeCheckout()).rejects.toMatchObject({
+        code: "HANDLE_BOUND_DELETE_FAILED",
+      });
+      expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
+      expect(fileSystem.removed).toEqual([]);
+      for (const path of [checkoutDirectory, ...preservedPaths]) {
+        expect(fileSystem.has(path)).toBe(true);
+      }
+      await reservation.release();
+    },
+  );
+
+  it.each(["root", "attempt"] as const)(
+    "rejects a changed %s identity after native checkout removal",
+    async (changedDirectory) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const reservation = await createBudget(fileSystem).admit(attempt("a"));
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
+        reservation.attemptDirectory,
+      );
+      const removeCheckout = fileSystem.quarantineAndRemoveCheckout.bind(fileSystem);
+      fileSystem.quarantineAndRemoveCheckout = async (request) => {
+        const result = await removeCheckout(request);
+        fileSystem.changeIdentity(
+          changedDirectory === "root" ? request.workspaceRootDirectory : request.attemptDirectory,
+        );
+        return result;
+      };
+
+      await expect(reservation.removeCheckout()).rejects.toMatchObject({
+        code: changedDirectory === "root" ? "WORKSPACE_ROOT_UNSAFE" : "WORKSPACE_PATH_UNSAFE",
+      });
+      expect(fileSystem.removed).toEqual([checkoutDirectory]);
+      for (const path of preservedPaths) expect(fileSystem.has(path)).toBe(true);
+      await reservation.release();
+    },
+  );
+
+  it("requires checkout capability from a configured native adapter", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const reservation = await createBudget(fileSystem).admit(attempt("a"));
+    const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+      fileSystem,
+      reservation.attemptDirectory,
+    );
+    Object.defineProperty(fileSystem, "quarantineAndRemoveCheckout", { value: undefined });
+
+    await expect(reservation.removeCheckout()).rejects.toMatchObject({
+      code: "NATIVE_SECURITY_ADAPTER_REQUIRED",
+    });
+    expect(fileSystem.removed).toEqual([]);
+    for (const path of [checkoutDirectory, ...preservedPaths]) {
+      expect(fileSystem.has(path)).toBe(true);
+    }
+    await reservation.release();
+  });
+
+  it.each(["throws", "leaves checkout"] as const)(
+    "fails closed when native checkout removal %s",
+    async (failure) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const reservation = await createBudget(fileSystem).admit(attempt("a"));
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
+        reservation.attemptDirectory,
+      );
+      fileSystem.quarantineAndRemoveCheckout = async (request) => {
+        fileSystem.checkoutRemovalRequests.push(request);
+        if (failure === "throws") throw new Error("native checkout removal failed");
+        return { removedBytes: null };
+      };
+
+      await expect(reservation.removeCheckout()).rejects.toMatchObject({
+        code: "HANDLE_BOUND_DELETE_FAILED",
+      });
+      expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
+      expect(fileSystem.removed).toEqual([]);
+      for (const path of [checkoutDirectory, ...preservedPaths]) {
+        expect(fileSystem.has(path)).toBe(true);
+      }
+      await reservation.release();
+    },
+  );
 
   it("makes an abandoned failed-cleanup reservation available to the janitor", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
@@ -800,6 +1174,33 @@ describe("ProductionWorkspaceDiskBudget", () => {
     ).toThrowError(expect.objectContaining({ code: "INVALID_CONFIGURATION" }));
   });
 });
+
+function addCheckoutWithPreservedMarkers(
+  fileSystem: FakeWorkspaceDiskFileSystem,
+  attemptDirectory: string,
+): { readonly checkoutDirectory: string; readonly preservedPaths: readonly string[] } {
+  const checkoutDirectory = win32.join(attemptDirectory, "checkout");
+  const preservedPaths = [
+    workspaceRoot,
+    attemptDirectory,
+    "D:\\outside",
+    "D:\\outside\\marker.txt",
+  ];
+  fileSystem.addDirectory(attemptDirectory);
+  fileSystem.addDirectory(checkoutDirectory);
+  fileSystem.addFile(win32.join(checkoutDirectory, "first.bin"), 1n);
+  fileSystem.addFile(win32.join(checkoutDirectory, "second.bin"), 2n);
+  fileSystem.addDirectory("D:\\outside");
+  fileSystem.addFile("D:\\outside\\marker.txt", 3n);
+  for (const directory of ["temp", "control", "profile"]) {
+    const siblingDirectory = win32.join(attemptDirectory, directory);
+    const marker = win32.join(siblingDirectory, "marker.txt");
+    fileSystem.addDirectory(siblingDirectory);
+    fileSystem.addFile(marker, 4n);
+    preservedPaths.push(siblingDirectory, marker);
+  }
+  return { checkoutDirectory, preservedPaths };
+}
 
 function key(path: string): string {
   return win32.normalize(path).toLowerCase();

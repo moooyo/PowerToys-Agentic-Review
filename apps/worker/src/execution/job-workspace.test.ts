@@ -1,6 +1,7 @@
 import { win32 } from "node:path";
 import type { JobExecutionEnvelope } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConsoleJsonLogger, type Logger } from "../logging/logger.js";
 import {
   JobWorkspaceError,
   type JobWorkspaceFileSystem,
@@ -158,6 +159,7 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
   public pullRequestBaseOutput = `${baseSha}\n`;
   public pullRequestHeadOutput = `${headSha}\n`;
   public worktreeHeadOutput = `${headSha}\n`;
+  public worktreeListOutput: string | undefined;
   public mergeBaseOutput = `${baseSha}\n`;
   public onRun: ((spec: ProcessLaunchSpec, context: ManagedProcessRunContext) => void) | undefined;
   public waitForRun: Promise<void> | undefined;
@@ -190,6 +192,12 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
     let stdout = "";
     if (command === "cat-file") stdout = "commit\n";
     if (command === "merge-base") stdout = this.mergeBaseOutput;
+    if (command === "worktree" && spec.arguments.includes("list")) {
+      const repository = spec.arguments
+        .find((argument) => argument.startsWith("--git-dir="))
+        ?.slice("--git-dir=".length);
+      stdout = this.worktreeListOutput ?? `worktree ${repository}\0bare\0\0`;
+    }
     if (command === "rev-parse") {
       stdout = spec.arguments.includes("HEAD^{commit}")
         ? this.worktreeHeadOutput
@@ -205,7 +213,9 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
   public readonly admitted: string[] = [];
   public readonly released: string[] = [];
   public readonly monitored: string[] = [];
+  public readonly checkoutRemovals: string[] = [];
   public removalError: unknown;
+  public checkoutRemovalError: unknown;
   public onMonitorCheck: (() => void) | undefined;
 
   public constructor(private readonly fileSystem: FakeWorkspaceFileSystem) {}
@@ -246,6 +256,22 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
           );
         }
         await this.fileSystem.removeTree(attemptDirectory);
+      },
+      removeCheckout: async () => {
+        if (released) throw new WorkspaceDiskBudgetError("RESERVATION_RELEASED", "released");
+        if (this.checkoutRemovalError !== undefined) throw this.checkoutRemovalError;
+        const checkout = win32.join(attemptDirectory, "checkout");
+        const state = await this.fileSystem.lstat(checkout);
+        if (state === null) return;
+        if (
+          state.kind !== "directory" ||
+          state.reparsePoint ||
+          key(await this.fileSystem.realpath(checkout)) !== key(checkout)
+        ) {
+          throw new WorkspaceDiskBudgetError("WORKSPACE_PATH_UNSAFE", "Unsafe checkout.");
+        }
+        this.checkoutRemovals.push(checkout);
+        await this.fileSystem.removeTree(checkout);
       },
       abandon: () => {
         released = true;
@@ -390,6 +416,7 @@ function provider(
     readonly gitSharedScanTimeoutMs?: number;
     readonly gitSharedGcMinimumIntervalMs?: number;
     readonly gitSharedGcPruneAgeHours?: number;
+    readonly logger?: Logger;
   } = {},
 ): ProductionDisposableJobWorkspaceProvider {
   processRunner.fileSystem = fileSystem;
@@ -416,6 +443,7 @@ function provider(
     diskBudget: options.diskBudget ?? new FakeWorkspaceDiskBudget(fileSystem),
     fileSystem,
     processRunner,
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
   });
 }
 
@@ -872,6 +900,212 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.healthFaults).toEqual([]);
   });
 
+  it("recovers a nonzero Git removal through the reservation and confirms only this registration is absent", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const warn = vi.fn();
+    const progress = preparationContext();
+    const workspaceProvider = provider(fileSystem, processRunner, {
+      diskBudget,
+      logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+    });
+    const first = await workspaceProvider.prepare(envelope("pull_request"), progress.context);
+    const second = await workspaceProvider.prepare(
+      envelope("pull_request", { runAttemptId: "other-active-attempt" }),
+      preparationContext().context,
+    );
+    const repository = `${gitSharedRootDirectory}\\repository-1844564.git`;
+    processRunner.worktreeListOutput =
+      `worktree ${repository}\0bare\0\0` +
+      `worktree ${second.checkoutDirectory}\0HEAD ${headSha}\0detached\0\0`;
+    processRunner.onRun = (spec) => {
+      if (spec.arguments.includes("remove") && spec.arguments.at(-1) === first.checkoutDirectory) {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "Managed process exited with code 255.", {
+          exitCode: 255,
+          stderr: "error: failed to delete checkout: Result too large",
+        });
+      }
+    };
+    const callsBeforeCleanup = processRunner.calls.length;
+
+    await expect(first.cleanup()).resolves.toBeUndefined();
+
+    expect(diskBudget.checkoutRemovals).toEqual([first.checkoutDirectory]);
+    expect(diskBudget.released).toEqual([first.attemptDirectory]);
+    expect(fileSystem.has(first.attemptDirectory)).toBe(false);
+    expect(fileSystem.has(second.checkoutDirectory)).toBe(true);
+    expect(
+      processRunner.calls
+        .slice(callsBeforeCleanup)
+        .map((call) =>
+          call.spec.arguments.filter((arg) => ["remove", "prune", "list"].includes(arg)),
+        ),
+    ).toEqual([["remove"], ["prune"], ["list"]]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      "Git worktree removal recovered through reserved checkout cleanup.",
+      { exitCode: 255, stderrSummary: "error: failed to delete checkout: Result too large" },
+    );
+    expect(progress.healthFaults).toEqual([]);
+    await second.cleanup();
+  });
+
+  it.each([
+    "checkout_removal",
+    "prune",
+    "list",
+    "retained_registration",
+    "missing_bare",
+    "embedded_worktree",
+  ] as const)(
+    "fails cleanup closed when Git removal recovery cannot verify %s",
+    async (failureStage) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const progress = preparationContext();
+      const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+        envelope("pull_request"),
+        progress.context,
+      );
+      const repository = `${gitSharedRootDirectory}\\repository-1844564.git`;
+      if (failureStage === "checkout_removal") {
+        diskBudget.checkoutRemovalError = new WorkspaceDiskBudgetError(
+          "HANDLE_BOUND_DELETE_FAILED",
+          "Checkout deletion failed.",
+        );
+      } else if (failureStage === "retained_registration") {
+        processRunner.worktreeListOutput = `worktree ${repository}\0bare\0\0worktree ${workspace.checkoutDirectory}\0HEAD ${headSha}\0detached\0\0`;
+      } else if (failureStage === "missing_bare") {
+        processRunner.worktreeListOutput = `worktree ${repository}\0\0`;
+      } else if (failureStage === "embedded_worktree") {
+        processRunner.worktreeListOutput = `worktree ${repository}\0bare\0worktree ${workspace.checkoutDirectory}\0\0`;
+      }
+      processRunner.onRun = (spec) => {
+        if (spec.arguments.includes("remove") || spec.arguments.includes(failureStage)) {
+          throw new ManagedProcessRunError("NON_ZERO_EXIT", "Managed Git failed.", {
+            exitCode: 255,
+            stderr: "Result too large",
+          });
+        }
+      };
+
+      await expect(workspace.cleanup()).rejects.toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
+      expect(progress.healthFaults).toHaveLength(1);
+      expect(fileSystem.has(workspace.attemptDirectory)).toBe(false);
+    },
+  );
+
+  it.each(["PROCESS_FAILED", "PROCESS_TERMINATED", "OUTPUT_TRUNCATED", "ABORTED"] as const)(
+    "does not attempt reserved checkout recovery for %s",
+    async (failureCode) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const progress = preparationContext();
+      const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+        envelope("pull_request"),
+        progress.context,
+      );
+      processRunner.onRun = (spec) => {
+        if (spec.arguments.includes("remove"))
+          throw new ManagedProcessRunError(failureCode, "Injected managed process failure.");
+      };
+
+      await expect(workspace.cleanup()).rejects.toMatchObject({ code: "WORKSPACE_CLEANUP_FAILED" });
+      expect(diskBudget.checkoutRemovals).toEqual([]);
+      expect(progress.healthFaults).toHaveLength(1);
+    },
+  );
+
+  it("logs bounded redacted stderr for a failed fixed Git cleanup command", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    diskBudget.checkoutRemovalError = new WorkspaceDiskBudgetError(
+      "HANDLE_BOUND_DELETE_FAILED",
+      "Injected reserved checkout removal failure.",
+    );
+    const progress = preparationContext();
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+      envelope("pull_request"),
+      progress.context,
+    );
+    const secret = "SYNTHETIC_GIT_CREDENTIAL_MUST_NOT_BE_LOGGED";
+    const stdout = "SYNTHETIC_STDOUT_MUST_NOT_BE_LOGGED";
+    const stderr = [
+      "\u001b[31merror: failed to delete 'checkout/node_modules/package': Permission denied\u001b[0m",
+      `Authorization: Bearer ${secret}`,
+      `Cookie: session=${secret}`,
+      `fatal: https://reviewer:${secret}@github.com/example/repository?token=${secret}&safe=ok`,
+      `password="${secret}"; api_key=${secret}`,
+      `\u202e${"remaining diagnostic text ".repeat(300)}`,
+    ].join("\r\n");
+    processRunner.onRun = (spec) => {
+      if (commandName(spec.arguments) === "worktree" && spec.arguments.includes("remove")) {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "Managed process exited with code 255.", {
+          exitCode: 255,
+          stdout,
+          stderr,
+        });
+      }
+    };
+
+    const failure: unknown = await workspace.cleanup().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(JobWorkspaceError);
+    if (!(failure instanceof JobWorkspaceError) || !(failure.cause instanceof JobWorkspaceError)) {
+      throw new Error("The cleanup failure did not retain its Git-specific cause.");
+    }
+    expect(failure.code).toBe("WORKSPACE_CLEANUP_FAILED");
+    expect(failure.cause.code).toBe("WORKSPACE_CLEANUP_FAILED");
+    expect(failure.cause.message).toContain("Git worktree remove exited with code 255; stderr:");
+    expect(failure.cause.message).toContain("Permission denied");
+    expect(failure.cause.message).toContain("[REDACTED]");
+    expect(failure.cause.message).toContain("...[truncated]");
+    expect(failure.cause.message.length).toBeLessThan(2_300);
+    for (const control of ["\u001b", "\r", "\n", "\u202e"]) {
+      expect(failure.cause.message).not.toContain(control);
+    }
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      new ConsoleJsonLogger("error").error("Cleanup diagnostic fixture.", { error: failure });
+      const serialized = String(log.mock.calls[0]?.[0]);
+      expect(serialized).toContain("Permission denied");
+      expect(serialized).toContain("Git worktree remove exited with code 255");
+      expect(serialized).not.toContain(secret);
+      expect(serialized).not.toContain(stdout);
+    } finally {
+      log.mockRestore();
+    }
+    expect(progress.healthFaults).toHaveLength(1);
+    expect(fileSystem.has(workspace.attemptDirectory)).toBe(false);
+  });
+
+  it("does not add process output to non-cleanup Git failure messages", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const output = "SYNTHETIC_OUTPUT_MUST_NOT_BE_LOGGED";
+    processRunner.onRun = (spec) => {
+      if (commandName(spec.arguments) === "fetch") {
+        throw new ManagedProcessRunError("NON_ZERO_EXIT", "Managed process exited with code 1.", {
+          exitCode: 1,
+          stdout: output,
+          stderr: output,
+        });
+      }
+    };
+    const failure: unknown = await provider(fileSystem, processRunner)
+      .prepare(envelope("pull_request"), preparationContext().context)
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(JobWorkspaceError);
+    if (!(failure instanceof JobWorkspaceError)) throw new Error("Expected a Git failure.");
+    expect(failure.code).toBe("GIT_COMMAND_FAILED");
+    expect(failure.message).not.toContain(output);
+    expect(failure.message).not.toContain("stderr:");
+  });
+
   it("attempts post-cleanup gc for low free space without blocking attempt removal", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
@@ -1293,6 +1527,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
           },
           removeAttempt: async () => {
             await fileSystem.removeTree(attemptDirectory);
+          },
+          removeCheckout: async () => {
+            await fileSystem.removeTree(win32.join(attemptDirectory, "checkout"));
           },
           abandon: () => {
             released = true;

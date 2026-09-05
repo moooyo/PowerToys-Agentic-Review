@@ -172,6 +172,7 @@ async function createExecutionRuntime(
         gcPruneAgeHours: execution.gitSharedGcPruneAgeHours,
       },
       diskBudget,
+      logger,
     });
     return {
       processHost,

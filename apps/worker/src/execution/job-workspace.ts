@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import { win32 } from "node:path";
 import type { JobExecutionEnvelope } from "@agentic-review/contracts";
+import type { Logger } from "../logging/logger.js";
 import type { ManagedProcessRunner, ManagedProcessRunResult } from "./managed-process-runner.js";
 import {
   ManagedProcessRunError,
@@ -85,6 +86,7 @@ export interface ProductionDisposableJobWorkspaceProviderOptions {
   readonly diskBudget: WorkspaceDiskBudget;
   readonly fileSystem?: JobWorkspaceFileSystem;
   readonly processRunner?: ManagedProcessRunner;
+  readonly logger?: Logger;
 }
 
 export type JobWorkspaceFailureCode =
@@ -244,6 +246,11 @@ const directoryGitEnvironmentNames = new Set(["SYSTEMROOT", "WINDIR"]);
 const maximumSharedGitScanEntries = 1_000_000;
 const maximumSharedGitScanDurationMs = 300_000;
 const maximumSharedGitGcPruneAgeHours = 24 * 365;
+const maximumGitCleanupStderrCharacters = 2_048;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: Remove terminal escape sequences from diagnostic output.
+const gitCleanupAnsiPattern = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: Control and direction characters must not reach diagnostic log messages.
+const gitLogControlPattern = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu;
 
 interface SharedCacheScanSummary {
   readonly totalBytes: bigint;
@@ -281,6 +288,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
   readonly #repositoryTails = new Map<string, Promise<void>>();
   readonly #activeWorktreeCounts = new Map<string, number>();
   readonly #lastRepositoryGcAt = new Map<string, number>();
+  readonly #logger: Logger | undefined;
 
   public constructor(options: ProductionDisposableJobWorkspaceProviderOptions) {
     try {
@@ -362,6 +370,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     this.#diskBudget = options.diskBudget;
     this.#fileSystem = options.fileSystem ?? new ProductionJobWorkspaceFileSystem();
     this.#processRunner = options.processRunner ?? new ProductionManagedProcessRunner();
+    this.#logger = options.logger;
   }
 
   public async prepare(
@@ -848,6 +857,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     await this.#withSharedCacheMutationLock(cleanupContext.signal, async () => {
       await this.#withRepositoryLock(repository.key, cleanupContext.signal, async () => {
         let worktreeRemoved = false;
+        let recoveredFailure: ManagedProcessRunError | undefined;
         try {
           await this.#runGit(
             layout,
@@ -874,22 +884,57 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           if (
             error instanceof JobWorkspaceError &&
             error.code === "GIT_LOCAL_OR_REVISION_FAILED" &&
-            (await guard.hasMissingCheckoutDirectory())
+            error.cause instanceof ManagedProcessRunError &&
+            error.cause.code === "NON_ZERO_EXIT"
           ) {
-            await this.#runGit(
-              layout,
-              guard,
-              diskReservation,
-              [`--git-dir=${repository.gitDirectory}`, "worktree", "prune", "--expire", "now"],
-              "deterministic_local",
-              cleanupContext,
-              null,
-              false,
-              undefined,
-              "cleanup_safe",
-            );
-            this.#markWorktreeRemoved(repository.key);
-            worktreeRemoved = true;
+            try {
+              await guard.validateForCleanup();
+              await diskReservation.removeCheckout();
+              if (!(await guard.hasMissingCheckoutDirectory())) {
+                throw new JobWorkspaceError(
+                  "WORKSPACE_PATH_UNSAFE",
+                  "Reserved checkout removal left the checkout path present.",
+                );
+              }
+              await this.#runGit(
+                layout,
+                guard,
+                diskReservation,
+                [`--git-dir=${repository.gitDirectory}`, "worktree", "prune", "--expire", "now"],
+                "deterministic_local",
+                cleanupContext,
+                null,
+                false,
+                undefined,
+                "cleanup_safe",
+              );
+              const registration = await this.#runGit(
+                layout,
+                guard,
+                diskReservation,
+                [`--git-dir=${repository.gitDirectory}`, "worktree", "list", "--porcelain", "-z"],
+                "deterministic_local",
+                cleanupContext,
+                null,
+                false,
+                undefined,
+                "cleanup_safe",
+              );
+              assertWorktreeRegistrationMissing(
+                registration.stdout,
+                repository.gitDirectory,
+                layout.checkoutDirectory,
+              );
+              this.#markWorktreeRemoved(repository.key);
+              worktreeRemoved = true;
+              recoveredFailure = error.cause;
+            } catch (recoveryError) {
+              throw new JobWorkspaceError(
+                "WORKSPACE_CLEANUP_FAILED",
+                `Reserved checkout recovery failed after ${error.message}`,
+                { cause: recoveryError },
+              );
+            }
           } else {
             throw error;
           }
@@ -905,6 +950,19 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           cleanupContext,
           "post_cleanup",
         );
+        if (recoveredFailure !== undefined) {
+          try {
+            this.#logger?.warn(
+              "Git worktree removal recovered through reserved checkout cleanup.",
+              {
+                exitCode: recoveredFailure.exitCode,
+                stderrSummary: summarizeGitCleanupStderr(recoveredFailure.stderr),
+              },
+            );
+          } catch {
+            // Diagnostic logging must not reverse a verified cleanup recovery.
+          }
+        }
       });
     });
   }
@@ -1409,7 +1467,11 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       }
       if (error instanceof JobWorkspaceError) throw error;
       if (error instanceof ManagedProcessRunError) {
-        throw classifyManagedGitFailure(error, failurePolicy);
+        throw classifyManagedGitFailure(
+          error,
+          failurePolicy,
+          validationMode === "cleanup_safe" ? cleanupGitOperation(commandArguments) : undefined,
+        );
       }
       throw new JobWorkspaceError("GIT_COMMAND_FAILED", "A trusted Git command failed.", {
         cause: error,
@@ -2158,6 +2220,7 @@ function workspaceDiskAdmissionError(error: WorkspaceDiskBudgetError): JobWorksp
 function classifyManagedGitFailure(
   error: ManagedProcessRunError,
   failurePolicy: "ambiguous_remote" | "deterministic_local" | "node_infrastructure",
+  cleanupOperation?: string,
 ): JobWorkspaceError {
   if (error.code === "OUTPUT_TRUNCATED" || error.code === "INVALID_UTF8_OUTPUT") {
     return new JobWorkspaceError(
@@ -2167,17 +2230,21 @@ function classifyManagedGitFailure(
     );
   }
   if (error.code === "NON_ZERO_EXIT") {
+    const diagnostic =
+      cleanupOperation === undefined
+        ? ""
+        : ` Git ${cleanupOperation} exited with code ${error.exitCode ?? "unknown"}; stderr: ${summarizeGitCleanupStderr(error.stderr)}`;
     if (failurePolicy === "node_infrastructure") {
       return new JobWorkspaceError(
         "GIT_INFRASTRUCTURE_FAILED",
-        "Git could not initialize the trusted local workspace.",
+        `Git could not initialize the trusted local workspace.${diagnostic}`,
         { cause: error },
       );
     }
     if (failurePolicy === "deterministic_local") {
       return new JobWorkspaceError(
         "GIT_LOCAL_OR_REVISION_FAILED",
-        "A deterministic local Git or fetched-revision operation failed.",
+        `A deterministic local Git or fetched-revision operation failed.${diagnostic}`,
         { cause: error },
       );
     }
@@ -2185,7 +2252,7 @@ function classifyManagedGitFailure(
     // the trusted job max-attempt policy, after which the Server dead-letters the job for review.
     return new JobWorkspaceError(
       "GIT_COMMAND_FAILED",
-      "Git returned a non-zero exit whose source cannot be classified safely.",
+      `Git returned a non-zero exit whose source cannot be classified safely.${diagnostic}`,
       { cause: error },
     );
   }
@@ -2194,6 +2261,95 @@ function classifyManagedGitFailure(
     "The managed Git process failed because Worker infrastructure was unavailable.",
     { cause: error },
   );
+}
+
+function cleanupGitOperation(argumentsList: readonly string[]): string {
+  if (argumentsList.includes("worktree")) {
+    if (argumentsList.includes("remove")) return "worktree remove";
+    return argumentsList.includes("list") ? "worktree list" : "worktree prune";
+  }
+  if (argumentsList.includes("reflog")) return "reflog expire";
+  if (argumentsList.includes("gc")) return "gc";
+  return "cleanup";
+}
+
+function assertWorktreeRegistrationMissing(
+  output: string,
+  repositoryDirectory: string,
+  checkoutDirectory: string,
+): void {
+  const fail = (): never => {
+    throw new JobWorkspaceError(
+      "GIT_LOCAL_OR_REVISION_FAILED",
+      "Git did not confirm that the removed checkout registration is absent.",
+    );
+  };
+  if (!output.endsWith("\0\0")) fail();
+  let repositoryPresent = false;
+  const seen = new Set<string>();
+  for (const record of output.slice(0, -2).split("\0\0")) {
+    const fields = record.split("\0");
+    const firstField = fields[0] ?? "";
+    if (!firstField.startsWith("worktree ")) fail();
+    if (
+      fields
+        .slice(1)
+        .some(
+          (field) =>
+            !/^(?:bare|HEAD [a-f0-9]{40}(?:[a-f0-9]{24})?|branch refs\/[^\r\n]+|detached|locked(?: [^\r\n]*)?|prunable(?: [^\r\n]*)?)$/u.test(
+              field,
+            ),
+        )
+    ) {
+      fail();
+    }
+    const path = firstField.slice("worktree ".length);
+    try {
+      assertWindowsLocalAbsolutePath(path, "Git worktree registration", false);
+    } catch {
+      fail();
+    }
+    const identity = comparableWindowsPath(path);
+    if (seen.has(identity) || sameWindowsPath(path, checkoutDirectory)) fail();
+    seen.add(identity);
+    if (sameWindowsPath(path, repositoryDirectory)) {
+      if (fields.filter((field) => field === "bare").length !== 1) fail();
+      repositoryPresent = true;
+    }
+  }
+  if (!repositoryPresent) fail();
+}
+
+function summarizeGitCleanupStderr(stderr: string): string {
+  // The managed runner already bounds its capture. Redact before truncation so a credential
+  // spanning the output boundary cannot leave a partial secret in the operator-visible message.
+  const summary = stderr
+    .replace(gitCleanupAnsiPattern, "")
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=][^\r\n]*/giu,
+      "[REDACTED]",
+    )
+    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/giu, "[REDACTED]")
+    .replace(/(https?:\/\/)[^\s/"'<>]*@/giu, "$1[REDACTED]@")
+    .replace(
+      /([?&][^\s&=]*(?:token|key|secret|password|credential|signature)[^\s&=]*=)[^\s&"'<>]*/giu,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})\b/gu,
+      "[REDACTED]",
+    )
+    .replace(
+      /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|secret|token)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/giu,
+      "[REDACTED]",
+    )
+    .replace(gitLogControlPattern, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (summary.length === 0) return "[empty]";
+  return summary.length <= maximumGitCleanupStderrCharacters
+    ? summary
+    : `${summary.slice(0, maximumGitCleanupStderrCharacters - 14).toWellFormed()}...[truncated]`;
 }
 
 function workspaceDiskLimitError(error: WorkspaceDiskBudgetError): JobWorkspaceError {
