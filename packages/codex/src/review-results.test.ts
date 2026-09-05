@@ -119,6 +119,27 @@ describe("PrReviewPlanV1Schema", () => {
       }),
     ).toBe(false);
   });
+
+  it.each([
+    "/src/file.ts",
+    "C:/repo/file.ts",
+    "c:relative.ts",
+    "\\\\server\\share\\file.ts",
+    "../file.ts",
+    "src/../file.ts",
+    "src/..",
+    "src/file\u0000.ts",
+    "src/file\r.ts",
+    "src/file\n.ts",
+    "src/file\u001f.ts",
+  ])("rejects unsafe repository paths at the authoritative runtime boundary: %j", (path) => {
+    expect(
+      Value.Check(PrReviewPlanV1Schema, {
+        ...validPrReviewPlan,
+        findings: [{ ...validPrReviewPlan.findings[0], path }],
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("IssueTriageV1Schema", () => {
@@ -160,6 +181,32 @@ describe("model output schemas", () => {
     expect(schema).not.toHaveProperty("anyOf");
     assertStructuredOutputSchema(schema, "$");
   });
+
+  it.each([
+    "src/file.ts",
+    ".github/workflows/ci.yml",
+    "docs with spaces/guide.md",
+    "src/\u4e2d\u6587.ts",
+  ])("accepts portable repository paths in model output: %s", (path) => {
+    expect(
+      Value.Check(PrReviewPlanV1ModelOutputSchema, {
+        ...validPrReviewPlan,
+        findings: [{ ...validPrReviewPlan.findings[0], path }],
+      }),
+    ).toBe(true);
+  });
+
+  it.each(["../file.ts", "src/../file.ts", "C:/repo/file.ts"])(
+    "still rejects unsafe model output with the authoritative runtime schema: %s",
+    (path) => {
+      const result = {
+        ...validPrReviewPlan,
+        findings: [{ ...validPrReviewPlan.findings[0], path }],
+      };
+      expect(Value.Check(PrReviewPlanV1ModelOutputSchema, result)).toBe(true);
+      expect(Value.Check(PrReviewPlanV1Schema, result)).toBe(false);
+    },
+  );
 });
 
 function assertStructuredOutputSchema(schema: unknown, path: string): void {
@@ -172,6 +219,14 @@ function assertStructuredOutputSchema(schema: unknown, path: string): void {
       supportedStructuredOutputKeywords.has(keyword),
       `${path} uses unsupported keyword ${keyword}`,
     ).toBe(true);
+  }
+
+  if (record.pattern !== undefined) {
+    expect(record.pattern, `${path}.pattern`).toBeTypeOf("string");
+    const pattern = record.pattern as string;
+    expect(pattern, `${path}.pattern must not use lookaround`).not.toMatch(/\(\?(?:[=!]|<[=!])/u);
+    expect(pattern, `${path}.pattern must not use backreferences`).not.toMatch(/\\(?:[1-9]|k<)/u);
+    expect(() => new RegExp(pattern, "u")).not.toThrow();
   }
 
   if (record.type === "object") {

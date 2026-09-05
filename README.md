@@ -28,8 +28,10 @@ baseline.
 
 Admitted repository revisions are trusted execution inputs. Pull request jobs use one persistent
 shared Git object store per configured public repository. Before each job, the Worker fetches the
-current `main` and exact pull request head, verifies the expected SHAs and merge base, and creates a
-detached per-attempt worktree. Repeated reviews therefore transfer only missing Git objects.
+immutable `baseSha` and pull request head with full history, verifies both SHAs and their merge base,
+and creates a detached per-attempt worktree. Any PR base branch is supported; there is no `main`
+assumption or fallback. Fetch disables Git auto-maintenance so the Worker owns maintenance timing.
+Repeated reviews therefore transfer only missing Git objects.
 The Worker enforces a separate shared-cache byte limit and free-space guard, performs conservative
 age-based Git maintenance only when worktree metadata is inactive, and drains if reclamation cannot
 restore the configured budget.
@@ -39,8 +41,16 @@ and test inside the disposable worktree. ProcessHost and Windows Job Objects sti
 process-count, memory, timeout, and output limits. Worker and Server credentials are not propagated
 to child processes.
 
+`WORKER_EXECUTION_PROFILE_DIRECTORY` is a dedicated persistent Codex home. The Worker validates its
+canonical path before cleanup, loads only allowed model/provider/auth settings, and enforces task
+settings with `--ignore-user-config` and CLI overrides. Codex's project trust is `untrusted` only to
+suppress repository configuration; admitted code remains trusted and `AGENTS.md` is still loaded.
+Provider header credentials reach only native Codex, while build/test tools receive seven explicit
+non-secret environment variables.
+
 ProcessHost also holds a Windows global mutex derived from the resolved Worker data root, preventing
 overlapping execution Workers from mutating the same cache or workspace tree.
+If initialization fails after ProcessHost starts, the Worker closes it before reporting the error.
 
 The MVP has one result channel: an inline, schema-validated completion payload. There is no result
 artifact upload or Server artifact store.
@@ -58,6 +68,9 @@ credentials.
 ## Development
 
 The repository requires Node.js 24.20.x and pnpm 11.24.x.
+Run verification on `test-env` by default; local verification requires explicit authorization for
+the current task. Such authorization was granted for the ongoing Windows E2E follow-up, which is
+not yet recorded as complete.
 
 ```powershell
 pnpm install --frozen-lockfile

@@ -323,6 +323,86 @@ describe("reconcileGitHubPolling", () => {
     expect(secondEvents[0]?.sourceEventId).not.toBe(firstRevision?.sourceEventId);
   });
 
+  it("scopes a repeated PR revision to the reopened assignment without using polling time", async () => {
+    const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
+      items: request.query.includes("review-requested") ? [] : [assignedPullRequestSearchItem],
+      nextPage: null,
+    });
+    const firstEvents: NormalizedSchedulingEvent[] = [];
+    const first = await reconcile(createClient({ search }), firstEvents);
+    const closed = await reconcile(
+      createClient({ search: async () => ({ items: [], nextPage: null }) }),
+      [],
+      { previousActiveProjection: first.nextActiveProjection },
+    );
+    const reopenedClient = createClient({
+      search,
+      timeline: async () => ({
+        items: [{ ...assignedPullRequestEvent, githubEventId: 2_003 }],
+        nextPage: null,
+      }),
+    });
+    const reopenedEvents: NormalizedSchedulingEvent[] = [];
+    const reopened = await reconcile(reopenedClient, reopenedEvents, {
+      previousActiveProjection: closed.nextActiveProjection,
+    });
+    const firstRevision = firstEvents.find((event) => event.action === "revision_observed");
+    const reopenedRevision = reopenedEvents.find((event) => event.action === "revision_observed");
+
+    expect(reopenedRevision?.revision.revisionKey).toBe(firstRevision?.revision.revisionKey);
+    expect(reopenedRevision?.workItem.updatedAt).toBe(firstRevision?.workItem.updatedAt);
+    expect(reopenedRevision?.sourceEventId).not.toBe(firstRevision?.sourceEventId);
+
+    const retryEvents: NormalizedSchedulingEvent[] = [];
+    await reconcile(reopenedClient, retryEvents, {
+      previousActiveProjection: closed.nextActiveProjection,
+      now: () => new Date("2026-08-31T12:00:00.000Z"),
+    });
+    const retriedRevision = retryEvents.find((event) => event.action === "revision_observed");
+    expect(retriedRevision?.sourceEventId).toBe(reopenedRevision?.sourceEventId);
+    expect(retriedRevision?.observedAt).not.toBe(reopenedRevision?.observedAt);
+
+    const stableEvents: NormalizedSchedulingEvent[] = [];
+    await reconcile(reopenedClient, stableEvents, {
+      previousActiveProjection: reopened.nextActiveProjection,
+    });
+    expect(stableEvents).toEqual([]);
+  });
+
+  it("distinguishes a PR revision revisited later within the same active assignment", async () => {
+    const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
+      items: request.query.includes("review-requested") ? [] : [assignedPullRequestSearchItem],
+      nextPage: null,
+    });
+    const firstEvents: NormalizedSchedulingEvent[] = [];
+    const first = await reconcile(createClient({ search }), firstEvents);
+    const advanced = await reconcile(
+      createClient({
+        search,
+        pullRequest: { ...pullRequest, headSha: "c".repeat(40), updatedAt: "2026-08-30T08:00:00Z" },
+      }),
+      [],
+      { previousActiveProjection: first.nextActiveProjection },
+    );
+    const revisitedEvents: NormalizedSchedulingEvent[] = [];
+    const revisited = await reconcile(
+      createClient({
+        search,
+        pullRequest: { ...pullRequest, updatedAt: "2026-08-30T09:00:00Z" },
+      }),
+      revisitedEvents,
+      { previousActiveProjection: advanced.nextActiveProjection },
+    );
+    const firstRevision = firstEvents.find((event) => event.action === "revision_observed");
+
+    expect(revisitedEvents).toHaveLength(1);
+    expect(revisitedEvents[0]?.revision.revisionKey).toBe(firstRevision?.revision.revisionKey);
+    expect(revisitedEvents[0]?.sourceEventId).not.toBe(firstRevision?.sourceEventId);
+    expect(revisited.nextActiveProjection.workItems[0]?.activeRequests).toEqual(
+      first.nextActiveProjection.workItems[0]?.activeRequests,
+    );
+  });
+
   it("observes edited issue content while its assignment remains active", async () => {
     const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
       items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],

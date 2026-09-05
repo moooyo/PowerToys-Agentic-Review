@@ -53,6 +53,8 @@ export interface GitHubSearchItem {
   readonly kind: "issue" | "pull_request";
   readonly githubWorkItemId: number;
   readonly number: number;
+  /** Reuse the detail fetched to resolve a search result's issue ID to its canonical PR ID. */
+  readonly pullRequestSnapshot?: GitHubPullRequestSnapshot;
 }
 
 interface GitHubWorkItemSnapshotBase {
@@ -243,6 +245,7 @@ interface Candidate {
   readonly kind: GitHubSearchItem["kind"];
   readonly githubWorkItemId: number;
   readonly number: number;
+  readonly pullRequestSnapshot?: GitHubPullRequestSnapshot;
   readonly activeRequestKinds: Set<SchedulingRequestKind>;
 }
 
@@ -347,11 +350,12 @@ export async function reconcileGitHubPolling(
               number: target.number,
               ...requestSignal,
             })
-          : await input.client.getPullRequest({
+          : (current?.pullRequestSnapshot ??
+            (await input.client.getPullRequest({
               repositoryFullName: input.repository.fullName,
               number: target.number,
               ...requestSignal,
-            });
+            })));
     } catch (error) {
       if (
         current === undefined &&
@@ -498,6 +502,9 @@ export async function reconcileGitHubPolling(
           repository,
           workItem,
           revision,
+          activeRequestSourceIds: [...activeRequests.values()].map(
+            (request) => request.openedSourceEventId,
+          ),
           observedAt,
         }),
       );
@@ -672,6 +679,9 @@ function mergeCandidates(
       kind: item.kind,
       githubWorkItemId: item.githubWorkItemId,
       number: item.number,
+      ...(item.pullRequestSnapshot === undefined
+        ? {}
+        : { pullRequestSnapshot: item.pullRequestSnapshot }),
       activeRequestKinds: new Set([requestKind]),
     });
   };
@@ -855,6 +865,7 @@ function createRevisionObservedEvent(input: {
   readonly repository: GitHubRepository;
   readonly workItem: GitHubWorkItem;
   readonly revision: GitHubWorkItemRevision;
+  readonly activeRequestSourceIds: readonly string[];
   readonly observedAt: string;
 }): NormalizedSchedulingEvent {
   const sourceMaterial =
@@ -872,7 +883,13 @@ function createRevisionObservedEvent(input: {
           input.revision.baseSha,
           input.revision.headSha,
         ];
-  const sourceDigest = stableDigest(sourceMaterial);
+  // A revision can recur after reauthorization or a branch reset. Scope its observation to
+  // the active requests and GitHub snapshot timestamp, independently of polling wall-clock time.
+  const sourceDigest = stableDigest([
+    ...sourceMaterial,
+    input.workItem.updatedAt,
+    [...input.activeRequestSourceIds].sort(),
+  ]);
   return {
     contractVersion: 1,
     eventId: `github-poll-event:v1:revision-observed:${sourceDigest}`,

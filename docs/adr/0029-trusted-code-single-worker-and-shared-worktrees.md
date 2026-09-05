@@ -35,18 +35,35 @@ repository materialization, and result reporting.
    - Keep ProcessHost and Job Object based process containment.
    - Keep explicit resource limits.
    - Do not pass server credentials to child processes.
+   - On initialization failure after ProcessHost creation, close it before propagating the original
+     error so the child process and singleton are not retained by a failed startup.
 
 4. Pull request repository and worktree model:
    - Maintain one persistent shared Git repository/object store per upstream repository.
-   - Before each pull request task, fetch from remote to make required objects available.
+   - Before each pull request task, fetch its immutable `baseSha` and PR head ref with full history.
+     Base branch names are unrestricted; do not assume or fall back to `main`.
    - Create a detached worktree at the exact pull request task `headSha`.
    - Retain enough commit history to compute `merge-base` reliably for task and review workflows.
    - Remove the task worktree after task completion.
+   - Disable fetch auto-maintenance and retain Worker-owned conservative cache accounting and GC.
 
 5. Result and log contract:
    - Inline result is the only result delivery path for MVP.
    - Ordinary execution logs are not a second result channel.
    - Ordinary execution logs may be exposed later as optional artifacts.
+
+6. Codex identity and configuration:
+   - Use `WORKER_EXECUTION_PROFILE_DIRECTORY` as a dedicated persistent Codex home, with
+     operator-provisioned configuration and supported authentication.
+   - Verify canonical directory identity and separation before orphan cleanup; retain disposable
+     task control, temporary, and user-profile directories.
+   - Load only allowed model/provider/auth settings, then enforce execution settings through
+     `--ignore-user-config` and fixed CLI overrides. Project trust `untrusted` suppresses project
+     configuration without changing the trusted-code admission policy or `AGENTS.md` loading.
+   - Pass selected provider header credentials only in the native Codex environment. Build/test
+     shells receive seven explicit non-secret variables and no authentication directory or tokens.
+   - Disable MCP, plugins, hooks, notifications, and inherited additional writable roots; add only
+     the current task temporary directory to the worktree's write access.
 
 ## Consequences
 

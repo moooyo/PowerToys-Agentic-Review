@@ -31,6 +31,28 @@ const normalizeFailure = (error: unknown): Error =>
     ? error
     : new Error("The server received a non-Error lifecycle failure.", { cause: error });
 
+const summarizeGitHubPollingError = (
+  error: unknown,
+  token: string,
+): { name: string; message: string } => {
+  if (!(error instanceof Error)) {
+    return {
+      name: "UnknownError",
+      message: "The GitHub polling operation received a non-Error failure.",
+    };
+  }
+  const sanitize = (value: string, maximumLength: number): string =>
+    value
+      .replaceAll(token, "[REDACTED]")
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: Strip control characters from untrusted diagnostic text.
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .slice(0, maximumLength);
+  return {
+    name: sanitize(error.name, 128),
+    message: sanitize(error.message, 2_048),
+  };
+};
+
 const start = async (): Promise<void> => {
   assertLinuxServerPlatform();
   const lifecycle = createProductionServerLifecycle({
@@ -178,7 +200,10 @@ const start = async (): Promise<void> => {
         signal: lifecycle.signal,
         observeError: (error, context) => {
           app.log.error(
-            { error, repository: context.repository.fullName },
+            {
+              error: summarizeGitHubPollingError(error, pollingConfig.token),
+              repository: context.repository.fullName,
+            },
             "GitHub polling reconciliation failed for a repository.",
           );
         },
@@ -192,7 +217,10 @@ const start = async (): Promise<void> => {
         },
       });
       const pollingCompletion = pollingCoordinator.run().catch((error: unknown) => {
-        app.log.error({ error }, "GitHub polling coordinator stopped unexpectedly.");
+        app.log.error(
+          { error: summarizeGitHubPollingError(error, pollingConfig.token) },
+          "GitHub polling coordinator stopped unexpectedly.",
+        );
         throw error;
       });
       lifecycle.trackBackground("github-polling", pollingCompletion);

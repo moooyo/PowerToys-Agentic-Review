@@ -27,9 +27,10 @@ replaces their credential-isolation threat model with one trusted-code Worker pr
 ## Shared repositories and worktrees
 
 Each configured public GitHub repository has one persistent bare repository beneath
-`WORKER_GIT_SHARED_ROOT_DIRECTORY`. Before a pull request job starts, the Worker fetches the current
-`main` ref and the GitHub pull request head ref into that shared object store, verifies the
-envelope's base and head SHAs, and requires a valid merge base. It then creates a detached worktree
+`WORKER_GIT_SHARED_ROOT_DIRECTORY`. Before a pull request job starts, the Worker fetches the immutable
+envelope `baseSha` and the GitHub pull request head ref with full history, verifies both commit SHAs,
+and requires a valid merge base. It supports arbitrary base refs, including `dev`, with no `main`
+assumption or fallback. It then creates a detached worktree
 for the exact head SHA beneath `WORKER_WORKSPACE_ROOT_DIRECTORY`.
 
 The current Git environment disables credential helpers and uses an anonymous GitHub HTTPS URL, so
@@ -44,8 +45,23 @@ directory. The next preparation also prunes stale worktree metadata left by an i
 The shared object store is not recreated for every attempt, so repeated reviews download only
 missing Git objects. Shared repository cleanup and conservative Git garbage collection are
 performed by the Worker runtime using the shared-Git policy variables in
-`worker-config.template.psd1`. Manual repository-wide GC procedures are out of scope for this
+`worker-config.template.psd1`. Fetch uses `--no-auto-maintenance` to preserve Worker ownership of
+maintenance timing. Manual repository-wide GC procedures are out of scope for this
 deployment profile.
+
+Workspace admission, monitoring, and cleanup use bounded disk operations.
+`WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS` defaults to `30000` and accepts `100..300000` milliseconds;
+each operation's deadline includes time waiting for the accounting lock and is shared by all
+snapshot retries. `WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT` defaults to `100000` and accepts
+`1..1000000` entries per accounting scan. Larger pnpm trees may need higher limits based on host I/O
+performance. Raising them permits longer scans and delays disk-budget failure detection; per-attempt
+and total quotas, reserved headroom, and the free-space floor remain enforced. Shared Git accounting
+continues to use its separate `WORKER_GIT_SHARED_SCAN_*` settings.
+
+Attempt disk scans cover preparation and active review commands. Fixed Git cleanup and maintenance
+commands use cleanup path guards and managed process limits without scanning the attempt being
+dismantled: removing a checkout can temporarily leave pnpm store links dangling. Shared-cache
+accounting remains enforced, and final attempt deletion does not follow links into their targets.
 
 ## Worker authentication
 
@@ -63,6 +79,31 @@ The file contains exactly one compact JSON object:
 
 The parent Worker process owns this Token. Git, Codex, ProcessHost children, repository commands,
 and validation commands receive replacement environments that do not contain it.
+
+## Codex profile and execution configuration
+
+`WORKER_EXECUTION_PROFILE_DIRECTORY` is a dedicated persistent `CODEX_HOME`, separate from all task
+workspaces, temporary roots, shared Git state, and trusted binaries. Before starting ProcessHost or
+sweeping orphan workspaces, the Worker checks directory identities with `lstat` and `realpath`,
+rejecting links, aliases, overlap, and observed changes. Per-attempt `USERPROFILE`, temporary files,
+and control files remain disposable.
+
+Provision `config.toml` and supported authentication under the actual Worker Windows identity in
+that home. File/keyring authentication and supported provider authentication commands are allowed.
+The Worker does not overwrite the profile or copy its authentication files into a task. A login in
+another default Codex profile is not sufficient. Native compatibility checks currently pin Codex
+0.145.0.
+
+The loader selects only allowed model/provider/auth settings. `--ignore-user-config` and fixed CLI
+overrides suppress other user configuration, MCP, plugins, hooks, notifications, and inherited
+extra writable roots. Project trust is `untrusted` to suppress repository config; admitted code
+remains trusted, and `AGENTS.md` is still loaded. Approval uses `--config approval_policy="never"`.
+
+Selected provider HTTP headers become `CODEX_PROVIDER_HEADER_<n>` variables passed only to native
+Codex, never credential values in argv. Build/test shells receive exactly `COMSPEC`, `PATH`,
+`PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and `USERPROFILE`; their environment contains neither the
+Codex home nor provider, Worker, or GitHub credentials. Extra write access is limited to the current
+task temporary directory.
 
 ## Development launch
 
@@ -89,9 +130,16 @@ Copy-Item .\deploy\worker\worker-config.template.psd1 .\deploy\worker\worker-con
 Worker-side shared Git cache and conservative GC controls. Process-level values such as `NODE_ENV`
 remain service-manager configuration.
 
+The launch script resolves Node.js and normalizes `PATH`. Do not add `WORKER_RECIPE_IDS`; Codex runs
+repository build/test commands directly. If initialization fails after ProcessHost starts, the
+Worker waits for ProcessHost closure before reporting the original error.
+
 For manual acceptance on Windows, follow `deploy/worker/worker-e2e-runbook.md` and capture evidence
 with `deploy/worker/invoke-worker-e2e.ps1`. That script is an evidence collector and does not run
 an automated end-to-end workflow.
+The current local Windows exercise is explicitly authorized and uses an approved PR targeting
+`dev`; real E2E acceptance is still in progress. Other local verification continues to require
+task-specific authorization.
 
 Production Server connections use HTTPS. Package signing is a deployment concern only when Worker
 bundles are distributed automatically; it is not required for a manual trusted deployment.

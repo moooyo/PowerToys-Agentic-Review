@@ -4,6 +4,11 @@ Status date: 2026-09-05
 
 Starting commit: `f4dadbc36bda55aa679590af538e2d397ecdcaf6`
 
+Later update: the request for a PR against `main` recorded below is superseded. The current
+[Windows E2E runbook](../../deploy/worker/worker-e2e-runbook.md) accepts any approved target base
+branch. The collector's `real-public-pr` criterion requires the PR's actual target base branch
+and immutable base/head SHAs and remains manual with `acceptanceStatus = 'unverified'`.
+
 ## Outcome and remaining objective
 
 The remaining objective from the worker-cache-governance handoff is still the real Windows E2E

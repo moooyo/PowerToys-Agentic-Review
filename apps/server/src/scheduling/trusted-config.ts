@@ -111,7 +111,7 @@ const promptSpecifications = [
     name: "pull-request-review",
     version: "1",
     outputSchemaId: "PrReviewPlanV1",
-    outputSchemaSha256: "fd201092072879b125cdd8aa202b1309c8852f3d19b9f46dc279e318e78715be",
+    outputSchemaSha256: "51792222539ef85ed7d12c810b82772de673701c6c8f0011e54aa2fc82336d36",
   },
 ] as const satisfies readonly PromptSpecification[];
 

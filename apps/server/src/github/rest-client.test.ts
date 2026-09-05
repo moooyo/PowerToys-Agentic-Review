@@ -1,5 +1,7 @@
+import type { NormalizedSchedulingEvent } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 
+import { reconcileGitHubPolling } from "../../dist/github/poller.js";
 import {
   GitHubRestApiError,
   GitHubRestClient,
@@ -15,6 +17,30 @@ const repositoryPayload = {
   private: false,
 };
 
+const pullRequestPayload = {
+  id: 4092547032,
+  node_id: "PR_kwDOQ37W1M7z70_Y",
+  number: 1,
+  title: "Recorded pull request identity fixture",
+  body: null,
+  state: "open",
+  user: { id: 42196638, login: "moooyo", type: "User" },
+  html_url: "https://github.com/moooyo/kiss-translator-m3/pull/1",
+  created_at: "2026-09-05T00:00:00Z",
+  updated_at: "2026-09-05T01:00:00Z",
+  closed_at: null,
+  draft: false,
+  base: { sha: "174d9b6a6f4f301c8d99378c44ce742d53b70446" },
+  head: { sha: "d32380d8401a4d0d34f9622bfc87f676fd037214" },
+};
+
+const pullRequestSearchItem = {
+  id: 4930710068,
+  node_id: pullRequestPayload.node_id,
+  number: 1,
+  pull_request: { url: "https://untrusted-response.example/pulls/1" },
+};
+
 describe("GitHubRestClient", () => {
   it("injects authentication/version headers and maps pagination plus rate limits", async () => {
     const token = "secret-token-value";
@@ -26,13 +52,21 @@ describe("GitHubRestClient", () => {
         headers: new Headers(init?.headers),
         signal: init?.signal instanceof AbortSignal ? init.signal : null,
       });
+      if (new URL(String(input)).pathname.endsWith("/pulls/20")) {
+        return Response.json({ ...pullRequestPayload, id: 20, node_id: "PR_20", number: 20 });
+      }
       return new Response(
         JSON.stringify({
           total_count: 2,
           incomplete_results: false,
           items: [
             { id: 10, number: 10 },
-            { id: 20, number: 20, pull_request: { url: "https://api.github.test/pulls/20" } },
+            {
+              id: 20,
+              node_id: "PR_20",
+              number: 20,
+              pull_request: { url: "https://api.github.test/pulls/20" },
+            },
           ],
         }),
         {
@@ -65,7 +99,7 @@ describe("GitHubRestClient", () => {
       signal: controller.signal,
     });
 
-    expect(result.items).toEqual([
+    expect(result.items).toMatchObject([
       { kind: "issue", githubWorkItemId: 10, number: 10 },
       { kind: "pull_request", githubWorkItemId: 20, number: 20 },
     ]);
@@ -82,6 +116,106 @@ describe("GitHubRestClient", () => {
     expect(requests[0]?.signal).toBe(controller.signal);
     expect(observations[0]).toMatchObject({ status: 200, notModified: false });
   });
+
+  it("reconciles distinct issue-search and pull-request IDs using the canonical PR identity", async () => {
+    const requestedUrls: string[] = [];
+    const events: NormalizedSchedulingEvent[] = [];
+    const client = new GitHubRestClient({
+      token: "fixture-token",
+      userAgent: "agentic-review-tests/1.0",
+      fetchImplementation: async (input) => {
+        const url = new URL(String(input));
+        requestedUrls.push(url.href);
+        if (url.pathname === "/repos/moooyo/kiss-translator-m3") {
+          return Response.json({
+            ...repositoryPayload,
+            id: 1132386004,
+            full_name: "moooyo/kiss-translator-m3",
+            html_url: "https://github.com/moooyo/kiss-translator-m3",
+            default_branch: "dev",
+          });
+        }
+        if (url.pathname === "/search/issues") {
+          const assigned = url.searchParams.get("q")?.includes("assignee:") === true;
+          return Response.json({
+            total_count: assigned ? 1 : 0,
+            incomplete_results: false,
+            items: assigned ? [pullRequestSearchItem] : [],
+          });
+        }
+        if (url.pathname === "/repos/moooyo/kiss-translator-m3/pulls/1") {
+          return Response.json(pullRequestPayload);
+        }
+        if (url.pathname === "/repos/moooyo/kiss-translator-m3/issues/1/timeline") {
+          return Response.json([
+            {
+              id: 10001,
+              event: "assigned",
+              actor: pullRequestPayload.user,
+              assignee: pullRequestPayload.user,
+              created_at: "2026-09-05T01:00:00Z",
+            },
+          ]);
+        }
+        throw new Error("Unexpected fixture request.");
+      },
+    });
+    const result = await reconcileGitHubPolling({
+      client,
+      repository: { githubRepositoryId: 1132386004, fullName: "moooyo/kiss-translator-m3" },
+      reviewer: { githubUserId: 42196638, login: "moooyo" },
+      ingest: (event) => {
+        events.push(event);
+      },
+      now: () => new Date("2026-09-05T02:00:00Z"),
+    });
+
+    expect(result.uniqueWorkItemCount).toBe(1);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "request_opened",
+          requestKind: "assignment",
+          workItem: expect.objectContaining({ githubWorkItemId: 4092547032, number: 1 }),
+        }),
+      ]),
+    );
+    expect(result.nextActiveProjection.workItems[0]?.workItem.githubWorkItemId).toBe(4092547032);
+    expect(requestedUrls.filter((url) => new URL(url).pathname.endsWith("/pulls/1"))).toHaveLength(
+      1,
+    );
+    expect(requestedUrls.every((url) => new URL(url).origin === "https://api.github.com")).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    { field: "number", replacement: { number: 2 } },
+    { field: "node ID", replacement: { node_id: "PR_different" } },
+  ])(
+    "rejects PR details whose $field does not match the search result",
+    async ({ replacement }) => {
+      const client = new GitHubRestClient({
+        token: "fixture-token",
+        userAgent: "agentic-review-tests/1.0",
+        fetchImplementation: async (input) =>
+          Response.json(
+            new URL(String(input)).pathname === "/search/issues"
+              ? { total_count: 1, incomplete_results: false, items: [pullRequestSearchItem] }
+              : { ...pullRequestPayload, ...replacement },
+          ),
+      });
+
+      await expect(
+        client.searchIssuesAndPullRequests({
+          repositoryFullName: "moooyo/kiss-translator-m3",
+          query: "repo:moooyo/kiss-translator-m3 is:open assignee:moooyo",
+          page: 1,
+          perPage: 100,
+        }),
+      ).rejects.toThrow(/does not match its pull request detail identity/u);
+    },
+  );
 
   it("uses ETags and serves a 304 response from its bounded representation cache", async () => {
     const seenIfNoneMatch: Array<string | null> = [];

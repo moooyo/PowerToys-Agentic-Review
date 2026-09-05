@@ -155,3 +155,6 @@ jobs:
 
       - name: Test Worker E2E evidence collector
         run: ./deploy/worker/tests/invoke-worker-e2e.tests.ps1
+
+      - name: Test Worker launch helpers
+        run: ./deploy/worker/tests/start-worker.tests.ps1

@@ -24,7 +24,7 @@ import type {
   ProcessLaunchSpec,
 } from "./process-host-protocol.js";
 import {
-  buildReviewCodexConfig,
+  buildReviewCodexConfigurationOverrides,
   type ReviewFileHandle,
   type ReviewFileIO,
   type ReviewFileStat,
@@ -37,12 +37,24 @@ const paths = {
   attempt: "C:\\AgenticReview\\attempt-1",
   checkout: "C:\\AgenticReview\\attempt-1\\checkout",
   control: "C:\\AgenticReview\\attempt-1\\control",
-  codexHome: "C:\\AgenticReview\\attempt-1\\codex-home",
+  codexHome: "C:\\AgenticReview\\Profile",
+  attemptCodexHome: "C:\\AgenticReview\\attempt-1\\codex-home",
   temp: "C:\\AgenticReview\\attempt-1\\temp",
   userProfile: "C:\\AgenticReview\\attempt-1\\user-profile",
   result: "C:\\AgenticReview\\attempt-1\\control\\result.json",
   schema: "C:\\AgenticReview\\attempt-1\\control\\schema.json",
-  config: "C:\\AgenticReview\\attempt-1\\codex-home\\config.toml",
+  config: "C:\\AgenticReview\\Profile\\config.toml",
+  attemptConfig: "C:\\AgenticReview\\attempt-1\\codex-home\\config.toml",
+} as const;
+
+const shellEnvironment = {
+  COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+  PATH: "C:\\Windows\\System32;C:\\Tools",
+  PATHEXT: ".COM;.EXE;.BAT;.CMD",
+  SYSTEMROOT: "C:\\Windows",
+  TEMP: paths.temp,
+  TMP: paths.temp,
+  USERPROFILE: paths.userProfile,
 } as const;
 
 const prompt = "Review the immutable target revision.";
@@ -315,7 +327,7 @@ class FakeWorkspaceProvider implements JobWorkspaceProvider {
       attemptDirectory: paths.attempt,
       checkoutDirectory: paths.checkout,
       controlDirectory: paths.control,
-      codexHomeDirectory: paths.codexHome,
+      codexHomeDirectory: paths.attemptCodexHome,
       tempDirectory: paths.temp,
       userProfileDirectory: paths.userProfile,
       startDiskMonitoring: async (parentSignal): Promise<WorkspaceDiskMonitor> => {
@@ -403,6 +415,7 @@ const createOptions = (
 ): ReviewJobExecutorOptions => ({
   workspaceProvider,
   codexExecutablePath: "C:\\Tools\\Codex\\codex.exe",
+  codexHomeDirectory: paths.codexHome,
   systemRoot: "C:\\Windows",
   comSpec: "C:\\Windows\\System32\\cmd.exe",
   path: "C:\\Windows\\System32;C:\\Tools",
@@ -424,6 +437,7 @@ const execute = async (
     readonly workspace?: FakeWorkspaceProvider;
     readonly processHost?: FakeProcessHost;
     readonly signal?: AbortSignal;
+    readonly executorOptions?: Partial<ReviewJobExecutorOptions>;
   } = {},
 ) => {
   const fileIO = options.fileIO ?? new FakeFileIO();
@@ -435,7 +449,7 @@ const execute = async (
   const progress: ExecutionProgress[] = [];
   const nodeHealthFaults: Error[] = [];
   const deferredCleanups: Array<() => Promise<void>> = [];
-  const executor = new ReviewJobExecutor(createOptions(workspace, fileIO));
+  const executor = new ReviewJobExecutor(createOptions(workspace, fileIO, options.executorOptions));
   const execution = executor.execute(envelope, {
     signal: options.signal ?? new AbortController().signal,
     processHost,
@@ -454,40 +468,85 @@ const execute = async (
   };
 };
 
-describe("buildReviewCodexConfig", () => {
-  it("builds a fixed workspace execution posture with a safely escaped project path", () => {
-    const config = buildReviewCodexConfig("c:/AgenticReview/attempt-1/checkout");
+describe("buildReviewCodexConfigurationOverrides", () => {
+  it("restricts task capabilities while preserving operator authentication and model selection", () => {
+    const overrides = buildReviewCodexConfigurationOverrides(
+      "c:/AgenticReview/attempt-1/checkout",
+      shellEnvironment,
+    );
 
-    expect(config).toContain('approval_policy = "never"');
-    expect(config).toContain('sandbox_mode = "workspace-write"');
-    expect(config).toContain('project_doc_fallback_filenames = ["AGENTS.md"]');
-    expect(config).toContain('[shell_environment_policy]\ninherit = "none"');
-    expect(config).toContain("ignore_default_excludes = false");
-    expect(config).toContain("[sandbox_workspace_write]\nnetwork_access = true");
-    expect(config).toContain('sandbox = "elevated"');
-    expect(config).toContain('web_search = "disabled"');
-    expect(config).toContain('persistence = "none"');
-    expect(config).toContain('cli_auth_credentials_store = "keyring"');
-    expect(config).toContain('[projects."C:\\\\AgenticReview\\\\attempt-1\\\\checkout"]');
-    expect(config).toContain('trust_level = "trusted"');
-    expect(config).toContain("apps = false");
-    expect(config).toContain("hooks = false");
-    expect(config).toContain("memories = false");
-    expect(config).toContain("multi_agent = false");
-    expect(config).toContain("remote_plugin = false");
-    expect(config).toContain("skill_mcp_dependency_install = false");
-    expect(config).toContain("view_image = false");
-    expect(config).not.toContain("strict-config");
+    expect(overrides).toEqual(
+      expect.arrayContaining([
+        'approval_policy="never"',
+        'sandbox_mode="workspace-write"',
+        "allow_login_shell=false",
+        "notify=[]",
+        'project_doc_fallback_filenames=["AGENTS.md"]',
+        'shell_environment_policy.inherit="none"',
+        "shell_environment_policy.ignore_default_excludes=false",
+        "sandbox_workspace_write.network_access=true",
+        'sandbox_workspace_write.writable_roots=["C:\\\\AgenticReview\\\\attempt-1\\\\temp"]',
+        'windows.sandbox="elevated"',
+        'web_search="disabled"',
+        'history.persistence="none"',
+        'projects={"C:\\\\AgenticReview\\\\attempt-1\\\\checkout"={trust_level="untrusted"}}',
+        "mcp_servers={}",
+        "features.apps=false",
+        "features.hooks=false",
+        "features.memories=false",
+        "features.multi_agent=false",
+        "features.plugins=false",
+        "features.remote_plugin=false",
+        "features.skill_mcp_dependency_install=false",
+        "agents.enabled=false",
+        "apps._default.enabled=false",
+        "apps._default.destructive_enabled=false",
+        "apps._default.open_world_enabled=false",
+        "tools.web_search=false",
+        "tools.view_image=false",
+      ]),
+    );
+    expect(
+      overrides.some((value) =>
+        /^(?:cli_auth_credentials_store|model|model_provider)=/u.test(value),
+      ),
+    ).toBe(false);
   });
 
-  it.each(["relative\\checkout", "C:\\review\\..\\checkout", "C:\\review\ncheckout"])(
+  it.each(["relative\\checkout", "C:\\review\\..\\checkout", "C:\\review\ncheckout", "C:\\"])(
     "rejects unsafe TOML project path %j",
-    (path) => expect(() => buildReviewCodexConfig(path)).toThrow(TypeError),
+    (path) =>
+      expect(() => buildReviewCodexConfigurationOverrides(path, shellEnvironment)).toThrow(
+        TypeError,
+      ),
   );
+
+  it("sets only the safe tool environment and omits Codex authentication locations", () => {
+    const environment = {
+      ...shellEnvironment,
+      CODEX_HOME: paths.codexHome,
+      OPENAI_API_KEY: "not-an-api-key",
+      WORKER_TOKEN: "not-a-worker-token",
+    };
+    const overrides = buildReviewCodexConfigurationOverrides(paths.checkout, environment);
+    const shellPolicy = overrides.find((value) =>
+      value.startsWith("shell_environment_policy.set="),
+    );
+
+    expect(shellPolicy).toBe(
+      'shell_environment_policy.set={COMSPEC="C:\\\\Windows\\\\System32\\\\cmd.exe",' +
+        'PATH="C:\\\\Windows\\\\System32;C:\\\\Tools",PATHEXT=".COM;.EXE;.BAT;.CMD",' +
+        'SYSTEMROOT="C:\\\\Windows",TEMP="C:\\\\AgenticReview\\\\attempt-1\\\\temp",' +
+        'TMP="C:\\\\AgenticReview\\\\attempt-1\\\\temp",' +
+        'USERPROFILE="C:\\\\AgenticReview\\\\attempt-1\\\\user-profile"}',
+    );
+    expect(shellPolicy).not.toContain("CODEX_HOME");
+    expect(shellPolicy).not.toContain("OPENAI_API_KEY");
+  });
 });
 
 describe("ReviewJobExecutor success", () => {
-  it("executes a PR review through ProcessHost and writes isolated control files", async () => {
+  it("executes a PR review with a persistent Codex home and isolated control files", async () => {
     const result = validPrResult();
     const run = await execute(createEnvelope("pull_request_review"), result);
 
@@ -505,14 +564,35 @@ describe("ReviewJobExecutor success", () => {
       limits: { hardTimeoutMs: 600_000 },
     });
     expect(run.processHost.seenSpec?.arguments).toContain("--ephemeral");
+    expect(run.processHost.seenSpec?.arguments).toContain("--ignore-user-config");
     expect(run.processHost.seenSpec?.arguments).toEqual(
       expect.arrayContaining(["--cd", paths.checkout]),
     );
+    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
+    const overrides = argumentsList.flatMap((argument, index) =>
+      argument === "--config" ? [argumentsList[index + 1]] : [],
+    );
+    expect(overrides).toEqual(
+      expect.arrayContaining([
+        ...buildReviewCodexConfigurationOverrides(paths.checkout, shellEnvironment),
+      ]),
+    );
+    expect(Object.keys(run.processHost.seenSpec?.environment ?? {}).sort()).toEqual([
+      "CODEX_HOME",
+      "COMSPEC",
+      "PATH",
+      "PATHEXT",
+      "SYSTEMROOT",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+    ]);
     expect(run.workspace.diskMonitorCalls).toBe(1);
     expect(run.workspace.diskMonitorCloseCalls).toBe(1);
     expect(run.processHost.seenSignal).toBe(run.workspace.diskMonitorController.signal);
     expect(run.fileIO.readText(paths.schema)).toBe(createCanonicalResult(prSchema.value).json);
-    expect(run.fileIO.readText(paths.config)).toContain('trust_level = "trusted"');
+    expect(run.fileIO.readText(paths.config)).toBeUndefined();
+    expect(run.fileIO.readText(paths.attemptConfig)).toBeUndefined();
     expect(run.workspace.cleanupCalls).toBe(0);
     expect(run.deferredCleanups).toHaveLength(1);
     await Promise.all([run.deferredCleanups[0]?.(), run.deferredCleanups[0]?.()]);
@@ -526,6 +606,68 @@ describe("ReviewJobExecutor success", () => {
       ]),
     );
     expect(run.progress.at(-1)).toEqual({ phase: "codex_review", processCount: 0 });
+  });
+
+  it("leaves the provisioned Codex configuration unchanged", async () => {
+    const fileIO = new FakeFileIO();
+    const operatorConfig = [
+      'cli_auth_credentials_store = "file"',
+      'model_provider = "worker-provider"',
+      'model = "operator-selected-model"',
+      "",
+    ].join("\n");
+    fileIO.put(paths.config, operatorConfig);
+    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), { fileIO });
+
+    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(fileIO.readText(paths.config)).toBe(operatorConfig);
+    expect(fileIO.readText(paths.attemptConfig)).toBeUndefined();
+    expect(run.processHost.seenSpec?.environment.CODEX_HOME).toBe(paths.codexHome);
+  });
+
+  it("applies operator model settings before mandatory task restrictions", async () => {
+    const operatorOverrides = [
+      'model="operator-model"',
+      'model_provider="worker-provider"',
+      'cli_auth_credentials_store="file"',
+      'approval_policy="on-request"',
+      'web_search="live"',
+    ];
+    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+      executorOptions: { codexConfigurationOverrides: operatorOverrides },
+    });
+
+    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
+    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
+    const overrides = argumentsList.flatMap((argument, index) =>
+      argument === "--config" ? [argumentsList[index + 1] as string] : [],
+    );
+    expect(overrides.slice(0, operatorOverrides.length)).toEqual(operatorOverrides);
+    expect(overrides.filter((value) => value.startsWith("approval_policy=")).at(-1)).toBe(
+      'approval_policy="never"',
+    );
+    expect(overrides.filter((value) => value.startsWith("web_search=")).at(-1)).toBe(
+      'web_search="disabled"',
+    );
+  });
+
+  it("passes provider header credentials only to the native Codex environment", async () => {
+    const headerName = "CODEX_PROVIDER_HEADER_0";
+    const headerValue = "test-provider-header-value";
+    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+      executorOptions: { codexProviderEnvironment: { [headerName]: headerValue } },
+    });
+
+    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(run.processHost.seenSpec?.environment[headerName]).toBe(headerValue);
+    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
+    expect(argumentsList.join("\n")).not.toContain(headerValue);
+    const shellPolicy = argumentsList.find((value) =>
+      value.startsWith("shell_environment_policy.set="),
+    );
+    expect(shellPolicy).toBeDefined();
+    expect(shellPolicy).not.toContain(headerName);
+    expect(shellPolicy).not.toContain(headerValue);
   });
 
   it("selects the authoritative issue schema for issue triage", async () => {
@@ -548,6 +690,41 @@ describe("ReviewJobExecutor success", () => {
 });
 
 describe("ReviewJobExecutor trust validation", () => {
+  it.each([
+    paths.attempt,
+    paths.checkout,
+    paths.control,
+    paths.temp,
+    paths.userProfile,
+    "c:\\AGENTICREVIEW\\attempt-1\\profile",
+    "C:\\AgenticReview",
+  ])("rejects a persistent Codex home overlapping the attempt: %s", async (codexHomeDirectory) => {
+    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+      executorOptions: { codexHomeDirectory },
+    });
+
+    await expect(run.execution).resolves.toMatchObject({
+      outcome: "failed",
+      code: "CODEX_LAUNCH_SPEC_INVALID",
+      retryable: false,
+    });
+    expect(run.processHost.startCalls).toBe(0);
+    expect(run.workspace.diskMonitorCalls).toBe(0);
+    expect(run.fileIO.readText(paths.schema)).toBeUndefined();
+  });
+
+  it.each(["relative\\profile", "C:\\review\\..\\profile", "C:\\review\nprofile", "C:\\"])(
+    "rejects an invalid persistent Codex home before execution: %j",
+    (codexHomeDirectory) => {
+      expect(
+        () =>
+          new ReviewJobExecutor(
+            createOptions(new FakeWorkspaceProvider(), new FakeFileIO(), { codexHomeDirectory }),
+          ),
+      ).toThrow(TypeError);
+    },
+  );
+
   it("fails closed before workspace creation when cleanup registration is unavailable", async () => {
     const fileIO = new FakeFileIO();
     const workspace = new FakeWorkspaceProvider();

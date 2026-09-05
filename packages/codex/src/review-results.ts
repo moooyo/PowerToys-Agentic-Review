@@ -29,7 +29,9 @@ const ModelRequestedRecipeIdSchema = Type.String({
   pattern: "^[a-z0-9][a-z0-9._-]*$",
 });
 const ModelRepositoryRelativePathSchema = Type.String({
-  pattern: "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000-\\u001F]+$",
+  description:
+    "Repository-relative path using '/' separators. Do not use an absolute path, drive prefix, or '..' path segment.",
+  pattern: "^[^/\\\\\\u0000-\\u001F][^\\\\\\u0000-\\u001F]*$",
 });
 const createModelSourceLineSchema = () => Type.Integer({ minimum: 1, maximum: 10_000_000 });
 const ModelConfidenceSchema = Type.Number({ minimum: 0, maximum: 1 });

@@ -8,6 +8,12 @@ Base commit: `8ecac63f49dd4ba984ed37b4dddb758942d55325`
 
 Implementation commit: `3826a4056145add877110c815d2ceb87cbed4e09`
 
+Later update: the `main`-only PR base restriction and deferral recorded below are superseded.
+Current PR preparation supports any approved target base branch. Follow the current
+[Windows E2E runbook](../../deploy/worker/worker-e2e-runbook.md); the collector's `real-public-pr`
+criterion requires the PR's actual target base branch and immutable base/head SHAs and remains
+manual with `acceptanceStatus = 'unverified'`.
+
 GitHub Actions: [CI run 33930740444](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/33930740444)
 
 ## Outcome

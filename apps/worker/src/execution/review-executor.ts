@@ -39,9 +39,19 @@ const maximumRetainedRecordCount = 4_096;
 const maximumRetainedRecordCharacters = 8 * 1024 * 1024;
 const maximumJsonlLineCharacters = 1_048_576;
 const maximumResultFileBytes = 2 * 1024 * 1024;
-const configFileName = "config.toml";
 const schemaFileName = "schema.json";
 const resultFileName = "result.json";
+const codexShellEnvironmentNames = [
+  "COMSPEC",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+] as const;
+
+type CodexShellEnvironment = Readonly<Record<(typeof codexShellEnvironmentNames)[number], string>>;
 
 export interface ReviewFileStat {
   readonly dev: bigint;
@@ -74,6 +84,9 @@ export interface ReviewFileIO {
 export interface ReviewJobExecutorOptions {
   readonly workspaceProvider: JobWorkspaceProvider;
   readonly codexExecutablePath: string;
+  readonly codexHomeDirectory: string;
+  readonly codexConfigurationOverrides?: readonly string[];
+  readonly codexProviderEnvironment?: Readonly<Record<string, string>>;
   readonly systemRoot: string;
   readonly comSpec: string;
   readonly path: string;
@@ -149,8 +162,13 @@ const authoritativeIssueSchema = createAuthoritativeSchema(
 export class ReviewJobExecutor implements JobExecutor {
   readonly #fileIO: ReviewFileIO;
   readonly #logger: Logger;
+  readonly #codexHomeDirectory: string;
 
   public constructor(private readonly options: ReviewJobExecutorOptions) {
+    this.#codexHomeDirectory = normalizeSafeWindowsDirectory(
+      options.codexHomeDirectory,
+      "codexHomeDirectory",
+    );
     assertConfiguredLimit(
       options.maximumHardTimeoutMs,
       "maximumHardTimeoutMs",
@@ -247,15 +265,13 @@ export class ReviewJobExecutor implements JobExecutor {
     context: JobExecutionContext,
     reportNodeHealthFault: (error: Error) => void,
   ): Promise<JobExecutionResult> {
+    assertPersistentCodexHomeOutsideAttempt(this.#codexHomeDirectory, workspace.attemptDirectory);
     const schemaPath = win32.join(workspace.controlDirectory, schemaFileName);
     const resultPath = win32.join(workspace.controlDirectory, resultFileName);
-    const configPath = win32.join(workspace.codexHomeDirectory, configFileName);
-    const config = buildReviewCodexConfig(workspace.checkoutDirectory);
 
     try {
       await assertPathMissing(this.#fileIO, resultPath);
       await this.#fileIO.writeExclusiveUtf8(schemaPath, authority.json);
-      await this.#fileIO.writeExclusiveUtf8(configPath, config);
     } catch (error) {
       if (error instanceof ReviewExecutionError) {
         throw error;
@@ -288,6 +304,15 @@ export class ReviewJobExecutor implements JobExecutor {
 
     let launchSpec: CodexProcessLaunchSpec;
     try {
+      const shellEnvironment: CodexShellEnvironment = {
+        COMSPEC: this.options.comSpec,
+        PATH: this.options.path,
+        PATHEXT: this.options.pathExt,
+        SYSTEMROOT: this.options.systemRoot,
+        TEMP: workspace.tempDirectory,
+        TMP: workspace.tempDirectory,
+        USERPROFILE: workspace.userProfileDirectory,
+      };
       launchSpec = buildCodexExecLaunchSpec({
         executable: this.options.codexExecutablePath,
         workingDirectory: workspace.checkoutDirectory,
@@ -296,15 +321,14 @@ export class ReviewJobExecutor implements JobExecutor {
         prompt: envelope.prompt.renderedPrompt,
         outputSchemaPath: schemaPath,
         outputLastMessagePath: resultPath,
+        configurationOverrides: [
+          ...(this.options.codexConfigurationOverrides ?? []),
+          ...buildReviewCodexConfigurationOverrides(workspace.checkoutDirectory, shellEnvironment),
+        ],
+        providerEnvironment: this.options.codexProviderEnvironment ?? {},
         environment: {
-          CODEX_HOME: workspace.codexHomeDirectory,
-          COMSPEC: this.options.comSpec,
-          PATH: this.options.path,
-          PATHEXT: this.options.pathExt,
-          SYSTEMROOT: this.options.systemRoot,
-          TEMP: workspace.tempDirectory,
-          TMP: workspace.tempDirectory,
-          USERPROFILE: workspace.userProfileDirectory,
+          CODEX_HOME: this.#codexHomeDirectory,
+          ...shellEnvironment,
         },
         limits: {
           hardTimeoutMs,
@@ -485,57 +509,49 @@ export class ReviewJobExecutor implements JobExecutor {
   }
 }
 
-export function buildReviewCodexConfig(checkoutDirectory: string): string {
-  const projectPath = normalizeSafeProjectPath(checkoutDirectory);
-  return [
-    'approval_policy = "never"',
-    'sandbox_mode = "workspace-write"',
-    "allow_login_shell = false",
-    "check_for_update_on_startup = false",
-    'web_search = "disabled"',
-    "project_doc_max_bytes = 32768",
-    'project_doc_fallback_filenames = ["AGENTS.md"]',
-    'file_opener = "none"',
-    'cli_auth_credentials_store = "keyring"',
-    'mcp_oauth_credentials_store = "keyring"',
-    "",
-    "[shell_environment_policy]",
-    'inherit = "none"',
-    "ignore_default_excludes = false",
-    "",
-    "[sandbox_workspace_write]",
-    "network_access = true",
-    "",
-    "[windows]",
-    'sandbox = "elevated"',
-    "",
-    "[history]",
-    'persistence = "none"',
-    "",
-    `[projects.${tomlBasicString(projectPath)}]`,
-    'trust_level = "trusted"',
-    "",
-    "[features]",
-    "apps = false",
-    "hooks = false",
-    "memories = false",
-    "multi_agent = false",
-    "remote_plugin = false",
-    "skill_mcp_dependency_install = false",
-    "",
-    "[agents]",
-    "enabled = false",
-    "",
-    "[apps._default]",
-    "enabled = false",
-    "destructive_enabled = false",
-    "open_world_enabled = false",
-    "",
-    "[tools]",
-    "web_search = false",
-    "view_image = false",
-    "",
-  ].join("\n");
+export function buildReviewCodexConfigurationOverrides(
+  checkoutDirectory: string,
+  environment: CodexShellEnvironment,
+): readonly string[] {
+  const projectPath = normalizeSafeWindowsDirectory(checkoutDirectory, "checkoutDirectory");
+  const tempPath = normalizeSafeWindowsDirectory(environment.TEMP, "tempDirectory");
+  const shellEnvironment = codexShellEnvironmentNames
+    .map((name) => `${name}=${tomlBasicString(environment[name])}`)
+    .join(",");
+  return Object.freeze([
+    'approval_policy="never"',
+    'sandbox_mode="workspace-write"',
+    "allow_login_shell=false",
+    "notify=[]",
+    "check_for_update_on_startup=false",
+    'web_search="disabled"',
+    "project_doc_max_bytes=32768",
+    'project_doc_fallback_filenames=["AGENTS.md"]',
+    'file_opener="none"',
+    'mcp_oauth_credentials_store="keyring"',
+    "mcp_servers={}",
+    'shell_environment_policy.inherit="none"',
+    "shell_environment_policy.ignore_default_excludes=false",
+    `shell_environment_policy.set={${shellEnvironment}}`,
+    "sandbox_workspace_write.network_access=true",
+    `sandbox_workspace_write.writable_roots=[${tomlBasicString(tempPath)}]`,
+    'windows.sandbox="elevated"',
+    'history.persistence="none"',
+    `projects={${tomlBasicString(projectPath)}={trust_level="untrusted"}}`,
+    "features.apps=false",
+    "features.hooks=false",
+    "features.memories=false",
+    "features.multi_agent=false",
+    "features.plugins=false",
+    "features.remote_plugin=false",
+    "features.skill_mcp_dependency_install=false",
+    "agents.enabled=false",
+    "apps._default.enabled=false",
+    "apps._default.destructive_enabled=false",
+    "apps._default.open_world_enabled=false",
+    "tools.web_search=false",
+    "tools.view_image=false",
+  ]);
 }
 
 function createAuthoritativeSchema(
@@ -981,10 +997,10 @@ function codexFailureMessage(code: CodexExecutionFailureCode): string {
   return messages[code];
 }
 
-function normalizeSafeProjectPath(value: string): string {
-  assertWellFormedUnicode(value, "checkoutDirectory");
+function normalizeSafeWindowsDirectory(value: string, name: string): string {
+  assertWellFormedUnicode(value, name);
   if (!/^[A-Za-z]:[\\/]/u.test(value) || value.slice(2).includes(":")) {
-    throw new TypeError("checkoutDirectory must be an absolute local Windows path");
+    throw new TypeError(`${name} must be an absolute local Windows path`);
   }
   for (const component of value.slice(3).split(/[\\/]/u)) {
     if (
@@ -995,11 +1011,34 @@ function normalizeSafeProjectPath(value: string): string {
       /[<>:"|?*]/u.test(component) ||
       [...component].some((character) => character.charCodeAt(0) <= 0x1f)
     ) {
-      throw new TypeError("checkoutDirectory contains an unsafe Windows path component");
+      throw new TypeError(`${name} contains an unsafe Windows path component`);
     }
   }
   const normalized = win32.normalize(value.replaceAll("/", "\\"));
+  if (normalized === win32.parse(normalized).root) {
+    throw new TypeError(`${name} must not be a filesystem root`);
+  }
   return `${normalized[0]?.toUpperCase() ?? ""}${normalized.slice(1)}`.replace(/[\\]+$/u, "");
+}
+
+function assertPersistentCodexHomeOutsideAttempt(
+  codexHome: string,
+  attemptDirectory: string,
+): void {
+  const attempt = normalizeSafeWindowsDirectory(attemptDirectory, "attemptDirectory");
+  const profile = codexHome.toLowerCase();
+  const workspace = attempt.toLowerCase();
+  if (
+    profile === workspace ||
+    profile.startsWith(`${workspace}\\`) ||
+    workspace.startsWith(`${profile}\\`)
+  ) {
+    throw new ReviewExecutionError(
+      "CODEX_LAUNCH_SPEC_INVALID",
+      "The persistent Codex home must be disjoint from the task attempt directory.",
+      false,
+    );
+  }
 }
 
 function tomlBasicString(value: string): string {

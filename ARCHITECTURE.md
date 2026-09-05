@@ -48,7 +48,8 @@ remove operational controls:
   combined-output limits.
 - Git and Codex receive replacement environments.
 - Worker Bearer Tokens and Server-side GitHub credentials are never propagated to child processes.
-- Worktrees and per-attempt Codex state are deleted after terminal reporting.
+- Worktrees and task control, temporary, and user-profile directories are deleted after terminal
+  reporting; the dedicated Codex authentication home persists.
 
 ProcessHost is a reliability and resource-control boundary, not an adversarial same-user sandbox.
 
@@ -104,11 +105,16 @@ installer. Manual trusted deployment is the supported pre-release path.
 At startup the Worker:
 
 1. loads its fixed Bearer Token profile;
-2. validates configured executable paths and SHA-256 digests;
-3. starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
-4. sweeps abandoned attempt directories;
-5. registers one Worker instance; and
-6. enters the claim, heartbeat, execute, and terminal-report loop.
+2. checks persistent Codex and runtime directory identities using read-only `lstat`/`realpath`
+   validation, rejecting links, aliases, overlap, and observed identity changes;
+3. loads allowed Codex profile settings and validates executable paths and SHA-256 digests;
+4. starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
+5. sweeps abandoned attempt directories;
+6. registers one Worker instance; and
+7. enters the claim, heartbeat, execute, and terminal-report loop.
+
+Any initialization failure after ProcessHost creation closes that client before rethrowing the
+original error. Cleanup diagnostics are bounded and cannot mask the startup failure.
 
 Only one Worker process may use a node's data, shared-repository, and workspace directories at a
 time. ProcessHost holds a Windows global named mutex derived from the resolved Worker data root for
@@ -129,14 +135,16 @@ repository and performs the following operations:
 1. initialize or reuse the bare repository;
 2. set the canonical GitHub `origin` URL;
 3. prune stale worktree registrations;
-4. fetch `refs/heads/main` and the pull request head ref without shallow history;
+4. fetch the envelope's immutable `baseSha` and pull request head ref without shallow history,
+   using `--no-auto-maintenance`;
 5. verify the fetched pull request head equals the envelope's immutable `headSha`;
 6. verify the envelope `baseSha` and `headSha` are commits and have a merge base;
 7. create a detached worktree at the exact `headSha`; and
 8. verify the worktree `HEAD` again before Codex starts.
 
-Fetching current `main` refreshes the shared object store, but the current `main` tip is not
-required to equal the immutable job `baseSha`; queued jobs remain valid when `main` advances.
+The fetch is independent of the base branch name or its current tip. It supports PRs targeting
+`dev` or any other base ref without assuming or falling back to `main`. Queued jobs retain their
+immutable base SHA when the branch advances.
 
 The current Worker uses an anonymous GitHub HTTPS URL and disables credential helpers. Private
 repository checkout is not supported by this MVP.
@@ -162,16 +170,33 @@ an issue snapshot rather than a repository revision.
 
 The Server renders a trusted versioned prompt and sends its digest and authoritative output schema
 in the job envelope. The Worker independently selects the matching compiled schema, verifies the
-envelope, and writes a private Codex home, configuration, schema, and result path for the attempt.
+envelope, and writes only the per-attempt schema and result control files. The persistent
+`WORKER_EXECUTION_PROFILE_DIRECTORY` is the dedicated `CODEX_HOME`; the Worker does not overwrite its
+operator-provisioned `config.toml` or copy authentication files into worktrees.
+
+The profile loader allows only supported model, selected-provider, and authentication settings.
+Provider HTTP header values are converted to `CODEX_PROVIDER_HEADER_<n>` environment variables for
+native Codex; their values are not serialized into command-line overrides. Build/test shells get
+exactly `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and `USERPROFILE`, with no Codex
+home, provider credentials, Worker Token, or GitHub credentials.
 
 Codex runs with:
 
 - `sandbox_mode = "workspace-write"`;
+- `--ignore-user-config` and fixed CLI overrides after the allowed operator settings;
+- `--config approval_policy="never"` rather than the unsupported exec `--ask-for-approval` form;
 - outbound network access enabled inside that sandbox;
 - the prepared worktree as its working directory;
 - project instructions such as `AGENTS.md` enabled;
+- project trust `untrusted`, suppressing repository config without changing the trusted-code policy;
+- MCP, plugins, hooks, notifications, and inherited extra write roots disabled, with only the current
+  task temporary directory added to the worktree's write access;
 - a replacement environment without Worker credentials; and
 - ProcessHost resource and lifetime limits.
+
+The pinned native CLI used for the current compatibility checks is Codex 0.145.0. The dedicated
+profile must have `config.toml` and supported file/keyring authentication or a supported provider
+authentication command; a login in another default profile does not establish Worker readiness.
 
 The pull request prompt explicitly permits inspection, edits, builds, tests, and other validation
 inside the disposable worktree. It forbids publishing, pushing, merging, or mutating external
@@ -216,9 +241,9 @@ stopped while operators reconcile the restored database and Worker credentials. 
 ## Known pre-release gaps
 
 - Windows-native end-to-end validation must still cover the actual Worker, Git worktree, Codex, and
-  ProcessHost composition.
+  ProcessHost composition. The explicitly authorized local exercise on a PR targeting `dev` is in
+  progress; this document does not claim a completed E2E result.
 - Automatic Windows service installation, restart policy, and upgrade management remain
   deployment-owned.
-- The current pull request fetch policy assumes the configured base branch is `main`.
 - Repository checkout currently supports only anonymously readable public GitHub repositories.
 - GitHub publication, approval workflows, and optional execution-log retention are not implemented.

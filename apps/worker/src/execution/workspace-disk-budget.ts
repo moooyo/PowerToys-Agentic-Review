@@ -740,7 +740,13 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
         }
         const attemptDirectory = win32.join(this.#workspaceRootDirectory, name);
         this.#assertAttemptPath(attemptDirectory, name);
-        const bytes = await this.#scanAttempt(attemptDirectory, counter, signal, deadline);
+        const bytes = await this.#scanAttempt(
+          attemptDirectory,
+          counter,
+          signal,
+          deadline,
+          this.#reservations.has(name),
+        );
         attemptBytes.set(name, bytes);
         totalBytes += bytes;
       }
@@ -761,7 +767,10 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     counter: EntryCounter,
     signal?: AbortSignal,
     deadline = this.#newScanDeadline(),
+    active = false,
   ): Promise<bigint> {
+    // Active attempts are sampled while commands create, remove, and grow files. Their full
+    // reservations still count toward total capacity; unreserved attempts require stable scans.
     const stack = [attemptDirectory];
     counter.value += 1;
     if (counter.value > this.#maximumAccountingEntries) throw accountingLimitError();
@@ -772,9 +781,25 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
       const candidate = stack.pop();
       if (candidate === undefined) break;
       this.#assertContained(candidate);
-      const state = await this.#validatedPathState(candidate, undefined, signal, deadline);
+      const isAttemptRoot = sameWindowsPath(candidate, attemptDirectory);
+      const allowDisappearance = active && !isAttemptRoot;
+      const state = await this.#validatedPathState(
+        candidate,
+        undefined,
+        signal,
+        deadline,
+        allowDisappearance,
+        isAttemptRoot ? undefined : attemptDirectory,
+      );
       if (state === null) {
+        if (allowDisappearance) continue;
         throw snapshotUnstableError();
+      }
+      if (state.reparsePoint) {
+        // Dependency managers use links inside an attempt. Count the link itself without
+        // traversing its target, which is already reachable through its ordinary directory.
+        bytes += state.size;
+        continue;
       }
       if (state.kind === "file") {
         if (state.size < 0n) {
@@ -792,7 +817,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
           "Workspace accounting encountered a non-file, non-directory entry.",
         );
       }
-      if (sameWindowsPath(candidate, attemptDirectory)) attemptRootState = state;
+      if (isAttemptRoot) attemptRootState = state;
 
       const remaining = this.#maximumAccountingEntries - counter.value;
       let listing: BoundedDirectoryEntries;
@@ -803,7 +828,24 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
           ioContext(signal, deadline),
         );
       } catch (error) {
-        if (hasErrorCode(error, "ENOENT")) throw snapshotUnstableError(error);
+        if (hasErrorCode(error, "ENOENT")) {
+          if (allowDisappearance) {
+            // A removed descendant is ordinary workload churn. If its name has already been
+            // reused, still reject a different directory identity or an unsafe replacement.
+            const afterMissing = await this.#validatedPathState(
+              candidate,
+              "directory",
+              signal,
+              deadline,
+              true,
+            );
+            if (afterMissing !== null && !samePathIdentity(state, afterMissing)) {
+              throw changedWorkspaceIdentityError();
+            }
+            continue;
+          }
+          throw snapshotUnstableError(error);
+        }
         throw error;
       }
       this.#assertScanActive(signal, deadline);
@@ -815,17 +857,25 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
         throw accountingLimitError();
       }
       counter.value += listing.entries.length;
-      for (const name of listing.entries) {
-        stack.push(win32.join(candidate, name));
-      }
       const directoryAfterListing = await this.#validatedPathState(
         candidate,
         "directory",
         signal,
         deadline,
+        allowDisappearance,
       );
-      if (directoryAfterListing === null || !sameStablePathState(state, directoryAfterListing)) {
+      if (directoryAfterListing === null) {
+        if (allowDisappearance) continue;
         throw snapshotUnstableError();
+      }
+      if (active && !samePathIdentity(state, directoryAfterListing)) {
+        throw changedWorkspaceIdentityError();
+      }
+      if (!active && !sameStablePathState(state, directoryAfterListing)) {
+        throw snapshotUnstableError();
+      }
+      for (const name of listing.entries) {
+        stack.push(win32.join(candidate, name));
       }
     }
     const attemptRootAfterScan = await this.#validatedPathState(
@@ -834,11 +884,13 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
       signal,
       deadline,
     );
-    if (
-      attemptRootState === undefined ||
-      attemptRootAfterScan === null ||
-      !sameStablePathState(attemptRootState, attemptRootAfterScan)
-    ) {
+    if (attemptRootState === undefined || attemptRootAfterScan === null) {
+      throw snapshotUnstableError();
+    }
+    if (active && !samePathIdentity(attemptRootState, attemptRootAfterScan)) {
+      throw changedWorkspaceIdentityError();
+    }
+    if (!active && !sameStablePathState(attemptRootState, attemptRootAfterScan)) {
       throw snapshotUnstableError();
     }
     return bytes;
@@ -885,12 +937,17 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     requiredKind?: "directory" | "file",
     signal?: AbortSignal,
     deadline?: bigint,
+    allowDisappearance = false,
+    allowedLinkRootDirectory?: string,
   ): Promise<WorkspaceDiskPathState | null> {
     this.#assertScanActive(signal, deadline);
     this.#assertContained(path);
     const state = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
     if (state === null) return null;
-    if (state.reparsePoint || (requiredKind !== undefined && state.kind !== requiredKind)) {
+    if (
+      (state.reparsePoint && allowedLinkRootDirectory === undefined) ||
+      (requiredKind !== undefined && state.kind !== requiredKind)
+    ) {
       throw new WorkspaceDiskBudgetError(
         "WORKSPACE_PATH_UNSAFE",
         "Workspace path is a reparse point or has an unexpected type.",
@@ -903,10 +960,33 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
         await this.#fileSystem.realpath(path, ioContext(signal, deadline)),
       );
     } catch (error) {
-      if (hasErrorCode(error, "ENOENT")) throw snapshotUnstableError(error);
+      if (hasErrorCode(error, "ENOENT")) {
+        if (allowDisappearance) {
+          // Package managers may unlink an entry after lstat. Confirm it is gone instead of
+          // confusing a removed link with one that still has an unresolved, possibly unsafe target.
+          const current = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
+          this.#assertScanActive(signal, deadline);
+          if (current === null) return null;
+        }
+        throw snapshotUnstableError(error);
+      }
       throw error;
     }
     this.#assertScanActive(signal, deadline);
+    if (state.reparsePoint && allowedLinkRootDirectory !== undefined) {
+      const relative = win32.relative(allowedLinkRootDirectory, realPath);
+      if (
+        relative === ".." ||
+        relative.startsWith(`..${win32.sep}`) ||
+        win32.isAbsolute(relative)
+      ) {
+        throw new WorkspaceDiskBudgetError(
+          "WORKSPACE_PATH_UNSAFE",
+          "A workspace link resolves outside its owning attempt directory.",
+        );
+      }
+      return state;
+    }
     if (!sameWindowsPath(realPath, path)) {
       throw new WorkspaceDiskBudgetError(
         "WORKSPACE_PATH_UNSAFE",
@@ -1558,6 +1638,13 @@ function snapshotUnstableError(cause?: unknown): WorkspaceDiskBudgetError {
     "SNAPSHOT_UNSTABLE",
     "Workspace entries changed while a bounded disk snapshot was being measured.",
     cause === undefined ? undefined : { cause },
+  );
+}
+
+function changedWorkspaceIdentityError(): WorkspaceDiskBudgetError {
+  return new WorkspaceDiskBudgetError(
+    "WORKSPACE_PATH_UNSAFE",
+    "A workspace directory changed identity during active disk accounting.",
   );
 }
 

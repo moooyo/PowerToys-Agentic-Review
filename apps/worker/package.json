@@ -19,7 +19,8 @@
   "dependencies": {
     "@agentic-review/codex": "workspace:*",
     "@agentic-review/contracts": "workspace:*",
-    "@sinclair/typebox": "0.34.52"
+    "@sinclair/typebox": "0.34.52",
+    "smol-toml": "1.8.0"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

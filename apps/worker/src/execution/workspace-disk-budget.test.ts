@@ -35,6 +35,7 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
   public ownershipGate: Promise<void> | undefined;
   public ownershipChecks = 0;
   public onLstat: ((path: string) => void) | undefined;
+  public onReadDirectory: ((path: string) => void) | undefined;
   readonly #transientMissing = new Map<string, number>();
 
   public constructor() {
@@ -79,6 +80,7 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
       .filter((entry) => key(win32.dirname(entry.path)) === parent && key(entry.path) !== parent)
       .map((entry) => win32.basename(entry.path))
       .sort();
+    this.onReadDirectory?.(path);
     return {
       entries: entries.slice(0, maximumEntries),
       truncated: entries.length > maximumEntries,
@@ -183,6 +185,12 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
 
   public setFileSize(path: string, size: bigint): void {
     this.#entry(path).size = size;
+  }
+
+  public touch(path: string): void {
+    const entry = this.#entry(path);
+    entry.modifiedAtMs += 1n;
+    entry.changedAtMs += 1n;
   }
 
   public setReparsePoint(path: string): void {
@@ -424,6 +432,7 @@ describe("ProductionWorkspaceDiskBudget", () => {
     reparseFileSystem.addDirectory(existing);
     reparseFileSystem.addDirectory(win32.join(existing, "redirected"));
     reparseFileSystem.setReparsePoint(win32.join(existing, "redirected"));
+    reparseFileSystem.setRealPath(win32.join(existing, "redirected"), "D:\\outside");
     await expect(createBudget(reparseFileSystem).admit(attempt("b"))).rejects.toMatchObject({
       code: "WORKSPACE_PATH_UNSAFE",
     });
@@ -464,6 +473,96 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await expect(createBudget(fileSystem).admit(attempt("b"))).rejects.toMatchObject({
       code: "SNAPSHOT_UNSTABLE",
     });
+  });
+
+  it("reserves full active capacity when admission samples a concurrently growing attempt", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    const activePath = attempt("a");
+    const active = await budget.admit(activePath);
+    fileSystem.addDirectory(activePath);
+    fileSystem.addFile(win32.join(activePath, "existing.bin"), mebibyte);
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) !== key(activePath)) return;
+      fileSystem.touch(activePath);
+      if (!fileSystem.has(win32.join(activePath, "new.bin"))) {
+        fileSystem.addFile(win32.join(activePath, "new.bin"), 90n * mebibyte);
+      }
+    };
+
+    const second = await budget.admit(attempt("b"));
+    await expect(budget.admit(attempt("c"))).rejects.toMatchObject({
+      code: "EXISTING_WORKSPACE_UNHEALTHY",
+    });
+    await second.release();
+    await active.release();
+  });
+
+  it("keeps unreserved attempt metadata and cleanup checks strict", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const existing = attempt("a");
+    fileSystem.addDirectory(existing);
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) === key(existing)) fileSystem.touch(existing);
+    };
+    await expect(createBudget(fileSystem).admit(attempt("b"))).rejects.toMatchObject({
+      code: "SNAPSHOT_UNSTABLE",
+    });
+
+    fileSystem.onReadDirectory = undefined;
+    const budget = createBudget(fileSystem);
+    const activePath = attempt("c");
+    const active = await budget.admit(activePath);
+    fileSystem.addDirectory(activePath);
+    fileSystem.onLstat = (path) => {
+      if (key(path) === key(activePath)) fileSystem.touch(activePath);
+    };
+    await expect(active.removeAttempt()).rejects.toMatchObject({ code: "SNAPSHOT_UNSTABLE" });
+    expect(fileSystem.has(activePath)).toBe(true);
+    await active.release();
+  });
+
+  it("retains the entry cap while an active attempt changes directory timestamps", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 2 });
+    const activePath = attempt("a");
+    const active = await budget.admit(activePath);
+    fileSystem.addDirectory(activePath);
+    fileSystem.addFile(win32.join(activePath, "first.bin"), 1n);
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) === key(activePath)) fileSystem.touch(activePath);
+    };
+    const monitor = await active.startMonitoring(new AbortController().signal);
+    fileSystem.addFile(win32.join(activePath, "second.bin"), 1n);
+
+    await clock.tick();
+    expect(monitor.violation).toMatchObject({ code: "ACCOUNTING_LIMIT_EXCEEDED" });
+    await expect(monitor.close()).rejects.toMatchObject({ code: "ACCOUNTING_LIMIT_EXCEEDED" });
+    await active.release();
+  });
+
+  it("retains the deadline and free-space floor during active churn", async () => {
+    for (const expectedCode of ["ACCOUNTING_TIMED_OUT", "INSUFFICIENT_FREE_SPACE"] as const) {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock);
+      const activePath = attempt("a");
+      const active = await budget.admit(activePath);
+      fileSystem.addDirectory(activePath);
+      const monitor = await active.startMonitoring(new AbortController().signal);
+      fileSystem.onReadDirectory = (path) => {
+        if (key(path) !== key(activePath)) return;
+        fileSystem.touch(activePath);
+        if (expectedCode === "ACCOUNTING_TIMED_OUT") clock.advance(30_001);
+        else fileSystem.freeBytes = 49n * mebibyte;
+      };
+
+      await clock.tick();
+      expect(monitor.violation).toMatchObject({ code: expectedCode });
+      await expect(monitor.close()).rejects.toMatchObject({ code: expectedCode });
+      await active.release();
+    }
   });
 
   it("stops a bounded admission scan when its lease signal is cancelled", async () => {

@@ -155,6 +155,7 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
   }> = [];
   public failAtCall: number | undefined;
   public failureCode: ManagedProcessRunFailureCode = "NON_ZERO_EXIT";
+  public pullRequestBaseOutput = `${baseSha}\n`;
   public pullRequestHeadOutput = `${headSha}\n`;
   public worktreeHeadOutput = `${headSha}\n`;
   public mergeBaseOutput = `${baseSha}\n`;
@@ -192,7 +193,9 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
     if (command === "rev-parse") {
       stdout = spec.arguments.includes("HEAD^{commit}")
         ? this.worktreeHeadOutput
-        : this.pullRequestHeadOutput;
+        : spec.arguments.includes("refs/agentic-review/latest-base^{commit}")
+          ? this.pullRequestBaseOutput
+          : this.pullRequestHeadOutput;
     }
     return { exitCode: 0, stdout, stderr: "" };
   }
@@ -203,6 +206,7 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
   public readonly released: string[] = [];
   public readonly monitored: string[] = [];
   public removalError: unknown;
+  public onMonitorCheck: (() => void) | undefined;
 
   public constructor(private readonly fileSystem: FakeWorkspaceFileSystem) {}
 
@@ -219,10 +223,11 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
       attemptDirectory,
       startMonitoring: async (parentSignal): Promise<WorkspaceDiskMonitor> => {
         this.monitored.push(attemptDirectory);
+        this.onMonitorCheck?.();
         return {
           signal: parentSignal,
           violation: undefined,
-          close: async () => undefined,
+          close: async () => this.onMonitorCheck?.(),
         };
       },
       removeAttempt: async () => {
@@ -301,6 +306,8 @@ function envelope(
     readonly runAttemptId?: string;
     readonly repository?: string;
     readonly repositoryId?: number;
+    readonly baseSha?: string;
+    readonly headSha?: string;
   } = {},
 ): JobExecutionEnvelope {
   const commonResource = {
@@ -320,8 +327,8 @@ function envelope(
       : {
           ...commonResource,
           kind: "pull_request" as const,
-          baseSha,
-          headSha,
+          baseSha: options.baseSha ?? baseSha,
+          headSha: options.headSha ?? headSha,
           isDraft: false,
         };
   return {
@@ -483,9 +490,10 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
   it("fetches and verifies an immutable pull request comparison without shell input", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
     const progress = preparationContext();
 
-    const workspace = await provider(fileSystem, processRunner).prepare(
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
       envelope("pull_request"),
       progress.context,
     );
@@ -495,6 +503,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       "config",
       "worktree",
       "fetch",
+      "rev-parse",
       "rev-parse",
       "cat-file",
       "cat-file",
@@ -507,16 +516,52 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       (call) => commandName(call.spec.arguments) === "fetch",
     );
     expect(fetches).toHaveLength(1);
-    expect(fetches[0]?.spec.arguments).toContain("+refs/heads/main:refs/remotes/origin/main");
+    expect(fetches[0]?.spec.arguments).toContain(`+${baseSha}:refs/agentic-review/latest-base`);
     expect(fetches[0]?.spec.arguments).toContain(
       "+refs/pull/42/head:refs/agentic-review/latest-head",
     );
     expect(
-      processRunner.calls.some((call) =>
-        call.spec.arguments.includes("refs/remotes/origin/main^{commit}"),
+      fetches.some((call) =>
+        call.spec.arguments.some((argument) => argument.includes("refs/heads/")),
       ),
     ).toBe(false);
+    expect(
+      fetches.some((call) =>
+        call.spec.arguments.some((argument) =>
+          /^--(?:depth|deepen|shallow|filter)(?:=|-|$)/u.test(argument),
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      processRunner.calls.some((call) =>
+        call.spec.arguments.includes("refs/agentic-review/latest-base^{commit}"),
+      ),
+    ).toBe(true);
+    const mergeBaseCall = processRunner.calls.find(
+      (call) => commandName(call.spec.arguments) === "merge-base",
+    );
+    expect(mergeBaseCall?.spec.arguments.slice(-4)).toEqual([
+      "merge-base",
+      "--all",
+      baseSha,
+      headSha,
+    ]);
+    const worktreeCall = processRunner.calls.find(
+      (call) =>
+        commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("add"),
+    );
+    expect(worktreeCall?.spec.arguments.slice(-6)).toEqual([
+      "worktree",
+      "add",
+      "--detach",
+      "--force",
+      workspace.checkoutDirectory,
+      headSha,
+    ]);
     expect(fetches.every((call) => call.spec.arguments.includes("--quiet"))).toBe(true);
+    expect(fetches.every((call) => call.spec.arguments.includes("--no-auto-maintenance"))).toBe(
+      true,
+    );
     expect(
       processRunner.calls.some((call) => call.spec.arguments.includes("--no-recurse-submodules")),
     ).toBe(true);
@@ -545,8 +590,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       expect(call.spec.arguments).not.toContain("powershell.exe");
     }
     expect(progress.processCounts).toEqual([
-      0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+      0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
     ]);
+    expect(diskBudget.monitored).toHaveLength(processRunner.calls.length);
 
     await workspace.cleanup();
   });
@@ -760,6 +806,8 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
   it("falls back to prune and still runs post-cleanup gc when checkout was removed", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
     const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const progress = preparationContext();
     const repositoryDirectory = `${gitSharedRootDirectory}\\repository-1844564.git`;
     const objectsDirectory = `${repositoryDirectory}\\objects`;
     const packDirectory = `${objectsDirectory}\\pack`;
@@ -781,17 +829,26 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     };
 
     const workspace = await provider(fileSystem, processRunner, {
+      diskBudget,
       gitSharedCacheMaxBytes: 1_024n,
       gitSharedMinimumFreeBytes: 0n,
       gitSharedGcMinimumIntervalMs: 0,
-    }).prepare(envelope("pull_request"), preparationContext().context);
+    }).prepare(envelope("pull_request"), progress.context);
 
     fileSystem.addDirectory(objectsDirectory);
     fileSystem.addDirectory(packDirectory);
     fileSystem.addFile(oversizedPack, 8_192n);
     fileSystem.removePath(workspace.checkoutDirectory);
+    diskBudget.onMonitorCheck = () => {
+      throw new WorkspaceDiskBudgetError(
+        "SNAPSHOT_UNSTABLE",
+        "The retained package-store link points to the removed checkout.",
+      );
+    };
 
     const callsBeforeCleanup = processRunner.calls.length;
+    const monitorsBeforeCleanup = diskBudget.monitored.length;
+    progress.controller.abort(new Error("cancelled by server"));
     await workspace.cleanup();
     const cleanupCalls = processRunner.calls.slice(callsBeforeCleanup);
     expect(
@@ -807,6 +864,11 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
       ),
     ).toBe(true);
     expect(cleanupCalls.some((call) => commandName(call.spec.arguments) === "gc")).toBe(true);
+    expect(diskBudget.monitored).toHaveLength(monitorsBeforeCleanup);
+    expect(cleanupCalls.every((call) => !call.context.signal.aborted)).toBe(true);
+    expect(fileSystem.has(workspace.attemptDirectory)).toBe(false);
+    expect(diskBudget.released).toEqual([workspace.attemptDirectory]);
+    expect(progress.healthFaults).toEqual([]);
   });
 
   it("attempts post-cleanup gc for low free space without blocking attempt removal", async () => {
@@ -925,6 +987,55 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(fileSystem.removed).toHaveLength(1);
     expect(fileSystem.removed[0]).toMatch(/\\attempt-[a-f0-9]{64}$/u);
     expect(fileSystem.has(workspaceRoot)).toBe(true);
+  });
+
+  it("rejects a fetched base that differs from the immutable comparison base", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const progress = preparationContext();
+    processRunner.pullRequestBaseOutput = `${"c".repeat(40)}\n`;
+
+    await expect(
+      provider(fileSystem, processRunner).prepare(envelope("pull_request"), progress.context),
+    ).rejects.toMatchObject({ code: "GIT_REVISION_MISMATCH" });
+    expect(
+      processRunner.calls.some(
+        (call) =>
+          commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("add"),
+      ),
+    ).toBe(false);
+    expect(fileSystem.removed).toHaveLength(1);
+    expect(progress.healthFaults).toEqual([]);
+  });
+
+  it.each([
+    "--upload-pack=evil",
+    "main",
+    "dev",
+    "release/2026.09",
+    `+${baseSha}:refs/heads/injected`,
+    `${baseSha}:refs/heads/injected`,
+    `${baseSha}^`,
+    `${baseSha}\n`,
+    "a".repeat(39),
+    "a".repeat(41),
+    "A".repeat(40),
+  ])("rejects a non-canonical immutable revision %j before invoking Git", async (revision) => {
+    for (const target of ["baseSha", "headSha"] as const) {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const progress = preparationContext();
+
+      await expect(
+        provider(fileSystem, processRunner).prepare(
+          envelope("pull_request", { [target]: revision }),
+          progress.context,
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+      expect(processRunner.calls).toHaveLength(0);
+      expect(fileSystem.removed).toHaveLength(1);
+      expect(progress.healthFaults).toEqual([]);
+    }
   });
 
   it("rejects a prepared worktree whose HEAD differs from the admitted revision", async () => {

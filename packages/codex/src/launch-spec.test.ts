@@ -61,9 +61,10 @@ describe("buildCodexExecLaunchSpec", () => {
         "--json",
         "--color",
         "never",
-        "--ask-for-approval",
-        "never",
+        "--config",
+        'approval_policy="never"',
         "--ephemeral",
+        "--ignore-user-config",
         "--sandbox",
         "workspace-write",
         "--output-schema",
@@ -87,6 +88,291 @@ describe("buildCodexExecLaunchSpec", () => {
       limits: validLimits(),
     });
     expect(spec.arguments).not.toContain(options.prompt);
+  });
+
+  it("preserves default arguments when configuration overrides are empty", () => {
+    expect(
+      buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides: [] }).arguments,
+    ).toEqual(buildCodexExecLaunchSpec(validOptions()).arguments);
+  });
+
+  it("keeps configuration values intact and applies mandatory safety arguments afterward", () => {
+    const configurationOverrides = [
+      'approval_policy="on-request"',
+      'sandbox_mode="danger-full-access"',
+      'developer_instructions="Keep --cd C:/Other; & echo ordinary text"',
+    ];
+    const defaultSpec = buildCodexExecLaunchSpec(validOptions());
+    const spec = buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides });
+
+    expect(spec.arguments).toEqual([
+      "exec",
+      "--config",
+      configurationOverrides[0],
+      "--config",
+      configurationOverrides[1],
+      "--config",
+      configurationOverrides[2],
+      ...defaultSpec.arguments.slice(1),
+    ]);
+    const finalConfigIndex = spec.arguments.lastIndexOf("--config");
+    expect(spec.arguments[finalConfigIndex + 1]).toBe('approval_policy="never"');
+    const sandboxIndex = spec.arguments.indexOf("--sandbox");
+    expect(sandboxIndex).toBeGreaterThan(finalConfigIndex);
+    expect(spec.arguments[sandboxIndex + 1]).toBe("workspace-write");
+    expect(spec.arguments.filter((argument) => argument === "--cd")).toHaveLength(1);
+    expect(spec.arguments.filter((argument) => argument === "--output-schema")).toHaveLength(1);
+    expect(spec.arguments.filter((argument) => argument === "--output-last-message")).toHaveLength(
+      1,
+    );
+
+    configurationOverrides[0] = 'approval_policy="untrusted"';
+    expect(spec.arguments[2]).toBe('approval_policy="on-request"');
+  });
+
+  it("accepts forty independent configuration overrides", () => {
+    const configurationOverrides = Array.from(
+      { length: 40 },
+      (_, index) => `features.feature_${index}=false`,
+    );
+    const spec = buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides });
+
+    expect(spec.arguments.filter((argument) => argument === "--config")).toHaveLength(41);
+  });
+
+  it.each([
+    { name: "non-array", value: "model=example" },
+    { name: "null", value: null },
+    { name: "non-string entry", value: [false] },
+    { name: "empty entry", value: [""] },
+    { name: "blank entry", value: ["   "] },
+    { name: "missing assignment", value: ["--cd C:/Other"] },
+    { name: "missing key", value: [" =false"] },
+    { name: "missing value", value: ["features.hooks= "] },
+    { name: "NUL", value: ["features.hooks=false\0"] },
+    { name: "line feed", value: ["features.hooks=false\nmodel=other"] },
+    { name: "carriage return", value: ["features.hooks=false\rmodel=other"] },
+    { name: "Unicode newline", value: ["features.hooks=false\u2028model=other"] },
+    { name: "malformed Unicode", value: ["model=\uD800"] },
+  ])("rejects $name configuration overrides", ({ value }) => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        configurationOverrides: value as unknown as readonly string[],
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it("rejects too many configuration overrides", () => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        configurationOverrides: Array.from({ length: 129 }, () => "features.hooks=false"),
+      }),
+    ).toThrow(/must not exceed 128 entries/u);
+  });
+
+  it("bounds each configuration override by UTF-8 bytes", () => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        configurationOverrides: [`model=${"\u754c".repeat(11_000)}`],
+      }),
+    ).toThrow(/must not exceed 32768 UTF-8 bytes/u);
+  });
+
+  it("accepts the total configuration byte boundary and rejects larger inputs", () => {
+    const override = `model=${"x".repeat(32 * 1024 - "model=".length)}`;
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        configurationOverrides: Array.from({ length: 4 }, () => override),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        configurationOverrides: Array.from({ length: 5 }, () => override),
+      }),
+    ).toThrow(/must not exceed 131072 total UTF-8 bytes/u);
+  });
+
+  it("includes configuration arguments in the complete ProcessHost frame limit", () => {
+    const options = { ...validOptions(), prompt: "\\".repeat(500_000) };
+    expect(() => buildCodexExecLaunchSpec(options)).not.toThrow();
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...options,
+        configurationOverrides: Array.from({ length: 3 }, () => `model=${"x".repeat(30_000)}`),
+      }),
+    ).toThrow(/ProcessHost start request must not exceed 1048576 UTF-8 bytes/u);
+  });
+
+  it("keeps provider credentials only in the dedicated process environment", () => {
+    const providerCredential = "fixture-only-provider-credential";
+    const providerEnvironment = { CODEX_PROVIDER_HEADER_0: providerCredential };
+    const options = {
+      ...validOptions(),
+      configurationOverrides: [
+        'model_providers.selected.env_http_headers={Authorization="CODEX_PROVIDER_HEADER_0"}',
+      ],
+      providerEnvironment,
+    };
+    const spec = buildCodexExecLaunchSpec(options);
+
+    expect(spec.environment).toEqual({ ...validEnvironment(), ...providerEnvironment });
+    expect(Object.isFrozen(spec.environment)).toBe(true);
+    expect(JSON.stringify(spec.arguments)).not.toContain(providerCredential);
+    expect(spec.standardInput).not.toContain(providerCredential);
+    expect(options.environment).not.toHaveProperty("CODEX_PROVIDER_HEADER_0");
+    providerEnvironment.CODEX_PROVIDER_HEADER_0 = "changed-provider-credential";
+    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe(providerCredential);
+  });
+
+  it("accepts a null-prototype provider environment with own data properties", () => {
+    const providerEnvironment: Record<string, string> = Object.create(null);
+    providerEnvironment.CODEX_PROVIDER_HEADER_0 = "fixture-provider-value";
+    const spec = buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment });
+
+    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe("fixture-provider-value");
+  });
+
+  it("accepts exactly sixty-four provider entries and rejects additional entries", () => {
+    const providerEnvironment = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [`CODEX_PROVIDER_HEADER_${index}`, "value"]),
+    );
+    expect(() =>
+      buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment }),
+    ).not.toThrow();
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        providerEnvironment: { ...providerEnvironment, CODEX_PROVIDER_HEADER_64: "value" },
+      }),
+    ).toThrow(/providerEnvironment must not exceed 64 entries/u);
+  });
+
+  it.each([
+    "CODEX_PROVIDER_HEADER_",
+    "CODEX_PROVIDER_HEADER_01",
+    "CODEX_PROVIDER_HEADER_-1",
+    "CODEX_PROVIDER_HEADER_1.0",
+    "codex_provider_header_0",
+    "CODEX_PROVIDER_HEADER_0_SUFFIX",
+    "GITHUB_TOKEN",
+    "WORKER_BEARER_TOKEN",
+    "PATH",
+  ])("rejects unsupported dedicated provider variable %s", (name) => {
+    expect(() =>
+      buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment: { [name]: "value" } }),
+    ).toThrow(/providerEnvironment contains an unsupported variable name/u);
+  });
+
+  it("does not admit provider variable names through the ordinary environment", () => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        environment: { ...validEnvironment(), CODEX_PROVIDER_HEADER_0: "value" },
+      }),
+    ).toThrow(/not in the Codex allowlist/u);
+  });
+
+  it.each([
+    { name: "null", value: null },
+    { name: "string", value: "provider-environment" },
+    { name: "array", value: [] },
+    { name: "inherited properties", value: Object.create({ CODEX_PROVIDER_HEADER_0: "value" }) },
+    { name: "symbol property", value: { [Symbol("provider")]: "value" } },
+    {
+      name: "non-enumerable property",
+      value: Object.defineProperty({}, "CODEX_PROVIDER_HEADER_0", { value: "value" }),
+    },
+  ])("rejects $name provider environments", ({ value }) => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        providerEnvironment: value as unknown as Readonly<Record<string, string>>,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it("rejects provider accessors without evaluating them", () => {
+    let getterCalled = false;
+    const providerEnvironment = Object.defineProperty({}, "CODEX_PROVIDER_HEADER_0", {
+      enumerable: true,
+      get: () => {
+        getterCalled = true;
+        return "fixture-provider-value";
+      },
+    });
+    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment })).toThrow(
+      /own enumerable data properties/u,
+    );
+    expect(getterCalled).toBe(false);
+  });
+
+  it.each([
+    { name: "non-string", value: 123 },
+    { name: "empty", value: "" },
+    { name: "blank", value: "   " },
+    { name: "NUL", value: "provider\0value" },
+    { name: "CR", value: "provider\rvalue" },
+    { name: "LF", value: "provider\nvalue" },
+    { name: "malformed Unicode", value: "provider\uD800" },
+  ])("rejects $name provider values", ({ value }) => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        providerEnvironment: { CODEX_PROVIDER_HEADER_0: value } as Readonly<Record<string, string>>,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it("enforces the Windows environment value length for provider credentials", () => {
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        providerEnvironment: { CODEX_PROVIDER_HEADER_0: "x".repeat(32_767) },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...validOptions(),
+        providerEnvironment: { CODEX_PROVIDER_HEADER_0: "x".repeat(32_768) },
+      }),
+    ).toThrow(/providerEnvironment value exceeds the Windows value limit/u);
+  });
+
+  it("includes provider credentials in the complete ProcessHost frame limit", () => {
+    const options = { ...validOptions(), prompt: "\\".repeat(500_000) };
+    expect(() => buildCodexExecLaunchSpec(options)).not.toThrow();
+    expect(() =>
+      buildCodexExecLaunchSpec({
+        ...options,
+        providerEnvironment: {
+          CODEX_PROVIDER_HEADER_0: "x".repeat(30_000),
+          CODEX_PROVIDER_HEADER_1: "y".repeat(30_000),
+        },
+      }),
+    ).toThrow(/ProcessHost start request must not exceed 1048576 UTF-8 bytes/u);
+  });
+
+  it("does not disclose provider or configuration values in validation errors", () => {
+    const marker = "private-fixture-marker";
+    for (const overrides of [
+      { providerEnvironment: { CODEX_PROVIDER_HEADER_0: `${marker}\0` } },
+      { providerEnvironment: { [marker]: "value" } },
+      { configurationOverrides: [`model="${marker}"\n`] },
+    ]) {
+      let error: unknown;
+      try {
+        buildCodexExecLaunchSpec({ ...validOptions(), ...overrides });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(TypeError);
+      expect(String(error)).not.toContain(marker);
+    }
   });
 
   it("does not retain mutable environment or limits objects", () => {

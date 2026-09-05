@@ -2,12 +2,14 @@ import { mkdir, realpath } from "node:fs/promises";
 import { win32 } from "node:path";
 import process from "node:process";
 import { loadWorkerConfig } from "./config.js";
+import { loadCodexProviderProfile } from "./execution/codex-provider-profile.js";
 import {
   type JobExecutor,
   PlaceholderJobExecutor,
   ReviewJobExecutor,
 } from "./execution/job-executor.js";
 import { ProductionDisposableJobWorkspaceProvider } from "./execution/job-workspace.js";
+import { verifyPersistentCodexHome } from "./execution/persistent-codex-home.js";
 import {
   deriveWorkerProcessHostInstanceKey,
   StdioProcessHostClient,
@@ -100,6 +102,15 @@ async function createExecutionRuntime(
     mkdir(execution.profileDirectory, { recursive: true }),
     mkdir(gitWorkingDirectory, { recursive: true }),
   ]);
+  const codexHomeDirectory = await verifyPersistentCodexHome({
+    profileDirectory: execution.profileDirectory,
+    workspaceRootDirectory: execution.workspaceRootDirectory,
+    tempDirectory: execution.tempDirectory,
+    gitSharedRootDirectory: execution.gitSharedRootDirectory,
+    gitWorkingDirectory,
+    trustedExecutableRoot: execution.trustedExecutableRoot,
+  });
+  const codexProfile = await loadCodexProviderProfile(codexHomeDirectory);
 
   const binaries = await verifyTrustedExecutionBinaries({
     trustedExecutableRoot: execution.trustedExecutableRoot,
@@ -124,57 +135,78 @@ async function createExecutionRuntime(
     startTimeoutMs: execution.processHostStartTimeoutMs,
     shutdownTimeoutMs: execution.processHostShutdownTimeoutMs,
   });
-  const diskBudget = new ProductionWorkspaceDiskBudget({
-    workspaceRootDirectory: execution.workspaceRootDirectory,
-    perAttemptDiskBytes: BigInt(execution.perAttemptDiskBytes),
-    totalWorkspaceDiskBytes: BigInt(execution.totalWorkspaceDiskBytes),
-    minimumFreeDiskBytes: BigInt(execution.minimumFreeDiskBytes),
-    orphanRetentionMilliseconds: BigInt(execution.orphanRetentionHours) * 60n * 60n * 1_000n,
-    orphanScanLimit: execution.orphanScanLimit,
-  });
-  const orphanSweep = await diskBudget.sweepOrphans();
-  logger.info("Worker workspace startup sweep completed.", {
-    ...orphanSweep,
-    removedBytes: orphanSweep.removedBytes?.toString() ?? null,
-  });
-  const workspaceProvider = new ProductionDisposableJobWorkspaceProvider({
-    workspaceRootDirectory: execution.workspaceRootDirectory,
-    gitSharedRootDirectory: execution.gitSharedRootDirectory,
-    gitExecutable: binaries.gitPath,
-    gitWorkingDirectory,
-    gitEnvironment: { SYSTEMROOT: systemRoot, COMSPEC: comSpec, PATH: path, PATHEXT: pathExt },
-    gitLimits: {
-      hardTimeoutMs: execution.gitHardTimeoutMs,
-      maximumProcessCount: execution.gitResourceLimits.maximumProcessCount,
-      maximumMemoryBytes: execution.gitResourceLimits.maximumMemoryBytes,
-      maximumOutputBytes: execution.gitResourceLimits.maximumOutputBytes,
-    },
-    gitSharedCachePolicy: {
-      maximumTotalBytes: BigInt(execution.gitSharedCacheMaxBytes),
-      minimumFreeBytes: BigInt(execution.gitSharedMinimumFreeDiskBytes),
-      maximumScanEntries: execution.gitSharedScanEntryLimit,
-      maximumScanDurationMs: execution.gitSharedScanTimeoutMs,
-      gcMinimumIntervalMs: execution.gitSharedGcMinimumIntervalMinutes * 60_000,
-      gcPruneAgeHours: execution.gitSharedGcPruneAgeHours,
-    },
-    diskBudget,
-  });
-  return {
-    processHost,
-    executor: new ReviewJobExecutor({
-      workspaceProvider,
-      codexExecutablePath: binaries.codexPath,
-      systemRoot,
-      comSpec,
-      path,
-      pathExt,
-      maximumHardTimeoutMs: execution.codexMaximumHardTimeoutMs,
-      maximumProcessCount: execution.codexResourceLimits.maximumProcessCount,
-      maximumMemoryBytes: execution.codexResourceLimits.maximumMemoryBytes,
-      maximumOutputBytes: execution.codexResourceLimits.maximumOutputBytes,
-      logger,
-    }),
-  };
+  try {
+    const diskBudget = new ProductionWorkspaceDiskBudget({
+      workspaceRootDirectory: execution.workspaceRootDirectory,
+      perAttemptDiskBytes: BigInt(execution.perAttemptDiskBytes),
+      totalWorkspaceDiskBytes: BigInt(execution.totalWorkspaceDiskBytes),
+      minimumFreeDiskBytes: BigInt(execution.minimumFreeDiskBytes),
+      maximumAccountingEntries: execution.diskScanEntryLimit,
+      maximumScanDurationMilliseconds: execution.diskScanTimeoutMs,
+      orphanRetentionMilliseconds: BigInt(execution.orphanRetentionHours) * 60n * 60n * 1_000n,
+      orphanScanLimit: execution.orphanScanLimit,
+    });
+    const orphanSweep = await diskBudget.sweepOrphans();
+    logger.info("Worker workspace startup sweep completed.", {
+      ...orphanSweep,
+      removedBytes: orphanSweep.removedBytes?.toString() ?? null,
+    });
+    const workspaceProvider = new ProductionDisposableJobWorkspaceProvider({
+      workspaceRootDirectory: execution.workspaceRootDirectory,
+      gitSharedRootDirectory: execution.gitSharedRootDirectory,
+      gitExecutable: binaries.gitPath,
+      gitWorkingDirectory,
+      gitEnvironment: { SYSTEMROOT: systemRoot, COMSPEC: comSpec, PATH: path, PATHEXT: pathExt },
+      gitLimits: {
+        hardTimeoutMs: execution.gitHardTimeoutMs,
+        maximumProcessCount: execution.gitResourceLimits.maximumProcessCount,
+        maximumMemoryBytes: execution.gitResourceLimits.maximumMemoryBytes,
+        maximumOutputBytes: execution.gitResourceLimits.maximumOutputBytes,
+      },
+      gitSharedCachePolicy: {
+        maximumTotalBytes: BigInt(execution.gitSharedCacheMaxBytes),
+        minimumFreeBytes: BigInt(execution.gitSharedMinimumFreeDiskBytes),
+        maximumScanEntries: execution.gitSharedScanEntryLimit,
+        maximumScanDurationMs: execution.gitSharedScanTimeoutMs,
+        gcMinimumIntervalMs: execution.gitSharedGcMinimumIntervalMinutes * 60_000,
+        gcPruneAgeHours: execution.gitSharedGcPruneAgeHours,
+      },
+      diskBudget,
+    });
+    return {
+      processHost,
+      executor: new ReviewJobExecutor({
+        workspaceProvider,
+        codexExecutablePath: binaries.codexPath,
+        codexHomeDirectory,
+        codexConfigurationOverrides: codexProfile.configurationOverrides,
+        codexProviderEnvironment: codexProfile.providerEnvironment,
+        systemRoot,
+        comSpec,
+        path,
+        pathExt,
+        maximumHardTimeoutMs: execution.codexMaximumHardTimeoutMs,
+        maximumProcessCount: execution.codexResourceLimits.maximumProcessCount,
+        maximumMemoryBytes: execution.codexResourceLimits.maximumMemoryBytes,
+        maximumOutputBytes: execution.codexResourceLimits.maximumOutputBytes,
+        logger,
+      }),
+    };
+  } catch (error) {
+    try {
+      await processHost.close();
+    } catch (cleanupError) {
+      try {
+        logger.error("Worker ProcessHost cleanup failed after a startup error.", {
+          errorName:
+            cleanupError instanceof Error ? cleanupError.name.slice(0, 128) : "UnknownError",
+        });
+      } catch {
+        // Preserve the original startup error even when diagnostic logging fails.
+      }
+    }
+    throw error;
+  }
 }
 
 function requiredEnvironment(name: "SYSTEMROOT" | "COMSPEC" | "PATH" | "PATHEXT"): string {

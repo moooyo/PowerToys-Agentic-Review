@@ -686,6 +686,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           context,
           null,
         );
+        // The immutable base can belong to any branch, including one that has since advanced.
         await this.#runGit(
           layout,
           guard,
@@ -696,10 +697,11 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
             "--quiet",
             "--force",
             "--no-tags",
+            "--no-auto-maintenance",
             "--no-write-fetch-head",
             "--no-recurse-submodules",
             "origin",
-            "+refs/heads/main:refs/remotes/origin/main",
+            `+${baseSha}:refs/agentic-review/latest-base`,
             `+refs/pull/${pullRequestNumber}/head:refs/agentic-review/latest-head`,
           ],
           "ambiguous_remote",
@@ -729,6 +731,21 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           null,
         );
         assertExactGitObjectId(currentHead.stdout, headSha, "pull request head");
+        const currentBase = await this.#runGit(
+          layout,
+          guard,
+          diskReservation,
+          [
+            `--git-dir=${repository.gitDirectory}`,
+            "rev-parse",
+            "--verify",
+            "refs/agentic-review/latest-base^{commit}",
+          ],
+          "deterministic_local",
+          context,
+          null,
+        );
+        assertExactGitObjectId(currentBase.stdout, baseSha, "pull request base");
         const baseType = await this.#runGit(
           layout,
           guard,
@@ -1327,7 +1344,13 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     throwIfAborted(context.signal);
     context.reportProcessCount(1);
     try {
-      const monitor = await diskReservation.startMonitoring(context.signal);
+      // Teardown deliberately removes link targets before the remaining attempt is deleted.
+      // Its fixed Git commands retain cleanup guards, managed limits, and shared-cache accounting,
+      // but must not require the dismantled attempt tree to remain a valid execution snapshot.
+      const monitor =
+        validationMode === "cleanup_safe"
+          ? undefined
+          : await diskReservation.startMonitoring(context.signal);
       let result: ManagedProcessRunResult | undefined;
       let processError: unknown;
       try {
@@ -1349,18 +1372,18 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
             },
             limits: this.#gitLimits,
           },
-          { processHost: context.processHost, signal: monitor.signal },
+          { processHost: context.processHost, signal: monitor?.signal ?? context.signal },
         );
         onProcessSuccess?.();
       } catch (error) {
         processError = error;
       }
       try {
-        await monitor.close();
+        await monitor?.close();
       } catch (error) {
         processError = error;
       }
-      if (monitor.violation !== undefined) {
+      if (monitor?.violation !== undefined) {
         throw workspaceDiskLimitError(monitor.violation);
       }
       if (processError !== undefined) throw processError;
@@ -1955,7 +1978,7 @@ function buildAnonymousGitHubUrl(fullName: string): string {
 }
 
 function validateGitObjectId(value: string, name: string): string {
-  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value)) {
+  if (typeof value !== "string" || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value)) {
     throw new JobWorkspaceError("INVALID_ENVELOPE", `${name} is not a canonical Git object ID.`);
   }
   return value;

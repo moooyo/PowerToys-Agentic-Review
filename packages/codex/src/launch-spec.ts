@@ -40,14 +40,20 @@ export interface BuildCodexExecLaunchSpecOptions {
   readonly prompt: string;
   readonly outputSchemaPath: string;
   readonly outputLastMessagePath: string;
+  readonly configurationOverrides?: readonly string[];
+  readonly providerEnvironment?: Readonly<Record<string, string>>;
   readonly environment: Readonly<Record<string, string>>;
   readonly limits: CodexProcessResourceLimits;
 }
 
 const maximumPromptUtf8Bytes = 512 * 1024;
+const maximumConfigurationOverrideCount = 128;
+const maximumConfigurationOverrideUtf8Bytes = 32 * 1024;
+const maximumConfigurationOverridesUtf8Bytes = 128 * 1024;
 const maximumProcessHostFrameBytes = 1_048_576;
 const maximumProcessHostRequestId = "R".repeat(128);
 const maximumEnvironmentValueLength = 32_767;
+const maximumProviderEnvironmentEntries = 64;
 const allowedEnvironmentNames = new Set([
   "APPDATA",
   "CODEX_HOME",
@@ -139,17 +145,25 @@ export function buildCodexExecLaunchSpec(
 
   assertPrompt(options.prompt);
   assertLimits(options.limits);
-  const environment = copyMinimalEnvironment(options.environment, repositoryWorkingDirectory);
+  const environment = Object.freeze({
+    ...copyMinimalEnvironment(options.environment, repositoryWorkingDirectory),
+    ...copyProviderEnvironment(options.providerEnvironment),
+  });
+  const configurationArguments = buildConfigurationOverrideArguments(
+    options.configurationOverrides,
+  );
   const argumentsList = Object.freeze([
     "exec",
+    ...configurationArguments,
     "--cd",
     repositoryWorkingDirectory,
     "--json",
     "--color",
     "never",
-    "--ask-for-approval",
-    "never",
+    "--config",
+    'approval_policy="never"',
     "--ephemeral",
+    "--ignore-user-config",
     "--sandbox",
     "workspace-write",
     "--output-schema",
@@ -178,6 +192,55 @@ function assertPrompt(prompt: string): void {
   if (utf8Bytes > maximumPromptUtf8Bytes) {
     throw new RangeError(`prompt must not exceed ${maximumPromptUtf8Bytes} UTF-8 bytes`);
   }
+}
+
+function buildConfigurationOverrideArguments(overrides: readonly string[] | undefined): string[] {
+  if (overrides === undefined) {
+    return [];
+  }
+  if (!Array.isArray(overrides)) {
+    throw new TypeError("configurationOverrides must be an array of strings");
+  }
+  if (overrides.length > maximumConfigurationOverrideCount) {
+    throw new RangeError(
+      `configurationOverrides must not exceed ${maximumConfigurationOverrideCount} entries`,
+    );
+  }
+
+  const argumentsList: string[] = [];
+  let totalUtf8Bytes = 0;
+  for (const [index, override] of overrides.entries()) {
+    const name = `configurationOverrides[${index}]`;
+    if (typeof override !== "string") {
+      throw new TypeError(`${name} must be a string`);
+    }
+    assertNonEmptyText(override, name);
+    if (/[\r\n\u0085\u2028\u2029]/u.test(override)) {
+      throw new TypeError(`${name} must not contain a newline`);
+    }
+    const separatorIndex = override.indexOf("=");
+    if (
+      separatorIndex < 1 ||
+      override.slice(0, separatorIndex).trim().length === 0 ||
+      override.slice(separatorIndex + 1).trim().length === 0
+    ) {
+      throw new TypeError(`${name} must be a key=value configuration assignment`);
+    }
+    const utf8Bytes = Buffer.byteLength(override, "utf8");
+    if (utf8Bytes > maximumConfigurationOverrideUtf8Bytes) {
+      throw new RangeError(
+        `${name} must not exceed ${maximumConfigurationOverrideUtf8Bytes} UTF-8 bytes`,
+      );
+    }
+    totalUtf8Bytes += utf8Bytes;
+    if (totalUtf8Bytes > maximumConfigurationOverridesUtf8Bytes) {
+      throw new RangeError(
+        `configurationOverrides must not exceed ${maximumConfigurationOverridesUtf8Bytes} total UTF-8 bytes`,
+      );
+    }
+    argumentsList.push("--config", override);
+  }
+  return argumentsList;
 }
 
 function normalizeLocalWindowsExecutable(value: string, name: string): string {
@@ -350,6 +413,52 @@ function copyMinimalEnvironment(
   return Object.freeze(
     Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right))),
   );
+}
+
+function copyProviderEnvironment(
+  environment: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> {
+  if (environment === undefined) {
+    return {};
+  }
+  if (
+    environment === null ||
+    typeof environment !== "object" ||
+    (Object.getPrototypeOf(environment) !== Object.prototype &&
+      Object.getPrototypeOf(environment) !== null)
+  ) {
+    throw new TypeError("providerEnvironment must be a plain object");
+  }
+  const names = Reflect.ownKeys(environment);
+  if (names.length > maximumProviderEnvironmentEntries) {
+    throw new RangeError(
+      `providerEnvironment must not exceed ${maximumProviderEnvironmentEntries} entries`,
+    );
+  }
+
+  const entries: Array<readonly [string, string]> = [];
+  for (const name of names) {
+    if (typeof name !== "string" || !/^CODEX_PROVIDER_HEADER_(0|[1-9][0-9]*)$/u.test(name)) {
+      throw new TypeError("providerEnvironment contains an unsupported variable name");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(environment, name);
+    if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new TypeError("providerEnvironment must contain only own enumerable data properties");
+    }
+    const value: unknown = descriptor.value;
+    if (typeof value !== "string" || value.length === 0 || value.trim().length === 0) {
+      throw new TypeError("providerEnvironment values must be non-empty strings");
+    }
+    assertWellFormedUnicode(value, "providerEnvironment value");
+    if (/[\0\r\n]/u.test(value)) {
+      throw new TypeError("providerEnvironment values must not contain NUL, CR, or LF");
+    }
+    if (value.length > maximumEnvironmentValueLength) {
+      throw new RangeError("providerEnvironment value exceeds the Windows value limit");
+    }
+    entries.push([name, value]);
+  }
+  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function assertEnvironmentName(name: string): void {

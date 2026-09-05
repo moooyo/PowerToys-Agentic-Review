@@ -1,6 +1,7 @@
 # Implementation Status
 
-Current as of 2026-09-05 on branch `main`.
+Current working-tree status as of 2026-09-05. The ongoing Windows E2E exercise is not yet a completed
+acceptance result.
 
 ## Implemented baseline
 
@@ -27,16 +28,26 @@ Current as of 2026-09-05 on branch `main`.
   reporting.
 - Pinned Git, Codex, and ProcessHost executable paths and SHA-256 verification.
 - Replacement child environments that exclude the Worker Bearer Token.
+- A dedicated persistent Codex home, read-only canonical-directory and overlap checks before orphan
+  cleanup, and allowlisted model/provider/auth configuration loading.
+- Native Codex provider header variables separated from argv and the seven-variable build/test
+  shell environment; neither shell authentication paths nor Worker/GitHub credentials are exposed.
+- Fixed `--ignore-user-config`, workspace-write/approval settings, project config suppression with
+  `untrusted` project trust, and disabled MCP/plugins/hooks/notifications/inherited extra write roots.
+- Pinned native Codex 0.145.0 compatibility, using `--config approval_policy="never"` for exec.
 - Native ProcessHost supervision with Windows Job Object lifetime and resource limits.
 - A Windows global named mutex, held by ProcessHost, that prevents two execution Workers from using
   the same resolved data root concurrently.
+- ProcessHost closure on initialization failure, plus resolved Node.js and normalized PATH handling
+  in the deployment launch helper.
 - Per-attempt disk reservation, monitoring, cleanup, and startup orphan sweep.
 - One persistent shared bare Git repository per configured public GitHub repository.
 - Bounded shared-repository accounting with a total cache limit, minimum-free-disk guard, bounded
   scans, conservative age-based reflog expiry and GC, and node drain when reclamation is insufficient.
 - A cancellable global shared-cache mutation lock for whole-root accounting and bare-repository
   setup/cleanup, plus per-repository operation ordering.
-- Full-history fetch of `main` and the GitHub pull request head ref.
+- Full-history fetch of the immutable `baseSha` and GitHub pull request head ref, supporting arbitrary
+  base branches without a `main` assumption or fallback and disabling fetch auto-maintenance.
 - Immutable base/head commit checks, merge-base validation, detached worktree creation, and final
   `HEAD` verification.
 - Codex workspace-write execution with outbound network access for trusted admitted code.
@@ -81,6 +92,8 @@ ADR 0029 is the current architecture decision for these removals.
   maintenance only when worktree metadata is inactive.
 - Local execution singleton: one global ProcessHost mutex per resolved Worker data root.
 - Task checkout: detached worktree below the per-attempt workspace directory.
+- Codex identity: persistent `WORKER_EXECUTION_PROFILE_DIRECTORY`, provisioned under the Worker
+  account with `config.toml` and supported file/keyring or provider-command authentication.
 - Completion: inline `{ resultDigest, result }` only.
 - GitHub credentials: owned by the Server; not sent to the Worker or child processes.
 
@@ -88,7 +101,6 @@ ADR 0029 is the current architecture decision for these removals.
 
 - Automatic Worker package distribution, installer, upgrade, repair, rollback, or signature
   verification.
-- A repository base branch other than `main`.
 - Private repository checkout credentials.
 - GitHub review publication or merge operations.
 - Optional execution-log and artifact retention.
@@ -97,8 +109,9 @@ ADR 0029 is the current architecture decision for these removals.
 
 ## Verification requirements
 
-Repository verification is run on `test-env` because local validation is not authorized by the
-workspace policy. The required branch gate is:
+Repository verification defaults to `test-env`; local validation requires explicit authorization
+for the current task. The current Windows follow-up has that authorization, without changing the
+default policy for other tasks. The required branch gate is:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -112,7 +125,7 @@ ProcessHost Go tests and Windows cross-compilation are separate checks. A final 
 end-to-end exercise is still required before deployment because Linux CI cannot prove Windows
 service-manager, Job Object, path, ACL, Git, or Codex runtime behavior.
 
-## Latest verification
+## Verified remote baseline
 
 On 2026-09-05, implementation commit `3826a40` passed on `test-env` with Node.js 24.20.0 and pnpm
 11.24.0:
@@ -134,3 +147,11 @@ regressions passed on Linux `test-env` with PowerShell 7.6.5, and Biome still pa
 files. These checks do not establish Windows process inspection or real release acceptance.
 The Windows host, deployment configuration, permitted public PR, Codex authentication behavior,
 and actual command evidence must be available before the remaining exercise can be completed.
+
+## Current Windows follow-up
+
+The user explicitly authorized local verification and the selected real public PR targeting `dev`.
+Focused Worker/Codex tests, type checks, configuration probes, and native ProcessHost checks have
+supported the fixes described above. The real Worker/Server E2E run is still in progress. This
+status does not claim an accepted review result, actual build/test execution, cancellation, cache
+reuse, or cleanup acceptance; the final evidence handoff must establish those outcomes.

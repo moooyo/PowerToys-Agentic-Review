@@ -11,9 +11,13 @@ import {
   DatabaseGitHubPollingState,
   type GitHubPollingReconciliationEventInput,
 } from "../../dist/database/github-polling-state.js";
-import type {
-  GitHubPollingActiveProjection,
-  GitHubPollingProjectionKey,
+import {
+  type GitHubPollingActiveProjection,
+  type GitHubPollingProjectionKey,
+  type GitHubPullRequestSnapshot,
+  type GitHubReadClient,
+  type GitHubTimelineEvent,
+  reconcileGitHubPolling,
 } from "../../dist/github/poller.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
@@ -176,6 +180,60 @@ const reconciliationEntry = (
   };
 };
 
+const pullRequestReconciliationEntry = (
+  event: NormalizedSchedulingEvent,
+): GitHubPollingReconciliationEventInput => {
+  if (event.action !== "request_opened" && event.action !== "revision_observed") {
+    return { event, policy: pollingPolicy, schedule: null };
+  }
+  if (event.workItem.kind !== "pull_request" || event.revision.kind !== "pull_request") {
+    throw new Error("The polling test schedule requires a pull request.");
+  }
+  const renderedPrompt = "Review the polled pull request.";
+  return {
+    event,
+    policy: pollingPolicy,
+    schedule: {
+      jobKind: "pull_request_review",
+      priority: 10,
+      intentVersion: 1,
+      maxAttempts: 3,
+      requiredCapabilities: [],
+      executionTemplate: {
+        repository: {
+          githubRepositoryId: event.repository.githubRepositoryId,
+          fullName: event.repository.fullName,
+        },
+        resource: {
+          kind: "pull_request",
+          githubNodeId: event.workItem.githubNodeId,
+          number: event.workItem.number,
+          title: event.workItem.title,
+          author: event.workItem.author,
+          canonicalSnapshot: event.workItem,
+          baseSha: event.revision.baseSha,
+          headSha: event.revision.headSha,
+          isDraft: event.workItem.isDraft,
+        },
+        prompt: {
+          name: "pull-request-review",
+          version: "test",
+          renderedPrompt,
+          promptSha256: sha256(renderedPrompt),
+          outputSchema: {},
+          outputSchemaSha256: sha256("{}"),
+        },
+        executionPolicy: {
+          hardTimeoutMs: 600_000,
+          noProgressTimeoutMs: 600_000,
+          allowedRecipeIds: ["pull-request-review"],
+          requiredCapabilityLabels: {},
+        },
+      },
+    },
+  };
+};
+
 const createFixture = async (): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "agentic-review-github-polling-"));
   const databasePath = join(directory, "server.sqlite");
@@ -286,6 +344,179 @@ describe("DatabaseGitHubPollingState", () => {
     });
     await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(checkpoint);
     expect(jobs.total).toBe(1);
+  });
+
+  it("opens a new epoch and job when the same pull request revision is reassigned", async () => {
+    const { clients, databasePath } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    let assigned = true;
+    let snapshot: GitHubPullRequestSnapshot = {
+      kind: "pull_request",
+      githubWorkItemId: 501,
+      githubNodeId: "PR_501",
+      number: 501,
+      title: "Review the same revision after reassignment",
+      body: "The assignment can be renewed without changing the commits.",
+      state: "open",
+      author: { githubUserId: 200, login: "pull-request-author", accountType: "user" },
+      htmlUrl: "https://github.com/microsoft/PowerToys/pull/501",
+      createdAt: "2026-08-30T10:00:00.000Z",
+      updatedAt: "2026-08-30T10:05:00.000Z",
+      closedAt: null,
+      isDraft: false,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+    };
+    let timeline: GitHubTimelineEvent[] = [
+      {
+        githubEventId: 1_001,
+        action: "assigned",
+        actor: reviewer,
+        target: reviewer,
+        occurredAt: snapshot.updatedAt,
+      },
+    ];
+    const github: GitHubReadClient = {
+      getRepository: async () => ({
+        githubRepositoryId: key.githubRepositoryId,
+        githubNodeId: "R_1",
+        fullName: key.repositoryFullName,
+        htmlUrl: "https://github.com/microsoft/PowerToys",
+        defaultBranch: "main",
+        isPrivate: false,
+      }),
+      searchIssuesAndPullRequests: async (request) => ({
+        items:
+          assigned && !request.query.includes("review-requested")
+            ? [
+                {
+                  kind: "pull_request",
+                  githubWorkItemId: snapshot.githubWorkItemId,
+                  number: snapshot.number,
+                },
+              ]
+            : [],
+        nextPage: null,
+      }),
+      getIssue: async () => {
+        throw new Error("The reassignment fixture only supports pull requests.");
+      },
+      getPullRequest: async () => snapshot,
+      listIssueTimelineEvents: async () => ({ items: timeline, nextPage: null }),
+    };
+    const pollAndCommit = async (observedAt: string) => {
+      const entries: GitHubPollingReconciliationEventInput[] = [];
+      const result = await reconcileGitHubPolling({
+        client: github,
+        repository: {
+          githubRepositoryId: key.githubRepositoryId,
+          fullName: key.repositoryFullName,
+        },
+        reviewer,
+        previousActiveProjection: await state.readActiveProjection(key, undefined),
+        now: () => new Date(observedAt),
+        ingest: (event) => {
+          entries.push(pullRequestReconciliationEntry(event));
+        },
+      });
+      const eventResults = await state.commitReconciliation(
+        key,
+        result.nextActiveProjection,
+        entries,
+        undefined,
+      );
+      return { entries, eventResults, projection: result.nextActiveProjection };
+    };
+
+    const first = await pollAndCommit("2026-08-30T10:05:30.000Z");
+    assigned = false;
+    snapshot = { ...snapshot, updatedAt: "2026-08-30T10:06:00.000Z" };
+    timeline.push({
+      githubEventId: 1_002,
+      action: "unassigned",
+      actor: reviewer,
+      target: reviewer,
+      occurredAt: snapshot.updatedAt,
+    });
+    const closed = await pollAndCommit("2026-08-30T10:06:30.000Z");
+    expect(closed.eventResults[0]).toMatchObject({
+      closedRequestEpochIds: [first.eventResults[0]?.openedRequestEpochId],
+      activeRequestEpochIds: [],
+      staleJobCount: 1,
+    });
+    expect(closed.projection.workItems).toEqual([]);
+
+    assigned = true;
+    snapshot = { ...snapshot, updatedAt: "2026-08-30T10:07:00.000Z" };
+    timeline = [
+      ...timeline,
+      {
+        githubEventId: 1_003,
+        action: "assigned",
+        actor: reviewer,
+        target: reviewer,
+        occurredAt: snapshot.updatedAt,
+      },
+    ];
+    const reopened = await pollAndCommit("2026-08-30T10:07:30.000Z");
+    expect(reopened.entries.map(({ event }) => event.action)).toEqual([
+      "request_opened",
+      "revision_observed",
+    ]);
+    expect(reopened.entries[1]?.event.revision.revisionKey).toBe(
+      first.entries[1]?.event.revision.revisionKey,
+    );
+    expect(reopened.entries[1]?.event.sourceEventId).not.toBe(
+      first.entries[1]?.event.sourceEventId,
+    );
+    expect(reopened.eventResults[0]).toMatchObject({ authorized: true, jobCreated: true });
+    expect(reopened.eventResults[0]?.openedRequestEpochId).not.toBe(
+      first.eventResults[0]?.openedRequestEpochId,
+    );
+    expect(reopened.eventResults[0]?.jobId).not.toBe(first.eventResults[0]?.jobId);
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(reopened.projection);
+
+    const repeated = await pollAndCommit("2026-08-30T10:08:30.000Z");
+    expect(repeated.entries).toEqual([]);
+    const jobs = await client.request("listJobs", {});
+    expect(jobs.total).toBe(2);
+    expect(jobs.items.map((job) => job.status).sort()).toEqual(["queued", "stale"]);
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        reader.prepare("SELECT ordinal, status FROM request_epochs ORDER BY ordinal").all(),
+      ).toEqual([
+        { ordinal: 1, status: "closed" },
+        { ordinal: 2, status: "active" },
+      ]);
+    } finally {
+      reader.close();
+    }
+  });
+
+  it("rejects changed normalized data for an existing event key without advancing its checkpoint", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const checkpoint = projection("reviewer", "poll:immutable:1");
+    const entry = reconciliationEntry("poll:immutable:1", checkpoint);
+    await state.commitReconciliation(key, checkpoint, [entry], undefined);
+    const changedEntry: GitHubPollingReconciliationEventInput = {
+      ...entry,
+      schedule: null,
+      event: {
+        ...entry.event,
+        workItem: { ...entry.event.workItem, title: "Changed immutable event data" },
+      },
+    };
+    const replacement = projection("reviewer", "poll:immutable:2");
+
+    await expect(
+      state.commitReconciliation(key, replacement, [changedEntry], undefined),
+    ).rejects.toMatchObject({ code: "NORMALIZED_EVENT_CONFLICT" });
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(checkpoint);
+    await expect(client.request("listJobs", {})).resolves.toMatchObject({ total: 1 });
   });
 
   it("rolls back earlier events and the checkpoint when a later event fails", async () => {

@@ -18,6 +18,36 @@ $ErrorActionPreference = 'Stop'
 
 $authProfilePath = 'C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json'
 
+function Resolve-WorkerNodeApplication {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    $commands = @(Get-Command -Name $Executable -ErrorAction Stop)
+    if ($commands.Count -ne 1 -or $commands[0].CommandType -ne [System.Management.Automation.CommandTypes]::Application) {
+        throw 'NodeExecutable must resolve to a single application.'
+    }
+
+    return [System.IO.Path]::GetFullPath($commands[0].Path)
+}
+
+function Get-WorkerProcessPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeDirectory,
+        [AllowNull()][AllowEmptyString()][string]$InheritedPath
+    )
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $entries = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in (@($NodeDirectory) + @($InheritedPath -split ';'))) {
+        $trimmedEntry = $entry.Trim()
+        if ($trimmedEntry.Length -gt 0 -and $seen.Add($trimmedEntry)) {
+            $entries.Add($trimmedEntry)
+        }
+    }
+
+    # Preserve non-empty entries for the runtime path validator; do not resolve relative paths.
+    return $entries -join ';'
+}
+
 function Test-RunningWorkerProcess {
     param([Parameter(Mandatory = $true)][string]$EntryPath)
 
@@ -120,13 +150,16 @@ if (Test-RunningWorkerProcess -EntryPath $resolvedWorkerEntryPath) {
 }
 
 Set-WorkerEnvironment -Config $config
+$resolvedNodeExecutable = Resolve-WorkerNodeApplication -Executable $NodeExecutable
+$nodeDirectory = [System.IO.Path]::GetDirectoryName($resolvedNodeExecutable)
+$env:PATH = Get-WorkerProcessPath -NodeDirectory $nodeDirectory -InheritedPath $env:PATH
 
 Write-Host "Starting Worker from $resolvedWorkerEntryPath"
 Write-Host "Loaded configuration from $resolvedConfigPath"
 Write-Host "Authentication profile found at fixed path."
 Write-Host 'Single-instance preflight passed (this is not a hard host-wide lock).'
 
-& $NodeExecutable '--enable-source-maps' $resolvedWorkerEntryPath
+& $resolvedNodeExecutable '--enable-source-maps' $resolvedWorkerEntryPath
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
     throw "Worker exited with code $exitCode."

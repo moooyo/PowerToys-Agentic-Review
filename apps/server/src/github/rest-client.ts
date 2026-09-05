@@ -132,9 +132,36 @@ export class GitHubRestClient implements GitHubReadClient {
     const response = await this.#getJson<JsonObject>("search/issues", query, request.signal);
     const requestUrl = responseUrl(this.#baseUrl, "search/issues", query);
     const payload = expectObject(response.data, "response", requestUrl);
-    const items = expectArray(payload.items, "response.items", requestUrl).map((value, index) =>
-      mapSearchItem(value, `response.items[${index}]`, requestUrl),
-    );
+    const items: GitHubSearchItem[] = [];
+    for (const [index, value] of expectArray(
+      payload.items,
+      "response.items",
+      requestUrl,
+    ).entries()) {
+      const itemPath = `response.items[${index}]`;
+      const item = mapSearchItem(value, itemPath, requestUrl);
+      if (item.kind === "issue") {
+        items.push(item);
+        continue;
+      }
+      const object = expectObject(value, itemPath, requestUrl);
+      const nodeId = readString(object.node_id, `${itemPath}.node_id`, requestUrl);
+      // Search exposes the issue ID, while PR details and webhooks use the distinct PR ID.
+      // Resolve only through the configured repository and number, never a response-supplied URL.
+      const snapshot = await this.getPullRequest({
+        repositoryFullName: request.repositoryFullName,
+        number: item.number,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      });
+      if (snapshot.number !== item.number || snapshot.githubNodeId !== nodeId) {
+        invalidResponse(`${itemPath} does not match its pull request detail identity.`, requestUrl);
+      }
+      items.push({
+        ...item,
+        githubWorkItemId: snapshot.githubWorkItemId,
+        pullRequestSnapshot: snapshot,
+      });
+    }
     const totalCount = readNonNegativeInteger(
       payload.total_count,
       "response.total_count",

@@ -1,9 +1,13 @@
 # Worker Windows E2E Runbook
 
 This is an operator-driven release acceptance exercise for one manually deployed Windows Worker
-and a real public GitHub pull request targeting `main`. Running the evidence collector alone does
-not perform this exercise or establish acceptance. Record each criterion as passed, failed, or
-blocked, with evidence from the actual run.
+and a real public GitHub pull request targeting an approved base branch. Running the evidence
+collector alone does not perform this exercise or establish acceptance. Record each criterion as
+passed, failed, or blocked, with evidence from the actual run.
+
+The current 2026-09-05 follow-up has explicit local Windows verification authorization and an
+approved PR targeting `dev`. That real E2E run is still in progress; this runbook does not certify
+its outcome. Other tasks retain the default `test-env` verification policy unless locally authorized.
 
 ## Required inputs and execution authority
 
@@ -20,7 +24,7 @@ Prepare all of the following before starting:
 - Operator access to the Dashboard and read-only access to the deployed Server's job, attempt,
   authorization, and result records. The Dashboard provides reads; it has no create, cancel, or
   requeue action in this milestone.
-- An approved public PR against `main`, its repository's numeric GitHub ID, PR number, base SHA,
+- An approved public PR, its base ref, repository's numeric GitHub ID, PR number, immutable base SHA,
   and head SHA. The operator must have permission to change the selected PR's assignment or user
   review request for this exercise. Keep the PR revision stable during each attempt.
 - Working GitHub ingestion for that repository, through a verified webhook and/or authenticated
@@ -32,22 +36,34 @@ Prepare all of the following before starting:
   a way to retain their actual execution evidence, and an operation that remains active long
   enough to capture descendants and request cancellation.
 - A documented Codex authentication mechanism for the pinned CLI under the Worker execution
-  account and the exact per-attempt environment described below.
+  account and dedicated persistent profile described below. Current native CLI compatibility
+  checks use Codex 0.145.0.
 
 Missing host authorization, deployment files, credentials, permitted PR actions, or evidence
 access blocks the corresponding acceptance step. Do not substitute a local development machine
 without authorization. A Linux `test-env` can run Linux verification but cannot establish Windows
 Job Object, keyring, descendant, or workspace behavior. Passing CI does not complete this runbook.
 
-The Worker creates fresh per-attempt `CODEX_HOME` and `USERPROFILE` directories, writes
-`cli_auth_credentials_store = "keyring"`, and supplies a replacement environment without an API
-key. It does not copy `auth.json`; `WORKER_EXECUTION_PROFILE_DIRECTORY` is not an authentication
-import mechanism. The deployment must establish how the pinned CLI can access valid credentials
-with these settings. A successful login in a different default profile is insufficient evidence.
-Identify the pinned CLI's supported credential mechanism, including any external provisioning,
-before the exercise. If it cannot authenticate under the per-attempt settings on the authorized
-host, mark real Codex execution blocked. Never include credentials or credential-store contents
-in the evidence bundle.
+The Worker uses `WORKER_EXECUTION_PROFILE_DIRECTORY` as its dedicated persistent `CODEX_HOME`.
+Provision a regular UTF-8 `config.toml` (at most 64 KiB) and supported file/keyring authentication or
+provider `auth.command`/`auth.args` under the actual Worker identity. The Worker loads configuration
+at startup, preserves authentication storage, and does not copy it into tasks. A successful login in
+a different default profile is insufficient. Record only sanitized readiness facts and the selected
+authentication mechanism; never include credential contents or process environments in evidence.
+
+Before orphan cleanup, startup rejects profile/runtime directory links, aliases, overlap, and
+observed identity changes. Task `USERPROFILE`, temporary files, control files, and the checkout
+remain per-attempt. The loader allows only model/provider/auth settings. Codex then uses
+`--ignore-user-config`, `--config approval_policy="never"`, and project trust `untrusted` to suppress
+other configuration while retaining `AGENTS.md` and the trusted-code admission policy. MCP, plugins,
+hooks, notifications, and inherited extra writable roots are disabled; only the current task
+temporary directory is added to worktree write access.
+
+Provider header values are carried in native-Codex-only `CODEX_PROVIDER_HEADER_<n>` variables,
+not argv. Tool shells receive exactly `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and
+`USERPROFILE`, without the Codex home or credentials. Ambient API keys are not forwarded; provider
+`env_key` and directly supplied `env_http_headers` are rejected. If the dedicated runtime cannot
+authenticate, keep real execution blocked.
 
 ## Evidence setup and Worker registration
 
@@ -55,6 +71,9 @@ Create a private evidence directory outside Worker data and repository worktrees
 deployed commit, binary versions and digests, host identity, execution account, UTC start time,
 repository ID, PR URL, and expected base/head SHAs. Preserve the non-secret policy values used for
 this run. Use a distinct output filename for each capture; the collector does not overwrite files.
+Preparation fetches the immutable base SHA and PR head with full history, without a `main` fallback.
+`--no-auto-maintenance` suppresses fetch's implicit maintenance; Worker-controlled budget and GC
+policies remain active.
 
 Capture a baseline of the configured shared repository, workspace root, and relevant process
 identities before requesting work. Use the numeric GitHub repository ID, not the Server's internal
@@ -80,6 +99,12 @@ the host's approved log capture facility:
 ```powershell
 .\deploy\worker\start-worker.ps1 -ConfigPath .\deploy\worker\worker-config.psd1
 ```
+
+The launcher resolves Node.js to an absolute executable, places its directory first in `PATH`, and
+removes empty and duplicate entries. Runtime path checks still apply. Do not add the removed
+`WORKER_RECIPE_IDS` setting. If startup fails after ProcessHost creation, confirm that the failed
+Worker and its ProcessHost exit and release the data-root mutex before retrying; startup cleanup
+must preserve the original failure rather than leave a child process holding the singleton.
 
 Save the `Worker registered.` record and the authenticated
 `GET /api/v1/dashboard/workers` response identifying this node and instance. Confirm current
@@ -115,8 +140,12 @@ $e2eConfig = Import-PowerShellDataFile -LiteralPath '.\deploy\worker\worker-conf
 $e2eGit = [string]$e2eConfig['WORKER_GIT_EXECUTABLE_PATH']
 $e2eSharedRepository = '<exact-shared-repository-path>'
 $e2eCheckout = '<exact-attempt-checkout-path>'
+$e2eBaseSha = '<immutable-job-base-sha>'
+$e2eHeadSha = '<immutable-job-head-sha>'
 & $e2eGit "--git-dir=$e2eSharedRepository" rev-parse --is-bare-repository
 & $e2eGit "--git-dir=$e2eSharedRepository" worktree list --porcelain
+& $e2eGit "--git-dir=$e2eSharedRepository" rev-parse --verify "${e2eBaseSha}^{commit}"
+& $e2eGit "--git-dir=$e2eSharedRepository" merge-base $e2eBaseSha $e2eHeadSha
 & $e2eGit -C $e2eCheckout rev-parse --verify 'HEAD^{commit}'
 & $e2eGit -C $e2eCheckout rev-parse --git-common-dir
 & $e2eGit -C $e2eCheckout symbolic-ref -q HEAD
@@ -125,9 +154,11 @@ $e2eDetachedHeadExitCode = $LASTEXITCODE
 
 The repository must be bare, the worktree listing must identify this checkout as detached, and
 checkout `HEAD` must equal the recorded PR head SHA. `--git-common-dir` must resolve to the expected
-shared repository. `symbolic-ref -q HEAD` returns exit code 1 with no branch reference for a
-detached HEAD; retain that expected exit code explicitly. A missing checkout or another nonzero
-result is not proof of detachment. Do not run repository-wide maintenance manually.
+shared repository. The immutable base SHA must resolve as a commit and have a merge base with the
+head, regardless of the base branch name or current tip. `symbolic-ref -q HEAD` returns exit code 1
+with no branch reference for a detached HEAD; retain that expected exit code explicitly. A missing
+checkout or another nonzero result is not proof of detachment. Do not run repository-wide maintenance
+manually.
 
 ## Real build/test execution and accepted inline result
 
@@ -218,8 +249,11 @@ This exercise does not publish a GitHub review, merge a PR, or add Dashboard mut
 ## Descendant and workspace cleanup
 
 After each terminal response, allow the configured teardown interval for deferred worktree and
-process cleanup. A terminal Server status can precede cleanup completion. Retain an after snapshot
-and correlate it with the active snapshot:
+process cleanup. A terminal Server status can precede cleanup completion. Fixed Git cleanup and
+maintenance commands retain cleanup path guards, managed timeouts and resource limits, and shared
+Git accounting. They do not run execution-phase attempt scans while removing link targets; pnpm
+store links can temporarily dangle until final attempt deletion, which must not follow the links.
+Retain an after snapshot and correlate it with the active snapshot:
 
 - Every captured descendant of that attempt must be gone by PID and creation time. Match both
   fields because Windows can reuse PIDs. To establish no surviving descendant, also retain the

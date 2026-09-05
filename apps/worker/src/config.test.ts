@@ -347,6 +347,8 @@ describe("loadWorkerConfig execution mode", () => {
       perAttemptDiskBytes: 16 * gibibyte,
       totalWorkspaceDiskBytes: 32 * gibibyte,
       minimumFreeDiskBytes: 10 * gibibyte,
+      diskScanEntryLimit: 100_000,
+      diskScanTimeoutMs: 30_000,
       orphanRetentionHours: 24,
       orphanScanLimit: 100,
       gitSharedCacheMaxBytes: 64 * gibibyte,
@@ -695,6 +697,12 @@ describe("Worker execution disk policy", () => {
     ["WORKER_EXECUTION_PER_ATTEMPT_DISK_BYTES", String(512 * mebibyte - 1)],
     ["WORKER_EXECUTION_TOTAL_WORKSPACE_DISK_BYTES", "9007199254740992"],
     ["WORKER_EXECUTION_MINIMUM_FREE_DISK_BYTES", String(gibibyte - 1)],
+    ["WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT", "0"],
+    ["WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT", "1000001"],
+    ["WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT", "1.5"],
+    ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "99"],
+    ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "300001"],
+    ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "Infinity"],
     ["WORKER_EXECUTION_ORPHAN_RETENTION_HOURS", "0"],
     ["WORKER_EXECUTION_ORPHAN_SCAN_LIMIT", "10001"],
     ["WORKER_GIT_SHARED_CACHE_MAX_BYTES", String(gibibyte - 1)],
@@ -724,6 +732,8 @@ describe("Worker execution disk policy", () => {
       WORKER_EXECUTION_PER_ATTEMPT_DISK_BYTES: String(8 * gibibyte),
       WORKER_EXECUTION_TOTAL_WORKSPACE_DISK_BYTES: String(24 * gibibyte),
       WORKER_EXECUTION_MINIMUM_FREE_DISK_BYTES: String(12 * gibibyte),
+      WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT: "500000",
+      WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS: "120000",
       WORKER_EXECUTION_ORPHAN_RETENTION_HOURS: "48",
       WORKER_EXECUTION_ORPHAN_SCAN_LIMIT: "250",
       WORKER_GIT_SHARED_CACHE_MAX_BYTES: String(96 * gibibyte),
@@ -738,6 +748,8 @@ describe("Worker execution disk policy", () => {
       perAttemptDiskBytes: 8 * gibibyte,
       totalWorkspaceDiskBytes: 24 * gibibyte,
       minimumFreeDiskBytes: 12 * gibibyte,
+      diskScanEntryLimit: 500_000,
+      diskScanTimeoutMs: 120_000,
       orphanRetentionHours: 48,
       orphanScanLimit: 250,
       gitSharedCacheMaxBytes: 96 * gibibyte,
@@ -746,6 +758,24 @@ describe("Worker execution disk policy", () => {
       gitSharedScanTimeoutMs: 45_000,
       gitSharedGcMinimumIntervalMinutes: 15,
       gitSharedGcPruneAgeHours: 336,
+    });
+  });
+
+  it.each([
+    { entryLimit: 1, timeoutMs: 100 },
+    { entryLimit: 1_000_000, timeoutMs: 300_000 },
+  ])("accepts workspace scan bounds $entryLimit / $timeoutMs", ({ entryLimit, timeoutMs }) => {
+    const config = loadWorkerConfig({
+      ...enabledEnvironment(),
+      WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT: String(entryLimit),
+      WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS: String(timeoutMs),
+    });
+
+    expect(config.execution).toMatchObject({
+      diskScanEntryLimit: entryLimit,
+      diskScanTimeoutMs: timeoutMs,
+      gitSharedScanEntryLimit: 250_000,
+      gitSharedScanTimeoutMs: 30_000,
     });
   });
 });

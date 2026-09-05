@@ -106,6 +106,8 @@ export interface WorkerExecutionConfig {
   readonly perAttemptDiskBytes: number;
   readonly totalWorkspaceDiskBytes: number;
   readonly minimumFreeDiskBytes: number;
+  readonly diskScanEntryLimit: number;
+  readonly diskScanTimeoutMs: number;
   readonly orphanRetentionHours: number;
   readonly orphanScanLimit: number;
   readonly gitSharedCacheMaxBytes: number;
@@ -411,6 +413,20 @@ function loadExecutionConfig(
     gibibyte,
     maximumPerAttemptDiskBytes,
   );
+  const diskScanEntryLimit = readInteger(
+    environment,
+    "WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT",
+    100_000,
+    1,
+    1_000_000,
+  );
+  const diskScanTimeoutMs = readInteger(
+    environment,
+    "WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS",
+    30_000,
+    100,
+    300_000,
+  );
   const orphanRetentionHours = readInteger(
     environment,
     "WORKER_EXECUTION_ORPHAN_RETENTION_HOURS",
@@ -504,6 +520,8 @@ function loadExecutionConfig(
     perAttemptDiskBytes,
     totalWorkspaceDiskBytes,
     minimumFreeDiskBytes,
+    diskScanEntryLimit,
+    diskScanTimeoutMs,
     orphanRetentionHours,
     orphanScanLimit,
     gitSharedCacheMaxBytes,

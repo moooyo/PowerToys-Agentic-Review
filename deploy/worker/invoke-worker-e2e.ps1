@@ -181,7 +181,7 @@ if (-not [string]::IsNullOrWhiteSpace($WorkerLogPath)) {
 }
 $requirements = [ordered]@{
     'registration' = 'Correlate Worker registration and healthy status with its node and instance IDs.'
-    'real-public-main-pr' = 'Verify the public GitHub PR, main base, admitted actor, job ID, and immutable base/head SHAs.'
+    'real-public-pr' = 'Verify the public GitHub PR, its actual target base branch, admitted actor, job ID, and immutable base/head SHAs.'
     'shared-repository-preparation' = 'Compare both runs for the exact repository ID; capture detached HEAD and expected SHAs during each active attempt.'
     'codex-build-test' = 'Attach build/test invocations, working directory, exit codes, and output tied to the attempt. Log keywords are not proof.'
     'inline-completion' = 'Confirm one accepted immutable result for the successful attempt and matching Dashboard digest. HTTP retries may be idempotent.'

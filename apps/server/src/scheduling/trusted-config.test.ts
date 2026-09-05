@@ -8,6 +8,7 @@ import {
   IssueTriageV1Schema,
   PrReviewPlanV1ModelOutputSchema,
 } from "../../../../packages/codex/src/review-results.js";
+import { defaultTrustedSchedulingPolicy } from "../../dist/scheduling/default-policy.js";
 import {
   loadTrustedSchedulingConfig,
   type TrustedSchedulingPolicy,
@@ -34,6 +35,20 @@ afterEach(async () => {
 });
 
 describe("loadTrustedSchedulingConfig", () => {
+  it("loads the production default policy without shared-object validation failures", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadTrustedSchedulingConfig({
+      promptDirectory: fixture.promptDirectory,
+      policy: defaultTrustedSchedulingPolicy,
+      outputSchemas: schemas,
+    });
+
+    expect(config.issueTriage.policy).toEqual(defaultTrustedSchedulingPolicy.issueTriage);
+    expect(config.pullRequestReview.policy).toEqual(
+      defaultTrustedSchedulingPolicy.pullRequestReview,
+    );
+  });
+
   it("loads only the fixed versioned prompts from an absolute trusted directory", async () => {
     const fixture = await createPromptFixture();
     const config = await loadFixture(fixture.promptDirectory);

@@ -52,7 +52,7 @@ export class PlaceholderJobExecutor implements JobExecutor {
 }
 
 export {
-  buildReviewCodexConfig,
+  buildReviewCodexConfigurationOverrides,
   type ReviewFileHandle,
   type ReviewFileIO,
   ReviewJobExecutor,
