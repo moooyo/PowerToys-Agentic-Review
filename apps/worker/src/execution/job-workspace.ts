@@ -192,6 +192,8 @@ const gitConfigurationArguments = Object.freeze([
   "-c",
   "core.eol=lf",
   "-c",
+  "core.longpaths=true",
+  "-c",
   "core.fsmonitor=false",
   "-c",
   "core.hooksPath=NUL",

@@ -62,6 +62,8 @@ Attempt disk scans cover preparation and active review commands. Fixed Git clean
 commands use cleanup path guards and managed process limits without scanning the attempt being
 dismantled: removing a checkout can temporarily leave pnpm store links dangling. Shared-cache
 accounting remains enforced, and final attempt deletion does not follow links into their targets.
+The Worker passes `core.longpaths=true` to every Git command so Git for Windows can remove deeply
+nested dependency paths without relying on the execution account's global configuration.
 
 ## Worker authentication
 

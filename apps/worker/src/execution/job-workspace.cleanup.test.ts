@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   lstat,
   mkdir,
@@ -16,10 +17,11 @@ import {
   type JobWorkspaceError,
   ProductionDisposableJobWorkspaceProvider,
 } from "./job-workspace.js";
-import type {
-  ManagedProcessRunContext,
-  ManagedProcessRunner,
-  ManagedProcessRunResult,
+import {
+  type ManagedProcessRunContext,
+  ManagedProcessRunError,
+  type ManagedProcessRunner,
+  type ManagedProcessRunResult,
 } from "./managed-process-runner.js";
 import type { ProcessHostClient, ProcessLaunchSpec } from "./process-host-protocol.js";
 import { ProductionWorkspaceDiskBudget } from "./workspace-disk-budget.js";
@@ -44,6 +46,13 @@ const gitCommands = new Set([
 class FileSystemGitRunner implements ManagedProcessRunner {
   public readonly removalSignals: AbortSignal[] = [];
   public afterWorktreeRemoval: (() => Promise<void>) | undefined;
+  public latestSpec: ProcessLaunchSpec | undefined;
+  public removeImplementation:
+    | ((
+        spec: ProcessLaunchSpec,
+        context: ManagedProcessRunContext,
+      ) => Promise<ManagedProcessRunResult>)
+    | undefined;
 
   public constructor(private readonly fixtureRoot: string) {}
 
@@ -52,6 +61,7 @@ class FileSystemGitRunner implements ManagedProcessRunner {
     context: ManagedProcessRunContext,
   ): Promise<ManagedProcessRunResult> {
     context.signal.throwIfAborted();
+    this.latestSpec = spec;
     const command = spec.arguments.find((argument) => gitCommands.has(argument));
     if (command === undefined) throw new Error("Unexpected fake Git command.");
     if (command === "init") {
@@ -66,6 +76,18 @@ class FileSystemGitRunner implements ManagedProcessRunner {
     if (command === "worktree" && spec.arguments.includes("remove")) {
       const checkout = requiredArgument(spec.arguments.at(-1));
       this.removalSignals.push(context.signal);
+      if (this.removeImplementation !== undefined) {
+        const result = await this.removeImplementation(spec, context);
+        if (result.exitCode !== 0) {
+          throw new ManagedProcessRunError(
+            "NON_ZERO_EXIT",
+            "Real Git worktree removal failed.",
+            result,
+          );
+        }
+        await this.afterWorktreeRemoval?.();
+        return result;
+      }
       await rm(assertOwnedPath(this.fixtureRoot, checkout), { recursive: true, force: false });
       await this.afterWorktreeRemoval?.();
     }
@@ -89,7 +111,7 @@ const unusedProcessHost: ProcessHostClient = {
   close: async () => undefined,
 };
 
-async function createFixture() {
+async function createFixture(gitExecutable?: string) {
   const parent = await realpath(tmpdir());
   const root = await realpath(await mkdtemp(join(parent, fixturePrefix)));
   temporaryRoots.set(root, parent);
@@ -113,7 +135,7 @@ async function createFixture() {
   const provider = new ProductionDisposableJobWorkspaceProvider({
     workspaceRootDirectory: workspaceRoot,
     gitSharedRootDirectory: sharedRoot,
-    gitExecutable: join(root, "trusted", "git.exe"),
+    gitExecutable: gitExecutable ?? join(root, "trusted", "git.exe"),
     gitWorkingDirectory,
     gitEnvironment: {
       SYSTEMROOT: "C:\\Windows",
@@ -207,8 +229,150 @@ describe.skipIf(process.platform !== "win32")(
         await readmitted.release();
       },
     );
+
+    it("runs production Git cleanup arguments against a real worktree with long pnpm paths", async () => {
+      const executable = await findGitExecutable();
+      const fixture = await createFixture(executable);
+      const healthFaults: JobWorkspaceError[] = [];
+      const workspace = await fixture.provider.prepare(envelope(), {
+        signal: new AbortController().signal,
+        processHost: unusedProcessHost,
+        reportProcessCount: () => undefined,
+        reportNodeHealthFault: (error) => healthFaults.push(error),
+      });
+      const preparationSpec = fixture.runner.latestSpec;
+      if (preparationSpec === undefined)
+        throw new Error("Preparation did not produce a Git launch.");
+      const localGit = async (argumentsList: readonly string[]): Promise<void> => {
+        const result = await runRealGit({ ...preparationSpec, arguments: argumentsList });
+        expect(result, result.stderr).toMatchObject({ exitCode: 0 });
+      };
+      const seed = join(fixture.root, "seed");
+      const sharedRepository = join(fixture.sharedRoot, "repository-1844564.git");
+      await localGit(["init", "--quiet", seed]);
+      await writeFile(join(seed, "README.md"), "Local seed commit.\n");
+      await localGit(["-C", seed, "add", "README.md"]);
+      await localGit([
+        "-C",
+        seed,
+        "-c",
+        "user.name=Cleanup fixture",
+        "-c",
+        "user.email=cleanup-fixture@example.invalid",
+        "-c",
+        "core.hooksPath=NUL",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "Local cleanup fixture",
+      ]);
+      await localGit(["init", "--bare", "--quiet", sharedRepository]);
+      await localGit([
+        `--git-dir=${sharedRepository}`,
+        "-c",
+        "protocol.file.allow=always",
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        seed,
+        "HEAD:refs/heads/fixture",
+      ]);
+      await rm(assertOwnedPath(fixture.root, workspace.checkoutDirectory), {
+        recursive: true,
+        force: false,
+      });
+      await localGit([
+        `--git-dir=${sharedRepository}`,
+        "worktree",
+        "add",
+        "--quiet",
+        "--detach",
+        "--force",
+        workspace.checkoutDirectory,
+        "refs/heads/fixture",
+      ]);
+      const deepDirectory = join(
+        workspace.checkoutDirectory,
+        "node_modules",
+        ".pnpm",
+        `@fixture+package@1.0.0_${"dependency".repeat(8)}`,
+        "node_modules",
+        "@fixture",
+        "package",
+        "dist",
+        `generated-${"nested".repeat(12)}`,
+      );
+      await mkdir(deepDirectory, { recursive: true });
+      const deepFile = join(deepDirectory, "types.d.ts");
+      await writeFile(deepFile, "export type Fixture = string;\n");
+      expect(deepFile.length).toBeGreaterThan(260);
+      const outsideDirectory = join(fixture.root, "external-target");
+      await mkdir(outsideDirectory);
+      const marker = join(outsideDirectory, "marker.txt");
+      await writeFile(marker, "Preserve the external target.");
+      await symlink(outsideDirectory, join(workspace.tempDirectory, "external-link"), "junction");
+      let removalResult: ManagedProcessRunResult | undefined;
+      fixture.runner.removeImplementation = async (spec, context) => {
+        removalResult = await runRealGit(spec, context.signal);
+        return removalResult;
+      };
+
+      assertOwnedPath(fixture.root, workspace.attemptDirectory);
+      await expect(workspace.cleanup()).resolves.toBeUndefined();
+
+      expect(removalResult, removalResult?.stderr).toMatchObject({ exitCode: 0 });
+      expect(healthFaults).toEqual([]);
+      await expect(lstat(workspace.checkoutDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(workspace.attemptDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(marker, "utf8")).toBe("Preserve the external target.");
+      expect((await lstat(sharedRepository)).isDirectory()).toBe(true);
+    }, 120_000);
   },
 );
+
+async function findGitExecutable(): Promise<string> {
+  for (const directory of (process.env.PATH ?? process.env.Path ?? "").split(";")) {
+    if (!isAbsolute(directory)) continue;
+    const candidate = join(directory, "git.exe");
+    try {
+      if ((await lstat(candidate)).isFile()) return await realpath(candidate);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  }
+  throw new Error("Git for Windows was not found on PATH.");
+}
+
+function runRealGit(
+  spec: ProcessLaunchSpec,
+  signal?: AbortSignal,
+): Promise<ManagedProcessRunResult> {
+  return new Promise((resolveResult, reject) => {
+    execFile(
+      spec.executable,
+      [...spec.arguments],
+      {
+        cwd: spec.workingDirectory,
+        env: { ...spec.environment },
+        windowsHide: true,
+        timeout: spec.limits.hardTimeoutMs,
+        maxBuffer: spec.limits.maximumOutputBytes,
+        encoding: "utf8",
+        ...(signal === undefined ? {} : { signal }),
+      },
+      (error, stdout, stderr) => {
+        const exitCode = error === null ? 0 : error.code;
+        if (typeof exitCode !== "number") {
+          reject(error);
+          return;
+        }
+        resolveResult({ exitCode, stdout, stderr });
+      },
+    );
+  });
+}
 
 function assertOwnedPath(root: string, target: string): string {
   const absoluteTarget = resolve(target);

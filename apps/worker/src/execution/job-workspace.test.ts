@@ -570,6 +570,7 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     ).toBe(true);
     for (const call of processRunner.calls) {
       expect(call.spec.executable).toBe(gitExecutable);
+      expect(call.spec.arguments).toContain("core.longpaths=true");
       expect(call.spec.workingDirectory).toBe(gitWorkingDirectory);
       const changeDirectoryIndex = call.spec.arguments.indexOf("-C");
       if (changeDirectoryIndex !== -1) {
