@@ -54,7 +54,9 @@ Current as of 2026-09-05 on branch `main`.
   Windows cross-builds on Linux; and Worker typecheck/tests/build, ProcessHost tests, and
   deployment-script checks on Windows.
 - Manual Windows deployment has a complete configuration template, guarded launch helper, and an
-  explicit E2E evidence runbook. The evidence helper does not claim to execute the E2E workflow.
+  explicit E2E evidence runbook. The evidence helper records per-repository and per-attempt
+  observations across capture stages, never certifies acceptance, and preserves previous captures.
+  Standalone PowerShell regression checks cover the collector and run in Windows CI.
 
 ### Removed unpublished prototypes
 
@@ -112,7 +114,7 @@ service-manager, Job Object, path, ACL, Git, or Codex runtime behavior.
 
 ## Latest verification
 
-On 2026-09-05, the current staged `main` snapshot passed on `test-env` with Node.js 24.20.0 and pnpm
+On 2026-09-05, implementation commit `3826a40` passed on `test-env` with Node.js 24.20.0 and pnpm
 11.24.0:
 
 - workspace typecheck;
@@ -125,3 +127,10 @@ ProcessHost passed `go test ./...` and `go vet ./...` with Go 1.26.7. The same s
 for Windows amd64 and arm64. The repository CI additionally runs ProcessHost tests and deployment
 PowerShell parser checks on a native Windows runner. The remaining release-level validation is the
 operator-driven Windows E2E exercise described above.
+
+The E2E acceptance follow-up fixed misleading evidence heuristics and documented the supported
+GitHub authorization lifecycle used to create and cancel real review jobs. Its portable collector
+regressions passed on Linux `test-env` with PowerShell 7.6.5, and Biome still passed across 198
+files. These checks do not establish Windows process inspection or real release acceptance.
+The Windows host, deployment configuration, permitted public PR, Codex authentication behavior,
+and actual command evidence must be available before the remaining exercise can be completed.

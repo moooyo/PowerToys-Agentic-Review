@@ -152,3 +152,6 @@ jobs:
           if ($hasErrors) {
             throw "PowerShell syntax validation failed for deploy/worker scripts."
           }
+
+      - name: Test Worker E2E evidence collector
+        run: ./deploy/worker/tests/invoke-worker-e2e.tests.ps1

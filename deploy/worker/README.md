@@ -9,6 +9,7 @@ flow.
 Install the following trusted, pinned files:
 
 - Node.js 24.20.x;
+- PowerShell 7 or newer (`pwsh`) for the Windows E2E evidence collector;
 - Git for Windows;
 - Codex CLI;
 - `apps/worker/dist/worker.mjs` and its source map/metadata;
@@ -65,7 +66,29 @@ For release acceptance, use `deploy/worker/worker-e2e-runbook.md` and
 `deploy/worker/invoke-worker-e2e.ps1` to collect evidence for registration, a real `public/main`
 PR, Codex validation, inline completion, lease cancellation handling, ProcessHost cleanup,
 workspace cleanup, and shared-Git policy configuration. The script collects evidence only; it does
-not execute an automated E2E run.
+not execute an automated E2E run or declare acceptance. Its timestamped observations must be
+correlated with actual job and run-attempt identities, active worktrees and descendants, retained
+build/test output, and the Server's accepted result records. Use distinct output paths for each
+baseline, active, completed, and cancelled capture.
+
+The exercise requires an explicitly authorized Windows verification host, configured Worker and
+Codex authentication, a reachable Server with operator/read-only evidence access, and permission
+to change assignment or user review requests on the selected public PR. The configured GitHub
+reviewer or an allowlisted actor opens work through those GitHub actions. Removing the final active
+assignment/review request triggers lease cancellation after ingestion; the Dashboard has no job
+creation, cancellation, or requeue action. The runbook explains how to open a fresh authorization
+epoch for the second attempt and prove shared-cache reuse.
+
+Codex uses a fresh per-attempt `CODEX_HOME` and `USERPROFILE`, a replacement environment without an
+API key, and `cli_auth_credentials_store = "keyring"`. The Worker does not import `auth.json` from
+`WORKER_EXECUTION_PROFILE_DIRECTORY`. Establish authentication for the pinned CLI under that exact
+Windows account and environment before claiming real execution; default-profile login alone is
+not proof. The Worker also does not persist Codex command output, so arrange actual build/test and
+process-lifecycle evidence capture before the disposable workspace is removed.
+
+Missing deployment inputs or evidence keep release acceptance blocked. Linux `test-env` checks
+and CI results do not replace the operator-driven Windows exercise. See the
+[Windows E2E runbook](./worker-e2e-runbook.md) for the required evidence and decision criteria.
 
 ## Distribution and signing
 
