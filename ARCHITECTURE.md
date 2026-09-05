@@ -238,11 +238,12 @@ liveness open, readiness closed, Worker routes closed, GitHub ingestion stopped,
 stopped while operators reconcile the restored database and Worker credentials. See
 `docs/operations/worker-token-recovery.md`.
 
+The authorized Windows runtime E2E exercise passed, including healthy success, active cancellation,
+cache reuse, and recovered cleanup. Its tested scope, evidence, and environment closeout are in the
+[live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
+
 ## Known pre-release gaps
 
-- Windows-native end-to-end validation must still cover the actual Worker, Git worktree, Codex, and
-  ProcessHost composition. The explicitly authorized local exercise on a PR targeting `dev` is in
-  progress; this document does not claim a completed E2E result.
 - Automatic Windows service installation, restart policy, and upgrade management remain
   deployment-owned.
 - Repository checkout currently supports only anonymously readable public GitHub repositories.

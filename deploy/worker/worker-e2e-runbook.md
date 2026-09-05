@@ -6,8 +6,10 @@ collector alone does not perform this exercise or establish acceptance. Record e
 passed, failed, or blocked, with evidence from the actual run.
 
 The current 2026-09-05 follow-up has explicit local Windows verification authorization and an
-approved PR targeting `dev`. That real E2E run is still in progress; this runbook does not certify
-its outcome. Other tasks retain the default `test-env` verification policy unless locally authorized.
+approved PR targeting `dev`. Runtime acceptance passed through manual evidence correlation; see the
+[live validation handoff](../../docs/handoff/2026-09-05-windows-e2e-live-validation.md) for evidence
+and environment closeout. The collector still reports automatic `unverified` observations.
+Other tasks retain the default `test-env` policy unless locally authorized.
 
 ## Required inputs and execution authority
 

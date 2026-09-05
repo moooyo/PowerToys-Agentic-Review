@@ -69,8 +69,9 @@ credentials.
 
 The repository requires Node.js 24.20.x and pnpm 11.24.x.
 Run verification on `test-env` by default; local verification requires explicit authorization for
-the current task. Such authorization was granted for the ongoing Windows E2E follow-up, which is
-not yet recorded as complete.
+the current task. The authorized Windows runtime E2E exercise passed; its tested configuration,
+evidence, and environment closeout are recorded in the
+[live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
 
 ```powershell
 pnpm install --frozen-lockfile

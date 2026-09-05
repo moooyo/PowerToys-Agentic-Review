@@ -147,9 +147,10 @@ Worker waits for ProcessHost closure before reporting the original error.
 For manual acceptance on Windows, follow `deploy/worker/worker-e2e-runbook.md` and capture evidence
 with `deploy/worker/invoke-worker-e2e.ps1`. That script is an evidence collector and does not run
 an automated end-to-end workflow.
-The current local Windows exercise is explicitly authorized and uses an approved PR targeting
-`dev`; real E2E acceptance is still in progress. Other local verification continues to require
-task-specific authorization.
+The authorized local Windows exercise on the approved PR targeting `dev` passed runtime acceptance.
+Its tested configuration, evidence, and environment closeout are recorded in the
+[live validation handoff](../../docs/handoff/2026-09-05-windows-e2e-live-validation.md).
+Other local verification continues to require task-specific authorization.
 
 Production Server connections use HTTPS. Package signing is a deployment concern only when Worker
 bundles are distributed automatically; it is not required for a manual trusted deployment.

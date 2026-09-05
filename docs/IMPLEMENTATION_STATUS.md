@@ -1,7 +1,8 @@
 # Implementation Status
 
-Current working-tree status as of 2026-09-05. The ongoing Windows E2E exercise is not yet a completed
-acceptance result.
+Current status as of 2026-09-05: real Windows runtime E2E acceptance passed. Evidence and environment
+closeout are recorded in the
+[live validation handoff](./handoff/2026-09-05-windows-e2e-live-validation.md).
 
 ## Implemented baseline
 
@@ -121,9 +122,9 @@ pnpm build
 pnpm lint
 ```
 
-ProcessHost Go tests and Windows cross-compilation are separate checks. A final Windows-native
-end-to-end exercise is still required before deployment because Linux CI cannot prove Windows
-service-manager, Job Object, path, ACL, Git, or Codex runtime behavior.
+ProcessHost Go tests and Windows cross-compilation are separate checks. Windows-native validation
+is required in addition to Linux CI, which cannot establish Windows process, path, ACL, Git, or
+Codex runtime behavior. The current runtime exercise has completed as recorded below.
 
 ## Verified remote baseline
 
@@ -138,20 +139,26 @@ On 2026-09-05, implementation commit `3826a40` passed on `test-env` with Node.js
 
 ProcessHost passed `go test ./...` and `go vet ./...` with Go 1.26.7. The same source cross-compiled
 for Windows amd64 and arm64. The repository CI additionally runs ProcessHost tests and deployment
-PowerShell parser checks on a native Windows runner. The remaining release-level validation is the
-operator-driven Windows E2E exercise described above.
+PowerShell parser checks on a native Windows runner. At that baseline, the operator-driven Windows
+E2E exercise remained outstanding; its subsequent outcome is recorded below.
 
 The E2E acceptance follow-up fixed misleading evidence heuristics and documented the supported
 GitHub authorization lifecycle used to create and cancel real review jobs. Its portable collector
 regressions passed on Linux `test-env` with PowerShell 7.6.5, and Biome still passed across 198
 files. These checks do not establish Windows process inspection or real release acceptance.
-The Windows host, deployment configuration, permitted public PR, Codex authentication behavior,
-and actual command evidence must be available before the remaining exercise can be completed.
+Those earlier checks were preparation; the subsequent authorized Windows runtime evidence is
+recorded below.
 
-## Current Windows follow-up
+## Windows runtime acceptance and closeout
 
 The user explicitly authorized local verification and the selected real public PR targeting `dev`.
-Focused Worker/Codex tests, type checks, configuration probes, and native ProcessHost checks have
-supported the fixes described above. The real Worker/Server E2E run is still in progress. This
-status does not claim an accepted review result, actual build/test execution, cancellation, cache
-reuse, or cleanup acceptance; the final evidence handoff must establish those outcomes.
+Production commit `3cf2ef9b04b03ea5e0849ed3d609e49042eb9e98` has green CI, and manual correlation
+establishes healthy real success, Codex-launched build/test execution, one accepted result, fresh
+active cancellation with zero accepted results, cache reuse, and recovered cleanup without drain.
+The independent native audit reports no required runtime evidence gaps. The collector's automatic
+`unverified` status remains intentional; the manual decision and precise evidence are linked in the
+[live validation handoff](./handoff/2026-09-05-windows-e2e-live-validation.md).
+
+Test processes are stopped, the test Worker credential is revoked, and remote token/database
+cleanup is complete. The handoff records the remaining local private-copy disposition separately
+from the completed runtime acceptance.

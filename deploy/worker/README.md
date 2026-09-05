@@ -106,8 +106,10 @@ creation, cancellation, or requeue action. The runbook explains how to open a fr
 epoch for the second attempt and prove shared-cache reuse.
 
 PR preparation fetches the immutable `baseSha` and PR head with full history. It supports arbitrary
-base branches, with no `main` assumption or fallback. The current user-authorized local exercise
-uses a PR targeting `dev`; its real E2E result is still in progress and is not established here.
+base branches, with no `main` assumption or fallback. The authorized Windows exercise on a PR
+targeting `dev` passed runtime acceptance. Its tested configuration, evidence, and environment
+closeout are recorded in the
+[live validation handoff](../../docs/handoff/2026-09-05-windows-e2e-live-validation.md).
 
 Codex uses the persistent home and fresh per-attempt `USERPROFILE`, temporary, and control
 directories. The loader passes only allowed model/provider/auth settings before fixed execution
