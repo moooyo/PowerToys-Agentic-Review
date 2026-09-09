@@ -1,0 +1,162 @@
+.prompts-page {
+  width: 100%;
+  padding: 24px;
+}
+
+.prompts-notice {
+  margin-bottom: 20px;
+}
+
+.prompts-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin-bottom: 20px;
+}
+
+.prompts-toolbar > .ant-typography {
+  flex: 1;
+  min-width: 240px;
+  margin: 0;
+}
+
+.prompts-workflow-filter {
+  width: 250px;
+  max-width: 100%;
+}
+
+.prompts-template-cell {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.prompts-name-link {
+  height: auto;
+  padding: 0;
+  font-weight: 600;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.prompts-secondary {
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.prompts-break {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.prompts-drawer-actions,
+.prompts-editor-actions,
+.prompts-editor-status,
+.prompts-preview-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.prompts-drawer-actions {
+  justify-content: flex-end;
+}
+
+.prompts-editor-actions {
+  justify-content: space-between;
+  margin-top: 16px;
+}
+
+.prompts-editor-status {
+  justify-content: space-between;
+  margin-bottom: 12px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.prompts-template-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.prompts-form-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.prompts-field-label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.prompts-code-editor,
+.prompts-readonly {
+  font-family: var(--app-code-font);
+  font-size: 13px;
+  line-height: 1.65;
+  tab-size: 2;
+}
+
+.prompts-readonly {
+  max-height: 60vh;
+  margin: 16px 0 0;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--app-line);
+  border-radius: 6px;
+  background: var(--app-canvas);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.prompts-preview {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--app-line);
+}
+
+.prompts-preview-result,
+.prompts-section-note {
+  margin-top: 20px;
+}
+
+.prompts-preview-digest {
+  margin-top: 12px;
+}
+
+.prompts-preview-meta {
+  color: var(--app-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .prompts-page {
+    padding: 16px;
+  }
+
+  .prompts-page > .ant-card > .ant-card-body {
+    padding: 16px;
+  }
+
+  .prompts-form-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .prompts-workflow-filter {
+    width: 100%;
+  }
+}

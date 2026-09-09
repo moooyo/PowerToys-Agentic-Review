@@ -1,0 +1,69 @@
+.configuration-audit {
+  width: 100%;
+}
+
+.configuration-audit-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.configuration-audit-toolbar .ant-typography {
+  margin-bottom: 0;
+}
+
+.configuration-audit-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.configuration-audit-identity > .ant-tag {
+  align-self: flex-start;
+  margin-inline-end: 0;
+}
+
+.configuration-audit-break {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.configuration-audit-note {
+  margin-bottom: 16px;
+}
+
+.configuration-audit-snapshot {
+  max-height: 56vh;
+  overflow: auto;
+  margin: 16px 0 0;
+  padding: 16px;
+  border: 1px solid var(--app-line);
+  border-radius: 6px;
+  background: var(--app-canvas);
+  font-family: var(--app-code-font);
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.configuration-audit-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+@media (max-width: 575px) {
+  .configuration-audit-toolbar {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .configuration-audit-snapshot {
+    padding: 12px;
+  }
+}

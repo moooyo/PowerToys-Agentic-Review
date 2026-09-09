@@ -1,0 +1,61 @@
+.system-page {
+  width: 100%;
+  padding: 24px;
+}
+
+.system-page__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 16px;
+}
+
+.system-page__refresh-note,
+.system-page__last-refreshed {
+  color: var(--app-muted);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.system-page__content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+.system-health__notice {
+  margin-bottom: 16px;
+}
+
+.system-health__summary {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.system-health__checked {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.system-page__error {
+  margin-bottom: 24px;
+}
+
+.system-page__last-refreshed {
+  margin: 0;
+  text-align: right;
+}
+
+@media (max-width: 767px) {
+  .system-page {
+    padding: 16px;
+  }
+
+  .system-panel > .ant-card-body {
+    padding: 16px;
+  }
+}

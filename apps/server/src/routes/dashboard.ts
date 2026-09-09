@@ -1,4 +1,5 @@
 import {
+  type DashboardHealthComponent,
   type DashboardJobDetailRead,
   DashboardJobDetailReadSchema,
   type DashboardJobListQuery,
@@ -20,9 +21,14 @@ import {
   EntityIdSchema,
   type ErrorDetails,
   ErrorDetailsSchema,
+  type OperatorPrincipal,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import type { FastifyInstance, FastifyRequest, onRequestAsyncHookHandler } from "fastify";
+import { bindOperatorDatabase } from "../database/operator-database.js";
+import type { OperatorRequestInput } from "../database/operator-request.js";
+import type { GitHubIngestionHealthSource } from "../github/ingestion-health.js";
+import { sendConfigurationError } from "./configuration-support.js";
 
 export const DASHBOARD_API_PATHS = {
   jobById: "/api/v1/dashboard/jobs/:jobId",
@@ -33,6 +39,7 @@ export const DASHBOARD_API_PATHS = {
 } as const;
 
 export interface DashboardReadStore {
+  request(operation: "operatorRequest", input: OperatorRequestInput): Promise<unknown>;
   request(
     operation: "listWorkItems",
     input: DashboardWorkItemListQuery,
@@ -48,7 +55,7 @@ export interface DashboardReadStore {
   ): Promise<DashboardWorkerListResponse>;
   request(
     operation: "getSystemSnapshot",
-    input: Record<string, never>,
+    input: { readonly githubHealth?: DashboardHealthComponent },
   ): Promise<DashboardSystemRead>;
 }
 
@@ -57,6 +64,8 @@ export type DashboardAuthenticationPreHandler = onRequestAsyncHookHandler;
 export interface DashboardRouteDependencies {
   readonly database: DashboardReadStore;
   readonly authenticate: DashboardAuthenticationPreHandler;
+  readonly actor: (request: FastifyRequest) => OperatorPrincipal;
+  readonly githubHealth?: GitHubIngestionHealthSource;
 }
 
 type QueryRecord = Record<string, unknown>;
@@ -270,12 +279,15 @@ export const registerDashboardRoutes = (
   app: FastifyInstance,
   dependencies: DashboardRouteDependencies,
 ): void => {
-  const { authenticate, database } = dependencies;
+  const { authenticate, actor, database, githubHealth } = dependencies;
+  const operatorDatabase = (request: FastifyRequest) =>
+    bindOperatorDatabase(database, actor(request));
 
   app.get<{ Querystring: DashboardWorkItemListQuery; Reply: DashboardWorkItemListResponse }>(
     DASHBOARD_API_PATHS.workItems,
     {
       preValidation: normalizeQueryPreValidation({
+        entityIds: ["repositoryId"],
         filters: { authorization: 16, kind: 16, stage: 16, state: 16 },
       }),
       onRequest: authenticate,
@@ -284,15 +296,21 @@ export const registerDashboardRoutes = (
         response: { 200: workItemResponseSchema },
       },
     },
-    async (request) => database.request("listWorkItems", request.query),
+    async (request, reply) => {
+      try {
+        return await operatorDatabase(request).request("listWorkItems", request.query);
+      } catch (error) {
+        return sendConfigurationError(reply, error);
+      }
+    },
   );
 
   app.get<{ Querystring: DashboardJobListQuery; Reply: DashboardJobListResponse }>(
     DASHBOARD_API_PATHS.jobs,
     {
       preValidation: normalizeQueryPreValidation({
-        entityIds: ["workItemId"],
-        filters: { phase: 32, stage: 32, status: 32 },
+        entityIds: ["repositoryId", "workItemId"],
+        filters: { admission: 2, phase: 32, stage: 32, status: 32 },
       }),
       onRequest: authenticate,
       schema: {
@@ -300,7 +318,13 @@ export const registerDashboardRoutes = (
         response: { 200: jobResponseSchema },
       },
     },
-    async (request) => database.request("listJobs", request.query),
+    async (request, reply) => {
+      try {
+        return await operatorDatabase(request).request("listJobs", request.query);
+      } catch (error) {
+        return sendConfigurationError(reply, error);
+      }
+    },
   );
 
   app.get<{
@@ -322,15 +346,19 @@ export const registerDashboardRoutes = (
       },
     },
     async (request, reply) => {
-      const job = await database.request("getJob", request.params);
-      if (job === null) {
-        return reply.code(404).send({
-          code: "dashboard_job_not_found",
-          message: "The dashboard job does not exist.",
-          retryable: false,
-        });
+      try {
+        const job = await operatorDatabase(request).request("getJob", request.params);
+        if (job === null) {
+          return reply.code(404).send({
+            code: "dashboard_job_not_found",
+            message: "The dashboard job does not exist.",
+            retryable: false,
+          });
+        }
+        return job;
+      } catch (error) {
+        return sendConfigurationError(reply, error);
       }
-      return job;
     },
   );
 
@@ -347,7 +375,13 @@ export const registerDashboardRoutes = (
         response: { 200: workerResponseSchema },
       },
     },
-    async (request) => database.request("listWorkers", request.query),
+    async (request, reply) => {
+      try {
+        return await operatorDatabase(request).request("listWorkers", request.query);
+      } catch (error) {
+        return sendConfigurationError(reply, error);
+      }
+    },
   );
 
   app.get<{ Querystring: Record<string, never>; Reply: DashboardSystemRead }>(
@@ -360,6 +394,17 @@ export const registerDashboardRoutes = (
         response: { 200: systemResponseSchema },
       },
     },
-    async () => database.request("getSystemSnapshot", {}),
+    async (request, reply) => {
+      try {
+        const authorizedDatabase = operatorDatabase(request);
+        await authorizedDatabase.request("operatorCheckPermission", {});
+        return await authorizedDatabase.request(
+          "getSystemSnapshot",
+          githubHealth === undefined ? {} : { githubHealth: githubHealth.getHealth() },
+        );
+      } catch (error) {
+        return sendConfigurationError(reply, error);
+      }
+    },
   );
 };

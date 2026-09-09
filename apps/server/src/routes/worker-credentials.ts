@@ -7,6 +7,7 @@ import type {
 } from "fastify";
 import type { DatabaseClient } from "../database/database-client.js";
 import { DatabaseRequestError } from "../database/errors.js";
+import { bindOperatorDatabase } from "../database/operator-database.js";
 import type {
   WorkerNodeAuthState,
   WorkerNodeCredentialListItem,
@@ -14,6 +15,7 @@ import type {
 } from "../database/protocol.js";
 import type { OperatorSession } from "../security/operator-auth.js";
 import { type OperatorAuthRouteService, readOperatorSession } from "./auth.js";
+import { sendConfigurationError } from "./configuration-support.js";
 
 export const WORKER_CREDENTIAL_PATHS = {
   list: "/api/v1/operator/worker-nodes",
@@ -194,6 +196,13 @@ const hashWorkerToken = (token: string): string =>
   createHash("sha256").update(token, "ascii").digest("hex");
 
 const sendDatabaseError = (reply: FastifyReply, error: unknown): FastifyReply => {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "PLATFORM_FORBIDDEN" || error.code === "PLATFORM_NOT_FOUND")
+  ) {
+    return sendConfigurationError(reply, error);
+  }
   const code = error instanceof DatabaseRequestError ? error.code : undefined;
   switch (code) {
     case "WORKER_NODE_CREDENTIAL_NOT_FOUND":
@@ -366,10 +375,13 @@ export const registerWorkerCredentialRoutes = (
       return sendInvalidRequest(reply);
     }
     try {
-      const result: unknown = await dependencies.database.request(
-        "listWorkerNodeCredentials",
-        pagination,
-      );
+      const session = requireSession(request, sessions);
+      const database = bindOperatorDatabase(dependencies.database, {
+        issuer: session.issuer,
+        subject: session.subject,
+      });
+      await database.request("operatorCheckPermission", {});
+      const result: unknown = await database.request("listWorkerNodeCredentials", pagination);
       const response = readWorkerNodeCredentialListResult(result, pagination.limit);
       if (response === undefined) {
         return sendDatabaseError(reply, undefined);
@@ -389,12 +401,17 @@ export const registerWorkerCredentialRoutes = (
         return sendInvalidRequest(reply);
       }
       const session = requireSession(request, sessions);
-      const workerNodeId = `worker:${randomUUID()}`;
-      const token = createWorkerToken();
-      const workerTokenSha256 = hashWorkerToken(token);
 
       try {
-        const result = await dependencies.database.request("createWorkerNodeCredential", {
+        const database = bindOperatorDatabase(dependencies.database, {
+          issuer: session.issuer,
+          subject: session.subject,
+        });
+        await database.request("operatorCheckPermission", {});
+        const workerNodeId = `worker:${randomUUID()}`;
+        const token = createWorkerToken();
+        const workerTokenSha256 = hashWorkerToken(token);
+        const result = await database.request("createWorkerNodeCredential", {
           workerNodeId,
           displayName: body.displayName,
           workerTokenSha256,
@@ -421,11 +438,16 @@ export const registerWorkerCredentialRoutes = (
         return sendInvalidRequest(reply);
       }
       const session = requireSession(request, sessions);
-      const token = createWorkerToken();
-      const workerTokenSha256 = hashWorkerToken(token);
 
       try {
-        const result = await dependencies.database.request("rotateWorkerToken", {
+        const database = bindOperatorDatabase(dependencies.database, {
+          issuer: session.issuer,
+          subject: session.subject,
+        });
+        await database.request("operatorCheckPermission", {});
+        const token = createWorkerToken();
+        const workerTokenSha256 = hashWorkerToken(token);
+        const result = await database.request("rotateWorkerToken", {
           workerNodeId,
           workerTokenSha256,
           expectedUpdatedAt: body.expectedUpdatedAt,
@@ -456,7 +478,12 @@ export const registerWorkerCredentialRoutes = (
       const session = requireSession(request, sessions);
 
       try {
-        const result = await dependencies.database.request("revokeWorkerToken", {
+        const database = bindOperatorDatabase(dependencies.database, {
+          issuer: session.issuer,
+          subject: session.subject,
+        });
+        await database.request("operatorCheckPermission", {});
+        const result = await database.request("revokeWorkerToken", {
           workerNodeId,
           revokedByIssuer: session.issuer,
           revokedBySubject: session.subject,

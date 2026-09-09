@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   type BuildCodexExecLaunchSpecOptions,
+  buildCodexAppServerLaunchSpec,
   buildCodexExecLaunchSpec,
   type CodexProcessResourceLimits,
   codexProcessResourceLimitBounds,
@@ -36,7 +37,156 @@ const validOptions = (): BuildCodexExecLaunchSpecOptions => ({
   limits: validLimits(),
 });
 
+describe("buildCodexAppServerLaunchSpec", () => {
+  const options = () => ({ ...validOptions(), permissionProfile: "validation_review" });
+
+  it("uses dedicated interactive input without exec-only arguments or prompt delivery", () => {
+    const spec = buildCodexAppServerLaunchSpec(options());
+    expect(spec.arguments).toEqual([
+      "--strict-config",
+      "app-server",
+      "--config",
+      'approval_policy="never"',
+      "--config",
+      'default_permissions="validation_review"',
+      "--stdio",
+    ]);
+    expect(spec).not.toHaveProperty("standardInput");
+    expect(spec.interactiveStdin).toBe(true);
+    expect(spec.captureProcessIdentity).toBe(true);
+    expect(spec.environmentMode).toBe("replace");
+    expect(spec.workingDirectory).toBe(options().controlRootDirectory);
+  });
+
+  it("fixes approvals and profile after overrides while keeping values as individual arguments", () => {
+    const value = 'developer_instructions="Keep --sandbox danger-full-access; & echo as text"';
+    const spec = buildCodexAppServerLaunchSpec({
+      ...options(),
+      configurationOverrides: [
+        value,
+        'approval_policy="on-request"',
+        'default_permissions="other"',
+      ],
+    });
+    expect(spec.arguments[3]).toBe(value);
+    expect(spec.arguments.slice(-5)).toEqual([
+      "--config",
+      'approval_policy="never"',
+      "--config",
+      'default_permissions="validation_review"',
+      "--stdio",
+    ]);
+    expect(spec.arguments).not.toContain("--sandbox");
+  });
+
+  it.each([
+    'sandbox_mode="read-only"',
+    "sandbox_workspace_write.network_access=false",
+    "sandbox_workspace_write={network_access=false}",
+    '"sandbox_mode"="read-only"',
+    '"sandbox_\\u006dode"="read-only"',
+    "'sandbox_mode'='read-only'",
+  ])("rejects legacy sandbox overrides and quoted aliases: %s", (assignment) => {
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        configurationOverrides: [assignment],
+      }),
+    ).toThrow(/sandbox|bare dotted keys/u);
+  });
+
+  it.each([
+    "",
+    "../profile",
+    "profile\nother",
+    "profile\n",
+    "profile\r\n",
+    "profile.with.dot",
+    "a".repeat(65),
+  ])("rejects invalid profile identifiers: %j", (permissionProfile) => {
+    expect(() => buildCodexAppServerLaunchSpec({ ...options(), permissionProfile })).toThrow(
+      /permissionProfile/u,
+    );
+  });
+
+  it("rejects inherited secrets, checkout-owned executables and overlapping control paths", () => {
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        environment: { ...validEnvironment(), GITHUB_TOKEN: "not-a-live-token" },
+      }),
+    ).toThrow(/secret-bearing/u);
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        executable: "C:\\Work\\Checkout\\codex.exe",
+      }),
+    ).toThrow(/executable/u);
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        controlRootDirectory: "C:\\Work",
+        processWorkingDirectory: "C:\\Work\\control",
+      }),
+    ).toThrow(/overlap/u);
+  });
+
+  it("copies bounded launch inputs before the caller can change them", () => {
+    const input = {
+      ...options(),
+      configurationOverrides: ["features.shell_tool=false"],
+      providerEnvironment: { CODEX_PROVIDER_HEADER_0: "Bearer synthetic" },
+    };
+    const spec = buildCodexAppServerLaunchSpec(input);
+    input.configurationOverrides[0] = "features.shell_tool=true";
+    input.providerEnvironment.CODEX_PROVIDER_HEADER_0 = "Bearer changed";
+    expect(spec.arguments).toContain("features.shell_tool=false");
+    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe("Bearer synthetic");
+    expect(Object.isFrozen(spec)).toBe(true);
+    expect(Object.isFrozen(spec.environment)).toBe(true);
+    expect(Object.isFrozen(spec.limits)).toBe(true);
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        configurationOverrides: Array.from({ length: 129 }, () => "features.shell_tool=false"),
+      }),
+    ).toThrow(/128 entries/u);
+    expect(() =>
+      buildCodexAppServerLaunchSpec({
+        ...options(),
+        limits: { ...validLimits(), maximumProcessCount: 0 },
+      }),
+    ).toThrow(/maximumProcessCount/u);
+  });
+});
+
 describe("buildCodexExecLaunchSpec", () => {
+  it("uses an explicit read-only sandbox after conflicting configuration overrides", () => {
+    const spec = buildCodexExecLaunchSpec({
+      ...validOptions(),
+      sandboxMode: "read-only",
+      configurationOverrides: ['sandbox_mode="danger-full-access"'],
+    });
+    expect(spec.arguments[spec.arguments.indexOf("--sandbox") + 1]).toBe("read-only");
+    expect(spec.arguments[spec.arguments.lastIndexOf("--config") + 1]).toBe(
+      'approval_policy="never"',
+    );
+    expect(spec.arguments).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(spec.arguments).toContain("--ignore-rules");
+  });
+
+  it.each(["danger-full-access", "", "READ-ONLY"])(
+    "rejects an unsupported sandbox mode %j",
+    (sandboxMode) => {
+      expect(() =>
+        buildCodexExecLaunchSpec({
+          ...validOptions(),
+          sandboxMode,
+        } as unknown as BuildCodexExecLaunchSpecOptions),
+      ).toThrow(/sandboxMode/u);
+    },
+  );
+
   it("builds an ephemeral, non-interactive workspace execution with a replacement environment", () => {
     const options = {
       ...validOptions(),

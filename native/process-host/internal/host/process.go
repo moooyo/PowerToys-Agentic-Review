@@ -1,6 +1,7 @@
 package host
 
 import (
+	"errors"
 	"io"
 
 	"github.com/moooyo/PowerToys-Agentic-Review/native/process-host/internal/protocol"
@@ -19,4 +20,15 @@ type launchedProcess interface {
 
 type processLauncher interface {
 	Launch(spec protocol.ProcessLaunchSpec, limits protocol.EffectiveLimits) (launchedProcess, error)
+}
+
+var (
+	errProcessIdentityUnavailable = errors.New("process creation identity is unavailable")
+	errProcessIdentityQueryFailed = errors.New("process creation identity query failed")
+)
+
+// processIdentityProvider exposes identity captured from the original launch handle.
+// Implementations must not query a process by PID to reconstruct this value.
+type processIdentityProvider interface {
+	ProcessCreationTimeFileTime() uint64
 }

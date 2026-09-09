@@ -96,6 +96,22 @@ export function evaluateSchedulingAuthorization(
     });
   }
 
+  if (
+    event.workItem.kind === "pull_request" &&
+    event.source !== "webhook" &&
+    policy.newRevisionPolicy !== "inherit_authorized_epoch"
+  ) {
+    return createDecision({
+      event,
+      policyVersion: policy.policyVersion,
+      evaluatedAt,
+      outcome: "denied",
+      basis: null,
+      reason: "denied_revision_not_inheritable",
+      inheritedFromEpochId: null,
+    });
+  }
+
   if (event.actor.githubUserId === policy.schedulingTargetGithubUserId) {
     return createDecision({
       event,
@@ -236,19 +252,20 @@ export interface EvaluateRevisionInheritanceInput {
   epoch: AuthorizedRequestEpoch | null;
   event: SchedulingRevisionObservedEvent;
   evaluatedAt: string;
-  fallbackPolicyVersion: number;
+  policy: SelfOrAllowlistPolicy;
+  epochPolicy: SelfOrAllowlistPolicy | null;
 }
 
 export function evaluateRevisionInheritance(
   input: EvaluateRevisionInheritanceInput,
 ): AuthorizationDecision {
-  const { epoch, event, evaluatedAt } = input;
-  assertPositiveSafeInteger(input.fallbackPolicyVersion, "fallbackPolicyVersion");
+  const { epoch, event, evaluatedAt, policy, epochPolicy } = input;
+  assertPositiveSafeInteger(policy.policyVersion, "policy.policyVersion");
 
   if (epoch === null || epoch.status !== "active") {
     return createDecision({
       event,
-      policyVersion: input.fallbackPolicyVersion,
+      policyVersion: policy.policyVersion,
       evaluatedAt,
       outcome: "denied",
       basis: null,
@@ -260,7 +277,7 @@ export function evaluateRevisionInheritance(
   if (!eventHasConsistentIdentity(event)) {
     return createDecision({
       event,
-      policyVersion: epoch.authorizationPolicyVersion,
+      policyVersion: policy.policyVersion,
       evaluatedAt,
       outcome: "denied",
       basis: null,
@@ -272,7 +289,7 @@ export function evaluateRevisionInheritance(
   if (!eventMatchesEpochWorkItem(epoch, event)) {
     return createDecision({
       event,
-      policyVersion: epoch.authorizationPolicyVersion,
+      policyVersion: policy.policyVersion,
       evaluatedAt,
       outcome: "denied",
       basis: null,
@@ -284,7 +301,7 @@ export function evaluateRevisionInheritance(
   if (event.workItem.state !== "open") {
     return createDecision({
       event,
-      policyVersion: epoch.authorizationPolicyVersion,
+      policyVersion: policy.policyVersion,
       evaluatedAt,
       outcome: "denied",
       basis: null,
@@ -296,7 +313,7 @@ export function evaluateRevisionInheritance(
   if (event.revision.revisionKey === epoch.currentRevision.revisionKey) {
     return createDecision({
       event,
-      policyVersion: epoch.authorizationPolicyVersion,
+      policyVersion: policy.policyVersion,
       evaluatedAt,
       outcome: "denied",
       basis: null,
@@ -305,9 +322,22 @@ export function evaluateRevisionInheritance(
     });
   }
 
+  if (!policiesAllowRevisionInheritance(epoch, policy, epochPolicy)) {
+    return createDecision({
+      event,
+      policyVersion: policy.policyVersion,
+      evaluatedAt,
+      outcome: "denied",
+      basis: null,
+      reason: "denied_revision_not_inheritable",
+      inheritedFromEpochId: null,
+      targetGithubUserId: epoch.target.githubUserId,
+    });
+  }
+
   return createDecision({
     event,
-    policyVersion: epoch.authorizationPolicyVersion,
+    policyVersion: policy.policyVersion,
     evaluatedAt,
     outcome: "authorized",
     basis: "active_epoch",
@@ -315,6 +345,26 @@ export function evaluateRevisionInheritance(
     inheritedFromEpochId: epoch.requestEpochId,
     targetGithubUserId: epoch.target.githubUserId,
   });
+}
+
+function policiesAllowRevisionInheritance(
+  epoch: ActiveAuthorizedRequestEpoch,
+  policy: SelfOrAllowlistPolicy,
+  epochPolicy: SelfOrAllowlistPolicy | null,
+): boolean {
+  return (
+    epochPolicy !== null &&
+    epochPolicy.policyVersion === epoch.authorizationPolicyVersion &&
+    (epoch.currentRevision.kind !== "pull_request" ||
+      (policy.newRevisionPolicy === "inherit_authorized_epoch" &&
+        epochPolicy.newRevisionPolicy === "inherit_authorized_epoch")) &&
+    [policy, epochPolicy].every(
+      (candidate) =>
+        candidate.schedulingTargetGithubUserId === epoch.target.githubUserId &&
+        (epoch.openedByActor.githubUserId === candidate.schedulingTargetGithubUserId ||
+          candidate.allowlistedActorGithubUserIds.includes(epoch.openedByActor.githubUserId)),
+    )
+  );
 }
 
 export function advanceAuthorizedRequestEpochRevision(

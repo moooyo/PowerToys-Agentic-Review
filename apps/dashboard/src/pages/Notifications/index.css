@@ -1,0 +1,33 @@
+.notifications-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.notifications-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.notifications-filters,
+.notifications-actions {
+  margin-bottom: 16px;
+}
+.notification-event {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+  max-width: 720px;
+}
+.notifications-pagination {
+  margin-top: 16px;
+}
+.notifications-coverage {
+  margin: 16px 0 0;
+  font-size: 12px;
+}
+.notifications-page .ant-alert {
+  margin-bottom: 16px;
+}

@@ -1,17 +1,23 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Type } from "@sinclair/typebox";
+import { maximumPromptContentUtf8Bytes, type PromptVersion } from "@agentic-review/contracts";
+import { CloneType, Type } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   IssueTriageV1ModelOutputSchema,
-  IssueTriageV1Schema,
+  IssueTriageV2ModelOutputSchema,
+  IssueTriageV2Schema,
   PrReviewPlanV1ModelOutputSchema,
+  PrReviewPlanV2ModelOutputSchema,
 } from "../../../../packages/codex/src/review-results.js";
 import { defaultTrustedSchedulingPolicy } from "../../dist/scheduling/default-policy.js";
 import {
+  isLoadedTrustedSchedulingConfig,
   loadTrustedSchedulingConfig,
   type TrustedSchedulingPolicy,
+  withPublishedWorkflowPrompt,
 } from "../../dist/scheduling/trusted-config.js";
 
 const temporaryDirectories: string[] = [];
@@ -47,6 +53,8 @@ describe("loadTrustedSchedulingConfig", () => {
     expect(config.pullRequestReview.policy).toEqual(
       defaultTrustedSchedulingPolicy.pullRequestReview,
     );
+    expect(config.issueTriage.policy.intentVersion).toBe(2);
+    expect(config.pullRequestReview.policy.intentVersion).toBe(2);
   });
 
   it("loads only the fixed versioned prompts from an absolute trusted directory", async () => {
@@ -55,23 +63,23 @@ describe("loadTrustedSchedulingConfig", () => {
 
     expect(config.issueTriage).toMatchObject({
       name: "issue-triage",
-      version: "1",
+      version: "2",
       text: fixture.issuePrompt,
       outputSchema: { type: "object" },
       policy: createPolicy().issueTriage,
     });
     expect(config.pullRequestReview).toMatchObject({
       name: "pull-request-review",
-      version: "1",
+      version: "2",
       text: fixture.pullRequestPrompt,
       outputSchema: { type: "object" },
       policy: createPolicy().pullRequestReview,
     });
     expect(config.issueTriage.outputSchema).toEqual(
-      JSON.parse(JSON.stringify(IssueTriageV1ModelOutputSchema)),
+      JSON.parse(JSON.stringify(IssueTriageV2ModelOutputSchema)),
     );
     expect(config.pullRequestReview.outputSchema).toEqual(
-      JSON.parse(JSON.stringify(PrReviewPlanV1ModelOutputSchema)),
+      JSON.parse(JSON.stringify(PrReviewPlanV2ModelOutputSchema)),
     );
     expect(config.issueTriage.outputSchema).not.toHaveProperty("$id");
     expect(config.pullRequestReview.outputSchema).not.toHaveProperty("$id");
@@ -94,7 +102,7 @@ describe("loadTrustedSchedulingConfig", () => {
     "rejects a prompt file that is a symbolic link",
     async () => {
       const fixture = await createPromptFixture();
-      const issuePromptPath = join(fixture.promptDirectory, "issue-triage-v1.md");
+      const issuePromptPath = join(fixture.promptDirectory, "issue-triage-v2.md");
       const outsidePromptPath = join(fixture.root, "outside-issue-prompt.md");
       await rm(issuePromptPath);
       await writeFile(outsidePromptPath, "Outside prompt", "utf8");
@@ -122,11 +130,11 @@ describe("loadTrustedSchedulingConfig", () => {
 
   it("rejects missing and empty fixed prompt files", async () => {
     const missingFixture = await createPromptFixture();
-    await rm(join(missingFixture.promptDirectory, "issue-triage-v1.md"));
+    await rm(join(missingFixture.promptDirectory, "issue-triage-v2.md"));
     await expect(loadFixture(missingFixture.promptDirectory)).rejects.toThrow(/inspect/u);
 
     const emptyFixture = await createPromptFixture();
-    await writeFile(join(emptyFixture.promptDirectory, "issue-triage-v1.md"), "", "utf8");
+    await writeFile(join(emptyFixture.promptDirectory, "issue-triage-v2.md"), "", "utf8");
     await expect(loadFixture(emptyFixture.promptDirectory)).rejects.toThrow(/between 1/u);
   });
 
@@ -137,33 +145,64 @@ describe("loadTrustedSchedulingConfig", () => {
         promptDirectory: fixture.promptDirectory,
         policy: createPolicy(),
         outputSchemas: {
-          issueTriage: PrReviewPlanV1ModelOutputSchema,
-          pullRequestReview: IssueTriageV1ModelOutputSchema,
+          issueTriage: PrReviewPlanV2ModelOutputSchema,
+          pullRequestReview: IssueTriageV2ModelOutputSchema,
         },
       }),
-    ).rejects.toThrow(/authoritative IssueTriageV1/u);
+    ).rejects.toThrow(/authoritative IssueTriageV2/u);
 
     await expect(
       loadTrustedSchedulingConfig({
         promptDirectory: fixture.promptDirectory,
         policy: createPolicy(),
         outputSchemas: {
-          issueTriage: IssueTriageV1Schema,
-          pullRequestReview: PrReviewPlanV1ModelOutputSchema,
+          issueTriage: CloneType(IssueTriageV2Schema),
+          pullRequestReview: PrReviewPlanV2ModelOutputSchema,
         },
       }),
-    ).rejects.toThrow(/authoritative IssueTriageV1/u);
+    ).rejects.toThrow(/authoritative IssueTriageV2/u);
 
     await expect(
       loadTrustedSchedulingConfig({
         promptDirectory: fixture.promptDirectory,
         policy: createPolicy(),
         outputSchemas: {
-          issueTriage: Type.Unknown({ $id: "IssueTriageV1" }),
+          issueTriage: Type.Unknown({ $id: "IssueTriageV2" }),
+          pullRequestReview: PrReviewPlanV2ModelOutputSchema,
+        },
+      }),
+    ).rejects.toThrow(/authoritative IssueTriageV2/u);
+  });
+
+  it("rejects previous and modified output schemas for the V2 prompt defaults", async () => {
+    const fixture = await createPromptFixture();
+    const changedIssueSchema = Type.Object(
+      {
+        ...IssueTriageV2ModelOutputSchema.properties,
+        summary: Type.Number(),
+      },
+      { additionalProperties: false },
+    );
+
+    for (const issueTriage of [IssueTriageV1ModelOutputSchema, changedIssueSchema]) {
+      await expect(
+        loadTrustedSchedulingConfig({
+          promptDirectory: fixture.promptDirectory,
+          policy: createPolicy(),
+          outputSchemas: { issueTriage, pullRequestReview: PrReviewPlanV2ModelOutputSchema },
+        }),
+      ).rejects.toThrow(/authoritative IssueTriageV2/u);
+    }
+    await expect(
+      loadTrustedSchedulingConfig({
+        promptDirectory: fixture.promptDirectory,
+        policy: createPolicy(),
+        outputSchemas: {
+          issueTriage: IssueTriageV2ModelOutputSchema,
           pullRequestReview: PrReviewPlanV1ModelOutputSchema,
         },
       }),
-    ).rejects.toThrow(/authoritative IssueTriageV1/u);
+    ).rejects.toThrow(/authoritative PrReviewPlanV2/u);
   });
 
   it("requires worker selection capabilities to cover execution policy labels", async () => {
@@ -258,10 +297,220 @@ describe("loadTrustedSchedulingConfig", () => {
   });
 });
 
+describe("withPublishedWorkflowPrompt", () => {
+  it.each([
+    {
+      workflowKind: "issue_triage",
+      selectedKey: "issueTriage",
+      unchangedKey: "pullRequestReview",
+      outputSchemaVersion: "IssueTriageV2",
+    },
+    {
+      workflowKind: "pr_static_build",
+      selectedKey: "pullRequestReview",
+      unchangedKey: "issueTriage",
+      outputSchemaVersion: "PrReviewPlanV2",
+    },
+  ] as const)(
+    "applies the published $workflowKind prompt while preserving trusted policy and schema",
+    async ({ workflowKind, selectedKey, unchangedKey, outputSchemaVersion }) => {
+      const fixture = await createPromptFixture();
+      const config = await loadFixture(fixture.promptDirectory);
+      const originalConfig = JSON.stringify(config);
+      const version = createPublishedPromptVersion({ outputSchemaVersion });
+      const templateName = "Published workflow prompt";
+
+      const updated = withPublishedWorkflowPrompt(config, {
+        workflowKind,
+        templateName,
+        version,
+      });
+
+      expect(updated).not.toBe(config);
+      expect(updated[selectedKey]).not.toBe(config[selectedKey]);
+      expect(updated[selectedKey]).toEqual({
+        ...config[selectedKey],
+        name: templateName,
+        version: version.id,
+        text: version.content,
+      });
+      expect(updated[selectedKey].policy).toBe(config[selectedKey].policy);
+      expect(updated[selectedKey].outputSchema).toBe(config[selectedKey].outputSchema);
+      expect(updated[unchangedKey]).toBe(config[unchangedKey]);
+      expect(JSON.stringify(config)).toBe(originalConfig);
+      expectDeeplyFrozen(updated);
+      expect(isLoadedTrustedSchedulingConfig(updated)).toBe(true);
+    },
+  );
+
+  it("allows both published prompts to be applied without losing the first override", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+    const issueVersion = createPublishedPromptVersion();
+    const pullRequestVersion = createPublishedPromptVersion({
+      id: "prompt-version-pr-29",
+      templateId: "prompt-template-pr",
+      version: 29,
+      content: "Published pull request prompt.\n",
+      outputSchemaVersion: "PrReviewPlanV2",
+    });
+    const issueConfig = withPublishedWorkflowPrompt(config, {
+      workflowKind: "issue_triage",
+      templateName: "Published issue triage",
+      version: issueVersion,
+    });
+
+    const updated = withPublishedWorkflowPrompt(issueConfig, {
+      workflowKind: "pr_static_build",
+      templateName: "Published pull request review",
+      version: pullRequestVersion,
+    });
+
+    expect(updated.issueTriage).toBe(issueConfig.issueTriage);
+    expect(updated.issueTriage.version).toBe(issueVersion.id);
+    expect(updated.pullRequestReview).toEqual({
+      ...config.pullRequestReview,
+      name: "Published pull request review",
+      version: pullRequestVersion.id,
+      text: pullRequestVersion.content,
+    });
+    expect(issueConfig.pullRequestReview).toBe(config.pullRequestReview);
+    expect(config.issueTriage.text).toBe(fixture.issuePrompt);
+    expect(config.pullRequestReview.text).toBe(fixture.pullRequestPrompt);
+    expectDeeplyFrozen(updated);
+    expect(isLoadedTrustedSchedulingConfig(updated)).toBe(true);
+  });
+
+  it("rejects a frozen copy that was not loaded as trusted configuration", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+    const untrustedConfig = Object.freeze({ ...config });
+
+    expect(isLoadedTrustedSchedulingConfig(untrustedConfig)).toBe(false);
+    expect(() =>
+      withPublishedWorkflowPrompt(untrustedConfig, {
+        workflowKind: "issue_triage",
+        templateName: "Published issue triage",
+        version: createPublishedPromptVersion(),
+      }),
+    ).toThrow(/loaded trusted defaults/u);
+  });
+
+  it("rejects the UI workflow even when its prompt matches the pull request schema", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+    const input = {
+      workflowKind: "pr_ui",
+      templateName: "Published UI review",
+      version: createPublishedPromptVersion({ outputSchemaVersion: "PrReviewPlanV2" }),
+    } as unknown as Parameters<typeof withPublishedWorkflowPrompt>[1];
+
+    expect(() => withPublishedWorkflowPrompt(config, input)).toThrow(/invalid or incompatible/u);
+  });
+
+  it.each([
+    { workflowKind: "issue_triage", outputSchemaVersion: "PrReviewPlanV2" },
+    { workflowKind: "pr_static_build", outputSchemaVersion: "IssueTriageV2" },
+  ] as const)(
+    "rejects $outputSchemaVersion for the $workflowKind workflow",
+    async ({ workflowKind, outputSchemaVersion }) => {
+      const fixture = await createPromptFixture();
+      const config = await loadFixture(fixture.promptDirectory);
+
+      expect(() =>
+        withPublishedWorkflowPrompt(config, {
+          workflowKind,
+          templateName: "Published workflow prompt",
+          version: createPublishedPromptVersion({ outputSchemaVersion }),
+        }),
+      ).toThrow(/invalid or incompatible/u);
+    },
+  );
+
+  it("rejects content that no longer matches the published digest", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+    const version = createPublishedPromptVersion();
+    version.content = "Changed after publication.\n";
+
+    expect(() =>
+      withPublishedWorkflowPrompt(config, {
+        workflowKind: "issue_triage",
+        templateName: "Published issue triage",
+        version,
+      }),
+    ).toThrow(/invalid or incompatible/u);
+  });
+
+  it.each([
+    { name: "empty", content: "" },
+    { name: "whitespace-only", content: " \r\n\t " },
+    { name: "NUL-containing", content: "Published\0prompt" },
+  ])("rejects $name content even with a matching digest", async ({ content }) => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+
+    expect(() =>
+      withPublishedWorkflowPrompt(config, {
+        workflowKind: "issue_triage",
+        templateName: "Published issue triage",
+        version: createPublishedPromptVersion({ content }),
+      }),
+    ).toThrow(/invalid or incompatible/u);
+  });
+
+  it("enforces the inclusive UTF-8 byte limit independently of the character count", async () => {
+    const fixture = await createPromptFixture();
+    const config = await loadFixture(fixture.promptDirectory);
+    const content = "\u00e9".repeat(maximumPromptContentUtf8Bytes / 2);
+    const overLimitContent = `${content}x`;
+    const input = {
+      workflowKind: "issue_triage",
+      templateName: "Published issue triage",
+      version: createPublishedPromptVersion({ content }),
+    } as const;
+
+    expect(withPublishedWorkflowPrompt(config, input).issueTriage.text).toBe(content);
+    expect(overLimitContent.length).toBeLessThan(maximumPromptContentUtf8Bytes);
+    expect(() =>
+      withPublishedWorkflowPrompt(config, {
+        ...input,
+        version: createPublishedPromptVersion({ content: overLimitContent }),
+      }),
+    ).toThrow(/invalid or incompatible/u);
+  });
+});
+
 const schemas = {
-  issueTriage: IssueTriageV1ModelOutputSchema,
-  pullRequestReview: PrReviewPlanV1ModelOutputSchema,
+  issueTriage: IssueTriageV2ModelOutputSchema,
+  pullRequestReview: PrReviewPlanV2ModelOutputSchema,
 };
+
+function createPublishedPromptVersion(overrides: Partial<PromptVersion> = {}): PromptVersion {
+  const content = overrides.content ?? "Published workflow prompt.\r\nPreserve these bytes.\r\n";
+  return {
+    id: "prompt-version-17",
+    templateId: "prompt-template-issue",
+    version: 17,
+    content,
+    contentSha256: createHash("sha256").update(content).digest("hex"),
+    outputSchemaVersion: "IssueTriageV2",
+    createdAt: "2026-09-07T00:00:00.000Z",
+    publishedAt: "2026-09-07T00:00:00.000Z",
+    createdBy: "https://identity.example.test/operator-1",
+    ...overrides,
+  };
+}
+
+function expectDeeplyFrozen(value: unknown): void {
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+  expect(Object.isFrozen(value)).toBe(true);
+  for (const child of Object.values(value)) {
+    expectDeeplyFrozen(child);
+  }
+}
 
 function createPolicy(): TrustedSchedulingPolicy {
   return {
@@ -318,8 +567,8 @@ async function createPromptFixture(): Promise<{
   const issuePrompt = "Trusted issue prompt.\r\nPreserve these bytes.\r\n";
   const pullRequestPrompt = "Trusted pull request prompt.\n";
   await Promise.all([
-    writeFile(join(promptDirectory, "issue-triage-v1.md"), issuePrompt, "utf8"),
-    writeFile(join(promptDirectory, "pull-request-review-v1.md"), pullRequestPrompt, "utf8"),
+    writeFile(join(promptDirectory, "issue-triage-v2.md"), issuePrompt, "utf8"),
+    writeFile(join(promptDirectory, "pull-request-review-v2.md"), pullRequestPrompt, "utf8"),
   ]);
   return { root, promptDirectory, issuePrompt, pullRequestPrompt };
 }

@@ -4,6 +4,7 @@ import { buildApp } from "../../dist/app.js";
 import type { ServerConfig } from "../../dist/config.js";
 import type { DatabaseClient } from "../../dist/database/database-client.js";
 import { registerHealthRoutes } from "../../dist/routes/health.js";
+import { createSchedulingTestDatabase } from "../background/scheduling-pump.testing.js";
 
 const createHealthApp = (
   request: ReturnType<typeof vi.fn>,
@@ -137,7 +138,7 @@ describe("buildApp readiness gating", () => {
     const databaseRequest = vi.fn(async (_operation: string) => ({ sqliteVersion: "3.50.4" }));
     const app = buildApp({
       config,
-      database: { request: databaseRequest } as unknown as DatabaseClient,
+      database: createSchedulingTestDatabase(databaseRequest),
       shutdownSignal: new AbortController().signal,
       serverAdmission: { read: () => false },
     });
@@ -154,7 +155,8 @@ describe("buildApp readiness gating", () => {
       expect(worker.statusCode).toBe(503);
       expect(
         databaseRequest.mock.calls.every(
-          ([operation]) => operation === "cleanupExpiredOperatorAuth",
+          ([operation]) =>
+            operation === "cleanupExpiredOperatorAuth" || operation === "maintainNotifications",
         ),
       ).toBe(true);
     } finally {

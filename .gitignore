@@ -12,6 +12,7 @@ coverage/
 !.env.example
 data/
 .data/
+.evidence/
 artifacts/
 !apps/server/src/artifacts/
 !apps/server/src/artifacts/**

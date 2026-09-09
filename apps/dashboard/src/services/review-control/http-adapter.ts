@@ -73,6 +73,8 @@ const workItemStates = {
 } satisfies Record<WorkItemState, true>;
 
 const workItemStages = {
+  not_scheduled: true,
+  awaiting_admission: true,
   done: true,
   preparing: true,
   publishing: true,
@@ -114,6 +116,7 @@ const executionPhases = {
 
 const jobStages = {
   ...executionPhases,
+  awaiting_admission: true,
   done: true,
   queued: true,
 } satisfies Record<DashboardJobStage, true>;
@@ -203,7 +206,7 @@ const appendEntityIdFilter = (
     invalidRequest(operation, `query.${name}`, "one entity identifier");
   }
   const entityId = value as string;
-  if (entityId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(entityId)) {
+  if (entityId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/u.test(entityId)) {
     invalidRequest(operation, `query.${name}`, "a valid entity identifier");
   }
   parameters.set(name, entityId);
@@ -238,7 +241,11 @@ const withQuery = (endpoint: string, parameters: URLSearchParams): string => {
 };
 
 const buildWorkItemPath = (query: ListQuery, operation: string): string => {
-  assertKnownFilters(query.filters, ["authorization", "kind", "stage", "state"], operation);
+  assertKnownFilters(
+    query.filters,
+    ["authorization", "kind", "stage", "state", "repositoryId"],
+    operation,
+  );
   const parameters = baseQuery(query, operation);
   appendEnumFilter(parameters, "kind", query.filters?.kind, operation, workItemKinds, 16);
   appendEnumFilter(parameters, "state", query.filters?.state, operation, workItemStates, 16);
@@ -251,16 +258,32 @@ const buildWorkItemPath = (query: ListQuery, operation: string): string => {
     authorizations,
     16,
   );
+  appendEntityIdFilter(parameters, "repositoryId", query.filters?.repositoryId, operation);
   return withQuery(endpoints.workItems, parameters);
 };
 
 const buildJobPath = (query: ListQuery, operation: string): string => {
-  assertKnownFilters(query.filters, ["phase", "stage", "status", "workItemId"], operation);
+  assertKnownFilters(
+    query.filters,
+    ["phase", "stage", "status", "admission", "workItemId", "repositoryId"],
+    operation,
+  );
   const parameters = baseQuery(query, operation);
   appendEnumFilter(parameters, "status", query.filters?.status, operation, jobStates, 32);
   appendEnumFilter(parameters, "phase", query.filters?.phase, operation, executionPhases, 32);
   appendEnumFilter(parameters, "stage", query.filters?.stage, operation, jobStages, 32);
+  if (Array.isArray(query.filters?.admission) && query.filters.admission.length === 0)
+    invalidRequest(operation, "query.admission", "one or two admission states");
+  appendEnumFilter(
+    parameters,
+    "admission",
+    query.filters?.admission,
+    operation,
+    { pending: true, admitted: true },
+    2,
+  );
   appendEntityIdFilter(parameters, "workItemId", query.filters?.workItemId, operation);
+  appendEntityIdFilter(parameters, "repositoryId", query.filters?.repositoryId, operation);
   return withQuery(endpoints.jobs, parameters);
 };
 
@@ -372,6 +395,25 @@ export interface HttpReviewControlAdapterOptions extends DashboardHttpClientOpti
   readonly client?: DashboardHttpClient;
 }
 
+function ensureRepositoryScope<T extends { repositoryId: string }>(
+  response: PageResult<T>,
+  query: ListQuery,
+  operation: string,
+): PageResult<T> {
+  const repositoryId = query.filters?.repositoryId;
+  if (
+    typeof repositoryId === "string" &&
+    response.items.some((item) => item.repositoryId !== repositoryId)
+  ) {
+    throw new ReviewControlProtocolError(
+      operation,
+      `The ${operation} response included data from another repository.`,
+      "$.items.repositoryId",
+    );
+  }
+  return response;
+}
+
 export class HttpReviewControlAdapter implements ReviewControlAdapter {
   private readonly client: DashboardHttpClient;
 
@@ -382,7 +424,7 @@ export class HttpReviewControlAdapter implements ReviewControlAdapter {
   async listWorkItems(query: ListQuery = {}): Promise<PageResult<WorkItem>> {
     const operation = "listWorkItems";
     const response = await this.client.get(buildWorkItemPath(query, operation), operation);
-    return mapWorkItemListResponse(response, operation);
+    return ensureRepositoryScope(mapWorkItemListResponse(response, operation), query, operation);
   }
 
   async requeueWorkItem(_workItemId: string): Promise<void> {
@@ -392,13 +434,15 @@ export class HttpReviewControlAdapter implements ReviewControlAdapter {
   async listJobs(query: ListQuery = {}): Promise<PageResult<Job>> {
     const operation = "listJobs";
     const response = await this.client.get(buildJobPath(query, operation), operation);
-    return mapJobListResponse(response, operation);
+    return ensureRepositoryScope(mapJobListResponse(response, operation), query, operation);
   }
 
-  async getJob(jobId: string): Promise<JobDetails | null> {
+  async getJob(jobId: string, signal?: AbortSignal): Promise<JobDetails | null> {
     const operation = "getJob";
     try {
-      const response = await this.client.get(buildJobByIdPath(jobId, operation), operation);
+      const response = await this.client.get(buildJobByIdPath(jobId, operation), operation, {
+        signal,
+      });
       return mapJobDetailsResponse(response, operation);
     } catch (error) {
       if (

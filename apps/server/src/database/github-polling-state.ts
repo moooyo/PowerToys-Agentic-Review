@@ -1,9 +1,17 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+  ActiveAuthorizedRequestEpochSchema,
+  type NormalizedSchedulingEvent,
+  NormalizedSchedulingEventSchema,
+  type SchedulingRequestKind,
+} from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
 import type {
   GitHubPollingActiveProjection,
   GitHubPollingProjectionKey,
   GitHubPollingStateSink,
   GitHubPollingStateSource,
+  GitHubPollingWorkItemProjection,
 } from "../github/poller.js";
 import type { DatabaseClient } from "./database-client.js";
 import { ingestSchedulingEventInTransaction } from "./github-ingestion.js";
@@ -83,6 +91,211 @@ const withImmediateTransaction = <T>(database: DatabaseSync, action: () => T): T
   }
 };
 
+interface ActiveEpochPollingSeedRow {
+  readonly epoch_id: string;
+  readonly epoch_json: string;
+  readonly request_kind: SchedulingRequestKind;
+  readonly target_github_user_id: number;
+  readonly work_item_id: string;
+  readonly github_work_item_id: number;
+  readonly github_node_id: string;
+  readonly github_number: number;
+  readonly resource_kind: "issue" | "pull_request";
+  readonly current_revision_key: string;
+  readonly opening_event_key: string;
+  readonly opening_source: NormalizedSchedulingEvent["source"];
+  readonly opening_source_event_id: string;
+  readonly opening_occurred_at: string;
+  readonly opening_actor_github_user_id: number;
+  readonly opening_normalized_json: string;
+}
+
+const readActiveEpochPollingSeeds = (
+  database: DatabaseSync,
+  key: GitHubPollingProjectionKey,
+): readonly ActiveEpochPollingSeedRow[] =>
+  database
+    .prepare(`
+      SELECT
+        epoch.id AS epoch_id,
+        epoch.epoch_json,
+        epoch.request_kind,
+        epoch.target_github_user_id,
+        item.id AS work_item_id,
+        item.github_work_item_id,
+        item.github_node_id,
+        item.github_number,
+        item.resource_kind,
+        revision.revision_key AS current_revision_key,
+        opening.event_key AS opening_event_key,
+        opening.source AS opening_source,
+        opening.source_event_id AS opening_source_event_id,
+        opening.occurred_at AS opening_occurred_at,
+        opening.actor_github_user_id AS opening_actor_github_user_id,
+        opening.normalized_json AS opening_normalized_json
+      FROM request_epochs AS epoch
+      JOIN work_items AS item ON item.id = epoch.work_item_id
+      JOIN repositories AS repository ON repository.id = item.repository_id
+      JOIN github_events AS opening
+        ON opening.id = epoch.opening_event_id
+        AND opening.work_item_id = item.id
+        AND opening.repository_id = item.repository_id
+      JOIN work_item_revisions AS revision
+        ON revision.id = epoch.current_revision_id AND revision.work_item_id = item.id
+      WHERE repository.github_repository_id = ?
+        AND epoch.target_github_user_id = ?
+        AND epoch.status = 'active'
+      ORDER BY epoch.updated_at DESC, epoch.ordinal DESC, epoch.id DESC
+    `)
+    .all(
+      key.githubRepositoryId,
+      key.reviewerGithubUserId,
+    ) as unknown as ActiveEpochPollingSeedRow[];
+
+const parseActiveEpochPollingSeed = (
+  row: ActiveEpochPollingSeedRow,
+  key: GitHubPollingProjectionKey,
+): { readonly reviewerLogin: string; readonly projection: GitHubPollingWorkItemProjection } => {
+  const epoch = JSON.parse(row.epoch_json) as unknown;
+  const opening = JSON.parse(row.opening_normalized_json) as unknown;
+  if (
+    !Value.Check(ActiveAuthorizedRequestEpochSchema, epoch) ||
+    !Value.Check(NormalizedSchedulingEventSchema, opening) ||
+    opening.action !== "request_opened" ||
+    opening.actor === null ||
+    opening.target === null ||
+    opening.workItem.state !== "open" ||
+    epoch.requestEpochId !== row.epoch_id ||
+    epoch.githubRepositoryId !== key.githubRepositoryId ||
+    epoch.githubWorkItemId !== row.github_work_item_id ||
+    epoch.target.githubUserId !== key.reviewerGithubUserId ||
+    epoch.target.githubUserId !== row.target_github_user_id ||
+    epoch.requestKind !== row.request_kind ||
+    epoch.openedByEventId !== row.opening_event_key ||
+    epoch.openedByEventId !== opening.eventId ||
+    epoch.openedByActor.githubUserId !== opening.actor.githubUserId ||
+    opening.actor.githubUserId !== row.opening_actor_github_user_id ||
+    Date.parse(epoch.openedAt) !== Date.parse(row.opening_occurred_at) ||
+    Date.parse(opening.occurredAt) !== Date.parse(row.opening_occurred_at) ||
+    opening.sourceEventId !== row.opening_source_event_id ||
+    opening.source !== row.opening_source ||
+    opening.requestKind !== epoch.requestKind ||
+    opening.target.githubUserId !== epoch.target.githubUserId ||
+    opening.repository.githubRepositoryId !== key.githubRepositoryId ||
+    opening.workItem.githubRepositoryId !== key.githubRepositoryId ||
+    opening.workItem.githubWorkItemId !== row.github_work_item_id ||
+    opening.workItem.githubNodeId !== row.github_node_id ||
+    opening.workItem.number !== row.github_number ||
+    opening.workItem.kind !== row.resource_kind ||
+    opening.revision.githubRepositoryId !== key.githubRepositoryId ||
+    opening.revision.githubWorkItemId !== row.github_work_item_id ||
+    opening.revision.kind !== row.resource_kind ||
+    epoch.currentRevision.githubRepositoryId !== key.githubRepositoryId ||
+    epoch.currentRevision.githubWorkItemId !== row.github_work_item_id ||
+    epoch.currentRevision.kind !== row.resource_kind ||
+    epoch.currentRevision.revisionKey !== row.current_revision_key ||
+    (epoch.requestKind === "review_request" && row.resource_kind !== "pull_request")
+  ) {
+    throw new TypeError("A persisted active request cannot seed its GitHub polling projection.");
+  }
+  return {
+    reviewerLogin: epoch.target.login,
+    projection: {
+      workItem: opening.workItem,
+      revision: epoch.currentRevision,
+      needsRevisionObservation: true,
+      activeRequests: [
+        {
+          requestKind: epoch.requestKind,
+          openedSourceEventId: opening.sourceEventId,
+          openedAt: epoch.openedAt,
+        },
+      ],
+    },
+  };
+};
+
+const hasSamePollingRequestOrigin = (
+  database: DatabaseSync,
+  seed: ActiveEpochPollingSeedRow,
+  sourceEventId: string,
+): boolean =>
+  sourceEventId === seed.opening_source_event_id ||
+  database
+    .prepare(`
+      SELECT 1
+      FROM github_events
+      WHERE work_item_id = ? AND source_event_id = ? AND action = 'request_opened'
+        AND request_kind = ? AND target_github_user_id = ?
+        AND actor_github_user_id = ? AND occurred_at = ? AND source <> ?
+      LIMIT 1
+    `)
+    .get(
+      seed.work_item_id,
+      sourceEventId,
+      seed.request_kind,
+      seed.target_github_user_id,
+      seed.opening_actor_github_user_id,
+      seed.opening_occurred_at,
+      seed.opening_source,
+    ) !== undefined;
+
+const mergeActiveEpochPollingSeeds = (
+  database: DatabaseSync,
+  key: GitHubPollingProjectionKey,
+  checkpoint: GitHubPollingActiveProjection | null,
+): GitHubPollingActiveProjection | null => {
+  const workItems = new Map<number, GitHubPollingWorkItemProjection>(
+    checkpoint?.workItems.map((item) => [item.workItem.githubWorkItemId, item]),
+  );
+  let reviewerLogin = checkpoint?.reviewerLogin;
+  for (const row of readActiveEpochPollingSeeds(database, key)) {
+    const seed = parseActiveEpochPollingSeed(row, key);
+    reviewerLogin ??= seed.reviewerLogin;
+    const previous = workItems.get(row.github_work_item_id);
+    if (previous === undefined) {
+      workItems.set(row.github_work_item_id, seed.projection);
+      continue;
+    }
+    const requests = new Map(
+      previous.activeRequests.map((request) => [request.requestKind, request]),
+    );
+    const previousRequest = requests.get(row.request_kind);
+    // A completed checkpoint may be ahead of an epoch whose policy forbids revision inheritance.
+    // Only a missing or replaced request origin requires another forced observation.
+    const needsRevisionObservation =
+      previousRequest === undefined ||
+      !hasSamePollingRequestOrigin(database, row, previousRequest.openedSourceEventId);
+    if (needsRevisionObservation) {
+      requests.set(row.request_kind, {
+        requestKind: row.request_kind,
+        openedSourceEventId: row.opening_source_event_id,
+        openedAt: row.opening_occurred_at,
+      });
+      workItems.set(row.github_work_item_id, {
+        ...previous,
+        needsRevisionObservation: true,
+        activeRequests: [...requests.values()],
+      });
+    } else if (previousRequest.openedAt !== row.opening_occurred_at) {
+      requests.set(row.request_kind, { ...previousRequest, openedAt: row.opening_occurred_at });
+      workItems.set(row.github_work_item_id, {
+        ...previous,
+        activeRequests: [...requests.values()],
+      });
+    }
+  }
+  if (reviewerLogin === undefined) return null;
+  return {
+    version: 1,
+    githubRepositoryId: key.githubRepositoryId,
+    repositoryFullName: key.repositoryFullName,
+    reviewerGithubUserId: key.reviewerGithubUserId,
+    reviewerLogin,
+    workItems: [...workItems.values()],
+  };
+};
+
 export const readGitHubPollingProjection = (
   database: DatabaseSync,
   key: GitHubPollingProjectionKey,
@@ -102,10 +315,9 @@ export const readGitHubPollingProjection = (
       key.repositoryFullName,
       key.reviewerGithubUserId,
     ) as unknown as { readonly projection_json: string } | undefined;
-  return {
-    projection:
-      row === undefined ? null : (JSON.parse(row.projection_json) as GitHubPollingActiveProjection),
-  };
+  const checkpoint =
+    row === undefined ? null : (JSON.parse(row.projection_json) as GitHubPollingActiveProjection);
+  return { projection: mergeActiveEpochPollingSeeds(database, key, checkpoint) };
 };
 
 export const writeGitHubPollingProjection = (

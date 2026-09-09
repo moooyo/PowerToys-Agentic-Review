@@ -5,6 +5,7 @@ import {
   type AuthorizationDecision,
   AuthorizedRequestEpochSchema,
   JobExecutionTemplateSchema,
+  type NormalizedSchedulingEvent,
   NormalizedSchedulingEventSchema,
   type SelfOrAllowlistPolicy,
   SelfOrAllowlistPolicySchema,
@@ -22,11 +23,18 @@ import {
   NormalizedEventConflictError,
   WebhookDeliveryConflictError,
 } from "./errors.js";
+import {
+  createGitHubReviewRunInTransaction,
+  observeGitHubReviewRunSourceInTransaction,
+  pinGitHubLegacyJobInTransaction,
+} from "./github-review-runs.js";
+import { createJobAdmissionInTransaction } from "./job-admission.js";
 import type {
   IngestSchedulingEventInput,
   IngestSchedulingEventResult,
   ScheduleJobInput,
 } from "./protocol.js";
+import { ordinaryReviewJobSql } from "./review-purpose.js";
 
 interface RepositoryRow {
   readonly id: string;
@@ -61,6 +69,7 @@ interface RevisionRow {
 interface EventRow {
   readonly id: string;
   readonly normalized_sha256: string;
+  readonly normalized_json: string;
   readonly result_json: string | null;
 }
 
@@ -76,6 +85,8 @@ interface EpochRow {
   readonly epoch_json: string;
   readonly policy_json: string;
   readonly policy_sha256: string;
+  readonly opening_source: NormalizedSchedulingEvent["source"];
+  readonly opening_source_event_id: string;
 }
 
 const sha256Pattern = /^[a-f0-9]{64}$/u;
@@ -180,6 +191,79 @@ const parseStoredResult = (value: string | null): IngestSchedulingEventResult =>
   return parsed as IngestSchedulingEventResult;
 };
 
+const sourceEventIdentity = (event: NormalizedSchedulingEvent): unknown => {
+  if (
+    (event.source === "poll" && event.action === "request_opened") ||
+    (event.source === "reconciliation" &&
+      (event.action === "request_closed" || event.action === "work_item_closed"))
+  ) {
+    // A timeline event identifies the request, not the snapshot fetched while observing it.
+    // Snapshots are projected independently through revision_observed events.
+    return {
+      contractVersion: event.contractVersion,
+      eventId: event.eventId,
+      source: event.source,
+      sourceEventId: event.sourceEventId,
+      action: event.action,
+      requestKind: event.requestKind,
+      occurredAt: event.action === "request_closed" ? null : event.occurredAt,
+      closeReason: event.action === "request_opened" ? null : event.closeReason,
+      revision:
+        event.action === "work_item_closed"
+          ? { revisionKey: event.revision.revisionKey, identity: immutableRevisionIdentity(event) }
+          : null,
+      repositoryId: event.repository.githubRepositoryId,
+      repositoryNodeId: event.repository.githubNodeId,
+      workItemId: event.workItem.githubWorkItemId,
+      workItemNodeId: event.workItem.githubNodeId,
+      workItemNumber: event.workItem.number,
+      workItemKind: event.workItem.kind,
+      authorId: event.author.githubUserId,
+      actorId: event.actor?.githubUserId ?? null,
+      targetId: event.target?.githubUserId ?? null,
+    };
+  }
+  return {
+    ...event,
+    observedAt: null,
+    revision: { ...event.revision, observedAt: null },
+  };
+};
+
+const matchesStoredSourceEvent = (
+  stored: EventRow,
+  event: NormalizedSchedulingEvent,
+  normalizedSha256: string,
+): boolean => {
+  if (stored.normalized_sha256 === normalizedSha256) {
+    return true;
+  }
+  const original = JSON.parse(stored.normalized_json) as unknown;
+  if (
+    hash(stored.normalized_json) !== stored.normalized_sha256 ||
+    !Value.Check(NormalizedSchedulingEventSchema, original)
+  ) {
+    throw new GitHubIngestionInvariantError("The persisted source event is inconsistent.");
+  }
+  if (
+    original.revision.revisionKey === event.revision.revisionKey &&
+    canonicalJson(immutableRevisionIdentity(original)) !==
+      canonicalJson(immutableRevisionIdentity(event))
+  ) {
+    return false;
+  }
+  return canonicalJson(sourceEventIdentity(original)) === canonicalJson(sourceEventIdentity(event));
+};
+
+const immutableRevisionIdentity = (event: NormalizedSchedulingEvent): unknown =>
+  event.revision.kind === "pull_request"
+    ? {
+        kind: event.revision.kind,
+        baseSha: event.revision.baseSha,
+        headSha: event.revision.headSha,
+      }
+    : { kind: event.revision.kind, contentDigest: event.revision.contentDigest };
+
 const readDuplicate = (
   database: DatabaseSync,
   input: IngestSchedulingEventInput,
@@ -202,12 +286,12 @@ const readDuplicate = (
       }
       const event = database
         .prepare(`
-          SELECT id, normalized_sha256, result_json
+          SELECT id, normalized_sha256, normalized_json, result_json
           FROM github_events
           WHERE webhook_delivery_id = ?
         `)
         .get(input.delivery.deliveryId) as unknown as EventRow | undefined;
-      if (event === undefined || event.normalized_sha256 !== normalizedSha256) {
+      if (event === undefined || !matchesStoredSourceEvent(event, input.event, normalizedSha256)) {
         throw new NormalizedEventConflictError();
       }
       return {
@@ -217,19 +301,25 @@ const readDuplicate = (
     }
   }
 
-  const event = database
+  const events = database
     .prepare(`
-      SELECT id, normalized_sha256, result_json
+      SELECT id, normalized_sha256, normalized_json, result_json
       FROM github_events
       WHERE event_key = ? OR (source = ? AND source_event_id = ?)
     `)
-    .get(input.event.eventId, input.event.source, input.event.sourceEventId) as unknown as
-    | EventRow
-    | undefined;
+    .all(
+      input.event.eventId,
+      input.event.source,
+      input.event.sourceEventId,
+    ) as unknown as EventRow[];
+  if (events.length > 1) {
+    throw new NormalizedEventConflictError();
+  }
+  const event = events[0];
   if (event === undefined) {
     return null;
   }
-  if (event.normalized_sha256 !== normalizedSha256) {
+  if (!matchesStoredSourceEvent(event, input.event, normalizedSha256)) {
     throw new NormalizedEventConflictError();
   }
   return { ...parseStoredResult(event.result_json), outcome: "duplicate" };
@@ -270,8 +360,24 @@ const projectRepository = (
   const snapshotJson = canonicalJson(repository);
   const observedAt = normalizeDateTime(input.event.observedAt, "event.observedAt");
   const existing = candidates[0];
+  const managed = database
+    .prepare("SELECT id FROM managed_repositories WHERE github_repository_id = ?")
+    .get(repository.githubRepositoryId) as { id: string } | undefined;
+  const repositoryId = existing?.id ?? managed?.id ?? randomUUID();
+  if (managed && managed.id !== repositoryId) {
+    throw new GitHubIngestionInvariantError(
+      "The managed repository and projection identities disagree.",
+    );
+  }
+  database
+    .prepare(`INSERT INTO managed_repositories
+    (id, github_repository_id, full_name, enabled, version, connection_status, metadata_json, configuration_source, created_at, updated_at)
+    VALUES (?, ?, ?, 0, 1, 'unknown', ?, 'discovered', ?, ?)
+    ON CONFLICT(github_repository_id) DO UPDATE SET full_name = excluded.full_name,
+      metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`)
+    .run(repositoryId, repository.githubRepositoryId, repository.fullName, snapshotJson, now, now);
   if (existing === undefined) {
-    const id = randomUUID();
+    const id = repositoryId;
     database
       .prepare(`
         INSERT INTO repositories (
@@ -729,10 +835,13 @@ const readActiveEpochs = (database: DatabaseSync, workItemId: string): readonly 
         epoch.ordinal,
         epoch.epoch_json,
         decision.policy_json,
-        decision.policy_sha256
+        decision.policy_sha256,
+        opening.source AS opening_source,
+        opening.source_event_id AS opening_source_event_id
       FROM request_epochs AS epoch
       JOIN authorization_decisions AS decision
         ON decision.id = epoch.authorization_decision_id
+      JOIN github_events AS opening ON opening.id = epoch.opening_event_id
       WHERE epoch.work_item_id = ? AND epoch.status = 'active'
       ORDER BY epoch.ordinal DESC, epoch.id DESC
     `)
@@ -808,20 +917,56 @@ const requestTransitionIsCurrent = (
   }
   const prior = database
     .prepare(`
-      SELECT occurred_at
+      SELECT occurred_at, action
       FROM github_events
       WHERE work_item_id = ?
-        AND request_kind = ?
-        AND target_github_user_id = ?
-      ORDER BY occurred_at DESC, created_at DESC
+        AND (
+          (request_kind = ? AND target_github_user_id = ?)
+          OR action = 'work_item_closed'
+        )
+      ORDER BY occurred_at DESC,
+        CASE WHEN action IN ('request_closed', 'work_item_closed') THEN 0 ELSE 1 END,
+        created_at DESC
       LIMIT 1
     `)
     .get(workItemId, event.requestKind, event.target.githubUserId) as unknown as
-    | { readonly occurred_at: string }
+    | { readonly occurred_at: string; readonly action: NormalizedSchedulingEvent["action"] }
     | undefined;
+  if (prior === undefined) return true;
+  const occurredAt = normalizeDateTime(event.occurredAt, "event.occurredAt");
+  if (
+    event.action === "request_opened" &&
+    (prior.action === "request_closed" || prior.action === "work_item_closed")
+  ) {
+    // A previous request cannot restore an authorization closed at the same timestamp.
+    return prior.occurred_at < occurredAt;
+  }
+  return prior.occurred_at <= occurredAt;
+};
+
+const requestOriginWasSuppressed = (
+  database: DatabaseSync,
+  workItemId: string,
+  event: NormalizedSchedulingEvent,
+): boolean => {
+  if (event.action !== "request_opened") return false;
   return (
-    prior === undefined ||
-    prior.occurred_at <= normalizeDateTime(event.occurredAt, "event.occurredAt")
+    database
+      .prepare(`
+    SELECT id FROM github_events
+    WHERE work_item_id = ? AND action = 'request_opened'
+      AND request_kind = ? AND target_github_user_id IS ?
+      AND (actor_github_user_id IS ? OR actor_github_user_id IS NULL)
+      AND occurred_at = ? AND json_extract(result_json, '$.schedulingSuppressed') = 1
+    LIMIT 1
+  `)
+      .get(
+        workItemId,
+        event.requestKind,
+        event.target?.githubUserId ?? null,
+        event.actor?.githubUserId ?? null,
+        normalizeDateTime(event.occurredAt, "event.occurredAt"),
+      ) !== undefined
   );
 };
 
@@ -989,9 +1134,12 @@ const linkJobToActiveEpochs = (
       INSERT OR IGNORE INTO job_request_epochs (job_id, request_epoch_id, linked_at)
       SELECT ?, epoch.id, ?
       FROM request_epochs AS epoch
+      JOIN work_item_revisions AS revision ON revision.id = epoch.current_revision_id
+      JOIN jobs AS job ON job.id = ? AND job.resource_revision = revision.revision_key
       WHERE epoch.work_item_id = ? AND epoch.status = 'active'
+        AND ${ordinaryReviewJobSql("job")}
     `)
-    .run(jobId, now, workItemId);
+    .run(jobId, now, jobId, workItemId);
 };
 
 const scheduleJob = (
@@ -1004,6 +1152,29 @@ const scheduleJob = (
   now: string,
 ): { readonly id: string; readonly created: boolean } => {
   const revisionKey = input.event.revision.revisionKey;
+  // Configuration changes apply to a later authorized activation, not to another observation
+  // of the same active request and revision. Preserve its first usable immutable job snapshot.
+  const pinned = database
+    .prepare(`
+      SELECT job.id
+      FROM jobs AS job
+      JOIN job_request_epochs AS link ON link.job_id = job.id
+      WHERE job.work_item_id = ?
+        AND job.job_kind = ?
+        AND job.resource_revision = ?
+        AND link.request_epoch_id = ?
+        AND ${ordinaryReviewJobSql("job")}
+        AND job.status NOT IN ('stale', 'cancelled', 'cancel_requested')
+      ORDER BY job.created_at, job.rowid
+      LIMIT 1
+    `)
+    .get(workItem.id, schedule.jobKind, revisionKey, primaryEpoch.requestEpochId) as
+    | { readonly id: string }
+    | undefined;
+  if (pinned !== undefined) {
+    linkJobToActiveEpochs(database, pinned.id, workItem.id, now);
+    return { id: pinned.id, created: false };
+  }
   const executionJson = canonicalJson(schedule.executionTemplate);
   const executionDigest = hash(executionJson);
   const requiredCapabilitiesJson = canonicalJson(schedule.requiredCapabilities);
@@ -1024,7 +1195,14 @@ const scheduleJob = (
         AND job.required_capabilities_json = ?
         AND job.max_attempts = ?
         AND job.priority = ?
+        AND ${ordinaryReviewJobSql("job")}
+        AND job.status NOT IN ('stale', 'cancelled', 'cancel_requested')
         AND epoch.status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM work_item_revisions AS revision
+          WHERE revision.id = epoch.current_revision_id
+            AND revision.revision_key = job.resource_revision
+        )
       ORDER BY job.created_at DESC, job.id DESC
       LIMIT 1
     `)
@@ -1046,6 +1224,30 @@ const scheduleJob = (
   }
 
   const id = randomUUID();
+  const activationRow = database
+    .prepare(`
+      SELECT COALESCE(MAX(activation), 0) + 1 AS activation
+      FROM jobs
+      WHERE request_epoch_id = ?
+        AND ${ordinaryReviewJobSql("jobs")}
+        AND job_kind = ?
+        AND resource_revision = ?
+        AND intent_version = ?
+        AND execution_digest = ?
+        AND required_capabilities_digest = ?
+        AND max_attempts = ?
+        AND priority = ?
+    `)
+    .get(
+      primaryEpoch.requestEpochId,
+      schedule.jobKind,
+      revisionKey,
+      schedule.intentVersion,
+      executionDigest,
+      requiredCapabilitiesDigest,
+      schedule.maxAttempts,
+      schedule.priority,
+    ) as unknown as { readonly activation: number };
   const semanticKey = [
     "github",
     input.event.repository.githubRepositoryId,
@@ -1058,6 +1260,8 @@ const scheduleJob = (
     requiredCapabilitiesDigest,
     schedule.maxAttempts,
     schedule.priority,
+    "activation",
+    activationRow.activation,
   ].join(":");
   const concurrencyKey = [
     "github",
@@ -1086,8 +1290,9 @@ const scheduleJob = (
         created_at,
         updated_at,
         request_epoch_id,
-        source_event_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_event_id,
+        activation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       id,
@@ -1109,7 +1314,9 @@ const scheduleJob = (
       now,
       primaryEpoch.requestEpochId,
       githubEventId,
+      activationRow.activation,
     );
+  createJobAdmissionInTransaction(database, id, now);
   linkJobToActiveEpochs(database, id, workItem.id, now);
   return { id, created: true };
 };
@@ -1122,10 +1329,22 @@ const supersedeJobs = (
   now: string,
 ): { readonly stale: number; readonly cancelRequested: number } => {
   const revisionFilter = currentRevision === null ? "" : "AND resource_revision <> ?";
+  const authorizationFilter =
+    reason === "request_withdrawn"
+      ? `AND NOT EXISTS (
+          SELECT 1
+          FROM job_request_epochs AS link
+          JOIN request_epochs AS epoch ON epoch.id = link.request_epoch_id
+          JOIN work_item_revisions AS revision ON revision.id = epoch.current_revision_id
+          WHERE link.job_id = jobs.id
+            AND epoch.status = 'active'
+            AND revision.revision_key = jobs.resource_revision
+        )`
+      : "";
   const message =
     reason === "superseded_revision"
       ? "A newer immutable resource revision superseded this job."
-      : "All authorized request epochs were closed.";
+      : "No active request epoch authorizes this job revision.";
   const staleStatement = database.prepare(`
     UPDATE jobs
     SET
@@ -1136,7 +1355,9 @@ const supersedeJobs = (
       failure_message = ?,
       updated_at = ?
     WHERE work_item_id = ?
+      AND ${ordinaryReviewJobSql("jobs")}
       ${revisionFilter}
+      ${authorizationFilter}
       AND status IN ('queued', 'retry_waiting')
       AND current_run_attempt_id IS NULL
   `);
@@ -1149,7 +1370,9 @@ const supersedeJobs = (
       failure_message = ?,
       updated_at = ?
     WHERE work_item_id = ?
+      AND ${ordinaryReviewJobSql("jobs")}
       ${revisionFilter}
+      ${authorizationFilter}
       AND status IN ('leased', 'running')
       AND current_run_attempt_id IS NOT NULL
   `);
@@ -1169,13 +1392,49 @@ export const ingestSchedulingEventInTransaction = (
   input: IngestSchedulingEventInput,
 ): IngestSchedulingEventResult => {
   validateInput(input);
+  if (input.allowScheduling !== undefined && typeof input.allowScheduling !== "boolean") {
+    throw new GitHubIngestionInvariantError("allowScheduling must be a boolean when supplied.");
+  }
+  const allowScheduling = input.allowScheduling !== false;
+  if (!allowScheduling && input.schedule !== null) {
+    throw new GitHubIngestionInvariantError(
+      "Observation-only ingestion cannot supply a job schedule.",
+    );
+  }
+  if (
+    input.allowScheduling === true &&
+    (input.event.action === "request_opened" || input.event.action === "revision_observed")
+  ) {
+    const current = database
+      .prepare(`
+      SELECT full_name, enabled, authorization_policy_json
+      FROM managed_repositories WHERE github_repository_id = ?
+    `)
+      .get(input.event.repository.githubRepositoryId) as
+      | {
+          readonly full_name: string;
+          readonly enabled: number;
+          readonly authorization_policy_json: string | null;
+        }
+      | undefined;
+    if (
+      current === undefined ||
+      current.enabled !== 1 ||
+      current.full_name.toLowerCase() !== input.event.repository.fullName.toLowerCase() ||
+      current.authorization_policy_json === null ||
+      canonicalJson(JSON.parse(current.authorization_policy_json)) !== canonicalJson(input.policy)
+    ) {
+      throw new GitHubIngestionInvariantError(
+        "Repository scheduling settings changed. Resolve current configuration before retrying.",
+      );
+    }
+  }
   if (input.schedule !== null) {
     if (input.event.action !== "request_opened" && input.event.action !== "revision_observed") {
       throw new GitHubIngestionInvariantError(
         "Only request_opened and revision_observed events may carry a candidate schedule.",
       );
     }
-    validateSchedule(input.schedule, input);
   }
   const normalizedJson = canonicalJson(input.event);
   const normalizedSha256 = hash(normalizedJson);
@@ -1209,7 +1468,21 @@ export const ingestSchedulingEventInTransaction = (
   const projectedWorkItem = projectWorkItem(database, repository, input, now);
   const workItem = projectedWorkItem.row;
   const revision = projectRevision(database, workItem, input, now);
+  observeGitHubReviewRunSourceInTransaction(
+    database,
+    {
+      workItemId: workItem.id,
+      currentRevisionKey: workItem.current_revision_key,
+      revisionChanged: projectedWorkItem.revisionChanged,
+    },
+    now,
+  );
   const requestIsCurrent = requestTransitionIsCurrent(database, workItem.id, input);
+  // A later transport cannot turn a request observed while paused into a new authorization.
+  // Ordinary denials remain distinct so a strict-SHA polling observation may still be followed
+  // by an authoritative webhook carrying the exact authorized revision.
+  const schedulingSuppressed =
+    !allowScheduling || requestOriginWasSuppressed(database, workItem.id, input.event);
   const eventId = insertEvent(
     database,
     input,
@@ -1225,10 +1498,15 @@ export const ingestSchedulingEventInTransaction = (
   const closedRequestEpochIds: string[] = [];
   let openedRequestEpochId: string | null = null;
   let schedulingEpoch: ActiveAuthorizedRequestEpoch | null = null;
+  const schedulingEpochs: ActiveAuthorizedRequestEpoch[] = [];
   let authorized = false;
+  let replacedStaleJobCount = 0;
+  let replacedCancelRequestedJobCount = 0;
+  // Snapshot precedence must not discard a request that names the exact current
+  // immutable revision. Request withdrawal is fenced independently by source time.
   const eventRevisionIsCurrent =
-    projectedWorkItem.projected &&
-    workItem.current_revision_key === input.event.revision.revisionKey;
+    workItem.current_revision_key === input.event.revision.revisionKey &&
+    workItem.state === input.event.workItem.state;
 
   if (input.event.action === "request_opened") {
     const decision = evaluateSchedulingAuthorization({
@@ -1248,7 +1526,7 @@ export const ingestSchedulingEventInTransaction = (
     );
     authorizationDecisionIds.push(decisionId);
 
-    if (decision.outcome === "authorized" && requestIsCurrent && eventRevisionIsCurrent) {
+    if (requestIsCurrent) {
       const activeRows = readActiveEpochs(database, workItem.id);
       const matching = activeRows.find((row) => {
         const epoch = parseEpoch(row.epoch_json);
@@ -1258,26 +1536,87 @@ export const ingestSchedulingEventInTransaction = (
           epoch.target.githubUserId === input.event.target.githubUserId
         );
       });
-      if (matching !== undefined) {
-        schedulingEpoch = parseEpoch(matching.epoch_json);
+      const matchingEpoch = matching === undefined ? undefined : parseEpoch(matching.epoch_json);
+      const sameRequestOrigin =
+        matching !== undefined &&
+        matchingEpoch !== undefined &&
+        (matching.opening_source === input.event.source
+          ? matching.opening_source_event_id === input.event.sourceEventId
+          : Date.parse(matchingEpoch.openedAt) === Date.parse(input.event.occurredAt) &&
+            matchingEpoch.openedByActor.githubUserId === input.event.actor?.githubUserId);
+      if (matchingEpoch !== undefined && sameRequestOrigin) {
+        if (
+          !schedulingSuppressed &&
+          decision.outcome === "authorized" &&
+          eventRevisionIsCurrent &&
+          matchingEpoch.currentRevision.revisionKey === input.event.revision.revisionKey
+        ) {
+          schedulingEpoch = matchingEpoch;
+        }
+        // A second transport observation cannot expand the original request's revision.
+        // The separate revision event evaluates its recorded and current policy scopes.
       } else {
-        const ordinalRow = database
-          .prepare(`
+        if (
+          matching !== undefined &&
+          (input.event.source === "webhook" || input.event.actor !== null)
+        ) {
+          // A new explicit request replaces the previous request even when its removal
+          // delivery was missed, regardless of whether its new actor is authorized.
+          // An actor-less search observation does not prove a replacement occurred.
+          const replacementId = `github-request-replaced:v1:${hash(
+            canonicalJson([matching.id, input.event.eventId]),
+          )}`;
+          const closed = ingestSchedulingEventInTransaction(database, {
+            ...input,
+            delivery: null,
+            schedule: null,
+            event: {
+              ...input.event,
+              eventId: replacementId,
+              source: "reconciliation",
+              sourceEventId: replacementId,
+              action: "request_closed",
+              closeReason:
+                input.event.requestKind === "assignment"
+                  ? "assignment_removed"
+                  : "review_request_removed",
+            },
+          });
+          if (!closed.closedRequestEpochIds.includes(matching.id)) {
+            throw new GitHubIngestionInvariantError("The replaced request epoch was not closed.");
+          }
+          closedRequestEpochIds.push(...closed.closedRequestEpochIds);
+          replacedStaleJobCount += closed.staleJobCount;
+          replacedCancelRequestedJobCount += closed.cancelRequestedJobCount;
+        }
+        if (!schedulingSuppressed && decision.outcome === "authorized" && eventRevisionIsCurrent) {
+          const ordinalRow = database
+            .prepare(`
               SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal
               FROM request_epochs
               WHERE work_item_id = ?
             `)
-          .get(workItem.id) as unknown as { readonly ordinal: number };
-        schedulingEpoch = openAuthorizedRequestEpoch({
-          event: input.event,
-          decision,
-          requestEpochId: randomUUID(),
-          sequence: ordinalRow.ordinal,
-        });
-        insertEpoch(database, workItem.id, revision.id, eventId, decisionId, schedulingEpoch, now);
-        openedRequestEpochId = schedulingEpoch.requestEpochId;
+            .get(workItem.id) as unknown as { readonly ordinal: number };
+          schedulingEpoch = openAuthorizedRequestEpoch({
+            event: input.event,
+            decision,
+            requestEpochId: randomUUID(),
+            sequence: ordinalRow.ordinal,
+          });
+          insertEpoch(
+            database,
+            workItem.id,
+            revision.id,
+            eventId,
+            decisionId,
+            schedulingEpoch,
+            now,
+          );
+          openedRequestEpochId = schedulingEpoch.requestEpochId;
+        }
       }
-      authorized = true;
+      authorized = schedulingEpoch !== null;
+      if (schedulingEpoch !== null) schedulingEpochs.push(schedulingEpoch);
     }
   } else if (input.event.action === "revision_observed") {
     const activeRows = readActiveEpochs(database, workItem.id);
@@ -1286,7 +1625,8 @@ export const ingestSchedulingEventInTransaction = (
         epoch: null,
         event: input.event,
         evaluatedAt: now,
-        fallbackPolicyVersion: input.policy.policyVersion,
+        policy: input.policy,
+        epochPolicy: null,
       });
       authorizationDecisionIds.push(
         insertDecision(
@@ -1311,7 +1651,8 @@ export const ingestSchedulingEventInTransaction = (
           epoch,
           event: effectiveEvent,
           evaluatedAt: now,
-          fallbackPolicyVersion: epochPolicy.policyVersion,
+          policy: input.policy,
+          epochPolicy,
         });
         authorizationDecisionIds.push(
           insertDecision(
@@ -1319,16 +1660,17 @@ export const ingestSchedulingEventInTransaction = (
             workItem.id,
             eventId,
             input.event.eventId,
-            epochPolicy,
+            input.policy,
             decision,
             epoch.requestEpochId,
             now,
           ),
         );
-        if (eventRevisionIsCurrent && decision.outcome === "authorized") {
+        if (!schedulingSuppressed && eventRevisionIsCurrent && decision.outcome === "authorized") {
           const advanced = advanceAuthorizedRequestEpochRevision(epoch, input.event, decision);
           updateEpochRevision(database, advanced, revision.id, now);
           schedulingEpoch ??= advanced;
+          schedulingEpochs.push(advanced);
           authorized = true;
         }
       }
@@ -1365,8 +1707,8 @@ export const ingestSchedulingEventInTransaction = (
     // A reopened item only updates its projection. It never reactivates a closed authorization.
   }
 
-  let staleJobCount = 0;
-  let cancelRequestedJobCount = 0;
+  let staleJobCount = replacedStaleJobCount;
+  let cancelRequestedJobCount = replacedCancelRequestedJobCount;
   if (projectedWorkItem.revisionChanged) {
     const superseded = supersedeJobs(
       database,
@@ -1381,10 +1723,7 @@ export const ingestSchedulingEventInTransaction = (
 
   const activeRows = readActiveEpochs(database, workItem.id);
   const activeRequestEpochIds = activeRows.map((row) => row.id);
-  if (
-    (input.event.action === "request_closed" || input.event.action === "work_item_closed") &&
-    activeRows.length === 0
-  ) {
+  if (input.event.action === "request_closed" || input.event.action === "work_item_closed") {
     const withdrawn = supersedeJobs(database, workItem.id, null, "request_withdrawn", now);
     staleJobCount += withdrawn.stale;
     cancelRequestedJobCount += withdrawn.cancelRequested;
@@ -1393,22 +1732,49 @@ export const ingestSchedulingEventInTransaction = (
   let jobId: string | null = null;
   let jobCreated = false;
   if (authorized && schedulingEpoch !== null) {
-    if (input.schedule === null) {
-      throw new GitHubIngestionInvariantError(
-        "An authorized scheduling decision requires an atomic job schedule.",
+    for (const epoch of schedulingEpochs) {
+      const automatic = createGitHubReviewRunInTransaction(
+        database,
+        {
+          repositoryId: repository.id,
+          workItemId: workItem.id,
+          requestEpochId: epoch.requestEpochId,
+        },
+        now,
       );
+      if (automatic?.kind === "legacy") {
+        jobId ??= automatic.jobId;
+      } else if (automatic?.kind === "review_run") {
+        jobId ??=
+          automatic.dispatch?.createdJobs[0]?.jobId ??
+          automatic.run.requests.flatMap((request) => request.jobs)[0]?.jobId ??
+          null;
+        jobCreated ||= (automatic.dispatch?.createdJobs.length ?? 0) > 0;
+      } else {
+        if (input.schedule === null) {
+          throw new GitHubIngestionInvariantError(
+            "An authorized scheduling decision requires an atomic job schedule.",
+          );
+        }
+        validateSchedule(input.schedule, input);
+        const scheduled = scheduleJob(
+          database,
+          input,
+          input.schedule,
+          workItem,
+          epoch,
+          eventId,
+          now,
+        );
+        pinGitHubLegacyJobInTransaction(
+          database,
+          { workItemId: workItem.id, jobId: scheduled.id },
+          now,
+        );
+        jobId ??= scheduled.id;
+        jobCreated ||= scheduled.created;
+      }
     }
-    const scheduled = scheduleJob(
-      database,
-      input,
-      input.schedule,
-      workItem,
-      schedulingEpoch,
-      eventId,
-      now,
-    );
-    jobId = scheduled.id;
-    jobCreated = scheduled.created;
   }
 
   const result: IngestSchedulingEventResult = {
@@ -1426,6 +1792,7 @@ export const ingestSchedulingEventInTransaction = (
     jobCreated,
     staleJobCount,
     cancelRequestedJobCount,
+    ...(schedulingSuppressed ? { schedulingSuppressed: true } : {}),
   };
   const resultJson = canonicalJson(result);
   database

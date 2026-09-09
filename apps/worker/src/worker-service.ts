@@ -37,6 +37,7 @@ interface DeferredCleanupScope {
 }
 
 const forcedRunSettleTimeoutMilliseconds = 5_000;
+const capacityRetryMilliseconds = 5_000;
 
 class WorkerShutdownError extends Error {
   public constructor(message: string) {
@@ -56,6 +57,8 @@ export class WorkerService {
   #currentClaimController: AbortController | undefined;
   #fatalError: unknown = undefined;
   #draining = false;
+  #capacityAvailable = true;
+  #nextCapacityCheckAt = 0;
   #stopping = false;
   #shutdownPromise?: Promise<void>;
 
@@ -65,6 +68,7 @@ export class WorkerService {
     private readonly executor: JobExecutor,
     private readonly processHost: ProcessHostClient,
     private readonly logger: Logger,
+    private readonly canAcceptWork?: (signal: AbortSignal) => Promise<boolean>,
   ) {
     this.#capabilitiesDigest = digestCapabilities(config.capabilities);
   }
@@ -240,7 +244,11 @@ export class WorkerService {
       if (this.#registrationPromise !== undefined) {
         await this.#registrationPromise;
       }
-      if (this.#draining || !this.config.executionEnabled || this.#availableSlots() === 0) {
+      if (
+        this.#draining ||
+        !this.config.executionEnabled ||
+        this.#activeRuns.size >= this.config.maxSlots
+      ) {
         try {
           await delay(this.config.idleDelayMilliseconds, stopSignal);
         } catch {
@@ -248,6 +256,35 @@ export class WorkerService {
         }
         continue;
       }
+
+      if (
+        this.canAcceptWork !== undefined &&
+        (!this.#capacityAvailable || performance.now() >= this.#nextCapacityCheckAt)
+      ) {
+        try {
+          const available = await this.canAcceptWork(stopSignal);
+          if (available !== this.#capacityAvailable) {
+            this.logger.info(
+              available
+                ? "Worker disk capacity recovered; resuming lease claims."
+                : "Worker disk capacity is unavailable; pausing lease claims.",
+            );
+          }
+          this.#capacityAvailable = available;
+          this.#nextCapacityCheckAt = performance.now() + capacityRetryMilliseconds;
+          if (!available) {
+            await delay(capacityRetryMilliseconds, stopSignal).catch(() => undefined);
+            continue;
+          }
+        } catch (error) {
+          if (!stopSignal.aborted) {
+            this.logger.error("Worker capacity safety check failed.", { error });
+            this.requestDrain("capacity_safety_check_failed");
+          }
+          continue;
+        }
+      }
+      if (this.#draining || stopSignal.aborted) continue;
 
       const claimController = new AbortController();
       this.#currentClaimController = claimController;
@@ -293,14 +330,17 @@ export class WorkerService {
 
   async #handleClaimResponse(response: ClaimLeaseResponse, stopSignal: AbortSignal): Promise<void> {
     if (response.outcome === "granted") {
-      if (this.#draining || this.#stopping || stopSignal.aborted) {
+      if (this.#draining || this.#stopping || stopSignal.aborted || !this.#capacityAvailable) {
+        const capacityPaused = !this.#capacityAvailable && !this.#draining && !this.#stopping;
         await this.api
           .failRun(
             response.envelope.lease.runAttemptId,
             {
               ...response.envelope.lease,
-              code: "WORKER_DRAINING",
-              message: "The worker entered drain mode before the granted lease could start.",
+              code: capacityPaused ? "WORKER_CAPACITY_UNAVAILABLE" : "WORKER_DRAINING",
+              message: capacityPaused
+                ? "Worker disk capacity became unavailable before the granted lease could start."
+                : "The worker entered drain mode before the granted lease could start.",
               retryable: true,
             },
             stopSignal,
@@ -399,6 +439,7 @@ export class WorkerService {
       lease.reportProgress("preparing", 0);
       const result = await this.executor.execute(envelope, {
         signal: controller.signal,
+        attemptSignal: controller.signal,
         processHost: this.processHost,
         reportProgress: ({ phase, processCount }) => lease.reportProgress(phase, processCount),
         reportNodeHealthFault: (error) => {
@@ -419,6 +460,16 @@ export class WorkerService {
           deferredCleanup.callbacks.push(cleanup);
         },
       });
+      if (
+        this.canAcceptWork !== undefined &&
+        result.outcome === "failed" &&
+        result.code.endsWith("WORKSPACE_DISK_CAPACITY_UNAVAILABLE")
+      ) {
+        this.#capacityAvailable = false;
+        this.#nextCapacityCheckAt = 0;
+        this.#currentClaimController?.abort(new Error("Worker disk capacity is unavailable."));
+        this.logger.info("Worker disk capacity is unavailable; pausing lease claims.");
+      }
       deferredCleanup.accepting = false;
       if (controller.signal.aborted) {
         throw controller.signal.reason ?? new Error("Run execution was aborted.");
@@ -462,12 +513,10 @@ export class WorkerService {
           throw controller.signal.reason ?? new Error("Run execution was aborted.");
         }
       } else {
-        const submission = this.#createFailureSubmission(
-          envelope,
-          result.code,
-          result.message,
-          result.retryable,
-        );
+        const submission = {
+          ...this.#createFailureSubmission(envelope, result.code, result.message, result.retryable),
+          ...(result.diagnostics === undefined ? {} : { diagnostics: result.diagnostics }),
+        };
         const terminalResponse = await this.#submitTerminalWithRetry(
           "failure",
           (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),
@@ -716,7 +765,7 @@ export class WorkerService {
   }
 
   #availableSlots(): number {
-    if (this.#draining || !this.config.executionEnabled) {
+    if (this.#draining || !this.#capacityAvailable || !this.config.executionEnabled) {
       return 0;
     }
     return Math.max(0, this.config.maxSlots - this.#activeRuns.size);

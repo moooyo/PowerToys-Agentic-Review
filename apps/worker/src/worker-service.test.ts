@@ -2,8 +2,10 @@ import type {
   ClaimLeaseResponse,
   JobExecutionEnvelope,
   RunCompletionSubmission,
+  RunFailureDiagnostics,
   RunFailureSubmission,
   RunTerminalResponse,
+  WorkerHeartbeatRequest,
   WorkerHeartbeatResponse,
   WorkerRegistrationResponse,
 } from "@agentic-review/contracts";
@@ -185,6 +187,7 @@ describe("WorkerService control-plane transport failures", () => {
     let workerInstanceId = "";
     let claimCalls = 0;
     let executionSignal: AbortSignal | undefined;
+    let attemptSignal: AbortSignal | undefined;
     api.registerHandler = async (request) => {
       workerInstanceId = request.workerInstanceId;
       return createRegistration();
@@ -199,6 +202,7 @@ describe("WorkerService control-plane transport failures", () => {
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
         executionSignal = context.signal;
+        attemptSignal = context.attemptSignal;
         return await new Promise<never>((_resolve, reject) => {
           context.signal.addEventListener("abort", () => reject(context.signal.reason), {
             once: true,
@@ -217,6 +221,7 @@ describe("WorkerService control-plane transport failures", () => {
     await expect(service.run()).rejects.toBe(fatal);
     expect(claimCalls).toBe(2);
     expect(executionSignal?.aborted).toBe(true);
+    expect(attemptSignal).toBe(executionSignal);
     await service.stop("test_complete");
   });
 
@@ -322,7 +327,321 @@ describe("WorkerService control-plane transport failures", () => {
   });
 });
 
+describe("WorkerService capacity recovery", () => {
+  it("keeps heartbeats online with no slots until disk capacity recovers", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    let capacityAvailable = false;
+    const canAcceptWork = vi.fn(async (_signal: AbortSignal) => capacityAvailable);
+    const claimSlots: number[] = [];
+    const heartbeats: WorkerHeartbeatRequest[] = [];
+    api.claimHandler = async (request) => {
+      claimSlots.push(request.availableSlots);
+      return createNoWorkResponse();
+    };
+    api.heartbeatHandler = async (_instanceId, request) => {
+      heartbeats.push(request);
+      return createHeartbeatResponse();
+    };
+    const service = new WorkerService(
+      { ...createConfig(), maxSlots: 2 },
+      api,
+      createImmediateExecutor(),
+      processHost,
+      logger,
+      canAcceptWork,
+    );
+    const runPromise = service.run();
+    await waitFor(() => canAcceptWork.mock.calls.length === 1);
+    await flushAsyncWork();
+    heartbeats.length = 0;
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(canAcceptWork).toHaveBeenCalledTimes(2);
+    expect(claimSlots).toEqual([]);
+    expect(heartbeats.length).toBeGreaterThan(0);
+    expect(heartbeats.every((request) => request.health.state === "online")).toBe(true);
+    expect(heartbeats.every((request) => request.availableSlots === 0)).toBe(true);
+
+    capacityAvailable = true;
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => claimSlots.length === 1);
+    expect(canAcceptWork).toHaveBeenCalledTimes(3);
+    expect(claimSlots).toEqual([2]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(heartbeats.at(-1)).toMatchObject({ availableSlots: 2, health: { state: "online" } });
+
+    await service.stop("test_complete");
+    await runPromise;
+  });
+
+  it("invalidates cached capacity and pauses lease claims after an execution capacity failure", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    let workerInstanceId = "";
+    let capacityAvailable = true;
+    let claimCalls = 0;
+    let pendingClaimSignal: AbortSignal | undefined;
+    let resolveExecution:
+      | ((result: Awaited<ReturnType<JobExecutor["execute"]>>) => void)
+      | undefined;
+    const canAcceptWork = vi.fn(async (_signal: AbortSignal) => capacityAvailable);
+    const failures: RunFailureSubmission[] = [];
+    const heartbeats: WorkerHeartbeatRequest[] = [];
+    api.registerHandler = async (request) => {
+      workerInstanceId = request.workerInstanceId;
+      return createRegistration();
+    };
+    api.claimHandler = async (_request, signal) => {
+      claimCalls += 1;
+      if (claimCalls === 1) {
+        return createGrantedResponse(createEnvelope(workerInstanceId));
+      }
+      if (claimCalls === 2) {
+        if (signal === undefined) {
+          throw new Error("WorkerService did not provide a lease claim abort signal.");
+        }
+        pendingClaimSignal = signal;
+        return await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      return createNoWorkResponse();
+    };
+    api.failHandler = async (runAttemptId, submission) => {
+      failures.push(submission);
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
+    };
+    api.heartbeatHandler = async (_instanceId, request) => {
+      heartbeats.push(request);
+      return createHeartbeatResponse();
+    };
+    const executor: JobExecutor = {
+      execute: async () =>
+        await new Promise((resolve) => {
+          resolveExecution = resolve;
+        }),
+    };
+    const service = new WorkerService(
+      { ...createConfig(), maxSlots: 2 },
+      api,
+      executor,
+      processHost,
+      logger,
+      canAcceptWork,
+    );
+    const runPromise = service.run();
+    await waitFor(() => pendingClaimSignal !== undefined && resolveExecution !== undefined);
+    expect(canAcceptWork).toHaveBeenCalledTimes(1);
+
+    capacityAvailable = false;
+    resolveExecution?.({
+      outcome: "failed",
+      code: "REVIEW_WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      message: "Workspace disk capacity is temporarily unavailable.",
+      retryable: true,
+    });
+    await waitFor(() => failures.length === 1 && canAcceptWork.mock.calls.length === 2);
+    expect(pendingClaimSignal?.aborted).toBe(true);
+    expect(claimCalls).toBe(2);
+    expect(failures[0]).toMatchObject({
+      code: "REVIEW_WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      retryable: true,
+    });
+    await flushAsyncWork();
+    heartbeats.length = 0;
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(claimCalls).toBe(2);
+    expect(canAcceptWork).toHaveBeenCalledTimes(3);
+    expect(heartbeats.length).toBeGreaterThan(0);
+    expect(heartbeats.every((request) => request.health.state === "online")).toBe(true);
+    expect(heartbeats.every((request) => request.availableSlots === 0)).toBe(true);
+
+    capacityAvailable = true;
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => claimCalls === 3);
+    expect(canAcceptWork).toHaveBeenCalledTimes(4);
+
+    await service.stop("test_complete");
+    await runPromise;
+  });
+
+  it("releases a late lease grant after capacity failure without starting another execution", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    let workerInstanceId = "";
+    let capacityAvailable = true;
+    let claimCalls = 0;
+    let pendingClaimSignal: AbortSignal | undefined;
+    let resolvePendingClaim: ((response: ClaimLeaseResponse) => void) | undefined;
+    let resolveExecution:
+      | ((result: Awaited<ReturnType<JobExecutor["execute"]>>) => void)
+      | undefined;
+    const canAcceptWork = vi.fn(async (_signal: AbortSignal) => capacityAvailable);
+    const executedAttempts: string[] = [];
+    const failures: RunFailureSubmission[] = [];
+    api.registerHandler = async (request) => {
+      workerInstanceId = request.workerInstanceId;
+      return createRegistration();
+    };
+    api.claimHandler = async (_request, signal) => {
+      claimCalls += 1;
+      if (claimCalls === 1) {
+        return createGrantedResponse(createEnvelope(workerInstanceId));
+      }
+      if (claimCalls === 2) {
+        pendingClaimSignal = signal;
+        return await new Promise((resolve) => {
+          resolvePendingClaim = resolve;
+        });
+      }
+      return createNoWorkResponse();
+    };
+    api.failHandler = async (runAttemptId, submission) => {
+      failures.push(submission);
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
+    };
+    const executor: JobExecutor = {
+      execute: async (envelope) => {
+        executedAttempts.push(envelope.lease.runAttemptId);
+        if (executedAttempts.length > 1) {
+          return { outcome: "succeeded", resultDigest: digest, result: { ok: true } };
+        }
+        return await new Promise((resolve) => {
+          resolveExecution = resolve;
+        });
+      },
+    };
+    const service = new WorkerService(
+      { ...createConfig(), maxSlots: 2 },
+      api,
+      executor,
+      processHost,
+      logger,
+      canAcceptWork,
+    );
+    const runPromise = service.run();
+    await waitFor(() => resolvePendingClaim !== undefined && resolveExecution !== undefined);
+
+    capacityAvailable = false;
+    resolveExecution?.({
+      outcome: "failed",
+      code: "REVIEW_WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      message: "Workspace disk capacity is temporarily unavailable.",
+      retryable: true,
+    });
+    await waitFor(() => failures.length === 1);
+    expect(pendingClaimSignal?.aborted).toBe(true);
+
+    const lateEnvelope = createEnvelope(workerInstanceId);
+    resolvePendingClaim?.(
+      createGrantedResponse({
+        ...lateEnvelope,
+        lease: { ...lateEnvelope.lease, runAttemptId: "late-run-attempt-id" },
+      }),
+    );
+    await waitFor(() => failures.length === 2 && canAcceptWork.mock.calls.length === 2);
+
+    expect(failures[1]).toMatchObject({
+      runAttemptId: "late-run-attempt-id",
+      code: "WORKER_CAPACITY_UNAVAILABLE",
+      retryable: true,
+    });
+    expect(executedAttempts).toEqual(["run-attempt-id"]);
+    expect(claimCalls).toBe(2);
+
+    await service.stop("test_complete");
+    await runPromise;
+  });
+
+  it("drains instead of resuming claims when a capacity safety check fails", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    const claimLease = vi.fn(async () => createNoWorkResponse());
+    api.claimHandler = claimLease;
+    const heartbeats: WorkerHeartbeatRequest[] = [];
+    api.heartbeatHandler = async (_instanceId, request) => {
+      heartbeats.push(request);
+      return createHeartbeatResponse();
+    };
+    const canAcceptWork = vi.fn(async (_signal: AbortSignal) => {
+      throw Object.assign(new Error("Workspace root is unsafe."), {
+        code: "WORKSPACE_ROOT_UNSAFE",
+      });
+    });
+    const service = new WorkerService(
+      createConfig(),
+      api,
+      createImmediateExecutor(),
+      processHost,
+      logger,
+      canAcceptWork,
+    );
+    const runPromise = service.run();
+    await waitFor(() => canAcceptWork.mock.calls.length === 1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(canAcceptWork).toHaveBeenCalledTimes(1);
+    expect(claimLease).not.toHaveBeenCalled();
+    expect(heartbeats.at(-1)).toMatchObject({ availableSlots: 0, health: { state: "draining" } });
+
+    await service.stop("test_complete");
+    await runPromise;
+  });
+});
+
 describe("WorkerService terminal reporting", () => {
+  it("forwards optional execution failure diagnostics in the terminal submission", async () => {
+    useFakeTime();
+    const api = new FakeWorkerApi();
+    let workerInstanceId = "";
+    let claimCalls = 0;
+    const failures: RunFailureSubmission[] = [];
+    const diagnostics: RunFailureDiagnostics = {
+      category: "workspace",
+      exitCode: null,
+      summary: "The workspace disk budget cannot accept another attempt.",
+      correlationId: "workspace-capacity-check",
+    };
+    api.registerHandler = async (request) => {
+      workerInstanceId = request.workerInstanceId;
+      return createRegistration();
+    };
+    api.claimHandler = async () => {
+      claimCalls += 1;
+      return claimCalls === 1
+        ? createGrantedResponse(createEnvelope(workerInstanceId))
+        : createNoWorkResponse();
+    };
+    api.failHandler = async (runAttemptId, submission) => {
+      failures.push(submission);
+      return createTerminalResponse(submission.jobId, runAttemptId, "failed", "failed");
+    };
+    const executor: JobExecutor = {
+      execute: async () => ({
+        outcome: "failed",
+        code: "REVIEW_WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+        message: "Workspace disk capacity is temporarily unavailable.",
+        retryable: true,
+        diagnostics,
+      }),
+    };
+    const service = new WorkerService(createConfig(), api, executor, processHost, logger);
+    const runPromise = service.run();
+    await waitFor(() => failures.length === 1);
+
+    expect(failures[0]).toMatchObject({
+      code: "REVIEW_WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      retryable: true,
+      diagnostics,
+    });
+    expect(failures[0]?.diagnostics).toBe(diagnostics);
+
+    await service.stop("test_complete");
+    await runPromise;
+  });
+
   it("runs deferred cleanups once in LIFO order after completion reporting finishes", async () => {
     useFakeTime();
     const api = new FakeWorkerApi();

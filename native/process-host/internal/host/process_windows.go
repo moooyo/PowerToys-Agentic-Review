@@ -185,6 +185,14 @@ func (windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.E
 		}
 	}()
 
+	var processCreationTimeFileTime uint64
+	if spec.CaptureProcessIdentity {
+		processCreationTimeFileTime, err = readProcessCreationTimeFileTime(processInfo.Process)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if _, err := windows.ResumeThread(processInfo.Thread); err != nil {
 		_ = windows.TerminateJobObject(job, terminationExitCode)
 		return nil, fmt.Errorf("resume assigned process: %w", err)
@@ -199,13 +207,26 @@ func (windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.E
 	jobOwned = false
 	cleanupPipes = false
 	return &windowsProcess{
-		processID:      processInfo.ProcessId,
-		process:        processInfo.Process,
-		job:            job,
-		standardInput:  stdinParent,
-		standardOutput: stdoutParent,
-		standardError:  stderrParent,
+		processID:                   processInfo.ProcessId,
+		processCreationTimeFileTime: processCreationTimeFileTime,
+		process:                     processInfo.Process,
+		job:                         job,
+		standardInput:               stdinParent,
+		standardOutput:              stdoutParent,
+		standardError:               stderrParent,
 	}, nil
+}
+
+func readProcessCreationTimeFileTime(process windows.Handle) (uint64, error) {
+	var creationTime, exitTime, kernelTime, userTime windows.Filetime
+	if err := windows.GetProcessTimes(process, &creationTime, &exitTime, &kernelTime, &userTime); err != nil {
+		return 0, fmt.Errorf("%w: GetProcessTimes: %w", errProcessIdentityQueryFailed, err)
+	}
+	value := uint64(creationTime.HighDateTime)<<32 | uint64(creationTime.LowDateTime)
+	if value == 0 {
+		return 0, fmt.Errorf("%w: GetProcessTimes returned a zero creation time", errProcessIdentityQueryFailed)
+	}
+	return value, nil
 }
 
 func createLimitedJob(limits protocol.EffectiveLimits) (windows.Handle, error) {
@@ -320,12 +341,13 @@ func validateRuntimePath(path string, executable bool) (string, error) {
 }
 
 type windowsProcess struct {
-	processID      uint32
-	process        windows.Handle
-	job            windows.Handle
-	standardInput  *os.File
-	standardOutput *os.File
-	standardError  *os.File
+	processID                   uint32
+	processCreationTimeFileTime uint64
+	process                     windows.Handle
+	job                         windows.Handle
+	standardInput               *os.File
+	standardOutput              *os.File
+	standardError               *os.File
 
 	jobMu                sync.Mutex
 	rootExited           bool
@@ -334,10 +356,11 @@ type windowsProcess struct {
 	closeErr             error
 }
 
-func (p *windowsProcess) ProcessID() uint32             { return p.processID }
-func (p *windowsProcess) StandardInput() io.WriteCloser { return p.standardInput }
-func (p *windowsProcess) StandardOutput() io.ReadCloser { return p.standardOutput }
-func (p *windowsProcess) StandardError() io.ReadCloser  { return p.standardError }
+func (p *windowsProcess) ProcessID() uint32                   { return p.processID }
+func (p *windowsProcess) ProcessCreationTimeFileTime() uint64 { return p.processCreationTimeFileTime }
+func (p *windowsProcess) StandardInput() io.WriteCloser       { return p.standardInput }
+func (p *windowsProcess) StandardOutput() io.ReadCloser       { return p.standardOutput }
+func (p *windowsProcess) StandardError() io.ReadCloser        { return p.standardError }
 
 func (p *windowsProcess) Wait() (*int64, error) {
 	status, err := windows.WaitForSingleObject(p.process, windows.INFINITE)

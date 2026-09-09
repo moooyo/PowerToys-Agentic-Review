@@ -2,16 +2,25 @@ import type {
   AuthorizationDecisionReason,
   DashboardAuthorization,
   DashboardJobOutcome,
+  DashboardRequestEpochSummary,
   DashboardWorkItemFreshness,
   DashboardWorkItemPriority,
   DashboardWorkItemStage,
   ExecutionPhase,
   GitHubAccountType,
   GitHubWorkItemKind,
+  JobAdmission,
   JobState,
+  ReviewExecutionEvidence,
+  RunFailureDiagnostics,
   SchedulingRequestKind,
+  VerificationReport,
   WorkerState,
   WorkItemState,
+} from "@agentic-review/contracts";
+import {
+  getDashboardWorkItemAdmissionIssues,
+  getJobAdmissionIssues,
 } from "@agentic-review/contracts";
 import { ReviewControlProtocolError } from "./errors";
 import type {
@@ -86,6 +95,8 @@ const workItemStates = {
 } satisfies Record<WorkItemState, true>;
 
 const workItemStages = {
+  not_scheduled: true,
+  awaiting_admission: true,
   done: true,
   preparing: true,
   publishing: true,
@@ -131,6 +142,22 @@ const jobOutcomes = {
   timed_out: true,
 } satisfies Record<DashboardJobOutcome, true>;
 
+const verificationStatuses = {
+  not_run: true,
+  passed: true,
+  failed: true,
+  unknown: true,
+} satisfies Record<VerificationReport["status"], true>;
+
+const failureCategories = {
+  workspace: true,
+  launch: true,
+  process: true,
+  event_stream: true,
+  result: true,
+  internal: true,
+} satisfies Record<RunFailureDiagnostics["category"], true>;
+
 const workerStates = {
   disabled: true,
   draining: true,
@@ -159,7 +186,7 @@ const workerCredentialAuthStates = {
   revoked: true,
 } as const;
 
-const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const entityIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/u;
 const workerNodeIdPattern =
   /^worker:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
@@ -170,6 +197,8 @@ const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]
 const requestedRecipeIdPattern = /^[a-z0-9][a-z0-9._-]*$/;
 const maxSourceLine = 10_000_000;
 const maxInt32 = 2_147_483_647;
+const minExitCode = -2_147_483_648;
+const maxExitCode = 4_294_967_295;
 
 const fail = (operation: string, path: string, expectation: string): never => {
   throw new ReviewControlProtocolError(
@@ -466,15 +495,7 @@ const readRevision = (value: unknown, operation: string, path: string): Revision
   readInteger(revision, "githubWorkItemId", operation, path, 1);
   readDateTime(revision, "observedAt", operation, path);
   readDateTime(revision, "sourceUpdatedAt", operation, path);
-  const revisionKey = readString(
-    revision,
-    "revisionKey",
-    operation,
-    path,
-    kind === "issue" ? 64 : 40,
-    64,
-    kind === "issue" ? sha256Pattern : gitObjectIdPattern,
-  );
+  const revisionKey = readString(revision, "revisionKey", operation, path, 64, 64, sha256Pattern);
 
   if (kind === "issue") {
     readString(revision, "contentDigest", operation, path, 64, 64, sha256Pattern);
@@ -496,25 +517,78 @@ const requestEpochKeys = [
   "closedAt",
 ] as const;
 
-const validateRequestEpoch = (value: unknown, operation: string, path: string): void => {
+const readRequestEpoch = (
+  value: unknown,
+  operation: string,
+  path: string,
+): DashboardRequestEpochSummary | null => {
   if (value === null) {
-    return;
+    return null;
   }
   const epoch = asObject(value, operation, path, requestEpochKeys);
-  readEntityId(epoch, "requestEpochId", operation, path);
-  readEnum(epoch, "requestKind", operation, path, schedulingRequestKinds);
-  readInteger(epoch, "sequence", operation, path, 1);
+  const requestEpochId = readEntityId(epoch, "requestEpochId", operation, path);
+  const requestKind = readEnum(epoch, "requestKind", operation, path, schedulingRequestKinds);
+  const sequence = readInteger(epoch, "sequence", operation, path, 1);
   const status = readEnum(epoch, "status", operation, path, { active: true, closed: true });
-  readEnum(epoch, "authorization", operation, path, { allowlisted: true, self: true });
-  readDateTime(epoch, "openedAt", operation, path);
+  const authorization = readEnum(epoch, "authorization", operation, path, {
+    allowlisted: true,
+    self: true,
+  });
+  const openedAt = readDateTime(epoch, "openedAt", operation, path);
   const closedAt = readNullableDateTime(epoch, "closedAt", operation, path);
   if ((status === "active" && closedAt !== null) || (status === "closed" && closedAt === null)) {
     fail(operation, `${path}.closedAt`, `a value consistent with status ${status}`);
   }
+  return { requestEpochId, requestKind, sequence, status, authorization, openedAt, closedAt };
 };
+
+function readAdmission(
+  item: JsonObject,
+  key: string,
+  status: JobState,
+  attemptCount: number,
+  operation: string,
+  path: string,
+): JobAdmission | null {
+  let admission: JobAdmission | null = null;
+  if (item[key] !== null) {
+    const source = asObject(item[key], operation, `${path}.${key}`, [
+      "state",
+      "attemptBase",
+      "requestedAt",
+      "timestampBasis",
+      "admittedAt",
+    ]);
+    const state = readEnum(source, "state", operation, `${path}.${key}`, {
+      pending: true,
+      admitted: true,
+    });
+    const attemptBase = readInteger(source, "attemptBase", operation, `${path}.${key}`, 0);
+    const requestedAt = readDateTime(source, "requestedAt", operation, `${path}.${key}`);
+    const timestampBasis = readEnum(source, "timestampBasis", operation, `${path}.${key}`, {
+      recorded: true,
+      migration_backfill: true,
+    });
+    const admittedAt = readNullableDateTime(source, "admittedAt", operation, `${path}.${key}`);
+    if ((state === "pending") !== (admittedAt === null))
+      fail(operation, `${path}.${key}`, "an admission timestamp matching its state");
+    admission =
+      state === "pending"
+        ? { state, attemptBase, requestedAt, timestampBasis, admittedAt: null }
+        : { state, attemptBase, requestedAt, timestampBasis, admittedAt: admittedAt as string };
+  }
+  if (getJobAdmissionIssues({ status, attemptCount, admission }).length > 0)
+    fail(
+      operation,
+      `${path}.${key}`,
+      "an exact waiting admission episode or null for a nonwaiting job",
+    );
+  return admission;
+}
 
 const workItemKeys = [
   "id",
+  "repositoryId",
   "kind",
   "repository",
   "number",
@@ -535,6 +609,8 @@ const workItemKeys = [
   "activeRequestEpoch",
   "latestJobId",
   "latestJobStatus",
+  "latestJobAttemptCount",
+  "latestJobAdmission",
   "workerNodeId",
   "attentionReason",
   "updatedAt",
@@ -543,6 +619,7 @@ const workItemKeys = [
 const mapWorkItem = (value: unknown, operation: string, path: string): WorkItem => {
   const item = asObject(value, operation, path, workItemKeys);
   const id = readEntityId(item, "id", operation, path);
+  const repositoryId = readEntityId(item, "repositoryId", operation, path);
   const kind = readEnum(item, "kind", operation, path, workItemKinds);
   const repository = readString(item, "repository", operation, path, 3, 201);
   const number = readInteger(item, "number", operation, path, 1);
@@ -565,7 +642,7 @@ const mapWorkItem = (value: unknown, operation: string, path: string): WorkItem 
   );
   readNullableEnum(item, "authorizationReason", operation, path, authorizationReasons);
   const priority = readEnum(item, "priority", operation, path, priorities);
-  readEnum(item, "state", operation, path, workItemStates);
+  const state = readEnum(item, "state", operation, path, workItemStates);
   const stage = readEnum(item, "stage", operation, path, workItemStages);
   const freshness = readEnum(item, "freshness", operation, path, freshnessValues);
   const revision = readRevision(item.currentRevision, operation, `${path}.currentRevision`);
@@ -573,15 +650,50 @@ const mapWorkItem = (value: unknown, operation: string, path: string): WorkItem 
     fail(operation, `${path}.currentRevision.kind`, `the work item kind ${kind}`);
   }
   const reviewedRevisionKey = readNullableString(item, "reviewedRevisionKey", operation, path);
-  validateRequestEpoch(item.activeRequestEpoch, operation, `${path}.activeRequestEpoch`);
-  readNullableEntityId(item, "latestJobId", operation, path);
-  readNullableEnum(item, "latestJobStatus", operation, path, jobStates);
+  const activeRequestEpoch = readRequestEpoch(
+    item.activeRequestEpoch,
+    operation,
+    `${path}.activeRequestEpoch`,
+  );
+  const latestJobId = readNullableEntityId(item, "latestJobId", operation, path);
+  const latestJobStatus = readNullableEnum(item, "latestJobStatus", operation, path, jobStates);
+  const latestJobAttemptCount = readNullableInteger(
+    item,
+    "latestJobAttemptCount",
+    operation,
+    path,
+    0,
+  );
+  const latestJobAdmission =
+    latestJobStatus === null
+      ? (item.latestJobAdmission as null)
+      : readAdmission(
+          item,
+          "latestJobAdmission",
+          latestJobStatus,
+          latestJobAttemptCount ?? -1,
+          operation,
+          path,
+        );
   const workerNodeId = readNullableEntityId(item, "workerNodeId", operation, path);
   const attentionReason = readNullableString(item, "attentionReason", operation, path);
   const updatedAt = readDateTime(item, "updatedAt", operation, path);
+  if (
+    getDashboardWorkItemAdmissionIssues({
+      latestJobId,
+      latestJobStatus,
+      latestJobAttemptCount,
+      latestJobAdmission,
+      stage,
+    }).length > 0
+  )
+    fail(operation, path, "a work item with consistent latest-job admission identity and stage");
 
   return {
     id,
+    repositoryId,
+    revisionKey: revision.revisionKey,
+    activeRequestEpoch,
     kind,
     repository,
     number,
@@ -597,8 +709,13 @@ const mapWorkItem = (value: unknown, operation: string, path: string): WorkItem 
     scheduledBy: schedulingActor ?? "No scheduling actor",
     authorization: authorization ?? "pending",
     priority,
+    state,
     stage,
     freshness,
+    ...(latestJobId === null ? {} : { latestJobId }),
+    ...(latestJobStatus === null ? {} : { latestJobStatus }),
+    latestJobAttemptCount,
+    latestJobAdmission,
     ...(revision.headSha === undefined ? {} : { headSha: revision.headSha }),
     ...(reviewedRevisionKey === null ? {} : { reviewedSha: reviewedRevisionKey }),
     ...(workerNodeId === null ? {} : { workerNodeId }),
@@ -609,11 +726,13 @@ const mapWorkItem = (value: unknown, operation: string, path: string): WorkItem 
 
 const jobKeys = [
   "id",
+  "repositoryId",
   "workItemId",
   "workItemRef",
   "title",
   "generation",
   "status",
+  "admission",
   "phase",
   "attempt",
   "maxAttempts",
@@ -633,11 +752,14 @@ export const mapJobStage = (
   phase: ExecutionPhase | null,
   operation: string,
   path: string,
+  admission: JobAdmission | null,
 ): JobStage => {
   switch (status) {
     case "queued":
     case "retry_waiting":
-      return "queued";
+      if (admission == null)
+        return fail(operation, `${path}.admission`, "a waiting admission episode");
+      return admission.state === "pending" ? "awaiting_admission" : "queued";
     case "cancel_requested":
       return "cancelling";
     case "cancelled":
@@ -659,6 +781,7 @@ export const mapJobStage = (
 const mapJob = (value: unknown, operation: string, path: string): Job => {
   const item = asObject(value, operation, path, jobKeys);
   const id = readEntityId(item, "id", operation, path);
+  const repositoryId = readEntityId(item, "repositoryId", operation, path);
   const workItemId = readEntityId(item, "workItemId", operation, path);
   const workItemRef = readString(item, "workItemRef", operation, path, 1, 256);
   const title = readString(item, "title", operation, path, 1, 256);
@@ -666,6 +789,7 @@ const mapJob = (value: unknown, operation: string, path: string): Job => {
   const status = readEnum(item, "status", operation, path, jobStates);
   const phase = readNullableEnum(item, "phase", operation, path, executionPhases);
   const attempt = readInteger(item, "attempt", operation, path, 0);
+  const admission = readAdmission(item, "admission", status, attempt, operation, path);
   const maxAttempts = readInteger(item, "maxAttempts", operation, path, 1);
   const workerNodeId = readNullableEntityId(item, "workerNodeId", operation, path);
   const leaseGeneration = readNullableInteger(item, "leaseGeneration", operation, path, 1);
@@ -679,12 +803,14 @@ const mapJob = (value: unknown, operation: string, path: string): Job => {
 
   return {
     id,
+    repositoryId,
     workItemId,
     workItemRef,
     title,
     generation,
     status,
-    stage: mapJobStage(status, phase, operation, path),
+    admission,
+    stage: mapJobStage(status, phase, operation, path, admission),
     attempt,
     maxAttempts,
     ...(workerNodeId === null ? {} : { workerNodeId }),
@@ -741,7 +867,125 @@ const mapReviewFinding = (value: unknown, operation: string, path: string) => {
   };
 };
 
-const mapJobReviewResult = (value: unknown, operation: string, path: string) => {
+const mapVerificationReport = (
+  value: unknown,
+  operation: string,
+  path: string,
+): VerificationReport => {
+  const report = asObject(value, operation, path, ["status", "summary", "commands"]);
+  const commands = readUnknownArray(report.commands, operation, `${path}.commands`, 32);
+  return {
+    status: readEnum(report, "status", operation, path, verificationStatuses),
+    summary: readString(report, "summary", operation, path, 1, 2_048),
+    commands: commands.map((value, index) => {
+      const commandPath = `${path}.commands[${index}]`;
+      const command = asObject(value, operation, commandPath, ["command", "status"]);
+      return {
+        command: readString(command, "command", operation, commandPath, 1, 2_048),
+        status: readEnum(command, "status", operation, commandPath, verificationStatuses),
+      };
+    }),
+  };
+};
+
+const mapExecutionEvidence = (
+  value: unknown,
+  operation: string,
+  path: string,
+): ReviewExecutionEvidence => {
+  const evidence = asObject(value, operation, path, [
+    "schemaVersion",
+    "source",
+    "commandCapture",
+    "commands",
+    "worktree",
+  ]);
+  const commands = readUnknownArray(evidence.commands, operation, `${path}.commands`, 128);
+  const worktreePath = `${path}.worktree`;
+  const worktree = asObject(evidence.worktree, operation, worktreePath, ["status", "source"]);
+  return {
+    schemaVersion: readEnum(evidence, "schemaVersion", operation, path, {
+      ReviewExecutionEvidenceV1: true,
+    }),
+    source: readEnum(evidence, "source", operation, path, { worker: true }),
+    commandCapture: readEnum(evidence, "commandCapture", operation, path, {
+      complete: true,
+      incomplete: true,
+    }),
+    commands: commands.map((value, index) => {
+      const commandPath = `${path}.commands[${index}]`;
+      const command = asObject(value, operation, commandPath, [
+        "itemId",
+        "command",
+        "status",
+        "exitCode",
+      ]);
+      return {
+        itemId: readString(command, "itemId", operation, commandPath, 1, 128),
+        command: readString(command, "command", operation, commandPath, 1, 2_048),
+        status: readEnum(command, "status", operation, commandPath, {
+          completed: true,
+          failed: true,
+          unknown: true,
+        }),
+        exitCode: readNullableInteger(
+          command,
+          "exitCode",
+          operation,
+          commandPath,
+          minExitCode,
+          maxExitCode,
+        ),
+      };
+    }),
+    worktree: {
+      status: readEnum(worktree, "status", operation, worktreePath, {
+        clean: true,
+        modified: true,
+        unknown: true,
+      }),
+      source: readEnum(worktree, "source", operation, worktreePath, {
+        git_status: true,
+        not_observed: true,
+      }),
+    },
+  };
+};
+
+const mapFailureDiagnostics = (
+  value: unknown,
+  operation: string,
+  path: string,
+): RunFailureDiagnostics | null => {
+  if (value === null) {
+    return null;
+  }
+  const diagnostics = asObject(value, operation, path, [
+    "category",
+    "exitCode",
+    "summary",
+    "correlationId",
+  ]);
+  return {
+    category: readEnum(diagnostics, "category", operation, path, failureCategories),
+    exitCode: readNullableInteger(
+      diagnostics,
+      "exitCode",
+      operation,
+      path,
+      minExitCode,
+      maxExitCode,
+    ),
+    summary: readString(diagnostics, "summary", operation, path, 1, 2_048),
+    correlationId: readString(diagnostics, "correlationId", operation, path, 1, 128),
+  };
+};
+
+const mapJobReviewResult = (
+  value: unknown,
+  operation: string,
+  path: string,
+): JobReviewResult | null => {
   if (value === null) {
     return null;
   }
@@ -754,10 +998,14 @@ const mapJobReviewResult = (value: unknown, operation: string, path: string) => 
     "createdAt",
     "prReview",
     "issueTriage",
+    "verification",
+    "executionEvidence",
   ]);
   const schemaId = readEnum(result, "schemaId", operation, path, {
     IssueTriageV1: true,
     PrReviewPlanV1: true,
+    IssueTriageV2: true,
+    PrReviewPlanV2: true,
   });
   const requestedRecipeIds = readStringArray(result, "requestedRecipeIds", operation, path, 32, {
     pattern: requestedRecipeIdPattern,
@@ -866,8 +1114,8 @@ const mapJobReviewResult = (value: unknown, operation: string, path: string) => 
   }
 
   if (
-    (schemaId === "PrReviewPlanV1") !== (prReview !== null) ||
-    (schemaId === "IssueTriageV1") !== (issueTriage !== null)
+    (schemaId === "PrReviewPlanV1" || schemaId === "PrReviewPlanV2") !== (prReview !== null) ||
+    (schemaId === "IssueTriageV1" || schemaId === "IssueTriageV2") !== (issueTriage !== null)
   ) {
     fail(operation, `${path}.schemaId`, "a value consistent with the projected review result");
   }
@@ -881,6 +1129,24 @@ const mapJobReviewResult = (value: unknown, operation: string, path: string) => 
     createdAt: readDateTime(result, "createdAt", operation, path),
     prReview,
     issueTriage,
+    ...(result.verification === undefined
+      ? {}
+      : {
+          verification: mapVerificationReport(
+            result.verification,
+            operation,
+            `${path}.verification`,
+          ),
+        }),
+    ...(result.executionEvidence === undefined
+      ? {}
+      : {
+          executionEvidence: mapExecutionEvidence(
+            result.executionEvidence,
+            operation,
+            `${path}.executionEvidence`,
+          ),
+        }),
   };
 };
 
@@ -889,20 +1155,25 @@ const mapJobDetails = (value: unknown, operation: string): JobDetails => {
     ...jobKeys,
     "failureCode",
     "failureMessage",
+    "failureDiagnostics",
     "resultDigest",
     "reviewResult",
   ]);
   const status = readEnum(item, "status", operation, "$", jobStates);
   const phase = readNullableEnum(item, "phase", operation, "$", executionPhases);
+  const attempt = readInteger(item, "attempt", operation, "$", 0);
+  const admission = readAdmission(item, "admission", status, attempt, operation, "$");
   return {
     id: readEntityId(item, "id", operation, "$"),
+    repositoryId: readEntityId(item, "repositoryId", operation, "$"),
     workItemId: readEntityId(item, "workItemId", operation, "$"),
     workItemRef: readString(item, "workItemRef", operation, "$", 1, 256),
     title: readString(item, "title", operation, "$", 1, 256),
     generation: readInteger(item, "generation", operation, "$", 1),
     status,
-    stage: mapJobStage(status, phase, operation, "$"),
-    attempt: readInteger(item, "attempt", operation, "$", 0),
+    admission,
+    stage: mapJobStage(status, phase, operation, "$", admission),
+    attempt,
     maxAttempts: readInteger(item, "maxAttempts", operation, "$", 1),
     ...(item.workerNodeId === null
       ? {}
@@ -925,6 +1196,15 @@ const mapJobDetails = (value: unknown, operation: string): JobDetails => {
     updatedAt: readDateTime(item, "updatedAt", operation, "$"),
     failureCode: readNullableString(item, "failureCode", operation, "$", 128),
     failureMessage: readNullableString(item, "failureMessage", operation, "$", 2_048),
+    ...(item.failureDiagnostics === undefined
+      ? {}
+      : {
+          failureDiagnostics: mapFailureDiagnostics(
+            item.failureDiagnostics,
+            operation,
+            "$.failureDiagnostics",
+          ),
+        }),
     resultDigest:
       item.resultDigest === null
         ? null
@@ -1040,6 +1320,10 @@ const systemKeys = [
   "sqliteVersion",
   "databaseSizeBytes",
   "oldestQueuedAt",
+  "oldestAwaitingAdmissionAt",
+  "queuedJobs",
+  "awaitingAdmissionJobs",
+  "pendingValidationRequests",
   "activeWorkers",
   "activeLeases",
   "pendingApprovals",
@@ -1053,6 +1337,19 @@ export const mapSystemSnapshotResponse = (
   const item = asObject(value, operation, "$", systemKeys);
   const databaseSizeBytes = readInteger(item, "databaseSizeBytes", operation, "$", 0);
   const oldestQueuedAt = readNullableDateTime(item, "oldestQueuedAt", operation, "$");
+  const oldestAwaitingAdmissionAt = readNullableDateTime(
+    item,
+    "oldestAwaitingAdmissionAt",
+    operation,
+    "$",
+  );
+  const queuedJobs = readInteger(item, "queuedJobs", operation, "$", 0);
+  const awaitingAdmissionJobs = readInteger(item, "awaitingAdmissionJobs", operation, "$", 0);
+  if (
+    (queuedJobs === 0) !== (oldestQueuedAt === null) ||
+    (awaitingAdmissionJobs === 0) !== (oldestAwaitingAdmissionAt === null)
+  )
+    fail(operation, "$", "waiting counts with matching oldest timestamps");
   const health = item.health;
   if (!Array.isArray(health) || health.length > 128) {
     fail(operation, "$.health", "an array with at most 128 items");
@@ -1066,6 +1363,10 @@ export const mapSystemSnapshotResponse = (
     sqliteVersion: readString(item, "sqliteVersion", operation, "$", 1, 128),
     databaseSizeMb: databaseSizeBytes / 1_048_576,
     ...(oldestQueuedAt === null ? {} : { oldestQueuedAt }),
+    ...(oldestAwaitingAdmissionAt === null ? {} : { oldestAwaitingAdmissionAt }),
+    queuedJobs,
+    awaitingAdmissionJobs,
+    pendingValidationRequests: readInteger(item, "pendingValidationRequests", operation, "$", 0),
     activeWorkers: readInteger(item, "activeWorkers", operation, "$", 0),
     activeLeases: readInteger(item, "activeLeases", operation, "$", 0),
     pendingApprovals: readInteger(item, "pendingApprovals", operation, "$", 0),

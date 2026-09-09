@@ -7,7 +7,19 @@ import {
   statfs as nodeStatFileSystem,
 } from "node:fs/promises";
 import { win32 } from "node:path";
-import type { JobExecutionEnvelope } from "@agentic-review/contracts";
+import { createCanonicalResult } from "@agentic-review/codex";
+import {
+  evaluationExecutionCapabilityLabel,
+  GitHubIssueSchema,
+  getEvaluationValidationJobContextIssues,
+  type JobExecutionEnvelope,
+  JobExecutionEnvelopeV2Schema,
+  maximumRenderedPromptUtf8Bytes,
+  ReviewRunTestedSourceAuthorizationSchema,
+  validationExecutorCapabilityLabels,
+} from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
+import { registerWorkerContractFormats } from "../contracts-formats.js";
 import type { Logger } from "../logging/logger.js";
 import type { ManagedProcessRunner, ManagedProcessRunResult } from "./managed-process-runner.js";
 import {
@@ -27,6 +39,8 @@ import {
   type WorkspaceDiskReservation,
 } from "./workspace-disk-budget.js";
 
+registerWorkerContractFormats();
+
 export interface PreparedJobWorkspace {
   readonly attemptDirectory: string;
   readonly checkoutDirectory: string;
@@ -35,6 +49,7 @@ export interface PreparedJobWorkspace {
   readonly tempDirectory: string;
   readonly userProfileDirectory: string;
   startDiskMonitoring(parentSignal: AbortSignal): Promise<WorkspaceDiskMonitor>;
+  captureWorktreeState?(signal: AbortSignal): Promise<"clean" | "modified" | "unknown">;
   cleanup(): Promise<void>;
 }
 
@@ -49,6 +64,7 @@ export interface JobWorkspaceProvider {
   prepare(
     envelope: JobExecutionEnvelope,
     context: WorkspacePreparationContext,
+    purpose?: "validation" | "model",
   ): Promise<PreparedJobWorkspace>;
 }
 
@@ -98,6 +114,7 @@ export type JobWorkspaceFailureCode =
   | "WORKSPACE_CREATE_FAILED"
   | "WORKSPACE_CLEANUP_FAILED"
   | "WORKSPACE_DISK_ADMISSION_FAILED"
+  | "WORKSPACE_DISK_CAPACITY_UNAVAILABLE"
   | "WORKSPACE_DISK_ATTEMPT_LIMIT_EXCEEDED"
   | "WORKSPACE_DISK_INFRASTRUCTURE_UNAVAILABLE"
   | "GIT_COMMAND_FAILED"
@@ -180,6 +197,13 @@ const enforcedGitEnvironment = Object.freeze({
   SSH_ASKPASS: "",
   GIT_OPTIONAL_LOCKS: "0",
   LC_ALL: "C",
+});
+
+// These private, immutable argument identities share the enclosing source-capture disk monitor.
+// Ordinary argument arrays, including identical argv, retain their per-command disk monitor.
+const sourceObservationGitArguments = Object.freeze({
+  status: Object.freeze(["status", "--porcelain=v1", "--untracked-files=all"]),
+  head: Object.freeze(["rev-parse", "--verify", "HEAD^{commit}"]),
 });
 
 const gitConfigurationArguments = Object.freeze([
@@ -376,6 +400,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
   public async prepare(
     envelope: JobExecutionEnvelope,
     context: WorkspacePreparationContext,
+    purpose: "validation" | "model" = "validation",
   ): Promise<PreparedJobWorkspace> {
     context.reportProcessCount(0);
     throwIfAborted(context.signal);
@@ -388,10 +413,16 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
 
     let layout: WorkspaceLayout;
     let repository: SharedRepositoryLayout | undefined;
+    let source: WorkspaceSource | null;
     try {
-      layout = deriveWorkspaceLayout(this.#workspaceRootDirectory, envelope.lease.runAttemptId);
+      source = workspaceSource(envelope);
+      layout = deriveWorkspaceLayout(
+        this.#workspaceRootDirectory,
+        envelope.lease.runAttemptId,
+        purpose,
+      );
       repository =
-        envelope.resource.kind === "pull_request"
+        source !== null
           ? deriveSharedRepositoryLayout(
               this.#gitSharedRootDirectory,
               envelope.repository.githubRepositoryId,
@@ -474,13 +505,13 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         },
       );
       await guard.validateAll();
-      if (repository !== undefined && envelope.resource.kind === "pull_request") {
+      if (repository !== undefined && source !== null) {
         await this.#verifyPreparedWorktree(
           layout,
           guard,
           admittedDiskReservation,
-          envelope.resource.baseSha,
-          envelope.resource.headSha,
+          source.baseSha,
+          source.headSha,
           context,
         );
       }
@@ -494,6 +525,54 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         userProfileDirectory: layout.userProfileDirectory,
         startDiskMonitoring: (parentSignal: AbortSignal) =>
           admittedDiskReservation.startMonitoring(parentSignal),
+        captureWorktreeState: async (
+          signal: AbortSignal,
+        ): Promise<"clean" | "modified" | "unknown"> => {
+          if (repository === undefined || source === null) {
+            return "unknown";
+          }
+          let monitor: WorkspaceDiskMonitor | undefined;
+          let state: "clean" | "modified" | "unknown" = "unknown";
+          try {
+            monitor = await admittedDiskReservation.startMonitoring(signal);
+            const observationContext = {
+              ...context,
+              signal: monitor.signal,
+              reportProcessCount: () => undefined,
+            };
+            const status = await this.#runGit(
+              layout,
+              guard,
+              admittedDiskReservation,
+              sourceObservationGitArguments.status,
+              "deterministic_local",
+              observationContext,
+            );
+            if (status.stdout.trim().length > 0) state = "modified";
+            else {
+              const head = await this.#runGit(
+                layout,
+                guard,
+                admittedDiskReservation,
+                sourceObservationGitArguments.head,
+                "deterministic_local",
+                observationContext,
+              );
+              state = head.stdout.trim() === source.headSha ? "clean" : "modified";
+            }
+          } catch {
+            state = "unknown";
+          } finally {
+            try {
+              await monitor?.close();
+              if (monitor?.violation !== undefined || monitor?.signal.aborted || signal.aborted)
+                state = "unknown";
+            } catch {
+              state = "unknown";
+            }
+          }
+          return state;
+        },
         cleanup: async () => {
           if (cleaned) return;
           let cleanupError: unknown;
@@ -634,24 +713,20 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     context: WorkspacePreparationContext,
     onWorktreeRegistered: () => void,
   ): Promise<void> {
-    if (envelope.resource.kind === "issue") return;
+    const source = workspaceSource(envelope);
+    if (source === null) return;
     if (repository === undefined) {
       throw new JobWorkspaceError(
         "INVALID_ENVELOPE",
-        "Pull request workspaces require a shared repository identity.",
+        "Executable validation workspaces require a shared repository identity.",
       );
     }
 
     const repositoryUrl = buildAnonymousGitHubUrl(envelope.repository.fullName);
-    const baseSha = validateGitObjectId(envelope.resource.baseSha, "baseSha");
-    const headSha = validateGitObjectId(envelope.resource.headSha, "headSha");
-    const pullRequestNumber = envelope.resource.number;
-    if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
-      throw new JobWorkspaceError(
-        "INVALID_ENVELOPE",
-        "Pull request number must be a positive integer.",
-      );
-    }
+    const baseSha = validateGitObjectId(source.baseSha, "baseSha");
+    const headSha = validateGitObjectId(source.headSha, "headSha");
+    const headReference =
+      source.fetchHead === "exact_commit" ? headSha : `refs/pull/${source.pullRequestNumber}/head`;
     await this.#withSharedCacheMutationLock(context.signal, async () => {
       await this.#withRepositoryLock(repository.key, context.signal, async () => {
         await this.#validateSharedRepositoryDirectory(repository, false);
@@ -713,7 +788,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
             "--no-recurse-submodules",
             "origin",
             `+${baseSha}:refs/agentic-review/latest-base`,
-            `+refs/pull/${pullRequestNumber}/head:refs/agentic-review/latest-head`,
+            `+${headReference}:refs/agentic-review/latest-head`,
           ],
           "ambiguous_remote",
           context,
@@ -1407,8 +1482,14 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       // Teardown deliberately removes link targets before the remaining attempt is deleted.
       // Its fixed Git commands retain cleanup guards, managed limits, and shared-cache accounting,
       // but must not require the dismantled attempt tree to remain a valid execution snapshot.
+      // The two private source-observation argv identities share their enclosing capture monitor.
+      // Workspace guards, managed process limits, and the monitor signal still apply to each Git
+      // command, including any repository-configured filter invoked during status observation.
+      const observesSource =
+        commandArguments === sourceObservationGitArguments.status ||
+        commandArguments === sourceObservationGitArguments.head;
       const monitor =
-        validationMode === "cleanup_safe"
+        validationMode === "cleanup_safe" || observesSource
           ? undefined
           : await diskReservation.startMonitoring(context.signal);
       let result: ManagedProcessRunResult | undefined;
@@ -1681,14 +1762,199 @@ function deriveSharedRepositoryLayout(
   return Object.freeze({ key, gitDirectory });
 }
 
-function deriveWorkspaceLayout(rootDirectory: string, runAttemptId: string): WorkspaceLayout {
+interface WorkspaceSource {
+  readonly baseSha: string;
+  readonly headSha: string;
+  readonly pullRequestNumber: number | null;
+  readonly fetchHead: "pull_request_ref" | "exact_commit";
+}
+
+function workspaceSource(envelope: JobExecutionEnvelope): WorkspaceSource | null {
+  if ("validation" in envelope && hasEvaluationWorkspaceMarker(envelope.validation))
+    return evaluationWorkspaceSource(envelope);
+  if (envelope.resource.kind === "pull_request") {
+    const resource = envelope.resource;
+    if (!Number.isSafeInteger(resource.number) || resource.number < 1)
+      throw new TypeError("The PR number is invalid.");
+    if (envelope.envelopeVersion === 2) {
+      const source = envelope.validation.testedSourceRevision;
+      if (
+        source?.kind !== "pull_request" ||
+        source.baseSha !== resource.baseSha ||
+        source.headSha !== resource.headSha ||
+        envelope.validation.testedSourceAuthorization !== null ||
+        envelope.validation.revisionKey !==
+          createHash("sha256").update(`${resource.baseSha}\0${resource.headSha}`).digest("hex")
+      ) {
+        throw new TypeError("The validation plan does not authorize this exact PR source.");
+      }
+    }
+    return {
+      baseSha: resource.baseSha,
+      headSha: resource.headSha,
+      pullRequestNumber: resource.number,
+      fetchHead: "pull_request_ref",
+    };
+  }
+  if (envelope.envelopeVersion === 1 || envelope.validation.workflowKind === "issue_triage")
+    return null;
+  const validation = envelope.validation;
+  const source = validation.testedSourceRevision;
+  const authorization = validation.testedSourceAuthorization;
+  const snapshot = envelope.resource.canonicalSnapshot;
+  if (
+    validation.workflowKind !== "issue_validation" ||
+    source?.kind !== "commit" ||
+    !authorization ||
+    !Value.Check(ReviewRunTestedSourceAuthorizationSchema, authorization) ||
+    !Value.Check(GitHubIssueSchema, snapshot) ||
+    authorization.kind !== "operator" ||
+    authorization.activationId !== validation.activationId ||
+    authorization.headSha !== source.headSha ||
+    authorization.githubRepositoryId !== envelope.repository.githubRepositoryId ||
+    authorization.githubWorkItemId !== snapshot.githubWorkItemId ||
+    snapshot.githubRepositoryId !== envelope.repository.githubRepositoryId ||
+    snapshot.number !== envelope.resource.number ||
+    snapshot.githubNodeId !== envelope.resource.githubNodeId ||
+    authorization.issueRevisionKey !== envelope.resource.revisionDigest ||
+    validation.revisionKey !== envelope.resource.revisionDigest
+  ) {
+    throw new TypeError(
+      "Issue reproduction requires explicit authorization for this exact source commit.",
+    );
+  }
+  const headSha = validateGitObjectId(source.headSha, "headSha");
+  return { baseSha: headSha, headSha, pullRequestNumber: null, fetchHead: "exact_commit" };
+}
+
+function hasEvaluationWorkspaceMarker(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const context = value as Record<string, unknown>;
+  return (
+    context.schemaVersion === "ValidationJobContextV2" ||
+    (context.purpose !== null &&
+      typeof context.purpose === "object" &&
+      !Array.isArray(context.purpose) &&
+      (context.purpose as Record<string, unknown>).kind === "evaluation")
+  );
+}
+
+/** Validates frozen-source preparation; executor readiness and model authority remain separate. */
+function evaluationWorkspaceSource(envelope: JobExecutionEnvelope): WorkspaceSource | null {
+  if (
+    !Value.Check(JobExecutionEnvelopeV2Schema, envelope) ||
+    envelope.envelopeVersion !== 2 ||
+    envelope.validation.schemaVersion !== "ValidationJobContextV2" ||
+    getEvaluationValidationJobContextIssues(envelope.validation).length > 0
+  )
+    throw new TypeError(
+      "The evaluation workspace requires its complete frozen source and operator authority.",
+    );
+  const context = envelope.validation;
+  const frozenCommit = (value: string, label: string): string => {
+    if (value.length !== 40 && value.length !== 64)
+      throw new TypeError("The frozen evaluation commit must be an exact Git object ID.");
+    return validateGitObjectId(value, label);
+  };
+  const source = context.source;
+  const item = source.workItem;
+  const revision = source.revision;
+  const sourceDigest = createCanonicalResult({
+    repository: source.repository,
+    workItemId: source.workItemId,
+    workItem: item,
+    revision,
+    testedSourceRevision: source.testedSourceRevision,
+    revisionId: source.revisionId,
+  }).sha256;
+  const revisionKey = createHash("sha256")
+    .update(
+      revision.kind === "pull_request"
+        ? `${revision.baseSha}\0${revision.headSha}`
+        : JSON.stringify([item.title, item.body, item.state, item.updatedAt]),
+    )
+    .digest("hex");
+  const commonResource = {
+    githubNodeId: item.githubNodeId,
+    number: item.number,
+    title: item.title,
+    author: item.author,
+    canonicalSnapshot: item,
+  };
+  const resource =
+    item.kind === "pull_request" && revision.kind === "pull_request"
+      ? {
+          ...commonResource,
+          kind: "pull_request",
+          baseSha: revision.baseSha,
+          headSha: revision.headSha,
+          isDraft: item.isDraft,
+        }
+      : { ...commonResource, kind: "issue", revisionDigest: revision.revisionKey };
+  const labels = envelope.executionPolicy.requiredCapabilityLabels;
+  if (
+    sourceDigest !== source.sourceDigest ||
+    revisionKey !== revision.revisionKey ||
+    (revision.kind === "issue" && revision.contentDigest !== revisionKey) ||
+    createCanonicalResult(envelope.repository).json !==
+      createCanonicalResult({
+        githubRepositoryId: source.repository.githubRepositoryId,
+        fullName: source.repository.fullName,
+      }).json ||
+    createCanonicalResult(envelope.resource).json !== createCanonicalResult(resource).json ||
+    envelope.job.jobId !== envelope.lease.jobId ||
+    envelope.job.kind !== (item.kind === "pull_request" ? "pull_request_review" : "issue_triage") ||
+    createCanonicalResult(context.profileVersion.config).sha256 !==
+      context.profileVersion.configSha256 ||
+    envelope.executionPolicy.hardTimeoutMs !== context.profileVersion.config.hardTimeoutMs ||
+    envelope.executionPolicy.noProgressTimeoutMs !==
+      context.profileVersion.config.noProgressTimeoutMs ||
+    envelope.executionPolicy.allowedRecipeIds.length !== 0 ||
+    labels[evaluationExecutionCapabilityLabel] !== "1" ||
+    labels[validationExecutorCapabilityLabels.envelope] !== "2" ||
+    labels[validationExecutorCapabilityLabels[context.target]] !== "1" ||
+    envelope.prompt.name !== context.promptVersion.templateId ||
+    envelope.prompt.version !== String(context.promptVersion.version) ||
+    !envelope.prompt.renderedPrompt.isWellFormed() ||
+    Buffer.byteLength(envelope.prompt.renderedPrompt, "utf8") > maximumRenderedPromptUtf8Bytes ||
+    createHash("sha256").update(envelope.prompt.renderedPrompt, "utf8").digest("hex") !==
+      envelope.prompt.promptSha256 ||
+    createCanonicalResult(envelope.prompt.outputSchema).sha256 !==
+      envelope.prompt.outputSchemaSha256
+  )
+    throw new TypeError(
+      "The evaluation workspace identity differs from its frozen source or request.",
+    );
+  if (revision.kind === "pull_request")
+    return {
+      baseSha: frozenCommit(revision.baseSha, "baseSha"),
+      headSha: frozenCommit(revision.headSha, "headSha"),
+      pullRequestNumber: item.number,
+      fetchHead: "exact_commit",
+    };
+  if (context.workflowKind === "issue_triage") return null;
+  const tested = context.testedSourceRevision;
+  if (tested?.kind !== "commit")
+    throw new TypeError("The evaluation workspace requires its explicitly selected Issue commit.");
+  const headSha = frozenCommit(tested.headSha, "headSha");
+  return { baseSha: headSha, headSha, pullRequestNumber: null, fetchHead: "exact_commit" };
+}
+
+function deriveWorkspaceLayout(
+  rootDirectory: string,
+  runAttemptId: string,
+  purpose: "validation" | "model" = "validation",
+): WorkspaceLayout {
   if (
     typeof runAttemptId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(runAttemptId)
   ) {
     throw new TypeError("runAttemptId is invalid.");
   }
-  const attemptName = `attempt-${createHash("sha256").update(runAttemptId, "utf8").digest("hex")}`;
+  if (purpose !== "validation" && purpose !== "model")
+    throw new TypeError("Workspace purpose is invalid.");
+  const identity = purpose === "model" ? `${runAttemptId}\0model` : runAttemptId;
+  const attemptName = `attempt-${createHash("sha256").update(identity, "utf8").digest("hex")}`;
   const attemptDirectory = win32.join(rootDirectory, attemptName);
   const checkoutDirectory = win32.join(attemptDirectory, "checkout");
   const controlDirectory = win32.join(attemptDirectory, "control");
@@ -2185,6 +2451,7 @@ function isNodeInfrastructureFailure(code: JobWorkspaceFailureCode): boolean {
     code === "ABORTED" ||
     code === "INVALID_ENVELOPE" ||
     code === "WORKSPACE_DISK_ATTEMPT_LIMIT_EXCEEDED" ||
+    code === "WORKSPACE_DISK_CAPACITY_UNAVAILABLE" ||
     code === "GIT_COMMAND_FAILED" ||
     code === "GIT_LOCAL_OR_REVISION_FAILED" ||
     code === "GIT_POLICY_LIMIT_EXCEEDED" ||
@@ -2366,9 +2633,19 @@ function workspaceDiskLimitError(error: WorkspaceDiskBudgetError): JobWorkspaceE
     );
   }
   if (
+    error.code === "CAPACITY_UNAVAILABLE" ||
+    error.code === "ACCOUNTING_BUSY" ||
+    error.code === "INSUFFICIENT_FREE_SPACE"
+  ) {
+    return new JobWorkspaceError(
+      "WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      "Workspace disk capacity is temporarily unavailable.",
+      { cause: error },
+    );
+  }
+  if (
     error.code === "EXISTING_WORKSPACE_UNHEALTHY" ||
     error.code === "SNAPSHOT_UNSTABLE" ||
-    error.code === "INSUFFICIENT_FREE_SPACE" ||
     error.code === "ACCOUNTING_FAILED" ||
     error.code === "ACCOUNTING_TIMED_OUT" ||
     error.code === "EXCLUSIVE_WORKSPACE_OWNERSHIP_LOST" ||

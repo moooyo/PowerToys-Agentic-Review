@@ -231,6 +231,11 @@ const callbackParametersFrom = (request: FastifyRequest): URLSearchParams => {
   return requestUrl.searchParams;
 };
 
+const requestSessions = new WeakMap<
+  FastifyRequest,
+  WeakMap<OperatorAuthRouteService, Promise<OperatorSession | null>>
+>();
+
 export const readOperatorSession = async (
   request: FastifyRequest,
   auth: OperatorAuthRouteService,
@@ -238,10 +243,22 @@ export const readOperatorSession = async (
   if (!isAllowedRequest(request, auth)) {
     return null;
   }
-  return auth.getSession(
-    request.cookies[cookiePolicyFor(auth).sessionCookie],
-    browserBindingTokenFrom(request, auth),
-  );
+  let services = requestSessions.get(request);
+  if (services === undefined) {
+    services = new WeakMap();
+    requestSessions.set(request, services);
+  }
+  let session = services.get(auth);
+  if (session === undefined) {
+    // Reuse authentication only within this request. The next request must observe expiry,
+    // revocation, and current identity-provider policy through the production service again.
+    session = auth.getSession(
+      request.cookies[cookiePolicyFor(auth).sessionCookie],
+      browserBindingTokenFrom(request, auth),
+    );
+    services.set(auth, session);
+  }
+  return session;
 };
 
 export const registerOperatorAuthRoutes = (

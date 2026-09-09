@@ -1,0 +1,29 @@
+.publication-body {
+  max-height: 52vh;
+  overflow: auto;
+  padding: 16px;
+  margin: 12px 0 20px;
+  border: 1px solid var(--app-line);
+  border-radius: 6px;
+  background: var(--app-canvas);
+  font-family: var(--app-code-font);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.publication-stack {
+  width: 100%;
+}
+.publication-notice {
+  margin-bottom: 16px;
+}
+.publication-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.publication-identity {
+  overflow-wrap: anywhere;
+}

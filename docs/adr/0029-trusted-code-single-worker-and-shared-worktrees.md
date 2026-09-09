@@ -23,6 +23,9 @@ repository materialization, and result reporting.
 
 2. Trust model for execution code:
    - Execution code admitted by policy is treated as trusted code.
+   - [ADR 0030](./0030-explicit-pull-request-execution-authorization.md) requires a new explicit
+     authorization for each PR base/head revision by default. Automatic inheritance is an explicit
+     operator policy that trusts future code while the request remains active.
    - OIDC and signed distribution are not MVP prerequisites.
    - If and when automatic distribution is introduced, signature-based distribution controls will be
      added at that time.

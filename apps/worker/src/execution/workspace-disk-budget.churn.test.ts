@@ -365,8 +365,8 @@ describe.skipIf(process.platform !== "win32")(
       await fixture.clock.tick();
 
       expect(monitor.signal.aborted).toBe(true);
-      expect(monitor.violation).toMatchObject({ code: "SNAPSHOT_UNSTABLE" });
-      await expect(monitor.close()).rejects.toMatchObject({ code: "SNAPSHOT_UNSTABLE" });
+      expect(monitor.violation).toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
+      await expect(monitor.close()).rejects.toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
       assertOwnedPath(fixture.root, fixture.attemptDirectory);
       await fixture.reservation.removeAttempt();
       expect(await fixture.fileSystem.lstat(fixture.attemptDirectory)).toBeNull();

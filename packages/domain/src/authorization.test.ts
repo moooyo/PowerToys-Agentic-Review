@@ -30,6 +30,10 @@ const policy: SelfOrAllowlistPolicy = {
   schedulingTargetGithubUserId: reviewer.githubUserId,
   allowlistedActorGithubUserIds: [maintainer.githubUserId],
   unknownActorPolicy: "deny",
+  newRevisionPolicy: "require_new_authorization",
+};
+const inheritancePolicy: SelfOrAllowlistPolicy = {
+  ...policy,
   newRevisionPolicy: "inherit_authorized_epoch",
 };
 
@@ -86,6 +90,29 @@ describe("SelfOrAllowlist authorization", () => {
       actorGithubUserId: null,
     });
   });
+
+  it.each(["poll", "reconciliation"] as const)(
+    "does not use a historical %s actor as authorization of the current PR revision",
+    (source) => {
+      const event: SchedulingRequestOpenedEvent = {
+        ...requestOpened({ schedulingActor: maintainer }),
+        source,
+      };
+
+      expect(decide(event)).toMatchObject({
+        outcome: "denied",
+        reason: "denied_revision_not_inheritable",
+      });
+      expect(decide(event, withoutRevisionPolicy(policy))).toMatchObject({
+        outcome: "denied",
+        reason: "denied_revision_not_inheritable",
+      });
+      expect(decide(event, inheritancePolicy)).toMatchObject({
+        outcome: "authorized",
+        basis: "allowlist",
+      });
+    },
+  );
 });
 
 describe("authorized request epochs", () => {
@@ -111,11 +138,54 @@ describe("authorized request epochs", () => {
     });
   });
 
-  it("inherits an active authorized epoch for a new pull request SHA", () => {
+  it.each([contributor, maintainer])(
+    "requires a new request for a new SHA even when $login pushes it",
+    (pushingActor) => {
+      const opened = requestOpened({ schedulingActor: maintainer });
+      const epoch = openAuthorizedRequestEpoch({
+        event: opened,
+        decision: decide(opened),
+        requestEpochId: "exact-revision-epoch",
+        sequence: 1,
+      });
+      const pushed = {
+        ...revisionObserved(opened, "2222222222222222222222222222222222222222"),
+        actor: pushingActor,
+      };
+
+      expect(
+        evaluateRevisionInheritance({
+          epoch,
+          event: pushed,
+          evaluatedAt: now,
+          policy,
+          epochPolicy: policy,
+        }),
+      ).toMatchObject({
+        outcome: "denied",
+        reason: "denied_revision_not_inheritable",
+        inheritedFromEpochId: null,
+      });
+      expect(epoch.currentRevision).toEqual(opened.revision);
+
+      const requestedAgain: SchedulingRequestOpenedEvent = {
+        ...opened,
+        eventId: "explicit-request-for-new-sha",
+        sourceEventId: "new-request-delivery",
+        revision: pushed.revision,
+      };
+      expect(decide(requestedAgain)).toMatchObject({
+        outcome: "authorized",
+        basis: "allowlist",
+      });
+    },
+  );
+
+  it("inherits a new pull request SHA only when both policies explicitly allow it", () => {
     const opened = requestOpened({ schedulingActor: maintainer });
     const epoch = openAuthorizedRequestEpoch({
       event: opened,
-      decision: decide(opened),
+      decision: decide(opened, inheritancePolicy),
       requestEpochId: "epoch-2",
       sequence: 2,
     });
@@ -125,7 +195,8 @@ describe("authorized request epochs", () => {
       epoch,
       event: pushed,
       evaluatedAt: pushed.observedAt,
-      fallbackPolicyVersion: policy.policyVersion,
+      policy: inheritancePolicy,
+      epochPolicy: inheritancePolicy,
     });
 
     expect(inheritance).toMatchObject({
@@ -141,7 +212,68 @@ describe("authorized request epochs", () => {
     ).toEqual(pushed.revision);
   });
 
-  it("inherits an active authorized epoch for edited issue content", () => {
+  it.each([
+    { name: "current policy requires a new request", current: policy, original: inheritancePolicy },
+    {
+      name: "original policy required a new request",
+      current: inheritancePolicy,
+      original: policy,
+    },
+    {
+      name: "original policy snapshot is missing",
+      current: inheritancePolicy,
+      original: null,
+    },
+    {
+      name: "original snapshot belongs to another policy version",
+      current: inheritancePolicy,
+      original: { ...inheritancePolicy, policyVersion: 99 },
+    },
+    {
+      name: "original policy omitted revision scope",
+      current: inheritancePolicy,
+      original: withoutRevisionPolicy(inheritancePolicy),
+    },
+    {
+      name: "current policy omitted revision scope",
+      current: withoutRevisionPolicy(inheritancePolicy),
+      original: inheritancePolicy,
+    },
+    {
+      name: "opening actor was removed from the current allowlist",
+      current: { ...inheritancePolicy, allowlistedActorGithubUserIds: [] },
+      original: inheritancePolicy,
+    },
+    {
+      name: "configured review target changed",
+      current: { ...inheritancePolicy, schedulingTargetGithubUserId: contributor.githubUserId },
+      original: inheritancePolicy,
+    },
+  ])("denies inheritance when $name", ({ current, original }) => {
+    const opened = requestOpened({ schedulingActor: maintainer });
+    const epoch = openAuthorizedRequestEpoch({
+      event: opened,
+      decision: decide(opened, inheritancePolicy),
+      requestEpochId: "policy-scope-epoch",
+      sequence: 1,
+    });
+
+    expect(
+      evaluateRevisionInheritance({
+        epoch,
+        event: revisionObserved(opened, "2222222222222222222222222222222222222222"),
+        evaluatedAt: now,
+        policy: { ...current, policyVersion: 4 },
+        epochPolicy: original,
+      }),
+    ).toMatchObject({
+      outcome: "denied",
+      reason: "denied_revision_not_inheritable",
+      policyVersion: 4,
+    });
+  });
+
+  it("inherits issue snapshots without granting execution of a repository revision", () => {
     const pullRequestEvent = requestOpened({ schedulingActor: reviewer });
     if (pullRequestEvent.workItem.kind !== "pull_request") {
       throw new Error("Expected a pull request fixture.");
@@ -170,9 +302,13 @@ describe("authorized request epochs", () => {
     };
     const epoch = openAuthorizedRequestEpoch({
       event: opened,
-      decision: decide(opened),
+      decision: decide(opened, inheritancePolicy),
       requestEpochId: "issue-epoch",
       sequence: 4,
+    });
+    expect(decide({ ...opened, source: "poll" })).toMatchObject({
+      outcome: "authorized",
+      basis: "self",
     });
     const nextDigest = "b".repeat(64);
     const edited: SchedulingRevisionObservedEvent = {
@@ -199,7 +335,21 @@ describe("authorized request epochs", () => {
         epoch,
         event: edited,
         evaluatedAt: now,
-        fallbackPolicyVersion: policy.policyVersion,
+        policy: inheritancePolicy,
+        epochPolicy: inheritancePolicy,
+      }),
+    ).toMatchObject({
+      outcome: "authorized",
+      basis: "active_epoch",
+      inheritedFromEpochId: "issue-epoch",
+    });
+    expect(
+      evaluateRevisionInheritance({
+        epoch,
+        event: edited,
+        evaluatedAt: now,
+        policy,
+        epochPolicy: inheritancePolicy,
       }),
     ).toMatchObject({
       outcome: "authorized",
@@ -225,7 +375,8 @@ describe("authorized request epochs", () => {
       epoch: closed.epoch,
       event: revisionObserved(opened, "3333333333333333333333333333333333333333"),
       evaluatedAt: now,
-      fallbackPolicyVersion: policy.policyVersion,
+      policy: inheritancePolicy,
+      epochPolicy: inheritancePolicy,
     });
 
     expect(inheritance).toMatchObject({
@@ -235,8 +386,13 @@ describe("authorized request epochs", () => {
   });
 });
 
-function decide(event: NormalizedSchedulingEvent) {
-  return evaluateSchedulingAuthorization({ event, policy, evaluatedAt: now });
+function decide(event: NormalizedSchedulingEvent, selectedPolicy = policy) {
+  return evaluateSchedulingAuthorization({ event, policy: selectedPolicy, evaluatedAt: now });
+}
+
+function withoutRevisionPolicy(selectedPolicy: SelfOrAllowlistPolicy): SelfOrAllowlistPolicy {
+  const { newRevisionPolicy: _newRevisionPolicy, ...legacyPolicy } = selectedPolicy;
+  return legacyPolicy;
 }
 
 function actor(githubUserId: number, login: string): GitHubActor {

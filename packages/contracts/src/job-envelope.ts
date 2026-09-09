@@ -10,8 +10,10 @@ import {
   ProtocolVersionSchema,
   Sha256Schema,
 } from "./common.js";
+import { ValidationJobContextV2Schema } from "./evaluation-execution.js";
 import { GitHubActorSchema } from "./github.js";
 import { JobKindSchema } from "./states.js";
+import { ValidationJobContextSchema } from "./validation-job.js";
 import { LeaseIdentitySchema } from "./worker.js";
 
 export const RepositoryTargetSchema = Type.Object(
@@ -106,37 +108,65 @@ const JobExecutionTemplateProperties = {
   executionPolicy: ExecutionPolicySchema,
 };
 
-export const JobExecutionTemplateSchema = Type.Object(JobExecutionTemplateProperties, {
+export const JobExecutionTemplateV1Schema = Type.Object(JobExecutionTemplateProperties, {
   additionalProperties: false,
 });
+export const ValidationExecutionContextSchema = Type.Union([
+  ValidationJobContextSchema,
+  ValidationJobContextV2Schema,
+]);
+export type ValidationExecutionContext = Static<typeof ValidationExecutionContextSchema>;
+export const JobExecutionTemplateV2Schema = Type.Object(
+  { ...JobExecutionTemplateProperties, validation: ValidationExecutionContextSchema },
+  { additionalProperties: false },
+);
+export const JobExecutionTemplateSchema = Type.Union([
+  JobExecutionTemplateV1Schema,
+  JobExecutionTemplateV2Schema,
+]);
 export type JobExecutionTemplate = Static<typeof JobExecutionTemplateSchema>;
+export type JobExecutionTemplateV2 = Static<typeof JobExecutionTemplateV2Schema>;
 
-export const JobExecutionEnvelopeSchema = Type.Object(
+const JobExecutionEnvelopeProperties = {
+  protocolVersion: ProtocolVersionSchema,
+  assignedAt: DateTimeSchema,
+  leaseExpiresAt: DateTimeSchema,
+  executionDeadlineAt: DateTimeSchema,
+  lease: LeaseIdentitySchema,
+  job: Type.Object(
+    {
+      jobId: EntityIdSchema,
+      kind: JobKindSchema,
+      priority: Type.Integer(),
+      attempt: PositiveIntegerSchema,
+      maxAttempts: PositiveIntegerSchema,
+      generation: NonNegativeIntegerSchema,
+      intentVersion: PositiveIntegerSchema,
+      semanticKey: Type.String({ minLength: 1, maxLength: 1_024 }),
+    },
+    { additionalProperties: false },
+  ),
+  ...JobExecutionTemplateProperties,
+};
+
+export const JobExecutionEnvelopeV1Schema = Type.Object(
+  { ...JobExecutionEnvelopeProperties, envelopeVersion: Type.Literal(1) },
+  { additionalProperties: false },
+);
+export const JobExecutionEnvelopeV2Schema = Type.Object(
   {
-    protocolVersion: ProtocolVersionSchema,
-    envelopeVersion: Type.Literal(1),
-    assignedAt: DateTimeSchema,
-    leaseExpiresAt: DateTimeSchema,
-    executionDeadlineAt: DateTimeSchema,
-    lease: LeaseIdentitySchema,
-    job: Type.Object(
-      {
-        jobId: EntityIdSchema,
-        kind: JobKindSchema,
-        priority: Type.Integer(),
-        attempt: PositiveIntegerSchema,
-        maxAttempts: PositiveIntegerSchema,
-        generation: NonNegativeIntegerSchema,
-        intentVersion: PositiveIntegerSchema,
-        semanticKey: Type.String({ minLength: 1, maxLength: 1_024 }),
-      },
-      { additionalProperties: false },
-    ),
-    ...JobExecutionTemplateProperties,
+    ...JobExecutionEnvelopeProperties,
+    envelopeVersion: Type.Literal(2),
+    validation: ValidationExecutionContextSchema,
   },
   { additionalProperties: false },
 );
+export const JobExecutionEnvelopeSchema = Type.Union([
+  JobExecutionEnvelopeV1Schema,
+  JobExecutionEnvelopeV2Schema,
+]);
 export type JobExecutionEnvelope = Static<typeof JobExecutionEnvelopeSchema>;
+export type JobExecutionEnvelopeV2 = Static<typeof JobExecutionEnvelopeV2Schema>;
 
 export const ClaimLeaseGrantedSchema = Type.Object(
   {

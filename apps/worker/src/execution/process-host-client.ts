@@ -5,8 +5,10 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import { PassThrough } from "node:stream";
+import { types } from "node:util";
 import {
   assertValidProcessLaunchSpec,
+  assertValidProcessStdinResult,
   assertWindowsLocalAbsolutePath,
   encodeProcessHostRequest,
   type ManagedProcess,
@@ -16,9 +18,12 @@ import {
   type ProcessHostEvent,
   ProcessHostProtocolError,
   type ProcessHostRequest,
+  type ProcessHostStdinRequest,
   type ProcessLaunchSpec,
+  type ProcessStdinResultEvent,
   type ProcessTerminationReason,
   parseProcessHostEventFrame,
+  processHostInteractiveStdinCapability,
   processHostMaximumFrameBytes,
   processHostProtocolVersion,
 } from "./process-host-protocol.js";
@@ -49,6 +54,7 @@ export interface StdioProcessHostClientOptions {
   readonly startTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
   readonly spawnProcess?: ProcessHostSpawn;
+  readonly interactiveStdin?: true;
 }
 
 export class ProcessHostRequestError extends Error {
@@ -103,11 +109,44 @@ interface ActiveProcess {
   readonly truncatedStreams: Set<"stdout" | "stderr" | "combined">;
   readonly requestErrorCodes: Set<string>;
   readonly maximumBufferedOutputBytes: number;
+  readonly captureProcessIdentity: boolean;
+  readonly interactiveStdin: boolean;
   state: ProcessState;
   processId?: number;
   expectedOutputSequence: number;
   termination?: TerminationState;
   completionFailure?: Error;
+  input?: InteractiveInput;
+  exitEvent?: ProcessExitedEvent;
+  processIdReleased?: boolean;
+  inputDrainTimer?: NodeJS.Timeout;
+}
+
+interface InputOperation {
+  readonly request: ProcessHostStdinRequest;
+  readonly result: Deferred<void>;
+  readonly bytes: number;
+  readonly signal: AbortSignal | undefined;
+  readonly onAbort: (() => void) | undefined;
+  timer?: NodeJS.Timeout;
+  sent: boolean;
+}
+interface InteractiveInput {
+  readonly streamId: string;
+  state: "open" | "closing" | "closed" | "failed";
+  sequence: number;
+  operations: number;
+  bytes: number;
+  pending?: InputOperation;
+  closePromise?: Promise<void>;
+}
+interface LateInputResult {
+  readonly streamId: string;
+  readonly sequence: number;
+  readonly operation: "write" | "close";
+  readonly bytes: number;
+  readonly expiresAt: number;
+  readonly timer: NodeJS.Timeout;
 }
 
 class Deferred<T> {
@@ -159,6 +198,35 @@ const defaultStartTimeoutMs = 30_000;
 const defaultShutdownTimeoutMs = 15_000;
 const maximumClientBufferedOutputBytes = 8 * 1_024 * 1_024;
 const instanceKeyPattern = /^[a-f0-9]{64}$/u;
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength")?.get;
+const typedArrayBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, "buffer")?.get;
+
+function inputError(code: string): ProcessHostRequestError {
+  return new ProcessHostRequestError(code, `Interactive process input failed (${code}).`);
+}
+
+function snapshotInputBytes(bytes: Uint8Array): Buffer {
+  if (
+    !types.isUint8Array(bytes) ||
+    typedArrayLength === undefined ||
+    typedArrayBuffer === undefined
+  )
+    throw new ProcessHostProtocolError("Interactive stdin requires a Uint8Array chunk.");
+  const length = Reflect.apply(typedArrayLength, bytes, []) as number;
+  const buffer = Reflect.apply(typedArrayBuffer, bytes, []) as ArrayBufferLike;
+  if (types.isSharedArrayBuffer(buffer))
+    throw new ProcessHostProtocolError("Interactive stdin requires a nonshared byte snapshot.");
+  if (
+    !Number.isSafeInteger(length) ||
+    length < 1 ||
+    length > processHostInteractiveStdinCapability.maximumChunkBytes
+  )
+    throw inputError("STDIN_LIMIT_EXCEEDED");
+  const snapshot = new Uint8Array(length);
+  snapshot.set(bytes);
+  return Buffer.from(snapshot.buffer);
+}
 
 export class StdioProcessHostClient implements ProcessHostClient {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -168,12 +236,16 @@ export class StdioProcessHostClient implements ProcessHostClient {
   readonly #active = new Map<string, ActiveProcess>();
   readonly #processIds = new Set<number>();
   readonly #recentSettledTerminations = new Map<string, true>();
+  readonly #lateInputResults = new Map<string, LateInputResult>();
   readonly #requestTimeoutMs: number;
   readonly #startTimeoutMs: number;
   readonly #shutdownTimeoutMs: number;
   readonly #maximumConcurrentRequests: number;
   readonly #settledTerminationTombstoneLimit: number;
   readonly #hostSignal: AbortSignal | undefined;
+  readonly #interactiveStdin: boolean;
+  readonly #inputResultTimeoutMs: number;
+  #hostInteractiveStdin = false;
   #onHostAbort: (() => void) | undefined;
   #state: HostState = "awaiting_ready";
   #failure: Error | undefined;
@@ -206,6 +278,11 @@ export class StdioProcessHostClient implements ProcessHostClient {
       options.maximumConcurrentRequests,
     );
     this.#settledTerminationTombstoneLimit = this.#maximumConcurrentRequests * 2;
+    if (options.interactiveStdin !== undefined && options.interactiveStdin !== true)
+      throw new TypeError("interactiveStdin must be an explicit true opt-in.");
+    this.#interactiveStdin = options.interactiveStdin === true;
+    this.#inputResultTimeoutMs =
+      processHostInteractiveStdinCapability.writeTimeoutMs + this.#requestTimeoutMs;
     this.#hostSignal = options.hostSignal;
     if (this.#hostSignal?.aborted) {
       throw abortReason(this.#hostSignal, "ProcessHost client startup was aborted.");
@@ -220,6 +297,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
         String(this.#maximumConcurrentRequests),
         "--instance-key",
         instanceKey,
+        ...(this.#interactiveStdin ? ["--interactive-stdin"] : []),
       ],
       {
         cwd: win32.dirname(processHostPath),
@@ -263,12 +341,16 @@ export class StdioProcessHostClient implements ProcessHostClient {
   }
 
   public async start(spec: ProcessLaunchSpec, signal: AbortSignal): Promise<ManagedProcess> {
+    assertValidProcessLaunchSpec(spec);
+    spec = JSON.parse(JSON.stringify(spec)) as ProcessLaunchSpec;
     await this.#ready.promise;
     this.#assertReadyForStart();
     if (signal.aborted) {
       throw abortReason(signal, "Process start was aborted.");
     }
     assertValidProcessLaunchSpec(spec);
+    if (spec.interactiveStdin === true && (!this.#interactiveStdin || !this.#hostInteractiveStdin))
+      throw inputError("STDIN_NOT_ENABLED");
     if (this.#active.size >= this.#maximumConcurrentRequests) {
       throw new ProcessHostProtocolError(
         `ProcessHost client allows at most ${this.#maximumConcurrentRequests} active requests.`,
@@ -293,6 +375,8 @@ export class StdioProcessHostClient implements ProcessHostClient {
         spec.limits.maximumOutputBytes,
         maximumClientBufferedOutputBytes,
       ),
+      captureProcessIdentity: spec.captureProcessIdentity === true,
+      interactiveStdin: spec.interactiveStdin === true,
       state: "start_sent",
       expectedOutputSequence: 0,
     };
@@ -527,6 +611,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
         this.#handshakeTimer = undefined;
       }
       this.#state = "ready";
+      this.#hostInteractiveStdin = event.capabilities.interactiveStdin !== undefined;
       this.#ready.resolve();
       return;
     }
@@ -546,6 +631,10 @@ export class StdioProcessHostClient implements ProcessHostClient {
       this.#handleErrorEvent(event);
       return;
     }
+    if (event.type === "stdin_result") {
+      this.#handleInputResult(event);
+      return;
+    }
     if (this.#state === "awaiting_shutdown_ack") {
       throw new ProcessHostProtocolError("ProcessHost emitted a process event during shutdown.");
     }
@@ -553,7 +642,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
   }
 
   #handleProcessEvent(event: ProcessHostEvent): void {
-    if (event.type === "ready" || event.type === "error" || event.type === "shutdown_complete") {
+    if (
+      event.type === "ready" ||
+      event.type === "error" ||
+      event.type === "shutdown_complete" ||
+      event.type === "stdin_result"
+    ) {
       throw new ProcessHostProtocolError(`Unexpected ProcessHost ${event.type} event.`);
     }
     const entry = this.#active.get(event.requestId);
@@ -565,7 +659,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
 
     switch (event.type) {
       case "started":
-        this.#handleStarted(entry, event.processId);
+        this.#handleStarted(
+          entry,
+          event.processId,
+          event.processCreationTimeFileTime,
+          event.stdinStreamId,
+        );
         return;
       case "stdout":
       case "stderr":
@@ -583,22 +682,84 @@ export class StdioProcessHostClient implements ProcessHostClient {
     }
   }
 
-  #handleStarted(entry: ActiveProcess, processId: number): void {
+  #handleStarted(
+    entry: ActiveProcess,
+    processId: number,
+    processCreationTimeFileTime?: string,
+    stdinStreamId?: string,
+  ): void {
     if (entry.state !== "start_sent" || entry.processId !== undefined) {
       throw new ProcessHostProtocolError("ProcessHost emitted a duplicate started event.");
     }
     if (this.#processIds.has(processId)) {
       throw new ProcessHostProtocolError("ProcessHost reused an active process ID.");
     }
+    if (!entry.captureProcessIdentity && processCreationTimeFileTime !== undefined) {
+      throw new ProcessHostProtocolError(
+        "ProcessHost returned process identity that was not requested.",
+      );
+    }
+    if (!entry.interactiveStdin && stdinStreamId !== undefined)
+      throw new ProcessHostProtocolError(
+        "ProcessHost returned interactive stdin that was not requested.",
+      );
     entry.state = "started";
     entry.processId = processId;
     this.#processIds.add(processId);
+    if (entry.interactiveStdin && stdinStreamId === undefined) {
+      const error = inputError("STDIN_NOT_ENABLED");
+      entry.completionFailure ??= error;
+      void entry.lifecycleDone.promise.then(() => entry.started.reject(error));
+      void this.#terminate(entry, "cancelled").catch((failure: unknown) =>
+        this.#failHost(asProtocolError(failure)),
+      );
+      this.#watchInputDrain(entry);
+      return;
+    }
+    if (stdinStreamId !== undefined) {
+      for (const other of this.#active.values())
+        if (other !== entry && other.input?.streamId === stdinStreamId)
+          throw new ProcessHostProtocolError("ProcessHost reused an active stdin stream identity.");
+      entry.input = {
+        streamId: stdinStreamId,
+        state: "open",
+        sequence: 1,
+        operations: 0,
+        bytes: 0,
+      };
+    }
+    if (entry.captureProcessIdentity && processCreationTimeFileTime === undefined) {
+      const error = new ProcessHostRequestError(
+        "PROCESS_IDENTITY_UNAVAILABLE",
+        "ProcessHost did not provide the requested exact process creation identity.",
+      );
+      entry.completionFailure ??= error;
+      // An older Host can ignore the opt-in field. Do not expose an unverified process handle,
+      // and wait for this request's process tree to exit before rejecting its start operation.
+      void entry.lifecycleDone.promise.then(() => entry.started.reject(error));
+      void this.#terminate(entry, "cancelled").catch((terminationError: unknown) => {
+        this.#failHost(asProtocolError(terminationError));
+      });
+      if (entry.interactiveStdin) this.#watchInputDrain(entry);
+      return;
+    }
     const handle: ManagedProcess = Object.freeze({
       requestId: entry.requestId,
       processId,
+      ...(processCreationTimeFileTime === undefined ? {} : { processCreationTimeFileTime }),
       stdout: entry.stdout,
       stderr: entry.stderr,
       completed: entry.completed.promise,
+      ...(entry.input === undefined
+        ? {}
+        : {
+            stdin: Object.freeze({
+              streamId: entry.input.streamId,
+              write: (bytes: Uint8Array, signal?: AbortSignal) =>
+                this.#writeInput(entry, bytes, signal),
+              close: (signal?: AbortSignal) => this.#closeInput(entry, signal),
+            }),
+          }),
       terminate: async (reason: ProcessTerminationReason) => this.#terminate(entry, reason),
     });
     entry.started.resolve(handle);
@@ -607,6 +768,241 @@ export class StdioProcessHostClient implements ProcessHostClient {
         this.#failHost(asProtocolError(error));
       });
     }
+  }
+
+  #inputForOperation(entry: ActiveProcess): InteractiveInput {
+    if (this.#active.get(entry.requestId) !== entry || entry.state !== "started")
+      throw inputError("STDIN_PROCESS_NOT_RUNNING");
+    if (entry.exitEvent !== undefined) throw inputError("STDIN_PROCESS_EXITED");
+    const input = entry.input;
+    if (input === undefined) throw inputError("STDIN_NOT_ENABLED");
+    if (input.state === "closing" || input.state === "closed") throw inputError("STDIN_CLOSED");
+    if (
+      input.state === "failed" ||
+      entry.completionFailure !== undefined ||
+      entry.termination !== undefined
+    )
+      throw inputError("STDIN_PROCESS_NOT_RUNNING");
+    if (input.pending !== undefined) throw inputError("STDIN_BUSY");
+    return input;
+  }
+
+  #writeInput(entry: ActiveProcess, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+    try {
+      const input = this.#inputForOperation(entry);
+      const snapshot = snapshotInputBytes(bytes);
+      return this.#beginInput(entry, input, snapshot, signal);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  #closeInput(entry: ActiveProcess, signal?: AbortSignal): Promise<void> {
+    if (entry.input?.closePromise !== undefined) return entry.input.closePromise;
+    try {
+      const input = this.#inputForOperation(entry);
+      const promise = this.#beginInput(entry, input, undefined, signal);
+      input.closePromise = promise;
+      return promise;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  #beginInput(
+    entry: ActiveProcess,
+    input: InteractiveInput,
+    bytes: Buffer | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      const error = inputError("STDIN_CANCELLED");
+      this.#failInput(entry, error);
+      throw error;
+    }
+    const size = bytes?.byteLength ?? 0;
+    if (
+      input.operations >= processHostInteractiveStdinCapability.maximumOperations ||
+      input.bytes + size > processHostInteractiveStdinCapability.maximumTotalBytes
+    )
+      throw inputError("STDIN_LIMIT_EXCEEDED");
+    const common = {
+      protocolVersion: processHostProtocolVersion,
+      requestId: entry.requestId,
+      stdinStreamId: input.streamId,
+      sequence: input.sequence,
+    };
+    const request: ProcessHostStdinRequest =
+      bytes === undefined
+        ? { ...common, type: "stdin_close" }
+        : { ...common, type: "stdin_write", dataBase64: bytes.toString("base64") };
+    const operation: InputOperation = {
+      request,
+      bytes: size,
+      result: new Deferred<void>(),
+      sent: false,
+      signal,
+      onAbort:
+        signal === undefined
+          ? undefined
+          : () => this.#failInput(entry, inputError("STDIN_CANCELLED")),
+    };
+    input.operations++;
+    input.sequence++;
+    input.bytes += size;
+    input.pending = operation;
+    if (bytes === undefined) input.state = "closing";
+    operation.timer = setTimeout(() => {
+      if (this.#active.get(entry.requestId) === entry && input.pending === operation)
+        this.#failInput(
+          entry,
+          inputError(bytes === undefined ? "STDIN_CLOSE_FAILED" : "STDIN_WRITE_TIMEOUT"),
+        );
+    }, this.#inputResultTimeoutMs);
+    operation.timer.unref();
+    if (operation.onAbort !== undefined)
+      signal?.addEventListener("abort", operation.onAbort, { once: true });
+    if (signal?.aborted) this.#failInput(entry, inputError("STDIN_CANCELLED"));
+    void this.#writeRequest(request, () => {
+      if (
+        this.#active.get(entry.requestId) !== entry ||
+        input.pending !== operation ||
+        operation.result.settled
+      )
+        return false;
+      if (entry.exitEvent !== undefined) {
+        this.#failInput(entry, inputError("STDIN_PROCESS_EXITED"));
+        return false;
+      }
+      operation.sent = true;
+      return true;
+    }).catch((error: unknown) => {
+      operation.result.reject(error);
+      this.#clearInputOperation(operation);
+    });
+    return operation.result.promise;
+  }
+
+  #handleInputResult(event: ProcessStdinResultEvent): void {
+    const entry = this.#active.get(event.requestId);
+    const input = entry?.input;
+    const pending = input?.pending;
+    if (entry === undefined || input === undefined || pending === undefined) {
+      if (this.#consumeLateInputResult(event)) return;
+      throw new ProcessHostProtocolError(
+        "ProcessHost stdin result referenced an unknown operation.",
+      );
+    }
+    if (!pending.sent)
+      throw new ProcessHostProtocolError(
+        "ProcessHost acknowledged stdin before its request was sent.",
+      );
+    assertValidProcessStdinResult(event, pending.request);
+    this.#clearInputOperation(pending);
+    delete input.pending;
+    if (event.status === "failed") {
+      const error = inputError(event.code ?? "STDIN_WRITE_FAILED");
+      pending.result.reject(error);
+      this.#failInput(entry, error);
+    } else {
+      // Cancellation is monotonic even when a completed pipe write's ACK races with it.
+      if (input.state !== "failed") {
+        if (event.operation === "close") input.state = "closed";
+        pending.result.resolve();
+      }
+      if (entry.exitEvent !== undefined) this.#finalizeExited(entry);
+    }
+  }
+
+  #clearInputOperation(operation: InputOperation): void {
+    if (operation.timer !== undefined) clearTimeout(operation.timer);
+    delete operation.timer;
+    if (operation.onAbort !== undefined)
+      operation.signal?.removeEventListener("abort", operation.onAbort);
+  }
+
+  #failInput(entry: ActiveProcess, error: Error): void {
+    if (this.#active.get(entry.requestId) !== entry) return;
+    entry.completionFailure ??= error;
+    if (entry.input !== undefined) {
+      entry.input.state = "failed";
+      if (entry.input.pending !== undefined) {
+        entry.input.pending.result.reject(error);
+        this.#clearInputOperation(entry.input.pending);
+      }
+    }
+    if (entry.exitEvent !== undefined) {
+      this.#finalizeExited(entry);
+      return;
+    }
+    this.#watchInputDrain(entry);
+    if (entry.state === "started" && entry.termination === undefined)
+      void this.#terminate(entry, "cancelled").catch((failure: unknown) =>
+        this.#failHost(asProtocolError(failure)),
+      );
+  }
+
+  #watchInputDrain(entry: ActiveProcess): void {
+    if (entry.inputDrainTimer !== undefined) return;
+    entry.inputDrainTimer = setTimeout(() => {
+      if (this.#active.get(entry.requestId) === entry && entry.exitEvent === undefined)
+        this.#failHost(
+          new ProcessHostProtocolError(
+            "ProcessHost did not drain the process after interactive stdin failed.",
+          ),
+        );
+    }, this.#shutdownTimeoutMs);
+    entry.inputDrainTimer.unref();
+  }
+
+  #rememberLateInputResult(entry: ActiveProcess, operation: InputOperation): void {
+    if (!operation.sent) return;
+    this.#deleteLateInputResult(entry.requestId);
+    const timer = setTimeout(
+      () => this.#deleteLateInputResult(entry.requestId),
+      this.#inputResultTimeoutMs,
+    );
+    timer.unref();
+    this.#lateInputResults.set(entry.requestId, {
+      streamId: operation.request.stdinStreamId,
+      sequence: operation.request.sequence,
+      operation: operation.request.type === "stdin_write" ? "write" : "close",
+      bytes: operation.bytes,
+      expiresAt: Date.now() + this.#inputResultTimeoutMs,
+      timer,
+    });
+    while (this.#lateInputResults.size > this.#settledTerminationTombstoneLimit) {
+      const oldest = this.#lateInputResults.keys().next().value;
+      if (oldest === undefined) break;
+      this.#deleteLateInputResult(oldest);
+    }
+  }
+
+  #deleteLateInputResult(requestId: string): void {
+    const entry = this.#lateInputResults.get(requestId);
+    if (entry !== undefined) clearTimeout(entry.timer);
+    this.#lateInputResults.delete(requestId);
+  }
+
+  #consumeLateInputResult(event: ProcessStdinResultEvent): boolean {
+    const remembered = this.#lateInputResults.get(event.requestId);
+    if (remembered === undefined) return false;
+    if (Date.now() >= remembered.expiresAt) {
+      this.#deleteLateInputResult(event.requestId);
+      return false;
+    }
+    if (
+      event.stdinStreamId !== remembered.streamId ||
+      event.sequence !== remembered.sequence ||
+      event.operation !== remembered.operation ||
+      event.bytesWritten > remembered.bytes ||
+      (event.status === "succeeded" && event.bytesWritten !== remembered.bytes)
+    )
+      throw new ProcessHostProtocolError(
+        "ProcessHost late stdin result changed its operation identity or byte count.",
+      );
+    this.#deleteLateInputResult(event.requestId);
+    return true;
   }
 
   #handleOutput(
@@ -721,7 +1117,22 @@ export class StdioProcessHostClient implements ProcessHostClient {
     if (terminationSettledByExit) {
       this.#rememberSettledTermination(entry.requestId);
     }
+    entry.exitEvent = event;
+    this.#releaseProcessId(entry);
+    entry.stdout.end();
+    entry.stderr.end();
+    if (
+      entry.input?.pending !== undefined &&
+      !entry.input.pending.result.settled &&
+      entry.completionFailure === undefined
+    )
+      return;
+    this.#finalizeExited(entry);
+  }
 
+  #finalizeExited(entry: ActiveProcess): void {
+    const event = entry.exitEvent;
+    if (event === undefined || this.#active.get(entry.requestId) !== entry) return;
     if (entry.completionFailure === undefined) {
       entry.completed.resolve(event);
     } else {
@@ -768,6 +1179,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
     ) {
       entry.termination.acknowledgedEvent = true;
       entry.termination.acknowledged.resolve();
+      this.#recentSettledTerminations.delete(entry.requestId);
       return;
     }
     entry.completionFailure ??= error;
@@ -783,12 +1195,17 @@ export class StdioProcessHostClient implements ProcessHostClient {
       throw new ProcessHostProtocolError("ProcessHost acknowledged shutdown with active requests.");
     }
     this.#state = "awaiting_exit";
+    for (const requestId of this.#lateInputResults.keys()) this.#deleteLateInputResult(requestId);
     this.#child.stdin.end();
     this.#shutdownAcknowledged.resolve();
   }
 
   async #terminate(entry: ActiveProcess, reason: ProcessTerminationReason): Promise<void> {
-    if (this.#active.get(entry.requestId) !== entry || entry.state !== "started") {
+    if (
+      this.#active.get(entry.requestId) !== entry ||
+      entry.state !== "started" ||
+      entry.exitEvent !== undefined
+    ) {
       throw new ProcessHostProtocolError("Cannot terminate a process that is not active.");
     }
     if (entry.termination !== undefined) {
@@ -828,6 +1245,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
     entry: ActiveProcess,
     fallbackReason: ProcessTerminationReason,
   ): Promise<void> {
+    if (entry.exitEvent !== undefined) return;
     if (entry.termination !== undefined) {
       await this.#withHostDeadline(
         entry.termination.acknowledged.promise,
@@ -845,13 +1263,13 @@ export class StdioProcessHostClient implements ProcessHostClient {
     }
     const error = abortReason(entry.signal, "Managed process was aborted.");
     entry.completionFailure ??= error;
+    if (entry.input !== undefined) {
+      this.#failInput(entry, inputError("STDIN_CANCELLED"));
+      return;
+    }
     if (entry.state === "start_sent") {
-      this.#failHost(
-        new ProcessHostProtocolError(
-          "Managed process was aborted before ProcessHost acknowledged its start.",
-          { cause: error },
-        ),
-      );
+      // Keep the start deadline and admission slot until the host acknowledges or rejects it.
+      // A successful acknowledgement will terminate only this request in #handleStarted.
       return;
     }
     if (entry.termination === undefined) {
@@ -888,7 +1306,11 @@ export class StdioProcessHostClient implements ProcessHostClient {
   }
 
   #assertStarted(entry: ActiveProcess, eventType: string): void {
-    if (entry.state !== "started" || entry.processId === undefined) {
+    if (
+      entry.state !== "started" ||
+      entry.processId === undefined ||
+      entry.exitEvent !== undefined
+    ) {
       throw new ProcessHostProtocolError(
         `ProcessHost emitted ${eventType} before acknowledging process start.`,
       );
@@ -896,16 +1318,26 @@ export class StdioProcessHostClient implements ProcessHostClient {
   }
 
   #finishBeforeStart(entry: ActiveProcess, error: Error): void {
-    entry.started.reject(error);
-    entry.completed.reject(error);
+    const failure = entry.completionFailure ?? error;
+    entry.started.reject(failure);
+    entry.completed.reject(failure);
     this.#finishEntry(entry);
   }
 
   #finishEntry(entry: ActiveProcess): void {
     entry.signal.removeEventListener("abort", entry.onAbort);
     this.#active.delete(entry.requestId);
-    if (entry.processId !== undefined) {
-      this.#processIds.delete(entry.processId);
+    this.#releaseProcessId(entry);
+    if (entry.inputDrainTimer !== undefined) clearTimeout(entry.inputDrainTimer);
+    if (entry.input !== undefined) {
+      if (entry.input.pending !== undefined) {
+        const operation = entry.input.pending;
+        this.#rememberLateInputResult(entry, operation);
+        this.#clearInputOperation(operation);
+        operation.result.reject(entry.completionFailure ?? inputError("STDIN_PROCESS_EXITED"));
+        delete entry.input.pending;
+      }
+      if (entry.input.state !== "failed") entry.input.state = "closed";
     }
     if (entry.termination !== undefined && !entry.termination.acknowledged.settled) {
       entry.termination.acknowledged.reject(
@@ -917,7 +1349,14 @@ export class StdioProcessHostClient implements ProcessHostClient {
     entry.lifecycleDone.resolve();
   }
 
-  #writeRequest(request: ProcessHostRequest): Promise<void> {
+  #releaseProcessId(entry: ActiveProcess): void {
+    if (entry.processId !== undefined && entry.processIdReleased !== true) {
+      this.#processIds.delete(entry.processId);
+      entry.processIdReleased = true;
+    }
+  }
+
+  #writeRequest(request: ProcessHostRequest, beforeWrite?: () => boolean): Promise<void> {
     const frame = encodeProcessHostRequest(request);
     const unboundedOperation = this.#writeChain.then(
       () =>
@@ -927,6 +1366,10 @@ export class StdioProcessHostClient implements ProcessHostClient {
             return;
           }
           try {
+            if (beforeWrite !== undefined && !beforeWrite()) {
+              resolve();
+              return;
+            }
             this.#child.stdin.write(frame, (error?: Error | null) => {
               if (error !== undefined && error !== null) {
                 const protocolError = new ProcessHostProtocolError(
@@ -1015,6 +1458,11 @@ export class StdioProcessHostClient implements ProcessHostClient {
       entry.started.reject(error);
       entry.completed.reject(error);
       entry.termination?.acknowledged.reject(error);
+      if (entry.inputDrainTimer !== undefined) clearTimeout(entry.inputDrainTimer);
+      if (entry.input?.pending !== undefined) {
+        this.#clearInputOperation(entry.input.pending);
+        entry.input.pending.result.reject(error);
+      }
       entry.stdout.end();
       entry.stderr.end();
       entry.lifecycleDone.resolve();
@@ -1022,6 +1470,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
     this.#active.clear();
     this.#processIds.clear();
     this.#recentSettledTerminations.clear();
+    for (const requestId of this.#lateInputResults.keys()) this.#deleteLateInputResult(requestId);
     this.#readBuffer = Buffer.alloc(0);
     this.#child.stdin.destroy();
     if (!this.#child.killed) {

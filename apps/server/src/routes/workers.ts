@@ -29,6 +29,7 @@ import {
   getAuthenticatedWorkerIdentity,
   getAuthenticatedWorkerTokenSha256,
 } from "../security/worker-identity.js";
+import { sendMappedEvidenceError } from "./evidence-http-errors.js";
 
 interface RouteDependencies {
   readonly config: ServerConfig;
@@ -129,6 +130,8 @@ const validateRunFailureRequest = async (
 };
 
 const handleTerminalDatabaseError = (error: unknown, reply: FastifyReply): FastifyReply => {
+  const evidenceError = sendMappedEvidenceError(reply, error);
+  if (evidenceError !== undefined) return evidenceError;
   if (error instanceof DatabaseRequestError && error.code === "TERMINAL_SUBMISSION_CONFLICT") {
     return reply.code(409).send({
       code: "terminal_submission_conflict",
@@ -300,30 +303,41 @@ export const registerWorkerRoutes = (
       onRequest: authenticateWorker.onRequest,
       preValidation: authenticateWorker.preValidation,
     },
-    async (request) => {
+    async (request, reply) => {
       const { workerNodeId } = getAuthenticatedWorkerIdentity(request);
       const waitSeconds = Math.min(request.body.waitSeconds ?? 0, config.maxLongPollSeconds);
       const deadline = Date.now() + waitSeconds * 1_000;
+      const disconnected = new AbortController();
+      const stopWaiting = () => disconnected.abort();
+      // IncomingMessage.close also occurs after an ordinary request body is read.
+      // Response.close instead tracks the connection for the entire long poll.
+      reply.raw.once("close", stopWaiting);
+      request.raw.once("aborted", stopWaiting);
+      if (reply.raw.destroyed || request.raw.aborted) stopWaiting();
+      const claimSignal = AbortSignal.any([shutdownSignal, disconnected.signal]);
 
-      while (!shutdownSignal.aborted) {
-        const result = await database.request("claimLease", {
-          ...request.body,
-          workerNodeId,
-          protocolVersion: request.body.protocolVersion,
-          leaseTtlSeconds: config.leaseTtlSeconds,
-        });
-        if (result.outcome !== "no_work" || Date.now() >= deadline) {
-          return { ...result, serverTime: new Date().toISOString() };
-        }
-
-        const remaining = deadline - Date.now();
-        try {
-          await delay(Math.min(1_000, remaining), undefined, {
-            signal: shutdownSignal,
+      try {
+        while (!claimSignal.aborted) {
+          const result = await database.request("claimLease", {
+            ...request.body,
+            workerNodeId,
+            protocolVersion: request.body.protocolVersion,
+            leaseTtlSeconds: config.leaseTtlSeconds,
           });
-        } catch {
-          break;
+          if (result.outcome !== "no_work" || Date.now() >= deadline) {
+            return { ...result, serverTime: new Date().toISOString() };
+          }
+
+          const remaining = deadline - Date.now();
+          try {
+            await delay(Math.min(1_000, remaining), undefined, { signal: claimSignal });
+          } catch {
+            break;
+          }
         }
+      } finally {
+        reply.raw.off("close", stopWaiting);
+        request.raw.off("aborted", stopWaiting);
       }
 
       return {
@@ -487,6 +501,9 @@ export const registerWorkerRoutes = (
           leaseGeneration: request.body.leaseGeneration,
           failureCode: request.body.code,
           failureMessage: request.body.message,
+          ...(request.body.diagnostics === undefined
+            ? {}
+            : { diagnostics: request.body.diagnostics }),
           retryable: request.body.retryable,
           retryDelaySeconds: config.retryDelaySeconds,
         });

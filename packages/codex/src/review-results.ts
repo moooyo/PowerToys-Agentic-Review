@@ -1,3 +1,4 @@
+import { ReviewExecutionEvidenceSchema, VerificationReportSchema } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
 
 const ResultIdentifierSchema = Type.String({
@@ -181,3 +182,90 @@ export const IssueTriageV1ModelOutputSchema = Type.Object(
 
 export const ReviewResultV1Schema = Type.Union([PrReviewPlanV1Schema, IssueTriageV1Schema]);
 export type ReviewResultV1 = Static<typeof ReviewResultV1Schema>;
+
+const createModelVerificationStatusSchema = () =>
+  Type.Union([
+    Type.Literal("not_run"),
+    Type.Literal("passed"),
+    Type.Literal("failed"),
+    Type.Literal("unknown"),
+  ]);
+
+const VerificationReportModelOutputSchema = Type.Object(
+  {
+    status: createModelVerificationStatusSchema(),
+    summary: Type.String(),
+    commands: Type.Array(
+      Type.Object(
+        { command: Type.String(), status: createModelVerificationStatusSchema() },
+        { additionalProperties: false },
+      ),
+      { maxItems: 32 },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+// V1 remains byte-for-byte authoritative for queued jobs and persisted results.
+// V2 model results cannot supply worker evidence; the Worker adds it after validation.
+export const PrReviewPlanV2ModelOutputSchema = Type.Object(
+  {
+    ...PrReviewPlanV1ModelOutputSchema.properties,
+    schemaVersion: Type.Literal("PrReviewPlanV2"),
+    verification: VerificationReportModelOutputSchema,
+  },
+  { additionalProperties: false },
+);
+export const IssueTriageV2ModelOutputSchema = Type.Object(
+  {
+    ...IssueTriageV1ModelOutputSchema.properties,
+    schemaVersion: Type.Literal("IssueTriageV2"),
+    verification: VerificationReportModelOutputSchema,
+  },
+  { additionalProperties: false },
+);
+
+export const PrReviewPlanV2ModelResultSchema = Type.Object(
+  {
+    ...PrReviewPlanV1Schema.properties,
+    schemaVersion: Type.Literal("PrReviewPlanV2"),
+    verification: VerificationReportSchema,
+  },
+  { additionalProperties: false },
+);
+export const IssueTriageV2ModelResultSchema = Type.Object(
+  {
+    ...IssueTriageV1Schema.properties,
+    schemaVersion: Type.Literal("IssueTriageV2"),
+    verification: VerificationReportSchema,
+  },
+  { additionalProperties: false },
+);
+
+export const PrReviewPlanV2Schema = Type.Object(
+  {
+    ...PrReviewPlanV2ModelResultSchema.properties,
+    executionEvidence: ReviewExecutionEvidenceSchema,
+  },
+  { $id: "PrReviewPlanV2", additionalProperties: false },
+);
+export type PrReviewPlanV2 = Static<typeof PrReviewPlanV2Schema>;
+export const IssueTriageV2Schema = Type.Object(
+  {
+    ...IssueTriageV2ModelResultSchema.properties,
+    executionEvidence: ReviewExecutionEvidenceSchema,
+  },
+  { $id: "IssueTriageV2", additionalProperties: false },
+);
+export type IssueTriageV2 = Static<typeof IssueTriageV2Schema>;
+export const ReviewResultSchema = Type.Union([
+  PrReviewPlanV1Schema,
+  IssueTriageV1Schema,
+  PrReviewPlanV2Schema,
+  IssueTriageV2Schema,
+]);
+export type ReviewResult = Static<typeof ReviewResultSchema>;
+export type ReviewModelResult =
+  | ReviewResultV1
+  | Static<typeof PrReviewPlanV2ModelResultSchema>
+  | Static<typeof IssueTriageV2ModelResultSchema>;

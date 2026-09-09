@@ -8,10 +8,20 @@ import {
   Sha256Schema,
 } from "./common.js";
 import {
+  ReviewExecutionEvidenceSchema,
+  RunFailureDiagnosticsSchema,
+  VerificationReportSchema,
+} from "./execution-evidence.js";
+import {
   GitHubActorSchema,
   GitHubWorkItemKindSchema,
   GitHubWorkItemRevisionSchema,
 } from "./github.js";
+import {
+  getJobAdmissionIssues,
+  JobAdmissionStateSchema,
+  NullableJobAdmissionSchema,
+} from "./job-admission.js";
 import {
   AuthorizationDecisionReasonSchema,
   AuthorizationDecisionSchema,
@@ -52,6 +62,8 @@ export const DashboardWorkItemPrioritySchema = Type.Union(
 export type DashboardWorkItemPriority = Static<typeof DashboardWorkItemPrioritySchema>;
 
 export const DashboardWorkItemStageValues = [
+  "not_scheduled",
+  "awaiting_admission",
   "queued",
   "preparing",
   "reviewing",
@@ -66,6 +78,7 @@ export const DashboardWorkItemStageSchema = Type.Union(
 export type DashboardWorkItemStage = Static<typeof DashboardWorkItemStageSchema>;
 
 export const DashboardJobStageSchema = Type.Union([
+  Type.Literal("awaiting_admission"),
   Type.Literal("queued"),
   ExecutionPhaseSchema,
   Type.Literal("done"),
@@ -96,6 +109,7 @@ export const DashboardWorkItemListItemSchema = Type.Object(
   {
     id: EntityIdSchema,
     kind: GitHubWorkItemKindSchema,
+    repositoryId: EntityIdSchema,
     repository: Type.String({ minLength: 3, maxLength: 201 }),
     number: PositiveIntegerSchema,
     title: Type.String({ minLength: 1, maxLength: 1_024 }),
@@ -115,6 +129,8 @@ export const DashboardWorkItemListItemSchema = Type.Object(
     activeRequestEpoch: Type.Union([DashboardRequestEpochSummarySchema, Type.Null()]),
     latestJobId: NullableEntityIdSchema,
     latestJobStatus: Type.Union([JobStateSchema, Type.Null()]),
+    latestJobAttemptCount: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
+    latestJobAdmission: NullableJobAdmissionSchema,
     workerNodeId: NullableEntityIdSchema,
     attentionReason: NullableStringSchema,
     updatedAt: DateTimeSchema,
@@ -122,6 +138,46 @@ export const DashboardWorkItemListItemSchema = Type.Object(
   { additionalProperties: false },
 );
 export type DashboardWorkItemListItem = Static<typeof DashboardWorkItemListItemSchema>;
+
+// Call after schema validation. These fields describe the latest real Job; they do not
+// manufacture an execution for an unmaterialized validation request or an unscheduled item.
+export function getDashboardWorkItemAdmissionIssues(
+  value: Pick<
+    DashboardWorkItemListItem,
+    "latestJobId" | "latestJobStatus" | "latestJobAttemptCount" | "latestJobAdmission" | "stage"
+  >,
+): string[] {
+  const issues: string[] = [];
+  if (value.latestJobId === null) {
+    if (
+      value.latestJobStatus !== null ||
+      value.latestJobAttemptCount !== null ||
+      value.latestJobAdmission !== null
+    )
+      issues.push("admission_without_job_identity");
+    if (value.stage !== "not_scheduled") issues.push("unscheduled_stage_mismatch");
+    return issues;
+  }
+  if (value.latestJobStatus === null || value.latestJobAttemptCount === null) {
+    issues.push("incomplete_latest_job_identity");
+    return issues;
+  }
+  issues.push(
+    ...getJobAdmissionIssues({
+      status: value.latestJobStatus,
+      attemptCount: value.latestJobAttemptCount,
+      admission: value.latestJobAdmission,
+    }),
+  );
+  const waiting = value.latestJobStatus === "queued" || value.latestJobStatus === "retry_waiting";
+  if (waiting) {
+    const stage = value.latestJobAdmission?.state === "pending" ? "awaiting_admission" : "queued";
+    if (value.stage !== stage) issues.push("admission_stage_mismatch");
+  } else if (["not_scheduled", "awaiting_admission", "queued"].includes(value.stage)) {
+    issues.push("queue_stage_outside_waiting");
+  }
+  return issues;
+}
 
 export const DashboardWorkItemReadSchema = Type.Object(
   {
@@ -144,6 +200,7 @@ const DashboardListQueryProperties = {
 export const DashboardWorkItemListQuerySchema = Type.Object(
   {
     ...DashboardListQueryProperties,
+    repositoryId: Type.Optional(EntityIdSchema),
     kind: Type.Optional(
       Type.Union([
         GitHubWorkItemKindSchema,
@@ -193,11 +250,13 @@ export type DashboardJobOutcome = Static<typeof DashboardJobOutcomeSchema>;
 export const DashboardJobListItemSchema = Type.Object(
   {
     id: EntityIdSchema,
+    repositoryId: EntityIdSchema,
     workItemId: EntityIdSchema,
     workItemRef: Type.String({ minLength: 1, maxLength: 256 }),
     title: Type.String({ minLength: 1, maxLength: 256 }),
     generation: PositiveIntegerSchema,
     status: JobStateSchema,
+    admission: NullableJobAdmissionSchema,
     phase: Type.Union([ExecutionPhaseSchema, Type.Null()]),
     attempt: NonNegativeIntegerSchema,
     maxAttempts: PositiveIntegerSchema,
@@ -220,6 +279,7 @@ export const DashboardJobReadSchema = Type.Object(
     ...DashboardJobListItemSchema.properties,
     failureCode: NullableStringSchema,
     failureMessage: NullableStringSchema,
+    failureDiagnostics: Type.Optional(Type.Union([RunFailureDiagnosticsSchema, Type.Null()])),
     resultDigest: Type.Union([Sha256Schema, Type.Null()]),
   },
   { additionalProperties: false },
@@ -288,7 +348,12 @@ export type DashboardIssueTriageProjection = Static<typeof DashboardIssueTriageP
 export const DashboardReviewResultReadSchema = Type.Object(
   {
     reviewResultId: EntityIdSchema,
-    schemaId: Type.Union([Type.Literal("IssueTriageV1"), Type.Literal("PrReviewPlanV1")]),
+    schemaId: Type.Union([
+      Type.Literal("IssueTriageV1"),
+      Type.Literal("PrReviewPlanV1"),
+      Type.Literal("IssueTriageV2"),
+      Type.Literal("PrReviewPlanV2"),
+    ]),
     resultDigest: Sha256Schema,
     summary: Type.String({ minLength: 1, maxLength: 8_192 }),
     requestedRecipeIds: Type.Array(DashboardRequestedRecipeIdSchema, {
@@ -311,6 +376,8 @@ export const DashboardReviewResultReadSchema = Type.Object(
       Type.Null(),
     ]),
     issueTriage: Type.Union([DashboardIssueTriageProjectionSchema, Type.Null()]),
+    verification: Type.Optional(VerificationReportSchema),
+    executionEvidence: Type.Optional(ReviewExecutionEvidenceSchema),
   },
   { additionalProperties: false },
 );
@@ -328,8 +395,16 @@ export type DashboardJobDetailRead = Static<typeof DashboardJobDetailReadSchema>
 export const DashboardJobListQuerySchema = Type.Object(
   {
     ...DashboardListQueryProperties,
+    repositoryId: Type.Optional(EntityIdSchema),
     status: Type.Optional(
       Type.Union([JobStateSchema, Type.Array(JobStateSchema, { maxItems: 32, uniqueItems: true })]),
+    ),
+    // Admission filters select only queued/retry_waiting Jobs, never their historical episodes.
+    admission: Type.Optional(
+      Type.Union([
+        JobAdmissionStateSchema,
+        Type.Array(JobAdmissionStateSchema, { minItems: 1, maxItems: 2, uniqueItems: true }),
+      ]),
     ),
     phase: Type.Optional(
       Type.Union([
@@ -439,6 +514,10 @@ export const DashboardSystemReadSchema = Type.Object(
     sqliteVersion: Type.String({ minLength: 1, maxLength: 128 }),
     databaseSizeBytes: NonNegativeIntegerSchema,
     oldestQueuedAt: NullableDateTimeSchema,
+    queuedJobs: NonNegativeIntegerSchema,
+    awaitingAdmissionJobs: NonNegativeIntegerSchema,
+    pendingValidationRequests: NonNegativeIntegerSchema,
+    oldestAwaitingAdmissionAt: NullableDateTimeSchema,
     activeWorkers: NonNegativeIntegerSchema,
     activeLeases: NonNegativeIntegerSchema,
     pendingApprovals: NonNegativeIntegerSchema,

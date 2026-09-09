@@ -8,6 +8,7 @@ import {
   WorkspaceDiskBudgetError,
   type WorkspaceDiskClock,
   type WorkspaceDiskInterval,
+  type WorkspaceDiskIoContext,
   type WorkspaceDiskPathState,
 } from "./workspace-disk-budget.js";
 
@@ -41,6 +42,8 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
   public ownershipChecks = 0;
   public onLstat: ((path: string) => void) | undefined;
   public onReadDirectory: ((path: string) => void) | undefined;
+  public onRealpath: ((path: string) => void) | undefined;
+  public onReadLink: ((path: string) => void) | undefined;
   readonly #transientMissing = new Map<string, number>();
 
   public constructor() {
@@ -68,9 +71,15 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
   }
 
   public async realpath(path: string): Promise<string> {
+    this.onRealpath?.(path);
     const entry = this.#entries.get(key(path));
     if (entry === undefined) throw fileSystemError("ENOENT", `Missing path: ${path}`);
     return entry.realPath;
+  }
+
+  public async readLink(path: string): Promise<string> {
+    this.onReadLink?.(path);
+    return this.#entry(path).realPath;
   }
 
   public async readDirectoryBounded(
@@ -228,6 +237,10 @@ class FakeWorkspaceDiskFileSystem implements NativeWorkspaceSecurityAdapter {
     this.#entry(path).inode += 1n;
   }
 
+  public removeEntry(path: string): void {
+    this.#entries.delete(key(path));
+  }
+
   public touch(path: string): void {
     const entry = this.#entry(path);
     entry.modifiedAtMs += 1n;
@@ -365,7 +378,7 @@ describe("ProductionWorkspaceDiskBudget", () => {
 
     expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
     expect(results[2]).toMatchObject({
-      reason: { code: "EXISTING_WORKSPACE_UNHEALTHY" },
+      reason: { code: "CAPACITY_UNAVAILABLE" },
     });
     expect(paths.every((path) => !fileSystem.has(path))).toBe(true);
 
@@ -397,7 +410,7 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await expect(first).resolves.toMatchObject({ attemptDirectory: attempt("a") });
   });
 
-  it("starts the operation deadline when a request enters the exclusive queue", async () => {
+  it("distinguishes a busy exclusive queue from an expired filesystem operation", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
     const clock = new FakeWorkspaceDiskClock();
     let releaseOwnership!: () => void;
@@ -412,9 +425,32 @@ describe("ProductionWorkspaceDiskBudget", () => {
     const queued = budget.admit(attempt("b"));
 
     clock.advance(30_001);
-    await expect(queued).rejects.toMatchObject({ code: "ACCOUNTING_TIMED_OUT" });
+    await expect(queued).rejects.toMatchObject({ code: "ACCOUNTING_BUSY" });
     releaseOwnership();
     await expect(first).rejects.toMatchObject({ code: "ACCOUNTING_TIMED_OUT" });
+  });
+
+  it("gives a filesystem operation its full deadline after waiting in the exclusive queue", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock);
+    let releaseOwnership!: () => void;
+    fileSystem.ownershipGate = new Promise<void>((resolve) => {
+      releaseOwnership = resolve;
+    });
+    const first = budget.admit(attempt("a"));
+    await waitForCondition(() => fileSystem.ownershipChecks === 1);
+    const second = budget.admit(attempt("b"));
+    clock.advance(20_000);
+    let rootReads = 0;
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) === key(workspaceRoot) && ++rootReads === 2) clock.advance(20_000);
+    };
+    releaseOwnership();
+
+    await expect(first).resolves.toMatchObject({ attemptDirectory: attempt("a") });
+    await expect(second).resolves.toMatchObject({ attemptDirectory: attempt("b") });
+    expect(rootReads).toBe(2);
   });
 
   it("uses native handle-bound removal for a reserved attempt", async () => {
@@ -800,6 +836,21 @@ describe("ProductionWorkspaceDiskBudget", () => {
     });
   });
 
+  it("checks temporary capacity without reserving it and recovers after space returns", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    fileSystem.freeBytes = 149n * mebibyte;
+    await expect(budget.hasCapacity()).resolves.toBe(false);
+    fileSystem.freeBytes = 1_000n * mebibyte;
+    await expect(budget.hasCapacity()).resolves.toBe(true);
+    const first = await budget.admit(attempt("a"));
+    const second = await budget.admit(attempt("b"));
+    await expect(budget.hasCapacity()).resolves.toBe(false);
+    await first.release();
+    await expect(budget.hasCapacity()).resolves.toBe(true);
+    await second.release();
+  });
+
   it("fails accounting closed on reparse points and bounded-scan exhaustion", async () => {
     const reparseFileSystem = new FakeWorkspaceDiskFileSystem();
     const existing = attempt("a");
@@ -866,7 +917,7 @@ describe("ProductionWorkspaceDiskBudget", () => {
 
     const second = await budget.admit(attempt("b"));
     await expect(budget.admit(attempt("c"))).rejects.toMatchObject({
-      code: "EXISTING_WORKSPACE_UNHEALTHY",
+      code: "CAPACITY_UNAVAILABLE",
     });
     await second.release();
     await active.release();
@@ -894,6 +945,745 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await expect(active.removeAttempt()).rejects.toMatchObject({ code: "SNAPSHOT_UNSTABLE" });
     expect(fileSystem.has(activePath)).toBe(true);
     await active.release();
+  });
+
+  it("samples active creation, deletion, growth, and dangling dependency links without traversal", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock);
+    const active = await budget.admit(attempt("a"));
+    const activePath = active.attemptDirectory;
+    const link = win32.join(activePath, "dependency");
+    const target = win32.join(activePath, "pending", "package", "index.js");
+    const output = win32.join(activePath, "output.bin");
+    fileSystem.addDirectory(activePath);
+    fileSystem.addFile(link, 1n);
+    fileSystem.setReparsePoint(link);
+    fileSystem.setRealPath(link, target);
+    fileSystem.addFile(output, mebibyte);
+    fileSystem.onRealpath = (path) => {
+      if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is not published.");
+    };
+    let generations = 0;
+    let previousTemporary: string | undefined;
+    const enumerated: string[] = [];
+    fileSystem.onReadDirectory = (path) => {
+      enumerated.push(path);
+      if (key(path) !== key(activePath)) return;
+      generations += 1;
+      fileSystem.touch(activePath);
+      if (previousTemporary !== undefined) fileSystem.removeEntry(previousTemporary);
+      previousTemporary = win32.join(activePath, `temporary-${generations}.bin`);
+      fileSystem.addFile(previousTemporary, 1n);
+      fileSystem.setFileSize(output, BigInt(generations) * mebibyte);
+    };
+
+    const monitor = await active.startMonitoring(new AbortController().signal);
+    for (let tick = 0; tick < 4; tick += 1) await clock.tick();
+    await monitor.close();
+
+    expect(generations).toBe(6);
+    expect(monitor.signal.aborted).toBe(false);
+    expect(monitor.violation).toBeUndefined();
+    expect(
+      enumerated.every((path) => [key(workspaceRoot), key(activePath)].includes(key(path))),
+    ).toBe(true);
+    expect(fileSystem.has(target)).toBe(false);
+    await active.release();
+  });
+
+  it("samples repeated atomic file replacement and preserves its largest observed size", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock);
+    const active = await budget.admit(attempt("a"));
+    fileSystem.addDirectory(active.attemptDirectory);
+    const output = win32.join(active.attemptDirectory, "output.bin");
+    fileSystem.addFile(output, mebibyte);
+    let replacements = 0;
+    fileSystem.onRealpath = (path) => {
+      if (key(path) !== key(output)) return;
+      replacements += 1;
+      fileSystem.changeIdentity(output);
+      fileSystem.setFileSize(output, mebibyte);
+      throw fileSystemError("ENOENT", "File was replaced between metadata reads.");
+    };
+
+    const monitor = await active.startMonitoring(new AbortController().signal);
+    for (let tick = 0; tick < 4; tick += 1) {
+      fileSystem.setFileSize(output, BigInt(tick + 2) * mebibyte);
+      await clock.tick();
+      expect(monitor.violation).toBeUndefined();
+    }
+    fileSystem.setFileSize(output, 101n * mebibyte);
+    await clock.tick();
+
+    expect(replacements).toBe(6);
+    expect(monitor.signal.aborted).toBe(true);
+    await expect(monitor.close()).rejects.toMatchObject({
+      code: "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+    });
+    await active.release();
+  });
+
+  it.each(["outside", "other-attempt", "junction-ancestor"] as const)(
+    "rejects an unresolved active link with an unsafe %s target",
+    async (unsafe) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      fileSystem.addDirectory(activePath);
+      const link = win32.join(activePath, "dependency");
+      const alias = win32.join(activePath, "alias");
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(
+        link,
+        unsafe === "outside"
+          ? "D:\\outside\\missing.js"
+          : unsafe === "other-attempt"
+            ? win32.join(attempt("b"), "missing.js")
+            : win32.join(alias, "missing.js"),
+      );
+      if (unsafe === "junction-ancestor") {
+        fileSystem.addDirectory(alias);
+        fileSystem.setReparsePoint(alias);
+        fileSystem.setRealPath(alias, "D:\\outside");
+      }
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+
+      await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      expect(fileSystem.removed).toEqual([]);
+      await active.release();
+    },
+  );
+
+  it.each(["directory", "reparse", "parent-alias", "parent-identity"] as const)(
+    "rejects an active file ENOENT race with a %s replacement",
+    async (replacement) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      fileSystem.addDirectory(activePath);
+      const output = win32.join(activePath, "output.bin");
+      fileSystem.addFile(output, 1n);
+      fileSystem.onRealpath = (path) => {
+        if (key(path) !== key(output)) return;
+        if (replacement === "directory") fileSystem.addDirectory(output);
+        if (replacement === "reparse") fileSystem.setReparsePoint(output);
+        if (replacement === "parent-alias") fileSystem.setRealPath(activePath, "D:\\outside");
+        if (replacement === "parent-identity") fileSystem.changeIdentity(activePath);
+        throw fileSystemError("ENOENT", "Path was replaced during sampling.");
+      };
+
+      await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      await active.release();
+    },
+  );
+
+  it.each(["link", "attempt", "root"] as const)(
+    "rejects a changed %s identity while sampling an unresolved active link",
+    async (replacement) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      fileSystem.addDirectory(activePath);
+      const link = win32.join(activePath, "dependency");
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(link, win32.join(activePath, "missing.js"));
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+      fileSystem.onReadLink = () => {
+        fileSystem.changeIdentity(
+          replacement === "link" ? link : replacement === "attempt" ? activePath : workspaceRoot,
+        );
+      };
+
+      await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+        code: replacement === "root" ? "WORKSPACE_ROOT_UNSAFE" : "WORKSPACE_PATH_UNSAFE",
+      });
+      await active.release();
+    },
+  );
+
+  it("keeps dangling-link sampling bounded by the entry cap and original deadline", async () => {
+    for (const violation of ["ACCOUNTING_LIMIT_EXCEEDED", "ACCOUNTING_TIMED_OUT"] as const) {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 2 });
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      fileSystem.addDirectory(activePath);
+      const link = win32.join(activePath, "dependency");
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(link, win32.join(activePath, "missing", "package.js"));
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+      const monitor = await active.startMonitoring(new AbortController().signal);
+      if (violation === "ACCOUNTING_LIMIT_EXCEEDED") {
+        fileSystem.addFile(win32.join(activePath, "extra.bin"), 1n);
+      } else {
+        fileSystem.onReadLink = () => clock.advance(30_001);
+      }
+
+      await clock.tick();
+      expect(monitor.signal.aborted).toBe(true);
+      await expect(monitor.close()).rejects.toMatchObject({ code: violation });
+      await active.release();
+    }
+  });
+
+  it.each(["parent-alias", "parent-identity", "link-metadata"] as const)(
+    "rejects a dangling active link after observed %s changes",
+    async (replacement) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      const parent = win32.join(activePath, "packages");
+      const link = win32.join(parent, "dependency");
+      fileSystem.addDirectory(activePath);
+      fileSystem.addDirectory(parent);
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(link, win32.join(activePath, "missing.js"));
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+      fileSystem.onReadLink = () => {
+        if (replacement === "parent-alias") fileSystem.setRealPath(parent, "D:\\outside");
+        if (replacement === "parent-identity") fileSystem.changeIdentity(parent);
+        if (replacement === "link-metadata") fileSystem.touch(link);
+      };
+
+      await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      await active.release();
+    },
+  );
+
+  it.each(["probe-limit", "deadline"] as const)(
+    "bounds missing ancestors of a single active link by the %s",
+    async (limit) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      const link = win32.join(activePath, "dependency");
+      const missing = win32.join(activePath, "missing");
+      fileSystem.addDirectory(activePath);
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(
+        link,
+        limit === "probe-limit"
+          ? win32.join(missing, ...Array<string>(64).fill("nested"), "package.js")
+          : win32.join(missing, "package.js"),
+      );
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+      let ancestorReads = 0;
+      fileSystem.onLstat = (path) => {
+        if (!key(path).startsWith(`${key(missing)}\\`) && key(path) !== key(missing)) return;
+        ancestorReads += 1;
+        if (limit === "deadline" && key(path) === key(missing)) clock.advance(30_001);
+      };
+
+      await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+        code: limit === "probe-limit" ? "ACCOUNTING_LIMIT_EXCEEDED" : "ACCOUNTING_TIMED_OUT",
+      });
+      expect(ancestorReads).toBe(limit === "probe-limit" ? 64 : 2);
+      await active.release();
+    },
+  );
+
+  it("keeps inactive unresolved links and adapters without readLink on strict validation", async () => {
+    for (const activeSampling of [false, true]) {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const activePath = attempt("a");
+      const active = activeSampling ? await budget.admit(activePath) : undefined;
+      fileSystem.addDirectory(activePath);
+      const link = win32.join(activePath, "dependency");
+      fileSystem.addFile(link, 1n);
+      fileSystem.setReparsePoint(link);
+      fileSystem.setRealPath(link, win32.join(activePath, "missing.js"));
+      fileSystem.onRealpath = (path) => {
+        if (key(path) === key(link)) throw fileSystemError("ENOENT", "Link target is missing.");
+      };
+      if (activeSampling) Object.defineProperty(fileSystem, "readLink", { value: undefined });
+
+      await expect(
+        active === undefined
+          ? budget.admit(attempt("b"))
+          : active.startMonitoring(new AbortController().signal),
+      ).rejects.toMatchObject({ code: "SNAPSHOT_UNSTABLE" });
+      expect(fileSystem.removed).toEqual([]);
+      await active?.release();
+    }
+  });
+
+  it("overlaps four metadata requests and drains the whole batch before starting another", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    const active = await budget.admit(attempt("a"));
+    const activePath = active.attemptDirectory;
+    fileSystem.addDirectory(activePath);
+    const files = Array.from({ length: 8 }, (_, index) => win32.join(activePath, `file-${index}`));
+    for (const file of files) fileSystem.addFile(file, 1n);
+    const firstMetadata = deferredVoid();
+    const lastMetadata = deferredVoid();
+    const lstat = fileSystem.lstat.bind(fileSystem);
+    const realpath = fileSystem.realpath.bind(fileSystem);
+    let pending = 0;
+    let maximumPending = 0;
+    let started = 0;
+    let completed = 0;
+    let lastStarted = false;
+    const observed = new Set<string>();
+    const begin = (): void => {
+      pending += 1;
+      maximumPending = Math.max(maximumPending, pending);
+    };
+    fileSystem.lstat = async (path) => {
+      if (!files.includes(path)) return lstat(path);
+      begin();
+      started += 1;
+      observed.add(path);
+      try {
+        await firstMetadata.promise;
+        return await lstat(path);
+      } finally {
+        pending -= 1;
+      }
+    };
+    fileSystem.realpath = async (path) => {
+      if (!files.includes(path)) return realpath(path);
+      begin();
+      try {
+        if (path === files[7]) {
+          lastStarted = true;
+          await lastMetadata.promise;
+        }
+        return await realpath(path);
+      } finally {
+        pending -= 1;
+        completed += 1;
+      }
+    };
+
+    const starting = active.startMonitoring(new AbortController().signal);
+    try {
+      await waitForCondition(() => started === 4);
+      expect(pending).toBe(4);
+      firstMetadata.resolve();
+      await waitForCondition(() => lastStarted && completed === 3);
+      expect(started).toBe(4);
+      expect(pending).toBe(1);
+    } finally {
+      firstMetadata.resolve();
+      lastMetadata.resolve();
+    }
+    const monitor = await starting;
+    expect(started).toBe(8);
+    expect(observed.size).toBe(8);
+    expect(maximumPending).toBe(4);
+    expect(pending).toBe(0);
+    await monitor.close();
+    await active.release();
+  });
+
+  it("drains sibling I/O before releasing the queue and preserves unsafe errors over rename retries", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    const existing = attempt("a");
+    fileSystem.addDirectory(existing);
+    const later = win32.join(existing, "a-later");
+    const transient = win32.join(existing, "b-transient");
+    const unsafe = win32.join(existing, "c-unsafe");
+    const held = [win32.join(existing, "d-held"), win32.join(existing, "e-held")];
+    for (const file of [later, transient, unsafe, ...held]) fileSystem.addFile(file, 1n);
+    fileSystem.missNextLstats(transient, 1);
+    const gate = deferredVoid();
+    const lstat = fileSystem.lstat.bind(fileSystem);
+    const realpath = fileSystem.realpath.bind(fileSystem);
+    let heldReads = 0;
+    let unsafeReads = 0;
+    let laterRead = false;
+    fileSystem.lstat = async (path) => {
+      if (path === later) laterRead = true;
+      if (held.includes(path)) {
+        heldReads += 1;
+        await gate.promise;
+      }
+      return lstat(path);
+    };
+    fileSystem.realpath = async (path) => {
+      if (path === unsafe && ++unsafeReads === 1) return "D:\\outside";
+      return realpath(path);
+    };
+    let settled = false;
+    const admission = budget.admit(attempt("b"));
+    void admission.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    let queued: Promise<boolean> | undefined;
+    try {
+      await waitForCondition(() => heldReads === 2 && unsafeReads === 1);
+      const ownershipChecks = fileSystem.ownershipChecks;
+      queued = budget.hasCapacity();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(fileSystem.ownershipChecks).toBe(ownershipChecks);
+      expect(laterRead).toBe(false);
+    } finally {
+      gate.resolve();
+    }
+    await expect(admission).rejects.toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
+    await expect(queued).resolves.toBe(true);
+    expect(heldReads).toBe(4);
+  });
+
+  it.each(["root", "attempt", "escape"] as const)(
+    "preserves the %s safety check after concurrent metadata settles",
+    async (unsafe) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      fileSystem.addDirectory(activePath);
+      const monitor = await active.startMonitoring(new AbortController().signal);
+      const files = Array.from({ length: 4 }, (_, index) =>
+        win32.join(activePath, `file-${index}`),
+      );
+      for (const file of files) fileSystem.addFile(file, 1n);
+      const gate = deferredVoid();
+      const lstat = fileSystem.lstat.bind(fileSystem);
+      let started = 0;
+      fileSystem.lstat = async (path) => {
+        if (files.includes(path)) {
+          started += 1;
+          await gate.promise;
+        }
+        return lstat(path);
+      };
+      const checking = clock.tick();
+      try {
+        await waitForCondition(() => started === 4);
+        if (unsafe === "root") fileSystem.changeIdentity(workspaceRoot);
+        else if (unsafe === "attempt") fileSystem.changeIdentity(activePath);
+        else fileSystem.setRealPath(files[0] as string, "D:\\outside");
+      } finally {
+        gate.resolve();
+      }
+      await checking;
+      await expect(monitor.close()).rejects.toMatchObject({
+        code: unsafe === "root" ? "WORKSPACE_ROOT_UNSAFE" : "WORKSPACE_PATH_UNSAFE",
+      });
+      await active.release();
+    },
+  );
+
+  it.each(["deadline", "cancellation"] as const)(
+    "drains started metadata after %s without changing its I/O deadline",
+    async (interruption) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock);
+      const existing = attempt("a");
+      fileSystem.addDirectory(existing);
+      const files = Array.from({ length: 4 }, (_, index) => win32.join(existing, `file-${index}`));
+      for (const file of files) fileSystem.addFile(file, 1n);
+      const gate = deferredVoid();
+      const lstat = fileSystem.lstat.bind(fileSystem);
+      const contexts: (WorkspaceDiskIoContext | undefined)[] = [];
+      fileSystem.lstat = async (path, context?: WorkspaceDiskIoContext) => {
+        if (files.includes(path)) {
+          contexts.push(context);
+          await gate.promise;
+        }
+        return lstat(path);
+      };
+      const controller = new AbortController();
+      let settled = false;
+      const admission = budget.admit(attempt("b"), controller.signal);
+      void admission.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      try {
+        await waitForCondition(() => contexts.length === 4);
+        if (interruption === "deadline") clock.advance(30_001);
+        else controller.abort(new Error("The lease ended during metadata I/O."));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(contexts.map((context) => context?.deadlineEpochMilliseconds)).toEqual([
+          40_000n,
+          40_000n,
+          40_000n,
+          40_000n,
+        ]);
+        expect(contexts.every((context) => context?.signal === controller.signal)).toBe(true);
+      } finally {
+        gate.resolve();
+      }
+      await expect(admission).rejects.toMatchObject({
+        code: interruption === "deadline" ? "ACCOUNTING_TIMED_OUT" : "ABORTED",
+      });
+    },
+  );
+
+  it.each(["stable", "identity", "reparse"] as const)(
+    "does not expose children before their %s parent finishes validation",
+    async (parentChange) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const active = await budget.admit(attempt("a"));
+      const activePath = active.attemptDirectory;
+      const parent = win32.join(activePath, "parent");
+      const child = win32.join(parent, "child.bin");
+      fileSystem.addDirectory(activePath);
+      fileSystem.addDirectory(parent);
+      fileSystem.addFile(child, 1n);
+      const gate = deferredVoid();
+      const lstat = fileSystem.lstat.bind(fileSystem);
+      let parentReads = 0;
+      let childRead = false;
+      fileSystem.lstat = async (path) => {
+        if (path === parent && ++parentReads === 2) await gate.promise;
+        if (path === child) childRead = true;
+        return lstat(path);
+      };
+      const starting = active.startMonitoring(new AbortController().signal);
+      try {
+        await waitForCondition(() => parentReads === 2);
+        expect(childRead).toBe(false);
+        if (parentChange === "identity") fileSystem.changeIdentity(parent);
+        if (parentChange === "reparse") fileSystem.setReparsePoint(parent);
+      } finally {
+        gate.resolve();
+      }
+      if (parentChange === "stable") {
+        const monitor = await starting;
+        expect(childRead).toBe(true);
+        await monitor.close();
+      } else {
+        await expect(starting).rejects.toMatchObject({ code: "WORKSPACE_PATH_UNSAFE" });
+        expect(childRead).toBe(false);
+      }
+      await active.release();
+    },
+  );
+
+  it("uses the updated global entry allowance for sibling directories after parallel metadata", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem, undefined, { maximumAccountingEntries: 7 });
+    const active = await budget.admit(attempt("a"));
+    const activePath = active.attemptDirectory;
+    fileSystem.addDirectory(activePath);
+    const directories = [win32.join(activePath, "first"), win32.join(activePath, "second")];
+    for (const directory of directories) {
+      fileSystem.addDirectory(directory);
+      for (let index = 0; index < 3; index += 1) {
+        fileSystem.addFile(win32.join(directory, `file-${index}`), 1n);
+      }
+    }
+    const listing = fileSystem.readDirectoryBounded.bind(fileSystem);
+    const allowances: number[] = [];
+    fileSystem.readDirectoryBounded = async (path, maximumEntries) => {
+      if (directories.includes(path)) allowances.push(maximumEntries);
+      return listing(path, maximumEntries);
+    };
+
+    await expect(active.startMonitoring(new AbortController().signal)).rejects.toMatchObject({
+      code: "ACCOUNTING_LIMIT_EXCEEDED",
+    });
+    expect(allowances).toEqual([4, 1]);
+    await active.release();
+  });
+
+  it("accumulates every parallel file sample at the exact byte and entry boundaries", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 9 });
+    const active = await budget.admit(attempt("a"));
+    const activePath = active.attemptDirectory;
+    fileSystem.addDirectory(activePath);
+    const files = Array.from({ length: 4 }, (_, index) => {
+      const directory = win32.join(activePath, `directory-${index}`);
+      fileSystem.addDirectory(directory);
+      const file = win32.join(directory, "file.bin");
+      fileSystem.addFile(file, 25n * mebibyte);
+      return file;
+    });
+    const monitor = await active.startMonitoring(new AbortController().signal);
+    expect(monitor.violation).toBeUndefined();
+    fileSystem.setFileSize(files[0] as string, 25n * mebibyte + 1n);
+    await clock.tick();
+
+    await expect(monitor.close()).rejects.toMatchObject({
+      code: "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+    });
+    await active.release();
+  });
+
+  it("shares one bounded workspace scan across four monitor intervals", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock, { totalWorkspaceDiskBytes: 400n * mebibyte });
+    const reservations = [];
+    for (const name of ["a", "b", "c", "d"]) {
+      const reservation = await budget.admit(attempt(name));
+      fileSystem.addDirectory(reservation.attemptDirectory);
+      reservations.push(reservation);
+    }
+    const monitors = await Promise.all(
+      reservations.map((reservation) => reservation.startMonitoring(new AbortController().signal)),
+    );
+    let rootReads = 0;
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) !== key(workspaceRoot)) return;
+      rootReads += 1;
+      clock.advance(10_000);
+    };
+
+    await clock.tick();
+
+    expect(rootReads).toBe(1);
+    expect(monitors.every((monitor) => monitor.violation === undefined)).toBe(true);
+    fileSystem.onReadDirectory = undefined;
+    await Promise.all(monitors.map((monitor) => monitor.close()));
+    await Promise.all(reservations.map((reservation) => reservation.release()));
+  });
+
+  it("applies each reservation's own quota verdict to the shared snapshot", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const budget = createBudget(fileSystem, clock);
+    const first = await budget.admit(attempt("a"));
+    const second = await budget.admit(attempt("b"));
+    fileSystem.addDirectory(first.attemptDirectory);
+    fileSystem.addDirectory(second.attemptDirectory);
+    const monitors = await Promise.all(
+      [first, second].map((reservation) =>
+        reservation.startMonitoring(new AbortController().signal),
+      ),
+    );
+    fileSystem.addFile(win32.join(first.attemptDirectory, "large.bin"), 101n * mebibyte);
+    let rootReads = 0;
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) === key(workspaceRoot)) rootReads += 1;
+    };
+
+    await clock.tick();
+
+    expect(rootReads).toBe(1);
+    expect(monitors[0]?.violation).toMatchObject({ code: "CURRENT_ATTEMPT_LIMIT_EXCEEDED" });
+    expect(monitors[1]?.violation).toMatchObject({ code: "EXISTING_WORKSPACE_UNHEALTHY" });
+    await Promise.allSettled(monitors.map((monitor) => monitor.close()));
+    await first.release();
+    await second.release();
+  });
+
+  it("cancels one shared-scan waiter without cancelling another reservation", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    const first = await budget.admit(attempt("a"));
+    const second = await budget.admit(attempt("b"));
+    fileSystem.addDirectory(first.attemptDirectory);
+    fileSystem.addDirectory(second.attemptDirectory);
+    const previousOwnershipChecks = fileSystem.ownershipChecks;
+    let releaseOwnership!: () => void;
+    fileSystem.ownershipGate = new Promise<void>((resolve) => {
+      releaseOwnership = resolve;
+    });
+    let rootReads = 0;
+    fileSystem.onReadDirectory = (path) => {
+      if (key(path) === key(workspaceRoot)) rootReads += 1;
+    };
+    const controller = new AbortController();
+    const cancelled = first.startMonitoring(controller.signal);
+    await waitForCondition(() => fileSystem.ownershipChecks > previousOwnershipChecks);
+    const healthy = second.startMonitoring(new AbortController().signal);
+    controller.abort(new Error("Only the first lease ended."));
+    await expect(cancelled).rejects.toMatchObject({ code: "ABORTED" });
+    releaseOwnership();
+
+    const monitor = await healthy;
+    expect(rootReads).toBe(1);
+    expect(monitor.violation).toBeUndefined();
+    await monitor.close();
+    await first.release();
+    await second.release();
+  });
+
+  it("starts a fresh final scan after an older shared scan already sampled the attempt", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const budget = createBudget(fileSystem);
+    const first = await budget.admit(attempt("a"));
+    const second = await budget.admit(attempt("b"));
+    fileSystem.addDirectory(first.attemptDirectory);
+    fileSystem.addDirectory(second.attemptDirectory);
+    const output = win32.join(first.attemptDirectory, "output.bin");
+    fileSystem.addFile(output, mebibyte);
+    const firstMonitor = await first.startMonitoring(new AbortController().signal);
+    const readDirectory = fileSystem.readDirectoryBounded.bind(fileSystem);
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let paused = false;
+    let rootReads = 0;
+    fileSystem.readDirectoryBounded = async (path, maximumEntries) => {
+      const result = await readDirectory(path, maximumEntries);
+      if (key(path) === key(workspaceRoot)) rootReads += 1;
+      if (!paused && key(path) === key(second.attemptDirectory)) {
+        paused = true;
+        await readGate;
+      }
+      return result;
+    };
+    const secondStart = second.startMonitoring(new AbortController().signal);
+    await waitForCondition(() => paused);
+    fileSystem.setFileSize(output, 101n * mebibyte);
+    const closing = firstMonitor.close();
+    const closeExpectation = expect(closing).rejects.toMatchObject({
+      code: "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+    });
+    releaseRead();
+
+    const secondMonitor = await secondStart;
+    await closeExpectation;
+    expect(rootReads).toBe(2);
+    await secondMonitor.close().catch(() => undefined);
+    await first.release();
+    await second.release();
   });
 
   it("retains the entry cap while an active attempt changes directory timestamps", async () => {
@@ -1055,6 +1845,69 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await reservation.release();
   });
 
+  it("recovers fresh startup orphans in bounded batches before restoring full capacity", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const clock = new FakeWorkspaceDiskClock();
+    const firstOrphan = attempt("a");
+    const secondOrphan = attempt("b");
+    fileSystem.addDirectory(firstOrphan, clock.now - 500n);
+    fileSystem.addFile(win32.join(firstOrphan, "interrupted.bin"), 1n);
+    fileSystem.addDirectory(secondOrphan, clock.now - 500n);
+    fileSystem.addFile(win32.join(secondOrphan, "interrupted.bin"), 2n);
+    const budget = createBudget(fileSystem, clock, { orphanScanLimit: 1 });
+
+    await expect(budget.recoverOrphans()).resolves.toEqual({
+      scanned: 2,
+      removed: 2,
+      retained: 0,
+      active: 0,
+      removedBytes: 3n,
+      limitReached: false,
+    });
+    expect(fileSystem.has(firstOrphan)).toBe(false);
+    expect(fileSystem.has(secondOrphan)).toBe(false);
+    const admitted = await Promise.all([budget.admit(attempt("c")), budget.admit(attempt("d"))]);
+    expect(admitted).toHaveLength(2);
+    await Promise.all(admitted.map((reservation) => reservation.release()));
+  });
+
+  it("refuses startup recovery after admission or loss of exclusive ownership", async () => {
+    const activeFileSystem = new FakeWorkspaceDiskFileSystem();
+    const activeBudget = createBudget(activeFileSystem);
+    const active = await activeBudget.admit(attempt("a"));
+    activeFileSystem.addDirectory(active.attemptDirectory);
+    await expect(activeBudget.recoverOrphans()).rejects.toMatchObject({
+      code: "EXCLUSIVE_WORKSPACE_OWNERSHIP_LOST",
+    });
+    expect(activeFileSystem.removed).toEqual([]);
+    await active.release();
+
+    const unowned = new FakeWorkspaceDiskFileSystem();
+    unowned.addDirectory(attempt("b"));
+    unowned.exclusiveOwnership = false;
+    await expect(createBudget(unowned).recoverOrphans()).rejects.toMatchObject({
+      code: "EXCLUSIVE_WORKSPACE_OWNERSHIP_LOST",
+    });
+    expect(unowned.removed).toEqual([]);
+  });
+
+  it("keeps startup recovery path checks strict for fresh orphans", async () => {
+    for (const unsafe of ["reparse", "redirected"] as const) {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const recent = attempt("a");
+      fileSystem.addDirectory(recent, clock.now);
+      if (unsafe === "reparse") fileSystem.setReparsePoint(recent);
+      else fileSystem.setRealPath(recent, "D:\\outside");
+
+      await expect(createBudget(fileSystem, clock).recoverOrphans()).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      expect(fileSystem.removed).toEqual([]);
+      expect(fileSystem.has(recent)).toBe(true);
+    }
+  });
+
   it("removes only retained-age orphan attempts and reports bigint reclaimed bytes", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
     const clock = new FakeWorkspaceDiskClock();
@@ -1208,6 +2061,14 @@ function key(path: string): string {
 
 function fileSystemError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
+}
+
+function deferredVoid(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
 }
 
 async function waitForCondition(condition: () => boolean): Promise<void> {

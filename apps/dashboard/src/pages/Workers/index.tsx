@@ -1,24 +1,30 @@
 import {
   KeyOutlined,
   PlusOutlined,
-  SafetyCertificateOutlined,
+  ReloadOutlined,
+  SearchOutlined,
   StopOutlined,
 } from "@ant-design/icons";
 import type { ActionType, ProColumns } from "@ant-design/pro-components";
-import { PageContainer, ProTable } from "@ant-design/pro-components";
+import { ProTable } from "@ant-design/pro-components";
 import {
+  Alert,
   Button,
+  Card,
   Form,
   Input,
   Modal,
   message,
   Progress,
+  Select,
   Space,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { OperatorAccessGate } from "@/components/OperatorAccess";
+import { PageHeader } from "@/components/PageHeader";
 import { StatusTag } from "@/components/StatusTag";
 import { reviewControl, type WorkerCredentialSecret } from "@/services/review-control";
 import { asFilterValue, asSearchValue } from "@/utils/table";
@@ -38,7 +44,9 @@ import {
   MAX_WORKER_INVENTORY_PAGE_SIZE,
   mergeWorkerInventory,
   paginateWorkerInventory,
+  type WorkerInventoryAuthState,
   type WorkerInventoryRow,
+  type WorkerInventoryRuntimeState,
   type WorkerInventorySnapshotCache,
 } from "./worker-inventory";
 import "./index.css";
@@ -54,7 +62,21 @@ interface RevealedCredential {
   secret: WorkerCredentialSecret;
 }
 
+interface WorkerListParams {
+  search?: string;
+  authState?: WorkerInventoryAuthState;
+  runtimeState?: WorkerInventoryRuntimeState;
+}
+
 export default function WorkersPage() {
+  return (
+    <OperatorAccessGate platformOnly>
+      <WorkersContent />
+    </OperatorAccessGate>
+  );
+}
+
+function WorkersContent() {
   const actionRef = useRef<ActionType>(null);
   const confirmationGateRef = useRef<SynchronousGate>({ active: false });
   const credentialMutationGateRef = useRef<SynchronousGate>({ active: false });
@@ -71,10 +93,23 @@ export default function WorkersPage() {
   const inventoryCache = inventoryCacheRef.current;
   const [createForm] = Form.useForm<CreateWorkerFields>();
   const [createOpen, setCreateOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [accessFilter, setAccessFilter] = useState<WorkerInventoryAuthState | "all">("all");
+  const [runtimeFilter, setRuntimeFilter] = useState<WorkerInventoryRuntimeState | "all">("all");
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
   const [mutationKey, setMutationKey] = useState<MutationKey | null>(null);
   const [revealedCredential, setRevealedCredential] = useState<RevealedCredential | null>(null);
   const [messageApi, messageContext] = message.useMessage();
   const [modalApi, modalContext] = Modal.useModal();
+  const tableParams = useMemo<WorkerListParams>(
+    () => ({
+      search: asSearchValue(search),
+      authState: accessFilter === "all" ? undefined : accessFilter,
+      runtimeState: runtimeFilter === "all" ? undefined : runtimeFilter,
+    }),
+    [search, accessFilter, runtimeFilter],
+  );
 
   const reloadInventory = () => {
     inventoryCache.invalidate();
@@ -114,7 +149,7 @@ export default function WorkersPage() {
         afterClose: releaseConfirmation,
         autoFocusButton: "cancel",
         content: (
-          <Space direction="vertical" size={6}>
+          <Space orientation="vertical" size={6}>
             <Typography.Text>{row.displayName}</Typography.Text>
             <Typography.Text className="mono" type="secondary">
               {row.workerNodeId}
@@ -162,7 +197,7 @@ export default function WorkersPage() {
         afterClose: releaseConfirmation,
         autoFocusButton: "cancel",
         content: (
-          <Space direction="vertical" size={6}>
+          <Space orientation="vertical" size={6}>
             <Typography.Text>{row.displayName}</Typography.Text>
             <Typography.Text className="mono" type="secondary">
               {row.workerNodeId}
@@ -201,30 +236,26 @@ export default function WorkersPage() {
 
   const columns: ProColumns<WorkerInventoryRow>[] = [
     {
-      title: "Search",
-      dataIndex: "search",
-      hideInTable: true,
-      fieldProps: { placeholder: "Name, node, instance, or location" },
-    },
-    {
       title: "Worker",
       dataIndex: "workerNodeId",
       width: 280,
       search: false,
       render: (_, row) => (
-        <Space className="worker-inventory__identity" direction="vertical" size={0}>
-          <Typography.Text strong>{row.displayName}</Typography.Text>
-          <Tooltip title={row.workerNodeId}>
-            <Typography.Text className="worker-inventory__node-id mono">
-              {row.workerNodeId}
-            </Typography.Text>
-          </Tooltip>
-          {row.runtime === undefined ? null : (
-            <Typography.Text className="worker-inventory__instance-id mono">
-              {row.runtime.instanceId}
-            </Typography.Text>
-          )}
-        </Space>
+        <div className="worker-inventory__identity">
+          <div className="worker-inventory__name">
+            <Typography.Text strong>{row.displayName}</Typography.Text>
+            <Tooltip title={row.workerNodeId}>
+              <Typography.Text className="worker-inventory__node-id mono">
+                {row.workerNodeId}
+              </Typography.Text>
+            </Tooltip>
+            {row.runtime === undefined ? null : (
+              <Typography.Text className="worker-inventory__instance-id mono">
+                {row.runtime.instanceId}
+              </Typography.Text>
+            )}
+          </div>
+        </div>
       ),
     },
     {
@@ -274,6 +305,8 @@ export default function WorkersPage() {
             format={() => `${row.runtime?.activeSlots}/${row.runtime?.maxSlots}`}
             percent={Math.round((row.runtime.activeSlots / row.runtime.maxSlots) * 100)}
             size="small"
+            status="normal"
+            strokeColor="var(--app-accent)"
           />
         ),
     },
@@ -306,7 +339,7 @@ export default function WorkersPage() {
             {row.runtime === undefined ? "—" : "Idle"}
           </Typography.Text>
         ) : (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             {row.runtime.currentJobs.map((job) => (
               <Typography.Text className="mono" key={job}>
                 {job}
@@ -399,75 +432,152 @@ export default function WorkersPage() {
   ];
 
   return (
-    <PageContainer
-      className="operational-page"
-      header={{
-        title: "Workers",
-        subTitle: "Registration credentials and Windows worker runtime state",
-      }}
-    >
+    <section aria-labelledby="workers-page-title" className="workers-page">
       {messageContext}
       {modalContext}
 
-      <ProTable<WorkerInventoryRow>
-        actionRef={actionRef}
-        cardBordered={false}
-        className="operational-table"
-        columns={columns}
-        columnsState={{
-          defaultValue: {
-            capabilities: { show: false },
-            credentialUpdatedAt: { show: false },
-            diskFreeGb: { show: false },
-            lastHeartbeatAt: { show: false },
-            version: { show: false },
-          },
-          persistenceKey: "agentic-review:workers:columns:v1",
-          persistenceType: "localStorage",
-        }}
-        headerTitle={
-          <Space size={8}>
-            <SafetyCertificateOutlined />
-            <span>Worker access roster</span>
+      <PageHeader
+        eyebrow="Operations"
+        title="Workers"
+        titleId="workers-page-title"
+        description="Manage workers, capacity, and access."
+        actions={
+          <Space wrap size={8}>
+            <Button icon={<ReloadOutlined />} loading={inventoryLoading} onClick={reloadInventory}>
+              Refresh
+            </Button>
+            <Button
+              disabled={mutationKey !== null}
+              icon={<PlusOutlined />}
+              onClick={() => setCreateOpen(true)}
+              type="primary"
+            >
+              Register worker
+            </Button>
           </Space>
         }
-        options={{ density: true, fullScreen: true, reload: reloadInventory, setting: true }}
-        pagination={{
-          defaultPageSize: DEFAULT_WORKER_INVENTORY_PAGE_SIZE,
-          pageSizeOptions: [50, 100, MAX_WORKER_INVENTORY_PAGE_SIZE],
-          showSizeChanger: true,
-        }}
-        request={async (params) => {
-          const rows = filterWorkerInventory(await inventoryCache.load(), {
-            search: asSearchValue(params.search),
-            authState: asFilterValue(params.authState),
-            runtimeState: asFilterValue(params.runtimeState),
-          });
-          const page = paginateWorkerInventory(rows, params.current, params.pageSize);
-          return { data: page.items, success: true, total: page.total };
-        }}
-        rowKey="workerNodeId"
-        scroll={{ x: true }}
-        search={{ labelWidth: "auto" }}
-        size="small"
-        toolBarRender={() => [
-          <Button
-            disabled={mutationKey !== null}
-            icon={<PlusOutlined />}
-            key="register"
-            onClick={() => setCreateOpen(true)}
-            type="primary"
-          >
-            Register worker
-          </Button>,
-        ]}
       />
+
+      <Card className="workers-panel">
+        {inventoryError !== null && (
+          <Alert
+            className="workers-error"
+            description={inventoryError}
+            title="Worker inventory could not be refreshed"
+            showIcon
+            type="error"
+          />
+        )}
+        <ProTable<WorkerInventoryRow, WorkerListParams>
+          actionRef={actionRef}
+          cardProps={false}
+          className="workers-table"
+          columns={columns}
+          columnsState={{
+            defaultValue: {
+              capabilities: { show: false },
+              credentialUpdatedAt: { show: false },
+              diskFreeGb: { show: false },
+              lastHeartbeatAt: { show: false },
+              version: { show: false },
+            },
+            persistenceKey: "agentic-review:workers:columns:v1",
+            persistenceType: "localStorage",
+          }}
+          debounceTime={180}
+          headerTitle={false}
+          onLoadingChange={(loading) => {
+            setInventoryLoading(
+              loading === true || (typeof loading === "object" && loading.spinning !== false),
+            );
+          }}
+          onRequestError={(error) => {
+            setInventoryError(
+              workerMutationErrorText(error, "Refresh the worker list to try again."),
+            );
+          }}
+          options={{ density: false, fullScreen: false, reload: false, setting: true }}
+          pagination={{
+            defaultPageSize: DEFAULT_WORKER_INVENTORY_PAGE_SIZE,
+            hideOnSinglePage: true,
+            pageSizeOptions: [50, 100, MAX_WORKER_INVENTORY_PAGE_SIZE],
+            showSizeChanger: true,
+            showTotal: (total) => `${total} ${total === 1 ? "worker" : "workers"}`,
+          }}
+          params={tableParams}
+          request={async (params) => {
+            setInventoryError(null);
+            const rows = filterWorkerInventory(await inventoryCache.load(), {
+              search: asSearchValue(params.search),
+              authState: asFilterValue(params.authState),
+              runtimeState: asFilterValue(params.runtimeState),
+            });
+            const page = paginateWorkerInventory(rows, params.current, params.pageSize);
+            return { data: page.items, success: true, total: page.total };
+          }}
+          rowKey="workerNodeId"
+          scroll={{ x: true }}
+          search={false}
+          size="middle"
+          toolbar={{
+            search: (
+              <div className="workers-filters">
+                <Input
+                  allowClear
+                  aria-label="Search workers"
+                  className="workers-search"
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Name, node, instance, or location"
+                  prefix={<SearchOutlined aria-hidden />}
+                  value={search}
+                />
+                <div className="workers-filter">
+                  <label htmlFor="workers-access-filter">Access</label>
+                  <Select<WorkerInventoryAuthState | "all">
+                    aria-label="Filter workers by access"
+                    className="workers-access-filter"
+                    id="workers-access-filter"
+                    onChange={setAccessFilter}
+                    options={[
+                      { value: "all", label: "All access" },
+                      { value: "pending", label: "Pending" },
+                      { value: "active", label: "Active" },
+                      { value: "revoked", label: "Revoked" },
+                      { value: "unknown", label: "Unknown" },
+                    ]}
+                    value={accessFilter}
+                  />
+                </div>
+                <div className="workers-filter">
+                  <label htmlFor="workers-runtime-filter">Runtime</label>
+                  <Select<WorkerInventoryRuntimeState | "all">
+                    aria-label="Filter workers by runtime"
+                    className="workers-runtime-filter"
+                    id="workers-runtime-filter"
+                    onChange={setRuntimeFilter}
+                    options={[
+                      { value: "all", label: "All runtime" },
+                      { value: "online", label: "Online" },
+                      { value: "draining", label: "Draining" },
+                      { value: "offline", label: "Offline" },
+                      { value: "disabled", label: "Disabled" },
+                      { value: "not_connected", label: "Not connected" },
+                    ]}
+                    value={runtimeFilter}
+                  />
+                </div>
+              </div>
+            ),
+          }}
+        />
+      </Card>
 
       <Modal
         cancelButtonProps={{ disabled: mutationKey === "create" }}
         confirmLoading={mutationKey === "create"}
+        className="workers-register-modal"
         destroyOnHidden
-        maskClosable={false}
+        mask={{ closable: false }}
         okText="Create credential"
         onCancel={() => {
           if (mutationKey !== "create") {
@@ -478,6 +588,7 @@ export default function WorkersPage() {
         onOk={() => createForm.submit()}
         open={createOpen}
         title="Register a Windows worker"
+        width={480}
       >
         <Typography.Paragraph type="secondary">
           The worker starts in pending state. Its one-time token is shown after the credential is
@@ -525,6 +636,6 @@ export default function WorkersPage() {
         onCopySuccess={() => messageApi.success("Token copied to the clipboard.")}
         operation={revealedCredential?.operation ?? "created"}
       />
-    </PageContainer>
+    </section>
   );
 }

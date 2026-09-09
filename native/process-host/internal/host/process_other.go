@@ -14,6 +14,9 @@ func newProcessLauncher() processLauncher {
 	return unsupportedLauncher{}
 }
 
-func (unsupportedLauncher) Launch(protocol.ProcessLaunchSpec, protocol.EffectiveLimits) (launchedProcess, error) {
+func (unsupportedLauncher) Launch(spec protocol.ProcessLaunchSpec, _ protocol.EffectiveLimits) (launchedProcess, error) {
+	if spec.CaptureProcessIdentity {
+		return nil, errProcessIdentityUnavailable
+	}
 	return nil, errors.New("ProcessHost process execution is supported only on Windows")
 }

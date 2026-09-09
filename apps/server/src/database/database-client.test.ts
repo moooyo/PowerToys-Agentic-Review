@@ -7,7 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
   IssueTriageV1ModelOutputSchema,
+  IssueTriageV2ModelOutputSchema,
   PrReviewPlanV1ModelOutputSchema,
+  PrReviewPlanV2ModelOutputSchema,
 } from "@agentic-review/codex";
 import {
   type JobExecutionTemplate,
@@ -22,8 +24,12 @@ import {
   DatabaseClient,
   type DatabaseWorkerTransport,
 } from "../../dist/database/database-client.js";
+import { createJobAdmissionInTransaction } from "../../dist/database/job-admission.js";
 import { runMigrations } from "../../dist/database/migrations.js";
-import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
+import type {
+  IngestSchedulingEventInput,
+  ListWorkerNodeCredentialsInput,
+} from "../../dist/database/protocol.js";
 import {
   databaseInitializationMarkerContent,
   databaseInitializationMarkerPath,
@@ -512,7 +518,11 @@ interface WorkerNodeCredentialRow {
 
 const fixtures: DatabaseFixture[] = [];
 
-const createFixture = async (seedLeaseJob = true): Promise<DatabaseFixture> => {
+const createFixture = async (
+  seedLeaseJob = true,
+  seedTemplate: JobExecutionTemplate = executionTemplate,
+  admittedFixture = false,
+): Promise<DatabaseFixture> => {
   const directory = await mkdtemp(join(tmpdir(), "agentic-review-server-"));
   const databasePath = join(directory, "server.sqlite");
 
@@ -522,6 +532,7 @@ const createFixture = async (seedLeaseJob = true): Promise<DatabaseFixture> => {
       runMigrations(seedDatabase, migrationsDirectory);
       if (seedLeaseJob) {
         const now = new Date().toISOString();
+        seedDatabase.exec("BEGIN IMMEDIATE");
         seedDatabase
           .prepare(`
           INSERT INTO jobs (
@@ -545,12 +556,26 @@ const createFixture = async (seedLeaseJob = true): Promise<DatabaseFixture> => {
             "microsoft/PowerToys#1:review",
             "microsoft/PowerToys#1",
             100,
-            JSON.stringify(executionTemplate),
-            executionTemplate.resource.headSha,
+            JSON.stringify(seedTemplate),
+            seedTemplate.resource.kind === "pull_request"
+              ? seedTemplate.resource.headSha
+              : seedTemplate.resource.revisionDigest,
             now,
             now,
             now,
           );
+        createJobAdmissionInTransaction(seedDatabase, "job-1", now);
+        if (admittedFixture) {
+          // Isolate claim-time checks on an already admitted historical queue entry.
+          expect(
+            seedDatabase
+              .prepare(
+                "UPDATE job_admission SET state = 'admitted', admitted_at = ? WHERE job_id = 'job-1' AND state = 'pending'",
+              )
+              .run(now).changes,
+          ).toBe(1);
+        }
+        seedDatabase.exec("COMMIT");
       }
     } finally {
       seedDatabase.close();
@@ -691,11 +716,24 @@ const claimLease = async (
     leaseTtlSeconds,
   });
 
+const enableRepositoryScheduling = (client: DatabaseClient, input: IngestSchedulingEventInput) =>
+  client.request("bootstrapManagedRepositories", {
+    repositories: [
+      {
+        githubRepositoryId: input.event.repository.githubRepositoryId,
+        fullName: input.event.repository.fullName,
+      },
+    ],
+    reviewer,
+    authorizationPolicy: input.policy,
+  });
+
 const scheduleAndClaimReview = async (
   fixture: DatabaseFixture,
   input: IngestSchedulingEventInput,
   workerSuffix: string,
 ) => {
+  await enableRepositoryScheduling(fixture.client, input);
   const ingestion = await fixture.client.request("ingestSchedulingEvent", input);
   if (!ingestion.authorized || ingestion.jobId === null) {
     throw new Error("Expected an authorized GitHub event to schedule a review job.");
@@ -945,9 +983,12 @@ describe("DatabaseClient Worker token authentication", () => {
       { offset: 0, limit: 1.5 },
       { offset: 0, limit: 1, sort: "updated" },
     ]) {
-      await expect(fixture.client.request("listWorkerNodeCredentials", input)).rejects.toThrow(
-        /Worker credential list (?:offset|limit|sort)/u,
-      );
+      await expect(
+        fixture.client.request(
+          "listWorkerNodeCredentials",
+          input as ListWorkerNodeCredentialsInput,
+        ),
+      ).rejects.toThrow(/Worker credential list (?:offset|limit|sort)/u);
     }
   });
 
@@ -1511,7 +1552,6 @@ describe("DatabaseClient lease integration", () => {
   });
 
   it("dead-letters an oversized claim response before committing a lease", async () => {
-    const fixture = await createFixture();
     const oversizedTemplate: JobExecutionTemplate = {
       ...executionTemplate,
       resource: {
@@ -1519,11 +1559,7 @@ describe("DatabaseClient lease integration", () => {
         canonicalSnapshot: { body: "x".repeat(maximumClaimLeaseResponseUtf8Bytes) },
       },
     };
-    withFixtureDatabase(fixture, (database) => {
-      database
-        .prepare("UPDATE jobs SET execution_json = ? WHERE id = 'job-1'")
-        .run(JSON.stringify(oversizedTemplate));
-    });
+    const fixture = await createFixture(true, oversizedTemplate, true);
 
     const worker = await registerWorker(fixture.client, "worker-large", "instance-large");
     await expect(
@@ -1555,7 +1591,7 @@ describe("DatabaseClient lease integration", () => {
     });
   });
 
-  it("reaches a compatible claim candidate after a full incompatible page", async () => {
+  it("retains bounded progress to reach a compatible candidate beyond an incompatible page", async () => {
     const fixture = await createFixture(false);
     const firstCreatedAt = Date.now() - 120_000;
     const nextAttemptAt = new Date(firstCreatedAt).toISOString();
@@ -1595,6 +1631,15 @@ describe("DatabaseClient lease integration", () => {
             createdAt,
             createdAt,
           );
+          createJobAdmissionInTransaction(database, jobId, createdAt);
+          // These entries already own queue admission; this regression tests the claim scan.
+          expect(
+            database
+              .prepare(
+                "UPDATE job_admission SET state = 'admitted', admitted_at = ? WHERE job_id = ? AND state = 'pending'",
+              )
+              .run(createdAt, jobId).changes,
+          ).toBe(1);
         }
         database.exec("COMMIT");
       } catch (error) {
@@ -1604,13 +1649,31 @@ describe("DatabaseClient lease integration", () => {
     });
 
     const worker = await registerWorker(fixture.client, "worker-paged", "instance-paged");
+    const firstClaim = await claimLease(
+      fixture.client,
+      "worker-paged",
+      "instance-paged",
+      worker.capabilitiesDigest,
+    );
+    expect(firstClaim.outcome).toBe("no_work");
+    withFixtureDatabase(fixture, (database) => {
+      expect(
+        database
+          .prepare(`SELECT COUNT(*) AS count FROM claim_scan_state
+        WHERE worker_instance_id = 'instance-paged' AND scan_kind = 'primary'
+          AND after_episode_sequence > 0 AND completed = 0`)
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM run_attempts").get()).toEqual({
+        count: 0,
+      });
+    });
     const claim = await claimLease(
       fixture.client,
       "worker-paged",
       "instance-paged",
       worker.capabilitiesDigest,
     );
-
     expect(claim.outcome).toBe("granted");
     if (claim.outcome === "granted") {
       expect(claim.envelope.job.jobId).toBe("job-paged-100");
@@ -1903,11 +1966,21 @@ describe("DatabaseClient lease integration", () => {
       ...claim.envelope.lease,
       failureCode: "temporary_execution_failure",
       failureMessage: "The execution host ended unexpectedly.",
+      diagnostics: {
+        category: "process" as const,
+        exitCode: 17,
+        summary: "The provider rejected the selected model.",
+        correlationId: claim.envelope.lease.runAttemptId,
+      },
       retryable: true,
       retryDelaySeconds: 1,
     };
     const first = await client.request("failLease", submission);
     withFixtureDatabase(fixture, (database) => {
+      const stored = database
+        .prepare("SELECT failure_diagnostics_json FROM run_attempts WHERE id = ?")
+        .get(claim.envelope.lease.runAttemptId) as { failure_diagnostics_json: string };
+      expect(JSON.parse(stored.failure_diagnostics_json)).toEqual(submission.diagnostics);
       database
         .prepare("UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?")
         .run("2000-01-01T00:00:00.000Z", claim.envelope.lease.runAttemptId);
@@ -1947,6 +2020,12 @@ describe("DatabaseClient lease integration", () => {
 
     await expect(
       client.request("failLease", { ...submission, retryable: false }),
+    ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
+    await expect(
+      client.request("failLease", {
+        ...submission,
+        diagnostics: { ...submission.diagnostics, exitCode: 18 },
+      }),
     ).rejects.toMatchObject({ code: "TERMINAL_SUBMISSION_CONFLICT" });
 
     const completion = { summary: "too late" };
@@ -2176,6 +2255,82 @@ describe("DatabaseClient lease integration", () => {
       ).toThrow("legacy review-result replay markers are migration-only");
     });
   });
+
+  it.each(["pull_request_review", "issue_triage"] as const)(
+    "persists V2 %s evidence and returns the model report separately from runtime observations",
+    async (kind) => {
+      const fixture = await createFixture(false);
+      const input =
+        kind === "pull_request_review"
+          ? makeRequestOpenedInput("delivery-v2-pr-evidence")
+          : makeIssueRequestOpenedInput("delivery-v2-issue-evidence");
+      if (input.schedule === null || input.schedule === undefined)
+        throw new Error("Expected a schedule.");
+      const schema =
+        kind === "pull_request_review"
+          ? PrReviewPlanV2ModelOutputSchema
+          : IssueTriageV2ModelOutputSchema;
+      const claim = await scheduleAndClaimReview(
+        fixture,
+        {
+          ...input,
+          schedule: {
+            ...input.schedule,
+            executionTemplate: {
+              ...input.schedule.executionTemplate,
+              prompt: {
+                ...input.schedule.executionTemplate.prompt,
+                outputSchema: schema,
+                outputSchemaSha256: sha256(canonicalJson(schema)),
+              },
+            },
+          },
+        },
+        `v2-${kind}`,
+      );
+      const result = {
+        ...(kind === "pull_request_review" ? validPrReviewResult() : validIssueTriageResult()),
+        schemaVersion: kind === "pull_request_review" ? "PrReviewPlanV2" : "IssueTriageV2",
+        verification: { status: "not_run", summary: "No validation was performed.", commands: [] },
+        executionEvidence: {
+          schemaVersion: "ReviewExecutionEvidenceV1",
+          source: "worker",
+          commandCapture: "complete",
+          commands: [
+            { itemId: "read_1", command: "git diff --stat", status: "completed", exitCode: 0 },
+          ],
+          worktree: { status: "clean", source: "git_status" },
+        },
+      };
+      const submission = {
+        ...claim.envelope.lease,
+        result,
+        resultDigest: sha256(canonicalJson(result)),
+      };
+      const { executionEvidence: _omittedEvidence, ...modelOnlyResult } = result;
+      await expect(
+        fixture.client.request("completeLease", {
+          ...claim.envelope.lease,
+          result: modelOnlyResult,
+          resultDigest: sha256(canonicalJson(modelOnlyResult)),
+        }),
+      ).rejects.toMatchObject({ code: "REVIEW_RESULT_INVALID" });
+      await expect(fixture.client.request("completeLease", submission)).resolves.toMatchObject({
+        jobState: "succeeded",
+      });
+      await expect(fixture.client.request("completeLease", submission)).resolves.toMatchObject({
+        jobState: "succeeded",
+      });
+      const detail = await fixture.client.request("getJob", { jobId: claim.envelope.lease.jobId });
+      expect(detail).toMatchObject({
+        reviewResult: {
+          schemaId: result.schemaVersion,
+          verification: result.verification,
+          executionEvidence: result.executionEvidence,
+        },
+      });
+    },
+  );
 
   it("rejects an omitted PR finding end line and persists an explicit null", async () => {
     const fixture = await createFixture(false);
@@ -2437,14 +2592,16 @@ describe("DatabaseClient lease integration", () => {
         readonly execution_digest: string;
         readonly revision_id: string;
       };
-      database
-        .prepare(`
+      database.exec("SAVEPOINT result_mismatch_fixture");
+      try {
+        database
+          .prepare(`
           UPDATE run_attempts
           SET status = 'succeeded', result_digest = ?, result_json = ?
           WHERE id = ?
         `)
-        .run(resultDigest, resultJson, claim.envelope.lease.runAttemptId);
-      const insert = database.prepare(`
+          .run(resultDigest, resultJson, claim.envelope.lease.runAttemptId);
+        const insert = database.prepare(`
         INSERT INTO review_results (
           id,
           run_attempt_id,
@@ -2466,63 +2623,62 @@ describe("DatabaseClient lease integration", () => {
           created_at
         ) VALUES (?, ?, ?, ?, ?, 'pull_request_review', ?, 'PrReviewPlanV1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      const commonArguments = [
-        claim.envelope.lease.runAttemptId,
-        claim.envelope.job.jobId,
-        context.work_item_id,
-        context.revision_id,
-        context.resource_revision,
-      ] as const;
-      const trailingArguments = (
-        allowedRecipeIdsJson = canonicalJson(claim.envelope.executionPolicy.allowedRecipeIds),
-      ) =>
-        [
-          resultJson,
-          result.summary,
-          canonicalJson(result.requestedRecipeIds),
-          claim.envelope.prompt.outputSchemaSha256,
-          claim.envelope.prompt.promptSha256,
-          allowedRecipeIdsJson,
-          context.execution_digest,
+        const commonArguments = [
+          claim.envelope.lease.runAttemptId,
+          claim.envelope.job.jobId,
+          context.work_item_id,
+          context.revision_id,
+          context.resource_revision,
         ] as const;
-      const differentDigest = `${resultDigest.startsWith("0") ? "1" : "0"}${resultDigest.slice(1)}`;
-      expect(() =>
-        insert.run(
-          "review-result-wrong-result",
-          ...commonArguments,
-          differentDigest,
-          ...trailingArguments(),
-          context.execution_json,
-          new Date().toISOString(),
-        ),
-      ).toThrow("review result dependency mismatch");
-      expect(() =>
-        insert.run(
-          "review-result-wrong-template",
-          ...commonArguments,
-          resultDigest,
-          ...trailingArguments(),
-          "{}",
-          new Date().toISOString(),
-        ),
-      ).toThrow("review result dependency mismatch");
-      expect(() =>
-        insert.run(
-          "review-result-wrong-allowlist",
-          ...commonArguments,
-          resultDigest,
-          ...trailingArguments('["different-recipe"]'),
-          context.execution_json,
-          new Date().toISOString(),
-        ),
-      ).toThrow("review result dependency mismatch");
-      database
-        .prepare(`
-          UPDATE run_attempts
-          SET status = 'leased', result_digest = NULL, result_json = NULL
-          WHERE id = ?
-        `)
-        .run(claim.envelope.lease.runAttemptId);
+        const trailingArguments = (
+          allowedRecipeIdsJson = canonicalJson(claim.envelope.executionPolicy.allowedRecipeIds),
+        ) =>
+          [
+            resultJson,
+            result.summary,
+            canonicalJson(result.requestedRecipeIds),
+            claim.envelope.prompt.outputSchemaSha256,
+            claim.envelope.prompt.promptSha256,
+            allowedRecipeIdsJson,
+            context.execution_digest,
+          ] as const;
+        const differentDigest = `${resultDigest.startsWith("0") ? "1" : "0"}${resultDigest.slice(1)}`;
+        expect(() =>
+          insert.run(
+            "review-result-wrong-result",
+            ...commonArguments,
+            differentDigest,
+            ...trailingArguments(),
+            context.execution_json,
+            new Date().toISOString(),
+          ),
+        ).toThrow("review result dependency mismatch");
+        expect(() =>
+          insert.run(
+            "review-result-wrong-template",
+            ...commonArguments,
+            resultDigest,
+            ...trailingArguments(),
+            "{}",
+            new Date().toISOString(),
+          ),
+        ).toThrow("review result dependency mismatch");
+        expect(() =>
+          insert.run(
+            "review-result-wrong-allowlist",
+            ...commonArguments,
+            resultDigest,
+            ...trailingArguments('["different-recipe"]'),
+            context.execution_json,
+            new Date().toISOString(),
+          ),
+        ).toThrow("review result dependency mismatch");
+      } finally {
+        // Restore the fixture by rolling back its uncommitted completion, never by reactivating
+        // a terminal attempt through a state transition that production correctly forbids.
+        database.exec("ROLLBACK TO SAVEPOINT result_mismatch_fixture");
+        database.exec("RELEASE SAVEPOINT result_mismatch_fixture");
+      }
     });
     assertUncommittedReviewCompletion(fixture, claim.envelope.lease.runAttemptId);
   });
@@ -2692,12 +2848,24 @@ describe("DatabaseClient scheduling ingestion integration", () => {
       trigger: "assignment",
       authorization: "self",
       latestJobId: first.jobId,
+      stage: "awaiting_admission",
+      latestJobAdmission: { state: "pending", attemptBase: 0 },
     });
     expect(jobs.total).toBe(1);
-    expect(jobs.items[0]).toMatchObject({ id: first.jobId, status: "queued" });
+    expect(jobs.items[0]).toMatchObject({
+      id: first.jobId,
+      status: "queued",
+      admission: { state: "pending", attemptBase: 0 },
+    });
     expect(system.sqliteVersion).toMatch(/^\d+\.\d+\.\d+$/u);
     expect(system.databaseSizeBytes).toBeGreaterThan(0);
-    expect(system.oldestQueuedAt).not.toBeNull();
+    expect(system).toMatchObject({
+      queuedJobs: 0,
+      awaitingAdmissionJobs: 1,
+      pendingValidationRequests: 0,
+      oldestQueuedAt: null,
+      oldestAwaitingAdmissionAt: jobs.items[0]?.createdAt,
+    });
   });
 
   it("reads one dashboard job with immutable structured review result details", async () => {
@@ -2947,6 +3115,7 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     const changedIntentInput = makeRequestOpenedInput("delivery-config-intent", headSha);
     const changedIntent = await client.request("ingestSchedulingEvent", {
       ...changedIntentInput,
+      event: { ...changedIntentInput.event, occurredAt: "2026-08-30T00:00:11.000Z" },
       schedule: { ...firstInput.schedule, intentVersion: 2 },
     });
     expect(changedIntent).toMatchObject({ jobCreated: true });
@@ -2958,6 +3127,7 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     );
     const changedCapabilities = await client.request("ingestSchedulingEvent", {
       ...changedCapabilitiesInput,
+      event: { ...changedCapabilitiesInput.event, occurredAt: "2026-08-30T00:00:12.000Z" },
       schedule: {
         ...firstInput.schedule,
         intentVersion: 2,
@@ -2971,6 +3141,7 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     const changedPrompt = "Review with the updated policy prompt.";
     const changedTemplate = await client.request("ingestSchedulingEvent", {
       ...changedTemplateInput,
+      event: { ...changedTemplateInput.event, occurredAt: "2026-08-30T00:00:13.000Z" },
       schedule: {
         ...firstInput.schedule,
         intentVersion: 2,
@@ -3017,7 +3188,7 @@ describe("DatabaseClient scheduling ingestion integration", () => {
     expect(jobs.items[0]?.status).toBe("stale");
   });
 
-  it("uses the epoch opening policy snapshot for inherited revision decisions", async () => {
+  it("records the current policy when reevaluating inherited revision authorization", async () => {
     const { client, directory } = await createFixture(false);
     await client.request(
       "ingestSchedulingEvent",
@@ -3029,13 +3200,14 @@ describe("DatabaseClient scheduling ingestion integration", () => {
       "2026-08-30T00:06:00.000Z",
       true,
     );
+    const currentPolicy = {
+      ...schedulingPolicy,
+      policyVersion: 9,
+      allowlistedActorGithubUserIds: [777],
+    };
     await client.request("ingestSchedulingEvent", {
       ...revisionInput,
-      policy: {
-        ...schedulingPolicy,
-        policyVersion: 9,
-        allowlistedActorGithubUserIds: [777],
-      },
+      policy: currentPolicy,
     });
     await client.close();
 
@@ -3052,9 +3224,9 @@ describe("DatabaseClient scheduling ingestion integration", () => {
         readonly policy_json: string;
         readonly policy_sha256: string;
       };
-      expect(inherited.policy_version).toBe(schedulingPolicy.policyVersion);
-      expect(JSON.parse(inherited.policy_json)).toEqual(schedulingPolicy);
-      expect(inherited.policy_sha256).toBe(sha256(canonicalJson(schedulingPolicy)));
+      expect(inherited.policy_version).toBe(currentPolicy.policyVersion);
+      expect(JSON.parse(inherited.policy_json)).toEqual(currentPolicy);
+      expect(inherited.policy_sha256).toBe(sha256(canonicalJson(currentPolicy)));
     } finally {
       auditDatabase.close();
     }
@@ -3063,10 +3235,9 @@ describe("DatabaseClient scheduling ingestion integration", () => {
   it("requests cancellation when the final active request is removed from a leased job", async () => {
     const { client } = await createFixture(false);
     const headSha = "d".repeat(40);
-    await client.request(
-      "ingestSchedulingEvent",
-      makeRequestOpenedInput("delivery-before-close", headSha),
-    );
+    const opened = makeRequestOpenedInput("delivery-before-close", headSha);
+    await enableRepositoryScheduling(client, opened);
+    await client.request("ingestSchedulingEvent", opened);
     const worker = await registerWorker(client, "worker-close", "instance-close");
     const claim = await claimLease(
       client,

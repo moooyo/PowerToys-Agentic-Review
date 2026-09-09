@@ -1,7 +1,8 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import {
   type ActiveAuthorizedRequestEpoch,
   type AuthorizationDecision,
+  type DashboardHealthComponent,
   type DashboardJobDetailRead,
   DashboardJobDetailReadSchema,
   type DashboardJobListQuery,
@@ -9,7 +10,6 @@ import {
   DashboardJobListResponseSchema,
   type DashboardJobReadQuery,
   DashboardJobReadQuerySchema,
-  type DashboardJobStage,
   type DashboardSystemRead,
   DashboardSystemReadSchema,
   type DashboardWorkerListQuery,
@@ -22,12 +22,20 @@ import {
   type ExecutionPhase,
   type GitHubActor,
   type GitHubWorkItemRevision,
+  getDashboardWorkItemAdmissionIssues,
+  getJobAdmissionIssues,
   type JobState,
   type NormalizedSchedulingEvent,
+  ReviewExecutionEvidenceSchema,
+  RunFailureDiagnosticsSchema,
+  VerificationReportSchema,
   type WorkerCapabilities,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { GitHubIngestionInvariantError } from "./errors.js";
+import { assertWaitingAdmissionIntegrity, readJobAdmission } from "./job-admission.js";
+import { type OperatorReadContext, repositoryReadSql } from "./operator-access.js";
+import { ordinaryReviewJobSql } from "./review-purpose.js";
 
 const workerTokenShapePattern = /arw1_[A-Za-z0-9_-]{43}/u;
 const redactedWorkerDisplayName = "Redacted worker";
@@ -35,6 +43,7 @@ const redactedWorkerDisplayName = "Redacted worker";
 interface WorkItemRow {
   readonly id: string;
   readonly kind: DashboardWorkItemListItem["kind"];
+  readonly repositoryId: string;
   readonly repository: string;
   readonly number: number;
   readonly title: string;
@@ -49,6 +58,8 @@ interface WorkItemRow {
   readonly latestEventJson: string | null;
   readonly latestJobId: string | null;
   readonly latestJobStatus: JobState | null;
+  readonly latestJobAttemptCount: number | null;
+  readonly latestJobAdmissionState: string | null;
   readonly latestJobPhase: ExecutionPhase | null;
   readonly latestJobPriority: number | null;
   readonly latestJobRevision: string | null;
@@ -56,6 +67,9 @@ interface WorkItemRow {
   readonly workerNodeId: string | null;
   readonly reviewedRevisionKey: string | null;
   readonly updatedAt: string;
+  readonly dashboardAuthorization: DashboardWorkItemListItem["authorization"];
+  readonly dashboardState: DashboardWorkItemListItem["state"];
+  readonly dashboardStage: DashboardWorkItemListItem["stage"];
 }
 
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
@@ -97,46 +111,42 @@ const searchPattern = (search: string | undefined): string | null => {
 const values = <T>(value: T | T[] | undefined): readonly T[] =>
   value === undefined ? [] : Array.isArray(value) ? value : [value];
 
-const paginate = <T>(items: readonly T[], page: number, size: number): readonly T[] => {
-  const offset = (page - 1) * size;
-  return items.slice(offset, offset + size);
+interface SqlFilters {
+  readonly clauses: string[];
+  readonly parameters: SQLInputValue[];
+}
+
+const addEnumFilter = (filters: SqlFilters, column: string, selected: readonly string[]): void => {
+  if (selected.length === 0) return;
+  filters.clauses.push(`${column} IN (${selected.map(() => "?").join(", ")})`);
+  filters.parameters.push(...selected);
 };
 
-const jobStage = (status: JobState | null, phase: ExecutionPhase | null): DashboardJobStage => {
-  if (status === null || status === "queued" || status === "retry_waiting") {
-    return "queued";
-  }
-  if (
-    status === "stale" ||
-    status === "succeeded" ||
-    status === "failed" ||
-    status === "dead_letter" ||
-    status === "cancelled"
-  ) {
-    return "done";
-  }
-  return phase ?? "leased";
-};
+const whereSql = (filters: SqlFilters): string =>
+  filters.clauses.length === 0 ? "" : `WHERE ${filters.clauses.join(" AND ")}`;
 
-const workItemStage = (
-  status: JobState | null,
-  phase: ExecutionPhase | null,
-): DashboardWorkItemListItem["stage"] => {
-  const stage = jobStage(status, phase);
-  if (stage === "done") {
-    return "done";
-  }
-  if (stage === "queued" || stage === "leased" || stage === "preparing") {
-    return stage === "queued" ? "queued" : "preparing";
-  }
-  if (stage === "validation") {
-    return "validating";
-  }
-  if (stage === "uploading" || stage === "completing") {
-    return "waiting_approval";
-  }
-  return "reviewing";
-};
+// These expressions are shared by filtering and projection so terminal and queued
+// states take precedence over any phase left on the last attempt.
+const jobStageSql = (status: string, phase: string, admission: string): string => `CASE
+  WHEN ${status} IS NULL THEN 'not_scheduled'
+  WHEN ${status} IN ('queued', 'retry_waiting') AND ${admission} = 'pending' THEN 'awaiting_admission'
+  WHEN ${status} IN ('queued', 'retry_waiting') AND ${admission} = 'admitted' THEN 'queued'
+  WHEN ${status} IN ('stale', 'succeeded', 'failed', 'dead_letter', 'cancelled') THEN 'done'
+  ELSE COALESCE(${phase}, 'leased')
+END`;
+
+const workItemStageSql = `CASE ${jobStageSql('"latestJobStatus"', '"latestJobPhase"', '"latestJobAdmissionState"')}
+  WHEN 'not_scheduled' THEN 'not_scheduled'
+  WHEN 'awaiting_admission' THEN 'awaiting_admission'
+  WHEN 'done' THEN 'done'
+  WHEN 'queued' THEN 'queued'
+  WHEN 'leased' THEN 'preparing'
+  WHEN 'preparing' THEN 'preparing'
+  WHEN 'validation' THEN 'validating'
+  WHEN 'uploading' THEN 'waiting_approval'
+  WHEN 'completing' THEN 'waiting_approval'
+  ELSE 'reviewing'
+END`;
 
 const priority = (value: number | null): DashboardWorkItemListItem["priority"] => {
   if (value !== null && value >= 100) return "urgent";
@@ -145,7 +155,17 @@ const priority = (value: number | null): DashboardWorkItemListItem["priority"] =
   return "normal";
 };
 
-const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
+const mapWorkItem = (database: DatabaseSync, row: WorkItemRow): DashboardWorkItemListItem => {
+  const latestJobAdmission = (() => {
+    if (row.latestJobId === null) return null;
+    if (row.latestJobStatus === null || row.latestJobAttemptCount === null)
+      throw new GitHubIngestionInvariantError("The latest work item Job identity is incomplete.");
+    return readJobAdmission(database, {
+      jobId: row.latestJobId,
+      status: row.latestJobStatus,
+      attemptCount: row.latestJobAttemptCount,
+    });
+  })();
   const author: GitHubActor = {
     githubUserId: row.authorGithubUserId,
     login: row.authorLogin,
@@ -161,37 +181,16 @@ const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
       : parseJson<AuthorizationDecision>(row.latestDecisionJson);
   const latestEvent =
     row.latestEventJson === null ? null : parseJson<NormalizedSchedulingEvent>(row.latestEventJson);
-  const authorization =
-    activeEpoch?.authorizationBasis === "self"
-      ? "self"
-      : activeEpoch?.authorizationBasis === "allowlist"
-        ? "allowlisted"
-        : latestDecision?.outcome === "denied"
-          ? "denied"
-          : null;
-  const stage = workItemStage(row.latestJobStatus, row.latestJobPhase);
   const currentRevision = parseJson<GitHubWorkItemRevision>(row.currentRevisionJson);
   const comparedRevision = row.latestJobRevision ?? row.reviewedRevisionKey;
   const freshness =
     comparedRevision !== null && comparedRevision !== currentRevision.revisionKey
       ? "superseded"
       : "current";
-  const state: DashboardWorkItemListItem["state"] =
-    row.state === "closed"
-      ? "closed"
-      : row.latestJobStatus === "leased" ||
-          row.latestJobStatus === "running" ||
-          row.latestJobStatus === "cancel_requested"
-        ? "active"
-        : activeEpoch !== null
-          ? "assigned"
-          : latestEvent?.action === "request_closed"
-            ? "unassigned"
-            : "open";
-
   return {
     id: row.id,
     kind: row.kind,
+    repositoryId: row.repositoryId,
     repository: row.repository,
     number: row.number,
     title: row.title,
@@ -200,7 +199,7 @@ const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
     trigger: activeEpoch?.requestKind ?? null,
     schedulingActor: activeEpoch?.openedByActor ?? latestEvent?.actor ?? null,
     schedulingTarget: activeEpoch?.target ?? latestEvent?.target ?? null,
-    authorization,
+    authorization: row.dashboardAuthorization,
     authorizationReason:
       activeEpoch?.authorizationBasis === "self"
         ? "authorized_self"
@@ -208,8 +207,8 @@ const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
           ? "authorized_allowlisted"
           : (latestDecision?.reason ?? null),
     priority: priority(row.latestJobPriority),
-    state,
-    stage,
+    state: row.dashboardState,
+    stage: row.dashboardStage,
     freshness,
     currentRevision,
     reviewedRevisionKey: row.reviewedRevisionKey,
@@ -227,6 +226,8 @@ const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
           },
     latestJobId: row.latestJobId,
     latestJobStatus: row.latestJobStatus,
+    latestJobAttemptCount: row.latestJobAttemptCount,
+    latestJobAdmission,
     workerNodeId: row.workerNodeId,
     attentionReason:
       row.latestJobFailure ??
@@ -235,10 +236,11 @@ const mapWorkItem = (row: WorkItemRow): DashboardWorkItemListItem => {
   };
 };
 
-const workItemSql = `
+const workItemContextSql = `
   SELECT
     item.id,
     item.resource_kind AS kind,
+    repository.id AS "repositoryId",
     repository.full_name AS repository,
     item.github_number AS number,
     item.title,
@@ -265,6 +267,8 @@ const workItemSql = `
     ) AS "latestEventJson",
     latest_job.id AS "latestJobId",
     latest_job.status AS "latestJobStatus",
+    latest_job.attempt_count AS "latestJobAttemptCount",
+    latest_admission.state AS "latestJobAdmissionState",
     latest_job.current_step AS "latestJobPhase",
     latest_job.priority AS "latestJobPriority",
     latest_job.resource_revision AS "latestJobRevision",
@@ -273,6 +277,12 @@ const workItemSql = `
     (
       SELECT job.resource_revision FROM jobs AS job
       WHERE job.work_item_id = item.id AND job.status = 'succeeded'
+        AND ${ordinaryReviewJobSql("job")}
+        AND NOT EXISTS (
+          SELECT 1 FROM review_run_job_links AS link
+          JOIN review_runs AS run ON run.id = link.review_run_id
+          WHERE link.job_id = job.id AND run.purpose = 'evaluation'
+        )
       ORDER BY job.completed_at DESC, job.id DESC LIMIT 1
     ) AS "reviewedRevisionKey",
     item.updated_at AS "updatedAt"
@@ -286,47 +296,100 @@ const workItemSql = `
       SELECT candidate.id
       FROM jobs AS candidate
       WHERE candidate.work_item_id = item.id
+        AND ${ordinaryReviewJobSql("candidate")}
+        AND NOT EXISTS (
+          SELECT 1 FROM review_run_job_links AS link
+          JOIN review_runs AS run ON run.id = link.review_run_id
+          WHERE link.job_id = candidate.id AND run.purpose = 'evaluation'
+        )
       ORDER BY candidate.created_at DESC, candidate.id DESC
       LIMIT 1
     )
   LEFT JOIN run_attempts AS latest_attempt
     ON latest_attempt.id = latest_job.current_run_attempt_id
-  WHERE (
-    ? IS NULL OR lower(
-      repository.full_name || ' ' || item.github_number || ' ' || item.title || ' ' ||
-      item.author_login
-    ) LIKE ? ESCAPE '\\'
+  LEFT JOIN job_admission AS latest_admission ON latest_admission.job_id = latest_job.id
+`;
+
+const workItemProjectionSql = `
+  WITH work_item_context AS (${workItemContextSql}),
+  work_item_projection AS (
+    SELECT *,
+      CASE
+        WHEN json_extract("activeEpochJson", '$.authorizationBasis') = 'self' THEN 'self'
+        WHEN json_extract("activeEpochJson", '$.authorizationBasis') = 'allowlist' THEN 'allowlisted'
+        WHEN json_extract("latestDecisionJson", '$.outcome') = 'denied' THEN 'denied'
+        ELSE NULL
+      END AS "dashboardAuthorization",
+      CASE
+        WHEN state = 'closed' THEN 'closed'
+        WHEN "latestJobStatus" IN ('leased', 'running', 'cancel_requested') THEN 'active'
+        WHEN "activeEpochJson" IS NOT NULL THEN 'assigned'
+        WHEN json_extract("latestEventJson", '$.action') = 'request_closed' THEN 'unassigned'
+        ELSE 'open'
+      END AS "dashboardState",
+      ${workItemStageSql} AS "dashboardStage"
+    FROM work_item_context
   )
-  ORDER BY item.updated_at DESC, item.id
 `;
 
 export const listWorkItems = (
   database: DatabaseSync,
   input: DashboardWorkItemListQuery,
+  context?: OperatorReadContext,
 ): DashboardWorkItemListResponse => {
   const page = pageNumber(input.page);
   const size = pageSize(input.pageSize);
   assertPagination(page, size);
-  const kinds = values(input.kind);
-  const states = values(input.state);
-  const stages = values(input.stage);
-  const authorizations = values(input.authorization);
+  const filters: SqlFilters = { clauses: [], parameters: [] };
+  if (context !== undefined) {
+    const visibility = repositoryReadSql(
+      "work_item_projection.repositoryId",
+      context.actor,
+      context.administrators,
+    );
+    filters.clauses.push(`(${visibility.sql})`);
+    filters.parameters.push(...visibility.parameters);
+  }
+  if (input.repositoryId !== undefined) {
+    filters.clauses.push('"repositoryId" = ?');
+    filters.parameters.push(input.repositoryId);
+  }
+  addEnumFilter(filters, "kind", values(input.kind));
+  addEnumFilter(filters, '"dashboardState"', values(input.state));
+  addEnumFilter(filters, '"dashboardStage"', values(input.stage));
+  addEnumFilter(filters, '"dashboardAuthorization"', values(input.authorization));
+  const search = searchPattern(input.search);
+  if (search !== null) {
+    filters.clauses.push(`lower(
+      repository || ' ' || number || ' ' || title || ' ' || "authorLogin"
+    ) LIKE ? ESCAPE '\\'`);
+    filters.parameters.push(search);
+  }
+  const filteredSql = `FROM work_item_projection ${whereSql(filters)}`;
 
   return withReadTransaction(database, () => {
-    const search = searchPattern(input.search);
-    const rows = database.prepare(workItemSql).all(search, search) as unknown as WorkItemRow[];
-    const filtered = rows
-      .map(mapWorkItem)
-      .filter(
-        (item) =>
-          (kinds.length === 0 || kinds.includes(item.kind)) &&
-          (states.length === 0 || states.includes(item.state)) &&
-          (stages.length === 0 || stages.includes(item.stage)) &&
-          (authorizations.length === 0 ||
-            (item.authorization !== null && authorizations.includes(item.authorization))),
-      );
-    const result = { items: [...paginate(filtered, page, size)], total: filtered.length };
-    if (!Value.Check(DashboardWorkItemListResponseSchema, result)) {
+    // Check the authorized scope before stage filters can hide missing waiting episodes.
+    assertWaitingAdmissionIntegrity(database, {
+      ...(input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId }),
+      ...(context === undefined ? {} : { context }),
+    });
+    const count = database
+      .prepare(`${workItemProjectionSql} SELECT COUNT(*) AS total ${filteredSql}`)
+      .get(...filters.parameters) as { readonly total: number };
+    const rows =
+      page > Math.ceil(count.total / size)
+        ? []
+        : (database
+            .prepare(`${workItemProjectionSql}
+              SELECT * ${filteredSql}
+              ORDER BY "updatedAt" DESC, id LIMIT ? OFFSET ?
+            `)
+            .all(...filters.parameters, size, (page - 1) * size) as unknown as WorkItemRow[]);
+    const result = { items: rows.map((row) => mapWorkItem(database, row)), total: count.total };
+    if (
+      !Value.Check(DashboardWorkItemListResponseSchema, result) ||
+      result.items.some((item) => getDashboardWorkItemAdmissionIssues(item).length > 0)
+    ) {
       throw new GitHubIngestionInvariantError(
         "The database work item projection does not match DashboardWorkItemListResponseSchema.",
       );
@@ -337,6 +400,7 @@ export const listWorkItems = (
 
 interface JobRow {
   readonly id: string;
+  readonly repositoryId: string;
   readonly workItemId: string;
   readonly workItemRef: string;
   readonly title: string;
@@ -360,12 +424,20 @@ interface JobRow {
 interface JobDetailsRow extends JobRow {
   readonly resultDigest: string | null;
   readonly failureMessage: string | null;
+  readonly failureDiagnosticsJson: string | null;
   readonly reviewResultId: string | null;
-  readonly reviewResultSchemaId: "IssueTriageV1" | "PrReviewPlanV1" | null;
+  readonly reviewResultSchemaId:
+    | "IssueTriageV1"
+    | "PrReviewPlanV1"
+    | "IssueTriageV2"
+    | "PrReviewPlanV2"
+    | null;
   readonly reviewResultDigest: string | null;
   readonly reviewResultSummary: string | null;
   readonly reviewRequestedRecipeIdsJson: string | null;
   readonly reviewResultCreatedAt: string | null;
+  readonly reviewVerificationJson: string | null;
+  readonly reviewExecutionEvidenceJson: string | null;
   readonly prReviewAssessment: "approve" | "comment" | "request_changes" | null;
   readonly issueCategory:
     | "bug"
@@ -394,9 +466,10 @@ interface ReviewFindingRow {
   readonly confidence: number;
 }
 
-const jobSql = `
+const jobSelectSql = `
   SELECT
     job.id,
+    repository.id AS "repositoryId",
     job.work_item_id AS "workItemId",
     repository.full_name || '#' || item.github_number AS "workItemRef",
     CASE job.job_kind
@@ -418,23 +491,20 @@ const jobSql = `
     job.completed_at AS "completedAt",
     job.created_at AS "createdAt",
     job.updated_at AS "updatedAt"
+`;
+
+const jobFromSql = `
   FROM jobs AS job
   JOIN work_items AS item ON item.id = job.work_item_id
   JOIN repositories AS repository ON repository.id = item.repository_id
   LEFT JOIN run_attempts AS attempt ON attempt.id = job.current_run_attempt_id
-  WHERE (? IS NULL OR job.work_item_id = ?)
-    AND (
-      ? IS NULL OR lower(
-        job.id || ' ' || repository.full_name || ' ' || item.github_number || ' ' ||
-        item.title || ' ' || COALESCE(attempt.worker_node_id, '')
-      ) LIKE ? ESCAPE '\\'
-    )
-  ORDER BY job.created_at DESC, job.id
+  LEFT JOIN job_admission AS admission ON admission.job_id = job.id
 `;
 
 const jobByIdSql = `
   SELECT
     job.id,
+    repository.id AS "repositoryId",
     job.work_item_id AS "workItemId",
     repository.full_name || '#' || item.github_number AS "workItemRef",
     CASE job.job_kind
@@ -454,12 +524,21 @@ const jobByIdSql = `
     job.failure_code AS "failureCode",
     review_result.result_digest AS "resultDigest",
     job.failure_message AS "failureMessage",
+    latest_attempt.failure_diagnostics_json AS "failureDiagnosticsJson",
     review_result.id AS "reviewResultId",
     review_result.schema_id AS "reviewResultSchemaId",
     review_result.result_digest AS "reviewResultDigest",
     review_result.summary AS "reviewResultSummary",
     review_result.requested_recipe_ids_json AS "reviewRequestedRecipeIdsJson",
     review_result.created_at AS "reviewResultCreatedAt",
+    CASE WHEN review_result.schema_id IN ('IssueTriageV2', 'PrReviewPlanV2')
+      THEN json_extract(review_result.result_json, '$.verification')
+      ELSE NULL
+    END AS "reviewVerificationJson",
+    CASE WHEN review_result.schema_id IN ('IssueTriageV2', 'PrReviewPlanV2')
+      THEN json_extract(review_result.result_json, '$.executionEvidence')
+      ELSE NULL
+    END AS "reviewExecutionEvidenceJson",
     pr_review.assessment AS "prReviewAssessment",
     issue_triage.category AS "issueCategory",
     issue_triage.priority AS "issuePriority",
@@ -475,6 +554,11 @@ const jobByIdSql = `
   JOIN work_items AS item ON item.id = job.work_item_id
   JOIN repositories AS repository ON repository.id = item.repository_id
   LEFT JOIN run_attempts AS attempt ON attempt.id = job.current_run_attempt_id
+  LEFT JOIN run_attempts AS latest_attempt ON latest_attempt.id = (
+    SELECT candidate.id FROM run_attempts AS candidate
+    WHERE candidate.job_id = job.id
+    ORDER BY candidate.attempt_number DESC LIMIT 1
+  )
   LEFT JOIN review_results AS review_result ON review_result.job_id = job.id
   LEFT JOIN pr_review_results AS pr_review ON pr_review.review_result_id = review_result.id
   LEFT JOIN issue_triage_results AS issue_triage ON issue_triage.review_result_id = review_result.id
@@ -521,56 +605,102 @@ const jobOutcome = (row: JobRow): DashboardJobListResponse["items"][number]["out
 export const listJobs = (
   database: DatabaseSync,
   input: DashboardJobListQuery,
+  context?: OperatorReadContext,
 ): DashboardJobListResponse => {
   const page = pageNumber(input.page);
   const size = pageSize(input.pageSize);
   assertPagination(page, size);
-  const statuses = values(input.status);
-  const phases = values(input.phase);
-  const stages = values(input.stage);
+  const filters: SqlFilters = { clauses: [], parameters: [] };
+  if (context !== undefined) {
+    const visibility = repositoryReadSql(
+      "item.repository_id",
+      context.actor,
+      context.administrators,
+    );
+    filters.clauses.push(`(${visibility.sql})`);
+    filters.parameters.push(...visibility.parameters);
+  }
+  if (input.repositoryId !== undefined) {
+    filters.clauses.push("item.repository_id = ?");
+    filters.parameters.push(input.repositoryId);
+  }
+  addEnumFilter(filters, "job.status", values(input.status));
+  addEnumFilter(filters, "job.current_step", values(input.phase));
+  addEnumFilter(
+    filters,
+    `(${jobStageSql("job.status", "job.current_step", "admission.state")})`,
+    values(input.stage),
+  );
+  const admission = values(input.admission);
+  if (admission.length > 0) {
+    filters.clauses.push("job.status IN ('queued', 'retry_waiting')");
+    addEnumFilter(filters, "admission.state", admission);
+  }
+  if (input.workItemId !== undefined) {
+    filters.clauses.push("job.work_item_id = ?");
+    filters.parameters.push(input.workItemId);
+  }
+  const search = searchPattern(input.search);
+  if (search !== null) {
+    filters.clauses.push(`lower(
+      job.id || ' ' || repository.full_name || ' ' || item.github_number || ' ' ||
+      item.title || ' ' || COALESCE(attempt.worker_node_id, '')
+    ) LIKE ? ESCAPE '\\'`);
+    filters.parameters.push(search);
+  }
+  const filteredSql = `${jobFromSql} ${whereSql(filters)}`;
 
   return withReadTransaction(database, () => {
-    const search = searchPattern(input.search);
-    const rows = database
-      .prepare(jobSql)
-      .all(
-        input.workItemId ?? null,
-        input.workItemId ?? null,
-        search,
-        search,
-      ) as unknown as JobRow[];
+    // An admission filter must never silently drop a corrupt waiting Job from the count.
+    assertWaitingAdmissionIntegrity(database, {
+      ...(input.repositoryId === undefined ? {} : { repositoryId: input.repositoryId }),
+      ...(context === undefined ? {} : { context }),
+    });
+    const count = database
+      .prepare(`SELECT COUNT(*) AS total ${filteredSql}`)
+      .get(...filters.parameters) as { readonly total: number };
+    const rows =
+      page > Math.ceil(count.total / size)
+        ? []
+        : (database
+            .prepare(`${jobSelectSql} ${filteredSql}
+              ORDER BY job.created_at DESC, job.id LIMIT ? OFFSET ?
+            `)
+            .all(...filters.parameters, size, (page - 1) * size) as unknown as JobRow[]);
     const now = Date.now();
-    const projected = rows
-      .filter((row) => {
-        const stage = jobStage(row.status, row.phase);
-        return (
-          (statuses.length === 0 || statuses.includes(row.status)) &&
-          (phases.length === 0 || (row.phase !== null && phases.includes(row.phase))) &&
-          (stages.length === 0 || stages.includes(stage))
-        );
-      })
-      .map((row) => ({
-        id: row.id,
-        workItemId: row.workItemId,
-        workItemRef: row.workItemRef,
-        title: row.title,
-        generation: row.generation,
+    const projected = rows.map((row) => ({
+      id: row.id,
+      repositoryId: row.repositoryId,
+      workItemId: row.workItemId,
+      workItemRef: row.workItemRef,
+      title: row.title,
+      generation: row.generation,
+      status: row.status,
+      phase: row.phase,
+      attempt: row.attempt,
+      admission: readJobAdmission(database, {
+        jobId: row.id,
         status: row.status,
-        phase: row.phase,
-        attempt: row.attempt,
-        maxAttempts: row.maxAttempts,
-        workerNodeId: row.workerNodeId,
-        leaseGeneration: row.leaseGeneration > 0 ? row.leaseGeneration : null,
-        leaseExpiresAt: row.leaseExpiresAt,
-        progressUpdatedAt: row.progressUpdatedAt,
-        elapsedSeconds: elapsedSeconds(row, now),
-        targetRevisionKey: row.targetRevisionKey,
-        outcome: jobOutcome(row),
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      }));
-    const result = { items: [...paginate(projected, page, size)], total: projected.length };
-    if (!Value.Check(DashboardJobListResponseSchema, result)) {
+        attemptCount: row.attempt,
+      }),
+      maxAttempts: row.maxAttempts,
+      workerNodeId: row.workerNodeId,
+      leaseGeneration: row.leaseGeneration > 0 ? row.leaseGeneration : null,
+      leaseExpiresAt: row.leaseExpiresAt,
+      progressUpdatedAt: row.progressUpdatedAt,
+      elapsedSeconds: elapsedSeconds(row, now),
+      targetRevisionKey: row.targetRevisionKey,
+      outcome: jobOutcome(row),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }));
+    const result = { items: projected, total: count.total };
+    if (
+      !Value.Check(DashboardJobListResponseSchema, result) ||
+      result.items.some(
+        (job) => getJobAdmissionIssues({ ...job, attemptCount: job.attempt }).length > 0,
+      )
+    ) {
       throw new GitHubIngestionInvariantError(
         "The database job projection does not match DashboardJobListResponseSchema.",
       );
@@ -653,15 +783,72 @@ const mapReviewFinding = (finding: ReviewFindingRow) => {
   };
 };
 
+const readReviewEvidence = (row: JobDetailsRow) => {
+  if (
+    row.reviewResultSchemaId !== "IssueTriageV2" &&
+    row.reviewResultSchemaId !== "PrReviewPlanV2"
+  ) {
+    return {};
+  }
+  const verification = parseJson<unknown>(
+    requirePersistedValue(
+      row.reviewVerificationJson,
+      "The persisted version-two review is missing its verification report.",
+    ),
+  );
+  const executionEvidence = parseJson<unknown>(
+    requirePersistedValue(
+      row.reviewExecutionEvidenceJson,
+      "The persisted version-two review is missing its execution evidence.",
+    ),
+  );
+  if (
+    !Value.Check(VerificationReportSchema, verification) ||
+    !Value.Check(ReviewExecutionEvidenceSchema, executionEvidence)
+  ) {
+    throw new GitHubIngestionInvariantError(
+      "The persisted version-two review evidence does not match its authoritative schema.",
+    );
+  }
+  return { verification, executionEvidence };
+};
+
+const readFailureDiagnostics = (json: string | null) => {
+  if (json === null) return null;
+  const diagnostics = parseJson<unknown>(json);
+  if (!Value.Check(RunFailureDiagnosticsSchema, diagnostics)) {
+    throw new GitHubIngestionInvariantError(
+      "The persisted run failure diagnostics do not match their authoritative schema.",
+    );
+  }
+  return diagnostics;
+};
+
 export const getJob = (
   database: DatabaseSync,
   input: DashboardJobReadQuery,
+  context?: OperatorReadContext,
 ): DashboardJobDetailRead | null =>
   withReadTransaction(database, () => {
     if (!Value.Check(DashboardJobReadQuerySchema, input)) {
       throw new GitHubIngestionInvariantError(
         "The dashboard job lookup input does not match DashboardJobReadQuerySchema.",
       );
+    }
+    if (context !== undefined) {
+      const visibility = repositoryReadSql(
+        "item.repository_id",
+        context.actor,
+        context.administrators,
+      );
+      // Resolve ownership from the stored work item. A platform administrator alone can pass
+      // this gate for jobs without a work item; their legacy projection may still be absent.
+      const visible = database
+        .prepare(`SELECT 1 FROM jobs AS job
+        LEFT JOIN work_items AS item ON item.id = job.work_item_id
+        WHERE job.id = ? AND (${visibility.sql}) LIMIT 1`)
+        .get(input.jobId, ...visibility.parameters);
+      if (visible === undefined) return null;
     }
     const row = database.prepare(jobByIdSql).get(input.jobId) as unknown as
       | JobDetailsRow
@@ -687,14 +874,19 @@ export const getJob = (
       throw new GitHubIngestionInvariantError("The persisted review result row is incomplete.");
     }
 
-    if (row.reviewResultSchemaId === "PrReviewPlanV1" && row.prReviewAssessment === null) {
+    const isPrReview =
+      row.reviewResultSchemaId === "PrReviewPlanV1" ||
+      row.reviewResultSchemaId === "PrReviewPlanV2";
+    const isIssueTriage =
+      row.reviewResultSchemaId === "IssueTriageV1" || row.reviewResultSchemaId === "IssueTriageV2";
+    if (isPrReview && row.prReviewAssessment === null) {
       throw new GitHubIngestionInvariantError(
         "The persisted PR review result is missing its projection assessment.",
       );
     }
 
     if (
-      row.reviewResultSchemaId === "IssueTriageV1" &&
+      isIssueTriage &&
       (row.issueCategory === null ||
         row.issuePriority === null ||
         row.issueConfidence === null ||
@@ -707,41 +899,40 @@ export const getJob = (
       );
     }
 
-    const issueTriage =
-      row.reviewResultSchemaId !== "IssueTriageV1"
-        ? null
-        : {
-            category: requirePersistedValue(
-              row.issueCategory,
-              "The persisted issue triage result is missing its category.",
+    const issueTriage = !isIssueTriage
+      ? null
+      : {
+          category: requirePersistedValue(
+            row.issueCategory,
+            "The persisted issue triage result is missing its category.",
+          ),
+          priority: requirePersistedValue(
+            row.issuePriority,
+            "The persisted issue triage result is missing its priority.",
+          ),
+          confidence: requirePersistedValue(
+            row.issueConfidence,
+            "The persisted issue triage result is missing its confidence.",
+          ),
+          suggestedLabels: parseStringArray(
+            requirePersistedValue(
+              row.issueSuggestedLabelsJson,
+              "The persisted issue triage result is missing suggested labels.",
             ),
-            priority: requirePersistedValue(
-              row.issuePriority,
-              "The persisted issue triage result is missing its priority.",
+          ),
+          missingInformation: parseStringArray(
+            requirePersistedValue(
+              row.issueMissingInformationJson,
+              "The persisted issue triage result is missing information requirements.",
             ),
-            confidence: requirePersistedValue(
-              row.issueConfidence,
-              "The persisted issue triage result is missing its confidence.",
+          ),
+          duplicateCandidates: parseIssueDuplicateCandidates(
+            requirePersistedValue(
+              row.issueDuplicateCandidatesJson,
+              "The persisted issue triage result is missing duplicate candidates.",
             ),
-            suggestedLabels: parseStringArray(
-              requirePersistedValue(
-                row.issueSuggestedLabelsJson,
-                "The persisted issue triage result is missing suggested labels.",
-              ),
-            ),
-            missingInformation: parseStringArray(
-              requirePersistedValue(
-                row.issueMissingInformationJson,
-                "The persisted issue triage result is missing information requirements.",
-              ),
-            ),
-            duplicateCandidates: parseIssueDuplicateCandidates(
-              requirePersistedValue(
-                row.issueDuplicateCandidatesJson,
-                "The persisted issue triage result is missing duplicate candidates.",
-              ),
-            ),
-          };
+          ),
+        };
 
     const reviewResult =
       row.reviewResultId === null
@@ -770,21 +961,22 @@ export const getJob = (
               row.reviewResultCreatedAt,
               "The persisted review result is missing its creation timestamp.",
             ),
-            prReview:
-              row.reviewResultSchemaId !== "PrReviewPlanV1"
-                ? null
-                : {
-                    assessment: requirePersistedValue(
-                      row.prReviewAssessment,
-                      "The persisted PR review result is missing its assessment.",
-                    ),
-                    findings: prReviewFindings.map(mapReviewFinding),
-                  },
+            prReview: !isPrReview
+              ? null
+              : {
+                  assessment: requirePersistedValue(
+                    row.prReviewAssessment,
+                    "The persisted PR review result is missing its assessment.",
+                  ),
+                  findings: prReviewFindings.map(mapReviewFinding),
+                },
             issueTriage,
+            ...readReviewEvidence(row),
           };
 
     const result: DashboardJobDetailRead = {
       id: row.id,
+      repositoryId: row.repositoryId,
       workItemId: row.workItemId,
       workItemRef: row.workItemRef,
       title: row.title,
@@ -792,6 +984,11 @@ export const getJob = (
       status: row.status,
       phase: row.phase,
       attempt: row.attempt,
+      admission: readJobAdmission(database, {
+        jobId: row.id,
+        status: row.status,
+        attemptCount: row.attempt,
+      }),
       maxAttempts: row.maxAttempts,
       workerNodeId: row.workerNodeId,
       leaseGeneration: row.leaseGeneration > 0 ? row.leaseGeneration : null,
@@ -804,10 +1001,14 @@ export const getJob = (
       updatedAt: row.updatedAt,
       failureCode: row.failureCode,
       failureMessage: row.failureMessage,
+      failureDiagnostics: readFailureDiagnostics(row.failureDiagnosticsJson),
       resultDigest: row.resultDigest,
       reviewResult,
     };
-    if (!Value.Check(DashboardJobDetailReadSchema, result)) {
+    if (
+      !Value.Check(DashboardJobDetailReadSchema, result) ||
+      getJobAdmissionIssues({ ...result, attemptCount: result.attempt }).length > 0
+    ) {
       throw new GitHubIngestionInvariantError(
         "The database job projection does not match DashboardJobDetailReadSchema.",
       );
@@ -942,17 +1143,21 @@ interface SystemRow {
   readonly sqliteVersion: string;
   readonly databaseSizeBytes: number;
   readonly oldestQueuedAt: string | null;
+  readonly queuedJobs: number;
+  readonly awaitingAdmissionJobs: number;
+  readonly pendingValidationRequests: number;
+  readonly oldestAwaitingAdmissionAt: string | null;
   readonly activeWorkers: number;
   readonly activeLeases: number;
-  readonly lastGitHubIngestionAt: string | null;
-  readonly stalePollingProjectionCount: number;
 }
 
 export const getSystemSnapshot = (
   database: DatabaseSync,
   _schemaVersion: number,
+  input: { readonly githubHealth?: DashboardHealthComponent } = {},
 ): DashboardSystemRead =>
   withReadTransaction(database, () => {
+    assertWaitingAdmissionIntegrity(database);
     const row = database
       .prepare(`
         SELECT
@@ -961,10 +1166,17 @@ export const getSystemSnapshot = (
             SELECT page_count * page_size
             FROM pragma_page_count(), pragma_page_size()
           ) AS "databaseSizeBytes",
+          queue."oldestQueuedAt",
+          queue."queuedJobs",
+          queue."awaitingAdmissionJobs",
+          queue."oldestAwaitingAdmissionAt",
           (
-            SELECT MIN(created_at) FROM jobs
-            WHERE status IN ('queued', 'retry_waiting')
-          ) AS "oldestQueuedAt",
+            SELECT COUNT(*) FROM validation_dispatch_checks AS pending
+            WHERE pending.pending = 1 AND NOT EXISTS (
+              SELECT 1 FROM review_run_job_links AS link
+              WHERE link.review_run_id = pending.review_run_id AND link.request_id = pending.request_id
+            )
+          ) AS "pendingValidationRequests",
           (
             SELECT COUNT(*) FROM workers
             WHERE status IN ('online', 'draining') AND superseded_at IS NULL
@@ -972,29 +1184,19 @@ export const getSystemSnapshot = (
           (
             SELECT COUNT(*) FROM run_attempts
             WHERE status IN ('leased', 'running')
-          ) AS "activeLeases",
-          (
-            SELECT MAX(observed_at)
-            FROM (
-              SELECT observed_at FROM github_events
-              UNION ALL
-              SELECT updated_at AS observed_at FROM github_polling_projections
-            )
-          ) AS "lastGitHubIngestionAt",
-          (
-            SELECT COUNT(*)
-            FROM github_polling_projections
-            WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes')
-          ) AS "stalePollingProjectionCount"
+          ) AS "activeLeases"
+        FROM (
+          SELECT
+            MIN(CASE WHEN admission.state = 'admitted' THEN job.created_at END) AS "oldestQueuedAt",
+            COUNT(CASE WHEN admission.state = 'admitted' THEN 1 END) AS "queuedJobs",
+            COUNT(CASE WHEN admission.state = 'pending' THEN 1 END) AS "awaitingAdmissionJobs",
+            MIN(CASE WHEN admission.state = 'pending' THEN job.created_at END) AS "oldestAwaitingAdmissionAt"
+          FROM jobs AS job JOIN job_admission AS admission ON admission.job_id = job.id
+          WHERE job.status IN ('queued', 'retry_waiting')
+        ) AS queue
       `)
       .get() as unknown as SystemRow;
     const checkedAt = new Date().toISOString();
-    const lastGitHubIngestionAgeMs =
-      row.lastGitHubIngestionAt === null
-        ? Number.POSITIVE_INFINITY
-        : Date.now() - Date.parse(row.lastGitHubIngestionAt);
-    const githubHealthy =
-      lastGitHubIngestionAgeMs <= 10 * 60 * 1_000 && row.stalePollingProjectionCount === 0;
     const workerPoolHealthy = row.activeWorkers > 0;
     const result: DashboardSystemRead = {
       serverVersion: "0.1.0",
@@ -1002,7 +1204,12 @@ export const getSystemSnapshot = (
       nodeVersion: process.versions.node,
       sqliteVersion: row.sqliteVersion,
       databaseSizeBytes: row.databaseSizeBytes,
+      // These ages identify the oldest Job, not an inferred historical admission event.
       oldestQueuedAt: row.oldestQueuedAt,
+      queuedJobs: row.queuedJobs,
+      awaitingAdmissionJobs: row.awaitingAdmissionJobs,
+      pendingValidationRequests: row.pendingValidationRequests,
+      oldestAwaitingAdmissionAt: row.oldestAwaitingAdmissionAt,
       activeWorkers: row.activeWorkers,
       activeLeases: row.activeLeases,
       pendingApprovals: 0,
@@ -1014,15 +1221,11 @@ export const getSystemSnapshot = (
           summary: "The database worker is responding and the current snapshot is consistent.",
           checkedAt,
         },
-        {
+        input.githubHealth ?? {
           id: "github",
           name: "GitHub ingestion",
-          status: githubHealthy ? "healthy" : "degraded",
-          summary: githubHealthy
-            ? "GitHub ingestion completed within the last ten minutes."
-            : row.lastGitHubIngestionAt === null
-              ? "No GitHub scheduling event or polling checkpoint has been processed yet."
-              : "One or more GitHub ingestion checkpoints are stale.",
+          status: "unavailable",
+          summary: "GitHub runtime health was not supplied for this database snapshot.",
           checkedAt,
         },
         {

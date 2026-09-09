@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../dist/app.js";
 import type { ServerConfig } from "../dist/config.js";
-import type { DatabaseClient } from "../dist/database/database-client.js";
+import type { OperatorRequestInput } from "../dist/database/operator-request.js";
 import type { OperatorAuthRouteService } from "../dist/routes/auth.js";
 import type { OperatorSession } from "../dist/security/operator-auth.js";
+import { createSchedulingTestDatabase } from "./background/scheduling-pump.testing.js";
 
 const operatorSession: OperatorSession = {
   issuer: "urn:agentic-review:development",
@@ -51,15 +52,17 @@ const baseConfig: ServerConfig = {
   allowInsecureHttp: true,
   tls: undefined,
   github: {
-    repositories: [{ githubRepositoryId: 1, fullName: "example/repository" }],
-    reviewer: { githubUserId: 1, login: "reviewer" },
-    authorizationPolicy: {
-      kind: "self_or_allowlist",
-      policyVersion: 1,
-      schedulingTargetGithubUserId: 1,
-      allowlistedActorGithubUserIds: [],
-      unknownActorPolicy: "deny",
-      newRevisionPolicy: "inherit_authorized_epoch",
+    legacyBootstrap: {
+      repositories: [{ githubRepositoryId: 1, fullName: "example/repository" }],
+      reviewer: { githubUserId: 1, login: "reviewer" },
+      authorizationPolicy: {
+        kind: "self_or_allowlist",
+        policyVersion: 1,
+        schedulingTargetGithubUserId: 1,
+        allowlistedActorGithubUserIds: [],
+        unknownActorPolicy: "deny",
+        newRevisionPolicy: "inherit_authorized_epoch",
+      },
     },
     promptDirectory: "/unused/prompts",
     webhook: {
@@ -96,6 +99,10 @@ const systemSnapshot = {
   sqliteVersion: "3.50.4",
   databaseSizeBytes: 1_024,
   oldestQueuedAt: null,
+  queuedJobs: 0,
+  awaitingAdmissionJobs: 0,
+  pendingValidationRequests: 0,
+  oldestAwaitingAdmissionAt: null,
   activeWorkers: 0,
   activeLeases: 0,
   pendingApprovals: 0,
@@ -104,7 +111,27 @@ const systemSnapshot = {
 
 const createDatabaseRequest = () =>
   vi.fn(async (operation: string, input?: Record<string, unknown>) => {
-    switch (operation) {
+    let selected = operation;
+    let selectedInput = input;
+    if (operation === "operatorRequest") {
+      const frame = input as unknown as OperatorRequestInput;
+      expect(Object.keys(frame).sort()).toEqual(["context", "input", "operation"]);
+      expect(frame.context).toEqual({
+        kind: "operator",
+        actor: { issuer: operatorSession.issuer, subject: operatorSession.subject },
+      });
+      selected = frame.operation;
+      selectedInput = frame.input as Record<string, unknown>;
+    } else {
+      expect([
+        "cleanupExpiredOperatorAuth",
+        "reapExpiredLeases",
+        "dispatchPendingValidationJobs",
+      ]).toContain(operation);
+    }
+    switch (selected) {
+      case "operatorCheckPermission":
+        return { authorized: true };
       case "cleanupExpiredOperatorAuth":
         return {
           deletedBrowserFlows: 0,
@@ -114,14 +141,16 @@ const createDatabaseRequest = () =>
         };
       case "reapExpiredLeases":
         return { expiredCount: 0 };
+      case "dispatchPendingValidationJobs":
+        return {};
       case "listWorkerNodeCredentials":
         return { items: [], total: 0 };
       case "createWorkerNodeCredential":
-        return { workerNodeId: input?.workerNodeId, authState: "pending" };
+        return { workerNodeId: selectedInput?.workerNodeId, authState: "pending" };
       case "rotateWorkerToken":
-        return { workerNodeId: input?.workerNodeId, authState: "active" };
+        return { workerNodeId: selectedInput?.workerNodeId, authState: "active" };
       case "revokeWorkerToken":
-        return { workerNodeId: input?.workerNodeId, authState: "revoked" };
+        return { workerNodeId: selectedInput?.workerNodeId, authState: "revoked" };
       case "getSystemSnapshot":
         return systemSnapshot;
       default:
@@ -135,7 +164,7 @@ const createDependencies = (
   operatorAuth?: OperatorAuthRouteService,
 ) => ({
   config,
-  database: { request } as unknown as DatabaseClient,
+  database: createSchedulingTestDatabase(request),
   shutdownSignal: new AbortController().signal,
   serverAdmission: { read: () => true },
   ...(operatorAuth === undefined ? {} : { operatorAuth }),
@@ -261,11 +290,20 @@ describe("recovery maintenance application boundary", () => {
       expect(revokeCredential.json()).toEqual({ workerNodeId, authState: "revoked" });
       expect(dashboard.statusCode).toBe(200);
       expect(dashboard.json()).toEqual(systemSnapshot);
-      expect(request).toHaveBeenCalledWith("listWorkerNodeCredentials", {
-        offset: 0,
-        limit: 200,
-      });
-      expect(request).toHaveBeenCalledWith("getSystemSnapshot", {});
+      expect(request).toHaveBeenCalledWith(
+        "operatorRequest",
+        expect.objectContaining({
+          operation: "listWorkerNodeCredentials",
+          input: { offset: 0, limit: 200 },
+        }),
+      );
+      expect(request).toHaveBeenCalledWith(
+        "operatorRequest",
+        expect.objectContaining({
+          operation: "getSystemSnapshot",
+          input: {},
+        }),
+      );
       expect(request).not.toHaveBeenCalledWith("ping", {});
     } finally {
       await app.close();

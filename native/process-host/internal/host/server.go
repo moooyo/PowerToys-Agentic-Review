@@ -2,11 +2,14 @@ package host
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +21,12 @@ import (
 const defaultMaximumConcurrentRequests = 4
 
 type Server struct {
-	reader        *protocol.FrameReader
-	emitter       *protocolEmitter
-	launcher      processLauncher
-	logger        *log.Logger
-	maxConcurrent int
+	reader           *protocol.FrameReader
+	emitter          *protocolEmitter
+	launcher         processLauncher
+	logger           *log.Logger
+	maxConcurrent    int
+	interactiveInput bool
 
 	mu           sync.Mutex
 	reservations map[string]*managedProcess
@@ -32,17 +36,22 @@ type Server struct {
 }
 
 func NewServer(input io.Reader, output io.Writer, logger *log.Logger, maximumConcurrentRequests int) *Server {
+	return NewServerWithInteractiveInput(input, output, logger, maximumConcurrentRequests, false)
+}
+
+func NewServerWithInteractiveInput(input io.Reader, output io.Writer, logger *log.Logger, maximumConcurrentRequests int, interactiveInput bool) *Server {
 	if maximumConcurrentRequests <= 0 {
 		maximumConcurrentRequests = defaultMaximumConcurrentRequests
 	}
 	return &Server{
-		reader:        protocol.NewFrameReader(input, protocol.MaxFrameBytes),
-		emitter:       newProtocolEmitter(protocol.NewFrameWriter(output, protocol.MaxFrameBytes)),
-		launcher:      newProcessLauncher(),
-		logger:        logger,
-		maxConcurrent: maximumConcurrentRequests,
-		reservations:  make(map[string]*managedProcess),
-		fatal:         make(chan error, 1),
+		reader:           protocol.NewFrameReader(input, protocol.MaxFrameBytes),
+		emitter:          newProtocolEmitter(protocol.NewFrameWriter(output, protocol.MaxFrameBytes)),
+		launcher:         newProcessLauncher(),
+		logger:           logger,
+		maxConcurrent:    maximumConcurrentRequests,
+		interactiveInput: interactiveInput,
+		reservations:     make(map[string]*managedProcess),
+		fatal:            make(chan error, 1),
 	}
 }
 
@@ -51,15 +60,19 @@ func (s *Server) Run(ctx context.Context) error {
 	if processID <= 0 || uint64(processID) > uint64(^uint32(0)) {
 		return errors.New("host process ID is outside the protocol range")
 	}
+	capabilities := protocol.ReadyCapabilities{
+		ConcurrentRequests:        true,
+		MaximumFrameBytes:         protocol.MaxFrameBytes,
+		MaximumConcurrentRequests: s.maxConcurrent,
+	}
+	if s.interactiveInput {
+		capabilities.InteractiveStdin = protocol.DefaultInteractiveStdinCapabilities()
+	}
 	if err := s.emitter.Emit(protocol.ReadyEvent{
 		ProtocolVersion: protocol.Version,
 		Type:            "ready",
 		ProcessHostPID:  uint32(processID),
-		Capabilities: protocol.ReadyCapabilities{
-			ConcurrentRequests:        true,
-			MaximumFrameBytes:         protocol.MaxFrameBytes,
-			MaximumConcurrentRequests: s.maxConcurrent,
-		},
+		Capabilities:    capabilities,
 	}); err != nil {
 		return fmt.Errorf("emit ready event: %w", err)
 	}
@@ -100,6 +113,14 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 			case protocol.TerminateRequest:
 				if err := s.terminate(request); err != nil {
+					return err
+				}
+			case protocol.StdinWriteRequest:
+				if err := s.writeInput(request); err != nil {
+					return err
+				}
+			case protocol.StdinCloseRequest:
+				if err := s.closeInput(request); err != nil {
 					return err
 				}
 			case protocol.ShutdownRequest:
@@ -148,6 +169,17 @@ func (s *Server) readRequests(results chan<- requestReadResult) {
 }
 
 func (s *Server) start(request protocol.StartRequest) error {
+	if request.Spec.InteractiveStdin && !s.interactiveInput {
+		return s.emitOperationalError(&request.ID, protocol.StdinNotEnabled, errors.New("interactive standard input is not enabled for this Host"))
+	}
+	var stdinStreamID string
+	if request.Spec.InteractiveStdin {
+		var nonce [32]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return s.emitOperationalError(&request.ID, "PROCESS_START_FAILED", errors.New("unable to allocate interactive input identity"))
+		}
+		stdinStreamID = hex.EncodeToString(nonce[:])
+	}
 	s.mu.Lock()
 	if _, exists := s.reservations[request.ID]; exists {
 		s.mu.Unlock()
@@ -168,7 +200,13 @@ func (s *Server) start(request protocol.StartRequest) error {
 	}
 	process, err := s.launcher.Launch(request.Spec, limits)
 	if err != nil {
-		emitErr := s.emitOperationalError(&request.ID, "PROCESS_START_FAILED", err)
+		code := "PROCESS_START_FAILED"
+		if errors.Is(err, errProcessIdentityUnavailable) {
+			code = "PROCESS_IDENTITY_UNAVAILABLE"
+		} else if errors.Is(err, errProcessIdentityQueryFailed) {
+			code = "PROCESS_IDENTITY_QUERY_FAILED"
+		}
+		emitErr := s.emitOperationalError(&request.ID, code, err)
 		s.releaseReservation(request.ID, nil, false)
 		return emitErr
 	}
@@ -180,17 +218,37 @@ func (s *Server) start(request protocol.StartRequest) error {
 		limits:    limits,
 		done:      make(chan struct{}),
 	}
+	if request.Spec.InteractiveStdin {
+		managed.input = newInputController(managed, stdinStreamID, process.StandardInput())
+	}
 	s.mu.Lock()
 	s.reservations[request.ID] = managed
 	s.activeWG.Add(1)
 	s.mu.Unlock()
+
+	var processCreationTimeFileTime string
+	if request.Spec.CaptureProcessIdentity {
+		provider, available := process.(processIdentityProvider)
+		if available {
+			if creationTime := provider.ProcessCreationTimeFileTime(); creationTime != 0 {
+				processCreationTimeFileTime = strconv.FormatUint(creationTime, 10)
+			}
+		}
+		if processCreationTimeFileTime == "" {
+			cleanupErr := managed.abortBeforeStarted()
+			emitErr := s.emitOperationalError(&request.ID, "PROCESS_IDENTITY_UNAVAILABLE", errProcessIdentityUnavailable)
+			return errors.Join(emitErr, cleanupErr)
+		}
+	}
 	managed.armTimeout()
 
 	if err := s.emitter.Emit(protocol.StartedEvent{
-		ProtocolVersion: protocol.Version,
-		Type:            "started",
-		RequestID:       request.ID,
-		ProcessID:       process.ProcessID(),
+		ProtocolVersion:             protocol.Version,
+		Type:                        "started",
+		RequestID:                   request.ID,
+		ProcessID:                   process.ProcessID(),
+		ProcessCreationTimeFileTime: processCreationTimeFileTime,
+		StdinStreamID:               stdinStreamID,
 	}); err != nil {
 		cleanupErr := managed.abortBeforeStarted()
 		return errors.Join(fmt.Errorf("emit started event: %w", err), cleanupErr)
@@ -356,11 +414,13 @@ func truncateUTF16(value string, maximumUnits int) string {
 }
 
 type managedProcess struct {
-	server    *Server
-	requestID string
-	process   launchedProcess
-	limits    protocol.EffectiveLimits
-	done      chan struct{}
+	server        *Server
+	requestID     string
+	process       launchedProcess
+	limits        protocol.EffectiveLimits
+	done          chan struct{}
+	input         *inputController
+	publicationMu sync.Mutex
 
 	lifecycleMu        sync.Mutex
 	terminating        bool
@@ -384,6 +444,8 @@ func (p *managedProcess) armTimeout() {
 }
 
 func (p *managedProcess) confirmStarted() error {
+	p.publicationMu.Lock()
+	defer p.publicationMu.Unlock()
 	p.lifecycleMu.Lock()
 	if p.finished {
 		p.lifecycleMu.Unlock()
@@ -441,18 +503,22 @@ func (p *managedProcess) startIO(standardInput *string) {
 		defer streams.Done()
 		collector.Drain("stderr", p.process.StandardError())
 	}()
-	go func() {
-		defer streams.Done()
-		defer p.process.StandardInput().Close()
-		if standardInput == nil {
-			return
-		}
-		if _, err := io.WriteString(p.process.StandardInput(), *standardInput); err != nil {
-			p.lifecycleMu.Lock()
-			p.inputError = err
-			p.lifecycleMu.Unlock()
-		}
-	}()
+	if p.input != nil {
+		p.input.start(&streams)
+	} else {
+		go func() {
+			defer streams.Done()
+			defer p.process.StandardInput().Close()
+			if standardInput == nil {
+				return
+			}
+			if _, err := io.WriteString(p.process.StandardInput(), *standardInput); err != nil {
+				p.lifecycleMu.Lock()
+				p.inputError = err
+				p.lifecycleMu.Unlock()
+			}
+		}()
+	}
 
 	go p.wait(collector, &streams)
 }
@@ -472,16 +538,22 @@ func (p *managedProcess) enforceTimeout(timer *time.Timer) {
 }
 
 func (p *managedProcess) terminate(reason protocol.TerminationReason, emitAcknowledgement bool) (bool, error) {
+	p.publicationMu.Lock()
+	defer p.publicationMu.Unlock()
 	p.lifecycleMu.Lock()
-	defer p.lifecycleMu.Unlock()
 	if p.finished || p.processExited || p.terminating {
+		p.lifecycleMu.Unlock()
 		return false, nil
 	}
 	p.terminating = true
+	if p.input != nil {
+		p.input.stop(protocol.StdinCancelled)
+	}
 	terminateErr := p.process.Terminate()
 	if errors.Is(terminateErr, errProcessAlreadyExited) {
 		p.terminating = false
 		p.processExited = true
+		p.lifecycleMu.Unlock()
 		return false, nil
 	}
 	if !p.started {
@@ -490,8 +562,10 @@ func (p *managedProcess) terminate(reason protocol.TerminationReason, emitAcknow
 			emitAcknowledgement: emitAcknowledgement,
 			err:                 terminateErr,
 		}
+		p.lifecycleMu.Unlock()
 		return true, nil
 	}
+	p.lifecycleMu.Unlock()
 	if terminateErr != nil {
 		return true, terminateErr
 	}
@@ -513,6 +587,9 @@ func (p *managedProcess) wait(collector *outputCollector, streams *sync.WaitGrou
 	p.lifecycleMu.Lock()
 	p.processExited = true
 	p.lifecycleMu.Unlock()
+	if p.input != nil {
+		p.input.stop(protocol.StdinProcessExited)
+	}
 	if waitErr != nil {
 		p.server.fail(waitErr)
 	}
@@ -537,9 +614,11 @@ func (p *managedProcess) wait(collector *outputCollector, streams *sync.WaitGrou
 	}
 	outputTruncated, outputErr := collector.Finish()
 
+	p.publicationMu.Lock()
 	p.lifecycleMu.Lock()
 	p.finished = true
 	inputErr := p.inputError
+	p.lifecycleMu.Unlock()
 	if outputErr != nil {
 		_ = p.server.emitOperationalError(&p.requestID, "OUTPUT_READ_FAILED", outputErr)
 	}
@@ -554,7 +633,7 @@ func (p *managedProcess) wait(collector *outputCollector, streams *sync.WaitGrou
 		Signal:          nil,
 		OutputTruncated: outputTruncated,
 	})
-	p.lifecycleMu.Unlock()
+	p.publicationMu.Unlock()
 
 	p.finishDone()
 	p.server.releaseReservation(p.requestID, p, true)

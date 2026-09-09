@@ -1,5 +1,15 @@
+import { createHash } from "node:crypto";
 import { win32 } from "node:path";
-import type { JobExecutionEnvelope } from "@agentic-review/contracts";
+import { createCanonicalResult } from "@agentic-review/codex";
+import {
+  type GitHubWorkItem,
+  getEvaluationValidationJobContextIssues,
+  type JobExecutionEnvelope,
+  type JobExecutionEnvelopeV2,
+  JobExecutionEnvelopeV2Schema,
+  type ValidationJobContextV2,
+} from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConsoleJsonLogger, type Logger } from "../logging/logger.js";
 import {
@@ -159,6 +169,7 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
   public pullRequestBaseOutput = `${baseSha}\n`;
   public pullRequestHeadOutput = `${headSha}\n`;
   public worktreeHeadOutput = `${headSha}\n`;
+  public worktreeStatusOutput = "";
   public worktreeListOutput: string | undefined;
   public mergeBaseOutput = `${baseSha}\n`;
   public onRun: ((spec: ProcessLaunchSpec, context: ManagedProcessRunContext) => void) | undefined;
@@ -190,6 +201,7 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
       this.fileSystem?.addDirectory(repositoryDirectory);
     }
     let stdout = "";
+    if (command === "status") stdout = this.worktreeStatusOutput;
     if (command === "cat-file") stdout = "commit\n";
     if (command === "merge-base") stdout = this.mergeBaseOutput;
     if (command === "worktree" && spec.arguments.includes("list")) {
@@ -217,6 +229,9 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
   public removalError: unknown;
   public checkoutRemovalError: unknown;
   public onMonitorCheck: (() => void) | undefined;
+  public monitorSignal: AbortSignal | undefined;
+  public monitorViolation: WorkspaceDiskBudgetError | undefined;
+  public monitorCloseError: unknown;
 
   public constructor(private readonly fileSystem: FakeWorkspaceFileSystem) {}
 
@@ -234,10 +249,16 @@ class FakeWorkspaceDiskBudget implements WorkspaceDiskBudget {
       startMonitoring: async (parentSignal): Promise<WorkspaceDiskMonitor> => {
         this.monitored.push(attemptDirectory);
         this.onMonitorCheck?.();
+        const budget = this;
         return {
-          signal: parentSignal,
-          violation: undefined,
-          close: async () => this.onMonitorCheck?.(),
+          signal: this.monitorSignal ?? parentSignal,
+          get violation() {
+            return budget.monitorViolation;
+          },
+          close: async () => {
+            this.onMonitorCheck?.();
+            if (this.monitorCloseError !== undefined) throw this.monitorCloseError;
+          },
         };
       },
       removeAttempt: async () => {
@@ -313,6 +334,7 @@ function commandName(argumentsList: readonly string[]): string | undefined {
     "merge-base",
     "worktree",
     "rev-parse",
+    "status",
   ]);
   return argumentsList.find((argument) => commands.has(argument));
 }
@@ -403,6 +425,261 @@ function envelope(
   };
 }
 
+function validationEnvelope(kind: "issue" | "pull_request"): JobExecutionEnvelopeV2 {
+  const legacy = envelope(kind);
+  const revisionKey =
+    kind === "issue"
+      ? "1".repeat(64)
+      : createHash("sha256").update(`${baseSha}\0${headSha}`).digest("hex");
+  const workflowKind = kind === "issue" ? "issue_validation" : "pr_static_build";
+  const config = {
+    schemaVersion: "ValidationProfileV1" as const,
+    setup: [],
+    build: [],
+    test: [],
+    launch: [],
+    cleanup: [],
+    requiredCapabilities: [],
+    hardTimeoutMs: 60_000,
+    noProgressTimeoutMs: 30_000,
+  };
+  return {
+    ...legacy,
+    envelopeVersion: 2,
+    resource:
+      kind === "issue"
+        ? {
+            ...legacy.resource,
+            kind: "issue",
+            revisionDigest: revisionKey,
+            canonicalSnapshot: {
+              kind: "issue",
+              githubWorkItemId: 42,
+              githubNodeId: "WI_node",
+              githubRepositoryId: legacy.repository.githubRepositoryId,
+              number: 42,
+              title: "Reproduce the issue on the selected commit",
+              body: "Expected behavior differs from actual behavior.",
+              state: "open",
+              author: legacy.resource.author,
+              htmlUrl: "https://github.com/microsoft/PowerToys/issues/42",
+              createdAt: "2026-08-30T00:00:00.000Z",
+              updatedAt: "2026-08-31T00:00:00.000Z",
+              closedAt: null,
+            },
+          }
+        : legacy.resource,
+    validation: {
+      schemaVersion: "ValidationJobContextV1",
+      runId: "review-run-42",
+      planDigest: digest,
+      activationId: "activation-42",
+      requestId: "request-42",
+      jobActivation: 1,
+      repositoryId: "repo-42",
+      workItemId: "work-item-42",
+      revisionKey,
+      requestEpochId: "epoch-42",
+      workflowKind,
+      target: "headless",
+      required: true,
+      profileVersion: {
+        id: "profile-version-42",
+        profileId: "profile-42",
+        repositoryId: "repo-42",
+        name: "Source validation",
+        workflowKind,
+        target: "headless",
+        version: 1,
+        config,
+        configSha256: createCanonicalResult(config).sha256,
+        required: true,
+        outputSchemaVersion: kind === "issue" ? "ValidationReportV1" : "PrReviewPlanV2",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        publishedAt: "2026-08-30T00:00:00.000Z",
+        createdBy: "operator",
+      },
+      promptVersion: {
+        id: "prompt-42",
+        templateId: "template-42",
+        version: 1,
+        contentSha256: digest,
+      },
+      requiredCheckIds: [],
+      testedSourceRevision:
+        kind === "issue" ? { kind: "commit", headSha } : { kind: "pull_request", baseSha, headSha },
+      testedSourceAuthorization:
+        kind === "issue"
+          ? {
+              kind: "operator",
+              activationId: "activation-42",
+              issuer: "local-operator",
+              subject: "operator",
+              authorizedAt: "2026-08-31T00:00:00.000Z",
+              githubRepositoryId: legacy.repository.githubRepositoryId,
+              githubWorkItemId: 42,
+              issueRevisionKey: revisionKey,
+              headSha,
+            }
+          : null,
+    },
+  };
+}
+
+type EvaluationWorkspaceEnvelope = JobExecutionEnvelopeV2 & { validation: ValidationJobContextV2 };
+
+function refreshEvaluationSourceDigest(input: EvaluationWorkspaceEnvelope): void {
+  const source = input.validation.source;
+  source.sourceDigest = createCanonicalResult({
+    repository: source.repository,
+    workItemId: source.workItemId,
+    workItem: source.workItem,
+    revision: source.revision,
+    testedSourceRevision: source.testedSourceRevision,
+    revisionId: source.revisionId,
+  }).sha256;
+}
+
+function evaluationEnvelope(kind: "issue" | "pull_request"): EvaluationWorkspaceEnvelope {
+  const original = validationEnvelope(kind);
+  const itemCommon = {
+    githubWorkItemId: 42,
+    githubNodeId: original.resource.githubNodeId,
+    githubRepositoryId: original.repository.githubRepositoryId,
+    number: original.resource.number,
+    title: "A frozen source example",
+    body: "The original source text.",
+    state: "open" as const,
+    author: original.resource.author,
+    htmlUrl: `https://github.com/microsoft/PowerToys/${kind === "issue" ? "issues" : "pull"}/42`,
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: original.assignedAt,
+    closedAt: null,
+  };
+  const item: GitHubWorkItem =
+    kind === "issue"
+      ? { ...itemCommon, kind: "issue" }
+      : { ...itemCommon, kind: "pull_request", isDraft: false };
+  const revisionKey = createHash("sha256")
+    .update(
+      kind === "pull_request"
+        ? `${baseSha}\0${headSha}`
+        : JSON.stringify([item.title, item.body, item.state, item.updatedAt]),
+    )
+    .digest("hex");
+  const source: ValidationJobContextV2["source"] = {
+    schemaVersion: "EvaluationSourceSnapshotV1",
+    freshness: "frozen",
+    sourceDigest: digest,
+    repository: {
+      id: original.validation.repositoryId,
+      ...original.repository,
+      configurationVersion: 1,
+    },
+    workItemId: original.validation.workItemId,
+    workItem: item,
+    revisionId: "source-revision-42",
+    revision:
+      kind === "pull_request"
+        ? {
+            kind: "pull_request",
+            githubRepositoryId: item.githubRepositoryId,
+            githubWorkItemId: item.githubWorkItemId,
+            revisionKey,
+            baseSha,
+            headSha,
+          }
+        : {
+            kind: "issue",
+            githubRepositoryId: item.githubRepositoryId,
+            githubWorkItemId: item.githubWorkItemId,
+            revisionKey,
+            contentDigest: revisionKey,
+          },
+    testedSourceRevision: original.validation.testedSourceRevision,
+    provenance: {
+      kind: "review_run",
+      capturedAt: original.assignedAt,
+      reviewRunId: "historical-review-run",
+      planDigest: digest,
+      requestEpochId: "historical-provenance-epoch",
+    },
+  };
+  const commonResource = {
+    githubNodeId: item.githubNodeId,
+    number: item.number,
+    title: item.title,
+    author: item.author,
+    canonicalSnapshot: item,
+  };
+  const input: EvaluationWorkspaceEnvelope = {
+    ...original,
+    resource:
+      kind === "pull_request"
+        ? { ...commonResource, kind: "pull_request", baseSha, headSha, isDraft: false }
+        : { ...commonResource, kind: "issue", revisionDigest: revisionKey },
+    prompt: {
+      ...original.prompt,
+      name: original.validation.promptVersion.templateId,
+      version: String(original.validation.promptVersion.version),
+      promptSha256: createHash("sha256").update(original.prompt.renderedPrompt).digest("hex"),
+      outputSchemaSha256: createCanonicalResult(original.prompt.outputSchema).sha256,
+    },
+    executionPolicy: {
+      ...original.executionPolicy,
+      hardTimeoutMs: original.validation.profileVersion.config.hardTimeoutMs,
+      noProgressTimeoutMs: original.validation.profileVersion.config.noProgressTimeoutMs,
+      requiredCapabilityLabels: {
+        executionEnvelope: "2",
+        validationHeadless: "1",
+        validationEvaluation: "1",
+      },
+    },
+    validation: {
+      ...original.validation,
+      schemaVersion: "ValidationJobContextV2",
+      jobActivation: 1,
+      revisionKey,
+      requestEpochId: null,
+      testedSourceAuthorization: null,
+      source,
+      purpose: {
+        schemaVersion: "EvaluationExecutionPurposeV1",
+        kind: "evaluation",
+        evaluationId: "evaluation-42",
+        cellId: "cell-42",
+        caseId: "case-42",
+        arm: "baseline",
+        sampleSetVersionId: "suite-version-42",
+        authorizationId: "evaluation-authorization-42",
+        executionManifestSha256: "e".repeat(64),
+        trial: 1,
+        upstreamMutationPolicy: "forbidden",
+      },
+      authorization: {
+        schemaVersion: "EvaluationExecutionAuthorizationV1",
+        kind: "operator_evaluation",
+        id: "evaluation-authorization-42",
+        actor: { issuer: "fixture", subject: "operator" },
+        authorizedAt: original.assignedAt,
+        evaluationId: "evaluation-42",
+        repositoryId: source.repository.id,
+        githubRepositoryId: source.repository.githubRepositoryId,
+        sampleSetVersionId: "suite-version-42",
+        sourceManifestSha256: "a".repeat(64),
+        configurationManifestSha256: "c".repeat(64),
+        cellManifestSha256: "d".repeat(64),
+        executionManifestSha256: "e".repeat(64),
+      },
+      modelRequirements: { required: kind === "pull_request", expectedModelIdentityDigest: null },
+    },
+  };
+  refreshEvaluationSourceDigest(input);
+  expect(Value.Check(JobExecutionEnvelopeV2Schema, input)).toBe(true);
+  expect(getEvaluationValidationJobContextIssues(input.validation)).toEqual([]);
+  return JSON.parse(createCanonicalResult(input).json) as EvaluationWorkspaceEnvelope;
+}
+
 function provider(
   fileSystem: FakeWorkspaceFileSystem,
   processRunner: FakeManagedProcessRunner,
@@ -477,6 +754,372 @@ function preparationContext(
 describe("ProductionDisposableJobWorkspaceProvider", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("isolates model and validation workspaces without changing the leased attempt", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const workspaces = provider(fileSystem, processRunner, { diskBudget });
+    const input = envelope("issue");
+    const leaseBefore = structuredClone(input.lease);
+    const validation = await workspaces.prepare(input, preparationContext().context);
+    const model = await workspaces.prepare(input, preparationContext().context, "model");
+
+    expect(input.lease).toEqual(leaseBefore);
+    expect(validation.attemptDirectory).not.toBe(model.attemptDirectory);
+    expect(win32.basename(validation.attemptDirectory)).toBe(
+      `attempt-${createHash("sha256").update(input.lease.runAttemptId).digest("hex")}`,
+    );
+    expect(diskBudget.admitted).toEqual([validation.attemptDirectory, model.attemptDirectory]);
+    await model.cleanup();
+    expect(fileSystem.has(validation.checkoutDirectory)).toBe(true);
+    await validation.cleanup();
+    expect(diskBudget.released).toEqual([model.attemptDirectory, validation.attemptDirectory]);
+  });
+
+  it("prepares the frozen evaluation PR commits after the upstream PR head has advanced", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const advanced = "c".repeat(40);
+    processRunner.onRun = (spec) => {
+      if (commandName(spec.arguments) === "fetch")
+        processRunner.pullRequestHeadOutput = spec.arguments.includes(
+          "+refs/pull/42/head:refs/agentic-review/latest-head",
+        )
+          ? `${advanced}\n`
+          : `${headSha}\n`;
+    };
+    const input = evaluationEnvelope("pull_request");
+    const before = structuredClone(input);
+    const workspace = await provider(fileSystem, processRunner).prepare(
+      input,
+      preparationContext().context,
+    );
+    const fetches = processRunner.calls.filter(
+      (call) => commandName(call.spec.arguments) === "fetch",
+    );
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.spec.arguments).toContain(`+${baseSha}:refs/agentic-review/latest-base`);
+    expect(fetches[0]?.spec.arguments).toContain(`+${headSha}:refs/agentic-review/latest-head`);
+    expect(fetches[0]?.spec.arguments.some((argument) => argument.includes("refs/pull/"))).toBe(
+      false,
+    );
+    const checkout = processRunner.calls.find(
+      (call) =>
+        commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("add"),
+    );
+    expect(checkout?.spec.arguments.at(-1)).toBe(headSha);
+    expect(await workspace.captureWorktreeState?.(new AbortController().signal)).toBe("clean");
+    expect(input).toEqual(before);
+    expect(input.validation.requestEpochId).toBeNull();
+    await workspace.cleanup();
+  });
+
+  it("prepares an evaluation Issue commit using its own operator authority and no legacy epoch", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    processRunner.pullRequestBaseOutput = `${headSha}\n`;
+    processRunner.mergeBaseOutput = `${headSha}\n`;
+    const input = evaluationEnvelope("issue");
+    expect(input.validation.testedSourceAuthorization).toBeNull();
+    const workspace = await provider(fileSystem, processRunner).prepare(
+      input,
+      preparationContext().context,
+    );
+    const fetch = processRunner.calls.find((call) => commandName(call.spec.arguments) === "fetch");
+    expect(fetch?.spec.arguments).toEqual(
+      expect.arrayContaining([
+        `+${headSha}:refs/agentic-review/latest-base`,
+        `+${headSha}:refs/agentic-review/latest-head`,
+      ]),
+    );
+    expect(fetch?.spec.arguments.some((argument) => argument.includes("refs/pull/"))).toBe(false);
+    expect(await workspace.captureWorktreeState?.(new AbortController().signal)).toBe("clean");
+    await workspace.cleanup();
+  });
+
+  it.each(["unreachable", "different_object"] as const)(
+    "fails frozen evaluation checkout without a current-head fallback: %s",
+    async (failure) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      processRunner.onRun = (spec) => {
+        if (commandName(spec.arguments) !== "fetch") return;
+        if (failure === "unreachable")
+          throw new ManagedProcessRunError("NON_ZERO_EXIT", "Frozen object is unavailable.", {
+            exitCode: 128,
+          });
+        processRunner.pullRequestHeadOutput = `${"c".repeat(40)}\n`;
+      };
+      await expect(
+        provider(fileSystem, processRunner).prepare(
+          evaluationEnvelope("pull_request"),
+          preparationContext().context,
+        ),
+      ).rejects.toMatchObject({
+        code: failure === "unreachable" ? "GIT_COMMAND_FAILED" : "GIT_REVISION_MISMATCH",
+      });
+      const fetches = processRunner.calls.filter(
+        (call) => commandName(call.spec.arguments) === "fetch",
+      );
+      expect(fetches).toHaveLength(1);
+      expect(fetches[0]?.spec.arguments).toContain(`+${headSha}:refs/agentic-review/latest-head`);
+      expect(
+        processRunner.calls.some((call) =>
+          call.spec.arguments.some((argument) => argument.includes("refs/pull/")),
+        ),
+      ).toBe(false);
+      expect(
+        processRunner.calls.some(
+          (call) =>
+            commandName(call.spec.arguments) === "worktree" && call.spec.arguments.includes("add"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  const invalidEvaluationSources: readonly [
+    string,
+    (input: EvaluationWorkspaceEnvelope) => void,
+  ][] = [
+    [
+      "operator authority",
+      (input) => {
+        input.validation.authorization.id = "other-authorization";
+      },
+    ],
+    [
+      "operator repository",
+      (input) => {
+        input.validation.authorization.repositoryId = "other-repository";
+      },
+    ],
+    [
+      "operator actor",
+      (input) => {
+        input.validation.authorization.actor.subject = "";
+      },
+    ],
+    [
+      "source digest",
+      (input) => {
+        input.validation.source.sourceDigest = "f".repeat(64);
+      },
+    ],
+    [
+      "outer repository",
+      (input) => {
+        input.repository.fullName = "another/repository";
+      },
+    ],
+    [
+      "outer resource",
+      (input) => {
+        input.resource.number += 1;
+      },
+    ],
+    [
+      "snapshot content",
+      (input) => {
+        (input.resource.canonicalSnapshot as GitHubWorkItem).body =
+          "Changed outside the frozen source.";
+      },
+    ],
+    [
+      "source revision",
+      (input) => {
+        input.validation.source.workItem.body = "Changed with a recomputed source digest.";
+        (input.resource.canonicalSnapshot as GitHubWorkItem).body =
+          input.validation.source.workItem.body;
+        refreshEvaluationSourceDigest(input);
+      },
+    ],
+    [
+      "tested commit",
+      (input) => {
+        input.validation.testedSourceRevision = { kind: "commit", headSha: "c".repeat(40) };
+      },
+    ],
+    [
+      "commit trailing newline",
+      (input) => {
+        const tested = { kind: "commit" as const, headSha: `${headSha}\n` };
+        input.validation.testedSourceRevision = { ...tested };
+        input.validation.source.testedSourceRevision = { ...tested };
+        refreshEvaluationSourceDigest(input);
+      },
+    ],
+    [
+      "legacy authority",
+      (input) => {
+        (input.validation as unknown as Record<string, unknown>).testedSourceAuthorization =
+          validationEnvelope("issue").validation.testedSourceAuthorization;
+      },
+    ],
+    [
+      "legacy epoch",
+      (input) => {
+        (input.validation as unknown as Record<string, unknown>).requestEpochId = "legacy-epoch";
+      },
+    ],
+    [
+      "lease Job",
+      (input) => {
+        input.lease.jobId = "another-job";
+      },
+    ],
+    [
+      "prompt bytes",
+      (input) => {
+        input.prompt.renderedPrompt += "changed";
+      },
+    ],
+    [
+      "profile digest",
+      (input) => {
+        input.validation.profileVersion.configSha256 = "f".repeat(64);
+      },
+    ],
+    [
+      "downgraded marker",
+      (input) => {
+        (input.validation as unknown as Record<string, unknown>).schemaVersion =
+          "ValidationJobContextV1";
+      },
+    ],
+  ];
+  it.each(invalidEvaluationSources)(
+    "rejects evaluation %s before filesystem, disk admission, or Git mutation",
+    async (_name, mutate) => {
+      const input = evaluationEnvelope("issue");
+      mutate(input);
+      const fileSystem = new FakeWorkspaceFileSystem(),
+        processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      await expect(
+        provider(fileSystem, processRunner, { diskBudget }).prepare(
+          input,
+          preparationContext().context,
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+      expect(fileSystem.created).toEqual([]);
+      expect(diskBudget.admitted).toEqual([]);
+      expect(processRunner.calls).toEqual([]);
+    },
+  );
+
+  it.each([{ schemaVersion: "ValidationJobContextV2" }, { purpose: { kind: "evaluation" } }])(
+    "does not treat a partial evaluation marker as source authority: %#",
+    async (validation) => {
+      const input = { ...envelope("pull_request"), validation } as unknown as JobExecutionEnvelope;
+      const fileSystem = new FakeWorkspaceFileSystem(),
+        processRunner = new FakeManagedProcessRunner();
+      await expect(
+        provider(fileSystem, processRunner).prepare(input, preparationContext().context),
+      ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+      expect(fileSystem.created).toEqual([]);
+      expect(processRunner.calls).toEqual([]);
+    },
+  );
+
+  it("checks out only the explicitly authorized issue commit and observes source changes", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    processRunner.pullRequestBaseOutput = `${headSha}\n`;
+    processRunner.mergeBaseOutput = `${headSha}\n`;
+    const workspace = await provider(fileSystem, processRunner).prepare(
+      validationEnvelope("issue"),
+      preparationContext().context,
+    );
+    const fetch = processRunner.calls.find((call) => commandName(call.spec.arguments) === "fetch");
+    expect(fetch?.spec.arguments.slice(-2)).toEqual([
+      `+${headSha}:refs/agentic-review/latest-base`,
+      `+${headSha}:refs/agentic-review/latest-head`,
+    ]);
+    expect(
+      processRunner.calls.some((call) =>
+        call.spec.arguments.some(
+          (arg) => arg.includes("refs/pull/") || arg.includes("refs/heads/"),
+        ),
+      ),
+    ).toBe(false);
+    const add = processRunner.calls.find((call) => call.spec.arguments.includes("add"));
+    expect(add?.spec.arguments.at(-1)).toBe(headSha);
+    await expect(workspace.captureWorktreeState?.(new AbortController().signal)).resolves.toBe(
+      "clean",
+    );
+    processRunner.worktreeHeadOutput = `${baseSha}\n`;
+    await expect(workspace.captureWorktreeState?.(new AbortController().signal)).resolves.toBe(
+      "modified",
+    );
+    await workspace.cleanup();
+  });
+
+  it.each([
+    "missing_authorization",
+    "activation",
+    "commit",
+    "repository",
+    "work_item",
+    "revision",
+    "snapshot_identity",
+    "invalid_commit",
+    "invalid_actor",
+  ])(
+    "rejects an unauthorized issue source before filesystem or Git changes: %s",
+    async (mutation) => {
+      const original = validationEnvelope("issue");
+      const authorization = original.validation.testedSourceAuthorization;
+      if (!authorization || original.resource.kind !== "issue") throw new Error("Invalid fixture.");
+      const changed = structuredClone(original);
+      if (mutation === "missing_authorization") changed.validation.testedSourceAuthorization = null;
+      if (mutation === "activation") authorization.activationId = "another-activation";
+      if (mutation === "commit") authorization.headSha = baseSha;
+      if (mutation === "repository") authorization.githubRepositoryId += 1;
+      if (mutation === "work_item") authorization.githubWorkItemId += 1;
+      if (mutation === "revision") authorization.issueRevisionKey = "c".repeat(64);
+      if (mutation === "invalid_actor") authorization.subject = "";
+      if (mutation !== "missing_authorization")
+        changed.validation.testedSourceAuthorization = authorization;
+      if (mutation === "snapshot_identity") changed.resource.number += 1;
+      if (mutation === "invalid_commit") {
+        changed.validation.testedSourceRevision = { kind: "commit", headSha: "main" };
+        authorization.headSha = "main";
+      }
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      await expect(
+        provider(fileSystem, processRunner).prepare(changed, preparationContext().context),
+      ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+      expect(fileSystem.created).toEqual([]);
+      expect(processRunner.calls).toEqual([]);
+    },
+  );
+
+  it("requires the frozen PR comparison and keeps triage snapshot-only", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const input = validationEnvelope("pull_request");
+    input.validation.testedSourceRevision = {
+      kind: "pull_request",
+      baseSha,
+      headSha: "c".repeat(40),
+    };
+    await expect(
+      provider(fileSystem, processRunner).prepare(input, preparationContext().context),
+    ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+    expect(fileSystem.created).toEqual([]);
+    const issue = validationEnvelope("issue");
+    issue.validation.workflowKind = "issue_triage";
+    issue.validation.testedSourceAuthorization = null;
+    issue.validation.testedSourceRevision = null;
+    const workspace = await provider(fileSystem, processRunner).prepare(
+      issue,
+      preparationContext().context,
+    );
+    expect(processRunner.calls).toEqual([]);
+    await workspace.cleanup();
   });
 
   it("creates an isolated non-repository workspace for issue triage", async () => {
@@ -625,6 +1268,265 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
 
     await workspace.cleanup();
   });
+
+  it.each([
+    { scenario: "clean", expected: "clean" },
+    { scenario: "modified", expected: "modified" },
+    { scenario: "changed_head", expected: "modified" },
+    { scenario: "extra_head_output", expected: "modified" },
+    { scenario: "unavailable", expected: "unknown" },
+    { scenario: "terminated", expected: "unknown" },
+    { scenario: "issue", expected: "unknown" },
+  ] as const)("captures final worktree state for $scenario", async ({ scenario, expected }) => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const progress = preparationContext();
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+      envelope(scenario === "issue" ? "issue" : "pull_request"),
+      progress.context,
+    );
+    if (scenario === "modified") processRunner.worktreeStatusOutput = " M src/file.ts\n";
+    if (scenario === "changed_head") processRunner.worktreeHeadOutput = `${"c".repeat(40)}\n`;
+    if (scenario === "extra_head_output") processRunner.worktreeHeadOutput = `${headSha}\nextra\n`;
+    if (scenario === "unavailable" || scenario === "terminated") {
+      processRunner.failAtCall = processRunner.calls.length + 1;
+      if (scenario === "terminated") processRunner.failureCode = "PROCESS_TERMINATED";
+    }
+    const previousCounts = [...progress.processCounts];
+    const previousCalls = processRunner.calls.length;
+    const previousMonitors = diskBudget.monitored.length;
+    const scan = vi.fn();
+    diskBudget.onMonitorCheck = scan;
+    const signal = new AbortController().signal;
+
+    await expect(workspace.captureWorktreeState?.(signal)).resolves.toBe(expected);
+
+    expect(progress.processCounts).toEqual(previousCounts);
+    expect(progress.healthFaults).toEqual([]);
+    expect(diskBudget.monitored).toHaveLength(previousMonitors + (scenario === "issue" ? 0 : 1));
+    expect(scan).toHaveBeenCalledTimes(scenario === "issue" ? 0 : 2);
+    const observations = processRunner.calls.slice(previousCalls);
+    if (scenario === "issue") expect(observations).toHaveLength(0);
+    else {
+      expect(observations[0]?.spec.arguments.slice(-3)).toEqual([
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+      ]);
+      const readsHead =
+        scenario === "clean" || scenario === "changed_head" || scenario === "extra_head_output";
+      expect(observations).toHaveLength(readsHead ? 2 : 1);
+      if (readsHead) {
+        expect(observations[1]?.spec.arguments.slice(-3)).toEqual([
+          "rev-parse",
+          "--verify",
+          "HEAD^{commit}",
+        ]);
+      }
+      for (const observation of observations) {
+        expect(observation.spec.executable).toBe(gitExecutable);
+        expect(observation.spec.arguments).toContain("core.hooksPath=NUL");
+        expect(observation.spec.arguments).toContain("core.fsmonitor=false");
+        expect(observation.spec.arguments.slice(-5, -3)).toEqual([
+          "-C",
+          workspace.checkoutDirectory,
+        ]);
+        expect(observation.spec.workingDirectory).toBe(gitWorkingDirectory);
+        expect(observation.spec.environmentMode).toBe("replace");
+        expect(observation.spec.environment.GIT_OPTIONAL_LOCKS).toBe("0");
+        expect(observation.spec.limits).toEqual({
+          hardTimeoutMs: 60_000,
+          maximumProcessCount: 4,
+          maximumMemoryBytes: 536_870_912,
+          maximumOutputBytes: 1_048_576,
+        });
+        expect(observation.context.signal).toBe(signal);
+        expect(observation.context.processHost).toBe(unusedProcessHost);
+      }
+    }
+    await workspace.cleanup();
+  });
+
+  it("keeps ordinary Git argv and explicit workload disk monitors active", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const scan = vi.fn();
+    diskBudget.onMonitorCheck = scan;
+    processRunner.onRun = () => {
+      expect(diskBudget.monitored).toHaveLength(processRunner.calls.length);
+      expect(scan).toHaveBeenCalledTimes(processRunner.calls.length * 2 - 1);
+    };
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+      envelope("pull_request"),
+      preparationContext().context,
+    );
+    expect(processRunner.calls.map((call) => commandName(call.spec.arguments))).toContain("fetch");
+    expect(processRunner.calls.some((call) => call.spec.arguments.includes("add"))).toBe(true);
+    expect(
+      processRunner.calls.some(
+        (call) =>
+          JSON.stringify(call.spec.arguments.slice(-3)) ===
+          JSON.stringify(["rev-parse", "--verify", "HEAD^{commit}"]),
+      ),
+    ).toBe(true);
+    expect(scan).toHaveBeenCalledTimes(processRunner.calls.length * 2);
+    processRunner.onRun = undefined;
+    scan.mockClear();
+
+    await expect(workspace.captureWorktreeState?.(new AbortController().signal)).resolves.toBe(
+      "clean",
+    );
+    expect(scan).toHaveBeenCalledTimes(2);
+    scan.mockClear();
+    const monitor = await workspace.startDiskMonitoring(new AbortController().signal);
+    await monitor.close();
+    expect(scan).toHaveBeenCalledTimes(2);
+    await workspace.cleanup();
+  });
+
+  it.each([
+    "clean",
+    "start_failure",
+    "abort_status",
+    "abort_close",
+    "violation_close",
+    "close_failure",
+  ] as const)("shares one source-capture disk monitor for %s", async (scenario) => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+      envelope("pull_request"),
+      preparationContext().context,
+    );
+    const controller = new AbortController();
+    const violation = new WorkspaceDiskBudgetError(
+      "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+      "Source observation exceeded the workspace disk budget.",
+    );
+    const lifecycle: string[] = [];
+    const previousMonitors = diskBudget.monitored.length;
+    diskBudget.monitorSignal = controller.signal;
+    diskBudget.onMonitorCheck = () => {
+      const closing = lifecycle.length > 0;
+      lifecycle.push(closing ? "close" : "start");
+      if (scenario === "start_failure") throw violation;
+      if (closing && scenario === "abort_close") controller.abort(new Error("capture expired"));
+      if (closing && scenario === "violation_close") diskBudget.monitorViolation = violation;
+    };
+    if (scenario === "close_failure") diskBudget.monitorCloseError = new Error("scan failed");
+    processRunner.onRun = (spec, context) => {
+      const command = commandName(spec.arguments);
+      lifecycle.push(command ?? "missing-command");
+      expect(context.signal).toBe(controller.signal);
+      expect(diskBudget.monitored).toHaveLength(previousMonitors + 1);
+      if (command === "status" && scenario === "abort_status") {
+        diskBudget.monitorViolation = violation;
+        controller.abort(violation);
+      }
+    };
+
+    await expect(workspace.captureWorktreeState?.(new AbortController().signal)).resolves.toBe(
+      scenario === "clean" ? "clean" : "unknown",
+    );
+
+    expect(diskBudget.monitored).toHaveLength(previousMonitors + 1);
+    expect(lifecycle).toEqual(
+      scenario === "start_failure"
+        ? ["start"]
+        : scenario === "abort_status"
+          ? ["start", "status", "close"]
+          : ["start", "status", "rev-parse", "close"],
+    );
+    processRunner.onRun = undefined;
+    diskBudget.onMonitorCheck = undefined;
+    diskBudget.monitorSignal = undefined;
+    diskBudget.monitorViolation = undefined;
+    diskBudget.monitorCloseError = undefined;
+    await workspace.cleanup();
+  });
+
+  it.each(["before_status", "status", "head"] as const)(
+    "returns unknown when source observation is cancelled at %s",
+    async (stage) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+        envelope("pull_request"),
+        preparationContext().context,
+      );
+      const controller = new AbortController();
+      if (stage === "before_status")
+        controller.abort(new Error("Source capture deadline expired."));
+      processRunner.onRun = (spec) => {
+        if (commandName(spec.arguments) === (stage === "head" ? "rev-parse" : stage)) {
+          controller.abort(new Error("Source capture deadline expired."));
+        }
+      };
+      const previousCalls = processRunner.calls.length;
+      const previousMonitors = diskBudget.monitored.length;
+
+      await expect(workspace.captureWorktreeState?.(controller.signal)).resolves.toBe("unknown");
+
+      expect(processRunner.calls).toHaveLength(
+        previousCalls + (stage === "before_status" ? 0 : stage === "status" ? 1 : 2),
+      );
+      expect(diskBudget.monitored).toHaveLength(previousMonitors + 1);
+      processRunner.onRun = undefined;
+      await workspace.cleanup();
+    },
+  );
+
+  it.each([
+    { stage: "before_status", path: "root", change: "realpath", calls: 0 },
+    { stage: "before_status", path: "checkout", change: "reparse", calls: 0 },
+    { stage: "status", path: "checkout", change: "realpath", calls: 1 },
+    { stage: "head", path: "temp", change: "reparse", calls: 2 },
+  ] as const)(
+    "rejects $path $change replacement at $stage during source observation",
+    async ({ stage, path, change, calls }) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+        envelope("pull_request"),
+        preparationContext().context,
+      );
+      const target =
+        path === "root"
+          ? workspaceRoot
+          : path === "checkout"
+            ? workspace.checkoutDirectory
+            : workspace.tempDirectory;
+      const replacePath = () => {
+        if (change === "realpath") fileSystem.setRealPath(target, "C:\\outside-workspace");
+        else fileSystem.setReparsePoint(target, true);
+      };
+      if (stage === "before_status") replacePath();
+      else {
+        processRunner.onRun = (spec) => {
+          if (commandName(spec.arguments) === (stage === "head" ? "rev-parse" : stage))
+            replacePath();
+        };
+      }
+      const previousCalls = processRunner.calls.length;
+      const previousMonitors = diskBudget.monitored.length;
+
+      await expect(workspace.captureWorktreeState?.(new AbortController().signal)).resolves.toBe(
+        "unknown",
+      );
+
+      expect(processRunner.calls).toHaveLength(previousCalls + calls);
+      expect(diskBudget.monitored).toHaveLength(previousMonitors + 1);
+      processRunner.onRun = undefined;
+      fileSystem.setRealPath(target, target);
+      fileSystem.setReparsePoint(target, false);
+      await workspace.cleanup();
+    },
+  );
 
   it("serializes shared-repository mutation for two attempts of the same repository", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
@@ -1425,6 +2327,9 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
   it.each([
     ["ACCOUNTING_LIMIT_EXCEEDED", "WORKSPACE_DISK_INFRASTRUCTURE_UNAVAILABLE", 1],
     ["CURRENT_ATTEMPT_LIMIT_EXCEEDED", "WORKSPACE_DISK_ATTEMPT_LIMIT_EXCEEDED", 0],
+    ["CAPACITY_UNAVAILABLE", "WORKSPACE_DISK_CAPACITY_UNAVAILABLE", 0],
+    ["ACCOUNTING_BUSY", "WORKSPACE_DISK_CAPACITY_UNAVAILABLE", 0],
+    ["INSUFFICIENT_FREE_SPACE", "WORKSPACE_DISK_CAPACITY_UNAVAILABLE", 0],
   ] as const)(
     "maps disk admission %s to %s with %i node health report",
     async (diskCode, expectedCode, expectedReports) => {

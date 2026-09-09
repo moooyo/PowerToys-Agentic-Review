@@ -60,6 +60,9 @@ func TestWindowsLauncherCreatesJobAndConnectsStandardIO(t *testing.T) {
 			t.Logf("process cleanup: %v", err)
 		}
 	}()
+	if process.ProcessCreationTimeFileTime() != 0 {
+		t.Fatal("launcher captured an unrequested process identity")
+	}
 
 	line, err := readLineWithTimeout(process.StandardOutput(), 5*time.Second)
 	if err != nil {
@@ -116,6 +119,62 @@ func TestWindowsLauncherCreatesJobAndConnectsStandardIO(t *testing.T) {
 		completed = true
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for helper exit")
+	}
+}
+
+func TestWindowsLauncherCapturesCreationTimeFromOriginalHandle(t *testing.T) {
+	process := launchWindowsLauncherTestProcessWithIdentity(t, windowsLauncherHelperArgument, protocol.ProcessResourceLimits{
+		HardTimeoutMS:       10_000,
+		MaximumProcessCount: 1,
+		MaximumMemoryBytes:  256 * 1024 * 1024,
+		MaximumOutputBytes:  4 * 1024,
+	}, true)
+	defer func() {
+		_ = process.Terminate()
+		if err := process.Close(); err != nil {
+			t.Errorf("close helper process: %v", err)
+		}
+	}()
+
+	var creationTime, exitTime, kernelTime, userTime windows.Filetime
+	if err := windows.GetProcessTimes(process.process, &creationTime, &exitTime, &kernelTime, &userTime); err != nil {
+		t.Fatalf("read creation time through original process handle: %v", err)
+	}
+	want := uint64(creationTime.HighDateTime)<<32 | uint64(creationTime.LowDateTime)
+	if got := process.ProcessCreationTimeFileTime(); got == 0 || got != want {
+		t.Fatalf("captured creation time = %d, want original handle value %d", got, want)
+	}
+	if err := process.StandardInput().Close(); err != nil {
+		t.Fatalf("close helper standard input: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() {
+		exitCode, err := process.Wait()
+		if err == nil && (exitCode == nil || *exitCode != 0) {
+			err = fmt.Errorf("helper exit code = %v, want 0", exitCode)
+		}
+		waited <- err
+	}()
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("wait for helper: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for identity helper exit")
+	}
+	if err := process.Close(); err != nil {
+		t.Fatalf("close exited helper: %v", err)
+	}
+	if got := process.ProcessCreationTimeFileTime(); got != want {
+		t.Fatalf("identity changed after handle closure = %d, want %d", got, want)
+	}
+}
+
+func TestReadProcessCreationTimeReportsKernelQueryFailure(t *testing.T) {
+	creationTime, err := readProcessCreationTimeFileTime(windows.Handle(0))
+	if creationTime != 0 || !errors.Is(err, errProcessIdentityQueryFailed) || !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		t.Fatalf("invalid handle query = (%d, %v), want PROCESS_IDENTITY_QUERY_FAILED with ERROR_INVALID_HANDLE", creationTime, err)
 	}
 }
 
@@ -269,6 +328,16 @@ func launchWindowsLauncherTestProcess(
 	resourceLimits protocol.ProcessResourceLimits,
 ) *windowsProcess {
 	t.Helper()
+	return launchWindowsLauncherTestProcessWithIdentity(t, helperArgument, resourceLimits, false)
+}
+
+func launchWindowsLauncherTestProcessWithIdentity(
+	t *testing.T,
+	helperArgument string,
+	resourceLimits protocol.ProcessResourceLimits,
+	captureIdentity bool,
+) *windowsProcess {
+	t.Helper()
 
 	executable, err := os.Executable()
 	if err != nil {
@@ -298,11 +367,12 @@ func launchWindowsLauncherTestProcess(
 	}
 
 	launched, err := newProcessLauncher().Launch(protocol.ProcessLaunchSpec{
-		Executable:       executable,
-		Arguments:        []string{"-test.run=^TestWindowsLauncherHelperProcess$", "--", helperArgument},
-		WorkingDirectory: workingDirectory,
-		EnvironmentMode:  "replace",
-		Environment:      environment,
+		Executable:             executable,
+		Arguments:              []string{"-test.run=^TestWindowsLauncherHelperProcess$", "--", helperArgument},
+		WorkingDirectory:       workingDirectory,
+		EnvironmentMode:        "replace",
+		Environment:            environment,
+		CaptureProcessIdentity: captureIdentity,
 	}, limits)
 	if err != nil {
 		t.Fatal(err)

@@ -7,7 +7,7 @@
     "node": ">=24.20.0 <25"
   },
   "scripts": {
-    "prepare:workspace-dependencies": "pnpm --filter @agentic-review/codex build && pnpm --filter @agentic-review/contracts build",
+    "prepare:workspace-dependencies": "pnpm --filter @agentic-review/codex build && pnpm --filter @agentic-review/contracts build && pnpm --filter @agentic-review/domain build",
     "prebuild": "pnpm run prepare:workspace-dependencies",
     "build": "node scripts/build-worker-bundles.mjs",
     "start": "node --enable-source-maps dist/worker.mjs",
@@ -19,7 +19,9 @@
   "dependencies": {
     "@agentic-review/codex": "workspace:*",
     "@agentic-review/contracts": "workspace:*",
+    "@agentic-review/domain": "workspace:*",
     "@sinclair/typebox": "0.34.52",
+    "playwright-core": "1.63.0",
     "smol-toml": "1.8.0"
   },
   "devDependencies": {

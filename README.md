@@ -1,7 +1,7 @@
 # PowerToys Agentic Review
 
-PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for GitHub
-issue triage and pull request review with Codex CLI. The project is pre-release and intentionally
+PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for multiple
+GitHub repositories, issue triage, and pull request review with Codex CLI. The project is pre-release and intentionally
 does not preserve compatibility with the earlier split-worker or artifact-storage prototypes.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md),
@@ -21,7 +21,7 @@ baseline.
 - `packages/codex`: shell-free Codex launch specifications, JSONL parsing, and result schemas.
 - `native/process-host`: Windows Job Object process-tree and resource-control adapter.
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
-- `migrations`: the current eight-step SQLite schema.
+- `migrations`: the current SQLite schema through migration `0023`.
 - `deploy/worker`: manual trusted deployment guidance for the unpublished Worker.
 
 ## Current execution model
@@ -52,8 +52,22 @@ ProcessHost also holds a Windows global mutex derived from the resolved Worker d
 overlapping execution Workers from mutating the same cache or workspace tree.
 If initialization fails after ProcessHost starts, the Worker closes it before reporting the error.
 
-The MVP has one result channel: an inline, schema-validated completion payload. There is no result
-artifact upload or Server artifact store.
+Results use bounded inline, schema-validated completion payloads. Profile validation additionally
+uses M16 bounded evidence upload and authenticated delivery for screenshots, traces, and structured
+test evidence. There is no general-purpose artifact distribution service; see
+[ADR 0031](./docs/adr/0031-profile-validation-runs-and-bounded-evidence.md).
+
+New jobs use V2 results that separate model-reported verification from Worker-observed commands,
+exit codes, and final Git worktree state. Failures retain bounded, redacted diagnostics. Existing
+V1 queued jobs and stored results remain supported. Server startup upgrades the supported schema
+8 single-Worker baseline transactionally; earlier unpublished prototypes still require a clean
+database.
+
+Pull request execution defaults to authorization of the exact base/head revision in an explicit
+webhook request. Polling still reconciles state and withdrawals but cannot approve a current SHA
+using an old timeline actor. Operators that intentionally trust future commits of an authorized PR
+can set `AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY=inherit_authorized_epoch`.
+Issue triage retains its snapshot-based workflow. See [ADR 0030](./docs/adr/0030-explicit-pull-request-execution-authorization.md).
 
 ## Authentication
 
@@ -65,13 +79,37 @@ Each Worker uses a node-scoped Bearer Token. Operator authentication supports ei
 GitHub OIDC is not required. GitHub webhook verification and/or a read token are separate ingestion
 credentials.
 
+Operator access is scoped by repository with viewer, reviewer, maintainer, and admin roles. An
+authenticated login without grants sees an empty repository directory. Platform administrators
+come from trusted startup configuration. OIDC deployments must explicitly configure
+`AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON` as a nonempty subset of authorized login subjects;
+loopback mode uses its configured development identity. See
+[repository access and upgrade guidance](./docs/design/2026-09-07-operator-repository-access.md).
+
+Run reports keep model advice, validation policy, and recorded human decisions separate. Operators
+can record an exact-revision decision, a comment, or a withdrawal; maintainers can record a qualified
+exception approval. Reruns and source changes make earlier decisions historical. These records
+stay within the platform and do not publish GitHub reviews or comments. See
+[the human decision workflow](./docs/design/2026-09-07-run-human-decisions.md).
+
+The connected result drawer also records finding disposition and compares explicitly selected
+results. Complete original findings remain available after acceptance, dismissal, resolution, or
+reopening. Current policy distinguishes reported P0/P1 findings from unresolved blockers; finding
+changes invalidate approvals of the old basis. A finding that is not observed again is not
+automatically resolved. See [the finding lifecycle](./docs/design/2026-09-07-finding-lifecycle.md).
+
 ## Development
 
 The repository requires Node.js 24.20.x and pnpm 11.24.x.
 Run verification on `test-env` by default; local verification requires explicit authorization for
-the current task. The authorized Windows runtime E2E exercise passed; its tested configuration,
+the current task. The 2026-09-05 Windows runtime E2E exercise passed; its tested configuration,
 evidence, and environment closeout are recorded in the
 [live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
+
+Automated verification must not write to any repository's PRs or issues without the user's
+explicit approval of the targets, operations, and content. This includes comments, reviews,
+labels, assignments, review requests, and state changes, even in a test repository. Use isolated
+fixtures or read-only live checks by default; see [the repository instructions](./AGENTS.md).
 
 ```powershell
 pnpm install --frozen-lockfile

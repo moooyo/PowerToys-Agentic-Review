@@ -1,5 +1,7 @@
 import { DatabaseClient } from "../database/database-client.js";
+import type { EvidenceStorageOptions } from "../database/evidence-assets.js";
 import { DatabaseOwnerLock } from "../database/owner-lock.js";
+import type { DatabaseWorkerOptions } from "../database/protocol.js";
 
 const policy = Object.freeze({
   constructionOwnerExitTimeoutMilliseconds: 30_000,
@@ -13,21 +15,59 @@ export interface ServerStorageRuntime {
 export interface CreateServerStorageRuntimeOptions {
   readonly databasePath: string;
   readonly migrationsDirectory: string;
+  readonly evidenceStorage?: EvidenceStorageOptions;
+  readonly operatorAccess?: DatabaseWorkerOptions["operatorAccess"];
+  readonly publicationPublisher?: DatabaseWorkerOptions["publicationPublisher"];
 }
 
-export interface CreateRecoveryMaintenanceStorageRuntimeOptions {
-  readonly databasePath: string;
-  readonly migrationsDirectory: string;
-}
+export interface CreateRecoveryMaintenanceStorageRuntimeOptions
+  extends CreateServerStorageRuntimeOptions {}
 
-const snapshotOptions = <T extends CreateServerStorageRuntimeOptions>(options: T): T => {
+const snapshotOptions = (
+  options: CreateServerStorageRuntimeOptions,
+): CreateServerStorageRuntimeOptions => {
   if (typeof options !== "object" || options === null) {
     throw new TypeError("Server storage runtime options must be an object.");
   }
+  const evidenceStorage = options.evidenceStorage;
+  const operatorAccess = options.operatorAccess;
+  const publisher = options.publicationPublisher;
+  if (
+    publisher !== undefined &&
+    (!Number.isSafeInteger(publisher.githubUserId) || publisher.githubUserId <= 0)
+  )
+    throw new TypeError(
+      "The configured publication publisher must have a positive safe numeric identity.",
+    );
   return Object.freeze({
     databasePath: options.databasePath,
     migrationsDirectory: options.migrationsDirectory,
-  }) as T;
+    ...(publisher === undefined
+      ? {}
+      : { publicationPublisher: Object.freeze({ githubUserId: publisher.githubUserId }) }),
+    ...(operatorAccess === undefined
+      ? {}
+      : {
+          operatorAccess: Object.freeze({
+            administrators: Object.freeze(
+              operatorAccess.administrators.map(({ issuer, subject }) =>
+                Object.freeze({ issuer, subject }),
+              ),
+            ),
+          }),
+        }),
+    ...(evidenceStorage === undefined
+      ? {}
+      : {
+          evidenceStorage: Object.freeze({
+            evidenceDirectory: evidenceStorage.evidenceDirectory,
+            globalQuotaBytes: evidenceStorage.globalQuotaBytes,
+            globalAssetLimit: evidenceStorage.globalAssetLimit,
+            retentionMs: evidenceStorage.retentionMs,
+            incompleteUploadTtlMs: evidenceStorage.incompleteUploadTtlMs,
+          }),
+        }),
+  });
 };
 
 const waitForOwnerExit = async (ownerExit: Promise<number>): Promise<void> => {
@@ -107,6 +147,7 @@ const throwStartupFailure = (error: unknown, cleanupErrors: readonly unknown[]):
 
 const createDatabaseOnlyRuntime = async (
   options: CreateServerStorageRuntimeOptions,
+  recoveryMaintenance: boolean,
 ): Promise<ServerStorageRuntime> => {
   const snapshot = snapshotOptions(options);
   let ownerLock: DatabaseOwnerLock | undefined;
@@ -118,6 +159,14 @@ const createDatabaseOnlyRuntime = async (
     database = await DatabaseClient.create({
       databasePath: ownerLock.databasePath,
       migrationsDirectory: snapshot.migrationsDirectory,
+      ...(recoveryMaintenance ? { recoveryMaintenance: true } : {}),
+      ...(snapshot.operatorAccess === undefined ? {} : { operatorAccess: snapshot.operatorAccess }),
+      ...(snapshot.publicationPublisher === undefined
+        ? {}
+        : { publicationPublisher: snapshot.publicationPublisher }),
+      ...(snapshot.evidenceStorage === undefined
+        ? {}
+        : { evidenceStorage: snapshot.evidenceStorage }),
     });
     ownerLock.assertReady();
 
@@ -154,8 +203,8 @@ const createDatabaseOnlyRuntime = async (
 
 export const createRecoveryMaintenanceStorageRuntime = (
   options: CreateRecoveryMaintenanceStorageRuntimeOptions,
-): Promise<ServerStorageRuntime> => createDatabaseOnlyRuntime(options);
+): Promise<ServerStorageRuntime> => createDatabaseOnlyRuntime(options, true);
 
 export const createServerStorageRuntime = (
   options: CreateServerStorageRuntimeOptions,
-): Promise<ServerStorageRuntime> => createDatabaseOnlyRuntime(options);
+): Promise<ServerStorageRuntime> => createDatabaseOnlyRuntime(options, false);

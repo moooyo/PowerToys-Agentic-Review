@@ -14,7 +14,7 @@ const createStaticReviewCapabilityLabels = () => ({
 export const defaultTrustedSchedulingPolicy: TrustedSchedulingPolicy = {
   issueTriage: {
     priority: 50,
-    intentVersion: 1,
+    intentVersion: 2,
     maxAttempts: 2,
     requiredCapabilities: createStaticReviewCapabilities(),
     executionPolicy: {
@@ -26,7 +26,7 @@ export const defaultTrustedSchedulingPolicy: TrustedSchedulingPolicy = {
   },
   pullRequestReview: {
     priority: 100,
-    intentVersion: 1,
+    intentVersion: 2,
     maxAttempts: 3,
     requiredCapabilities: createStaticReviewCapabilities(),
     executionPolicy: {

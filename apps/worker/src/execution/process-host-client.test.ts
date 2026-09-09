@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   deriveWorkerProcessHostInstanceKey,
   type ProcessHostSpawn,
@@ -110,6 +110,7 @@ const defaultInstanceKey = "a".repeat(64);
 interface TestTimeoutOptions {
   readonly requestTimeoutMs?: number;
   readonly startTimeoutMs?: number;
+  readonly shutdownTimeoutMs?: number;
 }
 
 async function connect(
@@ -181,6 +182,17 @@ async function startOne(client: StdioProcessHostClient, child: FakeProcessHost, 
   return { managed: await starting, requestId: request.requestId };
 }
 
+function exitProcess(child: FakeProcessHost, requestId: string, exitCode = 0): void {
+  child.writeEvent({
+    protocolVersion: processHostProtocolVersion,
+    type: "exited",
+    requestId,
+    exitCode,
+    signal: null,
+    outputTruncated: false,
+  });
+}
+
 async function closeNormally(
   client: StdioProcessHostClient,
   child: FakeProcessHost,
@@ -198,6 +210,131 @@ async function closeNormally(
 }
 
 describe("StdioProcessHostClient", () => {
+  it("returns exact requested process creation FILETIME without converting it to Number", async () => {
+    const { child, client } = await connect();
+    const starting = client.start(
+      { ...launchSpec(), captureProcessIdentity: true },
+      new AbortController().signal,
+    );
+    const request = (await waitForRequests(child, "start")).at(-1);
+    if (request === undefined || request.type !== "start")
+      throw new Error("Missing start request.");
+    expect(request.spec.captureProcessIdentity).toBe(true);
+    const processCreationTimeFileTime = "133801632001234567";
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5001,
+      processCreationTimeFileTime,
+    });
+
+    const managed = await starting;
+    expect(managed.processCreationTimeFileTime).toBe(processCreationTimeFileTime);
+    expect(typeof managed.processCreationTimeFileTime).toBe("string");
+    expect(Object.isFrozen(managed)).toBe(true);
+    exitProcess(child, request.requestId);
+    await managed.completed;
+    await closeNormally(client, child);
+  });
+
+  it("does not add identity controls or handle fields to ordinary headless launches", async () => {
+    const { child, client } = await connect();
+    const { managed, requestId } = await startOne(client, child);
+    const request = child.requests.find((candidate) => candidate.type === "start");
+    if (request?.type !== "start") throw new Error("Missing start request.");
+    expect(request.spec).not.toHaveProperty("captureProcessIdentity");
+    expect(managed).not.toHaveProperty("processCreationTimeFileTime");
+    exitProcess(child, requestId);
+    await managed.completed;
+    await closeNormally(client, child);
+  });
+
+  it("stops only a launch missing requested identity and waits for its tree exit before rejecting", async () => {
+    const { child, client } = await connect();
+    const sibling = await startOne(client, child, 5001);
+    const starting = client.start(
+      { ...launchSpec(), captureProcessIdentity: true },
+      new AbortController().signal,
+    );
+    let settled = false;
+    void starting.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const request = (await waitForRequests(child, "start", 2)).at(-1);
+    if (request === undefined) throw new Error("Missing identity start request.");
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5002,
+    });
+    const termination = (await waitForRequests(child, "terminate")).at(-1);
+    expect(termination).toMatchObject({ requestId: request.requestId, reason: "cancelled" });
+    expect(settled).toBe(false);
+    expect(child.killed).toBe(false);
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "terminated",
+      requestId: request.requestId,
+      reason: "cancelled",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    exitProcess(child, request.requestId, 1);
+
+    await expect(starting).rejects.toMatchObject({ code: "PROCESS_IDENTITY_UNAVAILABLE" });
+    expect(child.requests.filter((candidate) => candidate.type === "terminate")).toHaveLength(1);
+    expect(child.killed).toBe(false);
+    exitProcess(child, sibling.requestId);
+    await expect(sibling.managed.completed).resolves.toMatchObject({ exitCode: 0 });
+    await closeNormally(client, child);
+  });
+
+  it.each(["PROCESS_IDENTITY_UNAVAILABLE", "PROCESS_IDENTITY_QUERY_FAILED"])(
+    "propagates native %s without manufacturing an identity",
+    async (code) => {
+      const { child, client } = await connect();
+      const starting = client.start(
+        { ...launchSpec(), captureProcessIdentity: true },
+        new AbortController().signal,
+      );
+      const request = (await waitForRequests(child, "start")).at(-1);
+      if (request === undefined) throw new Error("Missing start request.");
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "error",
+        requestId: request.requestId,
+        code,
+        message: "Exact process creation identity is unavailable.",
+      });
+      await expect(starting).rejects.toMatchObject({ code });
+      expect(child.killed).toBe(false);
+      await closeNormally(client, child);
+    },
+  );
+
+  it("rejects process identity returned for a request that did not opt in", async () => {
+    const { child, client } = await connect();
+    const starting = client.start(launchSpec(), new AbortController().signal);
+    const request = (await waitForRequests(child, "start")).at(-1);
+    if (request === undefined) throw new Error("Missing start request.");
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5001,
+      processCreationTimeFileTime: "133801632001234567",
+    });
+    await expect(starting).rejects.toThrow(/identity that was not requested/u);
+    expect(child.killed).toBe(true);
+  });
+
   it("derives a deterministic instance key from worker identity roots", () => {
     const first = deriveWorkerProcessHostInstanceKey({
       dataDirectory: "D:/AgenticReview/Data/",
@@ -428,15 +565,230 @@ describe("StdioProcessHostClient", () => {
     expect(startStalled.child.killed).toBe(true);
   });
 
-  it("fails the host when a pending start is aborted", async () => {
-    const { child, client } = await connect();
+  it("cancels a pending start after acknowledgement without interrupting its sibling", async () => {
+    const { child, client } = await connect(2);
+    const sibling = await startOne(client, child);
     const controller = new AbortController();
     const starting = client.start(launchSpec(), controller.signal);
-    await waitForRequests(child, "start");
-    controller.abort(new Error("lease lost before start"));
+    const request = (await waitForRequests(child, "start", 2)).at(-1);
+    if (request === undefined) throw new Error("Missing start request.");
+    const abortFailure = new Error("lease lost before start");
+    controller.abort(abortFailure);
 
-    await expect(starting).rejects.toBeInstanceOf(ProcessHostProtocolError);
-    expect(child.killed).toBe(true);
+    expect(child.killed).toBe(false);
+    expect(child.requests.filter((request) => request.type === "terminate")).toHaveLength(0);
+    await expect(client.start(launchSpec(), new AbortController().signal)).rejects.toThrow(
+      /at most 2 active request/u,
+    );
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5002,
+    });
+    const cancelled = await starting;
+    expect(await waitForRequests(child, "terminate")).toEqual([
+      {
+        protocolVersion: processHostProtocolVersion,
+        type: "terminate",
+        requestId: request.requestId,
+        reason: "cancelled",
+      },
+    ]);
+    const output: Buffer[] = [];
+    sibling.managed.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "stdout",
+      requestId: sibling.requestId,
+      sequence: 0,
+      dataBase64: Buffer.from("sibling remains active").toString("base64"),
+    });
+    exitProcess(child, sibling.requestId);
+    await expect(sibling.managed.completed).resolves.toMatchObject({ exitCode: 0 });
+    expect(Buffer.concat(output).toString("utf8")).toBe("sibling remains active");
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "terminated",
+      requestId: request.requestId,
+      reason: "cancelled",
+    });
+    exitProcess(child, request.requestId, 1);
+    await expect(cancelled.completed).rejects.toBe(abortFailure);
+    expect(child.killed).toBe(false);
+    await closeNormally(client, child);
+  });
+
+  it.each([true, false])(
+    "reclaims a rejected start when cancellation precedes the rejection: %s",
+    async (cancelBeforeRejection) => {
+      const { child, client } = await connect(1);
+      const controller = new AbortController();
+      const starting = client.start(launchSpec(), controller.signal);
+      const request = (await waitForRequests(child, "start")).at(-1);
+      if (request === undefined) throw new Error("Missing start request.");
+      const abortFailure = new Error("lease lost before start");
+      if (cancelBeforeRejection) controller.abort(abortFailure);
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "error",
+        requestId: request.requestId,
+        code: "PROCESS_START_FAILED",
+        message: "The executable was not found.",
+      });
+      if (!cancelBeforeRejection) controller.abort(abortFailure);
+      if (cancelBeforeRejection) {
+        await expect(starting).rejects.toBe(abortFailure);
+      } else {
+        await expect(starting).rejects.toMatchObject({ code: "PROCESS_START_FAILED" });
+      }
+      expect(child.requests.filter((request) => request.type === "terminate")).toHaveLength(0);
+      const replacement = await startOne(client, child);
+      exitProcess(child, replacement.requestId);
+      await replacement.managed.completed;
+      expect(child.killed).toBe(false);
+      await closeNormally(client, child);
+    },
+  );
+
+  it("keeps the original start acknowledgement deadline after cancellation", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { child, client } = await connect(2, { startTimeoutMs: 100 });
+      const sibling = await startOne(client, child);
+      const controller = new AbortController();
+      const starting = client.start(launchSpec(), controller.signal);
+      const startFailure = expect(starting).rejects.toThrow(/did not acknowledge start/u);
+      const siblingFailure = expect(sibling.managed.completed).rejects.toBeInstanceOf(
+        ProcessHostProtocolError,
+      );
+      await waitForRequests(child, "start", 2);
+      await vi.advanceTimersByTimeAsync(75);
+      controller.abort(new Error("lease lost before start"));
+      await vi.advanceTimersByTimeAsync(24);
+      expect(child.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await Promise.all([startFailure, siblingFailure]);
+      expect(child.killed).toBe(true);
+      await expect(client.close()).rejects.toThrow(/did not acknowledge start/u);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["started", "rejected"] as const)(
+    "finishes shutdown when a cancelled pending start is %s",
+    async (outcome) => {
+      const { child, client } = await connect();
+      const controller = new AbortController();
+      const starting = client.start(launchSpec(), controller.signal);
+      const request = (await waitForRequests(child, "start")).at(-1);
+      if (request === undefined) throw new Error("Missing start request.");
+      const abortFailure = new Error("lease lost before shutdown");
+      controller.abort(abortFailure);
+      const closing = client.close();
+
+      if (outcome === "started") {
+        child.writeEvent({
+          protocolVersion: processHostProtocolVersion,
+          type: "started",
+          requestId: request.requestId,
+          processId: 5001,
+        });
+        const cancelled = await starting;
+        const terminations = await waitForRequests(child, "terminate");
+        expect(terminations).toHaveLength(1);
+        expect(terminations[0]).toMatchObject({
+          requestId: request.requestId,
+          reason: "cancelled",
+        });
+        child.writeEvent({
+          protocolVersion: processHostProtocolVersion,
+          type: "terminated",
+          requestId: request.requestId,
+          reason: "cancelled",
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(child.requests.filter((request) => request.type === "shutdown")).toHaveLength(0);
+        exitProcess(child, request.requestId, 1);
+        await expect(cancelled.completed).rejects.toBe(abortFailure);
+      } else {
+        child.writeEvent({
+          protocolVersion: processHostProtocolVersion,
+          type: "error",
+          requestId: request.requestId,
+          code: "PROCESS_START_FAILED",
+          message: "The executable was not found.",
+        });
+        await expect(starting).rejects.toBe(abortFailure);
+        expect(child.requests.filter((request) => request.type === "terminate")).toHaveLength(0);
+      }
+
+      await closeNormally(client, child);
+      await closing;
+      expect(child.killed).toBe(false);
+    },
+  );
+
+  it("bounds shutdown while a cancelled start remains unacknowledged", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { child, client } = await connect(2, {
+        startTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+      });
+      const sibling = await startOne(client, child);
+      const controller = new AbortController();
+      const starting = client.start(launchSpec(), controller.signal);
+      const startFailure = expect(starting).rejects.toThrow(/did not shut down/u);
+      const siblingFailure = expect(sibling.managed.completed).rejects.toThrow(
+        /did not shut down/u,
+      );
+      await waitForRequests(child, "start", 2);
+      controller.abort(new Error("lease lost before shutdown"));
+      const closeFailure = expect(client.close()).rejects.toThrow(/did not shut down/u);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(child.killed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await Promise.all([startFailure, siblingFailure, closeFailure]);
+      expect(child.killed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a cancelled start that exits before its termination request is processed", async () => {
+    const { child, client } = await connect(2);
+    const sibling = await startOne(client, child);
+    const controller = new AbortController();
+    const starting = client.start(launchSpec(), controller.signal);
+    const request = (await waitForRequests(child, "start", 2)).at(-1);
+    if (request === undefined) throw new Error("Missing start request.");
+    const abortFailure = new Error("lease lost before start");
+    controller.abort(abortFailure);
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5002,
+    });
+    exitProcess(child, request.requestId);
+    const cancelled = await starting;
+    await expect(cancelled.completed).rejects.toBe(abortFailure);
+    await waitForRequests(child, "terminate");
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "error",
+      requestId: request.requestId,
+      code: "PROCESS_NOT_FOUND",
+      message: "The process already exited before termination.",
+    });
+    exitProcess(child, sibling.requestId);
+    await sibling.managed.completed;
+    expect(child.killed).toBe(false);
+    await closeNormally(client, child);
   });
 
   it("fails active work when protocol stdout ends after a complete frame", async () => {

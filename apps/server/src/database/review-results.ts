@@ -5,14 +5,22 @@ import {
   type IssueTriageV1,
   IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
+  type IssueTriageV2,
+  IssueTriageV2ModelOutputSchema,
+  IssueTriageV2Schema,
   type PrReviewPlanV1,
   PrReviewPlanV1ModelOutputSchema,
   PrReviewPlanV1Schema,
+  type PrReviewPlanV2,
+  PrReviewPlanV2ModelOutputSchema,
+  PrReviewPlanV2Schema,
+  type ReviewModelResult,
 } from "@agentic-review/codex";
 import {
   type JobExecutionTemplate,
   JobExecutionTemplateSchema,
   maximumRunCompletionResultUtf8Bytes,
+  type ValidationSummaryV1,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -39,7 +47,7 @@ export interface ReviewCompletionJobContext {
 interface ValidatedReviewResultCommon {
   readonly canonicalResultJson: string;
   readonly resultDigest: string;
-  readonly schemaId: "IssueTriageV1" | "PrReviewPlanV1";
+  readonly schemaId: "IssueTriageV1" | "PrReviewPlanV1" | "IssueTriageV2" | "PrReviewPlanV2";
   readonly outputSchemaSha256: string;
   readonly promptSha256: string;
   readonly requestedRecipeIdsJson: string;
@@ -50,11 +58,11 @@ interface ValidatedReviewResultCommon {
 export type ValidatedReviewResult =
   | (ValidatedReviewResultCommon & {
       readonly jobKind: "pull_request_review";
-      readonly result: PrReviewPlanV1;
+      readonly result: PrReviewPlanV1 | PrReviewPlanV2;
     })
   | (ValidatedReviewResultCommon & {
       readonly jobKind: "issue_triage";
-      readonly result: IssueTriageV1;
+      readonly result: IssueTriageV1 | IssueTriageV2;
     });
 
 export interface CanonicalReviewResultSubmission {
@@ -63,14 +71,20 @@ export interface CanonicalReviewResultSubmission {
 }
 
 interface AuthoritativeSchema {
-  readonly id: "IssueTriageV1" | "PrReviewPlanV1";
+  readonly id: ValidatedReviewResultCommon["schemaId"];
   readonly json: string;
   readonly sha256: string;
 }
 
 const authoritativeSchemas = {
-  issue_triage: createAuthoritativeSchema("IssueTriageV1", IssueTriageV1ModelOutputSchema),
-  pull_request_review: createAuthoritativeSchema("PrReviewPlanV1", PrReviewPlanV1ModelOutputSchema),
+  issue_triage: [
+    createAuthoritativeSchema("IssueTriageV1", IssueTriageV1ModelOutputSchema),
+    createAuthoritativeSchema("IssueTriageV2", IssueTriageV2ModelOutputSchema),
+  ],
+  pull_request_review: [
+    createAuthoritativeSchema("PrReviewPlanV1", PrReviewPlanV1ModelOutputSchema),
+    createAuthoritativeSchema("PrReviewPlanV2", PrReviewPlanV2ModelOutputSchema),
+  ],
 } as const;
 
 export function validateReviewCompletion(
@@ -80,18 +94,34 @@ export function validateReviewCompletion(
   canonicalResult = canonicalizeReviewResultSubmission(result),
 ): ValidatedReviewResult {
   const template = parseAndValidateExecutionTemplate(context);
-  const authority = authoritativeSchemas[context.jobKind];
+  if ("validation" in template) {
+    throw new StoredExecutionTemplateInvalidError(
+      "Validation profile jobs require the validation result completion path.",
+    );
+  }
+  const authority = authoritativeSchemas[context.jobKind].find(
+    (candidate) => candidate.sha256 === template.prompt.outputSchemaSha256,
+  );
+  if (authority === undefined) {
+    throw new StoredExecutionTemplateInvalidError(
+      "The stored output schema version is unsupported.",
+    );
+  }
   validateTemplateDigests(context, template, authority);
   if (!securelyMatchesSha256(submittedDigest, canonicalResult.resultDigest)) {
     throw new ResultDigestMismatchError();
   }
 
   if (context.jobKind === "pull_request_review") {
-    if (!Value.Check(PrReviewPlanV1Schema, result)) {
-      throw new ReviewResultInvalidError("The review result does not match PrReviewPlanV1Schema.");
+    if (
+      !(Value.Check(PrReviewPlanV1Schema, result) || Value.Check(PrReviewPlanV2Schema, result)) ||
+      result.schemaVersion !== authority.id
+    ) {
+      throw new ReviewResultInvalidError(
+        "The review result does not match the authoritative PR review schema version.",
+      );
     }
-    validateRequestedRecipes(result.requestedRecipeIds, template.executionPolicy.allowedRecipeIds);
-    validatePrReviewBusinessRules(result);
+    validateReviewModelBusinessRules(result, template.executionPolicy.allowedRecipeIds);
     return {
       jobKind: context.jobKind,
       result,
@@ -106,10 +136,15 @@ export function validateReviewCompletion(
     };
   }
 
-  if (!Value.Check(IssueTriageV1Schema, result)) {
-    throw new ReviewResultInvalidError("The review result does not match IssueTriageV1Schema.");
+  if (
+    !(Value.Check(IssueTriageV1Schema, result) || Value.Check(IssueTriageV2Schema, result)) ||
+    result.schemaVersion !== authority.id
+  ) {
+    throw new ReviewResultInvalidError(
+      "The review result does not match the authoritative issue triage schema version.",
+    );
   }
-  validateRequestedRecipes(result.requestedRecipeIds, template.executionPolicy.allowedRecipeIds);
+  validateReviewModelBusinessRules(result, template.executionPolicy.allowedRecipeIds);
   return {
     jobKind: context.jobKind,
     result,
@@ -303,7 +338,11 @@ export function persistValidatedReviewResult(
 
 function createAuthoritativeSchema(
   id: AuthoritativeSchema["id"],
-  schema: typeof IssueTriageV1ModelOutputSchema | typeof PrReviewPlanV1ModelOutputSchema,
+  schema:
+    | typeof IssueTriageV1ModelOutputSchema
+    | typeof PrReviewPlanV1ModelOutputSchema
+    | typeof IssueTriageV2ModelOutputSchema
+    | typeof PrReviewPlanV2ModelOutputSchema,
 ): AuthoritativeSchema {
   const serialized = JSON.stringify(schema);
   if (serialized === undefined) {
@@ -430,7 +469,18 @@ function validateRequestedRecipes(
   }
 }
 
-function validatePrReviewBusinessRules(result: PrReviewPlanV1): void {
+/** Business checks shared by bounded raw model payloads and existing enriched review results.
+ * Schema, source authority and execution acceptance remain the caller's separate responsibility. */
+export function validateReviewModelBusinessRules(
+  result: ReviewModelResult,
+  allowedRecipeIds: readonly string[],
+): void {
+  validateRequestedRecipes(result.requestedRecipeIds, allowedRecipeIds);
+  if (result.schemaVersion === "PrReviewPlanV1" || result.schemaVersion === "PrReviewPlanV2")
+    validatePrReviewBusinessRules(result);
+}
+
+function validatePrReviewBusinessRules(result: Pick<PrReviewPlanV1, "findings">): void {
   const findingIds = new Set<string>();
   for (const finding of result.findings) {
     if (findingIds.has(finding.findingId)) {
@@ -452,6 +502,37 @@ function validatePrReviewBusinessRules(result: PrReviewPlanV1): void {
   }
 }
 
+/** Applies the existing summary observation rules without changing its raw content. */
+export function validateValidationModelSummaryBusinessRules(summary: ValidationSummaryV1): void {
+  const observationIds = new Set<string>();
+  for (const observation of summary.observations) {
+    if (observationIds.has(observation.id))
+      throw new ReviewResultInvalidError(
+        "The model summary contains duplicate observation identifiers.",
+      );
+    observationIds.add(observation.id);
+    if (observation.line !== null && observation.path === null)
+      throw new ReviewResultInvalidError(
+        "A model observation line requires a repository-relative source path.",
+      );
+    if (
+      observation.path !== null &&
+      (!observation.path.isWellFormed() ||
+        observation.path.includes("\\") ||
+        observation.path.includes(":") ||
+        [...observation.path].some(
+          (character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f,
+        ) ||
+        observation.path
+          .split("/")
+          .some((segment) => segment === "" || segment === "." || segment === ".."))
+    )
+      throw new ReviewResultInvalidError(
+        "The model summary contains a non-normalized repository-relative path.",
+      );
+  }
+}
+
 function isNormalizedRepositoryRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\") || path.includes(":")) {
     return false;
@@ -463,7 +544,7 @@ function isNormalizedRepositoryRelativePath(path: string): boolean {
 function persistPrReview(
   database: DatabaseSync,
   reviewResultId: string,
-  result: PrReviewPlanV1,
+  result: PrReviewPlanV1 | PrReviewPlanV2,
 ): void {
   database
     .prepare(`
@@ -505,7 +586,7 @@ function persistPrReview(
 function persistIssueTriage(
   database: DatabaseSync,
   reviewResultId: string,
-  result: IssueTriageV1,
+  result: IssueTriageV1 | IssueTriageV2,
 ): void {
   database
     .prepare(`

@@ -1,25 +1,64 @@
+import type { OperatorPrincipal } from "@agentic-review/contracts";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { startLeaseReaper } from "./background/lease-reaper.js";
+import { startNotificationReaper } from "./background/notification-reaper.js";
 import { startOperatorAuthReaper } from "./background/operator-auth-reaper.js";
+import { startPublicationPublisher } from "./background/publication-publisher.js";
+import { startSchedulingPump } from "./background/scheduling-pump.js";
 import type { ServerConfig } from "./config.js";
 import type { DatabaseClient } from "./database/database-client.js";
 import { DatabaseRequestError } from "./database/errors.js";
+import type {
+  GitHubIngestionHealthSource,
+  GitHubIngestionHealthTracker,
+} from "./github/ingestion-health.js";
 import {
   type GitHubEventIngestionService,
   GitHubRepositoryNotConfiguredError,
 } from "./github/ingestion-service.js";
+import type { GitHubPublicationTransport } from "./github/publication-client.js";
+import { createRepositoryConnectionResolver } from "./github/repository-connection.js";
 import {
   type OperatorAuthRouteService,
   readOperatorSession,
   registerOperatorAuthRoutes,
 } from "./routes/auth.js";
+import { registerConfigurationAuditRoutes } from "./routes/configuration-audit.js";
+import { sendConfigurationError } from "./routes/configuration-support.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
+import { registerEvaluationAdjudicationRoutes } from "./routes/evaluation-adjudication.js";
+import { registerEvaluationAssessmentRoutes } from "./routes/evaluation-assessments.js";
+import { registerEvaluationBatchRoutes } from "./routes/evaluation-batches.js";
+import { registerEvaluationEvidenceRoutes } from "./routes/evaluation-evidence.js";
+import { registerEvaluationManagementRoutes } from "./routes/evaluation-management.js";
+import { registerEvaluationModelInvocationRoutes } from "./routes/evaluation-model-invocations.js";
+import { registerEvaluationReproductionRoutes } from "./routes/evaluation-reproduction.js";
+import {
+  registerOperatorEvidenceRoutes,
+  registerWorkerEvidenceRoutes,
+} from "./routes/evidence-assets.js";
+import { registerFindingDispositionRoutes } from "./routes/finding-dispositions.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerModelInvocationRoutes } from "./routes/model-invocations.js";
+import { registerModelRuntimeRegistryRoutes } from "./routes/model-runtime-registry.js";
+import { registerNotificationRoutes } from "./routes/notifications.js";
+import { registerOperatorAccessRoutes } from "./routes/operator-access.js";
+import { registerOperatorConfigurationRateLimits } from "./routes/operator-rate-limit.js";
+import { registerPromptConfigurationRoutes } from "./routes/prompt-configuration.js";
+import { registerPublicationRoutes } from "./routes/publications.js";
+import { registerRepositoryRoutes } from "./routes/repositories.js";
+import { registerReviewRunActionRoutes } from "./routes/review-run-actions.js";
+import { registerReviewRunDecisionRoutes } from "./routes/review-run-decisions.js";
+import { registerReviewRunRoutes } from "./routes/review-runs.js";
+import { registerSchedulingRoutes } from "./routes/scheduling.js";
+import { registerSchedulingConfigurationRoutes } from "./routes/scheduling-configuration.js";
+import { registerValidationSummaryInputRoutes } from "./routes/validation-summary-inputs.js";
 import { registerWorkerCredentialRoutes } from "./routes/worker-credentials.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
+import { createPromptPreview } from "./runtime/prompt-preview.js";
 
 export interface AppDependencies {
   readonly config: ServerConfig;
@@ -29,7 +68,13 @@ export interface AppDependencies {
     read(): boolean;
   };
   readonly githubIngestion?: GitHubEventIngestionService;
+  readonly githubHealth?: GitHubIngestionHealthSource;
+  readonly githubWebhookHealth?: Pick<
+    GitHubIngestionHealthTracker,
+    "recordWebhookSuccess" | "recordWebhookFailure"
+  >;
   readonly operatorAuth?: OperatorAuthRouteService;
+  readonly publicationTransport?: GitHubPublicationTransport;
 }
 
 const isRequestValidationError = (
@@ -202,6 +247,12 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         retryable: false,
       });
     }
+    if (
+      error instanceof DatabaseRequestError &&
+      (error.code === "PLATFORM_FORBIDDEN" || error.code === "PLATFORM_NOT_FOUND")
+    ) {
+      return sendConfigurationError(reply, error);
+    }
     if (isRequestValidationError(error)) {
       return reply.code(400).send({
         code: "request_validation_failed",
@@ -241,11 +292,36 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
       database: dependencies.database,
       shutdownSignal: dependencies.shutdownSignal,
     });
+    registerModelInvocationRoutes(workerScope, {
+      config: dependencies.config,
+      database: dependencies.database,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
+    registerValidationSummaryInputRoutes(workerScope, {
+      config: dependencies.config,
+      database: dependencies.database,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
   });
 
   const operatorAuth = dependencies.operatorAuth;
+  registerWorkerEvidenceRoutes(app, {
+    database: dependencies.database,
+    config: dependencies.config,
+    shutdownSignal: dependencies.shutdownSignal,
+  });
   if (operatorAuth !== undefined) {
     registerOperatorAuthRoutes(app, operatorAuth);
+    registerOperatorEvidenceRoutes(app, {
+      database: dependencies.database,
+      operatorAuth,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
+    registerEvaluationEvidenceRoutes(app, {
+      database: dependencies.database,
+      operatorAuth,
+      shutdownSignal: dependencies.shutdownSignal,
+    });
     app.register(async (credentialScope) => {
       await credentialScope.register(rateLimit, {
         global: false,
@@ -264,8 +340,124 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         operatorAuth,
       });
     });
+    app.register(async (configurationScope) => {
+      await registerOperatorConfigurationRateLimits(configurationScope, operatorAuth);
+      registerModelRuntimeRegistryRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerEvaluationAssessmentRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerEvaluationAdjudicationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerEvaluationBatchRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerEvaluationManagementRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerEvaluationReproductionRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+      });
+      registerEvaluationModelInvocationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+      });
+      registerNotificationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerPublicationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerOperatorAccessRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerRepositoryRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+        resolveRepository: createRepositoryConnectionResolver({
+          ...(dependencies.config.github?.polling?.token === undefined
+            ? {}
+            : { token: dependencies.config.github.polling.token }),
+          signal: dependencies.shutdownSignal,
+        }),
+      });
+      registerConfigurationAuditRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerSchedulingRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerSchedulingConfigurationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerPromptConfigurationRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+        preview: createPromptPreview(dependencies.database),
+      });
+      registerReviewRunRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerReviewRunActionRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerReviewRunDecisionRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+      registerFindingDispositionRoutes(configurationScope, {
+        database: dependencies.database,
+        operatorAuth,
+        readOnly: dependencies.config.recoveryMaintenance,
+      });
+    });
+    const dashboardActors = new WeakMap<FastifyRequest, OperatorPrincipal>();
     registerDashboardRoutes(app, {
       database: dependencies.database,
+      actor: (request) => {
+        const actor = dashboardActors.get(request);
+        if (actor === undefined)
+          throw new DatabaseRequestError(
+            "An authenticated operator identity is required.",
+            "PLATFORM_FORBIDDEN",
+          );
+        return actor;
+      },
+      ...(dependencies.githubHealth === undefined
+        ? {}
+        : { githubHealth: dependencies.githubHealth }),
       authenticate: async (request, reply) => {
         reply.header("cache-control", "private, no-store").header("vary", "Cookie");
         const session = await readOperatorSession(request, operatorAuth);
@@ -276,6 +468,10 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
             retryable: false,
           });
         }
+        dashboardActors.set(
+          request,
+          Object.freeze({ issuer: session.issuer, subject: session.subject }),
+        );
       },
     });
   }
@@ -295,7 +491,25 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         maxPayloadBytes: webhook.maxPayloadBytes,
       },
       ingest: async (event, delivery) => {
-        await githubIngestion.ingest(event, delivery);
+        try {
+          await githubIngestion.ingest(event, delivery);
+        } catch (error) {
+          if (
+            dependencies.githubWebhookHealth !== undefined &&
+            !(error instanceof GitHubRepositoryNotConfiguredError)
+          ) {
+            const repository = await dependencies.database
+              .request("getManagedRepositoryByGitHubId", {
+                githubRepositoryId: event.repository.githubRepositoryId,
+              })
+              .catch(() => null);
+            if (repository?.fullName.toLowerCase() === event.repository.fullName.toLowerCase()) {
+              dependencies.githubWebhookHealth.recordWebhookFailure(event.repository);
+            }
+          }
+          throw error;
+        }
+        dependencies.githubWebhookHealth?.recordWebhookSuccess(event.repository);
       },
     });
   }
@@ -319,6 +533,21 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
   }
 
+  const scheduling = dependencies.config.recoveryMaintenance
+    ? { wake: (): void => {}, stop: async (): Promise<void> => {} }
+    : startSchedulingPump(dependencies.database, app.log, dependencies.shutdownSignal);
+  const publisher =
+    dependencies.config.recoveryMaintenance ||
+    dependencies.config.publication === undefined ||
+    operatorAuth === undefined ||
+    dependencies.publicationTransport === undefined
+      ? { stop: async (): Promise<void> => {} }
+      : startPublicationPublisher(
+          dependencies.database,
+          dependencies.publicationTransport,
+          app.log,
+          dependencies.shutdownSignal,
+        );
   const stopLeaseReaper = dependencies.config.recoveryMaintenance
     ? async (): Promise<void> => {}
     : startLeaseReaper(
@@ -326,6 +555,7 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         dependencies.config,
         app.log,
         dependencies.shutdownSignal,
+        scheduling.wake,
       );
   const stopOperatorAuthReaper = startOperatorAuthReaper(
     dependencies.database,
@@ -333,8 +563,17 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     app.log,
     dependencies.shutdownSignal,
   );
+  const stopNotificationReaper = dependencies.config.recoveryMaintenance
+    ? async (): Promise<void> => {}
+    : startNotificationReaper(dependencies.database, app.log, dependencies.shutdownSignal);
   app.addHook("onClose", async () => {
-    await Promise.all([stopLeaseReaper(), stopOperatorAuthReaper()]);
+    await Promise.all([
+      publisher.stop(),
+      scheduling.stop(),
+      stopLeaseReaper(),
+      stopOperatorAuthReaper(),
+      stopNotificationReaper(),
+    ]);
   });
 
   return app;

@@ -10,9 +10,78 @@ import type {
 
 interface PendingRequest {
   readonly operation: DatabaseOperation;
+  readonly schedulingChange?: SchedulingChange;
   readonly resolve: (value: unknown) => void;
   readonly reject: (reason: Error) => void;
 }
+
+interface SchedulingChange {
+  readonly operation: string;
+  readonly worker?: {
+    readonly key: string;
+    readonly availableSlots: number;
+  };
+}
+
+const schedulingMutations = new Set<string>([
+  "registerWorker",
+  "rotateWorkerToken",
+  "revokeWorkerToken",
+  "completeLease",
+  "failLease",
+  "createReviewRun",
+  "createOperatorReviewRun",
+  "associateReviewRunJob",
+  "rerunValidationRequest",
+  "createManagedRepository",
+  "updateManagedRepository",
+  "updateRepositoryConnection",
+  "updatePlatformSchedulingConfiguration",
+]);
+const maximumObservedWorkerSchedulingStates = 1_024;
+
+const recordValue = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+const captureSchedulingChange = (
+  operation: DatabaseOperation,
+  input: unknown,
+): SchedulingChange | undefined => {
+  const request = recordValue(input);
+  const effectiveOperation = operation === "operatorRequest" ? request?.operation : operation;
+  if (typeof effectiveOperation !== "string") return undefined;
+  if (schedulingMutations.has(effectiveOperation)) return { operation: effectiveOperation };
+  if (
+    [
+      "reapExpiredLeases",
+      "claimLease",
+      "ingestSchedulingEvent",
+      "commitGitHubPollingReconciliation",
+      "dispatchReviewRun",
+      "cancelValidationJob",
+      "bootstrapManagedRepositories",
+    ].includes(effectiveOperation)
+  ) {
+    return { operation: effectiveOperation };
+  }
+  if (
+    operation === "heartbeatWorker" &&
+    typeof request?.workerNodeId === "string" &&
+    typeof request.workerInstanceId === "string" &&
+    typeof request.availableSlots === "number"
+  ) {
+    return {
+      operation,
+      worker: {
+        key: JSON.stringify([request.workerNodeId, request.workerInstanceId]),
+        availableSlots: request.availableSlots,
+      },
+    };
+  }
+  return undefined;
+};
 
 export interface DatabaseWorkerTransport {
   postMessage(value: unknown): void;
@@ -90,6 +159,8 @@ export const terminateWorkerAndWaitForExit = async (
 export class DatabaseClient {
   readonly #worker: DatabaseWorkerTransport;
   readonly #pending = new Map<number, PendingRequest>();
+  readonly #schedulingListeners = new Set<() => void>();
+  readonly #workerSchedulingStates = new Map<string, string>();
   readonly #ready: Promise<void>;
   readonly #exited: Promise<number>;
   #resolveReady!: () => void;
@@ -233,6 +304,15 @@ export class DatabaseClient {
     return this.#startClose();
   }
 
+  /** Background owners subscribe explicitly; ordinary database clients never start a timer. */
+  public subscribeSchedulingChanges(listener: () => void): () => void {
+    if (this.#isClosing || this.#terminalError !== undefined) return () => {};
+    this.#schedulingListeners.add(listener);
+    return () => {
+      this.#schedulingListeners.delete(listener);
+    };
+  }
+
   #startClose(): Promise<void> {
     this.#closePromise ??= this.#closeDatabaseOwner();
     return this.#closePromise;
@@ -249,6 +329,8 @@ export class DatabaseClient {
     }
 
     this.#isClosing = true;
+    this.#schedulingListeners.clear();
+    this.#workerSchedulingStates.clear();
     if (this.#terminalError !== undefined) {
       const terminalError = this.#terminalError;
       let exitObserved = false;
@@ -333,7 +415,13 @@ export class DatabaseClient {
       input,
     };
     const response = new Promise<unknown>((resolve, reject) => {
-      this.#pending.set(id, { operation, resolve, reject });
+      const schedulingChange = captureSchedulingChange(operation, input);
+      this.#pending.set(id, {
+        operation,
+        ...(schedulingChange === undefined ? {} : { schedulingChange }),
+        resolve,
+        reject,
+      });
     });
     try {
       this.#worker.postMessage(request);
@@ -374,9 +462,63 @@ export class DatabaseClient {
     }
     if (message.ok) {
       pending.resolve(message.output);
+      if (
+        !this.#isClosing &&
+        this.#terminalError === undefined &&
+        this.#schedulingListeners.size > 0 &&
+        this.#changesScheduling(pending.schedulingChange, message.output)
+      ) {
+        for (const listener of [...this.#schedulingListeners]) {
+          if (!this.#schedulingListeners.has(listener)) continue;
+          try {
+            listener();
+          } catch {
+            // A background wake must not change the committed database response.
+          }
+        }
+      }
       return;
     }
     pending.reject(new DatabaseRequestError(message.error.message, message.error.code));
+  }
+
+  #changesScheduling(change: SchedulingChange | undefined, output: unknown): boolean {
+    if (change === undefined) return false;
+    const result = recordValue(output);
+    switch (change.operation) {
+      case "heartbeatWorker": {
+        if (change.worker === undefined || typeof result?.state !== "string") return false;
+        const { key, availableSlots } = change.worker;
+        const state = JSON.stringify([result.state, availableSlots]);
+        if (this.#workerSchedulingStates.get(key) === state) return false;
+        this.#workerSchedulingStates.delete(key);
+        this.#workerSchedulingStates.set(key, state);
+        if (this.#workerSchedulingStates.size > maximumObservedWorkerSchedulingStates) {
+          const oldest = this.#workerSchedulingStates.keys().next().value;
+          if (oldest !== undefined) this.#workerSchedulingStates.delete(oldest);
+        }
+        return true;
+      }
+      case "reapExpiredLeases":
+        return typeof result?.expiredCount === "number" && result.expiredCount > 0;
+      case "claimLease":
+        return result?.outcome === "granted";
+      case "ingestSchedulingEvent":
+        return result?.outcome === "processed";
+      case "commitGitHubPollingReconciliation":
+        return (
+          Array.isArray(result?.eventResults) &&
+          result.eventResults.some((entry) => recordValue(entry)?.outcome === "processed")
+        );
+      case "dispatchReviewRun":
+        return Array.isArray(result?.createdJobs) && result.createdJobs.length > 0;
+      case "cancelValidationJob":
+        return result?.changed === true;
+      case "bootstrapManagedRepositories":
+        return typeof result?.imported === "number" && result.imported > 0;
+      default:
+        return schedulingMutations.has(change.operation);
+    }
   }
 
   #fail(error: Error): void {
@@ -384,6 +526,8 @@ export class DatabaseClient {
       return;
     }
     this.#terminalError = error;
+    this.#schedulingListeners.clear();
+    this.#workerSchedulingStates.clear();
     this.#rejectReady(error);
     for (const pending of this.#pending.values()) {
       pending.reject(error);

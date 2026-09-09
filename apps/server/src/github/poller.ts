@@ -165,12 +165,15 @@ export interface GitHubPollingActiveRequestProjection {
   readonly requestKind: SchedulingRequestKind;
   /** The normalized source event that opened the currently observed request epoch. */
   readonly openedSourceEventId: string;
+  readonly openedAt?: string;
 }
 
 export interface GitHubPollingWorkItemProjection {
   readonly workItem: GitHubWorkItem;
   readonly revision: GitHubWorkItemRevision;
   readonly activeRequests: readonly GitHubPollingActiveRequestProjection[];
+  /** An epoch-derived seed still needs a complete polling revision observation. */
+  readonly needsRevisionObservation?: boolean;
 }
 
 /**
@@ -263,6 +266,7 @@ interface PreviousWorkItemProjection {
   readonly workItem: GitHubWorkItem;
   readonly revision: GitHubWorkItemRevision;
   readonly activeRequests: ReadonlyMap<SchedulingRequestKind, GitHubPollingActiveRequestProjection>;
+  readonly needsRevisionObservation?: boolean;
 }
 
 interface ReconciliationTarget {
@@ -372,6 +376,19 @@ export async function reconcileGitHubPolling(
     assertSnapshotMatchesTarget(snapshot, target);
 
     const workItem = normalizeWorkItem(snapshot, input.repository.githubRepositoryId);
+    if (
+      previous !== undefined &&
+      [...previous.activeRequests.values()].some(
+        (request) =>
+          request.openedAt !== undefined &&
+          Date.parse(workItem.updatedAt) < Date.parse(request.openedAt),
+      )
+    ) {
+      // A snapshot older than a known request cannot establish its current state.
+      // Keep the checkpoint until a current snapshot can confirm a transition.
+      nextWorkItems.push(previousProjectionValue(previous));
+      continue;
+    }
     const revision = normalizeRevision(snapshot, input.repository.githubRepositoryId, observedAt);
     if (snapshot.state === "closed") {
       await ingest(
@@ -405,6 +422,27 @@ export async function reconcileGitHubPolling(
     }
 
     const orderedTimeline = orderTimeline(timeline.items);
+    const recoveredRequests = new Map<SchedulingRequestKind, ActiveTimelineRequest>();
+    const evidenceIsComplete =
+      !assigned.truncated &&
+      !reviewRequested.truncated &&
+      !timeline.truncated &&
+      [...(current?.activeRequestKinds ?? [])].every((requestKind) => {
+        const recovered = recoverActiveTimelineRequest(
+          orderedTimeline,
+          requestKind,
+          input.reviewer.githubUserId,
+        );
+        if (recovered === null || recovered.event.actor === null) return false;
+        recoveredRequests.set(requestKind, recovered);
+        return true;
+      });
+    if (!evidenceIsComplete) {
+      // An incomplete read cannot expand a retained authorization to the current
+      // revision. Keep the previous checkpoint so a complete cycle retries it.
+      if (previous !== undefined) nextWorkItems.push(previousProjectionValue(previous));
+      continue;
+    }
     const activeRequests = new Map<SchedulingRequestKind, GitHubPollingActiveRequestProjection>();
     const requestKinds = new Set<SchedulingRequestKind>([
       ...(current?.activeRequestKinds ?? []),
@@ -416,12 +454,6 @@ export async function reconcileGitHubPolling(
       const observedActive = current?.activeRequestKinds.has(requestKind) ?? false;
       if (!observedActive) {
         if (priorRequest === undefined) {
-          continue;
-        }
-        if (
-          !searchCompletedForRequestKind(requestKind, assigned.truncated, reviewRequested.truncated)
-        ) {
-          activeRequests.set(requestKind, priorRequest);
           continue;
         }
         await ingest(
@@ -441,12 +473,11 @@ export async function reconcileGitHubPolling(
         continue;
       }
 
-      const recovered = timeline.truncated
-        ? null
-        : recoverActiveTimelineRequest(orderedTimeline, requestKind, input.reviewer.githubUserId);
-      if (priorRequest !== undefined && recovered === null) {
-        activeRequests.set(requestKind, priorRequest);
-        continue;
+      const recovered = recoveredRequests.get(requestKind);
+      if (recovered === undefined) {
+        throw new GitHubPollingInvariantError(
+          "An active request lost its complete timeline evidence.",
+        );
       }
 
       const openedEvent = createRequestOpenedEvent({
@@ -455,28 +486,8 @@ export async function reconcileGitHubPolling(
         revision,
         requestKind,
         recovered,
-        reviewer,
         observedAt,
       });
-      if (
-        priorRequest !== undefined &&
-        priorRequest.openedSourceEventId !== openedEvent.sourceEventId
-      ) {
-        await ingest(
-          input,
-          createRequestClosedEvent({
-            repository,
-            workItem,
-            revision,
-            requestKind,
-            reviewer,
-            openedSourceEventId: priorRequest.openedSourceEventId,
-            occurredAt: openedEvent.occurredAt,
-            observedAt,
-          }),
-        );
-        emittedEventCount += 1;
-      }
       if (
         priorRequest === undefined ||
         priorRequest.openedSourceEventId !== openedEvent.sourceEventId
@@ -487,6 +498,7 @@ export async function reconcileGitHubPolling(
       activeRequests.set(requestKind, {
         requestKind,
         openedSourceEventId: openedEvent.sourceEventId,
+        openedAt: openedEvent.occurredAt,
       });
     }
 
@@ -494,8 +506,10 @@ export async function reconcileGitHubPolling(
       previous !== undefined && previous.revision.revisionKey !== revision.revisionKey;
     if (
       activeRequests.size > 0 &&
-      (revisionChanged || (snapshot.kind === "pull_request" && previous === undefined))
+      (revisionChanged || previous === undefined || previous.needsRevisionObservation === true)
     ) {
+      // A recovered request may already exist in the durable event history. Project the
+      // current snapshot independently so replay never has to mutate its source event.
       await ingest(
         input,
         createRevisionObservedEvent({
@@ -556,6 +570,9 @@ function previousProjectionValue(
   return {
     workItem: previous.workItem,
     revision: previous.revision,
+    ...(previous.needsRevisionObservation === undefined
+      ? {}
+      : { needsRevisionObservation: previous.needsRevisionObservation }),
     activeRequests: orderedRequestKinds(new Set(previous.activeRequests.keys())).map(
       (requestKind) => {
         const request = previous.activeRequests.get(requestKind);
@@ -606,6 +623,9 @@ function readPreviousProjection(
       workItem: item.workItem,
       revision: item.revision,
       activeRequests,
+      ...(item.needsRevisionObservation === undefined
+        ? {}
+        : { needsRevisionObservation: item.needsRevisionObservation }),
     });
   }
   return workItems;
@@ -642,14 +662,6 @@ function mergeReconciliationTargets(
       left.kind.localeCompare(right.kind) ||
       left.githubWorkItemId - right.githubWorkItemId,
   );
-}
-
-function searchCompletedForRequestKind(
-  requestKind: SchedulingRequestKind,
-  assignedSearchTruncated: boolean,
-  reviewRequestedSearchTruncated: boolean,
-): boolean {
-  return requestKind === "assignment" ? !assignedSearchTruncated : !reviewRequestedSearchTruncated;
 }
 
 function mergeCandidates(
@@ -725,6 +737,10 @@ function recoverActiveTimelineRequest(
   reviewerId: number,
 ): ActiveTimelineRequest | null {
   let active: ActiveTimelineRequest | null = null;
+  let timestamp: number | null = null;
+  let actionAtTimestamp: GitHubTimelineAction | null = null;
+  let actorAtTimestamp: number | null = null;
+  let ambiguous = false;
   const openAction = requestKind === "assignment" ? "assigned" : "review_requested";
   const closeAction = requestKind === "assignment" ? "unassigned" : "review_request_removed";
 
@@ -733,6 +749,25 @@ function recoverActiveTimelineRequest(
       continue;
     }
     if (event.target?.githubUserId !== reviewerId) {
+      continue;
+    }
+    const occurredAt = Date.parse(event.occurredAt);
+    const actorId = event.actor?.githubUserId ?? null;
+    if (timestamp !== occurredAt) {
+      timestamp = occurredAt;
+      actionAtTimestamp = event.action;
+      actorAtTimestamp = actorId;
+      ambiguous = false;
+    } else if (
+      actionAtTimestamp !== event.action ||
+      (event.action === openAction && actorAtTimestamp !== actorId)
+    ) {
+      ambiguous = true;
+    }
+    if (ambiguous) {
+      // GitHub timestamps do not establish an order within this group. Event ID
+      // lexical ordering must not decide whether execution remains authorized.
+      active = null;
       continue;
     }
     active = event.action === openAction ? { event } : null;
@@ -745,35 +780,29 @@ function createRequestOpenedEvent(input: {
   readonly workItem: GitHubWorkItem;
   readonly revision: GitHubWorkItemRevision;
   readonly requestKind: SchedulingRequestKind;
-  readonly recovered: ActiveTimelineRequest | null;
-  readonly reviewer: GitHubActor;
+  readonly recovered: ActiveTimelineRequest;
   readonly observedAt: string;
 }): NormalizedSchedulingEvent {
-  const evidence = input.recovered?.event;
-  const sourceMaterial =
-    evidence === undefined
-      ? [
-          "active-state",
-          input.repository.githubRepositoryId,
-          input.workItem.githubWorkItemId,
-          input.requestKind,
-          input.reviewer.githubUserId,
-          input.workItem.updatedAt,
-        ]
-      : [
-          "timeline",
-          input.repository.githubRepositoryId,
-          input.workItem.githubWorkItemId,
-          input.requestKind,
-          timelineIdentity(evidence),
-        ];
+  const evidence = input.recovered.event;
+  if (evidence.actor === null || evidence.target === null) {
+    throw new GitHubPollingInvariantError(
+      "A recovered request must have a known actor and target.",
+    );
+  }
+  const sourceMaterial = [
+    "timeline",
+    input.repository.githubRepositoryId,
+    input.workItem.githubWorkItemId,
+    input.requestKind,
+    timelineIdentity(evidence),
+  ];
   const sourceDigest = stableDigest(sourceMaterial);
   return {
     contractVersion: 1,
     eventId: `github-poll-event:v1:request-opened:${sourceDigest}`,
     source: "poll",
     sourceEventId: `github-poll-source:v1:${sourceDigest}`,
-    occurredAt: evidence?.occurredAt ?? input.workItem.updatedAt,
+    occurredAt: evidence.occurredAt,
     observedAt: input.observedAt,
     repository: input.repository,
     workItem: input.workItem,
@@ -781,12 +810,8 @@ function createRequestOpenedEvent(input: {
     author: input.workItem.author,
     action: "request_opened",
     requestKind: input.requestKind,
-    actor:
-      evidence === undefined || evidence.actor === null ? null : normalizeIdentity(evidence.actor),
-    target:
-      evidence === undefined || evidence.target === null
-        ? input.reviewer
-        : normalizeIdentity(evidence.target),
+    actor: normalizeIdentity(evidence.actor),
+    target: normalizeIdentity(evidence.target),
   };
 }
 
@@ -1163,6 +1188,14 @@ function validatePreviousProjection(input: ReconcileGitHubPollingInput): void {
         "Previous active projection contains an inconsistent or inactive work item.",
       );
     }
+    if (
+      item.needsRevisionObservation !== undefined &&
+      typeof item.needsRevisionObservation !== "boolean"
+    ) {
+      throw new GitHubPollingInvariantError(
+        "Previous active projection has an invalid revision observation marker.",
+      );
+    }
     assertPositiveInteger(item.workItem.githubWorkItemId, "projected work item githubWorkItemId");
     assertPositiveInteger(item.workItem.number, "projected work item number");
     if (workItemIds.has(item.workItem.githubWorkItemId)) {
@@ -1178,6 +1211,9 @@ function validatePreviousProjection(input: ReconcileGitHubPollingInput): void {
         (request.requestKind !== "assignment" && request.requestKind !== "review_request") ||
         request.openedSourceEventId.length === 0 ||
         request.openedSourceEventId.length > 512 ||
+        (request.openedAt !== undefined &&
+          (typeof request.openedAt !== "string" ||
+            !Number.isFinite(Date.parse(request.openedAt)))) ||
         (request.requestKind === "review_request" && item.workItem.kind !== "pull_request") ||
         requestKinds.has(request.requestKind)
       ) {

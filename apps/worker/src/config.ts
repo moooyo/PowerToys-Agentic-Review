@@ -12,10 +12,12 @@ import {
 import { hostname } from "node:os";
 import { win32 } from "node:path";
 import { TextDecoder } from "node:util";
-import type {
-  ProtocolVersion,
-  WorkerArchitecture,
-  WorkerCapabilities,
+import {
+  type ProtocolVersion,
+  type WorkerArchitecture,
+  type WorkerCapabilities,
+  workerModelExecutionDisabledLabel,
+  workerModelExecutionDisabledValue,
 } from "@agentic-review/contracts";
 import { processHostResourceBounds } from "./execution/process-host-protocol.js";
 
@@ -82,25 +84,28 @@ export interface WorkerExecutionResourceLimits {
   readonly maximumOutputBytes: number;
 }
 
-export interface WorkerExecutionConfig {
+export interface WorkerEvaluationModelConfig {
+  readonly backend: "app_server";
+  readonly workerBundleSha256: string;
+  readonly nodeExecutableSha256: string;
+  /** Expected policy observations; configuration never grants execution acceptance. */
+  readonly reviewLaunchPolicySha256: string;
+  readonly summaryLaunchPolicySha256?: string;
+}
+
+export interface WorkerExecutionCommonConfig {
   readonly trustedExecutableRoot: string;
   readonly processHostPath: string;
   readonly processHostSha256: string;
-  readonly codexExecutablePath: string;
-  readonly codexSha256: string;
-  readonly codexVersion: string;
   readonly gitExecutablePath: string;
   readonly gitSha256: string;
   readonly gitSharedRootDirectory: string;
   readonly workspaceRootDirectory: string;
   readonly tempDirectory: string;
-  readonly profileDirectory: string;
   readonly processHostRequestTimeoutMs: number;
   readonly processHostStartTimeoutMs: number;
   readonly processHostShutdownTimeoutMs: number;
-  readonly codexMaximumHardTimeoutMs: number;
   readonly gitHardTimeoutMs: number;
-  readonly codexResourceLimits: WorkerExecutionResourceLimits;
   readonly gitResourceLimits: WorkerExecutionResourceLimits;
   readonly totalResourceBudget: WorkerExecutionResourceLimits;
   readonly perAttemptDiskBytes: number;
@@ -108,7 +113,6 @@ export interface WorkerExecutionConfig {
   readonly minimumFreeDiskBytes: number;
   readonly diskScanEntryLimit: number;
   readonly diskScanTimeoutMs: number;
-  readonly orphanRetentionHours: number;
   readonly orphanScanLimit: number;
   readonly gitSharedCacheMaxBytes: number;
   readonly gitSharedMinimumFreeDiskBytes: number;
@@ -117,6 +121,34 @@ export interface WorkerExecutionConfig {
   readonly gitSharedGcMinimumIntervalMinutes: number;
   readonly gitSharedGcPruneAgeHours: number;
 }
+
+export interface WorkerModelExecutionConfig extends WorkerExecutionCommonConfig {
+  readonly modelExecutionEnabled?: true;
+  readonly codexExecutablePath: string;
+  readonly codexSha256: string;
+  readonly codexVersion: string;
+  readonly profileDirectory: string;
+  readonly evaluationModel?: WorkerEvaluationModelConfig;
+  readonly codexMaximumHardTimeoutMs: number;
+  readonly codexResourceLimits: WorkerExecutionResourceLimits;
+}
+
+export interface WorkerValidationOnlyExecutionConfig extends WorkerExecutionCommonConfig {
+  readonly modelExecutionEnabled: false;
+  readonly validationMaximumHardTimeoutMs: number;
+  readonly validationResourceLimits: WorkerExecutionResourceLimits;
+  readonly codexExecutablePath?: never;
+  readonly codexSha256?: never;
+  readonly codexVersion?: never;
+  readonly profileDirectory?: never;
+  readonly evaluationModel?: never;
+  readonly codexMaximumHardTimeoutMs?: never;
+  readonly codexResourceLimits?: never;
+}
+
+export type WorkerExecutionConfig =
+  | WorkerModelExecutionConfig
+  | WorkerValidationOnlyExecutionConfig;
 
 export interface WorkerConfig {
   readonly serverUrl: URL;
@@ -128,6 +160,7 @@ export interface WorkerConfig {
   readonly maxSlots: number;
   readonly dataDirectory: string;
   readonly executionEnabled: boolean;
+  readonly modelExecutionEnabled?: boolean;
   readonly execution?: WorkerExecutionConfig;
   readonly claimWaitSeconds: number;
   readonly registrationRetrySeconds: number;
@@ -146,6 +179,8 @@ export function loadWorkerConfig(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies: WorkerConfigDependencies = {},
 ): WorkerConfig {
+  const modelExecutionEnabled = readBoolean(environment, "WORKER_MODEL_EXECUTION_ENABLED", true);
+  assertWorkerModelExecutionConfiguration(environment, modelExecutionEnabled);
   const authentication = loadWorkerAuthentication(
     dependencies.workerAuthFileReader ?? systemWorkerAuthFileReader,
   );
@@ -192,6 +227,14 @@ export function loadWorkerConfig(
     3_600,
   );
   const executionEnabled = readBoolean(environment, "WORKER_EXECUTION_ENABLED", false);
+  if (
+    !executionEnabled &&
+    Object.keys(environment).some(
+      (name) => name.startsWith("WORKER_EVALUATION_MODEL_") && environment[name] !== undefined,
+    )
+  ) {
+    throw new Error("WORKER_EVALUATION_MODEL_BACKEND requires WORKER_EXECUTION_ENABLED.");
+  }
   const recipeIds = readStringArray(environment.WORKER_RECIPE_IDS);
   if (recipeIds.length !== 0) {
     throw new Error(
@@ -202,7 +245,7 @@ export function loadWorkerConfig(
   // These checks are lexical only. Before registration, the startup verifier resolves the real
   // paths, rejects reparse points, confirms file identity, and compares binary digests.
   const execution = executionEnabled
-    ? loadExecutionConfig(environment, dataDirectory, maxSlots)
+    ? loadExecutionConfig(environment, dataDirectory, maxSlots, modelExecutionEnabled)
     : undefined;
 
   const logLevel = environment.WORKER_LOG_LEVEL ?? "info";
@@ -212,9 +255,16 @@ export function loadWorkerConfig(
   const displayName = readDisplayName(environment.WORKER_DISPLAY_NAME ?? hostname());
   const workerVersion = readWorkerVersion(environment.WORKER_VERSION ?? "0.1.0");
   const labels = {
-    ...readStringRecord(environment.WORKER_LABELS_JSON, "WORKER_LABELS_JSON"),
+    ...Object.fromEntries(
+      Object.entries(readStringRecord(environment.WORKER_LABELS_JSON, "WORKER_LABELS_JSON")).filter(
+        ([name]) => name.toLowerCase() !== workerModelExecutionDisabledLabel.toLowerCase(),
+      ),
+    ),
     execution: executionEnabled ? "enabled" : "disabled",
     processHost: execution === undefined ? "unavailable" : "available",
+    ...(modelExecutionEnabled
+      ? {}
+      : { [workerModelExecutionDisabledLabel]: workerModelExecutionDisabledValue }),
   };
   assertStringRecordBounds(labels, "Worker capability labels");
 
@@ -228,6 +278,7 @@ export function loadWorkerConfig(
     maxSlots,
     dataDirectory,
     executionEnabled,
+    ...(modelExecutionEnabled ? {} : { modelExecutionEnabled: false }),
     ...(execution === undefined ? {} : { execution }),
     claimWaitSeconds: readInteger(environment, "WORKER_CLAIM_WAIT_SECONDS", 30, 1, 60),
     registrationRetrySeconds: readInteger(
@@ -271,10 +322,29 @@ export function loadWorkerConfig(
   };
 }
 
+/** Reject incompatible switches before authentication, TLS, or model files are accessed. */
+export function assertWorkerModelExecutionConfiguration(
+  environment: NodeJS.ProcessEnv,
+  modelExecutionEnabled: boolean,
+): void {
+  if (modelExecutionEnabled) return;
+  if (
+    Object.keys(environment).some(
+      (name) => name.startsWith("WORKER_EVALUATION_MODEL_") && environment[name] !== undefined,
+    ) ||
+    readBoolean(environment, "WORKER_VALIDATION_SUMMARY_ENABLED", false) ||
+    environment.WORKER_VALIDATION_SUMMARY_TIMEOUT_MS !== undefined
+  )
+    throw new Error(
+      "Model execution is disabled; validation summaries and evaluation model configuration are not allowed.",
+    );
+}
+
 function loadExecutionConfig(
   environment: NodeJS.ProcessEnv,
   dataDirectory: string,
   maxSlots: number,
+  modelExecutionEnabled: boolean,
 ): WorkerExecutionConfig {
   const trustedExecutableRoot = readRequiredWindowsPath(
     environment,
@@ -287,26 +357,27 @@ function loadExecutionConfig(
     "WORKER_PROCESS_HOST_PATH",
     "executable",
   );
-  const codexExecutablePath = readRequiredWindowsPath(
-    environment,
-    "WORKER_CODEX_EXECUTABLE_PATH",
-    "executable",
-  );
+  const codexExecutablePath = modelExecutionEnabled
+    ? readRequiredWindowsPath(environment, "WORKER_CODEX_EXECUTABLE_PATH", "executable")
+    : undefined;
   const gitExecutablePath = readRequiredWindowsPath(
     environment,
     "WORKER_GIT_EXECUTABLE_PATH",
     "executable",
   );
   assertStrictDescendant(trustedExecutableRoot, processHostPath, "WORKER_PROCESS_HOST_PATH");
-  assertStrictDescendant(
-    trustedExecutableRoot,
-    codexExecutablePath,
-    "WORKER_CODEX_EXECUTABLE_PATH",
-  );
+  if (codexExecutablePath !== undefined)
+    assertStrictDescendant(
+      trustedExecutableRoot,
+      codexExecutablePath,
+      "WORKER_CODEX_EXECUTABLE_PATH",
+    );
   assertStrictDescendant(trustedExecutableRoot, gitExecutablePath, "WORKER_GIT_EXECUTABLE_PATH");
   assertPairwiseDisjoint(
     [processHostPath, "WORKER_PROCESS_HOST_PATH"],
-    [codexExecutablePath, "WORKER_CODEX_EXECUTABLE_PATH"],
+    ...(codexExecutablePath === undefined
+      ? []
+      : [[codexExecutablePath, "WORKER_CODEX_EXECUTABLE_PATH"] as const]),
     [gitExecutablePath, "WORKER_GIT_EXECUTABLE_PATH"],
   );
 
@@ -328,27 +399,34 @@ function loadExecutionConfig(
     "directory",
   );
   assertNotFileSystemRoot(tempDirectory, "WORKER_EXECUTION_TEMP_DIRECTORY");
-  const profileDirectory = readRequiredWindowsPath(
-    environment,
-    "WORKER_EXECUTION_PROFILE_DIRECTORY",
-    "directory",
-  );
-  assertNotFileSystemRoot(profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
+  const profileDirectory = modelExecutionEnabled
+    ? readRequiredWindowsPath(environment, "WORKER_EXECUTION_PROFILE_DIRECTORY", "directory")
+    : undefined;
+  if (profileDirectory !== undefined)
+    assertNotFileSystemRoot(profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
   assertDisjoint(trustedExecutableRoot, dataDirectory, "trusted executable root", "data root");
   assertStrictDescendant(dataDirectory, gitSharedRootDirectory, "WORKER_GIT_SHARED_ROOT_DIRECTORY");
   assertStrictDescendant(dataDirectory, workspaceRootDirectory, "WORKER_WORKSPACE_ROOT_DIRECTORY");
   assertStrictDescendant(dataDirectory, tempDirectory, "WORKER_EXECUTION_TEMP_DIRECTORY");
-  assertStrictDescendant(dataDirectory, profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
+  if (profileDirectory !== undefined)
+    assertStrictDescendant(dataDirectory, profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY");
   assertPairwiseDisjoint(
     [gitSharedRootDirectory, "WORKER_GIT_SHARED_ROOT_DIRECTORY"],
     [workspaceRootDirectory, "WORKER_WORKSPACE_ROOT_DIRECTORY"],
     [tempDirectory, "WORKER_EXECUTION_TEMP_DIRECTORY"],
-    [profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY"],
+    ...(profileDirectory === undefined
+      ? []
+      : [[profileDirectory, "WORKER_EXECUTION_PROFILE_DIRECTORY"] as const]),
   );
 
-  const codexVersion = readRequiredExact(environment, "WORKER_CODEX_VERSION");
-  assertWellFormedUnicode(codexVersion, "WORKER_CODEX_VERSION");
-  if (codexVersion.length > 128 || codexVersion.toLowerCase() === "not-configured") {
+  const codexVersion = modelExecutionEnabled
+    ? readRequiredExact(environment, "WORKER_CODEX_VERSION")
+    : undefined;
+  if (codexVersion !== undefined) assertWellFormedUnicode(codexVersion, "WORKER_CODEX_VERSION");
+  if (
+    codexVersion !== undefined &&
+    (codexVersion.length > 128 || codexVersion.toLowerCase() === "not-configured")
+  ) {
     throw new Error("WORKER_CODEX_VERSION must identify the installed pinned Codex version.");
   }
 
@@ -363,7 +441,12 @@ function loadExecutionConfig(
     maximumOutputBytes: 4 * mebibyte,
   });
   const totalResourceBudget = readTotalResourceBudget(environment);
-  assertAggregateResourceBudget(maxSlots, codexResourceLimits, totalResourceBudget, "Codex");
+  assertAggregateResourceBudget(
+    maxSlots,
+    codexResourceLimits,
+    totalResourceBudget,
+    modelExecutionEnabled ? "Codex" : "Validation",
+  );
   assertAggregateResourceBudget(maxSlots, gitResourceLimits, totalResourceBudget, "Git");
   const processHostRequestTimeoutMs = readInteger(
     environment,
@@ -427,13 +510,6 @@ function loadExecutionConfig(
     100,
     300_000,
   );
-  const orphanRetentionHours = readInteger(
-    environment,
-    "WORKER_EXECUTION_ORPHAN_RETENTION_HOURS",
-    24,
-    1,
-    24 * 30,
-  );
   const orphanScanLimit = readInteger(
     environment,
     "WORKER_EXECUTION_ORPHAN_SCAN_LIMIT",
@@ -484,29 +560,18 @@ function loadExecutionConfig(
     8_760,
   );
 
-  return {
+  const common: WorkerExecutionCommonConfig = {
     trustedExecutableRoot,
     processHostPath,
     processHostSha256: readSha256(environment, "WORKER_PROCESS_HOST_SHA256"),
-    codexExecutablePath,
-    codexSha256: readSha256(environment, "WORKER_CODEX_SHA256"),
-    codexVersion,
     gitExecutablePath,
     gitSha256: readSha256(environment, "WORKER_GIT_SHA256"),
     gitSharedRootDirectory,
     workspaceRootDirectory,
     tempDirectory,
-    profileDirectory,
     processHostRequestTimeoutMs,
     processHostStartTimeoutMs,
     processHostShutdownTimeoutMs,
-    codexMaximumHardTimeoutMs: readInteger(
-      environment,
-      "WORKER_CODEX_MAXIMUM_HARD_TIMEOUT_MS",
-      60 * 60 * 1_000,
-      processHostResourceBounds.hardTimeoutMs.minimum,
-      processHostResourceBounds.hardTimeoutMs.maximum,
-    ),
     gitHardTimeoutMs: readInteger(
       environment,
       "WORKER_GIT_HARD_TIMEOUT_MS",
@@ -514,7 +579,6 @@ function loadExecutionConfig(
       processHostResourceBounds.hardTimeoutMs.minimum,
       processHostResourceBounds.hardTimeoutMs.maximum,
     ),
-    codexResourceLimits,
     gitResourceLimits,
     totalResourceBudget,
     perAttemptDiskBytes,
@@ -522,7 +586,6 @@ function loadExecutionConfig(
     minimumFreeDiskBytes,
     diskScanEntryLimit,
     diskScanTimeoutMs,
-    orphanRetentionHours,
     orphanScanLimit,
     gitSharedCacheMaxBytes,
     gitSharedMinimumFreeDiskBytes,
@@ -530,6 +593,78 @@ function loadExecutionConfig(
     gitSharedScanTimeoutMs,
     gitSharedGcMinimumIntervalMinutes,
     gitSharedGcPruneAgeHours,
+  };
+  // Existing numeric command-budget settings remain compatible without inventing model identity.
+  const maximumHardTimeoutMs = readInteger(
+    environment,
+    "WORKER_CODEX_MAXIMUM_HARD_TIMEOUT_MS",
+    60 * 60 * 1_000,
+    processHostResourceBounds.hardTimeoutMs.minimum,
+    processHostResourceBounds.hardTimeoutMs.maximum,
+  );
+  if (!modelExecutionEnabled)
+    return {
+      ...common,
+      modelExecutionEnabled: false,
+      validationMaximumHardTimeoutMs: maximumHardTimeoutMs,
+      validationResourceLimits: codexResourceLimits,
+    };
+  if (
+    codexExecutablePath === undefined ||
+    codexVersion === undefined ||
+    profileDirectory === undefined
+  )
+    throw new Error("Model execution requires its complete Codex configuration.");
+  return {
+    ...common,
+    codexExecutablePath,
+    codexSha256: readSha256(environment, "WORKER_CODEX_SHA256"),
+    codexVersion,
+    profileDirectory,
+    codexMaximumHardTimeoutMs: maximumHardTimeoutMs,
+    codexResourceLimits,
+    ...evaluationModelConfiguration(environment, codexVersion),
+  };
+}
+
+function evaluationModelConfiguration(
+  environment: NodeJS.ProcessEnv,
+  codexVersion: string,
+): { readonly evaluationModel?: WorkerEvaluationModelConfig } {
+  const backend = environment.WORKER_EVALUATION_MODEL_BACKEND;
+  const names = [
+    "WORKER_EVALUATION_MODEL_WORKER_BUNDLE_SHA256",
+    "WORKER_EVALUATION_MODEL_NODE_SHA256",
+    "WORKER_EVALUATION_MODEL_REVIEW_POLICY_SHA256",
+    "WORKER_EVALUATION_MODEL_SUMMARY_POLICY_SHA256",
+  ] as const;
+  const allowed = new Set<string>(["WORKER_EVALUATION_MODEL_BACKEND", ...names]);
+  if (
+    Object.keys(environment).some(
+      (name) =>
+        name.startsWith("WORKER_EVALUATION_MODEL_") &&
+        environment[name] !== undefined &&
+        !allowed.has(name),
+    )
+  )
+    throw new Error("An unsupported evaluation model configuration field was supplied.");
+  if (backend === undefined) {
+    if (names.some((name) => environment[name] !== undefined))
+      throw new Error("Evaluation model pins require WORKER_EVALUATION_MODEL_BACKEND.");
+    return {};
+  }
+  if (backend !== "app_server" || codexVersion !== "0.145.0")
+    throw new Error("The evaluation model backend requires app_server and Codex 0.145.0.");
+  return {
+    evaluationModel: Object.freeze({
+      backend,
+      workerBundleSha256: readSha256(environment, names[0]),
+      nodeExecutableSha256: readSha256(environment, names[1]),
+      reviewLaunchPolicySha256: readSha256(environment, names[2]),
+      ...(environment[names[3]] === undefined
+        ? {}
+        : { summaryLaunchPolicySha256: readSha256(environment, names[3]) }),
+    }),
   };
 }
 

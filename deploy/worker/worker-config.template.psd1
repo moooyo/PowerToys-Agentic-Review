@@ -27,6 +27,31 @@
     # Trusted execution mode (must be true in production)
     WORKER_EXECUTION_ENABLED = 'true'
 
+    # Profile validation uses the approved command registry, never PATH lookup.
+    # Headless defaults to WORKER_EXECUTION_ENABLED when this setting is omitted.
+    WORKER_VALIDATION_HEADLESS_ENABLED = 'true'
+    WORKER_VALIDATION_CLEANUP_TIMEOUT_MS = 30000 # Allowed: 1000..300000 milliseconds, including final source observation.
+    WORKER_VALIDATION_SUMMARY_ENABLED = 'false' # Optional UI/Issue model advice; runner checks remain authoritative.
+    WORKER_VALIDATION_SUMMARY_TIMEOUT_MS = 60000 # Allowed: 10000..300000; the remaining job budget also applies.
+    WORKER_VALIDATION_WEB_ENABLED = 'false'
+    WORKER_VALIDATION_WINDOWS_ENABLED = 'false'
+    # Enable Web only after deploying web-driver.mjs and its packaged playwright-core runtime.
+    # Install an explicit browser; the Worker does not download one.
+    # WORKER_VALIDATION_WEB_ENABLED = 'true'
+    # WORKER_VALIDATION_WEB_BROWSER_EXECUTABLE_PATH = 'C:\Program Files\Browser\browser.exe'
+    # Enable Windows UI only with WORKER_MAX_SLOTS=1 and an interactive-session readiness probe.
+    # Pre-create one private lock directory shared by every Worker node/server using the same
+    # Windows account and desktop session. Do not derive it from a node ID or workspace.
+    # WORKER_VALIDATION_WINDOWS_ENABLED = 'true'
+    # WORKER_VALIDATION_DESKTOP_LOCK_DIRECTORY = 'C:\ProgramData\AgenticReviewDesktopLocks'
+    # git/node/powershell/cmd aliases come from trusted startup paths and cannot be overridden.
+    # Additional aliases require installed .exe paths outside mutable execution directories.
+    # Optional sha256 pins use 64 lowercase hexadecimal characters from the installed binary.
+    # WORKER_VALIDATION_COMMANDS_JSON = '[{"name":"dotnet","path":"C:\\Program Files\\dotnet\\dotnet.exe","sha256":"<64-lowercase-hex>"}]'
+    # Values are protected file paths, never secret contents. Files must be private to the Worker
+    # identity, non-linked, stable UTF-8 without BOM/NUL, and at most 64 KiB / 32767 characters.
+    # WORKER_VALIDATION_SECRET_FILES_JSON = '{"test-access-token":"D:\\AgenticReview\\Secrets\\test-token.txt"}'
+
     # Data root and execution directories
     WORKER_DATA_DIR = 'D:\AgenticReview\Data'
     WORKER_GIT_SHARED_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Repositories'
@@ -79,7 +104,6 @@
     # Allowed ranges: 100..300000 milliseconds and 1..1000000 accounting entries.
     WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS = 30000
     WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT = 100000
-    WORKER_EXECUTION_ORPHAN_RETENTION_HOURS = 24
     WORKER_EXECUTION_ORPHAN_SCAN_LIMIT = 100
 
     # Shared Git cache policy and conservative Worker-side GC controls

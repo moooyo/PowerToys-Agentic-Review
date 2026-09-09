@@ -5,7 +5,13 @@ and a real public GitHub pull request targeting an approved base branch. Running
 collector alone does not perform this exercise or establish acceptance. Record each criterion as
 passed, failed, or blocked, with evidence from the actual run.
 
-The current 2026-09-05 follow-up has explicit local Windows verification authorization and an
+The live PR actions below require the user's explicit approval for the exact repository, PR,
+and mutations in the current exercise. Authorization to run tests or use `test-env`, an approved
+base branch, and historical approval recorded below do not authorize PR/issue writes. Without
+that approval, use isolated synthetic events and read-only checks; do not perform assignment,
+review-request, comment/review, label, or state mutations. See [AGENTS.md](../../AGENTS.md).
+
+The historical 2026-09-05 follow-up had explicit local Windows verification authorization and an
 approved PR targeting `dev`. Runtime acceptance passed through manual evidence correlation; see the
 [live validation handoff](../../docs/handoff/2026-09-05-windows-e2e-live-validation.md) for evidence
 and environment closeout. The collector still reports automatic `unverified` observations.

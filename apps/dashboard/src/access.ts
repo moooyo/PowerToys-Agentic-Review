@@ -1,13 +1,15 @@
 import type { InitialState } from "./app";
 
 export default function access(initialState: InitialState | undefined) {
-  const roles = initialState?.currentUser.roles ?? [];
+  const authenticated = initialState?.authenticated === true;
+  const platformAdministrator =
+    authenticated && initialState?.operatorAccess?.platformAdministrator === true;
 
   return {
-    canRead: roles.includes("review-operator"),
-    canApprove: process.env.NODE_ENV === "development" && roles.includes("review-operator"),
-    canManageWorkers: roles.includes("review-operator"),
-    canManageSystem: roles.includes("review-operator"),
-    canPublish: process.env.NODE_ENV === "development" && roles.includes("review-operator"),
+    canRead: authenticated,
+    canApprove: process.env.NODE_ENV === "development" && platformAdministrator,
+    canManageWorkers: platformAdministrator,
+    canManageSystem: platformAdministrator,
+    canPublish: process.env.NODE_ENV === "development" && platformAdministrator,
   };
 }

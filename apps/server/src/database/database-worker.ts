@@ -2,17 +2,21 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import {
+  type DashboardHealthComponent,
   type DashboardJobListQuery,
   type DashboardJobReadQuery,
+  type DashboardReviewRunReadQuery,
   type DashboardWorkerListQuery,
   type DashboardWorkItemListQuery,
-  type JobExecutionEnvelope,
-  JobExecutionEnvelopeSchema,
-  type JobExecutionTemplate,
-  JobExecutionTemplateSchema,
-  maximumClaimLeaseResponseUtf8Bytes,
+  type EvidenceAssetManifest,
+  type FinalizeEvidenceUploadRequest,
+  FinalizeEvidenceUploadRequestSchema,
+  getSchedulingCapacity,
+  type RunFailureDiagnostics,
+  RunFailureDiagnosticsSchema,
   type RunTerminalResponse,
   RunTerminalResponseSchema,
+  type SchedulingLimits,
   WorkerRegistrationRequestSchema,
 } from "@agentic-review/contracts";
 import { resolveExpiredAttempt } from "@agentic-review/domain";
@@ -29,6 +33,11 @@ import type {
   FindOperatorSessionInput,
 } from "../security/operator-auth.js";
 import {
+  type ConfigurationAuditRequest,
+  handleConfigurationAuditRequest,
+  isConfigurationAuditOperation,
+} from "./configuration-audit.js";
+import {
   getJob,
   getSystemSnapshot,
   listJobs,
@@ -43,6 +52,63 @@ import {
   WorkerInstanceSupersededError,
   WorkerUnavailableError,
 } from "./errors.js";
+import {
+  type EvaluationAdjudicationRequest,
+  handleEvaluationAdjudicationRequest,
+  isEvaluationAdjudicationOperation,
+} from "./evaluation-adjudication.js";
+import {
+  type EvaluationAssessmentCaptureRequest,
+  type EvaluationAssessmentRequest,
+  handleEvaluationAssessmentRequest,
+  isEvaluationAssessmentOperation,
+  prepareEvaluationAssessmentRequest,
+} from "./evaluation-assessments.js";
+import {
+  type EvaluationEvidenceRequest,
+  handleEvaluationEvidenceRequest,
+  isEvaluationEvidenceOperation,
+} from "./evaluation-evidence.js";
+import { readEvaluationJobBindingInTransaction } from "./evaluation-execution.js";
+import {
+  type EvaluationManagementRequest,
+  handleEvaluationManagementRequest,
+  isEvaluationManagementOperation,
+} from "./evaluation-management.js";
+import {
+  type EvaluationModelInvocationRequest,
+  handleEvaluationModelInvocationRequest,
+  isEvaluationModelInvocationOperation,
+} from "./evaluation-model-invocations.js";
+import {
+  type EvaluationBatchRequest,
+  handleEvaluationBatchRequest,
+  isEvaluationBatchOperation,
+} from "./evaluation-queries.js";
+import {
+  type EvaluationReproductionRequest,
+  handleEvaluationReproductionRequest,
+  isEvaluationReproductionOperation,
+} from "./evaluation-reproduction.js";
+import {
+  type EvaluationResultOperationMap,
+  getEvaluationCellResult,
+  prepareEvaluationCellResultRead,
+} from "./evaluation-results.js";
+import {
+  closeEvidenceAssetStorage,
+  type EvidenceAssetRequest,
+  EvidenceStorageError,
+  handleEvidenceAssetRequest,
+  initializeEvidenceStorage,
+  isEvidenceAssetOperation,
+} from "./evidence-assets.js";
+import { EvidenceVerificationCoordinator, type PreparedEvidence } from "./evidence-verification.js";
+import {
+  type FindingDispositionRequest,
+  handleFindingDispositionRequest,
+  isFindingDispositionOperation,
+} from "./finding-dispositions.js";
 import { ingestSchedulingEvent } from "./github-ingestion.js";
 import {
   type CommitGitHubPollingReconciliationInput,
@@ -51,7 +117,40 @@ import {
   type WriteGitHubPollingProjectionInput,
   writeGitHubPollingProjection,
 } from "./github-polling-state.js";
+import { assertCurrentIssueReproductionAuthorization } from "./issue-reproduction.js";
+import {
+  assertWaitingAdmissionIntegrity,
+  beginRetryAdmissionInTransaction,
+  getJobAdmissionRecord,
+  refineJobAdmissionOwnershipInTransaction,
+} from "./job-admission.js";
+import {
+  handleRepositoryConfigurationRequest,
+  isRepositoryConfigurationOperation,
+  type RepositoryConfigurationRequest,
+} from "./managed-repositories.js";
 import { inspectMigrationState, runMigrations } from "./migrations.js";
+import {
+  handleModelInvocationRequest,
+  isModelInvocationOperation,
+  type ModelInvocationRequest,
+} from "./model-invocations.js";
+import {
+  handleModelRuntimeRegistryRequest,
+  isModelRuntimeRegistryOperation,
+  type ModelRuntimeRegistryRequest,
+} from "./model-runtime-registry.js";
+import {
+  handleNotificationRequest,
+  isNotificationOperation,
+  type NotificationRequest,
+} from "./notifications.js";
+import {
+  handleOperatorAccessRequest,
+  isOperatorAccessOperation,
+  OperatorAccessError,
+  type OperatorAccessRequest,
+} from "./operator-access.js";
 import {
   beginOperatorLogin,
   type CleanupExpiredOperatorAuthInput,
@@ -64,6 +163,17 @@ import {
   findOperatorSession,
   purgeOperatorAuthForRecovery,
 } from "./operator-auth.js";
+import {
+  type AuthorizedOperatorRequest,
+  authorizeOperatorRequest,
+  type OperatorRequestInput,
+} from "./operator-request.js";
+import { createOperatorReviewRun } from "./operator-review-runs.js";
+import {
+  handlePromptConfigurationRequest,
+  isPromptConfigurationOperation,
+  type PromptConfigurationRequest,
+} from "./prompt-configuration.js";
 import type {
   AuthenticateWorkerTokenInput,
   AuthenticateWorkerTokenResult,
@@ -72,6 +182,7 @@ import type {
   CreateWorkerNodeCredentialInput,
   DatabaseHealth,
   DatabaseRequest,
+  DatabaseWorkerMessage,
   DatabaseWorkerOptions,
   HeartbeatLeaseInput,
   HeartbeatLeaseResult,
@@ -91,13 +202,78 @@ import type {
   WorkerNodeCredentialMutationResult,
 } from "./protocol.js";
 import {
+  getPublicationVerificationScope,
+  handlePublicationRequest,
+  isPublicationOperation,
+  type PublicationRequest,
+  preparePublicationSend,
+  readPublicationReplay,
+} from "./publications.js";
+import { DatabaseRequestDispatcher } from "./request-dispatcher.js";
+import {
   canonicalizeLegacyReviewResultSubmission,
   canonicalizeReviewResultSubmission,
   persistValidatedReviewResult,
   type ReviewCompletionJobContext,
   validateReviewCompletion,
 } from "./review-results.js";
+import {
+  handleReviewRunDecisionRequest,
+  isReviewRunDecisionOperation,
+  type ReviewRunDecisionRequest,
+  readReviewRunDecisionReplay,
+} from "./review-run-decisions.js";
+import {
+  handleReviewRunQuery,
+  handleVerifiedReviewRunQuery,
+  isReviewRunQueryOperation,
+  type ReviewRunQuery,
+  type VerifiedReviewRunEvidenceFacts,
+} from "./review-run-queries.js";
+import {
+  handleReviewRunRequest,
+  isReviewRunOperation,
+  type ReviewRunRequest,
+} from "./review-runs.js";
+import {
+  assertActiveSchedulingIntegrity,
+  readPlatformSchedulingConfiguration,
+  readSchedulingActiveLeaseCount,
+  resolveRepositorySchedulingPolicy,
+} from "./scheduling-accounting.js";
+import { admitPendingJobsInTransaction } from "./scheduling-admission.js";
+import { type FairClaimCandidate, inspectFairClaimCandidates } from "./scheduling-claim-scan.js";
+import {
+  handleSchedulingConfigurationRequest,
+  isSchedulingConfigurationOperation,
+  type SchedulingConfigurationRequest,
+} from "./scheduling-configuration.js";
+import {
+  handleSchedulingDiagnosticsRequest,
+  isSchedulingDiagnosticsOperation,
+  type SchedulingDiagnosticsRequest,
+} from "./scheduling-diagnostics.js";
+import {
+  evaluateJobWorkerCapabilities,
+  parseExecutionTemplate,
+  prepareClaimExecutionEnvelope,
+} from "./scheduling-eligibility.js";
+import { recordSuccessfulSchedulingServiceInTransaction } from "./scheduling-service.js";
 import { DatabaseStorageBinding } from "./storage-security.js";
+import {
+  handleValidationDispatchRequest,
+  isValidationDispatchOperation,
+  type ValidationDispatchRequest,
+} from "./validation-dispatch.js";
+import {
+  persistValidatedValidationResult,
+  validateValidationCompletion,
+} from "./validation-results.js";
+import {
+  freezeValidationSummaryInput,
+  prepareValidationSummaryInput,
+  type ValidationSummaryInputOwnerRequest,
+} from "./validation-summary-inputs.js";
 
 interface WorkerRow {
   readonly id: string;
@@ -107,22 +283,6 @@ interface WorkerRow {
   readonly capabilities_json: string;
   readonly capabilities_digest: string;
   readonly status: "online" | "draining" | "offline" | "disabled";
-}
-
-interface JobCandidateRow {
-  readonly id: string;
-  readonly job_kind: "issue_triage" | "pull_request_review";
-  readonly generation: number;
-  readonly intent_version: number;
-  readonly semantic_key: string;
-  readonly priority: number;
-  readonly execution_json: string;
-  readonly required_capabilities_json: string;
-  readonly next_attempt_at: string;
-  readonly created_at: string;
-  readonly attempt_count: number;
-  readonly max_attempts: number;
-  readonly lease_generation: number;
 }
 
 interface HeartbeatRow {
@@ -163,6 +323,9 @@ interface TerminalAttemptRow extends HeartbeatRow {
   readonly persisted_result_id: string | null;
   readonly persisted_result_digest: string | null;
   readonly persisted_result_json: string | null;
+  readonly validation_result_id: string | null;
+  readonly validation_result_digest: string | null;
+  readonly validation_result_json: string | null;
   readonly legacy_replay_id: string | null;
   readonly legacy_result_digest: string | null;
   readonly legacy_result_json: string | null;
@@ -172,6 +335,7 @@ interface FailureTerminalPayload {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+  readonly diagnostics?: RunFailureDiagnostics;
 }
 
 interface FailureTerminalReplayRecord {
@@ -213,9 +377,25 @@ if (port === null) {
 }
 
 const options = workerData as DatabaseWorkerOptions;
+if (
+  options.publicationPublisher !== undefined &&
+  (!Number.isSafeInteger(options.publicationPublisher.githubUserId) ||
+    options.publicationPublisher.githubUserId <= 0)
+)
+  throw new TypeError("The configured publication publisher identity is invalid.");
+const publicationPublisher =
+  options.publicationPublisher === undefined
+    ? null
+    : Object.freeze({ githubUserId: options.publicationPublisher.githubUserId });
+const operatorAdministrators = Object.freeze(
+  structuredClone(options.operatorAccess?.administrators ?? []).map((principal) =>
+    Object.freeze(principal),
+  ),
+);
 let database: DatabaseSync;
 let schemaVersion = 0;
-const claimCandidatePageSize = 100;
+let evidenceVerification: EvidenceVerificationCoordinator | undefined;
+const requests = new DatabaseRequestDispatcher();
 
 FormatRegistry.Set(
   "date-time",
@@ -355,56 +535,6 @@ const selectAttemptTimeoutFailure = (
     throw new Error("An active run attempt has no deadlines.");
   }
   return failure;
-};
-
-const capabilityAtPath = (capabilities: unknown, path: string): unknown => {
-  let current = capabilities;
-  for (const segment of path.split(".")) {
-    if (current === null || typeof current !== "object" || Array.isArray(current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
-};
-
-const satisfiesRequirement = (actual: unknown, required: unknown): boolean => {
-  if (Array.isArray(required)) {
-    return required.every((requirement) => {
-      if (typeof requirement !== "string") {
-        return false;
-      }
-
-      const direct = capabilityAtPath(actual, requirement);
-      if (direct === true || direct === requirement) {
-        return true;
-      }
-
-      if (actual !== null && typeof actual === "object") {
-        const recipeIds = (actual as Record<string, unknown>).recipeIds;
-        return Array.isArray(recipeIds) && recipeIds.includes(requirement);
-      }
-
-      return false;
-    });
-  }
-
-  if (required !== null && typeof required === "object") {
-    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) {
-      return false;
-    }
-
-    const actualRecord = actual as Record<string, unknown>;
-    return Object.entries(required as Record<string, unknown>).every(([key, expected]) =>
-      satisfiesRequirement(actualRecord[key], expected),
-    );
-  }
-
-  if (Array.isArray(actual)) {
-    return actual.includes(required);
-  }
-
-  return Object.is(actual, required);
 };
 
 const withImmediateTransaction = <T>(action: () => T): T => {
@@ -757,31 +887,6 @@ const revokeWorkerToken = (
   });
 };
 
-type ExecutionTemplateParseResult =
-  | { readonly ok: true; readonly template: JobExecutionTemplate }
-  | { readonly ok: false; readonly message: string };
-
-const parseExecutionTemplate = (serializedTemplate: string): ExecutionTemplateParseResult => {
-  let value: unknown;
-  try {
-    value = parseJson(serializedTemplate);
-  } catch {
-    return {
-      ok: false,
-      message: "Stored execution_json is not valid JSON.",
-    };
-  }
-
-  if (!Value.Check(JobExecutionTemplateSchema, value)) {
-    return {
-      ok: false,
-      message: "Stored execution_json does not match JobExecutionTemplateSchema.",
-    };
-  }
-
-  return { ok: true, template: value };
-};
-
 const deadLetterClaimCandidate = (
   jobId: string,
   now: string,
@@ -1086,87 +1191,73 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
       .run(nowText, nowText, worker.id);
 
     const capabilities = parseJson(worker.capabilities_json);
-    let cursor: JobCandidateRow | undefined;
-    while (true) {
-      const candidates = database
-        .prepare(`
-        SELECT
-          candidate.id,
-          candidate.job_kind,
-          candidate.generation,
-          candidate.intent_version,
-          candidate.semantic_key,
-          candidate.priority,
-          candidate.execution_json,
-          candidate.required_capabilities_json,
-          candidate.next_attempt_at,
-          candidate.created_at,
-          candidate.attempt_count,
-          candidate.max_attempts,
-          candidate.lease_generation
-        FROM jobs AS candidate
-        WHERE candidate.status IN ('queued', 'retry_waiting')
-          AND candidate.next_attempt_at <= ?
-          AND candidate.attempt_count < candidate.max_attempts
-          AND candidate.current_run_attempt_id IS NULL
-          AND (
-            candidate.execution_affinity_node_id IS NULL
-            OR candidate.execution_affinity_node_id = ?
+    assertWaitingAdmissionIntegrity(database);
+    // A current compatible claimant is positive runtime evidence even when a bounded fleet
+    // inventory cannot reach every Worker. It still uses the shared pending-admission selector.
+    const inspectionBuckets = new Set<string>();
+    const admissionPass = admitPendingJobsInTransaction(
+      database,
+      { limit: 32, workerId: worker.id, inspectionBuckets, maximumInspectedBuckets: 4 },
+      nowText,
+    );
+    assertActiveSchedulingIntegrity(database);
+    const platformPolicy = readPlatformSchedulingConfiguration(database);
+    const activeCount = readSchedulingActiveLeaseCount(database);
+    const activeCapacity = (count: number, limits: SchedulingLimits) =>
+      getSchedulingCapacity(limits, {
+        activeLeases: count,
+        admittedQueuedJobs: 0,
+        awaitingAdmissionJobs: 0,
+        awaitingConfigurationRequests: 0,
+      }).activeCapacity;
+    if (activeCapacity(activeCount, platformPolicy.limits) === "limited")
+      return { outcome: "no_work", retryAfterMs: 1_000 };
+    const repositoryCounts = new Map<string, number>();
+    const canGrant = (candidate: FairClaimCandidate, bucketKey: string, fresh = false): boolean => {
+      if (
+        candidate.next_attempt_at > nowText ||
+        candidate.attempt_count >= candidate.max_attempts ||
+        (candidate.execution_affinity_node_id !== null &&
+          candidate.execution_affinity_node_id !== input.workerNodeId)
+      )
+        return false;
+      if (
+        database
+          .prepare(
+            "SELECT 1 FROM jobs WHERE id <> ? AND concurrency_key = ? AND status IN ('leased', 'running', 'cancel_requested') LIMIT 1",
           )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM jobs AS active
-            WHERE active.id <> candidate.id
-              AND active.concurrency_key = candidate.concurrency_key
-              AND active.status IN ('leased', 'running', 'cancel_requested')
-          )
-          AND (
-            ? IS NULL
-            OR candidate.priority < ?
-            OR (
-              candidate.priority = ?
-              AND candidate.next_attempt_at > ?
-            )
-            OR (
-              candidate.priority = ?
-              AND candidate.next_attempt_at = ?
-              AND candidate.created_at > ?
-            )
-            OR (
-              candidate.priority = ?
-              AND candidate.next_attempt_at = ?
-              AND candidate.created_at = ?
-              AND candidate.id > ?
-            )
-          )
-        ORDER BY
-          candidate.priority DESC,
-          candidate.next_attempt_at,
-          candidate.created_at,
-          candidate.id
-        LIMIT ?
-      `)
-        .all(
-          nowText,
-          input.workerNodeId,
-          cursor?.id ?? null,
-          cursor?.priority ?? null,
-          cursor?.priority ?? null,
-          cursor?.next_attempt_at ?? null,
-          cursor?.priority ?? null,
-          cursor?.next_attempt_at ?? null,
-          cursor?.created_at ?? null,
-          cursor?.priority ?? null,
-          cursor?.next_attempt_at ?? null,
-          cursor?.created_at ?? null,
-          cursor?.id ?? null,
-          claimCandidatePageSize,
-        ) as unknown as JobCandidateRow[];
-      if (candidates.length === 0) {
-        return { outcome: "no_work", retryAfterMs: 1_000 };
+          .get(candidate.id, candidate.concurrency_key)
+      )
+        return false;
+      const policy = resolveRepositorySchedulingPolicy(database, bucketKey);
+      if (policy?.enabled === false) return false;
+      if (policy && policy.limits.maxActiveLeases !== null) {
+        let count = fresh ? undefined : repositoryCounts.get(bucketKey);
+        if (count === undefined) {
+          count = readSchedulingActiveLeaseCount(database, bucketKey);
+          repositoryCounts.set(bucketKey, count);
+        }
+        if (activeCapacity(count, policy.limits) === "limited") return false;
       }
-
-      for (const candidate of candidates) {
+      return (
+        !fresh ||
+        activeCapacity(
+          readSchedulingActiveLeaseCount(database),
+          readPlatformSchedulingConfiguration(database).limits,
+        ) === "available"
+      );
+    };
+    const scan = inspectFairClaimCandidates(
+      database,
+      {
+        id: worker.id,
+        instanceId: input.workerInstanceId,
+        protocolVersion: input.protocolVersion,
+        capabilitiesDigest: input.capabilitiesDigest,
+      },
+      nowText,
+      (candidate: FairClaimCandidate) => {
+        if (!canGrant(candidate, candidate.bucket_key)) return undefined;
         const parsedTemplate = parseExecutionTemplate(candidate.execution_json);
         if (!parsedTemplate.ok) {
           deadLetterClaimCandidate(
@@ -1175,8 +1266,21 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
             "invalid_execution_template",
             parsedTemplate.message,
           );
-          continue;
+          return undefined;
         }
+
+        const admission = getJobAdmissionRecord(database, candidate.id);
+        if (admission.ownershipState === "conflict") {
+          deadLetterClaimCandidate(
+            candidate.id,
+            nowText,
+            "invalid_execution_template",
+            "Stored execution ownership is inconsistent.",
+          );
+          return undefined;
+        }
+        if (admission.ownershipState === "unverified" || admission.ownershipState === "unscoped")
+          refineJobAdmissionOwnershipInTransaction(database, candidate.id, parsedTemplate.template);
 
         let requiredCapabilities: unknown;
         try {
@@ -1188,13 +1292,36 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
             "invalid_execution_template",
             "Stored required_capabilities_json is not valid JSON.",
           );
-          continue;
+          return undefined;
         }
-        if (!satisfiesRequirement(capabilities, requiredCapabilities)) {
-          continue;
-        }
-
         const { template } = parsedTemplate;
+        if (
+          "validation" in template &&
+          template.validation.schemaVersion === "ValidationJobContextV2"
+        ) {
+          const cell = readEvaluationJobBindingInTransaction(
+            database,
+            candidate.id,
+            template,
+            nowText,
+          );
+          if (
+            !cell.applicable ||
+            !cell.repositoryEnabled ||
+            cell.controlStatus !== "active" ||
+            cell.reproductionReadiness.state === "blocked" ||
+            // Registered expectations do not enable model-backed claims until receipt acceptance
+            // and the actual execution boundary are integrated.
+            cell.plan.modelRequirements.required
+          ) {
+            return undefined;
+          }
+        }
+        if (!evaluateJobWorkerCapabilities(template, requiredCapabilities, capabilities)) {
+          return undefined;
+        }
+        const currentAdmission = getJobAdmissionRecord(database, candidate.id);
+        if (!canGrant(candidate, currentAdmission.bucketKey)) return undefined;
         const executionDeadlineAt = calculateDeadline(now, template.executionPolicy.hardTimeoutMs);
         const noProgressDeadlineAt = calculateDeadline(
           now,
@@ -1211,58 +1338,66 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
         const leaseTokenHash = hash(leaseToken);
         const leaseGeneration = candidate.lease_generation + 1;
         const attemptNumber = candidate.attempt_count + 1;
-        const envelopeCandidate = {
-          ...template,
+        const preparedEnvelope = prepareClaimExecutionEnvelope(template, candidate, {
           protocolVersion: input.protocolVersion,
-          envelopeVersion: 1,
           assignedAt: nowText,
           leaseExpiresAt,
           executionDeadlineAt,
-          lease: {
-            jobId: candidate.id,
+          runAttemptId,
+          workerNodeId: input.workerNodeId,
+          workerInstanceId: input.workerInstanceId,
+          leaseToken,
+          leaseGeneration,
+        });
+        if (!preparedEnvelope.ok) {
+          deadLetterClaimCandidate(
+            candidate.id,
+            nowText,
+            preparedEnvelope.code,
+            preparedEnvelope.message,
+          );
+          return undefined;
+        }
+        const { envelope } = preparedEnvelope;
+
+        return {
+          candidate,
+          bucketKey: currentAdmission.bucketKey,
+          value: {
+            template,
             runAttemptId,
-            workerNodeId: input.workerNodeId,
-            workerInstanceId: input.workerInstanceId,
-            leaseToken,
+            leaseTokenHash,
             leaseGeneration,
-          },
-          job: {
-            jobId: candidate.id,
-            kind: candidate.job_kind,
-            priority: candidate.priority,
-            attempt: attemptNumber,
-            maxAttempts: candidate.max_attempts,
-            generation: candidate.generation,
-            intentVersion: candidate.intent_version,
-            semanticKey: candidate.semantic_key,
+            attemptNumber,
+            envelope,
+            leaseExpiresAt,
+            executionDeadlineAt,
+            noProgressDeadlineAt,
           },
         };
-        if (!Value.Check(JobExecutionEnvelopeSchema, envelopeCandidate)) {
-          deadLetterClaimCandidate(
-            candidate.id,
-            nowText,
-            "invalid_execution_envelope",
-            "Server-generated execution envelope does not match JobExecutionEnvelopeSchema.",
-          );
-          continue;
-        }
-        const envelope: JobExecutionEnvelope = envelopeCandidate;
-        const claimResponseBytes = Buffer.byteLength(
-          JSON.stringify({ outcome: "granted", envelope, serverTime: nowText }),
-          "utf8",
-        );
-        if (claimResponseBytes > maximumClaimLeaseResponseUtf8Bytes) {
-          deadLetterClaimCandidate(
-            candidate.id,
-            nowText,
-            "claim_response_too_large",
-            `Server-generated claim response is ${claimResponseBytes} bytes; maximum is ${maximumClaimLeaseResponseUtf8Bytes}.`,
-          );
-          continue;
-        }
-
-        const update = database
-          .prepare(`
+      },
+      {
+        inspectionBudget: 128 - admissionPass.examinedJobCount,
+        inspectionBuckets,
+        primaryBudget: Math.max(0, 96 - admissionPass.examinedJobCount),
+      },
+    );
+    if (!scan.selected) return { outcome: "no_work", retryAfterMs: 1_000 };
+    const { candidate, bucketKey, value } = scan.selected;
+    const {
+      template,
+      runAttemptId,
+      leaseTokenHash,
+      leaseGeneration,
+      attemptNumber,
+      envelope,
+      leaseExpiresAt,
+      executionDeadlineAt,
+      noProgressDeadlineAt,
+    } = value;
+    if (!canGrant(candidate, bucketKey, true)) return { outcome: "no_work", retryAfterMs: 1_000 };
+    const update = database
+      .prepare(`
           UPDATE jobs
           SET
             status = 'leased',
@@ -1277,15 +1412,20 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
           WHERE id = ?
             AND status IN ('queued', 'retry_waiting')
             AND current_run_attempt_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM job_admission AS admission
+              WHERE admission.job_id = jobs.id AND admission.state = 'admitted'
+                AND admission.attempt_base = jobs.attempt_count
+            )
         `)
-          .run(attemptNumber, leaseGeneration, runAttemptId, nowText, nowText, candidate.id);
-        if (Number(update.changes) !== 1) {
-          throw new Error("The selected job could not be leased atomically.");
-        }
+      .run(attemptNumber, leaseGeneration, runAttemptId, nowText, nowText, candidate.id);
+    if (Number(update.changes) !== 1) {
+      throw new Error("The selected job could not be leased atomically.");
+    }
 
-        // Run completion is inline-only; the database default remains authoritative.
-        database
-          .prepare(`
+    // Run completion is inline-only; the database default remains authoritative.
+    database
+      .prepare(`
           INSERT INTO run_attempts (
             id,
             job_id,
@@ -1308,34 +1448,30 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
             ?, ?, ?, ?, ?, ?, 'leased', ?, ?, ?, ?, ?, ?, ?, 'leased', 0, ?
           )
         `)
-          .run(
-            runAttemptId,
-            candidate.id,
-            attemptNumber,
-            worker.id,
-            input.workerNodeId,
-            input.workerInstanceId,
-            leaseTokenHash,
-            leaseGeneration,
-            leaseExpiresAt,
-            executionDeadlineAt,
-            template.executionPolicy.noProgressTimeoutMs,
-            noProgressDeadlineAt,
-            nowText,
-            nowText,
-          );
+      .run(
+        runAttemptId,
+        candidate.id,
+        attemptNumber,
+        worker.id,
+        input.workerNodeId,
+        input.workerInstanceId,
+        leaseTokenHash,
+        leaseGeneration,
+        leaseExpiresAt,
+        executionDeadlineAt,
+        template.executionPolicy.noProgressTimeoutMs,
+        noProgressDeadlineAt,
+        nowText,
+        nowText,
+      );
 
-        return {
-          outcome: "granted",
-          envelope,
-        };
-      }
-
-      cursor = candidates.at(-1);
-      if (cursor === undefined) {
-        return { outcome: "no_work", retryAfterMs: 1_000 };
-      }
-    }
+    recordSuccessfulSchedulingServiceInTransaction(
+      database,
+      bucketKey,
+      "claim",
+      candidate.work_class,
+    );
+    return { outcome: "granted", envelope };
   });
 
 const securelyMatchesHash = (actual: string, expected: string): boolean => {
@@ -1365,6 +1501,7 @@ const failureTerminalPayload = (input: LeaseFailureInput): FailureTerminalPayloa
   code: input.failureCode,
   message: input.failureMessage,
   retryable: input.retryable,
+  ...(input.diagnostics === undefined ? {} : { diagnostics: input.diagnostics }),
 });
 
 const parseFailureTerminalReplayRecord = (
@@ -1402,7 +1539,9 @@ const parseFailureTerminalReplayRecord = (
   if (
     typeof payloadRecord.code !== "string" ||
     typeof payloadRecord.message !== "string" ||
-    typeof payloadRecord.retryable !== "boolean"
+    typeof payloadRecord.retryable !== "boolean" ||
+    (payloadRecord.diagnostics !== undefined &&
+      !Value.Check(RunFailureDiagnosticsSchema, payloadRecord.diagnostics))
   ) {
     return null;
   }
@@ -1414,6 +1553,9 @@ const parseFailureTerminalReplayRecord = (
       code: payloadRecord.code,
       message: payloadRecord.message,
       retryable: payloadRecord.retryable,
+      ...(payloadRecord.diagnostics === undefined
+        ? {}
+        : { diagnostics: payloadRecord.diagnostics as RunFailureDiagnostics }),
     },
     response,
   };
@@ -1564,7 +1706,17 @@ const heartbeatLease = (input: HeartbeatLeaseInput): HeartbeatLeaseResult =>
     return { leaseExpiresAt, command };
   });
 
-const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
+interface CompletionEvidencePreflight {
+  readonly evidenceVerificationRequired: true;
+  readonly context: ReviewCompletionJobContext;
+}
+
+// Both passes are short synchronous transactions. The first preserves terminal replay and
+// rejects a stale lease before file work; the second repeats every fence after preflight.
+const completeLeaseTransaction = (
+  input: LeaseCompletionInput,
+  prepared?: PreparedEvidence,
+): LeaseTerminalResult | CompletionEvidencePreflight =>
   withImmediateTransaction(() => {
     const now = new Date().toISOString();
     const tokenHash = hash(input.leaseToken);
@@ -1603,6 +1755,9 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           legacy_replay.run_attempt_id AS legacy_replay_id,
           legacy_replay.result_digest AS legacy_result_digest,
           legacy_replay.result_json AS legacy_result_json,
+          validation_result.id AS validation_result_id,
+          validation_result.result_digest AS validation_result_digest,
+          validation_result.result_json AS validation_result_json,
           job.status AS job_status,
           job.cancellation_requested_at,
           job.current_run_attempt_id,
@@ -1619,6 +1774,8 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
           ON persisted_result.run_attempt_id = attempt.id
         LEFT JOIN legacy_review_result_replays AS legacy_replay
           ON legacy_replay.run_attempt_id = attempt.id
+        LEFT JOIN validation_job_results AS validation_result
+          ON validation_result.run_attempt_id = attempt.id
         WHERE attempt.id = ?
       `)
       .get(input.runAttemptId) as unknown as TerminalAttemptRow | undefined;
@@ -1649,16 +1806,27 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
     const canonicalResult = canonicalizeReviewResultSubmission(input.result);
     const resultJson = canonicalResult.canonicalResultJson;
     const expectedResultDigest = canonicalResult.resultDigest;
+    const executionTemplate = parseExecutionTemplate(fence.execution_json);
+    const validationJob = executionTemplate.ok && "validation" in executionTemplate.template;
     if (isTerminalAttemptState(fence.status)) {
-      const requiresPersistedResult = isPersistedReviewJob(fence);
+      const requiresPersistedResult = validationJob || isPersistedReviewJob(fence);
+      const persistedResultId = validationJob
+        ? fence.validation_result_id
+        : fence.persisted_result_id;
+      const persistedResultDigest = validationJob
+        ? fence.validation_result_digest
+        : fence.persisted_result_digest;
+      const persistedResultJson = validationJob
+        ? fence.validation_result_json
+        : fence.persisted_result_json;
       if (
         fence.status === "succeeded" &&
         fence.result_digest !== null &&
         fence.result_json === resultJson &&
-        (fence.persisted_result_id !== null) === requiresPersistedResult &&
-        (fence.persisted_result_id === null ||
-          (fence.persisted_result_digest === fence.result_digest &&
-            fence.persisted_result_json === fence.result_json)) &&
+        (persistedResultId !== null) === requiresPersistedResult &&
+        (persistedResultId === null ||
+          (persistedResultDigest === fence.result_digest &&
+            persistedResultJson === fence.result_json)) &&
         securelyMatchesHash(input.resultDigest, fence.result_digest) &&
         securelyMatchesHash(expectedResultDigest, fence.result_digest)
       ) {
@@ -1687,11 +1855,44 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
       throw new ResultDigestMismatchError();
     }
     const reviewContext = toReviewCompletionContext(fence, input.runAttemptId);
-    const validatedReview = isPersistedReviewJob(fence)
-      ? validateReviewCompletion(reviewContext, input.resultDigest, input.result, canonicalResult)
+    const coordinator = evidenceVerification;
+    if (validationJob && coordinator !== undefined && prepared === undefined) {
+      return { evidenceVerificationRequired: true, context: reviewContext };
+    }
+    if (prepared !== undefined) coordinator?.assertPreparedEvidence(prepared);
+    if (executionTemplate.ok && "validation" in executionTemplate.template)
+      assertCurrentIssueReproductionAuthorization(database, executionTemplate.template, input);
+    const validatedValidation = validationJob
+      ? validateValidationCompletion(
+          database,
+          reviewContext,
+          input.resultDigest,
+          input.result,
+          canonicalResult,
+          {
+            ...(coordinator === undefined || prepared === undefined
+              ? {}
+              : {
+                  validateEvidenceReferences: (scope) =>
+                    coordinator.admittedEvidenceReferences(prepared, scope),
+                  validateScenarioEvidence: (scope) =>
+                    coordinator.admittedScenarioEvidence(prepared, scope),
+                  readScenarioObservations: (scope) =>
+                    coordinator.admittedScenarioObservations(prepared, scope),
+                }),
+          },
+        )
       : null;
-    const committedResultDigest = validatedReview?.resultDigest ?? input.resultDigest;
-    const committedResultJson = validatedReview?.canonicalResultJson ?? resultJson;
+    const validatedReview =
+      !validationJob && isPersistedReviewJob(fence)
+        ? validateReviewCompletion(reviewContext, input.resultDigest, input.result, canonicalResult)
+        : null;
+    const committedResultDigest =
+      validatedValidation?.resultDigest ?? validatedReview?.resultDigest ?? input.resultDigest;
+    const committedResultJson =
+      validatedValidation?.canonicalResultJson ??
+      validatedReview?.canonicalResultJson ??
+      resultJson;
     const attemptUpdate = database
       .prepare(`
         UPDATE run_attempts
@@ -1739,6 +1940,9 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
     if (validatedReview !== null) {
       persistValidatedReviewResult(database, reviewContext, validatedReview, now);
     }
+    if (validatedValidation !== null) {
+      persistValidatedValidationResult(database, reviewContext, validatedValidation, now);
+    }
 
     const jobUpdate = database
       .prepare(`
@@ -1779,6 +1983,43 @@ const completeLease = (input: LeaseCompletionInput): LeaseTerminalResult =>
     };
   });
 
+const completeLease = (
+  input: LeaseCompletionInput,
+  signal: AbortSignal,
+): LeaseTerminalResult | Promise<LeaseTerminalResult> => {
+  const initial = completeLeaseTransaction(input);
+  if (!("evidenceVerificationRequired" in initial)) return initial;
+  const coordinator = evidenceVerification;
+  if (coordinator === undefined) {
+    throw new EvidenceStorageError("EVIDENCE_UNAVAILABLE", "Evidence storage is not configured.");
+  }
+  return (async () => {
+    let prepared: PreparedEvidence;
+    try {
+      prepared = await coordinator.prepareCompletionEvidence(
+        initial.context,
+        input.resultDigest,
+        input.result,
+        signal,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      // Another identical submission may have committed while this preflight was
+      // running. Preserve terminal replay without restarting file verification.
+      const replay = completeLeaseTransaction(input);
+      if (!("evidenceVerificationRequired" in replay)) return replay;
+      throw error;
+    }
+    signal.throwIfAborted();
+    // Consume the operation proof immediately, without another await or event-loop turn.
+    const result = completeLeaseTransaction(input, prepared);
+    if ("evidenceVerificationRequired" in result) {
+      throw new Error("Validation completion did not consume its evidence preflight.");
+    }
+    return result;
+  })();
+};
+
 const isPersistedReviewJob = (
   row: Pick<TerminalAttemptRow, "work_item_id" | "request_epoch_id">,
 ): boolean => row.work_item_id !== null && row.request_epoch_id !== null;
@@ -1803,6 +2044,12 @@ const toReviewCompletionContext = (
 
 const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
   withImmediateTransaction(() => {
+    if (
+      input.diagnostics !== undefined &&
+      !Value.Check(RunFailureDiagnosticsSchema, input.diagnostics)
+    ) {
+      throw new TypeError("Failure diagnostics do not match the supported contract.");
+    }
     const nowDate = new Date();
     const now = nowDate.toISOString();
     const retryAt = new Date(nowDate.getTime() + input.retryDelaySeconds * 1_000).toISOString();
@@ -1921,6 +2168,7 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
           ended_at = ?,
           failure_code = ?,
           failure_message = ?,
+          failure_diagnostics_json = ?,
           result_digest = ?,
           result_json = ?
         WHERE id = ?
@@ -1946,6 +2194,7 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
         now,
         input.failureCode,
         input.failureMessage,
+        input.diagnostics === undefined ? null : canonicalJson(input.diagnostics),
         terminalPayloadDigest,
         replayJson,
         input.runAttemptId,
@@ -1989,6 +2238,8 @@ const failLease = (input: LeaseFailureInput): LeaseTerminalResult =>
     if (Number(jobUpdate.changes) !== 1) {
       throw new LeaseLostError();
     }
+
+    if (shouldRetry) beginRetryAdmissionInTransaction(database, input.jobId, now);
 
     database
       .prepare(`
@@ -2071,7 +2322,7 @@ const reapExpiredLeases = (input: ReapExpiredLeasesInput): { readonly expiredCou
       const shouldRetry = nextStatus === "retry_waiting";
       const completedAt = shouldRetry ? null : nowText;
 
-      database
+      const jobUpdate = database
         .prepare(`
           UPDATE jobs
           SET
@@ -2095,6 +2346,8 @@ const reapExpiredLeases = (input: ReapExpiredLeasesInput): { readonly expiredCou
           attempt.job_id,
           attempt.id,
         );
+      if (shouldRetry && Number(jobUpdate.changes) === 1)
+        beginRetryAdmissionInTransaction(database, attempt.job_id, nowText);
     }
 
     database
@@ -2129,8 +2382,556 @@ const serializeError = (
   return { name: "Error", message: String(error) };
 };
 
-const handleRequest = (request: DatabaseRequest): unknown => {
+const pendingFinalizations = new Map<string, Promise<EvidenceAssetManifest>>();
+const finalizeEvidenceUpload = (
+  input: FinalizeEvidenceUploadRequest,
+  signal: AbortSignal,
+): Promise<EvidenceAssetManifest> => {
+  if (!Value.Check(FinalizeEvidenceUploadRequestSchema, input))
+    throw new EvidenceStorageError("EVIDENCE_INVALID", "The evidence request is invalid.");
+  const captured = structuredClone(input);
+  const coordinator = evidenceVerification;
+  if (coordinator === undefined)
+    throw new EvidenceStorageError("EVIDENCE_UNAVAILABLE", "Evidence storage is not configured.");
+  // Retries can overlap verification. Share the entire fenced finalization, including
+  // the rename/commit, only for the exact lease and asset. All requests use the owner signal.
+  const key = hash(
+    JSON.stringify([
+      captured.assetId,
+      captured.lease.jobId,
+      captured.lease.runAttemptId,
+      captured.lease.workerNodeId,
+      captured.lease.workerInstanceId,
+      captured.lease.leaseGeneration,
+      captured.lease.leaseToken,
+    ]),
+  );
+  const existing = pendingFinalizations.get(key);
+  if (existing !== undefined) return existing;
+  const pending = (async () => {
+    const prepared = await coordinator.prepareFinalizeEvidence(captured, signal);
+    signal.throwIfAborted();
+    return coordinator.commitPreparedFinalization(prepared);
+  })();
+  pendingFinalizations.set(key, pending);
+  const release = () => {
+    pendingFinalizations.delete(key);
+  };
+  void pending.then(release, release);
+  return pending;
+};
+
+const withVerifiedRunEvidence = async <T>(
+  scope: DashboardReviewRunReadQuery,
+  signal: AbortSignal,
+  operator: AuthorizedOperatorRequest | undefined,
+  project: (facts?: VerifiedReviewRunEvidenceFacts) => T,
+): Promise<T> => {
+  signal.throwIfAborted();
+  const coordinator = evidenceVerification;
+  if (coordinator === undefined) {
+    operator?.revalidate();
+    return project();
+  }
+  const { prepared, profiles } = await coordinator.prepareRunReadEvidence(scope, signal);
+  signal.throwIfAborted();
+  // The callback must consume prepared authority in its final synchronous transaction.
+  return project({
+    profiles,
+    assertCurrent: () => {
+      operator?.revalidate();
+      coordinator.assertPreparedEvidence(prepared);
+    },
+    admittedEvidenceReferences: (scope) => coordinator.admittedEvidenceReferences(prepared, scope),
+    admittedScenarioEvidence: (scope) => coordinator.admittedScenarioEvidence(prepared, scope),
+    admittedScenarioObservations: (scope) =>
+      coordinator.admittedScenarioObservations(prepared, scope),
+  });
+};
+
+const readVerifiedReviewRun = (
+  request: Extract<
+    ReviewRunQuery,
+    {
+      readonly operation:
+        | "getDashboardReviewRun"
+        | "getDashboardReviewRunJobResult"
+        | "getDashboardReviewRunReproductionCase";
+    }
+  >,
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+) =>
+  withVerifiedRunEvidence(request.input, signal, operator, (facts) =>
+    handleVerifiedReviewRunQuery(database, request, facts),
+  );
+
+const readVerifiedEvaluationCellResult = async (
+  input: EvaluationResultOperationMap["getEvaluationCellResult"]["input"],
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+) => {
+  signal.throwIfAborted();
+  const captured = structuredClone(input);
+  const query = prepareEvaluationCellResultRead(database, captured, operatorAdministrators);
+  const coordinator = evidenceVerification;
+  if (coordinator === undefined) {
+    operator?.revalidate();
+    return getEvaluationCellResult(database, captured, operatorAdministrators);
+  }
+  const { prepared, profiles } = await coordinator.prepareEvaluationCellReadEvidence(query, signal);
+  signal.throwIfAborted();
+  return getEvaluationCellResult(database, captured, operatorAdministrators, {
+    profiles,
+    assertCurrent: () => {
+      operator?.revalidate();
+      coordinator.assertPreparedEvidence(prepared);
+    },
+    admittedEvidenceReferences: (scope) => coordinator.admittedEvidenceReferences(prepared, scope),
+    admittedScenarioEvidence: (scope) => coordinator.admittedScenarioEvidence(prepared, scope),
+    admittedScenarioObservations: (scope) =>
+      coordinator.admittedScenarioObservations(prepared, scope),
+  });
+};
+
+const executeReviewRunDecision = (
+  request: ReviewRunDecisionRequest,
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+) => {
+  if (request.operation === "listReviewRunDecisionHistory") {
+    return handleReviewRunDecisionRequest(
+      database,
+      request,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (request.operation === "changeReviewRunDecision") {
+    // Historical receipts remain replayable after result expiry or a later decision.
+    // This lookup still checks the caller's current authority before returning anything.
+    const replay = readReviewRunDecisionReplay(database, request.input, operatorAdministrators);
+    if (replay !== undefined) return replay;
+  }
+  return withVerifiedRunEvidence(
+    { repositoryId: request.input.repositoryId, reviewRunId: request.input.reviewRunId },
+    signal,
+    operator,
+    (facts) =>
+      handleReviewRunDecisionRequest(
+        database,
+        request,
+        new Date().toISOString(),
+        operatorAdministrators,
+        facts,
+      ),
+  );
+};
+
+const executeEvaluationAssessment = async (
+  request: EvaluationAssessmentCaptureRequest,
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+) => {
+  signal.throwIfAborted();
+  const captured = structuredClone(request);
+  const restrictions = { readOnly: options.recoveryMaintenance === true };
+  const preparation = prepareEvaluationAssessmentRequest(
+    database,
+    captured,
+    operatorAdministrators,
+    restrictions,
+  );
+  if (preparation.kind === "replay") return preparation.assessment;
+  const coordinator = evidenceVerification;
+  if (coordinator === undefined) {
+    operator?.revalidate();
+    return handleEvaluationAssessmentRequest(
+      database,
+      captured,
+      new Date().toISOString(),
+      operatorAdministrators,
+      restrictions,
+    );
+  }
+  const proof = await coordinator.prepareEvaluationBatchReadEvidence(preparation.scope, signal);
+  signal.throwIfAborted();
+  const shared = {
+    assertCurrent: () => {
+      operator?.revalidate();
+      coordinator.assertPreparedEvidence(proof.prepared);
+    },
+    admittedEvidenceReferences: (
+      scope: Parameters<typeof coordinator.admittedEvidenceReferences>[1],
+    ) => coordinator.admittedEvidenceReferences(proof.prepared, scope),
+    admittedScenarioEvidence: (scope: Parameters<typeof coordinator.admittedScenarioEvidence>[1]) =>
+      coordinator.admittedScenarioEvidence(proof.prepared, scope),
+    admittedScenarioObservations: (
+      scope: Parameters<typeof coordinator.admittedScenarioObservations>[1],
+    ) => coordinator.admittedScenarioObservations(proof.prepared, scope),
+  };
+  return handleEvaluationAssessmentRequest(
+    database,
+    captured,
+    new Date().toISOString(),
+    operatorAdministrators,
+    {
+      ...restrictions,
+      facts: {
+        selectionDigest: proof.selectionDigest,
+        assertCurrent: shared.assertCurrent,
+        cells: new Map(
+          proof.cells.map((cell) => [
+            cell.cellId,
+            {
+              ...shared,
+              profiles:
+                cell.jobId && cell.verification
+                  ? [{ requestId: cell.requestId, jobId: cell.jobId, ...cell.verification }]
+                  : [],
+            },
+          ]),
+        ),
+      },
+    },
+  );
+};
+
+const executePublicationRequest = (
+  request: PublicationRequest,
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+) => {
+  const replay = readPublicationReplay(database, request, operatorAdministrators);
+  if (replay !== undefined) return replay;
+  const handle = (facts?: VerifiedReviewRunEvidenceFacts) =>
+    handlePublicationRequest(
+      database,
+      request,
+      new Date().toISOString(),
+      operatorAdministrators,
+      publicationPublisher,
+      facts,
+    );
+  if (request.operation === "getPublicationPreview" || request.operation === "confirmPublication") {
+    return withVerifiedRunEvidence(request.input, signal, operator, handle);
+  }
+  if (request.operation === "beginPublicationSend") {
+    const scope = preparePublicationSend(
+      database,
+      request.input,
+      new Date().toISOString(),
+      operatorAdministrators,
+      publicationPublisher,
+    );
+    if (scope === null) return null;
+    return withVerifiedRunEvidence(scope, signal, operator, handle);
+  }
+  if (request.operation === "retryPublication") {
+    const scope = getPublicationVerificationScope(database, request.input.publicationId);
+    if (scope.repositoryId !== request.input.repositoryId)
+      throw new OperatorAccessError(
+        "PLATFORM_NOT_FOUND",
+        "The publication resource was not found.",
+      );
+    return withVerifiedRunEvidence(scope, signal, operator, handle);
+  }
+  return handle();
+};
+
+const handleRequest = (
+  request: DatabaseRequest,
+  signal: AbortSignal,
+  operator?: AuthorizedOperatorRequest,
+): unknown => {
+  if (request.operation === "operatorRequest") {
+    if (operator !== undefined)
+      throw new OperatorAccessError(
+        "PLATFORM_FORBIDDEN",
+        "Nested operator requests are forbidden.",
+      );
+    const authorized = authorizeOperatorRequest(
+      database,
+      request.input as OperatorRequestInput,
+      operatorAdministrators,
+    );
+    return handleRequest(
+      { ...request, ...authorized.request } as DatabaseRequest,
+      signal,
+      authorized,
+    );
+  }
+  operator?.revalidate();
+  if (isEvaluationModelInvocationOperation(request.operation)) {
+    if (operator === undefined)
+      throw new OperatorAccessError(
+        "PLATFORM_FORBIDDEN",
+        "Invocation history requires an authenticated operator request.",
+      );
+    return handleEvaluationModelInvocationRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationModelInvocationRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (request.operation === "freezeValidationSummaryInput") {
+    if (operator !== undefined)
+      throw new OperatorAccessError(
+        "PLATFORM_FORBIDDEN",
+        "Summary input freezing requires the current Worker credential and lease.",
+      );
+    const input = structuredClone(request.input) as ValidationSummaryInputOwnerRequest;
+    const readOnly = options.recoveryMaintenance === true;
+    const initial = prepareValidationSummaryInput(database, input, new Date().toISOString(), {
+      readOnly,
+    });
+    if (initial.kind === "replay") return initial.response;
+    const coordinator = evidenceVerification;
+    if (!coordinator) {
+      if (initial.evidence.scopes.length === 0)
+        return freezeValidationSummaryInput(database, input, new Date().toISOString(), {
+          readOnly,
+        });
+      throw new EvidenceStorageError("EVIDENCE_UNAVAILABLE", "Evidence storage is not configured.");
+    }
+    return (async () => {
+      let prepared: PreparedEvidence;
+      try {
+        prepared = await coordinator.prepareValidationSummaryInputEvidence(
+          initial.evidence,
+          signal,
+        );
+      } catch (error) {
+        signal.throwIfAborted();
+        const replay = prepareValidationSummaryInput(database, input, new Date().toISOString(), {
+          readOnly,
+        });
+        if (replay.kind === "replay") return replay.response;
+        throw error;
+      }
+      signal.throwIfAborted();
+      return freezeValidationSummaryInput(database, input, new Date().toISOString(), {
+        readOnly,
+        evidence: {
+          assertCurrent: (fingerprint) =>
+            coordinator.assertPreparedSummaryInput(prepared, fingerprint),
+          validateEvidenceReferences: (scope) =>
+            coordinator.admittedEvidenceReferences(prepared, scope),
+          validateScenarioEvidence: (scope) =>
+            coordinator.admittedScenarioEvidence(prepared, scope),
+          readScenarioObservations: (scope) =>
+            coordinator.admittedScenarioObservations(prepared, scope),
+        },
+      });
+    })();
+  }
+  if (isModelInvocationOperation(request.operation)) {
+    return handleModelInvocationRequest(
+      database,
+      { operation: request.operation, input: request.input } as ModelInvocationRequest,
+      new Date().toISOString(),
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isModelRuntimeRegistryOperation(request.operation)) {
+    if (operator === undefined)
+      throw new OperatorAccessError(
+        "PLATFORM_FORBIDDEN",
+        "Model runtime registry operations require an authenticated operator request.",
+      );
+    return handleModelRuntimeRegistryRequest(
+      database,
+      { operation: request.operation, input: request.input } as ModelRuntimeRegistryRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isEvaluationAssessmentOperation(request.operation)) {
+    const assessment = {
+      operation: request.operation,
+      input: request.input,
+    } as EvaluationAssessmentRequest;
+    if (
+      assessment.operation === "getEvaluationScorePreview" ||
+      assessment.operation === "publishEvaluationAssessment"
+    )
+      return executeEvaluationAssessment(assessment, signal, operator);
+    return handleEvaluationAssessmentRequest(
+      database,
+      assessment,
+      new Date().toISOString(),
+      operatorAdministrators,
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isEvaluationAdjudicationOperation(request.operation)) {
+    return handleEvaluationAdjudicationRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationAdjudicationRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isEvaluationEvidenceOperation(request.operation)) {
+    return handleEvaluationEvidenceRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationEvidenceRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+      options.evidenceStorage,
+    );
+  }
+  if (request.operation === "getEvaluationCellResult") {
+    return readVerifiedEvaluationCellResult(
+      request.input as EvaluationResultOperationMap["getEvaluationCellResult"]["input"],
+      signal,
+      operator,
+    );
+  }
+  if (isEvaluationReproductionOperation(request.operation)) {
+    return handleEvaluationReproductionRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationReproductionRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (isEvaluationBatchOperation(request.operation)) {
+    return handleEvaluationBatchRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationBatchRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isEvaluationManagementOperation(request.operation)) {
+    return handleEvaluationManagementRequest(
+      database,
+      { operation: request.operation, input: request.input } as EvaluationManagementRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+      { readOnly: options.recoveryMaintenance === true },
+    );
+  }
+  if (isNotificationOperation(request.operation)) {
+    return handleNotificationRequest(
+      database,
+      { operation: request.operation, input: request.input } as NotificationRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (isPublicationOperation(request.operation)) {
+    return executePublicationRequest(request as PublicationRequest, signal, operator);
+  }
+  if (isFindingDispositionOperation(request.operation)) {
+    return handleFindingDispositionRequest(
+      database,
+      request as FindingDispositionRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (isReviewRunDecisionOperation(request.operation)) {
+    return executeReviewRunDecision(request as ReviewRunDecisionRequest, signal, operator);
+  }
+  if (isOperatorAccessOperation(request.operation)) {
+    return handleOperatorAccessRequest(
+      database,
+      request as OperatorAccessRequest,
+      new Date().toISOString(),
+      operatorAdministrators,
+    );
+  }
+  if (isEvidenceAssetOperation(request.operation)) {
+    if (options.evidenceStorage === undefined)
+      throw new EvidenceStorageError("EVIDENCE_UNAVAILABLE", "Evidence storage is not configured.");
+    if (request.operation === "finalizeEvidenceUpload")
+      return finalizeEvidenceUpload(request.input as FinalizeEvidenceUploadRequest, signal);
+    return handleEvidenceAssetRequest(
+      database,
+      request as EvidenceAssetRequest,
+      new Date().toISOString(),
+      options.evidenceStorage,
+    );
+  }
+  if (isRepositoryConfigurationOperation(request.operation)) {
+    return handleRepositoryConfigurationRequest(
+      database,
+      request as RepositoryConfigurationRequest,
+      new Date().toISOString(),
+      operator?.readContext,
+    );
+  }
+  if (isConfigurationAuditOperation(request.operation)) {
+    return handleConfigurationAuditRequest(
+      database,
+      request as ConfigurationAuditRequest,
+      operator?.readContext,
+    );
+  }
+  if (isSchedulingDiagnosticsOperation(request.operation)) {
+    return handleSchedulingDiagnosticsRequest(
+      database,
+      request as SchedulingDiagnosticsRequest,
+      new Date().toISOString(),
+      operator?.readContext,
+    );
+  }
+  if (isSchedulingConfigurationOperation(request.operation)) {
+    return handleSchedulingConfigurationRequest(
+      database,
+      request as SchedulingConfigurationRequest,
+      new Date().toISOString(),
+      operator?.readContext,
+    );
+  }
+  if (isReviewRunOperation(request.operation)) {
+    return handleReviewRunRequest(database, request as ReviewRunRequest, new Date().toISOString());
+  }
+  if (isValidationDispatchOperation(request.operation)) {
+    return handleValidationDispatchRequest(
+      database,
+      request as ValidationDispatchRequest,
+      new Date().toISOString(),
+    );
+  }
+  if (isReviewRunQueryOperation(request.operation)) {
+    const query = request as ReviewRunQuery;
+    if (
+      query.operation === "getDashboardReviewRun" ||
+      query.operation === "getDashboardReviewRunJobResult" ||
+      query.operation === "getDashboardReviewRunReproductionCase"
+    )
+      return readVerifiedReviewRun(query, signal, operator);
+    return handleReviewRunQuery(database, query);
+  }
+  if (request.operation === "createOperatorReviewRun") {
+    return createOperatorReviewRun(
+      database,
+      (request as DatabaseRequest<"createOperatorReviewRun">).input,
+      new Date().toISOString(),
+    );
+  }
+  if (isPromptConfigurationOperation(request.operation)) {
+    return handlePromptConfigurationRequest(
+      database,
+      request as PromptConfigurationRequest,
+      new Date().toISOString(),
+    );
+  }
   switch (request.operation) {
+    case "operatorCheckPermission":
+      if (operator === undefined)
+        throw new OperatorAccessError(
+          "PLATFORM_FORBIDDEN",
+          "An authenticated operator context is required.",
+        );
+      return { authorized: true } as const;
     case "ping":
       return ping();
     case "createWorkerNodeCredential":
@@ -2152,23 +2953,41 @@ const handleRequest = (request: DatabaseRequest): unknown => {
     case "heartbeatLease":
       return heartbeatLease(request.input as HeartbeatLeaseInput);
     case "completeLease":
-      return completeLease(request.input as LeaseCompletionInput);
+      return completeLease(request.input as LeaseCompletionInput, signal);
     case "failLease":
       return failLease(request.input as LeaseFailureInput);
     case "reapExpiredLeases":
       return reapExpiredLeases(request.input as ReapExpiredLeasesInput);
+    case "admitPendingJobs":
+      return withImmediateTransaction(() =>
+        admitPendingJobsInTransaction(
+          database,
+          request.input as { readonly limit?: number },
+          new Date().toISOString(),
+        ),
+      );
     case "ingestSchedulingEvent":
       return ingestSchedulingEvent(database, request.input as IngestSchedulingEventInput);
     case "listWorkItems":
-      return listWorkItems(database, request.input as DashboardWorkItemListQuery);
+      return listWorkItems(
+        database,
+        request.input as DashboardWorkItemListQuery,
+        operator?.readContext,
+      );
     case "listJobs":
-      return listJobs(database, request.input as DashboardJobListQuery);
+      return listJobs(database, request.input as DashboardJobListQuery, operator?.readContext);
     case "getJob":
-      return getJob(database, request.input as DashboardJobReadQuery);
+      return getJob(database, request.input as DashboardJobReadQuery, operator?.readContext);
     case "listWorkers":
       return listWorkers(database, request.input as DashboardWorkerListQuery);
     case "getSystemSnapshot":
-      return getSystemSnapshot(database, schemaVersion);
+      return getSystemSnapshot(
+        database,
+        schemaVersion,
+        request.input as {
+          readonly githubHealth?: DashboardHealthComponent;
+        },
+      );
     case "beginOperatorLogin":
       return beginOperatorLogin(database, request.input as BeginOperatorLoginInput);
     case "claimOperatorLoginTransaction":
@@ -2208,6 +3027,55 @@ const handleRequest = (request: DatabaseRequest): unknown => {
   throw new TypeError("Unsupported database operation.");
 };
 
+let parentClosed = false;
+let databaseClosed = false;
+let shutdownPromise: Promise<void> | undefined;
+let startupDatabase: DatabaseSync | undefined;
+
+const shutdownDatabase = (): Promise<void> => {
+  if (shutdownPromise !== undefined) return shutdownPromise;
+  // Stop admission and abort preflights before waiting; their continuations must settle
+  // while SQLite is still open. The read-only verifier must also confirm its own exit.
+  const drained = requests.drain();
+  shutdownPromise = (async () => {
+    const closed = await Promise.allSettled([
+      drained,
+      evidenceVerification?.close() ?? Promise.resolve(),
+    ]);
+    const failures: unknown[] = closed.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    try {
+      closeEvidenceAssetStorage(database);
+    } catch (error) {
+      failures.push(error);
+    }
+    completeDatabaseShutdown(
+      database,
+      () => {
+        databaseClosed = true;
+      },
+      (error) => failures.push(error),
+    );
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "Database resources did not close cleanly.");
+  })();
+  return shutdownPromise;
+};
+
+const postWorkerMessage = (message: DatabaseWorkerMessage): void => {
+  if (parentClosed) return;
+  try {
+    port.postMessage(message);
+  } catch {
+    parentClosed = true;
+    void shutdownDatabase().catch(() => {
+      process.exitCode = 1;
+    });
+  }
+};
+
 try {
   const storage = DatabaseStorageBinding.prepare(options.databasePath);
   storage.createDatabaseFile();
@@ -2216,6 +3084,7 @@ try {
     enableForeignKeyConstraints: true,
     enableDoubleQuotedStringLiterals: false,
   });
+  startupDatabase = database;
   storage.assertDatabaseOpened();
   database.exec("PRAGMA trusted_schema = OFF");
   database.exec("PRAGMA journal_mode = WAL");
@@ -2224,12 +3093,17 @@ try {
   database.exec("PRAGMA busy_timeout = 5000");
   const migrationState = inspectMigrationState(database, options.migrationsDirectory);
   if (storage.snapshot.initializationState === "initialized") {
-    if (migrationState.pendingVersions.length > 0) {
+    if (migrationState.pendingVersions.length > 0 && migrationState.currentVersion < 8) {
       throw new Error(
-        `Initialized database ${storage.databasePath} has schema version ${migrationState.currentVersion}; exact current schema version ${migrationState.targetVersion} is required. Rebuild the database.`,
+        `Initialized database ${storage.databasePath} has unsupported pre-release schema version ${migrationState.currentVersion}; version 8 or newer is required for upgrade to ${migrationState.targetVersion}. Rebuild the database.`,
       );
     }
-    schemaVersion = migrationState.currentVersion;
+    // Version 8 is the first supported single-Worker baseline. Earlier prototypes
+    // remain clean-install only; subsequent migrations preserve current results.
+    schemaVersion =
+      migrationState.pendingVersions.length === 0
+        ? migrationState.currentVersion
+        : runMigrations(database, options.migrationsDirectory);
   } else {
     schemaVersion = runMigrations(database, options.migrationsDirectory);
   }
@@ -2237,14 +3111,19 @@ try {
     storage.finalizeDatabaseInitialization();
   }
   storage.assertReady();
-  port.postMessage({ type: "ready" });
+  if (options.evidenceStorage !== undefined) {
+    initializeEvidenceStorage(database, options.evidenceStorage);
+    evidenceVerification = new EvidenceVerificationCoordinator(database, {
+      storage: options.evidenceStorage,
+    });
+  }
+  postWorkerMessage({ type: "ready" });
 
   port.on("message", (request: DatabaseRequest) => {
     if (request.operation === "shutdown") {
-      completeDatabaseShutdown(
-        database,
+      void shutdownDatabase().then(
         () => {
-          port.postMessage({
+          postWorkerMessage({
             type: "response",
             id: request.id,
             ok: true,
@@ -2253,29 +3132,50 @@ try {
           port.close();
         },
         (error) => {
-          port.postMessage({
+          postWorkerMessage({
             type: "response",
             id: request.id,
             ok: false,
             error: serializeError(error),
           });
+          // A SQLite close failure keeps the owner alive for the client's explicit
+          // forced-termination/exit-proof path; it must not acknowledge graceful exit.
+          if (databaseClosed) port.close();
         },
       );
       return;
     }
-    try {
-      const output = handleRequest(request);
-      port.postMessage({ type: "response", id: request.id, ok: true, output });
-    } catch (error) {
-      port.postMessage({
-        type: "response",
-        id: request.id,
-        ok: false,
-        error: serializeError(error),
-      });
-    }
+    // Each request settles independently. Never serialize this callback behind a
+    // pending evidence read: heartbeats, cancellation and scheduling stay responsive.
+    void requests
+      .run((signal) => handleRequest(request, signal))
+      .then(
+        (output) => postWorkerMessage({ type: "response", id: request.id, ok: true, output }),
+        (error) =>
+          postWorkerMessage({
+            type: "response",
+            id: request.id,
+            ok: false,
+            error: serializeError(error),
+          }),
+      );
+  });
+  port.on("close", () => {
+    parentClosed = true;
+    void shutdownDatabase().catch(() => {
+      process.exitCode = 1;
+    });
   });
 } catch (error) {
-  port.postMessage({ type: "fatal", error: serializeError(error) });
+  postWorkerMessage({ type: "fatal", error: serializeError(error) });
+  if (startupDatabase !== undefined && !databaseClosed) {
+    try {
+      closeEvidenceAssetStorage(startupDatabase);
+      startupDatabase.close();
+      databaseClosed = true;
+    } catch {
+      // The lifecycle owner still requires observed Worker exit after failed startup.
+    }
+  }
   port.close();
 }

@@ -1,29 +1,24 @@
 import { createHash } from "node:crypto";
-import {
-  lstat as nodeLstat,
-  open as nodeOpen,
-  realpath as nodeRealpath,
-  writeFile as nodeWriteFile,
-} from "node:fs/promises";
 import { win32 } from "node:path";
-import type { Readable } from "node:stream";
 import {
-  buildCodexExecLaunchSpec,
-  type CodexExecutionFailureCode,
-  CodexJsonlParser,
-  type CodexJsonlRecord,
-  type CodexProcessLaunchSpec,
-  codexProcessResourceLimitBounds,
   createCanonicalResult,
-  determineCodexExecutionResult,
   IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
+  IssueTriageV2ModelOutputSchema,
+  IssueTriageV2ModelResultSchema,
   type PrReviewPlanV1,
   PrReviewPlanV1ModelOutputSchema,
   PrReviewPlanV1Schema,
-  type ReviewResultV1,
+  PrReviewPlanV2ModelOutputSchema,
+  PrReviewPlanV2ModelResultSchema,
+  type ReviewModelResult,
+  redactExecutionText,
 } from "@agentic-review/codex";
-import type { JobExecutionEnvelope } from "@agentic-review/contracts";
+import {
+  type JobExecutionEnvelope,
+  type JobExecutionEnvelopeV2,
+  maximumRunCompletionResultUtf8Bytes,
+} from "@agentic-review/contracts";
 import type { Logger } from "../logging/logger.js";
 import type { JobExecutionContext, JobExecutionResult, JobExecutor } from "./job-executor.js";
 import {
@@ -31,123 +26,51 @@ import {
   type JobWorkspaceProvider,
   type PreparedJobWorkspace,
 } from "./job-workspace.js";
-import { ProcessHostRequestError } from "./process-host-client.js";
-import type { ManagedProcess } from "./process-host-protocol.js";
-import { WorkspaceDiskBudgetError, type WorkspaceDiskMonitor } from "./workspace-disk-budget.js";
+import {
+  assertModelOutputArtifact,
+  type CreateModelInvocation,
+  captureModelInvocationScope,
+  createModelOutputArtifact,
+  ModelOutputArtifactError,
+} from "./model-output-artifact.js";
+import {
+  errorSummary,
+  extractExitCode,
+  failureCategory,
+  PreparedCodexOutputRunner,
+  type PreparedCodexOutputRunnerOptions,
+  ReviewExecutionError,
+} from "./prepared-codex-output-runner.js";
+import { isEvaluationContext, validateProfileEnvelope } from "./profile-envelope.js";
 
-const maximumRetainedRecordCount = 4_096;
-const maximumRetainedRecordCharacters = 8 * 1024 * 1024;
-const maximumJsonlLineCharacters = 1_048_576;
-const maximumResultFileBytes = 2 * 1024 * 1024;
-const schemaFileName = "schema.json";
-const resultFileName = "result.json";
-const codexShellEnvironmentNames = [
-  "COMSPEC",
-  "PATH",
-  "PATHEXT",
-  "SYSTEMROOT",
-  "TEMP",
-  "TMP",
-  "USERPROFILE",
-] as const;
-
-type CodexShellEnvironment = Readonly<Record<(typeof codexShellEnvironmentNames)[number], string>>;
-
-export interface ReviewFileStat {
-  readonly dev: bigint;
-  readonly ino: bigint;
-  readonly size: bigint;
-  readonly mtimeMs: bigint;
-  readonly ctimeMs: bigint;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
-}
-
-export interface ReviewFileHandle {
-  stat(): Promise<ReviewFileStat>;
-  read(
-    buffer: Buffer,
-    offset: number,
-    length: number,
-    position: number,
-  ): Promise<{ readonly bytesRead: number }>;
-  close(): Promise<void>;
-}
-
-export interface ReviewFileIO {
-  writeExclusiveUtf8(path: string, content: string): Promise<void>;
-  lstat(path: string): Promise<ReviewFileStat>;
-  realpath(path: string): Promise<string>;
-  openRead(path: string): Promise<ReviewFileHandle>;
-}
-
-export interface ReviewJobExecutorOptions {
+export type {
+  ReviewFileHandle,
+  ReviewFileIO,
+  ReviewFileStat,
+} from "./prepared-codex-output-runner.js";
+export { buildReviewCodexConfigurationOverrides } from "./prepared-codex-output-runner.js";
+export interface ReviewJobExecutorOptions extends PreparedCodexOutputRunnerOptions {
   readonly workspaceProvider: JobWorkspaceProvider;
-  readonly codexExecutablePath: string;
-  readonly codexHomeDirectory: string;
-  readonly codexConfigurationOverrides?: readonly string[];
-  readonly codexProviderEnvironment?: Readonly<Record<string, string>>;
-  readonly systemRoot: string;
-  readonly comSpec: string;
-  readonly path: string;
-  readonly pathExt: string;
-  readonly maximumHardTimeoutMs: number;
-  readonly maximumProcessCount: number;
-  readonly maximumMemoryBytes: number;
-  readonly maximumOutputBytes: number;
-  readonly fileIO?: ReviewFileIO;
-  readonly logger?: Logger;
+  readonly createModelInvocation?: CreateModelInvocation;
 }
 
 interface AuthoritativeReviewSchema {
-  readonly resultSchema: typeof PrReviewPlanV1Schema | typeof IssueTriageV1Schema;
+  readonly resultSchema:
+    | typeof PrReviewPlanV1Schema
+    | typeof IssueTriageV1Schema
+    | typeof PrReviewPlanV2ModelResultSchema
+    | typeof IssueTriageV2ModelResultSchema;
   readonly json: string;
   readonly digest: string;
 }
 
-interface CollectedCodexRecords {
-  readonly records: readonly CodexJsonlRecord[];
-  readonly limitExceeded: boolean;
-}
-
 type FailedJobExecution = Extract<JobExecutionResult, { readonly outcome: "failed" }>;
-
-class ReviewExecutionError extends Error {
-  public constructor(
-    public readonly code: string,
-    message: string,
-    public readonly retryable: boolean,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "ReviewExecutionError";
-  }
-}
 
 const noOpLogger: Logger = {
   debug: () => undefined,
   info: () => undefined,
   warn: () => undefined,
   error: () => undefined,
-};
-
-const defaultFileIO: ReviewFileIO = {
-  writeExclusiveUtf8: async (path, content) => {
-    await nodeWriteFile(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  },
-  lstat: async (path) => nodeLstat(path, { bigint: true }),
-  realpath: async (path) => nodeRealpath(path),
-  openRead: async (path) => {
-    const handle = await nodeOpen(path, "r");
-    return {
-      stat: async () => handle.stat({ bigint: true }),
-      read: async (buffer, offset, length, position) => {
-        const result = await handle.read(buffer, offset, length, position);
-        return { bytesRead: result.bytesRead };
-      },
-      close: async () => handle.close(),
-    };
-  },
 };
 
 const authoritativePrSchema = createAuthoritativeSchema(
@@ -158,45 +81,62 @@ const authoritativeIssueSchema = createAuthoritativeSchema(
   IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
 );
+const authoritativePrV2Schema = createAuthoritativeSchema(
+  PrReviewPlanV2ModelOutputSchema,
+  PrReviewPlanV2ModelResultSchema,
+);
+const authoritativeIssueV2Schema = createAuthoritativeSchema(
+  IssueTriageV2ModelOutputSchema,
+  IssueTriageV2ModelResultSchema,
+);
 
 export class ReviewJobExecutor implements JobExecutor {
-  readonly #fileIO: ReviewFileIO;
+  readonly #prepared: PreparedCodexOutputRunner;
   readonly #logger: Logger;
-  readonly #codexHomeDirectory: string;
 
   public constructor(private readonly options: ReviewJobExecutorOptions) {
-    this.#codexHomeDirectory = normalizeSafeWindowsDirectory(
-      options.codexHomeDirectory,
-      "codexHomeDirectory",
-    );
-    assertConfiguredLimit(
-      options.maximumHardTimeoutMs,
-      "maximumHardTimeoutMs",
-      codexProcessResourceLimitBounds.hardTimeoutMs,
-    );
-    assertConfiguredLimit(
-      options.maximumProcessCount,
-      "maximumProcessCount",
-      codexProcessResourceLimitBounds.maximumProcessCount,
-    );
-    assertConfiguredLimit(
-      options.maximumMemoryBytes,
-      "maximumMemoryBytes",
-      codexProcessResourceLimitBounds.maximumMemoryBytes,
-    );
-    assertConfiguredLimit(
-      options.maximumOutputBytes,
-      "maximumOutputBytes",
-      codexProcessResourceLimitBounds.maximumOutputBytes,
-    );
-    this.#fileIO = options.fileIO ?? defaultFileIO;
+    this.#prepared = new PreparedCodexOutputRunner(options);
     this.#logger = options.logger ?? noOpLogger;
+  }
+
+  public get modelInvocationRequired(): boolean {
+    return this.options.createModelInvocation !== undefined;
   }
 
   public async execute(
     envelope: JobExecutionEnvelope,
     context: JobExecutionContext,
   ): Promise<JobExecutionResult> {
+    return this.#execute(envelope, context, false);
+  }
+
+  public async executeProfileModel(
+    envelope: JobExecutionEnvelopeV2,
+    context: JobExecutionContext,
+  ): Promise<JobExecutionResult> {
+    return this.#execute(envelope, context, true);
+  }
+
+  async #execute(
+    suppliedEnvelope: JobExecutionEnvelope,
+    context: JobExecutionContext,
+    profileModel: boolean,
+  ): Promise<JobExecutionResult> {
+    if ("validation" in suppliedEnvelope && isEvaluationContext(suppliedEnvelope.validation)) {
+      return failure(
+        "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
+        "This Worker has no accepted evaluation model execution boundary; model execution was not started.",
+        false,
+      );
+    }
+    const createModelInvocation = this.options.createModelInvocation;
+    const envelope = structuredClone(suppliedEnvelope);
+    if (createModelInvocation !== undefined && (!profileModel || envelope.envelopeVersion !== 2))
+      return failure(
+        "MODEL_INVOCATION_UNSUPPORTED",
+        "Recorded model output requires a frozen profile execution.",
+        false,
+      );
     context.reportProgress({ phase: "preparing", processCount: 0 });
     let nodeHealthFaultReported = false;
     const reportNodeHealthFaultOnce = (error: Error): void => {
@@ -206,7 +146,7 @@ export class ReviewJobExecutor implements JobExecutor {
     };
     try {
       context.signal.throwIfAborted();
-      const authority = validateEnvelope(envelope);
+      const authority = validateEnvelope(envelope, profileModel);
       if (context.deferCleanup === undefined) {
         return failure(
           "CLEANUP_REGISTRATION_UNAVAILABLE",
@@ -243,18 +183,20 @@ export class ReviewJobExecutor implements JobExecutor {
         );
       }
       context.signal.throwIfAborted();
-      return await this.#executePrepared(
+      const result = await this.#executePrepared(
         envelope,
         authority,
         workspace,
         context,
         reportNodeHealthFaultOnce,
+        createModelInvocation,
       );
+      return this.#withDiagnostics(result, envelope);
     } catch (error) {
       if (context.signal.aborted) {
         throw context.signal.reason ?? error;
       }
-      return this.#toFailure(error, envelope);
+      return this.#withDiagnostics(this.#toFailure(error, envelope), envelope);
     }
   }
 
@@ -264,299 +206,185 @@ export class ReviewJobExecutor implements JobExecutor {
     workspace: PreparedJobWorkspace,
     context: JobExecutionContext,
     reportNodeHealthFault: (error: Error) => void,
+    createModelInvocation?: CreateModelInvocation,
   ): Promise<JobExecutionResult> {
-    assertPersistentCodexHomeOutsideAttempt(this.#codexHomeDirectory, workspace.attemptDirectory);
-    const schemaPath = win32.join(workspace.controlDirectory, schemaFileName);
-    const resultPath = win32.join(workspace.controlDirectory, resultFileName);
-
-    try {
-      await assertPathMissing(this.#fileIO, resultPath);
-      await this.#fileIO.writeExclusiveUtf8(schemaPath, authority.json);
-    } catch (error) {
-      if (error instanceof ReviewExecutionError) {
-        throw error;
-      }
-      const failure = new ReviewExecutionError(
-        "CONTROL_FILE_WRITE_FAILED",
-        "The trusted Codex control files could not be created.",
-        true,
-        { cause: error },
-      );
-      reportNodeHealthFault(failure);
-      throw failure;
-    }
-
-    context.signal.throwIfAborted();
-    const hardTimeoutMs = Math.min(
-      envelope.executionPolicy.hardTimeoutMs,
-      this.options.maximumHardTimeoutMs,
-    );
-    if (
-      hardTimeoutMs < codexProcessResourceLimitBounds.hardTimeoutMs.minimum ||
-      hardTimeoutMs > codexProcessResourceLimitBounds.hardTimeoutMs.maximum
-    ) {
-      throw new ReviewExecutionError(
-        "EXECUTION_POLICY_INVALID",
-        "The job hard timeout is outside the supported Codex execution range.",
-        false,
-      );
-    }
-
-    let launchSpec: CodexProcessLaunchSpec;
-    try {
-      const shellEnvironment: CodexShellEnvironment = {
-        COMSPEC: this.options.comSpec,
-        PATH: this.options.path,
-        PATHEXT: this.options.pathExt,
-        SYSTEMROOT: this.options.systemRoot,
-        TEMP: workspace.tempDirectory,
-        TMP: workspace.tempDirectory,
-        USERPROFILE: workspace.userProfileDirectory,
-      };
-      launchSpec = buildCodexExecLaunchSpec({
-        executable: this.options.codexExecutablePath,
-        workingDirectory: workspace.checkoutDirectory,
-        processWorkingDirectory: workspace.controlDirectory,
-        controlRootDirectory: workspace.controlDirectory,
-        prompt: envelope.prompt.renderedPrompt,
-        outputSchemaPath: schemaPath,
-        outputLastMessagePath: resultPath,
-        configurationOverrides: [
-          ...(this.options.codexConfigurationOverrides ?? []),
-          ...buildReviewCodexConfigurationOverrides(workspace.checkoutDirectory, shellEnvironment),
-        ],
-        providerEnvironment: this.options.codexProviderEnvironment ?? {},
-        environment: {
-          CODEX_HOME: this.#codexHomeDirectory,
-          ...shellEnvironment,
-        },
-        limits: {
-          hardTimeoutMs,
-          maximumProcessCount: this.options.maximumProcessCount,
-          maximumMemoryBytes: this.options.maximumMemoryBytes,
-          maximumOutputBytes: this.options.maximumOutputBytes,
-        },
-      });
-    } catch (error) {
-      throw new ReviewExecutionError(
-        "CODEX_LAUNCH_SPEC_INVALID",
-        "The trusted Codex launch specification is invalid.",
-        false,
-        { cause: error },
-      );
-    }
-
-    context.reportProgress({ phase: "codex_review", processCount: 0 });
-    let diskMonitor: WorkspaceDiskMonitor;
-    try {
-      diskMonitor = await workspace.startDiskMonitoring(context.signal);
-    } catch (error) {
-      context.signal.throwIfAborted();
-      const failure = workspaceDiskExecutionError(error);
-      if (isNodeDiskFailure(error)) reportNodeHealthFault(failure);
-      throw failure;
-    }
-
-    let managed: ManagedProcess | undefined;
-    let processStartError: unknown;
-    try {
-      managed = await context.processHost.start(launchSpec, diskMonitor.signal);
-    } catch (error) {
-      processStartError = error;
-    }
-    if (managed === undefined) {
-      const diskError = await closeWorkspaceDiskMonitor(diskMonitor);
-      context.signal.throwIfAborted();
-      if (diskError !== undefined) {
-        const failure = workspaceDiskExecutionError(diskError);
-        if (isNodeDiskFailure(diskError)) reportNodeHealthFault(failure);
-        throw failure;
-      }
-      const failure = new ReviewExecutionError(
-        "CODEX_PROCESS_START_FAILED",
-        "The Codex process could not be started.",
-        true,
-        { cause: processStartError },
-      );
-      reportNodeHealthFault(failure);
-      throw failure;
-    }
-
-    context.reportProgress({ phase: "codex_review", processCount: 1 });
-    const progressPulse = new CodexProgressPulse(
+    const invocation = createModelInvocation?.(
+      structuredClone(envelope as JobExecutionEnvelopeV2),
       context,
-      envelope.executionPolicy.noProgressTimeoutMs,
     );
-    let settled: Awaited<ReturnType<typeof settleCodexProcess>>;
-    try {
-      settled = await settleCodexProcess(managed, () => progressPulse.observeActivity());
-    } finally {
-      progressPulse.stop();
-      context.reportProgress({ phase: "codex_review", processCount: 0 });
-    }
-    const diskError = await closeWorkspaceDiskMonitor(diskMonitor);
-    context.signal.throwIfAborted();
-    if (diskError !== undefined) {
-      const failure = workspaceDiskExecutionError(diskError);
-      if (isNodeDiskFailure(diskError)) reportNodeHealthFault(failure);
-      throw failure;
-    }
-
-    const completed = settled[0];
-    const stdout = settled[1];
-    const stderr = settled[2];
-    if (completed.status === "rejected") {
-      const failure = new ReviewExecutionError(
-        "CODEX_PROCESS_FAILED",
-        "The managed Codex process did not produce a completion event.",
-        true,
-        { cause: completed.reason },
-      );
-      if (!isProcessHardTimeout(completed.reason)) reportNodeHealthFault(failure);
-      throw failure;
-    }
-    if (stdout.status === "rejected" || stderr.status === "rejected") {
-      const streamError =
-        stdout.status === "rejected"
-          ? stdout.reason
-          : stderr.status === "rejected"
-            ? stderr.reason
-            : undefined;
-      const failure = new ReviewExecutionError(
-        "CODEX_STREAM_FAILED",
-        "A managed Codex output stream ended unexpectedly.",
-        true,
-        { cause: streamError },
-      );
-      reportNodeHealthFault(failure);
-      throw failure;
-    }
-    if (stdout.value.limitExceeded) {
-      return failure(
-        "CODEX_EVENT_LIMIT_EXCEEDED",
-        "Codex emitted more structured events than the Worker can retain safely.",
-        false,
-      );
-    }
-
-    const processExit = completed.value;
-    let lastMessage: string | null = null;
-    if (processExit.exitCode === 0 && processExit.signal === null && !processExit.outputTruncated) {
-      try {
-        lastMessage = await readStableResultFile(
-          this.#fileIO,
-          workspace.controlDirectory,
-          resultPath,
-          Math.min(maximumResultFileBytes, this.options.maximumOutputBytes),
-        );
-      } catch (error) {
-        if (error instanceof ReviewExecutionError) {
-          return failure(error.code, error.message, error.retryable);
-        }
-        return failure(
-          "RESULT_FILE_READ_FAILED",
-          "The Codex result file could not be read because of a filesystem error.",
-          true,
-        );
-      }
-    }
-
-    const execution = determineCodexExecutionResult(
-      {
-        processExit: {
-          exitCode: processExit.exitCode,
-          signal: processExit.signal,
-          outputTruncated: processExit.outputTruncated,
-        },
-        records: stdout.value.records,
-        lastMessage,
-      },
-      authority.resultSchema,
-    );
-    if (!execution.ok) {
-      return failure(
-        `CODEX_${execution.code.toUpperCase()}`,
-        codexFailureMessage(execution.code),
-        execution.retryable,
-      );
-    }
-
+    if (createModelInvocation !== undefined && invocation === undefined)
+      throw new ModelOutputArtifactError();
+    const expectedScope =
+      invocation === undefined
+        ? undefined
+        : captureModelInvocationScope(invocation.expectedScope, envelope as JobExecutionEnvelopeV2);
+    const prepared = await this.#prepared.run({
+      workspace,
+      context,
+      authoritativeSchema: authority,
+      prompt: envelope.prompt.renderedPrompt,
+      hardTimeoutMs: envelope.executionPolicy.hardTimeoutMs,
+      noProgressTimeoutMs: envelope.executionPolicy.noProgressTimeoutMs,
+      correlationId: envelope.lease.runAttemptId,
+      launchPolicy: "review",
+      sensitiveValues: this.#secrets(envelope),
+      reportNodeHealthFault,
+      ...(invocation === undefined || expectedScope === undefined
+        ? {}
+        : { modelInvocation: { expectedScope, open: invocation.open.bind(invocation) } }),
+    });
+    if (prepared.outcome === "failed") return prepared;
+    const execution = prepared;
+    const original = {
+      outcome: "succeeded" as const,
+      result: structuredClone(prepared.result),
+      canonicalResultJson: prepared.canonicalResultJson,
+      resultDigest: prepared.resultDigest,
+      ...(prepared.modelInvocation === undefined
+        ? {}
+        : { modelInvocation: structuredClone(prepared.modelInvocation) }),
+    };
     const businessError = validateBusinessResult(envelope, execution.result);
     if (businessError !== null) {
       return failure("RESULT_BUSINESS_VALIDATION_FAILED", businessError, false);
     }
+    if (
+      execution.result.schemaVersion === "PrReviewPlanV1" ||
+      execution.result.schemaVersion === "IssueTriageV1"
+    ) {
+      return {
+        outcome: "succeeded",
+        resultDigest: execution.resultDigest,
+        result: execution.result,
+      };
+    }
+    const redact = (text: string) => redactExecutionText(text, this.#secrets(envelope));
+    let worktreeStatus: "clean" | "modified" | "unknown" = "unknown";
+    try {
+      worktreeStatus = (await workspace.captureWorktreeState?.(context.signal)) ?? "unknown";
+    } catch {
+      context.signal.throwIfAborted();
+    }
+    const executionEvidence = {
+      schemaVersion: "ReviewExecutionEvidenceV1" as const,
+      source: "worker" as const,
+      ...prepared.commandEvidence,
+      worktree: {
+        status: worktreeStatus,
+        source: worktreeStatus === "unknown" ? ("not_observed" as const) : ("git_status" as const),
+      },
+    };
+    if (invocation !== undefined && expectedScope !== undefined) {
+      if (envelope.envelopeVersion !== 2) throw new ModelOutputArtifactError();
+      const artifact = assertModelOutputArtifact(
+        createModelOutputArtifact({
+          output: original,
+          executionEvidence,
+          expectedScope,
+          sensitiveValues: this.#secrets(envelope),
+        }),
+        envelope,
+      );
+      return {
+        outcome: "succeeded",
+        result: artifact.result,
+        resultDigest: artifact.modelOutputSha256,
+        modelOutputArtifact: artifact,
+      };
+    }
+    if (prepared.modelInvocation !== undefined) throw new ModelOutputArtifactError();
+    const result = {
+      ...execution.result,
+      verification: {
+        ...execution.result.verification,
+        summary: redact(execution.result.verification.summary),
+        commands: execution.result.verification.commands.map((command) => ({
+          ...command,
+          command: redact(command.command),
+        })),
+      },
+      executionEvidence,
+    };
+    const canonical = createCanonicalResult(result);
+    if (Buffer.byteLength(canonical.json, "utf8") > maximumRunCompletionResultUtf8Bytes) {
+      return failure(
+        "RESULT_WITH_EVIDENCE_TOO_LARGE",
+        "The review result and execution evidence exceed the inline result limit.",
+        false,
+      );
+    }
     return {
       outcome: "succeeded",
-      resultDigest: execution.resultDigest,
-      result: execution.result,
+      resultDigest: canonical.sha256,
+      result,
+    };
+  }
+
+  #secrets(envelope: JobExecutionEnvelope): readonly string[] {
+    return [
+      envelope.lease.leaseToken,
+      ...(this.options.codexProviderProtectedValues ??
+        Object.values(this.options.codexProviderEnvironment ?? {})),
+    ];
+  }
+
+  #withDiagnostics(result: JobExecutionResult, envelope: JobExecutionEnvelope): JobExecutionResult {
+    if (result.outcome === "succeeded") return result;
+    const redact = (text: string) => redactExecutionText(text, this.#secrets(envelope));
+    return {
+      ...result,
+      message: redact(result.message),
+      diagnostics: {
+        category: result.diagnostics?.category ?? failureCategory(result.code),
+        exitCode: result.diagnostics?.exitCode ?? null,
+        summary: redact(result.diagnostics?.summary ?? result.message),
+        correlationId: envelope.lease.runAttemptId,
+      },
     };
   }
 
   #toFailure(error: unknown, envelope: JobExecutionEnvelope): FailedJobExecution {
+    if (error instanceof ModelOutputArtifactError) return failure(error.code, error.message, false);
     if (error instanceof ReviewExecutionError) {
-      return failure(error.code, error.message, error.retryable);
+      return {
+        ...failure(error.code, error.message, error.retryable),
+        diagnostics: {
+          category: failureCategory(error.code),
+          exitCode: extractExitCode(error),
+          summary: errorSummary(error),
+          correlationId: envelope.lease.runAttemptId,
+        },
+      };
     }
     this.#logger.error("Review job failed unexpectedly.", {
       jobId: envelope.job.jobId,
       runAttemptId: envelope.lease.runAttemptId,
       errorName: errorName(error),
     });
-    return failure(
-      "REVIEW_EXECUTION_FAILED",
-      "The review job failed because of an unexpected Worker error.",
-      true,
-    );
+    return {
+      ...failure(
+        "REVIEW_EXECUTION_FAILED",
+        "The review job failed because of an unexpected Worker error.",
+        true,
+      ),
+      diagnostics: {
+        category: "internal",
+        exitCode: error instanceof Error ? extractExitCode(error) : null,
+        summary:
+          error instanceof Error ? errorSummary(error) : "A non-error value interrupted execution.",
+        correlationId: envelope.lease.runAttemptId,
+      },
+    };
   }
 }
 
-export function buildReviewCodexConfigurationOverrides(
-  checkoutDirectory: string,
-  environment: CodexShellEnvironment,
-): readonly string[] {
-  const projectPath = normalizeSafeWindowsDirectory(checkoutDirectory, "checkoutDirectory");
-  const tempPath = normalizeSafeWindowsDirectory(environment.TEMP, "tempDirectory");
-  const shellEnvironment = codexShellEnvironmentNames
-    .map((name) => `${name}=${tomlBasicString(environment[name])}`)
-    .join(",");
-  return Object.freeze([
-    'approval_policy="never"',
-    'sandbox_mode="workspace-write"',
-    "allow_login_shell=false",
-    "notify=[]",
-    "check_for_update_on_startup=false",
-    'web_search="disabled"',
-    "project_doc_max_bytes=32768",
-    'project_doc_fallback_filenames=["AGENTS.md"]',
-    'file_opener="none"',
-    'mcp_oauth_credentials_store="keyring"',
-    "mcp_servers={}",
-    'shell_environment_policy.inherit="none"',
-    "shell_environment_policy.ignore_default_excludes=false",
-    `shell_environment_policy.set={${shellEnvironment}}`,
-    "sandbox_workspace_write.network_access=true",
-    `sandbox_workspace_write.writable_roots=[${tomlBasicString(tempPath)}]`,
-    'windows.sandbox="elevated"',
-    'history.persistence="none"',
-    `projects={${tomlBasicString(projectPath)}={trust_level="untrusted"}}`,
-    "features.apps=false",
-    "features.hooks=false",
-    "features.memories=false",
-    "features.multi_agent=false",
-    "features.plugins=false",
-    "features.remote_plugin=false",
-    "features.skill_mcp_dependency_install=false",
-    "agents.enabled=false",
-    "apps._default.enabled=false",
-    "apps._default.destructive_enabled=false",
-    "apps._default.open_world_enabled=false",
-    "tools.web_search=false",
-    "tools.view_image=false",
-  ]);
-}
-
 function createAuthoritativeSchema(
-  modelOutputSchema: typeof PrReviewPlanV1ModelOutputSchema | typeof IssueTriageV1ModelOutputSchema,
-  resultSchema: typeof PrReviewPlanV1Schema | typeof IssueTriageV1Schema,
+  modelOutputSchema:
+    | typeof PrReviewPlanV1ModelOutputSchema
+    | typeof IssueTriageV1ModelOutputSchema
+    | typeof PrReviewPlanV2ModelOutputSchema
+    | typeof IssueTriageV2ModelOutputSchema,
+  resultSchema: AuthoritativeReviewSchema["resultSchema"],
 ): AuthoritativeReviewSchema {
   const serialized = JSON.stringify(modelOutputSchema);
   if (serialized === undefined) {
@@ -567,18 +395,42 @@ function createAuthoritativeSchema(
   return Object.freeze({ resultSchema, json: canonical.json, digest: canonical.sha256 });
 }
 
-function validateEnvelope(envelope: JobExecutionEnvelope): AuthoritativeReviewSchema {
+function validateEnvelope(
+  envelope: JobExecutionEnvelope,
+  profileModel: boolean,
+): AuthoritativeReviewSchema {
+  if (profileModel) {
+    if (envelope.envelopeVersion !== 2) {
+      throw contractError("Profile model execution requires the complete V2 envelope.");
+    }
+    try {
+      validateProfileEnvelope(envelope);
+    } catch {
+      throw contractError("The frozen profile model envelope is invalid.");
+    }
+    if (!["pr_static_build", "issue_triage"].includes(envelope.validation.workflowKind)) {
+      throw contractError("This workflow requires the validation summary executor.");
+    }
+  } else if (envelope.envelopeVersion !== 1) {
+    throw contractError("Validation profiles require the profile executor.");
+  }
   let authority: AuthoritativeReviewSchema;
   if (envelope.job.kind === "pull_request_review") {
     if (envelope.resource.kind !== "pull_request") {
       throw contractError("The PR review job does not target a pull request.");
     }
-    authority = authoritativePrSchema;
+    authority =
+      envelope.prompt.outputSchemaSha256 === authoritativePrV2Schema.digest
+        ? authoritativePrV2Schema
+        : authoritativePrSchema;
   } else if (envelope.job.kind === "issue_triage") {
     if (envelope.resource.kind !== "issue") {
       throw contractError("The issue triage job does not target an issue.");
     }
-    authority = authoritativeIssueSchema;
+    authority =
+      envelope.prompt.outputSchemaSha256 === authoritativeIssueV2Schema.digest
+        ? authoritativeIssueV2Schema
+        : authoritativeIssueSchema;
   } else {
     throw contractError("The job kind is not supported by the review executor.");
   }
@@ -631,310 +483,9 @@ function workspacePreparationError(error: JobWorkspaceError): ReviewExecutionErr
   );
 }
 
-async function closeWorkspaceDiskMonitor(
-  monitor: WorkspaceDiskMonitor,
-): Promise<unknown | undefined> {
-  try {
-    await monitor.close();
-  } catch (error) {
-    return monitor.violation ?? error;
-  }
-  return monitor.violation;
-}
-
-function workspaceDiskExecutionError(error: unknown): ReviewExecutionError {
-  if (!(error instanceof WorkspaceDiskBudgetError)) {
-    return new ReviewExecutionError(
-      "WORKSPACE_DISK_INFRASTRUCTURE_UNAVAILABLE",
-      "Workspace disk monitoring failed unexpectedly during Codex execution.",
-      true,
-      { cause: error },
-    );
-  }
-  if (error.code === "CURRENT_ATTEMPT_LIMIT_EXCEEDED") {
-    return new ReviewExecutionError(
-      "WORKSPACE_DISK_ATTEMPT_LIMIT_EXCEEDED",
-      "The review attempt exceeded its configured workspace disk budget.",
-      false,
-      { cause: error },
-    );
-  }
-  return new ReviewExecutionError(
-    "WORKSPACE_DISK_INFRASTRUCTURE_UNAVAILABLE",
-    "Workspace disk or node infrastructure became unavailable during Codex execution.",
-    true,
-    { cause: error },
-  );
-}
-
-function isNodeDiskFailure(error: unknown): boolean {
-  return !(
-    error instanceof WorkspaceDiskBudgetError &&
-    (error.code === "ABORTED" || error.code === "CURRENT_ATTEMPT_LIMIT_EXCEEDED")
-  );
-}
-
-function isProcessHardTimeout(error: unknown): boolean {
-  return error instanceof ProcessHostRequestError && error.code === "PROCESS_HARD_TIMEOUT";
-}
-
-/**
- * Reports throttled progress only when Codex emits stdout or stderr activity.
- * Silent runs must age out under the Server no-progress deadline.
- */
-class CodexProgressPulse {
-  readonly #activityThrottleMs: number;
-  #lastReportAt = 0;
-  #stopped = false;
-
-  public constructor(
-    private readonly context: JobExecutionContext,
-    noProgressTimeoutMs: number,
-  ) {
-    this.#activityThrottleMs = Math.min(5_000, Math.max(250, Math.floor(noProgressTimeoutMs / 4)));
-  }
-
-  public observeActivity(): void {
-    if (!this.#stopped && Date.now() - this.#lastReportAt >= this.#activityThrottleMs) {
-      this.#report();
-    }
-  }
-
-  public stop(): void {
-    if (this.#stopped) {
-      return;
-    }
-    this.#stopped = true;
-  }
-
-  #report(): void {
-    if (this.#stopped) {
-      return;
-    }
-    this.context.reportProgress({ phase: "codex_review", processCount: 1 });
-    this.#lastReportAt = Date.now();
-  }
-}
-
-async function settleCodexProcess(managed: ManagedProcess, reportActivity: () => void) {
-  return Promise.allSettled([
-    managed.completed,
-    collectCodexRecords(managed.stdout, reportActivity),
-    drainStream(managed.stderr, reportActivity),
-  ] as const);
-}
-
-async function collectCodexRecords(
-  stdout: Readable,
-  reportActivity: () => void,
-): Promise<CollectedCodexRecords> {
-  const parser = new CodexJsonlParser({ maximumLineCharacters: maximumJsonlLineCharacters });
-  const records: CodexJsonlRecord[] = [];
-  let retainedCharacters = 0;
-  let limitExceeded = false;
-
-  const retain = (incoming: readonly CodexJsonlRecord[]): void => {
-    for (const record of incoming) {
-      const characters = JSON.stringify(record).length;
-      if (
-        records.length >= maximumRetainedRecordCount ||
-        retainedCharacters + characters > maximumRetainedRecordCharacters
-      ) {
-        limitExceeded = true;
-        continue;
-      }
-      retainedCharacters += characters;
-      records.push(record);
-    }
-  };
-
-  for await (const chunk of stdout) {
-    if (typeof chunk === "string" || chunk instanceof Uint8Array) {
-      if (chunk.length > 0) {
-        reportActivity();
-      }
-      const parsed = parser.push(chunk);
-      retain(parsed);
-    } else {
-      throw new TypeError("Codex stdout emitted an unsupported chunk type.");
-    }
-  }
-  const finalRecords = parser.finish();
-  retain(finalRecords);
-  return { records, limitExceeded };
-}
-
-async function drainStream(stream: Readable, reportActivity: () => void): Promise<void> {
-  for await (const chunk of stream) {
-    if (
-      (typeof chunk === "string" && chunk.length > 0) ||
-      (chunk instanceof Uint8Array && chunk.byteLength > 0)
-    ) {
-      reportActivity();
-    }
-    // Deliberately discard stderr while draining it to avoid backpressure and data disclosure.
-  }
-}
-
-async function assertPathMissing(fileIO: ReviewFileIO, path: string): Promise<void> {
-  try {
-    await fileIO.lstat(path);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return;
-    }
-    throw error;
-  }
-  throw new ReviewExecutionError(
-    "RESULT_FILE_PREEXISTS",
-    "The Codex result path existed before process launch.",
-    false,
-  );
-}
-
-async function readStableResultFile(
-  fileIO: ReviewFileIO,
-  controlDirectory: string,
-  resultPath: string,
-  maximumBytes: number,
-): Promise<string | null> {
-  assertContainedWindowsPath(controlDirectory, resultPath);
-  let pathStat: ReviewFileStat;
-  try {
-    pathStat = await fileIO.lstat(resultPath);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return null;
-    }
-    throw error;
-  }
-  assertRegularStableFile(pathStat, maximumBytes);
-
-  const normalizedControl = normalizeWindowsPath(controlDirectory);
-  const normalizedResult = normalizeWindowsPath(resultPath);
-  const realControl = normalizeWindowsPath(await fileIO.realpath(controlDirectory));
-  const realResult = normalizeWindowsPath(await fileIO.realpath(resultPath));
-  if (
-    !windowsPathsEqual(normalizedControl, realControl) ||
-    !windowsPathsEqual(normalizedResult, realResult)
-  ) {
-    throw resultFileError("The Codex result path resolves through a reparse point.");
-  }
-  assertContainedWindowsPath(realControl, realResult);
-
-  const handle = await fileIO.openRead(resultPath);
-  let primaryError: unknown;
-  let decodedResult: string | undefined;
-  try {
-    const handleStatBefore = await handle.stat();
-    assertRegularStableFile(handleStatBefore, maximumBytes);
-    assertSameFile(pathStat, handleStatBefore);
-
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    let position = 0;
-    while (totalBytes <= maximumBytes) {
-      const capacity = Math.min(64 * 1024, maximumBytes + 1 - totalBytes);
-      const buffer = Buffer.allocUnsafe(capacity);
-      const { bytesRead } = await handle.read(buffer, 0, capacity, position);
-      if (bytesRead === 0) {
-        break;
-      }
-      chunks.push(buffer.subarray(0, bytesRead));
-      totalBytes += bytesRead;
-      position += bytesRead;
-    }
-    if (totalBytes > maximumBytes) {
-      throw resultFileError("The Codex result file exceeds its size limit.");
-    }
-
-    const handleStatAfter = await handle.stat();
-    const pathStatAfter = await fileIO.lstat(resultPath);
-    assertSameFile(handleStatBefore, handleStatAfter);
-    assertSameFile(handleStatAfter, pathStatAfter);
-    if (
-      handleStatBefore.size !== handleStatAfter.size ||
-      handleStatBefore.mtimeMs !== handleStatAfter.mtimeMs ||
-      handleStatBefore.ctimeMs !== handleStatAfter.ctimeMs
-    ) {
-      throw resultFileError("The Codex result file changed while it was being read.");
-    }
-    const realResultAfter = normalizeWindowsPath(await fileIO.realpath(resultPath));
-    if (!windowsPathsEqual(realResult, realResultAfter)) {
-      throw resultFileError("The Codex result path changed while it was being read.");
-    }
-
-    try {
-      decodedResult = new TextDecoder("utf-8", { fatal: true }).decode(
-        Buffer.concat(chunks, totalBytes),
-      );
-    } catch (error) {
-      throw new ReviewExecutionError(
-        "RESULT_FILE_INVALID",
-        "The Codex result file is not valid UTF-8.",
-        false,
-        { cause: error },
-      );
-    }
-  } catch (error) {
-    primaryError = error;
-  }
-  try {
-    await handle.close();
-  } catch (error) {
-    primaryError ??= error;
-  }
-  if (primaryError !== undefined) {
-    throw primaryError;
-  }
-  if (decodedResult === undefined) {
-    throw resultFileError("The Codex result file did not produce readable content.");
-  }
-  return decodedResult;
-}
-
-function assertRegularStableFile(stat: ReviewFileStat, maximumBytes: number): void {
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw resultFileError("The Codex result path is not a regular file.");
-  }
-  if (stat.dev < 0n || stat.ino < 0n || stat.size < 0n || stat.size > BigInt(maximumBytes)) {
-    throw resultFileError("The Codex result file exceeds its size limit.");
-  }
-}
-
-function assertSameFile(first: ReviewFileStat, second: ReviewFileStat): void {
-  if (first.dev !== second.dev || first.ino !== second.ino) {
-    throw resultFileError("The Codex result file changed identity while it was being read.");
-  }
-}
-
-function resultFileError(message: string): ReviewExecutionError {
-  return new ReviewExecutionError("RESULT_FILE_INVALID", message, false);
-}
-
-function assertContainedWindowsPath(root: string, candidate: string): void {
-  const relative = win32.relative(normalizeWindowsPath(root), normalizeWindowsPath(candidate));
-  if (
-    relative === "" ||
-    relative === ".." ||
-    relative.startsWith(`..${win32.sep}`) ||
-    win32.isAbsolute(relative)
-  ) {
-    throw resultFileError("The Codex result path is outside its control directory.");
-  }
-}
-
-function normalizeWindowsPath(path: string): string {
-  return win32.normalize(path).replace(/[\\/]+$/u, "");
-}
-
-function windowsPathsEqual(first: string, second: string): boolean {
-  return normalizeWindowsPath(first).toLowerCase() === normalizeWindowsPath(second).toLowerCase();
-}
-
 function validateBusinessResult(
   envelope: JobExecutionEnvelope,
-  result: ReviewResultV1,
+  result: ReviewModelResult,
 ): string | null {
   const allowedRecipes = new Set(envelope.executionPolicy.allowedRecipeIds);
   if (result.requestedRecipeIds.some((recipeId) => !allowedRecipes.has(recipeId))) {
@@ -981,96 +532,6 @@ function isNormalizedRepositoryRelativePath(path: string): boolean {
   );
 }
 
-function codexFailureMessage(code: CodexExecutionFailureCode): string {
-  const messages: Record<CodexExecutionFailureCode, string> = {
-    output_truncated: "Codex output exceeded the configured managed-process limit.",
-    process_terminated: "The managed Codex process was terminated before completion.",
-    invalid_event_stream: "Codex emitted an invalid structured event stream.",
-    codex_reported_error: "Codex reported an execution error.",
-    codex_turn_failed: "The Codex review turn failed.",
-    non_zero_exit: "Codex exited with a non-zero status.",
-    incomplete_event_stream: "Codex did not emit a complete review event sequence.",
-    missing_result: "Codex did not create a final structured result.",
-    invalid_result_json: "The Codex final result is not valid JSON.",
-    invalid_result_schema: "The Codex final result does not match the authoritative schema.",
-  };
-  return messages[code];
-}
-
-function normalizeSafeWindowsDirectory(value: string, name: string): string {
-  assertWellFormedUnicode(value, name);
-  if (!/^[A-Za-z]:[\\/]/u.test(value) || value.slice(2).includes(":")) {
-    throw new TypeError(`${name} must be an absolute local Windows path`);
-  }
-  for (const component of value.slice(3).split(/[\\/]/u)) {
-    if (
-      component === "." ||
-      component === ".." ||
-      component.endsWith(".") ||
-      component.endsWith(" ") ||
-      /[<>:"|?*]/u.test(component) ||
-      [...component].some((character) => character.charCodeAt(0) <= 0x1f)
-    ) {
-      throw new TypeError(`${name} contains an unsafe Windows path component`);
-    }
-  }
-  const normalized = win32.normalize(value.replaceAll("/", "\\"));
-  if (normalized === win32.parse(normalized).root) {
-    throw new TypeError(`${name} must not be a filesystem root`);
-  }
-  return `${normalized[0]?.toUpperCase() ?? ""}${normalized.slice(1)}`.replace(/[\\]+$/u, "");
-}
-
-function assertPersistentCodexHomeOutsideAttempt(
-  codexHome: string,
-  attemptDirectory: string,
-): void {
-  const attempt = normalizeSafeWindowsDirectory(attemptDirectory, "attemptDirectory");
-  const profile = codexHome.toLowerCase();
-  const workspace = attempt.toLowerCase();
-  if (
-    profile === workspace ||
-    profile.startsWith(`${workspace}\\`) ||
-    workspace.startsWith(`${profile}\\`)
-  ) {
-    throw new ReviewExecutionError(
-      "CODEX_LAUNCH_SPEC_INVALID",
-      "The persistent Codex home must be disjoint from the task attempt directory.",
-      false,
-    );
-  }
-}
-
-function tomlBasicString(value: string): string {
-  assertWellFormedUnicode(value, "TOML string");
-  return JSON.stringify(value);
-}
-
-function assertWellFormedUnicode(value: string, name: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
-        throw new TypeError(`${name} must contain well-formed Unicode`);
-      }
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      throw new TypeError(`${name} must contain well-formed Unicode`);
-    }
-  }
-}
-
-function assertConfiguredLimit(
-  value: number,
-  name: string,
-  bounds: { readonly minimum: number; readonly maximum: number },
-): void {
-  if (!Number.isSafeInteger(value) || value < bounds.minimum || value > bounds.maximum) {
-    throw new RangeError(`${name} is outside the supported ProcessHost range`);
-  }
-}
-
 function createIdempotentCleanup(cleanup: () => Promise<void>): () => Promise<void> {
   let cleanupPromise: Promise<void> | undefined;
   return () => {
@@ -1086,15 +547,6 @@ function failure(code: string, message: string, retryable: boolean): FailedJobEx
     message: message.slice(0, 2_048),
     retryable,
   };
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    error.code === code
-  );
 }
 
 function errorName(error: unknown): string {

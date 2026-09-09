@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   IssueTriageV1ModelOutputSchema,
   IssueTriageV1Schema,
+  IssueTriageV2ModelOutputSchema,
   PrReviewPlanV1ModelOutputSchema,
   PrReviewPlanV1Schema,
+  PrReviewPlanV2ModelOutputSchema,
 } from "./review-results.js";
 
 const supportedStructuredOutputKeywords = new Set([
@@ -176,6 +178,8 @@ describe("model output schemas", () => {
   it.each([
     ["PR review", PrReviewPlanV1ModelOutputSchema],
     ["issue triage", IssueTriageV1ModelOutputSchema],
+    ["PR review V2", PrReviewPlanV2ModelOutputSchema],
+    ["issue triage V2", IssueTriageV2ModelOutputSchema],
   ] as const)("keeps the %s schema within the Structured Outputs subset", (_name, schema) => {
     expect(schema.type).toBe("object");
     expect(schema).not.toHaveProperty("anyOf");

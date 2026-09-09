@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { runEvaluationReproductionRebuild } from "./evaluation-reproduction-rebuild.js";
+import { backfillJobAdmissions } from "./job-admission.js";
+import { runPromptProfileEvaluationRebuild } from "./migration-rebuild.js";
+import { runValidationResultRebuild } from "./validation-result-rebuild.js";
 
 interface AppliedMigration {
   readonly version: number;
@@ -134,9 +138,53 @@ export const inspectMigrationState = (
 
 export const runMigrations = (database: DatabaseSync, directory: string): number => {
   const migrations = readMigrations(directory);
-  validateAppliedMigrations(readAppliedMigrations(database), migrations);
+  const initiallyApplied = readAppliedMigrations(database);
+  validateAppliedMigrations(initiallyApplied, migrations);
+  const initiallyAppliedVersions = new Set(initiallyApplied.map((migration) => migration.version));
 
   for (const migration of migrations) {
+    const rebuild =
+      migration.version === 28 && migration.filename === "0028_prompt_profile_evaluations.sql"
+        ? runPromptProfileEvaluationRebuild
+        : migration.version === 31 && migration.filename === "0031_validation_model_outputs.sql"
+          ? runValidationResultRebuild
+          : migration.version === 33 && migration.filename === "0033_evaluation_reproduction.sql"
+            ? runEvaluationReproductionRebuild
+            : undefined;
+    if (rebuild !== undefined && !initiallyAppliedVersions.has(migration.version)) {
+      rebuild(database, {
+        isPending: () => {
+          const existing = database
+            .prepare("SELECT version, filename, checksum FROM schema_migrations WHERE version = ?")
+            .get(migration.version) as AppliedMigration | undefined;
+          if (existing === undefined) return true;
+          if (
+            existing.filename !== migration.filename ||
+            existing.checksum !== migration.checksum
+          ) {
+            throw new Error(
+              `Applied migration ${migration.version} does not match ${migration.filename}.`,
+            );
+          }
+          return false;
+        },
+        apply: () => {
+          database.exec(migration.sql);
+          database
+            .prepare(`
+            INSERT INTO schema_migrations (version, filename, checksum, applied_at)
+            VALUES (?, ?, ?, ?)
+          `)
+            .run(
+              migration.version,
+              migration.filename,
+              migration.checksum,
+              new Date().toISOString(),
+            );
+        },
+      });
+      continue;
+    }
     database.exec("BEGIN IMMEDIATE");
     try {
       database.exec(migrationTableSql);
@@ -146,12 +194,15 @@ export const runMigrations = (database: DatabaseSync, directory: string): number
 
       if (existing === undefined) {
         database.exec(migration.sql);
+        const appliedAt = new Date().toISOString();
+        if (migration.version === 24 && migration.filename === "0024_job_admission.sql")
+          backfillJobAdmissions(database, appliedAt);
         database
           .prepare(`
             INSERT INTO schema_migrations (version, filename, checksum, applied_at)
             VALUES (?, ?, ?, ?)
           `)
-          .run(migration.version, migration.filename, migration.checksum, new Date().toISOString());
+          .run(migration.version, migration.filename, migration.checksum, appliedAt);
       } else if (
         existing.filename !== migration.filename ||
         existing.checksum !== migration.checksum

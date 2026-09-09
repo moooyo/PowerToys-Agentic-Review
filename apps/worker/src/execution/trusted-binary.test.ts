@@ -8,6 +8,7 @@ import {
   TrustedBinaryVerificationError,
   type VerifyTrustedExecutionBinariesOptions,
   verifyTrustedExecutionBinaries,
+  verifyTrustedWorkerFile,
 } from "./trusted-binary.js";
 
 const trustedRoot = "C:\\Trusted\\bin";
@@ -29,6 +30,9 @@ class FakeNode {
   public ctimeMs: number;
   public symbolicLink = false;
   public reparsePoint = false;
+  public statOverrides: Partial<
+    Pick<TrustedBinaryFileStat, "dev" | "ino" | "size" | "mtimeMs" | "ctimeMs">
+  > = {};
 
   public constructor(options: {
     readonly path: string;
@@ -59,6 +63,7 @@ class FakeNode {
       size: this.size,
       mtimeMs: this.mtimeMs,
       ctimeMs: this.ctimeMs,
+      ...this.statOverrides,
       isDirectory: () => directory,
       isFile: () => file,
       isSymbolicLink: () => symbolicLink,
@@ -99,11 +104,14 @@ class FakeHandle implements TrustedBinaryFileHandle {
     }
     const available = Math.max(0, Math.min(length, this.#node.content.byteLength - position));
     this.#node.content.copy(buffer, offset, position, position + available);
+    const key = pathKey(this.#openedPath);
+    this.#fileIO.readBytes.set(key, (this.#fileIO.readBytes.get(key) ?? 0) + available);
     return { bytesRead: available };
   }
 
   public async close(): Promise<void> {
     await Promise.resolve();
+    this.#fileIO.closedPaths.push(this.#openedPath);
   }
 }
 
@@ -112,6 +120,10 @@ class FakeFileIO implements TrustedBinaryFileIO {
   public readonly openOverrides = new Map<string, FakeNode>();
   public onFirstRead: ((path: string, node: FakeNode) => void) | undefined;
   public maximumRequestedReadBytes = 0;
+  public readonly openedPaths: string[] = [];
+  public readonly closedPaths: string[] = [];
+  public readonly lstatPaths: string[] = [];
+  public readonly readBytes = new Map<string, number>();
 
   public add(node: FakeNode): FakeNode {
     this.#nodes.set(pathKey(node.path), node);
@@ -129,6 +141,7 @@ class FakeFileIO implements TrustedBinaryFileIO {
   }
 
   public async lstat(path: string): Promise<TrustedBinaryFileStat> {
+    this.lstatPaths.push(path);
     return this.node(path).snapshot();
   }
 
@@ -141,6 +154,7 @@ class FakeFileIO implements TrustedBinaryFileIO {
   }
 
   public async open(path: string): Promise<TrustedBinaryFileHandle> {
+    this.openedPaths.push(path);
     const node = this.openOverrides.get(pathKey(path)) ?? this.node(path);
     return new FakeHandle(this, path, node);
   }
@@ -191,20 +205,236 @@ function createFixture(): {
   };
 }
 
+describe("verifyTrustedWorkerFile", () => {
+  function fixture() {
+    const f = createFixture();
+    const path = `${trustedRoot}\\worker.mjs`;
+    const node = f.fileIO.add(
+      new FakeNode({
+        path,
+        kind: "file",
+        content: Buffer.from("synthetic Worker bundle"),
+        dev: 1,
+        ino: 20,
+      }),
+    );
+    return {
+      ...f,
+      node,
+      options: {
+        trustedExecutableRoot: trustedRoot,
+        role: "workerBundle" as const,
+        file: { path, expectedSha256: digest(node.content) },
+        fileIO: f.fileIO,
+      },
+    };
+  }
+  it("measures the stable bundle and retains bounded reads and closed handles", async () => {
+    const f = fixture();
+    const result = await verifyTrustedWorkerFile(f.options);
+    expect(result.path).toBe(f.node.path);
+    expect(result.measurement).toMatchObject({
+      sha256: digest(f.node.content),
+      sizeBytes: f.node.size,
+    });
+    expect(Object.isFrozen(result.measurement)).toBe(true);
+    expect(f.fileIO.closedPaths).toEqual([f.node.path]);
+    expect(f.fileIO.maximumRequestedReadBytes).toBeLessThanOrEqual(64 * 1024);
+  });
+  it("uses the same verifier for the Node executable without accepting a script as Node", async () => {
+    const f = createFixture();
+    const verified = await verifyTrustedWorkerFile({
+      trustedExecutableRoot: trustedRoot,
+      role: "node",
+      file: f.options.git,
+      fileIO: f.fileIO,
+    });
+    expect(verified.measurement.sha256).toBe(f.options.git.expectedSha256);
+    const bundle = fixture();
+    await expect(
+      verifyTrustedWorkerFile({ ...bundle.options, role: "node" }),
+    ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
+  });
+  it.each([
+    "C:\\Outside\\worker.mjs",
+    `${trustedRoot}\\other.mjs`,
+    `${trustedRoot}\\..\\worker.mjs`,
+  ])("rejects unsupported entry %s before opening it", async (path) => {
+    const f = fixture();
+    await expect(
+      verifyTrustedWorkerFile({ ...f.options, file: { ...f.options.file, path } }),
+    ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
+    expect(f.fileIO.openedPaths).toEqual([]);
+  });
+  it("rejects reparse points and changed identities even if the expected content is unchanged", async () => {
+    const link = fixture();
+    link.node.reparsePoint = true;
+    await expect(verifyTrustedWorkerFile(link.options)).rejects.toMatchObject({
+      code: "BINARY_NOT_REGULAR",
+    });
+    const changed = fixture();
+    changed.fileIO.onFirstRead = (_path, node) => {
+      node.ino++;
+    };
+    await expect(verifyTrustedWorkerFile(changed.options)).rejects.toMatchObject({
+      code: "BINARY_IDENTITY_CHANGED",
+    });
+    expect(changed.fileIO.closedPaths).toEqual([changed.node.path]);
+  });
+  it("rejects stale pins after closing the opened handle", async () => {
+    const f = fixture();
+    await expect(
+      verifyTrustedWorkerFile({
+        ...f.options,
+        file: { ...f.options.file, expectedSha256: "0".repeat(64) },
+      }),
+    ).rejects.toMatchObject({ code: "BINARY_DIGEST_MISMATCH" });
+    expect(f.fileIO.closedPaths).toEqual([f.node.path]);
+  });
+});
+
 describe("verifyTrustedExecutionBinaries", () => {
+  it("verifies only ProcessHost and Git for validation-only startup", async () => {
+    const { fileIO, options } = createFixture();
+    const { codex: _codex, ...validation } = options;
+    const verified = await verifyTrustedExecutionBinaries(validation);
+    expect(verified).not.toHaveProperty("codexPath");
+    expect(verified.measurements).not.toHaveProperty("codex");
+    expect(fileIO.openedPaths).toEqual([processHostPath, gitPath]);
+    expect(fileIO.closedPaths).toEqual([processHostPath, gitPath]);
+    expect(fileIO.lstatPaths).not.toContain(codexPath);
+    expect(Object.isFrozen(verified.measurements)).toBe(true);
+  });
   it("verifies three stable files with bounded streaming reads", async () => {
     const { fileIO, options } = createFixture();
+    const verifiedAtISO = "2026-09-08T12:34:56.789Z";
+    let clockCalls = 0;
 
-    const verified = await verifyTrustedExecutionBinaries(options);
+    const verified = await verifyTrustedExecutionBinaries({
+      ...options,
+      now: () => {
+        clockCalls++;
+        expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
+        expect(
+          fileIO.lstatPaths.filter((path) => windowsPathsEqual(path, trustedRoot)),
+        ).toHaveLength(2);
+        return new Date(verifiedAtISO);
+      },
+    });
 
     expect(verified).toEqual({
       trustedExecutableRoot: trustedRoot,
       processHostPath,
       codexPath,
       gitPath,
+      measurements: {
+        processHost: {
+          sha256: digest(fileIO.node(processHostPath).content),
+          sizeBytes: 130 * 1024,
+          fileIdentity: { dev: "1", ino: "10", mtimeMs: "1000", ctimeMs: "1000" },
+          verifiedAtISO,
+        },
+        codex: {
+          sha256: digest(fileIO.node(codexPath).content),
+          sizeBytes: Buffer.byteLength("trusted codex executable"),
+          fileIdentity: { dev: "1", ino: "11", mtimeMs: "1000", ctimeMs: "1000" },
+          verifiedAtISO,
+        },
+        git: {
+          sha256: digest(fileIO.node(gitPath).content),
+          sizeBytes: Buffer.byteLength("trusted git executable"),
+          fileIdentity: { dev: "1", ino: "12", mtimeMs: "1000", ctimeMs: "1000" },
+          verifiedAtISO,
+        },
+      },
     });
+    expect(clockCalls).toBe(1);
     expect(Object.isFrozen(verified)).toBe(true);
+    expect(Object.isFrozen(verified.measurements)).toBe(true);
+    for (const measurement of Object.values(verified.measurements)) {
+      expect(Object.isFrozen(measurement)).toBe(true);
+      expect(Object.isFrozen(measurement.fileIdentity)).toBe(true);
+    }
+    expect(Reflect.set(verified.measurements.codex, "sha256", "changed")).toBe(false);
+    expect(Reflect.set(verified.measurements.codex.fileIdentity, "ino", "changed")).toBe(false);
+    expect(Reflect.set(verified.measurements, "codex", null)).toBe(false);
+    expect(fileIO.openedPaths).toEqual([processHostPath, codexPath, gitPath]);
+    for (const path of [processHostPath, codexPath, gitPath])
+      expect(fileIO.readBytes.get(pathKey(path))).toBe(fileIO.node(path).content.byteLength);
     expect(fileIO.maximumRequestedReadBytes).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it("retains large bigint identities and fractional metadata as immutable JSON strings", async () => {
+    const { fileIO, options } = createFixture();
+    const processHost = fileIO.node(processHostPath);
+    processHost.statOverrides = {
+      dev: 9_007_199_254_740_993n,
+      ino: 18_446_744_073_709_551_615n,
+      size: BigInt(processHost.content.byteLength),
+      mtimeMs: 17_000_000_000_000_001n,
+      ctimeMs: 17_000_000_000_000_002n,
+    };
+    fileIO.node(codexPath).statOverrides = { mtimeMs: 1_700_000_000_000.125, ctimeMs: -0 };
+
+    const verified = await verifyTrustedExecutionBinaries(options);
+    const serialized = JSON.stringify(verified);
+    expect(JSON.parse(serialized)).toEqual(verified);
+    expect(verified.measurements.processHost.fileIdentity).toEqual({
+      dev: "9007199254740993",
+      ino: "18446744073709551615",
+      mtimeMs: "17000000000000001",
+      ctimeMs: "17000000000000002",
+    });
+    expect(verified.measurements.processHost.sizeBytes).toBe(processHost.content.byteLength);
+    expect(verified.measurements.codex.fileIdentity).toMatchObject({
+      mtimeMs: "1700000000000.125",
+      ctimeMs: "-0",
+    });
+    processHost.statOverrides = { ...processHost.statOverrides, ino: 1n };
+    fileIO.node(codexPath).content.fill(0);
+    expect(JSON.stringify(verified)).toBe(serialized);
+    for (const measurement of Object.values(verified.measurements))
+      expect(new Date(measurement.verifiedAtISO).toISOString()).toBe(measurement.verifiedAtISO);
+  });
+
+  it.each([
+    { label: "invalid date", now: () => new Date(Number.NaN) },
+    {
+      label: "throwing clock",
+      now: () => {
+        throw new Error("synthetic-private-clock-error");
+      },
+    },
+    { label: "non-Date result", now: () => "synthetic-private-clock-error" as unknown as Date },
+  ])(
+    "rejects an $label without returning measurements or exposing clock details",
+    async ({ now }) => {
+      const { fileIO, options } = createFixture();
+      await expect(verifyTrustedExecutionBinaries({ ...options, now })).rejects.toMatchObject({
+        code: "INVALID_VERIFICATION_TIME",
+        message: "Trusted binary verification time could not be captured.",
+      });
+      expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
+    },
+  );
+
+  it("does not timestamp a batch whose final trusted root identity check fails", async () => {
+    const { fileIO, options } = createFixture();
+    fileIO.onFirstRead = (path) => {
+      if (windowsPathsEqual(path, gitPath)) fileIO.node(trustedRoot).ino++;
+    };
+    let clockCalled = false;
+    await expect(
+      verifyTrustedExecutionBinaries({
+        ...options,
+        now: () => {
+          clockCalled = true;
+          return new Date("2026-09-08T12:34:56.789Z");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_TRUSTED_ROOT" });
+    expect(clockCalled).toBe(false);
+    expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
   });
 
   it("rejects digest mismatch and malformed or non-lowercase digests", async () => {

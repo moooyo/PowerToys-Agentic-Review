@@ -1,0 +1,101 @@
+import type {
+  FindingDispositionEvent,
+  FindingListResponse,
+  FindingOccurrence,
+  FindingResultContext,
+} from "@agentic-review/contracts";
+import { sampleReviewRunResults } from "../../services/runs/fixtures";
+
+const sample = sampleReviewRunResults.find(
+  (result) => result.report.workItemKind === "pull_request",
+);
+if (!sample) throw new Error("A sample PR result is required.");
+export const result = sample;
+export const principal = { issuer: "https://issuer.example/tenant", subject: "Reviewer" };
+export const context: FindingResultContext = {
+  repositoryId: result.repositoryId,
+  reviewRunId: result.reviewRunId,
+  requestId: result.requestId,
+  jobId: result.jobId,
+  workItemId: result.workItemId,
+  workItemKind: result.report.workItemKind,
+  resultId: result.id,
+  resultDigest: result.resultDigest,
+  revisionKey: result.revisionKey,
+  planDigest: result.planDigest,
+  profileVersionId: result.profileVersionId,
+  promptVersionId: result.promptVersionId,
+  workflowKind: "pr_static_build",
+  target: "headless",
+  activationNumber: result.activationNumber,
+  createdAt: result.createdAt,
+  contextDigest: "c".repeat(64),
+  sourceCurrent: true,
+  latestForRequest: true,
+  historical: false,
+  modelAvailability: "complete",
+  findingCount: 1,
+  dispositionDigest: "d".repeat(64),
+};
+export const occurrence: FindingOccurrence = {
+  key: "e".repeat(64),
+  resultId: result.id,
+  resultDigest: result.resultDigest,
+  kind: "pr_finding",
+  ordinal: 37,
+  modelId: "not-an-occurrence-key",
+  title: "Private P1 finding",
+  body: "Original immutable model body.\nThe exact original text is retained.",
+  priority: 1,
+  path: "src/private.ts",
+  line: 42,
+  endLine: 44,
+  confidence: 0.95,
+  disposition: { state: "open", version: 0, lastEventId: null, updatedAt: null, updatedBy: null },
+};
+export const listResponse: FindingListResponse = {
+  context,
+  items: [occurrence],
+  page: 1,
+  pageSize: 20,
+  total: 1,
+  summary: {
+    open: 1,
+    accepted: 0,
+    dismissed: 0,
+    resolved: 0,
+    rawBlocking: 1,
+    unresolvedBlocking: 1,
+  },
+};
+export const event: FindingDispositionEvent = {
+  id: "event-one",
+  changeId: "change-one",
+  repositoryId: context.repositoryId,
+  reviewRunId: context.reviewRunId,
+  requestId: context.requestId,
+  jobId: context.jobId,
+  workItemId: context.workItemId,
+  workItemKind: context.workItemKind,
+  occurrence: {
+    key: occurrence.key,
+    resultId: occurrence.resultId,
+    resultDigest: occurrence.resultDigest,
+    kind: occurrence.kind,
+    ordinal: occurrence.ordinal,
+  },
+  revisionKey: context.revisionKey,
+  planDigest: context.planDigest,
+  resultSetDigestAtChange: "f".repeat(64),
+  contextDigestAtChange: context.contextDigest,
+  sourceCurrentAtChange: true,
+  latestForRequestAtChange: true,
+  previousState: "open",
+  state: "accepted",
+  previousVersion: 0,
+  version: 1,
+  action: "accept",
+  reason: "Confirmed after inspecting the original report.\nStill unresolved.",
+  actor: principal,
+  createdAt: "2026-09-07T01:00:00.000Z",
+};

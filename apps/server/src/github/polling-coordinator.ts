@@ -20,6 +20,11 @@ export interface GitHubPollingCoordinatorErrorContext {
   readonly reviewer: GitHubPollingReviewerTarget;
 }
 
+export interface GitHubPollingRuntimeTarget {
+  readonly repository: GitHubPollingRepositoryTarget;
+  readonly reviewer: GitHubPollingReviewerTarget;
+}
+
 export type ObserveGitHubPollingError = (
   error: unknown,
   context: GitHubPollingCoordinatorErrorContext,
@@ -43,8 +48,16 @@ export type CommitGitHubPollingReconciliation = (
 
 export interface GitHubPollingCoordinatorOptions {
   readonly client: GitHubReadClient;
-  readonly repositories: readonly GitHubPollingRepositoryTarget[];
-  readonly reviewer: GitHubPollingReviewerTarget;
+  /** Legacy static targets must be configured together with reviewer. */
+  readonly repositories?: readonly GitHubPollingRepositoryTarget[];
+  readonly reviewer?: GitHubPollingReviewerTarget;
+  /**
+   * Resolves the complete authoritative target set for each new cycle. The set may be empty or
+   * include multiple reviewers for one repository to reconcile historical requests independently.
+   */
+  readonly resolveTargets?: () =>
+    | readonly GitHubPollingRuntimeTarget[]
+    | Promise<readonly GitHubPollingRuntimeTarget[]>;
   readonly intervalMs: number;
   readonly stateSource: GitHubPollingStateSource;
   readonly commitReconciliation?: CommitGitHubPollingReconciliation;
@@ -154,17 +167,33 @@ export class GitHubPollingCoordinator {
   }
 
   async #pollRepositories(): Promise<readonly GitHubPollingRepositoryOutcome[]> {
+    this.#options.signal.throwIfAborted();
+    const { repositories, reviewer, resolveTargets } = this.#options;
+    let resolvedTargets: readonly GitHubPollingRuntimeTarget[];
+    if (resolveTargets !== undefined) {
+      resolvedTargets = await resolveTargets();
+    } else if (repositories !== undefined && reviewer !== undefined) {
+      resolvedTargets = repositories.map((repository) => ({ repository, reviewer }));
+    } else {
+      throw new TypeError("Configure resolveTargets or both repositories and reviewer.");
+    }
+    this.#options.signal.throwIfAborted();
+    validateRuntimeTargets(resolvedTargets);
+    const targets = resolvedTargets.map(({ repository, reviewer }) => ({
+      repository: { ...repository },
+      reviewer: { ...reviewer },
+    }));
     const outcomes: GitHubPollingRepositoryOutcome[] = [];
-    for (const repository of this.#options.repositories) {
+    for (const { repository, reviewer } of targets) {
       this.#options.signal.throwIfAborted();
       try {
-        const result = await this.#pollRepository(repository);
+        const result = await this.#pollRepository(repository, reviewer);
         outcomes.push({ status: "fulfilled", repository, result });
       } catch (error) {
         this.#options.signal.throwIfAborted();
         outcomes.push({ status: "rejected", repository, error });
         if (this.#options.observeError !== undefined) {
-          await this.#options.observeError(error, { repository, reviewer: this.#options.reviewer });
+          await this.#options.observeError(error, { repository, reviewer });
           this.#options.signal.throwIfAborted();
         }
       }
@@ -174,8 +203,9 @@ export class GitHubPollingCoordinator {
 
   async #pollRepository(
     repository: GitHubPollingRepositoryTarget,
+    reviewer: GitHubPollingReviewerTarget,
   ): Promise<GitHubPollingReconciliationResult> {
-    const key = projectionKey(repository, this.#options.reviewer);
+    const key = projectionKey(repository, reviewer);
     const previousActiveProjection = await this.#options.stateSource.readActiveProjection(
       key,
       this.#options.signal,
@@ -185,7 +215,7 @@ export class GitHubPollingCoordinator {
     const result = await reconcileGitHubPolling({
       client: this.#options.client,
       repository,
-      reviewer: this.#options.reviewer,
+      reviewer,
       ingest: (event) => {
         events.push(event);
       },
@@ -235,7 +265,7 @@ export class GitHubPollingCoordinator {
     ) {
       await this.#options.observeUnavailableWorkItems(result.unavailableWorkItemNumbers, {
         repository,
-        reviewer: this.#options.reviewer,
+        reviewer,
       });
     }
     return result;
@@ -271,18 +301,59 @@ function validateOptions(options: GitHubPollingCoordinatorOptions): void {
       "Configure commitReconciliation, or both emit and stateSink for legacy persistence.",
     );
   }
-  if (options.repositories.length === 0) {
+  const { repositories, reviewer, resolveTargets } = options;
+  if ((repositories === undefined) !== (reviewer === undefined)) {
+    throw new TypeError("Static repositories and reviewer must be configured together.");
+  }
+  if (repositories === undefined || reviewer === undefined) {
+    if (resolveTargets === undefined) {
+      throw new TypeError("Configure resolveTargets or both repositories and reviewer.");
+    }
+    return;
+  }
+  if (repositories.length === 0 && resolveTargets === undefined) {
     throw new TypeError("At least one GitHub polling repository must be configured.");
   }
+  validateRepositories(repositories);
+  validateReviewer(reviewer);
+}
+
+function validateRuntimeTargets(targets: readonly GitHubPollingRuntimeTarget[]): void {
+  if (!Array.isArray(targets)) {
+    throw new TypeError("GitHub polling targets must be an array.");
+  }
+  const repositoryNamesById = new Map<number, string>();
+  const repositoryIdsByName = new Map<string, number>();
+  const targetKeys = new Set<string>();
+  for (const { repository, reviewer } of targets) {
+    validateRepository(repository);
+    validateReviewer(reviewer);
+    const name = repository.fullName.toLowerCase();
+    const existingName = repositoryNamesById.get(repository.githubRepositoryId);
+    const existingId = repositoryIdsByName.get(name);
+    if (
+      (existingName !== undefined && existingName !== name) ||
+      (existingId !== undefined && existingId !== repository.githubRepositoryId)
+    ) {
+      throw new TypeError(
+        "GitHub polling repository IDs and full names must identify the same repository.",
+      );
+    }
+    const key = `${repository.githubRepositoryId}:${reviewer.githubUserId}`;
+    if (targetKeys.has(key)) {
+      throw new TypeError("GitHub polling targets must be unique by repository and reviewer ID.");
+    }
+    repositoryNamesById.set(repository.githubRepositoryId, name);
+    repositoryIdsByName.set(name, repository.githubRepositoryId);
+    targetKeys.add(key);
+  }
+}
+
+function validateRepositories(repositories: readonly GitHubPollingRepositoryTarget[]): void {
   const repositoryIds = new Set<number>();
   const repositoryNames = new Set<string>();
-  for (const repository of options.repositories) {
-    if (
-      !Number.isSafeInteger(repository.githubRepositoryId) ||
-      repository.githubRepositoryId <= 0
-    ) {
-      throw new TypeError("Each GitHub polling repository must have a positive numeric ID.");
-    }
+  for (const repository of repositories) {
+    validateRepository(repository);
     const name = repository.fullName.toLowerCase();
     if (repositoryIds.has(repository.githubRepositoryId) || repositoryNames.has(name)) {
       throw new TypeError("GitHub polling repositories must be unique by ID and full name.");
@@ -290,8 +361,29 @@ function validateOptions(options: GitHubPollingCoordinatorOptions): void {
     repositoryIds.add(repository.githubRepositoryId);
     repositoryNames.add(name);
   }
-  if (!Number.isSafeInteger(options.reviewer.githubUserId) || options.reviewer.githubUserId <= 0) {
+}
+
+function validateRepository(repository: GitHubPollingRepositoryTarget): void {
+  if (!Number.isSafeInteger(repository.githubRepositoryId) || repository.githubRepositoryId <= 0) {
+    throw new TypeError("Each GitHub polling repository must have a positive numeric ID.");
+  }
+  if (
+    typeof repository.fullName !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository.fullName)
+  ) {
+    throw new TypeError("Each GitHub polling repository must have a GitHub owner/name pair.");
+  }
+}
+
+function validateReviewer(reviewer: GitHubPollingReviewerTarget): void {
+  if (!Number.isSafeInteger(reviewer.githubUserId) || reviewer.githubUserId <= 0) {
     throw new TypeError("The GitHub polling reviewer must have a positive numeric ID.");
+  }
+  if (
+    typeof reviewer.login !== "string" ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(reviewer.login)
+  ) {
+    throw new TypeError("The GitHub polling reviewer must have a valid GitHub user login.");
   }
 }
 

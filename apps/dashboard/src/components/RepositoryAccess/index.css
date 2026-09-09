@@ -1,0 +1,56 @@
+.repository-access-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.repository-access-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.repository-access-identity code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.repository-access-toolbar,
+.repository-access-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.repository-access-pagination {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.repository-access-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.repository-access-table .ant-table-cell {
+  vertical-align: top;
+}
+
+.repository-access-form {
+  margin-top: 20px;
+}
+
+.repository-access-confirmation {
+  margin-top: 16px;
+}
+
+@media (max-width: 575px) {
+  .repository-access-drawer .ant-drawer-body {
+    padding: 16px;
+  }
+}

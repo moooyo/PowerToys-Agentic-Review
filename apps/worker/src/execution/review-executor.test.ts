@@ -6,6 +6,7 @@ import {
   IssueTriageV1ModelOutputSchema,
   PrReviewPlanV1ModelOutputSchema,
   PrReviewPlanV1Schema,
+  PrReviewPlanV2ModelOutputSchema,
 } from "@agentic-review/codex";
 import type { JobExecutionEnvelope } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -307,6 +308,7 @@ class FakeFileIO implements ReviewFileIO {
 }
 
 class FakeWorkspaceProvider implements JobWorkspaceProvider {
+  public worktreeState: "clean" | "modified" | "unknown" = "unknown";
   public prepareCalls = 0;
   public cleanupCalls = 0;
   public prepareError: unknown;
@@ -330,6 +332,7 @@ class FakeWorkspaceProvider implements JobWorkspaceProvider {
       codexHomeDirectory: paths.attemptCodexHome,
       tempDirectory: paths.temp,
       userProfileDirectory: paths.userProfile,
+      captureWorktreeState: async () => this.worktreeState,
       startDiskMonitoring: async (parentSignal): Promise<WorkspaceDiskMonitor> => {
         this.diskMonitorCalls += 1;
         const onParentAbort = () => this.diskMonitorController.abort(parentSignal.reason);
@@ -589,7 +592,11 @@ describe("ReviewJobExecutor success", () => {
     ]);
     expect(run.workspace.diskMonitorCalls).toBe(1);
     expect(run.workspace.diskMonitorCloseCalls).toBe(1);
-    expect(run.processHost.seenSignal).toBe(run.workspace.diskMonitorController.signal);
+    expect(run.processHost.seenSignal?.aborted).toBe(false);
+    const diskAbortReason = new Error("Synthetic disk monitor cancellation.");
+    run.workspace.diskMonitorController.abort(diskAbortReason);
+    expect(run.processHost.seenSignal?.aborted).toBe(true);
+    expect(run.processHost.seenSignal?.reason).toBe(diskAbortReason);
     expect(run.fileIO.readText(paths.schema)).toBe(createCanonicalResult(prSchema.value).json);
     expect(run.fileIO.readText(paths.config)).toBeUndefined();
     expect(run.fileIO.readText(paths.attemptConfig)).toBeUndefined();
@@ -830,6 +837,236 @@ describe("ReviewJobExecutor trust validation", () => {
 });
 
 describe("ReviewJobExecutor process and result handling", () => {
+  it.each([
+    { version: "PrReviewPlanV1", field: "summary" },
+    { version: "PrReviewPlanV1", field: "finding" },
+    { version: "PrReviewPlanV2", field: "summary" },
+    { version: "PrReviewPlanV2", field: "finding" },
+  ] as const)(
+    "rejects known protected text in a valid $version $field",
+    async ({ version, field }) => {
+      const secret = "synthetic-protected-model-result";
+      const envelope = createEnvelope("pull_request_review");
+      if (version === "PrReviewPlanV2") {
+        const selectedSchema = schemaSnapshot(PrReviewPlanV2ModelOutputSchema);
+        envelope.prompt.outputSchema = selectedSchema.value;
+        envelope.prompt.outputSchemaSha256 = selectedSchema.digest;
+      }
+      const result = {
+        ...validPrResult(),
+        schemaVersion: version,
+        ...(version === "PrReviewPlanV2"
+          ? { verification: { status: "not_run", summary: "Only read files.", commands: [] } }
+          : {}),
+      };
+      if (field === "summary") result.summary = secret;
+      else result.findings = [{ ...validPrFinding(), body: secret }];
+      const run = await execute(envelope, result, {
+        executorOptions: { codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: secret } },
+      });
+      const outcome = await run.execution;
+      expect(outcome).toMatchObject({
+        outcome: "failed",
+        code: "CODEX_RESULT_UNSAFE",
+        retryable: false,
+        diagnostics: { category: "result" },
+      });
+      expect(outcome).not.toHaveProperty("result");
+      expect(outcome).not.toHaveProperty("resultDigest");
+      expect(JSON.stringify(outcome)).not.toContain(secret);
+      expect(run.processHost.startCalls).toBe(1);
+      expect(run.nodeHealthFaults).toEqual([]);
+    },
+  );
+
+  it("retains an approved public metadata literal in successful review content", async () => {
+    const result = { ...validPrResult(), summary: "worker" };
+    const run = await execute(createEnvelope("pull_request_review"), result, {
+      executorOptions: {
+        codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: "worker" },
+        codexProviderProtectedValues: [],
+      },
+    });
+    expect(await run.execution).toMatchObject({
+      outcome: "succeeded",
+      result,
+      resultDigest: createCanonicalResult(result).sha256,
+    });
+  });
+
+  it("keeps V2 model verification separate from redacted CLI evidence and final Git state", async () => {
+    const schema = schemaSnapshot(PrReviewPlanV2ModelOutputSchema);
+    const envelope = createEnvelope("pull_request_review");
+    envelope.prompt.outputSchema = schema.value;
+    envelope.prompt.outputSchemaSha256 = schema.digest;
+    const modelResult = {
+      ...validPrResult(),
+      schemaVersion: "PrReviewPlanV2",
+      verification: { status: "not_run", summary: "Only read files.", commands: [] },
+    };
+    const host = new FakeProcessHost();
+    host.stdout = Readable.from([
+      [
+        { type: "thread.started", thread_id: "thread-1" },
+        { type: "turn.started" },
+        {
+          type: "item.completed",
+          item: {
+            id: "item_1",
+            type: "command_execution",
+            command: "cat file; token=secret-value",
+            status: "completed",
+            exit_code: 0,
+          },
+        },
+        { type: "turn.completed" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    ]);
+    const workspace = new FakeWorkspaceProvider();
+    workspace.worktreeState = "modified";
+    const run = await execute(envelope, modelResult, { processHost: host, workspace });
+    const result = await run.execution;
+    expect(result).toMatchObject({
+      outcome: "succeeded",
+      result: {
+        verification: modelResult.verification,
+        executionEvidence: {
+          source: "worker",
+          commandCapture: "complete",
+          commands: [
+            {
+              itemId: "item_1",
+              command: "cat file; token=[REDACTED]",
+              exitCode: 0,
+              status: "completed",
+            },
+          ],
+          worktree: { status: "modified", source: "git_status" },
+        },
+      },
+    });
+    if (result.outcome !== "succeeded") throw new Error("Expected V2 success.");
+    expect(result.resultDigest).toBe(createCanonicalResult(result.result).sha256);
+    expect(JSON.stringify(result.result)).not.toContain("secret-value");
+  });
+
+  it("rejects model-supplied worker evidence", async () => {
+    const schema = schemaSnapshot(PrReviewPlanV2ModelOutputSchema);
+    const envelope = createEnvelope("pull_request_review");
+    envelope.prompt.outputSchema = schema.value;
+    envelope.prompt.outputSchemaSha256 = schema.digest;
+    const run = await execute(envelope, {
+      ...validPrResult(),
+      schemaVersion: "PrReviewPlanV2",
+      verification: { status: "passed", summary: "Claimed success.", commands: [] },
+      executionEvidence: { source: "worker" },
+    });
+    await expect(run.execution).resolves.toMatchObject({
+      outcome: "failed",
+      code: "CODEX_INVALID_RESULT_SCHEMA",
+    });
+  });
+
+  it("retains bounded redacted error details and the process exit code", async () => {
+    const envelope = createEnvelope("issue_triage");
+    const host = new FakeProcessHost();
+    host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
+    host.stdout = Readable.from([
+      JSON.stringify({
+        type: "error",
+        message: `Provider rejected credential configured-secret; token=hidden; ${envelope.lease.leaseToken}`,
+      }) + "\n",
+    ]);
+    const workerToken = `arw1_${"w".repeat(43)}`;
+    host.stderr = Readable.from([
+      [
+        "TLS handshake failed; Authorization: Token opaque-session",
+        "Proxy-Authorization: Negotiate proxy-session",
+        "Cookie: session_id=cookie-session; other=secondary-cookie",
+        "Set-Cookie: session_id=set-cookie-session; HttpOnly",
+        "curl -H \"Authorization: Token quoted-session\" -H 'Cookie: session_id=quoted-cookie'",
+        `Worker token: ${workerToken}`,
+      ].join("\n"),
+    ]);
+    const run = await execute(envelope, undefined, {
+      processHost: host,
+      executorOptions: {
+        codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: "configured-secret" },
+      },
+    });
+    const result = await run.execution;
+    expect(host.startCalls).toBe(1);
+    expect(result).toMatchObject({
+      outcome: "failed",
+      code: "CODEX_CODEX_REPORTED_ERROR",
+      diagnostics: { category: "process", exitCode: 42, correlationId: "attempt-1" },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).toContain("Provider rejected");
+    expect(serialized).toContain("TLS handshake failed");
+    for (const secret of [
+      "configured-secret",
+      "hidden",
+      "opaque-session",
+      "proxy-session",
+      "cookie-session",
+      "secondary-cookie",
+      "set-cookie-session",
+      "quoted-session",
+      "quoted-cookie",
+      workerToken,
+      envelope.lease.leaseToken,
+    ])
+      expect(serialized).not.toContain(secret);
+  });
+
+  it("keeps approved provider metadata in review diagnostics while protecting credentials", async () => {
+    const host = new FakeProcessHost();
+    host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
+    host.stdout = Readable.from([
+      `${JSON.stringify({ type: "error", message: "worker reported protected-provider-value" })}\n`,
+    ]);
+    host.stderr = Readable.from(["Authorization: Bearer generic-provider-value"]);
+    const run = await execute(createEnvelope("issue_triage"), undefined, {
+      processHost: host,
+      executorOptions: {
+        codexProviderEnvironment: {
+          CODEX_PROVIDER_HEADER_0: "worker",
+          CODEX_PROVIDER_HEADER_1: "protected-provider-value",
+        },
+        codexProviderProtectedValues: ["protected-provider-value"],
+      },
+    });
+    const result = await run.execution;
+    expect(result.outcome).toBe("failed");
+    expect(JSON.stringify(result)).toContain("worker reported");
+    expect(JSON.stringify(result)).not.toContain("protected-provider-value");
+    expect(JSON.stringify(result)).not.toContain("generic-provider-value");
+  });
+
+  it("lets another protected header with the same public text take precedence", async () => {
+    const host = new FakeProcessHost();
+    host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
+    host.stdout = Readable.from([
+      `${JSON.stringify({ type: "error", message: "worker reported a failure" })}\n`,
+    ]);
+    const run = await execute(createEnvelope("issue_triage"), undefined, {
+      processHost: host,
+      executorOptions: {
+        codexProviderEnvironment: {
+          CODEX_PROVIDER_HEADER_0: "worker",
+          CODEX_PROVIDER_HEADER_1: "worker",
+        },
+        codexProviderProtectedValues: ["worker"],
+      },
+    });
+    const result = await run.execution;
+    expect(result.outcome).toBe("failed");
+    expect(JSON.stringify(result)).not.toContain("worker");
+  });
+
   it("reports trusted control-file I/O failure as a node health fault", async () => {
     const fileIO = new FakeFileIO();
     fileIO.writeError = fileSystemError("EIO");
@@ -838,6 +1075,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     await expect(run.execution).resolves.toMatchObject({
       outcome: "failed",
       code: "CONTROL_FILE_WRITE_FAILED",
+      diagnostics: { summary: expect.stringContaining("Error [EIO]") },
     });
     expect(run.nodeHealthFaults).toHaveLength(1);
     expect(run.processHost.startCalls).toBe(0);
@@ -893,9 +1131,21 @@ describe("ReviewJobExecutor process and result handling", () => {
     },
     {
       code: "INSUFFICIENT_FREE_SPACE" as const,
-      expectedCode: "WORKSPACE_DISK_INFRASTRUCTURE_UNAVAILABLE",
+      expectedCode: "WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
       retryable: true,
-      drain: true,
+      drain: false,
+    },
+    {
+      code: "ACCOUNTING_BUSY" as const,
+      expectedCode: "WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      retryable: true,
+      drain: false,
+    },
+    {
+      code: "CAPACITY_UNAVAILABLE" as const,
+      expectedCode: "WORKSPACE_DISK_CAPACITY_UNAVAILABLE",
+      retryable: true,
+      drain: false,
     },
     {
       code: "EXISTING_WORKSPACE_UNHEALTHY" as const,
@@ -1000,11 +1250,18 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
   });
 
-  it.each(["open", "read", "close"] as const)(
-    "classifies result-file %s I/O errors as retryable",
-    async (operation) => {
+  it.each([
+    ["open", "EACCES"],
+    ["open", "EBUSY"],
+    ["read", "EIO"],
+    ["close", "EIO"],
+  ] as const)(
+    "preserves result-file %s %s diagnostics as retryable without exposing credentials",
+    async (operation, errorCode) => {
       const fileIO = new FakeFileIO();
-      const error = fileSystemError(operation === "open" ? "EBUSY" : "EIO");
+      const error = fileSystemError(errorCode);
+      error.name = "SystemError";
+      error.message = "File operation failed. Cookie: session_id=filesystem-cookie";
       if (operation === "open") fileIO.openReadError = error;
       if (operation === "read") fileIO.readError = error;
       if (operation === "close") fileIO.closeError = error;
@@ -1014,7 +1271,12 @@ describe("ReviewJobExecutor process and result handling", () => {
         outcome: "failed",
         code: "RESULT_FILE_READ_FAILED",
         retryable: true,
+        diagnostics: {
+          category: "result",
+          summary: expect.stringContaining(`SystemError [${errorCode}]`),
+        },
       });
+      expect(JSON.stringify(await run.execution)).not.toContain("filesystem-cookie");
     },
   );
 

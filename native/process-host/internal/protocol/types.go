@@ -32,13 +32,15 @@ type ProcessResourceLimits struct {
 }
 
 type ProcessLaunchSpec struct {
-	Executable       string                `json:"executable"`
-	Arguments        []string              `json:"arguments"`
-	WorkingDirectory string                `json:"workingDirectory"`
-	EnvironmentMode  string                `json:"environmentMode"`
-	Environment      map[string]string     `json:"environment"`
-	StandardInput    *string               `json:"standardInput,omitempty"`
-	Limits           ProcessResourceLimits `json:"limits"`
+	Executable             string                `json:"executable"`
+	Arguments              []string              `json:"arguments"`
+	WorkingDirectory       string                `json:"workingDirectory"`
+	EnvironmentMode        string                `json:"environmentMode"`
+	Environment            map[string]string     `json:"environment"`
+	StandardInput          *string               `json:"standardInput,omitempty"`
+	InteractiveStdin       bool                  `json:"interactiveStdin,omitempty"`
+	CaptureProcessIdentity bool                  `json:"captureProcessIdentity,omitempty"`
+	Limits                 ProcessResourceLimits `json:"limits"`
 }
 
 type HostRequest interface {
@@ -76,9 +78,10 @@ func (r ShutdownRequest) RequestID() string   { return r.ID }
 func (r ShutdownRequest) RequestType() string { return r.Type }
 
 type ReadyCapabilities struct {
-	ConcurrentRequests        bool `json:"concurrentRequests"`
-	MaximumFrameBytes         int  `json:"maximumFrameBytes"`
-	MaximumConcurrentRequests int  `json:"maximumConcurrentRequests"`
+	ConcurrentRequests        bool                          `json:"concurrentRequests"`
+	MaximumFrameBytes         int                           `json:"maximumFrameBytes"`
+	MaximumConcurrentRequests int                           `json:"maximumConcurrentRequests"`
+	InteractiveStdin          *InteractiveStdinCapabilities `json:"interactiveStdin,omitempty"`
 }
 
 type ReadyEvent struct {
@@ -89,10 +92,12 @@ type ReadyEvent struct {
 }
 
 type StartedEvent struct {
-	ProtocolVersion string `json:"protocolVersion"`
-	Type            string `json:"type"`
-	RequestID       string `json:"requestId"`
-	ProcessID       uint32 `json:"processId"`
+	ProtocolVersion             string `json:"protocolVersion"`
+	Type                        string `json:"type"`
+	RequestID                   string `json:"requestId"`
+	ProcessID                   uint32 `json:"processId"`
+	ProcessCreationTimeFileTime string `json:"processCreationTimeFileTime,omitempty"`
+	StdinStreamID               string `json:"stdinStreamId,omitempty"`
 }
 
 type OutputEvent struct {

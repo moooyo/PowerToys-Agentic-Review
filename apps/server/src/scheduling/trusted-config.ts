@@ -1,7 +1,16 @@
 import { constants, type Stats } from "node:fs";
 import { type FileHandle, lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { ExecutionPolicySchema } from "@agentic-review/contracts";
+import {
+  IssueTriageV2ModelOutputSchema,
+  PrReviewPlanV2ModelOutputSchema,
+} from "@agentic-review/codex";
+import {
+  EntityIdSchema,
+  ExecutionPolicySchema,
+  maximumPromptContentUtf8Bytes,
+  type PromptVersion,
+} from "@agentic-review/contracts";
 import { type Static, type TSchema, Type, TypeGuard } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { canonicalJson, sha256 } from "./canonical-json.js";
@@ -99,19 +108,19 @@ interface TrustedPromptDirectory {
 const promptSpecifications = [
   {
     key: "issueTriage",
-    fileName: "issue-triage-v1.md",
+    fileName: "issue-triage-v2.md",
     name: "issue-triage",
-    version: "1",
-    outputSchemaId: "IssueTriageV1",
-    outputSchemaSha256: "60c37a09ddf4361bc063b1ca8479fa714ec6b12efe86418a2d6bb9896c29a554",
+    version: "2",
+    outputSchemaId: "IssueTriageV2",
+    outputSchemaSha256: sha256(canonicalJson(IssueTriageV2ModelOutputSchema)),
   },
   {
     key: "pullRequestReview",
-    fileName: "pull-request-review-v1.md",
+    fileName: "pull-request-review-v2.md",
     name: "pull-request-review",
-    version: "1",
-    outputSchemaId: "PrReviewPlanV1",
-    outputSchemaSha256: "51792222539ef85ed7d12c810b82772de673701c6c8f0011e54aa2fc82336d36",
+    version: "2",
+    outputSchemaId: "PrReviewPlanV2",
+    outputSchemaSha256: sha256(canonicalJson(PrReviewPlanV2ModelOutputSchema)),
   },
 ] as const satisfies readonly PromptSpecification[];
 
@@ -168,6 +177,57 @@ export async function loadTrustedSchedulingConfig(
 
 export function isLoadedTrustedSchedulingConfig(value: TrustedSchedulingConfig): boolean {
   return loadedConfigurations.has(value);
+}
+
+export function withPublishedWorkflowPrompt(
+  config: TrustedSchedulingConfig,
+  input: {
+    readonly workflowKind: "issue_triage" | "pr_static_build";
+    readonly templateName: string;
+    readonly version: PromptVersion;
+  },
+): TrustedSchedulingConfig {
+  if (!isLoadedTrustedSchedulingConfig(config)) {
+    throw new TrustedSchedulingConfigError("A published prompt requires loaded trusted defaults.");
+  }
+  const key = input.workflowKind === "issue_triage" ? "issueTriage" : "pullRequestReview";
+  const expectedSchema = input.workflowKind === "issue_triage" ? "IssueTriageV2" : "PrReviewPlanV2";
+  const published = input.version;
+  if (
+    (input.workflowKind !== "issue_triage" && input.workflowKind !== "pr_static_build") ||
+    typeof input.templateName !== "string" ||
+    input.templateName.trim().length === 0 ||
+    input.templateName.length > 128 ||
+    [...input.templateName].some(
+      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    ) ||
+    !Value.Check(EntityIdSchema, published.id) ||
+    !Value.Check(EntityIdSchema, published.templateId) ||
+    !Number.isSafeInteger(published.version) ||
+    published.version < 1 ||
+    published.outputSchemaVersion !== expectedSchema ||
+    typeof published.content !== "string" ||
+    !published.content.isWellFormed() ||
+    published.content.trim().length === 0 ||
+    published.content.includes("\0") ||
+    Buffer.byteLength(published.content, "utf8") > maximumPromptContentUtf8Bytes ||
+    sha256(published.content) !== published.contentSha256
+  ) {
+    throw new TrustedSchedulingConfigError(
+      "The published workflow prompt is invalid or incompatible.",
+    );
+  }
+  const next = deepFreeze({
+    ...config,
+    [key]: {
+      ...config[key],
+      name: input.templateName,
+      version: published.id,
+      text: published.content,
+    },
+  });
+  loadedConfigurations.add(next);
+  return next;
 }
 
 async function resolveTrustedPromptDirectory(directory: string): Promise<TrustedPromptDirectory> {

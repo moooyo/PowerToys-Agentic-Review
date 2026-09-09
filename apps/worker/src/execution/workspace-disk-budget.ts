@@ -1,6 +1,7 @@
 import {
   lstat as nodeLstat,
   opendir as nodeOpenDirectory,
+  readlink as nodeReadLink,
   realpath as nodeRealpath,
   rm as nodeRemove,
   statfs as nodeStatFileSystem,
@@ -12,6 +13,9 @@ const defaultMonitorIntervalMs = 5_000;
 const defaultMaximumAccountingEntries = 100_000;
 const defaultMaximumScanDurationMs = 30_000;
 const defaultMaximumSnapshotGenerations = 3;
+const maximumDanglingLinkAncestorProbes = 64;
+const maximumConcurrentAccountingPaths = 4;
+const defaultOrphanRetentionMilliseconds = 24n * 60n * 60n * 1_000n;
 
 export interface WorkspaceDiskPathState {
   readonly kind: "directory" | "file" | "other";
@@ -36,6 +40,8 @@ export interface WorkspaceDiskIoContext {
 export interface WorkspaceDiskFileSystem {
   lstat(path: string, context?: WorkspaceDiskIoContext): Promise<WorkspaceDiskPathState | null>;
   realpath(path: string, context?: WorkspaceDiskIoContext): Promise<string>;
+  /** Reads the link text without opening its target. Older adapters retain strict link checks. */
+  readLink?(path: string, context?: WorkspaceDiskIoContext): Promise<string>;
   readDirectoryBounded(
     path: string,
     maximumEntries: number,
@@ -133,7 +139,7 @@ export interface ProductionWorkspaceDiskBudgetOptions {
   readonly perAttemptDiskBytes: bigint;
   readonly totalWorkspaceDiskBytes: bigint;
   readonly minimumFreeDiskBytes: bigint;
-  readonly orphanRetentionMilliseconds: bigint;
+  readonly orphanRetentionMilliseconds?: bigint;
   readonly orphanScanLimit: number;
   readonly monitorIntervalMilliseconds?: number;
   readonly maximumAccountingEntries?: number;
@@ -152,7 +158,9 @@ export type WorkspaceDiskBudgetFailureCode =
   | "ATTEMPT_ALREADY_EXISTS"
   | "ACCOUNTING_LIMIT_EXCEEDED"
   | "ACCOUNTING_TIMED_OUT"
+  | "ACCOUNTING_BUSY"
   | "ACCOUNTING_FAILED"
+  | "CAPACITY_UNAVAILABLE"
   | "CURRENT_ATTEMPT_LIMIT_EXCEEDED"
   | "EXISTING_WORKSPACE_UNHEALTHY"
   | "SNAPSHOT_UNSTABLE"
@@ -177,8 +185,9 @@ export class WorkspaceDiskBudgetError extends Error {
 }
 
 /**
- * Non-production fallback for diagnostics and deterministic adapters. Node filesystem promises
- * cannot guarantee cancellation of a blocked Windows I/O request.
+ * Cooperative filesystem backend for trusted workloads. Path checks detect observed identity and
+ * reparse changes, but do not provide handle-bound isolation against hostile concurrent swaps.
+ * Node filesystem promises cannot guarantee cancellation of a blocked Windows I/O request.
  */
 export class NodeWorkspaceDiskFileSystem implements WorkspaceDiskFileSystem {
   public async lstat(
@@ -207,6 +216,10 @@ export class NodeWorkspaceDiskFileSystem implements WorkspaceDiskFileSystem {
 
   public realpath(path: string, _context?: WorkspaceDiskIoContext): Promise<string> {
     return nodeRealpath(path);
+  }
+
+  public readLink(path: string, _context?: WorkspaceDiskIoContext): Promise<string> {
+    return nodeReadLink(path);
   }
 
   public async readDirectoryBounded(
@@ -287,7 +300,10 @@ interface EntryCounter {
  * This guard limits accidental and authorized workload growth inside one Worker process. It does
  * not replace a dedicated volume, an NTFS quota, or an operating-system storage boundary. Logical
  * file sizes cannot attribute NTFS alternate streams, allocation slack, or filesystem metadata to
- * one attempt; the free-space floor is only a secondary backstop for those cases.
+ * one attempt; the free-space floor is only a secondary backstop for those cases. Active samples
+ * are observations during mutation, not atomic snapshots or filesystem quotas. A later interval
+ * or final scan detects retained growth missed by an earlier sample. Sampling never authorizes
+ * deletion, and admission continues to reserve each active attempt's entire configured budget.
  */
 export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
   readonly #workspaceRootDirectory: string;
@@ -304,7 +320,10 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
   readonly #securityAdapter: NativeWorkspaceSecurityAdapter | undefined;
   readonly #clock: WorkspaceDiskClock;
   readonly #reservations = new Map<string, ReservationRecord>();
+  readonly #monitors = new Set<ProductionWorkspaceDiskMonitor>();
   #exclusiveTail: Promise<void> = Promise.resolve();
+  #monitorTimer: WorkspaceDiskInterval | undefined;
+  #monitoringHealth: Promise<ReadonlyMap<symbol, WorkspaceDiskBudgetError | undefined>> | undefined;
 
   public constructor(options: ProductionWorkspaceDiskBudgetOptions) {
     try {
@@ -322,7 +341,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
         "minimumFreeDiskBytes",
       );
       this.#orphanRetentionMilliseconds = assertPositiveBigInt(
-        options.orphanRetentionMilliseconds,
+        options.orphanRetentionMilliseconds ?? defaultOrphanRetentionMilliseconds,
         "orphanRetentionMilliseconds",
       );
       this.#orphanScanLimit = assertBoundedSafeInteger(
@@ -382,348 +401,399 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     signal?: AbortSignal,
   ): Promise<WorkspaceDiskReservation> {
     const attempt = this.#parseAttemptDirectory(attemptDirectory);
-    const deadline = this.#newScanDeadline();
-    return this.#runExclusive(
-      async () => {
-        throwIfAborted(signal);
-        await this.#assertWorkspaceAccessReady(signal, deadline);
-        if (this.#reservations.has(attempt.name)) {
-          throw new WorkspaceDiskBudgetError(
-            "ATTEMPT_ALREADY_EXISTS",
-            "The attempt already has an active disk reservation.",
-          );
-        }
+    return this.#runExclusive(async (deadline) => {
+      throwIfAborted(signal);
+      await this.#assertWorkspaceAccessReady(signal, deadline);
+      if (this.#reservations.has(attempt.name)) {
+        throw new WorkspaceDiskBudgetError(
+          "ATTEMPT_ALREADY_EXISTS",
+          "The attempt already has an active disk reservation.",
+        );
+      }
 
-        const snapshot = await this.#readSnapshot("admission", signal, deadline);
-        throwIfAborted(signal);
-        if (snapshot.attemptBytes.has(attempt.name)) {
-          throw new WorkspaceDiskBudgetError(
-            "ATTEMPT_ALREADY_EXISTS",
-            "The attempt directory already exists on disk.",
-          );
-        }
-        this.#assertExistingAttemptsWithinLimit(snapshot);
+      const snapshot = await this.#readSnapshot("admission", signal, deadline);
+      throwIfAborted(signal);
+      if (snapshot.attemptBytes.has(attempt.name)) {
+        throw new WorkspaceDiskBudgetError(
+          "ATTEMPT_ALREADY_EXISTS",
+          "The attempt directory already exists on disk.",
+        );
+      }
+      this.#assertExistingAttemptsWithinLimit(snapshot);
 
-        const reservedHeadroom = this.#reservedHeadroom(snapshot);
-        const projectedTotal = snapshot.totalBytes + reservedHeadroom + this.#perAttemptDiskBytes;
-        if (projectedTotal > this.#totalWorkspaceDiskBytes) {
-          throw new WorkspaceDiskBudgetError(
-            "EXISTING_WORKSPACE_UNHEALTHY",
-            "The workspace does not have enough unreserved budget for another attempt.",
-          );
-        }
+      const reservedHeadroom = this.#reservedHeadroom(snapshot);
+      const projectedTotal = snapshot.totalBytes + reservedHeadroom + this.#perAttemptDiskBytes;
+      if (projectedTotal > this.#totalWorkspaceDiskBytes) {
+        throw new WorkspaceDiskBudgetError(
+          "CAPACITY_UNAVAILABLE",
+          "The workspace does not have enough unreserved budget for another attempt.",
+        );
+      }
 
-        const availableBytes = await this.#readAvailableBytes(signal, deadline);
-        const requiredAvailable =
-          this.#minimumFreeDiskBytes + reservedHeadroom + this.#perAttemptDiskBytes;
-        if (availableBytes < requiredAvailable) {
-          throw new WorkspaceDiskBudgetError(
-            "INSUFFICIENT_FREE_SPACE",
-            "The workspace volume cannot preserve its minimum free-space reserve.",
-          );
-        }
-        throwIfAborted(signal);
+      const availableBytes = await this.#readAvailableBytes(signal, deadline);
+      const requiredAvailable =
+        this.#minimumFreeDiskBytes + reservedHeadroom + this.#perAttemptDiskBytes;
+      if (availableBytes < requiredAvailable) {
+        throw new WorkspaceDiskBudgetError(
+          "INSUFFICIENT_FREE_SPACE",
+          "The workspace volume cannot preserve its minimum free-space reserve.",
+        );
+      }
+      throwIfAborted(signal);
 
-        const record: ReservationRecord = {
-          identity: Symbol(attempt.name),
-          attemptName: attempt.name,
-          attemptDirectory: attempt.path,
-        };
-        this.#reservations.set(record.attemptName, record);
-        return new ProductionWorkspaceDiskReservation(this, record);
-      },
-      signal,
-      deadline,
-    );
+      const record: ReservationRecord = {
+        identity: Symbol(attempt.name),
+        attemptName: attempt.name,
+        attemptDirectory: attempt.path,
+      };
+      this.#reservations.set(record.attemptName, record);
+      return new ProductionWorkspaceDiskReservation(this, record);
+    }, signal);
   }
 
-  /** Run during startup before job claims begin. */
+  /** Checks admission capacity without creating a reservation or consuming a lease. */
+  public async hasCapacity(signal?: AbortSignal): Promise<boolean> {
+    try {
+      return await this.#runExclusive(async (deadline) => {
+        await this.#assertWorkspaceAccessReady(signal, deadline);
+        const snapshot = await this.#readSnapshot("capacity", signal, deadline);
+        this.#assertExistingAttemptsWithinLimit(snapshot);
+        const headroom = this.#reservedHeadroom(snapshot) + this.#perAttemptDiskBytes;
+        if (snapshot.totalBytes + headroom > this.#totalWorkspaceDiskBytes) return false;
+        return (
+          (await this.#readAvailableBytes(signal, deadline)) >=
+          this.#minimumFreeDiskBytes + headroom
+        );
+      }, signal);
+    } catch (error) {
+      if (error instanceof WorkspaceDiskBudgetError && error.code === "ACCOUNTING_BUSY") {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Run only after acquiring the process-lifetime singleton and before admitting work. Every
+   * unreserved attempt belongs to a previous process, so recovery does not retain fresh orphans.
+   */
+  public async recoverOrphans(): Promise<WorkspaceOrphanSweepResult> {
+    let result: WorkspaceOrphanSweepResult = {
+      scanned: 0,
+      removed: 0,
+      retained: 0,
+      active: 0,
+      removedBytes: 0n,
+      limitReached: false,
+    };
+    do {
+      const batch = await this.#sweepOrphans(true);
+      result = {
+        scanned: result.scanned + batch.scanned,
+        removed: result.removed + batch.removed,
+        retained: 0,
+        active: 0,
+        removedBytes:
+          result.removedBytes === null || batch.removedBytes === null
+            ? null
+            : result.removedBytes + batch.removedBytes,
+        limitReached: batch.limitReached,
+      };
+      if (batch.limitReached && batch.removed === 0) {
+        throw new WorkspaceDiskBudgetError(
+          "ORPHAN_DELETE_FAILED",
+          "Startup orphan recovery could not make progress through its bounded batch.",
+        );
+      }
+    } while (result.limitReached);
+    return result;
+  }
+
+  /** Applies retention when explicitly sweeping an already managed workspace. */
   public async sweepOrphans(): Promise<WorkspaceOrphanSweepResult> {
-    const sweepDeadline = this.#newScanDeadline();
-    return this.#runExclusive(
-      async () => {
-        try {
-          await this.#assertWorkspaceAccessReady(undefined, sweepDeadline);
-          let rootState = await this.#validateRoot(undefined, undefined, sweepDeadline);
-          const listing = await this.#fileSystem.readDirectoryBounded(
-            this.#workspaceRootDirectory,
-            this.#orphanScanLimit,
-            ioContext(undefined, sweepDeadline),
-          );
-          this.#assertScanActive(undefined, sweepDeadline);
-          assertUniqueSafeEntryNames(listing.entries);
+    return this.#sweepOrphans(false);
+  }
 
-          let removed = 0;
-          let retained = 0;
-          let active = 0;
-          let removedBytes: bigint | null = 0n;
-          const now = this.#clock.nowEpochMilliseconds();
-          if (now < 0n) {
-            throw new WorkspaceDiskBudgetError(
-              "ACCOUNTING_FAILED",
-              "The workspace cleanup clock returned a negative timestamp.",
-            );
-          }
-
-          for (const name of listing.entries) {
-            this.#assertScanActive(undefined, sweepDeadline);
-            if (!isStrictAttemptDirectoryName(name)) {
-              throw new WorkspaceDiskBudgetError(
-                "WORKSPACE_PATH_UNSAFE",
-                "Workspace root contains an entry that is not a recognized attempt directory.",
-              );
-            }
-            const candidate = win32.join(this.#workspaceRootDirectory, name);
-            this.#assertAttemptPath(candidate, name);
-            if (this.#reservations.has(name)) {
-              active += 1;
-              continue;
-            }
-
-            const state = await this.#validatedPathState(
-              candidate,
-              "directory",
-              undefined,
-              sweepDeadline,
-            );
-            if (state === null) continue;
-            const age = now - state.modifiedAtMs;
-            if (age < this.#orphanRetentionMilliseconds) {
-              retained += 1;
-              continue;
-            }
-
-            await this.#validateRoot(rootState, undefined, sweepDeadline);
-            const finalState = await this.#validatedPathState(
-              candidate,
-              "directory",
-              undefined,
-              sweepDeadline,
-            );
-            if (finalState === null || !sameStablePathState(state, finalState)) {
-              throw new WorkspaceDiskBudgetError(
-                "WORKSPACE_PATH_UNSAFE",
-                "An orphan attempt changed identity or timestamps before deletion.",
-              );
-            }
-            const removal = await this.#quarantineAndRemoveAttempt(
-              candidate,
-              rootState,
-              finalState,
-              sweepDeadline,
-            );
-            if (
-              (await this.#fileSystem.lstat(candidate, ioContext(undefined, sweepDeadline))) !==
-              null
-            ) {
-              throw new WorkspaceDiskBudgetError(
-                "ORPHAN_DELETE_FAILED",
-                "An orphan attempt directory still exists after removal.",
-              );
-            }
-            rootState = await this.#validateRoot(undefined, undefined, sweepDeadline);
-            removed += 1;
-            removedBytes =
-              removedBytes === null || removal.removedBytes === null
-                ? null
-                : removedBytes + removal.removedBytes;
-          }
-
-          return {
-            scanned: listing.entries.length,
-            removed,
-            retained,
-            active,
-            removedBytes,
-            limitReached: listing.truncated,
-          };
-        } catch (error) {
-          if (error instanceof WorkspaceDiskBudgetError) throw error;
+  async #sweepOrphans(recovering: boolean): Promise<WorkspaceOrphanSweepResult> {
+    return this.#runExclusive(async (sweepDeadline) => {
+      try {
+        await this.#assertWorkspaceAccessReady(undefined, sweepDeadline);
+        if (recovering && this.#reservations.size !== 0) {
           throw new WorkspaceDiskBudgetError(
-            "ACCOUNTING_FAILED",
-            "Workspace orphan cleanup failed closed.",
-            { cause: error },
+            "EXCLUSIVE_WORKSPACE_OWNERSHIP_LOST",
+            "Startup orphan recovery cannot run after work has been admitted.",
           );
         }
-      },
-      undefined,
-      sweepDeadline,
-    );
+        let rootState = await this.#validateRoot(undefined, undefined, sweepDeadline);
+        const listing = await this.#fileSystem.readDirectoryBounded(
+          this.#workspaceRootDirectory,
+          this.#orphanScanLimit,
+          ioContext(undefined, sweepDeadline),
+        );
+        this.#assertScanActive(undefined, sweepDeadline);
+        assertUniqueSafeEntryNames(listing.entries);
+
+        let removed = 0;
+        let retained = 0;
+        let active = 0;
+        let removedBytes: bigint | null = 0n;
+        const now = this.#clock.nowEpochMilliseconds();
+        if (now < 0n) {
+          throw new WorkspaceDiskBudgetError(
+            "ACCOUNTING_FAILED",
+            "The workspace cleanup clock returned a negative timestamp.",
+          );
+        }
+
+        for (const name of listing.entries) {
+          this.#assertScanActive(undefined, sweepDeadline);
+          if (!isStrictAttemptDirectoryName(name)) {
+            throw new WorkspaceDiskBudgetError(
+              "WORKSPACE_PATH_UNSAFE",
+              "Workspace root contains an entry that is not a recognized attempt directory.",
+            );
+          }
+          const candidate = win32.join(this.#workspaceRootDirectory, name);
+          this.#assertAttemptPath(candidate, name);
+          if (this.#reservations.has(name)) {
+            active += 1;
+            continue;
+          }
+
+          const state = await this.#validatedPathState(
+            candidate,
+            "directory",
+            undefined,
+            sweepDeadline,
+          );
+          if (state === null) continue;
+          const age = now - state.modifiedAtMs;
+          if (!recovering && age < this.#orphanRetentionMilliseconds) {
+            retained += 1;
+            continue;
+          }
+
+          await this.#validateRoot(rootState, undefined, sweepDeadline);
+          const finalState = await this.#validatedPathState(
+            candidate,
+            "directory",
+            undefined,
+            sweepDeadline,
+          );
+          if (finalState === null || !sameStablePathState(state, finalState)) {
+            throw new WorkspaceDiskBudgetError(
+              "WORKSPACE_PATH_UNSAFE",
+              "An orphan attempt changed identity or timestamps before deletion.",
+            );
+          }
+          const removal = await this.#quarantineAndRemoveAttempt(
+            candidate,
+            rootState,
+            finalState,
+            sweepDeadline,
+          );
+          if (
+            (await this.#fileSystem.lstat(candidate, ioContext(undefined, sweepDeadline))) !== null
+          ) {
+            throw new WorkspaceDiskBudgetError(
+              "ORPHAN_DELETE_FAILED",
+              "An orphan attempt directory still exists after removal.",
+            );
+          }
+          rootState = await this.#validateRoot(undefined, undefined, sweepDeadline);
+          removed += 1;
+          removedBytes =
+            removedBytes === null || removal.removedBytes === null
+              ? null
+              : removedBytes + removal.removedBytes;
+        }
+
+        return {
+          scanned: listing.entries.length,
+          removed,
+          retained,
+          active,
+          removedBytes,
+          limitReached: listing.truncated,
+        };
+      } catch (error) {
+        if (error instanceof WorkspaceDiskBudgetError) throw error;
+        throw new WorkspaceDiskBudgetError(
+          "ACCOUNTING_FAILED",
+          "Workspace orphan cleanup failed closed.",
+          { cause: error },
+        );
+      }
+    }, undefined);
   }
 
   public async startMonitoring(
     record: ReservationRecord,
     parentSignal: AbortSignal,
   ): Promise<WorkspaceDiskMonitor> {
-    const monitor = new ProductionWorkspaceDiskMonitor(
-      this,
-      record,
-      parentSignal,
-      this.#clock,
-      this.#monitorIntervalMilliseconds,
-    );
+    const monitor = new ProductionWorkspaceDiskMonitor(this, record, parentSignal);
     await monitor.start();
     return monitor;
   }
 
+  public attachMonitor(monitor: ProductionWorkspaceDiskMonitor): void {
+    this.#monitors.add(monitor);
+    if (this.#monitorTimer === undefined) {
+      this.#monitorTimer = this.#clock.scheduleInterval(async () => {
+        await Promise.all([...this.#monitors].map((active) => active.check()));
+      }, this.#monitorIntervalMilliseconds);
+    }
+  }
+
+  public detachMonitor(monitor: ProductionWorkspaceDiskMonitor): void {
+    this.#monitors.delete(monitor);
+    if (this.#monitors.size === 0) {
+      this.#monitorTimer?.cancel();
+      this.#monitorTimer = undefined;
+    }
+  }
+
   public async release(record: ReservationRecord): Promise<void> {
-    const deadline = this.#newScanDeadline();
-    await this.#runExclusive(
-      async () => {
-        const current = this.#reservations.get(record.attemptName);
-        if (current?.identity === record.identity) {
-          this.#reservations.delete(record.attemptName);
-        }
-      },
-      undefined,
-      deadline,
-    );
+    await this.#runExclusive(async () => {
+      const current = this.#reservations.get(record.attemptName);
+      if (current?.identity === record.identity) {
+        this.#reservations.delete(record.attemptName);
+      }
+    }, undefined);
   }
 
   public async removeAttempt(record: ReservationRecord): Promise<void> {
-    const deadline = this.#newScanDeadline();
-    await this.#runExclusive(
-      async () => {
-        const current = this.#reservations.get(record.attemptName);
-        if (current?.identity !== record.identity) {
-          throw new WorkspaceDiskBudgetError(
-            "RESERVATION_RELEASED",
-            "Cannot remove an attempt after its disk reservation was released.",
-          );
-        }
-        await this.#assertWorkspaceAccessReady(undefined, deadline);
-        const rootState = await this.#validateRoot(undefined, undefined, deadline);
-        const attemptState = await this.#validatedPathState(
-          record.attemptDirectory,
-          "directory",
-          undefined,
-          deadline,
+    await this.#runExclusive(async (deadline) => {
+      const current = this.#reservations.get(record.attemptName);
+      if (current?.identity !== record.identity) {
+        throw new WorkspaceDiskBudgetError(
+          "RESERVATION_RELEASED",
+          "Cannot remove an attempt after its disk reservation was released.",
         );
-        if (attemptState === null) return;
+      }
+      await this.#assertWorkspaceAccessReady(undefined, deadline);
+      const rootState = await this.#validateRoot(undefined, undefined, deadline);
+      const attemptState = await this.#validatedPathState(
+        record.attemptDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (attemptState === null) return;
 
-        const finalState = await this.#validatedPathState(
-          record.attemptDirectory,
-          "directory",
-          undefined,
-          deadline,
+      const finalState = await this.#validatedPathState(
+        record.attemptDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (finalState === null || !sameStablePathState(attemptState, finalState)) {
+        throw snapshotUnstableError();
+      }
+      await this.#quarantineAndRemoveAttempt(
+        record.attemptDirectory,
+        rootState,
+        finalState,
+        deadline,
+      );
+      if (
+        (await this.#fileSystem.lstat(record.attemptDirectory, ioContext(undefined, deadline))) !==
+        null
+      ) {
+        throw new WorkspaceDiskBudgetError(
+          "HANDLE_BOUND_DELETE_FAILED",
+          "The attempt path still exists after native quarantine removal.",
         );
-        if (finalState === null || !sameStablePathState(attemptState, finalState)) {
-          throw snapshotUnstableError();
-        }
-        await this.#quarantineAndRemoveAttempt(
-          record.attemptDirectory,
-          rootState,
-          finalState,
-          deadline,
-        );
-        if (
-          (await this.#fileSystem.lstat(
-            record.attemptDirectory,
-            ioContext(undefined, deadline),
-          )) !== null
-        ) {
-          throw new WorkspaceDiskBudgetError(
-            "HANDLE_BOUND_DELETE_FAILED",
-            "The attempt path still exists after native quarantine removal.",
-          );
-        }
-      },
-      undefined,
-      deadline,
-    );
+      }
+    }, undefined);
   }
 
   public async removeCheckout(record: ReservationRecord): Promise<void> {
-    const deadline = this.#newScanDeadline();
-    await this.#runExclusive(
-      async () => {
-        const current = this.#reservations.get(record.attemptName);
-        if (current?.identity !== record.identity) {
-          throw new WorkspaceDiskBudgetError(
-            "RESERVATION_RELEASED",
-            "Cannot remove a checkout after its disk reservation was released.",
-          );
-        }
-        await this.#assertWorkspaceAccessReady(undefined, deadline);
-        const rootState = await this.#validateRoot(undefined, undefined, deadline);
-        const attemptState = await this.#validatedPathState(
-          record.attemptDirectory,
-          "directory",
-          undefined,
-          deadline,
+    await this.#runExclusive(async (deadline) => {
+      const current = this.#reservations.get(record.attemptName);
+      if (current?.identity !== record.identity) {
+        throw new WorkspaceDiskBudgetError(
+          "RESERVATION_RELEASED",
+          "Cannot remove a checkout after its disk reservation was released.",
         );
-        if (attemptState === null) {
-          throw new WorkspaceDiskBudgetError(
-            "WORKSPACE_PATH_UNSAFE",
-            "The reserved attempt is missing before checkout removal.",
-          );
-        }
-        const checkoutDirectory = win32.join(record.attemptDirectory, "checkout");
-        const checkoutState = await this.#validatedPathState(
-          checkoutDirectory,
-          "directory",
-          undefined,
-          deadline,
+      }
+      await this.#assertWorkspaceAccessReady(undefined, deadline);
+      const rootState = await this.#validateRoot(undefined, undefined, deadline);
+      const attemptState = await this.#validatedPathState(
+        record.attemptDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (attemptState === null) {
+        throw new WorkspaceDiskBudgetError(
+          "WORKSPACE_PATH_UNSAFE",
+          "The reserved attempt is missing before checkout removal.",
         );
-        if (checkoutState === null) return;
+      }
+      const checkoutDirectory = win32.join(record.attemptDirectory, "checkout");
+      const checkoutState = await this.#validatedPathState(
+        checkoutDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (checkoutState === null) return;
 
-        await this.#validateRoot(rootState, undefined, deadline);
-        const finalAttempt = await this.#validatedPathState(
-          record.attemptDirectory,
-          "directory",
-          undefined,
-          deadline,
+      await this.#validateRoot(rootState, undefined, deadline);
+      const finalAttempt = await this.#validatedPathState(
+        record.attemptDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      const finalCheckout = await this.#validatedPathState(
+        checkoutDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (
+        finalAttempt === null ||
+        finalCheckout === null ||
+        !sameStablePathState(attemptState, finalAttempt) ||
+        !sameStablePathState(checkoutState, finalCheckout)
+      ) {
+        throw snapshotUnstableError();
+      }
+      await this.#quarantineAndRemoveCheckout(
+        record.attemptDirectory,
+        checkoutDirectory,
+        rootState,
+        finalAttempt,
+        finalCheckout,
+        deadline,
+      );
+      await this.#validateRoot(rootState, undefined, deadline);
+      const remainingAttempt = await this.#validatedPathState(
+        record.attemptDirectory,
+        "directory",
+        undefined,
+        deadline,
+      );
+      if (remainingAttempt === null || !samePathIdentity(attemptState, remainingAttempt)) {
+        throw new WorkspaceDiskBudgetError(
+          "WORKSPACE_PATH_UNSAFE",
+          "The reserved attempt changed identity during checkout removal.",
         );
-        const finalCheckout = await this.#validatedPathState(
-          checkoutDirectory,
-          "directory",
-          undefined,
-          deadline,
+      }
+      const remainingCheckout = await this.#fileSystem.lstat(
+        checkoutDirectory,
+        ioContext(undefined, deadline),
+      );
+      this.#assertScanActive(undefined, deadline);
+      if (remainingCheckout !== null) {
+        throw new WorkspaceDiskBudgetError(
+          "HANDLE_BOUND_DELETE_FAILED",
+          "The checkout path still exists after reserved checkout removal.",
         );
-        if (
-          finalAttempt === null ||
-          finalCheckout === null ||
-          !sameStablePathState(attemptState, finalAttempt) ||
-          !sameStablePathState(checkoutState, finalCheckout)
-        ) {
-          throw snapshotUnstableError();
-        }
-        await this.#quarantineAndRemoveCheckout(
-          record.attemptDirectory,
-          checkoutDirectory,
-          rootState,
-          finalAttempt,
-          finalCheckout,
-          deadline,
-        );
-        await this.#validateRoot(rootState, undefined, deadline);
-        const remainingAttempt = await this.#validatedPathState(
-          record.attemptDirectory,
-          "directory",
-          undefined,
-          deadline,
-        );
-        if (remainingAttempt === null || !samePathIdentity(attemptState, remainingAttempt)) {
-          throw new WorkspaceDiskBudgetError(
-            "WORKSPACE_PATH_UNSAFE",
-            "The reserved attempt changed identity during checkout removal.",
-          );
-        }
-        const remainingCheckout = await this.#fileSystem.lstat(
-          checkoutDirectory,
-          ioContext(undefined, deadline),
-        );
-        this.#assertScanActive(undefined, deadline);
-        if (remainingCheckout !== null) {
-          throw new WorkspaceDiskBudgetError(
-            "HANDLE_BOUND_DELETE_FAILED",
-            "The checkout path still exists after reserved checkout removal.",
-          );
-        }
-      },
-      undefined,
-      deadline,
-    );
+      }
+    }, undefined);
   }
 
   public abandon(record: ReservationRecord): void {
@@ -733,58 +803,95 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     }
   }
 
-  public async assertHealthy(record: ReservationRecord, signal?: AbortSignal): Promise<void> {
-    await this.#assertReservationHealthy(record, signal);
+  public async assertHealthy(
+    record: ReservationRecord,
+    signal?: AbortSignal,
+    requireFreshSnapshot = false,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    // A final check must start after the operation ended, even when another monitor already
+    // sampled this attempt in a scan that is still reading the rest of the workspace.
+    if (requireFreshSnapshot && this.#monitoringHealth !== undefined) {
+      await waitForDiskOperation(this.#monitoringHealth, signal);
+    }
+    while (true) {
+      this.#assertReservationActive(record);
+      const outcomes = await waitForDiskOperation(this.#readMonitoringHealth(), signal);
+      this.#assertReservationActive(record);
+      if (!outcomes.has(record.identity)) continue;
+      const failure = outcomes.get(record.identity);
+      if (failure !== undefined) throw failure;
+      return;
+    }
   }
 
-  async #assertReservationHealthy(record: ReservationRecord, signal?: AbortSignal): Promise<void> {
-    const deadline = this.#newScanDeadline();
-    await this.#runExclusive(
-      async () => {
-        throwIfAborted(signal);
-        await this.#assertWorkspaceAccessReady(signal, deadline);
-        const current = this.#reservations.get(record.attemptName);
-        if (current?.identity !== record.identity) {
-          throw new WorkspaceDiskBudgetError(
-            "RESERVATION_RELEASED",
-            "The workspace disk reservation is no longer active.",
-          );
+  #assertReservationActive(record: ReservationRecord): void {
+    if (this.#reservations.get(record.attemptName)?.identity !== record.identity) {
+      throw new WorkspaceDiskBudgetError(
+        "RESERVATION_RELEASED",
+        "The workspace disk reservation is no longer active.",
+      );
+    }
+  }
+
+  #readMonitoringHealth(): Promise<ReadonlyMap<symbol, WorkspaceDiskBudgetError | undefined>> {
+    if (this.#monitoringHealth !== undefined) return this.#monitoringHealth;
+    const scan = this.#runExclusive(async (deadline) => {
+      // The shared scan has its own lifetime. Cancelling one waiter cannot cancel its siblings.
+      await this.#assertWorkspaceAccessReady(undefined, deadline);
+      const snapshot = await this.#readSnapshot("monitoring", undefined, deadline);
+      const availableBytes = await this.#readAvailableBytes(undefined, deadline);
+      const outcomes = new Map<symbol, WorkspaceDiskBudgetError | undefined>();
+      for (const record of this.#reservations.values()) {
+        try {
+          this.#assertSnapshotHealthy(record, snapshot, availableBytes);
+          outcomes.set(record.identity, undefined);
+        } catch (error) {
+          if (!(error instanceof WorkspaceDiskBudgetError)) throw error;
+          outcomes.set(record.identity, error);
         }
-        const snapshot = await this.#readSnapshot("monitoring", signal, deadline);
-        const attemptBytes = snapshot.attemptBytes.get(record.attemptName);
-        if (attemptBytes === undefined) {
-          throw new WorkspaceDiskBudgetError(
-            "WORKSPACE_PATH_UNSAFE",
-            "The monitored attempt directory is missing.",
-          );
-        }
-        if (attemptBytes > this.#perAttemptDiskBytes) {
-          throw new WorkspaceDiskBudgetError(
-            "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
-            "The attempt exceeded its workspace disk budget.",
-          );
-        }
-        this.#assertExistingAttemptsWithinLimit(snapshot, record.attemptName);
-        const reservedHeadroom = this.#reservedHeadroom(snapshot, record.attemptName);
-        if (snapshot.totalBytes + reservedHeadroom > this.#totalWorkspaceDiskBytes) {
-          throw new WorkspaceDiskBudgetError(
-            "EXISTING_WORKSPACE_UNHEALTHY",
-            "The Worker workspace can no longer honor its active disk reservations.",
-          );
-        }
-        if (
-          (await this.#readAvailableBytes(signal, deadline)) <
-          this.#minimumFreeDiskBytes + reservedHeadroom
-        ) {
-          throw new WorkspaceDiskBudgetError(
-            "INSUFFICIENT_FREE_SPACE",
-            "The workspace volume fell below its minimum free-space reserve.",
-          );
-        }
-      },
-      signal,
-      deadline,
-    );
+      }
+      return outcomes;
+    }, undefined);
+    const shared = scan.finally(() => {
+      if (this.#monitoringHealth === shared) this.#monitoringHealth = undefined;
+    });
+    this.#monitoringHealth = shared;
+    return shared;
+  }
+
+  #assertSnapshotHealthy(
+    record: ReservationRecord,
+    snapshot: WorkspaceSnapshot,
+    availableBytes: bigint,
+  ): void {
+    const attemptBytes = snapshot.attemptBytes.get(record.attemptName);
+    if (attemptBytes === undefined) {
+      throw new WorkspaceDiskBudgetError(
+        "WORKSPACE_PATH_UNSAFE",
+        "The monitored attempt directory is missing.",
+      );
+    }
+    if (attemptBytes > this.#perAttemptDiskBytes) {
+      throw new WorkspaceDiskBudgetError(
+        "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+        "The attempt exceeded its workspace disk budget.",
+      );
+    }
+    this.#assertExistingAttemptsWithinLimit(snapshot, record.attemptName);
+    const reservedHeadroom = this.#reservedHeadroom(snapshot, record.attemptName);
+    if (snapshot.totalBytes + reservedHeadroom > this.#totalWorkspaceDiskBytes) {
+      throw new WorkspaceDiskBudgetError(
+        "EXISTING_WORKSPACE_UNHEALTHY",
+        "The Worker workspace can no longer honor its active disk reservations.",
+      );
+    }
+    if (availableBytes < this.#minimumFreeDiskBytes + reservedHeadroom) {
+      throw new WorkspaceDiskBudgetError(
+        "INSUFFICIENT_FREE_SPACE",
+        "The workspace volume fell below its minimum free-space reserve.",
+      );
+    }
   }
 
   async #readSnapshot(
@@ -888,104 +995,141 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     let attemptRootState: WorkspaceDiskPathState | undefined;
     while (stack.length > 0) {
       this.#assertScanActive(signal, deadline);
-      const candidate = stack.pop();
-      if (candidate === undefined) break;
-      this.#assertContained(candidate);
-      const isAttemptRoot = sameWindowsPath(candidate, attemptDirectory);
-      const allowDisappearance = active && !isAttemptRoot;
-      const state = await this.#validatedPathState(
-        candidate,
-        undefined,
-        signal,
-        deadline,
-        allowDisappearance,
-        isAttemptRoot ? undefined : attemptDirectory,
+      const candidates = stack.splice(-maximumConcurrentAccountingPaths);
+      // Only already-discovered siblings or independent branches run together. A directory must
+      // finish its identity checks before exposing children. Drain every started metadata request
+      // before propagating failure or releasing the exclusive scan: Node I/O cannot be forcibly
+      // cancelled, so Promise.all would leave orphaned work.
+      const results = await Promise.allSettled(
+        candidates.map(async (candidate) => {
+          this.#assertScanActive(signal, deadline);
+          this.#assertContained(candidate);
+          const isAttemptRoot = sameWindowsPath(candidate, attemptDirectory);
+          const allowDisappearance = active && !isAttemptRoot;
+          const state = await this.#validatedPathState(
+            candidate,
+            undefined,
+            signal,
+            deadline,
+            allowDisappearance,
+            isAttemptRoot ? undefined : attemptDirectory,
+          );
+          if (state === null && !allowDisappearance) throw snapshotUnstableError();
+          if (
+            state !== null &&
+            !state.reparsePoint &&
+            state.kind !== "file" &&
+            state.kind !== "directory"
+          ) {
+            throw new WorkspaceDiskBudgetError(
+              "WORKSPACE_PATH_UNSAFE",
+              "Workspace accounting encountered a non-file, non-directory entry.",
+            );
+          }
+          return { candidate, isAttemptRoot, allowDisappearance, state };
+        }),
       );
-      if (state === null) {
-        if (allowDisappearance) continue;
-        throw snapshotUnstableError();
-      }
-      if (state.reparsePoint) {
-        // Dependency managers use links inside an attempt. Count the link itself without
-        // traversing its target, which is already reachable through its ordinary directory.
-        bytes += state.size;
-        continue;
-      }
-      if (state.kind === "file") {
-        if (state.size < 0n) {
+      // A retryable rename race must not hide an unsafe path or exhausted budget observed by a
+      // sibling. Retrying that generation could otherwise discard its definitive failure.
+      const failures = results.filter((result) => result.status === "rejected");
+      const failure =
+        failures.find(
+          (result) =>
+            !(result.reason instanceof WorkspaceDiskBudgetError) ||
+            result.reason.code !== "SNAPSHOT_UNSTABLE",
+        ) ?? failures[0];
+      if (failure !== undefined) throw failure.reason;
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        const { candidate, isAttemptRoot, allowDisappearance, state } = result.value;
+        if (state === null) {
+          if (allowDisappearance) continue;
+          throw snapshotUnstableError();
+        }
+        if (state.reparsePoint) {
+          // Dependency managers use links inside an attempt. Count the link itself without
+          // traversing its target, which is already reachable through its ordinary directory.
+          bytes += state.size;
+          continue;
+        }
+        if (state.kind === "file") {
+          if (state.size < 0n) {
+            throw new WorkspaceDiskBudgetError(
+              "ACCOUNTING_FAILED",
+              "A workspace file reported a negative size.",
+            );
+          }
+          bytes += state.size;
+          continue;
+        }
+        if (state.kind !== "directory") {
           throw new WorkspaceDiskBudgetError(
-            "ACCOUNTING_FAILED",
-            "A workspace file reported a negative size.",
+            "WORKSPACE_PATH_UNSAFE",
+            "Workspace accounting encountered a non-file, non-directory entry.",
           );
         }
-        bytes += state.size;
-        continue;
-      }
-      if (state.kind !== "directory") {
-        throw new WorkspaceDiskBudgetError(
-          "WORKSPACE_PATH_UNSAFE",
-          "Workspace accounting encountered a non-file, non-directory entry.",
-        );
-      }
-      if (isAttemptRoot) attemptRootState = state;
+        if (isAttemptRoot) attemptRootState = state;
 
-      const remaining = this.#maximumAccountingEntries - counter.value;
-      let listing: BoundedDirectoryEntries;
-      try {
-        listing = await this.#fileSystem.readDirectoryBounded(
-          candidate,
-          Math.max(1, remaining),
-          ioContext(signal, deadline),
-        );
-      } catch (error) {
-        if (hasErrorCode(error, "ENOENT")) {
-          if (allowDisappearance) {
-            // A removed descendant is ordinary workload churn. If its name has already been
-            // reused, still reject a different directory identity or an unsafe replacement.
-            const afterMissing = await this.#validatedPathState(
-              candidate,
-              "directory",
-              signal,
-              deadline,
-              true,
-            );
-            if (afterMissing !== null && !samePathIdentity(state, afterMissing)) {
-              throw changedWorkspaceIdentityError();
+        // Keep enumeration sequential so each directory receives the actual remaining global entry
+        // allowance. Concurrent listings could each consume the same allowance before settling.
+        const remaining = this.#maximumAccountingEntries - counter.value;
+        let listing: BoundedDirectoryEntries;
+        try {
+          listing = await this.#fileSystem.readDirectoryBounded(
+            candidate,
+            Math.max(1, remaining),
+            ioContext(signal, deadline),
+          );
+        } catch (error) {
+          if (hasErrorCode(error, "ENOENT")) {
+            if (allowDisappearance) {
+              // A removed descendant is ordinary workload churn. If its name has already been
+              // reused, still reject a different directory identity or an unsafe replacement.
+              const afterMissing = await this.#validatedPathState(
+                candidate,
+                "directory",
+                signal,
+                deadline,
+                true,
+              );
+              if (afterMissing !== null && !samePathIdentity(state, afterMissing)) {
+                throw changedWorkspaceIdentityError();
+              }
+              continue;
             }
-            continue;
+            throw snapshotUnstableError(error);
           }
-          throw snapshotUnstableError(error);
+          throw error;
         }
-        throw error;
-      }
-      this.#assertScanActive(signal, deadline);
-      if (listing.truncated || (remaining === 0 && listing.entries.length > 0)) {
-        throw accountingLimitError();
-      }
-      assertUniqueSafeEntryNames(listing.entries);
-      if (counter.value + listing.entries.length > this.#maximumAccountingEntries) {
-        throw accountingLimitError();
-      }
-      counter.value += listing.entries.length;
-      const directoryAfterListing = await this.#validatedPathState(
-        candidate,
-        "directory",
-        signal,
-        deadline,
-        allowDisappearance,
-      );
-      if (directoryAfterListing === null) {
-        if (allowDisappearance) continue;
-        throw snapshotUnstableError();
-      }
-      if (active && !samePathIdentity(state, directoryAfterListing)) {
-        throw changedWorkspaceIdentityError();
-      }
-      if (!active && !sameStablePathState(state, directoryAfterListing)) {
-        throw snapshotUnstableError();
-      }
-      for (const name of listing.entries) {
-        stack.push(win32.join(candidate, name));
+        this.#assertScanActive(signal, deadline);
+        if (listing.truncated || (remaining === 0 && listing.entries.length > 0)) {
+          throw accountingLimitError();
+        }
+        assertUniqueSafeEntryNames(listing.entries);
+        if (counter.value + listing.entries.length > this.#maximumAccountingEntries) {
+          throw accountingLimitError();
+        }
+        counter.value += listing.entries.length;
+        const directoryAfterListing = await this.#validatedPathState(
+          candidate,
+          "directory",
+          signal,
+          deadline,
+          allowDisappearance,
+        );
+        if (directoryAfterListing === null) {
+          if (allowDisappearance) continue;
+          throw snapshotUnstableError();
+        }
+        if (active && !samePathIdentity(state, directoryAfterListing)) {
+          throw changedWorkspaceIdentityError();
+        }
+        if (!active && !sameStablePathState(state, directoryAfterListing)) {
+          throw snapshotUnstableError();
+        }
+        for (const name of listing.entries) {
+          stack.push(win32.join(candidate, name));
+        }
       }
     }
     const attemptRootAfterScan = await this.#validatedPathState(
@@ -1073,11 +1217,27 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     } catch (error) {
       if (hasErrorCode(error, "ENOENT")) {
         if (allowDisappearance) {
-          // Package managers may unlink an entry after lstat. Confirm it is gone instead of
-          // confusing a removed link with one that still has an unresolved, possibly unsafe target.
           const current = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
           this.#assertScanActive(signal, deadline);
           if (current === null) return null;
+          assertValidPathState(current);
+          if (state.reparsePoint && allowedLinkRootDirectory !== undefined) {
+            return this.#sampleDanglingActiveLink(
+              path,
+              state,
+              current,
+              allowedLinkRootDirectory,
+              signal,
+              deadline,
+              error,
+            );
+          }
+          if (state.kind === "file" && !state.reparsePoint) {
+            return this.#sampleReplacedActiveFile(path, state, current, signal, deadline);
+          }
+          if (current.reparsePoint || !samePathIdentity(state, current)) {
+            throw changedWorkspaceIdentityError();
+          }
         }
         throw snapshotUnstableError(error);
       }
@@ -1106,6 +1266,101 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     }
     this.#assertContained(realPath);
     return state;
+  }
+
+  async #sampleReplacedActiveFile(
+    path: string,
+    first: WorkspaceDiskPathState,
+    current: WorkspaceDiskPathState,
+    signal: AbortSignal | undefined,
+    deadline: bigint | undefined,
+  ): Promise<WorkspaceDiskPathState | null> {
+    if (current.kind !== "file" || current.reparsePoint) throw changedWorkspaceIdentityError();
+    // Atomic file replacement is ordinary build churn. The parent remains the authority for the
+    // canonical location; the file's sampled bytes do not grant traversal or deletion authority.
+    const parent = win32.dirname(path);
+    const parentBefore = await this.#validatedPathState(parent, "directory", signal, deadline);
+    if (parentBefore === null) return null;
+    const final = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
+    this.#assertScanActive(signal, deadline);
+    if (final === null) return null;
+    assertValidPathState(final);
+    if (final.kind !== "file" || final.reparsePoint) throw changedWorkspaceIdentityError();
+    const parentAfter = await this.#validatedPathState(parent, "directory", signal, deadline);
+    if (parentAfter === null) return null;
+    if (!samePathIdentity(parentBefore, parentAfter)) throw changedWorkspaceIdentityError();
+    return { ...final, size: maximumBigInt(first.size, current.size, final.size) };
+  }
+
+  async #sampleDanglingActiveLink(
+    path: string,
+    first: WorkspaceDiskPathState,
+    current: WorkspaceDiskPathState,
+    attemptDirectory: string,
+    signal: AbortSignal | undefined,
+    deadline: bigint | undefined,
+    cause: unknown,
+  ): Promise<WorkspaceDiskPathState | null> {
+    if (!current.reparsePoint || !sameStablePathState(first, current)) {
+      throw changedWorkspaceIdentityError();
+    }
+    if (this.#fileSystem.readLink === undefined) throw snapshotUnstableError(cause);
+    const parent = win32.dirname(path);
+    const parentBefore = await this.#validatedPathState(parent, "directory", signal, deadline);
+    if (parentBefore === null) return null;
+    let target: string;
+    try {
+      target = win32.resolve(
+        win32.dirname(path),
+        await this.#fileSystem.readLink(path, ioContext(signal, deadline)),
+      );
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) {
+        const final = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
+        this.#assertScanActive(signal, deadline);
+        if (final === null) return null;
+      }
+      throw error;
+    }
+    this.#assertScanActive(signal, deadline);
+    const relative = win32.relative(attemptDirectory, target);
+    if (relative === ".." || relative.startsWith(`..${win32.sep}`) || win32.isAbsolute(relative)) {
+      throw new WorkspaceDiskBudgetError(
+        "WORKSPACE_PATH_UNSAFE",
+        "An unresolved workspace link points outside its owning attempt directory.",
+      );
+    }
+    // pnpm can publish links before their targets or parent directories exist. Validate the
+    // closest existing ancestor instead of resolving the missing target. This also rejects an
+    // internal-looking target redirected through a junction. Never enumerate a link's target.
+    let ancestor = target;
+    let ancestorProbes = 0;
+    while (true) {
+      // Enumeration has its own entry cap. Bound the additional metadata work for a dangling
+      // target independently, including when all of its intermediate parents are missing.
+      if (ancestorProbes >= maximumDanglingLinkAncestorProbes) throw accountingLimitError();
+      ancestorProbes += 1;
+      const ancestorState = await this.#validatedPathState(ancestor, undefined, signal, deadline);
+      if (ancestorState !== null) {
+        if (ancestorState.kind !== "directory" && !sameWindowsPath(ancestor, target)) {
+          throw changedWorkspaceIdentityError();
+        }
+        break;
+      }
+      if (sameWindowsPath(ancestor, attemptDirectory)) throw changedWorkspaceIdentityError();
+      ancestor = win32.dirname(ancestor);
+    }
+    const final = await this.#fileSystem.lstat(path, ioContext(signal, deadline));
+    this.#assertScanActive(signal, deadline);
+    if (final === null) return null;
+    assertValidPathState(final);
+    if (!final.reparsePoint || !sameStablePathState(first, final)) {
+      throw changedWorkspaceIdentityError();
+    }
+    const parentAfter = await this.#validatedPathState(parent, "directory", signal, deadline);
+    if (parentAfter === null) return null;
+    if (!samePathIdentity(parentBefore, parentAfter)) throw changedWorkspaceIdentityError();
+    return { ...final, size: maximumBigInt(first.size, current.size, final.size) };
   }
 
   async #readAvailableBytes(
@@ -1377,24 +1632,24 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
   }
 
   async #runExclusive<T>(
-    operation: () => Promise<T>,
+    operation: (deadline: bigint) => Promise<T>,
     signal: AbortSignal | undefined,
-    deadline: bigint,
   ): Promise<T> {
+    const queueDeadline = this.#newScanDeadline();
     const previous = this.#exclusiveTail;
     let release!: () => void;
     this.#exclusiveTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
-      await this.#waitForExclusiveTurn(previous, signal, deadline);
+      await this.#waitForExclusiveTurn(previous, signal, queueDeadline);
     } catch (error) {
       void previous.then(release, release);
       throw error;
     }
     try {
-      this.#assertScanActive(signal, deadline);
-      return await operation();
+      throwIfAborted(signal);
+      return await operation(this.#newScanDeadline());
     } finally {
       release();
     }
@@ -1405,7 +1660,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     signal: AbortSignal | undefined,
     deadline: bigint,
   ): Promise<void> {
-    this.#assertScanActive(signal, deadline);
+    this.#assertQueueActive(signal, deadline);
     let rejectInterruption!: (error: unknown) => void;
     const interruption = new Promise<never>((_resolve, reject) => {
       rejectInterruption = reject;
@@ -1418,7 +1673,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
       () =>
         rejectInterruption(
           new WorkspaceDiskBudgetError(
-            "ACCOUNTING_TIMED_OUT",
+            "ACCOUNTING_BUSY",
             "Workspace disk operation expired while waiting for the exclusive queue.",
           ),
         ),
@@ -1426,11 +1681,22 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     );
     try {
       await Promise.race([previous, interruption]);
-      this.#assertScanActive(signal, deadline);
+      this.#assertQueueActive(signal, deadline);
     } finally {
       timeout.cancel();
       signal?.removeEventListener("abort", abortListener);
     }
+  }
+
+  #assertQueueActive(signal: AbortSignal | undefined, deadline: bigint): void {
+    throwIfAborted(signal);
+    if (this.#clock.nowEpochMilliseconds() >= deadline) {
+      throw new WorkspaceDiskBudgetError(
+        "ACCOUNTING_BUSY",
+        "Workspace disk operation expired while waiting for the exclusive queue.",
+      );
+    }
+    this.#assertScanActive(signal, deadline);
   }
 }
 
@@ -1492,7 +1758,6 @@ class ProductionWorkspaceDiskReservation implements WorkspaceDiskReservation {
 class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
   readonly #controller = new AbortController();
   readonly #parentAbortListener: () => void;
-  #timer: WorkspaceDiskInterval | undefined;
   #checkInFlight: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
   #violation: WorkspaceDiskBudgetError | undefined;
@@ -1501,13 +1766,12 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
     private readonly owner: ProductionWorkspaceDiskBudget,
     private readonly record: ReservationRecord,
     private readonly parentSignal: AbortSignal,
-    private readonly clock: WorkspaceDiskClock,
-    private readonly intervalMilliseconds: number,
   ) {
     this.#parentAbortListener = () => {
       if (!this.#controller.signal.aborted) {
         this.#controller.abort(this.parentSignal.reason);
       }
+      this.#detach();
     };
   }
 
@@ -1527,6 +1791,7 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
     this.parentSignal.addEventListener("abort", this.#parentAbortListener, { once: true });
     try {
       await this.owner.assertHealthy(this.record, this.parentSignal);
+      throwIfAborted(this.parentSignal);
     } catch (error) {
       if (this.parentSignal.aborted && isAbortedBudgetError(error)) {
         this.#parentAbortListener();
@@ -1538,10 +1803,7 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
       throw this.#violation;
     }
     try {
-      this.#timer = this.clock.scheduleInterval(
-        () => this.#scheduleCheck(),
-        this.intervalMilliseconds,
-      );
+      this.owner.attachMonitor(this);
     } catch (error) {
       this.#recordViolation(error);
       this.#detach();
@@ -1555,12 +1817,11 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
   }
 
   async #closeOnce(): Promise<void> {
-    this.#timer?.cancel();
-    this.#timer = undefined;
+    this.owner.detachMonitor(this);
     await this.#checkInFlight;
     if (this.#violation === undefined && !this.parentSignal.aborted) {
       try {
-        await this.owner.assertHealthy(this.record, this.parentSignal);
+        await this.owner.assertHealthy(this.record, this.parentSignal, true);
       } catch (error) {
         this.#recordViolation(error);
       }
@@ -1569,7 +1830,7 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
     if (this.#violation !== undefined) throw this.#violation;
   }
 
-  #scheduleCheck(): Promise<void> {
+  public check(): Promise<void> {
     if (this.#closePromise !== undefined) return Promise.resolve();
     if (this.#checkInFlight !== undefined) return this.#checkInFlight;
     const check = this.owner
@@ -1598,13 +1859,33 @@ class ProductionWorkspaceDiskMonitor implements WorkspaceDiskMonitor {
             { cause: error },
           );
     this.#violation ??= violation;
+    this.owner.detachMonitor(this);
     if (!this.#controller.signal.aborted) {
       this.#controller.abort(this.#violation);
     }
   }
 
   #detach(): void {
+    this.owner.detachMonitor(this);
     this.parentSignal.removeEventListener("abort", this.#parentAbortListener);
+  }
+}
+
+async function waitForDiskOperation<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  if (signal === undefined) return operation;
+  let rejectCancellation!: (error: WorkspaceDiskBudgetError) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const onAbort = (): void => rejectCancellation(abortedBudgetError(signal.reason));
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const result = await Promise.race([operation, cancelled]);
+    throwIfAborted(signal);
+    return result;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -1765,6 +2046,11 @@ function samePathIdentity(first: WorkspaceDiskPathState, second: WorkspaceDiskPa
   return (
     first.device === second.device && first.inode === second.inode && first.kind === second.kind
   );
+}
+
+function maximumBigInt(first: bigint, second: bigint, third: bigint): bigint {
+  const maximum = first > second ? first : second;
+  return maximum > third ? maximum : third;
 }
 
 function assertPositiveBigInt(value: bigint, name: string): bigint {

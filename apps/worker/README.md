@@ -1,9 +1,10 @@
 # Agentic Review Windows Worker
 
-The Worker is one headless, outbound-only Windows process that can be managed as a service. It
-registers with the Server, claims
-fenced leases, prepares an isolated Git worktree, runs Codex and approved validation commands, and
-submits one inline structured result.
+The Worker is one outbound-only Windows process. It registers with the Server, claims fenced
+leases, prepares isolated Git worktrees, and executes Codex reviews or configured validation
+profiles. It submits a structured result and uploads bounded, scoped evidence assets when required.
+Headless deployments can run as a service. Windows desktop UI validation requires a dedicated
+active, unlocked interactive session and an exclusive session lease.
 
 The admitted repositories and revisions are trusted execution inputs. Process and disk limits are
 retained as reliability controls rather than hostile-code containment. The Worker receives no
@@ -15,7 +16,10 @@ The production entry point is `src/main.ts`, bundled as `dist/worker.mjs`. When 
 enabled it composes:
 
 - `WorkerService` for registration, claims, heartbeats, lease fencing, drain, and terminal replay;
-- `ReviewJobExecutor` for Codex review and validation jobs;
+- `ProfileJobExecutor` for frozen profile jobs, with `ReviewJobExecutor` retaining legacy and
+  isolated model review execution;
+- `HeadlessValidationCheckRunner` and `UiProfileRunner` for typed checks and Windows/Web scenarios;
+- `EvidenceUploader` for finalized screenshots, steps, and browser traces;
 - `StdioProcessHostClient` and the native ProcessHost for Job Object process-tree supervision;
 - the ProcessHost global named mutex for one execution Worker per resolved data root;
 - `ProductionWorkspaceDiskBudget` for bounded attempt storage and orphan cleanup; and
@@ -23,6 +27,10 @@ enabled it composes:
 
 The historical Control and Executor role bundles are not production entry points. ADR 0029
 replaces their credential-isolation threat model with one trusted-code Worker process.
+ADR 0031 adds profile execution and bounded evidence without restoring the split-worker design.
+Runtime capability labels are generated from prepared components and interactive-session readiness;
+deployment labels cannot enable an unavailable driver. See the
+[profile runtime settings](../../deploy/worker/README.md#profile-validation-runtime).
 
 ## Shared repositories and worktrees
 
@@ -32,6 +40,16 @@ envelope `baseSha` and the GitHub pull request head ref with full history, verif
 and requires a valid merge base. It supports arbitrary base refs, including `dev`, with no `main`
 assumption or fallback. It then creates a detached worktree
 for the exact head SHA beneath `WORKER_WORKSPACE_ROOT_DIRECTORY`.
+Issue validation fetches only the exact commit authorized by its operator and frozen plan.
+Issue triage uses a non-repository snapshot workspace. Profile checks and model review have separate
+workspace directories under the same real lease, so model edits cannot certify a changed PR.
+
+Use a short workspace root when validating Windows projects with nested package lifecycle scripts.
+Filesystem long-path support does not guarantee that every tool can launch children from those
+directories. M24 reproduced `cmd.exe` child startup failures at long working-directory lengths with
+Node 24.20.0; pnpm 9.14.4 surfaced an unreadable-stream error. A fresh shorter workspace allowed the
+same pinned source and dependency installation to complete. See the
+[actual execution ledger](../../docs/design/2026-09-07-production-validation-acceptance.md).
 
 The current Git environment disables credential helpers and uses an anonymous GitHub HTTPS URL, so
 private repositories are not supported by this MVP.
@@ -51,12 +69,35 @@ deployment profile.
 
 Workspace admission, monitoring, and cleanup use bounded disk operations.
 `WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS` defaults to `30000` and accepts `100..300000` milliseconds;
-each operation's deadline includes time waiting for the accounting lock and is shared by all
-snapshot retries. `WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT` defaults to `100000` and accepts
+the accounting queue and the operation each have this deadline, and snapshot retries share the
+operation's deadline. A single Worker-wide monitoring timer shares each in-flight workspace scan
+across active reservations, while checking every reservation's own quota and identity. Final
+checks start a fresh scan after the command finishes. `WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT`
+defaults to `100000` and accepts
 `1..1000000` entries per accounting scan. Larger pnpm trees may need higher limits based on host I/O
 performance. Raising them permits longer scans and delays disk-budget failure detection; per-attempt
 and total quotas, reserved headroom, and the free-space floor remain enforced. Shared Git accounting
 continues to use its separate `WORKER_GIT_SHARED_SCAN_*` settings.
+
+Profile step deadlines include preparation and post-process verification, not only the command's
+wall time. Size build/test budgets using the full lifecycle on the intended dependency tree and
+host. A command can exit zero while the step remains inconclusive because its fresh verification
+exceeded the deadline. Publish a new profile version when changing these budgets; retained Run
+plans and results keep their original settings. Source observation and cleanup also require their
+own configured budget; increasing a scan timeout alone does not increase those deadlines.
+`WORKER_VALIDATION_CLEANUP_TIMEOUT_MS` defaults to `30000` and accepts `1000..300000`
+milliseconds. This independent budget covers final source observation and cleanup for headless
+and UI validation. Configure it for the complete final verification lifecycle, including any
+in-flight disk scan, fresh scans, Git observation, and configured cleanup commands. Increasing it
+can delay final lease settlement and desktop release after cancellation; individual command,
+process, disk, and source-integrity checks remain enforced.
+
+After ProcessHost acquires the data-root singleton, startup removes all unreserved attempt
+directories in bounded batches before claiming work, including attempts from a recent crash.
+Recovery retains the path and directory-identity checks used by ordinary cleanup. Temporary
+capacity shortages pause lease claims with zero available slots; the Worker checks again every
+five seconds and resumes when capacity returns. Unsafe paths and failed accounting still drain
+the Worker.
 
 Attempt disk scans cover preparation and active review commands. Fixed Git cleanup and maintenance
 commands use cleanup path guards and managed process limits without scanning the attempt being

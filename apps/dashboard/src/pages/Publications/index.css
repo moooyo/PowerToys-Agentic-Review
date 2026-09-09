@@ -1,0 +1,12 @@
+.publications-page {
+  padding: 24px;
+  width: 100%;
+}
+.publications-page .ant-pagination {
+  margin-top: 20px;
+}
+@media (max-width: 767px) {
+  .publications-page {
+    padding: 16px;
+  }
+}

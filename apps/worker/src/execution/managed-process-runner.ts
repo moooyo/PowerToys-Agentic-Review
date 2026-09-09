@@ -8,6 +8,8 @@ import type {
 export interface ManagedProcessRunContext {
   readonly processHost: ProcessHostClient;
   readonly signal: AbortSignal;
+  /** Synchronous notification of observed non-empty process output; receives no output bytes. */
+  readonly onProgress?: () => void;
 }
 
 export interface ManagedProcessRunResult {
@@ -24,6 +26,7 @@ export type ManagedProcessRunFailureCode =
   | "NON_ZERO_EXIT"
   | "OUTPUT_TRUNCATED"
   | "OUTPUT_READ_FAILED"
+  | "PROGRESS_OBSERVER_FAILED"
   | "INVALID_UTF8_OUTPUT";
 
 export class ManagedProcessRunError extends Error {
@@ -89,7 +92,10 @@ class StreamCapture {
   readonly #chunks: Buffer[] = [];
   #byteLength = 0;
 
-  public constructor(private readonly budget: SharedCaptureBudget) {}
+  public constructor(
+    private readonly budget: SharedCaptureBudget,
+    private readonly onProgress: () => void,
+  ) {}
 
   public async drain(stream: Readable): Promise<void> {
     for await (const value of stream) {
@@ -98,6 +104,8 @@ class StreamCapture {
         : value instanceof Uint8Array
           ? Buffer.from(value)
           : Buffer.from(String(value), "utf8");
+      if (chunk.byteLength === 0) continue;
+      this.onProgress();
       const accepted = this.budget.take(chunk);
       if (accepted !== null) {
         this.#chunks.push(Buffer.from(accepted));
@@ -153,8 +161,18 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
     const budget = new SharedCaptureBudget(
       Math.min(spec.limits.maximumOutputBytes, this.#maximumCapturedOutputBytes),
     );
-    const stdoutCapture = new StreamCapture(budget);
-    const stderrCapture = new StreamCapture(budget);
+    let progressFailure: { readonly cause: unknown } | undefined;
+    const reportProgress = (): void => {
+      if (context.signal.aborted || progressFailure !== undefined) return;
+      try {
+        context.onProgress?.();
+      } catch (cause) {
+        // An observer failure must not stop either output drain or race process-tree teardown.
+        progressFailure = { cause };
+      }
+    };
+    const stdoutCapture = new StreamCapture(budget, reportProgress);
+    const stderrCapture = new StreamCapture(budget, reportProgress);
     const [processOutcome, stdoutOutcome, stderrOutcome] = await Promise.allSettled([
       managed.completed,
       stdoutCapture.drain(managed.stdout),
@@ -172,6 +190,17 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
         context.signal,
         processOutcome.status === "rejected" ? processOutcome.reason : undefined,
         errorOutput(),
+      );
+    }
+    if (progressFailure !== undefined) {
+      throw new ManagedProcessRunError(
+        "PROGRESS_OBSERVER_FAILED",
+        "Managed process progress observation failed after process and output settlement.",
+        {
+          ...errorOutput(),
+          cause: progressFailure.cause,
+          exitCode: processOutcome.status === "fulfilled" ? processOutcome.value.exitCode : null,
+        },
       );
     }
     if (stdoutOutcome.status === "rejected" || stderrOutcome.status === "rejected") {

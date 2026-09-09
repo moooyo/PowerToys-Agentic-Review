@@ -36,9 +36,83 @@ shared Git, and binaries before orphan cleanup. It does not overwrite the profil
 authentication cache into a task.
 
 Use `deploy/worker/worker-config.template.psd1` as the deployment baseline. It includes every
-supported `WORKER_*` runtime environment variable consumed by `loadWorkerConfig()` and
-`loadExecutionConfig()`, plus Worker-side shared Git cache and conservative GC controls. Process
-environment values such as `NODE_ENV` remain owned by the service manager.
+supported `WORKER_*` runtime environment variable consumed by `loadWorkerConfig()`,
+`loadExecutionConfig()`, and `loadValidationRuntimeConfig()`, plus Worker-side shared Git cache and
+conservative GC controls. Process environment values such as `NODE_ENV` remain owned by the service manager.
+
+## Profile validation runtime
+
+Headless profile validation defaults to enabled when execution is enabled. Disable it explicitly with
+`WORKER_VALIDATION_HEADLESS_ENABLED=false` if this deployment does not provide that runner.
+`WORKER_VALIDATION_CLEANUP_TIMEOUT_MS` defaults to `30000` and accepts `1000..300000` milliseconds.
+This independent budget includes final source observation and cleanup. Large dependency trees
+may require an explicit increase to finish fresh filesystem verification; all path and disk
+checks still apply, and a timeout keeps the source state unknown.
+Validation runner settings cannot enable execution when `WORKER_EXECUTION_ENABLED` is false.
+
+Optional UI and Issue validation advice is enabled with `WORKER_VALIDATION_SUMMARY_ENABLED=true`.
+It defaults to disabled. The published workflow prompt is frozen in either mode; a disabled summary
+is displayed as not requested. `WORKER_VALIDATION_SUMMARY_TIMEOUT_MS` defaults to `60000` and accepts
+`10000..300000` milliseconds. The remaining job and no-progress budgets may allow less time or skip
+the summary. Advice uses a separate read-only model workspace and the already observed structured
+checks/evidence; it cannot replace runner outcomes or imply that the model inspected screenshots.
+Ordinary summary failures remain visible without retrying successful deterministic checks.
+
+Summary execution is implemented and wired, but production model acceptance is pending. Keep the
+opt-in disabled for the baseline deployment. M24's actual elevated, model-backed `codex exec`
+probe denied controlled file writes but connected to its owned loopback listener, so production
+network isolation is not accepted. The earlier unelevated helper probe does not supersede this
+observation. Actual summary composition also rejects ambiguous protected provider-header values;
+those values have not been declassified. See the
+[summary execution contract](../../docs/design/2026-09-07-optional-validation-summary.md) and
+[production acceptance ledger](../../docs/design/2026-09-07-production-validation-acceptance.md)
+for the independent runner/model conclusions and remaining scope.
+
+Web validation requires `WORKER_VALIDATION_WEB_ENABLED=true` and an installed browser at the exact
+absolute `.exe` path in `WORKER_VALIDATION_WEB_BROWSER_EXECUTABLE_PATH`. Deploy `web-driver.mjs`
+and the build-produced `node_modules/playwright-core` directory next to `worker.mjs`; do not replace
+that private runtime with a dependency link into an unrelated checkout. Preparation checks the
+driver, browser, and packaged runtime files. It never downloads a browser or searches `PATH`.
+Web validation also requires the bundled `windows-driver-entry.ps1` and the trusted Windows
+PowerShell executable for TCP listener ownership checks, even when desktop UI validation is disabled.
+
+Windows validation requires `WORKER_VALIDATION_WINDOWS_ENABLED=true`, `WORKER_MAX_SLOTS=1`,
+the deployed `windows-driver-entry.ps1` beside `worker.mjs`, and an explicit
+`WORKER_VALIDATION_DESKTOP_LOCK_DIRECTORY`. Provision one canonical, private lock directory shared
+by every Worker node and server using the same Windows account and desktop session. Grant that
+account the access needed to create and retain lease/quarantine records. Do not use per-node or
+per-workspace lock directories. The interactive-session readiness probe is separate from file
+preparation; enabling a setting alone is not evidence that a desktop is usable.
+
+Startup supplies the trusted `git`, `node`, `powershell`, and `cmd` aliases. Additional installed
+tools use `WORKER_VALIDATION_COMMANDS_JSON`, a bounded array of `{name,path,sha256?}` entries:
+
+```powershell
+@{
+    WORKER_VALIDATION_COMMANDS_JSON = '[{"name":"dotnet","path":"C:\\Program Files\\dotnet\\dotnet.exe"}]'
+    WORKER_VALIDATION_SECRET_FILES_JSON = '{"test-access-token":"D:\\AgenticReview\\Secrets\\test-token.txt"}'
+}
+```
+
+Aliases are case-insensitive, unique, and cannot replace the supplied system tools. Optional SHA-256
+pins must match the installed file. Profile executable fields accept registered aliases or explicit
+`./build/app.exe` paths into the current checkout. Bare filenames, arbitrary absolute paths, other
+relative paths, links, and redirected checkout ancestors are rejected. The executable resolver
+never allows a repository's same-named binary to replace a registered tool.
+
+Secret mappings contain only operator-provisioned absolute file paths. Keep secret bytes out of
+configuration JSON, prompts, command arguments, and diagnostics. Protect the files and their parent
+directories with Windows ACLs, outside workspaces, temporary roots, and shared Git state. Trusted
+tool and driver directories must also be protected against replacement by executed repository
+code. The runtime verifies file identities and rejects links, but does not infer Windows ACL
+protection from Unix mode bits. System executables may use normal Windows servicing hard links;
+custom tools, generated executables, and secret files must have one link.
+
+Secret reads use a bounded stable handle and strict UTF-8: at most 64 KiB and 32767 characters,
+non-empty, without BOM or NUL. Content is exact, including any trailing newline. Unknown references,
+file changes, and invalid content fail without logging bytes. Driver and browser paths are deployment
+inputs; capability labels are generated only after runtime preparation and applicable readiness
+checks succeed.
 
 ## Launch
 

@@ -1,4 +1,5 @@
 import type {
+  DashboardHealthComponent,
   DashboardJobDetailRead,
   DashboardJobListQuery,
   DashboardJobListResponse,
@@ -11,6 +12,9 @@ import type {
   JobExecutionEnvelope,
   JobExecutionTemplate,
   NormalizedSchedulingEvent,
+  OperatorPrincipal,
+  OperatorRepositoryPermission,
+  RunFailureDiagnostics,
   RunTerminalResponse,
   SelfOrAllowlistPolicy,
   WorkerState,
@@ -30,20 +34,54 @@ import type {
   FindOperatorSessionInput,
   OperatorSession,
 } from "../security/operator-auth.js";
+import type { ConfigurationAuditOperationMap } from "./configuration-audit.js";
+import type { EvaluationAdjudicationOperationMap } from "./evaluation-adjudication.js";
+import type { EvaluationAssessmentOperationMap } from "./evaluation-assessments.js";
+import type { EvaluationEvidenceOperationMap } from "./evaluation-evidence.js";
+import type { EvaluationManagementOperationMap } from "./evaluation-management.js";
+import type { EvaluationModelInvocationOperationMap } from "./evaluation-model-invocations.js";
+import type { EvaluationBatchOperationMap } from "./evaluation-queries.js";
+import type { EvaluationReproductionOperationMap } from "./evaluation-reproduction.js";
+import type { EvaluationResultOperationMap } from "./evaluation-results.js";
+import type { EvidenceAssetOperationMap, EvidenceStorageOptions } from "./evidence-assets.js";
+import type { FindingDispositionOperationMap } from "./finding-dispositions.js";
 import type {
   CommitGitHubPollingReconciliationInput,
   CommitGitHubPollingReconciliationResult,
   WriteGitHubPollingProjectionInput,
 } from "./github-polling-state.js";
+import type { RepositoryOperationMap } from "./managed-repositories.js";
+import type { ModelInvocationOperationMap } from "./model-invocations.js";
+import type { ModelRuntimeRegistryOperationMap } from "./model-runtime-registry.js";
+import type { NotificationOperationMap } from "./notifications.js";
+import type { OperatorAccessOperationMap } from "./operator-access.js";
 import type {
   CleanupExpiredOperatorAuthInput,
   CleanupExpiredOperatorAuthResult,
   PurgeOperatorAuthForRecoveryResult,
 } from "./operator-auth.js";
+import type { OperatorRequestInput } from "./operator-request.js";
+import type { OperatorReviewRunOperationMap } from "./operator-review-runs.js";
+import type { PromptConfigurationOperationMap } from "./prompt-configuration.js";
+import type { PublicationOperationMap } from "./publications.js";
+import type { ReviewRunDecisionOperationMap } from "./review-run-decisions.js";
+import type { ReviewRunQueryOperationMap } from "./review-run-queries.js";
+import type { ReviewRunOperationMap } from "./review-runs.js";
+import type { SchedulingConfigurationOperationMap } from "./scheduling-configuration.js";
+import type { SchedulingDiagnosticsOperationMap } from "./scheduling-diagnostics.js";
+import type { ValidationDispatchOperationMap } from "./validation-dispatch.js";
+import type { ValidationSummaryInputOperationMap } from "./validation-summary-inputs.js";
 export interface DatabaseWorkerOptions {
   readonly databasePath: string;
   readonly migrationsDirectory: string;
   readonly startupTimeoutMilliseconds?: number;
+  readonly evidenceStorage?: EvidenceStorageOptions;
+  // The owner enforces recovery restrictions after checking exact evaluation mutation replays.
+  readonly recoveryMaintenance?: boolean;
+  // Trusted server configuration; never supplied by an Operator HTTP body or session claims.
+  readonly operatorAccess?: { readonly administrators: readonly OperatorPrincipal[] };
+  // Publisher identity is public configuration. Its delivery credential never enters the owner.
+  readonly publicationPublisher?: { readonly githubUserId: number };
 }
 
 export interface RegisterWorkerInput {
@@ -196,6 +234,7 @@ export interface LeaseFailureInput {
   readonly leaseGeneration: number;
   readonly failureCode: string;
   readonly failureMessage: string;
+  readonly diagnostics?: RunFailureDiagnostics;
   readonly retryable: boolean;
   readonly retryDelaySeconds: number;
 }
@@ -229,6 +268,7 @@ export interface WebhookDeliveryInput {
 }
 
 export interface IngestSchedulingEventInput {
+  readonly allowScheduling?: boolean;
   readonly event: NormalizedSchedulingEvent;
   readonly policy: SelfOrAllowlistPolicy;
   readonly delivery: WebhookDeliveryInput | null;
@@ -236,6 +276,7 @@ export interface IngestSchedulingEventInput {
 }
 
 export interface IngestSchedulingEventResult {
+  readonly schedulingSuppressed?: boolean;
   readonly outcome: "processed" | "duplicate";
   readonly eventId: string;
   readonly repositoryId: string;
@@ -252,7 +293,48 @@ export interface IngestSchedulingEventResult {
   readonly cancelRequestedJobCount: number;
 }
 
-export interface DatabaseOperationMap {
+export interface DatabaseOperationMap
+  extends RepositoryOperationMap,
+    PromptConfigurationOperationMap,
+    ReviewRunOperationMap,
+    OperatorReviewRunOperationMap,
+    ReviewRunQueryOperationMap,
+    ConfigurationAuditOperationMap,
+    ValidationDispatchOperationMap,
+    EvidenceAssetOperationMap,
+    OperatorAccessOperationMap,
+    ReviewRunDecisionOperationMap,
+    FindingDispositionOperationMap,
+    SchedulingDiagnosticsOperationMap,
+    SchedulingConfigurationOperationMap,
+    PublicationOperationMap,
+    NotificationOperationMap,
+    EvaluationManagementOperationMap,
+    EvaluationBatchOperationMap,
+    EvaluationReproductionOperationMap,
+    EvaluationResultOperationMap,
+    EvaluationEvidenceOperationMap,
+    EvaluationAdjudicationOperationMap,
+    EvaluationAssessmentOperationMap,
+    ModelRuntimeRegistryOperationMap,
+    EvaluationModelInvocationOperationMap,
+    ModelInvocationOperationMap,
+    ValidationSummaryInputOperationMap {
+  readonly admitPendingJobs: {
+    readonly input: { readonly limit?: number };
+    readonly output: { readonly examinedJobCount: number; readonly admittedJobCount: number };
+  };
+  readonly operatorRequest: {
+    readonly input: OperatorRequestInput;
+    readonly output: unknown;
+  };
+  readonly operatorCheckPermission: {
+    readonly input: {
+      readonly repositoryId?: string;
+      readonly permission?: OperatorRepositoryPermission;
+    };
+    readonly output: { readonly authorized: true };
+  };
   readonly ping: {
     readonly input: Record<string, never>;
     readonly output: DatabaseHealth;
@@ -328,7 +410,7 @@ export interface DatabaseOperationMap {
     readonly output: DashboardWorkerListResponse;
   };
   readonly getSystemSnapshot: {
-    readonly input: Record<string, never>;
+    readonly input: { readonly githubHealth?: DashboardHealthComponent };
     readonly output: DashboardSystemRead;
   };
   readonly beginOperatorLogin: {

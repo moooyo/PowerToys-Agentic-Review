@@ -32,6 +32,9 @@ importers:
       '@ant-design/pro-components':
         specifier: 3.1.14-2
         version: 3.1.14-2(antd@6.6.2(date-fns@2.30.0)(moment@2.30.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@8.1.1)
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
       '@tanstack/react-query':
         specifier: 5.102.8
         version: 5.102.8(react@19.2.8)
@@ -118,9 +121,15 @@ importers:
       '@agentic-review/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@agentic-review/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
+      playwright-core:
+        specifier: 1.63.0
+        version: 1.63.0
       smol-toml:
         specifier: 1.8.0
         version: 1.8.0
@@ -137,6 +146,9 @@ importers:
 
   packages/codex:
     dependencies:
+      '@agentic-review/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
@@ -167,6 +179,9 @@ importers:
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
       vitest:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.13.3)(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(less@4.9.0(supports-color@8.1.1))(lightningcss@1.32.0)(terser@5.51.2))
@@ -5710,6 +5725,11 @@ packages:
 
   piscina@4.9.4:
     resolution: {integrity: sha512-RyBDr2VheQ8ZfH3N8SzQZHztqVyOtadTwLnUYof6gdj5161/eu2wNhCbGl5GHnNKDpnkicJYpKtL2J+y/gk6XA==}
+
+  playwright-core@1.63.0:
+    resolution: {integrity: sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   point-in-polygon@1.1.0:
     resolution: {integrity: sha512-3ojrFwjnnw8Q9242TzgXuTD+eKiutbzyslcq1ydfu82Db2y+Ogbmyrkpv0Hgj31qwT3lbS9+QAAO/pIQM35XRw==}
@@ -14060,6 +14080,8 @@ snapshots:
   piscina@4.9.4:
     optionalDependencies:
       '@napi-rs/nice': 1.1.1
+
+  playwright-core@1.63.0: {}
 
   point-in-polygon@1.1.0: {}
 

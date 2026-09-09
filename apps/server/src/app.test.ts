@@ -20,6 +20,10 @@ describe("Server application Worker authentication wiring", () => {
     expect(source).toContain("workerScope.rateLimit(");
     expect(source).toContain("credentialScope.rateLimit(");
     expect(source).toContain("operatorWorkerCredentialRequestsPerMinute = 300");
+    expect(source).toContain(
+      "registerOperatorConfigurationRateLimits(configurationScope, operatorAuth)",
+    );
+    expect(source).not.toContain("configurationScope.rateLimit({ max: 120");
     expect(source).toContain("error.statusCode === 429");
     expect(source).toContain('code: "request_rate_limited"');
     expect(source).not.toContain("workerCertificateBindings");

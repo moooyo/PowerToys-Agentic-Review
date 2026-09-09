@@ -14,6 +14,184 @@ const workerAuthProfilePath = "C:\\ProgramData\\AgenticReview\\Worker\\worker-au
 const workerNodeId = "worker-config:test";
 const workerToken = `arw1_${"A".repeat(43)}`;
 
+describe("validation-only Worker configuration", () => {
+  function environment(): NodeJS.ProcessEnv {
+    const value: NodeJS.ProcessEnv = {
+      ...enabledEnvironment(),
+      WORKER_MODEL_EXECUTION_ENABLED: "false",
+    };
+    for (const name of [
+      "WORKER_CODEX_EXECUTABLE_PATH",
+      "WORKER_CODEX_SHA256",
+      "WORKER_CODEX_VERSION",
+      "WORKER_EXECUTION_PROFILE_DIRECTORY",
+    ])
+      delete value[name];
+    return value;
+  }
+  it("loads without Codex identity or persistent profile paths while retaining command budgets", () => {
+    const configured = loadWorkerConfig(environment());
+    expect(configured.modelExecutionEnabled).toBe(false);
+    expect(configured.execution).toMatchObject({
+      modelExecutionEnabled: false,
+      validationMaximumHardTimeoutMs: 3_600_000,
+      validationResourceLimits: {
+        maximumProcessCount: 32,
+        maximumMemoryBytes: 8 * gibibyte,
+        maximumOutputBytes: 8 * mebibyte,
+      },
+    });
+    for (const field of [
+      "codexExecutablePath",
+      "codexSha256",
+      "codexVersion",
+      "profileDirectory",
+      "evaluationModel",
+      "codexResourceLimits",
+      "codexMaximumHardTimeoutMs",
+    ])
+      expect(configured.execution).not.toHaveProperty(field);
+    expect(configured.capabilities.codexVersion).toBe("not-configured");
+    expect(configured.capabilities.labels.modelExecution).toBe("disabled");
+  });
+  it("ignores unused model paths and identities instead of probing or validating them", () => {
+    const configured = loadWorkerConfig({
+      ...environment(),
+      WORKER_CODEX_EXECUTABLE_PATH: "unused",
+      WORKER_CODEX_SHA256: "unused",
+      WORKER_CODEX_VERSION: "",
+      WORKER_EXECUTION_PROFILE_DIRECTORY: "unused",
+    });
+    expect(configured.execution).not.toHaveProperty("profileDirectory");
+    expect(configured.execution).not.toHaveProperty("codexExecutablePath");
+  });
+  it.each([
+    { WORKER_VALIDATION_SUMMARY_ENABLED: "true" },
+    { WORKER_VALIDATION_SUMMARY_TIMEOUT_MS: "60000" },
+    { WORKER_EVALUATION_MODEL_BACKEND: "app_server" },
+    { WORKER_EVALUATION_MODEL_REVIEW_POLICY_SHA256: "a".repeat(64) },
+  ])("rejects model configuration conflicts before any credential file access %#", (conflict) => {
+    const reader = vi.fn(() => workerAuthProfileBytes());
+    expect(() =>
+      loadWorkerConfigProduction(
+        { ...environment(), ...conflict },
+        { workerAuthFileReader: reader },
+      ),
+    ).toThrow(/Model execution is disabled/u);
+    expect(reader).not.toHaveBeenCalled();
+  });
+  it("allows explicitly disabled ordinary summaries", () => {
+    expect(() =>
+      loadWorkerConfig({ ...environment(), WORKER_VALIDATION_SUMMARY_ENABLED: "false" }),
+    ).not.toThrow();
+  });
+  it.each([true, false])(
+    "removes forged model capability labels when model execution enabled=%s",
+    (enabled) => {
+      const configured = loadWorkerConfig({
+        ...enabledEnvironment(),
+        WORKER_MODEL_EXECUTION_ENABLED: String(enabled),
+        WORKER_LABELS_JSON: JSON.stringify({
+          modelExecution: "enabled",
+          MODELEXECUTION: "disabled",
+          ModelExecution: "enabled",
+          site: "fixture",
+        }),
+      });
+      expect(
+        Object.keys(configured.capabilities.labels).filter(
+          (name) => name.toLowerCase() === "modelexecution",
+        ),
+      ).toEqual(enabled ? [] : ["modelExecution"]);
+      expect(configured.capabilities.labels.site).toBe("fixture");
+    },
+  );
+  it("leaves the default enabled execution shape unchanged", () => {
+    const configured = loadWorkerConfig(enabledEnvironment());
+    expect(configured).not.toHaveProperty("modelExecutionEnabled");
+    expect(configured.execution).not.toHaveProperty("modelExecutionEnabled");
+    expect(configured.execution).toHaveProperty("codexExecutablePath");
+    expect(configured.capabilities.labels).not.toHaveProperty("modelExecution");
+  });
+});
+
+describe("evaluation model startup configuration", () => {
+  const pins = () => ({
+    WORKER_EVALUATION_MODEL_BACKEND: "app_server",
+    WORKER_EVALUATION_MODEL_WORKER_BUNDLE_SHA256: "d".repeat(64),
+    WORKER_EVALUATION_MODEL_NODE_SHA256: "e".repeat(64),
+    WORKER_EVALUATION_MODEL_REVIEW_POLICY_SHA256: "f".repeat(64),
+  });
+  it("keeps composition absent by default and snapshots explicit pins without granting capability", () => {
+    expect(loadWorkerConfig(enabledEnvironment()).execution?.evaluationModel).toBeUndefined();
+    const configured = loadWorkerConfig({
+      ...enabledEnvironment(),
+      ...pins(),
+      WORKER_CODEX_VERSION: "0.145.0",
+    });
+    expect(configured.execution?.evaluationModel).toEqual({
+      backend: "app_server",
+      workerBundleSha256: "d".repeat(64),
+      nodeExecutableSha256: "e".repeat(64),
+      reviewLaunchPolicySha256: "f".repeat(64),
+    });
+    expect(Object.isFrozen(configured.execution?.evaluationModel)).toBe(true);
+    expect(configured.capabilities.labels.validationEvaluation).toBeUndefined();
+  });
+  it.each(Object.keys(pins()))("rejects incomplete configuration missing %s", (key) => {
+    const environment: NodeJS.ProcessEnv = {
+      ...enabledEnvironment(),
+      ...pins(),
+      WORKER_CODEX_VERSION: "0.145.0",
+    };
+    delete environment[key];
+    expect(() => loadWorkerConfig(environment)).toThrow();
+  });
+  it.each(["exec", " app_server", "APP_SERVER", ""])(
+    "rejects unsupported backend %j",
+    (backend) => {
+      expect(() =>
+        loadWorkerConfig({
+          ...enabledEnvironment(),
+          ...pins(),
+          WORKER_CODEX_VERSION: "0.145.0",
+          WORKER_EVALUATION_MODEL_BACKEND: backend,
+        }),
+      ).toThrow();
+    },
+  );
+  it("rejects disabled execution, mismatched CLI versions, malformed pins and unsupported policy fields", () => {
+    expect(() => loadWorkerConfig({ ...baseEnvironment(), ...pins() })).toThrow();
+    expect(() => loadWorkerConfig({ ...enabledEnvironment(), ...pins() })).toThrow();
+    expect(() =>
+      loadWorkerConfig({
+        ...enabledEnvironment(),
+        ...pins(),
+        WORKER_CODEX_VERSION: "0.145.0",
+        WORKER_EVALUATION_MODEL_NODE_SHA256: "E".repeat(64),
+      }),
+    ).toThrow();
+    expect(() =>
+      loadWorkerConfig({
+        ...enabledEnvironment(),
+        ...pins(),
+        WORKER_CODEX_VERSION: "0.145.0",
+        WORKER_EVALUATION_MODEL_SUMMARY_POLICY_DIGEST: "a".repeat(64),
+      }),
+    ).toThrow();
+  });
+  it("snapshots an explicitly configured independent summary policy", () => {
+    const configured = loadWorkerConfig({
+      ...enabledEnvironment(),
+      ...pins(),
+      WORKER_CODEX_VERSION: "0.145.0",
+      WORKER_EVALUATION_MODEL_SUMMARY_POLICY_SHA256: "a".repeat(64),
+    });
+    expect(configured.execution?.evaluationModel?.summaryLaunchPolicySha256).toBe("a".repeat(64));
+    expect(configured.capabilities.labels.validationEvaluation).toBeUndefined();
+  });
+});
+
 describe("Worker transport policy", () => {
   it.each(["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"])(
     "allows explicit development HTTP for loopback origin %s",
@@ -349,7 +527,6 @@ describe("loadWorkerConfig execution mode", () => {
       minimumFreeDiskBytes: 10 * gibibyte,
       diskScanEntryLimit: 100_000,
       diskScanTimeoutMs: 30_000,
-      orphanRetentionHours: 24,
       orphanScanLimit: 100,
       gitSharedCacheMaxBytes: 64 * gibibyte,
       gitSharedMinimumFreeDiskBytes: 10 * gibibyte,
@@ -703,7 +880,6 @@ describe("Worker execution disk policy", () => {
     ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "99"],
     ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "300001"],
     ["WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS", "Infinity"],
-    ["WORKER_EXECUTION_ORPHAN_RETENTION_HOURS", "0"],
     ["WORKER_EXECUTION_ORPHAN_SCAN_LIMIT", "10001"],
     ["WORKER_GIT_SHARED_CACHE_MAX_BYTES", String(gibibyte - 1)],
     ["WORKER_GIT_SHARED_MINIMUM_FREE_DISK_BYTES", String(gibibyte - 1)],
@@ -734,7 +910,6 @@ describe("Worker execution disk policy", () => {
       WORKER_EXECUTION_MINIMUM_FREE_DISK_BYTES: String(12 * gibibyte),
       WORKER_EXECUTION_DISK_SCAN_ENTRY_LIMIT: "500000",
       WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS: "120000",
-      WORKER_EXECUTION_ORPHAN_RETENTION_HOURS: "48",
       WORKER_EXECUTION_ORPHAN_SCAN_LIMIT: "250",
       WORKER_GIT_SHARED_CACHE_MAX_BYTES: String(96 * gibibyte),
       WORKER_GIT_SHARED_MINIMUM_FREE_DISK_BYTES: String(14 * gibibyte),
@@ -750,7 +925,6 @@ describe("Worker execution disk policy", () => {
       minimumFreeDiskBytes: 12 * gibibyte,
       diskScanEntryLimit: 500_000,
       diskScanTimeoutMs: 120_000,
-      orphanRetentionHours: 48,
       orphanScanLimit: 250,
       gitSharedCacheMaxBytes: 96 * gibibyte,
       gitSharedMinimumFreeDiskBytes: 14 * gibibyte,

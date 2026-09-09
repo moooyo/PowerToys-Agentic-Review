@@ -49,20 +49,20 @@ export function CredentialRevealModal({
         </Button>
       }
       keyboard={false}
-      maskClosable={false}
+      mask={{ closable: false }}
       onCancel={onClose}
       open={credential !== null}
       title={operation === "created" ? "Worker credential created" : "Worker token rotated"}
       width={680}
     >
-      <Space className="credential-reveal" direction="vertical" size={16}>
+      <Space className="credential-reveal" orientation="vertical" size={16}>
         <Alert
           description={
             operation === "created"
               ? "The token cannot be recovered after this window is closed. Store it in the worker authentication file before continuing."
               : "The previous token is already invalid. Replace it in the worker authentication file before closing this window."
           }
-          message="Copy this token now"
+          title="Copy this token now"
           showIcon
           type="warning"
         />
@@ -73,14 +73,14 @@ export function CredentialRevealModal({
             <span>ONE-TIME WORKER ACCESS</span>
           </div>
 
-          <Space className="credential-reveal__identity" direction="vertical" size={3}>
+          <Space className="credential-reveal__identity" orientation="vertical" size={3}>
             <Typography.Text className="credential-reveal__label">Worker node ID</Typography.Text>
             <Typography.Text className="credential-reveal__node mono">
               {credential?.workerNodeId}
             </Typography.Text>
           </Space>
 
-          <Space className="credential-reveal__token-block" direction="vertical" size={8}>
+          <Space className="credential-reveal__token-block" orientation="vertical" size={8}>
             <Typography.Text className="credential-reveal__label">Bearer token</Typography.Text>
             <Input.TextArea
               aria-label="One-time worker token"

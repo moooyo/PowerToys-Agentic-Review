@@ -1,0 +1,193 @@
+.evaluations-page {
+  min-width: 0;
+  color: var(--ant-color-text, #141414);
+  font-size: 14px;
+}
+.evaluations-page .page-header h1 {
+  font-weight: 600;
+}
+.evaluations-page .ant-alert {
+  margin-block: 12px;
+}
+.evaluation-page-toolbar,
+.evaluation-subheading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.evaluation-page-toolbar {
+  margin-bottom: 16px;
+  color: var(--ant-color-text-secondary, #8c8c8c);
+}
+.evaluation-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.evaluation-kind-workspace {
+  container-type: inline-size;
+  container-name: evaluation-workspace;
+}
+.evaluation-selected-batch {
+  scroll-margin-top: 24px;
+}
+.evaluation-selected-batch:focus-visible {
+  outline: 2px solid var(--ant-color-primary, #1677ff);
+  outline-offset: 4px;
+}
+.evaluation-editor-area,
+.evaluation-sources,
+.evaluation-version,
+.evaluation-batch-workspace,
+.evaluation-case-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.evaluation-arm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-block: 16px;
+}
+.evaluation-check-select {
+  width: 100%;
+  min-width: 200px;
+}
+.evaluation-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.evaluation-cell-result {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.evaluation-result-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.evaluation-blockers {
+  max-height: 240px;
+  padding-inline-start: 20px;
+  overflow: auto;
+  font-size: 12px;
+}
+.evaluation-sources {
+  margin-top: 20px;
+}
+.evaluation-suite-choice.ant-btn {
+  width: 100%;
+  height: auto;
+  min-height: 60px;
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  white-space: normal;
+}
+.evaluation-suite-choice > span:first-child {
+  font-weight: 600;
+}
+.evaluation-suite-navigation .ant-list-item {
+  padding: 4px 0;
+  border: 0;
+}
+.evaluation-meta {
+  display: block;
+  color: var(--ant-color-text-secondary, #8c8c8c);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.evaluation-suite-choice.ant-btn-primary .evaluation-meta {
+  color: inherit;
+  opacity: 0.85;
+}
+.evaluation-source-signature {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-block: 8px;
+  white-space: normal;
+}
+.evaluation-source-signature .ant-space {
+  flex-wrap: wrap;
+}
+.evaluation-source-signature .ant-tag {
+  margin-inline-end: 0;
+}
+.evaluation-case-list > .ant-card {
+  border-inline-start: 3px solid var(--ant-color-primary, #1677ff);
+}
+.evaluation-case-list .ant-card-head-title {
+  white-space: normal;
+}
+.evaluation-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.evaluation-applicability {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.evaluation-criterion,
+.evaluation-finding {
+  padding: 12px;
+  margin-block: 12px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  background: var(--ant-color-fill-quaternary, #f5f5f5);
+  border-radius: var(--ant-border-radius, 6px);
+}
+.evaluation-subheading {
+  margin-block: 12px;
+}
+.evaluation-source-body {
+  max-height: 360px;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--ant-color-fill-quaternary, #f5f5f5);
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  font: inherit;
+}
+.evaluation-version-select,
+.evaluation-access-notice {
+  width: 100%;
+}
+.evaluation-name.ant-btn {
+  padding: 0;
+  height: auto;
+  white-space: normal;
+  text-align: left;
+}
+@container evaluation-workspace (max-width: 1300px) {
+  .evaluation-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 1400px) {
+  .evaluation-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 767px) {
+  .evaluation-field-grid,
+  .evaluation-arm-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .evaluation-subheading .ant-space {
+    flex-wrap: wrap;
+  }
+}

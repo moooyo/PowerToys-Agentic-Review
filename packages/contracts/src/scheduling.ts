@@ -120,6 +120,12 @@ export const NormalizedSchedulingEventSchema = Type.Union([
 ]);
 export type NormalizedSchedulingEvent = Static<typeof NormalizedSchedulingEventSchema>;
 
+export const NewRevisionAuthorizationPolicySchema = Type.Union([
+  Type.Literal("require_new_authorization"),
+  Type.Literal("inherit_authorized_epoch"),
+]);
+export type NewRevisionAuthorizationPolicy = Static<typeof NewRevisionAuthorizationPolicySchema>;
+
 export const SelfOrAllowlistPolicySchema = Type.Object(
   {
     kind: Type.Literal("self_or_allowlist"),
@@ -130,7 +136,8 @@ export const SelfOrAllowlistPolicySchema = Type.Object(
       uniqueItems: true,
     }),
     unknownActorPolicy: Type.Literal("deny"),
-    newRevisionPolicy: Type.Literal("inherit_authorized_epoch"),
+    // Missing fields in persisted policy snapshots require fresh pull request authorization.
+    newRevisionPolicy: Type.Optional(NewRevisionAuthorizationPolicySchema),
   },
   { additionalProperties: false },
 );

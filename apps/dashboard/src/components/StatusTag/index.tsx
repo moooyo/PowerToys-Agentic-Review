@@ -1,68 +1,59 @@
-import {
-  CheckCircleFilled,
-  ClockCircleFilled,
-  CloseCircleFilled,
-  ExclamationCircleFilled,
-  MinusCircleFilled,
-  SyncOutlined,
-} from "@ant-design/icons";
 import { Tag } from "antd";
-import type { ReactNode } from "react";
+import "./index.css";
 
-const statusPresentation: Record<string, { color: string; icon: ReactNode; label: string }> = {
-  healthy: { color: "success", icon: <CheckCircleFilled />, label: "Healthy" },
-  active: { color: "success", icon: <CheckCircleFilled />, label: "Active" },
-  online: { color: "success", icon: <CheckCircleFilled />, label: "Online" },
-  disabled: { color: "default", icon: <MinusCircleFilled />, label: "Disabled" },
-  busy: { color: "processing", icon: <SyncOutlined spin />, label: "Busy" },
-  draining: { color: "warning", icon: <ClockCircleFilled />, label: "Draining" },
-  offline: { color: "default", icon: <MinusCircleFilled />, label: "Offline" },
-  queued: { color: "default", icon: <ClockCircleFilled />, label: "Queued" },
-  leased: { color: "processing", icon: <SyncOutlined spin />, label: "Leased" },
-  running: { color: "processing", icon: <SyncOutlined spin />, label: "Running" },
+const statusPresentation: Record<string, { color: string; label: string }> = {
+  healthy: { color: "success", label: "Healthy" },
+  active: { color: "success", label: "Active" },
+  online: { color: "success", label: "Online" },
+  disabled: { color: "default", label: "Disabled" },
+  busy: { color: "processing", label: "Busy" },
+  draining: { color: "warning", label: "Draining" },
+  offline: { color: "default", label: "Offline" },
+  queued: { color: "default", label: "Queued" },
+  awaiting_admission: { color: "processing", label: "Awaiting admission" },
+  not_scheduled: { color: "default", label: "Not scheduled" },
+  leased: { color: "processing", label: "Leased" },
+  running: { color: "processing", label: "Running" },
   cancel_requested: {
     color: "warning",
-    icon: <ClockCircleFilled />,
     label: "Cancel requested",
   },
-  preparing: { color: "processing", icon: <SyncOutlined spin />, label: "Preparing" },
-  reviewing: { color: "processing", icon: <SyncOutlined spin />, label: "Reviewing" },
-  codex_review: { color: "processing", icon: <SyncOutlined spin />, label: "Codex review" },
-  validating: { color: "processing", icon: <SyncOutlined spin />, label: "Validating" },
-  validation: { color: "processing", icon: <SyncOutlined spin />, label: "Validation" },
+  preparing: { color: "processing", label: "Preparing" },
+  reviewing: { color: "processing", label: "Reviewing" },
+  codex_review: { color: "processing", label: "Codex review" },
+  validating: { color: "processing", label: "Validating" },
+  validation: { color: "processing", label: "Validation" },
   codex_revision: {
     color: "processing",
-    icon: <SyncOutlined spin />,
     label: "Codex revision",
   },
-  uploading: { color: "processing", icon: <SyncOutlined spin />, label: "Uploading" },
-  completing: { color: "processing", icon: <SyncOutlined spin />, label: "Completing" },
-  cancelling: { color: "warning", icon: <ClockCircleFilled />, label: "Cancelling" },
-  revising: { color: "processing", icon: <SyncOutlined spin />, label: "Revising" },
+  uploading: { color: "processing", label: "Uploading" },
+  completing: { color: "processing", label: "Completing" },
+  cancelling: { color: "warning", label: "Cancelling" },
+  revising: { color: "processing", label: "Revising" },
   waiting_approval: {
     color: "warning",
-    icon: <ClockCircleFilled />,
     label: "Waiting approval",
   },
-  publishing: { color: "processing", icon: <SyncOutlined spin />, label: "Publishing" },
-  retry_waiting: { color: "warning", icon: <ClockCircleFilled />, label: "Retry waiting" },
-  done: { color: "success", icon: <CheckCircleFilled />, label: "Done" },
-  succeeded: { color: "success", icon: <CheckCircleFilled />, label: "Succeeded" },
-  pending: { color: "processing", icon: <SyncOutlined spin />, label: "Pending" },
-  ready: { color: "cyan", icon: <CheckCircleFilled />, label: "Ready" },
-  published: { color: "success", icon: <CheckCircleFilled />, label: "Published" },
-  approved: { color: "success", icon: <CheckCircleFilled />, label: "Approved" },
-  rejected: { color: "error", icon: <CloseCircleFilled />, label: "Rejected" },
-  revoked: { color: "error", icon: <CloseCircleFilled />, label: "Revoked" },
-  failed: { color: "error", icon: <CloseCircleFilled />, label: "Failed" },
-  unavailable: { color: "error", icon: <CloseCircleFilled />, label: "Unavailable" },
-  degraded: { color: "warning", icon: <ExclamationCircleFilled />, label: "Degraded" },
-  cancelled: { color: "default", icon: <MinusCircleFilled />, label: "Cancelled" },
-  stale: { color: "warning", icon: <ExclamationCircleFilled />, label: "Stale" },
-  dead_letter: { color: "error", icon: <CloseCircleFilled />, label: "Dead letter" },
-  unknown: { color: "warning", icon: <ExclamationCircleFilled />, label: "Unknown" },
-  not_connected: { color: "default", icon: <MinusCircleFilled />, label: "Not connected" },
-  expired: { color: "default", icon: <MinusCircleFilled />, label: "Expired" },
+  publishing: { color: "processing", label: "Publishing" },
+  retry_waiting: { color: "warning", label: "Retry waiting" },
+  done: { color: "default", label: "Finished" },
+  succeeded: { color: "success", label: "Succeeded" },
+  pending: { color: "processing", label: "Pending" },
+  ready: { color: "processing", label: "Ready" },
+  published: { color: "success", label: "Published" },
+  approved: { color: "success", label: "Approved" },
+  rejected: { color: "error", label: "Rejected" },
+  revoked: { color: "error", label: "Revoked" },
+  failed: { color: "error", label: "Failed" },
+  unavailable: { color: "error", label: "Unavailable" },
+  degraded: { color: "warning", label: "Degraded" },
+  cancelled: { color: "default", label: "Cancelled" },
+  stale: { color: "warning", label: "Superseded" },
+  dead_letter: { color: "error", label: "Retry limit reached" },
+  unknown: { color: "default", label: "Unknown" },
+  not_connected: { color: "default", label: "Not connected" },
+  expired: { color: "default", label: "Expired" },
 };
 
 export interface StatusTagProps {
@@ -72,12 +63,11 @@ export interface StatusTagProps {
 export function StatusTag({ status }: StatusTagProps) {
   const presentation = statusPresentation[status] ?? {
     color: "default",
-    icon: <MinusCircleFilled />,
     label: status.replaceAll("_", " "),
   };
 
   return (
-    <Tag color={presentation.color} icon={presentation.icon}>
+    <Tag className="status-tag" color={presentation.color}>
       {presentation.label}
     </Tag>
   );

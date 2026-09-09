@@ -11,6 +11,7 @@ import {
   DatabaseGitHubPollingState,
   type GitHubPollingReconciliationEventInput,
 } from "../../dist/database/github-polling-state.js";
+import type { IngestSchedulingEventInput } from "../../dist/database/protocol.js";
 import {
   type GitHubPollingActiveProjection,
   type GitHubPollingProjectionKey,
@@ -19,6 +20,7 @@ import {
   type GitHubTimelineEvent,
   reconcileGitHubPolling,
 } from "../../dist/github/poller.js";
+import { createPullRequestRevisionKey } from "../../dist/github/revision-key.js";
 
 const migrationsDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
 
@@ -94,7 +96,13 @@ const projection = (
           observedAt: "2026-08-30T10:06:00.000Z",
           sourceUpdatedAt: "2026-08-30T10:05:00.000Z",
         },
-        activeRequests: [{ requestKind: "assignment", openedSourceEventId }],
+        activeRequests: [
+          {
+            requestKind: "assignment",
+            openedSourceEventId,
+            openedAt: "2026-08-30T10:04:00.000Z",
+          },
+        ],
       },
     ],
   };
@@ -234,6 +242,23 @@ const pullRequestReconciliationEntry = (
   };
 };
 
+const webhookOpening = (
+  sourceEventId: string,
+  activeProjection: GitHubPollingActiveProjection,
+): IngestSchedulingEventInput => {
+  const entry = reconciliationEntry(sourceEventId, activeProjection);
+  return {
+    ...entry,
+    event: { ...entry.event, source: "webhook", eventId: `webhook-event:${sourceEventId}` },
+    delivery: {
+      deliveryId: sourceEventId,
+      eventName: "issues",
+      receivedAt: entry.event.observedAt,
+      payloadSha256: sha256(sourceEventId),
+    },
+  };
+};
+
 const createFixture = async (): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "agentic-review-github-polling-"));
   const databasePath = join(directory, "server.sqlite");
@@ -263,6 +288,319 @@ describe("DatabaseGitHubPollingState", () => {
     const state = new DatabaseGitHubPollingState(clients[0] as DatabaseClient);
 
     await expect(state.readActiveProjection(key, undefined)).resolves.toBeNull();
+  });
+
+  it("seeds an uncheckpointed webhook request without writing state or crossing repository and reviewer scopes", async () => {
+    const { clients, databasePath } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const openingProjection = projection("reviewer", "webhook:uncheckpointed");
+    const opening = webhookOpening("webhook:uncheckpointed", openingProjection);
+    const result = await client.request("ingestSchedulingEvent", opening);
+
+    expect(result).toMatchObject({ authorized: true, jobCreated: true });
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual({
+      ...openingProjection,
+      workItems: openingProjection.workItems.map((item) => ({
+        ...item,
+        needsRevisionObservation: true,
+      })),
+    });
+    await expect(
+      state.readActiveProjection({ ...key, reviewerGithubUserId: 101 }, undefined),
+    ).resolves.toBeNull();
+    await expect(
+      state.readActiveProjection({ ...key, githubRepositoryId: 2 }, undefined),
+    ).resolves.toBeNull();
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        reader.prepare("SELECT COUNT(*) AS count FROM github_polling_projections").get(),
+      ).toEqual({
+        count: 0,
+      });
+      expect(reader.prepare("SELECT COUNT(*) AS count FROM github_events").get()).toEqual({
+        count: 1,
+      });
+      expect(reader.prepare("SELECT COUNT(*) AS count FROM jobs").get()).toEqual({ count: 1 });
+    } finally {
+      reader.close();
+    }
+  });
+
+  it("adds missing webhook work items while retaining checkpoint snapshots", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const checkpoint = projection("reviewer", "poll:already-observed");
+    await state.writeActiveProjection(key, checkpoint, undefined);
+    const extra = projection("reviewer", "webhook:missing-item");
+    const extraProjection: GitHubPollingActiveProjection = {
+      ...extra,
+      workItems: extra.workItems.map((item) => ({
+        ...item,
+        workItem: {
+          ...item.workItem,
+          githubWorkItemId: 502,
+          githubNodeId: "I_502",
+          number: 502,
+          htmlUrl: "https://github.com/microsoft/PowerToys/issues/502",
+        },
+        revision: { ...item.revision, githubWorkItemId: 502 },
+      })),
+    };
+    await client.request(
+      "ingestSchedulingEvent",
+      webhookOpening("webhook:missing-item", extraProjection),
+    );
+
+    const restored = await state.readActiveProjection(key, undefined);
+
+    expect(restored?.workItems).toEqual([
+      ...checkpoint.workItems,
+      ...extraProjection.workItems.map((item) => ({ ...item, needsRevisionObservation: true })),
+    ]);
+  });
+
+  it("merges request kinds authorized at different revisions and clears seed observation after a complete checkpoint", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const opening = (
+      requestKind: "assignment" | "review_request",
+      headSha: string,
+      occurredAt: string,
+    ): IngestSchedulingEventInput => {
+      const sourceEventId = `webhook:${requestKind}`;
+      const base = webhookOpening(sourceEventId, projection("reviewer", sourceEventId));
+      if (base.event.action !== "request_opened") throw new Error("Expected an opening fixture.");
+      const event = {
+        ...base.event,
+        requestKind,
+        occurredAt,
+        observedAt: occurredAt,
+        workItem: {
+          ...base.event.workItem,
+          kind: "pull_request",
+          isDraft: false,
+          htmlUrl: "https://github.com/microsoft/PowerToys/pull/501",
+          updatedAt: occurredAt,
+        },
+        revision: {
+          kind: "pull_request",
+          githubRepositoryId: key.githubRepositoryId,
+          githubWorkItemId: 501,
+          baseSha: "a".repeat(40),
+          headSha,
+          revisionKey: createPullRequestRevisionKey("a".repeat(40), headSha),
+          sourceUpdatedAt: occurredAt,
+          observedAt: occurredAt,
+        },
+      } satisfies NormalizedSchedulingEvent;
+      return {
+        ...base,
+        schedule: pullRequestReconciliationEntry(event).schedule,
+        policy: { ...pollingPolicy, newRevisionPolicy: "require_new_authorization" },
+        event,
+      };
+    };
+    const assignment = opening("assignment", "b".repeat(40), "2026-08-30T10:04:00.000Z");
+    const requested = opening("review_request", "c".repeat(40), "2026-08-30T10:05:00.000Z");
+    await client.request("ingestSchedulingEvent", assignment);
+    const firstSeed = await state.readActiveProjection(key, undefined);
+    if (firstSeed === null) throw new Error("Expected a seeded assignment.");
+    const checkpoint: GitHubPollingActiveProjection = {
+      ...firstSeed,
+      workItems: firstSeed.workItems.map(({ needsRevisionObservation: _marker, ...item }) => item),
+    };
+    await state.writeActiveProjection(key, checkpoint, undefined);
+    await client.request("ingestSchedulingEvent", requested);
+
+    const merged = await state.readActiveProjection(key, undefined);
+
+    expect(merged?.workItems[0]).toMatchObject({
+      workItem: assignment.event.workItem,
+      revision: assignment.event.revision,
+      needsRevisionObservation: true,
+      activeRequests: [
+        { requestKind: "assignment", openedSourceEventId: assignment.event.sourceEventId },
+        { requestKind: "review_request", openedSourceEventId: requested.event.sourceEventId },
+      ],
+    });
+    if (merged === null) throw new Error("Expected a merged checkpoint.");
+    const completed: GitHubPollingActiveProjection = {
+      ...merged,
+      workItems: merged.workItems.map(({ needsRevisionObservation: _marker, ...item }) => ({
+        ...item,
+        workItem: requested.event.workItem,
+        revision: requested.event.revision,
+      })),
+    };
+    await state.writeActiveProjection(key, completed, undefined);
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(completed);
+  });
+
+  it("replaces a stale checkpoint origin after a newer webhook epoch opens", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const checkpoint = projection("reviewer", "webhook:old-origin");
+    const first = webhookOpening("webhook:old-origin", checkpoint);
+    await client.request("ingestSchedulingEvent", first);
+    await state.writeActiveProjection(key, checkpoint, undefined);
+    await client.request("ingestSchedulingEvent", {
+      event: {
+        ...first.event,
+        eventId: "reconciliation:old-origin-closed",
+        source: "reconciliation",
+        sourceEventId: "reconciliation:old-origin-closed",
+        action: "request_closed",
+        requestKind: "assignment",
+        closeReason: "assignment_removed",
+        occurredAt: "2026-08-30T10:06:00.000Z",
+      },
+      policy: pollingPolicy,
+      schedule: null,
+      delivery: null,
+    });
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(checkpoint);
+    const replacement: IngestSchedulingEventInput = {
+      ...first,
+      event: {
+        ...first.event,
+        eventId: "webhook-event:new-origin",
+        sourceEventId: "webhook:new-origin",
+        occurredAt: "2026-08-30T10:07:00.000Z",
+        observedAt: "2026-08-30T10:07:00.000Z",
+      },
+      delivery: {
+        deliveryId: "webhook:new-origin",
+        eventName: "issues",
+        receivedAt: "2026-08-30T10:07:00.000Z",
+        payloadSha256: sha256("webhook:new-origin"),
+      },
+    };
+    const reopened = await client.request("ingestSchedulingEvent", replacement);
+    expect(reopened.openedRequestEpochId).not.toBeNull();
+
+    const restored = await state.readActiveProjection(key, undefined);
+
+    expect(restored?.workItems[0]).toEqual({
+      ...checkpoint.workItems[0],
+      needsRevisionObservation: true,
+      activeRequests: [
+        {
+          requestKind: "assignment",
+          openedSourceEventId: "webhook:new-origin",
+          openedAt: "2026-08-30T10:07:00.000Z",
+        },
+      ],
+    });
+  });
+
+  it("retains a persisted polling source that proves the same cross-transport request origin", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const openingProjection = projection("reviewer", "webhook:shared-origin");
+    await client.request(
+      "ingestSchedulingEvent",
+      webhookOpening("webhook:shared-origin", openingProjection),
+    );
+    const pollSourceId = "poll:shared-origin";
+    const checkpoint: GitHubPollingActiveProjection = {
+      ...openingProjection,
+      workItems: openingProjection.workItems.map((item) => ({
+        ...item,
+        activeRequests: item.activeRequests.map((request) => ({
+          ...request,
+          openedSourceEventId: pollSourceId,
+        })),
+      })),
+    };
+    const pollEntry = reconciliationEntry(pollSourceId, checkpoint);
+    await state.commitReconciliation(key, checkpoint, [pollEntry], undefined);
+
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual(checkpoint);
+    await expect(client.request("listJobs", {})).resolves.toMatchObject({ total: 1 });
+  });
+
+  it("replaces distinct same-transport origins even when actor and timestamps match", async () => {
+    const { clients } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const checkpoint = projection("reviewer", "poll:first-same-clock");
+    const first = reconciliationEntry("poll:first-same-clock", checkpoint);
+    const original = await state.commitReconciliation(key, checkpoint, [first], undefined);
+    const replacement = await client.request("ingestSchedulingEvent", {
+      ...first,
+      event: {
+        ...first.event,
+        eventId: "poll-event:second-same-clock",
+        sourceEventId: "poll:second-same-clock",
+      },
+      delivery: null,
+    });
+    expect(replacement.openedRequestEpochId).not.toBe(original[0]?.openedRequestEpochId);
+
+    const restored = await state.readActiveProjection(key, undefined);
+
+    expect(restored?.workItems[0]).toMatchObject({
+      needsRevisionObservation: true,
+      activeRequests: [
+        { requestKind: "assignment", openedSourceEventId: "poll:second-same-clock" },
+      ],
+    });
+  });
+
+  it("seeds from the opening snapshot when a newer stored work item is already closed", async () => {
+    const { clients, databasePath } = await createFixture();
+    const client = clients[0] as DatabaseClient;
+    const state = new DatabaseGitHubPollingState(client);
+    const openingProjection = projection("reviewer", "webhook:open-snapshot");
+    const opening = webhookOpening("webhook:open-snapshot", openingProjection);
+    await client.request("ingestSchedulingEvent", {
+      ...opening,
+      event: { ...opening.event, occurredAt: "2026-08-30T10:10:00.000Z" },
+    });
+    await client.request("ingestSchedulingEvent", {
+      event: {
+        ...opening.event,
+        eventId: "reconciliation:older-close",
+        source: "reconciliation",
+        sourceEventId: "reconciliation:older-close",
+        action: "work_item_closed",
+        requestKind: null,
+        actor: null,
+        target: null,
+        closeReason: "work_item_closed",
+        occurredAt: "2026-08-30T10:07:00.000Z",
+        observedAt: "2026-08-30T10:11:00.000Z",
+        workItem: {
+          ...opening.event.workItem,
+          state: "closed",
+          updatedAt: "2026-08-30T10:07:00.000Z",
+          closedAt: "2026-08-30T10:07:00.000Z",
+        },
+      },
+      policy: pollingPolicy,
+      delivery: null,
+      schedule: null,
+    });
+    const reader = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(reader.prepare("SELECT state FROM work_items").get()).toEqual({ state: "closed" });
+      expect(reader.prepare("SELECT status FROM request_epochs").get()).toEqual({
+        status: "active",
+      });
+    } finally {
+      reader.close();
+    }
+
+    const restored = await state.readActiveProjection(key, undefined);
+
+    expect(restored?.workItems[0]?.workItem).toEqual(opening.event.workItem);
+    expect(restored?.workItems[0]?.activeRequests[0]?.openedAt).toBe("2026-08-30T10:10:00.000Z");
   });
 
   it("atomically replaces and reads a complete projection", async () => {
@@ -495,7 +833,7 @@ describe("DatabaseGitHubPollingState", () => {
     }
   });
 
-  it("rejects changed normalized data for an existing event key without advancing its checkpoint", async () => {
+  it("rejects changed source identity for an existing event key without advancing its checkpoint", async () => {
     const { clients } = await createFixture();
     const client = clients[0] as DatabaseClient;
     const state = new DatabaseGitHubPollingState(client);
@@ -507,7 +845,7 @@ describe("DatabaseGitHubPollingState", () => {
       schedule: null,
       event: {
         ...entry.event,
-        workItem: { ...entry.event.workItem, title: "Changed immutable event data" },
+        actor: { ...reviewer, githubUserId: reviewer.githubUserId + 1 },
       },
     };
     const replacement = projection("reviewer", "poll:immutable:2");
@@ -566,7 +904,10 @@ describe("DatabaseGitHubPollingState", () => {
       delivery: null,
     });
     expect(eventResult.outcome).toBe("processed");
-    await expect(state.readActiveProjection(key, undefined)).resolves.toBeNull();
+    await expect(state.readActiveProjection(key, undefined)).resolves.toEqual({
+      ...checkpoint,
+      workItems: checkpoint.workItems.map((item) => ({ ...item, needsRevisionObservation: true })),
+    });
 
     const replay = await state.commitReconciliation(key, checkpoint, [entry], undefined);
     const jobs = await client.request("listJobs", {});

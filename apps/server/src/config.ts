@@ -1,7 +1,14 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { ServerOptions as HttpsServerOptions } from "node:https";
-import { isAbsolute, resolve } from "node:path";
-import type { SelfOrAllowlistPolicy } from "@agentic-review/contracts";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  ManagedRepositoryNameSchema,
+  type NewRevisionAuthorizationPolicy,
+  type OperatorPrincipal,
+  type SelfOrAllowlistPolicy,
+} from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
+import type { EvidenceStorageOptions } from "./database/evidence-assets.js";
 import type { OperatorAuthConfig } from "./security/operator-auth.js";
 import type { OperatorOidcClientConfig } from "./security/operator-auth-oidc.js";
 
@@ -21,13 +28,23 @@ export interface GitHubPollingConfig {
   readonly intervalSeconds: number;
 }
 
-export interface GitHubIntegrationConfig {
+export interface GitHubPublicationConfig {
+  readonly token: string;
+  readonly githubUserId: number;
+}
+
+export interface GitHubLegacyBootstrapConfig {
   readonly repositories: readonly GitHubRepositoryTargetConfig[];
   readonly reviewer: {
     readonly githubUserId: number;
     readonly login: string;
   };
   readonly authorizationPolicy: SelfOrAllowlistPolicy;
+}
+
+export interface GitHubIntegrationConfig {
+  /** One-time environment import; database-managed deployments leave this undefined. */
+  readonly legacyBootstrap: GitHubLegacyBootstrapConfig | undefined;
   readonly promptDirectory: string;
   readonly webhook: GitHubWebhookConfig | undefined;
   readonly polling: GitHubPollingConfig | undefined;
@@ -43,6 +60,7 @@ export interface ServerConfig {
   readonly port: number;
   readonly recoveryMaintenance: boolean;
   readonly databasePath: string;
+  readonly evidenceStorage?: EvidenceStorageOptions;
   readonly migrationsDirectory: string;
   readonly protocolVersion: string;
   readonly heartbeatIntervalSeconds: number;
@@ -56,7 +74,9 @@ export interface ServerConfig {
   readonly allowInsecureHttp: boolean;
   readonly tls: HttpsServerOptions | undefined;
   readonly github: GitHubIntegrationConfig | undefined;
+  readonly publication?: GitHubPublicationConfig;
   readonly operatorAuth: OperatorAuthRuntimeConfig | undefined;
+  readonly operatorAccess?: { readonly administrators: readonly OperatorPrincipal[] };
   readonly dashboardDirectory: string | undefined;
 }
 
@@ -80,6 +100,70 @@ const readPositiveInteger = (
   }
 
   return value;
+};
+
+const readEvidenceStorage = (
+  environment: NodeJS.ProcessEnv,
+  repositoryRoot: string,
+  databasePath: string,
+): EvidenceStorageOptions => {
+  const configuredDirectory = environment.AGENTIC_REVIEW_EVIDENCE_DIRECTORY?.trim();
+  if (
+    configuredDirectory !== undefined &&
+    configuredDirectory !== "" &&
+    (!isAbsolute(configuredDirectory) || configuredDirectory.includes("\u0000"))
+  ) {
+    throw new Error(
+      "AGENTIC_REVIEW_EVIDENCE_DIRECTORY must be an absolute path without NUL characters.",
+    );
+  }
+  const evidenceDirectory = resolve(
+    configuredDirectory === undefined || configuredDirectory === ""
+      ? resolve(repositoryRoot, ".evidence")
+      : configuredDirectory,
+  );
+  if (dirname(evidenceDirectory) === evidenceDirectory) {
+    throw new Error("AGENTIC_REVIEW_EVIDENCE_DIRECTORY must not be a filesystem root.");
+  }
+  const relativeToDatabase = relative(dirname(databasePath), evidenceDirectory);
+  if (
+    relativeToDatabase === "" ||
+    (relativeToDatabase !== ".." &&
+      !relativeToDatabase.startsWith(`..${sep}`) &&
+      !isAbsolute(relativeToDatabase))
+  ) {
+    throw new Error(
+      "AGENTIC_REVIEW_EVIDENCE_DIRECTORY must be outside the private SQLite parent directory.",
+    );
+  }
+  const dayMilliseconds = 24 * 60 * 60 * 1_000;
+  return Object.freeze({
+    evidenceDirectory,
+    globalQuotaBytes: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_EVIDENCE_GLOBAL_QUOTA_BYTES",
+      10 * 1_024 ** 3,
+      1_024 ** 4,
+    ),
+    globalAssetLimit: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_EVIDENCE_GLOBAL_ASSET_LIMIT",
+      10_000,
+      1_000_000,
+    ),
+    retentionMs: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_EVIDENCE_RETENTION_MS",
+      7 * dayMilliseconds,
+      365 * dayMilliseconds,
+    ),
+    incompleteUploadTtlMs: readPositiveInteger(
+      environment,
+      "AGENTIC_REVIEW_EVIDENCE_INCOMPLETE_UPLOAD_TTL_MS",
+      dayMilliseconds,
+      7 * dayMilliseconds,
+    ),
+  });
 };
 
 const readBoolean = (environment: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean => {
@@ -154,6 +238,42 @@ const readSecretText = (value: Buffer, name: string): string => {
   return text;
 };
 
+const readPublicationConfig = (
+  environment: NodeJS.ProcessEnv,
+  operatorAuth: OperatorAuthRuntimeConfig | undefined,
+): GitHubPublicationConfig | undefined => {
+  if (!readStrictBoolean(environment, "AGENTIC_REVIEW_PUBLICATION_ENABLED", false))
+    return undefined;
+  if (operatorAuth === undefined)
+    throw new Error("GitHub publication requires configured operator authentication.");
+  const userIdName = "AGENTIC_REVIEW_PUBLICATION_GITHUB_USER_ID";
+  readRequired(environment, userIdName);
+  const githubUserId = readPositiveInteger(environment, userIdName, 0);
+  const tokenName = "AGENTIC_REVIEW_PUBLICATION_TOKEN_PATH";
+  const path = readRequired(environment, tokenName);
+  if (!isAbsolute(path) || path.includes("\u0000"))
+    throw new Error(`${tokenName} must be an absolute path without NUL characters.`);
+  let bytes: Buffer;
+  try {
+    const state = statSync(path);
+    if (!state.isFile() || state.size < 1 || state.size > 8192)
+      throw new Error("Invalid publication credential file.");
+    bytes = readFileSync(path);
+    if (bytes.byteLength !== state.size) throw new Error("Publication credential changed.");
+  } catch {
+    throw new Error(`${tokenName} must identify a stable regular file of 1 through 8192 bytes.`);
+  }
+  let token: string;
+  try {
+    token = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+  } catch {
+    throw new Error(`${tokenName} must contain valid UTF-8 text.`);
+  }
+  if (!/^[\x21-\x7e]+$/u.test(token))
+    throw new Error(`${tokenName} must contain a nonempty ASCII token without whitespace.`);
+  return Object.freeze({ token, githubUserId });
+};
+
 const readPositiveIntegerValue = (value: unknown, name: string): number => {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new Error(`${name} must be a positive safe integer.`);
@@ -195,7 +315,7 @@ const readGitHubRepositories = (
       `GitHub repository target ${index}.githubRepositoryId`,
     );
     const fullName = record.fullName;
-    if (typeof fullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(fullName)) {
+    if (!Value.Check(ManagedRepositoryNameSchema, fullName)) {
       throw new Error(`GitHub repository target ${index}.fullName must be an owner/name pair.`);
     }
     const normalizedName = fullName.toLowerCase();
@@ -228,21 +348,50 @@ const readGitHubActorAllowlist = (environment: NodeJS.ProcessEnv): readonly numb
   return ids;
 };
 
-const readGitHubConfig = (
-  environment: NodeJS.ProcessEnv,
-  repositoryRoot: string,
-): GitHubIntegrationConfig | undefined => {
-  const webhookSecret = readOptionalSecretFile(
-    environment,
-    "AGENTIC_REVIEW_GITHUB_WEBHOOK_SECRET_PATH",
+const readNewRevisionPolicy = (environment: NodeJS.ProcessEnv): NewRevisionAuthorizationPolicy => {
+  const value = environment.AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY;
+  if (value === undefined) {
+    return "require_new_authorization";
+  }
+  if (value === "require_new_authorization" || value === "inherit_authorized_epoch") {
+    return value;
+  }
+  throw new Error(
+    "AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY must be require_new_authorization or inherit_authorized_epoch.",
   );
-  const pollingToken = readOptionalSecretFile(environment, "AGENTIC_REVIEW_GITHUB_TOKEN_PATH");
-  if (webhookSecret === undefined && pollingToken === undefined) {
+};
+
+const legacyBootstrapRequiredSettings = [
+  "AGENTIC_REVIEW_GITHUB_REPOSITORIES_JSON",
+  "AGENTIC_REVIEW_GITHUB_TARGET_USER_ID",
+  "AGENTIC_REVIEW_GITHUB_TARGET_LOGIN",
+] as const;
+
+const legacyBootstrapSettings = [
+  ...legacyBootstrapRequiredSettings,
+  "AGENTIC_REVIEW_GITHUB_ALLOWED_ACTOR_IDS_JSON",
+  "AGENTIC_REVIEW_GITHUB_POLICY_VERSION",
+  "AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY",
+] as const;
+
+const readGitHubLegacyBootstrap = (
+  environment: NodeJS.ProcessEnv,
+): GitHubLegacyBootstrapConfig | undefined => {
+  if (!legacyBootstrapSettings.some((name) => environment[name] !== undefined)) {
     return undefined;
   }
-
+  if (legacyBootstrapRequiredSettings.some((name) => !environment[name]?.trim())) {
+    throw new Error(
+      `Legacy GitHub bootstrap requires ${legacyBootstrapRequiredSettings.join(", ")} together. ` +
+        "Omit all legacy bootstrap settings to manage repository authorization in the database.",
+    );
+  }
+  const reviewerIdText = readRequired(environment, "AGENTIC_REVIEW_GITHUB_TARGET_USER_ID");
+  if (!/^[1-9][0-9]*$/u.test(reviewerIdText)) {
+    throw new Error("AGENTIC_REVIEW_GITHUB_TARGET_USER_ID must be a positive base-10 integer.");
+  }
   const reviewerId = readPositiveIntegerValue(
-    Number(readRequired(environment, "AGENTIC_REVIEW_GITHUB_TARGET_USER_ID")),
+    Number(reviewerIdText),
     "AGENTIC_REVIEW_GITHUB_TARGET_USER_ID",
   );
   const reviewerLogin = readRequired(environment, "AGENTIC_REVIEW_GITHUB_TARGET_LOGIN");
@@ -255,6 +404,38 @@ const readGitHubConfig = (
     1,
     2_147_483_647,
   );
+  const allowedActorIds = [...readGitHubActorAllowlist(environment)];
+  Object.freeze(allowedActorIds);
+  return Object.freeze({
+    repositories: Object.freeze([...readGitHubRepositories(environment)]),
+    reviewer: Object.freeze({ githubUserId: reviewerId, login: reviewerLogin }),
+    authorizationPolicy: Object.freeze({
+      kind: "self_or_allowlist",
+      policyVersion,
+      schedulingTargetGithubUserId: reviewerId,
+      allowlistedActorGithubUserIds: allowedActorIds,
+      unknownActorPolicy: "deny",
+      newRevisionPolicy: readNewRevisionPolicy(environment),
+    }),
+  });
+};
+
+const readGitHubConfig = (
+  environment: NodeJS.ProcessEnv,
+  repositoryRoot: string,
+): GitHubIntegrationConfig | undefined => {
+  const legacyBootstrap = readGitHubLegacyBootstrap(environment);
+  const webhookSecret = readOptionalSecretFile(
+    environment,
+    "AGENTIC_REVIEW_GITHUB_WEBHOOK_SECRET_PATH",
+  );
+  const pollingToken = readOptionalSecretFile(environment, "AGENTIC_REVIEW_GITHUB_TOKEN_PATH");
+  if (webhookSecret === undefined && pollingToken === undefined && legacyBootstrap === undefined) {
+    return undefined;
+  }
+  if (webhookSecret?.length === 0) {
+    throw new Error("AGENTIC_REVIEW_GITHUB_WEBHOOK_SECRET_PATH must contain a non-empty secret.");
+  }
   const configuredPromptDirectory = environment.AGENTIC_REVIEW_PROMPT_DIRECTORY?.trim();
   if (
     configuredPromptDirectory !== undefined &&
@@ -265,16 +446,7 @@ const readGitHubConfig = (
   }
 
   return Object.freeze({
-    repositories: readGitHubRepositories(environment),
-    reviewer: Object.freeze({ githubUserId: reviewerId, login: reviewerLogin }),
-    authorizationPolicy: Object.freeze({
-      kind: "self_or_allowlist",
-      policyVersion,
-      schedulingTargetGithubUserId: reviewerId,
-      allowlistedActorGithubUserIds: [...readGitHubActorAllowlist(environment)],
-      unknownActorPolicy: "deny",
-      newRevisionPolicy: "inherit_authorized_epoch",
-    }),
+    legacyBootstrap,
     promptDirectory:
       configuredPromptDirectory === undefined || configuredPromptDirectory === ""
         ? resolve(repositoryRoot, "config", "prompts")
@@ -317,7 +489,7 @@ const readStringArrayJson = (
     throw new Error(`${name} must contain 1 through ${maximumItems} strings.`);
   }
   const strings = value.map((entry, index) => {
-    if (typeof entry !== "string" || entry.length === 0 || entry.trim() !== entry) {
+    if (!isExactIdentityString(entry, 512)) {
       throw new Error(`${name}[${index}] must be a non-empty exact string.`);
     }
     return entry;
@@ -325,7 +497,58 @@ const readStringArrayJson = (
   if (new Set(strings).size !== strings.length) {
     throw new Error(`${name} must contain unique values.`);
   }
-  return strings;
+  return Object.freeze(strings);
+};
+
+const isExactIdentityString = (value: unknown, maximumLength: number): value is string =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= maximumLength &&
+  value.isWellFormed() &&
+  value.trim() === value &&
+  ![...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+
+const readExactIdentityString = (
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  maximumLength: number,
+): string => {
+  const value = environment[name];
+  if (!isExactIdentityString(value, maximumLength))
+    throw new Error(
+      `${name} must be a non-empty exact string of at most ${maximumLength} characters without control characters.`,
+    );
+  return value;
+};
+
+const readOperatorAccessConfig = (
+  environment: NodeJS.ProcessEnv,
+  auth: OperatorAuthRuntimeConfig | undefined,
+): ServerConfig["operatorAccess"] => {
+  if (auth === undefined) return undefined;
+  let administrators: OperatorPrincipal[];
+  if (auth.service.mode === "loopback") {
+    const { issuer, subject } = auth.service.developmentIdentity;
+    administrators = [{ issuer, subject }];
+  } else {
+    const subjects = readStringArrayJson(
+      environment,
+      "AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON",
+      1_024,
+    );
+    const authorized = new Set(auth.service.authorizedSubjects);
+    if (subjects.some((subject) => !authorized.has(subject)))
+      throw new Error(
+        "AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON must be an exact, case-sensitive subset of AGENTIC_REVIEW_OIDC_AUTHORIZED_SUBJECTS_JSON.",
+      );
+    const issuer = auth.oidc?.issuerUrl;
+    if (issuer === undefined)
+      throw new Error("OIDC administrator configuration requires an exact issuerUrl.");
+    administrators = subjects.map((subject) => ({ issuer, subject }));
+  }
+  return Object.freeze({
+    administrators: Object.freeze(administrators.map((principal) => Object.freeze(principal))),
+  });
 };
 
 const readOperatorAuthConfig = (
@@ -381,7 +604,11 @@ const readOperatorAuthConfig = (
         mode: "loopback" as const,
         developmentIdentity: {
           issuer: "urn:agentic-review:development",
-          subject: readRequired(environment, "AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT"),
+          subject: readExactIdentityString(
+            environment,
+            "AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_SUBJECT",
+            512,
+          ),
           displayName:
             environment.AGENTIC_REVIEW_DEVELOPMENT_OPERATOR_NAME?.trim() || "Development Operator",
           email: null,
@@ -427,7 +654,7 @@ const readOperatorAuthConfig = (
       ),
     },
     oidc: {
-      issuerUrl: readRequired(environment, "AGENTIC_REVIEW_OIDC_ISSUER_URL"),
+      issuerUrl: readExactIdentityString(environment, "AGENTIC_REVIEW_OIDC_ISSUER_URL", 2_048),
       clientId: readRequired(environment, "AGENTIC_REVIEW_OIDC_CLIENT_ID"),
       clientSecret: readSecretText(secretBytes, "AGENTIC_REVIEW_OIDC_CLIENT_SECRET_PATH"),
       clientAuthenticationMethod: validatedClientAuthenticationMethod,
@@ -528,6 +755,10 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
         })
       : undefined;
   const operatorAuth = readOperatorAuthConfig(environment, host);
+  const operatorAccess = readOperatorAccessConfig(environment, operatorAuth);
+  const publication = recoveryMaintenance
+    ? undefined
+    : readPublicationConfig(environment, operatorAuth);
   if (recoveryMaintenance && operatorAuth === undefined) {
     throw new Error("Recovery maintenance requires configured operator authentication.");
   }
@@ -537,6 +768,7 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     port: readPositiveInteger(environment, "AGENTIC_REVIEW_PORT", 8080, 65_535),
     recoveryMaintenance,
     databasePath,
+    evidenceStorage: readEvidenceStorage(environment, repositoryRoot, databasePath),
     migrationsDirectory: resolve(
       environment.AGENTIC_REVIEW_MIGRATIONS_DIRECTORY ?? resolve(repositoryRoot, "migrations"),
     ),
@@ -592,7 +824,9 @@ export const loadConfig = (environment: NodeJS.ProcessEnv = process.env): Server
     allowInsecureHttp,
     tls,
     github: recoveryMaintenance ? undefined : readGitHubConfig(environment, repositoryRoot),
+    ...(publication === undefined ? {} : { publication }),
     operatorAuth,
+    ...(operatorAccess === undefined ? {} : { operatorAccess }),
     dashboardDirectory:
       configuredDashboardDirectory === undefined || configuredDashboardDirectory === ""
         ? environment.NODE_ENV?.trim().toLowerCase() === "production"

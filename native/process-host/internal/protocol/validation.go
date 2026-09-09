@@ -73,6 +73,9 @@ func ValidateStartRequest(request StartRequest) error {
 	if err := ValidateEnvironment(request.Spec.Environment); err != nil {
 		return err
 	}
+	if request.Spec.InteractiveStdin && request.Spec.StandardInput != nil {
+		return errors.New("spec.interactiveStdin is mutually exclusive with spec.standardInput")
+	}
 	if request.Spec.StandardInput != nil {
 		if err := validateStandardInput(*request.Spec.StandardInput); err != nil {
 			return err

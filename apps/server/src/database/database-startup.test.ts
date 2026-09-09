@@ -62,14 +62,19 @@ describe("DatabaseClient startup", () => {
     expect(completed).toBe(true);
   });
 
-  it("builds exact schema version 8 without retired pre-release tables", async () => {
+  it("builds the current schema without retired pre-release tables", async () => {
     const directory = await createTemporaryDirectory();
     const database = new DatabaseSync(join(directory, "schema.sqlite"));
     try {
-      expect(runMigrations(database, migrationsDirectory)).toBe(8);
+      expect(runMigrations(database, migrationsDirectory)).toBe(33);
       expect(
-        database.prepare("SELECT filename FROM schema_migrations WHERE version = 8").get(),
-      ).toEqual({ filename: "0008_worker_token_auth_v1.sql" });
+        database.prepare("SELECT filename FROM schema_migrations WHERE version = 11").get(),
+      ).toEqual({ filename: "0011_job_activation.sql" });
+      expect(
+        database.prepare("SELECT filename FROM schema_migrations WHERE version = 13").get(),
+      ).toEqual({
+        filename: "0013_prompt_profiles.sql",
+      });
       expect(
         database
           .prepare(`
@@ -123,7 +128,7 @@ describe("DatabaseClient startup", () => {
       );
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /schema version 7; exact current schema version 8 is required.*Rebuild the database/u,
+        /unsupported pre-release schema version 7; version 8 or newer is required.*Rebuild the database/u,
       );
       await expect(lstat(join(directory, "data", "backups"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -133,6 +138,45 @@ describe("DatabaseClient startup", () => {
         expect(readSchemaVersion(unchangedDatabase)).toBe(7);
       } finally {
         unchangedDatabase.close();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "upgrades an initialized single-Worker database and preserves its credentials",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const versionEightDirectory = await createMigrationPrefixDirectory(directory, 8);
+      const databasePath = join(directory, "data", "state.sqlite");
+      await mkdir(join(directory, "data"), { mode: 0o700 });
+      const previous = new DatabaseSync(databasePath);
+      try {
+        runMigrations(previous, versionEightDirectory);
+        previous
+          .prepare(`
+          INSERT INTO worker_node_credentials (
+            worker_node_id, display_name, token_sha256, auth_state,
+            created_by_issuer, created_by_subject, updated_by_issuer, updated_by_subject,
+            created_at, updated_at
+          ) VALUES ('existing-worker', 'Existing Worker', ?, 'pending',
+            'loopback', 'operator', 'loopback', 'operator', ?, ?)
+        `)
+          .run("a".repeat(64), "2026-09-06T00:00:00.000Z", "2026-09-06T00:00:00.000Z");
+      } finally {
+        previous.close();
+      }
+      await chmod(databasePath, 0o600);
+      await writeInitializationMarker(databasePath);
+      const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
+      try {
+        await expect(client.request("ping", {})).resolves.toMatchObject({ schemaVersion: 33 });
+        await expect(
+          client.request("authenticateWorkerToken", {
+            workerTokenSha256: "a".repeat(64),
+          }),
+        ).resolves.toMatchObject({ outcome: "authenticated", workerNodeId: "existing-worker" });
+      } finally {
+        await client.close();
       }
     },
   );
@@ -392,7 +436,7 @@ describe("DatabaseClient startup", () => {
       await mkdir(dataDirectory, { mode: 0o700 });
       const unmarkedDatabase = new DatabaseSync(databasePath);
       try {
-        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(8);
+        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(33);
       } finally {
         unmarkedDatabase.close();
       }
@@ -415,13 +459,20 @@ describe("DatabaseClient startup", () => {
       await mkdir(join(directory, "data"), { mode: 0o700 });
       const newerDatabase = new DatabaseSync(databasePath);
       try {
-        expect(runMigrations(newerDatabase, migrationsDirectory)).toBe(8);
+        const latestVersion = runMigrations(newerDatabase, migrationsDirectory);
+        expect(latestVersion).toBe(33);
+        const futureVersion = latestVersion + 1;
         newerDatabase
           .prepare(`
             INSERT INTO schema_migrations (version, filename, checksum, applied_at)
-            VALUES (9, '0009_unknown.sql', ?, ?)
+            VALUES (?, ?, ?, ?)
           `)
-          .run("0".repeat(64), "2026-09-04T00:00:00.000Z");
+          .run(
+            futureVersion,
+            `${futureVersion}_unknown.sql`,
+            "0".repeat(64),
+            "2026-09-04T00:00:00.000Z",
+          );
       } finally {
         newerDatabase.close();
       }
@@ -429,7 +480,7 @@ describe("DatabaseClient startup", () => {
       await writeInitializationMarker(databasePath);
 
       await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
-        /Applied migration 9 .* is missing from the deployment/u,
+        /Applied migration \d+ .* is missing from the deployment/u,
       );
     },
   );

@@ -6,10 +6,10 @@ import {
 } from "@agentic-review/contracts";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { describe, expect, it, vi } from "vitest";
-import type { ServerConfig } from "../../dist/config.js";
-import type { DatabaseClient } from "../../dist/database/database-client.js";
-import { DatabaseRequestError } from "../../dist/database/errors.js";
-import { registerWorkerRoutes } from "../../dist/routes/workers.js";
+import type { ServerConfig } from "../config.js";
+import type { DatabaseClient } from "../database/database-client.js";
+import { DatabaseRequestError } from "../database/errors.js";
+import { registerWorkerRoutes } from "./workers.js";
 
 const config: ServerConfig = {
   host: "127.0.0.1",
@@ -71,7 +71,7 @@ const createApp = (
   readonly app: FastifyInstance;
   readonly request: ReturnType<typeof vi.fn>;
 } => {
-  const request = vi.fn(async (operation: string) => {
+  const request = vi.fn(async (operation: string, _input: unknown) => {
     if (operation === "completeLease" || operation === "failLease") {
       throw terminalError;
     }
@@ -100,6 +100,83 @@ const createApp = (
 };
 
 describe("Worker terminal routes", () => {
+  it.each([
+    "EVIDENCE_VERIFIER_BUSY",
+    "EVIDENCE_VERIFIER_TIMEOUT",
+    "EVIDENCE_VERIFIER_CANCELLED",
+    "EVIDENCE_VERIFIER_UNAVAILABLE",
+    "EVIDENCE_VERIFIER_SHUTDOWN",
+    "DATABASE_WORKER_SHUTTING_DOWN",
+  ])(
+    "returns a retryable 503 when asynchronous completion verification reports %s",
+    async (code) => {
+      const error = Object.assign(
+        new DatabaseRequestError("/private/evidence/storage-secret", code),
+        {
+          cause: new Error("Verifier transport and lease-token-secret"),
+        },
+      );
+      const { app, request } = createApp(error);
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/v1/worker/runs/run-attempt-id/complete",
+          payload: { ...leaseIdentity, resultDigest: "a".repeat(64), result: {} },
+        });
+        expect(response.statusCode).toBe(503);
+        expect(response.headers["retry-after"]).toBe("1");
+        expect(response.json()).toEqual({
+          code: code.toLowerCase(),
+          message:
+            code === "DATABASE_WORKER_SHUTTING_DOWN"
+              ? "The service is shutting down. Retry after the indicated delay."
+              : "Evidence verification is temporarily unavailable. Retry after the indicated delay.",
+          retryable: true,
+        });
+        expect(response.body).not.toContain("private/evidence");
+        expect(response.body).not.toContain("storage-secret");
+        expect(response.body).not.toContain("lease-token-secret");
+        expect(request).toHaveBeenCalledExactlyOnceWith(
+          "completeLease",
+          expect.objectContaining(leaseIdentity),
+        );
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    ["EVIDENCE_INVALID_SNAPSHOT", 400],
+    ["EVIDENCE_FILE_UNAVAILABLE", 404],
+    ["EVIDENCE_FILE_CHANGED", 409],
+    ["EVIDENCE_INTEGRITY_FAILED", 409],
+    ["EVIDENCE_SCENARIO_MISMATCH", 409],
+    ["EVIDENCE_VERIFIER_PROTOCOL", 503],
+    ["EVIDENCE_LEASE_REJECTED", 409],
+    ["EVIDENCE_CONFLICT", 409],
+    ["EVIDENCE_UNAVAILABLE", 503],
+  ] as const)("does not retry rejected completion evidence: %s", async (code, statusCode) => {
+    const { app, request } = createApp(
+      new DatabaseRequestError("/private/evidence/storage-secret", code),
+    );
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/worker/runs/run-attempt-id/complete",
+        payload: { ...leaseIdentity, resultDigest: "a".repeat(64), result: {} },
+      });
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.headers["retry-after"]).toBeUndefined();
+      expect(response.json()).toMatchObject({ code: code.toLowerCase(), retryable: false });
+      expect(response.body).not.toContain("private/evidence");
+      expect(response.body).not.toContain("storage-secret");
+      expect(request).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("uses a pending token to atomically register its database-mapped Worker node", async () => {
     const request = vi.fn(async (operation: string, _input: unknown) => {
       if (operation === "authenticateWorkerToken") {

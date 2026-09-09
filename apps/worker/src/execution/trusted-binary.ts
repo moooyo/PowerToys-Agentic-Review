@@ -18,7 +18,8 @@ export type TrustedBinaryVerificationErrorCode =
   | "BINARY_NOT_REGULAR"
   | "BINARY_IDENTITY_CHANGED"
   | "BINARY_DIGEST_MISMATCH"
-  | "BINARY_READ_FAILED";
+  | "BINARY_READ_FAILED"
+  | "INVALID_VERIFICATION_TIME";
 
 export class TrustedBinaryVerificationError extends Error {
   public constructor(
@@ -73,13 +74,89 @@ export interface VerifyTrustedExecutionBinariesOptions {
   readonly codex: TrustedBinarySpec;
   readonly git: TrustedBinarySpec;
   readonly fileIO?: TrustedBinaryFileIO;
+  readonly now?: () => Date;
 }
 
-export interface VerifiedTrustedExecutionBinaries {
+export type VerifyTrustedValidationBinariesOptions = Omit<
+  VerifyTrustedExecutionBinariesOptions,
+  "codex"
+> & {
+  readonly codex?: undefined;
+};
+
+export type TrustedBinaryRole = "processHost" | "codex" | "git";
+
+export interface VerifiedTrustedBinaryFileIdentity {
+  readonly dev: string;
+  readonly ino: string;
+  readonly mtimeMs: string;
+  readonly ctimeMs: string;
+}
+
+export interface VerifiedTrustedBinaryMeasurement {
+  readonly sha256: string;
+  readonly sizeBytes: number;
+  readonly fileIdentity: VerifiedTrustedBinaryFileIdentity;
+  /** Completion time after every binary handle closes and the trusted root is rechecked. */
+  readonly verifiedAtISO: string;
+}
+
+export interface VerifiedTrustedValidationBinaries {
   readonly trustedExecutableRoot: string;
   readonly processHostPath: string;
-  readonly codexPath: string;
   readonly gitPath: string;
+  readonly measurements: Readonly<Record<"processHost" | "git", VerifiedTrustedBinaryMeasurement>>;
+}
+
+export interface VerifiedTrustedExecutionBinaries extends VerifiedTrustedValidationBinaries {
+  readonly codexPath: string;
+  readonly measurements: Readonly<Record<TrustedBinaryRole, VerifiedTrustedBinaryMeasurement>>;
+}
+
+/** The running bundle and interpreter use the same deployment trust boundary as native tools. */
+export async function verifyTrustedWorkerFile(options: {
+  readonly trustedExecutableRoot: string;
+  readonly role: "workerBundle" | "node";
+  readonly file: TrustedBinarySpec;
+  readonly fileIO?: TrustedBinaryFileIO;
+}): Promise<{ readonly path: string; readonly measurement: VerifiedTrustedBinaryMeasurement }> {
+  const io = options.fileIO ?? defaultFileIO;
+  const rootPath = normalizeSafeWindowsPath(
+    options.trustedExecutableRoot,
+    "INVALID_TRUSTED_ROOT",
+    false,
+  );
+  if (windowsPathsEqual(rootPath, win32.parse(rootPath).root))
+    throw verificationError(
+      "INVALID_TRUSTED_ROOT",
+      "Trusted executable root cannot be a filesystem root.",
+    );
+  const executable = options.role === "node";
+  if (!executable && options.role !== "workerBundle")
+    throw verificationError("BINARY_PATH_UNSAFE", "The Worker file role is unsupported.");
+  const path = normalizeSafeWindowsPath(options.file.path, "BINARY_PATH_UNSAFE", executable);
+  if (!executable && win32.basename(path) !== "worker.mjs")
+    throw verificationError("BINARY_PATH_UNSAFE", "The deployed Worker entry must be worker.mjs.");
+  if (!isStrictDescendant(rootPath, path))
+    throw verificationError(
+      "BINARY_PATH_UNSAFE",
+      "The Worker file must be contained by the trusted root.",
+    );
+  const expectedSha256 = validateExpectedDigest(options.file.expectedSha256, options.role);
+  const root = await verifyRoot(io, rootPath);
+  const verified = await verifyBinary(
+    io,
+    root.canonicalPath,
+    options.role,
+    path,
+    expectedSha256,
+    executable,
+  );
+  await reverifyRoot(io, root);
+  return Object.freeze({
+    path: verified.canonicalPath,
+    measurement: binaryMeasurement(verified, new Date().toISOString()),
+  });
 }
 
 interface FileMetadata {
@@ -99,6 +176,9 @@ interface VerifiedRoot {
 interface VerifiedBinary {
   readonly canonicalPath: string;
   readonly identityKey: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+  readonly metadata: FileMetadata;
 }
 
 const defaultFileIO: TrustedBinaryFileIO = {
@@ -120,10 +200,18 @@ const defaultFileIO: TrustedBinaryFileIO = {
 
 // Deployment must make the trusted executable root read-only to the Worker identity. This verifier
 // relies on that property to close the remaining name-to-open TOCTOU window.
-export async function verifyTrustedExecutionBinaries(
+export function verifyTrustedExecutionBinaries(
   options: VerifyTrustedExecutionBinariesOptions,
-): Promise<Readonly<VerifiedTrustedExecutionBinaries>> {
+): Promise<Readonly<VerifiedTrustedExecutionBinaries>>;
+export function verifyTrustedExecutionBinaries(
+  options: VerifyTrustedValidationBinariesOptions,
+): Promise<Readonly<VerifiedTrustedValidationBinaries>>;
+export async function verifyTrustedExecutionBinaries(
+  options: VerifyTrustedExecutionBinariesOptions | VerifyTrustedValidationBinariesOptions,
+): Promise<Readonly<VerifiedTrustedExecutionBinaries | VerifiedTrustedValidationBinaries>> {
   const fileIO = options.fileIO ?? defaultFileIO;
+  const now = options.now ?? (() => new Date());
+  if (typeof now !== "function") throw invalidVerificationTime();
   const configuredRoot = normalizeSafeWindowsPath(
     options.trustedExecutableRoot,
     "INVALID_TRUSTED_ROOT",
@@ -136,9 +224,9 @@ export async function verifyTrustedExecutionBinaries(
     );
   }
 
-  const binaryEntries = [
+  const binaryEntries: readonly (readonly [TrustedBinaryRole, TrustedBinarySpec])[] = [
     ["processHost", options.processHost] as const,
-    ["codex", options.codex] as const,
+    ...(options.codex === undefined ? [] : [["codex", options.codex] as const]),
     ["git", options.git] as const,
   ];
   const configuredBinaries = binaryEntries.map(([name, spec]) => ({
@@ -149,7 +237,7 @@ export async function verifyTrustedExecutionBinaries(
   assertDistinctPaths(configuredBinaries);
 
   const root = await verifyRoot(fileIO, configuredRoot);
-  const verifiedPaths = new Map<string, string>();
+  const verifiedBinaries = new Map<TrustedBinaryRole, VerifiedBinary>();
   const verifiedPathKeys = new Set<string>();
   const verifiedIdentityKeys = new Set<string>();
   for (const binary of configuredBinaries) {
@@ -181,15 +269,41 @@ export async function verifyTrustedExecutionBinaries(
     }
     verifiedPathKeys.add(verifiedPathKey);
     verifiedIdentityKeys.add(verifiedBinary.identityKey);
-    verifiedPaths.set(binary.name, verifiedBinary.canonicalPath);
+    verifiedBinaries.set(binary.name, verifiedBinary);
   }
   await reverifyRoot(fileIO, root);
+  let verifiedAtISO: string;
+  try {
+    const instant = now();
+    if (!(instant instanceof Date)) throw invalidVerificationTime();
+    verifiedAtISO = Date.prototype.toISOString.call(instant);
+  } catch {
+    throw invalidVerificationTime();
+  }
+  const processHost = requiredVerifiedBinary(verifiedBinaries, "processHost");
+  const git = requiredVerifiedBinary(verifiedBinaries, "git");
+  const base = {
+    trustedExecutableRoot: root.canonicalPath,
+    processHostPath: processHost.canonicalPath,
+    gitPath: git.canonicalPath,
+    measurements: Object.freeze({
+      processHost: binaryMeasurement(processHost, verifiedAtISO),
+      git: binaryMeasurement(git, verifiedAtISO),
+    }),
+  };
+  if (options.codex === undefined) return Object.freeze(base);
+  const codex = requiredVerifiedBinary(verifiedBinaries, "codex");
 
   return Object.freeze({
     trustedExecutableRoot: root.canonicalPath,
-    processHostPath: requiredVerifiedPath(verifiedPaths, "processHost"),
-    codexPath: requiredVerifiedPath(verifiedPaths, "codex"),
-    gitPath: requiredVerifiedPath(verifiedPaths, "git"),
+    processHostPath: processHost.canonicalPath,
+    codexPath: codex.canonicalPath,
+    gitPath: git.canonicalPath,
+    measurements: Object.freeze({
+      processHost: base.measurements.processHost,
+      codex: binaryMeasurement(codex, verifiedAtISO),
+      git: base.measurements.git,
+    }),
   });
 }
 
@@ -248,13 +362,14 @@ async function verifyBinary(
   name: string,
   configuredPath: string,
   expectedSha256: string,
+  requireExecutable = true,
 ): Promise<VerifiedBinary> {
   const initialLstat = await binaryIO(() => fileIO.lstat(configuredPath), name);
   assertRegularBinary(initialLstat, name);
   const initialRealpath = normalizeSafeWindowsPath(
     await binaryIO(() => fileIO.realpath(configuredPath), name),
     "BINARY_PATH_UNSAFE",
-    true,
+    requireExecutable,
   );
   assertContainedRealpath(trustedRoot, initialRealpath, name);
   assertConfiguredRealpath(configuredPath, initialRealpath, name);
@@ -275,7 +390,7 @@ async function verifyBinary(
     const openedRealpath = normalizeSafeWindowsPath(
       await binaryIO(() => fileIO.realpath(configuredPath), name),
       "BINARY_PATH_UNSAFE",
-      true,
+      requireExecutable,
     );
     assertContainedRealpath(trustedRoot, openedRealpath, name);
     assertConfiguredRealpath(configuredPath, openedRealpath, name);
@@ -308,7 +423,7 @@ async function verifyBinary(
     const finalRealpath = normalizeSafeWindowsPath(
       await binaryIO(() => fileIO.realpath(configuredPath), name),
       "BINARY_PATH_UNSAFE",
-      true,
+      requireExecutable,
     );
     assertRegularBinary(finalFstat, name);
     assertRegularBinary(finalLstat, name);
@@ -342,6 +457,9 @@ async function verifyBinary(
     verifiedBinary = {
       canonicalPath: finalRealpath,
       identityKey: fileIdentityKey(openedMetadata),
+      sha256: actualSha256,
+      sizeBytes: binarySize,
+      metadata: openedMetadata,
     };
   } catch (error) {
     primaryError = error;
@@ -653,15 +771,44 @@ async function rootIO<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-function requiredVerifiedPath(paths: ReadonlyMap<string, string>, name: string): string {
-  const path = paths.get(name);
-  if (path === undefined) {
+function requiredVerifiedBinary(
+  binaries: ReadonlyMap<TrustedBinaryRole, VerifiedBinary>,
+  role: TrustedBinaryRole,
+): VerifiedBinary {
+  const binary = binaries.get(role);
+  if (binary === undefined) {
     throw verificationError(
       "BINARY_READ_FAILED",
       "Trusted binary verification result is incomplete.",
     );
   }
-  return path;
+  return binary;
+}
+
+function binaryMeasurement(
+  binary: VerifiedBinary,
+  verifiedAtISO: string,
+): VerifiedTrustedBinaryMeasurement {
+  const exactText = (value: TrustedBinaryStatValue): string =>
+    Object.is(value, -0) ? "-0" : value.toString();
+  return Object.freeze({
+    sha256: binary.sha256,
+    sizeBytes: binary.sizeBytes,
+    fileIdentity: Object.freeze({
+      dev: exactText(binary.metadata.dev),
+      ino: exactText(binary.metadata.ino),
+      mtimeMs: exactText(binary.metadata.mtimeMs),
+      ctimeMs: exactText(binary.metadata.ctimeMs),
+    }),
+    verifiedAtISO,
+  });
+}
+
+function invalidVerificationTime(): TrustedBinaryVerificationError {
+  return verificationError(
+    "INVALID_VERIFICATION_TIME",
+    "Trusted binary verification time could not be captured.",
+  );
 }
 
 function verificationError(

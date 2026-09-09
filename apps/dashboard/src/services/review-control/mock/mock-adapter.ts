@@ -1,4 +1,5 @@
 import type { ReviewControlAdapter } from "../adapter";
+import { ReviewControlRequestError } from "../errors";
 import type {
   Approval,
   ApprovalDecision,
@@ -54,6 +55,23 @@ const selected = (actual: string, expected: string | string[] | undefined): bool
     : expected === actual;
 };
 
+const repositoryFilter = (query: ListQuery, operation: string): string | undefined => {
+  const value = query.filters?.repositoryId;
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length > 128 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\s\S])/u.test(value)
+  ) {
+    throw new ReviewControlRequestError(
+      operation,
+      "query.repositoryId",
+      "The repository scope must be one valid entity identifier.",
+    );
+  }
+  return value;
+};
+
 const contains = (values: Array<string | number | undefined>, term?: string) => {
   if (!term) {
     return true;
@@ -96,6 +114,7 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
   private readonly publications = clone(publicationFixtures);
 
   async listWorkItems(query: ListQuery = {}): Promise<PageResult<WorkItem>> {
+    const repositoryId = repositoryFilter(query, "listWorkItems");
     await wait();
     const filtered = this.workItems.filter(
       (item) =>
@@ -103,7 +122,9 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
           [item.repository, item.number, item.title, item.author, item.scheduledBy],
           query.search,
         ) &&
+        selected(item.repositoryId, repositoryId) &&
         selected(item.kind, query.filters?.kind) &&
+        selected(item.state, query.filters?.state) &&
         selected(item.stage, query.filters?.stage) &&
         selected(item.authorization, query.filters?.authorization),
     );
@@ -118,14 +139,26 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
       item.freshness = "current";
       item.attentionReason = undefined;
       item.updatedAt = new Date().toISOString();
-      const repositoryName = item.repository.split("/").at(-1) ?? item.repository;
+      const jobId = `job-demo-${Date.now()}`;
+      item.latestJobId = jobId;
+      item.latestJobStatus = "queued";
+      item.latestJobAttemptCount = 0;
+      item.latestJobAdmission = {
+        state: "admitted",
+        attemptBase: 0,
+        requestedAt: item.updatedAt,
+        admittedAt: item.updatedAt,
+        timestampBasis: "recorded",
+      };
       this.jobs.unshift({
-        id: `job-demo-${Date.now()}`,
+        id: jobId,
+        repositoryId: item.repositoryId,
         workItemId: item.id,
-        workItemRef: `${repositoryName}#${item.number}`,
+        workItemRef: `${item.repository}#${item.number}`,
         title: item.kind === "pull_request" ? "PR review" : "Issue triage",
         generation: 1,
         status: "queued",
+        admission: clone(item.latestJobAdmission),
         stage: "queued",
         attempt: 0,
         maxAttempts: 3,
@@ -137,18 +170,42 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
   }
 
   async listJobs(query: ListQuery = {}): Promise<PageResult<Job>> {
+    const repositoryId = repositoryFilter(query, "listJobs");
+    const admission = query.filters?.admission;
+    if (admission !== undefined) {
+      const values = Array.isArray(admission) ? admission : [admission];
+      if (
+        values.length < 1 ||
+        values.length > 2 ||
+        new Set(values).size !== values.length ||
+        values.some((value) => value !== "pending" && value !== "admitted")
+      )
+        throw new ReviewControlRequestError(
+          "listJobs",
+          "query.admission",
+          "Admission filters require pending or admitted waiting jobs.",
+        );
+    }
     await wait();
     const filtered = this.jobs.filter(
       (job) =>
         contains([job.id, job.workItemRef, job.title, job.workerNodeId], query.search) &&
+        selected(job.repositoryId, repositoryId) &&
+        selected(job.workItemId, query.filters?.workItemId) &&
         selected(job.status, query.filters?.status) &&
+        (admission === undefined ||
+          ((job.status === "queued" || job.status === "retry_waiting") &&
+            job.admission !== null &&
+            selected(job.admission.state, admission))) &&
         selected(job.stage, query.filters?.stage),
     );
     return page(filtered, query);
   }
 
-  async getJob(jobId: string): Promise<JobDetails | null> {
+  async getJob(jobId: string, signal?: AbortSignal): Promise<JobDetails | null> {
+    signal?.throwIfAborted();
     await wait();
+    signal?.throwIfAborted();
     const job = this.jobs.find((candidate) => candidate.id === jobId);
     if (job === undefined) {
       return null;
@@ -159,48 +216,87 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
         : job.title.toLowerCase().includes("issue")
           ? {
               reviewResultId: `result-${job.id}`,
-              schemaId: "IssueTriageV1" as const,
+              schemaId: "IssueTriageV2" as const,
               resultDigest: "a".repeat(64),
-              summary: "The issue is actionable and ready for triage publication.",
+              summary:
+                "Keyboard Manager loses focus after a remap target is selected. This appears to be a UI focus regression; a short recording and diagnostic logs would help confirm the cause.",
               requestedRecipeIds: [],
               createdAt: job.createdAt,
+              verification: {
+                status: "not_run" as const,
+                summary: "Triage used the issue description; no verification commands were run.",
+                commands: [],
+              },
+              executionEvidence: {
+                schemaVersion: "ReviewExecutionEvidenceV1" as const,
+                source: "worker" as const,
+                commandCapture: "complete" as const,
+                commands: [],
+                worktree: { status: "unknown" as const, source: "not_observed" as const },
+              },
               prReview: null,
               issueTriage: {
                 category: "bug" as const,
                 priority: 1 as const,
                 confidence: 0.92,
-                suggestedLabels: ["Issue-Bug"],
-                missingInformation: ["Collect a complete repro video on latest main."],
-                duplicateCandidates: [
-                  {
-                    number: 41720,
-                    reason: "The symptom and module match a recent report.",
-                  },
+                suggestedLabels: ["Issue-Bug", "Product-Keyboard Manager"],
+                missingInformation: [
+                  "A short recording showing the target selection and loss of focus.",
+                  "PowerToys version and diagnostic logs from the affected session.",
                 ],
+                duplicateCandidates: [],
               },
             }
           : {
               reviewResultId: `result-${job.id}`,
-              schemaId: "PrReviewPlanV1" as const,
+              schemaId: "PrReviewPlanV2" as const,
               resultDigest: "b".repeat(64),
-              summary: "The PR needs one medium-severity fix before approval.",
+              summary:
+                job.workItemId === "wi-pr-41793"
+                  ? "The previous revision guards malformed Awake expiration payloads without introducing an actionable regression. A newer revision still needs review."
+                  : "The layout restoration change needs a guard for missing monitor handles after resume. One medium-priority finding needs attention before approval.",
               requestedRecipeIds: ["powertoys.static-check"],
               createdAt: job.createdAt,
-              prReview: {
-                assessment: "request_changes" as const,
-                findings: [
+              verification: {
+                status: "not_run" as const,
+                summary: "Static review completed. The affected Windows tests were not run.",
+                commands: [],
+              },
+              executionEvidence: {
+                schemaVersion: "ReviewExecutionEvidenceV1" as const,
+                source: "worker" as const,
+                commandCapture: "complete" as const,
+                commands: [
                   {
-                    findingId: `${job.id}-finding-1`,
-                    ordinal: 0,
-                    priority: 2 as const,
-                    title: "Guard null monitor handles",
-                    body: "The code path can dereference a missing monitor handle after resume.",
-                    path: "src/modules/FancyZones/LayoutRestore.cs",
-                    line: 233,
-                    endLine: 239,
-                    confidence: 0.88,
+                    itemId: "mock-command-1",
+                    command: "git diff --stat",
+                    status: "completed" as const,
+                    exitCode: 0,
                   },
                 ],
+                worktree: { status: "clean" as const, source: "git_status" as const },
+              },
+              prReview: {
+                assessment:
+                  job.workItemId === "wi-pr-41793"
+                    ? ("approve" as const)
+                    : ("request_changes" as const),
+                findings:
+                  job.workItemId === "wi-pr-41793"
+                    ? []
+                    : [
+                        {
+                          findingId: `${job.id}-finding-1`,
+                          ordinal: 0,
+                          priority: 2 as const,
+                          title: "Guard null monitor handles",
+                          body: "The code path can dereference a missing monitor handle after resume.",
+                          path: "src/modules/FancyZones/LayoutRestore.cs",
+                          line: 233,
+                          endLine: 239,
+                          confidence: 0.88,
+                        },
+                      ],
               },
               issueTriage: null,
             };
@@ -212,6 +308,15 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
       failureMessage:
         job.outcome === "failed" || job.outcome === "timed_out"
           ? "Mock failure detail for dashboard rendering."
+          : null,
+      failureDiagnostics:
+        job.outcome === "failed" || job.outcome === "timed_out"
+          ? {
+              category: "process",
+              exitCode: job.outcome === "timed_out" ? null : 1,
+              summary: "Mock process failure detail for dashboard rendering.",
+              correlationId: `run-${job.id}`,
+            }
           : null,
       resultDigest: reviewResult?.resultDigest ?? null,
       reviewResult,
@@ -225,6 +330,13 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
       job.status = "cancelled";
       job.stage = "done";
       job.outcome = "cancelled";
+      const workItem = this.workItems.find((item) => item.latestJobId === job.id);
+      if (workItem !== undefined) {
+        workItem.latestJobStatus = "cancelled";
+        workItem.stage = "done";
+        workItem.workerNodeId = undefined;
+        workItem.updatedAt = new Date().toISOString();
+      }
       if (job.workerNodeId !== undefined) {
         const worker = this.workers.find((candidate) => candidate.id === job.workerNodeId);
         if (worker !== undefined) {
@@ -365,6 +477,17 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
 
   async getSystemSnapshot(): Promise<SystemSnapshot> {
     await wait();
-    return clone(systemSnapshot);
+    const waiting = this.jobs.filter(
+      (job) => job.status === "queued" || job.status === "retry_waiting",
+    );
+    const queued = waiting.filter((job) => job.admission?.state === "admitted");
+    const pending = waiting.filter((job) => job.admission?.state === "pending");
+    return {
+      ...clone(systemSnapshot),
+      queuedJobs: queued.length,
+      awaitingAdmissionJobs: pending.length,
+      oldestQueuedAt: queued.map((job) => job.createdAt).sort()[0],
+      oldestAwaitingAdmissionAt: pending.map((job) => job.createdAt).sort()[0],
+    };
   }
 }

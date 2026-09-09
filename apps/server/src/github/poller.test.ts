@@ -65,7 +65,7 @@ const issue: GitHubIssueSnapshot = {
   author,
   htmlUrl: "https://github.com/microsoft/PowerToys/issues/10",
   createdAt: "2026-08-29T01:00:00.000Z",
-  updatedAt: "2026-08-30T01:00:00.000Z",
+  updatedAt: "2026-08-30T03:00:00.000Z",
   closedAt: null,
 };
 
@@ -80,7 +80,7 @@ const pullRequest: GitHubPullRequestSnapshot = {
   author,
   htmlUrl: "https://github.com/microsoft/PowerToys/pull/20",
   createdAt: "2026-08-29T02:00:00.000Z",
-  updatedAt: "2026-08-30T02:00:00.000Z",
+  updatedAt: "2026-08-30T05:00:00.000Z",
   closedAt: null,
   isDraft: false,
   baseSha: "a".repeat(40),
@@ -217,11 +217,26 @@ describe("reconcileGitHubPolling", () => {
     expect(client.listIssueTimelineEvents).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       uniqueWorkItemCount: 2,
-      emittedEventCount: 4,
+      emittedEventCount: 5,
       searchPageCount: 2,
       timelinePageCount: 2,
       searchTruncated: false,
       timelineTruncatedWorkItemNumbers: [],
+    });
+
+    const issueEvents = events.filter(
+      (event) => event.workItem.githubWorkItemId === issue.githubWorkItemId,
+    );
+    expect(issueEvents.map((event) => event.action)).toEqual([
+      "request_opened",
+      "revision_observed",
+    ]);
+    expect(issueEvents[1]).toMatchObject({
+      action: "revision_observed",
+      requestKind: null,
+      actor: null,
+      target: null,
+      revision: { kind: "issue", sourceUpdatedAt: issue.updatedAt },
     });
 
     const pullRequestEvents = events.filter(
@@ -283,7 +298,7 @@ describe("reconcileGitHubPolling", () => {
     const events: NormalizedSchedulingEvent[] = [];
     await reconcile(client, events);
 
-    expect(events).toHaveLength(1);
+    expect(events.map((event) => event.action)).toEqual(["request_opened", "revision_observed"]);
     expect(events[0]).toMatchObject({
       action: "request_opened",
       requestKind: "assignment",
@@ -322,6 +337,235 @@ describe("reconcileGitHubPolling", () => {
     });
     expect(secondEvents[0]?.sourceEventId).not.toBe(firstRevision?.sourceEventId);
   });
+
+  it("observes a seeded unchanged revision once and clears its pending marker", async () => {
+    const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
+      items: request.query.includes("review-requested") ? [assignedPullRequestSearchItem] : [],
+      nextPage: null,
+    });
+    const client = createClient({ search });
+    const initial = await reconcile(client, []);
+    const seededProjection: GitHubPollingActiveProjection = {
+      ...initial.nextActiveProjection,
+      workItems: initial.nextActiveProjection.workItems.map((item) => ({
+        ...item,
+        needsRevisionObservation: true,
+      })),
+    };
+    const events: NormalizedSchedulingEvent[] = [];
+    const observed = await reconcile(client, events, {
+      previousActiveProjection: seededProjection,
+    });
+
+    expect(events.map((event) => event.action)).toEqual(["revision_observed"]);
+    expect(events[0]?.revision.revisionKey).toBe(
+      seededProjection.workItems[0]?.revision.revisionKey,
+    );
+    expect(observed.nextActiveProjection.workItems[0]).not.toHaveProperty(
+      "needsRevisionObservation",
+    );
+    expect(observed.nextActiveProjection.workItems[0]?.activeRequests).toEqual([
+      expect.objectContaining({
+        requestKind: "review_request",
+        openedAt: reviewRequestedEvent.occurredAt,
+      }),
+    ]);
+
+    const stableEvents: NormalizedSchedulingEvent[] = [];
+    const stable = await reconcile(client, stableEvents, {
+      previousActiveProjection: observed.nextActiveProjection,
+    });
+    expect(stableEvents).toEqual([]);
+    expect(stable.nextActiveProjection).toEqual(observed.nextActiveProjection);
+  });
+
+  it.each(["search truncated", "timeline truncated", "permanently unavailable"] as const)(
+    "preserves a pending revision marker when evidence is %s",
+    async (scenario) => {
+      const search = async (
+        request: GitHubSearchRequest,
+      ): Promise<GitHubPage<GitHubSearchItem>> => ({
+        items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
+        nextPage: null,
+      });
+      const initial = await reconcile(createClient({ search }), []);
+      const seededProjection: GitHubPollingActiveProjection = {
+        ...initial.nextActiveProjection,
+        workItems: initial.nextActiveProjection.workItems.map((item) => ({
+          ...item,
+          needsRevisionObservation: true,
+        })),
+      };
+      const client = createClient({
+        issue: { ...issue, body: "Content awaiting complete evidence", updatedAt: observedAt },
+        search: async (request) => ({
+          items:
+            scenario === "permanently unavailable" || request.query.includes("review-requested")
+              ? []
+              : [assignedIssueSearchItem],
+          nextPage: null,
+          incomplete: scenario === "search truncated",
+        }),
+        timeline: async () => ({
+          items: [assignedIssueEvent],
+          nextPage: scenario === "timeline truncated" ? 2 : null,
+        }),
+      });
+      const unavailableError = new Error("Gone");
+      if (scenario === "permanently unavailable") {
+        client.getIssue.mockRejectedValue(unavailableError);
+      }
+      const events: NormalizedSchedulingEvent[] = [];
+      const result = await reconcile(client, events, {
+        previousActiveProjection: seededProjection,
+        maxTimelinePages: 1,
+        isPermanentlyUnavailableWorkItem: (error) => error === unavailableError,
+      });
+
+      expect(events).toEqual([]);
+      expect(result.nextActiveProjection).toEqual(seededProjection);
+      expect(result.unavailableWorkItemNumbers).toEqual(
+        scenario === "permanently unavailable" ? [issue.number] : [],
+      );
+      expect(result.timelineTruncatedWorkItemNumbers).toEqual(
+        scenario === "timeline truncated" ? [issue.number] : [],
+      );
+      expect(result.searchTruncated).toBe(scenario === "search truncated");
+    },
+  );
+
+  it.each(["open", "closed"] as const)(
+    "preserves the prior projection when a %s snapshot predates any known request opening",
+    async (state) => {
+      const initial = await reconcile(
+        createClient({
+          search: async () => ({ items: [assignedPullRequestSearchItem], nextPage: null }),
+        }),
+        [],
+      );
+      const seededProjection: GitHubPollingActiveProjection = {
+        ...initial.nextActiveProjection,
+        workItems: initial.nextActiveProjection.workItems.map((item) => ({
+          ...item,
+          needsRevisionObservation: true,
+        })),
+      };
+      const staleUpdatedAt = "2026-08-30T04:30:00.000Z";
+      expect(seededProjection.workItems[0]?.activeRequests).toEqual([
+        expect.objectContaining({
+          requestKind: "assignment",
+          openedAt: assignedPullRequestEvent.occurredAt,
+        }),
+        expect.objectContaining({
+          requestKind: "review_request",
+          openedAt: reviewRequestedEvent.occurredAt,
+        }),
+      ]);
+      const client = createClient({
+        pullRequest: {
+          ...pullRequest,
+          state,
+          headSha: "c".repeat(40),
+          updatedAt: staleUpdatedAt,
+          closedAt: state === "closed" ? staleUpdatedAt : null,
+        },
+        search: async (request) => ({
+          items:
+            state === "closed" || request.query.includes("review-requested")
+              ? []
+              : [assignedPullRequestSearchItem],
+          nextPage: null,
+        }),
+        timeline: async () => ({
+          items: [{ ...assignedPullRequestEvent, githubEventId: 2_003 }],
+          nextPage: null,
+        }),
+      });
+      const events: NormalizedSchedulingEvent[] = [];
+      const result = await reconcile(client, events, {
+        previousActiveProjection: seededProjection,
+      });
+
+      expect(events).toEqual([]);
+      expect(result.emittedEventCount).toBe(0);
+      expect(result.nextActiveProjection).toEqual(seededProjection);
+      expect(client.listIssueTimelineEvents).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts a legacy projection without request opening times or a revision marker", async () => {
+    const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
+      items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
+      nextPage: null,
+    });
+    const client = createClient({ search });
+    const initial = await reconcile(client, []);
+    const legacyProjection: GitHubPollingActiveProjection = {
+      ...initial.nextActiveProjection,
+      workItems: initial.nextActiveProjection.workItems.map((item) => ({
+        workItem: item.workItem,
+        revision: item.revision,
+        activeRequests: item.activeRequests.map((request) => ({
+          requestKind: request.requestKind,
+          openedSourceEventId: request.openedSourceEventId,
+        })),
+      })),
+    };
+    const events: NormalizedSchedulingEvent[] = [];
+    const result = await reconcile(client, events, {
+      previousActiveProjection: legacyProjection,
+    });
+
+    expect(events).toEqual([]);
+    expect(result.nextActiveProjection.workItems[0]).not.toHaveProperty("needsRevisionObservation");
+    expect(result.nextActiveProjection.workItems[0]?.activeRequests).toEqual([
+      expect.objectContaining({
+        requestKind: "assignment",
+        openedAt: assignedIssueEvent.occurredAt,
+      }),
+    ]);
+  });
+
+  it.each([
+    {
+      field: "needsRevisionObservation",
+      value: "true",
+      message: "invalid revision observation marker",
+    },
+    {
+      field: "needsRevisionObservation",
+      value: null,
+      message: "invalid revision observation marker",
+    },
+    { field: "needsRevisionObservation", value: 1, message: "invalid revision observation marker" },
+    { field: "openedAt", value: "not-a-date", message: "invalid active request" },
+    { field: "openedAt", value: null, message: "invalid active request" },
+    { field: "openedAt", value: 123, message: "invalid active request" },
+  ])(
+    "rejects invalid optional projection field $field=$value",
+    async ({ field, value, message }) => {
+      const initial = await reconcile(createClient(), []);
+      const invalidProjection = {
+        ...initial.nextActiveProjection,
+        workItems: initial.nextActiveProjection.workItems.map((item) => ({
+          ...item,
+          ...(field === "needsRevisionObservation" ? { needsRevisionObservation: value } : {}),
+          activeRequests: item.activeRequests.map((request) => ({
+            ...request,
+            ...(field === "openedAt" ? { openedAt: value } : {}),
+          })),
+        })),
+      } as unknown as GitHubPollingActiveProjection;
+      const client = createClient();
+      const events: NormalizedSchedulingEvent[] = [];
+
+      await expect(
+        reconcile(client, events, { previousActiveProjection: invalidProjection }),
+      ).rejects.toThrow(message);
+      expect(client.searchIssuesAndPullRequests).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+    },
+  );
 
   it("scopes a repeated PR revision to the reopened assignment without using polling time", async () => {
     const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
@@ -456,64 +700,269 @@ describe("reconcileGitHubPolling", () => {
     expect(differentlyEditedEvents[0]?.sourceEventId).not.toBe(events[0]?.sourceEventId);
   });
 
-  it("keeps an explicitly unknown timeline actor null", async () => {
+  it.each(["unknown actor", "truncated timeline", "missing assignment"] as const)(
+    "defers a first observation with %s until complete evidence arrives",
+    async (scenario) => {
+      const search = async (
+        request: GitHubSearchRequest,
+      ): Promise<GitHubPage<GitHubSearchItem>> => ({
+        items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
+        nextPage: null,
+      });
+      const client = createClient({
+        search,
+        timeline: async () => ({
+          items:
+            scenario === "missing assignment"
+              ? []
+              : [
+                  {
+                    ...assignedIssueEvent,
+                    actor: scenario === "unknown actor" ? null : assigner,
+                  },
+                ],
+          nextPage: scenario === "truncated timeline" ? 2 : null,
+        }),
+      });
+      const events: NormalizedSchedulingEvent[] = [];
+      const deferred = await reconcile(client, events, { maxTimelinePages: 1 });
+
+      expect(events).toEqual([]);
+      expect(deferred.emittedEventCount).toBe(0);
+      expect(deferred.nextActiveProjection.workItems).toEqual([]);
+      expect(deferred.timelineTruncatedWorkItemNumbers).toEqual(
+        scenario === "truncated timeline" ? [issue.number] : [],
+      );
+
+      const recoveredEvents: NormalizedSchedulingEvent[] = [];
+      const recovered = await reconcile(createClient({ search }), recoveredEvents, {
+        previousActiveProjection: deferred.nextActiveProjection,
+        now: () => new Date("2026-08-30T12:01:00.000Z"),
+      });
+      expect(recoveredEvents.map((event) => event.action)).toEqual([
+        "request_opened",
+        "revision_observed",
+      ]);
+      expect(recoveredEvents[0]).toMatchObject({
+        actor: { githubUserId: assigner.githubUserId },
+        target: { githubUserId: reviewer.githubUserId },
+        occurredAt: assignedIssueEvent.occurredAt,
+      });
+      expect(recovered.nextActiveProjection.workItems).toHaveLength(1);
+
+      const stableEvents: NormalizedSchedulingEvent[] = [];
+      await reconcile(createClient({ search }), stableEvents, {
+        previousActiveProjection: recovered.nextActiveProjection,
+      });
+      expect(stableEvents).toEqual([]);
+    },
+  );
+
+  it("keeps synthetic timeline identities stable across observation times", async () => {
     const client = createClient({
       search: async (request) => ({
         items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
         nextPage: null,
       }),
       timeline: async () => ({
-        items: [{ ...assignedIssueEvent, actor: null }],
+        items: [{ ...assignedIssueEvent, githubEventId: null }],
         nextPage: null,
       }),
-    });
-    const events: NormalizedSchedulingEvent[] = [];
-    await reconcile(client, events);
-
-    expect(events[0]).toMatchObject({
-      actor: null,
-      target: { githubUserId: reviewer.githubUserId },
-      author: { githubUserId: author.githubUserId },
-    });
-  });
-
-  it("does not trust an older actor when timeline pagination is truncated", async () => {
-    const client = createClient({
-      search: async (request) => ({
-        items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
-        nextPage: null,
-      }),
-      timeline: async () => ({ items: [assignedIssueEvent], nextPage: 2 }),
-    });
-    const events: NormalizedSchedulingEvent[] = [];
-    const result = await reconcile(client, events, { maxTimelinePages: 1 });
-
-    expect(result.timelineTruncatedWorkItemNumbers).toEqual([issue.number]);
-    expect(events[0]).toMatchObject({
-      actor: null,
-      target: { githubUserId: reviewer.githubUserId },
-      occurredAt: issue.updatedAt,
-    });
-  });
-
-  it("keeps synthetic event identities stable across observation times", async () => {
-    const client = createClient({
-      search: async (request) => ({
-        items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
-        nextPage: null,
-      }),
-      timeline: async () => ({ items: [], nextPage: null }),
     });
     const first: NormalizedSchedulingEvent[] = [];
     const second: NormalizedSchedulingEvent[] = [];
     await reconcile(client, first);
     await reconcile(client, second, { now: () => new Date("2026-08-31T12:00:00.000Z") });
 
+    expect(first.map((event) => event.action)).toEqual(["request_opened", "revision_observed"]);
+    expect(second.map((event) => event.action)).toEqual(["request_opened", "revision_observed"]);
     expect(first[0]?.eventId).toBe(second[0]?.eventId);
     expect(first[0]?.sourceEventId).toBe(second[0]?.sourceEventId);
     expect(first[0]?.observedAt).not.toBe(second[0]?.observedAt);
-    expect(first[0]?.actor).toBeNull();
+    expect(first[0]?.actor?.githubUserId).toBe(assigner.githubUserId);
   });
+
+  it.each([
+    "assigned search incomplete",
+    "review search incomplete",
+    "timeline truncated",
+    "missing review request",
+    "unknown review requester",
+  ] as const)(
+    "preserves the entire prior snapshot with %s and later advances",
+    async (scenario) => {
+      const search = async (): Promise<GitHubPage<GitHubSearchItem>> => ({
+        items: [assignedPullRequestSearchItem],
+        nextPage: null,
+      });
+      const initial = await reconcile(createClient({ search }), []);
+      const advancedPullRequest: GitHubPullRequestSnapshot = {
+        ...pullRequest,
+        title: "Updated pull request title",
+        body: "Updated pull request body",
+        headSha: "c".repeat(40),
+        updatedAt: "2026-08-30T08:00:00.000Z",
+      };
+      const incompleteClient = createClient({
+        pullRequest: advancedPullRequest,
+        search: async (request) => ({
+          items: [assignedPullRequestSearchItem],
+          nextPage: null,
+          incomplete: request.query.includes("review-requested")
+            ? scenario === "review search incomplete"
+            : scenario === "assigned search incomplete",
+        }),
+        timeline: async () => ({
+          items:
+            scenario === "missing review request"
+              ? [assignedPullRequestEvent]
+              : [
+                  assignedPullRequestEvent,
+                  {
+                    ...reviewRequestedEvent,
+                    actor: scenario === "unknown review requester" ? null : reviewRequester,
+                  },
+                ],
+          nextPage: scenario === "timeline truncated" ? 2 : null,
+        }),
+      });
+      const deferredEvents: NormalizedSchedulingEvent[] = [];
+      const deferred = await reconcile(incompleteClient, deferredEvents, {
+        previousActiveProjection: initial.nextActiveProjection,
+        maxTimelinePages: 1,
+        now: () => new Date("2026-08-30T12:01:00.000Z"),
+      });
+
+      expect(deferredEvents).toEqual([]);
+      expect(deferred.nextActiveProjection).toEqual(initial.nextActiveProjection);
+
+      const completeClient = createClient({ search, pullRequest: advancedPullRequest });
+      const recoveredEvents: NormalizedSchedulingEvent[] = [];
+      const recovered = await reconcile(completeClient, recoveredEvents, {
+        previousActiveProjection: deferred.nextActiveProjection,
+        now: () => new Date("2026-08-30T12:02:00.000Z"),
+      });
+      expect(recoveredEvents).toHaveLength(1);
+      expect(recoveredEvents[0]).toMatchObject({
+        action: "revision_observed",
+        workItem: {
+          title: advancedPullRequest.title,
+          body: advancedPullRequest.body,
+          updatedAt: advancedPullRequest.updatedAt,
+        },
+        revision: {
+          headSha: advancedPullRequest.headSha,
+          revisionKey: createPullRequestRevisionKey(
+            advancedPullRequest.baseSha,
+            advancedPullRequest.headSha,
+          ),
+        },
+      });
+      expect(recovered.nextActiveProjection.workItems[0]?.revision).toEqual(
+        recoveredEvents[0]?.revision,
+      );
+      expect(recovered.nextActiveProjection.workItems[0]?.activeRequests).toEqual(
+        initial.nextActiveProjection.workItems[0]?.activeRequests,
+      );
+
+      const stableEvents: NormalizedSchedulingEvent[] = [];
+      await reconcile(completeClient, stableEvents, {
+        previousActiveProjection: recovered.nextActiveProjection,
+      });
+      expect(stableEvents).toEqual([]);
+    },
+  );
+
+  it.each(["opposing transitions", "different opening actors"] as const)(
+    "defers same-time %s until a later unambiguous assignment arrives",
+    async (scenario) => {
+      const search = async (
+        request: GitHubSearchRequest,
+      ): Promise<GitHubPage<GitHubSearchItem>> => ({
+        items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
+        nextPage: null,
+      });
+      const initial = await reconcile(createClient({ search }), []);
+      const secondAssigner = { ...assigner, githubUserId: 301, login: "second-assigner" };
+      const ambiguousAt = "2026-08-30T08:00:00.000Z";
+      const changedIssue: GitHubIssueSnapshot = {
+        ...issue,
+        body: "Changed while assignment evidence is ambiguous",
+        updatedAt: ambiguousAt,
+      };
+      const ambiguousTimeline: GitHubTimelineEvent[] = [
+        assignedIssueEvent,
+        {
+          ...assignedIssueEvent,
+          githubEventId: 1_002,
+          action: scenario === "opposing transitions" ? "unassigned" : "assigned",
+          occurredAt: ambiguousAt,
+        },
+        {
+          ...assignedIssueEvent,
+          githubEventId: 1_003,
+          actor: secondAssigner,
+          occurredAt: ambiguousAt,
+        },
+      ];
+      const deferredEvents: NormalizedSchedulingEvent[] = [];
+      const deferred = await reconcile(
+        createClient({
+          search,
+          issue: changedIssue,
+          timeline: async () => ({ items: ambiguousTimeline, nextPage: null }),
+        }),
+        deferredEvents,
+        { previousActiveProjection: initial.nextActiveProjection },
+      );
+
+      expect(deferredEvents).toEqual([]);
+      expect(deferred.nextActiveProjection).toEqual(initial.nextActiveProjection);
+
+      const recoveredAt = "2026-08-30T09:00:00.000Z";
+      const completeClient = createClient({
+        search,
+        issue: { ...changedIssue, updatedAt: recoveredAt },
+        timeline: async () => ({
+          items: [
+            ...ambiguousTimeline,
+            {
+              ...assignedIssueEvent,
+              githubEventId: 1_004,
+              actor: secondAssigner,
+              occurredAt: recoveredAt,
+            },
+          ],
+          nextPage: null,
+        }),
+      });
+      const recoveredEvents: NormalizedSchedulingEvent[] = [];
+      const recovered = await reconcile(completeClient, recoveredEvents, {
+        previousActiveProjection: deferred.nextActiveProjection,
+      });
+      expect(recoveredEvents.map((event) => event.action)).toEqual([
+        "request_opened",
+        "revision_observed",
+      ]);
+      expect(recoveredEvents[0]).toMatchObject({
+        occurredAt: recoveredAt,
+        actor: { githubUserId: secondAssigner.githubUserId },
+      });
+      expect(recoveredEvents[1]).toMatchObject({
+        revision: { sourceUpdatedAt: recoveredAt },
+        workItem: { body: changedIssue.body, updatedAt: recoveredAt },
+      });
+      expect(recovered.nextActiveProjection.workItems[0]?.revision).toEqual(
+        recoveredEvents[1]?.revision,
+      );
+
+      const stableEvents: NormalizedSchedulingEvent[] = [];
+      await reconcile(completeClient, stableEvents, {
+        previousActiveProjection: recovered.nextActiveProjection,
+      });
+      expect(stableEvents).toEqual([]);
+    },
+  );
 
   it("honors page limits and exposes rate-limit metadata", async () => {
     const pageCalls: number[] = [];
@@ -549,6 +998,8 @@ describe("reconcileGitHubPolling", () => {
 
     expect(pageCalls).toEqual([1, 2]);
     expect(result.searchTruncated).toBe(true);
+    expect(events).toEqual([]);
+    expect(result.nextActiveProjection.workItems).toEqual([]);
     expect(rateLimitObservations).toEqual([
       {
         state: rateLimit,
@@ -598,7 +1049,7 @@ describe("reconcileGitHubPolling", () => {
     expect(retriedEvents[0]?.sourceEventId).toBe(closeEvents[0]?.sourceEventId);
   });
 
-  it("emits a work item close when a previously active item left the open search", async () => {
+  it("closes a previously active item even when both searches are incomplete", async () => {
     const initiallyAssigned = createClient({
       search: async (request) => ({
         items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
@@ -614,7 +1065,7 @@ describe("reconcileGitHubPolling", () => {
       closedAt,
     };
     const client = createClient({
-      search: async () => ({ items: [], nextPage: null }),
+      search: async () => ({ items: [], nextPage: null, incomplete: true }),
       issue: closedIssue,
     });
     const events: NormalizedSchedulingEvent[] = [];
@@ -632,7 +1083,96 @@ describe("reconcileGitHubPolling", () => {
       target: null,
       workItem: { state: "closed" },
     });
+    expect(result.searchTruncated).toBe(true);
+    expect(client.listIssueTimelineEvents).not.toHaveBeenCalled();
     expect(result.nextActiveProjection.workItems).toEqual([]);
+  });
+
+  it("separates a reopened issue assignment identity from its current snapshot", async () => {
+    const search = async (request: GitHubSearchRequest): Promise<GitHubPage<GitHubSearchItem>> => ({
+      items: request.query.includes("review-requested") ? [] : [assignedIssueSearchItem],
+      nextPage: null,
+    });
+    const initialEvents: NormalizedSchedulingEvent[] = [];
+    const initial = await reconcile(createClient({ search }), initialEvents);
+    const closedAt = "2026-08-30T13:00:00.000Z";
+    const closed = await reconcile(
+      createClient({
+        search: async () => ({ items: [], nextPage: null }),
+        issue: { ...issue, state: "closed", updatedAt: closedAt, closedAt },
+      }),
+      [],
+      {
+        previousActiveProjection: initial.nextActiveProjection,
+        now: () => new Date("2026-08-30T13:01:00.000Z"),
+      },
+    );
+    const reopenedAt = "2026-08-30T14:00:00.000Z";
+    const reopenedObservedAt = "2026-08-30T14:01:00.000Z";
+    const reopenedIssue: GitHubIssueSnapshot = {
+      ...issue,
+      title: "Reopened issue title",
+      body: "Reopened issue body",
+      updatedAt: reopenedAt,
+    };
+    const reopenedClient = createClient({ search, issue: reopenedIssue });
+    const reopenedEvents: NormalizedSchedulingEvent[] = [];
+    const reopened = await reconcile(reopenedClient, reopenedEvents, {
+      previousActiveProjection: closed.nextActiveProjection,
+      now: () => new Date(reopenedObservedAt),
+    });
+
+    expect(initialEvents.map((event) => event.action)).toEqual([
+      "request_opened",
+      "revision_observed",
+    ]);
+    expect(reopenedEvents.map((event) => event.action)).toEqual([
+      "request_opened",
+      "revision_observed",
+    ]);
+    expect(reopenedEvents[0]?.eventId).toBe(initialEvents[0]?.eventId);
+    expect(reopenedEvents[0]?.sourceEventId).toBe(initialEvents[0]?.sourceEventId);
+    expect(reopenedEvents[0]).toMatchObject({
+      occurredAt: assignedIssueEvent.occurredAt,
+      observedAt: reopenedObservedAt,
+    });
+    expect(reopenedEvents[1]).toMatchObject({
+      action: "revision_observed",
+      occurredAt: reopenedAt,
+      observedAt: reopenedObservedAt,
+      workItem: {
+        kind: "issue",
+        state: "open",
+        title: reopenedIssue.title,
+        body: reopenedIssue.body,
+        updatedAt: reopenedAt,
+        closedAt: null,
+      },
+      revision: { kind: "issue", sourceUpdatedAt: reopenedAt },
+    });
+    expect(reopenedEvents[1]?.sourceEventId).not.toBe(initialEvents[1]?.sourceEventId);
+    expect(reopenedEvents[1]?.revision.revisionKey).not.toBe(
+      initialEvents[1]?.revision.revisionKey,
+    );
+    expect(reopened.nextActiveProjection.workItems[0]?.revision).toEqual(
+      reopenedEvents[1]?.revision,
+    );
+
+    const retryEvents: NormalizedSchedulingEvent[] = [];
+    await reconcile(reopenedClient, retryEvents, {
+      previousActiveProjection: closed.nextActiveProjection,
+      now: () => new Date("2026-08-30T14:02:00.000Z"),
+    });
+    expect(retryEvents.map((event) => event.sourceEventId)).toEqual(
+      reopenedEvents.map((event) => event.sourceEventId),
+    );
+    expect(retryEvents[1]?.observedAt).not.toBe(reopenedEvents[1]?.observedAt);
+
+    const stableEvents: NormalizedSchedulingEvent[] = [];
+    await reconcile(reopenedClient, stableEvents, {
+      previousActiveProjection: reopened.nextActiveProjection,
+    });
+    expect(stableEvents).toEqual([]);
   });
 
   it("preserves unseen prior assignments while their search result is truncated", async () => {

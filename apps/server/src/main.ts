@@ -1,26 +1,25 @@
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  IssueTriageV1ModelOutputSchema,
-  PrReviewPlanV1ModelOutputSchema,
+  IssueTriageV2ModelOutputSchema,
+  PrReviewPlanV2ModelOutputSchema,
 } from "@agentic-review/codex";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { DatabaseGitHubPollingState } from "./database/github-polling-state.js";
 import { DatabaseOperatorAuthPersistence } from "./database/operator-auth-persistence.js";
+import { createGitHubIngestionHealthTracker } from "./github/ingestion-health.js";
 import { GitHubEventIngestionService } from "./github/ingestion-service.js";
 import { GitHubPollingCoordinator } from "./github/polling-coordinator.js";
+import { GitHubPublicationClient } from "./github/publication-client.js";
 import { GitHubRestApiError, GitHubRestClient } from "./github/rest-client.js";
+import { ManagedGitHubRuntimeConfiguration } from "./runtime/managed-github-configuration.js";
 import { createProductionServerLifecycle } from "./runtime/server-lifecycle.js";
 import { assertLinuxServerPlatform } from "./runtime/server-platform.js";
 import {
   createRecoveryMaintenanceStorageRuntime,
   createServerStorageRuntime,
 } from "./runtime/server-storage-runtime.js";
-import {
-  createScheduleJobInput,
-  defaultTrustedSchedulingPolicy,
-  loadTrustedSchedulingConfig,
-} from "./scheduling/index.js";
+import { defaultTrustedSchedulingPolicy, loadTrustedSchedulingConfig } from "./scheduling/index.js";
 import { OperatorAuthService } from "./security/operator-auth.js";
 import { createOperatorOidcClient } from "./security/operator-auth-oidc.js";
 
@@ -81,8 +80,8 @@ const start = async (): Promise<void> => {
             promptDirectory: config.github.promptDirectory,
             policy: defaultTrustedSchedulingPolicy,
             outputSchemas: {
-              issueTriage: IssueTriageV1ModelOutputSchema,
-              pullRequestReview: PrReviewPlanV1ModelOutputSchema,
+              issueTriage: IssueTriageV2ModelOutputSchema,
+              pullRequestReview: PrReviewPlanV2ModelOutputSchema,
             },
           });
     lifecycle.signal.throwIfAborted();
@@ -91,10 +90,21 @@ const start = async (): Promise<void> => {
       ? await createRecoveryMaintenanceStorageRuntime({
           databasePath: config.databasePath,
           migrationsDirectory: config.migrationsDirectory,
+          ...(config.operatorAccess === undefined ? {} : { operatorAccess: config.operatorAccess }),
+          ...(config.evidenceStorage === undefined
+            ? {}
+            : { evidenceStorage: config.evidenceStorage }),
         })
       : await createServerStorageRuntime({
           databasePath: config.databasePath,
           migrationsDirectory: config.migrationsDirectory,
+          ...(config.publication === undefined
+            ? {}
+            : { publicationPublisher: { githubUserId: config.publication.githubUserId } }),
+          ...(config.operatorAccess === undefined ? {} : { operatorAccess: config.operatorAccess }),
+          ...(config.evidenceStorage === undefined
+            ? {}
+            : { evidenceStorage: config.evidenceStorage }),
         });
     lifecycle.adoptStorageRuntime(storageRuntime);
     lifecycle.signal.throwIfAborted();
@@ -104,6 +114,40 @@ const start = async (): Promise<void> => {
       await database.request("purgeOperatorAuthForRecovery", {});
       lifecycle.signal.throwIfAborted();
     }
+    if (
+      !config.recoveryMaintenance &&
+      config.github !== undefined &&
+      schedulingConfig !== undefined
+    ) {
+      if (config.github.legacyBootstrap !== undefined) {
+        await database.request("bootstrapManagedRepositories", config.github.legacyBootstrap);
+      }
+      await database.request("bootstrapPromptTemplates", {
+        actor: { issuer: "system", subject: "trusted-file-bootstrap" },
+        templates: [
+          {
+            name: "Default PR review",
+            workflowKind: "pr_static_build",
+            content: schedulingConfig.pullRequestReview.text,
+            outputSchemaVersion: "PrReviewPlanV2",
+          },
+          {
+            name: "Default issue triage",
+            workflowKind: "issue_triage",
+            content: schedulingConfig.issueTriage.text,
+            outputSchemaVersion: "IssueTriageV2",
+          },
+        ],
+      });
+      lifecycle.signal.throwIfAborted();
+    }
+    const managedGitHub =
+      schedulingConfig === undefined
+        ? undefined
+        : new ManagedGitHubRuntimeConfiguration({
+            database,
+            legacySchedulingConfig: schedulingConfig,
+          });
     const operatorAuth =
       operatorAuthConfig === undefined
         ? undefined
@@ -113,21 +157,30 @@ const start = async (): Promise<void> => {
             ...(oidc === undefined ? {} : { oidc }),
           });
     const githubIngestion =
-      config.recoveryMaintenance || config.github === undefined || schedulingConfig === undefined
+      config.recoveryMaintenance || managedGitHub === undefined
         ? undefined
         : new GitHubEventIngestionService({
             database,
-            repositories: config.github.repositories,
-            policy: config.github.authorizationPolicy,
-            createSchedule: (event) => createScheduleJobInput(event, schedulingConfig),
+            resolveConfiguration: (event) => managedGitHub.resolveEvent(event),
           });
+    const githubHealth = createGitHubIngestionHealthTracker(config);
     const app = buildApp({
       config,
       database,
+      githubHealth,
+      githubWebhookHealth: githubHealth,
       shutdownSignal: lifecycle.signal,
       serverAdmission: lifecycle.admission,
       ...(githubIngestion === undefined ? {} : { githubIngestion }),
       ...(operatorAuth === undefined ? {} : { operatorAuth }),
+      ...(config.publication === undefined
+        ? {}
+        : {
+            publicationTransport: new GitHubPublicationClient({
+              token: config.publication.token,
+              expectedGitHubUserId: config.publication.githubUserId,
+            }),
+          }),
     });
     lifecycle.adoptApplication(app);
     lifecycle.signal.throwIfAborted();
@@ -141,14 +194,13 @@ const start = async (): Promise<void> => {
       !config.recoveryMaintenance &&
       config.github !== undefined &&
       githubIngestion !== undefined &&
-      schedulingConfig !== undefined
+      managedGitHub !== undefined
     ) {
       const pollingState = new DatabaseGitHubPollingState(database);
-      const githubConfig = config.github;
       const pollingCoordinator = new GitHubPollingCoordinator({
         client: new GitHubRestClient({
           token: pollingConfig.token,
-          userAgent: "PowerToys-Agentic-Review/0.1.0",
+          userAgent: "Agentic-Review/0.1.0",
           requestTimeoutMs: 30_000,
           observeResponse: async (observation) => {
             const rateLimit = observation.rateLimit;
@@ -181,24 +233,34 @@ const start = async (): Promise<void> => {
             }
           },
         }),
-        repositories: config.github.repositories,
-        reviewer: config.github.reviewer,
+        resolveTargets: async () => {
+          const targets = await managedGitHub.listPollingTargets();
+          githubHealth.updatePollingTargets(targets);
+          return targets;
+        },
         intervalMs: pollingConfig.intervalSeconds * 1_000,
         stateSource: pollingState,
         commitReconciliation: async (key, events, projection, signal) => {
           await pollingState.commitReconciliation(
             key,
             projection,
-            events.map((event) => ({
-              event,
-              policy: githubConfig.authorizationPolicy,
-              schedule: createScheduleJobInput(event, schedulingConfig),
-            })),
+            await managedGitHub.prepareReconciliation(key, events),
             signal,
+          );
+          githubHealth.recordReconciliationSuccess(
+            {
+              githubRepositoryId: key.githubRepositoryId,
+              fullName: key.repositoryFullName,
+            },
+            key.reviewerGithubUserId,
           );
         },
         signal: lifecycle.signal,
         observeError: (error, context) => {
+          githubHealth.recordReconciliationFailure(
+            context.repository,
+            context.reviewer.githubUserId,
+          );
           app.log.error(
             {
               error: summarizeGitHubPollingError(error, pollingConfig.token),

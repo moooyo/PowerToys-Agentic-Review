@@ -1,0 +1,17 @@
+.notification-bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 6px;
+  color: inherit;
+  border-radius: 6px;
+}
+.notification-bell:hover {
+  background: var(--ant-color-fill-tertiary, #f5f5f5);
+}
+.notification-bell__unavailable {
+  margin-left: 4px;
+  font-size: 10px;
+}

@@ -1,9 +1,21 @@
-import type { ExecutionPhase, JobState, WorkerState } from "@agentic-review/contracts";
+import type {
+  DashboardRequestEpochSummary,
+  ExecutionPhase,
+  JobAdmission,
+  JobState,
+  ReviewExecutionEvidence,
+  RunFailureDiagnostics,
+  VerificationReport,
+  WorkerState,
+  WorkItemState,
+} from "@agentic-review/contracts";
 
 export type WorkItemKind = "pull_request" | "issue";
 export type TriggerKind = "assigned" | "review_requested" | "not_requested";
 export type AuthorizationKind = "self" | "allowlisted" | "denied" | "pending";
 export type WorkItemStage =
+  | "not_scheduled"
+  | "awaiting_admission"
   | "queued"
   | "preparing"
   | "reviewing"
@@ -11,7 +23,7 @@ export type WorkItemStage =
   | "waiting_approval"
   | "publishing"
   | "done";
-export type JobStage = "queued" | ExecutionPhase | "done";
+export type JobStage = "queued" | "awaiting_admission" | ExecutionPhase | "done";
 export type JobStatus = JobState;
 
 export interface ListQuery {
@@ -28,6 +40,9 @@ export interface PageResult<T> {
 
 export interface WorkItem {
   id: string;
+  repositoryId: string;
+  revisionKey: string;
+  activeRequestEpoch: DashboardRequestEpochSummary | null;
   kind: WorkItemKind;
   repository: string;
   number: number;
@@ -38,8 +53,13 @@ export interface WorkItem {
   scheduledBy: string;
   authorization: AuthorizationKind;
   priority: "urgent" | "high" | "normal" | "low";
+  state: WorkItemState;
   stage: WorkItemStage;
   freshness: "current" | "superseded";
+  latestJobId?: string;
+  latestJobStatus?: JobStatus;
+  latestJobAttemptCount: number | null;
+  latestJobAdmission: JobAdmission | null;
   headSha?: string;
   reviewedSha?: string;
   workerNodeId?: string;
@@ -49,11 +69,13 @@ export interface WorkItem {
 
 export interface Job {
   id: string;
+  repositoryId: string;
   workItemId: string;
   workItemRef: string;
   title: string;
   generation: number;
   status: JobStatus;
+  admission: JobAdmission | null;
   stage: JobStage;
   attempt: number;
   maxAttempts: number;
@@ -86,11 +108,13 @@ export interface IssueDuplicateCandidate {
 
 export interface JobReviewResult {
   reviewResultId: string;
-  schemaId: "IssueTriageV1" | "PrReviewPlanV1";
+  schemaId: "IssueTriageV1" | "PrReviewPlanV1" | "IssueTriageV2" | "PrReviewPlanV2";
   resultDigest: string;
   summary: string;
   requestedRecipeIds: string[];
   createdAt: string;
+  verification?: VerificationReport;
+  executionEvidence?: ReviewExecutionEvidence;
   prReview: {
     assessment: "approve" | "comment" | "request_changes";
     findings: PrReviewFinding[];
@@ -109,6 +133,7 @@ export interface JobDetails extends Job {
   updatedAt: string;
   failureCode: string | null;
   failureMessage: string | null;
+  failureDiagnostics?: RunFailureDiagnostics | null;
   resultDigest: string | null;
   reviewResult: JobReviewResult | null;
 }
@@ -193,6 +218,10 @@ export interface SystemSnapshot {
   sqliteVersion: string;
   databaseSizeMb: number;
   oldestQueuedAt?: string;
+  oldestAwaitingAdmissionAt?: string;
+  queuedJobs: number;
+  awaitingAdmissionJobs: number;
+  pendingValidationRequests: number;
   activeWorkers: number;
   activeLeases: number;
   pendingApprovals: number;

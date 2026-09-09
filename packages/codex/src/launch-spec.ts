@@ -44,6 +44,21 @@ export interface BuildCodexExecLaunchSpecOptions {
   readonly providerEnvironment?: Readonly<Record<string, string>>;
   readonly environment: Readonly<Record<string, string>>;
   readonly limits: CodexProcessResourceLimits;
+  readonly sandboxMode?: "workspace-write" | "read-only";
+}
+
+export interface CodexAppServerProcessLaunchSpec
+  extends Omit<CodexProcessLaunchSpec, "standardInput"> {
+  readonly interactiveStdin: true;
+  readonly captureProcessIdentity: true;
+}
+
+export interface BuildCodexAppServerLaunchSpecOptions
+  extends Omit<
+    BuildCodexExecLaunchSpecOptions,
+    "prompt" | "outputSchemaPath" | "outputLastMessagePath" | "sandboxMode"
+  > {
+  readonly permissionProfile: string;
 }
 
 const maximumPromptUtf8Bytes = 512 * 1024;
@@ -145,6 +160,10 @@ export function buildCodexExecLaunchSpec(
 
   assertPrompt(options.prompt);
   assertLimits(options.limits);
+  const sandboxMode = options.sandboxMode ?? "workspace-write";
+  if (sandboxMode !== "workspace-write" && sandboxMode !== "read-only") {
+    throw new TypeError("sandboxMode must be workspace-write or read-only");
+  }
   const environment = Object.freeze({
     ...copyMinimalEnvironment(options.environment, repositoryWorkingDirectory),
     ...copyProviderEnvironment(options.providerEnvironment),
@@ -164,8 +183,9 @@ export function buildCodexExecLaunchSpec(
     'approval_policy="never"',
     "--ephemeral",
     "--ignore-user-config",
+    ...(sandboxMode === "read-only" ? ["--ignore-rules"] : []),
     "--sandbox",
-    "workspace-write",
+    sandboxMode,
     "--output-schema",
     outputSchemaPath,
     "--output-last-message",
@@ -180,6 +200,85 @@ export function buildCodexExecLaunchSpec(
     environmentMode: "replace",
     environment,
     standardInput: options.prompt,
+    limits: Object.freeze({ ...options.limits }),
+  });
+  assertEncodableProcessHostStartFrame(spec);
+  return spec;
+}
+
+/**
+ * Builds the dedicated app-server transport process. The caller must provide an owned fresh
+ * home and verify the actual session policy before starting a turn. This specification is
+ * requested configuration only; it does not establish sandbox enforcement or acceptance.
+ */
+export function buildCodexAppServerLaunchSpec(
+  options: BuildCodexAppServerLaunchSpecOptions,
+): CodexAppServerProcessLaunchSpec {
+  const executable = normalizeLocalWindowsExecutable(options.executable, "executable");
+  const repositoryWorkingDirectory = normalizeLocalWindowsDirectory(
+    options.workingDirectory,
+    "workingDirectory",
+  );
+  const processWorkingDirectory = normalizeLocalWindowsDirectory(
+    options.processWorkingDirectory,
+    "processWorkingDirectory",
+  );
+  const controlRootDirectory = normalizeLocalWindowsDirectory(
+    options.controlRootDirectory,
+    "controlRootDirectory",
+  );
+  assertDisjointDirectories(repositoryWorkingDirectory, controlRootDirectory);
+  assertContainedDirectory(
+    controlRootDirectory,
+    processWorkingDirectory,
+    "processWorkingDirectory",
+  );
+  if (isSameOrDescendant(repositoryWorkingDirectory, executable)) {
+    throw new TypeError("executable must not be inside the task workingDirectory");
+  }
+  assertLimits(options.limits);
+  if (
+    typeof options.permissionProfile !== "string" ||
+    !/^[a-z][a-z0-9_-]{0,63}(?![\s\S])/u.test(options.permissionProfile)
+  ) {
+    throw new TypeError("permissionProfile must be a bounded named permission profile");
+  }
+  const configurationArguments = buildConfigurationOverrideArguments(
+    options.configurationOverrides,
+  );
+  for (let index = 1; index < configurationArguments.length; index += 2) {
+    const assignment = configurationArguments[index] as string;
+    const key = assignment.slice(0, assignment.indexOf("=")).trim();
+    // Generated overrides use bare keys. Quoted or escaped aliases must not hide legacy
+    // sandbox settings, which take precedence over named permissions in the pinned CLI.
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(key)) {
+      throw new TypeError("app-server configuration overrides must use bare dotted keys");
+    }
+    const root = key.split(".", 1)[0];
+    if (root === "sandbox_mode" || root === "sandbox_workspace_write") {
+      throw new TypeError("legacy sandbox overrides cannot be combined with named permissions");
+    }
+  }
+  const spec: CodexAppServerProcessLaunchSpec = Object.freeze({
+    executable,
+    arguments: Object.freeze([
+      "--strict-config",
+      "app-server",
+      ...configurationArguments,
+      "--config",
+      'approval_policy="never"',
+      "--config",
+      `default_permissions=${JSON.stringify(options.permissionProfile)}`,
+      "--stdio",
+    ]),
+    workingDirectory: processWorkingDirectory,
+    environmentMode: "replace",
+    environment: Object.freeze({
+      ...copyMinimalEnvironment(options.environment, repositoryWorkingDirectory),
+      ...copyProviderEnvironment(options.providerEnvironment),
+    }),
+    interactiveStdin: true,
+    captureProcessIdentity: true,
     limits: Object.freeze({ ...options.limits }),
   });
   assertEncodableProcessHostStartFrame(spec);
@@ -521,7 +620,9 @@ function normalizeEnvironmentValue(name: string, value: string, workingDirectory
   return value;
 }
 
-function assertEncodableProcessHostStartFrame(spec: CodexProcessLaunchSpec): void {
+function assertEncodableProcessHostStartFrame(
+  spec: CodexProcessLaunchSpec | CodexAppServerProcessLaunchSpec,
+): void {
   const request = {
     protocolVersion: "1.0",
     type: "start",

@@ -8,10 +8,15 @@ import {
   ProtocolVersionSchema,
   Sha256Schema,
 } from "./common.js";
+import { RunFailureDiagnosticsSchema } from "./execution-evidence.js";
 import { ExecutionPhaseSchema, WorkerStateSchema } from "./states.js";
 
 export const WorkerArchitectureSchema = Type.Union([Type.Literal("x64"), Type.Literal("arm64")]);
 export type WorkerArchitecture = Static<typeof WorkerArchitectureSchema>;
+
+// Runtime-derived opt-out. An absent label preserves compatibility with existing Workers.
+export const workerModelExecutionDisabledLabel = "modelExecution";
+export const workerModelExecutionDisabledValue = "disabled";
 
 export const WorkerCapabilitiesSchema = Type.Object(
   {
@@ -189,6 +194,7 @@ export const RunFailureSubmissionSchema = Type.Composite(
         code: Type.String({ minLength: 1, maxLength: 128 }),
         message: Type.String({ minLength: 1, maxLength: 2_048 }),
         retryable: Type.Boolean(),
+        diagnostics: Type.Optional(RunFailureDiagnosticsSchema),
       },
       { additionalProperties: false },
     ),

@@ -1,428 +1,562 @@
-import type { ProColumns } from "@ant-design/pro-components";
-import { PageContainer, ProTable } from "@ant-design/pro-components";
+import type { JobAdmissionState } from "@agentic-review/contracts";
+import { FilterOutlined, ReloadOutlined } from "@ant-design/icons";
+import { type ActionType, type ProColumns, ProTable } from "@ant-design/pro-components";
+import { useLocation, useNavigate } from "@umijs/max";
+import { Alert, Button, Card, Empty, Input, Popover, Radio, Select } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { JobDetailDrawer } from "@/components/JobDetails";
 import {
-  Alert,
-  Button,
-  Descriptions,
-  Drawer,
-  Empty,
-  Grid,
-  List,
-  Space,
-  Spin,
-  Tag,
-  Typography,
-} from "antd";
-import { useCallback, useRef, useState } from "react";
-import { LeaseCountdown } from "@/components/LeaseCountdown";
+  clearNotificationTargetParameters,
+  notificationTargetPath,
+  parseNotificationTarget,
+} from "@/components/NotificationTarget/targets";
+import { OperatorAccessGate } from "@/components/OperatorAccess";
+import { PageHeader } from "@/components/PageHeader";
+import { RepositoryScopeUnavailable, useRepositoryScope } from "@/components/RepositoryScope";
 import { StatusTag } from "@/components/StatusTag";
-import { type Job, type JobDetails, reviewControl } from "@/services/review-control";
-import { formatDuration, shortSha } from "@/utils/format";
-import { asFilterValue, asSearchValue } from "@/utils/table";
+import { type Job, reviewControl } from "@/services/review-control";
+import { jobDisplayStatus } from "@/services/review-control/admission";
+import { formatDuration } from "@/utils/format";
+import "./index.css";
 
-const assessmentLabel: Record<"approve" | "comment" | "request_changes", string> = {
-  approve: "Approve",
-  comment: "Comment",
-  request_changes: "Request changes",
-};
+const statusOptions = [
+  { value: "queued", label: "Waiting to start" },
+  { value: "leased", label: "Leased" },
+  { value: "running", label: "Running" },
+  { value: "cancel_requested", label: "Cancel requested" },
+  { value: "retry_waiting", label: "Retry waiting" },
+  { value: "succeeded", label: "Succeeded" },
+  { value: "failed", label: "Failed" },
+  { value: "cancelled", label: "Cancelled" },
+  { value: "stale", label: "Superseded" },
+  { value: "dead_letter", label: "Retry limit reached" },
+];
+const stageOptions = [
+  { value: "awaiting_admission", label: "Awaiting admission" },
+  { value: "queued", label: "Queued" },
+  { value: "leased", label: "Worker assigned" },
+  { value: "preparing", label: "Preparing workspace" },
+  { value: "codex_review", label: "Reviewing" },
+  { value: "validation", label: "Validating" },
+  { value: "codex_revision", label: "Revising" },
+  { value: "uploading", label: "Transferring results" },
+  { value: "completing", label: "Saving result" },
+  { value: "cancelling", label: "Stopping execution" },
+  { value: "done", label: "Finished" },
+];
+const stageLabels = Object.fromEntries(stageOptions.map((option) => [option.value, option.label]));
+const views: { id: string; label: string; statuses: string[]; admission?: JobAdmissionState }[] = [
+  { id: "all", label: "All jobs", statuses: [] },
+  { id: "active", label: "In progress", statuses: ["leased", "running", "cancel_requested"] },
+  {
+    id: "pending",
+    label: "Awaiting admission",
+    statuses: ["queued", "retry_waiting"],
+    admission: "pending",
+  },
+  { id: "queued", label: "Queued", statuses: ["queued", "retry_waiting"], admission: "admitted" },
+  { id: "succeeded", label: "Succeeded", statuses: ["succeeded"] },
+  { id: "attention", label: "Needs attention", statuses: ["failed", "dead_letter"] },
+];
 
-const priorityLabel: Record<0 | 1 | 2 | 3, string> = {
-  0: "P0",
-  1: "P1",
-  2: "P2",
-  3: "P3",
-};
+interface JobsParameters {
+  current?: number;
+  pageSize?: number;
+  search?: string;
+  statuses?: string[];
+  stages?: string[];
+  repositoryId?: string;
+  admission?: JobAdmissionState;
+}
 
-const issueCategoryLabel: Record<
-  "bug" | "feature_request" | "documentation" | "question" | "support" | "other",
-  string
-> = {
-  bug: "Bug",
-  feature_request: "Feature request",
-  documentation: "Documentation",
-  question: "Question",
-  support: "Support",
-  other: "Other",
-};
+interface JobsTableResult {
+  data: Job[];
+  success: boolean;
+  total: number;
+}
+
+function sameStatuses(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((status) => right.includes(status));
+}
+
+function shortId(id: string): string {
+  return id.length > 16 ? `${id.slice(0, 13)}…` : id;
+}
+
+function CreatedTime({ value }: { value: string }) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return <span className="jobs-utility">Not recorded</span>;
+  return (
+    <time className="jobs-cell-stack" dateTime={value}>
+      <span>
+        {date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+      </span>
+      <span className="jobs-utility">
+        {date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
+      </span>
+    </time>
+  );
+}
 
 export default function JobsPage() {
-  const screens = Grid.useBreakpoint();
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [jobDetails, setJobDetails] = useState<JobDetails | null>(null);
-  const [detailsLoading, setDetailsLoading] = useState(false);
-  const [detailsError, setDetailsError] = useState<string | null>(null);
-  const detailsRequestGeneration = useRef(0);
+  const scope = useRepositoryScope();
+  if (!scope.ready) return <RepositoryScopeUnavailable />;
+  return (
+    <ScopedJobsPage
+      key={scope.key}
+      repositoryId={scope.repositoryId}
+      repositoryName={scope.label}
+    />
+  );
+}
 
-  const loadJobDetails = useCallback(async (jobId: string) => {
-    const requestGeneration = detailsRequestGeneration.current + 1;
-    detailsRequestGeneration.current = requestGeneration;
-    setSelectedJobId(jobId);
-    setDetailsLoading(true);
-    setDetailsError(null);
-    try {
-      const job = await reviewControl.getJob(jobId);
-      if (detailsRequestGeneration.current !== requestGeneration) {
-        return;
-      }
-      setJobDetails(job);
-    } catch (error) {
-      if (detailsRequestGeneration.current !== requestGeneration) {
-        return;
-      }
-      const message = error instanceof Error ? error.message : "Unable to load job details.";
-      setDetailsError(message);
-      setJobDetails(null);
-    } finally {
-      if (detailsRequestGeneration.current === requestGeneration) {
-        setDetailsLoading(false);
-      }
-    }
+export function SelectedJobDetails({
+  job,
+  onClose,
+}: {
+  job: Pick<Job, "id" | "repositoryId"> | null;
+  onClose: () => void;
+}) {
+  if (!job) return null;
+  return (
+    <OperatorAccessGate
+      key={`${job.repositoryId}:${job.id}`}
+      repositoryId={job.repositoryId}
+      permission="read"
+    >
+      <JobDetailDrawer repositoryId={job.repositoryId} jobId={job.id} onClose={onClose} />
+    </OperatorAccessGate>
+  );
+}
+
+function ScopedJobsPage({
+  repositoryId,
+  repositoryName,
+}: {
+  repositoryId?: string;
+  repositoryName: string;
+}) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const target = parseNotificationTarget(location.pathname, location.search);
+  const selectedJob =
+    target.kind === "target" &&
+    target.target.kind === "job" &&
+    target.target.repositoryId === repositoryId
+      ? { id: target.target.jobId, repositoryId: target.target.repositoryId }
+      : null;
+  const closeTarget = () =>
+    navigate({
+      pathname: location.pathname,
+      search: clearNotificationTargetParameters(location.search),
+    });
+  const actionRef = useRef<ActionType>(null);
+  const requestGeneration = useRef(0);
+  const latestRequest = useRef<Promise<JobsTableResult> | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [statuses, setStatuses] = useState<string[]>([]);
+  const [stages, setStages] = useState<string[]>([]);
+  const [admission, setAdmission] = useState<JobAdmissionState>();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      requestGeneration.current += 1;
+      latestRequest.current = null;
+    };
   }, []);
 
-  const closeDrawer = useCallback(() => {
-    detailsRequestGeneration.current += 1;
-    setSelectedJobId(null);
-    setJobDetails(null);
-    setDetailsLoading(false);
-    setDetailsError(null);
+  const parameters = useMemo(
+    () => ({ search, statuses, stages, admission, repositoryId }),
+    [search, statuses, stages, admission, repositoryId],
+  );
+  const activeView = views.find(
+    (view) => sameStatuses(view.statuses, statuses) && view.admission === admission,
+  )?.id;
+  const filterCount = statuses.length + stages.length + (admission ? 1 : 0);
+  const hasConstraints = search.length > 0 || filterCount > 0;
+
+  const resetPage = () => {
+    actionRef.current?.setPageInfo?.({ current: 1 });
+  };
+
+  const requestJobs = useCallback((params: JobsParameters): Promise<JobsTableResult> => {
+    const generation = ++requestGeneration.current;
+    setError(null);
+    setTotal(null);
+    const pending = (async (): Promise<JobsTableResult> => {
+      try {
+        const response = await reviewControl.listJobs({
+          page: params.current ?? 1,
+          pageSize: params.pageSize ?? 20,
+          search: params.search || undefined,
+          filters: {
+            repositoryId: params.repositoryId,
+            status: params.statuses?.length ? params.statuses : undefined,
+            stage: params.stages?.length ? params.stages : undefined,
+            admission: params.admission,
+          },
+        });
+        if (generation !== requestGeneration.current) {
+          return latestRequest.current ?? { data: [], success: false, total: 0 };
+        }
+        setTotal(response.total);
+        return { data: response.items, success: true, total: response.total };
+      } catch (failure) {
+        if (generation !== requestGeneration.current) {
+          return latestRequest.current ?? { data: [], success: false, total: 0 };
+        }
+        setError(failure instanceof Error ? failure.message : "The jobs request failed.");
+        setTotal(null);
+        // Clear prior rows on failure; the explicit error state replaces result counts.
+        return { data: [], success: true, total: 0 };
+      }
+    })();
+    // Older responses resolve to the newest request, so slow pages cannot replace a newer view.
+    latestRequest.current = pending;
+    return pending;
   }, []);
 
-  const drawerOpen = selectedJobId !== null;
+  const clearFilters = () => {
+    setStatuses([]);
+    setStages([]);
+    setAdmission(undefined);
+    resetPage();
+  };
+
+  const clearAll = () => {
+    clearFilters();
+    setSearchInput("");
+    setSearch("");
+  };
 
   const columns: ProColumns<Job>[] = [
     {
-      title: "Search",
-      dataIndex: "search",
-      hideInTable: true,
-      fieldProps: { placeholder: "Job, work item, or worker" },
-    },
-    {
-      title: "Job",
-      dataIndex: "id",
-      search: false,
-      width: 174,
-      render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text className="mono" copyable>
-            {record.id}
-          </Typography.Text>
-          <Typography.Text type="secondary">generation {record.generation}</Typography.Text>
-        </Space>
-      ),
-    },
-    {
-      title: "Work item",
+      title: "Work item / job",
       dataIndex: "workItemRef",
-      width: 220,
-      search: false,
-      render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text strong>{record.workItemRef}</Typography.Text>
-          <Typography.Text type="secondary">{record.title}</Typography.Text>
-        </Space>
+      width: 256,
+      render: (_, job) => (
+        <div className="jobs-cell-stack">
+          <span className="jobs-work-item">{job.workItemRef}</span>
+          <span className="jobs-utility jobs-job-identity">
+            {job.title}
+            <span aria-hidden="true"> · </span>
+            <span className="jobs-code" title={job.id}>
+              {shortId(job.id)}
+            </span>
+          </span>
+        </div>
       ),
     },
     {
-      title: "Status",
+      title: "Execution",
       dataIndex: "status",
-      width: 174,
-      valueEnum: {
-        queued: { text: "Queued" },
-        leased: { text: "Leased" },
-        running: { text: "Running" },
-        cancel_requested: { text: "Cancel requested" },
-        retry_waiting: { text: "Retry waiting" },
-        succeeded: { text: "Succeeded" },
-        failed: { text: "Failed" },
-        cancelled: { text: "Cancelled" },
-        stale: { text: "Stale" },
-        dead_letter: { text: "Dead letter" },
-      },
-      render: (_, record) => <StatusTag status={record.status} />,
-    },
-    {
-      title: "Stage",
-      dataIndex: "stage",
-      width: 138,
-      valueEnum: {
-        queued: { text: "Queued" },
-        leased: { text: "Leased" },
-        preparing: { text: "Preparing" },
-        codex_review: { text: "Codex review" },
-        validation: { text: "Validation" },
-        codex_revision: { text: "Codex revision" },
-        uploading: { text: "Uploading" },
-        completing: { text: "Completing" },
-        cancelling: { text: "Cancelling" },
-        done: { text: "Done" },
-      },
-      render: (_, record) => <StatusTag status={record.stage} />,
-    },
-    {
-      title: "Attempt",
-      dataIndex: "attempt",
-      width: 94,
-      search: false,
-      renderText: (_, record) => `${record.attempt}/${record.maxAttempts}`,
+      width: 168,
+      render: (_, job) => (
+        <div className="jobs-cell-stack">
+          <StatusTag status={jobDisplayStatus(job.status, job.admission)} />
+          <span className="jobs-utility">
+            {job.status === "succeeded"
+              ? "Result available"
+              : job.status === "failed" || job.status === "dead_letter"
+                ? "Inspect failure details"
+                : job.admission?.state === "pending"
+                  ? "Execution recorded; awaiting queue entry"
+                  : job.status === "retry_waiting"
+                    ? "Waiting for another attempt"
+                    : job.stage === "queued"
+                      ? "Waiting for a worker"
+                      : (stageLabels[job.stage] ?? job.stage.replaceAll("_", " "))}
+          </span>
+        </div>
+      ),
     },
     {
       title: "Worker",
       dataIndex: "workerNodeId",
-      width: 196,
-      search: false,
-      renderText: (value) => value ?? "Unassigned",
-    },
-    {
-      title: "Lease",
-      dataIndex: "leaseExpiresAt",
-      width: 112,
-      search: false,
-      render: (_, record) => <LeaseCountdown expiresAt={record.leaseExpiresAt} />,
-    },
-    {
-      title: "Revision",
-      dataIndex: "targetSha",
-      width: 108,
-      search: false,
-      renderText: (value) => <Typography.Text className="mono">{shortSha(value)}</Typography.Text>,
+      width: 192,
+      render: (_, job) => (
+        <div className="jobs-cell-stack">
+          <span className="jobs-worker" title={job.workerNodeId}>
+            {job.workerNodeId ?? "Unassigned"}
+          </span>
+          <span className="jobs-utility">
+            Attempt {job.attempt} / {job.maxAttempts}
+          </span>
+        </div>
+      ),
     },
     {
       title: "Elapsed",
       dataIndex: "elapsedSeconds",
-      width: 100,
-      search: false,
-      renderText: (value) => formatDuration(value),
+      width: 88,
+      render: (_, job) => (
+        <span className="jobs-numeric">{formatDuration(job.elapsedSeconds)}</span>
+      ),
     },
     {
       title: "Created",
       dataIndex: "createdAt",
-      valueType: "dateTime",
-      width: 168,
-      search: false,
+      width: 136,
+      render: (_, job) => <CreatedTime value={job.createdAt} />,
     },
     {
-      title: "Actions",
-      key: "actions",
-      valueType: "option",
-      width: 96,
+      title: "",
+      key: "details",
+      width: 80,
       fixed: "right",
-      render: (_, record) => [
+      render: (_, job) => (
         <Button
-          key="details"
-          size="small"
+          className="jobs-details-button"
           type="link"
-          onClick={() => void loadJobDetails(record.id)}
+          size="small"
+          onClick={() =>
+            navigate(
+              notificationTargetPath({
+                kind: "job",
+                repositoryId: job.repositoryId,
+                jobId: job.id,
+              }),
+            )
+          }
+          aria-label={`View details for ${job.workItemRef}, job ${job.id}`}
         >
           Details
-        </Button>,
-      ],
+        </Button>
+      ),
     },
   ];
 
+  const filters = (
+    <div className="jobs-filters">
+      <div className="jobs-filter-field">
+        <label htmlFor="jobs-admission-filter">Queue admission</label>
+        <Select
+          id="jobs-admission-filter"
+          aria-label="Filter jobs by admission"
+          allowClear
+          placeholder="Any admission state"
+          value={admission}
+          options={[
+            { value: "pending", label: "Awaiting admission" },
+            { value: "admitted", label: "Queued" },
+          ]}
+          onChange={(value: JobAdmissionState | undefined) => {
+            setAdmission(value);
+            resetPage();
+          }}
+        />
+        <span className="jobs-utility">Admission filters apply only to waiting jobs.</span>
+      </div>
+      <div className="jobs-filter-field">
+        <label htmlFor="jobs-status-filter">Status</label>
+        <Select
+          id="jobs-status-filter"
+          aria-label="Filter jobs by status"
+          mode="multiple"
+          allowClear
+          placeholder="Any status"
+          options={statusOptions}
+          value={statuses}
+          onChange={(value: string[]) => {
+            setStatuses(value);
+            resetPage();
+          }}
+          maxTagCount="responsive"
+        />
+      </div>
+      <div className="jobs-filter-field">
+        <label htmlFor="jobs-stage-filter">Stage</label>
+        <Select
+          id="jobs-stage-filter"
+          aria-label="Filter jobs by stage"
+          mode="multiple"
+          allowClear
+          placeholder="Any stage"
+          options={stageOptions}
+          value={stages}
+          onChange={(value: string[]) => {
+            setStages(value);
+            resetPage();
+          }}
+          maxTagCount="responsive"
+        />
+      </div>
+      <div className="jobs-filter-actions">
+        <Button type="text" disabled={filterCount === 0} onClick={clearFilters}>
+          Clear filters
+        </Button>
+        <Button onClick={() => setFiltersOpen(false)}>Done</Button>
+      </div>
+    </div>
+  );
+
   return (
-    <PageContainer className="operational-page" header={{ title: "Jobs" }}>
-      <ProTable<Job>
-        cardBordered={false}
-        className="operational-table"
-        columns={columns}
-        columnsState={{
-          defaultValue: {
-            attempt: { show: false },
-            leaseExpiresAt: { show: false },
-            targetSha: { show: false },
-          },
-          persistenceKey: "agentic-review:jobs:columns:v1",
-          persistenceType: "localStorage",
-        }}
-        headerTitle="Execution queue"
-        options={{ density: true, fullScreen: true, reload: true, setting: true }}
-        pagination={{ defaultPageSize: 20, showSizeChanger: true }}
-        request={async (params) => {
-          const result = await reviewControl.listJobs({
-            page: params.current,
-            pageSize: params.pageSize,
-            search: asSearchValue(params.search),
-            filters: {
-              stage: asFilterValue(params.stage),
-              status: asFilterValue(params.status),
-            },
-          });
-          return { data: result.items, success: true, total: result.total };
-        }}
-        rowKey="id"
-        scroll={{ x: true }}
-        search={{ labelWidth: "auto" }}
-        size="small"
+    <div className="jobs-page">
+      <PageHeader
+        eyebrow={repositoryName}
+        title="Jobs"
+        description="Follow each execution from queue to result."
+        actions={
+          <Button
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={() => void actionRef.current?.reload()}
+          >
+            Refresh
+          </Button>
+        }
       />
 
-      <Drawer
-        destroyOnClose
-        onClose={closeDrawer}
-        open={drawerOpen}
-        title={selectedJobId === null ? "Job details" : `Job ${selectedJobId}`}
-        width={screens.lg ? 860 : "100%"}
-      >
-        {detailsLoading ? (
-          <div style={{ display: "flex", justifyContent: "center", padding: 36 }}>
-            <Spin size="large" />
-          </div>
-        ) : detailsError !== null ? (
-          <Alert
-            showIcon
-            message="Unable to load job details"
-            description={detailsError}
-            type="error"
+      <Card className="jobs-panel" role="region" aria-label="Job execution monitor">
+        <div className="jobs-views">
+          <Radio.Group
+            role="radiogroup"
+            aria-label="Job status views"
+            optionType="button"
+            value={activeView ?? "custom"}
+            options={views.map((view) => ({ value: view.id, label: view.label }))}
+            onChange={(event) => {
+              const view = views.find((item) => item.id === event.target.value);
+              if (view) {
+                setStatuses([...view.statuses]);
+                setAdmission(view.admission);
+                resetPage();
+              }
+            }}
           />
-        ) : jobDetails === null ? (
-          <Empty description="This job no longer exists." />
-        ) : (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Descriptions bordered column={1} size="small" title="Execution">
-              <Descriptions.Item label="Work item">{jobDetails.workItemRef}</Descriptions.Item>
-              <Descriptions.Item label="Status">
-                <Space>
-                  <StatusTag status={jobDetails.status} />
-                  <StatusTag status={jobDetails.stage} />
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Attempt">{`${jobDetails.attempt}/${jobDetails.maxAttempts}`}</Descriptions.Item>
-              <Descriptions.Item label="Worker">
-                {jobDetails.workerNodeId ?? "Unassigned"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Lease">
-                <LeaseCountdown expiresAt={jobDetails.leaseExpiresAt} />
-              </Descriptions.Item>
-              <Descriptions.Item label="Elapsed">
-                {formatDuration(jobDetails.elapsedSeconds)}
-              </Descriptions.Item>
-              <Descriptions.Item label="Revision">
-                <Typography.Text className="mono">{shortSha(jobDetails.targetSha)}</Typography.Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="Failure code">
-                {jobDetails.failureCode ?? "-"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Failure message">
-                {jobDetails.failureMessage ?? "-"}
-              </Descriptions.Item>
-            </Descriptions>
+        </div>
 
-            {jobDetails.reviewResult === null ? (
-              <Empty
-                description="No persisted review result for this job."
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-              />
-            ) : (
-              <>
-                <Descriptions bordered column={1} size="small" title="Review result">
-                  <Descriptions.Item label="Schema">
-                    {jobDetails.reviewResult.schemaId}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Summary">
-                    {jobDetails.reviewResult.summary}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Result digest">
-                    <Typography.Text className="mono" copyable>
-                      {jobDetails.reviewResult.resultDigest}
-                    </Typography.Text>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Requested recipes">
-                    {jobDetails.reviewResult.requestedRecipeIds.length === 0
-                      ? "None"
-                      : jobDetails.reviewResult.requestedRecipeIds.map((recipeId) => (
-                          <Tag key={recipeId}>{recipeId}</Tag>
-                        ))}
-                  </Descriptions.Item>
-                </Descriptions>
+        <div className="jobs-toolbar">
+          <Input.Search
+            className="jobs-search"
+            aria-label="Search jobs"
+            placeholder="Search work item, job, or worker"
+            allowClear
+            maxLength={512}
+            value={searchInput}
+            onChange={(event) => {
+              setSearchInput(event.target.value);
+              if (event.target.value.length === 0) {
+                setSearch("");
+                resetPage();
+              }
+            }}
+            onSearch={(value) => {
+              setSearch(value.trim());
+              resetPage();
+            }}
+          />
+          <Popover
+            content={filters}
+            trigger="click"
+            placement="bottomLeft"
+            open={filtersOpen}
+            onOpenChange={setFiltersOpen}
+          >
+            <Button icon={<FilterOutlined />} aria-expanded={filtersOpen}>
+              Filters{filterCount > 0 ? ` (${filterCount})` : ""}
+            </Button>
+          </Popover>
+          {hasConstraints && (
+            <Button className="jobs-reset" type="text" onClick={clearAll}>
+              Reset
+            </Button>
+          )}
+          <span className="jobs-result-count" aria-live="polite">
+            {loading
+              ? "Loading jobs…"
+              : error
+                ? "Results unavailable"
+                : total === null
+                  ? ""
+                  : `${total.toLocaleString("en-US")} ${total === 1 ? "job" : "jobs"}`}
+          </span>
+        </div>
 
-                {jobDetails.reviewResult.prReview !== null && (
-                  <>
-                    <Space align="center">
-                      <Typography.Title level={5} style={{ margin: 0 }}>
-                        PR Findings
-                      </Typography.Title>
-                      <Tag color="blue">
-                        {assessmentLabel[jobDetails.reviewResult.prReview.assessment]}
-                      </Tag>
-                    </Space>
-                    <List
-                      bordered
-                      dataSource={jobDetails.reviewResult.prReview.findings}
-                      locale={{ emptyText: "No findings." }}
-                      renderItem={(finding) => (
-                        <List.Item key={finding.findingId}>
-                          <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                            <Space wrap>
-                              <Tag color="geekblue">{priorityLabel[finding.priority]}</Tag>
-                              <Typography.Text strong>{finding.title}</Typography.Text>
-                            </Space>
-                            <Typography.Text className="mono">
-                              {`${finding.path}:${finding.line}${finding.endLine === null ? "" : `-${finding.endLine}`}`}
-                            </Typography.Text>
-                            <Typography.Paragraph style={{ marginBottom: 0 }}>
-                              {finding.body}
-                            </Typography.Paragraph>
-                          </Space>
-                        </List.Item>
-                      )}
-                      size="small"
-                    />
-                  </>
-                )}
-
-                {jobDetails.reviewResult.issueTriage !== null && (
-                  <>
-                    <Typography.Title level={5} style={{ marginBottom: 0 }}>
-                      Issue Triage
-                    </Typography.Title>
-                    <Descriptions bordered column={1} size="small">
-                      <Descriptions.Item label="Category">
-                        {issueCategoryLabel[jobDetails.reviewResult.issueTriage.category]}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Priority">
-                        {priorityLabel[jobDetails.reviewResult.issueTriage.priority]}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Confidence">
-                        {`${Math.round(jobDetails.reviewResult.issueTriage.confidence * 100)}%`}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Suggested labels">
-                        {jobDetails.reviewResult.issueTriage.suggestedLabels.length === 0
-                          ? "None"
-                          : jobDetails.reviewResult.issueTriage.suggestedLabels.map((label) => (
-                              <Tag key={label}>{label}</Tag>
-                            ))}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Missing information">
-                        {jobDetails.reviewResult.issueTriage.missingInformation.length === 0 ? (
-                          "None"
-                        ) : (
-                          <List
-                            dataSource={jobDetails.reviewResult.issueTriage.missingInformation}
-                            renderItem={(item) => <List.Item>{item}</List.Item>}
-                            size="small"
-                          />
-                        )}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="Duplicate candidates">
-                        {jobDetails.reviewResult.issueTriage.duplicateCandidates.length === 0 ? (
-                          "None"
-                        ) : (
-                          <List
-                            dataSource={jobDetails.reviewResult.issueTriage.duplicateCandidates}
-                            renderItem={(candidate) => (
-                              <List.Item>{`#${candidate.number}: ${candidate.reason}`}</List.Item>
-                            )}
-                            size="small"
-                          />
-                        )}
-                      </Descriptions.Item>
-                    </Descriptions>
-                  </>
-                )}
-              </>
-            )}
-          </Space>
+        {error && (
+          <Alert
+            className="jobs-error"
+            type="error"
+            showIcon
+            title="Unable to load jobs"
+            description={error}
+            action={
+              <Button
+                size="small"
+                loading={loading}
+                onClick={() => void actionRef.current?.reload()}
+              >
+                Try again
+              </Button>
+            }
+          />
         )}
-      </Drawer>
-    </PageContainer>
+
+        <ProTable<Job, JobsParameters>
+          actionRef={actionRef}
+          className="operational-table jobs-table"
+          cardProps={false}
+          columns={columns}
+          rowKey="id"
+          request={requestJobs}
+          params={parameters}
+          onLoadingChange={(value) =>
+            setLoading(
+              value === true ||
+                (typeof value === "object" && value !== null && value.spinning !== false),
+            )
+          }
+          search={false}
+          options={false}
+          toolBarRender={false}
+          tableAlertRender={false}
+          size="middle"
+          scroll={{ x: 920 }}
+          tableLayout="fixed"
+          pagination={{
+            defaultPageSize: 20,
+            hideOnSinglePage: true,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            showTotal: (count, range) => (error ? "" : `${range[0]}–${range[1]} of ${count}`),
+          }}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  error
+                    ? "Job results could not be retrieved."
+                    : hasConstraints
+                      ? "No jobs match this view. Adjust the search or filters."
+                      : "No jobs have been scheduled yet."
+                }
+              >
+                {!error && hasConstraints && (
+                  <Button onClick={clearAll}>Clear search and filters</Button>
+                )}
+              </Empty>
+            ),
+          }}
+        />
+      </Card>
+
+      {target.kind === "invalid" ? (
+        <Alert
+          type="error"
+          showIcon
+          title="Invalid job target"
+          description={target.message}
+          action={<Button onClick={closeTarget}>Clear target</Button>}
+        />
+      ) : (
+        <SelectedJobDetails job={selectedJob} onClose={closeTarget} />
+      )}
+    </div>
   );
 }

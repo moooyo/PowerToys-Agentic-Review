@@ -7,7 +7,7 @@ output. Diagnostics are written to standard error.
 Build the Windows binary from this module:
 
 ```powershell
-go build -trimpath -o AgenticReview.ProcessHost.exe .
+go build -buildvcs=false -trimpath -o AgenticReview.ProcessHost.exe .
 ```
 
 The worker starts the binary with an absolute path, the required `--stdio` flag, and a validated
@@ -34,8 +34,8 @@ but it must not be described as hostile-code containment.
 Run the module tests serially on Windows:
 
 ```powershell
-go test -count=1 -p 1 -timeout 5m ./...
-go vet -p 1 ./...
+go test -buildvcs=false -count=1 -p 1 -timeout 5m ./...
+go vet -buildvcs=false -p 1 ./...
 ```
 
 The Windows integration test launches the Go test helper through the production `CreateProcessW`
@@ -43,3 +43,48 @@ path, observes it in the configured Job Object while it is blocked on standard i
 standard-I/O closure, process exit, Job drain, and handle cleanup. A second test has that helper
 spawn a real descendant, verifies both PIDs belong to the Job, terminates the Job, and confirms the
 root, descendant, and Job all reach their terminal state without a residual process.
+
+## Opt-in interactive standard input
+
+Start the Host with `--interactive-stdin` only when its client supports the versioned extension.
+The default ready event, noninteractive started event and one-shot `standardInput` write/EOF
+behavior are unchanged. Interactive launches require `spec.interactiveStdin: true`; they cannot
+also contain `standardInput`, including an empty string. There is no automatic fallback to an
+older Host. The enabled ready capability is exactly:
+
+```json
+{"interactiveStdin":{"version":1,"maximumChunkBytes":65536,"maximumTotalBytes":8388608,"maximumOperations":1024,"maximumPendingOperations":1,"writeTimeoutMs":10000}}
+```
+
+Each interactive `started` event adds a fresh 64-character lowercase hexadecimal `stdinStreamId`.
+Both `stdin_write` and `stdin_close` identify the start request, stream generation and next sequence
+number. Sequences begin at one, include close, and are independent of output stream sequence numbers.
+Writes carry canonical padded base64 for 1–65,536 arbitrary bytes; splitting a UTF-8 frame across
+chunks is valid. Accepted writes total at most 8 MiB and accepted operations total at most 1,024.
+Only one operation may await pipe completion. A committed result may be publishing while the next
+operation is admitted, but the single writer publishes that result before executing the next one.
+Admission failures do not advance the sequence; accepting close immediately prevents later writes.
+
+Every operation returns `stdin_result` with the exact request/stream/sequence/operation tuple.
+Success means only that bytes reached the pipe or EOF close completed. It does not mean that the
+child parsed, accepted or executed an application request. Partial failure, write timeout or close
+failure stops the affected process without replaying data. Internal failure does not emit an
+unsolicited `terminated(cancelled)` event; the correlated input result explains the failure.
+Zero observed written bytes on failure does not establish that the child received no bytes.
+
+The controller uses three fixed goroutines per interactive process: writer, pipe closer and
+deadline observer. Child pipe I/O does not occupy the Host control loop. `os.File.Close()` cancels
+pending Windows pipe I/O through the Go runtime; raw handles are never closed behind `os.File`.
+Every accepted input result finishes publication before `exited`. Normal EOF-driven exit preserves
+a completed close, and a late deadline cannot cancel an operation whose completion already won.
+The Host's existing synchronous stdout emitter is a separate backpressure boundary: clients must
+continue draining protocol output. This extension does not make that output queue unbounded.
+
+The `TestInteractiveInputWindows*` tests use only the owned Go test helper. They exercise real
+blocked Windows pipe writes while another process remains controllable, the advertised ten-second
+write timeout, explicit termination, byte-exact multi-chunk input and EOF. A duplicated Job Object
+handle independently verifies zero remaining processes; all original pipe/process handles must
+be closed. They invoke neither Codex nor a model, repository command, account setup or firewall
+change. Interactive input alone does not establish command/network isolation or enable evaluation
+model execution. The complete wire contract is in
+[`docs/design/2026-09-08-process-host-interactive-stdin.md`](../../docs/design/2026-09-08-process-host-interactive-stdin.md).

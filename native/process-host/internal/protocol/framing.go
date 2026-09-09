@@ -96,6 +96,19 @@ func NewFrameWriter(writer io.Writer, maxBytes int) *FrameWriter {
 }
 
 func (w *FrameWriter) WriteFrame(value any) error {
+	switch event := value.(type) {
+	case StdinResultEvent:
+		if err := ValidateStdinResultEvent(event); err != nil {
+			return fmt.Errorf("validate stdin result: %w", err)
+		}
+	case *StdinResultEvent:
+		if event == nil {
+			return errors.New("stdin result must not be nil")
+		}
+		if err := ValidateStdinResultEvent(*event); err != nil {
+			return fmt.Errorf("validate stdin result: %w", err)
+		}
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("marshal protocol frame: %w", err)

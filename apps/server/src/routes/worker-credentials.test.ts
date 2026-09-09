@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseClient } from "../../dist/database/database-client.js";
 import { DatabaseRequestError } from "../../dist/database/errors.js";
+import type { OperatorRequestInput } from "../../dist/database/operator-request.js";
 import {
   OPERATOR_SESSION_COOKIE,
   type OperatorAuthRouteService,
@@ -41,6 +42,12 @@ const session: OperatorSession = {
   createdAt: "2026-09-03T00:00:00.000Z",
   expiresAt: "2026-09-03T01:00:00.000Z",
 };
+const sessionActor = { issuer: session.issuer, subject: session.subject };
+const operatorCall = (operation: string, input: unknown) =>
+  [
+    "operatorRequest",
+    { context: { kind: "operator", actor: sessionActor }, operation, input },
+  ] as const;
 
 const createAuth = (authenticated = true): OperatorAuthRouteService => ({
   publicOrigin,
@@ -63,26 +70,36 @@ const createAuth = (authenticated = true): OperatorAuthRouteService => ({
 
 const createDatabase = (
   implementation?: (operation: string, input: unknown) => Promise<unknown>,
+  permissionFailure?: Error,
 ): { readonly database: DatabaseClient; readonly request: ReturnType<typeof vi.fn> } => {
-  const request = vi.fn(
+  const execute =
     implementation ??
-      (async (operation: string, input: unknown) => {
-        const workerNodeId = (input as { readonly workerNodeId: string }).workerNodeId;
-        if (operation === "createWorkerNodeCredential") {
-          return { workerNodeId, authState: "pending" };
-        }
-        if (operation === "listWorkerNodeCredentials") {
-          return { items: [], total: 0 };
-        }
-        if (operation === "rotateWorkerToken") {
-          return { workerNodeId, authState: "active" };
-        }
-        if (operation === "revokeWorkerToken") {
-          return { workerNodeId, authState: "revoked" };
-        }
-        throw new Error(`Unexpected operation: ${operation}`);
-      }),
-  );
+    (async (operation: string, input: unknown) => {
+      const workerNodeId = (input as { readonly workerNodeId: string }).workerNodeId;
+      if (operation === "createWorkerNodeCredential") {
+        return { workerNodeId, authState: "pending" };
+      }
+      if (operation === "listWorkerNodeCredentials") {
+        return { items: [], total: 0 };
+      }
+      if (operation === "rotateWorkerToken") {
+        return { workerNodeId, authState: "active" };
+      }
+      if (operation === "revokeWorkerToken") {
+        return { workerNodeId, authState: "revoked" };
+      }
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+  const request = vi.fn(async (operation: string, input: OperatorRequestInput) => {
+    expect(operation).toBe("operatorRequest");
+    expect(input.context).toEqual({ kind: "operator", actor: sessionActor });
+    if (input.operation === "operatorCheckPermission") {
+      expect(input.input).toEqual({});
+      if (permissionFailure !== undefined) throw permissionFailure;
+      return { authorized: true };
+    }
+    return execute(input.operation, input.input);
+  });
   return { database: { request } as unknown as DatabaseClient, request };
 };
 
@@ -169,7 +186,15 @@ describe("operator worker credential routes", () => {
       expect(response.body).not.toContain(fixedToken);
       expect(response.body).not.toContain(fixedTokenSha256);
       expect(response.body).not.toContain("tokenSha256");
-      expect(request).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenNthCalledWith(1, ...operatorCall("operatorCheckPermission", {}));
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        ...operatorCall("listWorkerNodeCredentials", {
+          offset: 0,
+          limit: 200,
+        }),
+      );
     } finally {
       await app.close();
     }
@@ -193,7 +218,7 @@ describe("operator worker credential routes", () => {
       expect(response.statusCode).toBe(200);
       expectNoStore(response);
       expect(response.json()).toEqual({ items: [], total: 12 });
-      expect(request).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledTimes(2);
     } finally {
       await app.close();
     }
@@ -354,13 +379,17 @@ describe("operator worker credential routes", () => {
       expect(randomBytes).toHaveBeenCalledWith(32);
       expect(randomBytes).toHaveBeenCalledTimes(1);
       expect(randomUUID).toHaveBeenCalledTimes(1);
-      expect(request).toHaveBeenCalledWith("createWorkerNodeCredential", {
-        workerNodeId: fixedWorkerNodeId,
-        displayName: "Review Worker 1",
-        workerTokenSha256: fixedTokenSha256,
-        createdByIssuer: session.issuer,
-        createdBySubject: session.subject,
-      });
+      expect(request).toHaveBeenNthCalledWith(1, ...operatorCall("operatorCheckPermission", {}));
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        ...operatorCall("createWorkerNodeCredential", {
+          workerNodeId: fixedWorkerNodeId,
+          displayName: "Review Worker 1",
+          workerTokenSha256: fixedTokenSha256,
+          createdByIssuer: session.issuer,
+          createdBySubject: session.subject,
+        }),
+      );
       expect(JSON.stringify(request.mock.calls)).not.toContain(fixedToken);
     } finally {
       await app.close();
@@ -394,13 +423,17 @@ describe("operator worker credential routes", () => {
           authState,
           token: fixedToken,
         });
-        expect(request).toHaveBeenCalledWith("rotateWorkerToken", {
-          workerNodeId: fixedWorkerNodeId,
-          workerTokenSha256: fixedTokenSha256,
-          expectedUpdatedAt: credentialUpdatedAt,
-          rotatedByIssuer: session.issuer,
-          rotatedBySubject: session.subject,
-        });
+        expect(request).toHaveBeenNthCalledWith(1, ...operatorCall("operatorCheckPermission", {}));
+        expect(request).toHaveBeenNthCalledWith(
+          2,
+          ...operatorCall("rotateWorkerToken", {
+            workerNodeId: fixedWorkerNodeId,
+            workerTokenSha256: fixedTokenSha256,
+            expectedUpdatedAt: credentialUpdatedAt,
+            rotatedByIssuer: session.issuer,
+            rotatedBySubject: session.subject,
+          }),
+        );
         expect(JSON.stringify(request.mock.calls)).not.toContain(fixedToken);
       } finally {
         await app.close();
@@ -424,18 +457,20 @@ describe("operator worker credential routes", () => {
         expect(response.json()).toEqual({ workerNodeId: fixedWorkerNodeId, authState: "revoked" });
         expect(response.body).not.toContain("token");
       }
-      expect(request).toHaveBeenCalledTimes(2);
-      expect(request).toHaveBeenLastCalledWith("revokeWorkerToken", {
-        workerNodeId: fixedWorkerNodeId,
-        revokedByIssuer: session.issuer,
-        revokedBySubject: session.subject,
-      });
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(request).toHaveBeenLastCalledWith(
+        ...operatorCall("revokeWorkerToken", {
+          workerNodeId: fixedWorkerNodeId,
+          revokedByIssuer: session.issuer,
+          revokedBySubject: session.subject,
+        }),
+      );
     } finally {
       await app.close();
     }
   });
 
-  it("accepts any authenticated operator identity without a second role check", async () => {
+  it("binds the exact authenticated principal to both the permission check and credential mutation", async () => {
     const auth = createAuth();
     const { database, request } = createDatabase();
     const { app } = createApp({ auth, database });
@@ -449,13 +484,136 @@ describe("operator worker credential routes", () => {
       });
 
       expect(response.statusCode).toBe(201);
-      expect(request).toHaveBeenCalledWith(
-        "createWorkerNodeCredential",
-        expect.objectContaining({
-          createdByIssuer: "https://identity.example.com",
-          createdBySubject: "ordinary-user-123",
-        }),
+      expect(auth.getSession).toHaveBeenCalledExactlyOnceWith(sessionToken, undefined);
+      expect(request).toHaveBeenNthCalledWith(1, ...operatorCall("operatorCheckPermission", {}));
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        ...operatorCall(
+          "createWorkerNodeCredential",
+          expect.objectContaining({
+            createdByIssuer: "https://identity.example.com",
+            createdBySubject: "ordinary-user-123",
+          }),
+        ),
       );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    { action: "list", method: "GET" as const, url: WORKER_CREDENTIAL_PATHS.list },
+    {
+      action: "create",
+      method: "POST" as const,
+      url: WORKER_CREDENTIAL_PATHS.create,
+      payload: { displayName: "Denied Worker" },
+    },
+    {
+      action: "rotate",
+      method: "POST" as const,
+      url: `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/token/rotate`,
+      payload: rotationBody,
+    },
+    {
+      action: "revoke",
+      method: "POST" as const,
+      url: `/api/v1/operator/worker-nodes/${fixedWorkerNodeId}/revoke`,
+    },
+  ])(
+    "rejects non-administrator $action before generating credentials or accessing global inventory",
+    async ({ method, url, payload }) => {
+      const execute = vi.fn(async () => {
+        throw new Error("A denied request must not execute.");
+      });
+      const { database, request } = createDatabase(
+        execute,
+        new DatabaseRequestError(
+          `Denied ordinary operator for private worker ${fixedWorkerNodeId} with ${fixedToken}.`,
+          "PLATFORM_FORBIDDEN",
+        ),
+      );
+      const { app, auth } = createApp({ database });
+      try {
+        await resetCredentialGeneratorCalls(app);
+        const response = await app.inject({
+          method,
+          url,
+          headers: { ...authenticatedHeaders(), "x-operator-subject": "platform-admin" },
+          ...(payload === undefined ? {} : { payload }),
+        });
+        expect(response.statusCode).toBe(403);
+        expectNoStore(response);
+        expect(response.json()).toMatchObject({ code: "platform_forbidden", retryable: false });
+        expect(response.body).not.toContain(fixedToken);
+        expect(response.body).not.toContain(fixedWorkerNodeId);
+        expect(auth.getSession).toHaveBeenCalledExactlyOnceWith(sessionToken, undefined);
+        expect(request).toHaveBeenCalledExactlyOnceWith(
+          ...operatorCall("operatorCheckPermission", {}),
+        );
+        expect(execute).not.toHaveBeenCalled();
+        expect(randomBytes).not.toHaveBeenCalled();
+        expect(randomUUID).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    ["actor", { displayName: "Worker", actor: { issuer: session.issuer, subject: "admin" } }],
+    [
+      "audit fields",
+      { displayName: "Worker", createdByIssuer: session.issuer, createdBySubject: "admin" },
+    ],
+  ])(
+    "rejects forged %s in credential creation before permission or token generation",
+    async (_name, payload) => {
+      const { database, request } = createDatabase();
+      const { app } = createApp({ database });
+      try {
+        await resetCredentialGeneratorCalls(app);
+        const response = await app.inject({
+          method: "POST",
+          url: WORKER_CREDENTIAL_PATHS.create,
+          headers: authenticatedHeaders(),
+          payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(request).not.toHaveBeenCalled();
+        expect(randomBytes).not.toHaveBeenCalled();
+        expect(randomUUID).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    ["PLATFORM_FORBIDDEN", 403],
+    ["PLATFORM_NOT_FOUND", 404],
+  ])("withholds a generated token after an opaque %s mutation rejection", async (code, status) => {
+    const { database, request } = createDatabase(async () => {
+      throw new DatabaseRequestError(
+        `Private worker ${fixedWorkerNodeId}: ${fixedToken}`,
+        code as string,
+      );
+    });
+    const { app } = createApp({ database });
+    try {
+      await resetCredentialGeneratorCalls(app);
+      const response = await app.inject({
+        method: "POST",
+        url: WORKER_CREDENTIAL_PATHS.create,
+        headers: authenticatedHeaders(),
+        payload: { displayName: "Revoked Access Worker" },
+      });
+      expect(response.statusCode).toBe(status);
+      expectNoStore(response);
+      expect(response.body).not.toContain(fixedToken);
+      expect(response.body).not.toContain(fixedWorkerNodeId);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(randomBytes).toHaveBeenCalledTimes(1);
     } finally {
       await app.close();
     }
@@ -676,7 +834,7 @@ describe("operator worker credential routes", () => {
   ])(
     "sanitizes %s without exposing generated credentials",
     async (_name, url, payload, code, status) => {
-      const request = vi.fn(async () => {
+      const { database } = createDatabase(async () => {
         throw code === undefined
           ? new Error(`Database failed while handling ${fixedToken} and ${fixedTokenSha256}.`)
           : new DatabaseRequestError(
@@ -684,7 +842,6 @@ describe("operator worker credential routes", () => {
               code,
             );
       });
-      const database = { request } as unknown as DatabaseClient;
       const { app } = createApp({ database });
 
       try {
@@ -706,11 +863,10 @@ describe("operator worker credential routes", () => {
   );
 
   it("withholds a rotated token unless storage confirms a pending or active state", async () => {
-    const request = vi.fn(async () => ({
+    const { database } = createDatabase(async () => ({
       workerNodeId: fixedWorkerNodeId,
       authState: "revoked",
     }));
-    const database = { request } as unknown as DatabaseClient;
     const { app } = createApp({ database });
 
     try {

@@ -1,5 +1,14 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as ts from "typescript/unstable/ast";
 import { createVirtualFileSystem } from "typescript/unstable/fs";
@@ -9,6 +18,12 @@ import { describe, expect, it } from "vitest";
 const serverBindingAuthoritySubpath = "@agentic-review/contracts/server-binding-authority-v1";
 const serverBindingSignerHostFixtureBasename = "server-binding-signer-host-fixture-v1.mjs";
 const serverBindingAuthorityConsumerAllowlist: readonly string[] = [];
+const evidenceVerifierClientSuffix = "/apps/server/src/database/evidence-verification-client.ts";
+const evidenceVerifierWorkerSuffix = "/apps/server/src/database/evidence-verification-worker.ts";
+const reviewedEvidenceWorkerCall =
+  'newWorker(newURL("./evidence-verification-worker.js",import.meta.url),{workerData:this.#root,resourceLimits:{maxOldGenerationSizeMb:128},})';
+const reviewedEvidenceRootInitialization =
+  "structuredClone(checkVerificationSchema(EvidenceVerificationRootSchema,options.storageRoot))";
 const sensitiveServerBindingModuleConsumers = new Map<string, readonly string[]>([
   ["server-binding-state-v1", []],
   ["server-binding-persistence-v1", []],
@@ -62,6 +77,91 @@ const retiredDatabaseBootstrapTokens = [
 ] as const;
 
 describe("production source boundaries", () => {
+  it("prunes the protected Worker directory before inspecting or traversing it", () => {
+    const root = resolve(tmpdir(), "virtual-source-boundary-no-filesystem-access");
+    const reads: string[] = [];
+    const directory = (name: string) => ({ name, isDirectory: () => true, isFile: () => false });
+    const paths = new Map<string, SourceDirectoryEntry[]>([
+      ["", [directory("apps")]],
+      ["apps", [directory("worker")]],
+      [
+        "apps/worker",
+        [
+          {
+            name: ".tmp-ui-driver-V7AOfu",
+            isDirectory: () => {
+              throw new Error("Protected metadata must not be inspected.");
+            },
+            isFile: () => {
+              throw new Error("Protected metadata must not be inspected.");
+            },
+          },
+          directory("src"),
+        ],
+      ],
+      ["apps/worker/src", [{ name: "main.ts", isDirectory: () => false, isFile: () => true }]],
+    ]);
+    const files = productionSourceFiles(root, (path) => {
+      const key = relative(root, path).replaceAll("\\", "/");
+      reads.push(key);
+      const entries = paths.get(key);
+      if (entries === undefined) throw new Error("Unexpected virtual directory traversal.");
+      return entries;
+    });
+    expect(files).toEqual([join(root, "apps/worker/src/main.ts")]);
+    expect(reads).toEqual(["", "apps", "apps/worker", "apps/worker/src"]);
+  });
+  it("excludes ignored artifacts while retaining actual source and build scripts", () => {
+    const temporaryRoot = resolve(tmpdir());
+    const fixturePrefix = "agentic-review-source-boundary-";
+    const fixtureRoot = mkdtempSync(join(temporaryRoot, fixturePrefix));
+    if (
+      dirname(fixtureRoot) !== temporaryRoot ||
+      !basename(fixtureRoot).startsWith(fixturePrefix)
+    ) {
+      throw new Error("Refusing to use a source-boundary fixture outside its temporary root.");
+    }
+    const includedPaths = [
+      "apps/server/src/main.ts",
+      "apps/server/src/artifacts/evidence-store.ts",
+      "apps/server/src/artifacts/nested/artifacts/evidence-reader.ts",
+      "apps/worker/scripts/build-worker-bundles.mjs",
+      "packages/contracts/scripts/clean-build-output.mjs",
+      "packages/contracts/src/index.ts",
+      "deploy/verify.cjs",
+      "config/artifact-policy.ts",
+    ];
+    const excludedPaths = [
+      "artifacts/local-e2e/config-isolation-probe.mjs",
+      "artifacts/local-e2e/apps/server/src/artifacts/copied-evidence-store.ts",
+      "packages/fixture/artifacts/generated-client.js",
+      "apps/server/dist/main.js",
+      "apps/server/node_modules/dependency/index.js",
+      "apps/server/src/route.test.ts",
+      "apps/server/src/fixture.testing.ts",
+      "apps/dashboard/src/page.spec.tsx",
+    ];
+    try {
+      for (const path of [...includedPaths, ...excludedPaths]) {
+        const fileName = join(fixtureRoot, path);
+        mkdirSync(dirname(fileName), { recursive: true });
+        writeFileSync(fileName, 'eval("boundary fixture");', "utf8");
+      }
+      const sources = productionSourceFiles(fixtureRoot);
+      expect(
+        sources.map((fileName) => relative(fixtureRoot, fileName).replaceAll("\\", "/")),
+      ).toEqual(includedPaths.toSorted());
+      const inspections = inspectProductionModules(
+        sources.map((fileName) => ({ fileName, source: readFileSync(fileName, "utf8") })),
+      );
+      for (const fileName of sources) {
+        expect(inspections.get(fileName), fileName).toContain("eval runtime loader");
+      }
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   it("removes the retired Server binding island while preserving reviewed production surfaces", () => {
     const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
     const contractsPackage = JSON.parse(
@@ -145,6 +245,7 @@ describe("production source boundaries", () => {
   it("rejects runtime loader escapes and attempts to restore retired binding modules", () => {
     const mutations = [
       'import "../feature.test.js";',
+      'import "../fixture.testing.js";',
       'import vm from "node:vm";',
       'await import("./hidden.js");',
       'require("./hidden.js");',
@@ -181,6 +282,16 @@ describe("production source boundaries", () => {
         fileName: resolve("test-fixtures/apps/server/src/database/database-client.ts"),
         source:
           'import { Worker } from "node:worker_threads"; class DatabaseClient { constructor(options) { const workerUrl = import.meta.url.endsWith(".ts") ? new URL("./database-worker.ts", import.meta.url) : new URL("./database-worker.js", import.meta.url); this.worker = new Worker(workerUrl, { workerData: options }); } }',
+      },
+      {
+        fileName: resolve(`test-fixtures${evidenceVerifierClientSuffix}`),
+        source:
+          'import { Worker } from "node:worker_threads"; class EvidenceVerificationClient { constructor(options, transport) { this.#root = structuredClone(checkVerificationSchema(EvidenceVerificationRootSchema, options.storageRoot)); this.#transport = transport ?? new Worker(new URL("./evidence-verification-worker.js", import.meta.url), { workerData: this.#root, resourceLimits: { maxOldGenerationSizeMb: 128 }, }); } }',
+      },
+      {
+        fileName: resolve(`test-fixtures${evidenceVerifierWorkerSuffix}`),
+        source:
+          'import { isMainThread, parentPort, workerData } from "node:worker_threads"; if (!isMainThread) { parentPort.postMessage(workerData); }',
       },
       {
         fileName: resolve("test-fixtures/apps/worker/scripts/build-worker-bundles.mjs"),
@@ -220,6 +331,91 @@ describe("production source boundaries", () => {
         0,
       );
     }
+  });
+
+  it("rejects evidence verifier loader, binding, option and port import drift", () => {
+    const client =
+      'import { Worker } from "node:worker_threads"; class EvidenceVerificationClient { constructor(options, transport) { this.#root = structuredClone(checkVerificationSchema(EvidenceVerificationRootSchema, options.storageRoot)); this.#transport = transport ?? new Worker(new URL("./evidence-verification-worker.js", import.meta.url), { workerData: this.#root, resourceLimits: { maxOldGenerationSizeMb: 128 }, }); } }';
+    const worker =
+      'import { isMainThread, parentPort, workerData } from "node:worker_threads"; if (!isMainThread) { parentPort.postMessage(workerData); }';
+    const mutations = [
+      ...[
+        client.replace('"./evidence-verification-worker.js"', "options.workerPath"),
+        client.replace('"./evidence-verification-worker.js"', '"./different-worker.js"'),
+        client.replace("import.meta.url)", "options.baseUrl)"),
+        client.replace(
+          "resourceLimits: { maxOldGenerationSizeMb: 128 },",
+          "resourceLimits: { maxOldGenerationSizeMb: 128 }, eval: true,",
+        ),
+        client.replace(
+          "resourceLimits: { maxOldGenerationSizeMb: 128 },",
+          'resourceLimits: { maxOldGenerationSizeMb: 128 }, execArgv: ["--import", options.loader],',
+        ),
+        client.replace("maxOldGenerationSizeMb: 128", "maxOldGenerationSizeMb: options.heapLimit"),
+        client.replace("workerData: this.#root", "workerData: options"),
+        client.replace(
+          "structuredClone(checkVerificationSchema(EvidenceVerificationRootSchema, options.storageRoot))",
+          "options.storageRoot",
+        ),
+        client.replace("this.#transport = transport ??", "this.#transport = arbitraryTransport ??"),
+        client.replace("class EvidenceVerificationClient", "class UnreviewedClient"),
+        client.replace("constructor(options, transport)", "create(options, transport)"),
+        client
+          .replace("import { Worker }", "import { Worker as W }")
+          .replace("new Worker(", "new W("),
+        client.replace(
+          "class EvidenceVerificationClient",
+          "const escaped = Worker; class EvidenceVerificationClient",
+        ),
+        client.replace(
+          "class EvidenceVerificationClient",
+          "export { Worker }; class EvidenceVerificationClient",
+        ),
+        client.replace('import { Worker } from "node:worker_threads";', ""),
+        client.replace(
+          'import { Worker } from "node:worker_threads";',
+          'import { Worker } from "node:worker_threads"; import { Worker } from "node:worker_threads";',
+        ),
+        client.replace('"node:worker_threads"', '"worker_threads"'),
+        client
+          .replace(
+            "this.#transport = transport ?? new Worker",
+            "const deferred = () => { this.#transport = transport ?? new Worker",
+          )
+          .replace("}); } }", "}); }; } }"),
+        client.replace(
+          "}); } }",
+          '}); this.#transport = transport ?? new Worker(new URL("./evidence-verification-worker.js", import.meta.url), { workerData: this.#root, resourceLimits: { maxOldGenerationSizeMb: 128 }, }); } }',
+        ),
+      ].map((source, index) => ({
+        fileName: resolve(`evidence-mutations/client-${index}${evidenceVerifierClientSuffix}`),
+        source,
+      })),
+      ...[
+        worker.replace(
+          "isMainThread, parentPort, workerData",
+          "isMainThread, parentPort, workerData, Worker",
+        ),
+        worker.replace("parentPort, workerData", "parentPort as port, workerData"),
+        worker.replace("import { isMainThread, parentPort, workerData }", "import * as threads"),
+        worker.replace('"node:worker_threads"', '"worker_threads"'),
+        worker.replace(
+          'import { isMainThread, parentPort, workerData } from "node:worker_threads";',
+          "",
+        ),
+        `${worker} new Worker(new URL("./evidence-verification-worker.js", import.meta.url));`,
+      ].map((source, index) => ({
+        fileName: resolve(`evidence-mutations/worker-${index}${evidenceVerifierWorkerSuffix}`),
+        source,
+      })),
+      {
+        fileName: resolve("evidence-mutations/apps/server/src/database/unreviewed-client.ts"),
+        source: client,
+      },
+    ];
+    const inspections = inspectProductionModules(mutations);
+    for (const mutation of mutations)
+      expect(inspections.get(mutation.fileName)?.length ?? 0, mutation.source).toBeGreaterThan(0);
   });
 });
 
@@ -486,11 +682,11 @@ function inspectProductionSourceFile(
     });
   };
   visit(sourceFile);
-  const expectedWorkerCalls = normalizedFileName.endsWith(
-    "/apps/server/src/database/database-client.ts",
-  )
-    ? 1
-    : 0;
+  const expectedWorkerCalls =
+    normalizedFileName.endsWith("/apps/server/src/database/database-client.ts") ||
+    normalizedFileName.endsWith(evidenceVerifierClientSuffix)
+      ? 1
+      : 0;
   const expectedSpawnSyncCalls = normalizedFileName.endsWith(
     "/apps/worker/scripts/build-worker-bundles.mjs",
   )
@@ -512,6 +708,21 @@ function inspectProductionSourceFile(
     if ((allowedLoaderBindingReferences.get(binding) ?? 0) !== 1) {
       violations.add(`${binding} loader binding reference count mismatch`);
     }
+  }
+  if (
+    normalizedFileName.endsWith(evidenceVerifierClientSuffix) ||
+    normalizedFileName.endsWith(evidenceVerifierWorkerSuffix)
+  ) {
+    const imports = sourceFile.statements.filter(
+      (statement) =>
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteralLikeNode(statement.moduleSpecifier) &&
+        ["node:worker_threads", "worker_threads"].includes(
+          statement.moduleSpecifier.text.toLowerCase(),
+        ),
+    );
+    if (imports.length !== 1)
+      violations.add("exact evidence verifier worker import count mismatch");
   }
   return [...violations].sort();
 }
@@ -642,6 +853,11 @@ function inspectSensitiveBindingExports(sourceFile: ts.SourceFile): string[] {
           violations.push("sensitive imported binding exported through a class field");
         }
         if (
+          (ts.isMethodDeclaration(member) ||
+            ts.isGetAccessorDeclaration(member) ||
+            ts.isSetAccessorDeclaration(member) ||
+            ts.isConstructorDeclaration(member) ||
+            ts.isClassStaticBlockDeclaration(member)) &&
           member.body !== undefined &&
           blockReturnsSensitiveBinding(member.body, taintedBindings)
         ) {
@@ -768,7 +984,8 @@ function exposesSensitiveBinding(
   }
   if (ts.isObjectLiteralExpression(expression)) {
     return expression.properties.some((property) => {
-      if (ts.isShorthandPropertyAssignment(property)) return bindings.has(property.name.text);
+      if (ts.isShorthandPropertyAssignment(property))
+        return ts.isIdentifier(property.name) && bindings.has(property.name.text);
       if (ts.isPropertyAssignment(property)) {
         return exposesSensitiveBinding(property.initializer, bindings);
       }
@@ -935,8 +1152,19 @@ function inspectLoaderImport(
       ? "Worker:Worker:value"
       : normalizedFileName.endsWith("/apps/server/src/database/database-worker.ts")
         ? "parentPort:parentPort:value,workerData:workerData:value"
-        : undefined;
-    if (expected === undefined || importedBindingSignature(declaration) !== expected) {
+        : normalizedFileName.endsWith(evidenceVerifierClientSuffix)
+          ? "Worker:Worker:value"
+          : normalizedFileName.endsWith(evidenceVerifierWorkerSuffix)
+            ? "isMainThread:isMainThread:value,parentPort:parentPort:value,workerData:workerData:value"
+            : undefined;
+    const evidenceModule =
+      normalizedFileName.endsWith(evidenceVerifierClientSuffix) ||
+      normalizedFileName.endsWith(evidenceVerifierWorkerSuffix);
+    if (
+      expected === undefined ||
+      importedBindingSignature(declaration) !== expected ||
+      (evidenceModule && declaration.moduleSpecifier.text !== "node:worker_threads")
+    ) {
       violations.add("worker_threads import outside exact allowlist");
     }
   }
@@ -955,7 +1183,9 @@ function importedBindingSignature(declaration: ts.ImportDeclaration): string {
   ) {
     return "invalid";
   }
-  const clauseIsTypeOnly = clause.isTypeOnly || phaseModifierKind === ts.SyntaxKind.TypeKeyword;
+  const clauseIsTypeOnly =
+    (clause as ts.ImportClause & { readonly isTypeOnly?: boolean }).isTypeOnly ||
+    phaseModifierKind === ts.SyntaxKind.TypeKeyword;
   return clause.namedBindings.elements
     .map((element) => {
       const imported = element.propertyName?.text ?? element.name.text;
@@ -970,6 +1200,57 @@ function isAllowedWorkerCall(
   sourceFile: ts.SourceFile,
   normalizedFileName: string,
 ): boolean {
+  if (normalizedFileName.endsWith(evidenceVerifierClientSuffix)) {
+    if (compactNodeText(expression, sourceFile) !== reviewedEvidenceWorkerCall) return false;
+    const constructorDeclaration = findAncestor(expression, ts.isConstructorDeclaration);
+    const containingClass =
+      constructorDeclaration === undefined
+        ? undefined
+        : findAncestor(constructorDeclaration, ts.isClassDeclaration);
+    if (
+      constructorDeclaration === undefined ||
+      containingClass?.name?.text !== "EvidenceVerificationClient"
+    )
+      return false;
+    let current = expression.parent as ts.Node | undefined;
+    while (current !== constructorDeclaration && current !== undefined) {
+      if (isFunctionLikeNode(current)) return false;
+      current = current.parent as ts.Node | undefined;
+    }
+    const fallback = expression.parent;
+    const assignment = fallback.parent;
+    if (
+      !ts.isBinaryExpression(fallback) ||
+      fallback.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionToken ||
+      fallback.right !== expression ||
+      compactNodeText(fallback.left, sourceFile) !== "transport" ||
+      !ts.isBinaryExpression(assignment) ||
+      assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+      assignment.right !== fallback ||
+      compactNodeText(assignment.left, sourceFile) !== "this.#transport"
+    )
+      return false;
+    const rootInitializers: ts.Expression[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        compactNodeText(node.left, sourceFile) === "this.#root"
+      )
+        rootInitializers.push(node.right);
+      node.forEachChild((child) => {
+        visit(child);
+        return undefined;
+      });
+    };
+    visit(constructorDeclaration);
+    return (
+      rootInitializers.length === 1 &&
+      rootInitializers[0] !== undefined &&
+      compactNodeText(rootInitializers[0], sourceFile).replace(/,\)$/u, ")") ===
+        reviewedEvidenceRootInitialization
+    );
+  }
   if (
     normalizedFileName.endsWith("/apps/server/src/database/database-client.ts") &&
     compactNodeText(expression, sourceFile) === "newWorker(workerUrl,{workerData:options})"
@@ -1184,7 +1465,18 @@ function codePointForScan(hexadecimal: string): string {
     : "invalid-code-point";
 }
 
-function productionSourceFiles(root: string): string[] {
+interface SourceDirectoryEntry {
+  readonly name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
+function productionSourceFiles(
+  root: string,
+  readEntries: (directory: string) => readonly SourceDirectoryEntry[] = (directory) =>
+    readdirSync(directory, { withFileTypes: true }),
+): string[] {
+  // Match .gitignore's generated artifacts exclusion and its explicit Server source exception.
+  const artifactSourceRoot = "apps/server/src/artifacts";
   const skippedDirectories = new Set([
     ".git",
     ".turbo",
@@ -1196,16 +1488,31 @@ function productionSourceFiles(root: string): string[] {
   ]);
   const files: string[] = [];
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of readEntries(directory)) {
       const path = join(directory, entry.name);
+      const repositoryPath = relative(root, path).replaceAll("\\", "/");
+      // This user-protected directory must be excluded before any metadata or child reads.
+      const protectedPath = "apps/worker/.tmp-ui-driver-v7aofu";
+      const foldedPath = repositoryPath.toLowerCase();
+      if (foldedPath === protectedPath || foldedPath.startsWith(`${protectedPath}/`)) continue;
       if (entry.isDirectory()) {
-        if (!skippedDirectories.has(entry.name)) visit(path);
+        if (skippedDirectories.has(entry.name)) continue;
+        if (
+          entry.name === "artifacts" &&
+          repositoryPath !== artifactSourceRoot &&
+          !repositoryPath.startsWith(`${artifactSourceRoot}/`)
+        ) {
+          continue;
+        }
+        visit(path);
         continue;
       }
       if (
         !entry.isFile() ||
         !/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
-        /\.(?:spec|test)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name)
+        // Fixture modules are excluded from production compilation as well. Imports of these
+        // files from a production module remain forbidden by the separate AST inspection.
+        /\.(?:spec|test|testing)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name)
       ) {
         continue;
       }

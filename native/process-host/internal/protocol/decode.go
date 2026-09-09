@@ -53,6 +53,30 @@ func DecodeRequest(frame []byte) (HostRequest, error) {
 			return nil, classifyValidationError(requestID, err)
 		}
 		return request, nil
+	case "stdin_write":
+		if err := requireProperties(object, []string{"protocolVersion", "type", "requestId", "stdinStreamId", "sequence", "dataBase64"}); err != nil {
+			return nil, requestError("INVALID_REQUEST", requestID, err)
+		}
+		var request StdinWriteRequest
+		if err := decodeStrict(frame, &request); err != nil {
+			return nil, requestError("INVALID_REQUEST", requestID, err)
+		}
+		if err := ValidateStdinWriteRequest(request); err != nil {
+			return nil, classifyValidationError(requestID, err)
+		}
+		return request, nil
+	case "stdin_close":
+		if err := requireProperties(object, []string{"protocolVersion", "type", "requestId", "stdinStreamId", "sequence"}); err != nil {
+			return nil, requestError("INVALID_REQUEST", requestID, err)
+		}
+		var request StdinCloseRequest
+		if err := decodeStrict(frame, &request); err != nil {
+			return nil, requestError("INVALID_REQUEST", requestID, err)
+		}
+		if err := ValidateStdinCloseRequest(request); err != nil {
+			return nil, classifyValidationError(requestID, err)
+		}
+		return request, nil
 	case "terminate":
 		if err := requireProperties(object, []string{"protocolVersion", "type", "requestId", "reason"}); err != nil {
 			return nil, requestError("INVALID_REQUEST", requestID, err)
@@ -93,13 +117,24 @@ func validateStartObjectShape(rawSpec json.RawMessage) error {
 	if err := requirePropertiesWithOptional(
 		spec,
 		[]string{"executable", "arguments", "workingDirectory", "environmentMode", "environment", "limits"},
-		[]string{"standardInput"},
+		[]string{"standardInput", "captureProcessIdentity", "interactiveStdin"},
 	); err != nil {
 		return fmt.Errorf("spec: %w", err)
 	}
 	standardInput, exists := spec["standardInput"]
 	if exists && bytes.Equal(bytes.TrimSpace(standardInput), []byte("null")) {
 		return errors.New("optional property \"standardInput\" must be a string when present")
+	}
+	if captureIdentity, exists := spec["captureProcessIdentity"]; exists && !bytes.Equal(bytes.TrimSpace(captureIdentity), []byte("true")) {
+		return errors.New("optional property \"captureProcessIdentity\" must be true when present")
+	}
+	if interactiveStdin, exists := spec["interactiveStdin"]; exists {
+		if !bytes.Equal(bytes.TrimSpace(interactiveStdin), []byte("true")) {
+			return errors.New("optional property \"interactiveStdin\" must be true when present")
+		}
+		if _, exists := spec["standardInput"]; exists {
+			return errors.New("spec.interactiveStdin is mutually exclusive with spec.standardInput")
+		}
 	}
 
 	var limits map[string]json.RawMessage

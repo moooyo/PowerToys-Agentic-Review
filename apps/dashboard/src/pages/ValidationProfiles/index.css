@@ -1,0 +1,135 @@
+.validation-profiles-page {
+  min-width: 0;
+}
+
+.validation-profiles-notice {
+  margin-bottom: 20px;
+}
+
+.validation-profiles-actions,
+.validation-profiles-binding-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.validation-profiles-actions {
+  justify-content: flex-end;
+}
+
+.validation-profiles-binding-choice {
+  align-items: flex-start;
+  margin-block: 24px;
+}
+
+.validation-profiles-binding-choice > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.validation-profiles-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.validation-profiles-code,
+.validation-profiles-json {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.validation-profiles-json {
+  padding: 16px;
+  max-height: 480px;
+  overflow: auto;
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: var(--ant-border-radius);
+  background: var(--ant-color-fill-quaternary);
+}
+
+.validation-profiles-name.ant-btn {
+  height: auto;
+  padding: 0;
+  font-weight: 600;
+  text-align: left;
+  white-space: normal;
+}
+
+.validation-profiles-secondary {
+  margin-top: 4px;
+  color: var(--ant-color-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.validation-profiles-date {
+  display: inline-block;
+  max-width: 180px;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.validation-profiles-version {
+  margin-top: 24px;
+}
+
+.validation-profiles-version .ant-descriptions {
+  margin-bottom: 16px;
+}
+
+.validation-profiles-probe-command,
+.validation-profiles-probe-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.validation-profiles-probe-command {
+  padding-block: 12px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
+}
+
+.validation-profiles-probe-command > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.validation-profiles-probe-command .ant-btn {
+  flex-shrink: 0;
+}
+
+.validation-profiles-probe-field {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: var(--ant-border-radius);
+}
+
+.validation-profiles-probe-heading {
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.validation-profiles-probe-field > .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .validation-profiles-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .validation-profiles-binding-choice {
+    flex-wrap: wrap;
+  }
+
+  .validation-profiles-probe-command {
+    flex-wrap: wrap;
+  }
+}

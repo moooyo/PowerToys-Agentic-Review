@@ -234,6 +234,23 @@ func TestServerReportsStartFailureBeforeShutdownOnNonWindows(t *testing.T) {
 	}
 }
 
+func TestServerRejectsRequestedProcessIdentityOnNonWindows(t *testing.T) {
+	var output bytes.Buffer
+	server := NewServer(strings.NewReader(""), &output, nil, 1)
+	request := validStartRequest("identity:unsupported")
+	request.Spec.CaptureProcessIdentity = true
+	if err := server.start(request); err != nil {
+		t.Fatal(err)
+	}
+	events := decodeEventLines(t, output.String())
+	if len(events) != 1 || events[0]["type"] != "error" || events[0]["code"] != "PROCESS_IDENTITY_UNAVAILABLE" {
+		t.Fatalf("unexpected events: %#v", events)
+	}
+	if len(server.reservations) != 0 {
+		t.Fatal("unsupported identity request retained its reservation")
+	}
+}
+
 func TestServerFatalDoesNotWaitForActiveLifecycle(t *testing.T) {
 	input, inputWriter := io.Pipe()
 	defer input.Close()
