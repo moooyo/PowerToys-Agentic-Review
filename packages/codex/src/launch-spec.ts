@@ -1,13 +1,15 @@
 import { win32 } from "node:path";
 
-export interface CodexProcessResourceLimits {
+export type CliEngine = "codex" | "copilot";
+
+export interface CliProcessResourceLimits {
   readonly hardTimeoutMs: number;
   readonly maximumProcessCount: number;
   readonly maximumMemoryBytes: number;
   readonly maximumOutputBytes: number;
 }
 
-export const codexProcessResourceLimitBounds = Object.freeze({
+export const cliProcessResourceLimitBounds = Object.freeze({
   hardTimeoutMs: Object.freeze({ minimum: 10_000, maximum: 2 * 60 * 60 * 1_000 }),
   maximumProcessCount: Object.freeze({ minimum: 1, maximum: 256 }),
   maximumMemoryBytes: Object.freeze({
@@ -17,74 +19,38 @@ export const codexProcessResourceLimitBounds = Object.freeze({
   maximumOutputBytes: Object.freeze({ minimum: 4 * 1024, maximum: 128 * 1024 * 1024 }),
 });
 
-/**
- * Pure data compatible with the worker ProcessLaunchSpec contract.
- * `environmentMode` requires ProcessHost to replace, rather than inherit or merge,
- * the parent process environment.
- */
-export interface CodexProcessLaunchSpec {
+/** Pure data for ProcessHost, which replaces the inherited Worker environment. */
+export interface CliProcessLaunchSpec {
   readonly executable: string;
   readonly arguments: readonly string[];
   readonly workingDirectory: string;
   readonly environmentMode: "replace";
   readonly environment: Readonly<Record<string, string>>;
   readonly standardInput: string;
-  readonly limits: CodexProcessResourceLimits;
+  readonly limits: CliProcessResourceLimits;
 }
 
-export interface BuildCodexExecLaunchSpecOptions {
+export interface BuildCliLaunchSpecOptions {
+  readonly engine: CliEngine;
   readonly executable: string;
   readonly workingDirectory: string;
-  readonly processWorkingDirectory: string;
   readonly controlRootDirectory: string;
   readonly prompt: string;
   readonly outputSchemaPath: string;
+  readonly outputSchemaJson: string;
   readonly outputLastMessagePath: string;
-  readonly configurationOverrides?: readonly string[];
-  readonly providerEnvironment?: Readonly<Record<string, string>>;
+  readonly model?: string;
   readonly environment: Readonly<Record<string, string>>;
-  readonly limits: CodexProcessResourceLimits;
-  readonly sandboxMode?: "workspace-write" | "read-only";
-}
-
-export interface CodexAppServerProcessLaunchSpec
-  extends Omit<CodexProcessLaunchSpec, "standardInput"> {
-  readonly interactiveStdin: true;
-  readonly captureProcessIdentity: true;
-}
-
-export interface BuildCodexAppServerLaunchSpecOptions
-  extends Omit<
-    BuildCodexExecLaunchSpecOptions,
-    "prompt" | "outputSchemaPath" | "outputLastMessagePath" | "sandboxMode"
-  > {
-  readonly permissionProfile: string;
+  readonly limits: CliProcessResourceLimits;
 }
 
 const maximumPromptUtf8Bytes = 512 * 1024;
-const maximumConfigurationOverrideCount = 128;
-const maximumConfigurationOverrideUtf8Bytes = 32 * 1024;
-const maximumConfigurationOverridesUtf8Bytes = 128 * 1024;
 const maximumProcessHostFrameBytes = 1_048_576;
 const maximumProcessHostRequestId = "R".repeat(128);
+const maximumEnvironmentEntries = 512;
+const maximumEnvironmentNameLength = 128;
 const maximumEnvironmentValueLength = 32_767;
-const maximumProviderEnvironmentEntries = 64;
-const allowedEnvironmentNames = new Set([
-  "APPDATA",
-  "CODEX_HOME",
-  "COMSPEC",
-  "LOCALAPPDATA",
-  "PATH",
-  "PATHEXT",
-  "SYSTEMROOT",
-  "TEMP",
-  "TMP",
-  "USERPROFILE",
-  "WINDIR",
-]);
-
 const requiredEnvironmentNames = [
-  "CODEX_HOME",
   "COMSPEC",
   "PATH",
   "PATHEXT",
@@ -96,6 +62,7 @@ const requiredEnvironmentNames = [
 const pathEnvironmentNames = new Set([
   "APPDATA",
   "CODEX_HOME",
+  "COPILOT_HOME",
   "LOCALAPPDATA",
   "SYSTEMROOT",
   "TEMP",
@@ -104,30 +71,18 @@ const pathEnvironmentNames = new Set([
   "WINDIR",
 ]);
 
-const sensitiveEnvironmentNameFragments = [
-  "AUTHORIZATION",
-  "CERT",
-  "COOKIE",
-  "CREDENTIAL",
-  "KEY",
-  "PASSWORD",
-  "PFX",
-  "SECRET",
-  "TOKEN",
-  "WORKER_TLS",
-] as const;
-
-export function buildCodexExecLaunchSpec(
-  options: BuildCodexExecLaunchSpecOptions,
-): CodexProcessLaunchSpec {
+/**
+ * Runs an installed, configured CLI inside the dedicated Worker VM.
+ * Authentication and provider selection remain owned by the CLI's existing configuration.
+ */
+export function buildCliLaunchSpec(options: BuildCliLaunchSpecOptions): CliProcessLaunchSpec {
+  if (options.engine !== "codex" && options.engine !== "copilot") {
+    throw new TypeError("engine must be codex or copilot");
+  }
   const executable = normalizeLocalWindowsExecutable(options.executable, "executable");
   const repositoryWorkingDirectory = normalizeLocalWindowsDirectory(
     options.workingDirectory,
     "workingDirectory",
-  );
-  const processWorkingDirectory = normalizeLocalWindowsDirectory(
-    options.processWorkingDirectory,
-    "processWorkingDirectory",
   );
   const controlRootDirectory = normalizeLocalWindowsDirectory(
     options.controlRootDirectory,
@@ -141,14 +96,7 @@ export function buildCodexExecLaunchSpec(
     options.outputLastMessagePath,
     "outputLastMessagePath",
   );
-
   assertDisjointDirectories(repositoryWorkingDirectory, controlRootDirectory);
-  assertContainedDirectory(
-    controlRootDirectory,
-    processWorkingDirectory,
-    "processWorkingDirectory",
-  );
-  assertDisjointDirectories(repositoryWorkingDirectory, processWorkingDirectory);
   assertDescendantPath(controlRootDirectory, outputSchemaPath, "outputSchemaPath");
   assertDescendantPath(controlRootDirectory, outputLastMessagePath, "outputLastMessagePath");
   if (windowsPathsEqual(outputSchemaPath, outputLastMessagePath)) {
@@ -159,126 +107,66 @@ export function buildCodexExecLaunchSpec(
   }
 
   assertPrompt(options.prompt);
+  assertSchemaJson(options.outputSchemaJson);
   assertLimits(options.limits);
-  const sandboxMode = options.sandboxMode ?? "workspace-write";
-  if (sandboxMode !== "workspace-write" && sandboxMode !== "read-only") {
-    throw new TypeError("sandboxMode must be workspace-write or read-only");
-  }
-  const environment = Object.freeze({
-    ...copyMinimalEnvironment(options.environment, repositoryWorkingDirectory),
-    ...copyProviderEnvironment(options.providerEnvironment),
-  });
-  const configurationArguments = buildConfigurationOverrideArguments(
-    options.configurationOverrides,
-  );
-  const argumentsList = Object.freeze([
-    "exec",
-    ...configurationArguments,
-    "--cd",
-    repositoryWorkingDirectory,
-    "--json",
-    "--color",
-    "never",
-    "--config",
-    'approval_policy="never"',
-    "--ephemeral",
-    "--ignore-user-config",
-    ...(sandboxMode === "read-only" ? ["--ignore-rules"] : []),
-    "--sandbox",
-    sandboxMode,
-    "--output-schema",
-    outputSchemaPath,
-    "--output-last-message",
-    outputLastMessagePath,
-    "-",
-  ]);
-
-  const spec: CodexProcessLaunchSpec = Object.freeze({
-    executable,
-    arguments: argumentsList,
-    workingDirectory: processWorkingDirectory,
-    environmentMode: "replace",
-    environment,
-    standardInput: options.prompt,
-    limits: Object.freeze({ ...options.limits }),
-  });
-  assertEncodableProcessHostStartFrame(spec);
-  return spec;
-}
-
-/**
- * Builds the dedicated app-server transport process. The caller must provide an owned fresh
- * home and verify the actual session policy before starting a turn. This specification is
- * requested configuration only; it does not establish sandbox enforcement or acceptance.
- */
-export function buildCodexAppServerLaunchSpec(
-  options: BuildCodexAppServerLaunchSpecOptions,
-): CodexAppServerProcessLaunchSpec {
-  const executable = normalizeLocalWindowsExecutable(options.executable, "executable");
-  const repositoryWorkingDirectory = normalizeLocalWindowsDirectory(
-    options.workingDirectory,
-    "workingDirectory",
-  );
-  const processWorkingDirectory = normalizeLocalWindowsDirectory(
-    options.processWorkingDirectory,
-    "processWorkingDirectory",
-  );
-  const controlRootDirectory = normalizeLocalWindowsDirectory(
-    options.controlRootDirectory,
-    "controlRootDirectory",
-  );
-  assertDisjointDirectories(repositoryWorkingDirectory, controlRootDirectory);
-  assertContainedDirectory(
-    controlRootDirectory,
-    processWorkingDirectory,
-    "processWorkingDirectory",
-  );
-  if (isSameOrDescendant(repositoryWorkingDirectory, executable)) {
-    throw new TypeError("executable must not be inside the task workingDirectory");
-  }
-  assertLimits(options.limits);
-  if (
-    typeof options.permissionProfile !== "string" ||
-    !/^[a-z][a-z0-9_-]{0,63}(?![\s\S])/u.test(options.permissionProfile)
-  ) {
-    throw new TypeError("permissionProfile must be a bounded named permission profile");
-  }
-  const configurationArguments = buildConfigurationOverrideArguments(
-    options.configurationOverrides,
-  );
-  for (let index = 1; index < configurationArguments.length; index += 2) {
-    const assignment = configurationArguments[index] as string;
-    const key = assignment.slice(0, assignment.indexOf("=")).trim();
-    // Generated overrides use bare keys. Quoted or escaped aliases must not hide legacy
-    // sandbox settings, which take precedence over named permissions in the pinned CLI.
-    if (!/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(key)) {
-      throw new TypeError("app-server configuration overrides must use bare dotted keys");
+  const modelArguments: string[] = [];
+  if (options.model !== undefined) {
+    assertNonEmptyText(options.model, "model");
+    if (options.model.length > 256 || /[\r\n]/u.test(options.model)) {
+      throw new TypeError("model must be a single line of at most 256 characters");
     }
-    const root = key.split(".", 1)[0];
-    if (root === "sandbox_mode" || root === "sandbox_workspace_write") {
-      throw new TypeError("legacy sandbox overrides cannot be combined with named permissions");
-    }
+    modelArguments.push("--model", options.model);
   }
-  const spec: CodexAppServerProcessLaunchSpec = Object.freeze({
+  const standardInput =
+    options.engine === "codex"
+      ? options.prompt
+      : [
+          options.prompt,
+          "",
+          "Return only one JSON object as your final response, without Markdown fences or other text.",
+          "The final response must conform to this JSON Schema:",
+          options.outputSchemaJson,
+        ].join("\n");
+  assertPrompt(standardInput);
+  const argumentsList =
+    options.engine === "codex"
+      ? [
+          "exec",
+          "--cd",
+          repositoryWorkingDirectory,
+          "--json",
+          "--color",
+          "never",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--ephemeral",
+          ...modelArguments,
+          "--output-schema",
+          outputSchemaPath,
+          "--output-last-message",
+          outputLastMessagePath,
+          "-",
+        ]
+      : [
+          "-C",
+          repositoryWorkingDirectory,
+          "--allow-all",
+          "--no-ask-user",
+          "--no-auto-update",
+          "--silent",
+          "--stream",
+          "on",
+          "--output-format",
+          "text",
+          "--no-color",
+          ...modelArguments,
+        ];
+  const spec: CliProcessLaunchSpec = Object.freeze({
     executable,
-    arguments: Object.freeze([
-      "--strict-config",
-      "app-server",
-      ...configurationArguments,
-      "--config",
-      'approval_policy="never"',
-      "--config",
-      `default_permissions=${JSON.stringify(options.permissionProfile)}`,
-      "--stdio",
-    ]),
-    workingDirectory: processWorkingDirectory,
+    arguments: Object.freeze(argumentsList),
+    workingDirectory: controlRootDirectory,
     environmentMode: "replace",
-    environment: Object.freeze({
-      ...copyMinimalEnvironment(options.environment, repositoryWorkingDirectory),
-      ...copyProviderEnvironment(options.providerEnvironment),
-    }),
-    interactiveStdin: true,
-    captureProcessIdentity: true,
+    environment: copyCliEnvironment(options.environment, repositoryWorkingDirectory),
+    standardInput,
     limits: Object.freeze({ ...options.limits }),
   });
   assertEncodableProcessHostStartFrame(spec);
@@ -287,59 +175,25 @@ export function buildCodexAppServerLaunchSpec(
 
 function assertPrompt(prompt: string): void {
   assertNonEmptyText(prompt, "prompt");
-  const utf8Bytes = Buffer.byteLength(prompt, "utf8");
-  if (utf8Bytes > maximumPromptUtf8Bytes) {
-    throw new RangeError(`prompt must not exceed ${maximumPromptUtf8Bytes} UTF-8 bytes`);
+  if (Buffer.byteLength(prompt, "utf8") > maximumPromptUtf8Bytes) {
+    throw new RangeError("prompt must not exceed 524288 UTF-8 bytes");
   }
 }
 
-function buildConfigurationOverrideArguments(overrides: readonly string[] | undefined): string[] {
-  if (overrides === undefined) {
-    return [];
+function assertSchemaJson(schemaJson: string): void {
+  assertNonEmptyText(schemaJson, "outputSchemaJson");
+  if (Buffer.byteLength(schemaJson, "utf8") > maximumPromptUtf8Bytes) {
+    throw new RangeError("outputSchemaJson exceeds the prompt limit");
   }
-  if (!Array.isArray(overrides)) {
-    throw new TypeError("configurationOverrides must be an array of strings");
+  let value: unknown;
+  try {
+    value = JSON.parse(schemaJson);
+  } catch {
+    throw new TypeError("outputSchemaJson must contain a JSON object");
   }
-  if (overrides.length > maximumConfigurationOverrideCount) {
-    throw new RangeError(
-      `configurationOverrides must not exceed ${maximumConfigurationOverrideCount} entries`,
-    );
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("outputSchemaJson must contain a JSON object");
   }
-
-  const argumentsList: string[] = [];
-  let totalUtf8Bytes = 0;
-  for (const [index, override] of overrides.entries()) {
-    const name = `configurationOverrides[${index}]`;
-    if (typeof override !== "string") {
-      throw new TypeError(`${name} must be a string`);
-    }
-    assertNonEmptyText(override, name);
-    if (/[\r\n\u0085\u2028\u2029]/u.test(override)) {
-      throw new TypeError(`${name} must not contain a newline`);
-    }
-    const separatorIndex = override.indexOf("=");
-    if (
-      separatorIndex < 1 ||
-      override.slice(0, separatorIndex).trim().length === 0 ||
-      override.slice(separatorIndex + 1).trim().length === 0
-    ) {
-      throw new TypeError(`${name} must be a key=value configuration assignment`);
-    }
-    const utf8Bytes = Buffer.byteLength(override, "utf8");
-    if (utf8Bytes > maximumConfigurationOverrideUtf8Bytes) {
-      throw new RangeError(
-        `${name} must not exceed ${maximumConfigurationOverrideUtf8Bytes} UTF-8 bytes`,
-      );
-    }
-    totalUtf8Bytes += utf8Bytes;
-    if (totalUtf8Bytes > maximumConfigurationOverridesUtf8Bytes) {
-      throw new RangeError(
-        `configurationOverrides must not exceed ${maximumConfigurationOverridesUtf8Bytes} total UTF-8 bytes`,
-      );
-    }
-    argumentsList.push("--config", override);
-  }
-  return argumentsList;
 }
 
 function normalizeLocalWindowsExecutable(value: string, name: string): string {
@@ -429,12 +283,6 @@ function assertDescendantPath(root: string, candidate: string, name: string): vo
   }
 }
 
-function assertContainedDirectory(root: string, candidate: string, name: string): void {
-  if (!isSameOrDescendant(root, candidate)) {
-    throw new TypeError(`${name} must be contained by controlRootDirectory`);
-  }
-}
-
 function assertDisjointDirectories(first: string, second: string): void {
   if (isSameOrDescendant(first, second) || isSameOrDescendant(second, first)) {
     throw new TypeError("workingDirectory and controlRootDirectory must not overlap");
@@ -453,26 +301,26 @@ function windowsPathsEqual(first: string, second: string): boolean {
   return first.toLowerCase() === second.toLowerCase();
 }
 
-function assertLimits(limits: CodexProcessResourceLimits): void {
+function assertLimits(limits: CliProcessResourceLimits): void {
   assertBoundedInteger(
     limits.hardTimeoutMs,
     "limits.hardTimeoutMs",
-    codexProcessResourceLimitBounds.hardTimeoutMs,
+    cliProcessResourceLimitBounds.hardTimeoutMs,
   );
   assertBoundedInteger(
     limits.maximumProcessCount,
     "limits.maximumProcessCount",
-    codexProcessResourceLimitBounds.maximumProcessCount,
+    cliProcessResourceLimitBounds.maximumProcessCount,
   );
   assertBoundedInteger(
     limits.maximumMemoryBytes,
     "limits.maximumMemoryBytes",
-    codexProcessResourceLimitBounds.maximumMemoryBytes,
+    cliProcessResourceLimitBounds.maximumMemoryBytes,
   );
   assertBoundedInteger(
     limits.maximumOutputBytes,
     "limits.maximumOutputBytes",
-    codexProcessResourceLimitBounds.maximumOutputBytes,
+    cliProcessResourceLimitBounds.maximumOutputBytes,
   );
 }
 
@@ -488,20 +336,24 @@ function assertBoundedInteger(
   }
 }
 
-function copyMinimalEnvironment(
+function copyCliEnvironment(
   environment: Readonly<Record<string, string>>,
   workingDirectory: string,
 ): Readonly<Record<string, string>> {
   const entries: Array<readonly [string, string]> = [];
   const observedNames = new Set<string>();
-  for (const [inputName, inputValue] of Object.entries(environment)) {
+  const inputEntries = Object.entries(environment);
+  if (inputEntries.length > maximumEnvironmentEntries) {
+    throw new RangeError("environment must not contain more than 512 properties");
+  }
+  for (const [inputName, inputValue] of inputEntries) {
     const name = inputName.toUpperCase();
-    assertEnvironmentName(name);
+    assertEnvironmentName(inputName);
     if (observedNames.has(name)) {
-      throw new TypeError(`environment contains duplicate case-insensitive name ${name}`);
+      throw new TypeError("environment contains a duplicate case-insensitive name");
     }
     observedNames.add(name);
-    entries.push([name, normalizeEnvironmentValue(name, inputValue, workingDirectory)]);
+    entries.push([inputName, normalizeEnvironmentValue(name, inputValue, workingDirectory)]);
   }
 
   for (const name of requiredEnvironmentNames) {
@@ -514,73 +366,37 @@ function copyMinimalEnvironment(
   );
 }
 
-function copyProviderEnvironment(
-  environment: Readonly<Record<string, string>> | undefined,
-): Readonly<Record<string, string>> {
-  if (environment === undefined) {
-    return {};
-  }
-  if (
-    environment === null ||
-    typeof environment !== "object" ||
-    (Object.getPrototypeOf(environment) !== Object.prototype &&
-      Object.getPrototypeOf(environment) !== null)
-  ) {
-    throw new TypeError("providerEnvironment must be a plain object");
-  }
-  const names = Reflect.ownKeys(environment);
-  if (names.length > maximumProviderEnvironmentEntries) {
-    throw new RangeError(
-      `providerEnvironment must not exceed ${maximumProviderEnvironmentEntries} entries`,
-    );
-  }
-
-  const entries: Array<readonly [string, string]> = [];
-  for (const name of names) {
-    if (typeof name !== "string" || !/^CODEX_PROVIDER_HEADER_(0|[1-9][0-9]*)$/u.test(name)) {
-      throw new TypeError("providerEnvironment contains an unsupported variable name");
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(environment, name);
-    if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
-      throw new TypeError("providerEnvironment must contain only own enumerable data properties");
-    }
-    const value: unknown = descriptor.value;
-    if (typeof value !== "string" || value.length === 0 || value.trim().length === 0) {
-      throw new TypeError("providerEnvironment values must be non-empty strings");
-    }
-    assertWellFormedUnicode(value, "providerEnvironment value");
-    if (/[\0\r\n]/u.test(value)) {
-      throw new TypeError("providerEnvironment values must not contain NUL, CR, or LF");
-    }
-    if (value.length > maximumEnvironmentValueLength) {
-      throw new RangeError("providerEnvironment value exceeds the Windows value limit");
-    }
-    entries.push([name, value]);
-  }
-  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
-}
-
 function assertEnvironmentName(name: string): void {
-  if (name.length === 0 || name.includes("=") || name.includes("\0")) {
+  assertWellFormedUnicode(name, "environment variable name");
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: Windows environment names must reject control characters.
+  if (name.length === 0 || /[=\u0000-\u001f\u007f-\u009f]/u.test(name)) {
     throw new TypeError(
-      "environment variable names must be non-empty and contain neither '=' nor NUL",
+      "environment variable names must be non-empty and contain neither '=' nor control characters",
     );
   }
-  if (sensitiveEnvironmentNameFragments.some((fragment) => name.includes(fragment))) {
-    throw new TypeError(`environment variable ${name} has a secret-bearing name`);
+  if (name.length > maximumEnvironmentNameLength) {
+    throw new RangeError("environment variable names must not exceed 128 UTF-16 code units");
   }
-  if (!allowedEnvironmentNames.has(name)) {
-    throw new TypeError(`environment variable ${name} is not in the Codex allowlist`);
+  const normalizedName = name.toUpperCase();
+  if (
+    normalizedName.startsWith("WORKER_") ||
+    normalizedName.startsWith("SERVER_") ||
+    normalizedName.startsWith("AGENTIC_REVIEW_")
+  ) {
+    throw new TypeError("environment must not include project control variables");
   }
 }
 
 function normalizeEnvironmentValue(name: string, value: string, workingDirectory: string): string {
-  assertWellFormedUnicode(value, `environment variable ${name}`);
-  if (value.length === 0 || value.includes("\0")) {
-    throw new TypeError(`environment variable ${name} must be non-empty and contain no NUL`);
+  if (typeof value !== "string") {
+    throw new TypeError("environment variable values must be strings");
+  }
+  assertWellFormedUnicode(value, "environment variable value");
+  if (value.includes("\0")) {
+    throw new TypeError("environment variable values must contain no NUL");
   }
   if (value.length > maximumEnvironmentValueLength) {
-    throw new RangeError(`environment variable ${name} exceeds the Windows value limit`);
+    throw new RangeError("environment variable value exceeds the Windows value limit");
   }
 
   if (pathEnvironmentNames.has(name)) {
@@ -594,9 +410,9 @@ function normalizeEnvironmentValue(name: string, value: string, workingDirectory
     return path;
   }
   if (name === "PATH") {
-    const paths = value.split(";");
-    if (paths.length === 0 || paths.some((path) => path.length === 0)) {
-      throw new TypeError("environment.PATH must contain non-empty absolute path entries");
+    const paths = value.split(";").filter((path) => path.length > 0);
+    if (paths.length === 0) {
+      throw new TypeError("environment.PATH must contain at least one absolute path entry");
     }
     return paths
       .map((path, index) => {
@@ -620,9 +436,7 @@ function normalizeEnvironmentValue(name: string, value: string, workingDirectory
   return value;
 }
 
-function assertEncodableProcessHostStartFrame(
-  spec: CodexProcessLaunchSpec | CodexAppServerProcessLaunchSpec,
-): void {
+function assertEncodableProcessHostStartFrame(spec: CliProcessLaunchSpec): void {
   const request = {
     protocolVersion: "1.0",
     type: "start",

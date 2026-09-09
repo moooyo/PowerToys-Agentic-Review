@@ -76,6 +76,21 @@ const failureDiagnostics = {
 } as const;
 
 describe("job details mapper", () => {
+  it.each(["cli_review", "cli_revision"] as const)(
+    "preserves the running %s execution phase",
+    (phase) => {
+      const response = mapJobDetailsResponse({
+        ...baseJobDetails,
+        status: "running",
+        phase,
+        outcome: null,
+        resultDigest: null,
+        reviewResult: null,
+      });
+      expect(response.stage).toBe(phase);
+    },
+  );
+
   it("preserves the repository identity for execution detail scope checks", () => {
     expect(mapJobDetailsResponse(baseJobDetails).repositoryId).toBe("repo-powertoys");
   });

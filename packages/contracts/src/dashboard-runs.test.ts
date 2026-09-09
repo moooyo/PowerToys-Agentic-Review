@@ -73,6 +73,16 @@ const job = {
 };
 const modelReview = {
   state: "completed",
+  execution: {
+    schemaVersion: "CliModelExecutionV1",
+    jobId: "job-1",
+    runAttemptId: "attempt-1",
+    cli: { kind: "codex", version: "1.0.0", requestedModel: null },
+    promptSha256: digest,
+    outputSchemaSha256: digest,
+    outputSha256: digest,
+    exitCode: 0,
+  },
   summary: "The model found no additional concerns.",
   recommendation: "approve",
   findings: [],
@@ -397,6 +407,21 @@ describe("operator review run creation contracts", () => {
 });
 
 describe("dashboard review run dimensions", () => {
+  it("retains completed CLI execution metadata and requires an explicit nullable projection", () => {
+    expect(Value.Check(DashboardValidationModelReviewSchema, modelReview)).toBe(true);
+    expect(
+      Value.Check(DashboardValidationModelReviewSchema, { ...modelReview, execution: null }),
+    ).toBe(true);
+    const { execution: _omitted, ...missingExecution } = modelReview;
+    expect(Value.Check(DashboardValidationModelReviewSchema, missingExecution)).toBe(false);
+    expect(
+      Value.Check(DashboardValidationModelReviewSchema, {
+        ...modelReview,
+        execution: { ...modelReview.execution, exitCode: 1 },
+      }),
+    ).toBe(false);
+  });
+
   it("keeps successful execution, failed validation, model approval, and ineligibility separate", () => {
     expect(Value.Check(DashboardReviewRunDetailSchema, detail)).toBe(true);
     expect(Value.Check(DashboardReviewRunResultSchema, result)).toBe(true);
@@ -456,6 +481,7 @@ describe("dashboard review run dimensions", () => {
         modelReview: {
           ...modelReview,
           state,
+          execution: null,
           summary: null,
           recommendation: null,
           error:

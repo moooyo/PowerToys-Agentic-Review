@@ -182,12 +182,12 @@ function manifests(value: Fixture, sourceVersionId: string, expectationVersionId
   return { source, expectation };
 }
 
-describe("evaluation management against the actual migrations 1-33 database", () => {
+describe("evaluation management against the actual migrations 1-31 database", () => {
   it("persists a current PR source without creating GitHub execution authority", () => {
     const value = fixture();
     expect(
       value.database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
-    ).toEqual({ version: 33 });
+    ).toEqual({ version: 31 });
     const authority = value.database
       .prepare(`SELECT
       (SELECT COUNT(*) FROM request_epochs) AS epochs,

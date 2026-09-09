@@ -290,6 +290,21 @@ describe("work item workspace response mapping", () => {
 });
 
 describe("work item workspace HTTP queries", () => {
+  it.each(["cli_review", "cli_revision"] as const)(
+    "sends the generic %s phase and stage filters",
+    async (phase) => {
+      const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+        jsonResponse({ items: [], total: 0 }),
+      );
+      const adapter = new HttpReviewControlAdapter({ fetch });
+      await adapter.listJobs({ page: 1, pageSize: 10, filters: { phase, stage: phase } });
+      expect(fetch).toHaveBeenCalledWith(
+        `/api/v1/dashboard/jobs?page=1&pageSize=10&phase=${phase}&stage=${phase}`,
+        expect.objectContaining({ method: "GET" }),
+      );
+    },
+  );
+
   it.each(workItemKinds)(
     "requests only the %s workspace before server pagination",
     async (kind) => {

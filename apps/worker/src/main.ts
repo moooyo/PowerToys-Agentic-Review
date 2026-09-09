@@ -9,14 +9,6 @@ import {
   type WorkerExecutionConfig,
   type WorkerModelExecutionConfig,
 } from "./config.js";
-import {
-  loadCodexProviderProfile,
-  loadCodexRelayProviderProfile,
-} from "./execution/codex-provider-profile.js";
-import {
-  type PreparedEvaluationModelRuntime,
-  prepareEvaluationModelRuntime,
-} from "./execution/evaluation-model-runtime.js";
 import { EvidenceUploader } from "./execution/evidence-uploader.js";
 import {
   type JobExecutionContext,
@@ -29,8 +21,8 @@ import {
   type PreparedJobWorkspace,
   ProductionDisposableJobWorkspaceProvider,
 } from "./execution/job-workspace.js";
-import { verifyPersistentCodexHome } from "./execution/persistent-codex-home.js";
-import { PreparedCodexOutputRunner } from "./execution/prepared-codex-output-runner.js";
+import { ProductionManagedProcessRunner } from "./execution/managed-process-runner.js";
+import { PreparedCliOutputRunner } from "./execution/prepared-cli-output-runner.js";
 import {
   deriveWorkerProcessHostInstanceKey,
   StdioProcessHostClient,
@@ -75,10 +67,7 @@ import { ConsoleJsonLogger } from "./logging/logger.js";
 import { WorkerApiError } from "./server-client/errors.js";
 import { HttpWorkerEvidenceApi } from "./server-client/evidence-api.js";
 import { HttpWorkerApi } from "./server-client/http-worker-api.js";
-import type {
-  ModelInvocationApi,
-  ModelSummaryInputApi,
-} from "./server-client/model-invocation-api.js";
+import type { ModelSummaryInputApi } from "./server-client/summary-input-api.js";
 import { WorkerService } from "./worker-service.js";
 
 async function main(): Promise<void> {
@@ -150,7 +139,7 @@ async function main(): Promise<void> {
 export async function createExecutionRuntime(
   config: ReturnType<typeof loadWorkerConfig>,
   logger: ConsoleJsonLogger,
-  modelInvocationApi?: ModelInvocationApi & Partial<ModelSummaryInputApi>,
+  summaryInputApi?: ModelSummaryInputApi,
 ): Promise<{
   readonly processHost: ProcessHostClient;
   readonly executor: JobExecutor;
@@ -161,11 +150,15 @@ export async function createExecutionRuntime(
   const execution = config.execution === undefined ? undefined : structuredClone(config.execution);
   const modelExecutionEnabled =
     config.modelExecutionEnabled !== false && execution?.modelExecutionEnabled !== false;
+  const accountEnvironment =
+    config.executionEnabled && modelExecutionEnabled
+      ? snapshotCliEnvironment(process.env, config.workerToken)
+      : undefined;
   assertWorkerModelExecutionConfiguration(process.env, modelExecutionEnabled);
   if (
     !modelExecutionEnabled &&
     execution !== undefined &&
-    (execution.modelExecutionEnabled !== false || execution.evaluationModel !== undefined)
+    execution.modelExecutionEnabled !== false
   )
     throw new Error("Disabled model execution requires a validation-only execution configuration.");
   if (!config.executionEnabled) {
@@ -193,28 +186,13 @@ export async function createExecutionRuntime(
     mkdir(execution.gitSharedRootDirectory, { recursive: true }),
     mkdir(execution.workspaceRootDirectory, { recursive: true }),
     mkdir(execution.tempDirectory, { recursive: true }),
-    ...(execution.modelExecutionEnabled === false
-      ? []
-      : [mkdir(execution.profileDirectory, { recursive: true })]),
     mkdir(gitWorkingDirectory, { recursive: true }),
   ]);
-  const { binaries, model } = await prepareExecutionTools(
-    execution,
-    gitWorkingDirectory,
-    modelInvocationApi,
-  );
-  const evaluationModel = model?.evaluation;
-  if (evaluationModel !== undefined)
-    logger.info(
-      "Evaluation model session composition is prepared; evaluation execution remains unavailable.",
-      {
-        implementationSha256: evaluationModel.implementationSha256,
-      },
-    );
-  const systemRoot = requiredEnvironment("SYSTEMROOT");
+  const { binaries, model } = await prepareExecutionTools(execution);
+  const systemRoot = requiredEnvironment("SYSTEMROOT", accountEnvironment);
   const comSpec = win32.join(systemRoot, "System32", "cmd.exe");
-  const path = requiredEnvironment("PATH");
-  const pathExt = requiredEnvironment("PATHEXT");
+  const path = requiredEnvironment("PATH", accountEnvironment);
+  const pathExt = requiredEnvironment("PATHEXT", accountEnvironment);
   const validation = await prepareValidationRuntime(
     loadValidationRuntimeConfig(process.env, {
       executionEnabled: config.executionEnabled,
@@ -226,9 +204,11 @@ export async function createExecutionRuntime(
           ? []
           : [
               {
-                name: "codex",
-                path: model.binaries.codexPath,
-                sha256: model.execution.codexSha256,
+                name: model.execution.engine,
+                path: model.binaries.cliPath,
+                ...(model.execution.cliSha256 === undefined
+                  ? {}
+                  : { sha256: model.execution.cliSha256 }),
               },
             ]),
         { name: "node", path: process.execPath },
@@ -273,9 +253,34 @@ export async function createExecutionRuntime(
     requestTimeoutMs: execution.processHostRequestTimeoutMs,
     startTimeoutMs: execution.processHostStartTimeoutMs,
     shutdownTimeoutMs: execution.processHostShutdownTimeoutMs,
-    ...(evaluationModel === undefined ? {} : { interactiveStdin: true as const }),
   });
   try {
+    const cliEnvironment =
+      model === undefined
+        ? undefined
+        : Object.freeze({
+            ...accountEnvironment,
+            ...baseEnvironment,
+            USERPROFILE: requiredEnvironment("USERPROFILE", accountEnvironment),
+            ...(model.execution.cliHomeDirectory === undefined
+              ? {}
+              : {
+                  [model.execution.engine === "codex" ? "CODEX_HOME" : "COPILOT_HOME"]:
+                    model.execution.cliHomeDirectory,
+                }),
+            TEMP: execution.tempDirectory,
+            TMP: execution.tempDirectory,
+            NO_COLOR: "1",
+          });
+    const cliVersion =
+      model === undefined || cliEnvironment === undefined
+        ? undefined
+        : await readInstalledCliVersion(
+            model.binaries.cliPath,
+            gitWorkingDirectory,
+            cliEnvironment,
+            processHost,
+          );
     const diskBudget = new ProductionWorkspaceDiskBudget({
       workspaceRootDirectory: execution.workspaceRootDirectory,
       perAttemptDiskBytes: BigInt(execution.perAttemptDiskBytes),
@@ -309,30 +314,35 @@ export async function createExecutionRuntime(
       logger,
     });
     const modelProcessOptions =
-      model === undefined
+      model === undefined || cliVersion === undefined || cliEnvironment === undefined
         ? undefined
         : {
-            codexExecutablePath: model.binaries.codexPath,
-            codexHomeDirectory: model.codexHomeDirectory,
+            engine: model.execution.engine,
+            cliExecutablePath: model.binaries.cliPath,
+            cliVersion,
+            cliEnvironment,
+            ...(model.execution.cliHomeDirectory === undefined
+              ? {}
+              : { cliHomeDirectory: model.execution.cliHomeDirectory }),
+            ...(model.execution.model === undefined ? {} : { model: model.execution.model }),
+            userProfileDirectory: cliEnvironment.USERPROFILE,
+            ...(accountEnvironment?.APPDATA === undefined
+              ? {}
+              : { appDataDirectory: accountEnvironment.APPDATA }),
+            ...(accountEnvironment?.LOCALAPPDATA === undefined
+              ? {}
+              : { localAppDataDirectory: accountEnvironment.LOCALAPPDATA }),
             systemRoot,
             comSpec,
             path,
             pathExt,
-            maximumHardTimeoutMs: model.execution.codexMaximumHardTimeoutMs,
-            maximumProcessCount: model.execution.codexResourceLimits.maximumProcessCount,
-            maximumMemoryBytes: model.execution.codexResourceLimits.maximumMemoryBytes,
-            maximumOutputBytes: model.execution.codexResourceLimits.maximumOutputBytes,
+            maximumHardTimeoutMs: model.execution.modelMaximumHardTimeoutMs,
+            maximumProcessCount: model.execution.modelResourceLimits.maximumProcessCount,
+            maximumMemoryBytes: model.execution.modelResourceLimits.maximumMemoryBytes,
+            maximumOutputBytes: model.execution.modelResourceLimits.maximumOutputBytes,
             logger,
           };
-    const reviewOptions =
-      model === undefined || modelProcessOptions === undefined
-        ? undefined
-        : {
-            ...modelProcessOptions,
-            codexConfigurationOverrides: model.profile.configurationOverrides,
-            codexProviderEnvironment: model.profile.providerEnvironment,
-            codexProviderProtectedValues: model.profile.protectedValues,
-          };
+    const reviewOptions = modelProcessOptions;
     const startupDrivers = uiDrivers(
       validation,
       baseEnvironment,
@@ -417,16 +427,13 @@ export async function createExecutionRuntime(
                 return new ReviewJobExecutor({ ...reviewOptions, workspaceProvider: provider });
               if (resolveProfileModelPolicy(envelope.validation).kind !== "review")
                 throw new Error("The frozen evaluation does not request a model review.");
-              if (evaluationModel === undefined)
-                throw new Error("Evaluation model session composition is not configured.");
               return new ReviewJobExecutor({
-                ...modelProcessOptions,
-                ...evaluationModel.review,
+                ...reviewOptions,
                 workspaceProvider: provider,
               });
             },
           }),
-      ...(summaryConfiguration === undefined && evaluationModel?.summary === undefined
+      ...(modelProcessOptions === undefined
         ? {}
         : {
             createSummaryExecutor: (envelope: JobExecutionEnvelopeV2) => {
@@ -439,29 +446,22 @@ export async function createExecutionRuntime(
               if (isEvaluationContext(envelope.validation)) {
                 if (resolveProfileModelPolicy(envelope.validation).kind !== "summary")
                   throw new Error("The frozen evaluation does not request a model summary.");
-                const summary = evaluationModel?.summary;
-                if (summary === undefined)
-                  throw new Error("Evaluation summary composition is not configured.");
+                if (summaryInputApi === undefined)
+                  throw new Error("Evaluation summaries require the summary input API.");
                 return new ValidationSummaryExecutor({
                   workspaceProvider,
-                  outputRunner: new PreparedCodexOutputRunner({
-                    ...modelProcessOptions,
-                    modelInvocationBackend: summary.modelInvocationBackend,
-                    codexProviderProtectedValues: summary.codexProviderProtectedValues,
-                  }),
-                  createSummaryModelInvocation: summary.createSummaryModelInvocation,
+                  outputRunner: new PreparedCliOutputRunner(modelProcessOptions),
+                  summaryInputApi,
                   ...(summaryConfiguration === undefined
                     ? {}
                     : { maximumSummaryTimeoutMs: summaryConfiguration.maximumTimeoutMs }),
-                  sensitiveValues: summary.codexProviderProtectedValues,
                 });
               }
               if (summaryConfiguration === undefined) return undefined;
               return new ValidationSummaryExecutor({
                 workspaceProvider,
-                outputRunner: new PreparedCodexOutputRunner(reviewOptions),
+                outputRunner: new PreparedCliOutputRunner(reviewOptions),
                 maximumSummaryTimeoutMs: summaryConfiguration.maximumTimeoutMs,
-                sensitiveValues: model.profile.protectedValues,
               });
             },
           }),
@@ -508,18 +508,28 @@ export async function createExecutionRuntime(
       processHost,
       canAcceptWork: (signal) => diskBudget.hasCapacity(signal),
       executor,
-      capabilities: createRuntimeCapabilities(config.capabilities, {
-        execution: true,
-        envelopeV2: true,
-        headless: validation.headlessEnabled,
-        web: validation.web !== undefined,
-        windowsDesktop: windowsDesktopReady,
-        evidenceDelivery: true,
-        reproduction: true,
-        structuredProbes: true,
-        uiObservations: uiObservationsReady,
-        ...(modelExecutionEnabled ? {} : { modelExecution: false }),
-      }),
+      capabilities: createRuntimeCapabilities(
+        {
+          ...config.capabilities,
+          cliEngine: model?.execution.engine ?? null,
+          cliVersion: cliVersion ?? null,
+        },
+        {
+          execution: true,
+          envelopeV2: true,
+          headless: validation.headlessEnabled,
+          web: validation.web !== undefined,
+          windowsDesktop: windowsDesktopReady,
+          evidenceDelivery: true,
+          reproduction: true,
+          structuredProbes: true,
+          uiObservations: uiObservationsReady,
+          evaluationModelReview: modelProcessOptions !== undefined,
+          evaluationModelSummary:
+            modelProcessOptions !== undefined && summaryInputApi !== undefined,
+          ...(modelExecutionEnabled ? {} : { modelExecution: false }),
+        },
+      ),
     };
   } catch (error) {
     await closeAfterStartupFailure(processHost, logger);
@@ -530,17 +540,10 @@ export async function createExecutionRuntime(
 interface PreparedExecutionModel {
   readonly execution: WorkerModelExecutionConfig;
   readonly binaries: VerifiedTrustedExecutionBinaries;
-  readonly codexHomeDirectory: string;
-  readonly profile: Awaited<ReturnType<typeof loadCodexProviderProfile>>;
-  readonly evaluation?: PreparedEvaluationModelRuntime;
 }
 
-/** Validation-only startup never opens a model profile or measures a Codex executable. */
-async function prepareExecutionTools(
-  execution: WorkerExecutionConfig,
-  gitWorkingDirectory: string,
-  modelInvocationApi?: ModelInvocationApi & Partial<ModelSummaryInputApi>,
-): Promise<{
+/** CLI authentication and user configuration remain owned by the installed CLI. */
+async function prepareExecutionTools(execution: WorkerExecutionConfig): Promise<{
   readonly binaries: VerifiedTrustedValidationBinaries;
   readonly model?: PreparedExecutionModel;
 }> {
@@ -551,56 +554,57 @@ async function prepareExecutionTools(
   };
   if (execution.modelExecutionEnabled === false)
     return { binaries: await verifyTrustedExecutionBinaries(shared) };
-  const codexHomeDirectory = await verifyPersistentCodexHome({
-    profileDirectory: execution.profileDirectory,
-    workspaceRootDirectory: execution.workspaceRootDirectory,
-    tempDirectory: execution.tempDirectory,
-    gitSharedRootDirectory: execution.gitSharedRootDirectory,
-    gitWorkingDirectory,
-    trustedExecutableRoot: execution.trustedExecutableRoot,
-  });
-  const profile = await loadCodexProviderProfile(codexHomeDirectory);
   const binaries = await verifyTrustedExecutionBinaries({
     ...shared,
-    codex: { path: execution.codexExecutablePath, expectedSha256: execution.codexSha256 },
-  });
-  const evaluation =
-    execution.evaluationModel === undefined
-      ? undefined
-      : await prepareEvaluationModelRuntime({
-          configuration: execution.evaluationModel,
-          trustedExecutableRoot: execution.trustedExecutableRoot,
-          workerEntryPath: fileURLToPath(import.meta.url),
-          processEntryPath: process.argv[1],
-          nodeExecutablePath: process.execPath,
-          nodeVersion: process.versions.node,
-          nodeExecArguments: process.execArgv,
-          nodeOptions: process.env.NODE_OPTIONS,
-          codexVersion: execution.codexVersion,
-          codexMeasurement: binaries.measurements.codex,
-          provider: await loadCodexRelayProviderProfile(codexHomeDirectory),
-          api: modelInvocationApi,
-          ...(modelInvocationApi?.freezeValidationSummaryInput === undefined
-            ? {}
-            : {
-                summaryInputApi: {
-                  freezeValidationSummaryInput:
-                    modelInvocationApi.freezeValidationSummaryInput.bind(modelInvocationApi),
-                },
-              }),
-        });
-  return {
-    binaries,
-    model: {
-      execution,
-      binaries,
-      codexHomeDirectory,
-      profile,
-      ...(evaluation === undefined ? {} : { evaluation }),
+    cli: {
+      path: execution.cliExecutablePath,
+      ...(execution.cliSha256 === undefined ? {} : { expectedSha256: execution.cliSha256 }),
     },
-  };
+  });
+  return { binaries, model: { execution, binaries } };
 }
 
+async function readInstalledCliVersion(
+  executable: string,
+  workingDirectory: string,
+  environment: Readonly<Record<string, string>>,
+  processHost: ProcessHostClient,
+): Promise<string> {
+  try {
+    const output = await new ProductionManagedProcessRunner({
+      maximumCapturedOutputBytes: 64 * 1024,
+      maximumErrorPreviewBytes: 0,
+    }).run(
+      {
+        executable,
+        arguments: ["--version"],
+        workingDirectory,
+        environmentMode: "replace",
+        environment,
+        standardInput: "",
+        limits: {
+          hardTimeoutMs: 20_000,
+          maximumProcessCount: 8,
+          maximumMemoryBytes: 512 * 1024 * 1024,
+          maximumOutputBytes: 64 * 1024,
+        },
+      },
+      { processHost, signal: AbortSignal.timeout(25_000) },
+    );
+    const version = output.stdout.trim().split(/\r?\n/u)[0] ?? "";
+    if (
+      version.length === 0 ||
+      version.length > 128 ||
+      [...version].some(
+        (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      )
+    )
+      throw new Error("Invalid CLI version output.");
+    return version;
+  } catch {
+    throw new Error("The configured CLI did not return a usable version from --version.");
+  }
+}
 async function closeAfterStartupFailure(
   processHost: ProcessHostClient,
   logger: ConsoleJsonLogger,
@@ -646,6 +650,7 @@ function uiDrivers(
       TEMP: tempDirectory,
       TMP: tempDirectory,
       USERPROFILE: userProfileDirectory,
+      PSMODULEANALYSISCACHEPATH: win32.join(tempDirectory, "PowerShell-ModuleAnalysisCache"),
     },
   };
 }
@@ -676,8 +681,29 @@ async function createUiEvidenceDirectory(
   return directory;
 }
 
-function requiredEnvironment(name: "SYSTEMROOT" | "PATH" | "PATHEXT"): string {
-  const value = process.env[name]?.trim();
+function snapshotCliEnvironment(
+  environment: NodeJS.ProcessEnv,
+  workerToken: string,
+): Readonly<Record<string, string>> {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(environment)
+        .filter(
+          (entry): entry is [string, string] =>
+            entry[1] !== undefined &&
+            (workerToken.length === 0 || !entry[1].includes(workerToken)) &&
+            !/^(?:WORKER_|SERVER_|AGENTIC_REVIEW_)/u.test(entry[0].toUpperCase()),
+        )
+        .map(([name, value]) => [name.toUpperCase(), value]),
+    ),
+  );
+}
+
+function requiredEnvironment(
+  name: "SYSTEMROOT" | "PATH" | "PATHEXT" | "USERPROFILE",
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const value = environment[name]?.trim();
   if (value === undefined || value === "") {
     throw new Error(`Worker execution requires the ${name} environment variable.`);
   }

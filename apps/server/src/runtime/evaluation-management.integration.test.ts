@@ -118,7 +118,7 @@ async function startRuntime(fixture: RuntimeFixture, options: RuntimeOptions = {
     recoveryMaintenance: options.recoveryMaintenance === true,
     operatorAccess: { administrators: [administrator] },
   });
-  expect(await owner(fixture).request("ping", {})).toMatchObject({ schemaVersion: 33 });
+  expect(await owner(fixture).request("ping", {})).toMatchObject({ schemaVersion: 31 });
   const auth = new OperatorAuthService({
     config: {
       mode: "loopback",
@@ -519,7 +519,7 @@ function persisted(fixture: RuntimeFixture) {
       database
         .prepare("SELECT COUNT(*) AS count, MAX(version) AS latest FROM schema_migrations")
         .get(),
-    ).toEqual({ count: 33, latest: 33 });
+    ).toEqual({ count: 31, latest: 31 });
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     const execution = database
       .prepare(`SELECT
@@ -1012,7 +1012,7 @@ describe.skipIf(process.platform !== "linux")(
         expect(detail.configurations[arm]).toMatchObject({
           profile: { id: profile.id },
           prompt: { id: prompt.id },
-          modelRequirements: { required: false, expectedModelIdentityDigest: null },
+          modelRequirements: { required: false },
         });
         expect(detail.configurations[arm].profile).not.toHaveProperty("config");
         expect(detail.configurations[arm].prompt).not.toHaveProperty("content");

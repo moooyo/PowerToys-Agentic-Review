@@ -5,11 +5,28 @@ claim. Contracts or recorded-result scoring alone do not complete it. The accept
 [roadmap](2026-09-06-validation-platform-roadmap.md) and the user's prohibition on unapproved
 real PR/Issue writes remain in force.
 
-The populated schema-27 upgrade requirement has now passed a complete synthetic history acceptance:
+The current deployment model is [one long-lived Worker per VM](./2026-09-10-single-worker-vm.md),
+with successive tasks on that Worker. VM isolation is managed by deployment. Evaluation does not
+require a separate protected Worker journal, OS execution adapter, signing authority or
+attestation-based admission protocol. Normal scheduling quotas, capabilities, leases, cancellation,
+per-task cleanup and result ownership remain part of execution.
+
+Model execution follows the [CLI-owned execution design](./2026-09-10-cli-owned-model-execution.md):
+the Worker selects Codex or Copilot CLI, while the CLI owns login, provider configuration and HTTP
+traffic. There is no global provider registry or project-owned provider HTTP ledger. The project
+records CLI configuration, detected version, process exit and validated structured output.
+
+The unused `executionAccepted` field is removed from the current development contracts. The
+product is unreleased, so development directly maintains the current schema without database
+resets, old-version upgrades, conversion or compatibility migrations. Verification uses isolated
+synthetic records; existing data and historical artifacts remain unchanged.
+
+The earlier populated schema-27 upgrade verification passed a complete synthetic history acceptance:
 74 old tables and 101 rows, a finalized evidence file, 12 current readers and five exact old-receipt
 replays were verified through schema 33. See the
 [populated upgrade record](../../artifacts/m32-evaluations-20260908/populated-upgrade/REPORT.md).
-This satisfies that migration slice; actual Evaluation/model execution remains independently gated.
+This is retained implementation history, not a requirement for further old-version upgrades.
+Actual Evaluation/model execution remains independently unverified.
 
 ## Product outcome
 
@@ -116,17 +133,20 @@ M31's per-PR/Issue validation notification producer excludes evaluation cells; t
 workspace exposes batch progress and report readiness without pretending each sample is a new
 PR/Issue validation result.
 
-The Worker must retain evaluation restrictions when the profile executor delegates to a model
-executor. Its existing V2-to-V1 model-envelope conversion must not drop trusted restrictions.
-Profile commands and model subprocesses both fall within the execution side-effect boundary.
-A purpose flag, a hidden Publish button or a prompt instruction alone does not provide confinement.
+The Worker retains the complete frozen V2 evaluation context when the profile executor delegates
+to a model executor. The legacy V1 entry cannot substitute for that evaluation context.
+Profile commands and model subprocesses run inside the deployed VM. A purpose flag, a hidden
+Publish button or a prompt instruction alone does not provide confinement; deployment owns that
+isolation. Existing process-tree cleanup, workspace cleanup and failure quarantine still apply
+before the long-lived Worker starts another task.
 
 Prompt evaluations require actual model execution, including UI/Issue workflows whose production
-summaries are otherwise optional. Missing model support, absent or mismatched verified model identity,
-or an unaccepted execution boundary makes the model dimension blocked/incomplete. Profile check
+summaries are otherwise optional. Missing CLI support or missing/invalid structured model output
+makes the model dimension blocked/incomplete. Profile check
 observations can remain independently valid; they cannot stand in for Prompt evaluation.
-Requested and observed model identities must be traceable to trusted runtime metadata. Client-supplied
-digests are not attestations. The existing model-isolation and metadata acceptance gaps remain open.
+Configured CLI/model choices and the detected CLI version remain recorded facts, without claiming
+independently verified remote-model identity. Content digests do not attest to OS isolation. Actual CLI/model execution and
+the intended VM deployment still need acceptance; they are not a blanket software refusal gate.
 
 ## Persistence migration
 
@@ -143,8 +163,9 @@ Publishing advances the suite CAS revision even when its draft text is unchanged
 All cases, including not-applicable cases, receive both preallocated cell/Run/request identities.
 Only applicable cells receive Jobs. Cells store their future Run IDs without a forward FK;
 `review_runs.evaluation_cell_id` is the unique reverse FK. The creation transaction inserts the
-batch, fresh authorization, complete cells, Runs and requests, then a seal that proves the entire
-matrix exists. Admission requires that seal and an active control record. Cancellation changes
+batch, fresh authorization, complete cells, Runs and requests, then a seal that records that the
+entire matrix exists. This database seal is a completeness record, not a digital signature.
+Scheduling requires that record and an active control record. Cancellation changes
 the control record with audit history, without modifying the authorization or frozen manifests.
 
 Digest dependencies are acyclic: source and configuration manifests precede the cell manifest;
@@ -196,7 +217,8 @@ null, not 100 percent. Labels and adjudications are never model self-reported co
 The report shows execution/evidence coverage, check agreement, finding TP/FN/FP/duplicates/unjudged,
 and paired quality changes separately. A valid baseline with an unavailable candidate is a coverage
 regression, not a disappearing pair. New coverage cannot offset regressions in the original scope.
-Different or unknown model identities do not support a model-quality comparison.
+Comparisons must retain differences and uncertainty in the recorded CLI/model configuration;
+the application does not claim to verify a provider's underlying model identity.
 
 Adjudication updates use CAS/change IDs and produce audit receipts. Publishing an assessment freezes
 its source/result/expectation/adjudication digests, scorer version, numerators, denominators and
@@ -248,13 +270,14 @@ M32 is complete only when all of the following have evidence:
 5. Evaluation Jobs cannot alter ordinary latest results, approval, decisions, reproduction conclusions,
    GitHub activations or publication, even through direct SQL/owner paths. No real PR/Issue write is
    performed by automated acceptance without exact user approval.
-6. Model-dependent evaluation actually exercises the frozen prompts and a verified runtime/model
-   identity inside an accepted side-effect boundary. A stub or missing optional summary is not success.
+6. Model-dependent evaluation actually exercises the frozen prompts through the selected CLI in
+   the intended VM, with recorded configuration, exit, structured output and per-task cleanup.
+   A stub or missing optional summary is not success.
 7. Persisted adjudication and immutable assessments agree with the real results and frozen denominator;
    scope, lost responses and read-only replay are verified through the actual Dashboard.
 8. Both Windows/Web profile targets, migration recovery and evidence lifecycle retain their existing
    acceptance requirements. Tmpfs or isolated mocks are described accurately and never stand in for
-   deployed identity, persistent-disk, real application or model-boundary acceptance.
+   deployed identity, persistent-disk, real application or actual provider execution acceptance.
 
 Implementation proceeds through contracts/scoring, source/authority/migration, actual execution,
 operator APIs and Dashboard, then full regression and connected acceptance. Intermediate milestones

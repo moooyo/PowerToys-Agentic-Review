@@ -98,9 +98,7 @@ export function assertCellResultBinding(
     (Object.keys(expected) as (keyof typeof expected)[]).some(
       (key) => result[key] !== expected[key],
     ) ||
-    result.modelRequirements.required !== binding.modelRequirements.required ||
-    result.modelRequirements.expectedModelIdentityDigest !==
-      binding.modelRequirements.expectedModelIdentityDigest
+    result.modelRequirements.required !== binding.modelRequirements.required
   )
     throw new ReviewControlProtocolError(
       "read evaluation cell result",

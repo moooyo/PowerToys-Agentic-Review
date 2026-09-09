@@ -76,11 +76,6 @@ import {
   isEvaluationManagementOperation,
 } from "./evaluation-management.js";
 import {
-  type EvaluationModelInvocationRequest,
-  handleEvaluationModelInvocationRequest,
-  isEvaluationModelInvocationOperation,
-} from "./evaluation-model-invocations.js";
-import {
   type EvaluationBatchRequest,
   handleEvaluationBatchRequest,
   isEvaluationBatchOperation,
@@ -130,16 +125,6 @@ import {
   type RepositoryConfigurationRequest,
 } from "./managed-repositories.js";
 import { inspectMigrationState, runMigrations } from "./migrations.js";
-import {
-  handleModelInvocationRequest,
-  isModelInvocationOperation,
-  type ModelInvocationRequest,
-} from "./model-invocations.js";
-import {
-  handleModelRuntimeRegistryRequest,
-  isModelRuntimeRegistryOperation,
-  type ModelRuntimeRegistryRequest,
-} from "./model-runtime-registry.js";
 import {
   handleNotificationRequest,
   isNotificationOperation,
@@ -1309,10 +1294,7 @@ const claimLease = (input: ClaimLeaseInput): ClaimLeaseResult =>
             !cell.applicable ||
             !cell.repositoryEnabled ||
             cell.controlStatus !== "active" ||
-            cell.reproductionReadiness.state === "blocked" ||
-            // Registered expectations do not enable model-backed claims until receipt acceptance
-            // and the actual execution boundary are integrated.
-            cell.plan.modelRequirements.required
+            cell.reproductionReadiness.state === "blocked"
           ) {
             return undefined;
           }
@@ -2662,19 +2644,6 @@ const handleRequest = (
     );
   }
   operator?.revalidate();
-  if (isEvaluationModelInvocationOperation(request.operation)) {
-    if (operator === undefined)
-      throw new OperatorAccessError(
-        "PLATFORM_FORBIDDEN",
-        "Invocation history requires an authenticated operator request.",
-      );
-    return handleEvaluationModelInvocationRequest(
-      database,
-      { operation: request.operation, input: request.input } as EvaluationModelInvocationRequest,
-      new Date().toISOString(),
-      operatorAdministrators,
-    );
-  }
   if (request.operation === "freezeValidationSummaryInput") {
     if (operator !== undefined)
       throw new OperatorAccessError(
@@ -2725,28 +2694,6 @@ const handleRequest = (
         },
       });
     })();
-  }
-  if (isModelInvocationOperation(request.operation)) {
-    return handleModelInvocationRequest(
-      database,
-      { operation: request.operation, input: request.input } as ModelInvocationRequest,
-      new Date().toISOString(),
-      { readOnly: options.recoveryMaintenance === true },
-    );
-  }
-  if (isModelRuntimeRegistryOperation(request.operation)) {
-    if (operator === undefined)
-      throw new OperatorAccessError(
-        "PLATFORM_FORBIDDEN",
-        "Model runtime registry operations require an authenticated operator request.",
-      );
-    return handleModelRuntimeRegistryRequest(
-      database,
-      { operation: request.operation, input: request.input } as ModelRuntimeRegistryRequest,
-      new Date().toISOString(),
-      operatorAdministrators,
-      { readOnly: options.recoveryMaintenance === true },
-    );
   }
   if (isEvaluationAssessmentOperation(request.operation)) {
     const assessment = {

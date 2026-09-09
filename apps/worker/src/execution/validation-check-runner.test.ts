@@ -235,7 +235,6 @@ function harness(options: Partial<RunnerOptions> = {}) {
     attemptDirectory: paths.attempt,
     checkoutDirectory: paths.checkout,
     controlDirectory: paths.control,
-    codexHomeDirectory: paths.codexHome,
     tempDirectory: paths.temp,
     userProfileDirectory: paths.userProfile,
     startDiskMonitoring,
@@ -744,22 +743,25 @@ describe("UiCommandBridge", () => {
     },
   );
 
-  it("never overrides a reserved base name even when configured as the managed port variable", async () => {
-    const fixture = harness();
-    const selected = uiProfile();
-    if (selected.config.ui?.target !== "web") throw new Error("Expected a Web fixture.");
-    selected.config.ui.service.portEnvironmentVariable = "pAtH";
-    selected.configSha256 = createCanonicalResult(selected.config).sha256;
-    await expect(
-      fixture.runner.createUiCommandBridge(selected).prepareLaunch({
-        workspace: fixture.workspace,
-        signal: fixture.controller.signal,
-        step: requireStep(selected.config.launch),
-        timeoutMs: 30000,
-        environmentOverrides: { pAtH: "32123" },
-      }),
-    ).rejects.toMatchObject({ code: "ENVIRONMENT_INVALID" });
-  });
+  it.each(["pAtH", "PSModuleAnalysisCachePath"])(
+    "never overrides reserved %s even when configured as the managed port variable",
+    async (name) => {
+      const fixture = harness();
+      const selected = uiProfile();
+      if (selected.config.ui?.target !== "web") throw new Error("Expected a Web fixture.");
+      selected.config.ui.service.portEnvironmentVariable = name;
+      selected.configSha256 = createCanonicalResult(selected.config).sha256;
+      await expect(
+        fixture.runner.createUiCommandBridge(selected).prepareLaunch({
+          workspace: fixture.workspace,
+          signal: fixture.controller.signal,
+          step: requireStep(selected.config.launch),
+          timeoutMs: 30000,
+          environmentOverrides: { [name]: "32123" },
+        }),
+      ).rejects.toMatchObject({ code: "ENVIRONMENT_INVALID" });
+    },
+  );
 
   it("rejects a profile that preconfigures its assigned port and rejects overrides for Windows", async () => {
     const fixture = harness();
@@ -1110,6 +1112,7 @@ describe("HeadlessValidationCheckRunner", () => {
     });
     expect(fixture.processRunner.run.mock.calls[1]?.[0].environment).toEqual({
       ...baseEnvironment,
+      PSMODULEANALYSISCACHEPATH: win32.join(paths.temp, "PowerShell-ModuleAnalysisCache"),
       CI: "true",
     });
     expect(
@@ -1153,6 +1156,7 @@ describe("HeadlessValidationCheckRunner", () => {
   });
 
   it("replaces host temporary and user-profile locations with the current attempt directories", async () => {
+    vi.stubEnv("PSModuleAnalysisCachePath", "C:\\Host\\ModuleAnalysisCache");
     const fixture = harness({
       baseEnvironment: {
         ...baseEnvironment,
@@ -1168,6 +1172,7 @@ describe("HeadlessValidationCheckRunner", () => {
       TEMP: paths.temp,
       TMP: paths.temp,
       USERPROFILE: paths.userProfile,
+      PSMODULEANALYSISCACHEPATH: win32.join(paths.temp, "PowerShell-ModuleAnalysisCache"),
     });
   });
 
@@ -1640,29 +1645,32 @@ describe("HeadlessValidationCheckRunner", () => {
     expect(baseEnvironment).not.toHaveProperty("TEST_ACCESS_TOKEN");
   });
 
-  it("blocks attempts to override reserved environment names with different Windows casing", async () => {
-    const fixture = harness();
+  it.each(["Path", "PSModuleAnalysisCachePath", "psmoduleanalysiscachepath"])(
+    "blocks profile attempts to override reserved %s with different Windows casing",
+    async (name) => {
+      const fixture = harness();
 
-    const result = await fixture.run(
-      profile({
-        test: [
-          step("custom-path", {
-            command: {
-              executable: "dotnet",
-              args: ["test"],
-              workingDirectory: ".",
-              environment: [{ name: "Path", value: "C:\\CustomTools" }],
-            },
-          }),
-        ],
-      }),
-    );
+      const result = await fixture.run(
+        profile({
+          test: [
+            step("custom-path", {
+              command: {
+                executable: "dotnet",
+                args: ["test"],
+                workingDirectory: ".",
+                environment: [{ name, value: "C:\\CustomTools" }],
+              },
+            }),
+          ],
+        }),
+      );
 
-    expect(fixture.processRunner.run).not.toHaveBeenCalled();
-    expect(baseEnvironment.PATH).toBe("C:\\Windows\\System32;C:\\Tools");
-    expect(result.report.checks[0]?.outcome).toBe("blocked");
-    expect(result.blockers.length).toBeGreaterThan(0);
-  });
+      expect(fixture.processRunner.run).not.toHaveBeenCalled();
+      expect(baseEnvironment.PATH).toBe("C:\\Windows\\System32;C:\\Tools");
+      expect(result.report.checks[0]?.outcome).toBe("blocked");
+      expect(result.blockers.length).toBeGreaterThan(0);
+    },
+  );
 
   it("blocks executable resolution errors before invoking ProcessHost", async () => {
     const fixture = harness({

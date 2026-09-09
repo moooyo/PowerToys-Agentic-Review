@@ -130,7 +130,7 @@ function configuration(
       publishedAt: now,
       createdBy: "operator-1",
     },
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
   };
 }
 
@@ -452,7 +452,7 @@ describe("evaluation progress and frozen detail", () => {
     expect(getEvaluationBatchStatus({ ...empty, cancelled: 2 }, true)).toBe("cancelled");
   });
 
-  it("keeps frozen selections and permits unresolved model identity as a visible blocker", () => {
+  it("keeps frozen selections and model requirements consistent with the batch mode", () => {
     const value = detail();
     const original = structuredClone(value);
     expect(getEvaluationBatchSummaryIssues(value.summary)).toEqual([]);
@@ -467,66 +467,25 @@ describe("evaluation progress and frozen detail", () => {
     expect(getEvaluationBatchDetailIssues(value)).toEqual([]);
   });
 
-  it("binds model registration detail to the selected ID and thin frozen identity reference", () => {
+  it("requires an explicit boolean model requirement for each frozen arm", () => {
     const value = detail();
-    const before = JSON.stringify(value);
-    expect(getEvaluationBatchDetailIssues(value)).toEqual([]);
-    expect(JSON.stringify(value)).toBe(before);
-    const selected = value.configurations.baseline;
-    value.summary.baseline.modelRuntimeRegistrationId = "registration-1";
-    expect(getEvaluationBatchDetailIssues(value).length).toBeGreaterThan(0);
-    selected.modelRequirements = {
-      required: true,
-      expectedModelIdentityDigest: digest,
-      runtimeRegistration: { registrationId: "registration-1", registrationSha256: "b".repeat(64) },
-    };
-    selected.modelRuntimeRegistration = {
-      schemaVersion: "ModelRuntimeRegistrationV1",
-      id: "registration-1",
-      name: "Expected runtime",
-      requestedModel: "requested-model",
-      identitySha256: digest,
-      createdAt: now,
-      createdBy: { ...actor },
-      identity: {
-        schemaVersion: "ModelRuntimeIdentityV1",
-        providerId: "provider",
-        modelId: "observed-model",
-        endpointSha256: digest,
-        client: {
-          kind: "codex_cli",
-          version: "fixture",
-          executableSha256: digest,
-          launchPolicySha256: digest,
-        },
-        relay: { implementationSha256: digest, policySha256: digest },
-      },
-    };
-    expect(getEvaluationBatchDetailIssues(value)).toEqual([]);
-    for (const change of [
-      (candidate: EvaluationBatchDetailV1) => {
-        candidate.summary.baseline.modelRuntimeRegistrationId = "another-registration";
-      },
-      (candidate: EvaluationBatchDetailV1) => {
-        delete candidate.summary.baseline.modelRuntimeRegistrationId;
-      },
-      (candidate: EvaluationBatchDetailV1) => {
-        delete candidate.configurations.baseline.modelRuntimeRegistration;
-      },
-      (candidate: EvaluationBatchDetailV1) => {
-        delete candidate.configurations.baseline.modelRequirements.runtimeRegistration;
-      },
-      (candidate: EvaluationBatchDetailV1) => {
-        candidate.configurations.baseline.modelRequirements.expectedModelIdentityDigest = null;
-      },
-      (candidate: EvaluationBatchDetailV1) => {
-        required(candidate.configurations.baseline.modelRuntimeRegistration).createdAt =
-          "2026-09-09T00:00:00Z";
-      },
-    ]) {
-      const candidate = structuredClone(value);
-      change(candidate);
-      expect(getEvaluationBatchDetailIssues(candidate).length).toBeGreaterThan(0);
+    for (const arm of ["baseline", "candidate"] as const) {
+      for (const modelRequirements of [
+        {},
+        { required: null },
+        { required: "true" },
+        { required: true, enabled: true },
+      ]) {
+        expect(
+          getEvaluationBatchDetailIssues({
+            ...value,
+            configurations: {
+              ...value.configurations,
+              [arm]: { ...value.configurations[arm], modelRequirements },
+            },
+          }).length,
+        ).toBeGreaterThan(0);
+      }
     }
   });
 

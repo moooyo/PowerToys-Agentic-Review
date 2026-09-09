@@ -1320,7 +1320,7 @@ describe("decision migration and immutable audit integrity", () => {
     expect(f.database.prepare("SELECT * FROM review_run_decision_events").all()).toEqual(before);
     expect(
       f.database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
-    ).toMatchObject({ version: 33 });
+    ).toMatchObject({ version: 31 });
     expect(f.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
   it.each([

@@ -486,7 +486,6 @@ function harness(selected = profile(), overrides: Partial<UiProfileRunnerOptions
     controlDirectory: paths.control,
     tempDirectory: paths.temp,
     userProfileDirectory: paths.user,
-    codexHomeDirectory: paths.codex,
     cleanup: vi.fn(async () => undefined),
     startDiskMonitoring: vi.fn(async (signal) => ({
       signal,
@@ -1380,7 +1379,6 @@ describe.skipIf(
           controlDirectory: directory("control"),
           tempDirectory: directory("temp"),
           userProfileDirectory: directory("user"),
-          codexHomeDirectory: directory("codex"),
           startDiskMonitoring: async (signal) => ({
             signal,
             violation: undefined,

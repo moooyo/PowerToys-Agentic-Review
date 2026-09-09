@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 
+import { CliEngineSchema } from "./cli-model-execution.js";
 import {
   DateTimeSchema,
   EntityIdSchema,
@@ -24,7 +25,8 @@ export const WorkerCapabilitiesSchema = Type.Object(
     architecture: WorkerArchitectureSchema,
     headless: Type.Boolean(),
     interactiveDesktop: Type.Boolean(),
-    codexVersion: Type.String({ minLength: 1, maxLength: 128 }),
+    cliEngine: Type.Union([CliEngineSchema, Type.Null()]),
+    cliVersion: Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()]),
     recipeIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
       maxItems: 256,
       uniqueItems: true,

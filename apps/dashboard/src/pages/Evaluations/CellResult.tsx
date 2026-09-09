@@ -12,6 +12,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useMemo, useState } from "react";
+import { CliExecutionDetails } from "@/components/CliExecutionDetails";
 import {
   createHttpEvaluationAdjudicationAdapter,
   type EvaluationAdjudicationAdapter,
@@ -230,6 +231,7 @@ export function CellResultContent({
         {result.modelRequirements.required && model.error ? (
           <Alert type="warning" title={model.error.code} description={model.error.message} />
         ) : null}
+        <CliExecutionDetails execution={model.execution} />
         {model.summary ? <Typography.Paragraph>{model.summary}</Typography.Paragraph> : null}
         {model.recommendation ? <p>Model recommendation: {model.recommendation}</p> : null}
         {model.reproductionConclusion ? (

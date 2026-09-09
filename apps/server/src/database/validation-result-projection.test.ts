@@ -68,11 +68,15 @@ function separated(value: ValidationJobResultV1): ValidationJobResultV2 {
       state: "completed",
       result: raw,
       executionEvidence,
-      invocation: {
-        invocationId: "projection-only",
-        scopeSha256: "a".repeat(64),
-        receiptSetSha256: "b".repeat(64),
-        modelOutputSha256: sha256(canonicalJson(raw)),
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "projection-job",
+        runAttemptId: "projection-attempt",
+        cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
+        promptSha256: "a".repeat(64),
+        outputSchemaSha256: "b".repeat(64),
+        outputSha256: sha256(canonicalJson(raw)),
+        exitCode: 0,
       },
     };
   } else if (modelSummary !== undefined && value.modelReview.state === "not_requested") {
@@ -86,11 +90,15 @@ function separated(value: ValidationJobResultV1): ValidationJobResultV2 {
         commands: [],
         worktree: { status: "clean", source: "git_status" },
       },
-      invocation: {
-        invocationId: "projection-only",
-        scopeSha256: "a".repeat(64),
-        receiptSetSha256: "b".repeat(64),
-        modelOutputSha256: sha256(canonicalJson(modelSummary)),
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "projection-job",
+        runAttemptId: "projection-attempt",
+        cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
+        promptSha256: "a".repeat(64),
+        outputSchemaSha256: "b".repeat(64),
+        outputSha256: sha256(canonicalJson(modelSummary)),
+        exitCode: 0,
       },
     };
   }
@@ -155,7 +163,7 @@ describe("purpose-neutral validation model projection", () => {
         subject.modelReview.state === "completed"
       ) {
         expect(subject.modelReview.result).not.toHaveProperty("executionEvidence");
-        expect(subject.modelReview.invocation.modelOutputSha256).not.toBe(sha256(before));
+        expect(subject.modelReview.execution.outputSha256).not.toBe(sha256(before));
       }
     },
   );
@@ -200,9 +208,11 @@ describe("purpose-neutral validation model projection", () => {
     const legacy = issueResult();
     const value = separated(legacy);
     const bytes = canonicalJson(value);
-    expect(normalizedValidationModel(value, "issue_validation")).toEqual(
-      normalizedValidationModel(legacy, "issue_validation"),
-    );
+    if (value.modelReview.state !== "completed") throw new Error("Expected completed CLI output.");
+    expect(normalizedValidationModel(value, "issue_validation")).toEqual({
+      ...normalizedValidationModel(legacy, "issue_validation"),
+      execution: value.modelReview.execution,
+    });
     expect(normalizedValidationReport(value)).toEqual(normalizedValidationReport(legacy));
     expect(normalizedValidationReport(value)).toMatchObject({
       reproductionConclusion: "inconclusive",
@@ -285,6 +295,7 @@ describe("purpose-neutral validation model projection", () => {
       issueTriage: null,
       reproductionConclusion: null,
       error: { code: "MODEL_FAILED", message: "The model did not complete." },
+      execution: null,
     });
   });
   it.each(["pr_static_build", "pr_ui", "issue_triage", "issue_validation"] as const)(

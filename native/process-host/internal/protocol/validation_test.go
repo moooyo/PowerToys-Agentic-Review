@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -95,17 +96,128 @@ func TestResolveLimits(t *testing.T) {
 }
 
 func TestValidateEnvironment(t *testing.T) {
+	if err := ValidateEnvironment(nil); err == nil {
+		t.Fatal("expected missing environment error")
+	}
+	if err := ValidateEnvironment(map[string]string{}); err != nil {
+		t.Fatalf("empty environment rejected: %v", err)
+	}
 	if err := ValidateEnvironment(map[string]string{"Path": "one", "PATH": "two"}); err == nil {
 		t.Fatal("expected case-insensitive collision error")
 	}
-	if err := ValidateEnvironment(map[string]string{"PATH": `C:\Windows`, "EMPTY": ""}); err != nil {
+	if err := ValidateEnvironment(map[string]string{
+		"PATH":                    `C:\Windows`,
+		"EMPTY":                   "",
+		"ProgramFiles(x86)":       `C:\Program Files (x86)`,
+		"CommonProgramFiles(x86)": `C:\Program Files (x86)\Common Files`,
+		"dash.dot-name":           "value",
+		"CLI_TOKEN":               "synthetic",
+	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if err := ValidateEnvironment(map[string]string{"BAD-NAME": "value"}); err == nil {
-		t.Fatal("expected invalid name error")
 	}
 	if err := ValidateEnvironment(map[string]string{"BAD": strings.Repeat("x", 8) + "\x00"}); err == nil {
 		t.Fatal("expected NUL value error")
+	}
+}
+
+func TestValidateEnvironmentNameBoundaries(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "ASCII boundary", value: strings.Repeat("a", 128), valid: true},
+		{name: "ASCII overflow", value: strings.Repeat("a", 129)},
+		{name: "BMP boundary", value: strings.Repeat("\u754c", 128), valid: true},
+		{name: "BMP overflow", value: strings.Repeat("\u754c", 129)},
+		{name: "astral boundary", value: strings.Repeat("\U0001f680", 64), valid: true},
+		{name: "astral overflow", value: strings.Repeat("\U0001f680", 65)},
+		{name: "mixed UTF-16 boundary", value: strings.Repeat("\U0001f680", 63) + "ab", valid: true},
+		{name: "mixed UTF-16 overflow", value: strings.Repeat("\U0001f680", 64) + "a"},
+		{name: "space", value: "space name", valid: true},
+		{name: "digit prefix", value: "1_NAME", valid: true},
+		{name: "non-control before DEL", value: "name~", valid: true},
+		{name: "non-control after C1", value: "name\u00a0", valid: true},
+		{name: "empty", value: ""},
+		{name: "equal", value: "BAD=NAME"},
+		{name: "equal prefix", value: "=C:"},
+		{name: "equal suffix", value: "NAME="},
+		{name: "malformed UTF-8", value: string([]byte{'B', 0xff})},
+		{name: "surrogate UTF-8", value: string([]byte{0xed, 0xa0, 0x80})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateEnvironment(map[string]string{test.value: "synthetic-secret-value"})
+			if test.valid && err != nil {
+				t.Fatalf("valid name rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("expected invalid name error")
+			}
+			if err != nil && strings.Contains(err.Error(), "synthetic-secret-value") {
+				t.Fatal("validation error exposed the environment value")
+			}
+		})
+	}
+}
+
+func TestValidateEnvironmentRejectsControlCharactersInNames(t *testing.T) {
+	for character := rune(0); character <= 0x9f; character++ {
+		if character > 0x1f && character < 0x7f {
+			continue
+		}
+		t.Run(fmt.Sprintf("U+%04X", character), func(t *testing.T) {
+			name := "before" + string(character) + "after"
+			err := ValidateEnvironment(map[string]string{name: "synthetic-secret-value"})
+			if err == nil {
+				t.Fatal("expected control character in name to be rejected")
+			}
+			if strings.Contains(err.Error(), "synthetic-secret-value") {
+				t.Fatal("validation error exposed the environment value")
+			}
+		})
+	}
+}
+
+func TestValidateEnvironmentCountBoundary(t *testing.T) {
+	environment := make(map[string]string, 513)
+	for index := 0; index < 512; index++ {
+		environment[fmt.Sprintf("ENV_%03d", index)] = "synthetic-secret-value"
+	}
+	if err := ValidateEnvironment(environment); err != nil {
+		t.Fatalf("512 environment properties rejected: %v", err)
+	}
+	environment["EXTRA"] = "synthetic-secret-value"
+	err := ValidateEnvironment(environment)
+	if err == nil {
+		t.Fatal("expected 513 environment properties to be rejected")
+	}
+	if strings.Contains(err.Error(), "synthetic-secret-value") {
+		t.Fatal("validation error exposed the environment value")
+	}
+}
+
+func TestValidateEnvironmentErrorsDoNotExposeValues(t *testing.T) {
+	const secret = "synthetic-secret-value"
+	tests := []struct {
+		name        string
+		environment map[string]string
+	}{
+		{name: "case-insensitive collision", environment: map[string]string{"Path": secret, "PATH": secret}},
+		{name: "NUL value", environment: map[string]string{"CLI_TOKEN": secret + "\x00"}},
+		{name: "malformed UTF-8 value", environment: map[string]string{"CLI_TOKEN": secret + string([]byte{0xff})}},
+		{name: "oversized value", environment: map[string]string{"CLI_TOKEN": secret + strings.Repeat("x", maximumBoundedTextUnits)}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateEnvironment(test.environment)
+			if err == nil {
+				t.Fatal("expected invalid environment error")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("validation error exposed the environment value")
+			}
+		})
 	}
 }
 

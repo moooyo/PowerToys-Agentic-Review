@@ -1,5 +1,6 @@
 # This entry runs only as a managed ProcessHost child in an exclusive interactive session.
-# It never launches applications, switches desktops, uses global input, or searches desktop UIA.
+# It never launches applications, switches desktops, directly sends global input, or searches desktop UIA.
+# UI Automation providers can synthesize input; invocation guards are conservative preconditions.
 # Synchronous UIA providers and PrintWindow can hang. The watchdog terminates this driver process
 # on a hard deadline; the caller must treat missing output as incomplete, never as a passing run.
 $ErrorActionPreference = 'Stop'
@@ -65,6 +66,7 @@ namespace AgenticReview.WindowsUi {
       [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string executable;
     }
     [StructLayout(LayoutKind.Sequential)] public struct Rectangle { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct Point { public int x, y; }
     [StructLayout(LayoutKind.Sequential, Pack = 4)] public struct FileInformation {
       public uint attributes; public long created, accessed, written;
       public uint volume, sizeHigh, sizeLow, links, indexHigh, indexLow;
@@ -95,6 +97,9 @@ namespace AgenticReview.WindowsUi {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPhysicalPoint(Point point);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rectangle rectangle);
@@ -125,7 +130,7 @@ namespace AgenticReview.WindowsUi {
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = InputLimit, RecursionLimit = 32 };
     readonly Dictionary<uint, OwnedProcess> owned = new Dictionary<uint, OwnedProcess>();
-    readonly HashSet<uint> live = new HashSet<uint>();
+    HashSet<uint> live = new HashSet<uint>();
     readonly ArrayList files = new ArrayList();
     readonly List<PendingCapture> pendingCaptures = new List<PendingCapture>();
     readonly Timer watchdog;
@@ -333,41 +338,94 @@ namespace AgenticReview.WindowsUi {
     }
     void RefreshOwnership() {
       Interactive();
-      RefreshOwnedProcesses(owned, live, root, session);
+      if (readyWindow != IntPtr.Zero && (readyProcess == 0 || readyThread == 0)) throw OwnershipFailure();
+      live = RefreshOwnedProcesses(owned, root, session, readyWindow == IntPtr.Zero ? root.Id : readyProcess);
     }
-    static void RefreshOwnedProcesses(Dictionary<uint, OwnedProcess> owned, HashSet<uint> live, OwnedProcess root, uint session) {
-      if (!root.Alive) throw OwnershipFailure();
+    static HashSet<uint> RequiredProcesses(Dictionary<uint, OwnedProcess> owned, OwnedProcess root, uint owner) {
+      OwnedProcess heldRoot;
+      if (!owned.TryGetValue(root.Id, out heldRoot) || !System.Object.ReferenceEquals(root, heldRoot) || !root.Alive) throw OwnershipFailure();
+      var required = new HashSet<uint>();
+      uint current = owner;
+      while (true) {
+        OwnedProcess process;
+        if (!required.Add(current) || !owned.TryGetValue(current, out process) || !process.Alive) throw OwnershipFailure();
+        if (current == root.Id) return required;
+        OwnedProcess parent;
+        if (!owned.TryGetValue(process.ParentId, out parent) || !parent.Alive || process.Created < parent.Created) throw OwnershipFailure();
+        current = parent.Id;
+      }
+    }
+    static bool EligibleProcess(OwnedProcess process, OwnedProcess parent, uint session) {
+      uint processSession;
+      return process.ParentId == parent.Id && process.Created >= parent.Created &&
+        parent.Alive && process.Alive && Native.ProcessIdToSessionId(process.Id, out processSession) &&
+        processSession == session && parent.Alive && process.Alive;
+    }
+    static void VerifyRequiredProcesses(Dictionary<uint, OwnedProcess> owned, OwnedProcess root, uint owner, HashSet<uint> required, HashSet<uint> candidates) {
+      var current = RequiredProcesses(owned, root, owner);
+      if (!current.SetEquals(required) || !candidates.IsSupersetOf(required)) throw OwnershipFailure();
+    }
+    static HashSet<uint> RefreshOwnedProcesses(Dictionary<uint, OwnedProcess> owned, OwnedProcess root, uint session, uint owner) {
+      // A selected owner can never fall back to root-only validation when its held chain dies.
+      var required = RequiredProcesses(owned, root, owner);
       var parents = SnapshotParents();
       if (!parents.ContainsKey(root.Id)) throw OwnershipFailure();
-      live.Clear(); live.Add(root.Id);
+      var candidates = new HashSet<uint>(); candidates.Add(root.Id);
+      var considered = new HashSet<uint>(); considered.Add(root.Id);
       bool changed;
       do {
         changed = false;
         foreach (var pair in parents) {
-          if (live.Contains(pair.Key) || !live.Contains(pair.Value)) continue;
+          if (considered.Contains(pair.Key) || !candidates.Contains(pair.Value)) continue;
+          considered.Add(pair.Key);
           OwnedProcess parent = owned[pair.Value];
-          if (!parent.Alive) throw OwnershipFailure();
+          if (!parent.Alive) continue;
           OwnedProcess child;
           if (!owned.TryGetValue(pair.Key, out child)) {
             if (owned.Count >= 128) throw OwnershipFailure();
-            child = new OwnedProcess(pair.Key, pair.Value); owned.Add(pair.Key, child);
+            // Short-lived helpers may disappear before their handle can be acquired. Their
+            // descendants are ineligible, but the unrelated required chain remains protected.
+            try { child = new OwnedProcess(pair.Key, pair.Value); }
+            catch (Failure) { continue; }
+            owned.Add(pair.Key, child);
           }
-          uint childSession;
-          if (!child.Alive || child.ParentId != parent.Id || child.Created < parent.Created || !parent.Alive ||
-              !Native.ProcessIdToSessionId(child.Id, out childSession) || childSession != session) throw OwnershipFailure();
-          live.Add(child.Id); changed = true;
+          // Keep every successfully held identity, including retired PIDs. Never reopen a
+          // cached PID as a new process or reclaim its place in the bounded identity budget.
+          if (!EligibleProcess(child, parent, session)) continue;
+          candidates.Add(child.Id); changed = true;
         }
       } while (changed);
-      // Opening a PID from the first snapshot can race that process exiting and its PID being
-      // reused. A fresh snapshot after every candidate handle is held must confirm every edge.
-      // The retained handles now pin those process identities until the scenario ends.
+      // Confirm both parent edges after all candidate handles have been acquired. A process
+      // rejected here cannot lend its ancestry to any descendants in the published live set.
       var confirmed = SnapshotParents();
-      foreach (uint processId in live) {
-        OwnedProcess process = owned[processId]; uint parentId;
-        if (!process.Alive || !confirmed.TryGetValue(processId, out parentId)) throw OwnershipFailure();
-        if (processId != root.Id && (parentId != process.ParentId || !live.Contains(parentId) || !owned[parentId].Alive)) throw OwnershipFailure();
-      }
-      if (!root.Alive) throw OwnershipFailure();
+      uint rootSession;
+      if (!confirmed.ContainsKey(root.Id) || !root.Alive ||
+          !Native.ProcessIdToSessionId(root.Id, out rootSession) || rootSession != session) throw OwnershipFailure();
+      var next = new HashSet<uint>(); next.Add(root.Id);
+      do {
+        changed = false;
+        foreach (uint processId in candidates) {
+          if (next.Contains(processId)) continue;
+          OwnedProcess process = owned[processId]; uint firstParent, secondParent;
+          if (!parents.TryGetValue(processId, out firstParent) || firstParent != process.ParentId ||
+              !confirmed.TryGetValue(processId, out secondParent) || secondParent != process.ParentId ||
+              !next.Contains(process.ParentId) || !EligibleProcess(process, owned[process.ParentId], session)) continue;
+          next.Add(processId); changed = true;
+        }
+      } while (changed);
+      // An admitted non-required parent can die during confirmation while its child remains
+      // alive. Prune the entire tree to convergence, not only the required owner's chain.
+      do {
+        changed = false;
+        foreach (uint processId in new List<uint>(next)) {
+          OwnedProcess process = owned[processId];
+          if (process.Alive && (processId == root.Id ||
+              (next.Contains(process.ParentId) && owned[process.ParentId].Alive))) continue;
+          next.Remove(processId); changed = true;
+        }
+      } while (changed);
+      VerifyRequiredProcesses(owned, root, owner, required, next);
+      return next;
     }
     static object ProbeSession(Dictionary<string, object> input) {
       Keys(input, "schemaVersion", "");
@@ -422,14 +480,16 @@ namespace AgenticReview.WindowsUi {
         uint sessionId, currentSession;
         if (root.Created != created || !Native.ProcessIdToSessionId(pid, out sessionId) ||
             !Native.ProcessIdToSessionId((uint)Process.GetCurrentProcess().Id, out currentSession) || sessionId != currentSession) throw OwnershipFailure();
-        RefreshOwnedProcesses(owned, live, root, sessionId);
+        live = RefreshOwnedProcesses(owned, root, sessionId, root.Id);
         var listeners = TcpListeners(port);
         if (listeners.Count == 0) reason = "not_listening";
         else if (listeners.Count > 1) reason = "ambiguous_listener";
         else if (!live.Contains(listeners[0])) reason = "unowned_listener";
         else {
-          RefreshOwnedProcesses(owned, live, root, sessionId);
+          var required = RequiredProcesses(owned, root, listeners[0]);
+          live = RefreshOwnedProcesses(owned, root, sessionId, listeners[0]);
           var confirmed = TcpListeners(port);
+          VerifyRequiredProcesses(owned, root, listeners[0], required, live);
           reason = confirmed.Count == 1 && confirmed[0] == listeners[0] && live.Contains(confirmed[0]) && owned[confirmed[0]].Alive ? "owned" : "ownership_lost";
         }
       } catch (Failure) { reason = "ownership_lost"; }
@@ -441,6 +501,7 @@ namespace AgenticReview.WindowsUi {
       uint processId; uint thread = Native.GetWindowThreadProcessId(window, out processId);
       if (!Native.IsWindow(window) || thread == 0 ||
           !live.Contains(processId) || !owned[processId].Alive || !root.Alive) throw OwnershipFailure();
+      if (!live.IsSupersetOf(RequiredProcesses(owned, root, processId))) throw OwnershipFailure();
       if (window == readyWindow && readyThread != 0 && (thread != readyThread || processId != readyProcess)) throw OwnershipFailure();
     }
     IntPtr FindWindow(bool requirePinned) {
@@ -477,10 +538,12 @@ namespace AgenticReview.WindowsUi {
       OwnedWindow(readyWindow);
       uint processId = (uint)element.Current.ProcessId;
       if (!live.Contains(processId) || !owned[processId].Alive) throw OwnershipFailure();
+      if (!live.IsSupersetOf(RequiredProcesses(owned, root, processId))) throw OwnershipFailure();
       var ancestor = element;
       for (int depth = 0; depth < 256 && ancestor != null; depth++) {
         uint ancestorProcess = (uint)ancestor.Current.ProcessId;
         if (!live.Contains(ancestorProcess) || !owned[ancestorProcess].Alive) throw OwnershipFailure();
+        if (!live.IsSupersetOf(RequiredProcesses(owned, root, ancestorProcess))) throw OwnershipFailure();
         if (ancestor.Current.NativeWindowHandle == readyWindow.ToInt32()) return;
         ancestor = TreeWalker.RawViewWalker.GetParent(ancestor);
       }
@@ -545,6 +608,68 @@ namespace AgenticReview.WindowsUi {
       if ((element == null) != (current == null) || (element != null && !Automation.Compare(element, current)))
         throw new Failure("provider_unavailable", "blocked", "The locator changed while its observation was being captured.", "provider_error");
     }
+    static Failure InvocationUnavailable() {
+      return new Failure("provider_unavailable", "blocked", "The owned foreground window and invocation point could not be verified.");
+    }
+    void VerifyFocusRoot(AutomationElement window) {
+      if (window == null || window.Current.NativeWindowHandle != readyWindow.ToInt32() ||
+          (uint)window.Current.ProcessId != readyProcess) throw OwnershipFailure();
+      VerifyElement(window);
+    }
+    InvokePattern PrepareInvoke(Dictionary<string, object> locator, AutomationElement element, long stepDeadline) {
+      // Preserve a small result margin without exhausting a valid 100 ms step budget.
+      long remainingBudget = Math.Max(0, stepDeadline - clock.ElapsedMilliseconds);
+      long invocationDeadline = stepDeadline - Math.Min(100, remainingBudget / 10);
+      FindWindow(true); VerifyElement(element);
+      if (Native.GetForegroundWindow() != readyWindow) {
+        var window = AutomationElement.FromHandle(readyWindow);
+        VerifyFocusRoot(window);
+        if (!window.Current.IsEnabled || window.Current.IsOffscreen) throw InvocationUnavailable();
+        if (clock.ElapsedMilliseconds >= invocationDeadline) throw InvocationUnavailable();
+        // Focus only the exact pinned root, once. A provider return does not prove that
+        // Windows granted foreground activation, and this never extends the step watchdog.
+        FindWindow(true); VerifyFocusRoot(window); window.SetFocus();
+        FindWindow(true); VerifyFocusRoot(window); VerifyElement(element);
+        long focusDeadline = Math.Min(invocationDeadline, clock.ElapsedMilliseconds + 1000);
+        while (Native.GetForegroundWindow() != readyWindow) {
+          long remaining = focusDeadline - clock.ElapsedMilliseconds;
+          if (remaining <= 0) throw InvocationUnavailable();
+          Thread.Sleep((int)Math.Min(25, remaining));
+          FindWindow(true); VerifyElement(element);
+        }
+      }
+      // Activation may replace a control or change its state and bounds. The original
+      // locator must still identify the same unique element before obtaining its pattern.
+      var current = Locate(locator);
+      if (current == null || !Automation.Compare(element, current)) throw InvocationUnavailable();
+      if (!current.Current.IsEnabled || current.Current.IsOffscreen || current.Current.IsPassword)
+        throw new Failure("unsupported_control", "blocked", "The target must be enabled, visible, and non-secret.");
+      object pattern;
+      if (!current.TryGetCurrentPattern(InvokePattern.Pattern, out pattern))
+        throw new Failure("unsupported_control", "blocked", "Click requires the UI Automation Invoke pattern.");
+      var rectangle = current.Current.BoundingRectangle;
+      if (rectangle.IsEmpty || rectangle.Width <= 0 || rectangle.Height <= 0 ||
+          Double.IsNaN(rectangle.X) || Double.IsInfinity(rectangle.X) ||
+          Double.IsNaN(rectangle.Y) || Double.IsInfinity(rectangle.Y) ||
+          Double.IsNaN(rectangle.Width) || Double.IsInfinity(rectangle.Width) ||
+          Double.IsNaN(rectangle.Height) || Double.IsInfinity(rectangle.Height)) throw InvocationUnavailable();
+      double centerX = rectangle.X + rectangle.Width / 2, centerY = rectangle.Y + rectangle.Height / 2;
+      if (Double.IsNaN(centerX) || Double.IsInfinity(centerX) || centerX < Int32.MinValue || centerX > Int32.MaxValue ||
+          Double.IsNaN(centerY) || Double.IsInfinity(centerY) || centerY < Int32.MinValue || centerY > Int32.MaxValue) throw InvocationUnavailable();
+      var point = new Native.Point { x = (int)Math.Floor(centerX), y = (int)Math.Floor(centerY) };
+      FindWindow(true); VerifyElement(current);
+      if (clock.ElapsedMilliseconds >= invocationDeadline) throw InvocationUnavailable();
+      // Some native toolbar providers click the physical rectangle center internally.
+      // Reject another top-level window covering that point, including an owned sibling.
+      // This does not prove arbitrary provider behavior, same-window hit identity, or
+      // eliminate the race between these final native checks and provider input.
+      IntPtr hit = Native.WindowFromPhysicalPoint(point);
+      if (hit == IntPtr.Zero || Native.GetAncestor(hit, 2) != readyWindow)
+        throw new Failure("provider_unavailable", "blocked", "The invocation point is covered or outside the pinned window.");
+      OwnedWindow(hit);
+      if (Native.GetForegroundWindow() != readyWindow) throw InvocationUnavailable();
+      return (InvokePattern)pattern;
+    }
     void Perform(Dictionary<string, object> planned, Dictionary<string, object> observed) {
       string action = (string)planned["action"];
       long stepDeadline = Math.Min(deadline, clock.ElapsedMilliseconds + Number(planned["timeoutMs"], 100, 60000));
@@ -570,7 +695,7 @@ namespace AgenticReview.WindowsUi {
             FindWindow(true); VerifyElement(element);
             if (action == "click") {
               if (!element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) throw new Failure("unsupported_control", "blocked", "Click requires the UI Automation Invoke pattern.");
-              FindWindow(true); VerifyElement(element); ((InvokePattern)pattern).Invoke();
+              PrepareInvoke(locator, element, stepDeadline).Invoke();
             } else {
               if (!element.TryGetCurrentPattern(ValuePattern.Pattern, out pattern) || ((ValuePattern)pattern).Current.IsReadOnly) throw new Failure("unsupported_control", "blocked", "Fill requires a writable UI Automation Value pattern.");
               FindWindow(true); VerifyElement(element); ((ValuePattern)pattern).SetValue((string)planned["value"]);
@@ -767,8 +892,16 @@ namespace AgenticReview.WindowsUi {
       deadline = clock.ElapsedMilliseconds + Number(readiness["timeoutMs"], 1000, 120000);
       try {
         Arm(deadline - clock.ElapsedMilliseconds); PrepareDirectory();
-        while ((readyWindow = FindWindow(false)) == IntPtr.Zero) {
-          if (clock.ElapsedMilliseconds >= deadline - 100) throw new Failure("window_unavailable", "blocked", "No unique owned window became ready within the startup budget.");
+        while (true) {
+          long sampleStarted = clock.ElapsedMilliseconds;
+          readyWindow = FindWindow(false);
+          if (readyWindow != IntPtr.Zero) break;
+          long nextSampleBudget = Math.Max(150, clock.ElapsedMilliseconds - sampleStarted + 100);
+          if (clock.ElapsedMilliseconds >= deadline - nextSampleBudget) {
+            // Bound terminal result finalization without starting another provider query.
+            watchdog.Change(10000, Timeout.Infinite);
+            throw new Failure("window_unavailable", "blocked", "No unique owned window became ready within the startup budget.");
+          }
           Thread.Sleep(75);
         }
         readyThread = Native.GetWindowThreadProcessId(readyWindow, out readyProcess);

@@ -237,34 +237,6 @@ const mutations: readonly [string, Mutation][] = [
       e.validation.modelRequirements.required = false;
     },
   ],
-  [
-    "registration omission",
-    (e) => {
-      delete e.validation.modelRuntimeRegistration;
-    },
-  ],
-  [
-    "registration identity",
-    (e) => {
-      const registration = e.validation.modelRuntimeRegistration;
-      if (!registration) throw new Error("Synthetic registration missing.");
-      registration.identity.modelId = "another-model";
-    },
-  ],
-  [
-    "registration digest",
-    (e) => {
-      const reference = e.validation.modelRequirements.runtimeRegistration;
-      if (!reference) throw new Error("Synthetic reference missing.");
-      reference.registrationSha256 = "f".repeat(64);
-    },
-  ],
-  [
-    "expected model identity",
-    (e) => {
-      e.validation.modelRequirements.expectedModelIdentityDigest = "f".repeat(64);
-    },
-  ],
 ];
 
 describe("frozen evaluation profile envelopes", () => {
@@ -290,25 +262,16 @@ describe("frozen evaluation profile envelopes", () => {
   );
 
   it.each(["pr_ui", "issue_validation"] as const)(
-    "accepts a profile-only %s without inventing a model registration",
+    "accepts a profile-only %s without requiring a model step",
     (workflow) => {
       const envelope = evaluationProfileEnvelopeFixture(
         workflow,
         workflow === "pr_ui" ? "web" : "headless",
         false,
       );
-      expect(envelope.validation.modelRuntimeRegistration).toBeUndefined();
       expect(() => validateProfileEnvelope(envelope)).not.toThrow();
     },
   );
-
-  it("keeps unresolved model identity as structurally valid data for the separate readiness gate", () => {
-    const envelope = evaluationProfileEnvelopeFixture();
-    envelope.validation.modelRequirements = { required: true, expectedModelIdentityDigest: null };
-    delete envelope.validation.modelRuntimeRegistration;
-    expect(() => validateProfileEnvelope(envelope)).not.toThrow();
-    expect(envelope.validation.modelRequirements.expectedModelIdentityDigest).toBeNull();
-  });
 
   it.each(mutations)("rejects changed %s", (_name, mutate) => {
     const envelope = evaluationProfileEnvelopeFixture();

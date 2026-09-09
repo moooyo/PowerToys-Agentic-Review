@@ -45,7 +45,6 @@ export interface PreparedJobWorkspace {
   readonly attemptDirectory: string;
   readonly checkoutDirectory: string;
   readonly controlDirectory: string;
-  readonly codexHomeDirectory: string;
   readonly tempDirectory: string;
   readonly userProfileDirectory: string;
   startDiskMonitoring(parentSignal: AbortSignal): Promise<WorkspaceDiskMonitor>;
@@ -177,7 +176,6 @@ interface WorkspaceLayout {
   readonly attemptDirectory: string;
   readonly checkoutDirectory: string;
   readonly controlDirectory: string;
-  readonly codexHomeDirectory: string;
   readonly tempDirectory: string;
   readonly userProfileDirectory: string;
 }
@@ -487,7 +485,6 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       attemptCreated = true;
       await this.#fileSystem.createDirectory(layout.checkoutDirectory);
       await this.#fileSystem.createDirectory(layout.controlDirectory);
-      await this.#fileSystem.createDirectory(layout.codexHomeDirectory);
       await this.#fileSystem.createDirectory(layout.tempDirectory);
       await this.#fileSystem.createDirectory(layout.userProfileDirectory);
       await guard.validateAll();
@@ -520,7 +517,6 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         attemptDirectory: layout.attemptDirectory,
         checkoutDirectory: layout.checkoutDirectory,
         controlDirectory: layout.controlDirectory,
-        codexHomeDirectory: layout.codexHomeDirectory,
         tempDirectory: layout.tempDirectory,
         userProfileDirectory: layout.userProfileDirectory,
         startDiskMonitoring: (parentSignal: AbortSignal) =>
@@ -1691,7 +1687,6 @@ class WorkspaceGuard {
     await this.#validateDirectory(this.layout.attemptDirectory, "attempt");
     await this.#validateDirectory(this.layout.checkoutDirectory, "checkout");
     await this.#validateDirectory(this.layout.controlDirectory, "control");
-    await this.#validateDirectory(this.layout.codexHomeDirectory, "codex-home");
     await this.#validateDirectory(this.layout.tempDirectory, "temp");
     await this.#validateDirectory(this.layout.userProfileDirectory, "user-profile");
   }
@@ -1701,7 +1696,6 @@ class WorkspaceGuard {
     await this.#validateDirectory(this.layout.attemptDirectory, "attempt");
     await this.#validateDirectory(this.layout.checkoutDirectory, "checkout", false);
     await this.#validateDirectory(this.layout.controlDirectory, "control");
-    await this.#validateDirectory(this.layout.codexHomeDirectory, "codex-home");
     await this.#validateDirectory(this.layout.tempDirectory, "temp");
     await this.#validateDirectory(this.layout.userProfileDirectory, "user-profile");
   }
@@ -1958,7 +1952,6 @@ function deriveWorkspaceLayout(
   const attemptDirectory = win32.join(rootDirectory, attemptName);
   const checkoutDirectory = win32.join(attemptDirectory, "checkout");
   const controlDirectory = win32.join(attemptDirectory, "control");
-  const codexHomeDirectory = win32.join(attemptDirectory, "codex-home");
   const tempDirectory = win32.join(attemptDirectory, "temp");
   const userProfileDirectory = win32.join(attemptDirectory, "user-profile");
   const layout = {
@@ -1966,19 +1959,12 @@ function deriveWorkspaceLayout(
     attemptDirectory,
     checkoutDirectory,
     controlDirectory,
-    codexHomeDirectory,
     tempDirectory,
     userProfileDirectory,
   };
 
   assertStrictDescendant(rootDirectory, attemptDirectory, "attempt");
-  const siblings = [
-    checkoutDirectory,
-    controlDirectory,
-    codexHomeDirectory,
-    tempDirectory,
-    userProfileDirectory,
-  ];
+  const siblings = [checkoutDirectory, controlDirectory, tempDirectory, userProfileDirectory];
   if (new Set(siblings.map(comparableWindowsPath)).size !== siblings.length) {
     throw new Error("Workspace sibling directories overlap.");
   }

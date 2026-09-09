@@ -6,10 +6,7 @@ import {
   EvaluationBatchCancelRequestSchema,
   EvaluationBatchSummaryV1Schema,
 } from "./evaluation-batches.js";
-import {
-  EvaluationModelRequirementsV1Schema,
-  getEvaluationModelRuntimeRegistrationIssues,
-} from "./evaluation-execution.js";
+import { EvaluationModelRequirementsV1Schema } from "./evaluation-execution.js";
 import {
   EvaluationArmSchema,
   EvaluationExecutionStateSchema,
@@ -24,7 +21,6 @@ import {
   getEvaluationSuiteVersionIssues,
 } from "./evaluation-suites.js";
 import { getJobAdmissionIssues, NullableJobAdmissionSchema } from "./job-admission.js";
-import { ModelRuntimeRegistrationV1Schema } from "./model-runtime-registry.js";
 import { type OperatorPrincipal, OperatorPrincipalSchema } from "./operator-access.js";
 import {
   PromptVersionSummarySchema,
@@ -139,7 +135,6 @@ const configuration = Type.Object(
     profile: ValidationProfileVersionSummarySchema,
     prompt: PromptVersionSummarySchema,
     modelRequirements: EvaluationModelRequirementsV1Schema,
-    modelRuntimeRegistration: Type.Optional(ModelRuntimeRegistrationV1Schema),
   },
   strict,
 );
@@ -492,19 +487,6 @@ export function getEvaluationBatchDetailIssues(value: unknown): string[] {
     issues.push("The evaluation detail must retain its frozen suite and current control identity.");
   for (const arm of ["baseline", "candidate"] as const) {
     const selected = result.configurations[arm];
-    issues.push(
-      ...getEvaluationModelRuntimeRegistrationIssues(
-        selected.modelRequirements,
-        selected.modelRuntimeRegistration,
-      ),
-    );
-    if (result.summary[arm].modelRuntimeRegistrationId !== selected.modelRuntimeRegistration?.id)
-      issues.push("The evaluation model registration snapshot must match its frozen selection.");
-    if (
-      selected.modelRuntimeRegistration !== undefined &&
-      Date.parse(selected.modelRuntimeRegistration.createdAt) > Date.parse(result.summary.createdAt)
-    )
-      issues.push("The evaluation cannot predate its frozen model registration.");
     if (
       selected.profile.id !== result.summary[arm].profileVersionId ||
       selected.prompt.id !== result.summary[arm].promptVersionId ||

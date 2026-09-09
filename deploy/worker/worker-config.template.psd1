@@ -26,6 +26,8 @@
 
     # Trusted execution mode (must be true in production)
     WORKER_EXECUTION_ENABLED = 'true'
+    # Model-free validation can set this to false and omit the CLI settings below.
+    WORKER_MODEL_EXECUTION_ENABLED = 'true'
 
     # Profile validation uses the approved command registry, never PATH lookup.
     # Headless defaults to WORKER_EXECUTION_ENABLED when this setting is omitted.
@@ -57,36 +59,40 @@
     WORKER_GIT_SHARED_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Repositories'
     WORKER_WORKSPACE_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Workspaces'
     WORKER_EXECUTION_TEMP_DIRECTORY = 'D:\AgenticReview\Data\Temp'
-    # Dedicated persistent CODEX_HOME; provision config.toml and supported authentication here.
-    # It must be a canonical directory disjoint from workspaces, temp, Git state, and binaries.
-    # The Worker loads only allowed model/provider/auth settings and never copies auth into tasks.
-    WORKER_EXECUTION_PROFILE_DIRECTORY = 'D:\AgenticReview\Data\Profile'
-
-    # Trusted pinned binaries (all required when execution is enabled)
+    # Trusted pinned infrastructure binaries (required when execution is enabled)
     WORKER_TRUSTED_EXECUTABLE_ROOT = 'D:\AgenticReview\Trusted'
     WORKER_PROCESS_HOST_PATH = 'D:\AgenticReview\Trusted\AgenticReview.ProcessHost.exe'
-    WORKER_CODEX_EXECUTABLE_PATH = 'D:\AgenticReview\Trusted\codex.exe'
     WORKER_GIT_EXECUTABLE_PATH = 'D:\AgenticReview\Trusted\git.exe'
     WORKER_PROCESS_HOST_SHA256 = '<64-lowercase-hex>'
-    WORKER_CODEX_SHA256 = '<64-lowercase-hex>'
     WORKER_GIT_SHA256 = '<64-lowercase-hex>'
-    # Replace the illustrative version below with the installed pinned CLI version.
-    # Current native compatibility checks use codex-cli 0.145.0.
-    WORKER_CODEX_VERSION = 'codex-1.2.3'
+
+    # CLI-owned model execution: only engine and executable are required for model-enabled startup.
+    # The CLI may be installed outside the trusted infrastructure root. Windows WinGet application
+    # links are resolved to the installed target. Startup detects --version within 20 seconds / 64 KiB.
+    # Log in with the selected CLI under the Worker account and the same optional CLI home.
+    # The Worker never reads or copies CLI authentication/provider files.
+    WORKER_CLI_ENGINE = 'codex' # Allowed: codex, copilot.
+    WORKER_CLI_EXECUTABLE_PATH = 'C:\Program Files\Codex\codex.exe'
+    # Optional persistent CLI home, outside disposable workspaces and temporary roots.
+    # WORKER_CLI_HOME = 'D:\AgenticReview\CliHome'
+    # Optional model selection handled by the CLI.
+    # WORKER_CLI_MODEL = '<model-name>'
+    # Optional installed CLI binary pin; the CLI version is always detected, never declared here.
+    # WORKER_CLI_SHA256 = '<64-lowercase-hex>'
 
     # ProcessHost request and lifecycle timeouts
     WORKER_PROCESS_HOST_REQUEST_TIMEOUT_MS = 15000
     WORKER_PROCESS_HOST_START_TIMEOUT_MS = 30000
     WORKER_PROCESS_HOST_SHUTDOWN_TIMEOUT_MS = 15000
 
-    # Codex/Git hard-stop controls; Codex runs repository commands directly, without recipe settings.
-    WORKER_CODEX_MAXIMUM_HARD_TIMEOUT_MS = 3600000
+    # Model/Git hard-stop controls; the CLI runs repository commands without recipe settings.
+    WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS = 3600000
     WORKER_GIT_HARD_TIMEOUT_MS = 600000
 
     # Per-command resource controls
-    WORKER_CODEX_MAX_PROCESSES = 32
-    WORKER_CODEX_MAX_MEMORY_BYTES = 8589934592
-    WORKER_CODEX_MAX_OUTPUT_BYTES = 8388608
+    WORKER_MODEL_MAX_PROCESSES = 32
+    WORKER_MODEL_MAX_MEMORY_BYTES = 8589934592
+    WORKER_MODEL_MAX_OUTPUT_BYTES = 8388608
     WORKER_GIT_MAX_PROCESSES = 8
     WORKER_GIT_MAX_MEMORY_BYTES = 2147483648
     WORKER_GIT_MAX_OUTPUT_BYTES = 4194304

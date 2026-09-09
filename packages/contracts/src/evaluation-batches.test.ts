@@ -99,7 +99,7 @@ function configuration(arm: "baseline" | "candidate"): EvaluationFrozenConfigura
         createdBy: "operator-1",
       },
     },
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
   };
 }
 
@@ -128,7 +128,7 @@ function cell(caseIndex: number, arm: "baseline" | "candidate"): EvaluationCellM
     promptVersionId: `prompt:${arm}:v1`,
     renderedPromptDigest: digest,
     outputSchemaDigest: "b".repeat(64),
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
   };
 }
 
@@ -184,35 +184,6 @@ function requestAtByteLimit(): EvaluationBatchCreateRequest {
 }
 
 describe("evaluation batch creation contracts", () => {
-  it("selects only an exact model registration ID while preserving legacy request bytes", () => {
-    const legacy = request();
-    const before = JSON.stringify(legacy);
-    expect(getEvaluationBatchCreateRequestIssues(legacy)).toEqual([]);
-    expect(JSON.stringify(legacy)).toBe(before);
-    const value = request();
-    value.baseline.modelRuntimeRegistrationId = "registration-baseline";
-    value.candidate.modelRuntimeRegistrationId = "registration-candidate";
-    expect(getEvaluationBatchCreateRequestIssues(value)).toEqual([]);
-    for (const invalid of ["", "registration\n", " registration", null, "x".repeat(129)])
-      expect(
-        getEvaluationBatchCreateRequestIssues({
-          ...value,
-          baseline: { ...value.baseline, modelRuntimeRegistrationId: invalid },
-        }).length,
-      ).toBeGreaterThan(0);
-    for (const extra of [
-      { modelRuntimeRegistration: {} },
-      { identitySha256: digest },
-      { registrationSha256: digest },
-      { modelRequirements: {} },
-    ])
-      expect(
-        getEvaluationBatchCreateRequestIssues({
-          ...value,
-          baseline: { ...value.baseline, ...extra },
-        }).length,
-      ).toBeGreaterThan(0);
-  });
   it("preserves explicit identities and mappings for both supported modes", () => {
     for (const mode of ["prompt_and_profile", "profile_only"] as const) {
       const value = { ...request(), mode };
@@ -386,7 +357,7 @@ describe("evaluation batch creation contracts", () => {
     { authorization: {} },
     { cellId: "client-cell" },
     { resultId: "old-success" },
-    { modelRequirements: { required: true, expectedModelIdentityDigest: digest } },
+    { modelRequirements: { required: true } },
     { executionManifestSha256: digest },
     { requestEpochId: "invented-epoch" },
   ])("rejects client-owned execution facts in the request: %j", (extra) => {
@@ -449,57 +420,36 @@ describe("evaluation batch creation contracts", () => {
 });
 
 describe("frozen evaluation manifest shapes and digest dependencies", () => {
-  it("pairs the complete frozen registration with a thin cell reference and preserves unknown history", () => {
-    const value = configuration("baseline");
-    const before = JSON.stringify(value);
-    expect(getEvaluationFrozenConfigurationIssues(value)).toEqual([]);
-    expect(JSON.stringify(value)).toBe(before);
-    value.modelRequirements.expectedModelIdentityDigest = digest;
-    value.modelRequirements.runtimeRegistration = {
-      registrationId: "registration-1",
-      registrationSha256: "b".repeat(64),
-    };
-    expect(getEvaluationFrozenConfigurationIssues(value).length).toBeGreaterThan(0);
-    value.modelRuntimeRegistration = {
-      schemaVersion: "ModelRuntimeRegistrationV1",
-      id: "registration-1",
-      name: "Expected runtime",
-      requestedModel: "requested",
-      identitySha256: digest,
-      createdAt: now,
-      createdBy: { issuer: "fixture", subject: "operator" },
-      identity: {
-        schemaVersion: "ModelRuntimeIdentityV1",
-        providerId: "provider",
-        modelId: "observed",
-        endpointSha256: digest,
-        client: {
-          kind: "codex_cli",
-          version: "fixture",
-          executableSha256: digest,
-          launchPolicySha256: digest,
-        },
-        relay: { implementationSha256: digest, policySha256: digest },
-      },
-    };
-    expect(getEvaluationFrozenConfigurationIssues(value)).toEqual([]);
-    const entry = cell(0, "baseline");
-    entry.modelRequirements = structuredClone(value.modelRequirements);
-    expect(Value.Check(EvaluationCellManifestEntryV1Schema, entry)).toBe(true);
-    expect(
-      Value.Check(EvaluationCellManifestEntryV1Schema, {
-        ...entry,
-        modelRuntimeRegistration: value.modelRuntimeRegistration,
-      }),
-    ).toBe(false);
-    expect(Object.keys(entry.modelRequirements.runtimeRegistration ?? {}).sort()).toEqual([
-      "registrationId",
-      "registrationSha256",
-    ]);
-    value.modelRuntimeRegistration.id = "another-registration";
-    expect(getEvaluationFrozenConfigurationIssues(value).length).toBeGreaterThan(0);
-    delete value.modelRequirements.runtimeRegistration;
-    expect(getEvaluationFrozenConfigurationIssues(value).length).toBeGreaterThan(0);
+  it("preserves required-only model requirements in frozen configurations and cell entries", () => {
+    for (const required of [true, false]) {
+      const value = configuration("baseline");
+      value.modelRequirements = { required };
+      const before = structuredClone(value);
+      expect(getEvaluationFrozenConfigurationIssues(value)).toEqual([]);
+      expect(value).toEqual(before);
+      const entry = cell(0, "baseline");
+      entry.modelRequirements = { required };
+      expect(Value.Check(EvaluationCellManifestEntryV1Schema, entry)).toBe(true);
+    }
+    for (const modelRequirements of [
+      {},
+      { required: null },
+      { required: "true" },
+      { required: true, enabled: true },
+    ]) {
+      expect(
+        getEvaluationFrozenConfigurationIssues({
+          ...configuration("baseline"),
+          modelRequirements,
+        }).length,
+      ).toBeGreaterThan(0);
+      expect(
+        Value.Check(EvaluationCellManifestEntryV1Schema, {
+          ...cell(0, "baseline"),
+          modelRequirements,
+        }),
+      ).toBe(false);
+    }
   });
   it("retains complete published configuration content and explicit model requirements", () => {
     expect(Value.Check(EvaluationFrozenConfigurationSchema, configuration("baseline"))).toBe(true);
@@ -507,12 +457,12 @@ describe("frozen evaluation manifest shapes and digest dependencies", () => {
       true,
     );
     const value = configuration("baseline");
-    value.modelRequirements = { required: false, expectedModelIdentityDigest: null };
+    value.modelRequirements = { required: false };
     expect(Value.Check(EvaluationFrozenConfigurationSchema, value)).toBe(true);
     expect(
       Value.Check(EvaluationFrozenConfigurationSchema, {
         ...value,
-        modelRequirements: { required: true },
+        modelRequirements: {},
       }),
     ).toBe(false);
     expect(

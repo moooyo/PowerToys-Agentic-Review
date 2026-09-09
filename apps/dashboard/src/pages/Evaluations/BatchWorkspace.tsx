@@ -30,8 +30,6 @@ import {
   useOriginalMutation,
   useRefreshEvaluations,
 } from "./context";
-import { ModelInvocationDrawer } from "./ModelInvocations";
-import { selectedCellInvocationBinding } from "./model-invocation-state";
 import { BatchReproductionPlan } from "./ReproductionPlan";
 import { FrozenSourceLabel } from "./Sources";
 import { collectCatalog, errorMessage, newIdentity } from "./state";
@@ -81,11 +79,9 @@ export function BatchConfigurationPanel({
 export function ExecutionCell({
   cell,
   onViewResult,
-  onViewInvocations,
 }: {
   cell: C.EvaluationCellSummaryV1;
   onViewResult?: (cell: C.EvaluationCellSummaryV1) => void;
-  onViewInvocations?: (cell: C.EvaluationCellSummaryV1) => void;
 }) {
   return (
     <div className="evaluation-cell">
@@ -155,15 +151,6 @@ export function ExecutionCell({
           <span className="evaluation-meta">Attempt {cell.result.runAttemptId}</span>
         </div>
       ) : null}
-      {onViewInvocations ? (
-        <Button
-          size="small"
-          aria-label={`View ${armLabels[cell.arm]} model calls for case ${cell.caseId}`}
-          onClick={() => onViewInvocations(cell)}
-        >
-          Model calls
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -171,11 +158,9 @@ export function ExecutionCell({
 export function BatchMatrix({
   matrix,
   onViewResult,
-  onViewInvocations,
 }: {
   matrix: C.EvaluationBatchMatrixV1;
   onViewResult?: (cell: C.EvaluationCellSummaryV1) => void;
-  onViewInvocations?: (cell: C.EvaluationCellSummaryV1) => void;
 }) {
   return (
     <div>
@@ -210,11 +195,7 @@ export function BatchMatrix({
             key: arm,
             width: "33%",
             render: (_: unknown, entry: C.EvaluationBatchMatrixV1["cases"][number]) => (
-              <ExecutionCell
-                cell={entry[arm]}
-                onViewResult={onViewResult}
-                onViewInvocations={onViewInvocations}
-              />
+              <ExecutionCell cell={entry[arm]} onViewResult={onViewResult} />
             ),
           })),
         ]}
@@ -258,7 +239,6 @@ export function BatchDetails({
   );
   const [reason, setReason] = useState("");
   const [resultSelection, setResultSelection] = useState<CellResultSelection | null>(null);
-  const [invocationSelection, setInvocationSelection] = useState<string | null>(null);
   const [assessmentPending, setAssessmentPending] = useState(false);
   const [error, setError] = useState<string | null>(null),
     [notice, setNotice] = useState<string | null>(null);
@@ -279,11 +259,6 @@ export function BatchDetails({
   }, [onPendingChange, cancellation.busy, cancellation.request, assessmentPending]);
   const detail = query.data?.detail;
   const resultBinding = selectedCellResultBinding(detail, query.data?.matrix, resultSelection);
-  const invocationBinding = selectedCellInvocationBinding(
-    detail,
-    query.data?.matrix,
-    invocationSelection,
-  );
   const locked =
     !active ||
     !page.canConfigure ||
@@ -386,30 +361,6 @@ export function BatchDetails({
                     ? "Model required"
                     : "Profile execution only"}
                 </Tag>
-                {detail.configurations[arm].modelRuntimeRegistration ? (
-                  <div style={{ marginTop: 12, overflowWrap: "anywhere" }}>
-                    <Typography.Text strong>Frozen expected model</Typography.Text>
-                    <p>{detail.configurations[arm].modelRuntimeRegistration.name}</p>
-                    <span className="evaluation-meta">
-                      Registration: {detail.configurations[arm].modelRuntimeRegistration.id}
-                    </span>
-                    <p>
-                      Requested:{" "}
-                      {detail.configurations[arm].modelRuntimeRegistration.requestedModel}
-                      <br />
-                      Expected provider model:{" "}
-                      {detail.configurations[arm].modelRuntimeRegistration.identity.modelId}
-                    </p>
-                    <Typography.Paragraph type="secondary">
-                      This is the saved expectation, not proof of actual execution. Later
-                      registration changes do not alter this batch.
-                    </Typography.Paragraph>
-                  </div>
-                ) : detail.configurations[arm].modelRequirements.required ? (
-                  <Typography.Paragraph type="secondary">
-                    This historical batch has no registered expected model configuration.
-                  </Typography.Paragraph>
-                ) : null}
               </Card>
             ))}
           </div>
@@ -424,17 +375,8 @@ export function BatchDetails({
           onViewResult={
             active && page.readable
               ? (cell) => {
-                  setInvocationSelection(null);
                   if (cell.result && cell.job)
                     setResultSelection({ cellId: cell.cellId, resultId: cell.result.resultId });
-                }
-              : undefined
-          }
-          onViewInvocations={
-            active && page.readable
-              ? (cell) => {
-                  setResultSelection(null);
-                  setInvocationSelection(cell.cellId);
                 }
               : undefined
           }
@@ -445,11 +387,6 @@ export function BatchDetails({
         binding={resultBinding}
         active={active}
         onClose={() => setResultSelection(null)}
-      />
-      <ModelInvocationDrawer
-        binding={invocationBinding}
-        active={active}
-        onClose={() => setInvocationSelection(null)}
       />
       {detail?.summary.workflowKind === "issue_validation" && query.data ? (
         <BatchReproductionPlan
@@ -466,7 +403,6 @@ export function BatchDetails({
         active={active && !cancellation.busy && cancellation.request === null}
         onPendingChange={setAssessmentPending}
         onViewResult={(cell) => {
-          setInvocationSelection(null);
           if (active && page.readable && cell.result && cell.job)
             setResultSelection({ cellId: cell.cellId, resultId: cell.result.resultId });
         }}

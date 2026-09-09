@@ -360,43 +360,23 @@ function criterionAssessment(
 }
 
 function modelUnavailableReason(
-  plan: EvaluationScoringPlanV1,
-  arm: EvaluationArm,
   observation: EvaluationOwnerObservation | undefined,
-  otherObservation: EvaluationOwnerObservation | undefined,
 ): string | null {
   if (observation?.executionState !== "completed")
     return observation?.reason ?? "The planned model execution has not completed.";
   if (observation.sourceState !== "original") return "Original source was not verified.";
   if (observation.model.state !== "complete") return observation.model.reason;
   if (!observation.model.evidenceAvailable) return "Required model evidence is unavailable.";
-  const compareModels = otherObservation?.model.state !== "not_applicable";
-  const otherArm = arm === "baseline" ? "candidate" : "baseline";
-  if (
-    plan[arm].modelIdentityDigest === null ||
-    (compareModels && plan[otherArm].modelIdentityDigest === null)
-  )
-    return "A frozen verified model identity is unavailable.";
-  if (compareModels && plan.baseline.modelIdentityDigest !== plan.candidate.modelIdentityDigest)
-    return "The two configurations do not freeze the same verified model identity.";
-  if (
-    observation.model.modelIdentityDigest === null ||
-    observation.model.modelIdentityDigest !== plan[arm].modelIdentityDigest
-  )
-    return "The observed model identity is unavailable or does not match the frozen identity.";
   return null;
 }
 
 function findingAssessment(
-  plan: EvaluationScoringPlanV1,
   item: EvaluationCaseExpectation,
-  arm: EvaluationArm,
   observation: EvaluationOwnerObservation | undefined,
-  otherObservation: EvaluationOwnerObservation | undefined,
   adjudications: ReadonlyMap<string, EvaluationFindingAdjudication>,
 ): EvaluationFindingAssessment {
   // Only the owner's explicit frozen-configuration projection can exclude the model dimension.
-  // A missing observation, failed model or unknown identity remains applicable and unavailable.
+  // A missing observation or failed model remains applicable and unavailable.
   const applicable =
     item.applicability.state === "applicable" && observation?.model.state !== "not_applicable";
   const reason =
@@ -404,7 +384,7 @@ function findingAssessment(
       ? item.applicability.reason
       : observation?.model.state === "not_applicable"
         ? observation.model.reason
-        : modelUnavailableReason(plan, arm, observation, otherObservation);
+        : modelUnavailableReason(observation);
   const available = applicable && reason === null;
   const keys =
     observation?.model.state === "complete" ? [...observation.model.occurrenceKeys].sort() : [];
@@ -486,11 +466,9 @@ function findingAssessment(
 }
 
 function armAssessment(
-  plan: EvaluationScoringPlanV1,
   item: EvaluationCaseExpectation,
   arm: EvaluationArm,
   observation: EvaluationOwnerObservation | undefined,
-  otherObservation: EvaluationOwnerObservation | undefined,
   adjudications: ReadonlyMap<string, EvaluationFindingAdjudication>,
 ): EvaluationArmCaseAssessment {
   return {
@@ -502,7 +480,7 @@ function armAssessment(
     criteria: item.criteria.map((criterion) =>
       criterionAssessment(item, criterion, arm, observation),
     ),
-    findings: findingAssessment(plan, item, arm, observation, otherObservation, adjudications),
+    findings: findingAssessment(item, observation, adjudications),
   };
 }
 
@@ -694,19 +672,15 @@ export function scoreEvaluation(
     const baselineKey = cellKey(item.caseId, "baseline");
     const candidateKey = cellKey(item.caseId, "candidate");
     const baseline = armAssessment(
-      frozen.plan,
       item,
       "baseline",
       observed.get(baselineKey),
-      observed.get(candidateKey),
       judgments.get(baselineKey) ?? new Map(),
     );
     const candidate = armAssessment(
-      frozen.plan,
       item,
       "candidate",
       observed.get(candidateKey),
-      observed.get(baselineKey),
       judgments.get(candidateKey) ?? new Map(),
     );
     return {

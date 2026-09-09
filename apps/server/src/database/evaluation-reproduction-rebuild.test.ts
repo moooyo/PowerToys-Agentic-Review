@@ -15,7 +15,7 @@ import {
 import { runMigrations } from "./migrations.js";
 
 const migrationDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
-const migrationName = "0033_evaluation_reproduction.sql";
+const migrationName = "0031_evaluation_reproduction.sql";
 const directories: string[] = [];
 const fixtures: { readonly database: DatabaseSync; close(): void }[] = [];
 const formats = new Map(["date-time", "uri"].map((name) => [name, FormatRegistry.Get(name)]));
@@ -119,12 +119,12 @@ async function install(directory: string, sql?: string): Promise<void> {
 }
 
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "evaluation-reproduction-m32-"));
+  const directory = await mkdtemp(join(tmpdir(), "evaluation-reproduction-m30-"));
   directories.push(directory);
   const files = (await readdir(migrationDirectory)).filter(
-    (name) => /^\d{4}_.*\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 32,
+    (name) => /^\d{4}_.*\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 30,
   );
-  expect(files).toHaveLength(32);
+  expect(files).toHaveLength(30);
   await Promise.all(
     files.map((name) => copyFile(join(migrationDirectory, name), join(directory, name))),
   );
@@ -185,7 +185,7 @@ describe("controlled evaluation reproduction migration rebuild", () => {
     const value = await fixture(),
       before = snapshot(value.database);
     await install(value.directory);
-    expect(runMigrations(value.database, value.directory)).toBe(33);
+    expect(runMigrations(value.database, value.directory)).toBe(31);
     restored(value.database);
     const after = snapshot(value.database);
     for (const [table, rows] of Object.entries(before.rows)) {
@@ -241,7 +241,7 @@ describe("controlled evaluation reproduction migration rebuild", () => {
       value.database.exec("UPDATE evaluations SET cell_manifest_json = cell_manifest_json"),
     ).toThrow(/immutable/u);
     expect(() => value.database.exec("DELETE FROM evaluations")).toThrow();
-    expect(runMigrations(value.database, value.directory)).toBe(33);
+    expect(runMigrations(value.database, value.directory)).toBe(31);
     expect(snapshot(value.database)).toEqual(after);
   });
 
@@ -364,7 +364,7 @@ describe("controlled evaluation reproduction migration rebuild", () => {
     expect(error.failures.map((failure) => failure.phase)).toEqual(["restore"]);
     spy.mockRestore();
     value.database.exec("PRAGMA foreign_keys = ON");
-    expect(runMigrations(value.database, value.directory)).toBe(33);
+    expect(runMigrations(value.database, value.directory)).toBe(31);
     restored(value.database);
   });
 

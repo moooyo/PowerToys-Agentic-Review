@@ -1,108 +1,92 @@
-import type {
-  ValidationJobResultV2,
-  ValidationJobResultV2ModelResult,
-} from "@agentic-review/codex";
-import type * as C from "@agentic-review/contracts";
-import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
-import { handleModelInvocationRequest } from "./model-invocations.js";
 import {
-  createModelInvocationFixture,
-  modelInvocationBeginRequest,
-  modelInvocationReceiptSet,
-  modelInvocationSealRequest,
-  modelInvocationFixtureTime as time,
-} from "./model-invocations.testing.js";
+  type ValidationJobResultV2,
+  type ValidationJobResultV2ModelResult,
+  ValidationJobResultV2Schema,
+} from "@agentic-review/codex";
+import { Value } from "@sinclair/typebox/value";
+import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
+import { createModelCliFixture, modelCliFixtureTime as time } from "./model-cli.testing.js";
 import type { ReviewCompletionJobContext } from "./review-results.js";
 import type { ValidationModelResultScope } from "./validation-model-result-binding.js";
+import {
+  persistValidatedValidationResult,
+  validateValidationCompletion,
+} from "./validation-results.js";
+import { freezeValidationSummaryInput } from "./validation-summary-inputs.js";
 import { validationSummaryInputRequest } from "./validation-summary-inputs.testing.js";
 
-type IssueModelOutput =
-  | Extract<ValidationJobResultV2ModelResult, { schemaVersion: "IssueTriageV2" }>
-  | Extract<ValidationJobResultV2ModelResult, { workItemKind: "issue" }>;
-
-/** Synthetic protocol records only. No production claim, compiler, model or accepted completion. */
+/** Synthetic CLI observations only. No production claim, compiler or model process runs. */
 export function createValidationModelResultBindingFixture(
   options: {
-    readonly raw?: IssueModelOutput;
-    readonly alterLedger?: (set: C.ModelInvocationReceiptSet) => void;
-    readonly openingOnly?: boolean;
-    readonly sealOnly?: boolean;
+    readonly kind?: "issue" | "pull_request";
+    readonly raw?: ValidationJobResultV2ModelResult;
   } = {},
 ) {
-  const f = createModelInvocationFixture();
+  const f = createModelCliFixture({ kind: options.kind ?? "issue" });
   try {
-    const request = modelInvocationBeginRequest(f);
     const cell = f.cells.find((entry) => entry.arm === "baseline");
     if (!cell) throw new Error("The synthetic baseline cell is missing.");
-    const raw: IssueModelOutput = options.raw ?? {
-      schemaVersion: "ValidationSummaryV1",
-      workItemKind: "issue",
-      summary: "Synthetic raw model summary.",
-      observations: [],
-      reproductionConclusion: "inconclusive",
-    };
-    const opening = handleModelInvocationRequest(
-      f.database,
-      {
-        operation: "beginModelInvocation",
-        input: { workerTokenSha256: f.workerTokenSha256, request },
-      },
-      time.opened,
-    ) as C.ModelInvocationOpening;
-    const ledger = modelInvocationReceiptSet(opening, f.identity.modelId);
-    const modelOutputSha256 = sha256(canonicalJson(raw));
-    const last = ledger.calls.at(-1);
-    if (!last?.receipt.response) throw new Error("The synthetic ledger must include one response.");
-    ledger.modelOutputSha256 = modelOutputSha256;
-    last.receipt.response.outputJsonSha256 = modelOutputSha256;
-    last.sha256 = sha256(canonicalJson(last.receipt));
-    options.alterLedger?.(ledger);
-    let seal: C.ModelInvocationSealV1 | null = null,
-      submission: C.ModelInvocationSubmissionV1 | null = null;
-    if (!options.openingOnly) {
-      seal = handleModelInvocationRequest(
-        f.database,
-        {
-          operation: "sealModelInvocation",
-          input: {
-            workerTokenSha256: f.workerTokenSha256,
-            request: modelInvocationSealRequest(request.lease, ledger),
-          },
-        },
-        time.sealed,
-      ) as C.ModelInvocationSealV1;
-      if (!options.sealOnly)
-        submission = handleModelInvocationRequest(
-          f.database,
-          {
-            operation: "submitModelInvocationReceipts",
-            input: {
-              workerTokenSha256: f.workerTokenSha256,
-              request: {
-                lease: request.lease,
-                invocationId: request.invocationId,
-                receiptSet: ledger,
-              },
+    const request = options.kind === "pull_request" ? null : validationSummaryInputRequest(f);
+    const receipt =
+      request === null
+        ? null
+        : freezeValidationSummaryInput(
+            f.database,
+            { workerTokenSha256: f.workerTokenSha256, request },
+            time.opened,
+          );
+    const raw: ValidationJobResultV2ModelResult =
+      options.raw ??
+      (options.kind === "pull_request"
+        ? {
+            schemaVersion: "PrReviewPlanV2",
+            summary: "Synthetic raw CLI review.",
+            assessment: "approve",
+            findings: [],
+            requestedRecipeIds: [],
+            verification: {
+              status: "not_run",
+              summary: "The runner owns build checks.",
+              commands: [],
             },
-          },
-          time.submitted,
-        ) as C.ModelInvocationSubmissionV1;
-    }
-    const frozenContext = validationSummaryInputRequest(f).context;
-    if (frozenContext.report.workItemKind !== "issue")
-      throw new Error("The synthetic summary fixture must retain its frozen Issue report.");
-    const result: ValidationJobResultV2 = {
+          }
+        : {
+            schemaVersion: "ValidationSummaryV1",
+            workItemKind: "issue",
+            summary: "Synthetic raw model summary.",
+            observations: [],
+            reproductionConclusion: "inconclusive",
+          });
+    const report: ValidationJobResultV2["report"] = request?.context.report ?? {
+      schemaVersion: "ValidationReportV1",
+      workItemKind: "pull_request",
+      source: "worker",
+      sourceState: "original",
+      summary: "Synthetic runner observations before CLI review.",
+      checks: [],
+    };
+    const lease = f.lease();
+    const result: unknown = {
       schemaVersion: "ValidationJobResultV2",
-      report: frozenContext.report,
-      execution: frozenContext.execution,
+      report,
+      execution: request?.context.execution ?? {
+        blockers: [],
+        diagnostics: [],
+        cleanupState: "not_needed",
+      },
       modelReview: {
         state: "completed",
         result: raw,
-        invocation: {
-          invocationId: request.invocationId,
-          scopeSha256: opening.scopeSha256,
-          receiptSetSha256: sha256(canonicalJson(ledger)),
-          modelOutputSha256,
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: lease.jobId,
+          runAttemptId: lease.runAttemptId,
+          cli: f.cli,
+          promptSha256: receipt?.reference.actualPromptSha256 ?? cell.prompt.promptSha256,
+          outputSchemaSha256: cell.prompt.outputSchemaSha256,
+          outputSha256: sha256(canonicalJson(raw)),
+          exitCode: 0,
+          ...(receipt === null ? {} : { summaryInputRef: receipt.reference }),
         },
         executionEvidence: {
           schemaVersion: "ReviewExecutionEvidenceV1",
@@ -113,6 +97,8 @@ export function createValidationModelResultBindingFixture(
         },
       },
     };
+    if (!Value.Check(ValidationJobResultV2Schema, result))
+      throw new Error("The synthetic CLI result must match its current output contract.");
     const execution = f.database
       .prepare("SELECT execution_digest FROM jobs WHERE id = ?")
       .get(cell.jobId) as { execution_digest: string };
@@ -121,11 +107,11 @@ export function createValidationModelResultBindingFixture(
       runId: cell.run_id,
       requestId: cell.request_id,
       jobId: cell.jobId,
-      runAttemptId: request.lease.runAttemptId,
+      runAttemptId: lease.runAttemptId,
       resultDigest: sha256(canonicalJson(result)),
       executionDigest: execution.execution_digest,
     };
-    return { ...f, result, scope, opening, ledger, seal, submission, cell };
+    return { ...f, result, scope, cell, summaryInput: receipt?.reference ?? null };
   } catch (error) {
     f.close();
     throw error;
@@ -150,8 +136,39 @@ export function validationModelCompletionContext(
     .get(f.scope.jobId) as unknown as ReviewCompletionJobContext;
 }
 
-/** Writes a clearly synthetic archived V2 result under all production SQL guards. This is
- * not the completion API and cannot establish that the required model gate has been accepted. */
+/** Completes synthetic observations through the production result validator and persistence API. */
+export function completeValidationModelResultFixture(f: ValidationModelResultBindingFixture) {
+  const context = validationModelCompletionContext(f),
+    now = "2026-09-08T04:02:00.000Z";
+  f.database.exec("BEGIN IMMEDIATE");
+  try {
+    const validated = validateValidationCompletion(
+      f.database,
+      context,
+      f.scope.resultDigest,
+      f.result,
+    );
+    f.database
+      .prepare(
+        "UPDATE run_attempts SET status = 'succeeded', result_digest = ?, result_json = ?, ended_at = ? WHERE id = ?",
+      )
+      .run(validated.resultDigest, validated.canonicalResultJson, now, context.runAttemptId);
+    const resultId = persistValidatedValidationResult(f.database, context, validated, now);
+    f.database
+      .prepare(
+        "UPDATE jobs SET status = 'succeeded', current_run_attempt_id = NULL, completed_at = ? WHERE id = ?",
+      )
+      .run(now, context.jobId);
+    f.database.exec("COMMIT");
+    return { ...f.scope, resultId, schemaId: "ValidationJobResultV2" as const };
+  } catch (error) {
+    if (f.database.isTransaction) f.database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** Writes a clearly synthetic archived V2 result under all production SQL guards.
+ * Completion tests use the normal validator and persistence API instead. */
 export function insertSyntheticStoredValidationModelResult(
   f: ValidationModelResultBindingFixture,
   resultId = "synthetic-bound-v2-result",

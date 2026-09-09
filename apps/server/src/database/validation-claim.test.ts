@@ -592,7 +592,8 @@ const registerAndClaim = async (
     architecture: "x64",
     headless: true,
     interactiveDesktop: true,
-    codexVersion: "test",
+    cliEngine: "codex",
+    cliVersion: "test",
     recipeIds: [],
     labels,
   };

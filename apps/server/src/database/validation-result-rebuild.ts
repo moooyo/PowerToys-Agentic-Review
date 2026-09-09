@@ -293,7 +293,7 @@ export function runValidationResultRebuild(database: DatabaseSync, actions: Rebu
     transactionStarted = true;
     if (actions.isPending()) {
       const before = inspect(database);
-      // Reuse the exact current definitions, including the M29 insertion fence. Do not restore
+      // Reuse the exact current definitions, including the Evaluation insertion fence. Do not restore
       // historical trigger text from the original V1 table migration.
       const retained = before.objects.filter((entry) => restoredObjectKeys.has(objectKey(entry)));
       for (const object of retained)

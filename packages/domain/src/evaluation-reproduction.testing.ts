@@ -346,7 +346,7 @@ export function evaluationPlanFixture(
       cellManifestSha256: "d".repeat(64),
       executionManifestSha256: "e".repeat(64),
     },
-    modelRequirements: { required: false, expectedModelIdentityDigest: null },
+    modelRequirements: { required: false },
     jobs: [
       {
         ...request,

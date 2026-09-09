@@ -1,6 +1,7 @@
 import { FormatRegistry, type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import { CliModelConfigurationSchema } from "./cli-model-execution.js";
 import { DateTimeSchema, EntityIdSchema, Sha256Schema } from "./common.js";
 import { QualifiedValidationCheckIdSchema, ValidationOutcomeSchema } from "./validation-report.js";
 
@@ -81,7 +82,6 @@ export const EvaluationScoringConfigurationSchema = Type.Object(
   {
     profileVersionId: EntityIdSchema,
     promptVersionId: EntityIdSchema,
-    modelIdentityDigest: Type.Union([Sha256Schema, Type.Null()]),
   },
   { additionalProperties: false },
 );
@@ -159,7 +159,7 @@ export const EvaluationModelObservationSchema = Type.Union([
     {
       state: Type.Literal("complete"),
       evidenceAvailable: Type.Boolean(),
-      modelIdentityDigest: Type.Union([Sha256Schema, Type.Null()]),
+      cli: CliModelConfigurationSchema,
       occurrenceKeys: Type.Array(Sha256Schema, {
         maxItems: maximumEvaluationObservedFindingCount,
         uniqueItems: true,

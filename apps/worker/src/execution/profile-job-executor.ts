@@ -60,7 +60,7 @@ import {
   type PreparedJobWorkspace,
 } from "./job-workspace.js";
 import { assertModelOutputArtifact, modelOutputReview } from "./model-output-artifact.js";
-import { isEvaluationContext, validateProfileEnvelope } from "./profile-envelope.js";
+import { validateProfileEnvelope } from "./profile-envelope.js";
 import {
   dispatchProfileModel,
   type ProfileModelReview,
@@ -106,15 +106,9 @@ export interface ProfileJobExecutorOptions {
   readonly createSummaryExecutor?: (
     envelope: JobExecutionEnvelopeV2,
     context: JobExecutionContext,
-  ) =>
-    | (Pick<ValidationSummaryExecutor, "execute"> & {
-        readonly modelInvocationRequired?: boolean;
-      })
-    | undefined;
+  ) => Pick<ValidationSummaryExecutor, "execute"> | undefined;
   /** Applies only to optional ordinary summaries, never to frozen evaluation requirements. */
   readonly optionalSummariesEnabled?: boolean;
-  /** Parent configuration, not a field accepted from model output. */
-  readonly requireModelInvocation?: boolean;
   readonly now?: () => Date;
 }
 class ProfileExecutionError extends Error {
@@ -149,21 +143,17 @@ export class ProfileJobExecutor implements JobExecutor {
       registerWorkerContractFormats();
       if (!Value.Check(JobExecutionEnvelopeSchema, envelope))
         return failed("VALIDATION_ENVELOPE_INVALID", "The execution envelope is invalid.");
-      if (jobRequiresModelExecution(envelope) || this.options.requireModelInvocation === true)
+      if (jobRequiresModelExecution(envelope))
         return failed(
           "MODEL_EXECUTION_DISABLED",
           "This Worker does not execute models; the required model task was not started.",
         );
     }
-    // Evaluation needs an accepted boundary for both profile commands and delegated models.
-    // Neither an envelope capability label nor a Prompt instruction establishes that boundary.
-    if ("validation" in envelope && isEvaluationContext(envelope.validation))
-      return failed(
-        "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
-        "This Worker has no accepted evaluation execution boundary; profile commands and model execution were not started.",
-      );
-    if (envelope.envelopeVersion === 1)
+    if (envelope.envelopeVersion === 1) {
+      if ("validation" in envelope)
+        return failed("VALIDATION_ENVELOPE_INVALID", "The execution envelope is invalid.");
       return this.options.legacyExecutor.execute(envelope, context);
+    }
     registerWorkerContractFormats();
     try {
       validateProfileEnvelope(envelope);
@@ -317,15 +307,13 @@ export class ProfileJobExecutor implements JobExecutor {
         );
       const modelPolicy = resolveProfileModelPolicy(
         frozen.validation,
-        this.options.modelExecutionEnabled === false ? false : this.options.requireModelInvocation,
         this.options.modelExecutionEnabled === false
           ? false
           : this.options.optionalSummariesEnabled,
       );
-      let useV2 = modelPolicy.recorded;
-      const invocationRequired = () => {
-        useV2 = true;
-        // Reserve the largest bounded failure wrapper before invoking a recorded model.
+      const useV2 = modelPolicy.retainModelOutput;
+      if (useV2) {
+        // Reserve the largest bounded failure wrapper before starting an evaluation model.
         // Runner facts that cannot fit a complete failure result are rejected before dispatch.
         const reservedExecution = structuredClone(details);
         let blockerUtf8Reserve = 0;
@@ -366,22 +354,15 @@ export class ProfileJobExecutor implements JobExecutor {
             "VALIDATION_RESULT_TOO_LARGE",
             "The complete runner observations leave insufficient capacity for required model failure reporting.",
           );
-      };
-      if (useV2) invocationRequired();
+      }
       const validationWorkspace = workspace;
       let modelReview = await dispatchProfileModel(modelPolicy, {
-        review: (recorded) =>
-          this.#reviewModel(
-            frozen,
-            scopedContext,
-            validationWorkspace,
-            invocationRequired,
-            recorded,
-          ),
+        review: (retainModelOutput) =>
+          this.#reviewModel(frozen, scopedContext, validationWorkspace, retainModelOutput),
         ...(this.options.createSummaryExecutor === undefined
           ? {}
           : {
-              summary: (recorded: boolean) =>
+              summary: (retainModelOutput: boolean) =>
                 this.#optionalSummary(
                   frozen,
                   scopedContext,
@@ -390,8 +371,7 @@ export class ProfileJobExecutor implements JobExecutor {
                   details,
                   summaryEvidence,
                   observations,
-                  invocationRequired,
-                  recorded,
+                  retainModelOutput,
                 ),
             }),
       });
@@ -442,8 +422,7 @@ export class ProfileJobExecutor implements JobExecutor {
             phase: "model_review",
             stepId: null,
             code: "MODEL_REVIEW_REQUIRED",
-            message:
-              "The required recorded model output could not be retained within the result budget.",
+            message: "The required model output could not be retained within the result budget.",
           });
       }
       if (
@@ -500,8 +479,7 @@ export class ProfileJobExecutor implements JobExecutor {
     execution: ValidationExecutionDetails,
     evidence: SummaryEvidence,
     observations: ValidationObservationResults,
-    onInvocationRequired: () => void,
-    requireRecording: boolean,
+    retainModelOutput: boolean,
   ): Promise<ModelReview> {
     context.signal.throwIfAborted();
     if (!evidence.complete)
@@ -511,7 +489,6 @@ export class ProfileJobExecutor implements JobExecutor {
         message: "The complete finalized UI evidence context is unavailable for optional advice.",
       };
     let nodeFault: Error | undefined;
-    let recordingRequired = requireRecording;
     const reportFault = (error: Error): void => {
       if (nodeFault === undefined) {
         nodeFault = error;
@@ -535,8 +512,6 @@ export class ProfileJobExecutor implements JobExecutor {
     try {
       const executor = this.options.createSummaryExecutor?.(input.envelope, summaryContext);
       if (executor === undefined) return { state: "not_requested" };
-      recordingRequired ||= executor.modelInvocationRequired === true;
-      if (recordingRequired) onInvocationRequired();
       // ValidationSummaryExecutor owns the sole optional timeout, no-progress limit, teardown
       // budget, and terminal-report reserve. Parent lease cancellation is always propagated.
       attempt = await executor.execute(input, summaryContext);
@@ -550,7 +525,7 @@ export class ProfileJobExecutor implements JobExecutor {
         );
       }
       if (nodeFault !== undefined) {
-        if (!recordingRequired || execution.blockers.length < 160)
+        if (!retainModelOutput || execution.blockers.length < 160)
           execution.blockers.push({
             phase: "model_review",
             stepId: null,
@@ -584,8 +559,13 @@ export class ProfileJobExecutor implements JobExecutor {
             "The optional summary did not match its frozen prompt, evidence context, or result schema.",
         };
       }
-      if (recordingRequired || attempt.modelOutputArtifact !== undefined) {
-        onInvocationRequired();
+      if (!retainModelOutput && attempt.modelOutputArtifact !== undefined)
+        return {
+          state: "failed",
+          code: "SUMMARY_RESULT_INVALID",
+          message: "An ordinary summary returned an unexpected evaluation output artifact.",
+        };
+      if (retainModelOutput) {
         const actualPromptSha256 = createHash("sha256")
           .update(
             composeSummaryPrompt(envelope.prompt.renderedPrompt, expectedContext.json),
@@ -598,8 +578,8 @@ export class ProfileJobExecutor implements JobExecutor {
         )
           return {
             state: "failed",
-            code: "SUMMARY_RECORDING_MISSING",
-            message: "The summary did not retain its original output and invocation binding.",
+            code: "SUMMARY_EXECUTION_MISSING",
+            message: "The summary did not retain its original output and CLI execution details.",
           };
         const artifact = assertModelOutputArtifact(
           attempt.modelOutputArtifact,
@@ -611,7 +591,7 @@ export class ProfileJobExecutor implements JobExecutor {
           return {
             state: "failed",
             code: "SUMMARY_RESULT_INVALID",
-            message: "The retained raw summary differs from its invocation output.",
+            message: "The retained raw summary differs from its CLI output.",
           };
         return modelOutputReview(artifact);
       }
@@ -646,7 +626,7 @@ export class ProfileJobExecutor implements JobExecutor {
       if (error instanceof ProfileExecutionError && error.code === "VALIDATION_RESULT_TOO_LARGE")
         throw error;
       if (nodeFault !== undefined) {
-        if (!recordingRequired || execution.blockers.length < 160)
+        if (!retainModelOutput || execution.blockers.length < 160)
           execution.blockers.push({
             phase: "model_review",
             stepId: null,
@@ -668,8 +648,7 @@ export class ProfileJobExecutor implements JobExecutor {
     envelope: JobExecutionEnvelopeV2,
     context: JobExecutionContext,
     validationWorkspace: PreparedJobWorkspace,
-    onInvocationRequired: () => void,
-    requireRecording: boolean,
+    retainModelOutput: boolean,
   ): Promise<ModelReview> {
     if (this.options.createModelExecutor === undefined)
       return {
@@ -724,7 +703,6 @@ export class ProfileJobExecutor implements JobExecutor {
           attemptDirectory: result.attemptDirectory,
           checkoutDirectory: result.checkoutDirectory,
           controlDirectory: result.controlDirectory,
-          codexHomeDirectory: result.codexHomeDirectory,
           tempDirectory: result.tempDirectory,
           userProfileDirectory: result.userProfileDirectory,
           startDiskMonitoring: (signal) => result.startDiskMonitoring(signal),
@@ -738,8 +716,6 @@ export class ProfileJobExecutor implements JobExecutor {
     try {
       context.signal.throwIfAborted();
       const executor = this.options.createModelExecutor(provider, envelope, context);
-      const recordingRequired = requireRecording || executor.modelInvocationRequired === true;
-      if (recordingRequired) onInvocationRequired();
       const result = await executor.executeProfileModel(structuredClone(envelope), context);
       context.signal.throwIfAborted();
       if (result.outcome === "failed")
@@ -748,13 +724,19 @@ export class ProfileJobExecutor implements JobExecutor {
           code: safeCode(result.code, "MODEL_REVIEW_FAILED"),
           message: "The required model review could not complete; inspect its Worker diagnostics.",
         };
-      if (recordingRequired || result.modelOutputArtifact !== undefined) {
-        onInvocationRequired();
+      if (!retainModelOutput && result.modelOutputArtifact !== undefined)
+        return {
+          state: "failed",
+          code: "MODEL_RESULT_INVALID",
+          message: "An ordinary review returned an unexpected evaluation output artifact.",
+        };
+      if (retainModelOutput) {
         if (!prepared || modelWorkspace === undefined || result.modelOutputArtifact === undefined)
           return {
             state: "failed",
-            code: "MODEL_RECORDING_MISSING",
-            message: "The required review did not retain an original model output binding.",
+            code: "MODEL_EXECUTION_MISSING",
+            message:
+              "The required review did not retain an original model output and CLI execution details.",
           };
         const artifact = assertModelOutputArtifact(result.modelOutputArtifact, envelope);
         if (
@@ -765,7 +747,7 @@ export class ProfileJobExecutor implements JobExecutor {
           return {
             state: "failed",
             code: "MODEL_RESULT_INVALID",
-            message: "The original model output differs from its recorded validation result.",
+            message: "The original model output differs from its retained validation result.",
           };
         return modelOutputReview(artifact);
       }

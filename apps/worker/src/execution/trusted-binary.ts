@@ -36,6 +36,11 @@ export interface TrustedBinarySpec {
   readonly expectedSha256: string;
 }
 
+export interface CliBinarySpec {
+  readonly path: string;
+  readonly expectedSha256?: string;
+}
+
 export type TrustedBinaryStatValue = number | bigint;
 
 export interface TrustedBinaryFileStat {
@@ -71,7 +76,7 @@ export interface TrustedBinaryFileIO {
 export interface VerifyTrustedExecutionBinariesOptions {
   readonly trustedExecutableRoot: string;
   readonly processHost: TrustedBinarySpec;
-  readonly codex: TrustedBinarySpec;
+  readonly cli: CliBinarySpec;
   readonly git: TrustedBinarySpec;
   readonly fileIO?: TrustedBinaryFileIO;
   readonly now?: () => Date;
@@ -79,12 +84,12 @@ export interface VerifyTrustedExecutionBinariesOptions {
 
 export type VerifyTrustedValidationBinariesOptions = Omit<
   VerifyTrustedExecutionBinariesOptions,
-  "codex"
+  "cli"
 > & {
-  readonly codex?: undefined;
+  readonly cli?: undefined;
 };
 
-export type TrustedBinaryRole = "processHost" | "codex" | "git";
+export type TrustedBinaryRole = "processHost" | "cli" | "git";
 
 export interface VerifiedTrustedBinaryFileIdentity {
   readonly dev: string;
@@ -109,54 +114,8 @@ export interface VerifiedTrustedValidationBinaries {
 }
 
 export interface VerifiedTrustedExecutionBinaries extends VerifiedTrustedValidationBinaries {
-  readonly codexPath: string;
+  readonly cliPath: string;
   readonly measurements: Readonly<Record<TrustedBinaryRole, VerifiedTrustedBinaryMeasurement>>;
-}
-
-/** The running bundle and interpreter use the same deployment trust boundary as native tools. */
-export async function verifyTrustedWorkerFile(options: {
-  readonly trustedExecutableRoot: string;
-  readonly role: "workerBundle" | "node";
-  readonly file: TrustedBinarySpec;
-  readonly fileIO?: TrustedBinaryFileIO;
-}): Promise<{ readonly path: string; readonly measurement: VerifiedTrustedBinaryMeasurement }> {
-  const io = options.fileIO ?? defaultFileIO;
-  const rootPath = normalizeSafeWindowsPath(
-    options.trustedExecutableRoot,
-    "INVALID_TRUSTED_ROOT",
-    false,
-  );
-  if (windowsPathsEqual(rootPath, win32.parse(rootPath).root))
-    throw verificationError(
-      "INVALID_TRUSTED_ROOT",
-      "Trusted executable root cannot be a filesystem root.",
-    );
-  const executable = options.role === "node";
-  if (!executable && options.role !== "workerBundle")
-    throw verificationError("BINARY_PATH_UNSAFE", "The Worker file role is unsupported.");
-  const path = normalizeSafeWindowsPath(options.file.path, "BINARY_PATH_UNSAFE", executable);
-  if (!executable && win32.basename(path) !== "worker.mjs")
-    throw verificationError("BINARY_PATH_UNSAFE", "The deployed Worker entry must be worker.mjs.");
-  if (!isStrictDescendant(rootPath, path))
-    throw verificationError(
-      "BINARY_PATH_UNSAFE",
-      "The Worker file must be contained by the trusted root.",
-    );
-  const expectedSha256 = validateExpectedDigest(options.file.expectedSha256, options.role);
-  const root = await verifyRoot(io, rootPath);
-  const verified = await verifyBinary(
-    io,
-    root.canonicalPath,
-    options.role,
-    path,
-    expectedSha256,
-    executable,
-  );
-  await reverifyRoot(io, root);
-  return Object.freeze({
-    path: verified.canonicalPath,
-    measurement: binaryMeasurement(verified, new Date().toISOString()),
-  });
 }
 
 interface FileMetadata {
@@ -198,8 +157,8 @@ const defaultFileIO: TrustedBinaryFileIO = {
   },
 };
 
-// Deployment must make the trusted executable root read-only to the Worker identity. This verifier
-// relies on that property to close the remaining name-to-open TOCTOU window.
+// ProcessHost and Git belong to the deployment-managed trusted root. The CLI uses its existing
+// local installation and may have an optional digest pin; its resolved target is measured below.
 export function verifyTrustedExecutionBinaries(
   options: VerifyTrustedExecutionBinariesOptions,
 ): Promise<Readonly<VerifiedTrustedExecutionBinaries>>;
@@ -224,14 +183,17 @@ export async function verifyTrustedExecutionBinaries(
     );
   }
 
-  const binaryEntries: readonly (readonly [TrustedBinaryRole, TrustedBinarySpec])[] = [
+  const binaryEntries: readonly (readonly [TrustedBinaryRole, CliBinarySpec])[] = [
     ["processHost", options.processHost] as const,
-    ...(options.codex === undefined ? [] : [["codex", options.codex] as const]),
+    ...(options.cli === undefined ? [] : [["cli", options.cli] as const]),
     ["git", options.git] as const,
   ];
   const configuredBinaries = binaryEntries.map(([name, spec]) => ({
     name,
-    expectedSha256: validateExpectedDigest(spec.expectedSha256, name),
+    expectedSha256:
+      name === "cli" && spec.expectedSha256 === undefined
+        ? undefined
+        : validateExpectedDigest(spec.expectedSha256 ?? "", name),
     path: normalizeSafeWindowsPath(spec.path, "BINARY_PATH_UNSAFE", true),
   }));
   assertDistinctPaths(configuredBinaries);
@@ -241,17 +203,26 @@ export async function verifyTrustedExecutionBinaries(
   const verifiedPathKeys = new Set<string>();
   const verifiedIdentityKeys = new Set<string>();
   for (const binary of configuredBinaries) {
-    if (!isStrictDescendant(root.canonicalPath, binary.path)) {
+    if (binary.name !== "cli" && !isStrictDescendant(root.canonicalPath, binary.path)) {
       throw verificationError(
         "BINARY_PATH_UNSAFE",
         `Trusted binary ${binary.name} must be strictly contained by the trusted root.`,
       );
     }
+    // Resolve installation links once and execute the measured target, not the configured alias.
+    const resolvedPath =
+      binary.name === "cli"
+        ? normalizeSafeWindowsPath(
+            await binaryIO(() => fileIO.realpath(binary.path), binary.name),
+            "BINARY_PATH_UNSAFE",
+            true,
+          )
+        : binary.path;
     const verifiedBinary = await verifyBinary(
       fileIO,
-      root.canonicalPath,
+      binary.name === "cli" ? undefined : root.canonicalPath,
       binary.name,
-      binary.path,
+      resolvedPath,
       binary.expectedSha256,
     );
     const verifiedPathKey = windowsPathKey(verifiedBinary.canonicalPath);
@@ -291,17 +262,17 @@ export async function verifyTrustedExecutionBinaries(
       git: binaryMeasurement(git, verifiedAtISO),
     }),
   };
-  if (options.codex === undefined) return Object.freeze(base);
-  const codex = requiredVerifiedBinary(verifiedBinaries, "codex");
+  if (options.cli === undefined) return Object.freeze(base);
+  const cli = requiredVerifiedBinary(verifiedBinaries, "cli");
 
   return Object.freeze({
     trustedExecutableRoot: root.canonicalPath,
     processHostPath: processHost.canonicalPath,
-    codexPath: codex.canonicalPath,
+    cliPath: cli.canonicalPath,
     gitPath: git.canonicalPath,
     measurements: Object.freeze({
       processHost: base.measurements.processHost,
-      codex: binaryMeasurement(codex, verifiedAtISO),
+      cli: binaryMeasurement(cli, verifiedAtISO),
       git: base.measurements.git,
     }),
   });
@@ -358,18 +329,17 @@ async function reverifyRoot(fileIO: TrustedBinaryFileIO, root: VerifiedRoot): Pr
 
 async function verifyBinary(
   fileIO: TrustedBinaryFileIO,
-  trustedRoot: string,
+  trustedRoot: string | undefined,
   name: string,
   configuredPath: string,
-  expectedSha256: string,
-  requireExecutable = true,
+  expectedSha256: string | undefined,
 ): Promise<VerifiedBinary> {
   const initialLstat = await binaryIO(() => fileIO.lstat(configuredPath), name);
   assertRegularBinary(initialLstat, name);
   const initialRealpath = normalizeSafeWindowsPath(
     await binaryIO(() => fileIO.realpath(configuredPath), name),
     "BINARY_PATH_UNSAFE",
-    requireExecutable,
+    true,
   );
   assertContainedRealpath(trustedRoot, initialRealpath, name);
   assertConfiguredRealpath(configuredPath, initialRealpath, name);
@@ -390,7 +360,7 @@ async function verifyBinary(
     const openedRealpath = normalizeSafeWindowsPath(
       await binaryIO(() => fileIO.realpath(configuredPath), name),
       "BINARY_PATH_UNSAFE",
-      requireExecutable,
+      true,
     );
     assertContainedRealpath(trustedRoot, openedRealpath, name);
     assertConfiguredRealpath(configuredPath, openedRealpath, name);
@@ -423,7 +393,7 @@ async function verifyBinary(
     const finalRealpath = normalizeSafeWindowsPath(
       await binaryIO(() => fileIO.realpath(configuredPath), name),
       "BINARY_PATH_UNSAFE",
-      requireExecutable,
+      true,
     );
     assertRegularBinary(finalFstat, name);
     assertRegularBinary(finalLstat, name);
@@ -448,7 +418,7 @@ async function verifyBinary(
     if (!windowsPathsEqual(openedRealpath, finalRealpath)) {
       throw identityChanged(name);
     }
-    if (actualSha256 !== expectedSha256) {
+    if (expectedSha256 !== undefined && actualSha256 !== expectedSha256) {
       throw verificationError(
         "BINARY_DIGEST_MISMATCH",
         `Trusted binary ${name} did not match its configured SHA-256 digest.`,
@@ -596,8 +566,8 @@ function metadataEqual(left: FileMetadata, right: FileMetadata): boolean {
   );
 }
 
-function assertContainedRealpath(root: string, candidate: string, name: string): void {
-  if (!isStrictDescendant(root, candidate)) {
+function assertContainedRealpath(root: string | undefined, candidate: string, name: string): void {
+  if (root !== undefined && !isStrictDescendant(root, candidate)) {
     throw verificationError(
       "BINARY_PATH_UNSAFE",
       `Trusted binary ${name} resolved outside the trusted executable root.`,

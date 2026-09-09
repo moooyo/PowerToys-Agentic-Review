@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import * as C from "@agentic-review/contracts";
-import { assertEvaluationModelRuntimeRegistrationIntegrity } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { createEvaluationBatchInTransaction } from "./evaluation-batches.js";
 import { cancelEvaluationBatchInTransaction } from "./evaluation-control.js";
 import { EvaluationManagementError } from "./evaluation-management.js";
-import { readModelRuntimeRegistrationInTransaction } from "./model-runtime-registry.js";
 import { assertRepositoryPermission, isPlatformAdministrator } from "./operator-access.js";
 import {
   handlePromptConfigurationRequest,
@@ -194,7 +192,6 @@ const frozenConfigurationSummarySchema = Type.Object(
               strict,
             ),
             modelRequirements: C.EvaluationModelRequirementsV1Schema,
-            modelRuntimeRegistration: Type.Optional(C.ModelRuntimeRegistrationV1Schema),
           },
           strict,
         ),
@@ -211,13 +208,11 @@ type FrozenConfigurationSummary = {
     profileVersion: C.ValidationProfileVersionSummary;
     prompt: { workflowKind: C.WorkflowKind; version: C.PromptVersionSummary };
     modelRequirements: C.EvaluationModelRequirementsV1;
-    modelRuntimeRegistration?: C.ModelRuntimeRegistrationV1;
   };
   candidate: {
     profileVersion: C.ValidationProfileVersionSummary;
     prompt: { workflowKind: C.WorkflowKind; version: C.PromptVersionSummary };
     modelRequirements: C.EvaluationModelRequirementsV1;
-    modelRuntimeRegistration?: C.ModelRuntimeRegistrationV1;
   };
 };
 
@@ -272,29 +267,6 @@ function readHeader(database: DatabaseSync, repositoryId: string, evaluationId: 
   const rawConfiguration = parse(row.configurationJson, 131_072);
   if (!Value.Check(frozenConfigurationSummarySchema, rawConfiguration)) corrupt();
   const configuration = rawConfiguration as FrozenConfigurationSummary;
-  for (const arm of ["baseline", "candidate"] as const) {
-    const selected = configuration[arm];
-    try {
-      assertEvaluationModelRuntimeRegistrationIntegrity(
-        selected.modelRequirements,
-        selected.modelRuntimeRegistration,
-      );
-    } catch {
-      corrupt();
-    }
-    if (selected.modelRuntimeRegistration !== undefined) {
-      const recorded = readModelRuntimeRegistrationInTransaction(
-        database,
-        selected.modelRuntimeRegistration.id,
-      );
-      if (
-        recorded === null ||
-        recorded.registrationSha256 !==
-          selected.modelRequirements.runtimeRegistration?.registrationSha256
-      )
-        corrupt();
-    }
-  }
   if (
     configuration.repositoryId !== repositoryId ||
     configuration.baseline.prompt.workflowKind !== row.workflowKind ||
@@ -318,16 +290,10 @@ function readHeader(database: DatabaseSync, repositoryId: string, evaluationId: 
     baseline: {
       profileVersionId: configuration.baseline.profileVersion.id,
       promptVersionId: configuration.baseline.prompt.version.id,
-      ...(configuration.baseline.modelRuntimeRegistration === undefined
-        ? {}
-        : { modelRuntimeRegistrationId: configuration.baseline.modelRuntimeRegistration.id }),
     },
     candidate: {
       profileVersionId: configuration.candidate.profileVersion.id,
       promptVersionId: configuration.candidate.prompt.version.id,
-      ...(configuration.candidate.modelRuntimeRegistration === undefined
-        ? {}
-        : { modelRuntimeRegistrationId: configuration.candidate.modelRuntimeRegistration.id }),
     },
   };
   stored(summary, C.getEvaluationBatchSummaryIssues);
@@ -345,17 +311,11 @@ function readHeader(database: DatabaseSync, repositoryId: string, evaluationId: 
         profile: configuration.baseline.profileVersion,
         prompt: configuration.baseline.prompt.version,
         modelRequirements: configuration.baseline.modelRequirements,
-        ...(configuration.baseline.modelRuntimeRegistration === undefined
-          ? {}
-          : { modelRuntimeRegistration: configuration.baseline.modelRuntimeRegistration }),
       },
       candidate: {
         profile: configuration.candidate.profileVersion,
         prompt: configuration.candidate.prompt.version,
         modelRequirements: configuration.candidate.modelRequirements,
-        ...(configuration.candidate.modelRuntimeRegistration === undefined
-          ? {}
-          : { modelRuntimeRegistration: configuration.candidate.modelRuntimeRegistration }),
       },
     },
   };
@@ -367,7 +327,6 @@ const cellRowSchema = Type.Object(
       .properties,
     applicable: Type.Union([Type.Literal(0), Type.Literal(1)]),
     modelRequired: Type.Union([Type.Literal(0), Type.Literal(1)]),
-    expectedModelIdentityDigest: Type.Union([C.Sha256Schema, Type.Null()]),
     reproductionState: Type.Union([
       Type.Null(),
       Type.Literal("ready"),
@@ -395,12 +354,7 @@ function cellState(
   if (!row.applicable) return "not_run";
   if (!job) {
     if (header.control.status === "cancelled") return "cancelled";
-    if (
-      !header.repositoryEnabled ||
-      blockerCount > 0 ||
-      (row.modelRequired && row.expectedModelIdentityDigest === null)
-    )
-      return "blocked";
+    if (!header.repositoryEnabled || blockerCount > 0) return "blocked";
     return "not_run";
   }
   switch (job.status) {
@@ -415,7 +369,7 @@ function cellState(
       return "completed";
     case "failed":
     case "dead_letter":
-      return job.failureCode === "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE" ? "blocked" : "failed";
+      return "failed";
     case "cancelled":
       return "cancelled";
     case "stale":
@@ -431,7 +385,6 @@ function readCells(database: DatabaseSync, header: Header): CellProjection[] {
       cell.source_digest AS sourceDigest, cell.profile_version_id AS profileVersionId,
       cell.prompt_version_id AS promptVersionId, cell.applicable,
       json_extract(manifest.value, '$.modelRequirements.required') AS modelRequired,
-      json_extract(manifest.value, '$.modelRequirements.expectedModelIdentityDigest') AS expectedModelIdentityDigest,
       json_extract(manifest.value, '$.reproduction.state') AS reproductionState,
       checked.checked_at AS checkedAt,
       CASE WHEN checked.checked_at IS NULL THEN json_extract(run.readiness_json, '$[0].reasons')
@@ -459,7 +412,7 @@ function readCells(database: DatabaseSync, header: Header): CellProjection[] {
       AND result.review_run_id = cell.run_id AND result.request_id = cell.request_id
     WHERE cell.repository_id = ? AND cell.evaluation_id = ?
   ) SELECT cellId, caseId, arm, trial, runId, requestId, sourceId, sourceDigest,
-    profileVersionId, promptVersionId, applicable, modelRequired, expectedModelIdentityDigest, reproductionState, jobJson, resultJson,
+    profileVersionId, promptVersionId, applicable, modelRequired, reproductionState, jobJson, resultJson,
     (SELECT COUNT(*) FROM json_each(raw.blockers) WHERE raw.checkedAt IS NOT NULL OR json_extract(value, '$.code') <> 'unsupported_target') AS blockerCount,
     (SELECT json_group_array(json(value)) FROM (
       SELECT value FROM json_each(raw.blockers)
@@ -481,9 +434,7 @@ function readCells(database: DatabaseSync, header: Header): CellProjection[] {
       requests.has(row.requestId) ||
       row.profileVersionId !== header.summary[row.arm].profileVersionId ||
       row.promptVersionId !== header.summary[row.arm].promptVersionId ||
-      Boolean(row.modelRequired) !== header.configurations[row.arm].modelRequirements.required ||
-      row.expectedModelIdentityDigest !==
-        header.configurations[row.arm].modelRequirements.expectedModelIdentityDigest
+      Boolean(row.modelRequired) !== header.configurations[row.arm].modelRequirements.required
     )
       corrupt();
     ids.add(row.cellId);
@@ -505,15 +456,6 @@ function readCells(database: DatabaseSync, header: Header): CellProjection[] {
     }
     if (row.applicable && !job && !header.repositoryEnabled && header.control.status === "active") {
       blockers = [{ code: "authorization_changed" }];
-      blockerCount = 1;
-    } else if (
-      row.applicable &&
-      !job &&
-      row.modelRequired &&
-      row.expectedModelIdentityDigest === null &&
-      blockerCount === 0
-    ) {
-      blockers = [{ code: "missing_capability", capability: "verified_model_identity" }];
       blockerCount = 1;
     }
     const cell: C.EvaluationCellSummaryV1 = {

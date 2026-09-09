@@ -294,7 +294,7 @@ describe("evaluation adjudication context", () => {
     for (const extra of [
       { eligible: true },
       { evidenceVerified: true },
-      { modelIdentityDigest: digest },
+      { cli: { kind: "codex", version: "1.0.0", requestedModel: null } },
       { truePositive: true },
     ])
       expect(

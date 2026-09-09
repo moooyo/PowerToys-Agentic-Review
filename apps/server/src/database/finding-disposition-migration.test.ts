@@ -264,12 +264,12 @@ function jsonChange(
 describe("finding disposition migration", () => {
   it("runs the complete production sequence and preserves the original migration checksum", () => {
     const database = open();
-    expect(runMigrations(database, migrationsDirectory)).toBe(33);
+    expect(runMigrations(database, migrationsDirectory)).toBe(31);
     const before = rows(database, "schema_migrations", "version");
     expect(
       database.prepare("SELECT checksum FROM schema_migrations WHERE version = 20").get(),
     ).toEqual({ checksum: sha256(originalSql) });
-    expect(runMigrations(database, migrationsDirectory)).toBe(33);
+    expect(runMigrations(database, migrationsDirectory)).toBe(31);
     expect(rows(database, "schema_migrations", "version")).toEqual(before);
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });

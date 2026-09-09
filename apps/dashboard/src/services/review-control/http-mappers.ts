@@ -126,8 +126,8 @@ const jobStates = {
 
 const executionPhases = {
   cancelling: true,
-  codex_review: true,
-  codex_revision: true,
+  cli_review: true,
+  cli_revision: true,
   completing: true,
   leased: true,
   preparing: true,

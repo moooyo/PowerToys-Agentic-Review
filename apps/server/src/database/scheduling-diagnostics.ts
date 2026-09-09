@@ -810,16 +810,6 @@ function jobObservation(
         requirement: "evaluation_reproduction_mapping",
       });
     }
-    if (cell.plan.modelRequirements.required) {
-      reasons.add({
-        code: "plan_prerequisite_missing",
-        effect: "current_prerequisite",
-        requirement:
-          cell.plan.modelRequirements.expectedModelIdentityDigest === null
-            ? "verified_model_identity"
-            : "verified_model_execution",
-      });
-    }
   } else if ("validation" in template) {
     const run = readRun(database, template.validation.repositoryId, template.validation.runId, now);
     const request = run?.requests.find(

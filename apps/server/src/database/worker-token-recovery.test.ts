@@ -19,7 +19,8 @@ const workerCapabilities = {
   architecture: "x64",
   headless: true,
   interactiveDesktop: false,
-  codexVersion: "recovery-test",
+  cliEngine: "codex",
+  cliVersion: "recovery-test",
   recipeIds: ["pull-request-review"],
   labels: { pool: "recovery-test" },
 } as const;

@@ -8,31 +8,29 @@ import {
 } from "@agentic-review/codex";
 import {
   type EvidenceAssetManifest,
+  type FreezeValidationSummaryInputRequest,
+  type FreezeValidationSummaryInputResponse,
+  type FrozenValidationSummaryInputV1,
   GitHubWorkItemSchema,
   IssueValidationSummaryV1Schema,
   type JobExecutionEnvelopeV2,
-  type ModelInvocationScopeV1,
-  type ModelInvocationScopeV2,
   PullRequestValidationSummaryV1Schema,
   type ValidationProfileVersion,
   type ValidationReportV1,
-  type ValidationSummaryContextV1,
   type ValidationSummaryV1,
 } from "@agentic-review/contracts";
-import { modelInvocationScopeDigest } from "@agentic-review/domain";
 import type { TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LeaseLostError } from "../leases/errors.js";
 import type { JobExecutionContext } from "./job-executor.js";
 import type { JobWorkspaceProvider, PreparedJobWorkspace } from "./job-workspace.js";
-import { createSummaryModelInvocationScope } from "./model-output-artifact.js";
 import { modelArtifactEvaluationFixture } from "./model-output-artifact.testing.js";
 import type {
-  PreparedCodexOutputInput,
-  PreparedCodexOutputResult,
-  PreparedCodexOutputRunner,
-} from "./prepared-codex-output-runner.js";
+  PreparedCliOutputInput,
+  PreparedCliOutputResult,
+  PreparedCliOutputRunner,
+} from "./prepared-cli-output-runner.js";
 import {
   composeSummaryPrompt,
   createValidationSummaryContext,
@@ -247,7 +245,6 @@ function workspace(purpose: string): PreparedJobWorkspace {
     attemptDirectory: root,
     checkoutDirectory: `${root}\\checkout`,
     controlDirectory: `${root}\\control`,
-    codexHomeDirectory: `${root}\\codex`,
     tempDirectory: `${root}\\temp`,
     userProfileDirectory: `${root}\\user`,
     startDiskMonitoring: async (signal) => ({
@@ -397,8 +394,8 @@ function fixture(issue = false, overrides: Partial<ValidationSummaryExecutorOpti
       };
   let observedFileChange = false;
   const run = vi.fn<
-    (value: PreparedCodexOutputInput<TSchema>) => Promise<PreparedCodexOutputResult<unknown>>
-  >(async () => {
+    (value: PreparedCliOutputInput<TSchema>) => Promise<PreparedCliOutputResult<unknown>>
+  >(async (value) => {
     const canonical = createCanonicalResult(candidate);
     return {
       outcome: "succeeded",
@@ -407,6 +404,18 @@ function fixture(issue = false, overrides: Partial<ValidationSummaryExecutorOpti
       resultDigest: canonical.sha256,
       commandEvidence: { commands: [], commandCapture: "complete" },
       observedFileChange,
+      cliExecution: {
+        engine: "codex",
+        cliVersion: "fixture-version",
+        requestedModel: null,
+        processRequestId: "summary-process",
+        startedAt: now,
+        completedAt: "2026-09-08T00:00:01.000Z",
+        promptSha256: hash(value.prompt),
+        actualPromptSha256: hash(value.prompt),
+        outputSchemaSha256: value.authoritativeSchema.digest,
+        modelOutputSha256: canonical.sha256,
+      },
     };
   });
   const model = workspace("model");
@@ -428,7 +437,7 @@ function fixture(issue = false, overrides: Partial<ValidationSummaryExecutorOpti
   } satisfies JobExecutionContext;
   const options: ValidationSummaryExecutorOptions = {
     workspaceProvider: { prepare },
-    outputRunner: { run: run as PreparedCodexOutputRunner["run"] },
+    outputRunner: { run: run as PreparedCliOutputRunner["run"] },
     now: () => Date.parse(now),
     ...overrides,
   };
@@ -456,31 +465,56 @@ function fixture(issue = false, overrides: Partial<ValidationSummaryExecutorOpti
 
 afterEach(() => vi.useRealTimers());
 
-function summaryInvocationScope(
-  input: ValidationSummaryInput,
-  promptSha256: string,
-): ModelInvocationScopeV1 {
-  const envelope = input.envelope;
-  return {
-    schemaVersion: "ModelInvocationScopeV1",
-    repositoryId: envelope.validation.repositoryId,
-    evaluationId: "synthetic-evaluation",
-    cellId: "synthetic-cell",
-    runId: envelope.validation.runId,
-    requestId: envelope.validation.requestId,
-    jobId: envelope.lease.jobId,
-    attemptId: envelope.lease.runAttemptId,
-    invocationId: "synthetic-invocation",
-    authorizationId: "synthetic-authorization",
-    executionManifestSha256: "a".repeat(64),
-    promptSha256,
-    outputSchemaSha256: envelope.prompt.outputSchemaSha256,
-    expectedModelIdentitySha256: "b".repeat(64),
-    requestedModel: "synthetic-model",
+function summaryReceipt(
+  envelope: JobExecutionEnvelopeV2,
+  request: FreezeValidationSummaryInputRequest,
+): FreezeValidationSummaryInputResponse {
+  const validation = envelope.validation;
+  if (validation.schemaVersion !== "ValidationJobContextV2")
+    throw new Error("Expected an evaluation fixture.");
+  const canonical = createCanonicalResult(request.context);
+  const actualPromptSha256 = hash(
+    composeSummaryPrompt(envelope.prompt.renderedPrompt, canonical.json),
+  );
+  const document: FrozenValidationSummaryInputV1 = {
+    schemaVersion: "FrozenValidationSummaryInputV1",
+    inputId: request.inputId,
+    repositoryId: validation.repositoryId,
+    evaluationId: validation.purpose.evaluationId,
+    cellId: validation.purpose.cellId,
+    authorizationId: validation.authorization.id,
+    executionManifestSha256: validation.purpose.executionManifestSha256,
     workerNodeId: envelope.lease.workerNodeId,
     workerInstanceId: envelope.lease.workerInstanceId,
     leaseGeneration: envelope.lease.leaseGeneration,
+    sourcePromptSha256: envelope.prompt.promptSha256,
+    outputSchemaSha256: envelope.prompt.outputSchemaSha256,
+    contextSha256: canonical.sha256,
+    actualPromptSha256,
+    context: structuredClone(request.context),
+    frozenAt: now,
   };
+  return {
+    schemaVersion: "FreezeValidationSummaryInputResponseV1",
+    frozenAt: document.frozenAt,
+    reference: {
+      schemaVersion: "ValidationSummaryInputReferenceV1",
+      inputId: request.inputId,
+      inputSha256: createCanonicalResult(document).sha256,
+      sourcePromptSha256: document.sourcePromptSha256,
+      outputSchemaSha256: document.outputSchemaSha256,
+      contextSha256: canonical.sha256,
+      actualPromptSha256,
+    },
+  };
+}
+
+function evaluationSummaryFixture() {
+  const f = fixture(true);
+  Reflect.set(f.input, "envelope", modelArtifactEvaluationFixture("issue").envelope);
+  f.input.runnerReport.checks.length = 0;
+  f.input.runnerExecution.diagnostics.length = 0;
+  return f;
 }
 
 function attachEvidence(f: ReturnType<typeof fixture>) {
@@ -560,247 +594,170 @@ function attachEvidence(f: ReturnType<typeof fixture>) {
 }
 
 describe("optional ValidationSummary executor", () => {
-  it.each([false, true])(
-    "binds a complete evaluation summary context before dispatch (tampered=%s)",
-    async (tampered) => {
-      const f = fixture(true);
-      const evaluation = modelArtifactEvaluationFixture("issue").envelope;
-      Reflect.set(f.input, "envelope", evaluation);
-      f.input.runnerReport.checks.length = 0;
-      f.input.runnerExecution.diagnostics.length = 0;
-      let scope: ModelInvocationScopeV2 | undefined;
-      const createSummaryModelInvocation = vi.fn(
-        async (
-          envelope: JobExecutionEnvelopeV2,
-          _context: JobExecutionContext,
-          summaryContext: ValidationSummaryContextV1,
-        ) => {
-          const canonical = createCanonicalResult(summaryContext);
-          scope = createSummaryModelInvocationScope(envelope, "summary-invocation", {
-            schemaVersion: "ValidationSummaryInputReferenceV1",
-            inputId: "summary-input",
-            inputSha256: "e".repeat(64),
-            sourcePromptSha256: envelope.prompt.promptSha256,
-            outputSchemaSha256: envelope.prompt.outputSchemaSha256,
-            contextSha256: tampered ? "0".repeat(64) : canonical.sha256,
-            actualPromptSha256: hash(
-              composeSummaryPrompt(envelope.prompt.renderedPrompt, canonical.json),
-            ),
-          });
-          return { expectedScope: scope, open: vi.fn() };
+  it("freezes an evaluation context and retains the direct CLI output association", async () => {
+    const f = evaluationSummaryFixture();
+    const freezeValidationSummaryInput = vi.fn(
+      async (request: FreezeValidationSummaryInputRequest) =>
+        summaryReceipt(f.input.envelope, request),
+    );
+    const executor = new ValidationSummaryExecutor({
+      ...f.options,
+      summaryInputApi: { freezeValidationSummaryInput },
+    });
+    const completed = await executor.execute(f.input, f.context);
+    expect(completed).toMatchObject({
+      state: "completed",
+      modelOutputArtifact: {
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: f.input.envelope.lease.jobId,
+          runAttemptId: f.input.envelope.lease.runAttemptId,
+          cli: { kind: "codex", version: "fixture-version", requestedModel: null },
+          summaryInputRef: { contextSha256: createValidationSummaryContext(f.input).sha256 },
+        },
+      },
+    });
+    expect(freezeValidationSummaryInput).toHaveBeenCalledOnce();
+    expect(freezeValidationSummaryInput.mock.calls[0]?.[0]).toMatchObject({
+      lease: f.input.envelope.lease,
+      context: JSON.parse(createValidationSummaryContext(f.input).json),
+    });
+    expect(f.run.mock.calls[0]?.[0].launchPolicy).toBe("summary_read_only");
+    expect(f.input.runnerReport.modelSummary).toBeUndefined();
+    expect(f.capture).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "inputId",
+    "inputSha256",
+    "contextSha256",
+    "actualPromptSha256",
+    "sourcePromptSha256",
+    "outputSchemaSha256",
+  ] as const)(
+    "rejects a summary input receipt with an altered %s before running the CLI",
+    async (field) => {
+      const f = evaluationSummaryFixture();
+      const freezeValidationSummaryInput = vi.fn(
+        async (request: FreezeValidationSummaryInputRequest) => {
+          const receipt = summaryReceipt(f.input.envelope, request);
+          receipt.reference[field] = field === "inputId" ? "foreign-input" : "0".repeat(64);
+          return receipt;
         },
       );
+      const executor = new ValidationSummaryExecutor({
+        ...f.options,
+        summaryInputApi: { freezeValidationSummaryInput },
+      });
+      expect(await executor.execute(f.input, f.context)).toMatchObject({
+        state: "failed",
+        code: "SUMMARY_EXECUTION_FAILED",
+      });
+      expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a receipt computed for another execution even when its visible context hashes match", async () => {
+    const f = evaluationSummaryFixture();
+    const other = structuredClone(f.input.envelope);
+    if (other.validation.schemaVersion !== "ValidationJobContextV2")
+      throw new Error("Expected an evaluation fixture.");
+    other.validation.purpose.cellId = "another-cell";
+    const freezeValidationSummaryInput = vi.fn(
+      async (request: FreezeValidationSummaryInputRequest) => summaryReceipt(other, request),
+    );
+    const executor = new ValidationSummaryExecutor({
+      ...f.options,
+      summaryInputApi: { freezeValidationSummaryInput },
+    });
+    expect(await executor.execute(f.input, f.context)).toMatchObject({
+      state: "failed",
+      code: "SUMMARY_EXECUTION_FAILED",
+    });
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it("requires evaluation context storage without requiring a model service", async () => {
+    const f = evaluationSummaryFixture();
+    expect(await f.executor.execute(f.input, f.context)).toMatchObject({
+      state: "failed",
+      code: "SUMMARY_INPUT_UNAVAILABLE",
+    });
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it("propagates cancellation during input freezing without launching the CLI", async () => {
+    const f = evaluationSummaryFixture();
+    const freezeValidationSummaryInput = vi.fn(
+      (_request: FreezeValidationSummaryInputRequest, signal?: AbortSignal) =>
+        new Promise<FreezeValidationSummaryInputResponse>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
+    const executor = new ValidationSummaryExecutor({
+      ...f.options,
+      summaryInputApi: { freezeValidationSummaryInput },
+    });
+    const pending = executor.execute(f.input, f.context);
+    await vi.waitFor(() => expect(freezeValidationSummaryInput).toHaveBeenCalledOnce());
+    const lost = new LeaseLostError("Fixture lease lost", "lease_rejected");
+    f.controller.abort(lost);
+    await expect(pending).rejects.toBe(lost);
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary advice independent of evaluation context storage", async () => {
+    const f = fixture();
+    const freezeValidationSummaryInput = vi.fn(async () => {
+      throw new Error("Ordinary advice has no evaluation input.");
+    });
+    const executor = new ValidationSummaryExecutor({
+      ...f.options,
+      summaryInputApi: { freezeValidationSummaryInput },
+    });
+    expect(await executor.execute(f.input, f.context)).toMatchObject({ state: "completed" });
+    expect(freezeValidationSummaryInput).not.toHaveBeenCalled();
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    "retains Copilot advice with incomplete command capture and an unchanged worktree (evaluation=%s)",
+    async (evaluation) => {
+      const f = evaluation ? evaluationSummaryFixture() : fixture();
       const originalRun = f.run.getMockImplementation();
       if (!originalRun) throw new Error("Missing synthetic output runner.");
       f.run.mockImplementation(async (input) => {
         const result = await originalRun(input);
-        if (result.outcome !== "succeeded" || scope === undefined)
-          throw new Error("Expected synthetic output and scope.");
+        if (result.outcome === "failed") return result;
         return {
           ...result,
-          modelInvocation: {
-            executionAccepted: false,
-            modelOutputBound: true,
-            submission: {
-              schemaVersion: "ModelInvocationSubmissionV1",
-              invocationId: scope.invocationId,
-              scopeSha256: modelInvocationScopeDigest(scope),
-              receiptSetSha256: "e".repeat(64),
-              receivedAt: now,
-              consistency: {
-                state: "matched",
-                reasons: [],
-                observedIdentitySha256: scope.expectedModelIdentitySha256,
-              },
-              executionAccepted: false,
-            },
-          },
+          commandEvidence: { commands: [], commandCapture: "incomplete" },
+          cliExecution: { ...result.cliExecution, engine: "copilot" },
         };
       });
       const executor = new ValidationSummaryExecutor({
         ...f.options,
-        createSummaryModelInvocation,
+        summaryInputApi: {
+          freezeValidationSummaryInput: async (request) =>
+            summaryReceipt(f.input.envelope, request),
+        },
       });
-      const completed = await executor.execute(f.input, f.context);
-      if (tampered) {
-        expect(completed).toMatchObject({
-          state: "failed",
-          code: "SUMMARY_INVOCATION_SCOPE_INVALID",
-        });
-        expect(f.prepare).not.toHaveBeenCalled();
-        expect(f.run).not.toHaveBeenCalled();
-      } else {
-        expect(completed).toMatchObject({
-          state: "completed",
+      const result = await executor.execute(f.input, f.context);
+      expect(result).toMatchObject({ state: "completed" });
+      if (evaluation)
+        expect(result).toMatchObject({
           modelOutputArtifact: {
-            scope: { schemaVersion: "ModelInvocationScopeV2", purpose: "validation_summary" },
+            execution: { cli: { kind: "copilot" } },
+            executionEvidence: { commandCapture: "incomplete" },
           },
         });
-        expect(f.run.mock.calls[0]?.[0].launchPolicy).toBe("summary_read_only");
-        expect(createSummaryModelInvocation.mock.calls[0]?.[2]).toEqual(
-          JSON.parse(createValidationSummaryContext(f.input).json),
-        );
-        expect(f.input.runnerReport.modelSummary).toBeUndefined();
-        expect(f.capture).toHaveBeenCalledTimes(2);
-      }
-      expect(createSummaryModelInvocation).toHaveBeenCalledTimes(1);
+      expect(f.capture).toHaveBeenCalledTimes(2);
     },
   );
 
-  it("includes input freezing inside the optional summary timeout and preserves the parent", async () => {
-    vi.useFakeTimers();
-    const f = fixture(true);
-    const evaluation = modelArtifactEvaluationFixture("issue").envelope;
-    Reflect.set(f.input, "envelope", evaluation);
-    f.input.runnerReport.checks.length = 0;
-    f.input.runnerExecution.diagnostics.length = 0;
-    const createSummaryModelInvocation = vi.fn<
-      NonNullable<ValidationSummaryExecutorOptions["createSummaryModelInvocation"]>
-    >(
-      (_envelope, context) =>
-        new Promise((_resolve, reject) =>
-          context.signal.addEventListener("abort", () => reject(context.signal.reason), {
-            once: true,
-          }),
-        ),
-    );
-    const executor = new ValidationSummaryExecutor({ ...f.options, createSummaryModelInvocation });
-    const pending = executor.execute(f.input, f.context);
-    await vi.advanceTimersByTimeAsync(25000);
-    expect(await pending).toMatchObject({ state: "failed", code: "SUMMARY_TIMEOUT" });
-    expect(f.context.signal.aborted).toBe(false);
-    expect(f.prepare).not.toHaveBeenCalled();
-    expect(f.run).not.toHaveBeenCalled();
-  });
-  it.each([false, true])(
-    "preserves the attempt owner at the invocation factory while rejecting a frozen template digest (inherited=%s)",
-    async (inherited) => {
-      const f = fixture();
-      const owner = new AbortController();
-      const context = {
-        ...f.context,
-        ...(inherited ? { attemptSignal: owner.signal } : {}),
-      };
-      const scope = summaryInvocationScope(f.input, f.input.envelope.prompt.promptSha256);
-      const open = vi.fn(async () => {
-        throw new Error("No synthetic session may open.");
-      });
-      const createModelInvocation = vi.fn<
-        NonNullable<ValidationSummaryExecutorOptions["createModelInvocation"]>
-      >(() => ({ expectedScope: scope, open }));
-      const executor = new ValidationSummaryExecutor({
-        ...f.options,
-        createModelInvocation,
-      });
-      expect(executor.modelInvocationRequired).toBe(true);
-      expect(await executor.execute(f.input, context)).toMatchObject({
-        state: "failed",
-        code: "SUMMARY_INVOCATION_SCOPE_INVALID",
-      });
-      expect(f.run).not.toHaveBeenCalled();
-      expect(f.prepare).not.toHaveBeenCalled();
-      expect(open).not.toHaveBeenCalled();
-      const capturedContext = createModelInvocation.mock.calls[0]?.[1];
-      expect(capturedContext?.attemptSignal).toBe(inherited ? owner.signal : f.context.signal);
-      expect(capturedContext?.signal).not.toBe(context.signal);
-    },
-  );
-
-  it("does not forget a required invocation when its factory changes configuration", async () => {
-    const f = fixture();
-    const options: ValidationSummaryExecutorOptions = {
-      ...f.options,
-      createModelInvocation: () => {
-        Reflect.deleteProperty(options, "createModelInvocation");
-        return undefined as unknown as ReturnType<
-          NonNullable<ValidationSummaryExecutorOptions["createModelInvocation"]>
-        >;
-      },
-    };
-    const executor = new ValidationSummaryExecutor(options);
-    expect(await executor.execute(f.input, f.context)).toMatchObject({
-      state: "failed",
-      code: "SUMMARY_INVOCATION_SCOPE_INVALID",
-    });
-    expect(f.run).not.toHaveBeenCalled();
-    expect(f.prepare).not.toHaveBeenCalled();
-  });
-
-  it("rejects an evaluation invocation scope attached to an ordinary summary before dispatch", async () => {
-    const f = fixture();
-    const actual = hash(
-      composeSummaryPrompt(
-        f.input.envelope.prompt.renderedPrompt,
-        createValidationSummaryContext(f.input).json,
-      ),
-    );
-    const scope = summaryInvocationScope(f.input, actual);
-    const originalRun = f.run.getMockImplementation();
-    if (originalRun === undefined) throw new Error("Expected the pure output fixture.");
-    f.run.mockImplementation(async (input) => {
-      const output = await originalRun(input);
-      return output.outcome === "failed"
-        ? output
-        : {
-            ...output,
-            modelInvocation: {
-              executionAccepted: false,
-              modelOutputBound: true,
-              submission: {
-                schemaVersion: "ModelInvocationSubmissionV1",
-                invocationId: scope.invocationId,
-                scopeSha256: modelInvocationScopeDigest(scope),
-                receiptSetSha256: "c".repeat(64),
-                receivedAt: now,
-                consistency: {
-                  state: "matched",
-                  reasons: [],
-                  observedIdentitySha256: scope.expectedModelIdentitySha256,
-                },
-                executionAccepted: false,
-              },
-            },
-          };
-    });
-    const open = vi.fn(async () => {
-      throw new Error("The pure fixture cannot launch a collector.");
-    });
-    const executor = new ValidationSummaryExecutor({
-      ...f.options,
-      createModelInvocation: () => ({ expectedScope: scope, open }),
-    });
-    const attempt = await executor.execute(f.input, f.context);
-    expect(attempt).toMatchObject({ state: "failed", code: "SUMMARY_INVOCATION_SCOPE_INVALID" });
-    expect(attempt).not.toHaveProperty("summary");
-    expect(attempt).not.toHaveProperty("modelOutputArtifact");
-    expect(f.run).not.toHaveBeenCalled();
-    expect(f.prepare).not.toHaveBeenCalled();
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("discards an output lacking a recording when the parent explicitly requires collection", async () => {
-    const f = fixture();
-    const actual = hash(
-      composeSummaryPrompt(
-        f.input.envelope.prompt.renderedPrompt,
-        createValidationSummaryContext(f.input).json,
-      ),
-    );
-    const scope = summaryInvocationScope(f.input, actual);
-    const executor = new ValidationSummaryExecutor({
-      ...f.options,
-      createModelInvocation: () => ({
-        expectedScope: scope,
-        open: async () => {
-          throw new Error("No session may open.");
-        },
-      }),
-    });
-    const attempt = await executor.execute(f.input, f.context);
-    expect(attempt.state).toBe("failed");
-    expect(attempt).not.toHaveProperty("summary");
-    expect(attempt).not.toHaveProperty("modelOutputArtifact");
-  });
   it("passes scoped finalized manifests and remapped typed UI observations as read-only context", async () => {
     const f = fixture();
     const evidence = attachEvidence(f);
@@ -994,12 +951,12 @@ describe("optional ValidationSummary executor", () => {
   it.each(["runner context", "model output"])(
     "does not retain protected values from %s",
     async (source) => {
-      const f = fixture(false, { sensitiveValues: ["protected-provider-value"] });
-      if (source === "runner context") f.input.runnerReport.summary = "protected-provider-value";
-      else f.setCandidate({ ...f.candidate(), summary: "protected-provider-value" });
+      const f = fixture(false, { sensitiveValues: ["protected-fixture-value"] });
+      if (source === "runner context") f.input.runnerReport.summary = "protected-fixture-value";
+      else f.setCandidate({ ...f.candidate(), summary: "protected-fixture-value" });
       const result = await f.executor.execute(f.input, f.context);
       expect(result.state).toBe("failed");
-      expect(JSON.stringify(result)).not.toContain("protected-provider-value");
+      expect(JSON.stringify(result)).not.toContain("protected-fixture-value");
     },
   );
 
@@ -1014,17 +971,17 @@ describe("optional ValidationSummary executor", () => {
     });
     expect(unclassified.run).not.toHaveBeenCalled();
 
-    const classified = fixture(false, { sensitiveValues: ["protected-provider-value"] });
+    const classified = fixture(false, { sensitiveValues: ["protected-fixture-value"] });
     expect(await classified.executor.execute(classified.input, classified.context)).toMatchObject({
       state: "completed",
     });
     expect(classified.run).toHaveBeenCalledOnce();
     expect(classified.run.mock.calls[0]?.[0].sensitiveValues).toEqual([
       classified.input.envelope.lease.leaseToken,
-      "protected-provider-value",
+      "protected-fixture-value",
     ]);
-    const unsafe = fixture(false, { sensitiveValues: ["protected-provider-value"] });
-    unsafe.input.runnerReport.summary = "protected-provider-value";
+    const unsafe = fixture(false, { sensitiveValues: ["protected-fixture-value"] });
+    unsafe.input.runnerReport.summary = "protected-fixture-value";
     expect(await unsafe.executor.execute(unsafe.input, unsafe.context)).toMatchObject({
       state: "failed",
       code: "SUMMARY_CONTEXT_UNSAFE",
@@ -1252,7 +1209,7 @@ describe("optional ValidationSummary executor", () => {
     const f = fixture();
     f.run.mockImplementation(async (input) => {
       const fault = Object.assign(new Error("A model process did not settle"), {
-        code: "CODEX_STREAM_FAILED",
+        code: "CLI_STREAM_FAILED",
       });
       input.context.reportNodeHealthFault(fault);
       throw fault;
@@ -1276,7 +1233,7 @@ describe("optional ValidationSummary executor", () => {
     const f = fixture();
     f.capture.mockResolvedValueOnce("clean").mockImplementationOnce(async () => {
       f.run.mock.calls[0]?.[0].context.reportNodeHealthFault(
-        Object.assign(new Error("Late source observation fault"), { code: "CODEX_PROCESS_FAILED" }),
+        Object.assign(new Error("Late source observation fault"), { code: "CLI_PROCESS_FAILED" }),
       );
       return "clean";
     });

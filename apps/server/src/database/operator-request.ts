@@ -39,12 +39,6 @@ type Rule =
 // This is deliberately independent of the database operation registry. New internal RPCs do
 // not become operator-accessible merely because a handler was added to the Worker switch.
 const operatorRules = {
-  registerModelRuntime: { kind: "platform" },
-  changeModelRuntimeControl: { kind: "platform" },
-  listModelRuntimeRegistrations: { kind: "platform" },
-  getModelRuntimeRegistration: { kind: "platform" },
-  listModelRuntimeHistory: { kind: "platform" },
-  listEvaluationModelRuntimeOptions: { kind: "repository", permission: "configure" },
   createEvaluationBatch: { kind: "repository", permission: "configure" },
   cancelEvaluationBatch: { kind: "repository", permission: "configure" },
   listEvaluationBatches: { kind: "repository", permission: "read" },
@@ -55,7 +49,6 @@ const operatorRules = {
   getEvaluationReproductionPlan: { kind: "repository", permission: "read" },
   getEvaluationReproductionCell: { kind: "repository", permission: "read" },
   previewEvaluationReproduction: { kind: "repository", permission: "configure" },
-  listEvaluationCellModelInvocations: { kind: "repository", permission: "read" },
   getEvaluationAdjudicationContext: { kind: "repository", permission: "read" },
   listEvaluationAdjudicationHistory: { kind: "repository", permission: "read" },
   changeEvaluationAdjudication: { kind: "repository", permission: "review" },
@@ -173,12 +166,6 @@ export function isOperatorRequestOperation(
 }
 
 const actorOperations = new Set<OperatorRequestOperation>([
-  "registerModelRuntime",
-  "changeModelRuntimeControl",
-  "listModelRuntimeRegistrations",
-  "getModelRuntimeRegistration",
-  "listModelRuntimeHistory",
-  "listEvaluationModelRuntimeOptions",
   "createEvaluationBatch",
   "cancelEvaluationBatch",
   "listEvaluationBatches",
@@ -189,7 +176,6 @@ const actorOperations = new Set<OperatorRequestOperation>([
   "getEvaluationReproductionPlan",
   "getEvaluationReproductionCell",
   "previewEvaluationReproduction",
-  "listEvaluationCellModelInvocations",
   "getEvaluationAdjudicationContext",
   "listEvaluationAdjudicationHistory",
   "changeEvaluationAdjudication",

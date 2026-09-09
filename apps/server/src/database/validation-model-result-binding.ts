@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
+  composeSummaryPrompt,
   getValidationJobResultV2Issues,
   IssueTriageV2ModelOutputSchema,
   IssueTriageV2ModelResultSchema,
@@ -11,7 +12,6 @@ import * as C from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
 import { readEvaluationJobBindingInTransaction } from "./evaluation-execution.js";
-import { readModelInvocationHistoryInTransaction } from "./model-invocations.js";
 import {
   validateReviewModelBusinessRules,
   validateValidationModelSummaryBusinessRules,
@@ -33,18 +33,12 @@ export interface StoredValidationModelResultScope extends ValidationModelResultS
   readonly schemaId: string;
 }
 export interface ValidationModelResultBinding {
-  readonly invocationId: string;
-  readonly scopeSha256: string;
-  readonly receiptSetSha256: string;
-  readonly modelOutputSha256: string;
-  readonly collectionConsistency: C.ModelInvocationConsistency;
-  /** Content consistency does not authenticate the collector or authorize execution. */
-  readonly executionAccepted: false;
+  readonly execution: C.CliModelExecutionV1;
 }
 export class ValidationModelResultBindingError extends Error {
   readonly code = "VALIDATION_MODEL_RESULT_BINDING_INVALID";
   constructor() {
-    super("The raw validation model result does not match its immutable invocation binding.");
+    super("The raw validation model result does not match its task and CLI execution metadata.");
     this.name = "ValidationModelResultBindingError";
   }
 }
@@ -89,7 +83,7 @@ export function readValidationModelResultBindingInTransaction(
   try {
     const row = database
       .prepare(`SELECT job.execution_digest, CASE WHEN length(CAST(job.execution_json AS BLOB)) <= ${C.maximumReviewRunPlanUtf8Bytes} THEN job.execution_json END AS execution_json,
-      cell.id AS cell_id, cell.evaluation_id, attempt.worker_node_id, attempt.worker_instance_id, attempt.lease_generation
+      cell.id AS cell_id, cell.evaluation_id, attempt.worker_node_id, attempt.worker_instance_id, attempt.lease_generation, attempt.started_at
       FROM jobs AS job JOIN run_attempts AS attempt ON attempt.job_id = job.id AND attempt.id = ?
       JOIN review_run_job_links AS link ON link.job_id = job.id AND link.activation_number = 1
       JOIN review_runs AS run ON run.id = link.review_run_id AND run.purpose = 'evaluation'
@@ -108,6 +102,7 @@ export function readValidationModelResultBindingInTransaction(
           worker_node_id: string;
           worker_instance_id: string;
           lease_generation: number;
+          started_at: string;
         }
       | undefined;
     if (
@@ -159,27 +154,64 @@ export function readValidationModelResultBindingInTransaction(
         validateValidationModelSummaryBusinessRules(raw);
         break;
     }
-    const reference = result.modelReview.invocation;
-    const recorded = readModelInvocationHistoryInTransaction(
-      database,
-      {
-        repositoryId: scope.repositoryId,
-        evaluationId: cell.evaluationId,
-        cellId: cell.cellId,
-        invocationId: reference.invocationId,
-      },
-      now,
-    );
-    const opened = recorded.opening,
-      seal = recorded.seal,
-      submission = recorded.submission;
-    if (opened.scope.schemaVersion === "ModelInvocationScopeV2") {
-      const saved = readFrozenValidationSummaryInputInTransaction(
-        database,
-        opened.scope.inputRef.inputId,
+    const execution = result.modelReview.execution;
+    if (
+      execution.jobId !== scope.jobId ||
+      execution.runAttemptId !== scope.runAttemptId ||
+      execution.outputSchemaSha256 !== cell.prompt.outputSchemaSha256 ||
+      execution.outputSha256 !== sha256(canonicalJson(raw))
+    )
+      reject();
+    if (cell.request.workflowKind === "pr_ui" || cell.request.workflowKind === "issue_validation") {
+      const reference = execution.summaryInputRef;
+      if (!reference) reject();
+      const saved = readFrozenValidationSummaryInputInTransaction(database, reference.inputId);
+      if (!saved) reject();
+      const frozen = saved.document,
+        context = frozen.context;
+      const expectedPromptSha256 = sha256(
+        composeSummaryPrompt(cell.prompt.renderedPrompt, canonicalJson(context)),
       );
-      if (!saved || saved.inputSha256 !== opened.scope.inputRef.inputSha256) reject();
-      const context = saved.document.context;
+      if (
+        saved.inputSha256 !== reference.inputSha256 ||
+        frozen.repositoryId !== scope.repositoryId ||
+        frozen.evaluationId !== cell.evaluationId ||
+        frozen.cellId !== cell.cellId ||
+        frozen.authorizationId !== cell.plan.authorization.id ||
+        frozen.executionManifestSha256 !== cell.plan.purpose.executionManifestSha256 ||
+        frozen.workerNodeId !== row.worker_node_id ||
+        frozen.workerInstanceId !== row.worker_instance_id ||
+        frozen.leaseGeneration !== row.lease_generation ||
+        frozen.sourcePromptSha256 !== cell.prompt.promptSha256 ||
+        frozen.outputSchemaSha256 !== cell.prompt.outputSchemaSha256 ||
+        frozen.actualPromptSha256 !== expectedPromptSha256 ||
+        execution.promptSha256 !== expectedPromptSha256 ||
+        context.jobId !== scope.jobId ||
+        context.runAttemptId !== scope.runAttemptId ||
+        context.runId !== scope.runId ||
+        context.requestId !== scope.requestId ||
+        context.githubRepositoryId !== parsed.repository.githubRepositoryId ||
+        context.profileVersionId !== cell.request.profileVersion.id ||
+        context.planDigest !== cell.planDigest ||
+        context.revisionKey !== parsed.validation.revisionKey ||
+        canonicalJson(context.testedSourceRevision) !==
+          canonicalJson(parsed.validation.testedSourceRevision) ||
+        canonicalJson(context.reproduction ?? null) !==
+          canonicalJson(parsed.validation.reproduction ?? null) ||
+        frozen.frozenAt < row.started_at ||
+        (now !== undefined && frozen.frozenAt > now) ||
+        canonicalJson(reference) !==
+          canonicalJson({
+            schemaVersion: "ValidationSummaryInputReferenceV1",
+            inputId: frozen.inputId,
+            inputSha256: saved.inputSha256,
+            sourcePromptSha256: frozen.sourcePromptSha256,
+            outputSchemaSha256: frozen.outputSchemaSha256,
+            contextSha256: frozen.contextSha256,
+            actualPromptSha256: frozen.actualPromptSha256,
+          })
+      )
+        reject();
       if (
         canonicalJson(result.report) !== canonicalJson(context.report) ||
         result.execution.cleanupState !== context.execution.cleanupState ||
@@ -195,48 +227,19 @@ export function readValidationModelResultBindingInTransaction(
         ) !== canonicalJson(context.observationResults?.reproductionAssessment ?? null)
       )
         reject();
-    }
-    const modelOutputSha256 = sha256(canonicalJson(raw));
-    if (
-      !seal ||
-      !submission ||
-      submission.consistency.state !== "matched" ||
-      submission.executionAccepted !== false ||
-      opened.scope.jobId !== scope.jobId ||
-      opened.scope.attemptId !== scope.runAttemptId ||
-      opened.scope.runId !== scope.runId ||
-      opened.scope.requestId !== scope.requestId ||
-      opened.scope.workerNodeId !== row.worker_node_id ||
-      opened.scope.workerInstanceId !== row.worker_instance_id ||
-      opened.scope.leaseGeneration !== row.lease_generation ||
-      opened.scope.promptSha256 !== cell.prompt.promptSha256 ||
-      opened.scope.outputSchemaSha256 !== cell.prompt.outputSchemaSha256 ||
-      reference.scopeSha256 !== opened.scopeSha256 ||
-      reference.receiptSetSha256 !== seal.receiptSetSha256 ||
-      reference.receiptSetSha256 !== submission.receiptSetSha256 ||
-      reference.modelOutputSha256 !== modelOutputSha256 ||
-      seal.modelOutputSha256 !== modelOutputSha256 ||
-      seal.state !== "closed" ||
-      !seal.processClosed ||
-      !seal.relayClosed ||
-      seal.callCount === 0
-    )
+    } else if (
+      execution.summaryInputRef !== undefined ||
+      execution.promptSha256 !== cell.prompt.promptSha256
+    ) {
       reject();
-    return Object.freeze({
-      invocationId: reference.invocationId,
-      scopeSha256: reference.scopeSha256,
-      receiptSetSha256: reference.receiptSetSha256,
-      modelOutputSha256,
-      collectionConsistency: Object.freeze(submission.consistency),
-      executionAccepted: false as const,
-    });
+    }
+    return Object.freeze({ execution: Object.freeze(structuredClone(execution)) });
   } catch {
     return reject();
   }
 }
 
-/** Relation-only V1 callers retain their historical behavior and do not read a body or invocation
- * table. V2 callers must bind the actual stored body; stored creation time supplies its upper bound. */
+/** V2 callers bind the stored body to its task and prompt; creation time bounds frozen inputs. */
 export function validateStoredValidationModelResultBindingInTransaction(
   database: DatabaseSync,
   scope: StoredValidationModelResultScope,

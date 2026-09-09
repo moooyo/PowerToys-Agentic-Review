@@ -103,7 +103,7 @@ describe("evaluation completion through real sealed cells and admission", () => 
         .get(completion.runAttemptId),
     ).toMatchObject({ status: "running" });
   });
-  it("rejects schema-valid completed V2 model content on a profile-only completion before invocation admission", () => {
+  it("rejects schema-valid completed V2 CLI model content on a profile-only completion", () => {
     const fixture = createFixture(),
       cell = selected(fixture),
       completion = beginAttempt(fixture, cell);
@@ -120,11 +120,15 @@ describe("evaluation completion through real sealed cells and admission", () => 
       modelReview: {
         state: "completed",
         result: raw,
-        invocation: {
-          invocationId: "unrequested-model",
-          scopeSha256: "a".repeat(64),
-          receiptSetSha256: "b".repeat(64),
-          modelOutputSha256: sha256(canonicalJson(raw)),
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: cell.jobId,
+          runAttemptId: completion.runAttemptId,
+          cli: { kind: "codex", version: "fixture-cli", requestedModel: null },
+          promptSha256: sha256(cell.template.prompt.renderedPrompt),
+          outputSchemaSha256: "b".repeat(64),
+          outputSha256: sha256(canonicalJson(raw)),
+          exitCode: 0,
         },
         executionEvidence: {
           schemaVersion: "ReviewExecutionEvidenceV1",
@@ -147,9 +151,6 @@ describe("evaluation completion through real sealed cells and admission", () => 
     );
     expect(
       fixture.database.prepare("SELECT COUNT(*) AS count FROM validation_job_results").get(),
-    ).toMatchObject({ count: 0 });
-    expect(
-      fixture.database.prepare("SELECT COUNT(*) AS count FROM model_invocation_openings").get(),
     ).toMatchObject({ count: 0 });
   });
   it.each([
@@ -185,9 +186,6 @@ describe("evaluation completion through real sealed cells and admission", () => 
       expect(
         fixture.database.prepare("SELECT schema_id, result_json FROM validation_job_results").get(),
       ).toMatchObject({ schema_id: schemaVersion, result_json: json });
-      expect(
-        fixture.database.prepare("SELECT COUNT(*) AS count FROM model_invocation_openings").get(),
-      ).toMatchObject({ count: 0 });
     },
   );
   it("persists a fresh profile-only Issue result after source changes without projecting it as an ordinary reviewed revision", () => {
@@ -517,12 +515,11 @@ describe("evaluation completion through real sealed cells and admission", () => 
     );
   });
 
-  it("keeps Prompt-dependent PR evaluations unleased when no verified model identity is available", () => {
+  it("rejects a Prompt-dependent PR completion without a leased attempt", () => {
     const fixture = createFixture("pull_request");
     const cell = selected(fixture);
     expect(cell.plan.modelRequirements).toEqual({
       required: true,
-      expectedModelIdentityDigest: null,
     });
     const admission = getJobAdmissionRecord(fixture.database, cell.jobId);
     expect(admission).toMatchObject({
@@ -530,7 +527,7 @@ describe("evaluation completion through real sealed cells and admission", () => 
       admittedAt: null,
       ownershipState: "resolved",
     });
-    expect(admission.blockers).toContain("plan_prerequisite_missing");
+    expect(admission.blockers).not.toContain("plan_prerequisite_missing");
     expect(
       fixture.database
         .prepare("SELECT COUNT(*) AS count FROM run_attempts WHERE job_id = ?")

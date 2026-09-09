@@ -212,6 +212,15 @@ function readValidationSubmission(
   ) {
     invalidResult("Profile-only evaluations cannot submit model content.");
   }
+  if (
+    validation.schemaVersion === "ValidationJobContextV2" &&
+    validation.modelRequirements.required &&
+    checkedResult.schemaVersion === "ValidationJobResultV1" &&
+    (checkedResult.modelReview.state === "completed" ||
+      checkedResult.report.modelSummary !== undefined)
+  ) {
+    invalidResult("Model-backed evaluations require a V2 result bound to its CLI execution.");
+  }
   if (checkedResult.schemaVersion === "ValidationJobResultV1")
     validateModelSummary(checkedResult, template);
   validateProbeReceiptObservations({
@@ -252,14 +261,9 @@ function readValidationSubmission(
       }
     } catch {
       invalidResult(
-        "The raw validation model result does not match its immutable invocation binding.",
+        "The raw validation model result does not match its task and CLI execution metadata.",
       );
     }
-    // The content reader returns collection consistency only. No current input supplies
-    // independent execution acceptance, and this path must never create a persistence brand.
-    invalidTemplate(
-      "Model-backed ValidationJobResultV2 completion has not been accepted for execution.",
-    );
   }
   if (
     checkedResult.schemaVersion === "ValidationJobResultV1" &&
@@ -590,9 +594,6 @@ function readEvaluationCompletionIdentity(
       !binding.repositoryEnabled ||
       binding.controlStatus !== "active" ||
       binding.reproductionReadiness.state === "blocked" ||
-      // Required model completion remains unavailable until independently sealed, fenced
-      // invocation receipts are consumed here. A registered expectation alone is insufficient.
-      binding.plan.modelRequirements.required ||
       binding.runId !== row.review_run_id ||
       binding.repositoryId !== row.repository_id ||
       binding.requestId !== row.request_id ||

@@ -104,7 +104,7 @@ async function startRuntime(fixture: RuntimeFixture): Promise<void> {
     operatorAccess: { administrators: [{ issuer: operator.issuer, subject: operator.subject }] },
   });
   fixture.database = database;
-  expect(await database.request("ping", {})).toMatchObject({ schemaVersion: 33 });
+  expect(await database.request("ping", {})).toMatchObject({ schemaVersion: 31 });
   const auth = new OperatorAuthService({
     config: {
       mode: "loopback",
@@ -526,7 +526,7 @@ describe.skipIf(process.platform !== "linux")(
           persisted
             .prepare("SELECT COUNT(*) AS count, MAX(version) AS latest FROM schema_migrations")
             .get(),
-        ).toEqual({ count: 33, latest: 33 });
+        ).toEqual({ count: 31, latest: 31 });
         expect(persisted.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
         expect(
           persisted

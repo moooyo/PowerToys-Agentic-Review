@@ -12,31 +12,6 @@ export const evaluationBatchTestScope = {
   evaluationId: "evaluation-a",
 };
 
-export function batchModelRuntimeFixture(id = "model-runtime-a"): C.ModelRuntimeRegistrationV1 {
-  return {
-    schemaVersion: "ModelRuntimeRegistrationV1",
-    id,
-    name: "Expected evaluation runtime",
-    requestedModel: "requested-fixture-model",
-    identity: {
-      schemaVersion: "ModelRuntimeIdentityV1",
-      providerId: "fixture-provider",
-      endpointSha256: "a".repeat(64),
-      modelId: "expected-fixture-model",
-      client: {
-        kind: "codex_cli",
-        version: "fixture-cli",
-        executableSha256: "b".repeat(64),
-        launchPolicySha256: "c".repeat(64),
-      },
-      relay: { implementationSha256: "d".repeat(64), policySha256: "e".repeat(64) },
-    },
-    identitySha256: "f".repeat(64),
-    createdAt: evaluationTestTime,
-    createdBy: { ...evaluationBatchTestActor },
-  };
-}
-
 export function batchCreateRequestFixture(): C.EvaluationBatchCreateRequest {
   const version = suiteVersionFixture();
   return {
@@ -169,7 +144,7 @@ export function batchDetailFixture(): C.EvaluationBatchDetailV1 {
   const configuration = (arm: C.EvaluationArm) => ({
     profile: profile(arm),
     prompt: prompt(arm),
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
   });
   return {
     schemaVersion: "EvaluationBatchDetailV1",
@@ -297,7 +272,7 @@ export function cellResultFixture(): C.EvaluationCellResultV1 {
     workflowKind: "pr_static_build",
     target: "headless",
     createdAt: evaluationTestTime,
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
     evidenceComplete: true,
     report: {
       schemaVersion: "ValidationReportV1",
@@ -335,6 +310,16 @@ export function cellResultFixture(): C.EvaluationCellResultV1 {
       cleanupState: "completed",
     },
     modelReview: {
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "job-baseline",
+        runAttemptId: "attempt-baseline",
+        cli: { kind: "codex", version: "fixture-cli-1", requestedModel: null },
+        promptSha256: "d".repeat(64),
+        outputSchemaSha256: "e".repeat(64),
+        outputSha256: "f".repeat(64),
+        exitCode: 0,
+      },
       state: "completed",
       summary: "Model advice",
       recommendation: "approve",

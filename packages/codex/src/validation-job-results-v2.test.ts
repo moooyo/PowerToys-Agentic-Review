@@ -22,7 +22,7 @@ import {
   ValidationJobResultV2Schema,
 } from "./validation-job-results-v2.js";
 
-// Synthetic raw outputs and metadata exercise format consistency, never execution acceptance.
+// Synthetic raw outputs and metadata exercise task/output consistency.
 const digest = (value: number) => value.toString(16).padStart(64, "0");
 const evidence = (): ReviewExecutionEvidence => ({
   schemaVersion: "ReviewExecutionEvidenceV1",
@@ -125,11 +125,15 @@ function fixture(
     modelReview: {
       state: "completed",
       result,
-      invocation: {
-        invocationId: "invocation-1",
-        scopeSha256: digest(1),
-        receiptSetSha256: digest(2),
-        modelOutputSha256: createCanonicalResult(result).sha256,
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "job-1",
+        runAttemptId: "attempt-1",
+        cli: { kind: "codex", version: "1.0.0", requestedModel: null },
+        promptSha256: digest(1),
+        outputSchemaSha256: digest(2),
+        outputSha256: createCanonicalResult(result).sha256,
+        exitCode: 0,
       },
       executionEvidence: evidence(),
     },
@@ -158,7 +162,7 @@ function completed(value: ValidationJobResultV2): Completed {
 }
 const rebind = (value: ValidationJobResultV2) => {
   const model = completed(value);
-  model.invocation.modelOutputSha256 = createCanonicalResult(model.result).sha256;
+  model.execution.outputSha256 = createCanonicalResult(model.result).sha256;
 };
 
 describe("strict raw ValidationJobResultV2", () => {
@@ -176,7 +180,7 @@ describe("strict raw ValidationJobResultV2", () => {
     },
   );
   it.each(["not_requested", "failed"] as const)(
-    "keeps %s without invented output or invocation references",
+    "keeps %s without invented output or CLI execution metadata",
     (state) => {
       const value = fixture();
       value.modelReview =
@@ -190,7 +194,7 @@ describe("strict raw ValidationJobResultV2", () => {
       expect(getValidationJobResultV2Issues(value)).toEqual([]);
       expect(getValidationModelSummary(value)).toBeNull();
       expect(getValidationReviewModel(value)).toBeNull();
-      for (const field of ["result", "invocation", "executionEvidence"]) {
+      for (const field of ["result", "execution", "executionEvidence"]) {
         expect(
           getValidationJobResultV2Issues({
             ...value,
@@ -237,22 +241,17 @@ describe("strict raw ValidationJobResultV2", () => {
       "ValidationJobResultV2 report checks must contain only runner observations.",
     );
   });
-  it.each(["invocationId", "scopeSha256", "receiptSetSha256", "modelOutputSha256"] as const)(
-    "requires an exact nonnull %s reference",
+  it.each(["jobId", "runAttemptId", "promptSha256", "outputSchemaSha256", "outputSha256"] as const)(
+    "requires exact nonnull %s execution metadata",
     (field) => {
       const value = fixture();
-      for (const replacement of [
-        null,
-        "",
-        "bad value",
-        `${completed(value).invocation[field]}\n`,
-      ]) {
+      for (const replacement of [null, "", "bad value", `${completed(value).execution[field]}\n`]) {
         expect(
           getValidationJobResultV2Issues({
             ...value,
             modelReview: {
               ...completed(value),
-              invocation: { ...completed(value).invocation, [field]: replacement },
+              execution: { ...completed(value).execution, [field]: replacement },
             },
           }),
         ).not.toEqual([]);
@@ -263,24 +262,24 @@ describe("strict raw ValidationJobResultV2", () => {
     const value = fixture();
     completed(value).result.summary = "Changed raw text.";
     expect(getValidationJobResultV2Issues(value)).toContain(
-      "The raw model result must match the referenced canonical model output digest.",
+      "The raw model result must match its canonical CLI output digest.",
     );
     rebind(value);
     expect(getValidationJobResultV2Issues(value)).toEqual([]);
-    const original = completed(value).invocation.modelOutputSha256;
+    const original = completed(value).execution.outputSha256;
     completed(value).executionEvidence.worktree = { status: "unknown", source: "not_observed" };
     expect(getValidationJobResultV2Issues(value)).toEqual([]);
-    expect(completed(value).invocation.modelOutputSha256).toBe(original);
+    expect(completed(value).execution.outputSha256).toBe(original);
     expect(
       getValidationJobResultV2Issues({ ...value, rawSha256: original, enrichedSha256: digest(3) }),
     ).not.toEqual([]);
   });
-  it("leaves independent scope and receipt authentication to the owner", () => {
+  it("leaves task and prompt ownership checks to the Server", () => {
     const value = fixture();
-    completed(value).invocation.scopeSha256 = digest(99);
-    completed(value).invocation.receiptSetSha256 = digest(98);
+    completed(value).execution.promptSha256 = digest(99);
+    completed(value).execution.outputSchemaSha256 = digest(98);
     expect(getValidationJobResultV2Issues(value)).toEqual([]);
-    expect(getValidationJobResultV2Issues({ ...value, executionAccepted: true })).not.toEqual([]);
+    expect(getValidationJobResultV2Issues({ ...value, unexpectedField: true })).not.toEqual([]);
   });
   it.each([
     { state: "failed", code: "lowercase", message: "Failure." },

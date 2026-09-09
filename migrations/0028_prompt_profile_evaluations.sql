@@ -801,6 +801,17 @@ BEGIN
       AND json_extract(job.execution_json, '$.executionPolicy.allowedRecipeIds') IS '[]'
       AND json_extract(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.executionEnvelope') IS '2'
       AND json_extract(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.validationEvaluation') IS '1'
+      AND CASE WHEN json_extract(run.plan_json, '$.modelRequirements.required') IS 1 THEN (
+        json_extract(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.' || CASE
+          WHEN request.workflow_kind IN ('pr_static_build', 'issue_triage') THEN 'validationEvaluationReviewModel'
+          ELSE 'validationEvaluationSummaryModel' END) IS '1'
+        AND json_type(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.' || CASE
+          WHEN request.workflow_kind IN ('pr_static_build', 'issue_triage') THEN 'validationEvaluationSummaryModel'
+          ELSE 'validationEvaluationReviewModel' END) IS NULL
+      ) ELSE (
+        json_type(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.validationEvaluationReviewModel') IS NULL
+        AND json_type(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.validationEvaluationSummaryModel') IS NULL
+      ) END
       AND json_extract(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.' || CASE request.target
         WHEN 'headless' THEN 'validationHeadless' WHEN 'web' THEN 'validationWeb' ELSE 'validationWindowsDesktop' END) IS '1'
       -- Extensions are derived from the immutable request. No extra or missing labels are allowed.
@@ -842,6 +853,7 @@ BEGIN
       ) THEN json_extract(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.uiAssertionObservation') IS '1'
       ELSE json_type(job.execution_json, '$.executionPolicy.requiredCapabilityLabels.uiAssertionObservation') IS NULL END
       AND (SELECT COUNT(*) FROM json_each(job.execution_json, '$.executionPolicy.requiredCapabilityLabels')) = 3
+        + (json_extract(run.plan_json, '$.modelRequirements.required') IS 1)
         + EXISTS (
           SELECT 1 FROM json_each(run.plan_json, '$.reproduction.binding.cases') AS reproduction_case
           WHERE json_extract(reproduction_case.value, '$.requestId') IS request.request_id
@@ -1656,21 +1668,12 @@ BEGIN
       AND json_type(NEW.plan_json, '$.purpose.trial') IS 'integer'
       AND json_extract(NEW.plan_json, '$.purpose.trial') IS 1
       AND json_extract(NEW.plan_json, '$.purpose.upstreamMutationPolicy') IS 'forbidden'
-      AND (SELECT COUNT(*) FROM json_each(NEW.plan_json, '$.modelRequirements')) = 2
+      AND (SELECT COUNT(*) FROM json_each(NEW.plan_json, '$.modelRequirements')) = 1
       AND NOT EXISTS (
         SELECT 1 FROM json_each(NEW.plan_json, '$.modelRequirements')
-        WHERE key NOT IN ('required', 'expectedModelIdentityDigest')
+        WHERE key NOT IN ('required')
       )
       AND json_type(NEW.plan_json, '$.modelRequirements.required') IN ('true', 'false')
-      AND (
-        json_type(NEW.plan_json, '$.modelRequirements.expectedModelIdentityDigest') IS 'null'
-        OR (
-          json_type(NEW.plan_json, '$.modelRequirements.expectedModelIdentityDigest') IS 'text'
-          AND length(json_extract(NEW.plan_json, '$.modelRequirements.expectedModelIdentityDigest')) = 64
-          AND length(CAST(json_extract(NEW.plan_json, '$.modelRequirements.expectedModelIdentityDigest') AS BLOB)) = 64
-          AND json_extract(NEW.plan_json, '$.modelRequirements.expectedModelIdentityDigest') NOT GLOB '*[^0-9a-f]*'
-        )
-      )
       AND (SELECT COUNT(*) FROM json_each(NEW.plan_json, '$.jobs[0]')) = 7
       AND NOT EXISTS (
         SELECT 1 FROM json_each(NEW.plan_json, '$.jobs[0]')
@@ -2122,6 +2125,14 @@ CREATE TRIGGER tr_evaluation_insert BEFORE INSERT ON evaluations BEGIN
       JOIN prompt_versions AS prompt ON prompt.id = json_extract(arm.value, '$.prompt.version.id')
       JOIN prompt_templates AS template ON template.id = prompt.template_id
       WHERE version.id = json_extract(arm.value, '$.profileVersion.id')
+        AND arm.type IS 'object'
+        AND (SELECT COUNT(*) FROM json_each(arm.value)) = 3
+        AND NOT EXISTS (SELECT 1 FROM json_each(arm.value) WHERE key NOT IN ('profileVersion','prompt','modelRequirements'))
+        AND NOT EXISTS (SELECT parent, key FROM json_tree(arm.value) WHERE key IS NOT NULL GROUP BY parent, key HAVING COUNT(*) != 1)
+        AND json_type(arm.value, '$.modelRequirements') IS 'object'
+        AND (SELECT COUNT(*) FROM json_each(arm.value, '$.modelRequirements')) = 1
+        AND NOT EXISTS (SELECT 1 FROM json_each(arm.value, '$.modelRequirements') WHERE key NOT IN ('required'))
+        AND json_type(arm.value, '$.modelRequirements.required') IN ('true','false')
         AND profile.repository_id = NEW.repository_id AND profile.workflow_kind = NEW.workflow_kind AND profile.target = NEW.target
         AND template.workflow_kind = NEW.workflow_kind AND json_extract(arm.value, '$.prompt.workflowKind') IS NEW.workflow_kind
         AND json_extract(arm.value, '$.profileVersion.repositoryId') IS NEW.repository_id
@@ -2147,7 +2158,6 @@ CREATE TRIGGER tr_evaluation_insert BEFORE INSERT ON evaluations BEGIN
         AND json_extract(arm.value, '$.prompt.version.createdBy') IS prompt.created_by
         AND json_extract(NEW.scoring_plan_json, '$.' || arm.key || '.profileVersionId') IS version.id
         AND json_extract(NEW.scoring_plan_json, '$.' || arm.key || '.promptVersionId') IS prompt.id
-        AND json_extract(NEW.scoring_plan_json, '$.' || arm.key || '.modelIdentityDigest') IS json_extract(arm.value, '$.modelRequirements.expectedModelIdentityDigest')
     )
   ) THEN RAISE(ABORT, 'evaluation configuration must retain real published versions') END;
 END;
@@ -2338,4 +2348,3 @@ BEGIN SELECT RAISE(ABORT, 'evaluation records cannot be replaced'); END;
 CREATE TRIGGER tr_evaluation_assessments_immutable_update BEFORE UPDATE ON evaluation_assessments BEGIN SELECT RAISE(ABORT, 'evaluation records are immutable'); END;
 
 CREATE TRIGGER tr_evaluation_assessments_immutable_delete BEFORE DELETE ON evaluation_assessments BEGIN SELECT RAISE(ABORT, 'evaluation records cannot be deleted'); END;
-

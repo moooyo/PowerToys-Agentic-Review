@@ -1,6 +1,6 @@
 import type { ProLayoutProps } from "@ant-design/pro-components";
 
-const defaultSettings: ProLayoutProps = {
+const defaultSettings = {
   title: "Agentic Review",
   layout: "side",
   navTheme: "light",
@@ -29,6 +29,6 @@ const defaultSettings: ProLayoutProps = {
       paddingBlockPageContainerContent: 24,
     },
   },
-};
+} satisfies ProLayoutProps;
 
 export default defaultSettings;

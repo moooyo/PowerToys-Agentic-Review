@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
-import { createCanonicalResult, PrReviewPlanV2ModelOutputSchema } from "@agentic-review/codex";
 import {
+  createCanonicalResult,
+  PrReviewPlanV2ModelOutputSchema,
+  type ValidationJobResultV2ModelResult,
+} from "@agentic-review/codex";
+import {
+  getEvaluationModelRequiredCapabilityLabels,
   IssueValidationSummaryV1Schema,
   type JobExecutionEnvelopeV2,
-  type ModelInvocationScopeV1,
-  type ModelRuntimeRegistrationV1,
+  type ReviewExecutionEvidence,
   type ValidationJobContextV2,
+  type ValidationSummaryInputReferenceV1,
 } from "@agentic-review/contracts";
+import { createModelOutputArtifact } from "./model-output-artifact.js";
+import type { CliExecutionObservation } from "./prepared-cli-output-runner.js";
 
 export type ModelArtifactEvaluationEnvelope = JobExecutionEnvelopeV2 & {
   validation: ValidationJobContextV2;
@@ -25,7 +32,7 @@ export function refreshModelArtifactSourceDigest(envelope: ModelArtifactEvaluati
   }).sha256;
 }
 
-/** Complete synthetic data only; this fixture establishes neither a lease nor execution acceptance. */
+/** Complete synthetic data only; no CLI or external repository is accessed. */
 export function modelArtifactEvaluationFixture(kind: "pull_request" | "issue" = "pull_request") {
   const createdAt = "2026-09-08T00:00:00.000Z";
   const baseSha = "a".repeat(40),
@@ -61,29 +68,6 @@ export function modelArtifactEvaluationFixture(kind: "pull_request" | "issue" = 
     requiredCapabilities: [],
     hardTimeoutMs: 60_000,
     noProgressTimeoutMs: 30_000,
-  };
-  const identity: ModelRuntimeRegistrationV1["identity"] = {
-    schemaVersion: "ModelRuntimeIdentityV1",
-    providerId: "fixture-provider",
-    endpointSha256: hash("fixture-endpoint"),
-    modelId: "fixture-model",
-    client: {
-      kind: "codex_cli",
-      version: "fixture-version",
-      executableSha256: hash("fixture-cli"),
-      launchPolicySha256: hash("fixture-launch"),
-    },
-    relay: { implementationSha256: hash("fixture-relay"), policySha256: hash("fixture-policy") },
-  };
-  const registration: ModelRuntimeRegistrationV1 = {
-    schemaVersion: "ModelRuntimeRegistrationV1",
-    id: "registration-a",
-    name: "Synthetic registration",
-    requestedModel: "alias-a",
-    identity,
-    identitySha256: createCanonicalResult(identity).sha256,
-    createdAt,
-    createdBy: { issuer: "fixture", subject: "operator" },
   };
   const source: ValidationJobContextV2["source"] = {
     schemaVersion: "EvaluationSourceSnapshotV1",
@@ -185,6 +169,7 @@ export function modelArtifactEvaluationFixture(kind: "pull_request" | "issue" = 
         executionEnvelope: "2",
         validationEvaluation: "1",
         validationHeadless: "1",
+        ...getEvaluationModelRequiredCapabilityLabels(workflowKind, true),
       },
     },
     validation: {
@@ -244,7 +229,7 @@ export function modelArtifactEvaluationFixture(kind: "pull_request" | "issue" = 
         schemaVersion: "EvaluationExecutionAuthorizationV1",
         kind: "operator_evaluation",
         id: "authorization-a",
-        actor: registration.createdBy,
+        actor: { issuer: "fixture", subject: "operator" },
         authorizedAt: createdAt,
         evaluationId: "evaluation-a",
         repositoryId: "repo-a",
@@ -255,37 +240,85 @@ export function modelArtifactEvaluationFixture(kind: "pull_request" | "issue" = 
         cellManifestSha256: "d".repeat(64),
         executionManifestSha256: "a".repeat(64),
       },
-      modelRequirements: {
-        required: true,
-        expectedModelIdentityDigest: registration.identitySha256,
-        runtimeRegistration: {
-          registrationId: registration.id,
-          registrationSha256: createCanonicalResult(registration).sha256,
-        },
-      },
-      modelRuntimeRegistration: registration,
+      modelRequirements: { required: true },
     },
   };
   refreshModelArtifactSourceDigest(envelope);
-  const scope: ModelInvocationScopeV1 = {
-    schemaVersion: "ModelInvocationScopeV1",
-    repositoryId: "repo-a",
-    evaluationId: "evaluation-a",
-    cellId: "cell-a",
-    runId: "run-a",
-    requestId: "request-a",
-    jobId: "job-a",
-    attemptId: "attempt-a",
-    invocationId: "invocation-a",
-    authorizationId: "authorization-a",
-    executionManifestSha256: envelope.validation.purpose.executionManifestSha256,
-    promptSha256: envelope.prompt.promptSha256,
+  const rawResult: ValidationJobResultV2ModelResult =
+    kind === "issue"
+      ? {
+          schemaVersion: "ValidationSummaryV1",
+          workItemKind: "issue",
+          summary: "Original model output.",
+          reproductionConclusion: "inconclusive",
+          observations: [],
+        }
+      : {
+          schemaVersion: "PrReviewPlanV2",
+          summary: "Original model output.",
+          assessment: "comment",
+          findings: [],
+          requestedRecipeIds: [],
+          verification: {
+            status: "not_run",
+            summary: "The example token=placeholder is model text.",
+            commands: [],
+          },
+        };
+  const canonical = createCanonicalResult(rawResult);
+  const summaryInputRef: ValidationSummaryInputReferenceV1 | undefined =
+    kind === "issue"
+      ? {
+          schemaVersion: "ValidationSummaryInputReferenceV1",
+          inputId: "summary-input-a",
+          inputSha256: hash("synthetic-summary-input"),
+          sourcePromptSha256: envelope.prompt.promptSha256,
+          outputSchemaSha256: envelope.prompt.outputSchemaSha256,
+          contextSha256: hash("synthetic-summary-context"),
+          actualPromptSha256: hash("synthetic-summary-prompt"),
+        }
+      : undefined;
+  const cliExecution: CliExecutionObservation = {
+    engine: "codex",
+    cliVersion: "fixture-version",
+    requestedModel: null,
+    processRequestId: "process-request-a",
+    startedAt: createdAt,
+    completedAt: "2026-09-08T00:00:01.000Z",
+    promptSha256: summaryInputRef?.actualPromptSha256 ?? envelope.prompt.promptSha256,
+    actualPromptSha256: summaryInputRef?.actualPromptSha256 ?? envelope.prompt.promptSha256,
     outputSchemaSha256: envelope.prompt.outputSchemaSha256,
-    expectedModelIdentitySha256: registration.identitySha256,
-    requestedModel: registration.requestedModel,
-    workerNodeId: "worker-a",
-    workerInstanceId: "instance-a",
-    leaseGeneration: 1,
+    modelOutputSha256: canonical.sha256,
   };
-  return { envelope, scope };
+  const executionEvidence: ReviewExecutionEvidence = {
+    schemaVersion: "ReviewExecutionEvidenceV1",
+    source: "worker",
+    commandCapture: "complete",
+    commands: [{ itemId: "command-1", command: "git status", status: "completed", exitCode: 0 }],
+    worktree: { status: "modified", source: "git_status" },
+  };
+  const preparedOutput = {
+    outcome: "succeeded" as const,
+    result: rawResult,
+    canonicalResultJson: canonical.json,
+    resultDigest: canonical.sha256,
+    cliExecution,
+  };
+  const artifact = createModelOutputArtifact({
+    output: preparedOutput,
+    executionEvidence,
+    envelope,
+    ...(summaryInputRef === undefined ? {} : { summaryInputRef }),
+  });
+  return {
+    envelope,
+    rawResult,
+    resultJson: canonical.json,
+    canonical,
+    cliExecution,
+    executionEvidence,
+    preparedOutput,
+    summaryInputRef,
+    artifact,
+  };
 }

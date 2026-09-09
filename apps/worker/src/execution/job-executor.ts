@@ -47,7 +47,6 @@ export interface JobExecutor {
 
 /** Model delegation retains the complete frozen profile and execution purpose. */
 export interface ProfileModelExecutor {
-  readonly modelInvocationRequired?: boolean;
   executeProfileModel(
     envelope: JobExecutionEnvelopeV2,
     context: JobExecutionContext,
@@ -64,14 +63,13 @@ export class PlaceholderJobExecutor implements JobExecutor {
     return {
       outcome: "failed",
       code: "EXECUTOR_NOT_IMPLEMENTED",
-      message: "The Codex job executor has not been installed in this worker build.",
+      message: "The CLI job executor has not been installed in this worker build.",
       retryable: false,
     };
   }
 }
 
 export {
-  buildReviewCodexConfigurationOverrides,
   type ReviewFileHandle,
   type ReviewFileIO,
   ReviewJobExecutor,

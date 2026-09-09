@@ -470,7 +470,7 @@ function validateRequestedRecipes(
 }
 
 /** Business checks shared by bounded raw model payloads and existing enriched review results.
- * Schema, source authority and execution acceptance remain the caller's separate responsibility. */
+ * Schema, source authority and completion identity remain the caller's separate responsibility. */
 export function validateReviewModelBusinessRules(
   result: ReviewModelResult,
   allowedRecipeIds: readonly string[],

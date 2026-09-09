@@ -1,7 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { Sha256Schema } from "./common.js";
 
-// Keep this reference a leaf: invocation scopes must not import the context/envelope graph.
+// Keep this reference a leaf so CLI execution metadata does not import the context/envelope graph.
 export const ValidationSummaryInputReferenceV1Schema = Type.Object(
   {
     schemaVersion: Type.Literal("ValidationSummaryInputReferenceV1"),

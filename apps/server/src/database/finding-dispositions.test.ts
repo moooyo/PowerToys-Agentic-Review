@@ -1353,7 +1353,7 @@ describe("finding immutable audit and atomic projection", () => {
     runMigrations(f.database, migrationsDirectory);
     expect(
       f.database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
-    ).toMatchObject({ version: 33 });
+    ).toMatchObject({ version: 31 });
     expect(f.database.prepare("SELECT * FROM finding_disposition_events").all()).toEqual(audit);
     expect(f.database.prepare("SELECT * FROM finding_dispositions").all()).toEqual(projection);
     expect(f.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);

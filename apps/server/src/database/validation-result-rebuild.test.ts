@@ -6,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import { FormatRegistry } from "@sinclair/typebox";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
+import { createEvaluationExecutionTemplate } from "../scheduling/validation-job-factory.js";
 import {
   beginAttempt,
   completedAt,
+  context,
   createEvaluationCompletionFixture,
   type EvaluationCompletionFixture,
   resultFor,
@@ -18,6 +20,7 @@ import {
   validate,
 } from "./evaluation-completion.testing.js";
 import * as migrations from "./migrations.js";
+import { createModelCliFixture } from "./model-cli.testing.js";
 import {
   runValidationResultRebuild,
   ValidationResultRebuildError,
@@ -29,9 +32,9 @@ import {
 } from "./validation-results.js";
 
 const migrationDirectory = fileURLToPath(new URL("../../../../migrations", import.meta.url));
-const migrationName = "0031_validation_model_outputs.sql";
+const migrationName = "0029_validation_model_outputs.sql";
 const directories: string[] = [];
-const fixtures: EvaluationCompletionFixture[] = [];
+const fixtures: Pick<EvaluationCompletionFixture, "database" | "close">[] = [];
 const formats = new Map(["date-time", "uri"].map((key) => [key, FormatRegistry.Get(key)]));
 const runMigrations = migrations.runMigrations;
 type SchemaRow = {
@@ -148,16 +151,21 @@ async function install(directory: string, sql?: string): Promise<void> {
   );
 }
 
-async function fixture(arms: readonly ("baseline" | "candidate")[] = ["baseline", "candidate"]) {
-  const directory = await mkdtemp(join(tmpdir(), "validation-result-rebuild-m30-"));
+async function historicalDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "validation-result-rebuild-m28-"));
   directories.push(directory);
   const historical = (await readdir(migrationDirectory)).filter(
-    (name) => /^\d{4}_.*\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 30,
+    (name) => /^\d{4}_.*\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 28,
   );
-  expect(historical).toHaveLength(30);
+  expect(historical).toHaveLength(28);
   await Promise.all(
     historical.map((name) => copyFile(join(migrationDirectory, name), join(directory, name))),
   );
+  return directory;
+}
+
+async function fixture(arms: readonly ("baseline" | "candidate")[] = ["baseline", "candidate"]) {
+  const directory = await historicalDirectory();
   const redirected = vi
     .spyOn(migrations, "runMigrations")
     .mockImplementation((database) => runMigrations(database, directory));
@@ -168,7 +176,7 @@ async function fixture(arms: readonly ("baseline" | "candidate")[] = ["baseline"
     redirected.mockRestore();
   }
   fixtures.push(value);
-  expect(migrations.inspectMigrationState(value.database, directory).currentVersion).toBe(30);
+  expect(migrations.inspectMigrationState(value.database, directory).currentVersion).toBe(28);
   for (const [index, arm] of arms.entries()) {
     const cell = selected(value, arm),
       completion = beginAttempt(value, cell);
@@ -209,7 +217,7 @@ async function fixture(arms: readonly ("baseline" | "candidate")[] = ["baseline"
 
 function rawRow(validated: ValidatedValidationResult, json: string): Record<string, SQLInputValue> {
   return {
-    id: "invalid-v2-result",
+    id: "synthetic-v2-result",
     run_attempt_id: validated.runAttemptId,
     job_id: validated.jobId,
     repository_id: validated.repositoryId,
@@ -235,8 +243,8 @@ function rawRow(validated: ValidatedValidationResult, json: string): Record<stri
   };
 }
 
-describe.skipIf(process.platform !== "linux")("M31 validation result storage rebuild", () => {
-  it("preserves authentic M30 V1 bytes, explicit rowids, indexes, foreign keys and current M29 trigger definitions", async () => {
+describe.skipIf(process.platform !== "linux")("M29 validation result storage rebuild", () => {
+  it("preserves authentic M28 V1 bytes, explicit rowids, indexes, foreign keys and current trigger definitions", async () => {
     const value = await fixture(),
       before = snapshot(value.database);
     expect(before.rows.map((row) => row.physical_rowid).sort()).toEqual([41, 87]);
@@ -252,7 +260,7 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     );
     expect(currentTrigger?.sql).toContain("evaluation");
     await install(value.directory);
-    expect(runMigrations(value.database, value.directory)).toBe(31);
+    expect(runMigrations(value.database, value.directory)).toBe(29);
     const after = snapshot(value.database);
     expect(after.rows).toEqual(before.rows);
     expect(after.children).toEqual(before.children);
@@ -286,7 +294,7 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     ).toThrow(/immutable/u);
     expect(() => value.database.exec("DELETE FROM validation_job_results")).toThrow(/immutable/u);
     const exec = vi.spyOn(value.database, "exec");
-    expect(runMigrations(value.database, value.directory)).toBe(31);
+    expect(runMigrations(value.database, value.directory)).toBe(29);
     expect(exec.mock.calls.some(([sql]) => sql.includes("PRAGMA foreign_keys = OFF"))).toBe(false);
     expect(snapshot(value.database)).toEqual(after);
   });
@@ -306,7 +314,7 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
       `SELECT observe_validation_rebuild_window();\n${await readFile(join(migrationDirectory, migrationName), "utf8")}`,
     );
     const exec = vi.spyOn(value.database, "exec");
-    expect(runMigrations(value.database, value.directory)).toBe(31);
+    expect(runMigrations(value.database, value.directory)).toBe(29);
     expect(windows).toEqual([{ transaction: true, foreignKeys: 0 }]);
     const calls = exec.mock.calls.map(([sql]) => sql),
       off = calls.indexOf("PRAGMA foreign_keys = OFF");
@@ -321,7 +329,7 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     const value = await fixture(["baseline"]);
     const history = snapshot(value.database).rows;
     await install(value.directory);
-    expect(runMigrations(value.database, value.directory)).toBe(31);
+    expect(runMigrations(value.database, value.directory)).toBe(29);
     const cell = selected(value, "candidate"),
       completion = beginAttempt(value, cell);
     const result = { ...resultFor(cell), schemaVersion: "ValidationJobResultV2" as const };
@@ -477,32 +485,65 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     expect(foreignKeys(value.database)).toBe(0);
     injected.mockRestore();
     value.database.exec("PRAGMA foreign_keys = ON");
-    expect(runMigrations(value.database, value.directory)).toBe(31);
+    expect(runMigrations(value.database, value.directory)).toBe(29);
     expect(snapshot(value.database).rows).toEqual(beforeRows);
     expect(value.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   it.each([
+    "valid CLI execution",
     "duplicate model summary",
     "model-sourced check",
     "enriched raw model",
-    "missing invocation",
-    "unrecorded invocation",
-  ] as const)("rejects V2 %s at the rebuilt storage boundary", async (invalidKind) => {
-    const value = await fixture([]);
-    await install(value.directory);
-    expect(runMigrations(value.database, value.directory)).toBe(31);
-    const cell = selected(value),
-      completion = beginAttempt(value, cell);
+    "missing execution",
+    "wrong execution job",
+    "wrong execution attempt",
+    "wrong execution prompt",
+    "wrong execution output schema",
+  ] as const)("enforces V2 %s at the rebuilt storage boundary", async (caseKind) => {
+    const directory = await historicalDirectory();
+    const value = createModelCliFixture({ kind: "pull_request", migrationsDirectory: directory });
+    fixtures.push(value);
+    await install(directory);
+    expect(runMigrations(value.database, directory)).toBe(29);
+    const selectedCell = value.cells.find((entry) => entry.arm === "baseline");
+    if (!selectedCell)
+      throw new Error("The required-model storage fixture needs its baseline cell.");
+    const cell = {
+      ...selectedCell,
+      template: createEvaluationExecutionTemplate({
+        runId: selectedCell.run_id,
+        plan: selectedCell.plan,
+        planDigest: selectedCell.plan_digest,
+        frozenPrompt: selectedCell.prompt,
+      }),
+    };
+    expect(cell.plan.modelRequirements.required).toBe(true);
+    const completion = context(value.database, cell);
     const original = resultFor(cell),
-      validated = validate(value, completion, original);
+      validated = transaction(value.database, () =>
+        validateValidationCompletion(
+          value.database,
+          completion,
+          sha256(canonicalJson(original)),
+          original,
+        ),
+      );
     const report = structuredClone(original.report) as Record<string, unknown>;
     const summary = {
       schemaVersion: "ValidationSummaryV1",
-      workItemKind: "issue",
+      workItemKind: "pull_request",
       summary: "Synthetic advice.",
       observations: [],
-      reproductionConclusion: "inconclusive",
+      recommendation: "approve",
+    };
+    const model = {
+      schemaVersion: "PrReviewPlanV2",
+      summary: "Synthetic CLI review.",
+      assessment: "approve",
+      findings: [],
+      requestedRecipeIds: [],
+      verification: { status: "not_run", summary: "Runner checks are separate.", commands: [] },
     };
     const executionEvidence = {
       schemaVersion: "ReviewExecutionEvidenceV1",
@@ -511,9 +552,19 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
       commands: [],
       worktree: { status: "clean", source: "git_status" },
     };
+    const modelExecution = {
+      schemaVersion: "CliModelExecutionV1",
+      jobId: completion.jobId,
+      runAttemptId: completion.runAttemptId,
+      cli: { kind: "codex", version: "1.0.0", requestedModel: null },
+      promptSha256: cell.prompt.promptSha256,
+      outputSchemaSha256: cell.prompt.outputSchemaSha256,
+      outputSha256: sha256(canonicalJson(model)),
+      exitCode: 0,
+    };
     let modelReview: Record<string, unknown> = { state: "not_requested" };
-    if (invalidKind === "duplicate model summary") report.modelSummary = summary;
-    else if (invalidKind === "model-sourced check") {
+    if (caseKind === "duplicate model summary") report.modelSummary = summary;
+    else if (caseKind === "model-sourced check") {
       const checks = report.checks as { source: string }[];
       const check = checks[0];
       if (!check) throw new Error("The synthetic check is absent.");
@@ -521,16 +572,18 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     } else {
       modelReview = {
         state: "completed",
-        result: invalidKind === "enriched raw model" ? { ...summary, executionEvidence } : summary,
+        result: caseKind === "enriched raw model" ? { ...model, executionEvidence } : model,
         executionEvidence,
-        invocation: {
-          invocationId: "not-recorded",
-          scopeSha256: "a".repeat(64),
-          receiptSetSha256: "b".repeat(64),
-          modelOutputSha256: sha256(canonicalJson(summary)),
-        },
+        execution: modelExecution,
       };
-      if (invalidKind === "missing invocation") delete modelReview.invocation;
+      if (caseKind === "missing execution") delete modelReview.execution;
+      else if (caseKind === "wrong execution job") modelExecution.jobId = "another-job";
+      else if (caseKind === "wrong execution attempt")
+        modelExecution.runAttemptId = "another-attempt";
+      else if (caseKind === "wrong execution prompt")
+        modelExecution.promptSha256 = sha256("another-prompt");
+      else if (caseKind === "wrong execution output schema")
+        modelExecution.outputSchemaSha256 = sha256("another-output-schema");
     }
     const json = canonicalJson({
       schemaVersion: "ValidationJobResultV2",
@@ -541,24 +594,26 @@ describe.skipIf(process.platform !== "linux")("M31 validation result storage reb
     const row = rawRow(validated, json);
     value.database.exec("BEGIN IMMEDIATE");
     try {
-      // Negative SQL probes align the real settled attempt identity, then challenge only the
-      // new row format. They never manufacture an accepted owner result or run a model.
+      // Storage probes align a synthetic settled attempt and exercise the rebuilt row format.
+      // The accepted control establishes valid CLI metadata without running the owner or a model.
       value.database
         .prepare(
           "UPDATE run_attempts SET status = 'succeeded', result_digest = ?, result_json = ?, ended_at = ? WHERE id = ?",
         )
         .run(sha256(json), json, completedAt, completion.runAttemptId);
       const columns = Object.keys(row);
-      expect(() =>
+      const insert = () =>
         value.database
           .prepare(
             `INSERT INTO validation_job_results (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
           )
-          .run(...Object.values(row)),
-      ).toThrow();
+          .run(...Object.values(row));
+      const accepted = caseKind === "valid CLI execution";
+      if (accepted) expect(insert).not.toThrow();
+      else expect(insert).toThrow();
       expect(
         value.database.prepare("SELECT COUNT(*) AS count FROM validation_job_results").get()?.count,
-      ).toBe(0);
+      ).toBe(accepted ? 1 : 0);
     } finally {
       value.database.exec("ROLLBACK");
     }

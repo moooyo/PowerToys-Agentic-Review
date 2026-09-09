@@ -291,7 +291,8 @@ function workerCapabilities(labels: Record<string, string> = {}): WorkerCapabili
     architecture: "x64",
     headless: true,
     interactiveDesktop: true,
-    codexVersion: "test",
+    cliEngine: "codex",
+    cliVersion: "test",
     recipeIds: [],
     labels,
   };

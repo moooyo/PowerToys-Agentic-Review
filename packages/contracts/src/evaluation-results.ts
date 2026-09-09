@@ -153,6 +153,12 @@ export function getEvaluationCellResultIssues(value: unknown): string[] {
     issues.push("The normalized evaluation model review must not be duplicated in the report.");
   if (result.evidenceComplete && result.evidenceVerificationPending === true)
     issues.push("Evaluation evidence cannot be complete while verification is pending.");
+  const modelExecution = result.modelReview.execution;
+  if (
+    modelExecution !== null &&
+    (modelExecution.jobId !== result.jobId || modelExecution.runAttemptId !== result.runAttemptId)
+  )
+    issues.push("CLI execution must belong to the evaluation result's exact job and run attempt.");
 
   const expected = [
     ...result.modelReview.findings.map((finding, ordinal) => ({

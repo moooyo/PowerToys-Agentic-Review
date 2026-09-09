@@ -238,11 +238,15 @@ describe("independent stored probe admission", () => {
           commands: [],
           worktree: { status: "clean", source: "git_status" },
         },
-        invocation: {
-          invocationId: "projection-only",
-          scopeSha256: "a".repeat(64),
-          receiptSetSha256: "b".repeat(64),
-          modelOutputSha256: sha256(canonicalJson(model)),
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: "projection-job",
+          runAttemptId: "projection-attempt",
+          cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
+          promptSha256: "a".repeat(64),
+          outputSchemaSha256: "b".repeat(64),
+          outputSha256: sha256(canonicalJson(model)),
+          exitCode: 0,
         },
       },
     };

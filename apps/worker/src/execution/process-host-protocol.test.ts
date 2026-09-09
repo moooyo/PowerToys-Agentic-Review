@@ -546,6 +546,61 @@ describe("ProcessHost NDJSON contract", () => {
     ).toThrow(/collide case-insensitively/u);
   });
 
+  it("preserves Windows host environment names and configured CLI tokens", () => {
+    const environment = {
+      "ProgramFiles(x86)": "C:\\Program Files (x86)",
+      "CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
+      "env-with-dash": "value",
+      "env.with.dot": "value",
+      "\u914d\u7f6e": "value",
+      CLI_TOKEN: "synthetic-cli-token",
+      EMPTY: "",
+    };
+    const frame = encodeProcessHostRequest(startRequest({ ...launchSpec(), environment }));
+    expect(JSON.parse(frame.toString("utf8")).spec.environment).toEqual(environment);
+  });
+
+  it.each(["X".repeat(128), "\u{1f680}".repeat(64)])(
+    "accepts an environment name at the 128 UTF-16 unit boundary",
+    (name) => {
+      expect(() =>
+        encodeProcessHostRequest(
+          startRequest({ ...launchSpec(), environment: { [name]: "value" } }),
+        ),
+      ).not.toThrow();
+    },
+  );
+
+  it.each([
+    "",
+    "BAD=NAME",
+    "BAD\0NAME",
+    "BAD\nNAME",
+    "BAD\u007fNAME",
+    "BAD\u0085NAME",
+    "BAD\uD800NAME",
+    "x".repeat(129),
+    "\u{1f680}".repeat(65),
+  ])("rejects invalid Windows environment name %j", (name) => {
+    expect(() =>
+      encodeProcessHostRequest(startRequest({ ...launchSpec(), environment: { [name]: "value" } })),
+    ).toThrow(ProcessHostProtocolError);
+  });
+
+  it("accepts 512 host environment entries and rejects an additional entry", () => {
+    const environment = Object.fromEntries(
+      Array.from({ length: 512 }, (_, index) => [`ENV_${index}`, "value"]),
+    );
+    expect(() =>
+      encodeProcessHostRequest(startRequest({ ...launchSpec(), environment })),
+    ).not.toThrow();
+    expect(() =>
+      encodeProcessHostRequest(
+        startRequest({ ...launchSpec(), environment: { ...environment, EXTRA_ENV: "value" } }),
+      ),
+    ).toThrow(ProcessHostProtocolError);
+  });
+
   it("accepts the exact resource boundaries", () => {
     const minimums = Object.fromEntries(
       Object.entries(processHostResourceBounds).map(([name, bounds]) => [name, bounds.minimum]),

@@ -16,8 +16,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 if ($parseErrors.Count -ne 0) { throw 'The Worker launcher must parse without errors.' }
 
-# Load only the pure PATH and command-resolution helpers; never execute launcher preflight or Worker.
-foreach ($name in @('Resolve-WorkerNodeApplication', 'Get-WorkerProcessPath')) {
+# Load only pure configuration, PATH and resolution helpers; never execute launcher preflight or Worker.
+foreach ($name in @('Assert-Config', 'Resolve-WorkerNodeApplication', 'Get-WorkerProcessPath')) {
     $functions = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -30,6 +30,60 @@ function Assert-Equal {
     param([object]$Actual, [object]$Expected, [string]$Message)
     if ($Actual -cne $Expected) { throw $Message }
 }
+
+function Assert-Throws {
+    param([scriptblock]$Action, [string]$ExpectedMessage)
+    $caughtMessage = $null
+    try { & $Action } catch { $caughtMessage = $_.Exception.Message }
+    if ($caughtMessage -cne $ExpectedMessage) {
+        throw "Expected configuration rejection: $ExpectedMessage"
+    }
+}
+
+$minimalExecutionConfig = @{
+    WORKER_SERVER_URL = 'https://review.example.invalid'
+    WORKER_EXECUTION_ENABLED = 'true'
+    WORKER_TRUSTED_EXECUTABLE_ROOT = 'D:\Trusted'
+    WORKER_PROCESS_HOST_PATH = 'D:\Trusted\AgenticReview.ProcessHost.exe'
+    WORKER_GIT_EXECUTABLE_PATH = 'D:\Trusted\git.exe'
+    WORKER_WORKSPACE_ROOT_DIRECTORY = 'D:\Worker\Workspaces'
+    WORKER_EXECUTION_TEMP_DIRECTORY = 'D:\Worker\Temp'
+    WORKER_PROCESS_HOST_SHA256 = 'a' * 64
+    WORKER_GIT_SHA256 = 'b' * 64
+    WORKER_CLI_ENGINE = 'codex'
+    WORKER_CLI_EXECUTABLE_PATH = 'C:\Users\Worker\AppData\Local\Microsoft\WinGet\Links\codex.exe'
+}
+
+# No CLI version, digest, home, provider configuration, or authentication file is needed by preflight.
+foreach ($engine in @('codex', 'copilot')) {
+    $cliConfig = $minimalExecutionConfig.Clone()
+    $cliConfig['WORKER_CLI_ENGINE'] = $engine
+    Assert-Config -Config $cliConfig
+}
+
+$modelFreeConfig = $minimalExecutionConfig.Clone()
+$modelFreeConfig['WORKER_MODEL_EXECUTION_ENABLED'] = 'false'
+$modelFreeConfig.Remove('WORKER_CLI_ENGINE')
+$modelFreeConfig.Remove('WORKER_CLI_EXECUTABLE_PATH')
+Assert-Config -Config $modelFreeConfig
+Assert-Config -Config @{ WORKER_SERVER_URL = 'https://review.example.invalid' }
+
+foreach ($requiredName in @('WORKER_CLI_ENGINE', 'WORKER_CLI_EXECUTABLE_PATH')) {
+    $missingCliConfig = $minimalExecutionConfig.Clone()
+    $missingCliConfig.Remove($requiredName)
+    Assert-Throws -Action { Assert-Config -Config $missingCliConfig } `
+        -ExpectedMessage "$requiredName is required when model execution is enabled."
+}
+
+$invalidEngineConfig = $minimalExecutionConfig.Clone()
+$invalidEngineConfig['WORKER_CLI_ENGINE'] = 'unsupported'
+Assert-Throws -Action { Assert-Config -Config $invalidEngineConfig } `
+    -ExpectedMessage 'WORKER_CLI_ENGINE must be codex or copilot.'
+
+$missingHostPinConfig = $minimalExecutionConfig.Clone()
+$missingHostPinConfig.Remove('WORKER_PROCESS_HOST_SHA256')
+Assert-Throws -Action { Assert-Config -Config $missingHostPinConfig } `
+    -ExpectedMessage 'WORKER_PROCESS_HOST_SHA256 is required when WORKER_EXECUTION_ENABLED=true.'
 
 $originalPath = $env:PATH
 $normalized = Get-WorkerProcessPath -NodeDirectory 'C:\Selected Node' -InheritedPath ' ; C:\Windows\System32 ;c:\selected node;C:\Tools;C:\WINDOWS\SYSTEM32;; '

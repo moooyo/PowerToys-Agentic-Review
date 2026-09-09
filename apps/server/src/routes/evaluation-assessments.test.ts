@@ -41,12 +41,10 @@ const plan: C.EvaluationScoringPlanV1 = {
   baseline: {
     profileVersionId: "profile-baseline",
     promptVersionId: "prompt-baseline",
-    modelIdentityDigest: null,
   },
   candidate: {
     profileVersionId: "profile-candidate",
     promptVersionId: "prompt-candidate",
-    modelIdentityDigest: null,
   },
   cases: [
     {

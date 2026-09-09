@@ -47,7 +47,7 @@ export const processHostResourceBounds = Object.freeze({
 const maximumSafeInteger = Number.MAX_SAFE_INTEGER;
 const requestIdPattern = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
 const textWithoutNulPattern = "^[^\\u0000]*$";
-const environmentNamePattern = "^[A-Za-z_][A-Za-z0-9_]{0,127}$";
+const environmentNamePattern = "^[^=\\u0000-\\u001f\\u007f-\\u009f]{1,128}(?![\\s\\S])";
 const base64Pattern = "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$";
 const maximumUnsignedFileTime = 18_446_744_073_709_551_615n;
 
@@ -95,7 +95,7 @@ export const ProcessLaunchSpecSchema = Type.Object(
     environment: Type.Record(
       Type.String({ minLength: 1, maxLength: 128, pattern: environmentNamePattern }),
       Type.String({ maxLength: 32_767, pattern: textWithoutNulPattern }),
-      { maxProperties: 128 },
+      { maxProperties: 512, additionalProperties: false },
     ),
     standardInput: Type.Optional(
       Type.String({
@@ -398,6 +398,7 @@ export function assertValidProcessLaunchSpec(spec: unknown): asserts spec is Pro
   }
   const environmentNames = new Map<string, string>();
   for (const [name, value] of Object.entries(spec.environment)) {
+    assertWellFormedUnicode(name, "spec.environment variable name");
     const folded = name.toUpperCase();
     const previous = environmentNames.get(folded);
     if (previous !== undefined) {

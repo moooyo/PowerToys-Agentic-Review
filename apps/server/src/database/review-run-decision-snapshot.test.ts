@@ -246,7 +246,7 @@ describe("review run decision snapshots", () => {
       validationModelResultBinding,
       "validateStoredValidationModelResultBindingInTransaction",
     ).mockImplementation(() => {
-      throw new Error("The owner invocation is invalid.");
+      throw new Error("The CLI result binding is invalid.");
     });
     expect(() => read(f.database)).toThrowError(
       expect.objectContaining({ code: "PLATFORM_CORRUPT" }),

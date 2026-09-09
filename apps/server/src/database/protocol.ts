@@ -39,7 +39,6 @@ import type { EvaluationAdjudicationOperationMap } from "./evaluation-adjudicati
 import type { EvaluationAssessmentOperationMap } from "./evaluation-assessments.js";
 import type { EvaluationEvidenceOperationMap } from "./evaluation-evidence.js";
 import type { EvaluationManagementOperationMap } from "./evaluation-management.js";
-import type { EvaluationModelInvocationOperationMap } from "./evaluation-model-invocations.js";
 import type { EvaluationBatchOperationMap } from "./evaluation-queries.js";
 import type { EvaluationReproductionOperationMap } from "./evaluation-reproduction.js";
 import type { EvaluationResultOperationMap } from "./evaluation-results.js";
@@ -51,8 +50,6 @@ import type {
   WriteGitHubPollingProjectionInput,
 } from "./github-polling-state.js";
 import type { RepositoryOperationMap } from "./managed-repositories.js";
-import type { ModelInvocationOperationMap } from "./model-invocations.js";
-import type { ModelRuntimeRegistryOperationMap } from "./model-runtime-registry.js";
 import type { NotificationOperationMap } from "./notifications.js";
 import type { OperatorAccessOperationMap } from "./operator-access.js";
 import type {
@@ -316,9 +313,6 @@ export interface DatabaseOperationMap
     EvaluationEvidenceOperationMap,
     EvaluationAdjudicationOperationMap,
     EvaluationAssessmentOperationMap,
-    ModelRuntimeRegistryOperationMap,
-    EvaluationModelInvocationOperationMap,
-    ModelInvocationOperationMap,
     ValidationSummaryInputOperationMap {
   readonly admitPendingJobs: {
     readonly input: { readonly limit?: number };

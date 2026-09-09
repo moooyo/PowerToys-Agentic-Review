@@ -22,11 +22,11 @@ Other tasks retain the default `test-env` policy unless locally authorized.
 Prepare all of the following before starting:
 
 - A Windows host explicitly authorized for this verification, its execution account, and the
-  trusted Worker bundle, Node.js, Git, Codex CLI, and ProcessHost artifacts to deploy.
+  trusted Worker bundle, Node.js, Git, selected Codex or Copilot CLI, and ProcessHost artifacts.
 - PowerShell 7 or newer (`pwsh`) for the evidence collector and the commands in this runbook.
   Windows PowerShell 5.1 lacks the .NET path API used by the collector.
-- `worker-config.psd1` populated from the template with absolute paths, pinned versions and
-  SHA-256 digests, execution enabled, and distinct shared-cache and attempt-workspace directories.
+- `worker-config.psd1` populated from the template with absolute paths, CLI engine selection,
+  ProcessHost/Git integrity settings, execution enabled, and distinct shared-cache and workspace roots.
 - The node-scoped Worker authentication profile provisioned at
   `C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json` with private ACLs, and a reachable Server.
 - Operator access to the Dashboard and read-only access to the deployed Server's job, attempt,
@@ -43,40 +43,37 @@ Prepare all of the following before starting:
 - Repository prerequisites and trusted instructions identifying real build and test commands,
   a way to retain their actual execution evidence, and an operation that remains active long
   enough to capture descendants and request cancellation.
-- A documented Codex authentication mechanism for the pinned CLI under the Worker execution
-  account and dedicated persistent profile described below. Current native CLI compatibility
-  checks use Codex 0.145.0.
+- A completed login through the selected CLI under the Worker execution account and the same
+  optional CLI home that the deployment uses. Record the startup-observed CLI version.
 
 Missing host authorization, deployment files, credentials, permitted PR actions, or evidence
 access blocks the corresponding acceptance step. Do not substitute a local development machine
 without authorization. A Linux `test-env` can run Linux verification but cannot establish Windows
 Job Object, keyring, descendant, or workspace behavior. Passing CI does not complete this runbook.
 
-The Worker uses `WORKER_EXECUTION_PROFILE_DIRECTORY` as its dedicated persistent `CODEX_HOME`.
-Provision a regular UTF-8 `config.toml` (at most 64 KiB) and supported file/keyring authentication or
-provider `auth.command`/`auth.args` under the actual Worker identity. The Worker loads configuration
-at startup, preserves authentication storage, and does not copy it into tasks. A successful login in
-a different default profile is insufficient. Record only sanitized readiness facts and the selected
-authentication mechanism; never include credential contents or process environments in evidence.
+Configure `WORKER_CLI_ENGINE` as `codex` or `copilot` and set the absolute
+`WORKER_CLI_EXECUTABLE_PATH`. `WORKER_CLI_HOME` and `WORKER_CLI_MODEL` are optional. Startup runs a
+bounded `--version` detection through ProcessHost, with a 20-second and 64-KiB limit, and records
+the first stdout line. There is no manually entered CLI version; `WORKER_CLI_SHA256` is optional.
+CLI installation may be outside the infrastructure trusted root, including a Windows WinGet
+application link whose installed target is resolved at startup.
+Keep persistent CLI login storage outside disposable workspaces and temporary directories.
 
-Before orphan cleanup, startup rejects profile/runtime directory links, aliases, overlap, and
-observed identity changes. Task `USERPROFILE`, temporary files, control files, and the checkout
-remain per-attempt. The loader allows only model/provider/auth settings. Codex then uses
-`--ignore-user-config`, `--config approval_policy="never"`, and project trust `untrusted` to suppress
-other configuration while retaining `AGENTS.md` and the trusted-code admission policy. MCP, plugins,
-hooks, notifications, and inherited extra writable roots are disabled; only the current task
-temporary directory is added to worktree write access.
+The CLI owns login, provider configuration and HTTP traffic. The project does not inspect or copy
+CLI auth/provider files and has no global provider registry, HTTP relay, provider call ledger or
+provider metadata policy. Record only sanitized readiness facts, selected engine, observed CLI
+version and configured model. Never include authentication files, credential contents or process
+environments in evidence. If the CLI cannot authenticate, keep real execution blocked. See the
+[current execution design](../../docs/design/2026-09-10-cli-owned-model-execution.md).
 
-Provider header values are carried in native-Codex-only `CODEX_PROVIDER_HEADER_<n>` variables,
-not argv. Tool shells receive exactly `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and
-`USERPROFILE`, without the Codex home or credentials. Ambient API keys are not forwarded; provider
-`env_key` and directly supplied `env_http_headers` are rejected. If the dedicated runtime cannot
-authenticate, keep real execution blocked.
+ProcessHost enforces `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_PROCESSES`,
+`WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES` for model tasks. These are
+operational limits; they do not prove filesystem or network isolation within the VM.
 
 ## Evidence setup and Worker registration
 
 Create a private evidence directory outside Worker data and repository worktrees. Record the
-deployed commit, binary versions and digests, host identity, execution account, UTC start time,
+deployed commit, observed CLI version, ProcessHost/Git integrity evidence, host identity, execution account, UTC start time,
 repository ID, PR URL, and expected base/head SHAs. Preserve the non-secret policy values used for
 this run. Use a distinct output filename for each capture; the collector does not overwrite files.
 Preparation fetches the immutable base SHA and PR head with full history, without a `main` fallback.
@@ -118,8 +115,9 @@ Save the `Worker registered.` record and the authenticated
 `GET /api/v1/dashboard/workers` response identifying this node and instance. Confirm current
 heartbeats, an online healthy node, and available capacity. If terminal acknowledgements are
 needed in the console evidence, use `WORKER_LOG_LEVEL = 'debug'` for the acceptance deployment;
-`Server terminal decision received.` is a debug record. Log verbosity does not retain Codex command
-output.
+`Server terminal decision received.` is a debug record. Confirm `cliEngine` and `cliVersion` match
+the configured CLI and observed version. Both are null for a model-free Worker. Log verbosity does
+not prove that a model or repository command executed.
 
 ## Create the successful review through GitHub
 
@@ -171,18 +169,19 @@ manually.
 ## Real build/test execution and accepted inline result
 
 The trusted review prompt permits relevant build and test commands; it does not guarantee that
-Codex chooses both. `requestedRecipeIds` remains empty because commands run within the review,
+the selected CLI chooses both. `requestedRecipeIds` remains empty because commands run within the review,
 not through a separate recipe runner. Arrange the acceptance repository and trusted instructions
 before scheduling so both required commands are meaningful and their evidence can be retained.
 
 For each actual build and test, retain the command, checkout identity, start/end times, exit code,
 and tool-produced output or test report, linked to this attempt. The evidence must show that the
-managed Codex run launched the commands; an operator running them independently does not meet
-this criterion. A Codex summary claiming success, a log containing the word `codex`, or an online
+managed CLI run launched the commands; an operator running them independently does not meet
+this criterion. A model summary claiming success, a log naming the CLI, or an online
 Worker is insufficient.
 
-The Worker parses Codex JSONL in memory, discards stderr while draining it, uses ephemeral Codex
-execution, and removes the attempt workspace. It has no persistent execution-log channel. Arrange
+The Worker parses bounded CLI output and validates the structured model result before removing
+the attempt workspace. Its CLI configuration and exit records do not provide a provider HTTP
+ledger or independent repository-command evidence. Arrange
 trusted host-side capture of the relevant process events and command logs before the run, and
 retain worktree-produced reports before automatic cleanup. Do not weaken workspace cleanup or
 add credential contents to capture output. If actual command evidence cannot be obtained, leave
@@ -227,13 +226,13 @@ hashes, or the full database as evidence.
 2. Have the authorized actor add the selected assignment or user review request again. Confirm
    a new epoch and a distinct job ID, then record its distinct `runAttemptId` from `Lease claimed.`
    or the Server. Use the same repository and unchanged PR revision to isolate shared-cache reuse.
-3. While the new job is in `codex_review` and a known managed command/descendant is active, capture
+3. While the new job is in its model review phase and a known managed command/descendant is active, capture
    the second checkout, its detached HEAD, and its shared Git common directory. Compare with the
    first attempt: the bare repository persists at the same repository-ID path, the two attempt
    directories differ, and both checkouts use that shared repository. A generic `HEAD` file
    somewhere under the cache root does not prove reuse.
 4. Retain a process-tree snapshot before requesting cancellation. Identify the configured
-   ProcessHost executable and its Worker parent, then the Codex process and the known command's
+   ProcessHost executable and its Worker parent, then the selected CLI process and the known command's
    descendants. Record PID, parent PID, executable identity where available, and creation time.
    These observations must be associated with the active attempt and capture time. If a process
    exits before it can be identified, repeat the scenario with a suitably observable command.
@@ -315,7 +314,8 @@ Archive a manifest linking the deployed commit and non-secret configuration to:
 - GitHub repository/PR/revision identity, authorized opening/withdrawal actions, and request epochs.
 - Both job IDs and all their attempt IDs, phases, lease generations, and terminal states.
 - Active detached-worktree and shared-repository evidence from both attempts.
-- Actual Codex-launched build/test command evidence and exit results.
+- Selected CLI engine, detected version, configured model, process exit and structured-output validation.
+- Actual CLI-launched build/test command evidence and exit results.
 - The single accepted success result ID/digest and absence of a success result for cancellation.
 - Before/during/after descendant identities, lifecycle capture, and per-attempt cleanup evidence.
 - Timestamped collector JSON files, source logs/reports, and any missing or failed observations.

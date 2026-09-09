@@ -524,7 +524,7 @@ describe("current run finding disposition digest", () => {
       validationModelResultBinding,
       "validateStoredValidationModelResultBindingInTransaction",
     ).mockImplementation(() => {
-      throw new Error("The owner invocation is unavailable.");
+      throw new Error("The CLI result binding is unavailable.");
     });
     expectCorrupt(f.runDigest);
   });

@@ -130,8 +130,6 @@ export function captureEvaluationScoreInputsInTransaction(
         execution.plan.source.sourceDigest !== expected.sourceDigest ||
         execution.request.profileVersion.id !== cell.profileVersionId ||
         execution.request.prompt.version.id !== cell.promptVersionId ||
-        execution.plan.modelRequirements.expectedModelIdentityDigest !==
-          frozen.plan[arm].modelIdentityDigest ||
         canonicalJson(execution.plan.modelRequirements) !==
           canonicalJson(projection.configurations[arm].modelRequirements) ||
         execution.jobs.length !== (cell.job === null ? 0 : 1) ||
@@ -214,6 +212,7 @@ export function captureEvaluationScoreInputsInTransaction(
         },
       );
       const model = normalizedValidationModel(selected.result, selected.row.workflowKind);
+      if (modelRequired && model.state === "completed" && selected.modelBinding === null) corrupt();
       const context = handleEvaluationAdjudicationRequest(
         database,
         {
@@ -264,9 +263,7 @@ export function captureEvaluationScoreInputsInTransaction(
             ? {
                 state: "complete",
                 evidenceAvailable,
-                // Invocation consistency does not attest an accepted execution boundary. V1 and V2
-                // both withhold scoring identity while required-model execution remains unavailable.
-                modelIdentityDigest: null,
+                cli: selected.modelBinding!.execution.cli,
                 occurrenceKeys: context.items.map((item) => item.occurrence.key),
               }
             : {

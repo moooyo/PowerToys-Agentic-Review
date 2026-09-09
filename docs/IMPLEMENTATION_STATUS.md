@@ -1,12 +1,114 @@
 # Implementation Status
 
-Work is paused at the user's request on 2026-09-09. Read the
-[current paused handoff](./handoff/2026-09-09-validation-platform-paused-handoff.md) before resuming.
-The real Notepad++ Worker build passed, but UI acceptance remains blocked. A newly added native
-regression reproduced `ownership_lost` (one failure; other tests not selected); the production
-ancestry fix is not implemented. Historical passing checks below do not supersede that result.
+Current architecture as of 2026-09-10: each independent VM runs one long-lived Worker and multiple
+successive tasks. The [VM deployment decision](./design/2026-09-10-single-worker-vm.md) assigns
+isolation to deployment and retires the unused WindowsAttempt protected-journal, OS-adapter,
+signed-evidence and execution-admission design. Ordinary Job quotas, capabilities, leases,
+cancellation, process-tree draining, workspace cleanup and result ownership remain required.
+Model execution now follows the [CLI-owned execution design](./design/2026-09-10-cli-owned-model-execution.md).
+The Worker selects Codex or Copilot CLI and records CLI configuration, detected version, process
+exit and schema-validated structured output. The CLI owns login, provider configuration and HTTP
+traffic; the project does not read/copy CLI auth/provider files or maintain a global provider
+registry, model HTTP relay or provider call ledger. Capabilities expose nullable `cliEngine` and
+`cliVersion`, with null values when model execution is disabled. Configured model names do not
+establish independently verified remote-model identity. The unused `executionAccepted` field is
+absent from the current development contracts, results and UI. The product is unreleased: development directly
+maintains the current schema, without database resets, old-version upgrades, data conversion or
+compatibility migration work. Existing SQL initialization remains in use. Existing data and
+historical artifacts remain unchanged. Automated suites use isolated synthetic data; the explicitly
+authorized minimal configured CLI probes below are separately scoped.
 
-Current status as of 2026-09-09: the multi-repository validation platform is under integration.
+## M38 current delivery and verification
+
+M38 architecture cleanup and its recorded verification scope are complete. This is not completion
+of the entire product, real-repository model-quality acceptance or full VM deployment acceptance.
+
+M38 removes the project-owned provider registry, auth/provider profile loader, model HTTP relay,
+call ledger and separate app-server invocation flow. Model execution uses the selected Codex or
+Copilot CLI, its own login/configuration, bounded process supervision and structured task output.
+Existing Job leases, frozen source/Profile/Prompt and summary-input ownership, result consistency,
+process draining and workspace cleanup remain. Worker credential provisioning and existing data
+were not changed; no compatibility backend, old-data conversion or migration project was added.
+
+The [combined workspace result](../artifacts/m38-cli-execution-20260910/combined-test-results.json)
+has **12,968 passed, zero failed and two explicit Windows-only skips across 359 files / 12,970
+cases**. The complete v3 run initially had 12,963 passes, five failures and two skips. The five
+failures were old fixture expectations or cancellation assertions. The complete four-file v4
+retest passed 215 tests with zero failures/skips. Production runtime sources are identical between
+v3 and v4; the combined result checks file/case sets and replaces the four files' earlier outcomes,
+rather than adding all retest passes to the full-suite total. Original failures remain retained.
+The skipped native Windows cases are the Server UNC/case-alias evidence-root check in
+`apps/server/src/config.test.ts` and the real synthetic-file validation check in
+`apps/worker/src/execution/validation-runtime-config.test.ts`; they are not reported as passes.
+
+The v3 archive contains 1,068 files with SHA-256
+`7a5d4cde6a600763a28867d83ea05fb86a9886acdf3770b79da2f9635eab5d73`. The v4 archive contains 1,069
+files with SHA-256 `f04cb934097f11258eb0f1d23c2c757b72e69daa7874696ecbebdd920e91bba2`.
+M37-to-v3 has 83 removed and 16 added paths, including tests and SQL renumbering, not exclusively
+production modules. v4 type/build gates passed. Biome retained one test line-break formatting
+error, 66 warnings and 11 informational diagnostics. Only that formatting was corrected;
+[compiled-JavaScript identity](../artifacts/m38-cli-execution-20260910/format-token-proof.json)
+supports retaining the passed tests without repeating them. **The final v5 fresh-stage
+build/typecheck/lint and actual Worker bundle generation passed.** The v5 archive contains 1,069
+files with SHA-256 `be8bf6947bd566ea23fe90268bf24820b642f58c0c06877cf4ae1fd923a52f82`.
+The [build-source proof](../artifacts/m38-cli-execution-20260910/build-source-proof.json) confirms
+unchanged runtime sources from v4 to v5 and only the compiled-JavaScript-identical test formatting.
+Final Biome checked 180 files with zero errors, 66 warnings and 11 informational diagnostics;
+the earlier lint failure is retained.
+
+The [final v5 receipt](../artifacts/m38-cli-execution-20260910/verification/wsl/verify-run5-20260910/verification/tests/verification-receipt.json),
+SHA-256 `3ef24c7e35b27156a079e1d19f68593c4ea9fa32adf4f062a104bb7721490c54`, records all eight
+build/typecheck/setup/lint/bundle commands exiting 0, matching final source, an absent removed
+journal owner and no failure. This stage did not repeat completed tests. The emitted `worker.mjs`
+SHA-256 is `0064d137b493d128b4ce0d7e1542bd9ec1139984441872fb370c4268adf297bf`; all six Worker and
+web-driver bundle files are retained in [worker-bundle](../artifacts/m38-cli-execution-20260910/worker-bundle/)
+with individual hashes matched to the receipt.
+
+| Additional verified scope | Result and limit |
+| --- | --- |
+| Native Windows ProcessHost | 235 Go tests passed with zero failures/skips; vet/build passed. The built Host SHA-256 is `2811238c88a6f2b38247f2cd68ac60570c58ecd5b0fe490c6dc593b2d9dfd7ea`. |
+| Native CLI smoke run 2 | Real Host with synthetic Codex success, Copilot success, Codex cancellation, then another Copilot success; no node faults, all recorded owned child PIDs gone and Host exit 0. The cancellation regression passed 80 cases. |
+| Dashboard | v2 production build and 3,578 tests across 114 files passed. Windows run 2 passed v3 contracts emission, setup and typecheck; the compared 347-file Dashboard set differed only by two type-only `defaultSettings`/`satisfies` lines. The earlier build/tests were not repeated or represented as a new run. |
+| Deployment launcher | PowerShell 7.6.5/Pester 3.4.0 passed one wrapper case executing the complete standalone regression harness, with zero failures/skips and unchanged source hashes. No Worker/CLI, credential read or external write occurred. |
+| Real configured Codex | One minimal no-tool prompt returned strict `{"status":"ok"}` using the current login/configuration and CLI default model in approximately 11.4 seconds; command capture was complete with zero commands. |
+| Real configured Copilot | One minimal no-tool prompt returned the same strict JSON using the current login/configuration and CLI default model in approximately 27.1 seconds; command capture was incomplete with zero observed commands, not complete internal tool capture. |
+
+Both real CLI probes ended with Host exit 0, absent owned child PIDs and zero node faults. Their
+harnesses did not manually read/copy auth/provider files or change CLI configuration. No actual
+PR/Issue write occurred. The remote run 2 resource-related Worker typecheck `SIGKILL` without a
+TypeScript diagnostic, temporary SSH outage/recovery, native smoke run 1 cancellation
+misclassification, Dashboard run 1 type failure, original five suite failures and v4 lint failure
+remain recorded. See the [M38 handoff](./handoff/2026-09-10-cli-execution-handoff.md) for exact
+receipts, source identities, cleanup evidence and the completed final bundle gate.
+
+The real CLI checks establish only minimal no-tool JSON connectivity. They do not accept an actual
+repository review/evaluation, model quality, complete Copilot tool capture or the intended VM's
+full deployment workflow. PR/Issue writes still require separate exact-scope authorization.
+
+## Earlier verification milestones
+
+M37 historically completed the now-superseded VM app-server path and consecutive-task integration. The remote suite
+passed 2,136 tests across 46 files; actual local Windows Codex review/summary protocol cases passed
+against a controlled loopback Responses service. Worker packaging passed a separate unchanged-source
+retry after an initial nested typecheck failure. See the
+[model continuation handoff](./handoff/2026-09-10-model-continuation-handoff.md) for exact scope,
+source identities and retained failures. Those results do not accept the current direct CLI path;
+full repository/model workflows and the intended VM deployment remain separate acceptance work.
+
+M36 verification is complete: 42 exact test files and 1,902 assertions passed on `ssh test-env`,
+with zero failures/skips. Shared/Server builds, Worker/Server typechecks and Worker packaging
+passed; the retired journal owner is absent. See the
+[VM simplification handoff](./handoff/2026-09-10-vm-simplification-handoff.md) for source hashes,
+lint warnings, the unreleased schema policy and remaining real model/VM validation.
+
+M34's real Notepad++ Worker/UI/evidence/Dashboard acceptance is complete, including the corrected
+native driver's **67 passing tests**. See the
+[accepted UI handoff](./handoff/2026-09-09-windows-ui-accepted-handoff.md). M35's scoped Linux
+journal/recovery verification remains recorded in its
+[historical handoff](./handoff/2026-09-09-durable-journal-handoff.md); that unused implementation
+is retired by the VM decision. Its passing tests are not evidence for the replacement architecture.
+
+The multi-repository validation platform remains under integration.
 Contracts, persistence/routes, planners, execution components, evidence handling, and real
 Windows/Web drivers have passing checks. Worker startup composition, automatic GitHub planning,
 Dashboard evidence/actions, M19 repository access, M20a human decisions, M21 finding disposition,
@@ -23,18 +125,17 @@ adds separately authorized publication previews, immutable intents, a delivery o
 conservative recovery with isolated connected acceptance against an in-memory GitHub transport.
 M32 now includes scoped evaluation score previews, immutable assessment history, case details,
 and Dashboard review/save workflows. Its assessment browser checks and lifecycle closure passed
-the isolated synthetic scenarios recorded below; actual evaluation execution remains unaccepted.
-M32 also adds a tested model-response observation and relay foundation, with complete call records
-and pure consistency verification. The common Codex runner integrates parent-owned invocation
-lifecycle and raw-output binding. ValidationJobResultV2 now carries original model content separately
-from Worker evidence, with Server content binding, version-aware reads and schema 31 migration.
-Explicit production startup composition now connects the app-server review backend, static parent
-provider and invocation API to measured deployment files. Summary input freezing and explicit
-ScopeV2 binding are now integrated, with verification recorded in the current summary-input handoff.
-Accepted model execution and enabled evaluation execution remain outstanding.
-Actual Windows application scenarios and further repository/toolchain acceptance remain outstanding.
+the isolated synthetic scenarios recorded below; a real configured model/VM end-to-end run remains unverified.
+M32 historically added provider-response observation, a global runtime registry, HTTP call ledgers,
+app-server composition and separate invocation bindings. The CLI-owned architecture retires those
+execution paths and configuration requirements. Their implementation and verification records
+below remain historical evidence for the original source. Current model output stays separate
+from Worker validation facts and evidence, without a provider identity claim.
+Actual repository model review and evaluation execution, further application profiles and repository/toolchain
+deployment acceptance remain outstanding.
 The actual model probe denied controlled file writes but allowed a controlled loopback connection,
-so model network isolation is not accepted. The
+so Worker-enforced network isolation is not claimed. VM access and network policy belong to
+deployment. The
 [implementation ledger](./handoff/2026-09-07-validation-platform-implementation.md)
 records the evolving integration evidence and remaining work.
 
@@ -53,7 +154,7 @@ Those historical passes do not establish acceptance of the new profile-validatio
 | Human decisions | M20a immutable Run decision events, exact source/result-set binding, CAS and historical receipts, current policy checks, qualified overrides, comments and withdrawal, history, and Dashboard integration. M21 adds disposition-aware V2 snapshots while retaining V1 history. | Automated integration and connected synthetic administrator HTTP/browser acceptance pass for M20. Actual OIDC/lower-role browser acceptance remains outstanding. M22 reproduction is a separate measured workflow. |
 | Publication | M30 complete body/target/revision previews, separately versioned repository policy, explicit confirmation, immutable scoped intent, dedicated publisher identity, fenced delivery, exact confirmation replay, GET-only reconciliation and policy/attempt history. Two-repository connected acceptance passed with one mock POST per target. | No actual GitHub publication was authorized or performed. Deployment credentials and live target/payload acceptance remain separate. Unknown delivery is never automatically resent; GitHub does not supply distributed exactly-once semantics. |
 | Finding lifecycle | M21 complete result-scoped occurrences, immutable disposition audit and projection, context/CAS checks, policy v2, and conservative explicit result comparison. No disposition or resolution is inherited from a prior result. | Automated integration and connected synthetic administrator HTTP/browser acceptance pass. Actual deployment identities and model/runner execution are separate boundaries; development samples explicitly do not simulate disposition writes. |
-| Prompt/profile evaluation assessments | M32 freezes evaluation inputs, projects result/evidence and explicit finding adjudications, and provides deterministic score previews, immutable assessment versions, bounded case reads with frozen expectations, and Dashboard history/save workflows. | Assessment verification includes blocked, unexecuted batch snapshots and synthetic completed profile-only results. Browser save/retry/history/access scenarios and lifecycle closure passed. Required model identity, actual evaluation Worker/model execution, and Windows application evaluation remain unaccepted. |
+| Prompt/profile evaluation assessments | M32 freezes evaluation inputs, projects result/evidence and explicit finding adjudications, and provides deterministic score previews, immutable assessment versions, bounded case reads with frozen expectations, and Dashboard history/save workflows. | Assessment verification includes blocked, unexecuted batch snapshots and synthetic completed profile-only results. Browser save/retry/history/access scenarios and lifecycle closure passed. Actual evaluation CLI/model execution and Windows application evaluation remain unaccepted. |
 | Issue reproduction | M22 frozen cases, typed probe receipts, Windows/Web assertion capture, capability admission, independent Server assessment, and recorded/current case reads. Dashboard case authoring, profile observables, result comparison, evidence preview, pending reruns, and stale-source transitions passed connected fixture acceptance. | Acceptance uses an isolated local Git source and a fixture disk-monitor callback. Actual repository checkout, production model execution, and deployment-specific toolchain acceptance remain separate work. |
 | Frozen review runs | M14 immutable plans/rendered prompts, request snapshots, job associations, operator creation, and bounded history reads. | Complete product acceptance must exercise real operators and the intended repository policies. |
 | Validation results | M15 `ValidationJobResultV1` persistence and fenced completion, with runner checks, model review, lifecycle diagnostics, and evidence completeness kept separate. Legacy review result tables remain supported. | Current-source eligibility must be verified across full executions, reruns, cancellation, and evidence expiry. |
@@ -62,8 +163,8 @@ Those historical passes do not establish acceptance of the new profile-validatio
 | Current scheduling diagnostics | Strict M29 V3 diagnostics add current policy, exact scoped usage/overage, and separate queue/active limit reasons; historical V1/V2 remain valid. Repository readers receive coarse platform capacity without foreign counts. | Observations do not reserve capacity or establish queue position or an ETA. Partial inventory cannot prove Worker absence; source/authorization observations do not add new claim gates. |
 | GitHub routing | M18 source sequences and immutable legacy/ReviewRun routing per work item, authorization epoch, and source activation. | Automatic webhook/poller-to-profile execution is under integration verification. |
 | Headless execution | Registered commands run setup/build/test/cleanup with typed outcomes. M24 passed actual anonymous Git checkout, frozen install, Web compilation, CI tests, original-source verification, HTTP result equality, Dashboard display, and cleanup on a pinned public repository using production disk accounting. | This accepted run explicitly disabled model execution and used synthetic Issue metadata. It does not establish PR model review, measured Issue reproduction, private checkout, or real UI scenarios. |
-| Optional validation summary | A strict, bounded read-only model adapter is wired for UI/Issue validation and defaults to disabled. Runner facts and model advice remain separate. An explicit provider/endpoint/header/literal policy can classify approved public metadata; the common model-output path rejects known protected values. | M24's actual elevated model probe denied controlled file writes but allowed an owned loopback connection. Network isolation is not accepted. No actual provider metadata value has been declassified or actual model execution accepted by the classification/output changes. |
-| Windows desktop UI | Real UI Automation driver, owned-window evidence, active-session checks, exclusive session lease, process identity/draining, and reset/quarantine behavior. | A passing fixture does not establish unattended deployment readiness. The PowerToys Settings readiness review identifies missing Spectre libraries and a need for a separate Windows user/session or restorable VM; replacing environment paths alone does not isolate its settings. |
+| Optional validation summary | A bounded model summary is available for UI/Issue validation and defaults to disabled. The selected CLI owns login and provider traffic; runner facts and model advice remain separate. | M24's historical elevated model probe denied controlled file writes but allowed an owned loopback connection. The Worker does not claim network confinement; VM policy belongs to deployment. Those observations do not accept the current direct CLI summary path or an actual model deployment. |
+| Windows desktop UI | M34 accepted real Notepad++ build, passing and deliberately failing UI scenarios, all ten original evidence assets and Dashboard delivery. The driver retains owned-window evidence, active-session checks, exclusive session lease, process identity/draining, and reset/quarantine behavior. | Other applications and unattended VM deployment remain unaccepted. The PowerToys Settings readiness review identifies missing Spectre libraries and persistent settings that require profile-specific cleanup or deployment restoration. |
 | Web UI | M26 accepted anonymous pinned-source checkout, frozen dependency installation, actual homepage compilation, passing and deliberately failing UI scenarios, fifteen downloaded evidence assets, HTTP equality, Dashboard display/download/PNG preview, and process/workspace cleanup. Real source-capture progress now keeps valid bounded verification visible to the lease coordinator. | This homepage case does not establish extension/userscript integration, provider behavior, model execution, or measured Issue reproduction. |
 
 The architecture decision is [ADR 0031](./adr/0031-profile-validation-runs-and-bounded-evidence.md).
@@ -90,6 +191,10 @@ split Worker, installer, local RPC, or artifact-backed result compatibility desi
 - UI checks represent typed scenarios, not successful launch commands. Required UI profiles need
   required scenarios, actual driver support, and evidence delivery on the same executor. Current
   UI profiles build their own exact source; build-artifact reuse is not implemented.
+
+The following milestone sections retain their original source identities, test counts and runtime
+observations. A stage's historical lack of execution capability is not a current requirement for
+OS attestation; the VM decision above defines the current execution model.
 
 ### M27 P0 verification and lifecycle boundary
 
@@ -196,8 +301,9 @@ recorded in the [assessment delivery notes](../artifacts/m32-evaluations-2026090
 Runtime tests include blocked, unexecuted evaluation snapshots and incomplete coverage. The browser
 reports used synthetic completed profile-only results; no application, compiler, execution Worker
 or model ran in that fixture. Neither establishes successful model execution. Actual evaluation Worker/model execution,
-required model identity and confinement, and real Windows application scenarios remain separate
-unfinished boundaries. No real PR/Issue write was authorized or performed by this verification.
+required model identity and the intended VM deployment remained outside that verification.
+M34 subsequently accepted its scoped Notepad++ scenario. No real PR/Issue write was authorized
+or performed by this verification.
 
 ### M32 Worker source and model-delegation integration
 
@@ -209,15 +315,15 @@ current PR head. Component coverage includes moved references and source/authori
 
 Profile model delegation now retains the complete V2 envelope through a separate model entry;
 it no longer removes validation identity or rewrites the envelope to V1. A model workspace request
-must match the original canonical envelope. The legacy entry stays V1-only, and all relevant
-entries still reject evaluation execution before starting a workspace or model.
+must match the original canonical envelope. The legacy entry stays V1-only. This milestone still
+refused evaluation execution; the current VM design removes that blanket refusal while retaining
+the frozen-envelope checks.
 
-The optional [provider metadata policy](./operations/codex-provider-metadata.md) classifies only
-exactly approved public literals. Unmatched values, authentication headers and same-text secrets
-remain protected. All model results now pass a shared decoded-result check for known protected
-values; a rejection returns `CODEX_RESULT_UNSAFE` without changing the model body or its digest.
-Transport and protection use the same snapshot across asynchronous work. No actual provider
-profile was read or changed and no actual metadata literal was declassified in this increment.
+This historical increment used an optional provider metadata classification policy and a shared
+decoded-result guard for configured protected values. No actual provider profile was read or
+changed and no actual metadata literal was declassified in that increment. The
+[former policy](./operations/codex-provider-metadata.md) is retired; current startup does not read
+provider profiles or require a classification file.
 
 The final Windows Worker suite passed **1,483 tests with 28 conditional skips across 31 files**;
 type checking and production bundling passed. The tested 967-file source archive is
@@ -228,10 +334,15 @@ retained their expected commits and clean worktrees, all 30 Git invocations exit
 two reservations/26 monitors and native host closed. It did not execute a Profile, build, model,
 UI scenario or Server admission/completion. The
 [Worker integration notes](../artifacts/m32-evaluations-20260908/worker-execution-notes.md)
-retain test failures, source identity and the precise scope. Evaluation capability is still withheld
-until actual model identity and the complete command/model side-effect boundary are accepted.
+retain test failures, source identity and the precise scope. This milestone did not advertise
+evaluation capability or establish actual provider execution.
 
 ### M32 model observation foundation verification
+
+The provider observation, registry, invocation, app-server and summary-input sections that follow
+record superseded implementation history. They are not current deployment requirements or
+acceptance of the direct CLI path. Use the
+[CLI-owned execution design](./design/2026-09-10-cli-owned-model-execution.md) for active behavior.
 
 Strict runtime/scope/response/call contracts, a JSON/SSE observer, an invocation receipt recorder,
 a loopback Responses relay, and independent domain hash/scope checks are implemented. Requested
@@ -253,10 +364,10 @@ The [observation notes](../artifacts/m32-evaluations-20260908/model-observation-
 source identity, reports, corrections and scope.
 
 The later registry increment below adds expected configuration registration and freezing. Measured
-launch configuration, trusted authorization-helper composition, fenced Server receipt acceptance,
-versioned result/scoring integration and actual network isolation remain unfinished. Production
-evaluation capability remains withheld. The
-[design](./design/2026-09-08-model-runtime-observations.md) describes the remaining integration gates.
+launch configuration, parent-provider composition, fenced Server receipt acceptance and versioned
+result integration were completed in later increments. Actual provider execution and intended VM
+deployment remain to be exercised. The
+[design](./design/2026-09-08-model-runtime-observations.md) describes current integration requirements.
 
 ### M32 expected model runtime registry
 
@@ -264,7 +375,8 @@ Migration 0029, authenticated registry routes/RPC, platform administration, repo
 options, immutable snapshots and separate selection controls are implemented. Evaluation creation
 resolves a selected registration under the owner transaction. Compact cell references bind the full
 configuration/plan/context snapshots without expanding the cell-manifest storage limit. Existing
-unknown history remains unchanged. Registration does not enable required-model claim or completion.
+unknown history remains unchanged. Registration alone does not supply actual invocation/output
+records or satisfy the other Worker capability and lease requirements.
 
 The Dashboard adds System registration/control/history and per-arm evaluation selection, preserves
 uncertain requests across transient same-session access failure, and clears them on confirmed
@@ -294,7 +406,9 @@ remained available. These checks do not establish actual provider or model execu
 
 Migration 0030 adds immutable attempt-bound openings, independent closure commitments and complete
 ledger submissions. Worker HTTP APIs, a parent-owned relay/process coordinator and owner consistency
-verification are implemented. Every submission explicitly retains `executionAccepted: false`.
+verification are implemented. This historical milestone included the unused `executionAccepted`
+field. The current development schema removes it directly under the unreleased-product policy;
+there is no old-version upgrade or conversion task. The original milestone artifacts remain unchanged.
 The owner repeats current credential and lease checks; exact replay preserves the original record,
 while new expired/cancelled/recovery writes are refused. Original failures cannot be removed by
 uploading a shortened ledger. Runtime/control validators also reject inherited array serialization
@@ -314,10 +428,10 @@ It differs from the shared/Worker regression archive
 test assertions; both contain 1,011 files. Earlier preparation failures and raw reports are retained
 in the [invocation acceptance notes](../artifacts/m32-evaluations-20260908/model-invocation-notes.md).
 
-The coordinator is not yet composed into the production attempt lifecycle. Actual CLI/launch-policy
-measurement, trusted provider setup, accepted command/network isolation, final model-output binding
-and result/Dashboard integration remain open. Required-model claim/completion and advertised
-evaluation capability remain unchanged. See the [design](./design/2026-09-08-model-invocation-control.md).
+The coordinator was not yet composed into the production attempt lifecycle at this milestone.
+Later stages connected CLI/launch-policy measurement, parent provider configuration, final
+model-output binding and result/Dashboard integration. Actual provider and VM deployment acceptance
+remain open. See the [design](./design/2026-09-08-model-invocation-control.md).
 
 ### M32 invocation diagnostics and collector prerequisites
 
@@ -325,7 +439,8 @@ Operators can read invocation history from any evaluation cell, including failed
 without a final result. The owner verifies current repository permission, the frozen cell and every
 stored opening/seal/submission reference and digest. History remains readable after old Worker
 credentials or leases expire. The Dashboard separately shows expected/recorded model identity,
-call outcomes, incomplete collection reasons and unaccepted execution. Reads are explicitly
+call outcomes and incomplete collection reasons. The unused execution-acceptance field and its
+display are removed from the current development schema. Reads are explicitly
 refreshed, with at most ten invocations per page; changed access/scope removes prior content.
 
 The binary verifier now retains actual file SHA256, size, identity and verification time. A separate
@@ -359,8 +474,8 @@ The common Codex runner now consumes a parent-owned invocation session, compares
 scope with the actual prompt and output schema, attaches its managed process and rejecting stream
 drain promise, and closes with the validated raw model-output digest. It replaces provider launch
 inputs and uses the workspace provider's fresh per-attempt Codex home. Previously protected values
-remain protected even when provider launch settings are replaced. Startup does not yet construct
-these sessions, and collection still does not accept the execution boundary or final model result.
+remain protected even when provider launch settings are replaced. Startup did not yet construct
+these sessions at this milestone; later stages added composition and final model-output binding.
 
 The stable parent attempt signal prevents redispatch through a fresh wrapper, nonce or runner
 instance. Uncertain seal/submission transport receives one exact replay without a second process.
@@ -387,8 +502,9 @@ recording requirements and respect the shared 2 MiB envelope budget without trun
 The owner validates actual raw content against the frozen workflow, full Job/attempt scope and
 independent opening/seal/ledger records. Result, evidence, finding, reproduction, decision and
 evaluation reads now decode both stored versions while preserving their actual bytes and outer
-digests. Matching collection remains unaccepted execution and supplies no trusted model scoring
-identity. Required-model claim/completion gates and startup session composition remain closed.
+digests. Matching collection establishes consistency with the frozen expectation and recorded
+output, not OS confinement. Startup composition was connected in the subsequent stage. The VM
+design removes the former blanket required-model refusal while retaining result binding.
 
 Migration `0031_validation_model_outputs.sql` preserves V1 rows, byte content, rowids, foreign keys,
 indexes and current trigger definitions through a startup-owned rebuild. A schema/type/name/table
@@ -411,8 +527,8 @@ See the [V2 design](./design/2026-09-08-validation-model-results-v2.md) for the 
 The Worker now binds model invocation scopes to complete evaluation envelopes, including frozen
 source, profile/Prompt/schema, registration and lease identity. Ordinary production contexts and
 composite Prompt digests cannot impersonate the V1 evaluation binding. The combined scope/relay
-capture passed 2,033 Worker tests with 28 conditional skips, type checking and build; execution
-gates remain unchanged.
+capture passed 2,033 Worker tests with 28 conditional skips, type checking and build; this stage
+did not change the then-current execution restrictions.
 
 Actual Codex 0.145.0 bytes match the recorded binary pin. Its generated stable/experimental
 schemas and bounded same-process RPC probes confirm named-profile selection, disabled optional
@@ -445,9 +561,9 @@ Worker transport and pinned Codex 0.145.0 process completed eight metadata RPCs,
 streams and exited 0. No model request or sandbox setup occurred; new-home readiness remained
 `updateRequired`. The first real integration's queue-handoff failure and its correction are retained.
 
-This transport stage did not change main startup or evaluation/model gates; subsequent startup
-composition is described below. Model execution and policy acceptance remain open, and previous
-trusted binary copies/pins were not replaced. See the [transport design](./design/2026-09-08-process-host-interactive-stdin.md)
+This transport stage did not change main startup or the then-current evaluation/model gates;
+subsequent startup composition is described below. Actual model execution remained unverified,
+and previous trusted binary copies/pins were not replaced. See the [transport design](./design/2026-09-08-process-host-interactive-stdin.md)
 and [delivery evidence](../artifacts/m32-evaluations-20260908/interactive-stdin-delivery-notes.md).
 
 ### M32 single-turn output and attempt ownership
@@ -470,8 +586,8 @@ Strict CLI configuration exposed an unsupported `tools.view_image` setting. Its 
 the failed runs are retained; the synthetic provider still advertised `view_image` after that
 invalid field was removed. This must not be described as an effective tool restriction.
 PreparedRunner backend selection is implemented in the subsequent integration below. Production
-startup is connected in the subsequent startup stage below. Command/network isolation and Windows
-application acceptance remain open; model/evaluation execution gates remain unchanged.
+startup is connected in the subsequent startup stage below. This stage did not accept actual model
+execution or a Windows application, and did not change the then-current execution restrictions.
 See the [turn-output design](./design/2026-09-08-codex-app-server-turn-output.md) and
 [delivery evidence](../artifacts/m32-evaluations-20260908/app-server-turn-delivery-notes.md).
 
@@ -495,8 +611,8 @@ Three actual Windows metadata cases confirmed generated review/summary compatibi
 review hashes across distinct temporary layouts and ports. All reported `updateRequired`, refused
 execution, issued zero provider requests and closed their owned resources normally.
 
-This does not establish OS enforcement or real model acceptance. Production startup is connected
-in the next stage; the evaluation-only/composed-input guards remain in place.
+These metadata checks do not establish OS enforcement or real model execution. Production startup
+is connected in the next stage; evaluation-only/composed-input checks remain in place.
 See the [session-policy design](./design/2026-09-08-codex-app-server-session-policy.md)
 and [integration evidence](../artifacts/m32-evaluations-20260908/app-server-integration-delivery-notes.md).
 
@@ -518,10 +634,11 @@ metadata retains its existing classification. Startup snapshots its inputs and w
 verifications to settle on failure. The existing start command's `--enable-source-maps` flag is
 supported and included in the implementation identity.
 
-Configured composition is not execution acceptance: no evaluation capability is advertised, the
-execution boundary still refuses evaluation work. Evaluation summaries use the subsequent independently
-frozen input integration below. No Windows sandbox setup or real repository write
-is performed by this integration. See the [startup design](./design/2026-09-08-evaluation-model-startup.md)
+This composition was verified synthetically and did not exercise a real provider. Evaluation
+summaries use the subsequent independently frozen input integration below. The current VM design
+uses configured backend availability and ordinary capabilities/leases instead of an OS-attestation
+gate. No Windows sandbox setup or real repository write was performed by this integration.
+See the [startup design](./design/2026-09-08-evaluation-model-startup.md)
 and [verification evidence](../artifacts/m32-evaluations-20260908/startup-composition-delivery-notes.md).
 
 ### M32 frozen summary input integration
@@ -535,10 +652,10 @@ history remains readable. Final summary-result binding rechecks the original run
 allows only later model-stage lifecycle additions.
 
 Input freezing remains restricted to required-model summary workflows with a frozen registration;
-profile-only evaluation does not acquire model authority. The existing mapped evaluation
-reproduction restriction, execution-boundary guard and absent evaluation capability remain in
-place. This implementation does not establish real model execution, Windows sandbox readiness or
-deployment acceptance. See the [input design](./design/2026-09-09-frozen-validation-summary-input.md)
+profile-only evaluation does not acquire model authority. Mapped evaluation reproduction retains
+its own frozen input checks. This implementation does not establish actual model execution or
+VM deployment acceptance; the former blanket execution guard is retired by the VM design.
+See the [input design](./design/2026-09-09-frozen-validation-summary-input.md)
 and [integration evidence](../artifacts/m32-evaluations-20260908/summary-input-delivery-notes.md).
 
 ### M32 evaluation profile and model routing
@@ -550,8 +667,9 @@ is missing. Explicitly pinned evaluation summary composition is independent of o
 summary opt-in. Required failures retain runner facts in the recorded-result format.
 
 New Server completion rejects embedded or completed model content for profile-only evaluation,
-while retaining ordinary summaries and historical V1 reads. Neither Worker execution guard, the
-evaluation capability restriction, nor required-model Server completion acceptance is relaxed.
+while retaining ordinary summaries and historical V1 reads. This routing stage did not change
+the then-current execution restrictions. The VM design now removes the blanket refusal while
+retaining required-model factory availability and scope/output/observed-identity checks.
 See the [routing design](./design/2026-09-09-evaluation-profile-model-routing.md) and
 [verification records](../artifacts/m32-evaluations-20260908/profile-routing-delivery-notes.md).
 
@@ -565,16 +683,17 @@ remain blocked and cannot be represented as a missing Worker capability or an un
 The owner rechecks mapping readiness across runtime entry points. Worker and Server reproduction
 assessment use independent evaluation authorization while retaining ordinary Issue authorization.
 Migration 0033 preserves existing data and manifest versions. Dashboard input changes invalidate
-their previews; blocked previews remain valid configuration outcomes. Evaluation/model execution
-gates are still closed pending their separate acceptance. See the
+their previews; blocked previews remain valid configuration outcomes. Actual evaluation/model
+execution remains unverified by these mapping tests. See the
 [mapping design](./design/2026-09-09-evaluation-reproduction-mappings.md) and
 [verification records](../artifacts/m32-evaluations-20260908/mapped-reproduction-delivery-notes.md).
 
 ## Remaining product work
 
-- **Integration acceptance:** complete static/build, Windows UI, Web UI, and issue-reproduction flows
-  through Server, Worker, and Dashboard, including stale sources, evidence upload, failed assertions,
-  rerun/cancel, process draining, and environment restoration.
+- **Integration acceptance:** exercise actual model/evaluation execution and further application
+  profiles in the intended VM deployment. M26 Web and M34 Notepad++ scenarios are accepted within
+  their recorded scopes. Verify consecutive tasks, stale sources, evidence upload, failed assertions,
+  rerun/cancel, process draining and environment restoration.
 - **P0 deployment boundary:** M27 current waiting diagnostics are complete, alongside M19 repository
   ACL/membership audit reads and M23 configuration audit reads. Deployed OIDC and the intended
   multi-user deployment still require acceptance beyond the isolated connected diagnostic cases.
@@ -616,15 +735,21 @@ actions outside that scope require new approval. See [AGENTS.md](../AGENTS.md).
 - Real execution is wired when `WORKER_EXECUTION_ENABLED=true`.
 - Worker registration, long-poll claims, Worker and lease heartbeats, drain, and fenced terminal
   reporting.
-- Pinned Git, Codex, and ProcessHost executable paths and SHA-256 verification.
+- Pinned Git and ProcessHost executable paths and SHA-256 verification.
+- Codex or Copilot selected through `WORKER_CLI_ENGINE` and `WORKER_CLI_EXECUTABLE_PATH`, with
+  optional `WORKER_CLI_HOME`, `WORKER_CLI_MODEL` and `WORKER_CLI_SHA256`.
+- Bounded ProcessHost CLI version detection through `--version` (20 seconds, 64 KiB, first stdout
+  line), with nullable `cliEngine`/`cliVersion` capabilities instead of a declared CLI version.
 - Replacement child environments that exclude the Worker Bearer Token.
-- A dedicated persistent Codex home, read-only canonical-directory and overlap checks before orphan
-  cleanup, and allowlisted model/provider/auth configuration loading.
-- Native Codex provider header variables separated from argv and the seven-variable build/test
-  shell environment; neither shell authentication paths nor Worker/GitHub credentials are exposed.
-- Fixed `--ignore-user-config`, workspace-write/approval settings, project config suppression with
-  `untrusted` project trust, and disabled MCP/plugins/hooks/notifications/inherited extra write roots.
-- Pinned native Codex 0.145.0 compatibility, using `--config approval_policy="never"` for exec.
+- CLI-owned login, provider configuration and network traffic. The Worker does not inspect, copy
+  or rewrite CLI auth/provider files, and persistent login storage stays outside disposable tasks.
+- CLI paths may be outside the infrastructure trusted root; Windows WinGet application links
+  resolve to their installed targets. ProcessHost/Git retain the existing trusted-root rules.
+- No global provider registry, model HTTP relay, provider call ledger or metadata policy file.
+- CLI configuration, process exit and structured output remain distinct from runner checks and
+  evidence. They do not independently verify a provider's model identity.
+- Model resource settings use `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`,
+  `WORKER_MODEL_MAX_PROCESSES`, `WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES`.
 - Native ProcessHost supervision with Windows Job Object lifetime and resource limits.
 - A Windows global named mutex, held by ProcessHost, that prevents two execution Workers from using
   the same resolved data root concurrently.
@@ -641,14 +766,14 @@ actions outside that scope require new approval. See [AGENTS.md](../AGENTS.md).
   base branches without a `main` assumption or fallback and disabling fetch auto-maintenance.
 - Immutable base/head commit checks, merge-base validation, detached worktree creation, and final
   `HEAD` verification.
-- Codex workspace-write execution with outbound network access for trusted admitted code.
+- Selected CLI execution with outbound network access for trusted admitted code.
 - Legacy pull request prompt authorization to inspect, edit, build, and test inside its disposable
   worktree. Profile execution keeps model edits separate from original-source runner validation.
 - Inline schema-validated result submission.
 - V2 inline results separate model verification claims from captured command exits and final
   worktree state; bounded redacted failure diagnostics are persisted and shown in job details.
 - V1 queued templates and stored results remain supported across the schema 8+ upgrade path.
-- Progress deadline refreshes only on observed Codex stdout/stderr activity; silent execution no
+- Progress deadline refreshes only on observed CLI stdout/stderr activity; silent execution no
   longer receives synthetic keepalive progress.
 
 ### Dashboard and repository gates
@@ -674,6 +799,11 @@ The following are deliberately absent and have no migration or compatibility lay
   Threads; and
 - artifact-backed completion modes and their unpublished compatibility paths.
 
+The 2026-09-10 VM decision additionally removes the unused WindowsAttempt domain lifecycle,
+Worker lifecycle/journal/recovery modules and separate journal-owner bundle. Its former protected
+storage, OS adapter, signed evidence and execution-admission backlog is retired. The existing
+Job lease and ProcessHost/workspace cleanup mechanisms remain.
+
 ADR 0029 remains the decision for these removals. The new bounded M16 evidence channel is governed
 by ADR 0031; it must not be described as the restoration of those prototypes.
 
@@ -690,8 +820,8 @@ above describe its later extensions and acceptance boundaries.
   maintenance only when worktree metadata is inactive.
 - Local execution singleton: one global ProcessHost mutex per resolved Worker data root.
 - Task checkout: detached worktree below the per-attempt workspace directory.
-- Codex identity: persistent `WORKER_EXECUTION_PROFILE_DIRECTORY`, provisioned under the Worker
-  account with `config.toml` and supported file/keyring or provider-command authentication.
+- CLI login: managed by the selected Codex or Copilot CLI under the Worker account, using the same
+  optional `WORKER_CLI_HOME` as the deployment. No login storage is read or copied by the Worker.
 - Completion: bounded inline `{ resultDigest, result }`; profile results reference independently
   finalized evidence without introducing an artifact-backed completion mode.
 - Evidence: Worker/lease-scoped uploads, Server-derived manifests and storage paths, bounded

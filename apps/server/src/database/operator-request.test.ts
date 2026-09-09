@@ -172,14 +172,12 @@ const repositoryOperations: Record<string, OperatorRepositoryPermission> = {
   getEvaluationReproductionPlan: "read",
   getEvaluationReproductionCell: "read",
   previewEvaluationReproduction: "configure",
-  listEvaluationModelRuntimeOptions: "configure",
   createEvaluationBatch: "configure",
   cancelEvaluationBatch: "configure",
   listEvaluationBatches: "read",
   getEvaluationBatch: "read",
   getEvaluationBatchMatrix: "read",
   getEvaluationCellResult: "read",
-  listEvaluationCellModelInvocations: "read",
   getEvaluationAdjudicationContext: "read",
   listEvaluationAdjudicationHistory: "read",
   changeEvaluationAdjudication: "review",
@@ -229,11 +227,6 @@ const repositoryOperations: Record<string, OperatorRepositoryPermission> = {
   changeRepositoryAccess: "manage_access",
 };
 const platformOperations: OperatorRequestOperation[] = [
-  "registerModelRuntime",
-  "changeModelRuntimeControl",
-  "listModelRuntimeRegistrations",
-  "getModelRuntimeRegistration",
-  "listModelRuntimeHistory",
   "createManagedRepository",
   "listGlobalConfigurationAudit",
   "getGlobalConfigurationAudit",
@@ -255,35 +248,6 @@ const platformOperations: OperatorRequestOperation[] = [
 
 describe("authenticated operator request boundary", () => {
   it.each([
-    "registerModelRuntime",
-    "changeModelRuntimeControl",
-    "listModelRuntimeRegistrations",
-    "getModelRuntimeRegistration",
-    "listModelRuntimeHistory",
-  ] as const)("requires platform authority and stamps the exact actor for %s", (operation) => {
-    const database = fixture();
-    grant(database, "admin");
-    failure(() => authorize(database, operation, {}), "PLATFORM_FORBIDDEN");
-    const administrators = [administrator];
-    const accepted = authorizeOperatorRequest(
-      database,
-      {
-        context: { kind: "operator", actor: administrator },
-        operation,
-        input: { registrationId: "runtime-a", query: {} },
-      },
-      administrators,
-    );
-    expect(accepted.request.input.actor).toEqual(administrator);
-    expect(Object.isFrozen(accepted.request.input.actor)).toBe(true);
-    failure(
-      () => authorize(database, operation, { actor: member }, administrator),
-      "PLATFORM_FORBIDDEN",
-    );
-    administrators.splice(0);
-    failure(() => accepted.revalidate(), "PLATFORM_FORBIDDEN");
-  });
-  it.each([
     "createEvaluationBatch",
     "cancelEvaluationBatch",
     "listEvaluationBatches",
@@ -294,7 +258,6 @@ describe("authenticated operator request boundary", () => {
     "getEvaluationReproductionPlan",
     "getEvaluationReproductionCell",
     "previewEvaluationReproduction",
-    "listEvaluationCellModelInvocations",
     "getEvaluationAdjudicationContext",
     "listEvaluationAdjudicationHistory",
     "changeEvaluationAdjudication",
@@ -304,7 +267,6 @@ describe("authenticated operator request boundary", () => {
     "getEvaluationAssessment",
     "getEvaluationAssessmentCase",
     "listEvaluationPromptOptions",
-    "listEvaluationModelRuntimeOptions",
   ] as const)(
     "stamps the trusted actor for %s and rejects a conflicting input actor",
     (operation) => {

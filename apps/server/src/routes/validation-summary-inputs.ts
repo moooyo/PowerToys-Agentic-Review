@@ -120,15 +120,11 @@ function sendError(reply: FastifyReply, error: unknown): FastifyReply {
     const status =
       code === "WORKER_TOKEN_REJECTED"
         ? 401
-        : [
-              "VALIDATION_SUMMARY_INPUT_INVALID",
-              "MODEL_INVOCATION_INVALID",
-              "REVIEW_RESULT_INVALID",
-            ].includes(code)
+        : ["VALIDATION_SUMMARY_INPUT_INVALID", "REVIEW_RESULT_INVALID"].includes(code)
           ? 400
           : [
                 "VALIDATION_SUMMARY_INPUT_CONFLICT",
-                "MODEL_INVOCATION_LEASE_REJECTED",
+                "VALIDATION_SUMMARY_INPUT_LEASE_REJECTED",
                 "EVIDENCE_LEASE_REJECTED",
               ].includes(code)
             ? 409

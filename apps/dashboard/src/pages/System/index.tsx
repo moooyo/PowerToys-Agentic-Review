@@ -15,7 +15,6 @@ import {
   Table,
   Typography,
 } from "antd";
-import { ModelRuntimeRegistrations } from "@/components/ModelRuntimeRegistrations";
 import { OperatorAccessGate, useOperatorAccess } from "@/components/OperatorAccess";
 import { PageHeader } from "@/components/PageHeader";
 import { PlatformSchedulingPolicy } from "@/components/SchedulingPolicy";
@@ -205,14 +204,9 @@ function RuntimeDetails({ snapshot }: { snapshot: SystemSnapshot }) {
 
 export default function SystemPage() {
   return (
-    <>
-      <OperatorAccessGate platformOnly>
-        <SystemContent />
-      </OperatorAccessGate>
-      <div style={{ marginTop: 24 }}>
-        <ModelRuntimeRegistrations />
-      </div>
-    </>
+    <OperatorAccessGate platformOnly>
+      <SystemContent />
+    </OperatorAccessGate>
   );
 }
 

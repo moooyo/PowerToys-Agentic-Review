@@ -214,9 +214,7 @@ function boundResult(
     expected[`${purpose.arm}Binding`].runId !== selection.cell.runId ||
     expected[`${purpose.arm}Binding`].requestId !== selection.cell.requestId ||
     frozen.plan[purpose.arm].profileVersionId !== selection.row.profileVersionId ||
-    frozen.plan[purpose.arm].promptVersionId !== selection.row.promptVersionId ||
-    frozen.plan[purpose.arm].modelIdentityDigest !==
-      selection.cell.plan.modelRequirements.expectedModelIdentityDigest
+    frozen.plan[purpose.arm].promptVersionId !== selection.row.promptVersionId
   )
     corrupt();
   const cells = database

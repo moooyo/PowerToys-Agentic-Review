@@ -140,6 +140,10 @@ export function normalizedValidationModel(
     issueTriage: null,
     reproductionConclusion: null,
     error: review.state === "failed" ? { code: review.code, message: review.message } : null,
+    execution:
+      result.schemaVersion === "ValidationJobResultV2" && result.modelReview.state === "completed"
+        ? result.modelReview.execution
+        : null,
   };
   if (model !== null) {
     if (model.schemaVersion === "PrReviewPlanV2")

@@ -44,7 +44,8 @@ const workerCapabilities = {
   architecture: "x64",
   headless: true,
   interactiveDesktop: false,
-  codexVersion: "test",
+  cliEngine: "codex",
+  cliVersion: "test",
   recipeIds: ["pull-request-review"],
   labels: { pool: "test" },
 } satisfies WorkerCapabilities;
@@ -1765,7 +1766,7 @@ describe("DatabaseClient lease integration", () => {
 
       const heartbeat = await fixture.client.request("heartbeatLease", {
         ...claim.envelope.lease,
-        phase: "codex_review",
+        phase: "cli_review",
         progressSequence: 1,
         progress: { completedTurns: 1 },
         leaseTtlSeconds,
@@ -1969,7 +1970,7 @@ describe("DatabaseClient lease integration", () => {
       diagnostics: {
         category: "process" as const,
         exitCode: 17,
-        summary: "The provider rejected the selected model.",
+        summary: "The CLI process ended before producing a result.",
         correlationId: claim.envelope.lease.runAttemptId,
       },
       retryable: true,

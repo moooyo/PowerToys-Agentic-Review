@@ -1,7 +1,8 @@
 # PowerToys Agentic Review
 
 PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for multiple
-GitHub repositories, issue triage, and pull request review with Codex CLI. The project is pre-release and intentionally
+GitHub repositories, issue triage, and pull request review with Codex CLI or GitHub Copilot CLI.
+The project is pre-release and intentionally
 does not preserve compatibility with the earlier split-worker or artifact-storage prototypes.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md),
@@ -13,12 +14,12 @@ baseline.
 
 - `apps/server`: Linux control plane, GitHub ingestion, scheduling, fenced leases, operator
   authentication, and SQLite persistence.
-- `apps/worker`: one outbound-only Windows Worker that prepares worktrees, runs Codex and validation,
+- `apps/worker`: one outbound-only Windows Worker that prepares worktrees, runs the selected CLI and validation,
   and submits an inline structured result.
 - `apps/dashboard`: React and Ant Design Pro operator dashboard.
 - `packages/contracts`: runtime schemas and shared protocol types.
 - `packages/domain`: pure state-transition and scheduling policy logic.
-- `packages/codex`: shell-free Codex launch specifications, JSONL parsing, and result schemas.
+- `packages/codex`: shell-free model CLI launch specifications, structured output parsing, and result schemas.
 - `native/process-host`: Windows Job Object process-tree and resource-control adapter.
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
 - `migrations`: the current SQLite schema through migration `0023`.
@@ -36,17 +37,24 @@ The Worker enforces a separate shared-cache byte limit and free-space guard, per
 age-based Git maintenance only when worktree metadata is inactive, and drains if reclamation cannot
 restore the configured budget.
 
-Codex runs with workspace write access and outbound network access so it can inspect, edit, build,
+The selected CLI runs with workspace write access and outbound network access so it can inspect, edit, build,
 and test inside the disposable worktree. ProcessHost and Windows Job Objects still enforce lifetime,
 process-count, memory, timeout, and output limits. Worker and Server credentials are not propagated
 to child processes.
 
-`WORKER_EXECUTION_PROFILE_DIRECTORY` is a dedicated persistent Codex home. The Worker validates its
-canonical path before cleanup, loads only allowed model/provider/auth settings, and enforces task
-settings with `--ignore-user-config` and CLI overrides. Codex's project trust is `untrusted` only to
-suppress repository configuration; admitted code remains trusted and `AGENTS.md` is still loaded.
-Provider header credentials reach only native Codex, while build/test tools receive seven explicit
-non-secret environment variables.
+Model execution selects `WORKER_CLI_ENGINE=codex` or `copilot` and an absolute
+`WORKER_CLI_EXECUTABLE_PATH`. `WORKER_CLI_HOME` and `WORKER_CLI_MODEL` are optional. Log in through
+the selected CLI under the Worker account and intended CLI home. The CLI owns its authentication,
+provider selection, configuration and network requests; the project does not inspect or copy its
+authentication/provider files. Startup detects the CLI version with a bounded `--version` call,
+without a manually supplied CLI version. `WORKER_CLI_SHA256` is an optional binary pin; it is not
+required. Worker capabilities report nullable
+`cliEngine` and `cliVersion`.
+
+There is no global provider registry, model HTTP relay or provider request/response ledger in the
+active architecture. The project records CLI configuration, process exit and schema-validated
+structured output, without claiming independently verified provider model identity. See the
+[CLI-owned model execution design](./docs/design/2026-09-10-cli-owned-model-execution.md).
 
 ProcessHost also holds a Windows global mutex derived from the resolved Worker data root, preventing
 overlapping execution Workers from mutating the same cache or workspace tree.

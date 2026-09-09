@@ -11,10 +11,7 @@ import { HttpWorkerApi } from "../../../worker/src/server-client/http-worker-api
 import { DatabaseClient } from "../../dist/database/database-client.js";
 import { registerValidationSummaryInputRoutes as registerBuiltRoutes } from "../../dist/routes/validation-summary-inputs.js";
 import { DatabaseRequestError } from "../database/errors.js";
-import {
-  createModelInvocationFixture,
-  exportModelInvocationFixture,
-} from "../database/model-invocations.testing.js";
+import { createModelCliFixture, exportModelCliFixture } from "../database/model-cli.testing.js";
 import {
   databaseInitializationMarkerContent,
   databaseInitializationMarkerFilename,
@@ -131,7 +128,7 @@ describe("Worker summary input HTTP", () => {
   it("uses the actual Worker HTTP client, Fastify and separate SQLite owner, including recovery replay", async () => {
     const root = await mkdtemp(join(tmpdir(), "summary-input-http-owner-"));
     await chmod(root, 0o700);
-    const seeded = createModelInvocationFixture({ now: new Date().toISOString() }),
+    const seeded = createModelCliFixture({ now: new Date().toISOString() }),
       databasePath = join(root, "summary.sqlite");
     const payload = validationSummaryInputRequest(seeded),
       other = validationSummaryInputRequest(seeded, "candidate");
@@ -141,7 +138,7 @@ describe("Worker summary input HTTP", () => {
     let seedClosed = false;
     const app = Fastify({ logger: false });
     try {
-      exportModelInvocationFixture(seeded, databasePath);
+      exportModelCliFixture(seeded, databasePath);
       seedClosed = true;
       await chmod(databasePath, 0o600);
       await writeFile(
@@ -184,7 +181,8 @@ describe("Worker summary input HTTP", () => {
           architecture: "x64",
           headless: true,
           interactiveDesktop: false,
-          codexVersion: "not-configured",
+          cliEngine: "codex",
+          cliVersion: "not-configured",
           recipeIds: [],
           labels: { execution: "disabled" },
         },
@@ -364,7 +362,7 @@ describe("Worker summary input HTTP", () => {
   );
   it.each([
     ["WORKER_TOKEN_REJECTED", 401],
-    ["MODEL_INVOCATION_LEASE_REJECTED", 409],
+    ["VALIDATION_SUMMARY_INPUT_LEASE_REJECTED", 409],
     ["VALIDATION_SUMMARY_INPUT_CONFLICT", 409],
     ["VALIDATION_SUMMARY_INPUT_INVALID", 400],
     ["DATABASE_READ_ONLY", 503],

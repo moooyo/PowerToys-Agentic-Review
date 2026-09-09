@@ -1,10 +1,10 @@
 import type * as C from "@agentic-review/contracts";
 import { createEvaluationExecutionTemplate } from "../scheduling/validation-job-factory.js";
-import type { ModelInvocationFixture } from "./model-invocations.testing.js";
+import type { ModelCliFixture } from "./model-cli.testing.js";
 
-/** Synthetic runner observations only; no command, model, provider, or successful claim runs. */
+/** Synthetic runner observations only; no command, CLI, or successful claim runs. */
 export function validationSummaryInputRequest(
-  fixture: ModelInvocationFixture,
+  fixture: ModelCliFixture,
   arm: "baseline" | "candidate" = "baseline",
 ): C.FreezeValidationSummaryInputRequest {
   const cell = fixture.cells.find((value) => value.arm === arm);

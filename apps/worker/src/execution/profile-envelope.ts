@@ -14,10 +14,7 @@ import {
   maximumRenderedPromptUtf8Bytes,
   PullRequestValidationSummaryV1Schema,
 } from "@agentic-review/contracts";
-import {
-  assertEvaluationModelRuntimeRegistrationIntegrity,
-  getReviewRunExecutorCapabilityLabels,
-} from "@agentic-review/domain";
+import { getReviewRunExecutorCapabilityLabels } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
 import { validateReproductionEnvelope } from "./issue-reproduction-results.js";
@@ -133,10 +130,6 @@ function validateEvaluationProfileBinding(envelope: JobExecutionEnvelopeV2): voi
     throw new Error("Invalid evaluation validation context.");
   if (getEvaluationValidationJobContextIssues(context).length > 0)
     throw new Error("Invalid frozen evaluation authority or context.");
-  assertEvaluationModelRuntimeRegistrationIntegrity(
-    context.modelRequirements,
-    context.modelRuntimeRegistration,
-  );
   const source = context.source;
   const item = source.workItem;
   const revision = source.revision;

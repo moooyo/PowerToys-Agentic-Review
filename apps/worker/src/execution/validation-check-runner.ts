@@ -48,6 +48,11 @@ const baseEnvironmentNames = [
   "USERPROFILE",
 ] as const;
 const baseEnvironmentNameSet = new Set<string>(baseEnvironmentNames);
+const reservedEnvironmentNameSet = new Set<string>([
+  ...baseEnvironmentNames,
+  "CODEX_HOME",
+  "PSMODULEANALYSISCACHEPATH",
+]);
 const maximumCapturedOutputBytes = 1_024 * 1_024;
 const maximumResolvedSecretBytes = 1_024 * 1_024;
 const phases = ["setup", "build", "test", "cleanup"] as const;
@@ -330,8 +335,7 @@ export class HeadlessValidationCheckRunner {
             const folded = name.toUpperCase();
             if (
               folded !== ui.service.portEnvironmentVariable.toUpperCase() ||
-              baseEnvironmentNameSet.has(folded) ||
-              folded === "CODEX_HOME" ||
+              reservedEnvironmentNameSet.has(folded) ||
               folded.startsWith("WORKER_") ||
               Object.keys(spec.environment).some((existing) => existing.toUpperCase() === folded) ||
               typeof value !== "string" ||
@@ -845,6 +849,10 @@ export class HeadlessValidationCheckRunner {
       TEMP: workspace.tempDirectory,
       TMP: workspace.tempDirectory,
       USERPROFILE: workspace.userProfileDirectory,
+      PSMODULEANALYSISCACHEPATH: win32.join(
+        workspace.tempDirectory,
+        "PowerShell-ModuleAnalysisCache",
+      ),
     };
     for (const path of [workspace.tempDirectory, workspace.userProfileDirectory]) {
       assertWindowsLocalAbsolutePath(path, "validation task environment", false);
@@ -864,7 +872,7 @@ export class HeadlessValidationCheckRunner {
     }
     for (const variable of step.command.environment) {
       const name = variable.name.toUpperCase();
-      if (baseEnvironmentNameSet.has(name) || name === "CODEX_HOME" || name.startsWith("WORKER_")) {
+      if (reservedEnvironmentNameSet.has(name) || name.startsWith("WORKER_")) {
         throw new ValidationRunnerError(
           "ENVIRONMENT_INVALID",
           "The profile cannot replace a reserved execution environment variable.",

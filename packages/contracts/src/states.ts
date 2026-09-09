@@ -41,9 +41,9 @@ export type RunAttemptState = Static<typeof RunAttemptStateSchema>;
 export const ExecutionPhaseValues = [
   "leased",
   "preparing",
-  "codex_review",
+  "cli_review",
   "validation",
-  "codex_revision",
+  "cli_revision",
   "uploading",
   "completing",
   "cancelling",

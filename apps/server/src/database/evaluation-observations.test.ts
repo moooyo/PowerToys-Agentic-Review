@@ -47,15 +47,11 @@ import {
 } from "./evidence-verification.js";
 import { insertHistoricalEvaluationResult } from "./historical-evaluation-results.testing.js";
 import { getJobAdmissionRecord } from "./job-admission.js";
-import { handleModelInvocationRequest } from "./model-invocations.js";
-import {
-  createModelInvocationFixture,
-  modelInvocationBeginRequest,
-  modelInvocationFixtureTime,
-  modelInvocationReceiptSet,
-  modelInvocationSealRequest,
-} from "./model-invocations.testing.js";
 import type { ReviewCompletionJobContext } from "./review-results.js";
+import {
+  completeValidationModelResultFixture,
+  createValidationModelResultBindingFixture,
+} from "./validation-model-result-binding.testing.js";
 import type { VerifiedValidationEvidenceFacts } from "./validation-result-projection.js";
 import {
   persistValidatedValidationResult,
@@ -580,53 +576,14 @@ describe("evaluation observations from the complete frozen owner matrix", () => 
     },
   );
 
-  it("does not turn an independently matched collection into an accepted result or scoring identity", async () => {
-    const value = createModelInvocationFixture();
+  it("does not count frozen summary input without a completed CLI result", async () => {
+    const value = createValidationModelResultBindingFixture();
     fixtures.push(value);
-    const opening = handleModelInvocationRequest(
-      value.database,
-      {
-        operation: "beginModelInvocation",
-        input: {
-          workerTokenSha256: value.workerTokenSha256,
-          request: modelInvocationBeginRequest(value),
-        },
-      },
-      modelInvocationFixtureTime.opened,
-    ) as C.ModelInvocationOpeningV1;
-    const receiptSet = modelInvocationReceiptSet(opening);
-    handleModelInvocationRequest(
-      value.database,
-      {
-        operation: "sealModelInvocation",
-        input: {
-          workerTokenSha256: value.workerTokenSha256,
-          request: modelInvocationSealRequest(value.lease(), receiptSet),
-        },
-      },
-      modelInvocationFixtureTime.sealed,
-    );
-    const submission = handleModelInvocationRequest(
-      value.database,
-      {
-        operation: "submitModelInvocationReceipts",
-        input: {
-          workerTokenSha256: value.workerTokenSha256,
-          request: { lease: value.lease(), invocationId: opening.scope.invocationId, receiptSet },
-        },
-      },
-      modelInvocationFixtureTime.submitted,
-    ) as C.ModelInvocationSubmissionV1;
-    expect(submission).toMatchObject({
-      executionAccepted: false,
-      consistency: { state: "matched", observedIdentitySha256: value.registration.identitySha256 },
-    });
     const { coordinator } = evidenceCoordinator(value);
     const { inputs } = await verified(value, coordinator);
-    const observed = observation(inputs, opening.scope.cellId);
-    expect(inputs.frozen.plan.baseline.modelIdentityDigest).toBe(value.registration.identitySha256);
+    const observed = observation(inputs, value.cell.id);
     expect(observed).toMatchObject({ result: null, checks: [], model: { state: "not_run" } });
-    expect(observed.model).not.toHaveProperty("modelIdentityDigest");
+    expect(observed.model).not.toHaveProperty("cli");
     expect(reportFor(inputs).baseline.coverage.models).toEqual({
       numerator: 0,
       denominator: 1,
@@ -636,8 +593,32 @@ describe("evaluation observations from the complete frozen owner matrix", () => 
       value.database.prepare("SELECT COUNT(*) AS count FROM validation_job_results").get(),
     ).toEqual({ count: 0 });
   });
+  it("scores a completed model result with its Worker CLI metadata", async () => {
+    const value = createValidationModelResultBindingFixture();
+    fixtures.push(value);
+    const stored = completeValidationModelResultFixture(value);
+    const { coordinator } = evidenceCoordinator(value);
+    const { inputs } = await verified(value, coordinator);
+    expect(observation(inputs, value.cell.id)).toMatchObject({
+      executionState: "completed",
+      result: { resultId: stored.resultId, resultDigest: stored.resultDigest },
+      model: {
+        state: "complete",
+        evidenceAvailable: true,
+        cli: value.cli,
+      },
+    });
+    expect(reportFor(inputs).baseline.coverage.models).toEqual({
+      numerator: 1,
+      denominator: 1,
+      value: 1,
+    });
+    const candidate = value.cells.find((cell) => cell.arm === "candidate");
+    if (!candidate) throw new Error("The synthetic candidate cell is missing.");
+    expect(observation(inputs, candidate.id).model).toMatchObject({ state: "not_run" });
+  });
 
-  it("keeps required-model cells blocked without inventing an observed model identity or result", async () => {
+  it("keeps unexecuted model cells available without inventing CLI metadata or a result", async () => {
     const value = unexecutedFixture("pull_request");
     const { coordinator } = evidenceCoordinator(value);
     const { inputs } = await verified(value, coordinator);
@@ -645,15 +626,14 @@ describe("evaluation observations from the complete frozen owner matrix", () => 
       inputs.frozen.plan.cases.find((entry) => entry.applicability.state === "applicable"),
     );
     for (const arm of ["baseline", "candidate"] as const) {
-      expect(inputs.frozen.plan[arm].modelIdentityDigest).toBeNull();
       const entry = observation(inputs, applicable[`${arm}Binding`].cellId);
       expect(entry).toMatchObject({
-        executionState: "blocked",
+        executionState: "not_run",
         result: null,
         checks: [],
-        model: { state: "blocked" },
+        model: { state: "not_run" },
       });
-      expect(entry.model).not.toHaveProperty("modelIdentityDigest");
+      expect(entry.model).not.toHaveProperty("cli");
       expect(reportFor(inputs)[arm].coverage.models).toEqual({
         numerator: 0,
         denominator: 1,

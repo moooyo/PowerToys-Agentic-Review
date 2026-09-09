@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the current pre-release architecture, including the validation-platform
-integration in the working tree on 2026-09-07. Component checks have passed; complete cross-host
+integration and CLI-owned model execution in the working tree on 2026-09-10. Component checks have passed; complete cross-host
 Server/Worker/Dashboard acceptance is still in progress. See
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for that verification boundary.
 
@@ -35,7 +35,7 @@ Windows Worker
     +-- shared bare Git repository per GitHub repository
     +-- detached worktree per run attempt
     +-- separate original-source validation and model workspaces
-    +-- ProcessHost -> Git / Codex / validation process trees
+    +-- ProcessHost -> Git / Codex CLI or Copilot CLI / validation process trees
     +-- managed Windows UI Automation / Chromium driver children
 ```
 
@@ -55,10 +55,10 @@ remove operational controls:
 - Server leases and generations fence stale Workers and replayed terminal reports.
 - ProcessHost creates Windows Job Objects with kill-on-close, timeout, process-count, memory, and
   combined-output limits.
-- Git and Codex receive replacement environments.
+- Git and model CLI processes receive replacement environments.
 - Worker Bearer Tokens and Server-side GitHub credentials are never propagated to child processes.
 - Worktrees and task control, temporary, and user-profile directories are deleted after terminal
-  reporting; the dedicated Codex authentication home persists.
+  reporting; CLI-owned login storage remains outside disposable attempt directories.
 
 ProcessHost is a reliability and resource-control boundary, not an adversarial same-user sandbox.
 
@@ -288,9 +288,10 @@ installer. Manual trusted deployment is the supported pre-release path.
 At startup the Worker:
 
 1. loads its fixed Bearer Token profile;
-2. checks persistent Codex and runtime directory identities using read-only `lstat`/`realpath`
+2. checks configured runtime directory identities using read-only `lstat`/`realpath`
    validation, rejecting links, aliases, overlap, and observed identity changes;
-3. loads allowed Codex profile settings and validates executable paths and SHA-256 digests;
+3. validates runtime executable paths and ProcessHost/Git integrity settings, and detects the
+   configured model CLI version through a bounded `--version` call;
 4. starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
 5. recovers all abandoned attempt directories under the acquired singleton;
 6. registers one Worker instance; and
@@ -344,7 +345,7 @@ repository and performs the following operations:
 5. verify the fetched pull request head equals the envelope's immutable `headSha`;
 6. verify the envelope `baseSha` and `headSha` are commits and have a merge base;
 7. create a detached worktree at the exact `headSha`; and
-8. verify the worktree `HEAD` again before Codex starts.
+8. verify the worktree `HEAD` again before the model CLI starts.
 
 The fetch is independent of the base branch name or its current tip. It supports PRs targeting
 `dev` or any other base ref without assuming or falling back to `main`. Queued jobs retain their
@@ -375,37 +376,34 @@ they do not infer a checkout from a branch tip or from the issue content digest.
 and model review receive separate workspace identities under the same real attempt lease. UI
 profiles currently build their own source; no cross-profile build-artifact reuse is implemented.
 
-## Codex execution
+## CLI-owned model execution
 
 The Server renders a trusted versioned prompt and sends its digest and authoritative output schema
 in the job envelope. The Worker independently selects the matching compiled schema, verifies the
-envelope, and writes only the per-attempt schema and result control files. The persistent
-`WORKER_EXECUTION_PROFILE_DIRECTORY` is the dedicated `CODEX_HOME`; the Worker does not overwrite its
-operator-provisioned `config.toml` or copy authentication files into worktrees.
+envelope, and writes per-attempt schema and result control files. The Worker selects `codex` or
+`copilot` through `WORKER_CLI_ENGINE` and launches the absolute
+`WORKER_CLI_EXECUTABLE_PATH`. `WORKER_CLI_HOME` and `WORKER_CLI_MODEL` are optional configuration.
+Startup detects the installed CLI version through ProcessHost with a 20-second/64-KiB `--version`
+probe and records the first stdout line. There is no manually declared CLI version;
+`WORKER_CLI_SHA256` is an optional binary pin. CLI paths can be outside the infrastructure trusted
+root, and Windows WinGet links resolve to their installed targets. Capabilities expose nullable
+`cliEngine` and `cliVersion` and do not invent an identity for a model-free Worker.
 
-The profile loader allows only supported model, selected-provider, and authentication settings.
-Provider HTTP header values are converted to `CODEX_PROVIDER_HEADER_<n>` environment variables for
-native Codex; their values are not serialized into command-line overrides. Build/test shells get
-exactly `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and `USERPROFILE`, with no Codex
-home, provider credentials, Worker Token, or GitHub credentials.
+The selected CLI owns login, provider configuration, model access and HTTP traffic. Operators log
+in through that CLI under the actual Worker account and intended home. The Worker does not parse,
+copy or rewrite CLI auth/provider files. There is no global provider registry, project-owned HTTP
+relay, provider metadata classification policy or provider request/response ledger.
 
-Codex runs with:
+The project records the selected CLI configuration, bounded process exit and schema-validated
+structured output associated with the current task and lease. Configured model names and CLI
+versions are observations, not independent verification of a remote provider's model. Model-required
+work remains incomplete if the CLI is unavailable or its output is missing or invalid.
 
-- `sandbox_mode = "workspace-write"`;
-- `--ignore-user-config` and fixed CLI overrides after the allowed operator settings;
-- `--config approval_policy="never"` rather than the unsupported exec `--ask-for-approval` form;
-- outbound network access enabled for admitted execution code;
-- the prepared worktree as its working directory;
-- project instructions such as `AGENTS.md` enabled;
-- project trust `untrusted`, suppressing repository config without changing the trusted-code policy;
-- MCP, plugins, hooks, notifications, and inherited extra write roots disabled, with only the current
-  task temporary directory added to the worktree's write access;
-- a replacement environment without Worker credentials; and
-- ProcessHost resource and lifetime limits.
-
-The pinned native CLI used for the current compatibility checks is Codex 0.145.0. The dedicated
-profile must have `config.toml` and supported file/keyring authentication or a supported provider
-authentication command; a login in another default profile does not establish Worker readiness.
+The CLI uses the prepared worktree and managed ProcessHost lifetime/resource limits. Model limits
+use `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_PROCESSES`,
+`WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES`. Worker and Server credentials
+remain excluded from child environments. The VM deployment owns account, filesystem and network
+isolation. See the [current execution design](./docs/design/2026-09-10-cli-owned-model-execution.md).
 
 The legacy pull request prompt permits inspection, edits, builds, and tests inside its disposable
 worktree and forbids publishing, pushing, merging, or mutating external systems. Profile jobs run
@@ -465,7 +463,7 @@ and evidence/action components are present; their complete integration acceptanc
 ## Deployment
 
 The Server is expected to run on Linux with private SQLite and evidence storage. The Worker is
-manually deployed to Windows with pinned Node.js, Git, Codex CLI, `worker.mjs`, and ProcessHost
+manually deployed to Windows with Node.js, Git, the selected Codex or Copilot CLI, `worker.mjs`, and ProcessHost
 binaries. UI execution also needs the registered driver assets and browser or interactive-session
 prerequisites. A normal noninteractive service cannot satisfy desktop UI readiness. Automatic
 package distribution, Ed25519 release signing, upgrades, repair, and rollback are outside the MVP.

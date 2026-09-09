@@ -15,10 +15,10 @@ import {
   type EvaluationSourceSnapshotV1,
   EvaluationSourceSnapshotV1Schema,
   evaluationExecutionRequiredCapabilityLabels,
+  evaluationModelExecutionCapabilityLabels,
   getEvaluationExecutionAuthorizationIssues,
   getEvaluationExecutionTemplateIssues,
-  getEvaluationModelReadinessBlockers,
-  getEvaluationModelRuntimeRegistrationIssues,
+  getEvaluationModelRequiredCapabilityLabels,
   getEvaluationReviewRunPlanIssues,
   getEvaluationSourceSnapshotIssues,
   getEvaluationValidationJobContextIssues,
@@ -217,7 +217,7 @@ function plan(
       cellManifestSha256: digest("3"),
       executionManifestSha256: digest("e"),
     },
-    modelRequirements: { required: true, expectedModelIdentityDigest: digest("4") },
+    modelRequirements: { required: true },
     jobs: [
       {
         requestId: "request-1",
@@ -277,11 +277,6 @@ function context(value = plan()): ValidationJobContextV2 {
     purpose: structuredClone(value.purpose),
     authorization: structuredClone(value.authorization),
     modelRequirements: structuredClone(value.modelRequirements),
-    ...(value.modelRuntimeRegistration === undefined
-      ? {}
-      : {
-          modelRuntimeRegistration: structuredClone(value.modelRuntimeRegistration),
-        }),
     ...(value.reproduction === undefined
       ? {}
       : { reproduction: structuredClone(value.reproduction) }),
@@ -318,6 +313,10 @@ function execution(value = plan()): {
         ? "validationWeb"
         : "validationWindowsDesktop"]: "1",
     ...evaluationExecutionRequiredCapabilityLabels,
+    ...getEvaluationModelRequiredCapabilityLabels(
+      request.workflowKind,
+      value.modelRequirements.required,
+    ),
   };
   return {
     template: {
@@ -737,23 +736,22 @@ describe("evaluation-only run plans", () => {
     );
   });
 
-  it("retains missing required model identity as a blocker, while allowing profile-only UI evaluation", () => {
+  it.each([true, false])("accepts a model requirement containing only required: %s", (required) => {
+    expect(Value.Check(EvaluationModelRequirementsV1Schema, { required })).toBe(true);
+  });
+
+  it("requires model execution for static review and triage while allowing profile-only validation", () => {
     const value = plan();
-    value.modelRequirements.expectedModelIdentityDigest = null;
     expect(getEvaluationReviewRunPlanIssues(value)).toEqual([]);
-    expect(getEvaluationModelReadinessBlockers(value.modelRequirements)).toEqual([
-      "expected_model_identity_missing",
-    ]);
     value.modelRequirements.required = false;
     expect(getEvaluationReviewRunPlanIssues(value)).toContain(
       "Static review and Issue triage evaluations require model execution.",
     );
     const ui = plan("pr_ui", "web");
-    ui.modelRequirements = { required: false, expectedModelIdentityDigest: null };
+    ui.modelRequirements = { required: false };
     expect(getEvaluationReviewRunPlanIssues(ui)).toEqual([]);
-    expect(getEvaluationModelReadinessBlockers(ui.modelRequirements)).toEqual([]);
     const validation = plan("issue_validation");
-    validation.modelRequirements = { required: false, expectedModelIdentityDigest: null };
+    validation.modelRequirements = { required: false };
     expect(getEvaluationReviewRunPlanIssues(validation)).toEqual([]);
     const triage = plan("issue_triage");
     triage.modelRequirements.required = false;
@@ -768,110 +766,6 @@ describe("evaluation-only run plans", () => {
 });
 
 describe("evaluation context and template binding", () => {
-  function registeredPlan(): ReviewRunExecutionPlanV2 {
-    const value = plan();
-    value.modelRequirements.runtimeRegistration = {
-      registrationId: "registration-1",
-      registrationSha256: digest("9"),
-    };
-    value.modelRuntimeRegistration = {
-      schemaVersion: "ModelRuntimeRegistrationV1",
-      id: "registration-1",
-      name: "Expected runtime",
-      requestedModel: "requested-model",
-      identitySha256: digest("4"),
-      createdAt: capturedAt,
-      createdBy: { issuer: "https://identity.example", subject: "operator" },
-      identity: {
-        schemaVersion: "ModelRuntimeIdentityV1",
-        providerId: "provider-1",
-        modelId: "observed-model",
-        endpointSha256: digest("a"),
-        client: {
-          kind: "codex_cli",
-          version: "fixture",
-          executableSha256: digest("b"),
-          launchPolicySha256: digest("c"),
-        },
-        relay: { implementationSha256: digest("d"), policySha256: digest("e") },
-      },
-    };
-    return value;
-  }
-
-  it("freezes a thin registration reference with the complete matching plan/context snapshot", () => {
-    const value = registeredPlan();
-    const job = context(value);
-    expect(getEvaluationReviewRunPlanIssues(value)).toEqual([]);
-    expect(
-      getEvaluationValidationJobContextIssues(job, {
-        plan: value,
-        runId: "run-1",
-        planDigest: digest("6"),
-      }),
-    ).toEqual([]);
-    const { template, binding } = execution(value);
-    expect(getEvaluationExecutionTemplateIssues(template, binding)).toEqual([]);
-    expect(job.modelRuntimeRegistration).toEqual(value.modelRuntimeRegistration);
-    expect(
-      getEvaluationModelRuntimeRegistrationIssues(
-        value.modelRequirements,
-        value.modelRuntimeRegistration,
-      ),
-    ).toEqual([]);
-  });
-
-  it("rejects one-sided, wrong-identity, future or context-swapped registration snapshots", () => {
-    const missingSnapshot = registeredPlan();
-    delete missingSnapshot.modelRuntimeRegistration;
-    expect(getEvaluationReviewRunPlanIssues(missingSnapshot).length).toBeGreaterThan(0);
-    const missingReference = registeredPlan();
-    delete missingReference.modelRequirements.runtimeRegistration;
-    expect(getEvaluationReviewRunPlanIssues(missingReference).length).toBeGreaterThan(0);
-    for (const changes of [
-      { id: "another-registration" },
-      { identitySha256: digest("f") },
-      { createdAt: "2026-09-09T00:00:00Z" },
-    ]) {
-      const value = registeredPlan();
-      value.modelRuntimeRegistration = {
-        ...requireValue(value.modelRuntimeRegistration, "registration"),
-        ...changes,
-      };
-      expect(getEvaluationReviewRunPlanIssues(value).length).toBeGreaterThan(0);
-    }
-    const value = registeredPlan();
-    const job = context(value);
-    requireValue(job.modelRuntimeRegistration, "registration").requestedModel =
-      "another-requested-model";
-    expect(getEvaluationValidationJobContextIssues(job)).toEqual([]);
-    expect(
-      getEvaluationValidationJobContextIssues(job, {
-        plan: value,
-        runId: "run-1",
-        planDigest: digest("6"),
-      }).length,
-    ).toBeGreaterThan(0);
-    value.modelRequirements.expectedModelIdentityDigest = null;
-    expect(getEvaluationReviewRunPlanIssues(value).length).toBeGreaterThan(0);
-  });
-
-  it("preserves historical unknown requirements without synthesizing registration fields", () => {
-    const value = plan();
-    value.modelRequirements.expectedModelIdentityDigest = null;
-    const before = JSON.stringify(value);
-    expect(getEvaluationReviewRunPlanIssues(value)).toEqual([]);
-    expect(JSON.stringify(value)).toBe(before);
-    expect(Object.hasOwn(value.modelRequirements, "runtimeRegistration")).toBe(false);
-    expect(Object.hasOwn(context(value), "modelRuntimeRegistration")).toBe(false);
-    expect(
-      Value.Check(EvaluationModelRequirementsV1Schema, {
-        ...value.modelRequirements,
-        runtimeRegistration: { registrationId: "registration\n", registrationSha256: digest("9") },
-      }),
-    ).toBe(false);
-  });
-
   it("returns issues for an invalid expected plan without dereferencing missing requests", () => {
     const value = plan();
     const job = context(value);
@@ -941,9 +835,9 @@ describe("evaluation context and template binding", () => {
       },
     ],
     [
-      "model",
+      "model requirement",
       (value: ValidationJobContextV2) => {
-        value.modelRequirements.expectedModelIdentityDigest = digest("f");
+        value.modelRequirements.required = false;
       },
     ],
     [
@@ -1068,6 +962,22 @@ describe("evaluation context and template binding", () => {
       requiredCapabilityLabels: { executionEnvelope: "2", validationHeadless: "1" },
     };
     expect(getEvaluationExecutionTemplateIssues(template, altered)).toContain(
+      "Evaluation templates require implemented evaluation and target protocol capabilities.",
+    );
+  });
+
+  it("cannot remove the required model runtime from the caller's expected policy", () => {
+    const { template, binding } = execution();
+    const label = evaluationModelExecutionCapabilityLabels.review;
+    const labels = { ...binding.requiredCapabilityLabels };
+    delete labels[label];
+    template.executionPolicy.requiredCapabilityLabels = { ...labels };
+    expect(
+      getEvaluationExecutionTemplateIssues(template, {
+        ...binding,
+        requiredCapabilityLabels: labels,
+      }),
+    ).toContain(
       "Evaluation templates require implemented evaluation and target protocol capabilities.",
     );
   });

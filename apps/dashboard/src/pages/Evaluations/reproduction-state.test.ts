@@ -291,7 +291,7 @@ describe("explicit evaluation reproduction configuration", () => {
       requireReproductionPreviews([], value.cases, value.sources, {}, value.profiles),
     ).not.toThrow();
   });
-  it("retains reproduction mappings in profile-only mode without enabling model invocation", () => {
+  it("retains reproduction mappings in profile-only mode", () => {
     const value = fixture(),
       prompt = {
         ...batchPromptOptionsFixture().items[0]!,
@@ -310,7 +310,6 @@ describe("explicit evaluation reproduction configuration", () => {
     });
     expect(request.reproductionMappings).toEqual(mappings);
     expect(request.mode).toBe("profile_only");
-    expect(request.baseline.modelRuntimeRegistrationId).toBeUndefined();
     mappings[0]!.selectedCaseIds[0] = "changed-after-submit";
     expect(request.reproductionMappings?.[0]?.selectedCaseIds).toEqual(["original-case"]);
   });

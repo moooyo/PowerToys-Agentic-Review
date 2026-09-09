@@ -152,7 +152,8 @@ async function registerWorker(f: Fixture, suffix: string, disabled: boolean) {
     architecture: "x64",
     headless: true,
     interactiveDesktop: false,
-    codexVersion: "synthetic-protocol-only",
+    cliEngine: "codex",
+    cliVersion: "synthetic-protocol-only",
     recipeIds: [],
     labels: {
       executionEnvelope: "2",

@@ -186,8 +186,19 @@ describe("evaluation batch persistence", () => {
           evaluateEvaluationRunReadiness(cell.plan, []).flatMap((entry) => entry.reasons),
         ).not.toContainEqual({ code: "missing_source_authorization" });
         expect(
-          evaluateEvaluationRunReadiness(cell.plan, []).flatMap((entry) => entry.reasons),
-        ).toContainEqual({ code: "missing_capability", capability: "verified_model_identity" });
+          evaluateEvaluationRunReadiness(cell.plan, [
+            {
+              workflowKind: only(cell.plan.jobs).workflowKind,
+              target: only(cell.plan.jobs).target,
+              capabilities: [
+                "validationEvaluation",
+                "validationEvaluationReviewModel",
+                "validationEvaluationSummaryModel",
+              ],
+              evidenceDelivery: true,
+            },
+          ])[0],
+        ).toMatchObject({ state: "ready", reasons: [] });
       }
       expect(value.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     },
@@ -340,7 +351,6 @@ describe("evaluation batch persistence", () => {
     for (const cell of readEvaluationBatchCells(value.database, value.create(input).id)) {
       expect(cell.plan.modelRequirements).toEqual({
         required: false,
-        expectedModelIdentityDigest: null,
       });
       const support = {
         workflowKind: "issue_validation" as const,

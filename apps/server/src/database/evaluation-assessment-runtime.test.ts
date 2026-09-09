@@ -107,7 +107,8 @@ function expectIncompletePreview(value: C.EvaluationScorePreviewV1, version: num
     expect(value.summary[arm].coverage).toMatchObject({
       applicableCases: 1,
       completedCases: 0,
-      blockedCases: 1,
+      blockedCases: 0,
+      notRunCases: 1,
       availableModels: 0,
     });
     expect(value.summary[arm].quality.truePositives).toBe(0);
@@ -119,7 +120,7 @@ function expectIncompletePreview(value: C.EvaluationScorePreviewV1, version: num
 describe.skipIf(process.platform !== "linux")(
   "evaluation assessment publication through the real owner",
   () => {
-    it("publishes only actual blocked coverage snapshots and preserves permissions and original receipts through recovery", async () => {
+    it("publishes pending CLI execution coverage and preserves permissions and original receipts through recovery", async () => {
       let recovery = false;
       const fixture = await createEvidenceControlPlaneFixture(1, [administrator], {
         createClient: (options) =>
@@ -178,7 +179,7 @@ describe.skipIf(process.platform !== "linux")(
         request: {
           changeId: "assessment-runtime-suite",
           name: "Required model coverage gaps",
-          description: "A real frozen source whose required model identity is not available.",
+          description: "A real frozen source whose required CLI review has not executed.",
           workflowKind: "pr_static_build",
           target: "headless",
         },
@@ -259,25 +260,25 @@ describe.skipIf(process.platform !== "linux")(
       for (const arm of ["baseline", "candidate"] as const)
         expect(detail.configurations[arm].modelRequirements).toEqual({
           required: true,
-          expectedModelIdentityDigest: null,
         });
       const matrix = await operator().request("getEvaluationBatchMatrix", scope);
       expect(C.getEvaluationBatchMatrixIssues(matrix)).toEqual([]);
-      expect(matrix.status).toBe("blocked");
+      expect(matrix.status).toBe("pending");
       expect(matrix.progress).toMatchObject({
         totalCells: 2,
         applicableCells: 2,
-        blocked: 2,
+        blocked: 0,
+        not_run: 2,
         completed: 0,
         running: 0,
         queued: 0,
       });
       for (const entry of matrix.cases)
         for (const arm of ["baseline", "candidate"] as const)
-          expect(entry[arm]).toMatchObject({ state: "blocked", job: null, result: null });
+          expect(entry[arm]).toMatchObject({ state: "not_run", job: null, result: null });
 
-      // No claim, model invocation, completion, or upstream action is performed. These reports
-      // intentionally preserve the real required-model and execution coverage gaps above.
+      // No claim, CLI execution, completion, or upstream action is performed. These reports
+      // intentionally preserve the real pending model and execution coverage gaps above.
       const firstPreview = await operator().request("getEvaluationScorePreview", scope);
       expectIncompletePreview(firstPreview, 0);
       const firstRequest: C.EvaluationAssessmentPublishRequest = {
@@ -342,7 +343,7 @@ describe.skipIf(process.platform !== "linux")(
         findings: draft.cases[0]?.findings,
       });
       for (const arm of ["baseline", "candidate"] as const) {
-        expect(selectedCase.case[arm].executionState).toBe("blocked");
+        expect(selectedCase.case[arm].executionState).toBe("not_run");
         expect(selectedCase.case[arm].result).toBeNull();
         expect(selectedCase.case[arm].findings.modelAvailable).toBe(false);
       }
@@ -376,9 +377,9 @@ describe.skipIf(process.platform !== "linux")(
         expect(observations).toHaveLength(2);
         for (const observation of observations)
           expect(observation).toMatchObject({
-            executionState: "blocked",
+            executionState: "not_run",
             result: null,
-            model: { state: "blocked" },
+            model: { state: "not_run" },
           });
         expect(JSON.parse(row.adjudications)).toEqual([]);
       }

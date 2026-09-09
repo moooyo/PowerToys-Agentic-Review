@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 
+import { CliModelExecutionV1Schema } from "./cli-model-execution.js";
 import {
   DateTimeSchema,
   EntityIdSchema,
@@ -216,6 +217,7 @@ export type DashboardReviewRunJobListResponse = Static<
 
 export const DashboardValidationModelReviewSchema = Type.Object(
   {
+    execution: Type.Union([CliModelExecutionV1Schema, Type.Null()]),
     state: Type.Union([
       Type.Literal("completed"),
       Type.Literal("failed"),

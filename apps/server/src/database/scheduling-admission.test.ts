@@ -10,11 +10,11 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJobAdmissionInTransaction, getJobAdmissionRecord } from "./job-admission.js";
 import { runMigrations } from "./migrations.js";
-import { admitPendingJobsInTransaction } from "./scheduling-admission.js";
 import {
   readPlatformSchedulingConfiguration,
   readSchedulingUsage,
 } from "./scheduling-accounting.js";
+import { admitPendingJobsInTransaction } from "./scheduling-admission.js";
 import { readRepositorySchedulingService, type SchedulingWorkClass } from "./scheduling-service.js";
 
 const now = "2026-09-07T12:00:00.000Z";
@@ -122,7 +122,8 @@ function worker(database: DatabaseSync, id = "worker-ready", pool = "ready"): st
     architecture: "x64",
     headless: true,
     interactiveDesktop: false,
-    codexVersion: "test",
+    cliEngine: "codex",
+    cliVersion: "test",
     recipeIds: [],
     labels: { pool },
   };

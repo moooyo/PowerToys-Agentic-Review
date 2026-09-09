@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { CliModelConfiguration } from "../../contracts/src/cli-model-execution.js";
 import {
   assertEvaluationScoringReport,
   type EvaluationArm,
@@ -14,9 +15,12 @@ import {
 } from "./evaluation-scoring.js";
 
 const sourceDigest = "a".repeat(64);
-const modelDigest = "b".repeat(64);
 const otherDigest = "c".repeat(64);
 const key = (value: number) => value.toString(16).padStart(64, "0");
+
+function cliConfiguration(overrides: Partial<CliModelConfiguration> = {}): CliModelConfiguration {
+  return { kind: "codex", version: "1.0.0", requestedModel: "model-a", ...overrides };
+}
 
 function requireValue<T>(value: T | null | undefined): T {
   if (value === null || value === undefined) {
@@ -39,12 +43,10 @@ function plan(): EvaluationScoringPlanV1 {
     baseline: {
       profileVersionId: "profile-v1",
       promptVersionId: "prompt-v1",
-      modelIdentityDigest: modelDigest,
     },
     candidate: {
       profileVersionId: "profile-v2",
       promptVersionId: "prompt-v2",
-      modelIdentityDigest: modelDigest,
     },
     cases: [
       {
@@ -113,7 +115,7 @@ function observed(
     model: {
       state: "complete",
       evidenceAvailable: true,
-      modelIdentityDigest: modelDigest,
+      cli: cliConfiguration(),
       occurrenceKeys: [],
     },
   };
@@ -130,7 +132,7 @@ function findings(observation: EvaluationOwnerObservation, keys: string[]): void
   observation.model = {
     state: "complete",
     evidenceAvailable: true,
-    modelIdentityDigest: modelDigest,
+    cli: cliConfiguration(),
     occurrenceKeys: keys,
   };
 }
@@ -350,7 +352,7 @@ describe("criterion coverage and paired changes", () => {
     const input = plan();
     gold(input);
     const observation = observed(input);
-    observation.model = { state: "failed", reason: "The provider call failed." };
+    observation.model = { state: "failed", reason: "The CLI execution failed." };
     const report = score(input, [observation]);
     expect(report.baseline.quality.correctChecks).toBe(1);
     expect(report.baseline.quality.falseNegatives).toBe(0);
@@ -600,8 +602,6 @@ describe("profile-only model applicability", () => {
     const input = plan();
     gold(input, 2);
     firstCase(input).findings.annotation = "partial";
-    input.baseline.modelIdentityDigest = null;
-    input.candidate.modelIdentityDigest = null;
     const frozen = freezeEvaluationScoringPlan(input);
     const originalBytes = JSON.stringify(frozen.plan);
     const originalDigest = frozen.digest;
@@ -663,7 +663,6 @@ describe("profile-only model applicability", () => {
     (notApplicableArm) => {
       const input = plan();
       gold(input);
-      input[notApplicableArm].modelIdentityDigest = null;
       const requiredArm = notApplicableArm === "baseline" ? "candidate" : "baseline";
       const unrequested = noModel(observed(input, notApplicableArm));
       const required = observed(input, requiredArm);
@@ -859,7 +858,7 @@ describe("profile-only model applicability", () => {
   });
 });
 
-describe("unavailable model, source, and evidence gates", () => {
+describe("model availability, source evidence, and CLI metadata", () => {
   it.each(["failed", "not_run", "invalid", "blocked"] as const)(
     "does not turn a %s model into an empty valid output",
     (state) => {
@@ -944,53 +943,116 @@ describe("unavailable model, source, and evidence gates", () => {
     expect(report.baseline.coverage.availableModels).toBe(0);
   });
 
-  it.each([null, otherDigest])(
-    "does not score an unavailable or mismatched actual model identity %s",
-    (modelIdentityDigest) => {
-      const input = plan();
-      gold(input);
-      const baseline = observed(input);
-      const candidate = observed(input, "candidate");
-      if (candidate.model.state !== "complete") throw new Error("The fixture model is incomplete.");
-      candidate.model.modelIdentityDigest = modelIdentityDigest;
-      const report = score(input, [baseline, candidate]);
-      expect(report.candidate.quality.falseNegatives).toBe(0);
-      expect(report.candidate.quality.recall.value).toBeNull();
-      expect(report.candidate.quality.correctChecks).toBe(1);
-      expect(firstCase(report).paired.modelCoverage).toBe("coverage_regressed");
-    },
-  );
-
-  it("declines model quality comparison when the two frozen model identities differ", () => {
+  it.each([
+    { change: "CLI kind", cli: cliConfiguration({ kind: "copilot" }) },
+    { change: "CLI version", cli: cliConfiguration({ version: "2.0.0" }) },
+    { change: "requested model", cli: cliConfiguration({ requestedModel: "model-b" }) },
+    { change: "unspecified requested model", cli: cliConfiguration({ requestedModel: null }) },
+    { change: "identical CLI metadata", cli: cliConfiguration() },
+  ])("scores each arm independently with $change", ({ cli }) => {
     const input = plan();
     gold(input);
-    input.candidate.modelIdentityDigest = otherDigest;
     const baseline = observed(input);
     const candidate = observed(input, "candidate");
+    findings(baseline, [key(1)]);
     if (candidate.model.state !== "complete") throw new Error("The fixture model is incomplete.");
-    candidate.model.modelIdentityDigest = otherDigest;
-    const report = score(input, [baseline, candidate]);
-    expect(report.baseline.coverage.availableModels).toBe(0);
-    expect(report.candidate.coverage.availableModels).toBe(0);
-    expect(report.paired.findings.unavailable).toBe(1);
+    candidate.model.cli = cli;
+    const frozen = freezeEvaluationScoringPlan(input);
+    const captured = captureEvaluationObservations(frozen, [baseline, candidate]);
+    const capturedCandidate = requireValue(
+      captured.observations.find((observation) => observation.arm === "candidate"),
+    );
+    expect(capturedCandidate.model).toMatchObject({ state: "complete", cli });
+    expect(Object.isFrozen(capturedCandidate.model)).toBe(true);
+    if (capturedCandidate.model.state !== "complete")
+      throw new Error("The captured fixture model is incomplete.");
+    expect(Object.isFrozen(capturedCandidate.model.cli)).toBe(true);
+    const report = scoreEvaluation(frozen, captured, [
+      judgment(baseline, key(1), { kind: "match", expectedFindingId: "bug-1" }),
+    ]);
+    expect(report.baseline.quality).toMatchObject({
+      truePositives: 1,
+      falseNegatives: 0,
+      unresolvedExpected: 0,
+      recall: { numerator: 1, denominator: 1, value: 1 },
+      provisional: false,
+    });
+    expect(report.candidate.quality).toMatchObject({
+      truePositives: 0,
+      falseNegatives: 1,
+      unresolvedExpected: 0,
+      recall: { numerator: 0, denominator: 1, value: 0 },
+      provisional: false,
+    });
+    for (const arm of ["baseline", "candidate"] as const) {
+      expect(report[arm].coverage).toMatchObject({
+        availableModels: 1,
+        models: { numerator: 1, denominator: 1, value: 1 },
+        execution: { numerator: 1, denominator: 1, value: 1 },
+      });
+      expect(report[arm].quality.correctChecks).toBe(1);
+      expect(firstCase(report)[arm].findings.state).toBe("scored");
+    }
+    expect(report.paired.findings).toMatchObject({
+      compared: 1,
+      unavailable: 0,
+      coverage: { numerator: 1, denominator: 1, value: 1 },
+    });
     expect(report.paired.criteria.compared).toBe(1);
   });
 
-  it("keeps the execution matrix and runner checks when frozen model identities are unknown", () => {
+  it.each(["baseline", "candidate"] as const)(
+    "keeps the other arm scored when %s model evidence is missing",
+    (unavailableArm) => {
+      const input = plan();
+      gold(input);
+      const unavailable = observed(input, unavailableArm);
+      const availableArm = unavailableArm === "baseline" ? "candidate" : "baseline";
+      const available = observed(input, availableArm);
+      if (unavailable.model.state !== "complete")
+        throw new Error("The fixture model is incomplete.");
+      unavailable.model.cli = cliConfiguration({ kind: "copilot", requestedModel: null });
+      unavailable.model.evidenceAvailable = false;
+      const report = score(input, [unavailable, available]);
+      expect(report[unavailableArm].coverage.availableModels).toBe(0);
+      expect(report[unavailableArm].quality).toMatchObject({
+        falseNegatives: 0,
+        unresolvedExpected: 1,
+        recall: { value: null },
+      });
+      expect(report[availableArm].coverage.availableModels).toBe(1);
+      expect(report[availableArm].quality).toMatchObject({
+        falseNegatives: 1,
+        unresolvedExpected: 0,
+        recall: { numerator: 0, denominator: 1, value: 0 },
+      });
+      expect(report.paired.findings.compared).toBe(0);
+      expect(report.paired.criteria.compared).toBe(1);
+    },
+  );
+
+  it("scores both complete outputs when neither CLI requested a specific model", () => {
     const input = plan();
     gold(input);
-    input.baseline.modelIdentityDigest = null;
-    input.candidate.modelIdentityDigest = null;
     const baseline = observed(input);
     const candidate = observed(input, "candidate");
+    for (const observation of [baseline, candidate]) {
+      if (observation.model.state !== "complete")
+        throw new Error("The fixture model is incomplete.");
+      observation.model.cli = cliConfiguration({ requestedModel: null });
+    }
     const report = score(input, [baseline, candidate]);
-    expect(report.baseline.coverage.execution.value).toBe(1);
-    expect(report.baseline.quality.correctChecks).toBe(1);
-    expect(report.candidate.quality.correctChecks).toBe(1);
-    expect(report.baseline.coverage.availableModels).toBe(0);
-    expect(report.candidate.quality.falseNegatives).toBe(0);
-    expect(report.candidate.quality.knownPositiveRecall.value).toBeNull();
-    expect(report.paired.findings.unavailable).toBe(1);
+    for (const arm of ["baseline", "candidate"] as const) {
+      expect(report[arm].coverage.execution.value).toBe(1);
+      expect(report[arm].coverage.availableModels).toBe(1);
+      expect(report[arm].quality).toMatchObject({
+        correctChecks: 1,
+        falseNegatives: 1,
+        knownPositiveRecall: { numerator: 0, denominator: 1, value: 0 },
+        provisional: false,
+      });
+    }
+    expect(report.paired.findings).toMatchObject({ compared: 1, unavailable: 0 });
   });
 
   it("is deterministic across owner and adjudication ordering and returns a frozen valid report", () => {

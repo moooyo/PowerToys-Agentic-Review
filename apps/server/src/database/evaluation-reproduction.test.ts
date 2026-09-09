@@ -404,7 +404,7 @@ describe("frozen evaluation reproduction owners", () => {
     expect(counts(f)).toEqual(before);
   });
 
-  it("keeps required model readiness blocked independently of a complete reproduction mapping", () => {
+  it("dispatches required CLI review with a complete reproduction mapping", () => {
     const f = fixture({ requiredModel: true }),
       batch = f.create();
     for (const cell of readEvaluationBatchCells(f.database, batch.id)) {
@@ -415,11 +415,8 @@ describe("frozen evaluation reproduction owners", () => {
           evaluationBatchNow,
         ),
       );
-      expect(outcome.createdJobs).toHaveLength(0);
-      expect(outcome.blockedRequests[0]?.reasons).toContainEqual({
-        code: "missing_capability",
-        capability: "verified_model_identity",
-      });
+      expect(outcome.createdJobs).toHaveLength(1);
+      expect(outcome.blockedRequests).toEqual([]);
     }
   });
 

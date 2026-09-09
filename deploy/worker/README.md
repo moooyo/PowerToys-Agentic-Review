@@ -6,12 +6,12 @@ flow.
 
 ## Required payload
 
-Install the following trusted, pinned files:
+Install the following trusted files:
 
 - Node.js 24.20.x;
 - PowerShell 7 or newer (`pwsh`) for the Windows E2E evidence collector;
 - Git for Windows;
-- Codex CLI, pinned to the deployment version (current native compatibility checks use 0.145.0);
+- Codex CLI or GitHub Copilot CLI when model execution is enabled;
 - `apps/worker/dist/worker.mjs` and its source map/metadata;
 - `native/process-host/AgenticReview.ProcessHost.exe`; and
 - the fixed Worker authentication profile described in `apps/worker/README.md`.
@@ -20,20 +20,30 @@ Create that profile from an elevated PowerShell session with
 `deploy/worker/provision-worker-auth.ps1`. The script masks Token input and applies the private file
 and directory ACLs required by ADR 0025.
 
-Configure absolute executable paths, expected versions, and SHA-256 digests through the Worker
-environment. Store mutable data, shared repositories, attempt workspaces, temporary files, and the
-Codex profile in separate configured directories.
+Configure absolute executable paths and the ProcessHost/Git integrity settings through the Worker
+environment. Model execution needs `WORKER_CLI_ENGINE=codex` or `copilot` and
+`WORKER_CLI_EXECUTABLE_PATH`. The optional `WORKER_CLI_HOME` selects the persistent CLI home;
+`WORKER_CLI_MODEL` selects a model through the CLI. Startup detects the installed CLI version using
+a bounded `--version` call through ProcessHost, with a 20-second and 64-KiB limit, retaining the
+first stdout line. A hand-maintained CLI version is not accepted. `WORKER_CLI_SHA256` is an optional
+binary pin. The CLI path may be outside `WORKER_TRUSTED_EXECUTABLE_ROOT`; Windows WinGet application
+links resolve to the installed target. ProcessHost and Git retain their trusted-root and SHA rules.
 
-`WORKER_EXECUTION_PROFILE_DIRECTORY` is the dedicated persistent `CODEX_HOME`. Provision its
-`config.toml` and supported authentication under the Worker Windows identity. Use file/keyring
-authentication or supported provider `auth.command`/`auth.args`. Ambient API keys are not forwarded;
-provider `env_key` and directly supplied `env_http_headers` are rejected. Configuration is loaded at
-Worker startup, so changes require a restart. The config file must be a regular UTF-8 file no larger
-than 64 KiB.
+`WORKER_MODEL_EXECUTION_ENABLED` defaults to `true`. Set it to `false` and omit CLI configuration
+when deploying deterministic validation without model execution. Required-model tasks remain
+unavailable to that Worker; optional summary execution must stay disabled.
 
-The Worker checks canonical directory identities and separation from workspaces, temporary roots,
-shared Git, and binaries before orphan cleanup. It does not overwrite the profile or copy its
-authentication cache into a task.
+Run the selected CLI's own login flow under the actual Worker Windows identity, with the same home
+if one is configured. The CLI owns authentication, provider selection, configuration and HTTP
+traffic. The Worker does not read, copy or rewrite auth/provider files. Login in another account
+or home is not evidence that the Worker can run model tasks. Keep persistent CLI state separate
+from shared repositories, disposable workspaces and temporary directories.
+
+There is no global provider registry, HTTP relay/call ledger or provider metadata policy to
+configure. The project records selected CLI configuration, exit status and structured output.
+Worker capabilities contain nullable `cliEngine` and `cliVersion`; neither is a claim about the
+identity of a remote provider's model. See the
+[CLI-owned execution design](../../docs/design/2026-09-10-cli-owned-model-execution.md).
 
 Use `deploy/worker/worker-config.template.psd1` as the deployment baseline. It includes every
 supported `WORKER_*` runtime environment variable consumed by `loadWorkerConfig()`,
@@ -58,12 +68,10 @@ the summary. Advice uses a separate read-only model workspace and the already ob
 checks/evidence; it cannot replace runner outcomes or imply that the model inspected screenshots.
 Ordinary summary failures remain visible without retrying successful deterministic checks.
 
-Summary execution is implemented and wired, but production model acceptance is pending. Keep the
-opt-in disabled for the baseline deployment. M24's actual elevated, model-backed `codex exec`
-probe denied controlled file writes but connected to its owned loopback listener, so production
-network isolation is not accepted. The earlier unelevated helper probe does not supersede this
-observation. Actual summary composition also rejects ambiguous protected provider-header values;
-those values have not been declassified. See the
+Summary execution uses the selected CLI, and production model acceptance is pending. Keep the
+opt-in disabled for the baseline deployment. The historical M24 model probe denied controlled file
+writes but connected to its owned loopback listener. The Worker does not claim network isolation;
+the intended VM deployment owns that boundary. See the
 [summary execution contract](../../docs/design/2026-09-07-optional-validation-summary.md) and
 [production acceptance ledger](../../docs/design/2026-09-07-production-validation-acceptance.md)
 for the independent runner/model conclusions and remaining scope.
@@ -118,7 +126,8 @@ checks succeed.
 
 Build the TypeScript Worker and Windows ProcessHost from a trusted release checkout. Copy the
 resulting files to the Worker machine, create the authentication profile, copy the config template
-to `worker-config.psd1`, fill in pinned paths and digests, and launch:
+to `worker-config.psd1`, fill in runtime paths, CLI selection and ProcessHost/Git integrity settings,
+complete CLI login under the Worker account, and launch:
 
 ```powershell
 .\deploy\worker\start-worker.ps1 -ConfigPath .\deploy\worker\worker-config.psd1
@@ -131,7 +140,12 @@ executable path, puts that directory first in `PATH`, and removes empty and dupl
 The runtime still rejects unsafe path entries. The hard execution-mode guarantee is
 the Windows global named mutex held by ProcessHost for the resolved Worker data root.
 Initialization failures after ProcessHost creation await its closure before reporting the original
-error. Do not configure the removed `WORKER_RECIPE_IDS` setting; Codex executes repository commands.
+error. Do not configure the removed `WORKER_RECIPE_IDS` setting; the CLI executes repository commands.
+
+Model process limits use `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS` (default `3600000`),
+`WORKER_MODEL_MAX_PROCESSES` (default `32`), `WORKER_MODEL_MAX_MEMORY_BYTES` (default `8589934592`)
+and `WORKER_MODEL_MAX_OUTPUT_BYTES` (default `8388608`). The existing Git, aggregate process and
+workspace budgets remain separate.
 
 Use an external Windows service manager or scheduled-task policy if automatic restart is required.
 It must preserve graceful process shutdown. The current repository does not prescribe a specific
@@ -164,7 +178,7 @@ Worker-managed:
 
 For release acceptance, use `deploy/worker/worker-e2e-runbook.md` and
 `deploy/worker/invoke-worker-e2e.ps1` to collect evidence for registration, a real approved public
-PR, Codex validation, inline completion, lease cancellation handling, ProcessHost cleanup,
+PR, CLI-backed validation, inline completion, lease cancellation handling, ProcessHost cleanup,
 workspace cleanup, and shared-Git policy configuration. The script collects evidence only; it does
 not execute an automated E2E run or declare acceptance. Its timestamped observations must be
 correlated with actual job and run-attempt identities, active worktrees and descendants, retained
@@ -172,7 +186,7 @@ build/test output, and the Server's accepted result records. Use distinct output
 baseline, active, completed, and cancelled capture.
 
 The exercise requires an explicitly authorized Windows verification host, configured Worker and
-Codex authentication, a reachable Server with operator/read-only evidence access, and permission
+CLI login, a reachable Server with operator/read-only evidence access, and permission
 to change assignment or user review requests on the selected public PR. The configured GitHub
 reviewer or an allowlisted actor opens work through those GitHub actions. Removing the final active
 assignment/review request triggers lease cancellation after ingestion; the Dashboard has no job
@@ -185,25 +199,18 @@ targeting `dev` passed runtime acceptance. Its tested configuration, evidence, a
 closeout are recorded in the
 [live validation handoff](../../docs/handoff/2026-09-05-windows-e2e-live-validation.md).
 
-Codex uses the persistent home and fresh per-attempt `USERPROFILE`, temporary, and control
-directories. The loader passes only allowed model/provider/auth settings before fixed execution
-overrides. `--ignore-user-config` and project trust `untrusted` suppress other user/project config;
-the repository remains a trusted execution input and `AGENTS.md` remains available. MCP, plugins,
-hooks, notifications, and inherited extra write roots are disabled. Approval is supplied as
-`--config approval_policy="never"`, compatible with the pinned 0.145.0 CLI.
-
-Provider HTTP headers are transformed into `CODEX_PROVIDER_HEADER_<n>` variables for native Codex
-only. The build/test shell environment contains exactly `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`,
-`TEMP`, `TMP`, and `USERPROFILE`, excluding authentication paths and credentials. Establish login
-readiness for the dedicated profile; a default-profile login is not proof. Arrange actual
-build/test and process-lifecycle evidence capture before disposable workspaces are removed, and do
-not capture process environments or authentication contents.
+CLI authentication remains in CLI-owned storage and is not copied into disposable tasks. The
+Worker supplies task inputs, collects bounded structured output and supervises the CLI process;
+it does not capture provider requests or read authentication contents. Arrange actual build/test
+and process-lifecycle evidence before disposable workspaces are removed. Record selected engine,
+observed CLI version, configured model, process exit and output validation, without capturing
+process environments, login storage or provider credentials.
 
 Missing deployment inputs or evidence keep release acceptance blocked. Linux `test-env` checks
 and CI results do not replace the operator-driven Windows exercise. See the
 [Windows E2E runbook](./worker-e2e-runbook.md) for the required evidence and decision criteria.
-Local verification was explicitly authorized for the current exercise; the default verification
-policy for other tasks remains `test-env` unless separately authorized.
+Historical local verification authorization does not authorize a new exercise. The default
+verification policy remains `test-env` unless local verification is explicitly authorized.
 
 ## Distribution and signing
 

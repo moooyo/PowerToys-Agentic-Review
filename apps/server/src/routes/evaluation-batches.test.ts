@@ -159,12 +159,12 @@ const detail: C.EvaluationBatchDetailV1 = {
     baseline: {
       profile: profile("baseline"),
       prompt: prompt("baseline"),
-      modelRequirements: { required: true, expectedModelIdentityDigest: null },
+      modelRequirements: { required: true },
     },
     candidate: {
       profile: profile("candidate"),
       prompt: prompt("candidate"),
-      modelRequirements: { required: true, expectedModelIdentityDigest: null },
+      modelRequirements: { required: true },
     },
   },
 };
@@ -339,7 +339,7 @@ function resultPayload(): C.EvaluationCellResultV1 {
     workflowKind: "pr_static_build",
     target: "headless",
     createdAt: now,
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
     evidenceComplete: false,
     report: {
       schemaVersion: "ValidationReportV1",
@@ -371,6 +371,7 @@ function resultPayload(): C.EvaluationCellResultV1 {
       issueTriage: null,
       reproductionConclusion: null,
       error: null,
+      execution: null,
     },
     occurrences: [
       {

@@ -3,15 +3,11 @@ import { Value } from "@sinclair/typebox/value";
 
 import { DateTimeSchema, EntityIdSchema, GitHubNumericIdSchema, Sha256Schema } from "./common.js";
 import type { JobExecutionTemplateV1Schema, PromptEnvelope } from "./job-envelope.js";
-import {
-  getModelRuntimeRegistrationIssues,
-  type ModelRuntimeRegistrationV1,
-  ModelRuntimeRegistrationV1Schema,
-} from "./model-runtime-registry.js";
 import { OperatorPrincipalSchema } from "./operator-access.js";
 import {
   getValidationProfileConfigIssues,
   ValidationProfileVersionSchema,
+  type WorkflowKind,
   WorkflowOutputSchemaVersions,
 } from "./platform-configuration.js";
 import {
@@ -32,9 +28,25 @@ export const evaluationExecutionCapabilityLabel = "validationEvaluation";
 export const evaluationExecutionRequiredCapabilityLabels = Object.freeze({
   validationEvaluation: "1",
 });
+export const evaluationModelExecutionCapabilityLabels = Object.freeze({
+  review: "validationEvaluationReviewModel",
+  summary: "validationEvaluationSummaryModel",
+});
+
+/** A required model must use the runtime that implements the frozen workflow's output. */
+export function getEvaluationModelRequiredCapabilityLabels(
+  workflowKind: WorkflowKind,
+  modelRequired: boolean,
+): Record<string, string> {
+  if (!modelRequired) return {};
+  const label =
+    workflowKind === "pr_static_build" || workflowKind === "issue_triage"
+      ? evaluationModelExecutionCapabilityLabels.review
+      : evaluationModelExecutionCapabilityLabels.summary;
+  return { [label]: "1" };
+}
 
 const nullableId = Type.Union([EntityIdSchema, Type.Null()]);
-const nullableDigest = Type.Union([Sha256Schema, Type.Null()]);
 const nullableTestedSource = Type.Union([ReviewRunTestedSourceRevisionSchema, Type.Null()]);
 const frozenSourceProperties = {
   repository: ReviewRunExecutionPlanV1Schema.properties.repository,
@@ -125,21 +137,6 @@ export type EvaluationExecutionPurposeV1 = Static<typeof EvaluationExecutionPurp
 export const EvaluationModelRequirementsV1Schema = Type.Object(
   {
     required: Type.Boolean(),
-    // The owner must resolve this from verified runtime metadata; clients cannot attest it.
-    expectedModelIdentityDigest: nullableDigest,
-    runtimeRegistration: Type.Optional(
-      Type.Object(
-        {
-          registrationId: Type.String({
-            minLength: 1,
-            maxLength: 128,
-            pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])",
-          }),
-          registrationSha256: Sha256Schema,
-        },
-        { additionalProperties: false },
-      ),
-    ),
   },
   { additionalProperties: false },
 );
@@ -171,7 +168,6 @@ export const ReviewRunExecutionPlanV2Schema = Type.Object(
     source: EvaluationSourceSnapshotV1Schema,
     authorization: EvaluationExecutionAuthorizationV1Schema,
     modelRequirements: EvaluationModelRequirementsV1Schema,
-    modelRuntimeRegistration: Type.Optional(ModelRuntimeRegistrationV1Schema),
     jobs: Type.Array(EvaluationReviewRunPlannedJobSchema, { minItems: 1, maxItems: 1 }),
   },
   { additionalProperties: false },
@@ -195,7 +191,6 @@ export const ValidationJobContextV2Schema = Type.Object(
     source: EvaluationSourceSnapshotV1Schema,
     authorization: EvaluationExecutionAuthorizationV1Schema,
     modelRequirements: EvaluationModelRequirementsV1Schema,
-    modelRuntimeRegistration: Type.Optional(ModelRuntimeRegistrationV1Schema),
   },
   { additionalProperties: false },
 );
@@ -386,37 +381,6 @@ function requestIssues(
   return issues;
 }
 
-/** Registration digests and current enablement are independently checked by the owner. */
-export function getEvaluationModelRuntimeRegistrationIssues(
-  requirements: unknown,
-  registration?: unknown,
-): string[] {
-  const issues = shapeIssues(
-    EvaluationModelRequirementsV1Schema,
-    requirements,
-    "Evaluation model requirements",
-  );
-  if (issues.length) return issues;
-  const model = requirements as EvaluationModelRequirementsV1;
-  const reference = model.runtimeRegistration;
-  if ((reference === undefined) !== (registration === undefined))
-    return [
-      "Evaluation model registration reference and frozen snapshot must be present together.",
-    ];
-  if (reference === undefined) return [];
-  issues.push(...getModelRuntimeRegistrationIssues(registration));
-  if (issues.length) return issues;
-  const snapshot = registration as ModelRuntimeRegistrationV1;
-  if (
-    reference.registrationId !== snapshot.id ||
-    model.expectedModelIdentityDigest !== snapshot.identitySha256
-  )
-    issues.push(
-      "Evaluation model requirements must match their frozen registration and identity digest.",
-    );
-  return issues;
-}
-
 function reproductionIssues(value: ReviewRunExecutionPlanV2 | ValidationJobContextV2): string[] {
   if (value.reproduction === undefined) return [];
   const { binding } = value.reproduction;
@@ -460,18 +424,6 @@ export function getEvaluationReviewRunPlanIssues(value: unknown): string[] {
   if (issues.length > 0) return issues;
   const plan = value as ReviewRunExecutionPlanV2;
   issues.push(...authorityIssues(plan.source, plan.purpose, plan.authorization));
-  issues.push(
-    ...getEvaluationModelRuntimeRegistrationIssues(
-      plan.modelRequirements,
-      plan.modelRuntimeRegistration,
-    ),
-  );
-  if (
-    plan.modelRuntimeRegistration !== undefined &&
-    Date.parse(plan.modelRuntimeRegistration.createdAt) >
-      Date.parse(plan.authorization.authorizedAt)
-  )
-    issues.push("Evaluation authorization cannot precede its frozen model registration.");
   for (const field of [
     "repository",
     "workItemId",
@@ -510,18 +462,6 @@ export function getEvaluationValidationJobContextIssues(
   if (issues.length > 0) return issues;
   const context = value as ValidationJobContextV2;
   issues.push(...authorityIssues(context.source, context.purpose, context.authorization));
-  issues.push(
-    ...getEvaluationModelRuntimeRegistrationIssues(
-      context.modelRequirements,
-      context.modelRuntimeRegistration,
-    ),
-  );
-  if (
-    context.modelRuntimeRegistration !== undefined &&
-    Date.parse(context.modelRuntimeRegistration.createdAt) >
-      Date.parse(context.authorization.authorizedAt)
-  )
-    issues.push("Evaluation authorization cannot precede its frozen model registration.");
   if (
     context.repositoryId !== context.source.repository.id ||
     context.workItemId !== context.source.workItemId ||
@@ -552,7 +492,6 @@ export function getEvaluationValidationJobContextIssues(
       !same(context.source, plan.source) ||
       !same(context.authorization, plan.authorization) ||
       !same(context.modelRequirements, plan.modelRequirements) ||
-      !same(context.modelRuntimeRegistration ?? null, plan.modelRuntimeRegistration ?? null) ||
       !same(context.reproduction ?? null, plan.reproduction ?? null) ||
       !same(context.promptVersion, {
         id: prompt.id,
@@ -599,6 +538,10 @@ export function getEvaluationExecutionTemplateIssues(
   const labels = expected.requiredCapabilityLabels;
   const requiredProtocols: Record<string, string> = {
     ...evaluationExecutionRequiredCapabilityLabels,
+    ...getEvaluationModelRequiredCapabilityLabels(
+      context.workflowKind,
+      context.modelRequirements.required,
+    ),
     [validationExecutorCapabilityLabels.envelope]: "2",
     [validationExecutorCapabilityLabels[context.target]]: "1",
   };
@@ -635,20 +578,6 @@ export function getEvaluationExecutionTemplateIssues(
       "Evaluation template must match its frozen source, prompt, profile, and execution policy.",
     );
   return issues;
-}
-
-// No empty result from this helper attests runtime model metadata, capability, or confinement.
-export function getEvaluationModelReadinessBlockers(value: unknown): string[] {
-  const issues = shapeIssues(
-    EvaluationModelRequirementsV1Schema,
-    value,
-    "Evaluation model requirements",
-  );
-  if (issues.length > 0) return issues;
-  const model = value as EvaluationModelRequirementsV1;
-  return model.required && model.expectedModelIdentityDigest === null
-    ? ["expected_model_identity_missing"]
-    : [];
 }
 
 function assertNoIssues(issues: string[]): void {

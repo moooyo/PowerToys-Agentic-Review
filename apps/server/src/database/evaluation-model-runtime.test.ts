@@ -1,8 +1,5 @@
 import type * as C from "@agentic-review/contracts";
-import {
-  evaluateEvaluationRunReadiness,
-  modelRuntimeRegistrationDigest,
-} from "@agentic-review/domain";
+import { evaluateEvaluationRunReadiness } from "@agentic-review/domain";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson } from "../scheduling/canonical-json.js";
 import { createEvaluationExecutionTemplate } from "../scheduling/validation-job-factory.js";
@@ -16,8 +13,11 @@ import {
   setEvaluationManagementRole,
 } from "./evaluation-management.testing.js";
 import { handleEvaluationBatchRequest } from "./evaluation-queries.js";
-import { handleModelRuntimeRegistryRequest } from "./model-runtime-registry.js";
-import { handleValidationDispatchRequest } from "./validation-dispatch.js";
+import { inspectJobAdmissionReadinessInTransaction } from "./scheduling-diagnostics.js";
+import {
+  handleValidationDispatchRequest,
+  type ValidationDispatchOperationMap,
+} from "./validation-dispatch.js";
 
 type Fixture = ReturnType<typeof createEvaluationBatchFixture>;
 const fixtures: Fixture[] = [];
@@ -29,66 +29,7 @@ function fixture(kind: "pull_request" | "issue" = "pull_request") {
   fixtures.push(f);
   return f;
 }
-const registeredAt = "2026-09-08T02:59:00.000Z";
 const changedAt = "2026-09-08T03:01:00.000Z";
-function register(f: Fixture, suffix = "baseline", enabled = true): C.ModelRuntimeStatusV1 {
-  return handleModelRuntimeRegistryRequest(
-    f.database,
-    {
-      operation: "registerModelRuntime",
-      input: {
-        actor: evaluationAdministrator,
-        request: {
-          changeId: `register-${suffix}`,
-          name: `Expected runtime ${suffix}`,
-          requestedModel: `requested-${suffix}`,
-          enabled,
-          identity: {
-            schemaVersion: "ModelRuntimeIdentityV1",
-            providerId: "fixture-provider",
-            endpointSha256: "a".repeat(64),
-            modelId: `observed-${suffix}`,
-            client: {
-              kind: "codex_cli",
-              version: "fixture-cli",
-              executableSha256: "b".repeat(64),
-              launchPolicySha256: "c".repeat(64),
-            },
-            relay: { implementationSha256: "d".repeat(64), policySha256: "e".repeat(64) },
-          },
-        },
-      },
-    },
-    registeredAt,
-    [evaluationAdministrator],
-  ) as C.ModelRuntimeStatusV1;
-}
-function select(f: Fixture, baseline: C.ModelRuntimeStatusV1, candidate = baseline) {
-  const input = structuredClone(f.input);
-  input.request.baseline.modelRuntimeRegistrationId = baseline.registration.id;
-  input.request.candidate.modelRuntimeRegistrationId = candidate.registration.id;
-  return input;
-}
-function disable(f: Fixture, runtime: C.ModelRuntimeStatusV1) {
-  return handleModelRuntimeRegistryRequest(
-    f.database,
-    {
-      operation: "changeModelRuntimeControl",
-      input: {
-        actor: evaluationAdministrator,
-        registrationId: runtime.registration.id,
-        request: {
-          changeId: "disable-model-runtime",
-          expectedVersion: 1,
-          enabled: false,
-          reason: "Stop new selections.",
-        },
-      },
-    },
-    changedAt,
-    [evaluationAdministrator],
-  );
-}
 function detail(f: Fixture, id: string) {
   return handleEvaluationBatchRequest(
     f.database,
@@ -120,15 +61,12 @@ function readCell(f: Fixture, runId: string) {
   }
 }
 
-describe("Evaluation model runtime registration integration", () => {
-  it("freezes independent arm identities through configuration, plan, context, summary and scoring", () => {
+describe("Evaluation CLI model execution configuration", () => {
+  it("freezes both arm inputs and the model requirement through configuration, plan, context and scoring", () => {
     const f = fixture(),
-      baseline = register(f),
-      candidate = register(f, "candidate");
-    const input = select(f, baseline, candidate),
-      summary = f.create(input);
-    expect(summary.baseline.modelRuntimeRegistrationId).toBe(baseline.registration.id);
-    expect(summary.candidate.modelRuntimeRegistrationId).toBe(candidate.registration.id);
+      summary = f.create();
+    expect(summary.baseline).toEqual(f.baseline.selection);
+    expect(summary.candidate).toEqual(f.candidate.selection);
     const stored = persisted(f, summary.id);
     const configuration = JSON.parse(
       stored.configuration_manifest_json ?? "null",
@@ -136,58 +74,61 @@ describe("Evaluation model runtime registration integration", () => {
     const cells = JSON.parse(stored.cell_manifest_json ?? "null") as C.EvaluationCellManifestV1;
     const scoring = JSON.parse(stored.scoring_plan_json ?? "null") as C.EvaluationScoringPlanV1;
     for (const row of readEvaluationBatchCells(f.database, summary.id)) {
-      const expected = row.arm === "baseline" ? baseline.registration : candidate.registration;
-      expect(configuration[row.arm].modelRuntimeRegistration).toEqual(expected);
-      expect(row.plan.modelRuntimeRegistration).toEqual(expected);
-      expect(row.plan.modelRequirements).toEqual({
-        required: true,
-        expectedModelIdentityDigest: expected.identitySha256,
-        runtimeRegistration: {
-          registrationId: expected.id,
-          registrationSha256: modelRuntimeRegistrationDigest(expected),
-        },
-      });
+      const expected = row.arm === "baseline" ? f.baseline : f.candidate;
+      expect(configuration[row.arm].profileVersion).toEqual(expected.profile);
+      expect(configuration[row.arm].prompt.version).toEqual(expected.prompt);
+      expect(configuration[row.arm].modelRequirements).toEqual({ required: true });
+      expect(row.plan.modelRequirements).toEqual({ required: true });
       expect(cells.cells.find((entry) => entry.cellId === row.id)?.modelRequirements).toEqual(
         row.plan.modelRequirements,
       );
-      expect(cells.cells.find((entry) => entry.cellId === row.id)).not.toHaveProperty(
-        "modelRuntimeRegistration",
-      );
-      expect(scoring[row.arm].modelIdentityDigest).toBe(expected.identitySha256);
+      expect(scoring[row.arm]).toEqual(expected.selection);
       const template = createEvaluationExecutionTemplate({
         runId: row.run_id,
         plan: row.plan,
         planDigest: row.plan_digest,
         frozenPrompt: row.prompt,
       });
-      expect(template.validation.modelRuntimeRegistration).toEqual(expected);
+      expect(template.validation.modelRequirements).toEqual({ required: true });
       expect(readCell(f, row.run_id)?.plan).toEqual(row.plan);
     }
     const visible = detail(f, summary.id);
     expect(visible.summary).toEqual(summary);
-    expect(visible.configurations.baseline.modelRuntimeRegistration).toEqual(baseline.registration);
-    expect(visible.configurations.candidate.modelRuntimeRegistration).toEqual(
-      candidate.registration,
-    );
+    for (const arm of ["baseline", "candidate"] as const) {
+      expect(visible.configurations[arm].modelRequirements).toEqual({ required: true });
+      expect(visible.configurations[arm].profile.id).toBe(f[arm].profile.id);
+      expect(visible.configurations[arm].prompt.id).toBe(f[arm].prompt.id);
+    }
   });
-  it("does not turn a registered expectation into accepted model execution", () => {
+
+  it("dispatches required-model evaluations for configured Worker CLIs without provider registration", () => {
     const f = fixture(),
-      runtime = register(f),
-      summary = f.create(select(f, runtime));
+      summary = f.create();
     const row = readEvaluationBatchCells(f.database, summary.id).find(
       (cell) => cell.applicable === 1,
     );
     if (!row) throw new Error("An applicable fixture cell is required.");
     const readiness = evaluateEvaluationRunReadiness(row.plan, []);
-    expect(readiness[0]?.reasons).toContainEqual({
-      code: "missing_capability",
-      capability: "verified_model_execution",
-    });
-    handleValidationDispatchRequest(
+    expect(readiness[0]?.reasons).toEqual([{ code: "unsupported_target" }]);
+    const dispatched = handleValidationDispatchRequest(
       f.database,
       { operation: "dispatchPendingReviewRuns", input: { limit: 128 } },
       changedAt,
-    );
+    ) as ValidationDispatchOperationMap["dispatchPendingReviewRuns"]["output"];
+    expect(dispatched.createdJobs).toHaveLength(2);
+    expect(dispatched.blockedRequestCount).toBe(0);
+    for (const job of dispatched.createdJobs) {
+      f.database.exec("BEGIN");
+      try {
+        const current = inspectJobAdmissionReadinessInTransaction(f.database, job.jobId, changedAt);
+        expect(current.ready).toBe(false);
+        expect(current.reasons.some((reason) => reason.code === "plan_prerequisite_missing")).toBe(
+          false,
+        );
+      } finally {
+        f.database.exec("ROLLBACK");
+      }
+    }
     expect(f.database.prepare("SELECT COUNT(*) AS count FROM run_attempts").get()).toEqual({
       count: 0,
     });
@@ -196,80 +137,45 @@ describe("Evaluation model runtime registration integration", () => {
     ).toEqual({ count: 0 });
     expect(detail(f, summary.id).summary).toEqual(summary);
   });
-  it("keeps frozen records and exact replay intact after registration selection is disabled", () => {
+
+  it("keeps frozen records intact during exact creation replays", () => {
     const f = fixture(),
-      runtime = register(f),
-      input = select(f, runtime),
-      summary = f.create(input);
-    const before = persisted(f, summary.id);
-    disable(f, runtime);
+      input = structuredClone(f.input),
+      summary = f.create(input),
+      before = persisted(f, summary.id);
     expect(f.create(input, { readOnly: true })).toEqual(summary);
-    expect(detail(f, summary.id).configurations.baseline.modelRuntimeRegistration).toEqual(
-      runtime.registration,
-    );
-    const row = readEvaluationBatchCells(f.database, summary.id)[0];
-    if (!row) throw new Error("A fixture cell is required.");
-    expect(readCell(f, row.run_id)?.plan.modelRuntimeRegistration).toEqual(runtime.registration);
+    expect(detail(f, summary.id).summary).toEqual(summary);
+    expect(canonicalJson(f.create(input))).toBe(canonicalJson(summary));
     expect(persisted(f, summary.id)).toEqual(before);
-    const next = structuredClone(input);
-    next.request.changeId = "new-batch-after-disable";
-    expect(() =>
-      handleEvaluationBatchRequest(
-        f.database,
-        {
-          operation: "createEvaluationBatch",
-          input: next,
-        },
-        "2026-09-08T03:02:00.000Z",
-        [evaluationAdministrator],
-      ),
-    ).toThrowError(expect.objectContaining({ code: "PLATFORM_NOT_FOUND" }));
     expect(f.database.prepare("SELECT COUNT(*) AS count FROM evaluations").get()).toEqual({
       count: 1,
     });
   });
-  it("rejects unknown, disabled and client-forged registrations before any evaluation rows exist", () => {
-    const f = fixture(),
-      runtime = register(f, "disabled", false),
-      input = select(f, runtime);
-    expect(() => f.create(input)).toThrow();
-    input.request.baseline.modelRuntimeRegistrationId = "missing-registration";
-    expect(() => f.create(input)).toThrow();
-    Object.assign(input.request.baseline, { modelRuntimeRegistration: runtime.registration });
-    expect(() => f.create(input)).toThrow();
-    expect(f.database.prepare("SELECT COUNT(*) AS count FROM evaluations").get()).toEqual({
-      count: 0,
-    });
-  });
-  it("does not allow a model selection in profile-only mode", () => {
+
+  it("freezes profile-only evaluations without requesting CLI model content", () => {
     const f = fixture("issue"),
-      runtime = register(f),
-      input = select(f, runtime);
+      input = structuredClone(f.input);
     input.request.mode = "profile_only";
-    expect(() => f.create(input)).toThrow();
-    expect(f.database.prepare("SELECT COUNT(*) AS count FROM evaluations").get()).toEqual({
-      count: 0,
-    });
-  });
-  it("preserves old unknown batches byte for byte after later model registration", () => {
-    const f = fixture(),
-      summary = f.create(),
-      before = persisted(f, summary.id);
-    register(f);
+    const summary = f.create(input);
+    for (const row of readEvaluationBatchCells(f.database, summary.id)) {
+      expect(row.plan.modelRequirements).toEqual({ required: false });
+      const template = createEvaluationExecutionTemplate({
+        runId: row.run_id,
+        plan: row.plan,
+        planDigest: row.plan_digest,
+        frozenPrompt: row.prompt,
+      });
+      expect(template.validation.modelRequirements).toEqual({ required: false });
+      expect(readCell(f, row.run_id)?.plan).toEqual(row.plan);
+    }
     const visible = detail(f, summary.id);
-    expect(visible.summary).toEqual(summary);
-    expect(visible.configurations.baseline.modelRequirements).toEqual({
-      required: true,
-      expectedModelIdentityDigest: null,
-    });
-    expect(visible.configurations.baseline).not.toHaveProperty("modelRuntimeRegistration");
-    expect(persisted(f, summary.id)).toEqual(before);
-    expect(canonicalJson(f.create())).toBe(canonicalJson(summary));
+    expect(visible.configurations.baseline.modelRequirements).toEqual({ required: false });
+    expect(visible.configurations.candidate.modelRequirements).toEqual({ required: false });
   });
+
   it("reauthorizes repository access before an exact frozen creation replay", () => {
     const f = fixture(),
-      runtime = register(f),
-      input = select(f, runtime);
+      input = structuredClone(f.input);
     input.actor = { issuer: "https://fixture.invalid", subject: "repository-maintainer" };
     setEvaluationManagementRole(f.database, f.repositoryId, "maintainer", 0, input.actor);
     // A repository actor may select its current bound prompt in both arms.

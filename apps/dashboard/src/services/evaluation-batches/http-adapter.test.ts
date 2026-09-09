@@ -76,26 +76,20 @@ const reads = [
 ];
 
 describe("evaluation batch HTTP adapter", () => {
-  it("requires the response to retain the exact selected model registration in each arm", async () => {
+  it("requires the response to retain the exact Prompt and profile selections in each arm", async () => {
     const request = batchCreateRequestFixture();
-    request.baseline.modelRuntimeRegistrationId = "runtime-baseline";
-    request.candidate.modelRuntimeRegistrationId = "runtime-candidate";
     const summary = batchSummaryFixture();
-    summary.baseline.modelRuntimeRegistrationId = "runtime-baseline";
-    summary.candidate.modelRuntimeRegistrationId = "runtime-candidate";
     await expect(
       withResponse(summary).adapter.createBatch(repositoryId, request, evaluationBatchTestActor),
     ).resolves.toEqual(summary);
     for (const arm of ["baseline", "candidate"] as const) {
-      const wrong = structuredClone(summary);
-      wrong[arm].modelRuntimeRegistrationId = "other-runtime";
-      await expect(
-        withResponse(wrong).adapter.createBatch(repositoryId, request, evaluationBatchTestActor),
-      ).rejects.toBeInstanceOf(ReviewControlProtocolError);
-      delete wrong[arm].modelRuntimeRegistrationId;
-      await expect(
-        withResponse(wrong).adapter.createBatch(repositoryId, request, evaluationBatchTestActor),
-      ).rejects.toBeInstanceOf(ReviewControlProtocolError);
+      for (const field of ["profileVersionId", "promptVersionId"] as const) {
+        const wrong = structuredClone(summary);
+        wrong[arm][field] = "other-version";
+        await expect(
+          withResponse(wrong).adapter.createBatch(repositoryId, request, evaluationBatchTestActor),
+        ).rejects.toBeInstanceOf(ReviewControlProtocolError);
+      }
     }
   });
   it("uses six exact authenticated endpoints without transmitting the expected actor", async () => {

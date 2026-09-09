@@ -1,15 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import * as C from "@agentic-review/contracts";
-import {
-  assertEvaluationModelRuntimeRegistrationIntegrity,
-  validateEvaluationIssueReproductionBinding,
-} from "@agentic-review/domain";
+import { validateEvaluationIssueReproductionBinding } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
 import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
 import { createEvaluationExecutionTemplate } from "../scheduling/validation-job-factory.js";
 import { readEvaluationReproductionCellInTransaction } from "./evaluation-reproduction.js";
 import { assertEvaluationSourceSnapshotIntegrity } from "./evaluation-source.js";
-import { readModelRuntimeRegistrationInTransaction } from "./model-runtime-registry.js";
 
 export interface EvaluationExecutionCell {
   readonly runId: string;
@@ -159,10 +155,6 @@ export function readEvaluationExecutionCellInTransaction(
   try {
     C.assertEvaluationReviewRunPlan(plan);
     validateEvaluationIssueReproductionBinding(plan);
-    assertEvaluationModelRuntimeRegistrationIntegrity(
-      plan.modelRequirements,
-      plan.modelRuntimeRegistration,
-    );
     assertEvaluationSourceSnapshotIntegrity(source);
     C.assertEvaluationExecutionAuthorization(authorization);
   } catch {
@@ -175,20 +167,6 @@ export function readEvaluationExecutionCellInTransaction(
     !Value.Check(C.EvaluationExecutionManifestV1Schema, execution)
   )
     corrupt();
-  if (plan.modelRuntimeRegistration !== undefined) {
-    const registered = readModelRuntimeRegistrationInTransaction(
-      database,
-      plan.modelRuntimeRegistration.id,
-      now === undefined ? {} : { now },
-    );
-    if (
-      registered === null ||
-      !same(registered.registration, plan.modelRuntimeRegistration) ||
-      registered.registrationSha256 !==
-        plan.modelRequirements.runtimeRegistration?.registrationSha256
-    )
-      corrupt();
-  }
   const request = plan.jobs[0];
   const manifestEntries = cells.cells.filter((entry) => entry.cellId === row.cell_id);
   const entry = manifestEntries[0];
@@ -231,9 +209,6 @@ export function readEvaluationExecutionCellInTransaction(
       profileVersion: request.profileVersion,
       prompt: request.prompt,
       modelRequirements: plan.modelRequirements,
-      ...(plan.modelRuntimeRegistration === undefined
-        ? {}
-        : { modelRuntimeRegistration: plan.modelRuntimeRegistration }),
     }) ||
     cells.evaluationId !== row.evaluation_id ||
     cells.repositoryId !== row.repository_id ||

@@ -211,6 +211,7 @@ const result = {
     issueTriage: null,
     reproductionConclusion: null,
     error: null,
+    execution: null,
   },
 } satisfies DashboardReviewRunResult;
 const list = {
@@ -714,7 +715,10 @@ describe("operator review run routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({
-      code: name === "invalid historical job" ? "configuration_request_invalid" : "configuration_query_invalid",
+      code:
+        name === "invalid historical job"
+          ? "configuration_request_invalid"
+          : "configuration_query_invalid",
     });
     expect(request).not.toHaveBeenCalled();
   });

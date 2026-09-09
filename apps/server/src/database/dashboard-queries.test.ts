@@ -476,7 +476,8 @@ const createFixture = () => {
       architecture: "x64",
       headless: true,
       interactiveDesktop: false,
-      codexVersion: "1.0.0",
+      cliEngine: "codex",
+      cliVersion: "1.0.0",
       recipeIds: ["issue-triage"],
       labels: {},
     };
@@ -977,7 +978,7 @@ describe("dashboard database queries", () => {
       ...(["stale", "succeeded", "failed", "dead_letter", "cancelled"] as const).map((status) => ({
         id: status,
         status,
-        phase: "codex_review" as const,
+        phase: "cli_review" as const,
         jobStage: "done" as const,
         workItemStage: "done" as const,
       })),
@@ -1019,15 +1020,15 @@ describe("dashboard database queries", () => {
       {
         id: "review",
         status: "running",
-        phase: "codex_review",
-        jobStage: "codex_review",
+        phase: "cli_review",
+        jobStage: "cli_review",
         workItemStage: "reviewing",
       },
       {
         id: "revision",
         status: "running",
-        phase: "codex_revision",
-        jobStage: "codex_revision",
+        phase: "cli_revision",
+        jobStage: "cli_revision",
         workItemStage: "reviewing",
       },
       {
@@ -1186,7 +1187,7 @@ describe("dashboard database queries", () => {
     const assigned = fixture.addWorkItem("match-assigned");
     fixture.addEpoch(assigned);
     const active = fixture.addWorkItem("match-active");
-    fixture.addJob(active, { status: "running", phase: "codex_review" });
+    fixture.addJob(active, { status: "running", phase: "cli_review" });
     fixture.deny(active);
     const otherKind = fixture.addWorkItem("other-kind", { kind: "pull_request" });
     fixture.addEpoch(otherKind);
@@ -1198,7 +1199,7 @@ describe("dashboard database queries", () => {
     const otherState = fixture.addWorkItem("other-state", { state: "closed" });
     fixture.addEpoch(otherState);
     const unknown = fixture.addWorkItem("unknown-authorization");
-    fixture.addJob(unknown, { status: "running", phase: "codex_review" });
+    fixture.addJob(unknown, { status: "running", phase: "cli_review" });
 
     const query = {
       kind: "issue" as const,

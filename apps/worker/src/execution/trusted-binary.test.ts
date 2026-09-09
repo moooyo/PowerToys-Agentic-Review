@@ -8,12 +8,11 @@ import {
   TrustedBinaryVerificationError,
   type VerifyTrustedExecutionBinariesOptions,
   verifyTrustedExecutionBinaries,
-  verifyTrustedWorkerFile,
 } from "./trusted-binary.js";
 
 const trustedRoot = "C:\\Trusted\\bin";
 const processHostPath = `${trustedRoot}\\AgenticReview.ProcessHost.exe`;
-const codexPath = `${trustedRoot}\\codex.exe`;
+const cliPath = `${trustedRoot}\\cli.exe`;
 const gitPath = `${trustedRoot}\\git.exe`;
 
 type FakeNodeKind = "directory" | "file";
@@ -175,11 +174,11 @@ function createFixture(): {
       ino: 10,
     }),
   );
-  const codex = fileIO.add(
+  const cli = fileIO.add(
     new FakeNode({
-      path: codexPath,
+      path: cliPath,
       kind: "file",
-      content: Buffer.from("trusted codex executable"),
+      content: Buffer.from("trusted cli executable"),
       dev: 1,
       ino: 11,
     }),
@@ -198,111 +197,110 @@ function createFixture(): {
     options: {
       trustedExecutableRoot: trustedRoot,
       processHost: { path: processHostPath, expectedSha256: digest(processHost.content) },
-      codex: { path: codexPath, expectedSha256: digest(codex.content) },
+      cli: { path: cliPath, expectedSha256: digest(cli.content) },
       git: { path: gitPath, expectedSha256: digest(git.content) },
       fileIO,
     },
   };
 }
 
-describe("verifyTrustedWorkerFile", () => {
-  function fixture() {
-    const f = createFixture();
-    const path = `${trustedRoot}\\worker.mjs`;
-    const node = f.fileIO.add(
+describe("verifyTrustedExecutionBinaries", () => {
+  it.each([false, true])("uses an external CLI installation with digest pin %s", async (pin) => {
+    const { fileIO, options } = createFixture();
+    const installedCli = fileIO.add(
       new FakeNode({
-        path,
+        path: "C:\\Users\\Worker\\AppData\\Local\\Programs\\Codex\\codex.exe",
         kind: "file",
-        content: Buffer.from("synthetic Worker bundle"),
-        dev: 1,
-        ino: 20,
+        content: Buffer.from("existing CLI installation"),
+        dev: 2,
+        ino: 30,
       }),
     );
-    return {
-      ...f,
-      node,
-      options: {
-        trustedExecutableRoot: trustedRoot,
-        role: "workerBundle" as const,
-        file: { path, expectedSha256: digest(node.content) },
-        fileIO: f.fileIO,
+    const verified = await verifyTrustedExecutionBinaries({
+      ...options,
+      cli: {
+        path: installedCli.path,
+        ...(pin ? { expectedSha256: digest(installedCli.content) } : {}),
       },
+    });
+    expect(verified.cliPath).toBe(installedCli.path);
+    expect(verified.measurements.cli.sha256).toBe(digest(installedCli.content));
+    expect(fileIO.openedPaths).toEqual([processHostPath, installedCli.path, gitPath]);
+    expect(fileIO.closedPaths).toEqual(fileIO.openedPaths);
+  });
+
+  it("resolves a WinGet installation link and returns its measured target", async () => {
+    const { fileIO, options } = createFixture();
+    const installedCli = fileIO.add(
+      new FakeNode({
+        path: "C:\\Users\\Worker\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Codex\\codex.exe",
+        kind: "file",
+        content: Buffer.from("installed CLI target"),
+        dev: 2,
+        ino: 30,
+      }),
+    );
+    const link = fileIO.add(
+      new FakeNode({
+        path: "C:\\Users\\Worker\\AppData\\Local\\Microsoft\\WinGet\\Links\\codex.exe",
+        kind: "file",
+        dev: 2,
+        ino: 31,
+      }),
+    );
+    link.symbolicLink = true;
+    link.realPath = installedCli.path;
+    fileIO.onFirstRead = (path) => {
+      if (windowsPathsEqual(path, installedCli.path)) link.realPath = "C:\\Changed\\codex.exe";
     };
-  }
-  it("measures the stable bundle and retains bounded reads and closed handles", async () => {
-    const f = fixture();
-    const result = await verifyTrustedWorkerFile(f.options);
-    expect(result.path).toBe(f.node.path);
-    expect(result.measurement).toMatchObject({
-      sha256: digest(f.node.content),
-      sizeBytes: f.node.size,
-    });
-    expect(Object.isFrozen(result.measurement)).toBe(true);
-    expect(f.fileIO.closedPaths).toEqual([f.node.path]);
-    expect(f.fileIO.maximumRequestedReadBytes).toBeLessThanOrEqual(64 * 1024);
+    const verified = await verifyTrustedExecutionBinaries({ ...options, cli: { path: link.path } });
+    expect(verified.cliPath).toBe(installedCli.path);
+    expect(verified.measurements.cli.sha256).toBe(digest(installedCli.content));
+    expect(fileIO.openedPaths).toEqual([processHostPath, installedCli.path, gitPath]);
+    expect(fileIO.lstatPaths).not.toContain(link.path);
   });
-  it("uses the same verifier for the Node executable without accepting a script as Node", async () => {
-    const f = createFixture();
-    const verified = await verifyTrustedWorkerFile({
-      trustedExecutableRoot: trustedRoot,
-      role: "node",
-      file: f.options.git,
-      fileIO: f.fileIO,
-    });
-    expect(verified.measurement.sha256).toBe(f.options.git.expectedSha256);
-    const bundle = fixture();
+
+  it.each(["\\\\server\\share\\codex.exe", "C:\\Installed\\codex.cmd", "codex.exe"])(
+    "rejects a CLI link whose resolved target is not a local absolute executable: %s",
+    async (target) => {
+      const { fileIO, options } = createFixture();
+      fileIO.node(cliPath).realPath = target;
+      await expect(
+        verifyTrustedExecutionBinaries({ ...options, cli: { path: cliPath } }),
+      ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
+      expect(fileIO.openedPaths).toEqual([processHostPath]);
+    },
+  );
+
+  it("rejects an empty or stale CLI digest pin when one is explicitly supplied", async () => {
+    for (const expectedSha256 of ["", "0".repeat(64)]) {
+      const { options } = createFixture();
+      await expect(
+        verifyTrustedExecutionBinaries({ ...options, cli: { path: cliPath, expectedSha256 } }),
+      ).rejects.toMatchObject({ code: "BINARY_DIGEST_MISMATCH" });
+    }
+  });
+
+  it.each(["processHost", "git"] as const)("still requires a digest pin for %s", async (role) => {
+    const { fileIO, options } = createFixture();
     await expect(
-      verifyTrustedWorkerFile({ ...bundle.options, role: "node" }),
-    ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
-  });
-  it.each([
-    "C:\\Outside\\worker.mjs",
-    `${trustedRoot}\\other.mjs`,
-    `${trustedRoot}\\..\\worker.mjs`,
-  ])("rejects unsupported entry %s before opening it", async (path) => {
-    const f = fixture();
-    await expect(
-      verifyTrustedWorkerFile({ ...f.options, file: { ...f.options.file, path } }),
-    ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
-    expect(f.fileIO.openedPaths).toEqual([]);
-  });
-  it("rejects reparse points and changed identities even if the expected content is unchanged", async () => {
-    const link = fixture();
-    link.node.reparsePoint = true;
-    await expect(verifyTrustedWorkerFile(link.options)).rejects.toMatchObject({
-      code: "BINARY_NOT_REGULAR",
-    });
-    const changed = fixture();
-    changed.fileIO.onFirstRead = (_path, node) => {
-      node.ino++;
-    };
-    await expect(verifyTrustedWorkerFile(changed.options)).rejects.toMatchObject({
-      code: "BINARY_IDENTITY_CHANGED",
-    });
-    expect(changed.fileIO.closedPaths).toEqual([changed.node.path]);
-  });
-  it("rejects stale pins after closing the opened handle", async () => {
-    const f = fixture();
-    await expect(
-      verifyTrustedWorkerFile({
-        ...f.options,
-        file: { ...f.options.file, expectedSha256: "0".repeat(64) },
+      verifyTrustedExecutionBinaries({
+        ...options,
+        [role]: { ...options[role], expectedSha256: undefined as unknown as string },
       }),
     ).rejects.toMatchObject({ code: "BINARY_DIGEST_MISMATCH" });
-    expect(f.fileIO.closedPaths).toEqual([f.node.path]);
+    expect(fileIO.openedPaths).toEqual([]);
   });
-});
 
-describe("verifyTrustedExecutionBinaries", () => {
   it("verifies only ProcessHost and Git for validation-only startup", async () => {
     const { fileIO, options } = createFixture();
-    const { codex: _codex, ...validation } = options;
+    const { cli: _cli, ...validation } = options;
     const verified = await verifyTrustedExecutionBinaries(validation);
-    expect(verified).not.toHaveProperty("codexPath");
-    expect(verified.measurements).not.toHaveProperty("codex");
+    expect(verified).not.toHaveProperty("cliPath");
+    expect(verified.measurements).not.toHaveProperty("cli");
     expect(fileIO.openedPaths).toEqual([processHostPath, gitPath]);
     expect(fileIO.closedPaths).toEqual([processHostPath, gitPath]);
-    expect(fileIO.lstatPaths).not.toContain(codexPath);
+    expect(fileIO.lstatPaths).not.toContain(cliPath);
     expect(Object.isFrozen(verified.measurements)).toBe(true);
   });
   it("verifies three stable files with bounded streaming reads", async () => {
@@ -314,7 +312,7 @@ describe("verifyTrustedExecutionBinaries", () => {
       ...options,
       now: () => {
         clockCalls++;
-        expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
+        expect(fileIO.closedPaths).toEqual([processHostPath, cliPath, gitPath]);
         expect(
           fileIO.lstatPaths.filter((path) => windowsPathsEqual(path, trustedRoot)),
         ).toHaveLength(2);
@@ -325,7 +323,7 @@ describe("verifyTrustedExecutionBinaries", () => {
     expect(verified).toEqual({
       trustedExecutableRoot: trustedRoot,
       processHostPath,
-      codexPath,
+      cliPath,
       gitPath,
       measurements: {
         processHost: {
@@ -334,9 +332,9 @@ describe("verifyTrustedExecutionBinaries", () => {
           fileIdentity: { dev: "1", ino: "10", mtimeMs: "1000", ctimeMs: "1000" },
           verifiedAtISO,
         },
-        codex: {
-          sha256: digest(fileIO.node(codexPath).content),
-          sizeBytes: Buffer.byteLength("trusted codex executable"),
+        cli: {
+          sha256: digest(fileIO.node(cliPath).content),
+          sizeBytes: Buffer.byteLength("trusted cli executable"),
           fileIdentity: { dev: "1", ino: "11", mtimeMs: "1000", ctimeMs: "1000" },
           verifiedAtISO,
         },
@@ -355,11 +353,11 @@ describe("verifyTrustedExecutionBinaries", () => {
       expect(Object.isFrozen(measurement)).toBe(true);
       expect(Object.isFrozen(measurement.fileIdentity)).toBe(true);
     }
-    expect(Reflect.set(verified.measurements.codex, "sha256", "changed")).toBe(false);
-    expect(Reflect.set(verified.measurements.codex.fileIdentity, "ino", "changed")).toBe(false);
-    expect(Reflect.set(verified.measurements, "codex", null)).toBe(false);
-    expect(fileIO.openedPaths).toEqual([processHostPath, codexPath, gitPath]);
-    for (const path of [processHostPath, codexPath, gitPath])
+    expect(Reflect.set(verified.measurements.cli, "sha256", "changed")).toBe(false);
+    expect(Reflect.set(verified.measurements.cli.fileIdentity, "ino", "changed")).toBe(false);
+    expect(Reflect.set(verified.measurements, "cli", null)).toBe(false);
+    expect(fileIO.openedPaths).toEqual([processHostPath, cliPath, gitPath]);
+    for (const path of [processHostPath, cliPath, gitPath])
       expect(fileIO.readBytes.get(pathKey(path))).toBe(fileIO.node(path).content.byteLength);
     expect(fileIO.maximumRequestedReadBytes).toBeLessThanOrEqual(64 * 1024);
   });
@@ -374,7 +372,7 @@ describe("verifyTrustedExecutionBinaries", () => {
       mtimeMs: 17_000_000_000_000_001n,
       ctimeMs: 17_000_000_000_000_002n,
     };
-    fileIO.node(codexPath).statOverrides = { mtimeMs: 1_700_000_000_000.125, ctimeMs: -0 };
+    fileIO.node(cliPath).statOverrides = { mtimeMs: 1_700_000_000_000.125, ctimeMs: -0 };
 
     const verified = await verifyTrustedExecutionBinaries(options);
     const serialized = JSON.stringify(verified);
@@ -386,12 +384,12 @@ describe("verifyTrustedExecutionBinaries", () => {
       ctimeMs: "17000000000000002",
     });
     expect(verified.measurements.processHost.sizeBytes).toBe(processHost.content.byteLength);
-    expect(verified.measurements.codex.fileIdentity).toMatchObject({
+    expect(verified.measurements.cli.fileIdentity).toMatchObject({
       mtimeMs: "1700000000000.125",
       ctimeMs: "-0",
     });
     processHost.statOverrides = { ...processHost.statOverrides, ino: 1n };
-    fileIO.node(codexPath).content.fill(0);
+    fileIO.node(cliPath).content.fill(0);
     expect(JSON.stringify(verified)).toBe(serialized);
     for (const measurement of Object.values(verified.measurements))
       expect(new Date(measurement.verifiedAtISO).toISOString()).toBe(measurement.verifiedAtISO);
@@ -414,7 +412,7 @@ describe("verifyTrustedExecutionBinaries", () => {
         code: "INVALID_VERIFICATION_TIME",
         message: "Trusted binary verification time could not be captured.",
       });
-      expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
+      expect(fileIO.closedPaths).toEqual([processHostPath, cliPath, gitPath]);
     },
   );
 
@@ -434,7 +432,7 @@ describe("verifyTrustedExecutionBinaries", () => {
       }),
     ).rejects.toMatchObject({ code: "INVALID_TRUSTED_ROOT" });
     expect(clockCalled).toBe(false);
-    expect(fileIO.closedPaths).toEqual([processHostPath, codexPath, gitPath]);
+    expect(fileIO.closedPaths).toEqual([processHostPath, cliPath, gitPath]);
   });
 
   it("rejects digest mismatch and malformed or non-lowercase digests", async () => {
@@ -442,7 +440,7 @@ describe("verifyTrustedExecutionBinaries", () => {
     await expect(
       verifyTrustedExecutionBinaries({
         ...mismatch.options,
-        codex: { ...mismatch.options.codex, expectedSha256: "0".repeat(64) },
+        cli: { ...mismatch.options.cli, expectedSha256: "0".repeat(64) },
       }),
     ).rejects.toMatchObject({ code: "BINARY_DIGEST_MISMATCH" });
 
@@ -465,7 +463,7 @@ describe("verifyTrustedExecutionBinaries", () => {
     });
 
     const reparseFile = createFixture();
-    reparseFile.fileIO.node(codexPath).reparsePoint = true;
+    reparseFile.fileIO.node(cliPath).reparsePoint = true;
     await expect(verifyTrustedExecutionBinaries(reparseFile.options)).rejects.toMatchObject({
       code: "BINARY_NOT_REGULAR",
     });
@@ -511,17 +509,19 @@ describe("verifyTrustedExecutionBinaries", () => {
   it("detects a different object returned by open", async () => {
     const { fileIO, options } = createFixture();
     fileIO.openOverrides.set(
-      pathKey(codexPath),
+      pathKey(cliPath),
       new FakeNode({
-        path: codexPath,
+        path: cliPath,
         kind: "file",
-        content: fileIO.node(codexPath).content,
+        content: fileIO.node(cliPath).content,
         dev: 1,
         ino: 999,
       }),
     );
 
-    await expect(verifyTrustedExecutionBinaries(options)).rejects.toMatchObject({
+    await expect(
+      verifyTrustedExecutionBinaries({ ...options, cli: { path: cliPath } }),
+    ).rejects.toMatchObject({
       code: "BINARY_IDENTITY_CHANGED",
     });
   });
@@ -529,11 +529,11 @@ describe("verifyTrustedExecutionBinaries", () => {
   it("detects path replacement while hashing", async () => {
     const { fileIO, options } = createFixture();
     fileIO.onFirstRead = (path, node) => {
-      if (!windowsPathsEqual(path, codexPath)) return;
+      if (!windowsPathsEqual(path, cliPath)) return;
       fileIO.replace(
-        codexPath,
+        cliPath,
         new FakeNode({
-          path: codexPath,
+          path: cliPath,
           kind: "file",
           content: node.content,
           dev: node.dev,
@@ -589,23 +589,23 @@ describe("verifyTrustedExecutionBinaries", () => {
     await expect(
       verifyTrustedExecutionBinaries({
         ...configuredDuplicate.options,
-        git: { ...configuredDuplicate.options.git, path: codexPath.toUpperCase() },
+        git: { ...configuredDuplicate.options.git, path: cliPath.toUpperCase() },
       }),
     ).rejects.toMatchObject({ code: "BINARY_PATH_UNSAFE" });
 
     const resolvedDuplicate = createFixture();
-    const codex = resolvedDuplicate.fileIO.node(codexPath);
-    const aliasPath = `${trustedRoot}\\codex-alias.exe`;
+    const cli = resolvedDuplicate.fileIO.node(cliPath);
+    const aliasPath = `${trustedRoot}\\cli-alias.exe`;
     const alias = resolvedDuplicate.fileIO.add(
       new FakeNode({
         path: aliasPath,
         kind: "file",
-        content: codex.content,
-        dev: codex.dev,
-        ino: codex.ino,
+        content: cli.content,
+        dev: cli.dev,
+        ino: cli.ino,
       }),
     );
-    alias.realPath = codexPath;
+    alias.realPath = cliPath;
     await expect(
       verifyTrustedExecutionBinaries({
         ...resolvedDuplicate.options,
@@ -616,14 +616,14 @@ describe("verifyTrustedExecutionBinaries", () => {
 
   it("rejects distinct paths that identify the same hardlink object", async () => {
     const hardlink = createFixture();
-    const codex = hardlink.fileIO.node(codexPath);
+    const cli = hardlink.fileIO.node(cliPath);
     const git = hardlink.fileIO.node(gitPath);
-    git.dev = codex.dev;
-    git.ino = codex.ino;
-    git.content = codex.content;
-    git.size = codex.size;
-    git.mtimeMs = codex.mtimeMs;
-    git.ctimeMs = codex.ctimeMs;
+    git.dev = cli.dev;
+    git.ino = cli.ino;
+    git.content = cli.content;
+    git.size = cli.size;
+    git.mtimeMs = cli.mtimeMs;
+    git.ctimeMs = cli.ctimeMs;
 
     await expect(
       verifyTrustedExecutionBinaries({

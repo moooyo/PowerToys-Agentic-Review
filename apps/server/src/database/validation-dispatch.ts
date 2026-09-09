@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   EntityIdSchema,
   evaluationExecutionCapabilityLabel,
+  evaluationModelExecutionCapabilityLabels,
   type JobState,
   type ReviewRunBlockedReason,
   type ReviewRunExecutionPlanV1,
@@ -302,7 +303,8 @@ export function getValidationRunnerSupport(
       capability === validationExecutorCapabilityLabels.reproduction ||
       capability === validationExecutorCapabilityLabels.probes ||
       capability === validationExecutorCapabilityLabels.uiObservations ||
-      capability === evaluationExecutionCapabilityLabel
+      capability === evaluationExecutionCapabilityLabel ||
+      Object.values(evaluationModelExecutionCapabilityLabels).some((label) => label === capability)
         ? worker.labels[capability] === "1"
         : hasProfileCapability(worker, capability),
     );

@@ -73,11 +73,8 @@ export class HttpEvaluationBatchAdapter implements EvaluationBatchAdapter {
         value.mode === request.mode &&
         value.baseline.profileVersionId === request.baseline.profileVersionId &&
         value.baseline.promptVersionId === request.baseline.promptVersionId &&
-        value.baseline.modelRuntimeRegistrationId === request.baseline.modelRuntimeRegistrationId &&
         value.candidate.profileVersionId === request.candidate.profileVersionId &&
         value.candidate.promptVersionId === request.candidate.promptVersionId &&
-        value.candidate.modelRuntimeRegistrationId ===
-          request.candidate.modelRuntimeRegistrationId &&
         evaluationBatchActorMatches(value.createdBy, actor),
       operation,
     );

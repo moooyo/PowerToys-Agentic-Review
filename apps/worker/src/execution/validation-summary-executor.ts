@@ -26,30 +26,30 @@ import {
   type ValidationReportV1,
   ValidationReportV1Schema,
   type ValidationSummaryContextV1,
+  type ValidationSummaryInputReferenceV1,
   type ValidationSummaryV1,
 } from "@agentic-review/contracts";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
 import { LeaseLostError } from "../leases/errors.js";
+import type { ModelSummaryInputApi } from "../server-client/summary-input-api.js";
+import { freezeSummaryInput } from "./freeze-summary-input.js";
 import type { JobExecutionContext } from "./job-executor.js";
 import type { JobWorkspaceProvider, PreparedJobWorkspace } from "./job-workspace.js";
 import {
   assertModelOutputArtifact,
-  type CreateModelInvocation,
-  captureModelInvocationScope,
   createModelOutputArtifact,
   type ModelOutputArtifact,
   modelOutputReview,
 } from "./model-output-artifact.js";
-import type { CreateSummaryModelInvocation } from "./model-summary-invocation-factory.js";
-import type { PreparedCodexOutputRunner } from "./prepared-codex-output-runner.js";
+import type { PreparedCliOutputRunner } from "./prepared-cli-output-runner.js";
 import { assertWindowsLocalAbsolutePath } from "./process-host-protocol.js";
 
 registerWorkerContractFormats();
 export const maximumValidationSummaryContextBytes = 256 * 1_024;
 const maximumCombinedPromptBytes = 512 * 1_024;
-const minimumCodexTimeoutMs = 10_000;
+const minimumCliTimeoutMs = 10_000;
 const noProgressSubmissionSafetyMs = 5_000;
 const evidenceSchema = Type.Object(
   {
@@ -80,14 +80,13 @@ export interface ValidationSummaryInput extends ValidationSummaryContextInput {
 
 export interface ValidationSummaryExecutorOptions {
   readonly workspaceProvider: JobWorkspaceProvider;
-  readonly outputRunner: Pick<PreparedCodexOutputRunner, "run">;
+  readonly outputRunner: Pick<PreparedCliOutputRunner, "run">;
   readonly maximumSummaryTimeoutMs?: number;
   readonly completionReserveMs?: number;
   readonly teardownTimeoutMs?: number;
   readonly sensitiveValues?: readonly string[];
   readonly now?: () => number;
-  readonly createModelInvocation?: CreateModelInvocation;
-  readonly createSummaryModelInvocation?: CreateSummaryModelInvocation;
+  readonly summaryInputApi?: ModelSummaryInputApi;
 }
 
 export type ValidationSummaryAttempt =
@@ -133,19 +132,7 @@ export class ValidationSummaryExecutor {
   readonly #now: () => number;
   readonly #secrets: readonly string[];
 
-  public get modelInvocationRequired(): boolean {
-    return (
-      this.options.createModelInvocation !== undefined ||
-      this.options.createSummaryModelInvocation !== undefined
-    );
-  }
-
   public constructor(private readonly options: ValidationSummaryExecutorOptions) {
-    if (
-      options.createModelInvocation !== undefined &&
-      options.createSummaryModelInvocation !== undefined
-    )
-      throw new TypeError("A summary executor cannot configure both invocation factories.");
     this.#maximumTimeout = options.maximumSummaryTimeoutMs ?? 60_000;
     this.#reserve = options.completionReserveMs ?? 30_000;
     this.#teardownTimeout = options.teardownTimeoutMs ?? 5_000;
@@ -153,7 +140,7 @@ export class ValidationSummaryExecutor {
     this.#secrets = Object.freeze([...(options.sensitiveValues ?? [])]);
     if (
       !Number.isSafeInteger(this.#maximumTimeout) ||
-      this.#maximumTimeout < minimumCodexTimeoutMs ||
+      this.#maximumTimeout < minimumCliTimeoutMs ||
       this.#maximumTimeout > 300_000 ||
       !Number.isSafeInteger(this.#reserve) ||
       this.#reserve < 5_000 ||
@@ -172,8 +159,6 @@ export class ValidationSummaryExecutor {
   ): Promise<ValidationSummaryAttempt> {
     context.signal.throwIfAborted();
     const attemptSignal = context.attemptSignal ?? context.signal;
-    const createModelInvocation = this.options.createModelInvocation;
-    const createSummaryModelInvocation = this.options.createSummaryModelInvocation;
     let timer: NodeJS.Timeout | undefined;
     let nodeFault = false;
     let cleanupUnconfirmed = false;
@@ -182,10 +167,10 @@ export class ValidationSummaryExecutor {
       const code = (error as Error & { readonly code?: unknown }).code;
       if (
         [
-          "CODEX_PROCESS_START_FAILED",
-          "CODEX_PROCESS_FAILED",
-          "CODEX_STREAM_FAILED",
-          "CODEX_PROCESS_DRAIN_UNCONFIRMED",
+          "CLI_PROCESS_START_FAILED",
+          "CLI_PROCESS_FAILED",
+          "CLI_STREAM_FAILED",
+          "CLI_PROCESS_DRAIN_UNCONFIRMED",
         ].includes(String(code))
       )
         cleanupUnconfirmed = true;
@@ -227,40 +212,11 @@ export class ValidationSummaryExecutor {
       }
       const prompt = composeSummaryPrompt(envelope.prompt.renderedPrompt, canonicalContext.json);
       const actualPromptSha256 = hash(prompt);
-      const invocationContext: JobExecutionContext = {
-        ...context,
-        signal: child.signal,
-        attemptSignal,
-        reportNodeHealthFault,
-      };
-      let invocation = createModelInvocation?.(envelope, invocationContext);
-      let boundScope: ReturnType<typeof captureModelInvocationScope> | undefined;
-      const bindScope = (summaryContextSha256?: string): void => {
-        try {
-          if (invocation !== undefined)
-            boundScope = captureModelInvocationScope(
-              invocation.expectedScope,
-              envelope,
-              actualPromptSha256,
-              summaryContextSha256,
-            );
-          if (
-            (createModelInvocation !== undefined || createSummaryModelInvocation !== undefined) &&
-            boundScope === undefined
-          )
-            throw new Error();
-        } catch {
-          throw failure(
-            "SUMMARY_INVOCATION_SCOPE_INVALID",
-            "The actual summary prompt does not match its frozen invocation scope.",
-          );
-        }
-      };
-      if (createSummaryModelInvocation === undefined) bindScope();
+      let summaryInputRef: ValidationSummaryInputReferenceV1 | undefined;
       if (Buffer.byteLength(prompt, "utf8") > maximumCombinedPromptBytes) {
         throw failure(
           "SUMMARY_CONTEXT_TOO_LARGE",
-          "The frozen prompt and complete context exceed the Codex input budget.",
+          "The frozen prompt and complete context exceed the CLI input budget.",
         );
       }
       const deadline = Math.min(
@@ -274,7 +230,7 @@ export class ValidationSummaryExecutor {
           noProgressSubmissionSafetyMs,
       );
       const budget = Math.min(this.#maximumTimeout, available);
-      if (!Number.isSafeInteger(budget) || budget < minimumCodexTimeoutMs) {
+      if (!Number.isSafeInteger(budget) || budget < minimumCliTimeoutMs) {
         throw failure(
           "SUMMARY_BUDGET_UNAVAILABLE",
           "Insufficient execution or no-progress time remains for summary, teardown, and completion.",
@@ -296,14 +252,19 @@ export class ValidationSummaryExecutor {
       timer.unref();
       if (context.signal.aborted) cancel();
       child.signal.throwIfAborted();
-      if (createSummaryModelInvocation !== undefined) {
-        invocation = await createSummaryModelInvocation(
+      if (envelope.validation.schemaVersion === "ValidationJobContextV2") {
+        if (this.options.summaryInputApi === undefined)
+          throw failure(
+            "SUMMARY_INPUT_UNAVAILABLE",
+            "The evaluation summary input API is not configured.",
+          );
+        summaryInputRef = await freezeSummaryInput(
+          this.options.summaryInputApi,
           envelope,
-          invocationContext,
           JSON.parse(canonicalContext.json) as ValidationSummaryContextV1,
+          child.signal,
         );
         child.signal.throwIfAborted();
-        bindScope(canonicalContext.sha256);
       }
       let workspace: PreparedJobWorkspace | undefined;
       let cleanup: Promise<void> | undefined;
@@ -364,14 +325,6 @@ export class ValidationSummaryExecutor {
         launchPolicy: "summary_read_only",
         teardownTimeoutMs: this.#teardownTimeout,
         sensitiveValues: sensitive,
-        ...(invocation === undefined || boundScope === undefined
-          ? {}
-          : {
-              modelInvocation: {
-                expectedScope: boundScope,
-                open: invocation.open.bind(invocation),
-              },
-            }),
       });
       context.signal.throwIfAborted();
       child.signal.throwIfAborted();
@@ -383,7 +336,7 @@ export class ValidationSummaryExecutor {
       if (result.outcome === "failed") {
         throw failure(
           "SUMMARY_EXECUTION_FAILED",
-          "Codex did not complete the optional structured summary.",
+          "CLI did not complete the optional structured summary.",
         );
       }
       const originalOutput = {
@@ -391,9 +344,7 @@ export class ValidationSummaryExecutor {
         result: structuredClone(result.result),
         canonicalResultJson: result.canonicalResultJson,
         resultDigest: result.resultDigest,
-        ...(result.modelInvocation === undefined
-          ? {}
-          : { modelInvocation: structuredClone(result.modelInvocation) }),
+        cliExecution: structuredClone(result.cliExecution),
       };
       const originalEvidence = structuredClone(result.commandEvidence);
       const modelWorktree = await requireOriginalModelSource(workspace, child.signal);
@@ -401,12 +352,6 @@ export class ValidationSummaryExecutor {
         throw failure(
           "SUMMARY_CONTEXT_MODIFIED",
           "Model workspace changes invalidate the optional advice.",
-        );
-      }
-      if (result.commandEvidence.commandCapture !== "complete") {
-        throw failure(
-          "SUMMARY_EXECUTION_UNVERIFIED",
-          "The model execution observations are incomplete.",
         );
       }
       const summary: unknown = originalOutput.result;
@@ -421,7 +366,7 @@ export class ValidationSummaryExecutor {
       }
       validateObservations(summary);
       let modelOutputArtifact: ModelOutputArtifact | undefined;
-      if (invocation !== undefined && boundScope !== undefined) {
+      if (summaryInputRef !== undefined) {
         modelOutputArtifact = assertModelOutputArtifact(
           createModelOutputArtifact({
             output: originalOutput,
@@ -431,19 +376,13 @@ export class ValidationSummaryExecutor {
               ...originalEvidence,
               worktree: modelWorktree,
             },
-            expectedScope: boundScope,
+            envelope,
+            summaryInputRef,
             sensitiveValues: sensitive,
           }),
           envelope,
           actualPromptSha256,
-          boundScope.schemaVersion === "ModelInvocationScopeV2"
-            ? canonicalContext.sha256
-            : undefined,
-        );
-      } else if (result.modelInvocation !== undefined) {
-        throw failure(
-          "SUMMARY_INVOCATION_SCOPE_INVALID",
-          "The summary returned an unexpected invocation recording.",
+          canonicalContext.sha256,
         );
       }
       const combined = createCanonicalResult({
@@ -764,7 +703,6 @@ function workspaceDirectories(workspace: PreparedJobWorkspace): readonly string[
     workspace.attemptDirectory,
     workspace.checkoutDirectory,
     workspace.controlDirectory,
-    workspace.codexHomeDirectory,
     workspace.tempDirectory,
     workspace.userProfileDirectory,
   ].map((directory) => {

@@ -66,7 +66,7 @@ describe("DatabaseClient startup", () => {
     const directory = await createTemporaryDirectory();
     const database = new DatabaseSync(join(directory, "schema.sqlite"));
     try {
-      expect(runMigrations(database, migrationsDirectory)).toBe(33);
+      expect(runMigrations(database, migrationsDirectory)).toBe(31);
       expect(
         database.prepare("SELECT filename FROM schema_migrations WHERE version = 11").get(),
       ).toEqual({ filename: "0011_job_activation.sql" });
@@ -169,7 +169,7 @@ describe("DatabaseClient startup", () => {
       await writeInitializationMarker(databasePath);
       const client = await DatabaseClient.create({ databasePath, migrationsDirectory });
       try {
-        await expect(client.request("ping", {})).resolves.toMatchObject({ schemaVersion: 33 });
+        await expect(client.request("ping", {})).resolves.toMatchObject({ schemaVersion: 31 });
         await expect(
           client.request("authenticateWorkerToken", {
             workerTokenSha256: "a".repeat(64),
@@ -436,7 +436,7 @@ describe("DatabaseClient startup", () => {
       await mkdir(dataDirectory, { mode: 0o700 });
       const unmarkedDatabase = new DatabaseSync(databasePath);
       try {
-        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(33);
+        expect(runMigrations(unmarkedDatabase, migrationsDirectory)).toBe(31);
       } finally {
         unmarkedDatabase.close();
       }
@@ -460,7 +460,7 @@ describe("DatabaseClient startup", () => {
       const newerDatabase = new DatabaseSync(databasePath);
       try {
         const latestVersion = runMigrations(newerDatabase, migrationsDirectory);
-        expect(latestVersion).toBe(33);
+        expect(latestVersion).toBe(31);
         const futureVersion = latestVersion + 1;
         newerDatabase
           .prepare(`

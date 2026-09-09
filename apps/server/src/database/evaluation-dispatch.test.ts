@@ -108,7 +108,7 @@ function jobs(value: Fixture) {
 
 describe("evaluation request dispatch and control", () => {
   it.each(["profile_only", "prompt_and_profile"] as const)(
-    "matches the frozen %s requirement independently of the evaluation model gate",
+    "matches the frozen %s requirement to the Worker CLI capability",
     (mode) => {
       const value = fixture("issue", mode);
       const cell = readEvaluationBatchCells(value.database, value.batch.id).find(
@@ -121,7 +121,12 @@ describe("evaluation request dispatch and control", () => {
         planDigest: cell.plan_digest,
         frozenPrompt: cell.prompt,
       });
-      const labels = { executionEnvelope: "2", validationHeadless: "1", validationEvaluation: "1" };
+      const labels = {
+        executionEnvelope: "2",
+        validationHeadless: "1",
+        validationEvaluation: "1",
+        validationEvaluationSummaryModel: "1",
+      };
       expect(evaluateJobWorkerCapabilities(template, [], { labels })).toBe(true);
       expect(
         evaluateJobWorkerCapabilities(template, [], {
@@ -132,10 +137,8 @@ describe("evaluation request dispatch and control", () => {
         }),
       ).toBe(mode === "profile_only");
       const result = dispatch(value);
-      if (mode === "prompt_and_profile") {
-        expect(result.createdJobs).toEqual([]);
-        expect(result.blockedRequestCount).toBe(2);
-      } else expect(result.createdJobs).toHaveLength(2);
+      expect(result.createdJobs).toHaveLength(2);
+      expect(result.blockedRequestCount).toBe(0);
     },
   );
 
@@ -202,22 +205,18 @@ describe("evaluation request dispatch and control", () => {
   });
 
   it.each(["pull_request", "issue"] as const)(
-    "keeps %s Prompt evaluation blocked when verified model identity is missing",
+    "dispatches %s Prompt evaluation for an installed CLI without provider configuration",
     (kind) => {
       const value = fixture(kind, "prompt_and_profile");
       const result = dispatch(value);
-      expect(result.createdJobs).toEqual([]);
-      expect(result.blockedRequestCount).toBe(2);
+      expect(result.createdJobs).toHaveLength(2);
+      expect(result.blockedRequestCount).toBe(0);
       const checks = value.database
         .prepare(`SELECT blockers_json FROM validation_dispatch_checks WHERE review_run_id IN
       (SELECT run_id FROM evaluation_cells WHERE evaluation_id = ? AND applicable = 1)`)
         .all(value.batch.id) as { blockers_json: string }[];
       expect(checks).toHaveLength(2);
-      for (const check of checks)
-        expect(JSON.parse(check.blockers_json)).toContainEqual({
-          code: "missing_capability",
-          capability: "verified_model_identity",
-        });
+      for (const check of checks) expect(JSON.parse(check.blockers_json)).toEqual([]);
     },
   );
 

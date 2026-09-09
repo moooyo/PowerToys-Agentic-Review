@@ -123,10 +123,7 @@ describe("matrix result identity", () => {
       ).toThrow(/no longer matches/u);
     }
     expect(() =>
-      assertCellResultBinding(
-        { ...result, modelRequirements: { required: false, expectedModelIdentityDigest: null } },
-        expected,
-      ),
+      assertCellResultBinding({ ...result, modelRequirements: { required: false } }, expected),
     ).toThrow(/no longer matches/u);
   });
   it("clears a selected result when the matrix, batch or Job no longer supplies its exact identity", () => {
@@ -170,6 +167,9 @@ describe("evaluation result presentation", () => {
     expect(html).toContain("Fixture output");
     expect(html).toContain("Currently verified");
     expect(html).toContain("Model recommendation: approve");
+    expect(html).toContain("Codex CLI");
+    expect(html).toContain("fixture-cli-1");
+    expect(html).toContain("CLI default");
     expect(html).toContain("do not approve a pull request");
     expect(html).toContain("evidence-build");
     expect(html).not.toContain("/review-runs/");
@@ -177,8 +177,9 @@ describe("evaluation result presentation", () => {
   });
   it("keeps profile-only model execution distinct from failure", () => {
     const result = cellResultFixture();
-    result.modelRequirements = { required: false, expectedModelIdentityDigest: null };
+    result.modelRequirements = { required: false };
     result.modelReview = {
+      execution: null,
       state: "not_requested",
       summary: null,
       recommendation: null,
@@ -191,7 +192,23 @@ describe("evaluation result presentation", () => {
     const html = renderToStaticMarkup(<CellResultContent result={result} />);
     expect(html).toContain("Not required");
     expect(html).toContain("This is not a model failure");
+    expect(html).toContain("No CLI execution metadata was recorded");
+    expect(html).not.toContain("CLI default");
     expect(html).not.toContain("MODEL_FAILED");
+  });
+  it("shows the completed CLI configuration with its explicitly requested model", () => {
+    const result = cellResultFixture();
+    if (!result.modelReview.execution) throw new Error("CLI execution fixture required.");
+    result.modelReview.execution.cli = {
+      kind: "copilot",
+      version: "fixture-copilot-2",
+      requestedModel: "requested-fixture-model",
+    };
+    const html = renderToStaticMarkup(<CellResultContent result={result} />);
+    expect(html).toContain("Copilot CLI");
+    expect(html).toContain("fixture-copilot-2");
+    expect(html).toContain("requested-fixture-model");
+    expect(html).not.toContain("CLI default");
   });
   it("preserves repeated observation IDs and ordered diagnostics as separate recorded entries", () => {
     const result = cellResultFixture();

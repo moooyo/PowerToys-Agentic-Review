@@ -16,15 +16,11 @@ import {
   type IssueReproductionBindingV1,
   IssueValidationSummaryV1Schema,
   type JobExecutionEnvelopeV2,
-  type ModelInvocationScopeV1,
   type ObservationValue,
   PullRequestValidationSummaryV1Schema,
-  type ValidationJobContextV2,
-  ValidationJobContextV2Schema,
   type ValidationProfileVersion,
   type ValidationSummaryV1,
 } from "@agentic-review/contracts";
-import { modelInvocationScopeDigest } from "@agentic-review/domain";
 import type { TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,14 +36,16 @@ import {
   type JobWorkspaceProvider,
   type PreparedJobWorkspace,
 } from "./job-workspace.js";
-import type { ModelInvocationSessionResult } from "./model-invocation-coordinator.js";
-import { type CreateModelInvocation, createModelOutputArtifact } from "./model-output-artifact.js";
+import type { ModelOutputArtifact } from "./model-output-artifact.js";
 import type {
-  PreparedCodexOutputInput,
-  PreparedCodexOutputResult,
-} from "./prepared-codex-output-runner.js";
-import { PreparedCodexOutputRunner } from "./prepared-codex-output-runner.js";
-import { evaluationProfileEnvelopeFixture } from "./profile-envelope.testing.js";
+  PreparedCliOutputInput,
+  PreparedCliOutputResult,
+} from "./prepared-cli-output-runner.js";
+import { PreparedCliOutputRunner } from "./prepared-cli-output-runner.js";
+import {
+  evaluationProfileEnvelopeFixture,
+  refreshEvaluationProfileFixture,
+} from "./profile-envelope.testing.js";
 import { ProfileJobExecutor, type ProfileJobExecutorOptions } from "./profile-job-executor.js";
 import { ReviewJobExecutor } from "./review-executor.js";
 import { captureTestProbeOutput } from "./test-probe-capture.js";
@@ -261,13 +259,31 @@ function envelope(selected = profile()): JobExecutionEnvelopeV2 {
     },
   };
 }
+function evaluationEnvelope(ui = false, modelRequired = true) {
+  const selected = profile(ui);
+  const headlessWorkflow = modelRequired ? "pr_static_build" : "issue_validation";
+  const input = evaluationProfileEnvelopeFixture(
+    ui ? "pr_ui" : headlessWorkflow,
+    ui ? "windows_desktop" : "headless",
+    modelRequired,
+  );
+  input.validation.profileVersion = {
+    ...input.validation.profileVersion,
+    id: selected.id,
+    config: selected.config,
+  };
+  input.validation.requiredCheckIds = [`profile-version:${ui ? "scenario" : "test"}`];
+  input.executionPolicy.hardTimeoutMs = selected.config.hardTimeoutMs;
+  input.executionPolicy.noProgressTimeoutMs = selected.config.noProgressTimeoutMs;
+  refreshEvaluationProfileFixture(input);
+  return input;
+}
 function workspace(purpose: string): PreparedJobWorkspace {
   const root = `C:\\Worker\\${purpose}`;
   return {
     attemptDirectory: root,
     checkoutDirectory: `${root}\\checkout`,
     controlDirectory: `${root}\\control`,
-    codexHomeDirectory: `${root}\\codex`,
     tempDirectory: `${root}\\temp`,
     userProfileDirectory: `${root}\\user`,
     startDiskMonitoring: async (signal) => ({
@@ -348,14 +364,19 @@ function issueEnvelope(validation = false): JobExecutionEnvelopeV2 {
   value.prompt.outputSchemaSha256 = createCanonicalResult(value.prompt.outputSchema).sha256;
   return value;
 }
-function observed(ui = false): HeadlessValidationCheckResult {
+function observed(
+  ui = false,
+  workItemKind: "pull_request" | "issue" = "pull_request",
+): HeadlessValidationCheckResult {
   const id = `profile-version:${ui ? "scenario" : "test"}`;
   return {
     report: {
       schemaVersion: "ValidationReportV1",
       source: "worker",
       sourceState: "original",
-      workItemKind: "pull_request",
+      ...(workItemKind === "issue"
+        ? { workItemKind, reproductionConclusion: "inconclusive" as const }
+        : { workItemKind }),
       summary: "Original validation completed.",
       checks: [
         {
@@ -605,14 +626,14 @@ function harness(input = envelope()) {
   };
 }
 
-function actualModelExecutor(
-  provider: JobWorkspaceProvider,
-  createModelInvocation?: CreateModelInvocation,
-): ReviewJobExecutor {
+function actualModelExecutor(provider: JobWorkspaceProvider): ReviewJobExecutor {
   return new ReviewJobExecutor({
     workspaceProvider: provider,
-    codexExecutablePath: "C:\\Tools\\Codex\\codex.exe",
-    codexHomeDirectory: "C:\\AgenticReview\\Profile",
+    engine: "codex",
+    cliExecutablePath: "C:\\Tools\\Codex\\codex.exe",
+    cliVersion: "0.145.0",
+    cliHomeDirectory: "C:\\AgenticReview\\Profile\\.codex",
+    userProfileDirectory: "C:\\AgenticReview\\Profile",
     systemRoot: "C:\\Windows",
     comSpec: "C:\\Windows\\System32\\cmd.exe",
     path: "C:\\Windows\\System32",
@@ -621,57 +642,58 @@ function actualModelExecutor(
     maximumProcessCount: 64,
     maximumMemoryBytes: 8_589_934_592,
     maximumOutputBytes: 67_108_864,
-    ...(createModelInvocation === undefined ? {} : { createModelInvocation }),
   });
 }
-function recordedScope(
+function cliExecution(
   input: JobExecutionEnvelopeV2,
-  promptSha256 = input.prompt.promptSha256,
-): ModelInvocationScopeV1 {
+  outputSha256: string,
+  actualPromptSha256 = input.prompt.promptSha256,
+) {
   return {
-    schemaVersion: "ModelInvocationScopeV1",
-    repositoryId: input.validation.repositoryId,
-    evaluationId: "synthetic-evaluation",
-    cellId: "synthetic-cell",
-    runId: input.validation.runId,
-    requestId: input.validation.requestId,
-    jobId: input.lease.jobId,
-    attemptId: input.lease.runAttemptId,
-    invocationId: "synthetic-invocation",
-    authorizationId: "synthetic-authorization",
-    executionManifestSha256: "a".repeat(64),
-    promptSha256,
+    engine: "codex" as const,
+    cliVersion: "0.145.0",
+    requestedModel: null,
+    processRequestId: "model-process",
+    startedAt: now,
+    completedAt: now,
+    promptSha256: actualPromptSha256,
+    actualPromptSha256,
     outputSchemaSha256: input.prompt.outputSchemaSha256,
-    expectedModelIdentitySha256: "b".repeat(64),
-    requestedModel: "synthetic-model",
-    workerNodeId: input.lease.workerNodeId,
-    workerInstanceId: input.lease.workerInstanceId,
-    leaseGeneration: input.lease.leaseGeneration,
+    modelOutputSha256: outputSha256,
   };
 }
-function recording(scope: ModelInvocationScopeV1): ModelInvocationSessionResult {
+function outputArtifact(
+  input: JobExecutionEnvelopeV2,
+  result: ModelOutputArtifact["result"],
+): ModelOutputArtifact {
+  const canonical = createCanonicalResult(result);
   return {
-    executionAccepted: false,
-    modelOutputBound: true,
-    submission: {
-      schemaVersion: "ModelInvocationSubmissionV1",
-      invocationId: scope.invocationId,
-      scopeSha256: modelInvocationScopeDigest(scope),
-      receiptSetSha256: "c".repeat(64),
-      receivedAt: now,
-      consistency: {
-        state: "matched",
-        reasons: [],
-        observedIdentitySha256: scope.expectedModelIdentitySha256,
-      },
-      executionAccepted: false,
+    result,
+    canonicalResultJson: canonical.json,
+    modelOutputSha256: canonical.sha256,
+    execution: {
+      schemaVersion: "CliModelExecutionV1",
+      jobId: input.job.jobId,
+      runAttemptId: input.lease.runAttemptId,
+      cli: { kind: "codex", version: "0.145.0", requestedModel: null },
+      promptSha256: input.prompt.promptSha256,
+      outputSchemaSha256: input.prompt.outputSchemaSha256,
+      outputSha256: canonical.sha256,
+      exitCode: 0,
+    },
+    executionEvidence: {
+      schemaVersion: "ReviewExecutionEvidenceV1",
+      source: "worker",
+      commandCapture: "complete",
+      commands: [],
+      worktree: { status: "clean", source: "git_status" },
     },
   };
 }
 function typedV2(result: JobExecutionResult): ValidationJobResultV2 {
   expect(result.outcome, result.outcome === "failed" ? result.code : undefined).toBe("succeeded");
   if (result.outcome !== "succeeded" || !Value.Check(ValidationJobResultV2Schema, result.result))
-    throw new Error("Expected the recorded V2 result.");
+    throw new Error("Expected the evaluation V2 result.");
   expect(result.resultDigest).toBe(createCanonicalResult(result.result).sha256);
   return result.result;
 }
@@ -734,8 +756,8 @@ function adapterHarness() {
   const test = harness(envelope(profile(true)));
   summaryBudget(test.input);
   const run = vi.fn<
-    (input: PreparedCodexOutputInput<TSchema>) => Promise<PreparedCodexOutputResult<unknown>>
-  >(async () => {
+    (input: PreparedCliOutputInput<TSchema>) => Promise<PreparedCliOutputResult<unknown>>
+  >(async (input) => {
     const candidate = summary();
     const canonical = createCanonicalResult(candidate);
     return {
@@ -745,11 +767,12 @@ function adapterHarness() {
       resultDigest: canonical.sha256,
       commandEvidence: { commands: [], commandCapture: "complete" },
       observedFileChange: false,
+      cliExecution: cliExecution(test.input, canonical.sha256, hash(input.prompt)),
     };
   });
   const adapter = new ValidationSummaryExecutor({
     workspaceProvider: test.provider,
-    outputRunner: { run: run as PreparedCodexOutputRunner["run"] },
+    outputRunner: { run: run as PreparedCliOutputRunner["run"] },
     now: () => Date.parse(now),
   });
   return {
@@ -1442,13 +1465,14 @@ describe("profile job executor", () => {
     const test = harness();
     const { executionEvidence: _evidence, ...modelResult } = review();
     const canonical = createCanonicalResult(modelResult);
-    const run = vi.spyOn(PreparedCodexOutputRunner.prototype, "run").mockResolvedValue({
+    const run = vi.spyOn(PreparedCliOutputRunner.prototype, "run").mockResolvedValue({
       outcome: "succeeded",
       result: modelResult,
       resultDigest: canonical.sha256,
       canonicalResultJson: canonical.json,
       commandEvidence: { commands: [], commandCapture: "complete" },
       observedFileChange: false,
+      cliExecution: cliExecution(test.input, canonical.sha256),
     });
     try {
       test.createModelExecutor.mockImplementation((provider) => actualModelExecutor(provider));
@@ -1468,137 +1492,72 @@ describe("profile job executor", () => {
     }
   });
 
-  it("rejects an evaluation invocation scope attached to an ordinary profile before model dispatch", async () => {
+  it("rejects an evaluation output artifact attached to an ordinary profile", async () => {
     const test = harness();
-    const raw = {
-      schemaVersion: "PrReviewPlanV2" as const,
-      summary: "Original raw review.",
-      assessment: "comment" as const,
-      findings: [],
-      requestedRecipeIds: [],
-      verification: {
-        status: "not_run" as const,
-        summary: "Example token=placeholder must keep its original digest.",
-        commands: [],
-      },
-    };
-    const canonical = createCanonicalResult(raw);
-    const scope = recordedScope(test.input);
-    const open = vi.fn(async () => {
-      throw new Error("No actual session may open in this pure handoff test.");
+    const baseline = test.createModelExecutor.getMockImplementation();
+    if (baseline === undefined) throw new Error("Fixture model factory missing.");
+    test.createModelExecutor.mockImplementation((provider, input, context) => {
+      const executor = baseline(provider, input, context);
+      return {
+        executeProfileModel: async (input, context) => {
+          const result = await executor.executeProfileModel(input, context);
+          const { executionEvidence: _evidence, ...raw } = review();
+          return result.outcome === "succeeded"
+            ? { ...result, modelOutputArtifact: outputArtifact(evaluationEnvelope(), raw) }
+            : result;
+        },
+      };
     });
-    const factory: CreateModelInvocation = () => ({ expectedScope: scope, open });
-    const run = vi.spyOn(PreparedCodexOutputRunner.prototype, "run").mockResolvedValue({
-      outcome: "succeeded",
-      result: raw,
-      resultDigest: canonical.sha256,
-      canonicalResultJson: canonical.json,
-      commandEvidence: { commands: [], commandCapture: "complete" },
-      observedFileChange: false,
-      modelInvocation: recording(scope),
-    });
-    try {
-      test.createModelExecutor.mockImplementation((provider) =>
-        actualModelExecutor(provider, factory),
-      );
-      const result = typedV2(await test.run());
-      expect(result.modelReview).toMatchObject({
-        state: "failed",
-        code: "MODEL_OUTPUT_ARTIFACT_INVALID",
-      });
-      expect(result.modelReview).not.toHaveProperty("result");
-      expect(result.modelReview).not.toHaveProperty("invocation");
-      expect(result.report).not.toHaveProperty("modelSummary");
-      expect(result.report.checks.every((check) => check.source === "runner")).toBe(true);
-      expect(run).not.toHaveBeenCalled();
-      expect(open).not.toHaveBeenCalled();
-    } finally {
-      run.mockRestore();
-    }
+    const result = typed(await test.run());
+    expect(result.modelReview).toMatchObject({ state: "failed", code: "MODEL_RESULT_INVALID" });
+    expect(result.modelReview).not.toHaveProperty("result");
+    expect(result.report.checks.every((check) => check.source === "runner")).toBe(true);
   });
 
-  it("does not downgrade required recording to V1 when the prepared model omits its receipt", async () => {
-    const test = harness();
-    const raw = {
-      schemaVersion: "PrReviewPlanV2" as const,
-      summary: "Unrecorded output.",
-      assessment: "comment" as const,
-      findings: [],
-      requestedRecipeIds: [],
-      verification: { status: "not_run" as const, summary: "No receipt.", commands: [] },
-    };
-    const canonical = createCanonicalResult(raw);
-    const run = vi.spyOn(PreparedCodexOutputRunner.prototype, "run").mockResolvedValue({
-      outcome: "succeeded",
-      result: raw,
-      resultDigest: canonical.sha256,
-      canonicalResultJson: canonical.json,
-      commandEvidence: { commands: [], commandCapture: "complete" },
-      observedFileChange: false,
-    });
-    try {
-      test.createModelExecutor.mockImplementation((provider) =>
-        actualModelExecutor(provider, () => ({
-          expectedScope: recordedScope(test.input),
-          open: async () => {
-            throw new Error("No session may open.");
+  it.each(["jobId", "runAttemptId"] as const)(
+    "rejects evaluation CLI output with another %s while retaining runner facts",
+    async (field) => {
+      const test = harness(evaluationEnvelope());
+      const baseline = test.createModelExecutor.getMockImplementation();
+      if (baseline === undefined) throw new Error("Fixture model factory missing.");
+      test.createModelExecutor.mockImplementation((provider, input, context) => {
+        const executor = baseline(provider, input, context);
+        return {
+          executeProfileModel: async (input, context) => {
+            const prepared = await executor.executeProfileModel(input, context);
+            if (prepared.outcome === "failed") return prepared;
+            const { executionEvidence: _evidence, ...raw } = review();
+            const artifact = outputArtifact(input, raw);
+            artifact.execution[field] = "foreign-task";
+            return {
+              outcome: "succeeded",
+              result: raw,
+              resultDigest: artifact.modelOutputSha256,
+              modelOutputArtifact: artifact,
+            };
           },
-        })),
-      );
-      const result = typedV2(await test.run());
-      expect(result.modelReview).toMatchObject({
-        state: "failed",
-        code: "MODEL_OUTPUT_ARTIFACT_INVALID",
+        };
       });
+      const result = typedV2(await test.run());
+      expect(result.modelReview.state).toBe("failed");
       expect(result.report.checks[0]?.outcome).toBe("passed");
       expect(result.execution.blockers).toContainEqual(
         expect.objectContaining({ code: "MODEL_REVIEW_REQUIRED" }),
       );
-    } finally {
-      run.mockRestore();
-    }
-  });
+    },
+  );
 
-  it("rejects an invocation for another attempt before asking the prepared runner to execute", async () => {
-    const test = harness();
-    const scope = recordedScope(test.input);
-    scope.attemptId = "foreign-attempt";
-    const run = vi.spyOn(PreparedCodexOutputRunner.prototype, "run");
-    try {
-      test.createModelExecutor.mockImplementation((provider) =>
-        actualModelExecutor(provider, () => ({
-          expectedScope: scope,
-          open: async () => {
-            throw new Error("No session may open.");
-          },
-        })),
-      );
-      const result = typedV2(await test.run());
-      expect(result.modelReview).toMatchObject({
-        state: "failed",
-        code: "MODEL_OUTPUT_ARTIFACT_INVALID",
-      });
-      expect(run).not.toHaveBeenCalled();
-      expect(result.report.checks[0]?.outcome).toBe("passed");
-    } finally {
-      run.mockRestore();
-    }
-  });
-
-  it("fails required recording instead of accepting a legacy delegated result", async () => {
-    const test = harness();
+  it("requires CLI execution details for an evaluation model result", async () => {
+    const test = harness(evaluationEnvelope());
     const result = typedV2(
-      await new ProfileJobExecutor({ ...test.options, requireModelInvocation: true }).execute(
-        test.input,
-        test.context,
-      ),
+      await new ProfileJobExecutor(test.options).execute(test.input, test.context),
     );
-    expect(result.modelReview).toMatchObject({ state: "failed", code: "MODEL_RECORDING_MISSING" });
+    expect(result.modelReview).toMatchObject({ state: "failed", code: "MODEL_EXECUTION_MISSING" });
     expect(result.report.checks[0]?.outcome).toBe("passed");
   });
 
-  it("retains all 160 original blockers when recorded model output is unavailable", async () => {
-    const test = harness();
+  it("retains all 160 original blockers when evaluation model output is unavailable", async () => {
+    const test = harness(evaluationEnvelope());
     const facts = observed();
     facts.blockers = Array.from({ length: 160 }, (_, index) => ({
       phase: "profile" as const,
@@ -1608,18 +1567,15 @@ describe("profile job executor", () => {
     }));
     test.headlessRunner.run.mockResolvedValue(facts);
     const result = typedV2(
-      await new ProfileJobExecutor({ ...test.options, requireModelInvocation: true }).execute(
-        test.input,
-        test.context,
-      ),
+      await new ProfileJobExecutor(test.options).execute(test.input, test.context),
     );
-    expect(result.modelReview).toMatchObject({ state: "failed", code: "MODEL_RECORDING_MISSING" });
+    expect(result.modelReview).toMatchObject({ state: "failed", code: "MODEL_EXECUTION_MISSING" });
     expect(result.execution.blockers).toEqual(facts.blockers);
     expect(result.report.checks).toEqual(facts.report.checks);
   });
 
   it("reserves failure-report capacity before dispatching a model near the terminal byte ceiling", async () => {
-    const test = harness();
+    const test = harness(evaluationEnvelope());
     const selected = test.input.validation.profileVersion;
     const template = selected.config.test[0];
     if (template === undefined) throw new Error("Expected the command fixture.");
@@ -1661,6 +1617,9 @@ describe("profile job executor", () => {
     test.input.validation.requiredCheckIds = [...selected.config.build, ...selected.config.test]
       .map((step) => `${selected.id}:${step.id}`)
       .sort();
+    refreshEvaluationProfileFixture(
+      test.input as ReturnType<typeof evaluationProfileEnvelopeFixture>,
+    );
     const payload = () => ({
       schemaVersion: "ValidationJobResultV2",
       report: facts.report,
@@ -1684,10 +1643,7 @@ describe("profile job executor", () => {
     expect(bytes).toBeGreaterThan(2 * 1024 * 1024 - 2000);
     test.headlessRunner.run.mockResolvedValue(facts);
     expect(
-      await new ProfileJobExecutor({ ...test.options, requireModelInvocation: true }).execute(
-        test.input,
-        test.context,
-      ),
+      await new ProfileJobExecutor(test.options).execute(test.input, test.context),
     ).toMatchObject({ outcome: "failed", code: "VALIDATION_RESULT_TOO_LARGE" });
     expect(test.createModelExecutor).not.toHaveBeenCalled();
   });
@@ -1697,63 +1653,78 @@ describe("profile job executor", () => {
     test.execute.mockImplementation(async (input) => {
       const attempt = completedSummary(input);
       if (attempt.state !== "completed") throw new Error("Expected completed summary fixture.");
-      const actualPromptSha256 = hash(
-        composeSummaryPrompt(
-          input.envelope.prompt.renderedPrompt,
-          createValidationSummaryContext(input).json,
-        ),
-      );
-      const scope = recordedScope(input.envelope, actualPromptSha256);
-      const canonical = createCanonicalResult(attempt.summary);
-      const artifact = createModelOutputArtifact({
-        output: {
-          outcome: "succeeded",
-          result: attempt.summary,
-          canonicalResultJson: canonical.json,
-          resultDigest: canonical.sha256,
-          modelInvocation: recording(scope),
-        },
-        expectedScope: scope,
-        executionEvidence: {
-          schemaVersion: "ReviewExecutionEvidenceV1",
-          source: "worker",
-          commandCapture: "complete",
-          commands: [],
-          worktree: { status: "clean", source: "git_status" },
-        },
-      });
-      return { ...attempt, modelOutputArtifact: artifact, actualPromptSha256 };
+      return {
+        ...attempt,
+        modelOutputArtifact: outputArtifact(evaluationEnvelope(true), attempt.summary),
+      };
     });
-    const result = typedV2(await test.run());
-    expect(result.modelReview).toMatchObject({ state: "failed", code: "SUMMARY_EXECUTION_FAILED" });
+    const result = typed(await test.run());
+    expect(result.modelReview).toMatchObject({ state: "failed", code: "SUMMARY_RESULT_INVALID" });
     expect(result.modelReview).not.toHaveProperty("result");
-    expect(result.modelReview).not.toHaveProperty("invocation");
     expect(result.report).not.toHaveProperty("modelSummary");
     expect(result.report.checks[0]?.outcome).toBe("passed");
   });
 
-  it("does not downgrade a required recorded summary when its artifact is missing", async () => {
-    const test = summaryHarness();
+  it("retains an evaluation summary and its exact CLI prompt and context", async () => {
+    const test = summaryHarness(evaluationEnvelope(true));
+    test.execute.mockImplementation(async (input) => {
+      const attempt = completedSummary(input);
+      if (attempt.state !== "completed") throw new Error("Expected completed summary fixture.");
+      const context = createValidationSummaryContext(input);
+      const actualPromptSha256 = hash(
+        composeSummaryPrompt(input.envelope.prompt.renderedPrompt, context.json),
+      );
+      const artifact = outputArtifact(input.envelope, attempt.summary);
+      artifact.execution.promptSha256 = actualPromptSha256;
+      artifact.execution.summaryInputRef = {
+        schemaVersion: "ValidationSummaryInputReferenceV1",
+        inputId: "summary-input",
+        inputSha256: "a".repeat(64),
+        sourcePromptSha256: input.envelope.prompt.promptSha256,
+        outputSchemaSha256: input.envelope.prompt.outputSchemaSha256,
+        contextSha256: context.sha256,
+        actualPromptSha256,
+      };
+      return { ...attempt, modelOutputArtifact: artifact, actualPromptSha256 };
+    });
+    const result = typedV2(await test.run());
+    expect(result.modelReview).toMatchObject({
+      state: "completed",
+      result: summary(),
+      execution: {
+        jobId: test.input.job.jobId,
+        runAttemptId: test.input.lease.runAttemptId,
+        summaryInputRef: {
+          inputId: "summary-input",
+          sourcePromptSha256: test.input.prompt.promptSha256,
+        },
+      },
+    });
+    expect(result.report).not.toHaveProperty("modelSummary");
+    expect(result.report.checks[0]?.outcome).toBe("passed");
+    expect(result.execution.blockers).toEqual([]);
+  });
+
+  it("requires CLI execution details for an evaluation summary", async () => {
+    const test = summaryHarness(evaluationEnvelope(true));
     const result = typedV2(
       await new ProfileJobExecutor({
         ...test.options,
         createSummaryExecutor: test.factory,
-        requireModelInvocation: true,
       }).execute(test.input, test.context),
     );
     expect(result.modelReview).toMatchObject({
       state: "failed",
-      code: "SUMMARY_RECORDING_MISSING",
+      code: "SUMMARY_EXECUTION_MISSING",
     });
     expect(result.report).not.toHaveProperty("modelSummary");
     expect(result.report.checks[0]?.outcome).toBe("passed");
   });
   it("retains runner evidence and an explicit V2 failure when a required summary is unconfigured", async () => {
-    const test = summaryHarness();
+    const test = summaryHarness(evaluationEnvelope(true));
     const result = typedV2(
       await new ProfileJobExecutor({
         ...test.options,
-        requireModelInvocation: true,
       }).execute(test.input, test.context),
     );
     expect(result.modelReview).toMatchObject({
@@ -1824,18 +1795,30 @@ describe("profile job executor", () => {
       expect(test.context.processHost.start).not.toHaveBeenCalled();
     },
   );
-  it("keeps profile-only evaluation gated even on a model-disabled Worker", async () => {
-    const test = harness();
-    const input = evaluationProfileEnvelopeFixture("issue_validation", "headless", false);
-    expect(
-      await new ProfileJobExecutor({ ...test.options, modelExecutionEnabled: false }).execute(
-        input,
-        test.context,
-      ),
-    ).toMatchObject({ outcome: "failed", code: "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE" });
-    expect(test.provider.prepare).not.toHaveBeenCalled();
-    expect(test.createModelExecutor).not.toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    "runs profile-only evaluation with ui=%s when models are disabled",
+    async (ui) => {
+      const test = harness(evaluationEnvelope(ui, false));
+      test.headlessRunner.run.mockResolvedValue(observed(false, test.input.resource.kind));
+      const summaryFactory = vi.fn();
+      const result = typed(
+        await new ProfileJobExecutor({
+          ...test.options,
+          modelExecutionEnabled: false,
+          createSummaryExecutor: summaryFactory,
+        }).execute(test.input, test.context),
+      );
+      expect(result.report.checks[0]?.outcome).toBe("passed");
+      expect(result.modelReview).toEqual({ state: "not_requested" });
+      expect(test.provider.prepare).toHaveBeenCalledOnce();
+      expect(ui ? test.uiRunner.run : test.headlessRunner.run).toHaveBeenCalledOnce();
+      expect(test.createModelExecutor).not.toHaveBeenCalled();
+      expect(summaryFactory).not.toHaveBeenCalled();
+      expect(test.validation.cleanup).not.toHaveBeenCalled();
+      for (const cleanup of test.cleanups) await cleanup();
+      expect(test.validation.cleanup).toHaveBeenCalledOnce();
+    },
+  );
   it("runs ordinary validation without creating an optional model executor when models are disabled", async () => {
     const test = summaryHarness();
     const result = typed(
@@ -1865,7 +1848,7 @@ describe("profile job executor", () => {
     expect(test.context.processHost.start).not.toHaveBeenCalled();
   });
   it.each([{ purpose: { kind: "evaluation" } }, { schemaVersion: "ValidationJobContextV2" }])(
-    "retains the execution boundary at the direct model entry for marker %#",
+    "rejects an invalid evaluation marker at the direct model entry for marker %#",
     async (marker) => {
       const test = harness();
       Object.assign(test.input.validation, marker);
@@ -1875,11 +1858,10 @@ describe("profile job executor", () => {
       );
       expect(result).toMatchObject({
         outcome: "failed",
-        code: "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
+        code: "JOB_CONTRACT_INVALID",
       });
       expect(test.provider.prepare).not.toHaveBeenCalled();
       expect(test.context.processHost.start).not.toHaveBeenCalled();
-      expect(test.context.reportProgress).not.toHaveBeenCalled();
     },
   );
   it("rejects a downgraded envelope at the profile model entry", async () => {
@@ -2071,130 +2053,109 @@ describe("profile job executor", () => {
     expect(test.legacyExecutor.execute).toHaveBeenCalledWith(legacy, test.context);
     expect(test.provider.prepare).not.toHaveBeenCalled();
   });
-  it.each([
-    { ui: false, modelRequired: true },
-    { ui: false, modelRequired: false },
-    { ui: true, modelRequired: true },
-    { ui: true, modelRequired: false },
-  ])(
-    "rejects evaluation before any workspace or execution for %#",
-    async ({ ui, modelRequired }) => {
-      const test = harness(envelope(profile(ui)));
-      const original = test.input.validation;
-      const resource = test.input.resource;
-      const snapshot = resource.canonicalSnapshot;
-      if (
-        resource.kind !== "pull_request" ||
-        !Value.Check(GitHubWorkItemSchema, snapshot) ||
-        snapshot.kind !== "pull_request"
-      )
-        throw new Error("The fixture requires a PR source.");
-      const evaluationId = "evaluation-1";
-      const source: ValidationJobContextV2["source"] = {
-        schemaVersion: "EvaluationSourceSnapshotV1",
-        repository: {
-          id: original.repositoryId,
-          githubRepositoryId: test.input.repository.githubRepositoryId,
-          fullName: test.input.repository.fullName,
-          configurationVersion: 1,
-        },
-        workItemId: original.workItemId,
-        workItem: snapshot,
-        revision: {
-          kind: "pull_request",
-          githubRepositoryId: snapshot.githubRepositoryId,
-          githubWorkItemId: snapshot.githubWorkItemId,
-          revisionKey: original.revisionKey,
-          baseSha: resource.baseSha,
-          headSha: resource.headSha,
-        },
-        revisionId: "revision-1",
-        freshness: "frozen",
-        sourceDigest: "e".repeat(64),
-        testedSourceRevision: original.testedSourceRevision,
-        provenance: {
-          kind: "current_work_item",
-          capturedAt: now,
-          expectedRevisionKey: original.revisionKey,
-        },
-      };
-      const evaluation: ValidationJobContextV2 = {
-        ...original,
-        schemaVersion: "ValidationJobContextV2",
-        requestEpochId: null,
-        testedSourceAuthorization: null,
-        jobActivation: 1,
-        source,
-        purpose: {
-          schemaVersion: "EvaluationExecutionPurposeV1",
-          kind: "evaluation",
-          evaluationId,
-          cellId: "cell-1",
-          caseId: "case-1",
-          arm: "baseline",
-          sampleSetVersionId: "suite-version-1",
-          authorizationId: "authorization-1",
-          executionManifestSha256: "f".repeat(64),
-          trial: 1,
-          upstreamMutationPolicy: "forbidden",
-        },
-        authorization: {
-          schemaVersion: "EvaluationExecutionAuthorizationV1",
-          kind: "operator_evaluation",
-          id: "authorization-1",
-          actor: { issuer: "fixture-issuer", subject: "fixture-operator" },
-          authorizedAt: now,
-          evaluationId,
-          repositoryId: original.repositoryId,
-          githubRepositoryId: snapshot.githubRepositoryId,
-          sampleSetVersionId: "suite-version-1",
-          sourceManifestSha256: "a".repeat(64),
-          configurationManifestSha256: "b".repeat(64),
-          cellManifestSha256: "c".repeat(64),
-          executionManifestSha256: "f".repeat(64),
-        },
-        modelRequirements: { required: modelRequired, expectedModelIdentityDigest: null },
-      };
-      expect(Value.Check(ValidationJobContextV2Schema, evaluation)).toBe(true);
-      const input = { ...test.input, validation: evaluation } as unknown as JobExecutionEnvelopeV2;
-      input.executionPolicy.requiredCapabilityLabels.validationEvaluation = "1";
-      const summaryFactory = vi.fn<NonNullable<ProfileJobExecutorOptions["createSummaryExecutor"]>>(
-        () => {
-          throw new Error("Evaluation summary execution must not begin.");
-        },
+  it.each([false, true])(
+    "runs profile-only evaluation with ui=%s without requesting a configured model",
+    async (ui) => {
+      const test = harness(evaluationEnvelope(ui, false));
+      test.headlessRunner.run.mockResolvedValue(observed(false, test.input.resource.kind));
+      const summaryFactory = vi.fn();
+      const result = typed(
+        await new ProfileJobExecutor({
+          ...test.options,
+          createSummaryExecutor: summaryFactory,
+        }).execute(test.input, test.context),
       );
-      const result = await new ProfileJobExecutor({
-        ...test.options,
-        createSummaryExecutor: summaryFactory,
-      }).execute(input, test.context);
-      expect(result).toEqual({
-        outcome: "failed",
-        code: "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
-        retryable: false,
-        message:
-          "This Worker has no accepted evaluation execution boundary; profile commands and model execution were not started.",
-      });
-      expect(test.provider.prepare).not.toHaveBeenCalled();
-      expect(test.headlessRunner.run).not.toHaveBeenCalled();
-      expect(test.uiRunner.run).not.toHaveBeenCalled();
+      expect(result.report.checks[0]?.outcome).toBe("passed");
+      expect(result.modelReview).toEqual({ state: "not_requested" });
+      expect(test.provider.prepare).toHaveBeenCalledOnce();
       expect(test.createModelExecutor).not.toHaveBeenCalled();
       expect(summaryFactory).not.toHaveBeenCalled();
       expect(test.legacyExecutor.execute).not.toHaveBeenCalled();
-      expect(test.evidenceUploader.uploadUiScenarioEvidence).not.toHaveBeenCalled();
-      expect(test.context.processHost.start).not.toHaveBeenCalled();
-      expect(test.context.reportProgress).not.toHaveBeenCalled();
-      expect(test.cleanups).toEqual([]);
     },
   );
+  it("executes an evaluation review directly through the configured CLI", async () => {
+    const test = harness(evaluationEnvelope());
+    const { executionEvidence: _evidence, ...raw } = review();
+    const canonical = createCanonicalResult(raw);
+    const run = vi.spyOn(PreparedCliOutputRunner.prototype, "run").mockResolvedValue({
+      outcome: "succeeded",
+      result: raw,
+      resultDigest: canonical.sha256,
+      canonicalResultJson: canonical.json,
+      commandEvidence: { commands: [], commandCapture: "complete" },
+      observedFileChange: false,
+      cliExecution: cliExecution(test.input, canonical.sha256),
+    });
+    try {
+      test.createModelExecutor.mockImplementation((provider) => actualModelExecutor(provider));
+      const result = typedV2(await test.run());
+      expect(result.report.checks[0]?.outcome).toBe("passed");
+      expect(result.modelReview).toMatchObject({
+        state: "completed",
+        result: raw,
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: test.input.job.jobId,
+          runAttemptId: test.input.lease.runAttemptId,
+          cli: { kind: "codex", version: "0.145.0", requestedModel: null },
+          outputSha256: canonical.sha256,
+          exitCode: 0,
+        },
+      });
+      expect(run).toHaveBeenCalledOnce();
+      expect(test.provider.prepare).toHaveBeenCalledTimes(2);
+      expect(test.validation.cleanup).not.toHaveBeenCalled();
+      expect(test.model.cleanup).not.toHaveBeenCalled();
+      for (const cleanup of test.cleanups) await cleanup();
+      expect(test.validation.cleanup).toHaveBeenCalledOnce();
+      expect(test.model.cleanup).toHaveBeenCalledOnce();
+    } finally {
+      run.mockRestore();
+    }
+  });
+  it("retains runner results when a required evaluation CLI run fails", async () => {
+    const test = harness(evaluationEnvelope());
+    const run = vi.spyOn(PreparedCliOutputRunner.prototype, "run").mockResolvedValue({
+      outcome: "failed",
+      code: "CLI_PROCESS_FAILED",
+      message: "Synthetic CLI failure.",
+      retryable: false,
+    });
+    try {
+      test.createModelExecutor.mockImplementation((provider) => actualModelExecutor(provider));
+      const result = typedV2(await test.run());
+      expect(result.report.checks[0]?.outcome).toBe("passed");
+      expect(result.modelReview.state).toBe("failed");
+      expect(result.execution.blockers).toContainEqual(
+        expect.objectContaining({ phase: "model_review", code: "MODEL_REVIEW_REQUIRED" }),
+      );
+      expect(test.provider.prepare).toHaveBeenCalledTimes(2);
+      expect(run).toHaveBeenCalledOnce();
+      expect(test.context.processHost.start).not.toHaveBeenCalled();
+    } finally {
+      run.mockRestore();
+    }
+  });
+  it("does not complete required evaluation summaries without their configured executor", async () => {
+    const test = harness(evaluationEnvelope(true));
+    const result = typedV2(await test.run());
+    expect(result.report.checks[0]?.outcome).toBe("passed");
+    expect(result.modelReview).toMatchObject({
+      state: "failed",
+      code: "MODEL_EXECUTOR_UNAVAILABLE",
+    });
+    expect(test.evidenceUploader.uploadUiScenarioEvidence).toHaveBeenCalledOnce();
+    expect(test.createModelExecutor).not.toHaveBeenCalled();
+  });
   it.each([{ purpose: { kind: "evaluation" } }, { schemaVersion: "ValidationJobContextV2" }])(
-    "does not let a partially downgraded evaluation marker bypass the early guard %#",
+    "rejects a partially downgraded evaluation marker before workspace preparation %#",
     async (marker) => {
       const test = harness();
       Object.assign(test.input.validation, marker);
       const result = await test.run();
       expect(result).toMatchObject({
         outcome: "failed",
-        code: "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
+        code: "VALIDATION_ENVELOPE_INVALID",
         retryable: false,
       });
       expect(test.provider.prepare).not.toHaveBeenCalled();
@@ -2203,6 +2164,17 @@ describe("profile job executor", () => {
       expect(test.cleanups).toEqual([]);
     },
   );
+  it("does not route an evaluation with a downgraded envelope version to the legacy executor", async () => {
+    const test = harness(evaluationEnvelope(false, false));
+    Reflect.set(test.input, "envelopeVersion", 1);
+    expect(await test.run()).toMatchObject({
+      outcome: "failed",
+      code: "VALIDATION_ENVELOPE_INVALID",
+    });
+    expect(test.legacyExecutor.execute).not.toHaveBeenCalled();
+    expect(test.provider.prepare).not.toHaveBeenCalled();
+    expect(test.context.processHost.start).not.toHaveBeenCalled();
+  });
   it("keeps model changes in a separate purpose workspace and retains both until terminal reporting", async () => {
     const test = harness();
     const result = typed(await test.run());

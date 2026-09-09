@@ -159,6 +159,7 @@ const prResult: DashboardReviewRunResult = {
     cleanupState: "completed",
   },
   modelReview: {
+    execution: null,
     state: "completed",
     summary: "Sample review: restore the missing monitor type declaration before merging.",
     recommendation: "request_changes",
@@ -211,6 +212,7 @@ const issueTriageResult: DashboardReviewRunResult = {
   },
   execution: { blockers: [], diagnostics: [], cleanupState: "not_needed" },
   modelReview: {
+    execution: null,
     state: "completed",
     summary:
       "Sample triage: selecting a remap target appears to move keyboard focus outside the editor. Capture the PowerToys version and display configuration.",
@@ -287,6 +289,7 @@ const issueValidationResult: DashboardReviewRunResult = {
     cleanupState: "completed",
   },
   modelReview: {
+    execution: null,
     state: "completed",
     summary: "Sample reproduction: focus moves to the parent window when target selection closes.",
     recommendation: null,

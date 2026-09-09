@@ -41,19 +41,6 @@ const configurationIdSegment = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const configurationWorkflowSegment = "(?:pr_static_build|pr_ui|issue_triage|issue_validation)";
 const configurationPromptPrefix = "/api/v1/operator/prompts";
 const configurationRepositoryPrefix = `/api/v1/operator/repositories/${configurationIdSegment}`;
-const modelRuntimePrefix = "/api/v1/operator/model-runtimes";
-const modelRuntimeDetailPattern = new RegExp(
-  `^${modelRuntimePrefix}/${configurationIdSegment}$`,
-  "u",
-);
-const modelRuntimeHistoryPattern = new RegExp(
-  `^${modelRuntimePrefix}/${configurationIdSegment}/history$`,
-  "u",
-);
-const evaluationModelRuntimeOptionsPattern = new RegExp(
-  `^${configurationRepositoryPrefix}/evaluation-model-runtime-options$`,
-  "u",
-);
 const evaluationSourcePath = `${configurationRepositoryPrefix}/evaluation-sources`;
 const evaluationSuitePath = `${configurationRepositoryPrefix}/evaluation-suites`;
 const evaluationVersionPath = `${evaluationSuitePath}/${configurationIdSegment}/versions`;
@@ -97,10 +84,6 @@ const evaluationReproductionPlanPathPattern = new RegExp(
 );
 const evaluationReproductionPreviewPathPattern = new RegExp(
   `^${configurationRepositoryPrefix}/evaluation-reproduction/preview$`,
-  "u",
-);
-const evaluationModelInvocationListPathPattern = new RegExp(
-  `^${evaluationBatchPath}/${configurationIdSegment}/cells/${configurationIdSegment}/model-invocations$`,
   "u",
 );
 const evaluationEvidenceJsonPathPattern = new RegExp(
@@ -705,41 +688,6 @@ const isCanonicalFindingRead = (path: string): boolean => {
   );
 };
 
-const isCanonicalModelRuntimeRead = (path: string): boolean => {
-  if (modelRuntimeDetailPattern.test(path)) return true;
-  const index = path.indexOf("?");
-  if (index === -1) return false;
-  const pathname = path.slice(0, index);
-  const listing = pathname === modelRuntimePrefix;
-  if (
-    !listing &&
-    !modelRuntimeHistoryPattern.test(pathname) &&
-    !evaluationModelRuntimeOptionsPattern.test(pathname)
-  )
-    return false;
-  const query = path.slice(index + 1),
-    parameters = new URLSearchParams(query);
-  const keys = [...parameters.keys()].join(",");
-  if (
-    parameters.toString() !== query ||
-    (keys !== "page,pageSize" && !(listing && keys === "page,pageSize,enabled"))
-  )
-    return false;
-  const page = Number(parameters.get("page")),
-    size = Number(parameters.get("pageSize"));
-  return (
-    Number.isSafeInteger(page) &&
-    page >= 1 &&
-    String(page) === parameters.get("page") &&
-    Number.isSafeInteger(size) &&
-    size >= 1 &&
-    size <= 50 &&
-    String(size) === parameters.get("pageSize") &&
-    Number.isSafeInteger((page - 1) * size) &&
-    (!parameters.has("enabled") || ["true", "false"].includes(parameters.get("enabled") ?? ""))
-  );
-};
-
 const isCanonicalEvaluationBatchRead = (path: string): boolean => {
   if (
     evaluationBatchReadPathPattern.test(path) ||
@@ -785,28 +733,6 @@ const isCanonicalEvaluationBatchRead = (path: string): boolean => {
     Number.isSafeInteger((page - 1) * pageSize) &&
     (suiteId === null || (reviewRunFilterIdPattern.test(suiteId) && !/[\r\n]/u.test(suiteId))) &&
     (workflow === null || (evaluationWorkflowPattern.test(workflow) && !/[\r\n]/u.test(workflow)))
-  );
-};
-
-const isCanonicalEvaluationModelInvocationRead = (path: string): boolean => {
-  const index = path.indexOf("?");
-  if (index === -1 || !evaluationModelInvocationListPathPattern.test(path.slice(0, index)))
-    return false;
-  const query = path.slice(index + 1);
-  const parameters = new URLSearchParams(query);
-  if (parameters.toString() !== query || [...parameters.keys()].join(",") !== "page,pageSize")
-    return false;
-  const page = Number(parameters.get("page"));
-  const pageSize = Number(parameters.get("pageSize"));
-  return (
-    Number.isSafeInteger(page) &&
-    page >= 1 &&
-    String(page) === parameters.get("page") &&
-    Number.isSafeInteger(pageSize) &&
-    pageSize >= 1 &&
-    pageSize <= 10 &&
-    String(pageSize) === parameters.get("pageSize") &&
-    Number.isSafeInteger((page - 1) * pageSize)
   );
 };
 
@@ -943,15 +869,11 @@ const ensureControlPath = (path: string, method: DashboardHttpMethod): void => {
     (method === "POST" && publicationPostPathPattern.test(path));
   const isNotificationOperation =
     (method === "GET" && isCanonicalNotificationRead(path)) ||
-    (method === "GET" && isCanonicalModelRuntimeRead(path)) ||
-    (method === "POST" && path === modelRuntimePrefix) ||
-    (method === "PATCH" && modelRuntimeDetailPattern.test(path)) ||
     (method === "POST" && notificationStatePathPattern.test(path));
   const isEvaluationOperation =
     (method === "GET" &&
       (isCanonicalEvaluationRead(path) ||
         isCanonicalEvaluationBatchRead(path) ||
-        isCanonicalEvaluationModelInvocationRead(path) ||
         isCanonicalEvaluationAdjudicationRead(path) ||
         isCanonicalEvaluationAssessmentRead(path))) ||
     (method === "POST" &&

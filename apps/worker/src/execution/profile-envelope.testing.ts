@@ -141,8 +141,7 @@ export function evaluationProfileEnvelopeFixture(
     context.source.testedSourceRevision = null;
   }
   if (!modelRequired) {
-    context.modelRequirements = { required: false, expectedModelIdentityDigest: null };
-    delete context.modelRuntimeRegistration;
+    context.modelRequirements = { required: false };
   }
   envelope.prompt.outputSchema = JSON.parse(JSON.stringify(outputSchemas[workflowKind]));
   envelope.prompt.outputSchemaSha256 = createCanonicalResult(envelope.prompt.outputSchema).sha256;
@@ -169,7 +168,6 @@ export function ordinaryProfileEnvelopeFixture(
     purpose: _purpose,
     authorization,
     modelRequirements: _requirements,
-    modelRuntimeRegistration: _registration,
     ...context
   } = envelope.validation;
   const tested = context.testedSourceRevision;

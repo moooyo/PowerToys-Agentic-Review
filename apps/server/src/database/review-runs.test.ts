@@ -496,7 +496,8 @@ function startValidationJob(database: DatabaseSync, jobId: string): void {
     architecture: "x64",
     headless: true,
     interactiveDesktop: false,
-    codexVersion: "test",
+    cliEngine: "codex",
+    cliVersion: "test",
     recipeIds: [],
     labels: { executionEnvelope: "2", validationHeadless: "1" },
   });

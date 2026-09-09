@@ -16,7 +16,7 @@ function evaluation(workflowKind: ValidationJobContext["workflowKind"], required
     schemaVersion: context.schemaVersion,
     workflowKind,
     purpose: context.purpose,
-    modelRequirements: { required, expectedModelIdentityDigest: null },
+    modelRequirements: { required },
   } satisfies Pick<
     ValidationJobContextV2,
     "schemaVersion" | "workflowKind" | "purpose" | "modelRequirements"
@@ -24,43 +24,41 @@ function evaluation(workflowKind: ValidationJobContext["workflowKind"], required
 }
 
 describe("frozen profile model dispatch", () => {
+  it.each(workflows)("never creates model work for profile-only %s", async (workflow) => {
+    const review = vi.fn(),
+      summary = vi.fn();
+    const policy = resolveProfileModelPolicy(evaluation(workflow, false));
+    expect(policy).toEqual({ kind: "none", required: false, retainModelOutput: false });
+    expect(await dispatchProfileModel(policy, { review, summary })).toEqual({
+      state: "not_requested",
+    });
+    expect(review).not.toHaveBeenCalled();
+    expect(summary).not.toHaveBeenCalled();
+  });
+
   it.each(workflows)(
-    "never creates model work for profile-only %s, including a global recording override",
+    "retains the original CLI model output for required evaluation %s",
     async (workflow) => {
-      const review = vi.fn(),
-        summary = vi.fn();
-      for (const forceRecording of [false, true]) {
-        const policy = resolveProfileModelPolicy(evaluation(workflow, false), forceRecording);
-        expect(policy).toEqual({ kind: "none", required: false, recorded: false });
-        expect(await dispatchProfileModel(policy, { review, summary })).toEqual({
-          state: "not_requested",
-        });
-      }
-      expect(review).not.toHaveBeenCalled();
-      expect(summary).not.toHaveBeenCalled();
+      const policy = resolveProfileModelPolicy(evaluation(workflow, true));
+      const expectedKind =
+        workflow === "pr_ui" || workflow === "issue_validation" ? "summary" : "review";
+      expect(policy).toEqual({ kind: expectedKind, required: true, retainModelOutput: true });
+      const failure: ProfileModelReview = {
+        state: "failed",
+        code: "TEST_FAILURE",
+        message: "Synthetic failure.",
+      };
+      const review = vi.fn(async () => failure),
+        summary = vi.fn(async () => failure);
+      expect(await dispatchProfileModel(policy, { review, summary })).toBe(failure);
+      expect(expectedKind === "review" ? review : summary).toHaveBeenCalledExactlyOnceWith(true);
+      expect(expectedKind === "review" ? summary : review).not.toHaveBeenCalled();
+      expect(await dispatchProfileModel(policy, {})).toMatchObject({
+        state: "failed",
+        code: "MODEL_EXECUTOR_UNAVAILABLE",
+      });
     },
   );
-
-  it.each(workflows)("requires the recorded model branch for %s", async (workflow) => {
-    const policy = resolveProfileModelPolicy(evaluation(workflow, true));
-    const expectedKind =
-      workflow === "pr_ui" || workflow === "issue_validation" ? "summary" : "review";
-    expect(policy).toEqual({ kind: expectedKind, required: true, recorded: true });
-    const failure: ProfileModelReview = {
-      state: "failed",
-      code: "TEST_FAILURE",
-      message: "Synthetic failure.",
-    };
-    const review = vi.fn(async () => failure),
-      summary = vi.fn(async () => failure);
-    expect(await dispatchProfileModel(policy, { review, summary })).toBe(failure);
-    expect(expectedKind === "review" ? review : summary).toHaveBeenCalledExactlyOnceWith(true);
-    expect(expectedKind === "review" ? summary : review).not.toHaveBeenCalled();
-    expect(await dispatchProfileModel(policy, {})).toMatchObject({
-      state: "failed",
-      code: "MODEL_EXECUTOR_UNAVAILABLE",
-    });
-  });
 
   it.each(["pr_ui", "issue_validation"] as const)(
     "does not reinterpret a required but unrequested %s summary as optional",
@@ -82,15 +80,16 @@ describe("frozen profile model dispatch", () => {
         workflowKind,
       });
       const required = workflowKind === "pr_static_build" || workflowKind === "issue_triage";
-      expect(policy).toEqual({ kind: required ? "review" : "summary", required, recorded: false });
+      expect(policy).toEqual({
+        kind: required ? "review" : "summary",
+        required,
+        retainModelOutput: false,
+      });
       expect(await dispatchProfileModel(policy, {})).toMatchObject(
         required
           ? { state: "failed", code: "MODEL_EXECUTOR_UNAVAILABLE" }
           : { state: "not_requested" },
       );
-      expect(
-        resolveProfileModelPolicy({ schemaVersion: "ValidationJobContextV1", workflowKind }, true),
-      ).toMatchObject({ required: true, recorded: true });
     },
   );
 
@@ -113,14 +112,13 @@ describe("frozen profile model dispatch", () => {
       const disabled = resolveProfileModelPolicy(
         { schemaVersion: "ValidationJobContextV1", workflowKind },
         false,
-        false,
       );
       expect(await dispatchProfileModel(disabled, { summary })).toEqual({ state: "not_requested" });
       expect(summary).not.toHaveBeenCalled();
-      expect(resolveProfileModelPolicy(evaluation(workflowKind, true), false, false)).toEqual({
+      expect(resolveProfileModelPolicy(evaluation(workflowKind, true), false)).toEqual({
         kind: "summary",
         required: true,
-        recorded: true,
+        retainModelOutput: true,
       });
     },
   );

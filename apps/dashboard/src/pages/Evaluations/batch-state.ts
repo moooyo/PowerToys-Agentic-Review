@@ -111,7 +111,6 @@ export function createBatchRequest(input: {
   cases: C.EvaluationSuiteCaseDetailV1[];
   profiles: Record<Arm, C.ValidationProfileVersion>;
   prompts: Record<Arm, C.EvaluationPromptOptionV1>;
-  modelRuntimes?: Record<Arm, C.ModelRuntimeRegistrationV1>;
   mode: C.EvaluationBatchMode;
   choices: CheckChoices;
   reproductionMappings?: C.EvaluationReproductionMappingSelectionV1[];
@@ -180,14 +179,6 @@ export function createBatchRequest(input: {
       ? {}
       : { reproductionMappings: structuredClone(input.reproductionMappings) }),
   };
-  if (input.mode === "prompt_and_profile" && input.modelRuntimes !== undefined) {
-    for (const arm of arms) {
-      const runtime = input.modelRuntimes[arm];
-      if (C.getModelRuntimeRegistrationIssues(runtime).length > 0)
-        reject("Select a valid registered model configuration for both arms.");
-      request[arm].modelRuntimeRegistrationId = runtime.id;
-    }
-  }
   const issues = C.getEvaluationBatchCreateRequestIssues(request);
   if (issues.length) reject(issues[0] ?? "The batch request is invalid.");
   return request;

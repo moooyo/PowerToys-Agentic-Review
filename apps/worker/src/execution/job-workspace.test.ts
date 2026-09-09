@@ -671,7 +671,7 @@ function evaluationEnvelope(kind: "issue" | "pull_request"): EvaluationWorkspace
         cellManifestSha256: "d".repeat(64),
         executionManifestSha256: "e".repeat(64),
       },
-      modelRequirements: { required: kind === "pull_request", expectedModelIdentityDigest: null },
+      modelRequirements: { required: kind === "pull_request" },
     },
   };
   refreshEvaluationSourceDigest(input);
@@ -1136,18 +1136,16 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(processRunner.calls).toEqual([]);
     expect(win32.dirname(workspace.checkoutDirectory)).toBe(workspace.attemptDirectory);
     expect(win32.dirname(workspace.controlDirectory)).toBe(workspace.attemptDirectory);
-    expect(win32.dirname(workspace.codexHomeDirectory)).toBe(workspace.attemptDirectory);
     expect(win32.dirname(workspace.tempDirectory)).toBe(workspace.attemptDirectory);
     expect(win32.dirname(workspace.userProfileDirectory)).toBe(workspace.attemptDirectory);
     expect(
       new Set([
         workspace.checkoutDirectory,
         workspace.controlDirectory,
-        workspace.codexHomeDirectory,
         workspace.tempDirectory,
         workspace.userProfileDirectory,
       ]).size,
-    ).toBe(5);
+    ).toBe(4);
     expect(progress.processCounts).toEqual([0]);
     expect(diskBudget.admitted).toEqual([workspace.attemptDirectory]);
     expect(diskBudget.monitored).toEqual([]);

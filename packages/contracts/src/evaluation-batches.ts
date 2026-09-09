@@ -1,10 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { DateTimeSchema, EntityIdSchema, Sha256Schema } from "./common.js";
-import {
-  EvaluationModelRequirementsV1Schema,
-  getEvaluationModelRuntimeRegistrationIssues,
-} from "./evaluation-execution.js";
+import { EvaluationModelRequirementsV1Schema } from "./evaluation-execution.js";
 import {
   EvaluationReproductionMappingSelectionV1Schema,
   EvaluationReproductionStateSchema,
@@ -15,7 +12,6 @@ import {
   maximumEvaluationCaseCount,
   maximumEvaluationCriterionCount,
 } from "./evaluation-scoring.js";
-import { ModelRuntimeRegistrationV1Schema } from "./model-runtime-registry.js";
 import { OperatorPrincipalSchema } from "./operator-access.js";
 import {
   ValidationProfileVersionSchema,
@@ -38,13 +34,6 @@ export const EvaluationConfigurationSelectionSchema = Type.Object(
   {
     profileVersionId: EntityIdSchema,
     promptVersionId: EntityIdSchema,
-    modelRuntimeRegistrationId: Type.Optional(
-      Type.String({
-        minLength: 1,
-        maxLength: 128,
-        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])",
-      }),
-    ),
   },
   strict,
 );
@@ -62,8 +51,8 @@ export const EvaluationCriterionMappingSchema = Type.Object(
 );
 export type EvaluationCriterionMapping = Static<typeof EvaluationCriterionMappingSchema>;
 
-// Clients select published identities and explicit assessment mappings. They cannot provide
-// captured snapshots, runtime attestations, execution authority, cell IDs, or claimed results.
+// Clients select published profiles and prompts with explicit assessment mappings.
+// The Server captures source/configuration snapshots and assigns execution cells.
 export const EvaluationBatchCreateRequestSchema = Type.Object(
   {
     changeId: EntityIdSchema,
@@ -144,7 +133,6 @@ export const EvaluationFrozenConfigurationSchema = Type.Object(
     profileVersion: ValidationProfileVersionSchema,
     prompt: ReviewRunPromptSnapshotSchema,
     modelRequirements: EvaluationModelRequirementsV1Schema,
-    modelRuntimeRegistration: Type.Optional(ModelRuntimeRegistrationV1Schema),
   },
   strict,
 );
@@ -152,14 +140,9 @@ export type EvaluationFrozenConfiguration = Static<typeof EvaluationFrozenConfig
 export function getEvaluationFrozenConfigurationIssues(value: unknown): string[] {
   if (!wellFormed(value) || typeof value !== "object" || value === null || Array.isArray(value))
     return ["The evaluation frozen configuration must match its strict JSON contract."];
-  const candidate = value as Record<string, unknown>;
-  const issues = getEvaluationModelRuntimeRegistrationIssues(
-    candidate.modelRequirements,
-    candidate.modelRuntimeRegistration,
-  );
   if (!Value.Check(EvaluationFrozenConfigurationSchema, value))
     return ["The evaluation frozen configuration must match its strict JSON contract."];
-  return issues;
+  return [];
 }
 export const EvaluationConfigurationManifestV1Schema = Type.Object(
   {

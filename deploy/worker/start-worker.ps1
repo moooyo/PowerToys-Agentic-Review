@@ -87,7 +87,10 @@ function Set-WorkerEnvironment {
 }
 
 function Assert-Config {
-    param([Parameter(Mandatory = $true)][hashtable]$Config)
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [string]$SourcePath = 'worker configuration'
+    )
 
     $requiredAlways = @(
         'WORKER_SERVER_URL'
@@ -95,20 +98,16 @@ function Assert-Config {
     $requiredWhenExecutionEnabled = @(
         'WORKER_TRUSTED_EXECUTABLE_ROOT',
         'WORKER_PROCESS_HOST_PATH',
-        'WORKER_CODEX_EXECUTABLE_PATH',
         'WORKER_GIT_EXECUTABLE_PATH',
         'WORKER_WORKSPACE_ROOT_DIRECTORY',
         'WORKER_EXECUTION_TEMP_DIRECTORY',
-        'WORKER_EXECUTION_PROFILE_DIRECTORY',
-        'WORKER_CODEX_VERSION',
         'WORKER_PROCESS_HOST_SHA256',
-        'WORKER_CODEX_SHA256',
         'WORKER_GIT_SHA256'
     )
 
     foreach ($requiredName in $requiredAlways) {
         if ([string]::IsNullOrWhiteSpace([string]$Config[$requiredName])) {
-            throw "$requiredName is required in $ConfigPath."
+            throw "$requiredName is required in $SourcePath."
         }
     }
 
@@ -119,6 +118,21 @@ function Assert-Config {
         foreach ($requiredName in $requiredWhenExecutionEnabled) {
             if ([string]::IsNullOrWhiteSpace([string]$Config[$requiredName])) {
                 throw "$requiredName is required when WORKER_EXECUTION_ENABLED=true."
+            }
+        }
+
+        # Model execution defaults to enabled. Model-free validation does not require CLI settings.
+        $modelExecutionEnabled = [string]$Config['WORKER_MODEL_EXECUTION_ENABLED']
+        $isModelExecutionEnabled = $modelExecutionEnabled -notin @('false', '0')
+        if ($isModelExecutionEnabled) {
+            foreach ($requiredName in @('WORKER_CLI_ENGINE', 'WORKER_CLI_EXECUTABLE_PATH')) {
+                if ([string]::IsNullOrWhiteSpace([string]$Config[$requiredName])) {
+                    throw "$requiredName is required when model execution is enabled."
+                }
+            }
+
+            if ([string]$Config['WORKER_CLI_ENGINE'] -cnotin @('codex', 'copilot')) {
+                throw 'WORKER_CLI_ENGINE must be codex or copilot.'
             }
         }
     }
@@ -134,7 +148,7 @@ if ($config -isnot [hashtable]) {
     throw "Config file must return a hashtable: $resolvedConfigPath"
 }
 
-Assert-Config -Config $config
+Assert-Config -Config $config -SourcePath $resolvedConfigPath
 
 $resolvedWorkerEntryPath = [System.IO.Path]::GetFullPath($WorkerEntryPath)
 if (-not (Test-Path -LiteralPath $resolvedWorkerEntryPath -PathType Leaf)) {

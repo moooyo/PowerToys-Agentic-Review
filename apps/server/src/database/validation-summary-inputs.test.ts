@@ -18,13 +18,11 @@ import {
 import { inspectEvidenceFile, inspectEvidenceRoot } from "./evidence-files.js";
 import { EvidenceVerificationCoordinator } from "./evidence-verification.js";
 import type { AssetVerificationSnapshot } from "./evidence-verification-protocol.js";
-import { handleModelInvocationRequest } from "./model-invocations.js";
 import {
-  createModelInvocationFixture,
-  type ModelInvocationFixture,
-  modelInvocationBeginRequest,
-  modelInvocationFixtureTime as time,
-} from "./model-invocations.testing.js";
+  createModelCliFixture,
+  type ModelCliFixture,
+  modelCliFixtureTime as time,
+} from "./model-cli.testing.js";
 import {
   freezeValidationSummaryInput,
   prepareValidationSummaryInput,
@@ -33,7 +31,7 @@ import {
 } from "./validation-summary-inputs.js";
 import { validationSummaryInputRequest } from "./validation-summary-inputs.testing.js";
 
-const fixtures: ModelInvocationFixture[] = [],
+const fixtures: ModelCliFixture[] = [],
   directories: string[] = [],
   coordinators: EvidenceVerificationCoordinator[] = [];
 const formats = new Map(["date-time", "uri"].map((name) => [name, FormatRegistry.Get(name)]));
@@ -56,22 +54,22 @@ afterAll(() => {
     else FormatRegistry.Delete(name);
   }
 });
-function fixture(options: Parameters<typeof createModelInvocationFixture>[0] = {}) {
-  const f = createModelInvocationFixture(options);
+function fixture(options: Parameters<typeof createModelCliFixture>[0] = {}) {
+  const f = createModelCliFixture(options);
   fixtures.push(f);
   return f;
 }
-function input(f: ModelInvocationFixture, request = validationSummaryInputRequest(f)) {
+function input(f: ModelCliFixture, request = validationSummaryInputRequest(f)) {
   return { workerTokenSha256: f.workerTokenSha256, request };
 }
 function freeze(
-  f: ModelInvocationFixture,
+  f: ModelCliFixture,
   request = validationSummaryInputRequest(f),
   options: Parameters<typeof freezeValidationSummaryInput>[3] = {},
 ) {
   return freezeValidationSummaryInput(f.database, input(f, request), time.opened, options);
 }
-function records(f: ModelInvocationFixture) {
+function records(f: ModelCliFixture) {
   return canonicalJson(
     f.database
       .prepare("SELECT * FROM model_summary_inputs ORDER BY input_id")
@@ -79,7 +77,7 @@ function records(f: ModelInvocationFixture) {
       .map((row) => ({ ...row })),
   );
 }
-function stored(f: ModelInvocationFixture, id: string) {
+function stored(f: ModelCliFixture, id: string) {
   f.database.exec("BEGIN");
   try {
     return readFrozenValidationSummaryInputInTransaction(f.database, id);
@@ -98,7 +96,7 @@ function facts(
     readScenarioObservations: (scope) => coordinator.admittedScenarioObservations(prepared, scope),
   };
 }
-function coordinator(f: ModelInvocationFixture, storage: EvidenceStorageOptions) {
+function coordinator(f: ModelCliFixture, storage: EvidenceStorageOptions) {
   const value = new EvidenceVerificationCoordinator(f.database, {
     storage,
     now: () => time.opened,
@@ -211,7 +209,7 @@ describe("immutable validation summary inputs", () => {
     }
     expect(records(f)).toBe("[]");
   });
-  it("freezes actual composed input separately from the original Prompt and never opens or completes a model invocation", () => {
+  it("freezes actual composed input separately from the original Prompt without completing a model result", () => {
     const f = fixture(),
       request = validationSummaryInputRequest(f),
       receipt = freeze(f, request);
@@ -235,9 +233,6 @@ describe("immutable validation summary inputs", () => {
     });
     expect(records(f)).not.toContain(request.lease.leaseToken);
     expect(records(f)).not.toContain(f.workerToken);
-    expect(
-      f.database.prepare("SELECT COUNT(*) AS count FROM model_invocation_openings").get(),
-    ).toMatchObject({ count: 0 });
     expect(
       f.database.prepare("SELECT COUNT(*) AS count FROM validation_job_results").get(),
     ).toMatchObject({ count: 0 });
@@ -312,26 +307,16 @@ describe("immutable validation summary inputs", () => {
     expect(() => freeze(f, request)).toThrow();
     expect(records(f)).toBe("[]");
   });
-  it.each([{ modelRequired: false }, { registerRuntime: false }])(
-    "rejects a model-unregistered or profile-only attempt %j",
-    (options) => {
-      const f = fixture(options);
-      expect(() => freeze(f)).toThrow(
-        expect.objectContaining({ code: "MODEL_INVOCATION_LEASE_REJECTED" }),
-      );
-      expect(records(f)).toBe("[]");
-    },
-  );
-  it("does not replace the frozen input after its invocation opening", () => {
-    const f = fixture();
-    handleModelInvocationRequest(
-      f.database,
-      {
-        operation: "beginModelInvocation",
-        input: { workerTokenSha256: f.workerTokenSha256, request: modelInvocationBeginRequest(f) },
-      },
-      time.opened,
+  it("rejects a profile-only attempt", () => {
+    const f = fixture({ modelRequired: false });
+    expect(() => freeze(f)).toThrow(
+      expect.objectContaining({ code: "VALIDATION_SUMMARY_INPUT_LEASE_REJECTED" }),
     );
+    expect(records(f)).toBe("[]");
+  });
+  it("does not replace an already frozen input", () => {
+    const f = fixture();
+    freeze(f);
     const replacement = validationSummaryInputRequest(f);
     const original = records(f);
     replacement.inputId = "late-replacement";
@@ -539,7 +524,7 @@ describe("immutable validation summary inputs", () => {
       value.cellId = f.cells.find((cell) => cell.arm === "candidate")!.id;
     if (change === "foreign_prompt") value.sourcePromptSha256 = "a".repeat(64);
     if (change === "unknown_field")
-      (value as unknown as Record<string, unknown>).executionAccepted = true;
+      (value as unknown as Record<string, unknown>).unexpectedMetadata = true;
     if (change === "after_deadline") {
       value.frozenAt = time.deadline;
       row.frozen_at = time.deadline;

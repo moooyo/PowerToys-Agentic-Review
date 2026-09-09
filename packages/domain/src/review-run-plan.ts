@@ -6,6 +6,8 @@ import {
   assertReviewRunPlanInput,
   evaluationExecutionCapabilityLabel,
   evaluationExecutionRequiredCapabilityLabels,
+  evaluationModelExecutionCapabilityLabels,
+  getEvaluationModelRequiredCapabilityLabels,
   getValidationProfileConfigIssues,
   isUiAssertionAction,
   maximumPromptContentUtf8Bytes,
@@ -155,8 +157,11 @@ export function createReviewRunPlan(input: ReviewRunPlanInput): ReviewRunPlanRes
 
 /** Protocol requirements come from frozen execution intent, never from configurable profiles. */
 export function getReviewRunExecutorCapabilityLabels(
-  plan: Pick<ReviewRunExecutionPlanV1, "reproduction"> & { readonly schemaVersion?: string },
-  job: Pick<ReviewRunPlannedJob, "requestId" | "target" | "profileVersion">,
+  plan: Pick<ReviewRunExecutionPlanV1, "reproduction"> & {
+    readonly schemaVersion?: string;
+    readonly modelRequirements?: ReviewRunExecutionPlanV2["modelRequirements"];
+  },
+  job: Pick<ReviewRunPlannedJob, "requestId" | "target" | "profileVersion" | "workflowKind">,
 ): Record<string, string> {
   const labels: Record<string, string> = {
     [validationExecutorCapabilityLabels.envelope]: "2",
@@ -167,6 +172,13 @@ export function getReviewRunExecutorCapabilityLabels(
     plan.schemaVersion === "ValidationJobContextV2"
   ) {
     Object.assign(labels, evaluationExecutionRequiredCapabilityLabels);
+    Object.assign(
+      labels,
+      getEvaluationModelRequiredCapabilityLabels(
+        job.workflowKind,
+        plan.modelRequirements?.required === true,
+      ),
+    );
   }
   if (plan.reproduction?.binding.cases.some((entry) => entry.requestId === job.requestId)) {
     labels[validationExecutorCapabilityLabels.reproduction] = "1";
@@ -186,8 +198,11 @@ export function getReviewRunExecutorCapabilityLabels(
 
 /** A single executor must satisfy profile capabilities and every applicable protocol extension. */
 export function getReviewRunRequiredCapabilities(
-  plan: Pick<ReviewRunExecutionPlanV1, "reproduction"> & { readonly schemaVersion?: string },
-  job: Pick<ReviewRunPlannedJob, "requestId" | "target" | "profileVersion">,
+  plan: Pick<ReviewRunExecutionPlanV1, "reproduction"> & {
+    readonly schemaVersion?: string;
+    readonly modelRequirements?: ReviewRunExecutionPlanV2["modelRequirements"];
+  },
+  job: Pick<ReviewRunPlannedJob, "requestId" | "target" | "profileVersion" | "workflowKind">,
 ): string[] {
   const labels = getReviewRunExecutorCapabilityLabels(plan, job);
   return [
@@ -199,6 +214,7 @@ export function getReviewRunRequiredCapabilities(
         validationExecutorCapabilityLabels.probes,
         validationExecutorCapabilityLabels.uiObservations,
         evaluationExecutionCapabilityLabel,
+        ...Object.values(evaluationModelExecutionCapabilityLabels),
       ].filter((label) => labels[label] === "1"),
     ]),
   ];
@@ -239,21 +255,7 @@ export function evaluateEvaluationRunReadiness(
   runnerSupport: readonly ReviewRunRunnerSupport[],
 ): ReviewRunReadiness[] {
   assertEvaluationReviewRunPlan(plan);
-  const readiness = evaluateRunReadiness(plan, runnerSupport, true);
-  for (const entry of readiness) {
-    if (plan.modelRequirements.required) {
-      // Registered expectations cannot replace the still-unintegrated fenced invocation receipts.
-      entry.reasons.push({
-        code: "missing_capability",
-        capability:
-          plan.modelRequirements.expectedModelIdentityDigest === null
-            ? "verified_model_identity"
-            : "verified_model_execution",
-      });
-      entry.state = "blocked";
-    }
-  }
-  return readiness;
+  return evaluateRunReadiness(plan, runnerSupport, true);
 }
 
 function evaluateRunReadiness(

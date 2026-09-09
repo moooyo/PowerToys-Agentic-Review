@@ -9,7 +9,10 @@ import {
 } from "./evaluation-execution.js";
 import { EvaluationManagementError } from "./evaluation-management.js";
 import { decodeStoredValidationResult } from "./stored-validation-result.js";
-import { readValidationModelResultBindingInTransaction } from "./validation-model-result-binding.js";
+import {
+  readValidationModelResultBindingInTransaction,
+  type ValidationModelResultBinding,
+} from "./validation-model-result-binding.js";
 import type { ValidationEvidenceReferenceScope } from "./validation-results.js";
 
 export interface EvaluationResultRow {
@@ -48,6 +51,7 @@ export interface EvaluationResultSelection {
   readonly cell: EvaluationExecutionCell;
   readonly template: C.JobExecutionTemplateV2;
   readonly result: ValidationJobResult;
+  readonly modelBinding: ValidationModelResultBinding | null;
   readonly scopes: readonly ValidationEvidenceReferenceScope[];
 }
 
@@ -166,9 +170,10 @@ export function readEvaluationResultSelectionInTransaction(
     | undefined;
   if (!serialized) corrupt();
   let result: ValidationJobResult;
+  let modelBinding: ValidationModelResultBinding | null;
   try {
     result = decodeStoredValidationResult(row.schemaId, serialized.resultJson, row.resultDigest);
-    readValidationModelResultBindingInTransaction(
+    modelBinding = readValidationModelResultBindingInTransaction(
       database,
       {
         repositoryId: row.repositoryId,
@@ -208,6 +213,7 @@ export function readEvaluationResultSelectionInTransaction(
     cell,
     template,
     result,
+    modelBinding,
     identityDigest: sha256(canonicalJson(row)),
     scopes: result.report.checks
       .filter((check) => check.evidenceIds.length > 0)

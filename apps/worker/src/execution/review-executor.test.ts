@@ -8,7 +8,7 @@ import {
   PrReviewPlanV1Schema,
   PrReviewPlanV2ModelOutputSchema,
 } from "@agentic-review/codex";
-import type { JobExecutionEnvelope } from "@agentic-review/contracts";
+import type { JobExecutionEnvelope, JobExecutionEnvelopeV2 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Logger } from "../logging/logger.js";
 import type { ExecutionProgress } from "./job-executor.js";
@@ -24,8 +24,8 @@ import type {
   ProcessHostClient,
   ProcessLaunchSpec,
 } from "./process-host-protocol.js";
+import { evaluationProfileEnvelopeFixture } from "./profile-envelope.testing.js";
 import {
-  buildReviewCodexConfigurationOverrides,
   type ReviewFileHandle,
   type ReviewFileIO,
   type ReviewFileStat,
@@ -39,23 +39,11 @@ const paths = {
   checkout: "C:\\AgenticReview\\attempt-1\\checkout",
   control: "C:\\AgenticReview\\attempt-1\\control",
   codexHome: "C:\\AgenticReview\\Profile",
-  attemptCodexHome: "C:\\AgenticReview\\attempt-1\\codex-home",
   temp: "C:\\AgenticReview\\attempt-1\\temp",
   userProfile: "C:\\AgenticReview\\attempt-1\\user-profile",
   result: "C:\\AgenticReview\\attempt-1\\control\\result.json",
   schema: "C:\\AgenticReview\\attempt-1\\control\\schema.json",
   config: "C:\\AgenticReview\\Profile\\config.toml",
-  attemptConfig: "C:\\AgenticReview\\attempt-1\\codex-home\\config.toml",
-} as const;
-
-const shellEnvironment = {
-  COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-  PATH: "C:\\Windows\\System32;C:\\Tools",
-  PATHEXT: ".COM;.EXE;.BAT;.CMD",
-  SYSTEMROOT: "C:\\Windows",
-  TEMP: paths.temp,
-  TMP: paths.temp,
-  USERPROFILE: paths.userProfile,
 } as const;
 
 const prompt = "Review the immutable target revision.";
@@ -329,7 +317,6 @@ class FakeWorkspaceProvider implements JobWorkspaceProvider {
       attemptDirectory: paths.attempt,
       checkoutDirectory: paths.checkout,
       controlDirectory: paths.control,
-      codexHomeDirectory: paths.attemptCodexHome,
       tempDirectory: paths.temp,
       userProfileDirectory: paths.userProfile,
       captureWorktreeState: async () => this.worktreeState,
@@ -417,8 +404,11 @@ const createOptions = (
   overrides: Partial<ReviewJobExecutorOptions> = {},
 ): ReviewJobExecutorOptions => ({
   workspaceProvider,
-  codexExecutablePath: "C:\\Tools\\Codex\\codex.exe",
-  codexHomeDirectory: paths.codexHome,
+  engine: "codex",
+  cliExecutablePath: "C:\\Tools\\Codex\\codex.exe",
+  cliVersion: "0.145.0",
+  cliHomeDirectory: paths.codexHome,
+  userProfileDirectory: "C:\\Users\\Worker",
   systemRoot: "C:\\Windows",
   comSpec: "C:\\Windows\\System32\\cmd.exe",
   path: "C:\\Windows\\System32;C:\\Tools",
@@ -471,83 +461,6 @@ const execute = async (
   };
 };
 
-describe("buildReviewCodexConfigurationOverrides", () => {
-  it("restricts task capabilities while preserving operator authentication and model selection", () => {
-    const overrides = buildReviewCodexConfigurationOverrides(
-      "c:/AgenticReview/attempt-1/checkout",
-      shellEnvironment,
-    );
-
-    expect(overrides).toEqual(
-      expect.arrayContaining([
-        'approval_policy="never"',
-        'sandbox_mode="workspace-write"',
-        "allow_login_shell=false",
-        "notify=[]",
-        'project_doc_fallback_filenames=["AGENTS.md"]',
-        'shell_environment_policy.inherit="none"',
-        "shell_environment_policy.ignore_default_excludes=false",
-        "sandbox_workspace_write.network_access=true",
-        'sandbox_workspace_write.writable_roots=["C:\\\\AgenticReview\\\\attempt-1\\\\temp"]',
-        'windows.sandbox="elevated"',
-        'web_search="disabled"',
-        'history.persistence="none"',
-        'projects={"C:\\\\AgenticReview\\\\attempt-1\\\\checkout"={trust_level="untrusted"}}',
-        "mcp_servers={}",
-        "features.apps=false",
-        "features.hooks=false",
-        "features.memories=false",
-        "features.multi_agent=false",
-        "features.plugins=false",
-        "features.remote_plugin=false",
-        "features.skill_mcp_dependency_install=false",
-        "agents.enabled=false",
-        "apps._default.enabled=false",
-        "apps._default.destructive_enabled=false",
-        "apps._default.open_world_enabled=false",
-        "tools.web_search=false",
-        "tools.view_image=false",
-      ]),
-    );
-    expect(
-      overrides.some((value) =>
-        /^(?:cli_auth_credentials_store|model|model_provider)=/u.test(value),
-      ),
-    ).toBe(false);
-  });
-
-  it.each(["relative\\checkout", "C:\\review\\..\\checkout", "C:\\review\ncheckout", "C:\\"])(
-    "rejects unsafe TOML project path %j",
-    (path) =>
-      expect(() => buildReviewCodexConfigurationOverrides(path, shellEnvironment)).toThrow(
-        TypeError,
-      ),
-  );
-
-  it("sets only the safe tool environment and omits Codex authentication locations", () => {
-    const environment = {
-      ...shellEnvironment,
-      CODEX_HOME: paths.codexHome,
-      OPENAI_API_KEY: "not-an-api-key",
-      WORKER_TOKEN: "not-a-worker-token",
-    };
-    const overrides = buildReviewCodexConfigurationOverrides(paths.checkout, environment);
-    const shellPolicy = overrides.find((value) =>
-      value.startsWith("shell_environment_policy.set="),
-    );
-
-    expect(shellPolicy).toBe(
-      'shell_environment_policy.set={COMSPEC="C:\\\\Windows\\\\System32\\\\cmd.exe",' +
-        'PATH="C:\\\\Windows\\\\System32;C:\\\\Tools",PATHEXT=".COM;.EXE;.BAT;.CMD",' +
-        'SYSTEMROOT="C:\\\\Windows",TEMP="C:\\\\AgenticReview\\\\attempt-1\\\\temp",' +
-        'TMP="C:\\\\AgenticReview\\\\attempt-1\\\\temp",' +
-        'USERPROFILE="C:\\\\AgenticReview\\\\attempt-1\\\\user-profile"}',
-    );
-    expect(shellPolicy).not.toContain("CODEX_HOME");
-    expect(shellPolicy).not.toContain("OPENAI_API_KEY");
-  });
-});
-
 describe("ReviewJobExecutor success", () => {
   it("executes a PR review with a persistent Codex home and isolated control files", async () => {
     const result = validPrResult();
@@ -562,24 +475,17 @@ describe("ReviewJobExecutor success", () => {
         CODEX_HOME: paths.codexHome,
         TEMP: paths.temp,
         TMP: paths.temp,
-        USERPROFILE: paths.userProfile,
+        USERPROFILE: "C:\\Users\\Worker",
       },
       limits: { hardTimeoutMs: 600_000 },
     });
     expect(run.processHost.seenSpec?.arguments).toContain("--ephemeral");
-    expect(run.processHost.seenSpec?.arguments).toContain("--ignore-user-config");
+    expect(run.processHost.seenSpec?.arguments).not.toContain("--ignore-user-config");
     expect(run.processHost.seenSpec?.arguments).toEqual(
       expect.arrayContaining(["--cd", paths.checkout]),
     );
-    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
-    const overrides = argumentsList.flatMap((argument, index) =>
-      argument === "--config" ? [argumentsList[index + 1]] : [],
-    );
-    expect(overrides).toEqual(
-      expect.arrayContaining([
-        ...buildReviewCodexConfigurationOverrides(paths.checkout, shellEnvironment),
-      ]),
-    );
+    expect(run.processHost.seenSpec?.arguments).not.toContain("--config");
+    expect(run.processHost.seenSpec?.arguments).not.toContain("--model");
     expect(Object.keys(run.processHost.seenSpec?.environment ?? {}).sort()).toEqual([
       "CODEX_HOME",
       "COMSPEC",
@@ -595,11 +501,11 @@ describe("ReviewJobExecutor success", () => {
     expect(run.processHost.seenSignal?.aborted).toBe(false);
     const diskAbortReason = new Error("Synthetic disk monitor cancellation.");
     run.workspace.diskMonitorController.abort(diskAbortReason);
-    expect(run.processHost.seenSignal?.aborted).toBe(true);
-    expect(run.processHost.seenSignal?.reason).toBe(diskAbortReason);
+    // Later monitor cancellation must not replace the completed client's exit observation.
+    expect(run.processHost.seenSignal?.aborted).toBe(false);
+    expect(run.processHost.seenSignal?.reason).toBeUndefined();
     expect(run.fileIO.readText(paths.schema)).toBe(createCanonicalResult(prSchema.value).json);
     expect(run.fileIO.readText(paths.config)).toBeUndefined();
-    expect(run.fileIO.readText(paths.attemptConfig)).toBeUndefined();
     expect(run.workspace.cleanupCalls).toBe(0);
     expect(run.deferredCleanups).toHaveLength(1);
     await Promise.all([run.deferredCleanups[0]?.(), run.deferredCleanups[0]?.()]);
@@ -608,18 +514,17 @@ describe("ReviewJobExecutor success", () => {
     expect(run.progress).toEqual(
       expect.arrayContaining([
         { phase: "preparing", processCount: 0 },
-        { phase: "codex_review", processCount: 0 },
-        { phase: "codex_review", processCount: 1 },
+        { phase: "cli_review", processCount: 0 },
+        { phase: "cli_review", processCount: 1 },
       ]),
     );
-    expect(run.progress.at(-1)).toEqual({ phase: "codex_review", processCount: 0 });
+    expect(run.progress.at(-1)).toEqual({ phase: "cli_review", processCount: 0 });
   });
 
   it("leaves the provisioned Codex configuration unchanged", async () => {
     const fileIO = new FakeFileIO();
     const operatorConfig = [
       'cli_auth_credentials_store = "file"',
-      'model_provider = "worker-provider"',
       'model = "operator-selected-model"',
       "",
     ].join("\n");
@@ -628,53 +533,43 @@ describe("ReviewJobExecutor success", () => {
 
     await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
     expect(fileIO.readText(paths.config)).toBe(operatorConfig);
-    expect(fileIO.readText(paths.attemptConfig)).toBeUndefined();
     expect(run.processHost.seenSpec?.environment.CODEX_HOME).toBe(paths.codexHome);
   });
 
-  it("applies operator model settings before mandatory task restrictions", async () => {
-    const operatorOverrides = [
-      'model="operator-model"',
-      'model_provider="worker-provider"',
-      'cli_auth_credentials_store="file"',
-      'approval_policy="on-request"',
-      'web_search="live"',
-    ];
+  it("passes an explicit model to the installed CLI without injecting configuration", async () => {
     const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
-      executorOptions: { codexConfigurationOverrides: operatorOverrides },
+      executorOptions: { model: "operator-model" },
     });
-
     await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
-    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
-    const overrides = argumentsList.flatMap((argument, index) =>
-      argument === "--config" ? [argumentsList[index + 1] as string] : [],
+    expect(run.processHost.seenSpec?.arguments).toEqual(
+      expect.arrayContaining(["--model", "operator-model"]),
     );
-    expect(overrides.slice(0, operatorOverrides.length)).toEqual(operatorOverrides);
-    expect(overrides.filter((value) => value.startsWith("approval_policy=")).at(-1)).toBe(
-      'approval_policy="never"',
-    );
-    expect(overrides.filter((value) => value.startsWith("web_search=")).at(-1)).toBe(
-      'web_search="disabled"',
-    );
+    expect(run.processHost.seenSpec?.arguments).not.toContain("--config");
   });
 
-  it("passes provider header credentials only to the native Codex environment", async () => {
-    const headerName = "CODEX_PROVIDER_HEADER_0";
-    const headerValue = "test-provider-header-value";
-    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
-      executorOptions: { codexProviderEnvironment: { [headerName]: headerValue } },
+  it("runs the configured Copilot CLI and collects its final JSON response", async () => {
+    const result = validIssueResult();
+    const host = new FakeProcessHost();
+    host.stdout = Readable.from([JSON.stringify(result)]);
+    const run = await execute(createEnvelope("issue_triage"), undefined, {
+      processHost: host,
+      executorOptions: {
+        engine: "copilot",
+        cliExecutablePath: "C:\\Tools\\Copilot\\copilot.exe",
+        cliHomeDirectory: "C:\\Users\\Worker\\.copilot",
+      },
     });
-
-    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
-    expect(run.processHost.seenSpec?.environment[headerName]).toBe(headerValue);
-    const argumentsList = run.processHost.seenSpec?.arguments ?? [];
-    expect(argumentsList.join("\n")).not.toContain(headerValue);
-    const shellPolicy = argumentsList.find((value) =>
-      value.startsWith("shell_environment_policy.set="),
-    );
-    expect(shellPolicy).toBeDefined();
-    expect(shellPolicy).not.toContain(headerName);
-    expect(shellPolicy).not.toContain(headerValue);
+    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded", result });
+    expect(host.seenSpec).toMatchObject({
+      executable: "C:\\Tools\\Copilot\\copilot.exe",
+      environment: {
+        USERPROFILE: "C:\\Users\\Worker",
+        COPILOT_HOME: "C:\\Users\\Worker\\.copilot",
+      },
+    });
+    expect(host.seenSpec?.arguments).toContain("--no-ask-user");
+    expect(host.seenSpec?.standardInput).toContain(prompt);
+    expect(run.fileIO.readText(paths.result)).toBeUndefined();
   });
 
   it("selects the authoritative issue schema for issue triage", async () => {
@@ -696,39 +591,123 @@ describe("ReviewJobExecutor success", () => {
   });
 });
 
-describe("ReviewJobExecutor trust validation", () => {
-  it.each([
-    paths.attempt,
-    paths.checkout,
-    paths.control,
-    paths.temp,
-    paths.userProfile,
-    "c:\\AGENTICREVIEW\\attempt-1\\profile",
-    "C:\\AgenticReview",
-  ])("rejects a persistent Codex home overlapping the attempt: %s", async (codexHomeDirectory) => {
-    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
-      executorOptions: { codexHomeDirectory },
+describe("ReviewJobExecutor evaluation configuration", () => {
+  async function executeEvaluation(envelope: JobExecutionEnvelopeV2) {
+    const workspace = new FakeWorkspaceProvider();
+    workspace.worktreeState = "clean";
+    const processHost = new FakeProcessHost();
+    const fileIO = new FakeFileIO();
+    const output = {
+      ...validPrResult(),
+      schemaVersion: "PrReviewPlanV2",
+      requestedRecipeIds: [],
+      verification: { status: "not_run", summary: "Only read files.", commands: [] },
+    };
+    processHost.onStart = () => fileIO.put(paths.result, JSON.stringify(output));
+    const executor = new ReviewJobExecutor(createOptions(workspace, fileIO));
+    const cleanups: Array<() => Promise<void>> = [];
+    const result = await executor.executeProfileModel(envelope, {
+      signal: new AbortController().signal,
+      processHost,
+      reportProgress: () => undefined,
+      reportNodeHealthFault: () => undefined,
+      deferCleanup: (cleanup) => cleanups.push(cleanup),
     });
+    return { result, workspace, processHost, cleanups, output };
+  }
 
-    await expect(run.execution).resolves.toMatchObject({
-      outcome: "failed",
-      code: "CODEX_LAUNCH_SPEC_INVALID",
-      retryable: false,
+  it("retains an evaluation result from the configured CLI with task metadata", async () => {
+    const envelope = evaluationProfileEnvelopeFixture();
+    const run = await executeEvaluation(envelope);
+    expect(run.result).toMatchObject({
+      outcome: "succeeded",
+      result: run.output,
+      modelOutputArtifact: {
+        execution: {
+          schemaVersion: "CliModelExecutionV1",
+          jobId: envelope.job.jobId,
+          runAttemptId: envelope.lease.runAttemptId,
+          cli: { kind: "codex", version: "0.145.0", requestedModel: null },
+          promptSha256: envelope.prompt.promptSha256,
+          outputSchemaSha256: envelope.prompt.outputSchemaSha256,
+          outputSha256: createCanonicalResult(run.output).sha256,
+          exitCode: 0,
+        },
+      },
     });
-    expect(run.processHost.startCalls).toBe(0);
-    expect(run.workspace.diskMonitorCalls).toBe(0);
-    expect(run.fileIO.readText(paths.schema)).toBeUndefined();
+    expect(run.workspace.prepareCalls).toBe(1);
+    expect(run.processHost.startCalls).toBe(1);
+    expect(run.cleanups).toHaveLength(1);
+    expect(run.workspace.cleanupCalls).toBe(0);
+    await run.cleanups[0]?.();
+    expect(run.workspace.cleanupCalls).toBe(1);
   });
 
-  it.each(["relative\\profile", "C:\\review\\..\\profile", "C:\\review\nprofile", "C:\\"])(
-    "rejects an invalid persistent Codex home before execution: %j",
-    (codexHomeDirectory) => {
-      expect(
-        () =>
-          new ReviewJobExecutor(
-            createOptions(new FakeWorkspaceProvider(), new FakeFileIO(), { codexHomeDirectory }),
-          ),
-      ).toThrow(TypeError);
+  it("rejects profile-only validation at the direct review entry", async () => {
+    const run = await executeEvaluation(
+      evaluationProfileEnvelopeFixture("issue_validation", "headless", false),
+    );
+    expect(run.result).toMatchObject({
+      outcome: "failed",
+      code: "JOB_CONTRACT_INVALID",
+      message: "This workflow requires the validation summary executor.",
+      retryable: false,
+    });
+    expect(run.workspace.prepareCalls).toBe(0);
+    expect(run.processHost.startCalls).toBe(0);
+  });
+
+  it("rejects changed frozen evaluation data before starting the CLI", async () => {
+    const envelope = evaluationProfileEnvelopeFixture();
+    envelope.validation.source.sourceDigest = "0".repeat(64);
+    const run = await executeEvaluation(envelope);
+    expect(run.result).toMatchObject({ outcome: "failed", code: "JOB_CONTRACT_INVALID" });
+    expect(run.workspace.prepareCalls).toBe(0);
+    expect(run.processHost.startCalls).toBe(0);
+  });
+
+  it("does not run a downgraded evaluation through the legacy review entry", async () => {
+    const envelope = evaluationProfileEnvelopeFixture();
+    Reflect.set(envelope, "envelopeVersion", 1);
+    const run = await execute(envelope, undefined);
+    await expect(run.execution).resolves.toMatchObject({
+      outcome: "failed",
+      code: "JOB_CONTRACT_INVALID",
+    });
+    expect(run.workspace.prepareCalls).toBe(0);
+    expect(run.processHost.startCalls).toBe(0);
+  });
+});
+
+describe("ReviewJobExecutor trust validation", () => {
+  it.each([paths.checkout, `${paths.checkout}\\profile`])(
+    "rejects a configured CLI home inside the source checkout: %s",
+    async (cliHomeDirectory) => {
+      const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+        executorOptions: { cliHomeDirectory },
+      });
+      await expect(run.execution).resolves.toMatchObject({
+        outcome: "failed",
+        code: "CLI_LAUNCH_SPEC_INVALID",
+        retryable: false,
+      });
+      expect(run.processHost.startCalls).toBe(0);
+      expect(run.workspace.diskMonitorCalls).toBe(0);
+    },
+  );
+
+  it.each(["relative\\profile", "C:\\review\\..\\profile", "C:\\review\nprofile"])(
+    "rejects an invalid CLI home before starting a process: %j",
+    async (cliHomeDirectory) => {
+      const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+        executorOptions: { cliHomeDirectory },
+      });
+      await expect(run.execution).resolves.toMatchObject({
+        outcome: "failed",
+        code: "CLI_LAUNCH_SPEC_INVALID",
+        retryable: false,
+      });
+      expect(run.processHost.startCalls).toBe(0);
     },
   );
 
@@ -845,8 +824,8 @@ describe("ReviewJobExecutor process and result handling", () => {
   ] as const)(
     "rejects known protected text in a valid $version $field",
     async ({ version, field }) => {
-      const secret = "synthetic-protected-model-result";
       const envelope = createEnvelope("pull_request_review");
+      const secret = envelope.lease.leaseToken;
       if (version === "PrReviewPlanV2") {
         const selectedSchema = schemaSnapshot(PrReviewPlanV2ModelOutputSchema);
         envelope.prompt.outputSchema = selectedSchema.value;
@@ -861,13 +840,11 @@ describe("ReviewJobExecutor process and result handling", () => {
       };
       if (field === "summary") result.summary = secret;
       else result.findings = [{ ...validPrFinding(), body: secret }];
-      const run = await execute(envelope, result, {
-        executorOptions: { codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: secret } },
-      });
+      const run = await execute(envelope, result);
       const outcome = await run.execution;
       expect(outcome).toMatchObject({
         outcome: "failed",
-        code: "CODEX_RESULT_UNSAFE",
+        code: "CLI_RESULT_UNSAFE",
         retryable: false,
         diagnostics: { category: "result" },
       });
@@ -878,21 +855,6 @@ describe("ReviewJobExecutor process and result handling", () => {
       expect(run.nodeHealthFaults).toEqual([]);
     },
   );
-
-  it("retains an approved public metadata literal in successful review content", async () => {
-    const result = { ...validPrResult(), summary: "worker" };
-    const run = await execute(createEnvelope("pull_request_review"), result, {
-      executorOptions: {
-        codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: "worker" },
-        codexProviderProtectedValues: [],
-      },
-    });
-    expect(await run.execution).toMatchObject({
-      outcome: "succeeded",
-      result,
-      resultDigest: createCanonicalResult(result).sha256,
-    });
-  });
 
   it("keeps V2 model verification separate from redacted CLI evidence and final Git state", async () => {
     const schema = schemaSnapshot(PrReviewPlanV2ModelOutputSchema);
@@ -906,7 +868,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     };
     const host = new FakeProcessHost();
     host.stdout = Readable.from([
-      [
+      `${[
         { type: "thread.started", thread_id: "thread-1" },
         { type: "turn.started" },
         {
@@ -922,7 +884,7 @@ describe("ReviewJobExecutor process and result handling", () => {
         { type: "turn.completed" },
       ]
         .map((event) => JSON.stringify(event))
-        .join("\n") + "\n",
+        .join("\n")}\n`,
     ]);
     const workspace = new FakeWorkspaceProvider();
     workspace.worktreeState = "modified";
@@ -965,7 +927,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
     await expect(run.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_INVALID_RESULT_SCHEMA",
+      code: "CLI_INVALID_RESULT_SCHEMA",
     });
   });
 
@@ -974,10 +936,10 @@ describe("ReviewJobExecutor process and result handling", () => {
     const host = new FakeProcessHost();
     host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
     host.stdout = Readable.from([
-      JSON.stringify({
+      `${JSON.stringify({
         type: "error",
-        message: `Provider rejected credential configured-secret; token=hidden; ${envelope.lease.leaseToken}`,
-      }) + "\n",
+        message: `CLI rejected token=configured-secret; token=hidden; ${envelope.lease.leaseToken}`,
+      })}\n`,
     ]);
     const workerToken = `arw1_${"w".repeat(43)}`;
     host.stderr = Readable.from([
@@ -992,19 +954,16 @@ describe("ReviewJobExecutor process and result handling", () => {
     ]);
     const run = await execute(envelope, undefined, {
       processHost: host,
-      executorOptions: {
-        codexProviderEnvironment: { CODEX_PROVIDER_HEADER_0: "configured-secret" },
-      },
     });
     const result = await run.execution;
     expect(host.startCalls).toBe(1);
     expect(result).toMatchObject({
       outcome: "failed",
-      code: "CODEX_CODEX_REPORTED_ERROR",
+      code: "CLI_CODEX_REPORTED_ERROR",
       diagnostics: { category: "process", exitCode: 42, correlationId: "attempt-1" },
     });
     const serialized = JSON.stringify(result);
-    expect(serialized).toContain("Provider rejected");
+    expect(serialized).toContain("CLI rejected");
     expect(serialized).toContain("TLS handshake failed");
     for (const secret of [
       "configured-secret",
@@ -1020,51 +979,6 @@ describe("ReviewJobExecutor process and result handling", () => {
       envelope.lease.leaseToken,
     ])
       expect(serialized).not.toContain(secret);
-  });
-
-  it("keeps approved provider metadata in review diagnostics while protecting credentials", async () => {
-    const host = new FakeProcessHost();
-    host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
-    host.stdout = Readable.from([
-      `${JSON.stringify({ type: "error", message: "worker reported protected-provider-value" })}\n`,
-    ]);
-    host.stderr = Readable.from(["Authorization: Bearer generic-provider-value"]);
-    const run = await execute(createEnvelope("issue_triage"), undefined, {
-      processHost: host,
-      executorOptions: {
-        codexProviderEnvironment: {
-          CODEX_PROVIDER_HEADER_0: "worker",
-          CODEX_PROVIDER_HEADER_1: "protected-provider-value",
-        },
-        codexProviderProtectedValues: ["protected-provider-value"],
-      },
-    });
-    const result = await run.execution;
-    expect(result.outcome).toBe("failed");
-    expect(JSON.stringify(result)).toContain("worker reported");
-    expect(JSON.stringify(result)).not.toContain("protected-provider-value");
-    expect(JSON.stringify(result)).not.toContain("generic-provider-value");
-  });
-
-  it("lets another protected header with the same public text take precedence", async () => {
-    const host = new FakeProcessHost();
-    host.completion = Promise.resolve(exitEvent({ exitCode: 42 }));
-    host.stdout = Readable.from([
-      `${JSON.stringify({ type: "error", message: "worker reported a failure" })}\n`,
-    ]);
-    const run = await execute(createEnvelope("issue_triage"), undefined, {
-      processHost: host,
-      executorOptions: {
-        codexProviderEnvironment: {
-          CODEX_PROVIDER_HEADER_0: "worker",
-          CODEX_PROVIDER_HEADER_1: "worker",
-        },
-        codexProviderProtectedValues: ["worker"],
-      },
-    });
-    const result = await run.execution;
-    expect(result.outcome).toBe("failed");
-    expect(JSON.stringify(result)).not.toContain("worker");
   });
 
   it("reports trusted control-file I/O failure as a node health fault", async () => {
@@ -1089,7 +1003,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
     await expect(startRun.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_PROCESS_START_FAILED",
+      code: "CLI_PROCESS_START_FAILED",
     });
     expect(startRun.nodeHealthFaults).toHaveLength(1);
 
@@ -1104,7 +1018,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
     await expect(streamRun.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_STREAM_FAILED",
+      code: "CLI_STREAM_FAILED",
     });
     expect(streamRun.nodeHealthFaults).toHaveLength(1);
 
@@ -1117,7 +1031,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
     await expect(timeoutRun.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_PROCESS_FAILED",
+      code: "CLI_PROCESS_FAILED",
     });
     expect(timeoutRun.nodeHealthFaults).toEqual([]);
   });
@@ -1185,7 +1099,7 @@ describe("ReviewJobExecutor process and result handling", () => {
       },
       result: validIssueResult(),
       rawResult: false,
-      code: "CODEX_INVALID_EVENT_STREAM",
+      code: "CLI_INVALID_EVENT_STREAM",
     },
     {
       name: "non-zero exit",
@@ -1194,21 +1108,21 @@ describe("ReviewJobExecutor process and result handling", () => {
       },
       result: undefined,
       rawResult: false,
-      code: "CODEX_NON_ZERO_EXIT",
+      code: "CLI_NON_ZERO_EXIT",
     },
     {
       name: "missing result file",
       configure: (_host: FakeProcessHost) => undefined,
       result: undefined,
       rawResult: false,
-      code: "CODEX_MISSING_RESULT",
+      code: "CLI_MISSING_RESULT",
     },
     {
       name: "invalid result JSON",
       configure: (_host: FakeProcessHost) => undefined,
       result: "not-json",
       rawResult: true,
-      code: "CODEX_INVALID_RESULT_JSON",
+      code: "CLI_INVALID_RESULT_JSON",
     },
   ])("returns a stable failure for $name", async ({ configure, result, rawResult, code }) => {
     const fileIO = new FakeFileIO();
@@ -1288,7 +1202,7 @@ describe("ReviewJobExecutor process and result handling", () => {
 
     await expect(run.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_INVALID_RESULT_SCHEMA",
+      code: "CLI_INVALID_RESULT_SCHEMA",
       retryable: false,
     });
   });
@@ -1317,7 +1231,7 @@ describe("ReviewJobExecutor process and result handling", () => {
 
     await expect(run.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_EVENT_LIMIT_EXCEEDED",
+      code: "CLI_OUTPUT_LIMIT_EXCEEDED",
     });
   });
 
@@ -1373,7 +1287,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     });
     await waitFor(() => processHost.startCalls === 1);
     const activeReports = (): number =>
-      run.progress.filter((entry) => entry.phase === "codex_review" && entry.processCount === 1)
+      run.progress.filter((entry) => entry.phase === "cli_review" && entry.processCount === 1)
         .length;
     expect(activeReports()).toBe(1);
 
@@ -1403,7 +1317,7 @@ describe("ReviewJobExecutor process and result handling", () => {
     const reportsAfterCompletion = activeReports();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(activeReports()).toBe(reportsAfterCompletion);
-    expect(run.progress.at(-1)).toEqual({ phase: "codex_review", processCount: 0 });
+    expect(run.progress.at(-1)).toEqual({ phase: "cli_review", processCount: 0 });
   });
 });
 
@@ -1501,7 +1415,7 @@ describe("ReviewJobExecutor abort and cleanup", () => {
 
     await expect(run.execution).resolves.toMatchObject({
       outcome: "failed",
-      code: "CODEX_INVALID_RESULT_JSON",
+      code: "CLI_INVALID_RESULT_JSON",
     });
     expect(workspace.cleanupCalls).toBe(0);
     const cleanup = run.deferredCleanups[0];

@@ -8,14 +8,8 @@ import {
   ErrorDetailsSchema,
   type FreezeValidationSummaryInputRequest,
   type FreezeValidationSummaryInputResponse,
-  type ModelInvocationBeginRequest,
-  type ModelInvocationOpening,
-  type ModelInvocationSealRequest,
-  type ModelInvocationSealV1,
-  type ModelInvocationSubmissionV1,
-  type ModelInvocationSubmitRequest,
   maximumClaimLeaseResponseUtf8Bytes,
-  maximumModelInvocationControlRequestUtf8Bytes,
+  maximumValidationSummaryInputReceiptUtf8Bytes,
   type RunCompletionSubmission,
   type RunFailureSubmission,
   type RunTerminalResponse,
@@ -30,21 +24,13 @@ import {
 import { Value } from "@sinclair/typebox/value";
 import type { WorkerConfig } from "../config.js";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
-import { parseModelProtocolJson } from "../execution/model-response-observer.js";
 import type { Logger } from "../logging/logger.js";
 import { isPermanentWorkerClientError, ProtocolError, WorkerApiError } from "./errors.js";
 import {
-  type ModelInvocationApi,
   type ModelSummaryInputApi,
   parseFreezeValidationSummaryInputResponse,
-  parseModelInvocationOpening,
-  parseModelInvocationSeal,
-  parseModelInvocationSubmission,
   snapshotFreezeValidationSummaryInputRequest,
-  snapshotModelInvocationBeginRequest,
-  snapshotModelInvocationSealRequest,
-  snapshotModelInvocationSubmitRequest,
-} from "./model-invocation-api.js";
+} from "./summary-input-api.js";
 import type { WorkerApi } from "./worker-api.js";
 
 // A claim can contain both a bounded 1 MiB GitHub snapshot and a rendered prompt whose JSON
@@ -63,15 +49,14 @@ export interface HttpWorkerApiDependencies {
   readonly httpsRequest?: RequestFactory;
 }
 
-interface ModelInvocationTransport {
+interface SummaryInputTransport {
   readonly serialized: Buffer;
   readonly leaseToken: string;
-  readonly operation: "open" | "seal" | "receipts" | "summary_input";
 }
 
 registerWorkerContractFormats();
 
-export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummaryInputApi {
+export class HttpWorkerApi implements WorkerApi, ModelSummaryInputApi {
   readonly #secureContext: SecureContext | undefined;
   readonly #httpRequest: RequestFactory;
   readonly #httpsRequest: RequestFactory;
@@ -163,29 +148,12 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
     return parseRunTerminalResponse(response, submission.jobId, runAttemptId);
   }
 
-  public async beginModelInvocation(
-    request: ModelInvocationBeginRequest,
-    signal?: AbortSignal,
-  ): Promise<ModelInvocationOpening> {
-    const copy = snapshotModelInvocationBeginRequest(request);
-    this.#assertModelInvocationConfiguration(copy.value.lease.workerNodeId);
-    const response = await this.#requestJson(
-      "POST",
-      `/api/v1/worker/runs/${encodeURIComponent(copy.value.lease.runAttemptId)}/model-invocations/open`,
-      undefined,
-      signal,
-      undefined,
-      { serialized: copy.serialized, leaseToken: copy.value.lease.leaseToken, operation: "open" },
-    );
-    return parseModelInvocationOpening(response, copy.value);
-  }
-
   public async freezeValidationSummaryInput(
     request: FreezeValidationSummaryInputRequest,
     signal?: AbortSignal,
   ): Promise<FreezeValidationSummaryInputResponse> {
     const copy = snapshotFreezeValidationSummaryInputRequest(request);
-    this.#assertModelInvocationConfiguration(copy.value.lease.workerNodeId);
+    this.#assertSummaryInputConfiguration(copy.value.lease.workerNodeId);
     if (JSON.stringify(copy.value.context).includes(this.config.workerToken))
       throw new ProtocolError("Summary input cannot contain the Worker credential.");
     const response = await this.#requestJson(
@@ -197,51 +165,12 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
       {
         serialized: copy.serialized,
         leaseToken: copy.value.lease.leaseToken,
-        operation: "summary_input",
       },
     );
     return parseFreezeValidationSummaryInputResponse(response, copy.value);
   }
 
-  public async sealModelInvocation(
-    request: ModelInvocationSealRequest,
-    signal?: AbortSignal,
-  ): Promise<ModelInvocationSealV1> {
-    const copy = snapshotModelInvocationSealRequest(request);
-    this.#assertModelInvocationConfiguration(copy.value.lease.workerNodeId);
-    const response = await this.#requestJson(
-      "POST",
-      `/api/v1/worker/runs/${encodeURIComponent(copy.value.lease.runAttemptId)}/model-invocations/${encodeURIComponent(copy.value.invocationId)}/seal`,
-      undefined,
-      signal,
-      undefined,
-      { serialized: copy.serialized, leaseToken: copy.value.lease.leaseToken, operation: "seal" },
-    );
-    return parseModelInvocationSeal(response, copy.value);
-  }
-
-  public async submitModelInvocationReceipts(
-    request: ModelInvocationSubmitRequest,
-    signal?: AbortSignal,
-  ): Promise<ModelInvocationSubmissionV1> {
-    const copy = snapshotModelInvocationSubmitRequest(request);
-    this.#assertModelInvocationConfiguration(copy.value.lease.workerNodeId);
-    const response = await this.#requestJson(
-      "POST",
-      `/api/v1/worker/runs/${encodeURIComponent(copy.value.lease.runAttemptId)}/model-invocations/${encodeURIComponent(copy.value.invocationId)}/receipts`,
-      undefined,
-      signal,
-      undefined,
-      {
-        serialized: copy.serialized,
-        leaseToken: copy.value.lease.leaseToken,
-        operation: "receipts",
-      },
-    );
-    return parseModelInvocationSubmission(response, copy.value);
-  }
-
-  #assertModelInvocationConfiguration(workerNodeId: string): void {
+  #assertSummaryInputConfiguration(workerNodeId: string): void {
     if (
       workerNodeId !== this.config.workerNodeId ||
       this.config.serverUrl.username !== "" ||
@@ -255,7 +184,7 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
       this.config.requestTimeoutSeconds > 300
     )
       throw new ProtocolError(
-        "Model invocation transport configuration or Worker identity is invalid.",
+        "Summary input transport configuration or Worker identity is invalid.",
       );
   }
 
@@ -265,17 +194,17 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
     body: unknown,
     signal?: AbortSignal,
     timeoutMilliseconds = this.config.requestTimeoutSeconds * 1_000,
-    invocation?: ModelInvocationTransport,
+    summaryInput?: SummaryInputTransport,
   ): Promise<unknown> {
     if (signal?.aborted) {
-      throw invocation === undefined ? abortError(signal) : invocationAbortError();
+      throw summaryInput === undefined ? abortError(signal) : summaryInputAbortError();
     }
     const url = new URL(path, this.config.serverUrl);
-    const serializedBody = invocation?.serialized ?? Buffer.from(JSON.stringify(body), "utf8");
+    const serializedBody = summaryInput?.serialized ?? Buffer.from(JSON.stringify(body), "utf8");
     const responseLimit =
-      invocation === undefined
+      summaryInput === undefined
         ? maximumResponseBytes
-        : maximumModelInvocationControlRequestUtf8Bytes;
+        : maximumValidationSummaryInputReceiptUtf8Bytes;
     const options: RequestOptions = {
       method,
       headers: {
@@ -324,11 +253,11 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
       };
       const destroyRequest = (error: Error): void => {
         rejectOnce(error);
-        if (invocation !== undefined) incoming?.destroy();
+        if (summaryInput !== undefined) incoming?.destroy();
         request?.destroy();
       };
       onAbort = (): void => {
-        destroyRequest(invocation === undefined ? abortError(signal) : invocationAbortError());
+        destroyRequest(summaryInput === undefined ? abortError(signal) : summaryInputAbortError());
       };
       const handleResponse = (response: IncomingMessage): void => {
         incoming = response;
@@ -345,7 +274,7 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
               `Worker API response ${event} before completion.`,
               undefined,
               undefined,
-              cause === undefined || invocation !== undefined ? undefined : { cause },
+              cause === undefined || summaryInput !== undefined ? undefined : { cause },
             ),
           );
           response.destroy();
@@ -377,13 +306,11 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
           let payload: unknown;
           try {
             const bytes = Buffer.concat(chunks);
-            if (invocation === undefined) {
+            if (summaryInput === undefined) {
               const text = bytes.toString("utf8");
               payload = text === "" ? undefined : JSON.parse(text);
             } else {
-              payload = parseModelProtocolJson(
-                new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-              );
+              payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
             }
           } catch {
             rejectOnce(new ProtocolError("Worker API returned invalid JSON."));
@@ -391,8 +318,8 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
           }
           if (
             responseContainsWorkerToken(payload, this.config.workerToken) ||
-            (invocation !== undefined &&
-              responseContainsWorkerToken(payload, invocation.leaseToken))
+            (summaryInput !== undefined &&
+              responseContainsWorkerToken(payload, summaryInput.leaseToken))
           ) {
             rejectOnce(
               new ProtocolError("Worker API response contained confidential authentication data."),
@@ -421,7 +348,7 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
             ? this.#httpsRequest(url, options, handleResponse)
             : this.#httpRequest(url, options, handleResponse);
       } catch (error) {
-        rejectOnce(invocation === undefined ? error : invocationTransportError(error));
+        rejectOnce(summaryInput === undefined ? error : summaryInputTransportError(error));
         return;
       }
       if (settled || signal?.aborted) {
@@ -445,8 +372,8 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
         );
       });
       request.once("error", (error) => {
-        if (invocation === undefined) rejectOnce(error);
-        else destroyRequest(invocationTransportError(error));
+        if (summaryInput === undefined) rejectOnce(error);
+        else destroyRequest(summaryInputTransportError(error));
       });
       request.once("close", () => {
         if (!settled) {
@@ -458,11 +385,11 @@ export class HttpWorkerApi implements WorkerApi, ModelInvocationApi, ModelSummar
         request.end();
         this.logger.debug(
           "Worker API request started.",
-          invocation === undefined ? { method, path } : { operation: invocation.operation },
+          summaryInput === undefined ? { method, path } : { operation: "summary_input" },
         );
       } catch (error) {
-        if (invocation === undefined) rejectOnce(error);
-        else destroyRequest(invocationTransportError(error));
+        if (summaryInput === undefined) rejectOnce(error);
+        else destroyRequest(summaryInputTransportError(error));
       }
     });
   }
@@ -563,14 +490,14 @@ function abortError(signal: AbortSignal | undefined): Error {
   return signal?.reason instanceof Error ? signal.reason : new Error("Worker API request aborted.");
 }
 
-function invocationAbortError(): WorkerApiError {
-  return new WorkerApiError("Model invocation request was aborted.", undefined, "request_aborted", {
+function summaryInputAbortError(): WorkerApiError {
+  return new WorkerApiError("Summary input request was aborted.", undefined, "request_aborted", {
     retryable: false,
   });
 }
 
-function invocationTransportError(error: unknown): WorkerApiError {
-  return new WorkerApiError("Model invocation transport failed.", undefined, undefined, {
+function summaryInputTransportError(error: unknown): WorkerApiError {
+  return new WorkerApiError("Summary input transport failed.", undefined, undefined, {
     retryable: !isPermanentWorkerClientError(error),
   });
 }

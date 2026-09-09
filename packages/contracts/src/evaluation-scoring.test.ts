@@ -2,6 +2,7 @@ import { FormatRegistry, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { type CliModelConfiguration, CliModelConfigurationSchema } from "./cli-model-execution.js";
 import {
   type EvaluationCaseExpectation,
   EvaluationCaseExpectationSchema,
@@ -41,8 +42,11 @@ afterAll(() => {
 });
 
 const digest = "a".repeat(64);
-const modelDigest = "b".repeat(64);
 const timestamp = "2026-09-08T10:00:00.000Z";
+
+function cliConfiguration(): CliModelConfiguration {
+  return { kind: "codex", version: "1.0.0", requestedModel: "model-a" };
+}
 
 function occurrenceKey(index: number): string {
   return index.toString(16).padStart(64, "0");
@@ -89,12 +93,10 @@ function plan(): EvaluationScoringPlanV1 {
     baseline: {
       profileVersionId: "profile-baseline-v1",
       promptVersionId: "prompt-v1",
-      modelIdentityDigest: modelDigest,
     },
     candidate: {
       profileVersionId: "profile-candidate-v2",
       promptVersionId: "prompt-v2",
-      modelIdentityDigest: modelDigest,
     },
     cases: [caseExpectation()],
   };
@@ -138,7 +140,7 @@ function ownerObservation(): EvaluationOwnerObservation {
     model: {
       state: "complete",
       evidenceAvailable: true,
-      modelIdentityDigest: modelDigest,
+      cli: cliConfiguration(),
       occurrenceKeys: [],
     },
   };
@@ -188,13 +190,16 @@ describe("frozen evaluation scoring plan contracts", () => {
     expect(Value.Check(EvaluationScoringPlanV1Schema, plan())).toBe(true);
   });
 
-  it("retains a configuration with an explicitly unknown verified model identity", () => {
-    expect(
-      Value.Check(EvaluationScoringConfigurationSchema, {
-        ...plan().baseline,
-        modelIdentityDigest: null,
-      }),
-    ).toBe(true);
+  it("keeps observed CLI metadata outside the frozen configuration", () => {
+    for (const configuration of [plan().baseline, plan().candidate]) {
+      expect(Value.Check(EvaluationScoringConfigurationSchema, configuration)).toBe(true);
+      expect(
+        Value.Check(EvaluationScoringConfigurationSchema, {
+          ...configuration,
+          cli: cliConfiguration(),
+        }),
+      ).toBe(false);
+    }
   });
 
   it.each([
@@ -208,7 +213,7 @@ describe("frozen evaluation scoring plan contracts", () => {
     expect(Value.Check(EvaluationScoringPlanV1Schema, without(plan(), field))).toBe(false);
   });
 
-  it.each(["profileVersionId", "promptVersionId", "modelIdentityDigest"])(
+  it.each(["profileVersionId", "promptVersionId"])(
     "requires the frozen configuration field %s",
     (field) => {
       expect(
@@ -452,21 +457,50 @@ describe("evaluation scoring collection bounds", () => {
 });
 
 describe("internal evaluation owner observation contracts", () => {
-  it("accepts complete owner facts and an explicitly unknown model identity", () => {
-    expect(Value.Check(EvaluationOwnerObservationSchema, ownerObservation())).toBe(true);
+  it.each(["codex", "copilot"] as const)(
+    "records complete owner facts with %s CLI metadata",
+    (kind) => {
+      expect(Value.Check(EvaluationOwnerObservationSchema, ownerObservation())).toBe(true);
+      for (const requestedModel of ["model-a", null]) {
+        const cli = { ...cliConfiguration(), kind, requestedModel };
+        expect(Value.Check(CliModelConfigurationSchema, cli)).toBe(true);
+        expect(
+          Value.Check(EvaluationOwnerObservationSchema, {
+            ...ownerObservation(),
+            model: { ...ownerObservation().model, cli, evidenceAvailable: false },
+          }),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it("requires CLI metadata for a complete model observation", () => {
     expect(
-      Value.Check(EvaluationOwnerObservationSchema, {
-        ...ownerObservation(),
-        model: { ...ownerObservation().model, modelIdentityDigest: null, evidenceAvailable: false },
-      }),
-    ).toBe(true);
+      Value.Check(EvaluationModelObservationSchema, without(ownerObservation().model, "cli")),
+    ).toBe(false);
     expect(
-      Value.Check(
-        EvaluationModelObservationSchema,
-        without(ownerObservation().model, "modelIdentityDigest"),
-      ),
+      Value.Check(EvaluationModelObservationSchema, { ...ownerObservation().model, cli: null }),
     ).toBe(false);
   });
+
+  it.each(["kind", "version", "requestedModel"])("requires recorded CLI field %s", (field) => {
+    const cli = without(cliConfiguration(), field);
+    expect(Value.Check(CliModelConfigurationSchema, cli)).toBe(false);
+    expect(
+      Value.Check(EvaluationModelObservationSchema, { ...ownerObservation().model, cli }),
+    ).toBe(false);
+  });
+
+  it.each([{ kind: "unsupported" }, { version: 1 }, { requestedModel: 1 }])(
+    "rejects malformed CLI metadata: %j",
+    (invalid) => {
+      const cli = { ...cliConfiguration(), ...invalid };
+      expect(Value.Check(CliModelConfigurationSchema, cli)).toBe(false);
+      expect(
+        Value.Check(EvaluationModelObservationSchema, { ...ownerObservation().model, cli }),
+      ).toBe(false);
+    },
+  );
 
   it.each(["evaluationId", "repositoryId", "caseId", "arm", "cellId", "runId", "requestId"])(
     "requires owner scope field %s",
@@ -522,24 +556,14 @@ describe("internal evaluation owner observation contracts", () => {
   it.each(["", "A".repeat(64), "a".repeat(63), "g".repeat(64)])(
     "rejects malformed immutable digests: %s",
     (invalidDigest) => {
-      expect(
-        Value.Check(EvaluationScoringConfigurationSchema, {
-          ...plan().baseline,
-          modelIdentityDigest: invalidDigest,
-        }),
-      ).toBe(false);
-      expect(
-        Value.Check(EvaluationResultProvenanceSchema, {
-          ...resultProvenance(),
-          resultDigest: invalidDigest,
-        }),
-      ).toBe(false);
-      expect(
-        Value.Check(EvaluationModelObservationSchema, {
-          ...ownerObservation().model,
-          modelIdentityDigest: invalidDigest,
-        }),
-      ).toBe(false);
+      for (const field of ["resultDigest", "executionDigest", "sourceDigest"]) {
+        expect(
+          Value.Check(EvaluationResultProvenanceSchema, {
+            ...resultProvenance(),
+            [field]: invalidDigest,
+          }),
+        ).toBe(false);
+      }
     },
   );
 });
@@ -619,6 +643,7 @@ describe("closed evaluation scoring shapes", () => {
     ["owner projection", EvaluationOwnerObservationSchema, ownerObservation()],
     ["result provenance", EvaluationResultProvenanceSchema, resultProvenance()],
     ["complete model", EvaluationModelObservationSchema, ownerObservation().model],
+    ["CLI metadata", CliModelConfigurationSchema, cliConfiguration()],
     [
       "unavailable model",
       EvaluationModelObservationSchema,
@@ -632,7 +657,7 @@ describe("closed evaluation scoring shapes", () => {
     expect(Value.Check(schema, { ...value, provenanceVerified: true })).toBe(false);
   });
 
-  it("rejects extra fields inside applicability, expected truth, owner checks, and audit actors", () => {
+  it("rejects extra fields inside applicability, expected truth, owner facts, and audit actors", () => {
     expect(
       Value.Check(EvaluationCriterionSchema, {
         ...criterion(),
@@ -653,6 +678,12 @@ describe("closed evaluation scoring shapes", () => {
         outcome: "passed",
         evidenceAvailable: true,
         trusted: true,
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(EvaluationModelObservationSchema, {
+        ...ownerObservation().model,
+        cli: { ...cliConfiguration(), inferred: true },
       }),
     ).toBe(false);
     expect(

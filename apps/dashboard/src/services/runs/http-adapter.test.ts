@@ -190,6 +190,7 @@ const result: DashboardReviewRunResult = {
   },
   execution: { blockers: [], diagnostics: [], cleanupState: "completed" },
   modelReview: {
+    execution: null,
     state: "completed",
     summary: "No additional code concerns were identified.",
     recommendation: "approve",

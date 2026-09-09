@@ -146,9 +146,9 @@ export const runMigrations = (database: DatabaseSync, directory: string): number
     const rebuild =
       migration.version === 28 && migration.filename === "0028_prompt_profile_evaluations.sql"
         ? runPromptProfileEvaluationRebuild
-        : migration.version === 31 && migration.filename === "0031_validation_model_outputs.sql"
+        : migration.version === 29 && migration.filename === "0029_validation_model_outputs.sql"
           ? runValidationResultRebuild
-          : migration.version === 33 && migration.filename === "0033_evaluation_reproduction.sql"
+          : migration.version === 31 && migration.filename === "0031_evaluation_reproduction.sql"
             ? runEvaluationReproductionRebuild
             : undefined;
     if (rebuild !== undefined && !initiallyAppliedVersions.has(migration.version)) {

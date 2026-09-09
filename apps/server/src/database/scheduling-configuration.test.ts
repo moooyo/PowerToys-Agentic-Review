@@ -177,7 +177,7 @@ describe("platform scheduling configuration and history", () => {
     });
     expect(execute(database, "listPlatformSchedulingConfigurationAudit", {}, now).total).toBe(0);
     const saved = update(database, now, { maxActiveLeases: 2, maxQueuedJobs: 5 });
-    expect(runMigrations(database, migrations)).toBe(33);
+    expect(runMigrations(database, migrations)).toBe(31);
     expect(execute(database, "getPlatformSchedulingStatus", {}, now).configuration).toEqual(saved);
   });
 

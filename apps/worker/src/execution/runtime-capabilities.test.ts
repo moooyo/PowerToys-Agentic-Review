@@ -1,4 +1,7 @@
-import type { WorkerCapabilities } from "@agentic-review/contracts";
+import {
+  evaluationModelExecutionCapabilityLabels,
+  type WorkerCapabilities,
+} from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import type { WorkerExecutionConfig, WorkerValidationOnlyExecutionConfig } from "../config.js";
 import {
@@ -12,7 +15,8 @@ const base = (): WorkerCapabilities => ({
   architecture: "x64",
   headless: true,
   interactiveDesktop: false,
-  codexVersion: "codex-pinned",
+  cliEngine: "codex",
+  cliVersion: "codex-pinned",
   recipeIds: [],
   labels: { site: "fixture", execution: "enabled", processHost: "available" },
 });
@@ -27,6 +31,32 @@ const readiness = (
   evidenceDelivery: true,
   ...overrides,
 });
+const evaluationModelCases: readonly {
+  readonly name: string;
+  readonly prepared: Partial<ExecutionRuntimeReadiness>;
+  readonly expected: readonly string[];
+}[] = [
+  {
+    name: "without either model runtime",
+    prepared: {},
+    expected: [],
+  },
+  {
+    name: "with only the review runtime",
+    prepared: { evaluationModelReview: true },
+    expected: [evaluationModelExecutionCapabilityLabels.review],
+  },
+  {
+    name: "with only the summary runtime",
+    prepared: { evaluationModelSummary: true },
+    expected: [evaluationModelExecutionCapabilityLabels.summary],
+  },
+  {
+    name: "with both model runtimes",
+    prepared: { evaluationModelReview: true, evaluationModelSummary: true },
+    expected: Object.values(evaluationModelExecutionCapabilityLabels),
+  },
+];
 
 describe("runtime-derived Worker capabilities", () => {
   it.each([true, false])(
@@ -46,10 +76,11 @@ describe("runtime-derived Worker capabilities", () => {
       expect(
         Object.keys(result.labels).filter((name) => name.toLowerCase() === "modelexecution"),
       ).toEqual(enabled ? [] : ["modelExecution"]);
-      expect(result.codexVersion).toBe(enabled ? "codex-pinned" : "not-configured");
+      expect(result.cliEngine).toBe(enabled ? "codex" : null);
+      expect(result.cliVersion).toBe(enabled ? "codex-pinned" : null);
       expect(result.labels.validationWeb).toBe("1");
       expect(result.labels.validationWindowsDesktop).toBe("1");
-      expect(result.labels.validationEvaluation).toBeUndefined();
+      expect(result.labels.validationEvaluation).toBe("1");
       expect(result.interactiveDesktop).toBe(true);
     },
   );
@@ -60,13 +91,70 @@ describe("runtime-derived Worker capabilities", () => {
       execution: "enabled",
       processHost: "available",
       executionEnvelope: "2",
+      validationEvaluation: "1",
       validationHeadless: "1",
       evidenceDelivery: "1",
     });
-    expect(result.codexVersion).toBe("codex-pinned");
+    expect(result.cliVersion).toBe("codex-pinned");
     expect(result.headless).toBe(true);
     expect(result.interactiveDesktop).toBe(false);
   });
+
+  it.each(evaluationModelCases)(
+    "advertises independent evaluation model capabilities $name",
+    ({ prepared, expected }) => {
+      const result = createRuntimeCapabilities(base(), readiness(prepared));
+      for (const label of Object.values(evaluationModelExecutionCapabilityLabels))
+        expect(result.labels[label]).toBe(expected.includes(label) ? "1" : undefined);
+      expect(result.labels.validationEvaluation).toBe("1");
+      expect(result.labels.executionEnvelope).toBe("2");
+    },
+  );
+
+  it.each(["modelExecution", "envelopeV2", "execution"] as const)(
+    "withholds prepared evaluation model capabilities when %s is unavailable",
+    (unavailable) => {
+      const result = createRuntimeCapabilities(
+        base(),
+        readiness({
+          evaluationModelReview: true,
+          evaluationModelSummary: true,
+          [unavailable]: false,
+        }),
+      );
+      for (const label of Object.values(evaluationModelExecutionCapabilityLabels))
+        expect(result.labels[label]).toBeUndefined();
+      expect(result.labels.validationEvaluation).toBe(
+        unavailable === "modelExecution" ? "1" : undefined,
+      );
+    },
+  );
+
+  it.each(Object.values(evaluationModelExecutionCapabilityLabels))(
+    "reserves evaluation model label %s regardless of deployment casing",
+    (label) => {
+      const aliases = [label, label.toUpperCase(), label.toLowerCase(), `V${label.slice(1)}`];
+      const configured = base();
+      configured.labels = {
+        ...configured.labels,
+        ...Object.fromEntries(aliases.map((alias) => [alias, "forged"])),
+      };
+      const unprepared = createRuntimeCapabilities(configured, readiness());
+      expect(
+        Object.keys(unprepared.labels).filter((key) => key.toLowerCase() === label.toLowerCase()),
+      ).toEqual([]);
+      expect(unprepared.labels.validationEvaluation).toBe("1");
+      const prepared = createRuntimeCapabilities(
+        configured,
+        readiness({ evaluationModelReview: true, evaluationModelSummary: true }),
+      );
+      expect(
+        Object.keys(prepared.labels).filter((key) => key.toLowerCase() === label.toLowerCase()),
+      ).toEqual([label]);
+      expect(prepared.labels[label]).toBe("1");
+      for (const alias of aliases) expect(configured.labels[alias]).toBe("forged");
+    },
+  );
 
   it("removes forged reserved labels regardless of case and every UI namespace claim", () => {
     const configured = base();
@@ -80,6 +168,10 @@ describe("runtime-derived Worker capabilities", () => {
       validationWeb: "1",
       validationWindowsDesktop: "1",
       validationEvaluation: "1",
+      [evaluationModelExecutionCapabilityLabels.review]: "1",
+      [evaluationModelExecutionCapabilityLabels.review.toUpperCase()]: "1",
+      [evaluationModelExecutionCapabilityLabels.summary]: "1",
+      [evaluationModelExecutionCapabilityLabels.summary.toUpperCase()]: "1",
       evidenceDelivery: "1",
       "ui:web": "1",
       issueReproduction: "1",
@@ -100,10 +192,10 @@ describe("runtime-derived Worker capabilities", () => {
   });
 
   it.each(["validationEvaluation", "VALIDATIONEVALUATION", "ValidationEvaluation"])(
-    "never advertises unaccepted evaluation execution from deployment label %s",
+    "derives evaluation support from the V2 runtime instead of deployment label %s",
     (name) => {
       const configured = base();
-      configured.labels[name] = "1";
+      configured.labels[name] = "unsupported";
       const result = createRuntimeCapabilities(
         configured,
         readiness({
@@ -115,13 +207,14 @@ describe("runtime-derived Worker capabilities", () => {
         }),
       );
       expect(
-        Object.keys(result.labels).some((key) => key.toLowerCase() === "validationevaluation"),
-      ).toBe(false);
+        Object.keys(result.labels).filter((key) => key.toLowerCase() === "validationevaluation"),
+      ).toEqual(["validationEvaluation"]);
+      expect(result.labels.validationEvaluation).toBe("1");
       expect(result.labels.executionEnvelope).toBe("2");
       expect(result.labels.validationHeadless).toBe("1");
       expect(result.labels.validationWeb).toBe("1");
       expect(result.labels.validationWindowsDesktop).toBe("1");
-      expect(configured.labels[name]).toBe("1");
+      expect(configured.labels[name]).toBe("unsupported");
     },
   );
 
@@ -154,9 +247,16 @@ describe("runtime-derived Worker capabilities", () => {
   });
 
   it("does not derive executable labels from feature booleans when the V2 executor is unavailable", () => {
+    const configured = base();
+    configured.labels = {
+      ...configured.labels,
+      validationEvaluation: "1",
+      VALIDATIONEVALUATION: "1",
+      ValidationEvaluation: "1",
+    };
     expect(
       createRuntimeCapabilities(
-        base(),
+        configured,
         readiness({ envelopeV2: false, web: true, windowsDesktop: true }),
       ).labels,
     ).toStrictEqual({ site: "fixture", execution: "enabled", processHost: "available" });
@@ -202,8 +302,8 @@ describe("runtime-derived Worker capabilities", () => {
 
 function execution(): WorkerExecutionConfig {
   return {
-    codexMaximumHardTimeoutMs: 60_000,
-    codexResourceLimits: {
+    modelMaximumHardTimeoutMs: 60_000,
+    modelResourceLimits: {
       maximumProcessCount: 32,
       maximumMemoryBytes: 8 * 1_024 ** 3,
       maximumOutputBytes: 8 * 1_024 ** 2,
@@ -222,8 +322,8 @@ describe("validation concurrency resource limits", () => {
     if (settings.modelExecutionEnabled === false) throw new Error("Expected model fixture.");
     const validationOnly = {
       modelExecutionEnabled: false,
-      validationMaximumHardTimeoutMs: settings.codexMaximumHardTimeoutMs,
-      validationResourceLimits: settings.codexResourceLimits,
+      validationMaximumHardTimeoutMs: settings.modelMaximumHardTimeoutMs,
+      validationResourceLimits: settings.modelResourceLimits,
       totalResourceBudget: settings.totalResourceBudget,
     } as WorkerValidationOnlyExecutionConfig;
     expect(validationProcessLimits(validationOnly, 2, 2)).toEqual(
@@ -249,7 +349,7 @@ describe("validation concurrency resource limits", () => {
   it("preserves per-command headless limits within the shared budget", () => {
     expect(validationProcessLimits(execution(), 2, 1)).toStrictEqual({
       hardTimeoutMs: 60_000,
-      ...execution().codexResourceLimits,
+      ...execution().modelResourceLimits,
     });
   });
 

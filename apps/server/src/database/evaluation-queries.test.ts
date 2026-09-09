@@ -132,7 +132,7 @@ describe("public evaluation batch owner", () => {
   });
 
   it.each(["issue", "pull_request"] as const)(
-    "reports missing verified model identity for %s without completed cells",
+    "keeps %s CLI evaluation pending until dispatch without inventing completed cells",
     (kind) => {
       const value = fixture(kind),
         batch = create(value, "prompt_and_profile");
@@ -140,13 +140,17 @@ describe("public evaluation batch owner", () => {
         if (checked) dispatch(value);
         const result = matrix(value, batch.id);
         expect(result).toMatchObject({
-          status: "blocked",
-          progress: { blocked: 2, completed: 0, notApplicableCells: 2 },
+          status: checked ? "awaiting_admission" : "pending",
+          progress: {
+            blocked: 0,
+            completed: 0,
+            notApplicableCells: 2,
+            not_run: checked ? 0 : 2,
+            awaiting_admission: checked ? 2 : 0,
+          },
         });
-        expect(result.cases[0]?.baseline.blockers).toContainEqual({
-          code: "missing_capability",
-          capability: "verified_model_identity",
-        });
+        expect(result.cases[0]?.baseline.blockers).toEqual([]);
+        expect(result.cases[0]?.baseline.state).toBe(checked ? "awaiting_admission" : "not_run");
         expect(result.cases[1]?.baseline.state).toBe("not_run");
       }
     },

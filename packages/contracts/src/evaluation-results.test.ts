@@ -56,7 +56,7 @@ function result(): EvaluationCellResultV1 {
     workflowKind: "pr_static_build",
     target: "headless",
     createdAt: now,
-    modelRequirements: { required: true, expectedModelIdentityDigest: null },
+    modelRequirements: { required: true },
     evidenceComplete: true,
     report: {
       schemaVersion: "ValidationReportV1",
@@ -96,6 +96,16 @@ function result(): EvaluationCellResultV1 {
     },
     modelReview: {
       state: "completed",
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "job-1",
+        runAttemptId: "attempt-1",
+        cli: { kind: "codex", version: "1.0.0", requestedModel: null },
+        promptSha256: digest,
+        outputSchemaSha256: digest,
+        outputSha256: digest,
+        exitCode: 0,
+      },
       summary: "The model identified two findings and two observations.",
       recommendation: "request_changes",
       findings: Array.from({ length: 2 }, (_, ordinal) => ({
@@ -221,6 +231,19 @@ describe("evaluation cell result read scope", () => {
 });
 
 describe("evaluation cell result projection", () => {
+  it.each(["jobId", "runAttemptId"] as const)(
+    "rejects CLI execution from a different %s",
+    (field) => {
+      const value = result();
+      if (value.modelReview.execution === null) throw new Error("The CLI execution is absent.");
+      value.modelReview.execution[field] = `another-${field}`;
+      expect(Value.Check(EvaluationCellResultV1Schema, value)).toBe(true);
+      expect(getEvaluationCellResultIssues(value)).toContain(
+        "CLI execution must belong to the evaluation result's exact job and run attempt.",
+      );
+    },
+  );
+
   it("retains immutable evaluation identities, raw findings, and diagnostics in both arms", () => {
     for (const arm of ["baseline", "candidate"] as const) {
       const value = { ...result(), arm };
@@ -282,6 +305,7 @@ describe("evaluation cell result projection", () => {
       for (const modelRequired of [true, false]) {
         const value = result();
         value.modelReview.state = state;
+        value.modelReview.execution = null;
         value.modelReview.error =
           state === "failed"
             ? { code: "MODEL_UNAVAILABLE", message: "The model could not finish." }
@@ -499,7 +523,7 @@ describe("strict evaluation result JSON and size", () => {
         },
       },
       { modelReview: { ...value.modelReview, state: "not_applicable" } },
-      { modelRequirements: { required: true } },
+      { modelRequirements: {} },
       { occurrences: [{ ...value.occurrences[0], ordinal: 100 }] },
     ])
       expect(getEvaluationCellResultIssues({ ...value, ...patch }).length).toBeGreaterThan(0);

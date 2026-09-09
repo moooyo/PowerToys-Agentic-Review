@@ -5,6 +5,7 @@ import type {
   ValidationStepDiagnostic,
 } from "@agentic-review/contracts";
 import { Alert, Collapse, Empty, Space, Table, Tabs, Tag, Typography } from "antd";
+import { CliExecutionDetails } from "@/components/CliExecutionDetails";
 import { FindingReview } from "@/components/FindingReview";
 import { IssueReproductionResult } from "@/components/IssueReproduction";
 import { findings } from "@/services/findings";
@@ -141,6 +142,7 @@ function ModelReview({
           description={model.error.message}
         />
       )}
+      <CliExecutionDetails execution={model.execution} />
       <Prose>{model.summary ?? "No model summary was recorded."}</Prose>
       <Typography.Paragraph type="secondary">
         {workItemKind === "pull_request"

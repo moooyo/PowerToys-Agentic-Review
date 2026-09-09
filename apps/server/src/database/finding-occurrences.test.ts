@@ -147,11 +147,15 @@ function separatedResult(value: ValidationJobResultV1): ValidationJobResultV2 {
     modelReview: {
       state: "completed",
       result: model,
-      invocation: {
-        invocationId: "invocation-1",
-        scopeSha256: "d".repeat(64),
-        receiptSetSha256: "e".repeat(64),
-        modelOutputSha256: sha256(canonicalJson(model)),
+      execution: {
+        schemaVersion: "CliModelExecutionV1",
+        jobId: "projection-job",
+        runAttemptId: "projection-attempt",
+        cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
+        promptSha256: "a".repeat(64),
+        outputSchemaSha256: "b".repeat(64),
+        outputSha256: sha256(canonicalJson(model)),
+        exitCode: 0,
       },
       executionEvidence: {
         schemaVersion: "ReviewExecutionEvidenceV1",
@@ -396,12 +400,12 @@ describe("immutable finding result reader", () => {
       validationModelResultBinding,
       "readValidationModelResultBindingInTransaction",
     ).mockImplementation(() => {
-      throw new Error("The owner invocation does not match this result.");
+      throw new Error("The CLI execution does not match this result.");
     });
     const f = fixture({ result: separatedResult(prResult()) });
     expect(() => f.read()).toThrow(/stored finding result is invalid/);
   });
-  it("rejects mismatched V2 schema metadata before invocation binding", () => {
+  it("rejects mismatched V2 schema metadata before CLI result binding", () => {
     const admitted = vi.spyOn(
       validationModelResultBinding,
       "readValidationModelResultBindingInTransaction",

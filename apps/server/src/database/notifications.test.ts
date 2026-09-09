@@ -222,7 +222,7 @@ describe.skipIf(process.platform !== "linux")("notification persistence", () => 
     db.exec("PRAGMA foreign_keys = ON");
     expect(
       runMigrations(db, fileURLToPath(new URL("../../../../migrations", import.meta.url))),
-    ).toBe(33);
+    ).toBe(31);
     expect(db.prepare("SELECT COUNT(*) AS total FROM notification_events").get()).toMatchObject({
       total: 0,
     });

@@ -5,7 +5,5 @@ export * from "./issue-reproduction.js";
 export * from "./job-state.js";
 export * from "./lease.js";
 export * from "./model-execution.js";
-export * from "./model-invocation-submission.js";
-export * from "./model-runtime-verification.js";
 export * from "./review-run-plan.js";
 export * from "./validation-policy.js";

@@ -11,10 +11,12 @@ import {
   evaluationAdjudicationSetIssues,
   handleEvaluationAdjudicationRequest,
 } from "./evaluation-adjudication.js";
+import { createEvaluationBatchFixture } from "./evaluation-batches.testing.js";
 import {
   beginAttempt,
   createEvaluationCompletionFixture,
   type EvaluationCompletionFixture,
+  prepareEvaluationCompletionFixture,
   resultFor,
   selected,
   transaction,
@@ -428,17 +430,20 @@ describe("evaluation adjudication owner boundaries", () => {
       ).toThrow(expect.objectContaining({ code: "PLATFORM_INVALID" }));
   });
 
-  it("records the current model-required positive-path prerequisite without bypassing admission", () => {
-    const value = createEvaluationCompletionFixture("pull_request");
+  it("admits model-required work to a Worker with CLI execution capability", () => {
+    const value = prepareEvaluationCompletionFixture(
+      createEvaluationBatchFixture("pull_request", { notApplicableCase: false }),
+      "pull_request",
+      { [C.evaluationModelExecutionCapabilityLabels.review]: "1" },
+    );
     fixtures.push(value);
     const cell = selected(value),
       admission = present(getJobAdmissionRecord(value.database, cell.jobId));
     expect(cell.plan.modelRequirements).toEqual({
       required: true,
-      expectedModelIdentityDigest: null,
     });
-    expect(admission.state).toBe("pending");
-    expect(admission.blockers).toContain("plan_prerequisite_missing");
+    expect(admission.state).toBe("admitted");
+    expect(admission.blockers).toEqual([]);
     expect(value.database.prepare("SELECT COUNT(*) AS count FROM run_attempts").get()).toEqual({
       count: 0,
     });

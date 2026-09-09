@@ -28,8 +28,6 @@ import {
 } from "./job-workspace.js";
 import {
   assertModelOutputArtifact,
-  type CreateModelInvocation,
-  captureModelInvocationScope,
   createModelOutputArtifact,
   ModelOutputArtifactError,
 } from "./model-output-artifact.js";
@@ -37,21 +35,19 @@ import {
   errorSummary,
   extractExitCode,
   failureCategory,
-  PreparedCodexOutputRunner,
-  type PreparedCodexOutputRunnerOptions,
+  PreparedCliOutputRunner,
+  type PreparedCliOutputRunnerOptions,
   ReviewExecutionError,
-} from "./prepared-codex-output-runner.js";
-import { isEvaluationContext, validateProfileEnvelope } from "./profile-envelope.js";
+} from "./prepared-cli-output-runner.js";
+import { validateProfileEnvelope } from "./profile-envelope.js";
 
 export type {
   ReviewFileHandle,
   ReviewFileIO,
   ReviewFileStat,
-} from "./prepared-codex-output-runner.js";
-export { buildReviewCodexConfigurationOverrides } from "./prepared-codex-output-runner.js";
-export interface ReviewJobExecutorOptions extends PreparedCodexOutputRunnerOptions {
+} from "./prepared-cli-output-runner.js";
+export interface ReviewJobExecutorOptions extends PreparedCliOutputRunnerOptions {
   readonly workspaceProvider: JobWorkspaceProvider;
-  readonly createModelInvocation?: CreateModelInvocation;
 }
 
 interface AuthoritativeReviewSchema {
@@ -91,16 +87,12 @@ const authoritativeIssueV2Schema = createAuthoritativeSchema(
 );
 
 export class ReviewJobExecutor implements JobExecutor {
-  readonly #prepared: PreparedCodexOutputRunner;
+  readonly #prepared: PreparedCliOutputRunner;
   readonly #logger: Logger;
 
   public constructor(private readonly options: ReviewJobExecutorOptions) {
-    this.#prepared = new PreparedCodexOutputRunner(options);
+    this.#prepared = new PreparedCliOutputRunner(options);
     this.#logger = options.logger ?? noOpLogger;
-  }
-
-  public get modelInvocationRequired(): boolean {
-    return this.options.createModelInvocation !== undefined;
   }
 
   public async execute(
@@ -122,21 +114,7 @@ export class ReviewJobExecutor implements JobExecutor {
     context: JobExecutionContext,
     profileModel: boolean,
   ): Promise<JobExecutionResult> {
-    if ("validation" in suppliedEnvelope && isEvaluationContext(suppliedEnvelope.validation)) {
-      return failure(
-        "EVALUATION_EXECUTION_BOUNDARY_UNAVAILABLE",
-        "This Worker has no accepted evaluation model execution boundary; model execution was not started.",
-        false,
-      );
-    }
-    const createModelInvocation = this.options.createModelInvocation;
     const envelope = structuredClone(suppliedEnvelope);
-    if (createModelInvocation !== undefined && (!profileModel || envelope.envelopeVersion !== 2))
-      return failure(
-        "MODEL_INVOCATION_UNSUPPORTED",
-        "Recorded model output requires a frozen profile execution.",
-        false,
-      );
     context.reportProgress({ phase: "preparing", processCount: 0 });
     let nodeHealthFaultReported = false;
     const reportNodeHealthFaultOnce = (error: Error): void => {
@@ -189,7 +167,6 @@ export class ReviewJobExecutor implements JobExecutor {
         workspace,
         context,
         reportNodeHealthFaultOnce,
-        createModelInvocation,
       );
       return this.#withDiagnostics(result, envelope);
     } catch (error) {
@@ -206,18 +183,7 @@ export class ReviewJobExecutor implements JobExecutor {
     workspace: PreparedJobWorkspace,
     context: JobExecutionContext,
     reportNodeHealthFault: (error: Error) => void,
-    createModelInvocation?: CreateModelInvocation,
   ): Promise<JobExecutionResult> {
-    const invocation = createModelInvocation?.(
-      structuredClone(envelope as JobExecutionEnvelopeV2),
-      context,
-    );
-    if (createModelInvocation !== undefined && invocation === undefined)
-      throw new ModelOutputArtifactError();
-    const expectedScope =
-      invocation === undefined
-        ? undefined
-        : captureModelInvocationScope(invocation.expectedScope, envelope as JobExecutionEnvelopeV2);
     const prepared = await this.#prepared.run({
       workspace,
       context,
@@ -229,9 +195,6 @@ export class ReviewJobExecutor implements JobExecutor {
       launchPolicy: "review",
       sensitiveValues: this.#secrets(envelope),
       reportNodeHealthFault,
-      ...(invocation === undefined || expectedScope === undefined
-        ? {}
-        : { modelInvocation: { expectedScope, open: invocation.open.bind(invocation) } }),
     });
     if (prepared.outcome === "failed") return prepared;
     const execution = prepared;
@@ -240,9 +203,7 @@ export class ReviewJobExecutor implements JobExecutor {
       result: structuredClone(prepared.result),
       canonicalResultJson: prepared.canonicalResultJson,
       resultDigest: prepared.resultDigest,
-      ...(prepared.modelInvocation === undefined
-        ? {}
-        : { modelInvocation: structuredClone(prepared.modelInvocation) }),
+      cliExecution: structuredClone(prepared.cliExecution),
     };
     const businessError = validateBusinessResult(envelope, execution.result);
     if (businessError !== null) {
@@ -274,13 +235,16 @@ export class ReviewJobExecutor implements JobExecutor {
         source: worktreeStatus === "unknown" ? ("not_observed" as const) : ("git_status" as const),
       },
     };
-    if (invocation !== undefined && expectedScope !== undefined) {
+    if (
+      envelope.envelopeVersion === 2 &&
+      envelope.validation.schemaVersion === "ValidationJobContextV2"
+    ) {
       if (envelope.envelopeVersion !== 2) throw new ModelOutputArtifactError();
       const artifact = assertModelOutputArtifact(
         createModelOutputArtifact({
           output: original,
           executionEvidence,
-          expectedScope,
+          envelope,
           sensitiveValues: this.#secrets(envelope),
         }),
         envelope,
@@ -292,7 +256,6 @@ export class ReviewJobExecutor implements JobExecutor {
         modelOutputArtifact: artifact,
       };
     }
-    if (prepared.modelInvocation !== undefined) throw new ModelOutputArtifactError();
     const result = {
       ...execution.result,
       verification: {
@@ -321,11 +284,7 @@ export class ReviewJobExecutor implements JobExecutor {
   }
 
   #secrets(envelope: JobExecutionEnvelope): readonly string[] {
-    return [
-      envelope.lease.leaseToken,
-      ...(this.options.codexProviderProtectedValues ??
-        Object.values(this.options.codexProviderEnvironment ?? {})),
-    ];
+    return [envelope.lease.leaseToken];
   }
 
   #withDiagnostics(result: JobExecutionResult, envelope: JobExecutionEnvelope): JobExecutionResult {
@@ -411,7 +370,7 @@ function validateEnvelope(
     if (!["pr_static_build", "issue_triage"].includes(envelope.validation.workflowKind)) {
       throw contractError("This workflow requires the validation summary executor.");
     }
-  } else if (envelope.envelopeVersion !== 1) {
+  } else if (envelope.envelopeVersion !== 1 || "validation" in envelope) {
     throw contractError("Validation profiles require the profile executor.");
   }
   let authority: AuthoritativeReviewSchema;

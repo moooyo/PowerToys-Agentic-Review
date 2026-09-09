@@ -5,7 +5,6 @@ import {
   batchCreateRequestFixture,
   batchDetailFixture,
   batchMatrixFixture,
-  batchModelRuntimeFixture,
   batchPromptOptionsFixture,
 } from "@/services/evaluation-batches/fixtures.testing";
 import type { EvaluationAdapter } from "@/services/evaluations";
@@ -80,37 +79,16 @@ function input() {
 }
 
 describe("evaluation batch configuration", () => {
-  it("submits only the selected registration IDs while retaining exact check mappings", () => {
-    const value = input();
-    const modelRuntimes = {
-      baseline: batchModelRuntimeFixture("runtime-baseline"),
-      candidate: batchModelRuntimeFixture("runtime-candidate"),
-    };
-    const original = createBatchRequest(value);
-    const request = createBatchRequest({ ...value, modelRuntimes });
+  it("submits the exact Prompt and profile selections for each arm", () => {
+    const request = createBatchRequest(input());
     expect(request.baseline).toEqual({
-      ...original.baseline,
-      modelRuntimeRegistrationId: "runtime-baseline",
+      profileVersionId: "profile-baseline",
+      promptVersionId: "prompt-baseline",
     });
     expect(request.candidate).toEqual({
-      ...original.candidate,
-      modelRuntimeRegistrationId: "runtime-candidate",
+      profileVersionId: "profile-candidate",
+      promptVersionId: "prompt-candidate",
     });
-    expect(request.checkMappings).toEqual(original.checkMappings);
-    expect(JSON.stringify(request)).not.toContain("fixture-cli");
-    expect(JSON.stringify(request)).not.toContain("identitySha256");
-    modelRuntimes.baseline.id = "changed-after-selection";
-    expect(request.baseline.modelRuntimeRegistrationId).toBe("runtime-baseline");
-  });
-  it("rejects a malformed runtime selection before constructing a new batch request", () => {
-    const runtime = batchModelRuntimeFixture();
-    runtime.identity.modelId = "invalid\nmodel";
-    expect(() =>
-      createBatchRequest({
-        ...input(),
-        modelRuntimes: { baseline: runtime, candidate: batchModelRuntimeFixture() },
-      }),
-    ).toThrow(/valid registered model/u);
   });
   it("uses the full profile version prefix and only assessable frozen checks", () => {
     const value = profile("baseline");

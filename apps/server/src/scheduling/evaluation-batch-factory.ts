@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as C from "@agentic-review/contracts";
 import {
-  assertEvaluationModelRuntimeRegistrationIntegrity,
   createEvaluationReproductionCellRecord,
   createEvaluationReproductionManifest,
   evaluateEvaluationRunReadiness,
@@ -92,13 +91,8 @@ export function createEvaluationBatchPlan(input: {
   for (const arm of ["baseline", "candidate"] as const) {
     const selected = configuration[arm],
       profile = selected.profileVersion;
-    assertEvaluationModelRuntimeRegistrationIntegrity(
-      selected.modelRequirements,
-      selected.modelRuntimeRegistration,
-    );
     if (
       C.getEvaluationFrozenConfigurationIssues(selected).length > 0 ||
-      selected.modelRuntimeRegistration?.id !== request[arm].modelRuntimeRegistrationId ||
       profile.id !== request[arm].profileVersionId ||
       selected.prompt.version.id !== request[arm].promptVersionId ||
       profile.repositoryId !== version.repositoryId ||
@@ -330,9 +324,6 @@ export function createEvaluationBatchPlan(input: {
       ...(cell.reproductionRecord.reproduction === null
         ? {}
         : { reproduction: cell.reproductionRecord.reproduction }),
-      ...(selected.modelRuntimeRegistration === undefined
-        ? {}
-        : { modelRuntimeRegistration: selected.modelRuntimeRegistration }),
       purpose: {
         schemaVersion: "EvaluationExecutionPurposeV1",
         kind: "evaluation",
@@ -378,7 +369,6 @@ export function createEvaluationBatchPlan(input: {
   const scoringConfiguration = (arm: C.EvaluationArm) => ({
     profileVersionId: configuration[arm].profileVersion.id,
     promptVersionId: configuration[arm].prompt.version.id,
-    modelIdentityDigest: configuration[arm].modelRequirements.expectedModelIdentityDigest,
   });
   const scoringPlan: C.EvaluationScoringPlanV1 = {
     schemaVersion: "EvaluationScoringPlanV1",

@@ -1052,7 +1052,7 @@ describe("evaluation assessment owner", () => {
         present(observations[0]).model = {
           state: "complete",
           evidenceAvailable: false,
-          modelIdentityDigest: null,
+          cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
           occurrenceKeys: [],
         };
       },
@@ -1066,7 +1066,7 @@ describe("evaluation assessment owner", () => {
       observed.model = {
         state: "complete",
         evidenceAvailable: false,
-        modelIdentityDigest: null,
+        cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
         occurrenceKeys: ordinals.map((ordinal) =>
           findingOccurrenceKey({
             resultId: result.resultId,
@@ -1233,7 +1233,7 @@ describe("evaluation assessment owner", () => {
     observed.model = {
       state: "complete",
       evidenceAvailable: false,
-      modelIdentityDigest: null,
+      cli: { kind: "codex", version: "synthetic-cli", requestedModel: null },
       occurrenceKeys: keys,
     };
     const observationJson = canonicalJson(observations);
@@ -1249,7 +1249,7 @@ describe("evaluation assessment owner", () => {
       actor: evaluationActor,
       createdAt: now,
     };
-    // These explicit import fixtures prove immutable audit binding, not current model-gated write eligibility.
+    // These explicit import fixtures prove immutable audit binding independently of live CLI execution.
     const seedAudit = (
       judgment: C.EvaluationFindingAdjudication,
       version: number,

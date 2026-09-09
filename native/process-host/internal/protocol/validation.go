@@ -10,19 +10,20 @@ import (
 )
 
 const (
-	maximumRequestIDBytes     = 128
-	maximumBoundedTextUnits   = 32_767
-	maximumArgumentCount      = 1_024
-	maximumEnvironmentCount   = 128
-	maximumStandardInputBytes = 512 * 1024
-	minimumHardTimeoutMS      = 10_000
-	maximumHardTimeoutMS      = 2 * 60 * 60 * 1_000
-	minimumProcessCount       = 1
-	maximumProcessCount       = 256
-	minimumMemoryBytes        = 128 * 1024 * 1024
-	maximumMemoryBytes        = 64 * 1024 * 1024 * 1024
-	minimumOutputBytes        = 4 * 1024
-	maximumOutputBytes        = 128 * 1024 * 1024
+	maximumRequestIDBytes       = 128
+	maximumBoundedTextUnits     = 32_767
+	maximumArgumentCount        = 1_024
+	maximumEnvironmentCount     = 512
+	maximumEnvironmentNameUnits = 128
+	maximumStandardInputBytes   = 512 * 1024
+	minimumHardTimeoutMS        = 10_000
+	maximumHardTimeoutMS        = 2 * 60 * 60 * 1_000
+	minimumProcessCount         = 1
+	maximumProcessCount         = 256
+	minimumMemoryBytes          = 128 * 1024 * 1024
+	maximumMemoryBytes          = 64 * 1024 * 1024 * 1024
+	minimumOutputBytes          = 4 * 1024
+	maximumOutputBytes          = 128 * 1024 * 1024
 )
 
 type UnsupportedVersionError struct {
@@ -261,14 +262,11 @@ func validateBoundedText(name, value string, requireNonEmpty bool, maximumUTF16U
 }
 
 func validEnvironmentName(name string) bool {
-	if len(name) == 0 || len(name) > 128 {
+	if len(name) == 0 || !utf8.ValidString(name) || len(utf16.Encode([]rune(name))) > maximumEnvironmentNameUnits {
 		return false
 	}
-	if !isASCIILetter(name[0]) && name[0] != '_' {
-		return false
-	}
-	for index := 1; index < len(name); index++ {
-		if !isASCIIAlphaNumeric(name[index]) && name[index] != '_' {
+	for _, character := range name {
+		if character == '=' || character <= 0x1f || character >= 0x7f && character <= 0x9f {
 			return false
 		}
 	}

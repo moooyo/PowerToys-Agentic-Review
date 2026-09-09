@@ -94,7 +94,8 @@ function startRunningJob(database: DatabaseSync, jobId: string | null, attemptId
     architecture: "x64",
     headless: true,
     interactiveDesktop: false,
-    codexVersion: "test",
+    cliEngine: "codex",
+    cliVersion: "test",
     recipeIds: [],
     labels: {},
   });

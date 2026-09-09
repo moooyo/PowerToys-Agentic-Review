@@ -21,15 +21,15 @@ describe("validation-only Worker configuration", () => {
       WORKER_MODEL_EXECUTION_ENABLED: "false",
     };
     for (const name of [
-      "WORKER_CODEX_EXECUTABLE_PATH",
-      "WORKER_CODEX_SHA256",
-      "WORKER_CODEX_VERSION",
-      "WORKER_EXECUTION_PROFILE_DIRECTORY",
+      "WORKER_CLI_ENGINE",
+      "WORKER_CLI_EXECUTABLE_PATH",
+      "WORKER_CLI_SHA256",
+      "WORKER_CLI_HOME",
     ])
       delete value[name];
     return value;
   }
-  it("loads without Codex identity or persistent profile paths while retaining command budgets", () => {
+  it("loads without CLI identity or home paths while retaining command budgets", () => {
     const configured = loadWorkerConfig(environment());
     expect(configured.modelExecutionEnabled).toBe(false);
     expect(configured.execution).toMatchObject({
@@ -42,34 +42,32 @@ describe("validation-only Worker configuration", () => {
       },
     });
     for (const field of [
-      "codexExecutablePath",
-      "codexSha256",
-      "codexVersion",
-      "profileDirectory",
-      "evaluationModel",
-      "codexResourceLimits",
-      "codexMaximumHardTimeoutMs",
+      "engine",
+      "cliExecutablePath",
+      "cliSha256",
+      "cliVersion",
+      "cliHomeDirectory",
+      "modelResourceLimits",
+      "modelMaximumHardTimeoutMs",
     ])
       expect(configured.execution).not.toHaveProperty(field);
-    expect(configured.capabilities.codexVersion).toBe("not-configured");
+    expect(configured.capabilities.cliEngine).toBeNull();
+    expect(configured.capabilities.cliVersion).toBeNull();
     expect(configured.capabilities.labels.modelExecution).toBe("disabled");
   });
   it("ignores unused model paths and identities instead of probing or validating them", () => {
     const configured = loadWorkerConfig({
       ...environment(),
-      WORKER_CODEX_EXECUTABLE_PATH: "unused",
-      WORKER_CODEX_SHA256: "unused",
-      WORKER_CODEX_VERSION: "",
-      WORKER_EXECUTION_PROFILE_DIRECTORY: "unused",
+      WORKER_CLI_EXECUTABLE_PATH: "unused",
+      WORKER_CLI_SHA256: "unused",
+      WORKER_CLI_HOME: "unused",
     });
-    expect(configured.execution).not.toHaveProperty("profileDirectory");
-    expect(configured.execution).not.toHaveProperty("codexExecutablePath");
+    expect(configured.execution).not.toHaveProperty("cliHomeDirectory");
+    expect(configured.execution).not.toHaveProperty("cliExecutablePath");
   });
   it.each([
     { WORKER_VALIDATION_SUMMARY_ENABLED: "true" },
     { WORKER_VALIDATION_SUMMARY_TIMEOUT_MS: "60000" },
-    { WORKER_EVALUATION_MODEL_BACKEND: "app_server" },
-    { WORKER_EVALUATION_MODEL_REVIEW_POLICY_SHA256: "a".repeat(64) },
   ])("rejects model configuration conflicts before any credential file access %#", (conflict) => {
     const reader = vi.fn(() => workerAuthProfileBytes());
     expect(() =>
@@ -110,85 +108,82 @@ describe("validation-only Worker configuration", () => {
     const configured = loadWorkerConfig(enabledEnvironment());
     expect(configured).not.toHaveProperty("modelExecutionEnabled");
     expect(configured.execution).not.toHaveProperty("modelExecutionEnabled");
-    expect(configured.execution).toHaveProperty("codexExecutablePath");
+    expect(configured.execution).toHaveProperty("cliExecutablePath");
     expect(configured.capabilities.labels).not.toHaveProperty("modelExecution");
   });
 });
 
-describe("evaluation model startup configuration", () => {
-  const pins = () => ({
-    WORKER_EVALUATION_MODEL_BACKEND: "app_server",
-    WORKER_EVALUATION_MODEL_WORKER_BUNDLE_SHA256: "d".repeat(64),
-    WORKER_EVALUATION_MODEL_NODE_SHA256: "e".repeat(64),
-    WORKER_EVALUATION_MODEL_REVIEW_POLICY_SHA256: "f".repeat(64),
+describe("preconfigured CLI selection", () => {
+  it("requires only the CLI engine and executable beyond shared Worker settings", () => {
+    const environment = enabledEnvironment();
+    delete environment.WORKER_CLI_HOME;
+    delete environment.WORKER_CLI_SHA256;
+    const configured = loadWorkerConfig(environment);
+    expect(configured.execution).toMatchObject({
+      engine: "codex",
+      cliExecutablePath: "C:\\AgenticReview\\Bin\\Codex\\codex.exe",
+    });
+    expect(configured.execution).not.toHaveProperty("cliSha256");
+    expect(configured.execution).not.toHaveProperty("cliHomeDirectory");
+    expect(configured.capabilities.cliVersion).toBeNull();
   });
-  it("keeps composition absent by default and snapshots explicit pins without granting capability", () => {
-    expect(loadWorkerConfig(enabledEnvironment()).execution?.evaluationModel).toBeUndefined();
+  it.each(["codex", "copilot"])("selects %s without a Worker-managed home", (engine) => {
+    const environment: NodeJS.ProcessEnv = { ...enabledEnvironment(), WORKER_CLI_ENGINE: engine };
+    delete environment.WORKER_CLI_HOME;
+    const configured = loadWorkerConfig(environment);
+    expect(configured.execution?.engine).toBe(engine);
+    expect(configured.execution).not.toHaveProperty("cliHomeDirectory");
+    expect(configured.execution).not.toHaveProperty("model");
+  });
+
+  it("accepts an existing account home and an explicit model without reading either", () => {
     const configured = loadWorkerConfig({
       ...enabledEnvironment(),
-      ...pins(),
-      WORKER_CODEX_VERSION: "0.145.0",
+      WORKER_CLI_HOME: "C:\\Users\\Worker\\.codex",
+      WORKER_CLI_MODEL: "gpt-5.3-codex",
     });
-    expect(configured.execution?.evaluationModel).toEqual({
-      backend: "app_server",
-      workerBundleSha256: "d".repeat(64),
-      nodeExecutableSha256: "e".repeat(64),
-      reviewLaunchPolicySha256: "f".repeat(64),
+    expect(configured.execution).toMatchObject({
+      cliHomeDirectory: "C:\\Users\\Worker\\.codex",
+      model: "gpt-5.3-codex",
     });
-    expect(Object.isFrozen(configured.execution?.evaluationModel)).toBe(true);
-    expect(configured.capabilities.labels.validationEvaluation).toBeUndefined();
   });
-  it.each(Object.keys(pins()))("rejects incomplete configuration missing %s", (key) => {
+
+  it.each(["codex", "copilot"])("inherits only the selected %s CLI home", (engine) => {
     const environment: NodeJS.ProcessEnv = {
       ...enabledEnvironment(),
-      ...pins(),
-      WORKER_CODEX_VERSION: "0.145.0",
+      WORKER_CLI_ENGINE: engine,
+      CODEX_HOME: "C:\\Users\\Worker\\Codex",
+      COPILOT_HOME: "C:\\Users\\Worker\\Copilot",
     };
-    delete environment[key];
-    expect(() => loadWorkerConfig(environment)).toThrow();
+    delete environment.WORKER_CLI_HOME;
+    expect(loadWorkerConfig(environment).execution?.cliHomeDirectory).toBe(
+      engine === "codex" ? environment.CODEX_HOME : environment.COPILOT_HOME,
+    );
+    environment.WORKER_CLI_HOME = "C:\\Users\\Worker\\Selected";
+    expect(loadWorkerConfig(environment).execution?.cliHomeDirectory).toBe(
+      environment.WORKER_CLI_HOME,
+    );
   });
-  it.each(["exec", " app_server", "APP_SERVER", ""])(
-    "rejects unsupported backend %j",
-    (backend) => {
-      expect(() =>
-        loadWorkerConfig({
-          ...enabledEnvironment(),
-          ...pins(),
-          WORKER_CODEX_VERSION: "0.145.0",
-          WORKER_EVALUATION_MODEL_BACKEND: backend,
-        }),
-      ).toThrow();
-    },
-  );
-  it("rejects disabled execution, mismatched CLI versions, malformed pins and unsupported policy fields", () => {
-    expect(() => loadWorkerConfig({ ...baseEnvironment(), ...pins() })).toThrow();
-    expect(() => loadWorkerConfig({ ...enabledEnvironment(), ...pins() })).toThrow();
+
+  it.each(["", "unknown", "CODEX", " copilot"])("rejects unsupported engine %j", (engine) => {
+    expect(() => loadWorkerConfig({ ...enabledEnvironment(), WORKER_CLI_ENGINE: engine })).toThrow(
+      /WORKER_CLI_ENGINE/u,
+    );
+  });
+
+  it.each(["", " model", "model\nname", "x".repeat(129)])("rejects invalid model %j", (model) => {
+    expect(() => loadWorkerConfig({ ...enabledEnvironment(), WORKER_CLI_MODEL: model })).toThrow(
+      /WORKER_CLI_MODEL/u,
+    );
+  });
+
+  it("keeps the account CLI home outside disposable task storage", () => {
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
-        ...pins(),
-        WORKER_CODEX_VERSION: "0.145.0",
-        WORKER_EVALUATION_MODEL_NODE_SHA256: "E".repeat(64),
+        WORKER_CLI_HOME: "D:\\AgenticReview\\Data\\Workspaces\\.codex",
       }),
-    ).toThrow();
-    expect(() =>
-      loadWorkerConfig({
-        ...enabledEnvironment(),
-        ...pins(),
-        WORKER_CODEX_VERSION: "0.145.0",
-        WORKER_EVALUATION_MODEL_SUMMARY_POLICY_DIGEST: "a".repeat(64),
-      }),
-    ).toThrow();
-  });
-  it("snapshots an explicitly configured independent summary policy", () => {
-    const configured = loadWorkerConfig({
-      ...enabledEnvironment(),
-      ...pins(),
-      WORKER_CODEX_VERSION: "0.145.0",
-      WORKER_EVALUATION_MODEL_SUMMARY_POLICY_SHA256: "a".repeat(64),
-    });
-    expect(configured.execution?.evaluationModel?.summaryLaunchPolicySha256).toBe("a".repeat(64));
-    expect(configured.capabilities.labels.validationEvaluation).toBeUndefined();
+    ).toThrow(/must not overlap/u);
   });
 });
 
@@ -467,9 +462,8 @@ describe("loadWorkerConfig execution mode", () => {
       WORKER_TRUSTED_EXECUTABLE_ROOT: "relative/trusted",
       WORKER_PROCESS_HOST_PATH: "Z:\\missing\\ProcessHost.exe",
       WORKER_PROCESS_HOST_SHA256: "invalid",
-      WORKER_CODEX_EXECUTABLE_PATH: "\\\\server\\share\\codex.exe",
-      WORKER_CODEX_SHA256: "invalid",
-      WORKER_CODEX_VERSION: "not-configured",
+      WORKER_CLI_EXECUTABLE_PATH: "\\\\server\\share\\codex.exe",
+      WORKER_CLI_SHA256: "invalid",
       WORKER_GIT_EXECUTABLE_PATH: "C:\\unsafe\\..\\git.exe",
       WORKER_GIT_SHA256: "invalid",
       WORKER_WORKSPACE_ROOT_DIRECTORY: "relative/workspaces",
@@ -478,7 +472,8 @@ describe("loadWorkerConfig execution mode", () => {
     expect(config.executionEnabled).toBe(false);
     expect(config.execution).toBeUndefined();
     expect(config.capabilities).toMatchObject({
-      codexVersion: "not-configured",
+      cliEngine: null,
+      cliVersion: null,
       recipeIds: [],
       labels: { execution: "disabled", processHost: "unavailable" },
     });
@@ -490,24 +485,24 @@ describe("loadWorkerConfig execution mode", () => {
     expect(config.executionEnabled).toBe(true);
     expect(config.dataDirectory).toBe("D:\\AgenticReview\\Data");
     expect(config.execution).toEqual({
+      engine: "codex",
       trustedExecutableRoot: "C:\\AgenticReview\\Bin",
       processHostPath: "C:\\AgenticReview\\Bin\\AgenticReview.ProcessHost.exe",
       processHostSha256: "a".repeat(64),
-      codexExecutablePath: "C:\\AgenticReview\\Bin\\Codex\\codex.exe",
-      codexSha256: "b".repeat(64),
-      codexVersion: "codex-cli 1.2.3",
+      cliExecutablePath: "C:\\AgenticReview\\Bin\\Codex\\codex.exe",
+      cliSha256: "b".repeat(64),
       gitExecutablePath: "C:\\AgenticReview\\Bin\\Git\\git.exe",
       gitSha256: "c".repeat(64),
       gitSharedRootDirectory: "D:\\AgenticReview\\Data\\Repositories",
       workspaceRootDirectory: "D:\\AgenticReview\\Data\\Workspaces",
       tempDirectory: "D:\\AgenticReview\\Data\\Temp",
-      profileDirectory: "D:\\AgenticReview\\Data\\Profile",
+      cliHomeDirectory: "D:\\AgenticReview\\Data\\Profile",
       processHostRequestTimeoutMs: 15_000,
       processHostStartTimeoutMs: 30_000,
       processHostShutdownTimeoutMs: 15_000,
-      codexMaximumHardTimeoutMs: 60 * 60 * 1_000,
+      modelMaximumHardTimeoutMs: 60 * 60 * 1_000,
       gitHardTimeoutMs: 10 * 60 * 1_000,
-      codexResourceLimits: {
+      modelResourceLimits: {
         maximumProcessCount: 32,
         maximumMemoryBytes: 8 * gibibyte,
         maximumOutputBytes: 8 * mebibyte,
@@ -537,7 +532,8 @@ describe("loadWorkerConfig execution mode", () => {
     });
     expect(config.shutdownGraceSeconds).toBe(90);
     expect(config.capabilities).toMatchObject({
-      codexVersion: "codex-cli 1.2.3",
+      cliEngine: "codex",
+      cliVersion: null,
       recipeIds: [],
       labels: { execution: "enabled", processHost: "available" },
     });
@@ -548,7 +544,7 @@ describe("loadWorkerConfig execution mode", () => {
       ...enabledEnvironment(),
       WORKER_TRUSTED_EXECUTABLE_ROOT: "Z:\\NotInstalled\\Bin",
       WORKER_PROCESS_HOST_PATH: "Z:\\NotInstalled\\Bin\\ProcessHost.exe",
-      WORKER_CODEX_EXECUTABLE_PATH: "Z:\\NotInstalled\\Bin\\Codex\\codex.exe",
+      WORKER_CLI_EXECUTABLE_PATH: "Z:\\NotInstalled\\Bin\\Codex\\codex.exe",
       WORKER_GIT_EXECUTABLE_PATH: "Z:\\NotInstalled\\Bin\\Git\\git.exe",
     });
 
@@ -569,14 +565,12 @@ describe("loadWorkerConfig execution mode", () => {
     "WORKER_TRUSTED_EXECUTABLE_ROOT",
     "WORKER_PROCESS_HOST_PATH",
     "WORKER_PROCESS_HOST_SHA256",
-    "WORKER_CODEX_EXECUTABLE_PATH",
-    "WORKER_CODEX_SHA256",
-    "WORKER_CODEX_VERSION",
+    "WORKER_CLI_ENGINE",
+    "WORKER_CLI_EXECUTABLE_PATH",
     "WORKER_GIT_EXECUTABLE_PATH",
     "WORKER_GIT_SHA256",
     "WORKER_WORKSPACE_ROOT_DIRECTORY",
     "WORKER_EXECUTION_TEMP_DIRECTORY",
-    "WORKER_EXECUTION_PROFILE_DIRECTORY",
   ])("requires %s when execution is enabled", (name) => {
     const environment = enabledEnvironment();
     delete environment[name];
@@ -594,7 +588,7 @@ describe("Worker execution path policy", () => {
       /local Windows drive/u,
     ],
     [
-      "WORKER_CODEX_EXECUTABLE_PATH",
+      "WORKER_CLI_EXECUTABLE_PATH",
       "C:\\AgenticReview\\Bin\\Codex\\..\\codex.exe",
       /unsafe Windows path/u,
     ],
@@ -605,24 +599,24 @@ describe("Worker execution path policy", () => {
     ],
     ["WORKER_WORKSPACE_ROOT_DIRECTORY", "D:\\AgenticReview\\Data\\CON", /reserved/u],
     ["WORKER_EXECUTION_TEMP_DIRECTORY", "D:\\AgenticReview\\Data\\Temp.", /unsafe/u],
-    ["WORKER_EXECUTION_PROFILE_DIRECTORY", "D:\\AgenticReview\\Data\\Profile ", /whitespace/u],
+    ["WORKER_CLI_HOME", "D:\\AgenticReview\\Data\\Profile ", /whitespace/u],
     ["WORKER_DATA_DIR", "/var/lib/agentic-review", /local Windows drive/u],
   ])("rejects unsafe Windows path in %s", (name, value, expected) => {
     expect(() => loadWorkerConfig({ ...enabledEnvironment(), [name]: value })).toThrow(expected);
   });
 
-  it("requires every executable to be a distinct child of the trusted root", () => {
+  it("allows an installed CLI outside the trusted root while keeping all executable roles distinct", () => {
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
-        WORKER_CODEX_EXECUTABLE_PATH: "C:\\Other\\codex.exe",
+        WORKER_CLI_EXECUTABLE_PATH: "C:\\Other\\codex.exe",
       }),
-    ).toThrow(/WORKER_CODEX_EXECUTABLE_PATH must be contained beneath/u);
+    ).not.toThrow();
 
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
-        WORKER_GIT_EXECUTABLE_PATH: enabledEnvironment().WORKER_CODEX_EXECUTABLE_PATH,
+        WORKER_GIT_EXECUTABLE_PATH: enabledEnvironment().WORKER_CLI_EXECUTABLE_PATH,
       }),
     ).toThrow(/must not overlap/u);
 
@@ -641,7 +635,7 @@ describe("Worker execution path policy", () => {
         WORKER_DATA_DIR: "C:\\AgenticReview\\Bin\\Data",
         WORKER_WORKSPACE_ROOT_DIRECTORY: "C:\\AgenticReview\\Bin\\Data\\Workspaces",
         WORKER_EXECUTION_TEMP_DIRECTORY: "C:\\AgenticReview\\Bin\\Data\\Temp",
-        WORKER_EXECUTION_PROFILE_DIRECTORY: "C:\\AgenticReview\\Bin\\Data\\Profile",
+        WORKER_CLI_HOME: "C:\\AgenticReview\\Bin\\Data\\Profile",
       }),
     ).toThrow(/trusted executable root and data root must not overlap/u);
   });
@@ -652,7 +646,7 @@ describe("Worker execution path policy", () => {
     ["WORKER_GIT_SHARED_ROOT_DIRECTORY", "D:\\"],
     ["WORKER_WORKSPACE_ROOT_DIRECTORY", "D:\\"],
     ["WORKER_EXECUTION_TEMP_DIRECTORY", "D:\\"],
-    ["WORKER_EXECUTION_PROFILE_DIRECTORY", "D:\\"],
+    ["WORKER_CLI_HOME", "D:\\"],
   ])("rejects filesystem root in %s", (name, value) => {
     expect(() => loadWorkerConfig({ ...enabledEnvironment(), [name]: value })).toThrow(
       new RegExp(`${name} must not be a filesystem root`, "u"),
@@ -686,7 +680,7 @@ describe("Worker execution path policy", () => {
 describe("Worker execution identity policy", () => {
   it.each([
     ["WORKER_PROCESS_HOST_SHA256", "A".repeat(64)],
-    ["WORKER_CODEX_SHA256", "a".repeat(63)],
+    ["WORKER_CLI_SHA256", "a".repeat(63)],
     ["WORKER_GIT_SHA256", `${"a".repeat(63)}g`],
   ])("rejects invalid digest in %s", (name, value) => {
     expect(() => loadWorkerConfig({ ...enabledEnvironment(), [name]: value })).toThrow(
@@ -694,22 +688,13 @@ describe("Worker execution identity policy", () => {
     );
   });
 
-  it.each(["not-configured", "NOT-CONFIGURED", "", "v".repeat(129)])(
-    "rejects unavailable Codex version %j when enabled",
-    (value) => {
-      expect(() =>
-        loadWorkerConfig({ ...enabledEnvironment(), WORKER_CODEX_VERSION: value }),
-      ).toThrow(/WORKER_CODEX_VERSION/u);
-    },
-  );
-
   it("rejects obsolete validation recipe advertisement", () => {
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
         WORKER_RECIPE_IDS: "powertoys.build.x64",
       }),
-    ).toThrow(/not used by the trusted-code Worker/u);
+    ).toThrow(/not used by the Worker/u);
   });
 });
 
@@ -798,10 +783,10 @@ describe("Worker execution shutdown policy", () => {
 
 describe("Worker execution resource policy", () => {
   it.each([
-    ["WORKER_CODEX_MAX_PROCESSES", "257"],
+    ["WORKER_MODEL_MAX_PROCESSES", "257"],
     ["WORKER_GIT_MAX_MEMORY_BYTES", String(128 * mebibyte - 1)],
-    ["WORKER_CODEX_MAX_OUTPUT_BYTES", String(128 * mebibyte + 1)],
-    ["WORKER_CODEX_MAXIMUM_HARD_TIMEOUT_MS", "9999"],
+    ["WORKER_MODEL_MAX_OUTPUT_BYTES", String(128 * mebibyte + 1)],
+    ["WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS", "9999"],
     ["WORKER_GIT_HARD_TIMEOUT_MS", String(2 * 60 * 60 * 1_000 + 1)],
     ["WORKER_PROCESS_HOST_REQUEST_TIMEOUT_MS", "999"],
     ["WORKER_PROCESS_HOST_START_TIMEOUT_MS", "300001"],
@@ -820,28 +805,28 @@ describe("Worker execution resource policy", () => {
         WORKER_MAX_SLOTS: "3",
         WORKER_EXECUTION_TOTAL_MAX_PROCESSES: "96",
       }),
-    ).toThrow(/Codex memory multiplied by WORKER_MAX_SLOTS/u);
+    ).toThrow(/Model CLI memory multiplied by WORKER_MAX_SLOTS/u);
 
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
         WORKER_EXECUTION_TOTAL_MAX_PROCESSES: "63",
       }),
-    ).toThrow(/Codex process count multiplied by WORKER_MAX_SLOTS/u);
+    ).toThrow(/Model CLI process count multiplied by WORKER_MAX_SLOTS/u);
 
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
         WORKER_EXECUTION_TOTAL_MAX_OUTPUT_BYTES: String(16 * mebibyte - 1),
       }),
-    ).toThrow(/Codex output multiplied by WORKER_MAX_SLOTS/u);
+    ).toThrow(/Model CLI output multiplied by WORKER_MAX_SLOTS/u);
 
     expect(() =>
       loadWorkerConfig({
         ...enabledEnvironment(),
-        WORKER_CODEX_MAX_PROCESSES: "1",
-        WORKER_CODEX_MAX_MEMORY_BYTES: String(128 * mebibyte),
-        WORKER_CODEX_MAX_OUTPUT_BYTES: "4096",
+        WORKER_MODEL_MAX_PROCESSES: "1",
+        WORKER_MODEL_MAX_MEMORY_BYTES: String(128 * mebibyte),
+        WORKER_MODEL_MAX_OUTPUT_BYTES: "4096",
         WORKER_MAX_SLOTS: "9",
       }),
     ).toThrow(/Git process count multiplied by WORKER_MAX_SLOTS/u);
@@ -851,9 +836,9 @@ describe("Worker execution resource policy", () => {
     const config = loadWorkerConfig({
       ...enabledEnvironment(),
       WORKER_MAX_SLOTS: "4",
-      WORKER_CODEX_MAX_PROCESSES: "16",
-      WORKER_CODEX_MAX_MEMORY_BYTES: String(4 * gibibyte),
-      WORKER_CODEX_MAX_OUTPUT_BYTES: String(8 * mebibyte),
+      WORKER_MODEL_MAX_PROCESSES: "16",
+      WORKER_MODEL_MAX_MEMORY_BYTES: String(4 * gibibyte),
+      WORKER_MODEL_MAX_OUTPUT_BYTES: String(8 * mebibyte),
       WORKER_GIT_MAX_PROCESSES: "8",
       WORKER_GIT_MAX_MEMORY_BYTES: String(2 * gibibyte),
       WORKER_GIT_MAX_OUTPUT_BYTES: String(4 * mebibyte),
@@ -966,19 +951,19 @@ function baseEnvironment(): NodeJS.ProcessEnv {
 function enabledEnvironment(): NodeJS.ProcessEnv {
   return {
     ...baseEnvironment(),
+    WORKER_CLI_ENGINE: "codex",
     WORKER_EXECUTION_ENABLED: "true",
     WORKER_MAX_SLOTS: "2",
     WORKER_TRUSTED_EXECUTABLE_ROOT: "c:/AgenticReview/Bin/",
     WORKER_PROCESS_HOST_PATH: "c:/AgenticReview/Bin/AgenticReview.ProcessHost.exe",
     WORKER_PROCESS_HOST_SHA256: "a".repeat(64),
-    WORKER_CODEX_EXECUTABLE_PATH: "c:/AgenticReview/Bin/Codex/codex.exe",
-    WORKER_CODEX_SHA256: "b".repeat(64),
-    WORKER_CODEX_VERSION: "codex-cli 1.2.3",
+    WORKER_CLI_EXECUTABLE_PATH: "c:/AgenticReview/Bin/Codex/codex.exe",
+    WORKER_CLI_SHA256: "b".repeat(64),
     WORKER_GIT_EXECUTABLE_PATH: "c:/AgenticReview/Bin/Git/git.exe",
     WORKER_GIT_SHA256: "c".repeat(64),
     WORKER_WORKSPACE_ROOT_DIRECTORY: "d:/AgenticReview/Data/Workspaces",
     WORKER_EXECUTION_TEMP_DIRECTORY: "d:/AgenticReview/Data/Temp",
-    WORKER_EXECUTION_PROFILE_DIRECTORY: "d:/AgenticReview/Data/Profile",
+    WORKER_CLI_HOME: "d:/AgenticReview/Data/Profile",
   };
 }
 

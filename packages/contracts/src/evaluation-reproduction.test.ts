@@ -108,7 +108,7 @@ const entry = {
   promptVersionId: "prompt",
   renderedPromptDigest: sha,
   outputSchemaDigest: sha,
-  modelRequirements: { required: false, expectedModelIdentityDigest: null },
+  modelRequirements: { required: false },
 };
 function manifest() {
   return {
@@ -136,7 +136,7 @@ describe("explicit reproduction contracts", () => {
     });
     expect(getEvaluationReproductionArmMappingsIssues(mappings)).not.toEqual([]);
   });
-  it.each(["expectedOutcome", "findings", "authorization", "executionAccepted"])(
+  it.each(["expectedOutcome", "findings", "authorization", "resultDigest"])(
     "rejects injected %s fields",
     (field) => {
       expect(

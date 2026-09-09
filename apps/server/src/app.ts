@@ -33,7 +33,6 @@ import { registerEvaluationAssessmentRoutes } from "./routes/evaluation-assessme
 import { registerEvaluationBatchRoutes } from "./routes/evaluation-batches.js";
 import { registerEvaluationEvidenceRoutes } from "./routes/evaluation-evidence.js";
 import { registerEvaluationManagementRoutes } from "./routes/evaluation-management.js";
-import { registerEvaluationModelInvocationRoutes } from "./routes/evaluation-model-invocations.js";
 import { registerEvaluationReproductionRoutes } from "./routes/evaluation-reproduction.js";
 import {
   registerOperatorEvidenceRoutes,
@@ -42,8 +41,6 @@ import {
 import { registerFindingDispositionRoutes } from "./routes/finding-dispositions.js";
 import { registerGitHubWebhookRoutes } from "./routes/github.js";
 import { registerHealthRoutes } from "./routes/health.js";
-import { registerModelInvocationRoutes } from "./routes/model-invocations.js";
-import { registerModelRuntimeRegistryRoutes } from "./routes/model-runtime-registry.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerOperatorAccessRoutes } from "./routes/operator-access.js";
 import { registerOperatorConfigurationRateLimits } from "./routes/operator-rate-limit.js";
@@ -292,11 +289,6 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
       database: dependencies.database,
       shutdownSignal: dependencies.shutdownSignal,
     });
-    registerModelInvocationRoutes(workerScope, {
-      config: dependencies.config,
-      database: dependencies.database,
-      shutdownSignal: dependencies.shutdownSignal,
-    });
     registerValidationSummaryInputRoutes(workerScope, {
       config: dependencies.config,
       database: dependencies.database,
@@ -342,11 +334,6 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     });
     app.register(async (configurationScope) => {
       await registerOperatorConfigurationRateLimits(configurationScope, operatorAuth);
-      registerModelRuntimeRegistryRoutes(configurationScope, {
-        database: dependencies.database,
-        operatorAuth,
-        readOnly: dependencies.config.recoveryMaintenance,
-      });
       registerEvaluationAssessmentRoutes(configurationScope, {
         database: dependencies.database,
         operatorAuth,
@@ -368,10 +355,6 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
         readOnly: dependencies.config.recoveryMaintenance,
       });
       registerEvaluationReproductionRoutes(configurationScope, {
-        database: dependencies.database,
-        operatorAuth,
-      });
-      registerEvaluationModelInvocationRoutes(configurationScope, {
         database: dependencies.database,
         operatorAuth,
       });

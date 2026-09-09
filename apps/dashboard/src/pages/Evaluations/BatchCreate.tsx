@@ -8,10 +8,6 @@ import {
   type EvaluationReproductionAdapter,
 } from "@/services/evaluation-reproduction";
 import {
-  createHttpModelRuntimeRegistrationAdapter,
-  type ModelRuntimeRegistrationAdapter,
-} from "@/services/model-runtime-registrations";
-import {
   type Arm,
   armLabels,
   arms,
@@ -46,15 +42,12 @@ interface Selection {
   profileId: string | null;
   profileVersionId: string | null;
   promptVersionId: string | null;
-  modelRuntimeRegistrationId: string | null;
 }
 const emptySelection = (): Selection => ({
   profileId: null,
   profileVersionId: null,
   promptVersionId: null,
-  modelRuntimeRegistrationId: null,
 });
-const defaultRuntimeApi = createHttpModelRuntimeRegistrationAdapter();
 const defaultReproductionApi = createHttpEvaluationReproductionAdapter();
 
 function useProfileSelection(
@@ -98,7 +91,6 @@ export function BatchCreate({
   active,
   onCreated,
   onPendingChange,
-  runtimeApi = defaultRuntimeApi,
   reproductionApi = defaultReproductionApi,
 }: {
   version: C.EvaluationSuiteVersionV1;
@@ -107,7 +99,6 @@ export function BatchCreate({
   active: boolean;
   onCreated: (batch: C.EvaluationBatchSummaryV1) => void;
   onPendingChange: (pending: boolean) => void;
-  runtimeApi?: Pick<ModelRuntimeRegistrationAdapter, "options">;
   reproductionApi?: EvaluationReproductionAdapter;
 }) {
   const page = useEvaluationPage();
@@ -144,15 +135,6 @@ export function BatchCreate({
       ),
     active,
   );
-  const runtimes = useEvaluationQuery(
-    ["batch-model-runtime-options", page.repositoryId],
-    (signal) =>
-      collectCatalog((number) =>
-        runtimeApi.options(page.repositoryId, { page: number, pageSize: 50 }, signal),
-      ),
-    active && page.canConfigure && mode === "prompt_and_profile",
-  );
-  const availableRuntimes = page.canConfigure ? runtimes.data : undefined;
   const cases = useEvaluationQuery(
     ["batch-expectations", version.suiteId, version.id],
     (signal) => loadFrozenCases(page.api, version, signal),
@@ -208,21 +190,6 @@ export function BatchCreate({
       );
       return;
     }
-    const baselineRuntime = availableRuntimes?.find(
-      (entry) => entry.id === selection.baseline.modelRuntimeRegistrationId,
-    );
-    const candidateRuntime = availableRuntimes?.find(
-      (entry) => entry.id === selection.candidate.modelRuntimeRegistrationId,
-    );
-    if (
-      mode === "prompt_and_profile" &&
-      (runtimes.isFetching || runtimes.error || !baselineRuntime || !candidateRuntime)
-    ) {
-      setError(
-        "Select an available registered model configuration for both arms. Refresh the model options if a selection is unavailable.",
-      );
-      return;
-    }
     try {
       if (
         version.workflowKind === "issue_validation" &&
@@ -256,9 +223,6 @@ export function BatchCreate({
         cases: cases.data,
         profiles: { baseline, candidate },
         prompts: { baseline: baselinePrompt, candidate: candidatePrompt },
-        ...(mode === "prompt_and_profile" && baselineRuntime && candidateRuntime
-          ? { modelRuntimes: { baseline: baselineRuntime, candidate: candidateRuntime } }
-          : {}),
         mode,
         choices,
         ...(reproductionMappings?.length ? { reproductionMappings } : {}),
@@ -272,7 +236,6 @@ export function BatchCreate({
   const queryError =
     profiles.error ??
     prompts.error ??
-    (mode === "prompt_and_profile" ? runtimes.error : null) ??
     cases.error ??
     reproductionSources.error ??
     selectedProfiles.baseline.versions.error ??
@@ -312,23 +275,8 @@ export function BatchCreate({
         <p className="evaluation-meta">
           {mode === "profile_only"
             ? "Both Prompt identities are still frozen for provenance; the model does not run in this mode."
-            : "Model execution requires an admitted evaluation boundary. Creating a batch does not guarantee Worker admission."}
+            : "The Worker runs its configured model CLI. Completed results show the CLI, version and requested model."}
         </p>
-        {mode === "prompt_and_profile" ? (
-          <Space direction="vertical" style={{ width: "100%", marginBottom: 16 }}>
-            <Typography.Text type="secondary">
-              Registered models define the expected configuration. They do not confirm Worker
-              readiness or actual model execution.
-            </Typography.Text>
-            <Button
-              disabled={!active || !page.canConfigure}
-              loading={runtimes.isFetching}
-              onClick={() => runtimes.refetch()}
-            >
-              Refresh model options
-            </Button>
-          </Space>
-        ) : null}
         <div className="evaluation-arm-grid">
           {arms.map((arm) => (
             <Card size="small" title={armLabels[arm]} key={arm}>
@@ -388,39 +336,6 @@ export function BatchCreate({
                   }
                 />
               </Form.Item>
-              {mode === "prompt_and_profile" && page.canConfigure ? (
-                <Form.Item label={`${armLabels[arm]} model runtime`} required>
-                  <Select
-                    aria-label={`${armLabels[arm]} model runtime`}
-                    value={selection[arm].modelRuntimeRegistrationId}
-                    placeholder="Select registered expected configuration"
-                    showSearch
-                    optionFilterProp="label"
-                    loading={runtimes.isFetching}
-                    options={[
-                      ...(availableRuntimes ?? []).map((runtime) => ({
-                        value: runtime.id,
-                        label: `${runtime.name} · ${runtime.requestedModel}`,
-                      })),
-                      ...(selection[arm].modelRuntimeRegistrationId &&
-                      !availableRuntimes?.some(
-                        (runtime) => runtime.id === selection[arm].modelRuntimeRegistrationId,
-                      )
-                        ? [
-                            {
-                              value: selection[arm].modelRuntimeRegistrationId,
-                              label: `Unavailable registration · ${selection[arm].modelRuntimeRegistrationId}`,
-                              disabled: true,
-                            },
-                          ]
-                        : []),
-                    ]}
-                    onChange={(modelRuntimeRegistrationId) =>
-                      change(arm, { ...selection[arm], modelRuntimeRegistrationId })
-                    }
-                  />
-                </Form.Item>
-              ) : null}
               {selectedProfiles[arm].profile.data ? (
                 <p className="evaluation-meta">
                   {profileChecks(selectedProfiles[arm].profile.data).length} frozen build, test and

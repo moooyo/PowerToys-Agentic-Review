@@ -1,4 +1,6 @@
 import {
+  evaluationExecutionCapabilityLabel,
+  evaluationModelExecutionCapabilityLabels,
   validationExecutorCapabilityLabels,
   type WorkerCapabilities,
   WorkerCapabilitiesSchema,
@@ -23,6 +25,8 @@ export interface ExecutionRuntimeReadiness {
   readonly structuredProbes?: boolean;
   readonly uiObservations?: boolean;
   readonly modelExecution?: boolean;
+  readonly evaluationModelReview?: boolean;
+  readonly evaluationModelSummary?: boolean;
 }
 
 const reserved = new Set([
@@ -32,7 +36,8 @@ const reserved = new Set([
   "validationheadless",
   "validationweb",
   "validationwindowsdesktop",
-  "validationevaluation",
+  evaluationExecutionCapabilityLabel.toLowerCase(),
+  ...Object.values(evaluationModelExecutionCapabilityLabels).map((label) => label.toLowerCase()),
   "evidencedelivery",
   "issuereproduction",
   "structuredprobeoutput",
@@ -61,6 +66,13 @@ export function createRuntimeCapabilities(
   const web = envelopeV2 && evidenceDelivery && readiness.web;
   const windowsDesktop = envelopeV2 && evidenceDelivery && readiness.windowsDesktop;
   if (envelopeV2) labels[validationExecutorCapabilityLabels.envelope] = "2";
+  if (envelopeV2) labels[evaluationExecutionCapabilityLabel] = "1";
+  if (envelopeV2 && readiness.modelExecution !== false) {
+    if (readiness.evaluationModelReview)
+      labels[evaluationModelExecutionCapabilityLabels.review] = "1";
+    if (readiness.evaluationModelSummary)
+      labels[evaluationModelExecutionCapabilityLabels.summary] = "1";
+  }
   if (envelopeV2 && readiness.reproduction)
     labels[validationExecutorCapabilityLabels.reproduction] = "1";
   if (envelopeV2 && readiness.structuredProbes)
@@ -79,7 +91,9 @@ export function createRuntimeCapabilities(
   }
   const capabilities: WorkerCapabilities = {
     ...base,
-    ...(readiness.modelExecution === false ? { codexVersion: "not-configured" } : {}),
+    ...(readiness.modelExecution === false || !readiness.execution
+      ? { cliEngine: null, cliVersion: null }
+      : {}),
     headless: readiness.execution && (base.headless || headless || web),
     interactiveDesktop: windowsDesktop,
     recipeIds: [...base.recipeIds],
@@ -102,7 +116,7 @@ export function validationProcessLimits(
         hardTimeoutMs: execution.validationMaximumHardTimeoutMs,
         ...execution.validationResourceLimits,
       }
-    : { hardTimeoutMs: execution.codexMaximumHardTimeoutMs, ...execution.codexResourceLimits },
+    : { hardTimeoutMs: execution.modelMaximumHardTimeoutMs, ...execution.modelResourceLimits },
 ): ProcessResourceLimits {
   if (!Number.isSafeInteger(maxSlots) || maxSlots < 1 || maxSlots * concurrentTreesPerSlot > 64) {
     throw new RangeError("Validation slots exceed the 64 concurrent ProcessHost request limit.");

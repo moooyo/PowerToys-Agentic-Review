@@ -20,12 +20,12 @@ const statusPresentation: Record<string, { color: string; label: string }> = {
   },
   preparing: { color: "processing", label: "Preparing" },
   reviewing: { color: "processing", label: "Reviewing" },
-  codex_review: { color: "processing", label: "Codex review" },
+  cli_review: { color: "processing", label: "CLI review" },
   validating: { color: "processing", label: "Validating" },
   validation: { color: "processing", label: "Validation" },
-  codex_revision: {
+  cli_revision: {
     color: "processing",
-    label: "Codex revision",
+    label: "CLI revision",
   },
   uploading: { color: "processing", label: "Uploading" },
   completing: { color: "processing", label: "Completing" },

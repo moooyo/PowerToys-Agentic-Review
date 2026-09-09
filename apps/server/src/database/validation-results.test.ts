@@ -1056,7 +1056,7 @@ describe("mapped reproduction completion and current projection", () => {
       const latest = f.database
         .prepare("SELECT MAX(version) AS version FROM schema_migrations")
         .get() as { version: number };
-      expect(latest.version).toBe(33);
+      expect(latest.version).toBe(31);
       const labels = f.execution.executionPolicy.requiredCapabilityLabels;
       expect(Object.keys(labels)).toHaveLength(
         options.mappedReproduction ? 4 : options.declaredProbe || options.traceOff ? 3 : 2,

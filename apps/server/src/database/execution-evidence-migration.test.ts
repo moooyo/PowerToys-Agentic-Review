@@ -49,7 +49,7 @@ describe("execution evidence migration", () => {
     const beforeTriggers = readResultTriggers(database);
     const beforeIndexes = readResultIndexes(database);
 
-    expect(runMigrations(database, migrationsDirectory)).toBe(33);
+    expect(runMigrations(database, migrationsDirectory)).toBe(31);
     expect(readResultTables(database)).toEqual(beforeRows);
     expect(readResultForeignKeys(database)).toEqual(beforeForeignKeys);
     expectUpgradedResultTriggers(database, beforeTriggers);
@@ -110,7 +110,7 @@ describe("execution evidence migration", () => {
       );
     }
 
-    expect(runMigrations(database, migrationsDirectory)).toBe(33);
+    expect(runMigrations(database, migrationsDirectory)).toBe(31);
     expect(readResultTables(database)).toEqual(beforeRows);
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });

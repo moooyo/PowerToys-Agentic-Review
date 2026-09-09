@@ -24,7 +24,6 @@ import {
   WorkflowOutputSchemaVersions,
 } from "@agentic-review/contracts";
 import {
-  assertEvaluationModelRuntimeRegistrationIntegrity,
   getReviewRunExecutorCapabilityLabels,
   validateFrozenIssueReproductionBinding,
 } from "@agentic-review/domain";
@@ -57,10 +56,6 @@ export function createEvaluationExecutionTemplate(input: {
 }): EvaluationExecutionTemplate {
   const { plan, frozenPrompt: prompt } = input;
   assertEvaluationReviewRunPlan(plan);
-  assertEvaluationModelRuntimeRegistrationIntegrity(
-    plan.modelRequirements,
-    plan.modelRuntimeRegistration,
-  );
   const request = plan.jobs[0];
   if (
     !request ||
@@ -136,9 +131,6 @@ export function createEvaluationExecutionTemplate(input: {
       source: plan.source,
       authorization: plan.authorization,
       modelRequirements: plan.modelRequirements,
-      ...(plan.modelRuntimeRegistration === undefined
-        ? {}
-        : { modelRuntimeRegistration: plan.modelRuntimeRegistration }),
       ...(plan.reproduction === undefined ? {} : { reproduction: plan.reproduction }),
     },
   };

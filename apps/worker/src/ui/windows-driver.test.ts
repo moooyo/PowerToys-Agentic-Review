@@ -18,7 +18,9 @@ import {
   windowsDriverMaximumInputBytes,
 } from "./windows-driver.js";
 
-function textAssertion(expected = "Saved: public fixture"): WindowsUiScenarioStep {
+function textAssertion(
+  expected = "Saved: public fixture",
+): Extract<WindowsUiScenarioStep, { action: "assertText" }> {
   return {
     id: "assert-result",
     name: "Check saved text",
@@ -330,6 +332,8 @@ const driverEntry = fileURLToPath(new URL("./windows-driver-entry.ps1", import.m
 const fixtureEntry = fileURLToPath(new URL("./testdata/windows-fixture.ps1", import.meta.url));
 const children = new Set<ChildProcess>();
 const directories = new Set<string>();
+const fixtureDiagnostics = new WeakMap<ChildProcess, () => string>();
+const fixtureClosures = new WeakMap<ChildProcess, Promise<void>>();
 
 function runEntry(
   input: unknown,
@@ -357,7 +361,7 @@ function runEntry(
       stderr += bytes.toString("utf8");
     });
     child.once("error", reject);
-    child.once("exit", (code) => {
+    child.once("close", (code) => {
       clearTimeout(timer);
       children.delete(child);
       resolve({ code, stdout, stderr });
@@ -378,12 +382,14 @@ async function fixture(
     },
   );
   children.add(child);
+  fixtureClosures.set(child, new Promise<void>((resolve) => child.once("close", () => resolve())));
   const identity = await new Promise<WindowsDriverRequest["rootProcess"]>((resolve, reject) => {
     let output = "";
     let errors = "";
+    fixtureDiagnostics.set(child, () => errors);
     const timer = setTimeout(
       () => reject(new Error(`Fixture identity did not arrive: ${errors}`)),
-      10_000,
+      flags.includes("-Descendant") && flags.includes("-TcpPort") ? 20_000 : 10_000,
     );
     child.stdout.on("data", (bytes: Buffer) => {
       output += bytes.toString("utf8");
@@ -412,6 +418,121 @@ async function fixture(
   input.evidenceDirectory = directory;
   return { child, input };
 }
+async function stopLauncher(child: ChildProcess): Promise<void> {
+  const closed = fixtureClosures.get(child);
+  if (closed === undefined) throw new Error("The owned launcher has no close observation.");
+  const drained = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("Owned launcher cleanup exceeded its deadline.")),
+      20_000,
+    );
+    void closed.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  if (child.exitCode === null) child.stdin?.end("stop\n");
+  await drained;
+  expect(child.exitCode, fixtureDiagnostics.get(child)?.()).toBe(0);
+}
+async function prepareBackgroundWindow(input: WindowsDriverRequest): Promise<void> {
+  const title = input.readiness.window.title;
+  if (typeof title !== "string") throw new Error("The background fixture requires an exact title.");
+  const preparation: WindowsDriverRequest = {
+    ...input,
+    readiness: { ...input.readiness, window: { title: `${title} neutral` } },
+    scenario: {
+      ...input.scenario,
+      id: "prepare-background",
+      name: "Explicitly focus the owned neutral window before the target action",
+      steps: [
+        {
+          id: "prepare-neutral-window",
+          name: "Invoke the neutral preparation control once",
+          action: "click",
+          locator: {
+            by: "automationId",
+            automationId: "NeutralPrepareButton",
+            controlType: "Button",
+          },
+          timeoutMs: 5_000,
+        },
+        {
+          ...textAssertion("Background prepared"),
+          id: "verify-neutral-window",
+          name: "Verify the neutral window owned foreground with no target clicks",
+          locator: {
+            by: "automationId",
+            automationId: "NeutralPrepareButton",
+            controlType: "Button",
+          },
+        },
+      ],
+    },
+  };
+  const output = await runEntry(preparation);
+  expect(output.code, output.stderr).toBe(0);
+  const result = parseWindowsDriverResult(output.stdout, preparation);
+  expect(result, JSON.stringify(result)).toMatchObject({
+    outcome: "passed",
+    evidenceComplete: true,
+  });
+  expect(result.execution.steps[1]?.actual).toBe("Background prepared");
+}
+async function withOwnedLauncher(child: ChildProcess, run: () => Promise<void>): Promise<void> {
+  const failures: unknown[] = [];
+  try {
+    await run();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await stopLauncher(child);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    const diagnostics = fixtureDiagnostics.get(child)?.();
+    if (diagnostics) failures.push(new Error(`Bounded fixture diagnostics:\n${diagnostics}`));
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(
+      failures,
+      "The native fixture failed; original errors and bounded diagnostics are retained.",
+    );
+}
+function fixtureStatus(
+  child: ChildProcess,
+): Promise<{ guiAlive: boolean; ancestorAlive: boolean }> {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => {
+      child.stdout?.off("data", onData);
+      reject(new Error("The owned fixture status exceeded its deadline."));
+    }, 5_000);
+    function onData(bytes: Buffer): void {
+      output += bytes.toString("utf8");
+      if (!output.includes("\n")) return;
+      clearTimeout(timer);
+      child.stdout?.off("data", onData);
+      try {
+        const status = JSON.parse(output.trim()) as Record<string, unknown>;
+        if (
+          status.event !== "fixture_status" ||
+          typeof status.guiAlive !== "boolean" ||
+          typeof status.ancestorAlive !== "boolean"
+        )
+          throw new Error("The owned fixture returned an invalid process status.");
+        resolve({ guiAlive: status.guiAlive, ancestorAlive: status.ancestorAlive });
+      } catch (error) {
+        reject(error);
+      }
+    }
+    child.stdout?.on("data", onData);
+    child.stdin?.write("status\n");
+  });
+}
 afterEach(async () => {
   for (const child of children) {
     if (child.exitCode === null) {
@@ -430,7 +551,11 @@ afterEach(async () => {
     const path = relative(root, target);
     if (isAbsolute(path) || path.startsWith("..") || !path.startsWith("agentic-windows-evidence-"))
       throw new Error("Fixture cleanup must remain inside its own temporary evidence directory.");
-    await rm(target, { recursive: true, force: true });
+    if (nativeEnabled && process.env.AGENTIC_REVIEW_WINDOWS_UI_RETAIN_EVIDENCE === "1") {
+      console.info(
+        JSON.stringify({ type: "windows_fixture_evidence_retained", directory: target }),
+      );
+    } else await rm(target, { recursive: true, force: true });
   }
   directories.clear();
 });
@@ -698,6 +823,30 @@ describe.skipIf(!nativeEnabled)("Windows UI Automation native fixtures", () => {
     expect(rejected.reasonCode).toBe("unowned_listener");
     expect(rejected.owned).toBe(false);
   }, 45_000);
+  it("proves a native descendant TCP listener through a persistent launcher's live ancestry", async () => {
+    const reservation = createServer();
+    await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+    const address = reservation.address();
+    if (address === null || typeof address === "string")
+      throw new Error("Fixture port allocation failed.");
+    const port = address.port;
+    await new Promise<void>((resolve, reject) =>
+      reservation.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+    const { child, input: fixtureInput } = await fixture(["-Descendant", "-TcpPort", String(port)]);
+    const input = {
+      schemaVersion: "WindowsTcpOwnerProbeRequestV1",
+      rootProcess: fixtureInput.rootProcess,
+      port,
+    };
+    await withOwnedLauncher(child, async () => {
+      const output = await runEntry(input);
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsTcpOwnerProbeResult(output.stdout, input.rootProcess, port);
+      expect(result).toMatchObject({ reasonCode: "owned", owned: true });
+      expect(child.exitCode).toBeNull();
+    });
+  }, 90_000);
   it("rejects an empty-key window selector at the independent PowerShell boundary", async () => {
     const input = request();
     const output = await runEntry({
@@ -804,6 +953,116 @@ describe.skipIf(!nativeEnabled)("Windows UI Automation native fixtures", () => {
     expect(result.execution.steps[0]?.actual).toBe("Waiting");
     expect(result.evidenceComplete).toBe(true);
   }, 45_000);
+  it("focuses the pinned owned window before invoking a background button once", async () => {
+    const { child, input } = await fixture(["-Descendant", "-BackgroundBeforeClick"]);
+    input.evidence.screenshots = "on_failure";
+    input.scenario.steps = [
+      {
+        ...textAssertion("Before click: background; clicks: 0"),
+        id: "assert-background",
+        name: "Confirm the owned target starts in the background",
+        locator: { by: "automationId", automationId: "ForegroundPreparationLabel" },
+      },
+      {
+        id: "click-background-button",
+        name: "Invoke the owned background button once",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton", controlType: "Button" },
+        timeoutMs: 5_000,
+      },
+      {
+        ...textAssertion("Clicks: 1; foreground witnessed: true;"),
+        id: "assert-foreground-click",
+        name: "Observe foreground activation before the single callback",
+        match: "contains",
+      },
+    ];
+    await withOwnedLauncher(child, async () => {
+      await prepareBackgroundWindow(input);
+      const output = await runEntry(input);
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsDriverResult(output.stdout, input);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        outcome: "passed",
+        evidenceComplete: true,
+      });
+      expect(result.execution.steps.slice(0, 2).map((step) => step.actual)).toEqual([
+        "Before click: background; clicks: 0",
+        null,
+      ]);
+      // The guard precedes Invoke; an asynchronous callback can observe later focus changes.
+      expect(result.execution.steps[2]?.actual).toMatch(
+        /^Clicks: 1; foreground witnessed: true; callback foreground: (?:true; background clicks: 0|false; background clicks: 1)$/,
+      );
+      expect(await fixtureStatus(child)).toEqual({ guiAlive: true, ancestorAlive: true });
+    });
+  }, 90_000);
+  it("blocks an owned topmost window covering the click center without invoking", async () => {
+    const { child, input } = await fixture([
+      "-Descendant",
+      "-BackgroundBeforeClick",
+      "-OccludeClick",
+    ]);
+    input.evidence.screenshots = "on_failure";
+    input.scenario.steps = [
+      {
+        ...textAssertion("Before click: background; clicks: 0"),
+        id: "assert-background",
+        name: "Confirm the owned target starts in the background",
+        locator: { by: "automationId", automationId: "ForegroundPreparationLabel" },
+      },
+      {
+        id: "click-occluded-button",
+        name: "Reject a button covered by a separate owned top-level window",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton", controlType: "Button" },
+        timeoutMs: 5_000,
+      },
+      {
+        ...textAssertion("Clicks: 0; foreground: none; background clicks: 0"),
+        id: "not-reached-after-occlusion",
+        name: "Leave subsequent steps unexecuted after the blocked click",
+      },
+    ];
+    await withOwnedLauncher(child, async () => {
+      await prepareBackgroundWindow(input);
+      const output = await runEntry(input);
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsDriverResult(output.stdout, input);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        outcome: "blocked",
+        reasonCode: "provider_unavailable",
+      });
+      expect(result.execution.steps[1]?.summary).toBe(
+        "The invocation point is covered or outside the pinned window.",
+      );
+      expect(result.execution.steps.map((step) => step.outcome)).toEqual([
+        "passed",
+        "blocked",
+        "not_run",
+      ]);
+      const witnessInput: WindowsDriverRequest = {
+        ...input,
+        scenario: {
+          ...input.scenario,
+          id: "occluded-click-witness",
+          name: "Observe the untouched fixture after the blocked click",
+          steps: [textAssertion("Clicks: 0; foreground: none; background clicks: 0")],
+        },
+      };
+      const witnessOutput = await runEntry(witnessInput);
+      expect(witnessOutput.code, witnessOutput.stderr).toBe(0);
+      const witness = parseWindowsDriverResult(witnessOutput.stdout, witnessInput);
+      expect(witness, JSON.stringify(witness)).toMatchObject({
+        outcome: "passed",
+        evidenceComplete: true,
+      });
+      expect(witness.execution.steps[0]?.actual).toBe(
+        "Clicks: 0; foreground: none; background clicks: 0",
+      );
+      expect(await fixtureStatus(child)).toEqual({ guiAlive: true, ancestorAlive: true });
+    });
+  }, 90_000);
   it("rejects an exact PID whose trusted creation time does not match", async () => {
     const { input } = await fixture();
     input.rootProcess.creationTimeFileTime = String(
@@ -816,12 +1075,22 @@ describe.skipIf(!nativeEnabled)("Windows UI Automation native fixtures", () => {
   }, 45_000);
   it("does not search a same-title window outside the launched process tree", async () => {
     const unowned = await fixture();
+    unowned.input.scenario.steps = [textAssertion("Waiting")];
+    const visible = await runEntry(unowned.input);
+    expect(visible.code, visible.stderr).toBe(0);
+    expect(parseWindowsDriverResult(visible.stdout, unowned.input)).toMatchObject({
+      outcome: "passed",
+      evidenceComplete: true,
+    });
     const owned = await fixture(["-NoWindow"]);
     owned.input.readiness.window = unowned.input.readiness.window;
     owned.input.readiness.timeoutMs = 1_000;
-    const result = parseWindowsDriverResult((await runEntry(owned.input)).stdout, owned.input);
+    const output = await runEntry(owned.input);
+    expect(output.code, output.stderr).toBe(0);
+    const result = parseWindowsDriverResult(output.stdout, owned.input);
     expect(result.reasonCode).toBe("window_unavailable");
     expect(result.evidenceFiles.every((asset) => asset.kind !== "screenshot")).toBe(true);
+    expect(result.execution.steps.every((step) => step.outcome === "not_run")).toBe(true);
   }, 45_000);
   it.each([
     ["-DuplicateWindow", "ambiguous_window"],
@@ -993,7 +1262,10 @@ describe.skipIf(!nativeEnabled)("Windows UI Automation native fixtures", () => {
       const output = await runEntry(input);
       expect(output.code, output.stderr).toBe(0);
       const result = parseWindowsDriverResult(output.stdout, input);
-      expect(result, JSON.stringify(result)).toMatchObject({ outcome: "passed", evidenceComplete: true });
+      expect(result, JSON.stringify(result)).toMatchObject({
+        outcome: "passed",
+        evidenceComplete: true,
+      });
       expect(result.execution.steps[2]?.outcome).toBe("passed");
       expect(result.execution.steps[3]?.actual).toBe("Saved: metadata sibling fixture");
       expect(child.exitCode).toBeNull();
@@ -1001,13 +1273,160 @@ describe.skipIf(!nativeEnabled)("Windows UI Automation native fixtures", () => {
       child.stdin?.end("stop\n");
       if (child.exitCode === null) {
         await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("Owned launcher cleanup exceeded its deadline.")), 20_000);
-          child.once("exit", () => { clearTimeout(timer); resolve(); });
+          const timer = setTimeout(
+            () => reject(new Error("Owned launcher cleanup exceeded its deadline.")),
+            20_000,
+          );
+          child.once("exit", () => {
+            clearTimeout(timer);
+            resolve();
+          });
         });
       }
       expect(child.exitCode).toBe(0);
     }
   }, 60_000);
+  it("keeps a pinned descendant window usable after an unrelated helper exits on click", async () => {
+    const { child, input } = await fixture([
+      "-Descendant",
+      "-HelperExitAfterClick",
+      "-TracePublicInput",
+    ]);
+    input.scenario.steps = [
+      { ...textAssertion("Waiting"), id: "pin-window" },
+      {
+        id: "exit-helper",
+        name: "Exit the owned helper after pinning the window",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton", controlType: "Button" },
+        timeoutMs: 5_000,
+      },
+      {
+        id: "empty-after-helper-exit",
+        name: "Check the initial public input after helper exit",
+        action: "assertValue",
+        locator: { by: "automationId", automationId: "InputBox" },
+        expected: "",
+        timeoutMs: 5_000,
+      },
+      {
+        id: "fill-after-helper-exit",
+        name: "Fill the pinned GUI after the helper exits",
+        action: "fill",
+        locator: { by: "automationId", automationId: "InputBox" },
+        value: "pinned helper fixture",
+        timeoutMs: 5_000,
+      },
+      {
+        id: "verify-filled-input",
+        name: "Check the exact public input before saving",
+        action: "assertValue",
+        locator: { by: "automationId", automationId: "InputBox" },
+        expected: "pinned helper fixture",
+        timeoutMs: 5_000,
+      },
+      {
+        id: "save-after-helper-exit",
+        name: "Invoke the pinned GUI after the helper exits",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton", controlType: "Button" },
+        timeoutMs: 5_000,
+      },
+      { ...textAssertion("Saved: pinned helper fixture"), id: "assert-after-helper-exit" },
+    ];
+    await withOwnedLauncher(child, async () => {
+      const output = await runEntry(input);
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsDriverResult(output.stdout, input);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        outcome: "passed",
+        evidenceComplete: true,
+      });
+      expect(result.execution.steps.map((step) => step.outcome)).toEqual([
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+      ]);
+      expect(result.execution.steps[6]?.actual).toBe("Saved: pinned helper fixture");
+      expect(child.exitCode).toBeNull();
+    });
+  }, 90_000);
+  it("rejects a pinned descendant window owner exiting while its launcher stays alive", async () => {
+    const { child, input } = await fixture(["-Descendant", "-ExitAfterClick"]);
+    input.scenario.steps = [
+      { ...textAssertion("Waiting"), id: "pin-owner" },
+      {
+        id: "exit-owner",
+        name: "Exit the pinned GUI owner",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton" },
+        timeoutMs: 5_000,
+      },
+      { ...textAssertion("Waiting"), id: "observe-after-owner-exit" },
+      { ...textAssertion("Waiting"), id: "never-after-owner-exit" },
+    ];
+    await withOwnedLauncher(child, async () => {
+      const output = await runEntry(input);
+      expect(output.stderr).toContain('"stepId":"pin-owner","outcome":"passed"');
+      expect(child.exitCode).toBeNull();
+      expect(await fixtureStatus(child)).toEqual({ guiAlive: false, ancestorAlive: true });
+      // The provider can stop responding when its process exits; no partial result may escape.
+      if (output.code === 124) {
+        expect(output.stdout).toBe("");
+        expect(output.stderr).toContain("evidence is incomplete");
+        return;
+      }
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsDriverResult(output.stdout, input);
+      expect(result.outcome).toBe("blocked");
+      // Exit can destroy the HWND before the held process becomes signaled. Independently
+      // confirm actual GUI termination before accepting that window-closure outcome.
+      expect(["ownership_lost", "provider_unavailable", "window_unavailable"]).toContain(
+        result.reasonCode,
+      );
+      expect(result.execution.steps[0]?.outcome).toBe("passed");
+      expect(["not_run", "blocked"]).toContain(result.execution.steps[2]?.outcome);
+      expect(result.execution.steps[2]?.actual).toBeNull();
+      expect(result.execution.steps[3]?.outcome).toBe("not_run");
+      expect(result.evidenceComplete).toBe(false);
+    });
+  }, 90_000);
+  it("rejects a pinned GUI whose intermediate ancestor exits while the GUI and root stay alive", async () => {
+    const { child, input } = await fixture(["-AncestorExitAfterClick"]);
+    input.readiness.timeoutMs = 15_000;
+    input.scenario.steps = [
+      { ...textAssertion("Waiting"), id: "pin-through-ancestor" },
+      {
+        id: "exit-ancestor",
+        name: "Exit the pinned GUI owner's intermediate ancestor",
+        action: "click",
+        locator: { by: "automationId", automationId: "SaveButton" },
+        timeoutMs: 5_000,
+      },
+      { ...textAssertion("Ancestor exited"), id: "observe-orphan" },
+      { ...textAssertion("Ancestor exited"), id: "never-after-ancestor-exit" },
+    ];
+    await withOwnedLauncher(child, async () => {
+      const output = await runEntry(input);
+      expect(output.code, output.stderr).toBe(0);
+      const result = parseWindowsDriverResult(output.stdout, input);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        outcome: "blocked",
+        reasonCode: "ownership_lost",
+        evidenceComplete: false,
+      });
+      expect(result.execution.steps[0]?.outcome).toBe("passed");
+      expect(["not_run", "blocked"]).toContain(result.execution.steps[2]?.outcome);
+      expect(result.execution.steps[2]?.actual).toBeNull();
+      expect(result.execution.steps[3]?.outcome).toBe("not_run");
+      expect(child.exitCode).toBeNull();
+      expect(await fixtureStatus(child)).toEqual({ guiAlive: true, ancestorAlive: false });
+    });
+  }, 90_000);
   it("terminates a blocked UIA provider within the step watchdog budget", async () => {
     const { input } = await fixture();
     input.scenario.steps = [

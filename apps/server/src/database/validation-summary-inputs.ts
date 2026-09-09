@@ -5,16 +5,16 @@ import * as C from "@agentic-review/contracts";
 import { canonicalJson, sha256 } from "../scheduling/canonical-json.js";
 import { readEvidenceVerificationCandidate } from "./evidence-assets.js";
 import {
-  assertActiveModelInvocationAttempt,
-  readModelInvocationAttemptInTransaction,
-} from "./model-invocations.js";
-import {
   collectValidationRunnerEvidence,
   type ValidationCompletionOptions,
   type ValidationEvidenceReferenceScope,
   type ValidationRunnerEvidenceInput,
   validateValidationRunnerEvidence,
 } from "./validation-results.js";
+import {
+  assertActiveValidationSummaryInputAttempt,
+  readValidationSummaryInputAttemptInTransaction,
+} from "./validation-summary-input-lease.js";
 
 export interface ValidationSummaryInputOperationMap {
   freezeValidationSummaryInput: {
@@ -77,7 +77,7 @@ interface StoredRow {
 }
 const storedColumns = `input_id, run_attempt_id, job_id, input_sha256, intent_sha256, frozen_at,
  CASE WHEN length(CAST(input_json AS BLOB)) <= ${C.maximumFrozenValidationSummaryInputUtf8Bytes} THEN input_json END AS input_json`;
-type Attempt = ReturnType<typeof readModelInvocationAttemptInTransaction>;
+type Attempt = ReturnType<typeof readValidationSummaryInputAttemptInTransaction>;
 export interface ValidationSummaryInputEvidenceCollection {
   readonly fingerprint: string;
   readonly runner: ValidationRunnerEvidenceInput;
@@ -177,41 +177,6 @@ export function readFrozenValidationSummaryInputInTransaction(
   return { document: value, inputSha256: row.input_sha256 };
 }
 
-/** Rebuilds every input digest against the original immutable cell and stored attempt identity.
- * Historical reads do not require an active lease, a currently enabled registry, or available files. */
-export function readBoundValidationSummaryInputInTransaction(
-  database: DatabaseSync,
-  reference: C.ValidationSummaryInputReferenceV1,
-  attempt: Attempt,
-  latestAt: string,
-  referenceSource: "request" | "stored" = "stored",
-): C.FrozenValidationSummaryInputV1 {
-  const saved = readFrozenValidationSummaryInputInTransaction(database, reference.inputId);
-  const invalidReference = () =>
-    fail(
-      referenceSource === "request"
-        ? "VALIDATION_SUMMARY_INPUT_CONFLICT"
-        : "VALIDATION_SUMMARY_INPUT_CORRUPT",
-    );
-  if (
-    !saved ||
-    saved.document.context.jobId !== attempt.attempt.job_id ||
-    saved.document.context.runAttemptId !== attempt.attempt.id
-  )
-    return invalidReference();
-  if (saved.document.frozenAt > latestAt || saved.document.frozenAt < attempt.attempt.started_at)
-    fail("VALIDATION_SUMMARY_INPUT_CORRUPT");
-  runnerInput(attempt, saved.document.context);
-  const expected = document(
-    attempt,
-    { inputId: reference.inputId, context: saved.document.context },
-    saved.document.frozenAt,
-  );
-  if (!equal(saved.document, expected)) fail("VALIDATION_SUMMARY_INPUT_CORRUPT");
-  if (!equal(reference, response(expected).reference)) return invalidReference();
-  return saved.document;
-}
-
 function runnerInput(
   attempt: Attempt,
   context: C.ValidationSummaryContextV1,
@@ -308,7 +273,7 @@ function prepare(
     C.getFreezeValidationSummaryInputRequestIssues(input.request).length
   )
     fail();
-  const attempt = readModelInvocationAttemptInTransaction(
+  const attempt = readValidationSummaryInputAttemptInTransaction(
     database,
     { workerTokenSha256: input.workerTokenSha256, lease: input.request.lease },
     now,
@@ -338,13 +303,7 @@ function prepare(
     return { kind: "replay", response: response(saved.document) };
   }
   if (readOnly) fail("DATABASE_READ_ONLY");
-  assertActiveModelInvocationAttempt(attempt, now);
-  if (
-    database
-      .prepare("SELECT 1 FROM model_invocation_openings WHERE run_attempt_id = ?")
-      .get(input.request.lease.runAttemptId)
-  )
-    fail("VALIDATION_SUMMARY_INPUT_CONFLICT");
+  assertActiveValidationSummaryInputAttempt(attempt, now);
   return {
     kind: "verify",
     evidence: collect(database, runner, input.request.context, fingerprint),

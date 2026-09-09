@@ -1,8 +1,9 @@
 # Agentic Review Windows Worker
 
 The Worker is one outbound-only Windows process. It registers with the Server, claims fenced
-leases, prepares isolated Git worktrees, and executes Codex reviews or configured validation
-profiles. It submits a structured result and uploads bounded, scoped evidence assets when required.
+leases, prepares isolated Git worktrees, and executes configured validation profiles and reviews
+through Codex CLI or GitHub Copilot CLI. It submits a structured result and uploads bounded, scoped
+evidence assets when required.
 Headless deployments can run as a service. Windows desktop UI validation requires a dedicated
 active, unlocked interactive session and an exclusive session lease.
 
@@ -128,33 +129,39 @@ The file contains exactly one compact JSON object:
 {"profileId":"agentic-review-worker-auth-v1","token":"arw1_<43-base64url-characters>","workerNodeId":"<entity-id>"}
 ```
 
-The parent Worker process owns this Token. Git, Codex, ProcessHost children, repository commands,
+The parent Worker process owns this Token. Git, model CLI, ProcessHost children, repository commands,
 and validation commands receive replacement environments that do not contain it.
 
-## Codex profile and execution configuration
+## CLI-owned model execution
 
-`WORKER_EXECUTION_PROFILE_DIRECTORY` is a dedicated persistent `CODEX_HOME`, separate from all task
-workspaces, temporary roots, shared Git state, and trusted binaries. Before starting ProcessHost or
-sweeping orphan workspaces, the Worker checks directory identities with `lstat` and `realpath`,
-rejecting links, aliases, overlap, and observed changes. Per-attempt `USERPROFILE`, temporary files,
-and control files remain disposable.
+Configure `WORKER_CLI_ENGINE` as `codex` or `copilot` and set
+`WORKER_CLI_EXECUTABLE_PATH` to the installed CLI application. Optionally set `WORKER_CLI_HOME`
+for that CLI's persistent home and `WORKER_CLI_MODEL` for an explicit model choice. The Worker
+detects the installed version through a bounded `--version` invocation; it does not require a
+manually declared CLI version. `WORKER_CLI_SHA256` is an optional installed-binary pin. CLI paths
+may be outside `WORKER_TRUSTED_EXECUTABLE_ROOT`; Windows WinGet application links resolve to their
+installed targets. Version detection uses ProcessHost with a 20-second and 64-KiB limit and records
+the first stdout line. Runtime capabilities expose `cliEngine` and `cliVersion`
+as nullable values. `WORKER_MODEL_EXECUTION_ENABLED` defaults to `true`; set it to `false` and omit
+CLI configuration for a model-free Worker with neither an engine nor an observed CLI version.
 
-Provision `config.toml` and supported authentication under the actual Worker Windows identity in
-that home. File/keyring authentication and supported provider authentication commands are allowed.
-The Worker does not overwrite the profile or copy its authentication files into a task. A login in
-another default Codex profile is not sufficient. Native compatibility checks currently pin Codex
-0.145.0.
+Use the CLI's own login command under the Windows identity that runs the Worker, with the same
+optional home. The CLI manages its provider, authentication and network traffic. The Worker does
+not read, copy or rewrite CLI auth/provider configuration, and it does not create task-specific
+copies of login storage. Login in a different account or CLI home does not establish readiness.
+Keep persistent CLI state outside disposable workspaces and task temporary directories.
 
-The loader selects only allowed model/provider/auth settings. `--ignore-user-config` and fixed CLI
-overrides suppress other user configuration, MCP, plugins, hooks, notifications, and inherited
-extra writable roots. Project trust is `untrusted` to suppress repository config; admitted code
-remains trusted, and `AGENTS.md` is still loaded. Approval uses `--config approval_policy="never"`.
+The project owns the task prompt, output schema, selected CLI configuration, managed process exit
+and structured result. It has no global provider registry, provider metadata classification file,
+HTTP relay or provider call ledger. A configured model name and reported CLI version do not prove
+which remote model a provider used. See the
+[CLI-owned execution design](../../docs/design/2026-09-10-cli-owned-model-execution.md).
 
-Selected provider HTTP headers become `CODEX_PROVIDER_HEADER_<n>` variables passed only to native
-Codex, never credential values in argv. Build/test shells receive exactly `COMSPEC`, `PATH`,
-`PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, and `USERPROFILE`; their environment contains neither the
-Codex home nor provider, Worker, or GitHub credentials. Extra write access is limited to the current
-task temporary directory.
+`WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_PROCESSES`,
+`WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES` bound model execution through
+ProcessHost. These limits and replacement child environments preserve operational control and
+exclude the Worker Bearer Token; they do not establish hostile-code or network isolation inside
+the VM. Deterministic validation retains its own readiness, evidence and cleanup checks.
 
 ## Development launch
 
@@ -172,7 +179,7 @@ Then configure the execution tools and launch the Worker:
 
 ```powershell
 Copy-Item .\deploy\worker\worker-config.template.psd1 .\deploy\worker\worker-config.psd1
-# Fill in pinned executable paths, SHA-256 digests, and URL-specific values.
+# Fill in the Server URL, runtime paths, CLI selection, and ProcessHost/Git integrity settings.
 .\deploy\worker\start-worker.ps1 -ConfigPath .\deploy\worker\worker-config.psd1
 ```
 
@@ -181,7 +188,7 @@ Copy-Item .\deploy\worker\worker-config.template.psd1 .\deploy\worker\worker-con
 Worker-side shared Git cache and conservative GC controls. Process-level values such as `NODE_ENV`
 remain service-manager configuration.
 
-The launch script resolves Node.js and normalizes `PATH`. Do not add `WORKER_RECIPE_IDS`; Codex runs
+The launch script resolves Node.js and normalizes `PATH`. Do not add `WORKER_RECIPE_IDS`; the CLI runs
 repository build/test commands directly. If initialization fails after ProcessHost starts, the
 Worker waits for ProcessHost closure before reporting the original error.
 

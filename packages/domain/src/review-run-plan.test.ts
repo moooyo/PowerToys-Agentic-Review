@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  evaluationModelExecutionCapabilityLabels,
   type IssueReproductionRequestV1,
   type ReviewRunPlanInput,
   type ReviewRunRequest,
@@ -18,6 +19,7 @@ import {
   evaluateReviewRunStructuralReadiness,
   getRequiredReviewRunRequestBlockers,
   getReviewRunExecutorCapabilityLabels,
+  getReviewRunRequiredCapabilities,
 } from "./review-run-plan.js";
 import { evaluateValidationApproval } from "./validation-policy.js";
 
@@ -25,6 +27,39 @@ const now = "2026-09-07T00:00:00.000Z";
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const actor = { githubUserId: 10, login: "reviewer" };
+
+describe("frozen evaluation model capability requirements", () => {
+  it.each([
+    ["pr_static_build", "headless", evaluationModelExecutionCapabilityLabels.review],
+    ["issue_triage", "headless", evaluationModelExecutionCapabilityLabels.review],
+    ["pr_ui", "windows_desktop", evaluationModelExecutionCapabilityLabels.summary],
+    ["issue_validation", "headless", evaluationModelExecutionCapabilityLabels.summary],
+  ] as const)(
+    "requires the configured %s runtime in shared readiness and claim labels",
+    (workflow, target, label) => {
+      const selected = { ...request(workflow, target), requiredCheckIds: [] };
+      const plan = {
+        schemaVersion: "ReviewRunExecutionPlanV2",
+        modelRequirements: { required: true },
+      };
+      expect(getReviewRunExecutorCapabilityLabels(plan, selected)[label]).toBe("1");
+      expect(getReviewRunRequiredCapabilities(plan, selected)).toContain(label);
+      const profileOnly = {
+        ...plan,
+        modelRequirements: { ...plan.modelRequirements, required: false },
+      };
+      const ordinary = { ...plan, schemaVersion: "ReviewRunExecutionPlanV1" };
+      for (const other of [profileOnly, ordinary]) {
+        const labels = getReviewRunExecutorCapabilityLabels(other, selected);
+        const required = getReviewRunRequiredCapabilities(other, selected);
+        for (const runtimeLabel of Object.values(evaluationModelExecutionCapabilityLabels)) {
+          expect(labels[runtimeLabel]).toBeUndefined();
+          expect(required).not.toContain(runtimeLabel);
+        }
+      }
+    },
+  );
+});
 
 function first<T>(values: readonly T[]): T {
   const value = values[0];

@@ -1,70 +1,49 @@
 # Model-free validation Worker
 
-Status: implemented and verified through component regression, real Windows factory startup and
-a connected Windows WorkerService/Linux Server acceptance. This change does not enable evaluation
-execution or establish filesystem/network isolation. See the
-[delivery record](../../artifacts/m32-evaluations-20260908/model-free-worker-service-delivery-notes.md)
-for exact scope, retained harness failure and independent acceptance evidence.
+The active execution contract is
+[CLI-owned model execution](./2026-09-10-cli-owned-model-execution.md). One VM runs one long-lived
+Worker with the existing ProcessHost, Job lease, workspace and validation lifecycle.
 
-## Problem and intended behavior
+## Configuration and startup
 
-Profile validation currently initializes a persistent Codex home, reads a provider profile and
-requires a Codex executable even when the selected workflow does not request a model. Compilation,
-test probes and UI checks should be deployable without those dependencies. Such a Worker must also
-be excluded from tasks that require a model, rather than claiming them and silently omitting review.
+`WORKER_MODEL_EXECUTION_ENABLED` defaults to `true`. Set it to `false` and omit model CLI
+settings to run deterministic validation without Codex CLI or GitHub Copilot CLI. ProcessHost,
+Git, trusted infrastructure binaries, workspaces and validation target settings remain required
+when execution is enabled. Optional model summaries must stay disabled in model-free mode.
 
-`WORKER_MODEL_EXECUTION_ENABLED=false` selects the explicit model-free startup path. The existing
-model-enabled mode remains the default. The disabled configuration has no Codex executable, SHA,
-version, persistent profile or evaluation-model fields. It retains the common ProcessHost, Git,
-workspace and validation resource settings. Existing resource environment names remain compatible;
-the disabled runtime represents their values as validation limits, not a fabricated model identity.
+The disabled path does not prepare a model CLI, run its version probe or create a model executor.
+It does not read CLI login/provider files. The active model-enabled path requires only
+`WORKER_CLI_ENGINE` (`codex` or `copilot`) and `WORKER_CLI_EXECUTABLE_PATH`;
+`WORKER_CLI_HOME`, `WORKER_CLI_MODEL` and `WORKER_CLI_SHA256` are optional. The CLI owns its
+login, configuration and HTTP requests. There is no provider registry or relay to configure.
 
-Optional summaries and evaluation-model configuration conflict with disabled model execution and
-must be rejected before configuration causes file reads. Direct startup composition repeats the
-relevant checks. The disabled path does not initialize/read a persistent Codex home or provider,
-verify a Codex binary, register the built-in Codex command, or construct review, summary or model
-invocation factories. The existing per-attempt workspace can retain an empty `codex-home` layout
-directory for shared identity/cleanup invariants; no provider data is put there or exposed to the
-validation command environment.
+Resource settings use `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_PROCESSES`,
+`WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES`. Git, total process,
+workspace, headless, Web and Windows UI budgets retain their separate settings.
 
-Headless, Web and Windows desktop validation retain their independent driver readiness, disk and
-process budgets, evidence handling and cleanup. The setting does not make an unavailable target
-ready. It does not authorize evaluation commands to bypass their separate execution boundary.
+## Capabilities and scheduling
 
-## Capability and scheduling semantics
+Worker capabilities expose nullable `cliEngine` and `cliVersion`. Both are null for a
+model-free Worker; no placeholder version is advertised. Runtime-derived capability labels
+cannot be replaced by deployment labels. Model-enabled startup detects the actual installed
+CLI version through a bounded `--version` call.
 
-The Worker derives the reserved `modelExecution: "disabled"` label from startup configuration.
-Deployment labels cannot override it through another value or letter case. The existing
-`codexVersion: "not-configured"` value describes the absence of a configured model client; it is
-not a measured version or an execution attestation.
+The shared model-requirement classifier keeps a model-free Worker from claiming required-model
+work. Ordinary PR static review, Issue triage and required-model evaluations need an available
+CLI. Profile-only evaluation and eligible deterministic UI/Issue validation do not. Disabling
+model execution cannot silently turn a required model step into an optional one.
 
-An absent opt-out label retains compatibility with existing Workers. The Server's shared capability
-matching path rejects a disabled Worker for every legacy model task, ordinary static PR review and
-Issue triage, and any evaluation with a frozen required-model declaration. Ordinary PR UI and Issue
-validation can run without their optional summaries. Profile-only evaluation is also classified as
-not requiring a model, but still must pass every existing evaluation execution/admission gate.
+The Worker independently rejects required-model input before model preparation. Full envelope,
+source, authorization, lease and target-readiness checks remain separate. A browser or desktop
+setting does not make an unavailable target ready.
 
-Admission, claim, polling and diagnostics use the same classification. The Worker independently
-rejects model-required input before workspace or command preparation. Full envelope/source/lease
-validation remains separate; the small model-requirement classifier only consumes validated input
-and never supplies authorization. Existing plans, serialized contexts, migration history and model
-requirements are not rewritten by this Worker configuration change.
+## Acceptance boundary
 
-## Acceptance requirements
+Verify the model-free configuration without CLI installation or login files, null CLI
+capabilities, mixed-fleet scheduling and early required-model rejection. Separately verify real
+target execution, cancellation, evidence delivery and cleanup on the intended VM.
 
-- Verify configuration without Codex paths, version, persistent profile or provider files; reject
-  conflicting summary/evaluation configuration before filesystem access.
-- Verify that disabled startup does not call model binary/provider/home preparation or construct
-  model executors, including failure and cleanup paths.
-- Verify runtime-derived labels and preservation of ordinary target readiness.
-- Verify real owner/admission/claim behavior with a mixed Worker fleet: model tasks remain pending
-  or go to a compatible Worker, while model-free validation can be claimed normally.
-- Verify mandatory-model rejection in the Worker before any workspace or child process activity.
-- Retain actual execution, source identity, cancellation and result/evidence checks when accepting
-  a deployment; unit configuration checks alone do not accept target execution.
-
-This is a model orchestration choice, not an operating-system sandbox. Registered profile commands
-still execute deployment-trusted code. Evaluation purpose restrictions, actual model isolation,
-Windows application isolation and deployment acceptance remain independent work. No test may write
-to any real repository PR or Issue without the user's approval of the exact target, operation and
-content, as required by the repository AGENTS.md.
+Historical model-free acceptance reports remain in the artifact ledger and apply to their
+recorded source only. They do not prove the new direct CLI path, remote model identity or VM
+isolation. Verification uses `test-env` unless local verification is explicitly authorized;
+real repository PR/Issue writes always require explicit approval of their exact scope.

@@ -112,8 +112,6 @@ describe("batch comparison interface", () => {
       "Candidate profile version",
       "Baseline Prompt version",
       "Candidate Prompt version",
-      "Baseline model runtime",
-      "Candidate model runtime",
       "Baseline check for case case-1, criterion criterion-1",
       "Candidate check for case case-1, criterion criterion-1",
     ])
@@ -121,11 +119,7 @@ describe("batch comparison interface", () => {
     expect(
       state.queries.find((query) => query.queryKey.includes("batch-prompts"))?.queryKey,
     ).toContain("pr_static_build");
-    expect(
-      state.queries.find((query) => query.queryKey.includes("batch-model-runtime-options"))
-        ?.queryKey,
-    ).toContain("repository-a");
-    expect(html).toContain("They do not confirm Worker readiness or actual model execution");
+    expect(html).toContain("The Worker runs its configured model CLI");
   });
   it("gives the published version and cancellation reason explicit accessible names", () => {
     const workspace = renderToStaticMarkup(

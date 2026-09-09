@@ -18,7 +18,6 @@ import {
   readEvaluationSourceReproductionInTransaction,
 } from "./evaluation-reproduction.js";
 import { assertEvaluationSourceSnapshotIntegrity } from "./evaluation-source.js";
-import { readModelRuntimeRegistrationInTransaction } from "./model-runtime-registry.js";
 import { assertRepositoryPermission, isPlatformAdministrator } from "./operator-access.js";
 import {
   handlePromptConfigurationRequest,
@@ -122,36 +121,10 @@ function resolveConfiguration(
       "A selected evaluation configuration has a future publication timestamp.",
     );
   }
-  const modelRuntime =
-    selection.modelRuntimeRegistrationId === undefined
-      ? undefined
-      : readModelRuntimeRegistrationInTransaction(database, selection.modelRuntimeRegistrationId, {
-          requireEnabled: true,
-          now,
-        });
-  if (modelRuntime === null) missing();
-  if (modelRuntime !== undefined && input.request.mode !== "prompt_and_profile")
-    fail(
-      "PLATFORM_INVALID",
-      "Profile-only evaluations cannot select a model runtime registration.",
-    );
   return {
     profileVersion,
     prompt: { workflowKind, version },
-    // Registration freezes an expectation; it does not attest actual execution or isolation.
-    modelRequirements: {
-      required: input.request.mode === "prompt_and_profile",
-      expectedModelIdentityDigest: modelRuntime?.registration.identitySha256 ?? null,
-      ...(modelRuntime === undefined
-        ? {}
-        : {
-            runtimeRegistration: {
-              registrationId: modelRuntime.registration.id,
-              registrationSha256: modelRuntime.registrationSha256,
-            },
-          }),
-    },
-    ...(modelRuntime === undefined ? {} : { modelRuntimeRegistration: modelRuntime.registration }),
+    modelRequirements: { required: input.request.mode === "prompt_and_profile" },
   };
 }
 

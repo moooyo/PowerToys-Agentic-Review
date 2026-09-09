@@ -1,14 +1,14 @@
 import { types } from "node:util";
 import {
+  CliModelExecutionV1Schema,
+  getCliModelExecutionIssues,
   IssueReproductionRequestAssessmentV1Schema,
   IssueValidationReportV1Schema,
   IssueValidationSummaryV1Schema,
-  ModelInvocationScopeV1Schema,
   maximumRunCompletionResultUtf8Bytes,
   PullRequestValidationReportV1Schema,
   PullRequestValidationSummaryV1Schema,
   ReviewExecutionEvidenceSchema,
-  Sha256Schema,
   TestProbeReceiptV1Schema,
   ValidationExecutionDetailsSchema,
   type ValidationSummaryV1,
@@ -29,19 +29,6 @@ import {
 } from "./validation-job-results.js";
 
 const strict = { additionalProperties: false } as const;
-export const ValidationModelInvocationReferenceV1Schema = Type.Object(
-  {
-    invocationId: ModelInvocationScopeV1Schema.properties.invocationId,
-    scopeSha256: Sha256Schema,
-    receiptSetSha256: Sha256Schema,
-    modelOutputSha256: Sha256Schema,
-  },
-  strict,
-);
-export type ValidationModelInvocationReferenceV1 = Static<
-  typeof ValidationModelInvocationReferenceV1Schema
->;
-
 export const ValidationJobResultV2ModelResultSchema = Type.Union([
   PrReviewPlanV2ModelResultSchema,
   IssueTriageV2ModelResultSchema,
@@ -76,12 +63,12 @@ const common = {
 };
 const completed = {
   state: Type.Literal("completed"),
-  invocation: ValidationModelInvocationReferenceV1Schema,
+  execution: CliModelExecutionV1Schema,
   executionEvidence: ReviewExecutionEvidenceSchema,
 };
 
 // The model payload remains exactly as validated before Worker observations are attached.
-// A matching reference is consistency only; the owner independently authorizes result acceptance.
+// CLI metadata records task/output correlation, while observations remain separate from model text.
 export const ValidationJobResultV2Schema = Type.Union([
   Type.Object(
     {
@@ -169,7 +156,7 @@ function strictJson(value: unknown, ancestors = new Set<object>()): boolean {
   return valid;
 }
 
-/** Does not authenticate invocation references, verify Worker evidence or grant execution acceptance. */
+/** Checks raw output and CLI metadata consistency; the Server binds the result to its active lease. */
 export function getValidationJobResultV2Issues(value: unknown): string[] {
   const invalid = "ValidationJobResultV2 must match its strict JSON contract.";
   try {
@@ -183,12 +170,14 @@ export function getValidationJobResultV2Issues(value: unknown): string[] {
     const issues: string[] = [];
     if (result.report.checks.some((check) => check.source !== "runner"))
       issues.push("ValidationJobResultV2 report checks must contain only runner observations.");
-    if (
-      result.modelReview.state === "completed" &&
-      createCanonicalResult(result.modelReview.result).sha256 !==
-        result.modelReview.invocation.modelOutputSha256
-    )
-      issues.push("The raw model result must match the referenced canonical model output digest.");
+    if (result.modelReview.state === "completed") {
+      issues.push(...getCliModelExecutionIssues(result.modelReview.execution));
+      if (
+        createCanonicalResult(result.modelReview.result).sha256 !==
+        result.modelReview.execution.outputSha256
+      )
+        issues.push("The raw model result must match its canonical CLI output digest.");
+    }
     return issues;
   } catch {
     return [invalid];

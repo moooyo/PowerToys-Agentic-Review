@@ -1,4 +1,5 @@
 import {
+  evaluationModelExecutionCapabilityLabels,
   type JobExecutionTemplate,
   maximumClaimLeaseResponseUtf8Bytes,
   workerModelExecutionDisabledLabel,
@@ -70,6 +71,56 @@ const assignment: SchedulingClaimAssignment = {
 };
 
 describe("shared scheduling eligibility", () => {
+  it.each([
+    { workflow: "pr_static_build", required: true, labels: {}, eligible: false },
+    {
+      workflow: "pr_static_build",
+      required: true,
+      labels: { [evaluationModelExecutionCapabilityLabels.review]: "1" },
+      eligible: true,
+    },
+    {
+      workflow: "issue_validation",
+      required: true,
+      labels: { [evaluationModelExecutionCapabilityLabels.review]: "1" },
+      eligible: false,
+    },
+    {
+      workflow: "issue_validation",
+      required: true,
+      labels: { [evaluationModelExecutionCapabilityLabels.summary]: "1" },
+      eligible: true,
+    },
+    { workflow: "issue_validation", required: false, labels: {}, eligible: true },
+  ])(
+    "matches evaluation model factories for $workflow required=$required with $labels",
+    ({ workflow, required, labels, eligible }) => {
+      // Matching receives parsed templates in production; only fields used by this pure predicate are needed here.
+      const evaluationTemplate = {
+        ...template,
+        validation: {
+          schemaVersion: "ValidationJobContextV2",
+          workflowKind: workflow,
+          target: "headless",
+          requestId: "evaluation-request",
+          purpose: { kind: "evaluation" },
+          modelRequirements: { required },
+          profileVersion: { config: { requiredCapabilities: [], test: [] } },
+        },
+      } as unknown as JobExecutionTemplate;
+      const capabilities = {
+        labels: {
+          executionEnvelope: "2",
+          validationHeadless: "1",
+          validationEvaluation: "1",
+          ...labels,
+        },
+      };
+      expect(evaluateJobWorkerCapabilities(evaluationTemplate, {}, capabilities)).toBe(eligible);
+      expect(evaluateJobWorkerCapabilities(template, {}, capabilities)).toBe(true);
+    },
+  );
+
   it("rejects Legacy model work for a Worker that explicitly disables model execution", () => {
     const capabilities = Object.freeze({
       labels: Object.freeze({

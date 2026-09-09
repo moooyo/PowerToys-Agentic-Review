@@ -1,11 +1,10 @@
+import { win32 } from "node:path";
 import type { JobExecutionEnvelopeV2 } from "@agentic-review/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerConfig, WorkerExecutionConfig } from "./config.js";
-import type { PreparedEvaluationModelRuntime } from "./execution/evaluation-model-runtime.js";
 import type { JobExecutionContext } from "./execution/job-executor.js";
 import type { PreparedJobWorkspace } from "./execution/job-workspace.js";
-import { modelArtifactEvaluationFixture } from "./execution/model-output-artifact.testing.js";
-import type { PreparedCodexOutputRunnerOptions } from "./execution/prepared-codex-output-runner.js";
+import type { PreparedCliOutputRunnerOptions } from "./execution/prepared-cli-output-runner.js";
 import type { ProfileJobExecutorOptions } from "./execution/profile-job-executor.js";
 import type { UiProfileRunnerOptions } from "./execution/ui-profile-runner.js";
 import type { HeadlessValidationCheckRunnerOptions } from "./execution/validation-check-runner.js";
@@ -19,10 +18,7 @@ import type { ConsoleJsonLogger } from "./logging/logger.js";
 const state = vi.hoisted(() => ({
   close: vi.fn(async (): Promise<void> => undefined),
   createHost: vi.fn(),
-  prepareModel: vi.fn(),
-  loadRelayProfile: vi.fn(),
-  loadProvider: vi.fn(),
-  verifyHome: vi.fn(),
+  versionProbe: vi.fn(),
   verifyBinaries: vi.fn(),
   prepare: vi.fn(),
   sweep: vi.fn(async () => ({ removedBytes: 0n })),
@@ -31,15 +27,13 @@ const state = vi.hoisted(() => ({
   observations: vi.fn(),
   validation: undefined as ValidationRuntimeConfig | undefined,
   defaults: undefined as ValidationRuntimeTrustedDefaults | undefined,
-  providerEnvironment: {} as Record<string, string>,
-  providerProtectedValues: undefined as readonly string[] | undefined,
   profileOptions: undefined as ProfileJobExecutorOptions | undefined,
   headlessOptions: [] as HeadlessValidationCheckRunnerOptions[],
   uiCommandOptions: [] as HeadlessValidationCheckRunnerOptions[],
   uiOptions: [] as UiProfileRunnerOptions[],
   reviewOptions: [] as unknown[],
   summaryOptions: [] as ValidationSummaryExecutorOptions[],
-  preparedOptions: [] as PreparedCodexOutputRunnerOptions[],
+  preparedOptions: [] as PreparedCliOutputRunnerOptions[],
   workspaceRoots: [] as string[],
 }));
 
@@ -48,16 +42,9 @@ vi.mock("node:fs/promises", async (original) => ({
   mkdir: vi.fn(async () => undefined),
   realpath: vi.fn(async (path: string) => path),
   lstat: vi.fn(async () => ({ isDirectory: () => true, isSymbolicLink: () => false })),
-}));
-vi.mock("./execution/codex-provider-profile.js", () => ({
-  loadCodexRelayProviderProfile: state.loadRelayProfile,
-  loadCodexProviderProfile: state.loadProvider,
-}));
-vi.mock("./execution/evaluation-model-runtime.js", () => ({
-  prepareEvaluationModelRuntime: state.prepareModel,
-}));
-vi.mock("./execution/persistent-codex-home.js", () => ({
-  verifyPersistentCodexHome: state.verifyHome,
+  readFile: vi.fn(async () => {
+    throw new Error("Startup must not read account CLI files.");
+  }),
 }));
 vi.mock("./execution/trusted-binary.js", () => ({
   verifyTrustedExecutionBinaries: state.verifyBinaries,
@@ -65,6 +52,11 @@ vi.mock("./execution/trusted-binary.js", () => ({
 vi.mock("./execution/process-host-client.js", () => ({
   deriveWorkerProcessHostInstanceKey: () => "fixture-host",
   StdioProcessHostClient: { create: state.createHost },
+}));
+vi.mock("./execution/managed-process-runner.js", () => ({
+  ProductionManagedProcessRunner: class {
+    run = state.versionProbe;
+  },
 }));
 vi.mock("./execution/workspace-disk-budget.js", () => ({
   ProductionWorkspaceDiskBudget: class {
@@ -90,9 +82,9 @@ vi.mock("./execution/profile-job-executor.js", () => ({
     }
   },
 }));
-vi.mock("./execution/prepared-codex-output-runner.js", () => ({
-  PreparedCodexOutputRunner: class {
-    constructor(options: PreparedCodexOutputRunnerOptions) {
+vi.mock("./execution/prepared-cli-output-runner.js", () => ({
+  PreparedCliOutputRunner: class {
+    constructor(options: PreparedCliOutputRunnerOptions) {
       state.preparedOptions.push(options);
     }
   },
@@ -146,204 +138,212 @@ vi.mock("./server-client/evidence-api.js", () => ({ HttpWorkerEvidenceApi: class
 
 import { createExecutionRuntime } from "./main.js";
 
-describe("evaluation model production composition", () => {
-  function enabledModelConfig(summary = false): WorkerConfig {
-    const current = config();
-    if (current.execution === undefined || current.execution.modelExecutionEnabled === false)
-      throw new Error("Missing fixture execution settings.");
+describe("preconfigured CLI production composition", () => {
+  function evaluation(workflowKind: "pr_static_build" | "issue_validation", required = true) {
     return {
-      ...current,
-      execution: {
-        ...current.execution,
-        codexVersion: "0.145.0",
-        evaluationModel: {
-          backend: "app_server",
-          workerBundleSha256: "d".repeat(64),
-          nodeExecutableSha256: "e".repeat(64),
-          reviewLaunchPolicySha256: "f".repeat(64),
-          ...(summary ? { summaryLaunchPolicySha256: "2".repeat(64) } : {}),
-        },
+      validation: {
+        schemaVersion: "ValidationJobContextV2",
+        purpose: { kind: "evaluation" },
+        workflowKind,
+        modelRequirements: { required },
       },
-    };
+    } as JobExecutionEnvelopeV2;
   }
-  it("leaves the parent relay loader and interactive stdin absent by default", async () => {
-    await createExecutionRuntime(config(), logger);
-    expect(state.prepareModel).not.toHaveBeenCalled();
-    expect(state.loadRelayProfile).not.toHaveBeenCalled();
-    expect(state.createHost.mock.calls[0]?.[0]).not.toHaveProperty("interactiveStdin");
-  });
-  it("passes actual startup inputs to the composer and selects the binding only for evaluation", async () => {
-    const api = {
-      beginModelInvocation: vi.fn(),
-      sealModelInvocation: vi.fn(),
-      submitModelInvocationReceipts: vi.fn(),
-    };
-    const binding: PreparedEvaluationModelRuntime = {
-      implementationSha256: "1".repeat(64),
-      review: {
-        modelInvocationBackend: { kind: "app_server", codexExecutableSha256: "b".repeat(64) },
-        createModelInvocation: vi.fn(),
-        codexProviderProtectedValues: ["synthetic-upstream-secret"],
-      },
-    };
-    const provider = { state: "supported", declared: { providerId: "synthetic-provider" } };
-    state.loadRelayProfile.mockResolvedValue(provider);
-    state.prepareModel.mockResolvedValue(binding);
-    state.providerEnvironment = { CODEX_PROVIDER_HEADER_0: "synthetic-upstream-secret" };
-    const runtime = await createExecutionRuntime(enabledModelConfig(), logger, api);
-    expect(state.prepareModel).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        api,
-        provider,
-        nodeExecutablePath: process.execPath,
-        nodeVersion: process.versions.node,
-        processEntryPath: process.argv[1],
-        codexMeasurement: { sha256: "b".repeat(64) },
-      }),
-    );
-    expect(state.createHost.mock.calls[0]?.[0]).toMatchObject({ interactiveStdin: true });
-    expect(runtime.capabilities.labels.validationEvaluation).toBeUndefined();
-    const workspaceProvider = {} as ProfileJobExecutorOptions["workspaceProvider"];
-    state.profileOptions?.createModelExecutor?.(
-      workspaceProvider,
-      {} as JobExecutionEnvelopeV2,
-      context(),
-    );
-    expect(state.reviewOptions.at(-1)).toMatchObject({
-      codexProviderEnvironment: state.providerEnvironment,
+
+  it("observes the installed CLI version through a bounded ProcessHost command", async () => {
+    state.versionProbe.mockResolvedValue({
+      exitCode: 0,
+      stdout: "copilot 1.2.3\nAdditional information\n",
+      stderr: "",
     });
-    expect(state.reviewOptions.at(-1)).not.toHaveProperty("createModelInvocation");
-    state.profileOptions?.createModelExecutor?.(
-      workspaceProvider,
-      modelArtifactEvaluationFixture().envelope,
-      context(),
+    vi.stubEnv("WORKER_TOKEN", "fixture-worker-token");
+    vi.stubEnv("GITHUB_TOKEN", "fixture-account-token");
+    vi.stubEnv("SERVER_SESSION_SECRET", "fixture-server-secret");
+    vi.stubEnv("Agentic_Review_Oidc_Client_Secret", "fixture-control-secret");
+    vi.stubEnv("custom_endpoint", "https://fixture.invalid/model");
+    vi.stubEnv("CUSTOM_TOKEN", "fixture-custom-token");
+    vi.stubEnv("CLI_TOKEN_ALIAS", config().workerToken);
+    const runtime = await createExecutionRuntime(config(), logger);
+    expect(runtime.capabilities.cliVersion).toBe("copilot 1.2.3");
+    expect(state.reviewOptions[0]).toHaveProperty("cliVersion", "copilot 1.2.3");
+    expect(state.versionProbe).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        executable: "C:\\Trusted\\codex.exe",
+        arguments: ["--version"],
+        workingDirectory: "C:\\WorkerData\\GitRuntime",
+        environmentMode: "replace",
+        standardInput: "",
+        limits: {
+          hardTimeoutMs: 20_000,
+          maximumProcessCount: 8,
+          maximumMemoryBytes: 512 * 1024 * 1024,
+          maximumOutputBytes: 64 * 1024,
+        },
+      }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(state.reviewOptions.at(-1)).toMatchObject({ ...binding.review, workspaceProvider });
-    expect(state.reviewOptions.at(-1)).not.toHaveProperty("codexProviderEnvironment");
-    expect(state.reviewOptions.at(-1)).not.toHaveProperty("codexConfigurationOverrides");
-    expect(binding.review.createModelInvocation).not.toHaveBeenCalled();
-    expect(api.beginModelInvocation).not.toHaveBeenCalled();
-  });
-  it("refuses composition failure before starting the ProcessHost", async () => {
-    state.loadRelayProfile.mockResolvedValue({ state: "unsupported", reason: "PROFILE_MISSING" });
-    state.prepareModel.mockRejectedValue(new Error("Synthetic startup rejection."));
-    await expect(createExecutionRuntime(enabledModelConfig(), logger)).rejects.toThrow(
-      "Synthetic startup rejection",
+    const environment = state.versionProbe.mock.calls[0]?.[0].environment;
+    expect(environment).not.toHaveProperty("WORKER_TOKEN");
+    expect(environment).not.toHaveProperty("CLI_TOKEN_ALIAS");
+    expect(environment).not.toHaveProperty("SERVER_SESSION_SECRET");
+    expect(environment).not.toHaveProperty("AGENTIC_REVIEW_OIDC_CLIENT_SECRET");
+    expect(environment).toMatchObject({
+      USERPROFILE: "C:\\Users\\Worker",
+      CODEX_HOME: "C:\\WorkerData\\Profile",
+      GITHUB_TOKEN: "fixture-account-token",
+      CUSTOM_ENDPOINT: "https://fixture.invalid/model",
+      CUSTOM_TOKEN: "fixture-custom-token",
+      HOME: "C:\\Users\\Worker",
+      USERNAME: "Worker",
+    });
+    expect((state.reviewOptions[0] as PreparedCliOutputRunnerOptions).cliEnvironment).toBe(
+      environment,
     );
-    expect(state.createHost).not.toHaveBeenCalled();
+    expect(Object.isFrozen(environment)).toBe(true);
   });
-  it("does not fall back for unconfigured evaluation review or summary", async () => {
-    state.validation = { ...validation(), summary: { maximumTimeoutMs: 45_000 } };
+
+  it("snapshots the CLI account environment before asynchronous startup", async () => {
+    vi.stubEnv("CUSTOM_TOKEN", "fixture-initial-token");
+    const { realpath } = await import("node:fs/promises");
+    vi.mocked(realpath).mockImplementationOnce(async (path) => {
+      vi.stubEnv("CUSTOM_TOKEN", "fixture-mutated-token");
+      return String(path);
+    });
     await createExecutionRuntime(config(), logger);
-    const evaluation = modelArtifactEvaluationFixture().envelope;
-    const count = state.reviewOptions.length;
+    expect(state.versionProbe.mock.calls[0]?.[0].environment.CUSTOM_TOKEN).toBe(
+      "fixture-initial-token",
+    );
+    expect(
+      (state.reviewOptions[0] as PreparedCliOutputRunnerOptions).cliEnvironment?.CUSTOM_TOKEN,
+    ).toBe("fixture-initial-token");
+  });
+
+  it.each(["", "x".repeat(129), "bad\0version"])(
+    "closes the ProcessHost after unusable version output %j",
+    async (stdout) => {
+      state.versionProbe.mockResolvedValue({ exitCode: 0, stdout, stderr: "" });
+      await expect(createExecutionRuntime(config(), logger)).rejects.toThrow(
+        "did not return a usable version",
+      );
+      expect(state.close).toHaveBeenCalledOnce();
+      expect(state.reviewOptions).toHaveLength(0);
+    },
+  );
+
+  it("sanitizes failed version probes and closes their ProcessHost", async () => {
+    state.versionProbe.mockRejectedValue(new Error("fixture-sensitive-output"));
+    await expect(createExecutionRuntime(config(), logger)).rejects.toThrow(
+      "did not return a usable version",
+    );
+    expect(state.close).toHaveBeenCalledOnce();
+    expect(state.profileOptions).toBeUndefined();
+  });
+
+  it.each(["codex", "copilot"] as const)(
+    "uses the configured %s account for ordinary and evaluation reviews",
+    async (engine) => {
+      const settings = config();
+      if (settings.execution === undefined || settings.execution.modelExecutionEnabled === false)
+        throw new Error("Missing model fixture.");
+      const runtime = await createExecutionRuntime(
+        {
+          ...settings,
+          execution: { ...settings.execution, engine },
+        },
+        logger,
+      );
+      const provider = {} as ProfileJobExecutorOptions["workspaceProvider"];
+      state.profileOptions?.createModelExecutor?.(
+        provider,
+        {} as JobExecutionEnvelopeV2,
+        context(),
+      );
+      state.profileOptions?.createModelExecutor?.(
+        provider,
+        evaluation("pr_static_build"),
+        context(),
+      );
+      expect(state.reviewOptions.at(-1)).toEqual(state.reviewOptions.at(-2));
+      expect(state.reviewOptions.at(-1)).toMatchObject({
+        engine,
+        cliExecutablePath: "C:\\Trusted\\codex.exe",
+        cliVersion: "codex-pinned",
+        cliHomeDirectory: "C:\\WorkerData\\Profile",
+        userProfileDirectory: "C:\\Users\\Worker",
+        appDataDirectory: "C:\\Users\\Worker\\AppData\\Roaming",
+        localAppDataDirectory: "C:\\Users\\Worker\\AppData\\Local",
+      });
+      expect(runtime.capabilities.labels.validationEvaluationReviewModel).toBe("1");
+      expect(state.createHost.mock.calls[0]?.[0]).not.toHaveProperty("interactiveStdin");
+      const { mkdir, readFile } = await import("node:fs/promises");
+      expect(readFile).not.toHaveBeenCalled();
+      expect(vi.mocked(mkdir).mock.calls.some(([path]) => String(path).includes("Profile"))).toBe(
+        false,
+      );
+    },
+  );
+
+  it("leaves the CLI home unset when the installed CLI uses its own defaults", async () => {
+    const settings = config();
+    if (settings.execution === undefined || settings.execution.modelExecutionEnabled === false)
+      throw new Error("Missing model fixture.");
+    const { cliHomeDirectory: _home, ...execution } = settings.execution;
+    await createExecutionRuntime({ ...settings, execution }, logger);
+    expect(state.reviewOptions[0]).not.toHaveProperty("cliHomeDirectory");
+    expect(state.reviewOptions[0]).toHaveProperty("userProfileDirectory", "C:\\Users\\Worker");
+  });
+
+  it.each([true, false])(
+    "freezes evaluation summary inputs with ordinary summaries enabled=%s",
+    async (enabled) => {
+      state.validation = {
+        ...validation(),
+        ...(enabled ? { summary: { maximumTimeoutMs: 45_000 } } : {}),
+      };
+      const summaryInputApi = {
+        freezeValidationSummaryInput: vi.fn(async () => {
+          throw new Error("Not invoked at startup.");
+        }),
+      };
+      const runtime = await createExecutionRuntime(config(), logger, summaryInputApi);
+      state.profileOptions?.createSummaryExecutor?.(evaluation("issue_validation"), context());
+      expect(state.summaryOptions.at(-1)).toMatchObject({ summaryInputApi });
+      expect(state.preparedOptions.at(-1)).toMatchObject({
+        engine: "codex",
+        cliVersion: "codex-pinned",
+      });
+      expect(summaryInputApi.freezeValidationSummaryInput).not.toHaveBeenCalled();
+      expect(runtime.capabilities.labels.validationEvaluationSummaryModel).toBe("1");
+      expect(state.profileOptions?.optionalSummariesEnabled).toBe(enabled);
+    },
+  );
+
+  it("does not advertise evaluation summaries without the input persistence API", async () => {
+    const runtime = await createExecutionRuntime(config(), logger);
+    expect(runtime.capabilities.labels.validationEvaluationSummaryModel).toBeUndefined();
+    expect(() =>
+      state.profileOptions?.createSummaryExecutor?.(evaluation("issue_validation"), context()),
+    ).toThrow("summary input API");
+  });
+
+  it("does not create a model executor for profile-only evaluations", async () => {
+    await createExecutionRuntime(config(), logger);
+    const reviewCount = state.reviewOptions.length;
     expect(() =>
       state.profileOptions?.createModelExecutor?.(
         {} as ProfileJobExecutorOptions["workspaceProvider"],
-        evaluation,
+        evaluation("pr_static_build", false),
         context(),
       ),
-    ).toThrow("not configured");
-    expect(state.reviewOptions).toHaveLength(count);
+    ).toThrow("does not request a model review");
     expect(() =>
       state.profileOptions?.createSummaryExecutor?.(
-        modelArtifactEvaluationFixture("issue").envelope,
+        evaluation("issue_validation", false),
         context(),
       ),
-    ).toThrow("not configured");
-    expect(state.summaryOptions).toHaveLength(0);
-  });
-  it.each([true, false])(
-    "connects the pinned evaluation summary with ordinary summaries enabled=%s",
-    async (ordinarySummaryEnabled) => {
-      state.validation = {
-        ...validation(),
-        ...(ordinarySummaryEnabled ? { summary: { maximumTimeoutMs: 45000 } } : {}),
-      };
-      const createSummaryModelInvocation = vi.fn();
-      const binding: PreparedEvaluationModelRuntime = {
-        implementationSha256: "1".repeat(64),
-        review: {
-          modelInvocationBackend: { kind: "app_server", codexExecutableSha256: "b".repeat(64) },
-          createModelInvocation: vi.fn(),
-          codexProviderProtectedValues: ["synthetic-secret"],
-        },
-        summary: {
-          modelInvocationBackend: { kind: "app_server", codexExecutableSha256: "b".repeat(64) },
-          createSummaryModelInvocation,
-          codexProviderProtectedValues: ["synthetic-secret"],
-        },
-      };
-      state.prepareModel.mockResolvedValue(binding);
-      state.loadRelayProfile.mockResolvedValue({ state: "supported" });
-      const freezeValidationSummaryInput = vi.fn();
-      const api = {
-        beginModelInvocation: vi.fn(),
-        sealModelInvocation: vi.fn(),
-        submitModelInvocationReceipts: vi.fn(),
-        freezeValidationSummaryInput,
-      };
-      const runtime = await createExecutionRuntime(enabledModelConfig(true), logger, api);
-      expect(
-        state.prepareModel.mock.calls[0]?.[0].summaryInputApi.freezeValidationSummaryInput,
-      ).toBeTypeOf("function");
-      state.profileOptions?.createSummaryExecutor?.(
-        modelArtifactEvaluationFixture("issue").envelope,
-        context(),
-      );
-      expect(state.summaryOptions.at(-1)).toMatchObject({
-        createSummaryModelInvocation,
-        sensitiveValues: ["synthetic-secret"],
-        ...(ordinarySummaryEnabled ? { maximumSummaryTimeoutMs: 45000 } : {}),
-      });
-      expect(state.preparedOptions.at(-1)).toMatchObject({
-        modelInvocationBackend: binding.summary?.modelInvocationBackend,
-        codexProviderProtectedValues: ["synthetic-secret"],
-      });
-      expect(state.preparedOptions.at(-1)).not.toHaveProperty("codexProviderEnvironment");
-      expect(state.preparedOptions.at(-1)).not.toHaveProperty("codexConfigurationOverrides");
-      expect(runtime.capabilities.labels.validationEvaluation).toBeUndefined();
-      expect(createSummaryModelInvocation).not.toHaveBeenCalled();
-      expect(freezeValidationSummaryInput).not.toHaveBeenCalled();
-      if (!ordinarySummaryEnabled) {
-        expect(state.summaryOptions.at(-1)).not.toHaveProperty("maximumSummaryTimeoutMs");
-        const count = state.summaryOptions.length;
-        expect(state.profileOptions?.optionalSummariesEnabled).toBe(false);
-        expect(
-          state.profileOptions?.createSummaryExecutor?.({} as JobExecutionEnvelopeV2, context()),
-        ).toBeUndefined();
-        expect(state.summaryOptions).toHaveLength(count);
-      }
-    },
-  );
-  it("rejects direct model factory selection for every profile-only evaluation", async () => {
-    state.validation = { ...validation(), summary: { maximumTimeoutMs: 45000 } };
-    await createExecutionRuntime(config(), logger);
-    const reviewCount = state.reviewOptions.length;
-    for (const workflowKind of [
-      "pr_static_build",
-      "issue_triage",
-      "pr_ui",
-      "issue_validation",
-    ] as const) {
-      const input = modelArtifactEvaluationFixture().envelope;
-      input.validation.workflowKind = workflowKind;
-      input.validation.modelRequirements = { required: false, expectedModelIdentityDigest: null };
-      delete input.validation.modelRuntimeRegistration;
-      expect(() =>
-        state.profileOptions?.createModelExecutor?.(
-          {} as ProfileJobExecutorOptions["workspaceProvider"],
-          input,
-          context(),
-        ),
-      ).toThrow("does not request a model review");
-      expect(() => state.profileOptions?.createSummaryExecutor?.(input, context())).toThrow(
-        "does not request a model summary",
-      );
-    }
+    ).toThrow("does not request a model summary");
     expect(state.reviewOptions).toHaveLength(reviewCount);
     expect(state.summaryOptions).toHaveLength(0);
-    expect(state.preparedOptions).toHaveLength(0);
   });
 });
 
@@ -377,24 +377,24 @@ describe("deployed UI observation protocol admission", () => {
 
 function config(): WorkerConfig {
   const execution = {
+    engine: "codex",
     trustedExecutableRoot: "C:\\Trusted",
     processHostPath: "C:\\Trusted\\host.exe",
     processHostSha256: "a".repeat(64),
-    codexExecutablePath: "C:\\Trusted\\codex.exe",
-    codexSha256: "b".repeat(64),
-    codexVersion: "codex-pinned",
+    cliExecutablePath: "C:\\Trusted\\codex.exe",
+    cliSha256: "b".repeat(64),
     gitExecutablePath: "C:\\Trusted\\git.exe",
     gitSha256: "c".repeat(64),
     gitSharedRootDirectory: "C:\\WorkerData\\Repositories",
     workspaceRootDirectory: "C:\\WorkerData\\Workspaces",
     tempDirectory: "C:\\WorkerData\\Temp",
-    profileDirectory: "C:\\WorkerData\\Profile",
+    cliHomeDirectory: "C:\\WorkerData\\Profile",
     processHostRequestTimeoutMs: 15_000,
     processHostStartTimeoutMs: 30_000,
     processHostShutdownTimeoutMs: 15_000,
-    codexMaximumHardTimeoutMs: 60_000,
+    modelMaximumHardTimeoutMs: 60_000,
     gitHardTimeoutMs: 60_000,
-    codexResourceLimits: {
+    modelResourceLimits: {
       maximumProcessCount: 32,
       maximumMemoryBytes: 8 * 1_024 ** 3,
       maximumOutputBytes: 8 * 1_024 ** 2,
@@ -447,7 +447,8 @@ function config(): WorkerConfig {
       architecture: "x64",
       headless: true,
       interactiveDesktop: false,
-      codexVersion: "codex-pinned",
+      cliEngine: "codex",
+      cliVersion: null,
       recipeIds: [],
       labels: { site: "fixture", validationWindowsDesktop: "1", "ui:windows_desktop": "1" },
     },
@@ -504,14 +505,18 @@ const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Co
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const name of Object.keys(process.env)) vi.stubEnv(name, undefined);
   vi.stubEnv("SYSTEMROOT", "C:\\Windows");
   vi.stubEnv("COMSPEC", "C:\\Untrusted\\cmd.exe");
   vi.stubEnv("PATH", "C:\\Windows\\System32;C:\\Tools");
   vi.stubEnv("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+  vi.stubEnv("USERPROFILE", "C:\\Users\\Worker");
+  vi.stubEnv("APPDATA", "C:\\Users\\Worker\\AppData\\Roaming");
+  vi.stubEnv("LOCALAPPDATA", "C:\\Users\\Worker\\AppData\\Local");
+  vi.stubEnv("HOME", "C:\\Users\\Worker");
+  vi.stubEnv("USERNAME", "Worker");
   state.validation = validation();
   state.defaults = undefined;
-  state.providerEnvironment = {};
-  state.providerProtectedValues = undefined;
   state.profileOptions = undefined;
   state.headlessOptions.length = 0;
   state.uiCommandOptions.length = 0;
@@ -522,22 +527,17 @@ beforeEach(() => {
   state.workspaceRoots.length = 0;
   state.close.mockResolvedValue(undefined);
   state.createHost.mockResolvedValue({ close: state.close });
-  state.prepareModel.mockReset();
-  state.loadRelayProfile.mockReset();
-  state.loadProvider.mockReset().mockImplementation(async () => ({
-    configurationOverrides: [],
-    providerEnvironment: state.providerEnvironment,
-    protectedValues: state.providerProtectedValues ?? Object.values(state.providerEnvironment),
-  }));
-  state.verifyHome.mockReset().mockResolvedValue("C:\\WorkerData\\Profile");
+  state.versionProbe
+    .mockReset()
+    .mockResolvedValue({ exitCode: 0, stdout: "codex-pinned\n", stderr: "" });
   state.verifyBinaries.mockReset().mockImplementation(async (options) => ({
     processHostPath: "C:\\Trusted\\host.exe",
     gitPath: "C:\\Trusted\\git.exe",
-    ...(options.codex === undefined
+    ...(options.cli === undefined
       ? { measurements: {} }
       : {
-          codexPath: "C:\\Trusted\\codex.exe",
-          measurements: { codex: { sha256: "b".repeat(64) } },
+          cliPath: "C:\\Trusted\\codex.exe",
+          measurements: { cli: { sha256: "b".repeat(64) } },
         }),
   }));
   state.prepare.mockImplementation(async (value) => value);
@@ -560,13 +560,13 @@ describe("validation-only production startup", () => {
     if (settings === undefined || settings.modelExecutionEnabled === false)
       throw new Error("Missing model fixture.");
     const {
-      codexExecutablePath: _path,
-      codexSha256: _sha,
-      codexVersion: _version,
-      profileDirectory: _profile,
-      evaluationModel: _evaluation,
-      codexResourceLimits,
-      codexMaximumHardTimeoutMs,
+      engine: _engine,
+      cliExecutablePath: _path,
+      cliSha256: _sha,
+      cliHomeDirectory: _profile,
+      model: _model,
+      modelResourceLimits,
+      modelMaximumHardTimeoutMs,
       ...common
     } = settings;
     return {
@@ -575,8 +575,8 @@ describe("validation-only production startup", () => {
       execution: {
         ...common,
         modelExecutionEnabled: false,
-        validationResourceLimits: codexResourceLimits,
-        validationMaximumHardTimeoutMs: codexMaximumHardTimeoutMs,
+        validationResourceLimits: modelResourceLimits,
+        validationMaximumHardTimeoutMs: modelMaximumHardTimeoutMs,
       },
     };
   }
@@ -584,14 +584,9 @@ describe("validation-only production startup", () => {
     "prepares %s without persistent model files, binaries, or factories",
     async (target) => {
       state.validation = validation(target === "headless" ? undefined : target);
-      state.verifyHome.mockRejectedValue(new Error("Model HOME must not be touched."));
-      state.loadProvider.mockRejectedValue(new Error("Provider must not be read."));
       const runtime = await createExecutionRuntime(validationOnly(), logger);
-      expect(state.verifyHome).not.toHaveBeenCalled();
-      expect(state.loadProvider).not.toHaveBeenCalled();
-      expect(state.loadRelayProfile).not.toHaveBeenCalled();
-      expect(state.prepareModel).not.toHaveBeenCalled();
-      expect(state.verifyBinaries.mock.calls[0]?.[0]).not.toHaveProperty("codex");
+      expect(state.verifyBinaries.mock.calls[0]?.[0]).not.toHaveProperty("cli");
+      expect(state.versionProbe).not.toHaveBeenCalled();
       expect(state.defaults?.executables.some((entry) => entry.name === "codex")).toBe(false);
       expect(state.reviewOptions).toEqual([]);
       expect(state.summaryOptions).toEqual([]);
@@ -599,9 +594,10 @@ describe("validation-only production startup", () => {
       expect(state.profileOptions?.createModelExecutor).toBeUndefined();
       expect(state.profileOptions?.createSummaryExecutor).toBeUndefined();
       expect(state.profileOptions?.modelExecutionEnabled).toBe(false);
-      expect(runtime.capabilities.codexVersion).toBe("not-configured");
+      expect(runtime.capabilities.cliEngine).toBeNull();
+      expect(runtime.capabilities.cliVersion).toBeNull();
       expect(runtime.capabilities.labels.modelExecution).toBe("disabled");
-      expect(runtime.capabilities.labels.validationEvaluation).toBeUndefined();
+      expect(runtime.capabilities.labels.validationEvaluation).toBe("1");
       expect(state.createHost.mock.calls[0]?.[0]).not.toHaveProperty("interactiveStdin");
       if (target === "windows") {
         expect(state.session).toHaveBeenCalledOnce();
@@ -618,10 +614,10 @@ describe("validation-only production startup", () => {
       expect(state.close).toHaveBeenCalledOnce();
     },
   );
-  it.each(["WORKER_VALIDATION_SUMMARY_ENABLED", "WORKER_EVALUATION_MODEL_BACKEND"])(
+  it.each(["WORKER_VALIDATION_SUMMARY_ENABLED"])(
     "rejects %s before filesystem or native startup",
     async (name) => {
-      vi.stubEnv(name, name.endsWith("ENABLED") ? "true" : "app_server");
+      vi.stubEnv(name, "true");
       await expect(createExecutionRuntime(validationOnly(), logger)).rejects.toThrow(
         /Model execution is disabled/u,
       );
@@ -638,7 +634,6 @@ describe("validation-only production startup", () => {
       "Synthetic sweep failure",
     );
     expect(state.close).toHaveBeenCalledOnce();
-    expect(state.verifyHome).not.toHaveBeenCalled();
   });
   it("retains the disabled mode across asynchronous startup even if the caller mutates its settings", async () => {
     const settings = validationOnly();
@@ -646,14 +641,12 @@ describe("validation-only production startup", () => {
     vi.mocked(realpath).mockImplementationOnce(async () => {
       if (settings.execution === undefined) throw new Error("Missing fixture settings.");
       Reflect.set(settings.execution, "modelExecutionEnabled", true);
-      Reflect.set(settings.execution, "profileDirectory", "C:\\DoNotRead\\Profile");
+      Reflect.set(settings.execution, "cliHomeDirectory", "C:\\DoNotRead\\Profile");
       return settings.dataDirectory;
     });
     await createExecutionRuntime(settings, logger);
-    expect(state.verifyHome).not.toHaveBeenCalled();
-    expect(state.loadProvider).not.toHaveBeenCalled();
     expect(state.profileOptions?.modelExecutionEnabled).toBe(false);
-    expect(state.verifyBinaries.mock.calls[0]?.[0]).not.toHaveProperty("codex");
+    expect(state.verifyBinaries.mock.calls[0]?.[0]).not.toHaveProperty("cli");
   });
 });
 
@@ -686,10 +679,14 @@ describe("Worker production execution composition", () => {
     expect(state.defaults?.bundleDirectory).not.toContain("checkout");
     expect(runtime.capabilities.labels.validationHeadless).toBe("1");
     expect(runtime.capabilities.labels.executionEnvelope).toBe("2");
+    expect(runtime.capabilities.labels.validationEvaluation).toBe("1");
     expect(runtime.capabilities.labels.validationWindowsDesktop).toBeUndefined();
     expect(state.profileOptions?.legacyExecutor).toBeDefined();
     expect(state.profileOptions?.evidenceUploader).toBeDefined();
-    expect(state.profileOptions?.createSummaryExecutor).toBeUndefined();
+    expect(state.profileOptions?.createSummaryExecutor).toBeTypeOf("function");
+    expect(
+      state.profileOptions?.createSummaryExecutor?.({} as JobExecutionEnvelopeV2, context()),
+    ).toBeUndefined();
     expect(state.summaryOptions).toEqual([]);
     const checkSignal = new AbortController().signal;
     state.capacity.mockResolvedValue(false);
@@ -706,36 +703,12 @@ describe("Worker production execution composition", () => {
     expect(state.summaryOptions[0]).toMatchObject({
       workspaceProvider: state.profileOptions?.workspaceProvider,
       maximumSummaryTimeoutMs: 45_000,
-      sensitiveValues: [],
     });
     expect(state.preparedOptions[0]).toMatchObject({
-      codexExecutablePath: "C:\\Trusted\\codex.exe",
-      codexHomeDirectory: "C:\\WorkerData\\Profile",
-      codexProviderEnvironment: {},
+      cliExecutablePath: "C:\\Trusted\\codex.exe",
+      cliHomeDirectory: "C:\\WorkerData\\Profile",
+      userProfileDirectory: "C:\\Users\\Worker",
     });
-  });
-
-  it("shares loader-classified protection with review, summary and prepared runners only", async () => {
-    state.validation = { ...validation("web"), summary: { maximumTimeoutMs: 45_000 } };
-    state.providerEnvironment = {
-      CODEX_PROVIDER_HEADER_0: "worker",
-      CODEX_PROVIDER_HEADER_1: "fixture-authentication-credential",
-    };
-    state.providerProtectedValues = ["fixture-authentication-credential"];
-    await createExecutionRuntime(config(), logger);
-    state.profileOptions?.createSummaryExecutor?.({} as JobExecutionEnvelopeV2, context());
-    expect(state.reviewOptions[0]).toMatchObject({
-      codexProviderEnvironment: state.providerEnvironment,
-      codexProviderProtectedValues: state.providerProtectedValues,
-    });
-    expect(state.preparedOptions[0]).toMatchObject({
-      codexProviderEnvironment: state.providerEnvironment,
-      codexProviderProtectedValues: state.providerProtectedValues,
-    });
-    expect(state.summaryOptions[0]?.sensitiveValues).toEqual(state.providerProtectedValues);
-    expect(state.summaryOptions[0]?.sensitiveValues).not.toContain("worker");
-    expect(state.defaults).not.toHaveProperty("providerMetadataPolicy");
-    expect(state.validation).not.toHaveProperty("providerMetadataPolicy");
   });
 
   it("keeps each headless runner's workspace and progress callback independent", async () => {
@@ -774,7 +747,7 @@ describe("Worker production execution composition", () => {
     );
     expect(state.reviewOptions.at(-1)).toMatchObject({
       workspaceProvider: modelProvider,
-      codexHomeDirectory: "C:\\WorkerData\\Profile",
+      cliHomeDirectory: "C:\\WorkerData\\Profile",
     });
   });
 
@@ -788,8 +761,7 @@ describe("Worker production execution composition", () => {
         target === "headless" ? undefined : target === "web" ? "web" : "windows",
       );
       const settings = config();
-      state.providerEnvironment = { CODEX_PROVIDER_HEADER_0: "fixture-provider-secret" };
-      vi.stubEnv("CODEX_PROVIDER_HEADER_0", "fixture-ambient-provider-secret");
+      vi.stubEnv("GITHUB_TOKEN", "fixture-ambient-cli-secret");
       vi.stubEnv("WORKER_TOKEN", settings.workerToken);
       vi.stubEnv("TEMP", "C:\\WorkerAmbient\\Temp");
       vi.stubEnv("TMP", "C:\\WorkerAmbient\\Tmp");
@@ -831,13 +803,51 @@ describe("Worker production execution composition", () => {
       expect(environments[0]).not.toBe(environments[1]);
       for (const environment of environments) {
         expect(Object.values(environment)).not.toContain(settings.workerToken);
-        expect(Object.values(environment)).not.toContain(
-          state.providerEnvironment.CODEX_PROVIDER_HEADER_0,
-        );
+        expect(Object.values(environment)).not.toContain("fixture-ambient-cli-secret");
       }
       expect(state.reviewOptions[0]).toMatchObject({
-        codexProviderEnvironment: state.providerEnvironment,
+        userProfileDirectory: "C:\\WorkerAmbient\\User",
       });
+    },
+  );
+
+  it.each(["web", "windows"] as const)(
+    "confines %s PowerShell module caches to owned startup and attempt temporary directories",
+    async (target) => {
+      state.validation = validation(target);
+      vi.stubEnv("PSModuleAnalysisCachePath", "C:\\WorkerBundle\\dist\\ModuleAnalysisCache");
+      await createExecutionRuntime(config(), logger);
+      const startupCalls = [...state.observations.mock.calls, ...state.session.mock.calls];
+      expect(startupCalls.length).toBeGreaterThan(0);
+      for (const call of startupCalls) {
+        expect(call[0].environment).toMatchObject({
+          PSMODULEANALYSISCACHEPATH: "C:\\WorkerData\\Temp\\PowerShell-ModuleAnalysisCache",
+        });
+      }
+      const workspaces = [workspace("first"), workspace("second")];
+      for (const selectedWorkspace of workspaces) {
+        state.profileOptions?.createUiRunner?.(
+          {
+            validation: {
+              target: target === "web" ? "web" : "windows_desktop",
+              profileVersion: {},
+            },
+          } as JobExecutionEnvelopeV2,
+          context(),
+          selectedWorkspace,
+        );
+      }
+      expect(state.uiOptions.map((options) => options.drivers.environment)).toEqual(
+        workspaces.map((selectedWorkspace) =>
+          expect.objectContaining({
+            TEMP: selectedWorkspace.tempDirectory,
+            PSMODULEANALYSISCACHEPATH: win32.join(
+              selectedWorkspace.tempDirectory,
+              "PowerShell-ModuleAnalysisCache",
+            ),
+          }),
+        ),
+      );
     },
   );
 

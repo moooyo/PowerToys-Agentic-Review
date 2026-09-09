@@ -4,6 +4,11 @@ Status: implemented and wired into Worker production composition. The feature is
 disabled by default. Production model acceptance remains pending. This slice uses the existing
 result contracts and does not add a database migration.
 
+The active model runtime is [CLI-owned execution](./2026-09-10-cli-owned-model-execution.md).
+The selected Codex or Copilot CLI owns login, provider configuration and HTTP traffic. The Worker
+does not read or copy CLI auth/provider files, and there is no global provider registry or HTTP
+call ledger. The historical native observations below apply only to their recorded source.
+
 ## Implemented scope
 
 `main.ts` creates `ValidationSummaryExecutor` through the optional `ProfileJobExecutor` factory when
@@ -26,11 +31,11 @@ disk monitoring, progress pulses, bounded stdout/stderr draining, stable result-
 and credential redaction share one implementation. `ReviewJobExecutor` remains an adapter with its
 existing envelope checks and result enrichment.
 
-The shared runner reuses `buildCodexExecLaunchSpec`, `CodexJsonlParser`,
-`determineCodexExecutionResult<TSchema>`, and `createCanonicalResult` from `packages/codex/src`.
-Review retains its original default launch behavior. Summary execution uses the same trusted
-provider configuration and lease cancellation without passing through the legacy review schema or
-findings/recipe-request validator.
+The shared runner uses the selected CLI adapter, bounded output parsing and canonical result
+handling from `packages/codex/src`. Summary execution uses the configured CLI and current lease
+cancellation without passing through the legacy review schema or findings/recipe-request validator.
+CLI configuration, observed version and process exit remain distinct from model output and runner
+facts. They do not independently verify a provider's model identity.
 
 `ValidationSummaryExecutor` independently requires `pr_ui` or `issue_validation`, selects the
 exact PR/Issue `ValidationSummaryV1` branch from deployed code, and verifies the frozen prompt and
@@ -61,11 +66,10 @@ Frozen prompt bytes and `promptSha256` remain unchanged. Dynamic context has its
 prompt input to 512 KiB, and the composed terminal result to 2 MiB. Oversize data fails the optional
 summary without silently dropping failed checks or losing the runner report.
 
-The `summary_read_only` policy builds `codex exec --sandbox read-only --ignore-rules`, keeps approval
-disabled, configures the elevated Windows sandbox, and passes the network-access-false setting. It
-explicitly disables browser/computer-use/app/MCP/plugin/hook/subagent entry points. Provider access is separate
-from the child command environment. These are configured controls; the native acceptance limits
-below apply to claims about their production enforcement.
+The summary launch policy is intended for advice over already observed facts. CLI-specific launch
+settings do not establish operating-system confinement. The deployment owns VM filesystem and
+network isolation; the Worker retains managed process limits, lease cancellation, source checks
+and cleanup. The old provider configuration loader and relay path are not part of this policy.
 
 The summary adapter observes model source state before and after execution. A modified/unknown
 checkout or observed file-change event invalidates advice even when valid JSON was returned. Final
@@ -130,7 +134,7 @@ mapping from the reported bug to frozen scenario expectations, beyond this summa
 
 ## Verification and remaining acceptance
 
-The local full Worker suite passed **1,199 tests with 18 skipped**. Targeted coverage includes legacy
+The historical local full Worker suite passed **1,199 tests with 18 skipped**. Targeted coverage includes legacy
 Review parity, strict summary/schema/context binding, model workspace isolation and mutation,
 single-budget timeout behavior, lease propagation, deferred cleanup, teardown faults, and Profile
 composition with the real adapter. Server completion and separate runner/model Issue projections
@@ -152,16 +156,15 @@ and attempt closed cleanly. This confirms a loopback access gap in the tested co
 not evidence about every external destination. The optional summary is not accepted as
 network-isolated. See the [production acceptance ledger](2026-09-07-production-validation-acceptance.md).
 
-Real repository report composition also returned `SUMMARY_CONTEXT_UNSAFE` before model launch
-because all configured provider-header values are treated as protected text. Short values and
-ordinary transport metadata can collide with legitimate report content. Unknown authorization
-headers remain protected; length or appearance cannot justify declassification. No real provider
-configuration was changed to bypass this rejection.
+Historical report composition also returned `SUMMARY_CONTEXT_UNSAFE` under the former
+provider-header classification path. No real provider configuration was changed to bypass that
+rejection. The CLI-owned architecture removes the loader and metadata-policy requirement; that
+past result neither requires a new provider policy nor establishes direct CLI acceptance.
 
 The final M24 full Worker regression passed **1,370 tests with 28 skipped**, and the production bundle
 built successfully on authorized Windows. These checks do not resolve either model boundary.
-Keep the opt-in disabled until network enforcement and actual end-to-end summary acceptance are
-established. Deterministic headless checks can be accepted separately with the summary disabled.
+Keep the opt-in disabled until the intended CLI/model and VM deployment complete actual end-to-end
+summary acceptance. Deterministic headless checks can be accepted separately with the summary disabled.
 
 Reference points: [Profile integration](../../apps/worker/src/execution/profile-job-executor.ts),
 [shared process runner](../../apps/worker/src/execution/prepared-codex-output-runner.ts),

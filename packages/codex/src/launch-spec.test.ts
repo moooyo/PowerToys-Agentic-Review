@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  type BuildCodexExecLaunchSpecOptions,
-  buildCodexAppServerLaunchSpec,
-  buildCodexExecLaunchSpec,
-  type CodexProcessResourceLimits,
-  codexProcessResourceLimitBounds,
+  type BuildCliLaunchSpecOptions,
+  buildCliLaunchSpec,
+  type CliProcessResourceLimits,
+  cliProcessResourceLimitBounds,
 } from "./launch-spec.js";
 
 const validEnvironment = (): Record<string, string> => ({
+  APPDATA: "C:\\Service\\Profile\\AppData\\Roaming",
   CODEX_HOME: "C:\\Service\\Codex",
   COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+  LOCALAPPDATA: "C:\\Service\\Profile\\AppData\\Local",
   PATH: "C:\\Windows\\System32;C:\\Tools",
   PATHEXT: ".COM;.EXE;.BAT;.CMD",
   SYSTEMROOT: "C:\\Windows",
@@ -18,511 +19,196 @@ const validEnvironment = (): Record<string, string> => ({
   USERPROFILE: "C:\\Service\\Profile",
 });
 
-const validLimits = (): CodexProcessResourceLimits => ({
+const validLimits = (): CliProcessResourceLimits => ({
   hardTimeoutMs: 900_000,
   maximumProcessCount: 64,
   maximumMemoryBytes: 8_589_934_592,
   maximumOutputBytes: 67_108_864,
 });
 
-const validOptions = (): BuildCodexExecLaunchSpecOptions => ({
+const validOptions = (): BuildCliLaunchSpecOptions => ({
+  engine: "codex",
   executable: "C:\\Tools\\Codex\\codex.exe",
   workingDirectory: "C:\\Work\\Checkout",
-  processWorkingDirectory: "C:\\Service\\Runs\\attempt-1\\control",
   controlRootDirectory: "C:\\Service\\Runs\\attempt-1\\control",
   prompt: "Review this revision; & echo must remain ordinary prompt text.",
   outputSchemaPath: "C:\\Service\\Runs\\attempt-1\\control\\schema.json",
+  outputSchemaJson: '{"type":"object","properties":{"summary":{"type":"string"}}}',
   outputLastMessagePath: "C:\\Service\\Runs\\attempt-1\\control\\output\\result.json",
   environment: validEnvironment(),
   limits: validLimits(),
 });
 
-describe("buildCodexAppServerLaunchSpec", () => {
-  const options = () => ({ ...validOptions(), permissionProfile: "validation_review" });
-
-  it("uses dedicated interactive input without exec-only arguments or prompt delivery", () => {
-    const spec = buildCodexAppServerLaunchSpec(options());
-    expect(spec.arguments).toEqual([
-      "--strict-config",
-      "app-server",
-      "--config",
-      'approval_policy="never"',
-      "--config",
-      'default_permissions="validation_review"',
-      "--stdio",
-    ]);
-    expect(spec).not.toHaveProperty("standardInput");
-    expect(spec.interactiveStdin).toBe(true);
-    expect(spec.captureProcessIdentity).toBe(true);
-    expect(spec.environmentMode).toBe("replace");
-    expect(spec.workingDirectory).toBe(options().controlRootDirectory);
-  });
-
-  it("fixes approvals and profile after overrides while keeping values as individual arguments", () => {
-    const value = 'developer_instructions="Keep --sandbox danger-full-access; & echo as text"';
-    const spec = buildCodexAppServerLaunchSpec({
-      ...options(),
-      configurationOverrides: [
-        value,
-        'approval_policy="on-request"',
-        'default_permissions="other"',
-      ],
-    });
-    expect(spec.arguments[3]).toBe(value);
-    expect(spec.arguments.slice(-5)).toEqual([
-      "--config",
-      'approval_policy="never"',
-      "--config",
-      'default_permissions="validation_review"',
-      "--stdio",
-    ]);
-    expect(spec.arguments).not.toContain("--sandbox");
-  });
-
-  it.each([
-    'sandbox_mode="read-only"',
-    "sandbox_workspace_write.network_access=false",
-    "sandbox_workspace_write={network_access=false}",
-    '"sandbox_mode"="read-only"',
-    '"sandbox_\\u006dode"="read-only"',
-    "'sandbox_mode'='read-only'",
-  ])("rejects legacy sandbox overrides and quoted aliases: %s", (assignment) => {
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        configurationOverrides: [assignment],
-      }),
-    ).toThrow(/sandbox|bare dotted keys/u);
-  });
-
-  it.each([
-    "",
-    "../profile",
-    "profile\nother",
-    "profile\n",
-    "profile\r\n",
-    "profile.with.dot",
-    "a".repeat(65),
-  ])("rejects invalid profile identifiers: %j", (permissionProfile) => {
-    expect(() => buildCodexAppServerLaunchSpec({ ...options(), permissionProfile })).toThrow(
-      /permissionProfile/u,
-    );
-  });
-
-  it("rejects inherited secrets, checkout-owned executables and overlapping control paths", () => {
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        environment: { ...validEnvironment(), GITHUB_TOKEN: "not-a-live-token" },
-      }),
-    ).toThrow(/secret-bearing/u);
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        executable: "C:\\Work\\Checkout\\codex.exe",
-      }),
-    ).toThrow(/executable/u);
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        controlRootDirectory: "C:\\Work",
-        processWorkingDirectory: "C:\\Work\\control",
-      }),
-    ).toThrow(/overlap/u);
-  });
-
-  it("copies bounded launch inputs before the caller can change them", () => {
-    const input = {
-      ...options(),
-      configurationOverrides: ["features.shell_tool=false"],
-      providerEnvironment: { CODEX_PROVIDER_HEADER_0: "Bearer synthetic" },
-    };
-    const spec = buildCodexAppServerLaunchSpec(input);
-    input.configurationOverrides[0] = "features.shell_tool=true";
-    input.providerEnvironment.CODEX_PROVIDER_HEADER_0 = "Bearer changed";
-    expect(spec.arguments).toContain("features.shell_tool=false");
-    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe("Bearer synthetic");
-    expect(Object.isFrozen(spec)).toBe(true);
-    expect(Object.isFrozen(spec.environment)).toBe(true);
-    expect(Object.isFrozen(spec.limits)).toBe(true);
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        configurationOverrides: Array.from({ length: 129 }, () => "features.shell_tool=false"),
-      }),
-    ).toThrow(/128 entries/u);
-    expect(() =>
-      buildCodexAppServerLaunchSpec({
-        ...options(),
-        limits: { ...validLimits(), maximumProcessCount: 0 },
-      }),
-    ).toThrow(/maximumProcessCount/u);
-  });
-});
-
-describe("buildCodexExecLaunchSpec", () => {
-  it("uses an explicit read-only sandbox after conflicting configuration overrides", () => {
-    const spec = buildCodexExecLaunchSpec({
-      ...validOptions(),
-      sandboxMode: "read-only",
-      configurationOverrides: ['sandbox_mode="danger-full-access"'],
-    });
-    expect(spec.arguments[spec.arguments.indexOf("--sandbox") + 1]).toBe("read-only");
-    expect(spec.arguments[spec.arguments.lastIndexOf("--config") + 1]).toBe(
-      'approval_policy="never"',
-    );
-    expect(spec.arguments).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(spec.arguments).toContain("--ignore-rules");
-  });
-
-  it.each(["danger-full-access", "", "READ-ONLY"])(
-    "rejects an unsupported sandbox mode %j",
-    (sandboxMode) => {
-      expect(() =>
-        buildCodexExecLaunchSpec({
-          ...validOptions(),
-          sandboxMode,
-        } as unknown as BuildCodexExecLaunchSpecOptions),
-      ).toThrow(/sandboxMode/u);
-    },
-  );
-
-  it("builds an ephemeral, non-interactive workspace execution with a replacement environment", () => {
-    const options = {
-      ...validOptions(),
-      environment: {
-        codex_home: "C:\\Service\\Codex",
-        ComSpec: "C:\\Windows\\System32\\cmd.exe",
-        Path: "C:\\Windows\\System32;C:\\Tools",
-        PathExt: ".COM;.EXE;.BAT;.CMD",
-        SystemRoot: "C:\\Windows",
-        temp: "C:\\Service\\Temp",
-        userprofile: "C:\\Service\\Profile",
-      },
-    };
-    const spec = buildCodexExecLaunchSpec(options);
+describe("buildCliLaunchSpec", () => {
+  it("runs Codex exec through stdin and retains its configured profile", () => {
+    const options = validOptions();
+    const spec = buildCliLaunchSpec(options);
 
     expect(spec).toEqual({
-      executable: "C:\\Tools\\Codex\\codex.exe",
+      executable: options.executable,
       arguments: [
         "exec",
         "--cd",
-        "C:\\Work\\Checkout",
+        options.workingDirectory,
         "--json",
         "--color",
         "never",
-        "--config",
-        'approval_policy="never"',
+        "--dangerously-bypass-approvals-and-sandbox",
         "--ephemeral",
-        "--ignore-user-config",
-        "--sandbox",
-        "workspace-write",
         "--output-schema",
-        "C:\\Service\\Runs\\attempt-1\\control\\schema.json",
+        options.outputSchemaPath,
         "--output-last-message",
-        "C:\\Service\\Runs\\attempt-1\\control\\output\\result.json",
+        options.outputLastMessagePath,
         "-",
       ],
-      workingDirectory: "C:\\Service\\Runs\\attempt-1\\control",
+      workingDirectory: options.controlRootDirectory,
       environmentMode: "replace",
-      environment: {
-        CODEX_HOME: "C:\\Service\\Codex",
-        COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-        PATH: "C:\\Windows\\System32;C:\\Tools",
-        PATHEXT: ".COM;.EXE;.BAT;.CMD",
-        SYSTEMROOT: "C:\\Windows",
-        TEMP: "C:\\Service\\Temp",
-        USERPROFILE: "C:\\Service\\Profile",
-      },
+      environment: options.environment,
       standardInput: options.prompt,
-      limits: validLimits(),
+      limits: options.limits,
     });
     expect(spec.arguments).not.toContain(options.prompt);
+    expect(spec.arguments).not.toContain("--ignore-user-config");
+    expect(spec.arguments).not.toContain("--config");
+    expect(Object.isFrozen(spec)).toBe(true);
+    expect(Object.isFrozen(spec.arguments)).toBe(true);
+    expect(Object.isFrozen(spec.environment)).toBe(true);
+    expect(Object.isFrozen(spec.limits)).toBe(true);
   });
 
-  it("preserves default arguments when configuration overrides are empty", () => {
-    expect(
-      buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides: [] }).arguments,
-    ).toEqual(buildCodexExecLaunchSpec(validOptions()).arguments);
-  });
-
-  it("keeps configuration values intact and applies mandatory safety arguments afterward", () => {
-    const configurationOverrides = [
-      'approval_policy="on-request"',
-      'sandbox_mode="danger-full-access"',
-      'developer_instructions="Keep --cd C:/Other; & echo ordinary text"',
-    ];
-    const defaultSpec = buildCodexExecLaunchSpec(validOptions());
-    const spec = buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides });
-
-    expect(spec.arguments).toEqual([
-      "exec",
-      "--config",
-      configurationOverrides[0],
-      "--config",
-      configurationOverrides[1],
-      "--config",
-      configurationOverrides[2],
-      ...defaultSpec.arguments.slice(1),
-    ]);
-    const finalConfigIndex = spec.arguments.lastIndexOf("--config");
-    expect(spec.arguments[finalConfigIndex + 1]).toBe('approval_policy="never"');
-    const sandboxIndex = spec.arguments.indexOf("--sandbox");
-    expect(sandboxIndex).toBeGreaterThan(finalConfigIndex);
-    expect(spec.arguments[sandboxIndex + 1]).toBe("workspace-write");
-    expect(spec.arguments.filter((argument) => argument === "--cd")).toHaveLength(1);
-    expect(spec.arguments.filter((argument) => argument === "--output-schema")).toHaveLength(1);
-    expect(spec.arguments.filter((argument) => argument === "--output-last-message")).toHaveLength(
-      1,
-    );
-
-    configurationOverrides[0] = 'approval_policy="untrusted"';
-    expect(spec.arguments[2]).toBe('approval_policy="on-request"');
-  });
-
-  it("accepts forty independent configuration overrides", () => {
-    const configurationOverrides = Array.from(
-      { length: 40 },
-      (_, index) => `features.feature_${index}=false`,
-    );
-    const spec = buildCodexExecLaunchSpec({ ...validOptions(), configurationOverrides });
-
-    expect(spec.arguments.filter((argument) => argument === "--config")).toHaveLength(41);
-  });
-
-  it.each([
-    { name: "non-array", value: "model=example" },
-    { name: "null", value: null },
-    { name: "non-string entry", value: [false] },
-    { name: "empty entry", value: [""] },
-    { name: "blank entry", value: ["   "] },
-    { name: "missing assignment", value: ["--cd C:/Other"] },
-    { name: "missing key", value: [" =false"] },
-    { name: "missing value", value: ["features.hooks= "] },
-    { name: "NUL", value: ["features.hooks=false\0"] },
-    { name: "line feed", value: ["features.hooks=false\nmodel=other"] },
-    { name: "carriage return", value: ["features.hooks=false\rmodel=other"] },
-    { name: "Unicode newline", value: ["features.hooks=false\u2028model=other"] },
-    { name: "malformed Unicode", value: ["model=\uD800"] },
-  ])("rejects $name configuration overrides", ({ value }) => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        configurationOverrides: value as unknown as readonly string[],
-      }),
-    ).toThrow(TypeError);
-  });
-
-  it("rejects too many configuration overrides", () => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        configurationOverrides: Array.from({ length: 129 }, () => "features.hooks=false"),
-      }),
-    ).toThrow(/must not exceed 128 entries/u);
-  });
-
-  it("bounds each configuration override by UTF-8 bytes", () => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        configurationOverrides: [`model=${"\u754c".repeat(11_000)}`],
-      }),
-    ).toThrow(/must not exceed 32768 UTF-8 bytes/u);
-  });
-
-  it("accepts the total configuration byte boundary and rejects larger inputs", () => {
-    const override = `model=${"x".repeat(32 * 1024 - "model=".length)}`;
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        configurationOverrides: Array.from({ length: 4 }, () => override),
-      }),
-    ).not.toThrow();
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        configurationOverrides: Array.from({ length: 5 }, () => override),
-      }),
-    ).toThrow(/must not exceed 131072 total UTF-8 bytes/u);
-  });
-
-  it("includes configuration arguments in the complete ProcessHost frame limit", () => {
-    const options = { ...validOptions(), prompt: "\\".repeat(500_000) };
-    expect(() => buildCodexExecLaunchSpec(options)).not.toThrow();
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...options,
-        configurationOverrides: Array.from({ length: 3 }, () => `model=${"x".repeat(30_000)}`),
-      }),
-    ).toThrow(/ProcessHost start request must not exceed 1048576 UTF-8 bytes/u);
-  });
-
-  it("keeps provider credentials only in the dedicated process environment", () => {
-    const providerCredential = "fixture-only-provider-credential";
-    const providerEnvironment = { CODEX_PROVIDER_HEADER_0: providerCredential };
+  it("runs Copilot from stdin without asking the CLI to write a result file", () => {
     const options = {
       ...validOptions(),
-      configurationOverrides: [
-        'model_providers.selected.env_http_headers={Authorization="CODEX_PROVIDER_HEADER_0"}',
-      ],
-      providerEnvironment,
+      engine: "copilot" as const,
+      executable: "C:\\Tools\\Copilot\\copilot.exe",
     };
-    const spec = buildCodexExecLaunchSpec(options);
+    const spec = buildCliLaunchSpec(options);
 
-    expect(spec.environment).toEqual({ ...validEnvironment(), ...providerEnvironment });
-    expect(Object.isFrozen(spec.environment)).toBe(true);
-    expect(JSON.stringify(spec.arguments)).not.toContain(providerCredential);
-    expect(spec.standardInput).not.toContain(providerCredential);
-    expect(options.environment).not.toHaveProperty("CODEX_PROVIDER_HEADER_0");
-    providerEnvironment.CODEX_PROVIDER_HEADER_0 = "changed-provider-credential";
-    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe(providerCredential);
-  });
-
-  it("accepts a null-prototype provider environment with own data properties", () => {
-    const providerEnvironment: Record<string, string> = Object.create(null);
-    providerEnvironment.CODEX_PROVIDER_HEADER_0 = "fixture-provider-value";
-    const spec = buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment });
-
-    expect(spec.environment.CODEX_PROVIDER_HEADER_0).toBe("fixture-provider-value");
-  });
-
-  it("accepts exactly sixty-four provider entries and rejects additional entries", () => {
-    const providerEnvironment = Object.fromEntries(
-      Array.from({ length: 64 }, (_, index) => [`CODEX_PROVIDER_HEADER_${index}`, "value"]),
+    expect(spec.arguments).toEqual([
+      "-C",
+      options.workingDirectory,
+      "--allow-all",
+      "--no-ask-user",
+      "--no-auto-update",
+      "--silent",
+      "--stream",
+      "on",
+      "--output-format",
+      "text",
+      "--no-color",
+    ]);
+    expect(spec.arguments).not.toContain("-p");
+    expect(spec.arguments).not.toContain("--prompt");
+    expect(spec.standardInput).toBe(
+      [
+        options.prompt,
+        "",
+        "Return only one JSON object as your final response, without Markdown fences or other text.",
+        "The final response must conform to this JSON Schema:",
+        options.outputSchemaJson,
+      ].join("\n"),
     );
-    expect(() =>
-      buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment }),
-    ).not.toThrow();
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        providerEnvironment: { ...providerEnvironment, CODEX_PROVIDER_HEADER_64: "value" },
-      }),
-    ).toThrow(/providerEnvironment must not exceed 64 entries/u);
+    expect(spec.standardInput).not.toContain(options.outputLastMessagePath);
+    expect(spec.standardInput).not.toContain(options.outputSchemaPath);
+    expect(spec.workingDirectory).toBe(options.controlRootDirectory);
+    expect(spec.environment).toEqual(options.environment);
   });
 
-  it.each([
-    "CODEX_PROVIDER_HEADER_",
-    "CODEX_PROVIDER_HEADER_01",
-    "CODEX_PROVIDER_HEADER_-1",
-    "CODEX_PROVIDER_HEADER_1.0",
-    "codex_provider_header_0",
-    "CODEX_PROVIDER_HEADER_0_SUFFIX",
-    "GITHUB_TOKEN",
-    "WORKER_BEARER_TOKEN",
-    "PATH",
-  ])("rejects unsupported dedicated provider variable %s", (name) => {
-    expect(() =>
-      buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment: { [name]: "value" } }),
-    ).toThrow(/providerEnvironment contains an unsupported variable name/u);
-  });
-
-  it("does not admit provider variable names through the ordinary environment", () => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        environment: { ...validEnvironment(), CODEX_PROVIDER_HEADER_0: "value" },
-      }),
-    ).toThrow(/not in the Codex allowlist/u);
-  });
-
-  it.each([
-    { name: "null", value: null },
-    { name: "string", value: "provider-environment" },
-    { name: "array", value: [] },
-    { name: "inherited properties", value: Object.create({ CODEX_PROVIDER_HEADER_0: "value" }) },
-    { name: "symbol property", value: { [Symbol("provider")]: "value" } },
-    {
-      name: "non-enumerable property",
-      value: Object.defineProperty({}, "CODEX_PROVIDER_HEADER_0", { value: "value" }),
+  it.each(["codex", "copilot"] as const)(
+    "allows %s to select its configured model when no override is supplied",
+    (engine) => {
+      const spec = buildCliLaunchSpec({ ...validOptions(), engine });
+      expect(spec.arguments).not.toContain("--model");
     },
-  ])("rejects $name provider environments", ({ value }) => {
+  );
+
+  it.each(["codex", "copilot"] as const)(
+    "passes an explicit %s model as a single argument",
+    (engine) => {
+      const model = "configured-model";
+      const spec = buildCliLaunchSpec({ ...validOptions(), engine, model });
+      const index = spec.arguments.indexOf("--model");
+      expect(index).toBeGreaterThan(-1);
+      expect(spec.arguments[index + 1]).toBe(model);
+    },
+  );
+
+  it.each(["", " ", "model\nother", "model\rrestart", "model\0secret", "x".repeat(257)])(
+    "rejects invalid model %j",
+    (model) => {
+      expect(() => buildCliLaunchSpec({ ...validOptions(), model })).toThrow(TypeError);
+    },
+  );
+
+  it.each(["", "invalid", "null", "[]", '"text"', "1"])(
+    "rejects invalid schema JSON %j",
+    (outputSchemaJson) => {
+      expect(() => buildCliLaunchSpec({ ...validOptions(), outputSchemaJson })).toThrow(TypeError);
+    },
+  );
+
+  it("rejects unknown engines instead of selecting a fallback", () => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
-        providerEnvironment: value as unknown as Readonly<Record<string, string>>,
-      }),
-    ).toThrow(TypeError);
+        engine: "unknown",
+      } as unknown as BuildCliLaunchSpecOptions),
+    ).toThrow(/engine/u);
   });
 
-  it("rejects provider accessors without evaluating them", () => {
-    let getterCalled = false;
-    const providerEnvironment = Object.defineProperty({}, "CODEX_PROVIDER_HEADER_0", {
-      enumerable: true,
-      get: () => {
-        getterCalled = true;
-        return "fixture-provider-value";
-      },
+  it("preserves configured homes without requiring a custom CLI home", () => {
+    const environment = validEnvironment();
+    delete environment.CODEX_HOME;
+    const spec = buildCliLaunchSpec({ ...validOptions(), environment });
+    expect(spec.environment.CODEX_HOME).toBeUndefined();
+    expect(spec.environment.USERPROFILE).toBe(environment.USERPROFILE);
+    expect(spec.environment.APPDATA).toBe(environment.APPDATA);
+    expect(spec.environment.LOCALAPPDATA).toBe(environment.LOCALAPPDATA);
+
+    const copilotHome = "C:\\Service\\Copilot";
+    const copilot = buildCliLaunchSpec({
+      ...validOptions(),
+      engine: "copilot",
+      environment: { ...environment, COPILOT_HOME: copilotHome },
     });
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), providerEnvironment })).toThrow(
-      /own enumerable data properties/u,
-    );
-    expect(getterCalled).toBe(false);
+    expect(copilot.environment.COPILOT_HOME).toBe(copilotHome);
   });
 
   it.each([
-    { name: "non-string", value: 123 },
-    { name: "empty", value: "" },
-    { name: "blank", value: "   " },
-    { name: "NUL", value: "provider\0value" },
-    { name: "CR", value: "provider\rvalue" },
-    { name: "LF", value: "provider\nvalue" },
-    { name: "malformed Unicode", value: "provider\uD800" },
-  ])("rejects $name provider values", ({ value }) => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        providerEnvironment: { CODEX_PROVIDER_HEADER_0: value } as Readonly<Record<string, string>>,
-      }),
-    ).toThrow(TypeError);
+    "C:\\Windows\\System32;C:\\Tools;",
+    ";C:\\Windows\\System32;C:\\Tools",
+    ";;C:\\Windows\\System32;;;C:\\Tools;;",
+  ])("retains usable inherited PATH entries from %s", (path) => {
+    const environment = { ...validEnvironment(), PATH: path };
+    const spec = buildCliLaunchSpec({ ...validOptions(), environment });
+    expect(spec.environment.PATH).toBe("C:\\Windows\\System32;C:\\Tools");
+    expect(environment.PATH).toBe(path);
   });
 
-  it("enforces the Windows environment value length for provider credentials", () => {
+  it.each(["", ";", ";;;"])("rejects inherited PATH without executable directories: %j", (path) => {
     expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        providerEnvironment: { CODEX_PROVIDER_HEADER_0: "x".repeat(32_767) },
-      }),
-    ).not.toThrow();
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        providerEnvironment: { CODEX_PROVIDER_HEADER_0: "x".repeat(32_768) },
-      }),
-    ).toThrow(/providerEnvironment value exceeds the Windows value limit/u);
+      buildCliLaunchSpec({ ...validOptions(), environment: { ...validEnvironment(), PATH: path } }),
+    ).toThrow(/at least one absolute path entry/u);
   });
 
-  it("includes provider credentials in the complete ProcessHost frame limit", () => {
-    const options = { ...validOptions(), prompt: "\\".repeat(500_000) };
-    expect(() => buildCodexExecLaunchSpec(options)).not.toThrow();
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...options,
-        providerEnvironment: {
-          CODEX_PROVIDER_HEADER_0: "x".repeat(30_000),
-          CODEX_PROVIDER_HEADER_1: "y".repeat(30_000),
-        },
-      }),
-    ).toThrow(/ProcessHost start request must not exceed 1048576 UTF-8 bytes/u);
-  });
+  it.each([";relative;;C:\\Tools;", ";C:\\Work\\Checkout\\bin;;C:\\Tools;"])(
+    "keeps rejecting relative or task-owned PATH entries after empty entries: %s",
+    (path) => {
+      expect(() =>
+        buildCliLaunchSpec({
+          ...validOptions(),
+          environment: { ...validEnvironment(), PATH: path },
+        }),
+      ).toThrow(TypeError);
+    },
+  );
 
-  it("does not disclose provider or configuration values in validation errors", () => {
-    const marker = "private-fixture-marker";
-    for (const overrides of [
-      { providerEnvironment: { CODEX_PROVIDER_HEADER_0: `${marker}\0` } },
-      { providerEnvironment: { [marker]: "value" } },
-      { configurationOverrides: [`model="${marker}"\n`] },
-    ]) {
-      let error: unknown;
-      try {
-        buildCodexExecLaunchSpec({ ...validOptions(), ...overrides });
-      } catch (caught) {
-        error = caught;
-      }
-      expect(error).toBeInstanceOf(TypeError);
-      expect(String(error)).not.toContain(marker);
-    }
+  it("includes the Copilot schema instructions in the actual stdin limit", () => {
+    const options = { ...validOptions(), prompt: "x".repeat(512 * 1024) };
+    expect(() => buildCliLaunchSpec(options)).not.toThrow();
+    expect(() => buildCliLaunchSpec({ ...options, engine: "copilot" })).toThrow(
+      /524288 UTF-8 bytes/u,
+    );
   });
 
   it("does not retain mutable environment or limits objects", () => {
@@ -534,7 +220,7 @@ describe("buildCodexExecLaunchSpec", () => {
       maximumMemoryBytes: number;
       maximumOutputBytes: number;
     };
-    const spec = buildCodexExecLaunchSpec(options);
+    const spec = buildCliLaunchSpec(options);
 
     environment.CODEX_HOME = "C:\\Changed";
     limits.hardTimeoutMs = 10_000;
@@ -558,13 +244,11 @@ describe("buildCodexExecLaunchSpec", () => {
     "C:\\Tools\\CLOCK$\\codex.exe",
     "C:\\Work\\Checkout\\codex.exe",
   ])("rejects unsafe executable path %s", (executable) => {
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), executable })).toThrow(TypeError);
+    expect(() => buildCliLaunchSpec({ ...validOptions(), executable })).toThrow(TypeError);
   });
 
   it.each([
     { field: "workingDirectory", value: "relative\\checkout" },
-    { field: "processWorkingDirectory", value: "C:\\Other\\process" },
-    { field: "processWorkingDirectory", value: "C:\\Work\\Checkout\\process" },
     { field: "workingDirectory", value: "C:\\Work\0outside" },
     { field: "controlRootDirectory", value: "\\\\server\\share\\control" },
     { field: "outputSchemaPath", value: "C:\\Service\\Runs\\escape\\schema.json" },
@@ -572,12 +256,12 @@ describe("buildCodexExecLaunchSpec", () => {
     { field: "outputLastMessagePath", value: "C:\\Other\\result.json" },
     { field: "outputLastMessagePath", value: "C:\\Service\\Runs\\attempt-1\\control\\result.txt" },
   ] as const)("rejects unsafe or out-of-bound $field", ({ field, value }) => {
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), [field]: value })).toThrow();
+    expect(() => buildCliLaunchSpec({ ...validOptions(), [field]: value })).toThrow();
   });
 
   it("rejects overlapping control and checkout roots or aliased result files", () => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         controlRootDirectory: "C:\\Work",
         outputSchemaPath: "C:\\Work\\schema.json",
@@ -586,70 +270,137 @@ describe("buildCodexExecLaunchSpec", () => {
     ).toThrow(TypeError);
 
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         outputLastMessagePath: "c:\\service\\runs\\attempt-1\\control\\SCHEMA.json",
       }),
     ).toThrow(TypeError);
   });
 
-  it.each(["CODEX_HOME", "COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "USERPROFILE"])(
+  it.each(["COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "USERPROFILE"])(
     "requires %s in the replacement environment",
     (missingName) => {
       const environment = validEnvironment();
       delete environment[missingName];
-      expect(() => buildCodexExecLaunchSpec({ ...validOptions(), environment })).toThrow(
+      expect(() => buildCliLaunchSpec({ ...validOptions(), environment })).toThrow(
         new TypeError(`environment must define ${missingName} for replace mode`),
       );
     },
   );
 
+  it.each(["codex", "copilot"] as const)(
+    "preserves supplied CLI credentials and connection settings for %s",
+    (engine) => {
+      const environment = {
+        ...validEnvironment(),
+        CLI_TOKEN: "synthetic-cli-token",
+        GITHUB_TOKEN: "synthetic-github-token",
+        OPENAI_API_KEY: "synthetic-api-key",
+        CLIENT_SECRET: "synthetic-client-secret",
+        CustomEndpoint: "https://configured-cli.invalid/api",
+        "ProgramFiles(x86)": "C:\\Program Files (x86)",
+        "CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
+        CI: "true",
+        NO_COLOR: "",
+      };
+      const spec = buildCliLaunchSpec({ ...validOptions(), engine, environment });
+      expect(spec.environment).toEqual(environment);
+      expect(spec.environmentMode).toBe("replace");
+      expect(JSON.stringify(spec.arguments)).not.toContain(environment.CLI_TOKEN);
+      expect(spec.standardInput).not.toContain(environment.CLI_TOKEN);
+    },
+  );
+
   it.each([
-    "GITHUB_TOKEN",
-    "OPENAI_API_KEY",
-    "CLIENT_SECRET",
+    "WORKER_BEARER_TOKEN",
     "WORKER_TLS_KEY_PATH",
     "WORKER_TLS_CERT_PATH",
-  ])("rejects secret-bearing environment name %s", (name) => {
+    "SERVER_TOKEN",
+    "SERVER_URL",
+    "worker_token",
+    "Server_Admin_Token",
+    "AGENTIC_REVIEW_CREDENTIAL",
+    "agentic_review_server",
+  ])("rejects project control environment name %s", (name) => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), [name]: "sensitive" },
       }),
-    ).toThrow(/secret-bearing name/u);
+    ).toThrow(/project control variables/u);
   });
 
-  it("rejects unknown, duplicate, malformed, and checkout-relative environment entries", () => {
-    expect(() =>
-      buildCodexExecLaunchSpec({
-        ...validOptions(),
-        environment: { ...validEnvironment(), CI: "true" },
-      }),
-    ).toThrow(/allowlist/u);
+  it.each([
+    "env-with-dash",
+    "env.with.dot",
+    "\u914d\u7f6e",
+    "X".repeat(128),
+    "\u{1f680}".repeat(64),
+  ])("preserves a valid Windows environment name %s", (name) => {
+    const environment = { ...validEnvironment(), [name]: "synthetic-value" };
+    expect(buildCliLaunchSpec({ ...validOptions(), environment }).environment[name]).toBe(
+      "synthetic-value",
+    );
+  });
 
+  it.each([
+    "",
+    "BAD=NAME",
+    "BAD\0NAME",
+    "BAD\nNAME",
+    "BAD\u007fNAME",
+    "BAD\u0085NAME",
+    "BAD\uD800NAME",
+    "x".repeat(129),
+    "\u{1f680}".repeat(65),
+  ])("rejects an invalid Windows environment name %j", (name) => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
+        ...validOptions(),
+        environment: { ...validEnvironment(), [name]: "synthetic-value" },
+      }),
+    ).toThrow();
+  });
+
+  it("allows 512 host environment entries and rejects an additional entry", () => {
+    const environment = validEnvironment();
+    const addedCount = 512 - Object.keys(environment).length;
+    for (let index = 0; index < addedCount; index++) environment[`ENV_${index}`] = "value";
+    expect(
+      Object.keys(buildCliLaunchSpec({ ...validOptions(), environment }).environment),
+    ).toHaveLength(512);
+    expect(() =>
+      buildCliLaunchSpec({
+        ...validOptions(),
+        environment: { ...environment, EXTRA_ENV: "value" },
+      }),
+    ).toThrow(/512 properties/u);
+  });
+
+  it("rejects duplicate, malformed, and checkout-relative environment entries", () => {
+    expect(() =>
+      buildCliLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), Path: "C:\\Other" },
       }),
     ).toThrow(/duplicate case-insensitive/u);
 
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), PATH: "relative;C:\\Tools" },
       }),
     ).toThrow(/absolute local Windows drive path/u);
 
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), TEMP: "C:\\Work\\Checkout\\temp" },
       }),
     ).toThrow(/must not reference workingDirectory/u);
 
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         environment: { ...validEnvironment(), PATHEXT: ".EXE;.exe" },
       }),
@@ -657,18 +408,44 @@ describe("buildCodexExecLaunchSpec", () => {
   });
 
   it.each([
-    ["hardTimeoutMs", codexProcessResourceLimitBounds.hardTimeoutMs.minimum - 1],
-    ["hardTimeoutMs", codexProcessResourceLimitBounds.hardTimeoutMs.maximum + 1],
+    { name: "NUL", value: "private-fixture\0" },
+    { name: "malformed Unicode", value: "private-fixture\uD800" },
+    { name: "oversized", value: "private-fixture".repeat(3_000) },
+    { name: "non-string", value: 123 },
+  ])("rejects $name CLI environment values without exposing them", ({ value }) => {
+    let failure: unknown;
+    try {
+      buildCliLaunchSpec({
+        ...validOptions(),
+        environment: { ...validEnvironment(), CLI_TOKEN: value } as Record<string, string>,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).not.toContain("private-fixture");
+  });
+
+  it("preserves a CLI environment value at the Windows length boundary", () => {
+    const environment = { ...validEnvironment(), CLI_TOKEN: "x".repeat(32_767) };
+    expect(buildCliLaunchSpec({ ...validOptions(), environment }).environment.CLI_TOKEN).toBe(
+      environment.CLI_TOKEN,
+    );
+  });
+
+  it.each([
+    ["hardTimeoutMs", cliProcessResourceLimitBounds.hardTimeoutMs.minimum - 1],
+    ["hardTimeoutMs", cliProcessResourceLimitBounds.hardTimeoutMs.maximum + 1],
     ["maximumProcessCount", 0],
-    ["maximumProcessCount", codexProcessResourceLimitBounds.maximumProcessCount.maximum + 1],
-    ["maximumMemoryBytes", codexProcessResourceLimitBounds.maximumMemoryBytes.minimum - 1],
-    ["maximumMemoryBytes", codexProcessResourceLimitBounds.maximumMemoryBytes.maximum + 1],
-    ["maximumOutputBytes", codexProcessResourceLimitBounds.maximumOutputBytes.minimum - 1],
-    ["maximumOutputBytes", codexProcessResourceLimitBounds.maximumOutputBytes.maximum + 1],
+    ["maximumProcessCount", cliProcessResourceLimitBounds.maximumProcessCount.maximum + 1],
+    ["maximumMemoryBytes", cliProcessResourceLimitBounds.maximumMemoryBytes.minimum - 1],
+    ["maximumMemoryBytes", cliProcessResourceLimitBounds.maximumMemoryBytes.maximum + 1],
+    ["maximumOutputBytes", cliProcessResourceLimitBounds.maximumOutputBytes.minimum - 1],
+    ["maximumOutputBytes", cliProcessResourceLimitBounds.maximumOutputBytes.maximum + 1],
     ["maximumOutputBytes", 4_096.5],
   ] as const)("rejects out-of-range limit %s=%s", (name, value) => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         limits: { ...validLimits(), [name]: value },
       }),
@@ -678,13 +455,13 @@ describe("buildCodexExecLaunchSpec", () => {
   it("accepts every exact resource-limit boundary", () => {
     for (const edge of ["minimum", "maximum"] as const) {
       expect(() =>
-        buildCodexExecLaunchSpec({
+        buildCliLaunchSpec({
           ...validOptions(),
           limits: {
-            hardTimeoutMs: codexProcessResourceLimitBounds.hardTimeoutMs[edge],
-            maximumProcessCount: codexProcessResourceLimitBounds.maximumProcessCount[edge],
-            maximumMemoryBytes: codexProcessResourceLimitBounds.maximumMemoryBytes[edge],
-            maximumOutputBytes: codexProcessResourceLimitBounds.maximumOutputBytes[edge],
+            hardTimeoutMs: cliProcessResourceLimitBounds.hardTimeoutMs[edge],
+            maximumProcessCount: cliProcessResourceLimitBounds.maximumProcessCount[edge],
+            maximumMemoryBytes: cliProcessResourceLimitBounds.maximumMemoryBytes[edge],
+            maximumOutputBytes: cliProcessResourceLimitBounds.maximumOutputBytes[edge],
           },
         }),
       ).not.toThrow();
@@ -692,18 +469,18 @@ describe("buildCodexExecLaunchSpec", () => {
   });
 
   it("rejects a missing mandatory limit at runtime", () => {
-    const limits = validLimits() as Partial<CodexProcessResourceLimits>;
+    const limits = validLimits() as Partial<CliProcessResourceLimits>;
     delete limits.maximumOutputBytes;
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
-        limits: limits as CodexProcessResourceLimits,
+        limits: limits as CliProcessResourceLimits,
       }),
     ).toThrow(RangeError);
   });
 
   it.each(["", "   ", "review\0outside"])("rejects invalid prompt %j", (prompt) => {
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(TypeError);
+    expect(() => buildCliLaunchSpec({ ...validOptions(), prompt })).toThrow(TypeError);
   });
 
   it.each([
@@ -723,11 +500,11 @@ describe("buildCodexExecLaunchSpec", () => {
       }),
     },
   ])("rejects malformed surrogate input in $name", ({ options }) => {
-    expect(() => buildCodexExecLaunchSpec(options())).toThrow(/well-formed Unicode/u);
+    expect(() => buildCliLaunchSpec(options())).toThrow(/well-formed Unicode/u);
   });
 
   it("accepts an ASCII prompt at the exact raw limit when the complete start frame fits", () => {
-    const spec = buildCodexExecLaunchSpec({
+    const spec = buildCliLaunchSpec({
       ...validOptions(),
       prompt: "x".repeat(512 * 1024),
     });
@@ -743,7 +520,7 @@ describe("buildCodexExecLaunchSpec", () => {
 
   it("rejects an ASCII prompt one byte beyond the 512 KiB UTF-8 boundary", () => {
     expect(() =>
-      buildCodexExecLaunchSpec({
+      buildCliLaunchSpec({
         ...validOptions(),
         prompt: "x".repeat(512 * 1024 + 1),
       }),
@@ -755,14 +532,14 @@ describe("buildCodexExecLaunchSpec", () => {
     expect(prompt.length).toBeLessThan(512 * 1024);
     expect(Buffer.byteLength(prompt, "utf8")).toBeGreaterThan(512 * 1024);
 
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(RangeError);
+    expect(() => buildCliLaunchSpec({ ...validOptions(), prompt })).toThrow(RangeError);
   });
 
   it("rejects a highly escaped prompt when the complete start frame exceeds 1 MiB", () => {
     const prompt = "\\".repeat(512 * 1024);
     expect(Buffer.byteLength(prompt, "utf8")).toBe(512 * 1024);
 
-    expect(() => buildCodexExecLaunchSpec({ ...validOptions(), prompt })).toThrow(
+    expect(() => buildCliLaunchSpec({ ...validOptions(), prompt })).toThrow(
       /ProcessHost start request must not exceed 1048576 UTF-8 bytes/u,
     );
   });

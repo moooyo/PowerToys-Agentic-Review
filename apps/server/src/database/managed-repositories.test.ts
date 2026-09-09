@@ -57,7 +57,7 @@ const createDatabase = (): DatabaseSync => {
   const database = new DatabaseSync(":memory:");
   databases.push(database);
   database.exec("PRAGMA foreign_keys = ON");
-  expect(runMigrations(database, migrationsDirectory)).toBe(33);
+  expect(runMigrations(database, migrationsDirectory)).toBe(31);
   return database;
 };
 
