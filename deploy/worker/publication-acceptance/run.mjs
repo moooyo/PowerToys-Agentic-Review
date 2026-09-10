@@ -50,6 +50,7 @@ const receipt = {
   mode: execute ? "execute" : "prepare",
   operations: [],
   publications: [],
+  actions: { initial: null, disabled: null, final: null, runChecks: [], restoration: "not_needed" },
   cleanupFailures: [],
   failure: null,
 };
@@ -118,7 +119,7 @@ async function executeApproved() {
   assert.equal(approval.acceptanceId, plan.acceptanceId);
   assert.deepEqual(approval.repository, plan.approvalPlan.repository);
   assert.deepEqual(approval.document, plan.approvalPlan.document);
-  assert.equal(approval.operations.length, 11);
+  assert.equal(approval.operations.length, 13);
   const approvedTemplates = {};
   for (const kind of ["pull_request", "issue"]) {
     approvedTemplates[kind] = await readFile(join(approvedDirectory, filenames[kind]), "utf8");
@@ -170,6 +171,8 @@ async function executeApproved() {
       assert(operationId && !performed.has(operationId), "A mutation cannot be retried.");
       performed.add(operationId);
     }
+    const observation = { method, path, operationId: operationId ?? null, status: null };
+    receipt.operations.push(observation);
     const response = await fetch(`https://api.github.com${path}`, {
       method,
       redirect: "error",
@@ -183,12 +186,7 @@ async function executeApproved() {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    receipt.operations.push({
-      method,
-      path,
-      operationId: operationId ?? null,
-      status: response.status,
-    });
+    observation.status = response.status;
     if (method === "GET" && response.status === 404) return null;
     assert(response.ok, `GitHub ${method} failed with status ${response.status}.`);
     if (response.status === 204) return null;
@@ -213,8 +211,62 @@ async function executeApproved() {
     null,
     "The test branch already exists.",
   );
+  const readActionsPermissions = async () => {
+    const current = await api("GET", `${root}/actions/permissions`);
+    const permissions = {
+      enabled: current?.enabled,
+      allowed_actions: current?.allowed_actions,
+      sha_pinning_required: current?.sha_pinning_required,
+    };
+    assert.equal(typeof permissions.enabled, "boolean");
+    return permissions;
+  };
+  const assertPreservedActionsPolicy = (permissions) => {
+    for (const field of ["allowed_actions", "sha_pinning_required"])
+      assert(
+        permissions[field] === undefined ||
+          permissions[field] === plan.originalActionsPermissions[field],
+        "Actions permissions changed outside the approved scope.",
+      );
+  };
+  const assertNoActiveActionsRuns = async (phase) => {
+    const check = { phase, runs: [], complete: false };
+    receipt.actions.runChecks.push(check);
+    const ids = new Set();
+    let total;
+    for (let page = 1; page <= 100; page++) {
+      const result = await api("GET", `${root}/actions/runs?per_page=100&page=${page}`);
+      assert(
+        Number.isSafeInteger(result?.total_count) &&
+          result.total_count >= 0 &&
+          result.total_count <= 10_000,
+      );
+      assert(Array.isArray(result.workflow_runs) && result.workflow_runs.length <= 100);
+      if (total === undefined) total = result.total_count;
+      assert.equal(result.total_count, total, "Workflow-run inventory changed during inspection.");
+      for (const run of result.workflow_runs) {
+        assert(Number.isSafeInteger(run.id) && run.id > 0 && !ids.has(run.id));
+        ids.add(run.id);
+        check.runs.push({ id: run.id, status: run.status });
+        assert.equal(run.status, "completed", "An existing Actions run has not completed.");
+      }
+      if (ids.size === total) {
+        check.complete = true;
+        return;
+      }
+      assert(
+        result.workflow_runs.length === 100 && ids.size < total,
+        "Workflow-run inventory is incomplete.",
+      );
+    }
+    throw new Error("Workflow-run inventory exceeded its page limit.");
+  };
+  receipt.actions.initial = await readActionsPermissions();
+  assert.deepEqual(receipt.actions.initial, plan.originalActionsPermissions);
+  await assertNoActiveActionsRuns("before_disable");
   let createdBranch = false,
     enabledIssues = false,
+    actionsChangeAttempted = false,
     pull,
     issue,
     commitSha;
@@ -247,6 +299,18 @@ async function executeApproved() {
     return api(operation.method, path, operation.body ?? undefined, id);
   };
   try {
+    actionsChangeAttempted = true;
+    receipt.actions.disableAcknowledged = false;
+    try {
+      await mutate("disable-actions");
+      receipt.actions.disableAcknowledged = true;
+    } catch {
+      // A lost settings acknowledgement is resolved by GET, never by a second PUT.
+    }
+    receipt.actions.disabled = await readActionsPermissions();
+    assert.equal(receipt.actions.disabled.enabled, false);
+    assertPreservedActionsPolicy(receipt.actions.disabled);
+    await assertNoActiveActionsRuns("after_disable");
     const ref = await mutate("create-branch");
     assert.equal(ref.ref, `refs/heads/${plan.branch}`);
     assert.equal(ref.object.sha, plan.baseSha);
@@ -327,6 +391,30 @@ async function executeApproved() {
     if (enabledIssues)
       await cleanup("restore-issues-disabled", async () => {
         await mutate("restore-issues-disabled");
+      });
+    if (actionsChangeAttempted)
+      await cleanup("restore-actions", async () => {
+        receipt.actions.restoration = "unconfirmed";
+        const current = await readActionsPermissions();
+        if (current.enabled === plan.originalActionsPermissions.enabled) {
+          receipt.actions.final = current;
+          assert.deepEqual(current, plan.originalActionsPermissions);
+          receipt.actions.restoration = "already_original";
+          return;
+        }
+        assertPreservedActionsPolicy(current);
+        receipt.actions.restoreAcknowledged = false;
+        try {
+          await mutate("restore-actions");
+          receipt.actions.restoreAcknowledged = true;
+        } catch {
+          // Readback may confirm restoration even when its acknowledgement was lost.
+        }
+        receipt.actions.final = await readActionsPermissions();
+        assert.deepEqual(receipt.actions.final, plan.originalActionsPermissions);
+        receipt.actions.restoration = receipt.actions.restoreAcknowledged
+          ? "restored"
+          : "restored_from_readback";
       });
     token = undefined;
   }

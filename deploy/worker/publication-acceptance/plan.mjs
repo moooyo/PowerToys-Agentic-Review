@@ -7,6 +7,11 @@ export const publisherLogin = "moooyo";
 export const publisherId = 42196638;
 export const baseBranch = "main";
 export const baseSha = "3a1e642db52d45f88c0cb702b10663e1f65623f7";
+export const originalActionsPermissions = Object.freeze({
+  enabled: true,
+  allowed_actions: "all",
+  sha_pinning_required: false,
+});
 export const branch = `codex/${acceptanceId}`;
 export const documentPath = `doc/agentic-review-acceptance/${acceptanceId}.md`;
 export const commitMessage = "docs: add isolated Agentic Review publication acceptance fixture";
@@ -51,7 +56,8 @@ export const checkSummary =
 export const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 export const approvalPlan = Object.freeze({
-  schemaVersion: "PublicationAcceptancePlanV1",
+  schemaVersion: "PublicationAcceptancePlanV2",
+  supersedes: "The unapproved, unexecuted PublicationAcceptancePlanV1 with 11 operations.",
   acceptanceId,
   executionDefault: "prepare-only; no GitHub mutations",
   repository: {
@@ -67,6 +73,15 @@ export const approvalPlan = Object.freeze({
     credential: "Current GitHub CLI session, retained only in process memory.",
   },
   branch,
+  actions: {
+    originalPermissions: originalActionsPermissions,
+    readiness:
+      "Read all workflow-run pages and refuse any status other than completed before disabling Actions and again after disabled-state readback. Never cancel an existing run.",
+    preservation:
+      "Only enabled changes. Both PUT requests preserve allowed_actions=all and sha_pinning_required=false, which are supported request fields in the GitHub REST API.",
+    restoration:
+      "After all original cleanup actions, read back permissions and restore the original state if this run attempted to change Actions. Record unconfirmed acknowledgements and failed readback; never retry a mutation blindly.",
+  },
   document: {
     path: documentPath,
     content: documentBody,
@@ -74,6 +89,12 @@ export const approvalPlan = Object.freeze({
     commitMessage,
   },
   operations: [
+    {
+      id: "disable-actions",
+      method: "PUT",
+      path: `/repos/${repository}/actions/permissions`,
+      body: { ...originalActionsPermissions, enabled: false },
+    },
     {
       id: "create-branch",
       method: "POST",
@@ -155,6 +176,12 @@ export const approvalPlan = Object.freeze({
       path: `/repos/${repository}`,
       body: { has_issues: false },
     },
+    {
+      id: "restore-actions",
+      method: "PUT",
+      path: `/repos/${repository}/actions/permissions`,
+      body: { ...originalActionsPermissions },
+    },
   ],
   publication: {
     decisionAction: "comment",
@@ -180,7 +207,7 @@ export const approvalPlan = Object.freeze({
     retained:
       "The closed test PR, closed test Issue and their publication bodies remain as remote history; local database and receipts remain in the owned acceptance directory.",
     scope:
-      "Only targets created and recorded by this run. Existing branches, PRs, Issues, comments and settings are not cleanup targets.",
+      "Only targets created and recorded by this run, plus the explicitly approved Issues and Actions setting restoration. Existing branches, PRs, Issues and comments are not cleanup targets.",
     safety:
       "No automatic mutation retry. An uncertain setup or cleanup response is retained for read-only inspection; no unrelated target is substituted.",
   },

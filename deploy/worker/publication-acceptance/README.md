@@ -12,25 +12,50 @@ substitute repository or existing PR/Issue.
 
 ## Requested external changes
 
+This V2 plan replaces the unapproved 11-operation V1 plan. The original document, PR/Issue bodies,
+publication templates, branch, repository identity and source SHA remain unchanged. V1 artifacts
+are retained and cannot be used to execute V2.
+
 The exact request bodies are in `approval-plan.json`, generated from `plan.mjs`.
 
-1. Create `codex/m40-publication-20260910-b2619d4e` from the frozen main commit.
-2. Add only `doc/agentic-review-acceptance/m40-publication-20260910-b2619d4e.md` with the supplied text.
-3. Create the supplied draft PR against this fork's `main`.
-4. Temporarily set this fork's `has_issues` to `true`.
-5. Create the supplied dedicated test Issue.
-6. Send exactly one PR review with event `COMMENT` and the approved production-renderer body.
-7. Send exactly one Issue comment with the approved production-renderer body.
-8. Close the newly created draft PR, without merging it.
-9. Close the newly created test Issue as completed.
-10. Delete only the newly created test branch.
-11. Restore `has_issues` to `false`.
+1. Disable this fork's Actions with the supplied `PUT /actions/permissions` payload.
+2. Create `codex/m40-publication-20260910-b2619d4e` from the frozen main commit.
+3. Add only `doc/agentic-review-acceptance/m40-publication-20260910-b2619d4e.md` with the supplied text.
+4. Create the supplied draft PR against this fork's `main`.
+5. Temporarily set this fork's `has_issues` to `true`.
+6. Create the supplied dedicated test Issue.
+7. Send exactly one PR review with event `COMMENT` and the approved production-renderer body.
+8. Send exactly one Issue comment with the approved production-renderer body.
+9. Close the newly created draft PR, without merging it.
+10. Close the newly created test Issue as completed.
+11. Delete only the newly created test branch.
+12. Restore `has_issues` to `false`.
+13. Restore this fork's original Actions permissions with the supplied payload.
 
 The test PR/Issue and their comments remain as remote history. Enabling Issues is necessary for
 the Issue-comment case on this fork; restoration is part of this same proposed scope. No labels,
 assignees, review requests, approval reviews, source code changes, merges, or comment edits are
-included. Repository automations may observe the new draft PR and Issue; this harness does not
-change or enable workflow settings.
+included. The fork's frozen `spelling2.yml` listens to `pull_request_target` and can post PR comments,
+including for draft PRs. Disabling repository Actions for the complete exercise prevents this
+known workflow and other repository workflows from reacting to these test mutations.
+
+Before the first write, the harness requires the exact original Actions state:
+`enabled: true`, `allowed_actions: "all"`, `sha_pinning_required: false`. It reads every workflow-run
+page and refuses any status other than `completed`, including queued, in-progress, requested,
+pending, waiting and unknown states. It never cancels an existing run. After requesting disable,
+it requires `enabled: false` in a GET response and repeats the run check before creating the
+branch or either target. Visible optional permission fields must still match the original values;
+the API may omit those fields while Actions is disabled. Initial and final restoration checks
+require the complete original permission values.
+
+The official [GitHub REST API description](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.json)
+defines all three request fields for `PUT /repos/{owner}/{repo}/actions/permissions`, with a `204`
+success response. Both payloads explicitly retain `allowed_actions: "all"` and
+`sha_pinning_required: false`; only `enabled` changes. No workflow file or per-workflow state is
+edited. After the original cleanup attempts, the harness reads back permissions and restores the
+original state whenever it attempted to change Actions. Lost acknowledgements are recorded and
+resolved with GET; failed or uncertain restoration is retained in the receipt. It never blindly
+retries a mutation.
 
 ## Production components and result meaning
 
