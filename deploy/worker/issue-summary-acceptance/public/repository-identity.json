@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "M33PublicRepositoryIdentityV1",
+  "githubRepositoryId": 667731914,
+  "githubNodeId": "R_kgDOJ8zHyg",
+  "ownerLogin": "fishjar",
+  "name": "kiss-translator",
+  "fullName": "fishjar/kiss-translator",
+  "htmlUrl": "https://github.com/fishjar/kiss-translator",
+  "defaultBranch": "dev",
+  "isPrivate": false,
+  "source": {
+    "kind": "selected-fields-from-successful-public-api-response",
+    "url": "https://api.github.com/repos/fishjar/kiss-translator/issues/825/timeline?per_page=100",
+    "location": "cross-referenced source.issue.repository for pull request 833",
+    "note": "These selected fields were read from a successful public response before the anonymous API rate limit. This record is not the original full response."
+  }
+}

@@ -1,0 +1,255 @@
+{
+  "schemaVersion": "Issue1064ProbeContractV1",
+  "declaration": {
+    "schemaVersion": "TestProbeOutputDeclarationV1",
+    "fields": [
+      {
+        "id": "source_revision",
+        "description": "The hash-verified upstream commit used by the collector.",
+        "type": "string"
+      },
+      {
+        "id": "source_event_start_ms",
+        "description": "Speech event start in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_declared_duration_ms",
+        "description": "Speech event dDurationMs in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_line_break_ms",
+        "description": "Append-newline event start in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_line_break_gap_ms",
+        "description": "Milliseconds from the transcribed speech event start to the newline.",
+        "type": "number"
+      },
+      {
+        "id": "flat_event_count",
+        "description": "Actual number of flatEvents returned by prepareTimedTextEvents.",
+        "type": "number"
+      },
+      {
+        "id": "flat_start_ms",
+        "description": "Actual start of the first flattened event from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "flat_end_ms",
+        "description": "Actual end of the last flattened event from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "flat_duration_ms",
+        "description": "Actual last flat-event end minus first flat-event start.",
+        "type": "number"
+      },
+      {
+        "id": "flat_reaches_line_break",
+        "description": "Whether the actual final flattened end reaches or exceeds the source newline.",
+        "type": "boolean"
+      },
+      {
+        "id": "rule_cue_count",
+        "description": "Actual number of cues returned by runBuiltinSegmentation in Japanese rule mode.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_start_ms",
+        "description": "Actual start of the first built-in rule cue from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_end_ms",
+        "description": "Actual end of the last built-in rule cue from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_duration_ms",
+        "description": "Actual final built-in cue end minus first built-in cue start.",
+        "type": "number"
+      },
+      {
+        "id": "rule_reaches_line_break",
+        "description": "Whether the actual final built-in cue end reaches or exceeds the source newline.",
+        "type": "boolean"
+      },
+      {
+        "id": "flat_events_json",
+        "description": "JSON serialization of the actual flattened event array, including original speech text.",
+        "type": "string"
+      },
+      {
+        "id": "rule_cues_json",
+        "description": "JSON serialization of the actual built-in rule cue array, including original speech text.",
+        "type": "string"
+      },
+      {
+        "id": "flat_end_ms_spaced_control",
+        "description": "Actual final flattened end for the labelled punctuation-space sensitivity control.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_end_ms_spaced_control",
+        "description": "Actual final built-in rule cue end for the labelled punctuation-space sensitivity control.",
+        "type": "number"
+      }
+    ]
+  },
+  "command": {
+    "executable": "node",
+    "arguments": [
+      "--experimental-vm-modules",
+      "<owned-probe-directory>/probe.mjs",
+      "--checkout",
+      "."
+    ],
+    "workingDirectory": "Actual Worker checkout root",
+    "stdoutProtocol": "ProbeObservationsV1",
+    "collectionSuccessExitCode": 0,
+    "collectionFailureExitCode": 1,
+    "checkoutArgumentRequired": true
+  },
+  "inputs": [
+    {
+      "path": "reported-timedtext.transcribed.json",
+      "sha256": "95224363de08adfb0252a4a150a87ad4ab80e71b853c90831eec4126914787ad",
+      "sourceType": "Manual screenshot transcription",
+      "sourceIssueUrl": "https://github.com/fishjar/kiss-translator/issues/1064",
+      "sourceScreenshotSha256": "02441a7d6a72f381696c1179d9ba9dcd6c876fb309a0b58f09b3ac9634f0da0f"
+    }
+  ],
+  "upstreamManifest": {
+    "path": "source-manifest.json",
+    "sha256": "c7d457df571168574b7ec7860058198e0d9800868b9be65b9685a79d92f666f3",
+    "fileCount": 17,
+    "revision": "7dfc03ebc7f10530681109f6a5aec982a5573936"
+  },
+  "expectedParameters": {
+    "repositoryId": 667731914,
+    "issueNumber": 1064,
+    "issueId": 5295780029,
+    "sourceRevision": "7dfc03ebc7f10530681109f6a5aec982a5573936",
+    "sourceEventStartMs": 3839000,
+    "sourceDeclaredDurationMs": 3000,
+    "sourceLineBreakMs": 3848630,
+    "sourceLineBreakGapMs": 9630,
+    "documentedReportEndpointMs": 3842000,
+    "lineBreakEndpointMs": 3848630,
+    "sourceLanguage": "ja",
+    "segmentationMode": "rule",
+    "claimScope": "The screenshot-reported coarse speech event ends before the later append-newline in the shared flattened timing layer and built-in rule cues.",
+    "decisiveObservedFields": ["flat_end_ms", "rule_cue_end_ms"],
+    "preconditionObservedFields": ["source_revision", "source_event_start_ms"]
+  },
+  "whitespaceSensitivityControl": {
+    "label": "Punctuation-space sensitivity control; not the primary screenshot transcription",
+    "transformation": "Insert one U+0020 after each U+3002 in the first event's speech segment.",
+    "observedFields": ["flat_end_ms_spaced_control", "rule_cue_end_ms_spaced_control"]
+  },
+  "executionStatusAtAuthoring": "Acceptance collector prepared from the disclosed public M33 probe; each run must collect fresh observations.",
+  "probeOutput": {
+    "schemaVersion": "TestProbeOutputDeclarationV1",
+    "fields": [
+      {
+        "id": "source_revision",
+        "description": "The hash-verified upstream commit used by the collector.",
+        "type": "string"
+      },
+      {
+        "id": "source_event_start_ms",
+        "description": "Speech event start in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_declared_duration_ms",
+        "description": "Speech event dDurationMs in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_line_break_ms",
+        "description": "Append-newline event start in the frozen screenshot transcription.",
+        "type": "number"
+      },
+      {
+        "id": "source_line_break_gap_ms",
+        "description": "Milliseconds from the transcribed speech event start to the newline.",
+        "type": "number"
+      },
+      {
+        "id": "flat_event_count",
+        "description": "Actual number of flatEvents returned by prepareTimedTextEvents.",
+        "type": "number"
+      },
+      {
+        "id": "flat_start_ms",
+        "description": "Actual start of the first flattened event from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "flat_end_ms",
+        "description": "Actual end of the last flattened event from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "flat_duration_ms",
+        "description": "Actual last flat-event end minus first flat-event start.",
+        "type": "number"
+      },
+      {
+        "id": "flat_reaches_line_break",
+        "description": "Whether the actual final flattened end reaches or exceeds the source newline.",
+        "type": "boolean"
+      },
+      {
+        "id": "rule_cue_count",
+        "description": "Actual number of cues returned by runBuiltinSegmentation in Japanese rule mode.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_start_ms",
+        "description": "Actual start of the first built-in rule cue from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_end_ms",
+        "description": "Actual end of the last built-in rule cue from the primary transcription.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_duration_ms",
+        "description": "Actual final built-in cue end minus first built-in cue start.",
+        "type": "number"
+      },
+      {
+        "id": "rule_reaches_line_break",
+        "description": "Whether the actual final built-in cue end reaches or exceeds the source newline.",
+        "type": "boolean"
+      },
+      {
+        "id": "flat_events_json",
+        "description": "JSON serialization of the actual flattened event array, including original speech text.",
+        "type": "string"
+      },
+      {
+        "id": "rule_cues_json",
+        "description": "JSON serialization of the actual built-in rule cue array, including original speech text.",
+        "type": "string"
+      },
+      {
+        "id": "flat_end_ms_spaced_control",
+        "description": "Actual final flattened end for the labelled punctuation-space sensitivity control.",
+        "type": "number"
+      },
+      {
+        "id": "rule_cue_end_ms_spaced_control",
+        "description": "Actual final built-in rule cue end for the labelled punctuation-space sensitivity control.",
+        "type": "number"
+      }
+    ]
+  }
+}

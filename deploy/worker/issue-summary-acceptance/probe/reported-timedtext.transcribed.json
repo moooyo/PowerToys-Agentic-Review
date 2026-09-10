@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "Issue1064ScreenshotTranscriptionV1",
+  "issueUrl": "https://github.com/fishjar/kiss-translator/issues/1064",
+  "issueId": 5295780029,
+  "sourceType": "Manual transcription of the publicly attached timedtext screenshot; not an original JSON attachment",
+  "screenshot": "../public-source/reported-timedtext.png",
+  "screenshotSha256": "02441a7d6a72f381696c1179d9ba9dcd6c876fb309a0b58f09b3ac9634f0da0f",
+  "transcriptionNotes": [
+    "The primary transcription has no ASCII spaces after Japanese full stops and has one trailing U+0020 in the speech text.",
+    "Japanese full-stop glyph spacing is visually ambiguous; the separate whitespace sensitivity control inserts U+0020 after each U+3002.",
+    "The second event has no dDurationMs, and neither segment has tOffsetMs, matching the visible screenshot.",
+    "The screenshot is an excerpt of two events, not a complete timedtext response."
+  ],
+  "events": [
+    {
+      "tStartMs": 3839000,
+      "dDurationMs": 3000,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "ふう。やっぱりホームは落ち着く。ここに戻るたびに初めてログインした時を思い出すよ。え、 ",
+          "acAsrConf": 0,
+          "isSpeakerChange": 1
+        }
+      ]
+    },
+    {
+      "tStartMs": 3848630,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    }
+  ]
+}

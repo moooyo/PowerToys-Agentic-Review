@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "UpstreamSourceManifestV1",
+  "repository": "fishjar/kiss-translator",
+  "repositoryId": 667731914,
+  "issueNumber": 1064,
+  "issueId": 5295780029,
+  "releaseTag": "v2.0.32",
+  "annotatedTagObject": "a7a2faa955ea5ab8b05b17c75d64f1ac9f64c428",
+  "revision": "7dfc03ebc7f10530681109f6a5aec982a5573936",
+  "sourceDirectory": "upstream",
+  "downloadedVia": "Unauthenticated public HTTPS GET",
+  "files": [
+    {
+      "path": "src/subtitle/youtubeSubtitleProcessing.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/subtitle/youtubeSubtitleProcessing.js",
+      "sha256": "57edc53c6f8061de0817433302db3d4c1d73739491e99312cd73270b262bb00b",
+      "byteLength": 15688
+    },
+    {
+      "path": "src/subtitle/sentenceBreaker.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/subtitle/sentenceBreaker.js",
+      "sha256": "869cd536482191b73918afaaa69c0a7b75cd26a745faa9e87aaca229de853807",
+      "byteLength": 30303
+    },
+    {
+      "path": "src/subtitle/subtitleTextClassification.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/subtitle/subtitleTextClassification.js",
+      "sha256": "d96462382bfbf666f94e9ddc4571f2dd9417b5b7954e88778474c2e7a0e0a1fc",
+      "byteLength": 576
+    },
+    {
+      "path": "src/libs/log.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/libs/log.js",
+      "sha256": "9ff44cabccfd6a44b9b7748e55a63c1652167d2330acb1aae9e5ac313a44c593",
+      "byteLength": 5335
+    },
+    {
+      "path": "src/libs/language.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/libs/language.js",
+      "sha256": "63a785cfb0ce69184f45042d078b84bb18ec7ba39c64c98611997544abb58d62",
+      "byteLength": 2146
+    },
+    {
+      "path": "src/config/index.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/index.js",
+      "sha256": "24df0f978d02ce5867bcb244b9707ce0b026135947b1de2d36614ab59225b1ff",
+      "byteLength": 507
+    },
+    {
+      "path": "src/config/app.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/app.js",
+      "sha256": "e2f42d14520f0891a289948bac66505754433f11bd8f1f994195b9c1c5b57c7e",
+      "byteLength": 1061
+    },
+    {
+      "path": "src/config/rules.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/rules.js",
+      "sha256": "cc6ca01f7f6a3640b1f16598f57d2dc4e59c729086eb535dc8263336cba570b9",
+      "byteLength": 12938
+    },
+    {
+      "path": "src/config/api.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/api.js",
+      "sha256": "6a2a96aa5240f936791d7e3f203afc8eb4041e0169e13b8ad68e2930a3d41b85",
+      "byteLength": 68274
+    },
+    {
+      "path": "src/config/prompt.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/prompt.js",
+      "sha256": "26617cd71887082d0f0d40bd5e15f407ecf7429140605275e4e88152b8c694fd",
+      "byteLength": 31272
+    },
+    {
+      "path": "src/config/setting.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/setting.js",
+      "sha256": "eedb2d63c4dbcb1855e478d5bc7a763d016b86f8ddf2512a296bf7565c994a17",
+      "byteLength": 16610
+    },
+    {
+      "path": "src/config/i18n.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/i18n.js",
+      "sha256": "9f06802680eb09b606aa765c9f2b849fc68ebf13d44dd36a603305878e74a4fa",
+      "byteLength": 218873
+    },
+    {
+      "path": "src/config/storage.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/storage.js",
+      "sha256": "460cd5b1ddff918033b514a35dbea170cebcbb7f07170f0a0bc856946b4ef798",
+      "byteLength": 2687
+    },
+    {
+      "path": "src/config/url.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/url.js",
+      "sha256": "a022d3a59e5d409153ce9e111cee39a575eb7019ae56cb6188fb40a5a850a13a",
+      "byteLength": 1782
+    },
+    {
+      "path": "src/config/msg.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/msg.js",
+      "sha256": "bcdb2e2180d641ca2e002099705a7336383bd91a4d269f1d1a24e182e29b0a69",
+      "byteLength": 4600
+    },
+    {
+      "path": "src/config/client.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/client.js",
+      "sha256": "5298dbcccdb4c5d2f1acf4fa610e2a147b840adb2518b18753f56c3f2392a2c6",
+      "byteLength": 1042
+    },
+    {
+      "path": "src/config/styles.js",
+      "url": "https://raw.githubusercontent.com/fishjar/kiss-translator/7dfc03ebc7f10530681109f6a5aec982a5573936/src/config/styles.js",
+      "sha256": "80fe1923d361dea37aac85a425612685e3b8ae9b1612ce7d91d00f8916adc47e",
+      "byteLength": 2379
+    }
+  ]
+}

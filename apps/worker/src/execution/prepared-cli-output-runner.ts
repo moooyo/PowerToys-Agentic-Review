@@ -199,12 +199,18 @@ export class PreparedCliOutputRunner {
     const reportNodeHealthFault =
       input.reportNodeHealthFault ?? ((error: Error) => context.reportNodeHealthFault(error));
     const protectedValues = [
-      ...(input.sensitiveValues ?? []),
-      ...Object.entries(this.options.cliEnvironment ?? {})
-        .filter(([name]) =>
-          /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTHORIZATION|COOKIE|CREDENTIAL)/iu.test(name),
-        )
-        .map(([, value]) => value),
+      ...new Set(
+        [
+          ...(input.sensitiveValues ?? []),
+          ...Object.entries(this.options.cliEnvironment ?? {})
+            .filter(([name]) =>
+              /(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTHORIZATION|COOKIE|CREDENTIAL)/iu.test(
+                name,
+              ),
+            )
+            .map(([, value]) => value),
+        ].flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]),
+      ),
     ];
     const redact = (text: string) => redactExecutionText(text, protectedValues);
     const schemaPath = win32.join(workspace.controlDirectory, "schema.json");

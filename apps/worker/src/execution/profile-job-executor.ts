@@ -7,6 +7,7 @@ import {
   IssueTriageV2Schema,
   PrReviewPlanV2ModelResultSchema,
   PrReviewPlanV2Schema,
+  redactExecutionText,
   ValidationJobResultV1Schema,
   ValidationJobResultV2Schema,
 } from "@agentic-review/codex";
@@ -539,13 +540,21 @@ export class ProfileJobExecutor implements JobExecutor {
           message: "The optional model execution could not confirm safe completion.",
         };
       }
-      if (attempt.state === "failed")
+      if (attempt.state === "failed") {
+        const fallback =
+          "The optional validation summary could not complete; deterministic runner results are retained.";
+        const message = redactExecutionText(
+          typeof attempt.message === "string" && attempt.message.trim().length > 0
+            ? attempt.message
+            : fallback,
+          [envelope.lease.leaseToken],
+        ).toWellFormed();
         return {
           state: "failed",
-          code: safeCode(attempt.code, "SUMMARY_EXECUTION_FAILED"),
-          message:
-            "The optional validation summary could not complete; deterministic runner results are retained.",
+          code: safeCode(attempt.code, "SUMMARY_EXECUTION_FAILED", [envelope.lease.leaseToken]),
+          message: message.trim().length > 0 ? message : fallback,
         };
+      }
       const expectedContext = createValidationSummaryContext(input);
       if (
         attempt.contextSha256 !== expectedContext.sha256 ||
@@ -1308,8 +1317,16 @@ function failed(code: string, message: string, retryable = false): JobExecutionR
 function hash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
-function safeCode(value: string, fallback: string): string {
-  return /^[A-Z][A-Z0-9_]{0,127}$/u.test(value) ? value : fallback;
+function safeCode(
+  value: unknown,
+  fallback: string,
+  sensitiveValues: readonly string[] = [],
+): string {
+  return typeof value === "string" &&
+    /^[A-Z][A-Z0-9_]{0,127}$/u.test(value) &&
+    redactExecutionText(value, sensitiveValues) === value
+    ? value
+    : fallback;
 }
 function asError(value: unknown, fallback: string): Error {
   return value instanceof Error ? value : new Error(fallback);

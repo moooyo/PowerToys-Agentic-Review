@@ -920,6 +920,44 @@ describe("frozen Issue reproduction composition", () => {
     expect(JSON.stringify(result)).not.toContain('"local-shot"');
   });
 
+  it.each([false, true])(
+    "retains the confirmed reproduction and original evidence after a CLI summary failure (UI: %s)",
+    async (ui) => {
+      const { test } = reproductionFixture(
+        ui,
+        ui ? { type: "string", value: "Duplicate" } : { type: "boolean", value: true },
+      );
+      test.execute.mockResolvedValue({
+        state: "failed",
+        code: "CLI_NON_ZERO_EXIT",
+        message: "CLI exited with code 1; the configured output schema was rejected.",
+      });
+      const result = typed(await test.run());
+      expect(result.report).toMatchObject({
+        workItemKind: "issue",
+        reproductionConclusion: "confirmed",
+      });
+      expect(result).toMatchObject({
+        reproductionAssessment: { conclusion: "confirmed", coverage: "complete" },
+        modelReview: {
+          state: "failed",
+          code: "CLI_NON_ZERO_EXIT",
+          message: "CLI exited with code 1; the configured output schema was rejected.",
+        },
+      });
+      expect(result.report.checks[0]?.outcome).toBe(ui ? "failed" : "passed");
+      expect(result.execution.blockers).toEqual([]);
+      if (ui) {
+        expect(result).toMatchObject({
+          reproductionAssessment: {
+            cases: [{ state: "present", evidenceIds: ["server-local-shot", "server-local-steps"] }],
+          },
+        });
+      } else expect(result.probeReceipts).toHaveLength(1);
+      expect(test.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    },
+  );
+
   it("cannot infer absence from a positive-only probe whose predicate did not match", async () => {
     const { test, output } = reproductionFixture(false);
     const capture = output.probeCaptures?.[0];
@@ -1080,15 +1118,98 @@ describe("profile job executor", () => {
       test.execute.mockResolvedValue({
         state: "failed",
         code,
-        message: "Do not expose untrusted private model output.",
+        message: `The CLI summary could not complete ${code}; token=private-fixture-token`,
       });
       const result = typed(await test.run());
-      expect(result.modelReview).toMatchObject({ state: "failed", code });
-      expect(JSON.stringify(result)).not.toContain("untrusted private");
+      expect(result.modelReview).toMatchObject({
+        state: "failed",
+        code,
+        message: `The CLI summary could not complete ${code}; token=[REDACTED]`,
+      });
+      expect(JSON.stringify(result)).not.toContain("private-fixture-token");
       expect(result.report.modelSummary).toBeUndefined();
       expect(result.report.checks[0]?.outcome).toBe("passed");
       expect(result.execution.blockers).toEqual([]);
       expect(test.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains a failed CLI runner's safe diagnostic through both summary adapters", async () => {
+    const test = adapterHarness();
+    test.output.mockResolvedValue({
+      outcome: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message: "CLI exited with code 1.",
+      retryable: true,
+      diagnostics: {
+        category: "process",
+        exitCode: 1,
+        correlationId: test.input.lease.runAttemptId,
+        summary: `CLI exited with code 1; output schema rejected; lease=${test.input.lease.leaseToken}`,
+      },
+    });
+    const result = typed(await test.run());
+    expect(result.modelReview).toEqual({
+      state: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message: "CLI exited with code 1; output schema rejected; lease=[REDACTED]",
+    });
+    expect(result.report.checks[0]?.outcome).toBe("passed");
+    expect(result.report.checks[0]?.evidenceIds).toContain("server-local-shot");
+    expect(result.execution.blockers).toEqual([]);
+    expect(result.report.modelSummary).toBeUndefined();
+    expect(test.context.reportNodeHealthFault).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "invalid-code", "X".repeat(129), 4, null])(
+    "falls back for an invalid summary failure code without discarding its safe message: %j",
+    async (code) => {
+      const test = summaryHarness();
+      const attempt = {
+        state: "failed" as const,
+        code: "CLI_NON_ZERO_EXIT",
+        message: "CLI output schema was rejected.",
+      };
+      Reflect.set(attempt, "code", code);
+      test.execute.mockResolvedValue(attempt);
+      expect(typed(await test.run()).modelReview).toEqual({
+        state: "failed",
+        code: "SUMMARY_EXECUTION_FAILED",
+        message: attempt.message,
+      });
+    },
+  );
+
+  it("redacts the lease from failure codes and messages before bounding Unicode text", async () => {
+    const test = summaryHarness();
+    test.input.lease.leaseToken = "S".repeat(32);
+    test.execute.mockResolvedValue({
+      state: "failed",
+      code: test.input.lease.leaseToken,
+      message: `${test.input.lease.leaseToken} ${"界😀".repeat(1_000)}`,
+    });
+    const result = typed(await test.run());
+    expect(result.modelReview).toMatchObject({ state: "failed", code: "SUMMARY_EXECUTION_FAILED" });
+    if (result.modelReview.state !== "failed") throw new Error("Expected summary failure.");
+    expect(result.modelReview.message.startsWith("[REDACTED] ")).toBe(true);
+    expect(result.modelReview.message.length).toBeLessThanOrEqual(2_048);
+    expect(result.modelReview.message.isWellFormed()).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(test.input.lease.leaseToken);
+  });
+
+  it.each(["", " \r\n", undefined, 4])(
+    "keeps a generic fallback for an unavailable failure message: %j",
+    async (message) => {
+      const test = summaryHarness();
+      const attempt = { state: "failed" as const, code: "CLI_NON_ZERO_EXIT", message: "" };
+      Reflect.set(attempt, "message", message);
+      test.execute.mockResolvedValue(attempt);
+      expect(typed(await test.run()).modelReview).toEqual({
+        state: "failed",
+        code: "CLI_NON_ZERO_EXIT",
+        message:
+          "The optional validation summary could not complete; deterministic runner results are retained.",
+      });
     },
   );
   it("retains runner facts if the optional factory throws", async () => {

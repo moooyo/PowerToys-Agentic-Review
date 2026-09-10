@@ -4,6 +4,7 @@ import {
   composeSummaryPrompt,
   createCanonicalResult,
   createValidationSummaryContext,
+  redactExecutionText,
   type ValidationSummaryContextInput,
   type ValidationSummaryEvidenceContext,
 } from "@agentic-review/codex";
@@ -201,6 +202,9 @@ export class ValidationSummaryExecutor {
       const sensitive = [envelope.lease.leaseToken, ...this.#secrets].filter(
         (value) => value.length > 0,
       );
+      const diagnosticSecrets = [
+        ...new Set(sensitive.flatMap((value) => [value, JSON.stringify(value).slice(1, -1)])),
+      ];
       if (containsProtectedValue(JSON.parse(canonicalContext.json), sensitive)) {
         throw failure("SUMMARY_CONTEXT_UNSAFE", "The summary context contains protected values.");
       }
@@ -324,7 +328,7 @@ export class ValidationSummaryExecutor {
         correlationId: envelope.lease.runAttemptId,
         launchPolicy: "summary_read_only",
         teardownTimeoutMs: this.#teardownTimeout,
-        sensitiveValues: sensitive,
+        sensitiveValues: diagnosticSecrets,
       });
       context.signal.throwIfAborted();
       child.signal.throwIfAborted();
@@ -334,10 +338,18 @@ export class ValidationSummaryExecutor {
           "A Worker health fault invalidates the optional summary.",
         );
       if (result.outcome === "failed") {
-        throw failure(
-          "SUMMARY_EXECUTION_FAILED",
-          "CLI did not complete the optional structured summary.",
+        const code =
+          typeof result.code === "string" &&
+          /^[A-Z][A-Z0-9_]{0,127}$/u.test(result.code) &&
+          redactExecutionText(result.code, diagnosticSecrets) === result.code
+            ? result.code
+            : "SUMMARY_EXECUTION_FAILED";
+        const fallback = "CLI did not complete the optional structured summary.";
+        const detail = [result.diagnostics?.summary, result.message].find(
+          (value) => typeof value === "string" && value.trim().length > 0,
         );
+        const message = redactExecutionText(detail ?? fallback, diagnosticSecrets).toWellFormed();
+        throw failure(code, message.trim().length > 0 ? message : fallback);
       }
       const originalOutput = {
         outcome: "succeeded" as const,

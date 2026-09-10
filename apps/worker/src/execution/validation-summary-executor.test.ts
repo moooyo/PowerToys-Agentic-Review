@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import {
   composeSummaryPrompt as composeSharedSummaryPrompt,
   createCanonicalResult,
   createValidationSummaryContext as createSharedSummaryContext,
   IssueTriageV2ModelOutputSchema,
   PrReviewPlanV2ModelOutputSchema,
+  redactExecutionText,
 } from "@agentic-review/codex";
 import {
   type EvidenceAssetManifest,
@@ -26,11 +28,13 @@ import { LeaseLostError } from "../leases/errors.js";
 import type { JobExecutionContext } from "./job-executor.js";
 import type { JobWorkspaceProvider, PreparedJobWorkspace } from "./job-workspace.js";
 import { modelArtifactEvaluationFixture } from "./model-output-artifact.testing.js";
-import type {
-  PreparedCliOutputInput,
-  PreparedCliOutputResult,
+import {
+  type PreparedCliOutputInput,
+  type PreparedCliOutputResult,
   PreparedCliOutputRunner,
+  type ReviewFileIO,
 } from "./prepared-cli-output-runner.js";
+import { type ManagedProcess, processHostProtocolVersion } from "./process-host-protocol.js";
 import {
   composeSummaryPrompt,
   createValidationSummaryContext,
@@ -464,6 +468,15 @@ function fixture(issue = false, overrides: Partial<ValidationSummaryExecutorOpti
 }
 
 afterEach(() => vi.useRealTimers());
+
+function failedCliOutput(): Extract<PreparedCliOutputResult<unknown>, { outcome: "failed" }> {
+  return {
+    outcome: "failed",
+    code: "CLI_NON_ZERO_EXIT",
+    message: "CLI exited with code 1.",
+    retryable: false,
+  };
+}
 
 function summaryReceipt(
   envelope: JobExecutionEnvelopeV2,
@@ -1205,6 +1218,299 @@ describe("optional ValidationSummary executor", () => {
     await expect(cancelled.executor.execute(cancelled.input, cancelled.context)).rejects.toBe(lost);
   });
 
+  it("preserves the CLI exit code and a complete diagnostic without duplicating its reason", async () => {
+    const f = fixture();
+    const message = "CLI exited with code 1: the installed CLI needs sign-in.";
+    f.run.mockResolvedValue({
+      ...failedCliOutput(),
+      diagnostics: {
+        category: "process",
+        exitCode: 1,
+        summary: message,
+        correlationId: "summary-process",
+      },
+    });
+    expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+      state: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message,
+    });
+  });
+
+  it.each([undefined, "", " \t\n ", 42])(
+    "uses the CLI message when the diagnostic summary is unusable (%s)",
+    async (summary) => {
+      const f = fixture();
+      const diagnostics = {
+        category: "process" as const,
+        exitCode: 1,
+        summary: "Replaced by the malformed fixture.",
+        correlationId: "summary-process",
+      };
+      Reflect.set(diagnostics, "summary", summary);
+      f.run.mockResolvedValue({
+        ...failedCliOutput(),
+        message: "Copilot CLI exited with code 1: no active account was found.",
+        diagnostics,
+      });
+      expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+        state: "failed",
+        code: "CLI_NON_ZERO_EXIT",
+        message: "Copilot CLI exited with code 1: no active account was found.",
+      });
+    },
+  );
+
+  it("preserves a useful failure message when the CLI has no diagnostics", async () => {
+    const f = fixture();
+    f.run.mockResolvedValue(failedCliOutput());
+    expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+      state: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message: "CLI exited with code 1.",
+    });
+  });
+
+  it.each([undefined, " \t\n ", 42])(
+    "uses the generic diagnostic when the CLI message is unusable (%s)",
+    async (message) => {
+      const f = fixture();
+      const output = failedCliOutput();
+      Reflect.set(output, "message", message);
+      f.run.mockResolvedValue(output);
+      expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+        state: "failed",
+        code: "CLI_NON_ZERO_EXIT",
+        message: "CLI did not complete the optional structured summary.",
+      });
+    },
+  );
+
+  it.each(["", "cli_non_zero_exit", "CLI ERROR", "A".repeat(129), null])(
+    "replaces an invalid failure code while preserving its useful message (%s)",
+    async (code) => {
+      const f = fixture();
+      const output = failedCliOutput();
+      Reflect.set(output, "code", code);
+      f.run.mockResolvedValue(output);
+      expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+        state: "failed",
+        code: "SUMMARY_EXECUTION_FAILED",
+        message: "CLI exited with code 1.",
+      });
+    },
+  );
+
+  it.each(["lease", "explicit"] as const)(
+    "replaces a syntactically valid failure code containing a %s credential",
+    async (source) => {
+      const secret = "PRIVATE_CODE_FRAGMENT";
+      const f = fixture(false, { sensitiveValues: [secret] });
+      f.input.envelope.lease.leaseToken = "L".repeat(64);
+      const protectedValue = source === "lease" ? f.input.envelope.lease.leaseToken : secret;
+      f.run.mockResolvedValue({ ...failedCliOutput(), code: `CLI_${protectedValue}_FAILED` });
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result).toStrictEqual({
+        state: "failed",
+        code: "SUMMARY_EXECUTION_FAILED",
+        message: "CLI exited with code 1.",
+      });
+      expect(JSON.stringify(result)).not.toContain(protectedValue);
+    },
+  );
+
+  it.each(["message", "diagnostics"] as const)(
+    "redacts lease, explicit, and common credentials in a CLI %s while retaining the cause",
+    async (source) => {
+      const secret = "private fixture credential";
+      const commonToken = "ghp_12345678ABCDEFGH";
+      const bearer = "syntheticBearerCredential";
+      const f = fixture(false, { sensitiveValues: [secret] });
+      const message =
+        `CLI output: ${f.input.envelope.lease.leaseToken}; ${secret}; ${commonToken}; ` +
+        `Bearer ${bearer}; cause: the installed CLI has no active account.`;
+      const output = failedCliOutput();
+      if (source === "message") Reflect.set(output, "message", message);
+      else
+        Reflect.set(output, "diagnostics", {
+          category: "process",
+          exitCode: 1,
+          summary: message,
+          correlationId: "summary-process",
+        });
+      f.run.mockResolvedValue(output);
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result).toMatchObject({ state: "failed", code: "CLI_NON_ZERO_EXIT" });
+      if (result.state !== "failed") throw new Error("Expected a failed summary fixture.");
+      expect(result.message).toContain("cause: the installed CLI has no active account.");
+      expect(result.message).toContain("[REDACTED]");
+      for (const protectedValue of [f.input.envelope.lease.leaseToken, secret, commonToken, bearer])
+        expect(result.message).not.toContain(protectedValue);
+    },
+  );
+
+  it("redacts both literal and JSON-escaped explicit credentials from CLI diagnostics", async () => {
+    const secret = 'private\n"quoted"\\value';
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    const f = fixture(false, { sensitiveValues: [secret] });
+    f.run.mockResolvedValue({
+      ...failedCliOutput(),
+      diagnostics: {
+        category: "process",
+        exitCode: 1,
+        summary: `CLI output: ${secret}; JSON output: ${escaped}; cause: missing account.`,
+        correlationId: "summary-process",
+      },
+    });
+    const result = await f.executor.execute(f.input, f.context);
+    expect(result).toStrictEqual({
+      state: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message: "CLI output: [REDACTED]; JSON output: [REDACTED]; cause: missing account.",
+    });
+    expect(JSON.stringify(result)).not.toContain(escaped);
+  });
+
+  it("redacts a credential crossing the diagnostic limit before truncating the message", async () => {
+    const secret = "PRIVATE_BOUNDARY_CREDENTIAL";
+    const f = fixture(false, { sensitiveValues: [secret] });
+    f.run.mockResolvedValue({
+      ...failedCliOutput(),
+      message: `${"x".repeat(2_047)}${secret} trailing text`,
+    });
+    const result = await f.executor.execute(f.input, f.context);
+    expect(result).toMatchObject({ state: "failed", code: "CLI_NON_ZERO_EXIT" });
+    if (result.state !== "failed") throw new Error("Expected a failed summary fixture.");
+    expect(result.message).toBe(`${"x".repeat(2_047)}[`);
+    expect(result.message).toHaveLength(2_048);
+  });
+
+  it("supplies escaped credentials to the runner before its own diagnostic truncation", async () => {
+    const secret = 'private\n"quoted"\\value';
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    const f = fixture(false, { sensitiveValues: [secret] });
+    f.run.mockImplementation(async (input) => ({
+      ...failedCliOutput(),
+      diagnostics: {
+        category: "process",
+        exitCode: 1,
+        correlationId: "summary-process",
+        summary: redactExecutionText(`${"x".repeat(2_047)}${escaped}`, input.sensitiveValues),
+      },
+    }));
+    const result = await f.executor.execute(f.input, f.context);
+    expect(result).toMatchObject({ state: "failed", code: "CLI_NON_ZERO_EXIT" });
+    if (result.state !== "failed") throw new Error("Expected a failed summary fixture.");
+    expect(result.message).toBe(`${"x".repeat(2_047)}[`);
+    expect(f.run.mock.calls[0]?.[0].sensitiveValues).toContain(escaped);
+  });
+
+  it("retains only redacted environment diagnostics from the actual CLI runner", async () => {
+    const secret = 'private\n"quoted"\\environment-value';
+    const escaped = JSON.stringify(secret).slice(1, -1);
+    const f = fixture();
+    const fileIO = {
+      writeExclusiveUtf8: vi.fn(async () => undefined),
+      lstat: vi.fn(async () => {
+        throw Object.assign(new Error("Synthetic control file does not exist."), {
+          code: "ENOENT",
+        });
+      }),
+      realpath: vi.fn(async (path: string) => path),
+      openRead: vi.fn(async () => {
+        throw new Error("A failed process has no final result file.");
+      }),
+    } satisfies ReviewFileIO;
+    f.context.processHost.start.mockResolvedValue({
+      requestId: "environment-summary-process",
+      processId: 7,
+      stdout: Readable.from([]),
+      stderr: Readable.from([`ordinary error detail: ${escaped}; cause: output schema rejected`]),
+      completed: Promise.resolve({
+        protocolVersion: processHostProtocolVersion,
+        type: "exited",
+        requestId: "environment-summary-process",
+        exitCode: 1,
+        signal: null,
+        outputTruncated: false,
+      }),
+      terminate: vi.fn(async () => undefined),
+    } satisfies ManagedProcess);
+    const runner = new PreparedCliOutputRunner({
+      engine: "codex",
+      cliExecutablePath: "C:\\Trusted\\codex.exe",
+      cliVersion: "fixture-version",
+      cliEnvironment: { CONFIGURED_API_TOKEN: secret },
+      userProfileDirectory: "C:\\Users\\WorkerAccount",
+      systemRoot: "C:\\Windows",
+      comSpec: "C:\\Windows\\System32\\cmd.exe",
+      path: "C:\\Windows\\System32",
+      pathExt: ".EXE;.CMD",
+      maximumHardTimeoutMs: 120_000,
+      maximumProcessCount: 8,
+      maximumMemoryBytes: 512 * 1024 ** 2,
+      maximumOutputBytes: 4 * 1024 ** 2,
+      fileIO,
+    });
+    const run = vi.spyOn(runner, "run");
+    const executor = new ValidationSummaryExecutor({ ...f.options, outputRunner: runner });
+    const result = await executor.execute(f.input, f.context);
+    expect(result).toMatchObject({ state: "failed", code: "CLI_NON_ZERO_EXIT" });
+    if (result.state !== "failed") throw new Error("Expected a failed summary fixture.");
+    expect(result.message).toContain(
+      "ordinary error detail: [REDACTED]; cause: output schema rejected",
+    );
+    expect(result.message).not.toContain(secret);
+    expect(result.message).not.toContain(escaped);
+    expect(run.mock.calls[0]?.[0].sensitiveValues).toEqual([f.input.envelope.lease.leaseToken]);
+    expect(fileIO.openRead).not.toHaveBeenCalled();
+    expect(f.input.runnerReport.checks[0]?.outcome).toBe("failed");
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bounded diagnostic well formed when truncation splits an astral character", async () => {
+    const f = fixture();
+    f.run.mockResolvedValue({
+      ...failedCliOutput(),
+      message: `${"x".repeat(2_047)}\u{1F600} trailing text`,
+    });
+    const result = await f.executor.execute(f.input, f.context);
+    expect(result).toMatchObject({ state: "failed", code: "CLI_NON_ZERO_EXIT" });
+    if (result.state !== "failed") throw new Error("Expected a failed summary fixture.");
+    expect(result.message).toBe(`${"x".repeat(2_047)}\uFFFD`);
+    expect(result.message).toHaveLength(2_048);
+    expect(result.message.isWellFormed()).toBe(true);
+  });
+
+  it("retains deterministic runner facts, evidence, and deferred cleanup after a diagnosed CLI failure", async () => {
+    const f = fixture();
+    attachEvidence(f);
+    const before = createCanonicalResult({
+      report: f.input.runnerReport,
+      execution: f.input.runnerExecution,
+      evidence: f.input.evidenceContext,
+    });
+    f.run.mockResolvedValue(failedCliOutput());
+    expect(await f.executor.execute(f.input, f.context)).toStrictEqual({
+      state: "failed",
+      code: "CLI_NON_ZERO_EXIT",
+      message: "CLI exited with code 1.",
+    });
+    expect(
+      createCanonicalResult({
+        report: f.input.runnerReport,
+        execution: f.input.runnerExecution,
+        evidence: f.input.evidenceContext,
+      }),
+    ).toStrictEqual(before);
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    expect(f.controller.signal.aborted).toBe(false);
+    expect(f.model.cleanup).not.toHaveBeenCalled();
+    await f.cleanups[0]?.();
+    await f.cleanups[0]?.();
+    expect(f.model.cleanup).toHaveBeenCalledOnce();
+  });
+
   it("distinguishes unconfirmed process teardown from ordinary optional model failure", async () => {
     const f = fixture();
     f.run.mockImplementation(async (input) => {
@@ -1222,9 +1528,15 @@ describe("optional ValidationSummary executor", () => {
     expect(f.context.reportNodeHealthFault).toHaveBeenCalledOnce();
     expect(f.input.runnerExecution.blockers).toStrictEqual([]);
     const ordinary = fixture();
-    ordinary.run.mockRejectedValue(new Error("Invalid model response"));
+    ordinary.run.mockRejectedValue(
+      new Error(`Invalid model response containing ${ordinary.input.envelope.lease.leaseToken}`),
+    );
     const result = await ordinary.executor.execute(ordinary.input, ordinary.context);
-    expect(result.state).toBe("failed");
+    expect(result).toStrictEqual({
+      state: "failed",
+      code: "SUMMARY_EXECUTION_FAILED",
+      message: "The optional summary could not be completed safely.",
+    });
     expect(result).not.toHaveProperty("nodeFault");
     expect(result).not.toHaveProperty("cleanupUnconfirmed");
   });

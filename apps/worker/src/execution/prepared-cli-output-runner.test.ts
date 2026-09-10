@@ -50,6 +50,7 @@ function fixture(
     result?: string;
     stderr?: string;
     stdout?: readonly (string | Buffer)[];
+    exitCode?: number;
     fileChange?: boolean;
     sensitiveValues?: readonly string[];
     outputSchema?: TSchema;
@@ -147,7 +148,7 @@ function fixture(
         protocolVersion: processHostProtocolVersion,
         type: "exited",
         requestId: "request",
-        exitCode: 0,
+        exitCode: options.exitCode ?? 0,
         signal: null,
         outputTruncated: false,
       }),
@@ -1087,6 +1088,55 @@ describe("PreparedCliOutputRunner", () => {
     expect(JSON.stringify(result)).not.toContain("secret-lease-token");
     expect(JSON.stringify(result)).not.toContain("opaque-token");
   });
+
+  it.each(["codex", "copilot"] as const)(
+    "redacts literal and JSON-escaped environment credentials from %s failure diagnostics",
+    async (engine) => {
+      const secret = 'private\n"quoted"\\environment-value';
+      const escaped = JSON.stringify(secret).slice(1, -1);
+      const f = fixture({
+        engine,
+        exitCode: 1,
+        sensitiveValues: [],
+        settings: { cliEnvironment: { CONFIGURED_API_TOKEN: secret } },
+        stderr: `ordinary error details: ${secret}; encoded detail: ${escaped}; schema rejected`,
+      });
+      const result = await f.runner.run(f.input);
+      expect(result).toMatchObject({ outcome: "failed", code: "CLI_NON_ZERO_EXIT" });
+      if (result.outcome !== "failed") throw new Error("Expected CLI failure.");
+      expect(result.diagnostics?.summary).toContain(
+        "ordinary error details: [REDACTED]; encoded detail: [REDACTED]; schema rejected",
+      );
+      expect(result.diagnostics?.summary).not.toContain(secret);
+      expect(result.diagnostics?.summary).not.toContain(escaped);
+      expect(f.start.mock.calls[0]?.[0].environment.CONFIGURED_API_TOKEN).toBe(secret);
+      expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["codex", "copilot"] as const)(
+    "redacts JSON-escaped environment credentials before %s truncates the diagnostic",
+    async (engine) => {
+      const secret = 'private\n"quoted"\\environment-value';
+      const prefix =
+        engine === "codex"
+          ? "The Codex process exited with code 1; stderr: "
+          : "The CLI exited with code 1.; stderr: ";
+      const padding = "x".repeat(2_047 - prefix.length);
+      const f = fixture({
+        engine,
+        exitCode: 1,
+        sensitiveValues: [],
+        settings: { cliEnvironment: { CONFIGURED_API_TOKEN: secret } },
+        stderr: `${padding}${JSON.stringify(secret).slice(1, -1)}`,
+      });
+      const result = await f.runner.run(f.input);
+      expect(result).toMatchObject({ outcome: "failed", code: "CLI_NON_ZERO_EXIT" });
+      if (result.outcome !== "failed") throw new Error("Expected CLI failure.");
+      expect(result.diagnostics?.summary).toBe(`${prefix}${padding}[`);
+      expect(result.diagnostics?.summary).toHaveLength(2_048);
+    },
+  );
 
   it.each(["line\nsecret", "path\\secret", 'quoted"secret'])(
     "rejects protected decoded strings that require JSON escaping: %j",
