@@ -3,24 +3,26 @@ import type {
   ConfigurationAuditSummary,
   OperatorPrincipal,
 } from "@agentic-review/contracts";
-import { ReloadOutlined } from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
+import CloseIcon from "@mui/icons-material/Close";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Descriptions,
+  Chip,
   Drawer,
-  Empty,
+  IconButton,
   Pagination,
   Skeleton,
-  Table,
-  Tag,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import { configurationAudit } from "@/services/configuration-audit";
+import { useOperatorSession } from "@/state/session";
 import {
   type ConfigurationAuditScope,
   configurationAuditActionLabels,
@@ -44,11 +46,15 @@ function Actor({ actor }: { readonly actor: OperatorPrincipal }) {
   return (
     <div className="configuration-audit-identity configuration-audit-break">
       <span>
-        <Typography.Text type="secondary">Subject: </Typography.Text>
+        <Typography variant="body2" component="span" color="text.secondary">
+          Subject:{" "}
+        </Typography>
         <code>{actor.subject}</code>
       </span>
       <span>
-        <Typography.Text type="secondary">Issuer: </Typography.Text>
+        <Typography variant="body2" component="span" color="text.secondary">
+          Issuer:{" "}
+        </Typography>
         <code>{actor.issuer}</code>
       </span>
     </div>
@@ -60,33 +66,31 @@ function RecordedSnapshot({ event }: { readonly event: ConfigurationAuditEvent }
     event.source === "repository" ? repositorySnapshotSchedulingLabels(event.snapshot) : null;
   return (
     <>
-      <Alert
-        className="configuration-audit-note"
-        type="info"
-        showIcon
-        title={
-          event.source === "repository"
+      <Alert className="configuration-audit-note" severity={"info"}>
+        <AlertTitle>
+          {event.source === "repository"
             ? "Recorded repository snapshot"
-            : "Recorded operation metadata"
-        }
-        description={
-          event.source === "repository"
-            ? "These settings were stored with this operation. This history does not record every connection poll or repository rename. This is not the current repository state."
-            : event.action === "draft_saved"
-              ? "This event retained the template revision and draft revision only. The old draft body was not retained and cannot be reconstructed from the current draft."
-              : "This is the metadata retained for this operation. It does not contain an old draft body or substitute current template content."
-        }
-      />
-      <Typography.Title level={5}>Stored snapshot</Typography.Title>
+            : "Recorded operation metadata"}
+        </AlertTitle>
+        {event.source === "repository"
+          ? "These settings were stored with this operation. This history does not record every connection poll or repository rename. This is not the current repository state."
+          : event.action === "draft_saved"
+            ? "This event retained the template revision and draft revision only. The old draft body was not retained and cannot be reconstructed from the current draft."
+            : "This is the metadata retained for this operation. It does not contain an old draft body or substitute current template content."}
+      </Alert>
+      <Typography variant="h6" component="h3">
+        Stored snapshot
+      </Typography>
       {scheduling && (
-        <Descriptions
-          column={1}
-          size="small"
-          items={[
-            { key: "active", label: "Active lease limit", children: scheduling.active },
-            { key: "queue", label: "Admitted queue limit", children: scheduling.queue },
-          ]}
-        />
+        <div>
+          <DetailsGrid
+            columns={2}
+            items={[
+              { key: "active", label: "Active lease limit", value: scheduling.active },
+              { key: "queue", label: "Admitted queue limit", value: scheduling.queue },
+            ]}
+          />
+        </div>
       )}
       <pre className="configuration-audit-snapshot">{JSON.stringify(event.snapshot, null, 2)}</pre>
     </>
@@ -147,73 +151,99 @@ function EventDetails({
   return (
     <Drawer
       open
-      title="Configuration event"
-      size={760}
-      onClose={onClose}
-      extra={
-        <Button icon={<ReloadOutlined />} onClick={() => void refreshAccess()}>
-          Refresh access
-        </Button>
-      }
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") onClose();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": "Configuration event",
+          sx: { width: { xs: "100%", sm: 760 }, maxWidth: "100%" },
+        },
+      }}
     >
-      {query.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          title="Could not load configuration event"
-          description={errorMessage(query.error)}
-          action={<Button onClick={() => void query.refetch()}>Try again</Button>}
-        />
-      ) : !event ? (
-        <Skeleton active paragraph={{ rows: 8 }} />
-      ) : (
-        <>
-          <Descriptions
-            column={1}
-            size="small"
-            className="configuration-audit-note"
-            items={[
-              {
-                key: "action",
-                label: "Operation",
-                children: configurationAuditActionLabels[event.action],
-              },
-              {
-                key: "time",
-                label: "Recorded at (UTC)",
-                children: <time dateTime={event.createdAt}>{event.createdAt}</time>,
-              },
-              { key: "actor", label: "Actor", children: <Actor actor={event.actor} /> },
-              { key: "source", label: "Source", children: event.source },
-              {
-                key: "id",
-                label: "Event ID",
-                children: <code className="configuration-audit-break">{event.id}</code>,
-              },
-              {
-                key: "entity",
-                label: "Recorded entity ID",
-                children: <code className="configuration-audit-break">{event.entityId}</code>,
-              },
-              {
-                key: "scope",
-                label: "Scope",
-                children: event.repositoryId ? (
-                  <code className="configuration-audit-break">{event.repositoryId}</code>
-                ) : (
-                  "Global"
-                ),
-              },
-              {
-                key: "revision",
-                label: "Revision",
-                children: configurationAuditRevisionLabel(event),
-              },
-            ]}
-          />
-          <RecordedSnapshot event={event} />
-        </>
-      )}
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography variant="h6" sx={{ flex: 1 }}>
+          {"Configuration event"}
+        </Typography>
+        {
+          <Button
+            onClick={() => void refreshAccess()}
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+          >
+            Refresh access
+          </Button>
+        }
+        <IconButton aria-label="Close" disabled={false} onClick={() => onClose()}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        {query.isError ? (
+          <Alert
+            action={
+              <Button onClick={() => void query.refetch()} variant="outlined">
+                Try again
+              </Button>
+            }
+            severity={"error"}
+          >
+            <AlertTitle>{"Could not load configuration event"}</AlertTitle>
+            {errorMessage(query.error)}
+          </Alert>
+        ) : !event ? (
+          <Skeleton variant="rounded" height={8 * 24} aria-label="Loading" />
+        ) : (
+          <>
+            <div className={"configuration-audit-note"}>
+              <DetailsGrid
+                columns={2}
+                items={[
+                  {
+                    key: "action",
+                    label: "Operation",
+                    value: configurationAuditActionLabels[event.action],
+                  },
+                  {
+                    key: "time",
+                    label: "Recorded at (UTC)",
+                    value: <time dateTime={event.createdAt}>{event.createdAt}</time>,
+                  },
+                  { key: "actor", label: "Actor", value: <Actor actor={event.actor} /> },
+                  { key: "source", label: "Source", value: event.source },
+                  {
+                    key: "id",
+                    label: "Event ID",
+                    value: <code className="configuration-audit-break">{event.id}</code>,
+                  },
+                  {
+                    key: "entity",
+                    label: "Recorded entity ID",
+                    value: <code className="configuration-audit-break">{event.entityId}</code>,
+                  },
+                  {
+                    key: "scope",
+                    label: "Scope",
+                    value: event.repositoryId ? (
+                      <code className="configuration-audit-break">{event.repositoryId}</code>
+                    ) : (
+                      "Global"
+                    ),
+                  },
+                  {
+                    key: "revision",
+                    label: "Revision",
+                    value: configurationAuditRevisionLabel(event),
+                  },
+                ]}
+              />
+            </div>
+            <RecordedSnapshot event={event} />
+          </>
+        )}
+      </Box>
     </Drawer>
   );
 }
@@ -269,18 +299,17 @@ function AuditSession({
   return (
     <div className="configuration-audit">
       {configurationAudit.mode === "sample" && (
-        <Alert
-          className="configuration-audit-note"
-          showIcon
-          type="info"
-          title="Sample configuration history"
-          description="These fixed illustrative snapshots are independent of current preview settings."
-        />
+        <Alert className="configuration-audit-note" severity={"info"}>
+          <AlertTitle>{"Sample configuration history"}</AlertTitle>
+          {"These fixed illustrative snapshots are independent of current preview settings."}
+        </Alert>
       )}
       <div className="configuration-audit-toolbar">
         <div>
-          <Typography.Title level={5}>Configuration activity</Typography.Title>
-          <Typography.Paragraph type="secondary">
+          <Typography variant="h6" component="h3">
+            Configuration activity
+          </Typography>
+          <Typography variant="body2" component="p" color="text.secondary">
             {scope.kind === "repository" ? (
               "Recorded repository settings, prompt bindings, and validation profile operations for this repository."
             ) : scope.templateId ? (
@@ -291,109 +320,122 @@ function AuditSession({
             ) : (
               "Shared prompt templates and global default bindings. Repository overrides appear in each repository's configuration activity."
             )}
-          </Typography.Paragraph>
+          </Typography>
         </div>
-        <Button icon={<ReloadOutlined />} loading={query.isFetching} onClick={refresh}>
+        <Button
+          loading={query.isFetching}
+          onClick={refresh}
+          variant="outlined"
+          startIcon={<RefreshIcon />}
+        >
           Refresh activity
         </Button>
       </div>
-      <Typography.Paragraph type="secondary" className="configuration-audit-note">
+      <Typography
+        className="configuration-audit-note"
+        variant="body2"
+        component="p"
+        color="text.secondary"
+      >
         Events are newest first. Events with the same timestamp have a stable display order; it does
         not establish causality. Inspect an event to see only the snapshot retained at that
         operation.
-      </Typography.Paragraph>
+      </Typography>
       {query.isError ? (
         <Alert
-          type="error"
-          showIcon
-          title="Could not load configuration activity"
-          description={errorMessage(query.error)}
-          action={<Button onClick={refresh}>Try again</Button>}
-        />
+          action={
+            <Button onClick={refresh} variant="outlined">
+              Try again
+            </Button>
+          }
+          severity={"error"}
+        >
+          <AlertTitle>{"Could not load configuration activity"}</AlertTitle>
+          {errorMessage(query.error)}
+        </Alert>
       ) : !loaded ? (
-        <Skeleton active paragraph={{ rows: 5 }} />
+        <Skeleton variant="rounded" height={5 * 24} aria-label="Loading" />
       ) : (
         <>
-          <Table<ConfigurationAuditSummary>
-            size="small"
-            rowKey={configurationAuditRowKey}
-            dataSource={loaded.items}
-            pagination={false}
-            scroll={{ x: 720 }}
+          <DataTable<ConfigurationAuditSummary>
+            rows={loaded.items}
             columns={[
               {
-                title: "Recorded operation",
-                key: "operation",
+                id: "operation",
+                label: "Recorded operation",
                 width: 260,
-                render: (_: unknown, event) => (
-                  <div className="configuration-audit-identity">
-                    <Typography.Text strong>
-                      {configurationAuditActionLabels[event.action]}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
-                      {configurationAuditRevisionLabel(event)}
-                    </Typography.Text>
-                    <code className="configuration-audit-break">{event.entityId}</code>
-                    <Tag>{event.source}</Tag>
-                  </div>
-                ),
+                render: (event) => {
+                  return (
+                    <div className="configuration-audit-identity">
+                      <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+                        {configurationAuditActionLabels[event.action]}
+                      </Typography>
+                      <Typography variant="body2" component="span" color="text.secondary">
+                        {configurationAuditRevisionLabel(event)}
+                      </Typography>
+                      <code className="configuration-audit-break">{event.entityId}</code>
+                      <Chip size="medium" label={event.source}></Chip>
+                    </div>
+                  );
+                },
               },
               {
-                title: "Actor",
-                key: "actor",
-                render: (_: unknown, event) => <Actor actor={event.actor} />,
+                id: "actor",
+                label: "Actor",
+                render: (event) => {
+                  return <Actor actor={event.actor} />;
+                },
               },
               {
-                title: "Recorded at",
-                dataIndex: "createdAt",
+                id: "createdAt",
+                label: "Recorded at",
                 width: 185,
-                render: (value: string) => (
-                  <time dateTime={value} title={value}>
-                    {new Date(value).toLocaleString("en-US")}
-                  </time>
-                ),
+                render: (row) => {
+                  const value = row.createdAt;
+                  return (
+                    <time dateTime={value} title={value}>
+                      {new Date(value).toLocaleString("en-US")}
+                    </time>
+                  );
+                },
               },
               {
-                title: "",
-                key: "inspect",
+                id: "inspect",
+                label: "",
                 width: 90,
-                fixed: "right",
-                render: (_: unknown, event) => (
-                  <Button
-                    type="link"
-                    onClick={() => setSelected(event)}
-                    aria-label={`Inspect ${event.source} event ${event.id}`}
-                  >
-                    Inspect
-                  </Button>
-                ),
+                render: (event) => {
+                  return (
+                    <Button
+                      onClick={() => setSelected(event)}
+                      aria-label={`Inspect ${event.source} event ${event.id}`}
+                      variant={"text"}
+                    >
+                      Inspect
+                    </Button>
+                  );
+                },
               },
             ]}
-            locale={{
-              emptyText: (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description={
-                    loaded.total === 0
-                      ? "No configuration events were recorded for this scope."
-                      : "No events on this page. Choose a previous page or refresh activity."
-                  }
-                />
-              ),
-            }}
+            getRowId={configurationAuditRowKey}
+            emptyTitle={
+              loaded.total === 0
+                ? "No configuration events were recorded for this scope."
+                : "No events on this page. Choose a previous page or refresh activity."
+            }
           />
           {loaded.total > pageSize ? (
             <div className="configuration-audit-pagination">
+              <Typography variant="body2" color="text.secondary">
+                {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, loaded.total)} of{" "}
+                {loaded.total}
+              </Typography>
               <Pagination
-                current={page}
-                pageSize={pageSize}
-                total={loaded.total}
-                showSizeChanger={false}
-                onChange={(nextPage) => {
+                page={page}
+                count={Math.ceil(loaded.total / pageSize)}
+                onChange={(_event, nextPage) => {
                   setSelected(null);
                   setPage(nextPage);
                 }}
-                showTotal={(count, range) => `${range[0]}–${range[1]} of ${count}`}
               />
             </div>
           ) : null}
@@ -430,7 +472,7 @@ function AuditAccess({
   readonly enabled: boolean;
 }) {
   const access = useOperatorAccess(scope.kind === "repository" ? scope.repositoryId : undefined);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const mayRead =
     enabled &&
     access.ready &&
@@ -438,29 +480,32 @@ function AuditAccess({
     (scope.kind === "repository"
       ? access.can("read")
       : access.platformAdministrator && !access.checking);
-  if (access.pending || access.checking) return <Skeleton active paragraph={{ rows: 3 }} />;
+  if (access.pending || access.checking)
+    return <Skeleton variant="rounded" height={3 * 24} aria-label="Loading" />;
   if (!mayRead || !access.principal)
     return (
       <Alert
-        type="info"
-        showIcon
-        title="Configuration activity is unavailable"
-        description={
-          scope.kind === "repository"
-            ? "Verify repository read access to inspect configuration events."
-            : "Verify platform administrator access to inspect global prompt events."
+        action={
+          <Button onClick={() => void access.refresh()} variant="outlined">
+            Refresh access
+          </Button>
         }
-        action={<Button onClick={() => void access.refresh()}>Refresh access</Button>}
-      />
+        severity={"info"}
+      >
+        <AlertTitle>{"Configuration activity is unavailable"}</AlertTitle>
+        {scope.kind === "repository"
+          ? "Verify repository read access to inspect configuration events."
+          : "Verify platform administrator access to inspect global prompt events."}
+      </Alert>
     );
   if (configurationAudit.mode === "sample" && scope.kind === "global")
     return (
-      <Alert
-        type="info"
-        showIcon
-        title="Configuration activity is unavailable in Sample mode"
-        description="Shared prompt history is unavailable in sample mode. Repository activity contains fixed illustrative snapshots."
-      />
+      <Alert severity={"info"}>
+        <AlertTitle>{"Configuration activity is unavailable in Sample mode"}</AlertTitle>
+        {
+          "Shared prompt history is unavailable in sample mode. Repository activity contains fixed illustrative snapshots."
+        }
+      </Alert>
     );
   const session = JSON.stringify([
     initialState?.authenticationEpoch ?? 0,

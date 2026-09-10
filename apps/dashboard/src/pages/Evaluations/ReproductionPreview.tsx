@@ -1,5 +1,5 @@
 import type * as C from "@agentic-review/contracts";
-import { Alert, Button, Space, Tag, Typography } from "antd";
+import { Alert, AlertTitle, Button, Chip, Stack, Typography } from "@mui/material";
 import { useEffect, useRef } from "react";
 import type { EvaluationReproductionAdapter } from "@/services/evaluation-reproduction";
 import { type Arm, armLabels, arms } from "./batch-state";
@@ -10,20 +10,39 @@ import {
   reproductionPreviewKey,
 } from "./reproduction-state";
 import { errorMessage } from "./state";
-
 export function ReproductionPreviewResult({ value }: { value: C.EvaluationReproductionPreviewV1 }) {
   return (
-    <Space orientation="vertical" style={{ width: "100%" }}>
+    <Stack
+      style={{
+        width: "100%",
+      }}
+      direction="column"
+      spacing={1.5}
+      sx={{
+        minWidth: 0,
+      }}
+    >
       {arms.map((arm) => (
         <div key={arm}>
-          <Typography.Text strong>{armLabels[arm]}</Typography.Text>{" "}
-          <Tag color={value[arm].state === "blocked" ? "warning" : undefined}>
-            {value[arm].state === "ready"
-              ? "Mapping ready"
-              : value[arm].state === "blocked"
-                ? "Mapping blocked"
-                : "Not applicable"}
-          </Tag>
+          <Typography
+            component="span"
+            variant="body2"
+            sx={{
+              fontWeight: 500,
+            }}
+          >
+            {armLabels[arm]}
+          </Typography>{" "}
+          <Chip
+            label={
+              value[arm].state === "ready"
+                ? "Mapping ready"
+                : value[arm].state === "blocked"
+                  ? "Mapping blocked"
+                  : "Not applicable"
+            }
+            color={value[arm].state === "blocked" ? "warning" : "default"}
+          />
           {value[arm].blockers.length ? (
             <ul>
               {[
@@ -40,14 +59,13 @@ export function ReproductionPreviewResult({ value }: { value: C.EvaluationReprod
           ) : null}
         </div>
       ))}
-      <Typography.Paragraph type="secondary">
+      <Typography component="p" variant="body2" color={"text.secondary"}>
         This preview checks your choices without running validation. Creating the batch rechecks the
         original source and selected profiles.
-      </Typography.Paragraph>
-    </Space>
+      </Typography>
+    </Stack>
   );
 }
-
 export function ReproductionPreview({
   api,
   request,
@@ -65,10 +83,16 @@ export function ReproductionPreview({
 }) {
   const page = useEvaluationPage();
   const key = reproductionPreviewKey(request, sourceDefinitionSha256, profiles);
-  const current = useRef({ key, allowed: false });
+  const current = useRef({
+    key,
+    allowed: false,
+  });
   if (current.current.key !== key) {
     current.current.allowed = false;
-    current.current = { key, allowed: false };
+    current.current = {
+      key,
+      allowed: false,
+    };
   }
   current.current.allowed = !disabled && page.canConfigure;
   useEffect(() => {
@@ -99,33 +123,39 @@ export function ReproductionPreview({
       !result.isError &&
       result.data
     )
-      onPreview({ key, value: result.data });
+      onPreview({
+        key,
+        value: result.data,
+      });
   };
   return (
-    <div style={{ marginTop: 16 }}>
+    <div
+      style={{
+        marginTop: 16,
+      }}
+    >
       <Button
         disabled={disabled || !page.canConfigure}
         loading={query.isFetching}
         onClick={() => void preview()}
         aria-label={`Preview reproduction mapping for ${request.selection.caseId}`}
+        variant="outlined"
       >
         Preview reproduction mapping
       </Button>
       {query.error ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Mapping preview unavailable"
-          description={errorMessage(query.error)}
-        />
+        <Alert severity={"error"}>
+          <AlertTitle>{"Mapping preview unavailable"}</AlertTitle>
+          {errorMessage(query.error)}
+        </Alert>
       ) : null}
       {query.data && !query.isFetching ? (
         <ReproductionPreviewResult value={query.data} />
       ) : (
-        <Typography.Paragraph type="secondary">
+        <Typography component="p" variant="body2" color={"text.secondary"}>
           Preview the current choices before creating the batch. Any source, case or profile change
           requires a new preview.
-        </Typography.Paragraph>
+        </Typography>
       )}
     </div>
   );

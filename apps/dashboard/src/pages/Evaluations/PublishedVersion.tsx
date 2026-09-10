@@ -1,10 +1,23 @@
 import type * as C from "@agentic-review/contracts";
-import { Alert, Button, Card, Descriptions, Select, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  AlertTitle,
+  Autocomplete,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { useEffect, useState } from "react";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { CopyValue } from "./Display";
 import { CaseSourceLabel, FrozenSourceLabel, SourceDetails } from "./Sources";
 import { collectCatalog, errorMessage } from "./state";
-
 export function PublishedVersion({
   suiteId,
   preferredVersionId,
@@ -20,12 +33,22 @@ export function PublishedVersion({
   const [selected, setSelected] = useState<string | null>(preferredVersionId),
     [caseId, setCaseId] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string | null>(null);
-  const scope = { repositoryId: page.repositoryId, suiteId };
+  const scope = {
+    repositoryId: page.repositoryId,
+    suiteId,
+  };
   const versions = useEvaluationQuery(
     ["versions", suiteId],
     (signal) =>
       collectCatalog((number) =>
-        page.api.listSuiteVersions(scope, { page: number, pageSize: 50 }, signal),
+        page.api.listSuiteVersions(
+          scope,
+          {
+            page: number,
+            pageSize: 50,
+          },
+          signal,
+        ),
       ),
     active,
   );
@@ -36,7 +59,10 @@ export function PublishedVersion({
     }
   }, [active, selected, preferredVersionId, versions.data]);
   const versionId = selected;
-  const versionScope = { ...scope, versionId: versionId ?? "" };
+  const versionScope = {
+    ...scope,
+    versionId: versionId ?? "",
+  };
   const version = useEvaluationQuery(
     ["version", suiteId, versionId],
     (signal) => page.api.getSuiteVersion(versionScope, signal),
@@ -49,169 +75,245 @@ export function PublishedVersion({
   );
   const detail = useEvaluationQuery(
     ["case", suiteId, versionId, caseId],
-    (signal) => page.api.getSuiteCase({ ...versionScope, caseId: caseId ?? "" }, signal),
+    (signal) =>
+      page.api.getSuiteCase(
+        {
+          ...versionScope,
+          caseId: caseId ?? "",
+        },
+        signal,
+      ),
     active && versionId !== null && caseId !== null,
   );
   const error = versions.error ?? version.error ?? cases.error ?? detail.error;
   return (
     <div className="evaluation-version">
-      <Alert
-        type="info"
-        showIcon
-        title="Published versions are immutable"
-        description="These sources and expectations belong to this exact version. Later draft edits cannot change them."
-      />
+      <Alert severity={"info"}>
+        <AlertTitle>{"Published versions are immutable"}</AlertTitle>
+        {
+          "These sources and expectations belong to this exact version. Later draft edits cannot change them."
+        }
+      </Alert>
       {error ? (
-        <Alert
-          type="error"
-          title="Published version unavailable"
-          description={errorMessage(error)}
-        />
+        <Alert severity={"error"}>
+          <AlertTitle>{"Published version unavailable"}</AlertTitle>
+          {errorMessage(error)}
+        </Alert>
       ) : null}
-      <Select
-        aria-label="Published version"
-        value={versionId ?? undefined}
-        placeholder="No published versions"
+      <Autocomplete
         loading={versions.isFetching}
         className="evaluation-version-select"
         options={(versions.data ?? []).map((entry) => ({
           value: entry.id,
           label: `Version ${entry.version} · ${entry.caseCount} cases · ${entry.createdAt}`,
         }))}
-        onChange={(id) => {
-          setSelected(id);
-          setCaseId(null);
-          setSourceId(null);
+        disablePortal
+        fullWidth
+        value={
+          (versions.data ?? [])
+            .map((entry) => ({
+              value: entry.id,
+              label: `Version ${entry.version} · ${entry.caseCount} cases · ${entry.createdAt}`,
+            }))
+            .find((option) => option.value === (versionId ?? undefined)) ??
+          ((versionId ?? undefined) == null || String(versionId ?? undefined) === ""
+            ? null
+            : {
+                value: (versionId ?? undefined) as NonNullable<typeof versionId>,
+                label: String(versionId ?? undefined),
+              })
+        }
+        onChange={(_event, option) => {
+          if (option !== null)
+            ((id) => {
+              setSelected(id);
+              setCaseId(null);
+              setSourceId(null);
+            })(option.value as NonNullable<typeof versionId>);
         }}
+        getOptionLabel={(option) => option.label}
+        isOptionEqualToValue={(option, selected) => option.value === selected.value}
+        getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            label={"Published version"}
+            placeholder={"No published versions"}
+            slotProps={{
+              ...params.slotProps,
+              htmlInput: {
+                ...params.slotProps.htmlInput,
+                "aria-label": "Published version",
+              },
+            }}
+          />
+        )}
+        disableClearable={Boolean(versionId ?? undefined)}
+        getOptionKey={(option) => option.value}
       />
       {version.data ? (
-        <Descriptions
-          size="small"
-          column={1}
+        <DetailsGrid
           items={[
             {
               key: "revision",
               label: "Published from draft",
-              children: `Revision ${version.data.sourceDraftRevision}`,
+              value: `Revision ${version.data.sourceDraftRevision}`,
             },
             {
               key: "source",
               label: "Source manifest",
-              children: (
-                <Typography.Text copyable>{version.data.sourceManifestSha256}</Typography.Text>
-              ),
+              value: <CopyValue value={version.data.sourceManifestSha256} />,
             },
             {
               key: "expected",
               label: "Expectation manifest",
-              children: (
-                <Typography.Text copyable>{version.data.expectationManifestSha256}</Typography.Text>
-              ),
+              value: <CopyValue value={version.data.expectationManifestSha256} />,
             },
           ]}
+          columns={1}
         />
       ) : null}
-      <Table<C.EvaluationSuiteCaseSummaryV1>
-        rowKey="caseId"
-        size="small"
-        pagination={false}
+      <DataTable<C.EvaluationSuiteCaseSummaryV1>
         loading={active && !!versionId && cases.isPending}
-        dataSource={cases.data?.items ?? []}
+        rows={cases.data?.items ?? []}
+        getRowId={(row) => row.caseId}
         columns={[
           {
-            title: "Case",
-            key: "case",
-            render: (_, entry) => (
-              <div>
-                <Button
-                  type="link"
-                  className="evaluation-name"
-                  onClick={() => {
-                    setCaseId(entry.caseId);
-                    setSourceId(null);
-                  }}
-                >
-                  {entry.title}
-                </Button>
-                <CaseSourceLabel
-                  sourceId={entry.sourceId}
-                  known={sources.find((source) => source.id === entry.sourceId)}
+            id: "case",
+            label: "Case",
+            render: (entry) => {
+              return (
+                <div>
+                  <Button
+                    className="evaluation-name"
+                    onClick={() => {
+                      setCaseId(entry.caseId);
+                      setSourceId(null);
+                    }}
+                    variant="text"
+                  >
+                    {entry.title}
+                  </Button>
+                  <CaseSourceLabel
+                    sourceId={entry.sourceId}
+                    known={sources.find((source) => source.id === entry.sourceId)}
+                  />
+                </div>
+              );
+            },
+          },
+          {
+            id: "applicability",
+            label: "Applicability",
+            render: (entry) => {
+              return (
+                <Chip
+                  label={
+                    entry.applicability.state === "applicable" ? "Applicable" : "Not applicable"
+                  }
                 />
-              </div>
-            ),
+              );
+            },
           },
           {
-            title: "Applicability",
-            key: "applicability",
-            render: (_, entry) => (
-              <Tag>
-                {entry.applicability.state === "applicable" ? "Applicable" : "Not applicable"}
-              </Tag>
-            ),
+            id: "checks",
+            label: "Checks",
+            render: (row) => row.criterionCount,
           },
-          { title: "Checks", dataIndex: "criterionCount", key: "checks" },
           {
-            title: "Finding labels",
-            key: "labels",
-            render: (_, entry) => `${entry.annotation} · ${entry.expectedFindingCount}`,
+            id: "labels",
+            label: "Finding labels",
+            render: (entry) => {
+              return `${entry.annotation} · ${entry.expectedFindingCount}`;
+            },
           },
         ]}
+        ariaLabel="Evaluation records"
       />
       {detail.data ? (
-        <Card size="small" title={detail.data.expectation.title}>
-          <FrozenSourceLabel source={detail.data.source} />
-          <Space>
-            <Tag>{detail.data.expectation.findings.annotation}</Tag>
-            <Button size="small" onClick={() => setSourceId(detail.data?.source.id ?? null)}>
-              View frozen body
-            </Button>
-          </Space>
-          {detail.data.expectation.applicability.state === "not_applicable" ? (
-            <Alert
-              type="info"
-              title="Not applicable"
-              description={detail.data.expectation.applicability.reason}
-            />
-          ) : null}
-          <Table<C.EvaluationSuiteDraftCase["criteria"][number]>
-            rowKey="criterionId"
-            size="small"
-            pagination={false}
-            dataSource={detail.data.expectation.criteria}
-            columns={[
-              { title: "Expected check", dataIndex: "description", key: "description" },
-              { title: "Expected outcome", dataIndex: "expectedOutcome", key: "outcome" },
-              {
-                title: "Scope",
-                key: "scope",
-                render: (_, criterion) =>
-                  criterion.applicability.state === "applicable"
-                    ? "Applicable"
-                    : criterion.applicability.reason,
+        <Card variant="outlined">
+          <CardHeader
+            title={detail.data.expectation.title}
+            slotProps={{
+              title: {
+                variant: "subtitle1",
+                component: "h3",
               },
-            ]}
+            }}
           />
-          <Typography.Paragraph>
-            {detail.data.expectation.findings.annotation === "unlabeled"
-              ? "Finding expectations are unlabeled. This is not a negative example."
-              : detail.data.expectation.findings.expected.length === 0
-                ? detail.data.expectation.findings.annotation === "complete"
-                  ? "Complete labels declare that no findings are expected."
-                  : "No known positives are listed; other findings remain unassessed."
-                : detail.data.expectation.findings.annotation === "complete"
-                  ? "Exhaustive expected findings:"
-                  : "Known positive findings only:"}
-          </Typography.Paragraph>
-          {detail.data.expectation.findings.expected.length ? (
-            <ul>
-              {detail.data.expectation.findings.expected.map((finding) => (
-                <li key={finding.expectedFindingId}>
-                  {finding.description}
-                  <div className="evaluation-meta">{finding.expectedFindingId}</div>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          <CardContent>
+            <FrozenSourceLabel source={detail.data.source} />
+            <Stack
+              direction="row"
+              spacing={1.5}
+              sx={{
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 1,
+              }}
+            >
+              <Chip label={detail.data.expectation.findings.annotation} />
+              <Button
+                onClick={() => setSourceId(detail.data?.source.id ?? null)}
+                variant="outlined"
+              >
+                View frozen body
+              </Button>
+            </Stack>
+            {detail.data.expectation.applicability.state === "not_applicable" ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"Not applicable"}</AlertTitle>
+                {detail.data.expectation.applicability.reason}
+              </Alert>
+            ) : null}
+            <DataTable<C.EvaluationSuiteDraftCase["criteria"][number]>
+              rows={detail.data.expectation.criteria}
+              getRowId={(row) => row.criterionId}
+              columns={[
+                {
+                  id: "description",
+                  label: "Expected check",
+                  render: (row) => row.description,
+                },
+                {
+                  id: "outcome",
+                  label: "Expected outcome",
+                  render: (row) => row.expectedOutcome,
+                },
+                {
+                  id: "scope",
+                  label: "Scope",
+                  render: (criterion) => {
+                    return criterion.applicability.state === "applicable"
+                      ? "Applicable"
+                      : criterion.applicability.reason;
+                  },
+                },
+              ]}
+              ariaLabel="Evaluation records"
+            />
+            <Typography component="p" variant="body2">
+              {detail.data.expectation.findings.annotation === "unlabeled"
+                ? "Finding expectations are unlabeled. This is not a negative example."
+                : detail.data.expectation.findings.expected.length === 0
+                  ? detail.data.expectation.findings.annotation === "complete"
+                    ? "Complete labels declare that no findings are expected."
+                    : "No known positives are listed; other findings remain unassessed."
+                  : detail.data.expectation.findings.annotation === "complete"
+                    ? "Exhaustive expected findings:"
+                    : "Known positive findings only:"}
+            </Typography>
+            {detail.data.expectation.findings.expected.length ? (
+              <ul>
+                {detail.data.expectation.findings.expected.map((finding) => (
+                  <li key={finding.expectedFindingId}>
+                    {finding.description}
+                    <div className="evaluation-meta">{finding.expectedFindingId}</div>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </CardContent>
         </Card>
       ) : null}
       {sourceId ? <SourceDetails sourceId={sourceId} onClose={() => setSourceId(null)} /> : null}

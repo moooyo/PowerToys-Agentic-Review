@@ -17,7 +17,7 @@ const state = vi.hoisted(() => ({
   navigate: vi.fn(),
   close: undefined as (() => void) | undefined,
 }));
-vi.mock("@umijs/max", () => ({
+vi.mock("react-router-dom", () => ({
   useLocation: () => ({ pathname: "/publications", search: state.search }),
   useNavigate: () => state.navigate,
 }));
@@ -74,16 +74,17 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("@ant-design/icons", () => ({ ReloadOutlined: () => <span /> }));
-vi.mock("antd", () => {
+vi.mock("@mui/icons-material/Refresh", () => ({ default: () => <span /> }));
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
+    Alert: ({ children, action }: { children?: ReactNode; action?: ReactNode }) => (
       <aside>
-        {title}
-        {description}
+        {children}
+        {action}
       </aside>
     ),
+    AlertTitle: Content,
     Button: ({ children, disabled }: { children?: ReactNode; disabled?: boolean }) => {
       if (typeof children === "string") state.buttons.set(children, !!disabled);
       return (
@@ -92,52 +93,48 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Card: ({
-      children,
-      title,
-      extra,
-    }: {
-      children?: ReactNode;
-      title?: ReactNode;
-      extra?: ReactNode;
-    }) => (
-      <section>
+    Card: Content,
+    CardContent: Content,
+    CardHeader: ({ title, action }: { title?: ReactNode; action?: ReactNode }) => (
+      <header>
         {title}
-        {extra}
-        {children}
-      </section>
+        {action}
+      </header>
     ),
-    Descriptions: Content,
-    Drawer: ({
+    Dialog: ({
       children,
-      title,
-      extra,
       onClose,
     }: {
       children: ReactNode;
-      title: ReactNode;
-      extra: ReactNode;
-      onClose: () => void;
+      onClose?: (event: unknown, reason: "backdropClick" | "escapeKeyDown") => void;
     }) => {
-      state.close = onClose;
-      return (
-        <section>
-          {title}
-          {extra}
-          {children}
-        </section>
-      );
+      state.close = () => onClose?.({}, "backdropClick");
+      return <section>{children}</section>;
     },
-    Modal: Content,
+    DialogTitle: Content,
+    DialogContent: Content,
+    DialogActions: Content,
     Pagination: Content,
-    Select: Content,
+    TextField: Content,
+    MenuItem: Content,
     Skeleton: Content,
-    Space: Content,
-    Table: Content,
-    Tag: Content,
-    Typography: { Text: Content, Paragraph: Content, Title: Content },
+    Stack: Content,
+    Chip: ({ label }: { label: ReactNode }) => <span>{label}</span>,
+    Typography: Content,
   };
 });
+vi.mock("@/components/ui", () => ({
+  DataTable: () => <div />,
+  DetailsGrid: ({ items }: { items: { key?: string; label: ReactNode; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((entry, index) => (
+        <div key={entry.key ?? index}>
+          {entry.label}: {entry.value}
+        </div>
+      ))}
+    </dl>
+  ),
+}));
 beforeEach(() => {
   state.repositoryId = undefined;
   state.readable = true;

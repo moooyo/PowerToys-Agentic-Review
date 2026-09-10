@@ -9,25 +9,29 @@ import {
   getPublicationAttemptIssues,
   getPublicationRemoteReceiptIssues,
 } from "@agentic-review/contracts";
-import { ReloadOutlined } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useNavigate } from "@umijs/max";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   Alert,
+  AlertTitle,
   Button,
   Card,
-  Descriptions,
-  Drawer,
-  Modal,
+  CardContent,
+  CardHeader,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  MenuItem,
   Pagination,
-  Select,
   Skeleton,
-  Space,
-  Table,
-  Tag,
+  Stack,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   clearNotificationTargetParameters,
   notificationTargetPath,
@@ -48,6 +52,7 @@ import {
   publicationDeliveryLimitations,
 } from "@/components/PublicationPreview/state";
 import { RepositoryScopeUnavailable, useRepositoryScope } from "@/components/RepositoryScope";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import { publicationQueryRoot, publications } from "@/services/publications";
 import "./index.css";
 
@@ -75,7 +80,9 @@ const actionDescriptions: Record<PublicationControlAction, string> = {
 };
 function Status({ status }: { status: PublicationStatus }) {
   return (
-    <Tag
+    <Chip
+      size="medium"
+      label={status}
       color={
         status === "published"
           ? "success"
@@ -85,9 +92,7 @@ function Status({ status }: { status: PublicationStatus }) {
               ? "error"
               : "default"
       }
-    >
-      {status}
-    </Tag>
+    />
   );
 }
 function OutboxDetail({
@@ -218,245 +223,271 @@ function OutboxDetail({
       if (mounted.current) setSaving(false);
     }
   };
+  const closeDetails = () => {
+    if (inFlight.current || saving) return;
+    onClose();
+  };
+  const closeControl = () => {
+    if (inFlight.current || saving) return;
+    setIntent(null);
+    setFailure(null);
+  };
   return (
-    <Drawer
+    <Dialog
       open
-      title="Publication details"
-      size={940}
-      onClose={onClose}
-      closable={!saving}
-      keyboard={!saving}
-      mask={{ closable: !saving }}
-      extra={
+      fullWidth
+      maxWidth="lg"
+      aria-labelledby="publication-details-title"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") closeDetails();
+      }}
+    >
+      <DialogTitle id="publication-details-title">Publication details</DialogTitle>
+      <DialogContent>
+        {access.checking ? (
+          <Skeleton variant="rounded" height={240} />
+        ) : denied ? (
+          <Alert severity="info">
+            <AlertTitle>Publication access is unavailable</AlertTitle>The previous publication
+            content has been cleared.
+          </Alert>
+        ) : query.isError ? (
+          <Alert
+            severity="error"
+            action={<Button onClick={() => void query.refetch()}>Try again</Button>}
+          >
+            <AlertTitle>Could not load publication</AlertTitle>
+            {publicationError(query.error)}
+          </Alert>
+        ) : !detail ? (
+          <Skeleton variant="rounded" height={240} />
+        ) : (
+          <Stack spacing={3}>
+            {notice && <Alert severity="success">{notice}</Alert>}
+            <Stack
+              direction="row"
+              useFlexGap
+              sx={{ flexWrap: "wrap", alignItems: "center", gap: 2 }}
+            >
+              <Status status={detail.delivery.status} />
+              <Typography variant="body2" color="text.secondary">
+                Delivery version {detail.delivery.version} · Updated {detail.delivery.updatedAt}
+              </Typography>
+            </Stack>
+            <section className="publication-section" aria-label="Publication delivery record">
+              <Typography variant="h6" component="h3">
+                Delivery record
+              </Typography>
+              <DetailsGrid
+                columns={2}
+                items={[
+                  {
+                    key: "id",
+                    label: "Publication ID",
+                    value: <code>{detail.intent.publicationId}</code>,
+                  },
+                  {
+                    key: "actor",
+                    label: "Confirmed by",
+                    value: `${detail.intent.actor.subject} · ${detail.intent.actor.issuer}`,
+                  },
+                  { key: "created", label: "Confirmed at", value: detail.intent.createdAt },
+                  {
+                    key: "attempts",
+                    label: "Delivery and reconciliation attempts",
+                    value: detail.delivery.attemptCount,
+                  },
+                  {
+                    key: "failure",
+                    label: "Current result",
+                    value: detail.delivery.failure
+                      ? `${detail.delivery.failure.code}: ${detail.delivery.failure.message}`
+                      : "No failure recorded",
+                  },
+                  {
+                    key: "remote",
+                    label: "Verified remote publication",
+                    value: detail.delivery.remoteReceipt ? (
+                      <a
+                        href={detail.delivery.remoteReceipt.htmlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open the recorded GitHub publication
+                      </a>
+                    ) : (
+                      "No verified remote receipt"
+                    ),
+                  },
+                ]}
+              />
+            </section>
+            {detail.delivery.status === "unknown" && (
+              <Alert severity="warning">
+                <AlertTitle>Delivery is uncertain</AlertTitle>
+                Sending may have begun. This publication cannot be retried or cancelled. Check
+                GitHub using read-only reconciliation; an absent match never authorizes another
+                send.
+              </Alert>
+            )}
+            <Stack direction="row" useFlexGap sx={{ flexWrap: "wrap", gap: 1 }}>
+              {publicationActions(detail).map((action) => (
+                <Button
+                  key={action}
+                  color={action === "cancel" ? "error" : "primary"}
+                  variant="outlined"
+                  disabled={!access.can("configure") || saving}
+                  onClick={() => begin(action)}
+                >
+                  {labels[action]}
+                </Button>
+              ))}
+            </Stack>
+            {!access.allows("configure") && (
+              <Typography color="text.secondary">
+                Maintainer access or higher is required to cancel, retry, or reconcile publication.
+              </Typography>
+            )}
+            <PublicationDocument
+              target={detail.intent.target}
+              payload={detail.intent.payload}
+              binding={detail.intent.binding}
+              publisherGitHubUserId={detail.intent.publisherGitHubUserId}
+              payloadSha256={detail.intent.payloadSha256}
+            />
+            <Typography color="text.secondary">{publicationDeliveryLimitations}</Typography>
+            <section className="publication-section" aria-label="Publication history">
+              <Typography variant="h6" component="h3">
+                Append-only delivery and reconciliation history
+              </Typography>
+              {attempts.isError || historyMismatch ? (
+                <Alert severity="error">
+                  <AlertTitle>Could not load publication history</AlertTitle>
+                  {historyMismatch
+                    ? "The history does not match this publication target and publisher."
+                    : publicationError(attempts.error)}
+                </Alert>
+              ) : !attempts.data ? (
+                <Skeleton variant="rounded" height={140} />
+              ) : (
+                <>
+                  <DataTable
+                    ariaLabel="Delivery and reconciliation history"
+                    rows={attempts.data.items}
+                    getRowId={(entry) => entry.id}
+                    emptyTitle="No delivery or reconciliation observations have been recorded."
+                    columns={[
+                      { id: "attempt", label: "Attempt", render: (entry) => entry.attemptNumber },
+                      { id: "kind", label: "Kind", render: (entry) => entry.kind },
+                      { id: "phase", label: "Phase", render: (entry) => entry.phase },
+                      {
+                        id: "result",
+                        label: "Result",
+                        render: (entry) =>
+                          entry.phase === "outcome" ? entry.outcome : "No outcome recorded",
+                      },
+                      {
+                        id: "details",
+                        label: "Details",
+                        render: (entry) =>
+                          entry.failure ? (
+                            `${entry.failure.code}: ${entry.failure.message}`
+                          ) : entry.remoteReceipt ? (
+                            <a href={entry.remoteReceipt.htmlUrl} target="_blank" rel="noreferrer">
+                              Verified GitHub receipt
+                            </a>
+                          ) : (
+                            "No remote receipt"
+                          ),
+                      },
+                      { id: "time", label: "Recorded at", render: (entry) => entry.createdAt },
+                    ]}
+                  />
+                  {attempts.data.total > 20 && (
+                    <Pagination
+                      aria-label="Publication history pages"
+                      page={page}
+                      count={Math.ceil(attempts.data.total / 20)}
+                      onChange={(_event, value) => setPage(value)}
+                      sx={{ mt: 2 }}
+                    />
+                  )}
+                </>
+              )}
+            </section>
+          </Stack>
+        )}
+      </DialogContent>
+      <DialogActions>
         <Button disabled={saving} onClick={() => void access.refresh()}>
           Refresh access
         </Button>
-      }
-    >
-      {access.checking ? (
-        <Skeleton active paragraph={{ rows: 8 }} />
-      ) : denied ? (
-        <Alert
-          showIcon
-          type="info"
-          title="Publication access is unavailable"
-          description="The previous publication content has been cleared."
-        />
-      ) : query.isError ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load publication"
-          description={publicationError(query.error)}
-          action={<Button onClick={() => void query.refetch()}>Try again</Button>}
-        />
-      ) : !detail ? (
-        <Skeleton active paragraph={{ rows: 8 }} />
-      ) : (
-        <Space orientation="vertical" size="large" className="publication-stack">
-          {notice && <Alert showIcon type="success" title={notice} />}
-          <Space wrap>
-            <Status status={detail.delivery.status} />
-            <Typography.Text type="secondary">
-              Delivery version {detail.delivery.version} · Updated {detail.delivery.updatedAt}
-            </Typography.Text>
-          </Space>
-          <Descriptions
-            column={1}
-            size="small"
-            items={[
-              {
-                key: "id",
-                label: "Publication ID",
-                children: <code>{detail.intent.publicationId}</code>,
-              },
-              {
-                key: "actor",
-                label: "Confirmed by",
-                children: `${detail.intent.actor.subject} · ${detail.intent.actor.issuer}`,
-              },
-              { key: "created", label: "Confirmed at", children: detail.intent.createdAt },
-              {
-                key: "attempts",
-                label: "Delivery and reconciliation attempts",
-                children: detail.delivery.attemptCount,
-              },
-              {
-                key: "failure",
-                label: "Current result",
-                children: detail.delivery.failure
-                  ? `${detail.delivery.failure.code}: ${detail.delivery.failure.message}`
-                  : "No failure recorded",
-              },
-              {
-                key: "remote",
-                label: "Verified remote publication",
-                children: detail.delivery.remoteReceipt ? (
-                  <a href={detail.delivery.remoteReceipt.htmlUrl} target="_blank" rel="noreferrer">
-                    Open the recorded GitHub publication
-                  </a>
-                ) : (
-                  "No verified remote receipt"
-                ),
-              },
-            ]}
-          />
-          {detail.delivery.status === "unknown" && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Delivery is uncertain"
-              description="Sending may have begun. This publication cannot be retried or cancelled. Check GitHub using read-only reconciliation; an absent match never authorizes another send."
-            />
-          )}
-          <Space wrap>
-            {publicationActions(detail).map((action) => (
-              <Button
-                key={action}
-                danger={action === "cancel"}
-                disabled={!access.can("configure") || saving}
-                onClick={() => begin(action)}
-              >
-                {labels[action]}
-              </Button>
-            ))}
-          </Space>
-          {!access.allows("configure") && (
-            <Typography.Text type="secondary">
-              Maintainer access or higher is required to cancel, retry, or reconcile publication.
-            </Typography.Text>
-          )}
-          <PublicationDocument
-            target={detail.intent.target}
-            payload={detail.intent.payload}
-            binding={detail.intent.binding}
-            publisherGitHubUserId={detail.intent.publisherGitHubUserId}
-            payloadSha256={detail.intent.payloadSha256}
-          />
-          <Typography.Paragraph type="secondary">
-            {publicationDeliveryLimitations}
-          </Typography.Paragraph>
-          <Card size="small" title="Append-only delivery and reconciliation history">
-            {attempts.isError || historyMismatch ? (
-              <Alert
-                showIcon
-                type="error"
-                title="Could not load publication history"
-                description={
-                  historyMismatch
-                    ? "The history does not match this publication target and publisher."
-                    : publicationError(attempts.error)
-                }
-              />
-            ) : !attempts.data ? (
-              <Skeleton active />
-            ) : (
-              <>
-                <Table
-                  rowKey="id"
-                  size="small"
-                  pagination={false}
-                  dataSource={attempts.data.items}
-                  columns={[
-                    { title: "Attempt", dataIndex: "attemptNumber" },
-                    { title: "Kind", dataIndex: "kind" },
-                    { title: "Phase", dataIndex: "phase" },
-                    {
-                      title: "Result",
-                      render: (_, entry) =>
-                        entry.phase === "outcome" ? entry.outcome : "No outcome recorded",
-                    },
-                    {
-                      title: "Details",
-                      render: (_, entry) =>
-                        entry.failure ? (
-                          `${entry.failure.code}: ${entry.failure.message}`
-                        ) : entry.remoteReceipt ? (
-                          <a href={entry.remoteReceipt.htmlUrl} target="_blank" rel="noreferrer">
-                            Verified GitHub receipt
-                          </a>
-                        ) : (
-                          "No remote receipt"
-                        ),
-                    },
-                    { title: "Recorded at", dataIndex: "createdAt" },
-                  ]}
-                  locale={{
-                    emptyText: "No delivery or reconciliation observations have been recorded.",
-                  }}
-                />
-                <Pagination
-                  current={page}
-                  pageSize={20}
-                  total={attempts.data.total}
-                  showSizeChanger={false}
-                  hideOnSinglePage
-                  onChange={setPage}
-                />
-              </>
-            )}
-          </Card>
-        </Space>
-      )}
+        <Button disabled={saving} onClick={closeDetails}>
+          Close
+        </Button>
+      </DialogActions>
       {intent && !denied && !access.checking && (
-        <Modal
+        <Dialog
           open
-          title={labels[intent.action]}
-          okText={failure ? "Retry original action" : labels[intent.action]}
-          onOk={() => void submit()}
-          onCancel={() => {
-            if (!saving) {
-              setIntent(null);
-              setFailure(null);
-            }
+          fullWidth
+          maxWidth="sm"
+          aria-labelledby="publication-control-title"
+          onClose={(_event, reason) => {
+            if (reason === "escapeKeyDown" || reason === "backdropClick") closeControl();
           }}
-          confirmLoading={saving}
-          okButtonProps={{
-            disabled: !access.can("configure") || !currentActionAllowed,
-            danger: intent.action === "cancel",
-          }}
-          cancelButtonProps={{ disabled: saving }}
-          closable={!saving}
-          keyboard={!saving}
-          mask={{ closable: !saving }}
         >
-          <Typography.Paragraph>{actionDescriptions[intent.action]}</Typography.Paragraph>
-          {!currentActionAllowed && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Delivery state changed"
-              description="Close this dialog and review the current state before choosing an action. Unknown delivery permits only read-only reconciliation."
-            />
-          )}
-          <Descriptions
-            column={1}
-            size="small"
-            items={[
-              { key: "id", label: "Publication", children: <code>{publicationId}</code> },
-              {
-                key: "version",
-                label: "Expected delivery version",
-                children: intent.request.expectedVersion,
-              },
-              {
-                key: "body",
-                label: "Frozen payload digest",
-                children: <code>{intent.request.expectedPayloadSha256}</code>,
-              },
-            ]}
-          />
-          {!!failure && (
-            <Alert
-              showIcon
-              type="error"
-              title="Publication action failed"
-              description={`${publicationError(failure)} The original request identity is retained. Close this dialog to discard it and review current state.`}
-            />
-          )}
-        </Modal>
+          <DialogTitle id="publication-control-title">{labels[intent.action]}</DialogTitle>
+          <DialogContent>
+            <Stack spacing={2}>
+              <Typography>{actionDescriptions[intent.action]}</Typography>
+              {!currentActionAllowed && (
+                <Alert severity="warning">
+                  <AlertTitle>Delivery state changed</AlertTitle>
+                  Close this dialog and review the current state before choosing an action. Unknown
+                  delivery permits only read-only reconciliation.
+                </Alert>
+              )}
+              <DetailsGrid
+                columns={1}
+                items={[
+                  { key: "id", label: "Publication", value: <code>{publicationId}</code> },
+                  {
+                    key: "version",
+                    label: "Expected delivery version",
+                    value: intent.request.expectedVersion,
+                  },
+                  {
+                    key: "body",
+                    label: "Frozen payload digest",
+                    value: <code>{intent.request.expectedPayloadSha256}</code>,
+                  },
+                ]}
+              />
+              {!!failure && (
+                <Alert severity="error">
+                  <AlertTitle>Publication action failed</AlertTitle>
+                  {`${publicationError(failure)} The original request identity is retained. Close this dialog to discard it and review current state.`}
+                </Alert>
+              )}
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={saving} onClick={closeControl}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              color={intent.action === "cancel" ? "error" : "primary"}
+              loading={saving}
+              disabled={!access.can("configure") || !currentActionAllowed}
+              onClick={() => void submit()}
+            >
+              {failure ? "Retry original action" : labels[intent.action]}
+            </Button>
+          </DialogActions>
+        </Dialog>
       )}
-    </Drawer>
+    </Dialog>
   );
 }
 function Outbox({
@@ -492,116 +523,119 @@ function Outbox({
   });
   return (
     <>
-      <Card
-        title="Repository outbox"
-        extra={
-          <Space>
-            <Button onClick={() => void access.refresh()}>Refresh access</Button>
-            <Button
-              icon={<ReloadOutlined />}
-              loading={query.isFetching}
-              onClick={() => void query.refetch()}
-            >
-              Refresh
-            </Button>
-          </Space>
-        }
-      >
-        <Typography.Paragraph type="secondary">
-          Confirmed immutable publications for this repository only. Current delivery state
-          refreshes every 5 seconds.
-        </Typography.Paragraph>
-        <Select
-          aria-label="Filter publication status"
-          placeholder="All delivery states"
-          allowClear
-          style={{ width: 220, marginBottom: 16 }}
-          options={statuses.map((value) => ({ value, label: value }))}
-          value={status}
-          onChange={(value) => {
-            setStatus(value);
-            setPage(1);
-            onSelectPublication(null);
-          }}
+      <Card variant="elevation" elevation={0}>
+        <CardHeader
+          sx={{ flexWrap: "wrap", gap: 1, "& .MuiCardHeader-action": { m: 0 } }}
+          title="Repository outbox"
+          action={
+            <Stack direction="row" sx={{ gap: 1 }}>
+              <Button onClick={() => void access.refresh()}>Refresh access</Button>
+              <Button
+                startIcon={<RefreshIcon />}
+                loading={query.isFetching}
+                onClick={() => void query.refetch()}
+              >
+                Refresh
+              </Button>
+            </Stack>
+          }
         />
-        {read.denied ? (
-          <Alert
-            showIcon
-            type="info"
-            title="Publication access is unavailable"
-            description="The previous outbox content has been cleared. Refresh access before loading publications."
-          />
-        ) : query.isError ? (
-          <Alert
-            showIcon
-            type="error"
-            title="Could not load repository publications"
-            description={publicationError(query.error)}
-          />
-        ) : !query.data ? (
-          <Skeleton active paragraph={{ rows: 5 }} />
-        ) : (
-          <>
-            <Table<PublicationSummary>
-              rowKey="publicationId"
-              dataSource={query.data.items}
-              pagination={false}
-              scroll={{ x: 800 }}
-              columns={[
-                {
-                  key: "target",
-                  title: "Target",
-                  render: (_, entry) =>
-                    `${entry.target.kind === "pull_request" ? "PR" : "Issue"} #${entry.target.number} · ${entry.target.fullName}`,
-                },
-                {
-                  key: "state",
-                  title: "State",
-                  render: (_, entry) => <Status status={entry.delivery.status} />,
-                },
-                {
-                  key: "decision",
-                  title: "Decision",
-                  render: (_, entry) => <code>{entry.selectedDecisionId}</code>,
-                },
-                {
-                  key: "attempts",
-                  title: "Attempts",
-                  render: (_, entry) => entry.delivery.attemptCount,
-                },
-                {
-                  key: "updated",
-                  title: "Updated",
-                  render: (_, entry) => entry.delivery.updatedAt,
-                },
-                {
-                  key: "details",
-                  title: "Details",
-                  render: (_, entry) => (
-                    <Button
-                      aria-label={`Inspect publication ${entry.publicationId}`}
-                      onClick={() => onSelectPublication(entry.publicationId)}
-                    >
-                      Inspect
-                    </Button>
-                  ),
-                },
-              ]}
-              locale={{ emptyText: "No publications have been confirmed for this repository." }}
-            />
-            <Pagination
-              current={page}
-              pageSize={20}
-              total={query.data.total}
-              showSizeChanger={false}
-              hideOnSinglePage
-              onChange={(value) => {
-                setPage(value);
-                onSelectPublication(null);
-              }}
-            />
-          </>
-        )}
+        <CardContent sx={{ pt: 0 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Confirmed immutable publications for this repository only. Current delivery state
+            refreshes every 5 seconds.
+          </Typography>
+          <TextField
+            select
+            label="Filter publication status"
+            value={status ?? ""}
+            sx={{ minWidth: 240, mb: 3 }}
+            onChange={(event) => {
+              setStatus(event.target.value ? (event.target.value as PublicationStatus) : undefined);
+              setPage(1);
+              onSelectPublication(null);
+            }}
+          >
+            <MenuItem value="">All delivery states</MenuItem>
+            {statuses.map((value) => (
+              <MenuItem key={value} value={value}>
+                {value}
+              </MenuItem>
+            ))}
+          </TextField>
+          {read.denied ? (
+            <Alert severity="info">
+              <AlertTitle>Publication access is unavailable</AlertTitle>
+              The previous outbox content has been cleared. Refresh access before loading
+              publications.
+            </Alert>
+          ) : query.isError ? (
+            <Alert severity="error">
+              <AlertTitle>Could not load repository publications</AlertTitle>
+              {publicationError(query.error)}
+            </Alert>
+          ) : !query.data ? (
+            <Skeleton variant="rounded" height={180} />
+          ) : (
+            <>
+              <DataTable<PublicationSummary>
+                ariaLabel="Repository publication outbox"
+                rows={query.data.items}
+                getRowId={(entry) => entry.publicationId}
+                emptyTitle="No publications have been confirmed for this repository."
+                columns={[
+                  {
+                    id: "target",
+                    label: "Target",
+                    minWidth: 230,
+                    render: (entry) =>
+                      `${entry.target.kind === "pull_request" ? "PR" : "Issue"} #${entry.target.number} · ${entry.target.fullName}`,
+                  },
+                  {
+                    id: "state",
+                    label: "State",
+                    render: (entry) => <Status status={entry.delivery.status} />,
+                  },
+                  {
+                    id: "decision",
+                    label: "Decision",
+                    render: (entry) => <code>{entry.selectedDecisionId}</code>,
+                  },
+                  {
+                    id: "attempts",
+                    label: "Attempts",
+                    render: (entry) => entry.delivery.attemptCount,
+                  },
+                  { id: "updated", label: "Updated", render: (entry) => entry.delivery.updatedAt },
+                  {
+                    id: "details",
+                    label: "Details",
+                    render: (entry) => (
+                      <Button
+                        aria-label={`Inspect publication ${entry.publicationId}`}
+                        onClick={() => onSelectPublication(entry.publicationId)}
+                      >
+                        Inspect
+                      </Button>
+                    ),
+                  },
+                ]}
+              />
+              {query.data.total > 20 && (
+                <Pagination
+                  aria-label="Publication pages"
+                  page={page}
+                  count={Math.ceil(query.data.total / 20)}
+                  onChange={(_event, value) => {
+                    setPage(value);
+                    onSelectPublication(null);
+                  }}
+                  sx={{ mt: 2 }}
+                />
+              )}
+            </>
+          )}
+        </CardContent>
       </Card>
       {selectedPublicationId && !query.isError && !read.denied && (
         <OutboxDetail
@@ -651,19 +685,18 @@ export default function PublicationsPage() {
       />
       {target.kind === "invalid" ? (
         <Alert
-          showIcon
-          type="error"
-          title="Invalid publication target"
-          description={target.message}
+          severity="error"
           action={<Button onClick={() => selectPublication(null)}>Clear target</Button>}
-        />
+        >
+          <AlertTitle>Invalid publication target</AlertTitle>
+          {target.message}
+        </Alert>
       ) : !scope.repositoryId ? (
-        <Alert
-          showIcon
-          type="info"
-          title="Select a repository"
-          description="Choose one repository in the repository selector to inspect its publication outbox. There is no cross-repository outbox view."
-        />
+        <Alert severity="info">
+          <AlertTitle>Select a repository</AlertTitle>
+          Choose one repository in the repository selector to inspect its publication outbox. There
+          is no cross-repository outbox view.
+        </Alert>
       ) : !scope.ready ? (
         <RepositoryScopeUnavailable />
       ) : (

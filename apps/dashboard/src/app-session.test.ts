@@ -1,23 +1,8 @@
 import type { OperatorAccessContext } from "@agentic-review/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getInitialState } from "./app";
+import { getInitialState } from "./state/session";
 
 const mocks = vi.hoisted(() => ({ context: vi.fn(), assign: vi.fn() }));
-vi.mock("@ant-design/icons", () => ({
-  BranchesOutlined: () => null,
-  GithubOutlined: () => null,
-  LogoutOutlined: () => null,
-  MenuFoldOutlined: () => null,
-  MenuOutlined: () => null,
-  MenuUnfoldOutlined: () => null,
-  UserOutlined: () => null,
-}));
-vi.mock("antd", () => ({
-  Avatar: () => null,
-  Badge: () => null,
-  Button: () => null,
-  Tooltip: () => null,
-}));
 vi.mock("@/services/access", () => ({ access: { context: mocks.context } }));
 vi.mock("@/components/OperatorSession", () => ({ OperatorSessionBoundary: () => null }));
 vi.mock("@/components/OperatorAccess", () => ({

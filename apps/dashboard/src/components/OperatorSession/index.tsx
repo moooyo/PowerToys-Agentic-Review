@@ -1,9 +1,9 @@
+import { Skeleton } from "@mui/material";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Skeleton } from "antd";
 import { type ReactNode, useEffect, useState } from "react";
 import { OperatorAccessEvents } from "@/components/OperatorAccess";
 import { access } from "@/services/access";
+import { useOperatorSession } from "@/state/session";
 import { operatorSessionKey } from "./state";
 
 function SessionQueries({ children }: { children: ReactNode }) {
@@ -23,23 +23,23 @@ function SessionQueries({ children }: { children: ReactNode }) {
 }
 
 export function OperatorSessionBoundary({ children }: { children: ReactNode }) {
-  const { initialState, loading } = useModel("@@initialState");
+  const { initialState, loading } = useOperatorSession();
   // This boundary wraps the entire route tree, including navigation and selection state.
   // Authentication refreshes must not display data cached for the previous session.
   if (loading && !initialState)
     return (
       <div role="status" aria-label="Verifying operator session">
-        <Skeleton active paragraph={{ rows: 4 }} />
+        <Skeleton variant="rounded" height={200} />
       </div>
     );
   return (
     <>
       {loading ? (
         <div role="status" aria-label="Verifying operator session">
-          <Skeleton active paragraph={{ rows: 4 }} />
+          <Skeleton variant="rounded" height={200} />
         </div>
       ) : null}
-      <div hidden={loading} inert={loading} aria-hidden={loading}>
+      <div id="dashboard-session" hidden={loading} inert={loading} aria-hidden={loading}>
         <SessionQueries key={operatorSessionKey(initialState, access.mode)}>
           {children}
         </SessionQueries>

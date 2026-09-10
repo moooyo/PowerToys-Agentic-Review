@@ -1,9 +1,8 @@
-import { BellOutlined } from "@ant-design/icons";
-import { Link, useLocation } from "@umijs/max";
-import { Badge, Tooltip } from "antd";
+import NotificationsOutlinedIcon from "@mui/icons-material/NotificationsOutlined";
+import { Badge, IconButton, Tooltip } from "@mui/material";
+import { Link, useLocation } from "react-router-dom";
 import { useRepositoryScope } from "@/components/RepositoryScope";
 import { useNotificationAccess, useNotificationSummary } from "./access";
-import "./index.css";
 
 export function NotificationBell() {
   const scope = useRepositoryScope();
@@ -28,20 +27,15 @@ export function NotificationBell() {
       : "/notifications";
   return (
     <Tooltip title={label}>
-      <Link aria-label={label} to={to} className="notification-bell">
+      <IconButton aria-label={label} component={Link} to={to} color="inherit">
         <Badge
-          count={summary?.capped ? "99+" : summary?.unreadCount}
+          badgeContent={summary?.capped ? "99+" : summary?.unreadCount}
           showZero={!!summary}
-          size="small"
+          color="primary"
         >
-          <BellOutlined aria-hidden="true" style={{ fontSize: 18 }} />
+          <NotificationsOutlinedIcon aria-hidden="true" />
         </Badge>
-        {!summary && (
-          <span className="notification-bell__unavailable" aria-hidden="true">
-            —
-          </span>
-        )}
-      </Link>
+      </IconButton>
     </Tooltip>
   );
 }

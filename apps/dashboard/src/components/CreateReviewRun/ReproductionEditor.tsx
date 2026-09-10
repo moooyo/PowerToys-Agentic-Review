@@ -7,22 +7,25 @@ import type {
   ReproductionPrecondition,
   ValidationProfileVersion,
 } from "@agentic-review/contracts";
-import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import AddIcon from "@mui/icons-material/Add";
+import DeleteOutlinedIcon from "@mui/icons-material/DeleteOutlined";
 import {
   Alert,
+  AlertTitle,
+  Autocomplete,
+  Box,
   Button,
-  Card,
   Checkbox,
-  Empty,
-  Form,
-  Input,
-  InputNumber,
-  Select,
-  Space,
-  Tag,
+  Chip,
+  FormControlLabel,
+  IconButton,
+  MenuItem,
+  Stack,
+  TextField,
   Typography,
-} from "antd";
-import { useRef } from "react";
+} from "@mui/material";
+import { useEffect, useRef, useState } from "react";
+import { EmptyState } from "@/components/ui";
 import { targetLabels } from "@/pages/ValidationProfiles/forms";
 import type { RunProfileOption } from "./helpers";
 import {
@@ -30,6 +33,7 @@ import {
   getPreconditionChecks,
   getReproductionProfileOptions,
   observationRefKey,
+  observationValueFromInput,
   reproductionProfileUnavailableReason,
 } from "./reproduction";
 
@@ -43,10 +47,9 @@ interface ReproductionEditorProps {
   readonly sample: boolean;
 }
 
-const vertical = { width: "100%" };
-const row = { display: "flex", gap: 8, flexWrap: "wrap" as const, alignItems: "start" };
-const observationColumn = { flex: "2 1 240px", minWidth: 0 };
-const valueColumn = { flex: "1 1 160px", minWidth: 0 };
+const row = { display: "flex", gap: 16, flexWrap: "wrap" as const, alignItems: "start" };
+const observationColumn = { flex: "2 1 280px", minWidth: 0 };
+const valueColumn = { flex: "1 1 220px", minWidth: 0 };
 
 function useRowKeys<T extends object>() {
   const keys = useRef(new WeakMap<T, string>());
@@ -97,37 +100,79 @@ function ExactValue({
 }) {
   if (value.type === "boolean")
     return (
-      <Select
-        aria-label={label}
+      <TextField
+        size="medium"
+        select
+        label="Exact value"
+        slotProps={{ select: { SelectDisplayProps: { "aria-label": label } } }}
         value={value.value ? "true" : "false"}
         disabled={disabled}
-        style={vertical}
-        options={[
-          { value: "true", label: "True" },
-          { value: "false", label: "False" },
-        ]}
-        onChange={(next) => onChange({ type: "boolean", value: next === "true" })}
-      />
+        fullWidth
+        onChange={(event) => onChange({ type: "boolean", value: event.target.value === "true" })}
+      >
+        <MenuItem value="true">True</MenuItem>
+        <MenuItem value="false">False</MenuItem>
+      </TextField>
     );
   if (value.type === "number")
     return (
-      <InputNumber
-        aria-label={label}
+      <NumericExactValue
+        label={label}
         disabled={disabled}
-        style={vertical}
-        value={Number.isFinite(value.value) ? value.value : null}
-        onChange={(next) => onChange({ type: "number", value: next === null ? Number.NaN : next })}
+        value={value.value}
+        onChange={(next) => onChange({ type: "number", value: next })}
       />
     );
   return (
-    <Input.TextArea
-      aria-label={label}
+    <TextField
+      size="medium"
+      label="Exact value"
       disabled={disabled}
-      autoSize={{ minRows: 1, maxRows: 5 }}
-      maxLength={2048}
+      fullWidth
+      multiline
+      minRows={1}
+      maxRows={5}
+      slotProps={{ htmlInput: { maxLength: 2048, "aria-label": label } }}
       value={value.value}
       placeholder="Exact text; an empty value is allowed"
       onChange={(event) => onChange({ type: "string", value: event.target.value })}
+    />
+  );
+}
+
+function NumericExactValue({
+  value,
+  onChange,
+  label,
+  disabled,
+}: {
+  readonly value: number;
+  readonly onChange: (value: number) => void;
+  readonly label: string;
+  readonly disabled: boolean;
+}) {
+  const [draft, setDraft] = useState(() => (Number.isFinite(value) ? String(value) : ""));
+  useEffect(() => {
+    if (Number.isFinite(value) && Number(draft) !== value) setDraft(String(value));
+  }, [draft, value]);
+  return (
+    <TextField
+      size="medium"
+      label="Exact value"
+      disabled={disabled}
+      fullWidth
+      slotProps={{ htmlInput: { inputMode: "decimal", "aria-label": label } }}
+      value={draft}
+      onChange={(event) => {
+        const next = event.target.value;
+        setDraft(next);
+        try {
+          const parsed = observationValueFromInput("number", next);
+          if (parsed.type === "number") onChange(parsed.value);
+        } catch {
+          onChange(Number.NaN);
+        }
+      }}
     />
   );
 }
@@ -153,18 +198,29 @@ function PredicateRow({
   if (!available.some((entry) => entry.key === key))
     options.push({ value: key, label: "Observation unavailable in this version" });
   return (
-    <div style={row}>
+    <fieldset style={{ ...row, border: 0, padding: 0, margin: 0, minWidth: 0 }} aria-label={label}>
       <div style={observationColumn}>
-        <Select
-          aria-label={`${label} observation`}
-          style={vertical}
+        <Autocomplete
+          size="medium"
+          fullWidth
+          disableClearable
           disabled={disabled}
-          showSearch
-          optionFilterProp="label"
-          value={key}
+          value={options.find((option) => option.value === key)}
           options={options}
-          onChange={(next) => {
-            const selected = available.find((entry) => entry.key === next);
+          isOptionEqualToValue={(option, selected) => option.value === selected.value}
+          getOptionLabel={(option) => option.label}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label="Observation"
+              slotProps={{
+                ...params.slotProps,
+                htmlInput: { ...params.slotProps.htmlInput, "aria-label": `${label} observation` },
+              }}
+            />
+          )}
+          onChange={(_event, next) => {
+            const selected = available.find((entry) => entry.key === next.value);
             if (selected)
               onChange({ observation: selected.ref, equals: defaultValue(selected.type) });
           }}
@@ -178,14 +234,16 @@ function PredicateRow({
           onChange={(equals) => onChange({ ...value, equals })}
         />
       </div>
-      <Button
+      <IconButton
         aria-label={`Remove ${label}`}
         title="Remove condition"
-        icon={<DeleteOutlined />}
         disabled={disabled}
         onClick={onRemove}
-      />
-    </div>
+        sx={{ width: 40, height: 40, mt: 1 }}
+      >
+        <DeleteOutlinedIcon />
+      </IconButton>
+    </fieldset>
   );
 }
 
@@ -217,9 +275,13 @@ function SignatureEditor({
       });
   };
   return (
-    <Space orientation="vertical" size="small" style={vertical}>
-      <Typography.Text strong>{title}</Typography.Text>
-      <Typography.Text type="secondary">All conditions below must match exactly.</Typography.Text>
+    <Stack spacing={2}>
+      <Typography variant="subtitle1" component="h5" sx={{ fontWeight: 500 }}>
+        {title}
+      </Typography>
+      <Typography variant="body2" color="text.secondary">
+        All conditions below must match exactly.
+      </Typography>
       {value.allOf.map((predicate, index) => (
         <PredicateRow
           key={keys.keyFor(predicate)}
@@ -239,14 +301,15 @@ function SignatureEditor({
         />
       ))}
       <Button
-        size="small"
-        icon={<PlusOutlined />}
+        size="medium"
+        startIcon={<AddIcon />}
+        sx={{ alignSelf: "flex-start" }}
         disabled={disabled || value.allOf.length >= Math.min(16, available.length)}
         onClick={add}
       >
         Add condition
       </Button>
-    </Space>
+    </Stack>
   );
 }
 
@@ -271,47 +334,72 @@ function PreconditionsEditor({
   const remove = (index: number) =>
     onChange(value.filter((_entry, position) => position !== index));
   return (
-    <Space orientation="vertical" size="small" style={vertical}>
-      <Typography.Text strong>Preconditions</Typography.Text>
-      <Typography.Text type="secondary">
+    <Stack spacing={2}>
+      <Typography variant="subtitle1" component="h5" sx={{ fontWeight: 500 }}>
+        Preconditions
+      </Typography>
+      <Typography variant="body2" color="text.secondary">
         These controls must hold before either conclusion is valid.
-      </Typography.Text>
+      </Typography>
       {value.map((control, index) => (
         <div key={keys.keyFor(control)} style={{ ...row, paddingBlock: 4 }}>
-          <Select
-            aria-label={`Precondition ${index + 1} type`}
-            style={{ width: 180 }}
+          <TextField
+            size="medium"
+            select
+            label="Condition type"
+            slotProps={{
+              select: { SelectDisplayProps: { "aria-label": `Precondition ${index + 1} type` } },
+            }}
+            style={{ flex: "1 1 220px", minWidth: 0 }}
             value={control.kind}
             disabled={disabled}
-            options={[
-              { value: "check_passed", label: "Check passes", disabled: checks.length === 0 },
-              { value: "observation_equals", label: "Observation equals" },
-            ]}
-            onChange={(kind) => {
+            onChange={(event) => {
+              const kind = event.target.value;
               if (kind === "check_passed" && checks[0])
                 change(index, { kind, checkId: checks[0].id });
               const predicate = firstPredicate(profile);
               if (kind === "observation_equals" && predicate) change(index, { kind, predicate });
             }}
-          />
+          >
+            <MenuItem value="check_passed" disabled={checks.length === 0}>
+              Check passes
+            </MenuItem>
+            <MenuItem value="observation_equals">Observation equals</MenuItem>
+          </TextField>
           <div style={{ flex: "1 1 380px", minWidth: 0 }}>
             {control.kind === "check_passed" ? (
               <div style={row}>
-                <Select
-                  aria-label={`Precondition ${index + 1} check`}
+                <TextField
+                  size="medium"
+                  select
+                  label="Required check"
+                  slotProps={{
+                    select: {
+                      SelectDisplayProps: { "aria-label": `Precondition ${index + 1} check` },
+                    },
+                  }}
                   disabled={disabled}
                   style={observationColumn}
                   value={control.checkId}
-                  options={checks.map((check) => ({ value: check.id, label: check.label }))}
-                  onChange={(checkId) => change(index, { kind: "check_passed", checkId })}
-                />
-                <Button
+                  onChange={(event) =>
+                    change(index, { kind: "check_passed", checkId: event.target.value })
+                  }
+                >
+                  {checks.map((check) => (
+                    <MenuItem key={check.id} value={check.id}>
+                      {check.label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+                <IconButton
                   aria-label={`Remove precondition ${index + 1}`}
                   title="Remove precondition"
-                  icon={<DeleteOutlined />}
                   disabled={disabled}
                   onClick={() => remove(index)}
-                />
+                  sx={{ width: 40, height: 40, mt: 1 }}
+                >
+                  <DeleteOutlinedIcon />
+                </IconButton>
               </div>
             ) : (
               <PredicateRow
@@ -327,8 +415,9 @@ function PreconditionsEditor({
         </div>
       ))}
       <Button
-        size="small"
-        icon={<PlusOutlined />}
+        size="medium"
+        startIcon={<AddIcon />}
+        sx={{ alignSelf: "flex-start" }}
         disabled={disabled || value.length >= 16}
         onClick={() => {
           const check = checks[0];
@@ -339,7 +428,7 @@ function PreconditionsEditor({
       >
         Add precondition
       </Button>
-    </Space>
+    </Stack>
   );
 }
 
@@ -365,248 +454,280 @@ export function ReproductionEditor({
     replace(entry.id, { ...replacement, id: entry.id, context: entry.context });
   };
   return (
-    <Card size="small" title="Issue reproduction">
-      <Space orientation="vertical" size="middle" style={vertical}>
-        <Checkbox
-          checked={value !== undefined}
-          disabled={disabled}
-          onChange={(event) => {
-            const first = eligible[0];
-            onChange(
-              event.target.checked
-                ? {
-                    schemaVersion: "IssueReproductionRequestV1",
-                    claim: defaultClaim,
-                    cases: first ? [newCase(first.version)] : [],
-                  }
-                : undefined,
-            );
-          }}
-        >
-          Define observations for this issue
-        </Checkbox>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          Specify the behavior to reproduce and the observations that confirm it. Each case uses one
-          published validation profile.
-        </Typography.Paragraph>
-        {value !== undefined && (
-          <>
-            {sample && (
-              <Alert
-                type="info"
-                showIcon
-                title="Connected server required"
-                description="You can configure cases in this preview. Saving and executing reproduction runs requires a connected server."
-              />
-            )}
-            <Form layout="vertical" disabled={disabled}>
-              <Form.Item label="Reported behavior" required style={{ marginBottom: 0 }}>
-                <Input.TextArea
-                  aria-label="Reported behavior"
-                  maxLength={2048}
-                  showCount
-                  autoSize={{ minRows: 2, maxRows: 6 }}
-                  value={value.claim}
-                  onChange={(event) => onChange({ ...value, claim: event.target.value })}
-                />
-              </Form.Item>
-            </Form>
-            {eligible.length === 0 && (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Select a compatible issue validation profile with UI assertions or declared test output fields. Publish a new profile version if needed."
-              />
-            )}
-            {choices
-              .filter(
-                (entry) => !entry.suitable && entry.version.workflowKind === "issue_validation",
-              )
-              .map((entry) => (
-                <Alert
-                  key={entry.version.profileId}
-                  type="warning"
-                  showIcon
-                  title={entry.version.name}
-                  description={entry.reason}
-                />
-              ))}
-            {value.cases.map((entry, index) => {
-              const option = profiles.find(
-                (candidate) => candidate.version.profileId === entry.profileId,
+    <Stack component="section" aria-label="Issue reproduction" spacing={3}>
+      <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 500 }}>
+        Issue reproduction
+      </Typography>
+      <FormControlLabel
+        control={
+          <Checkbox
+            checked={value !== undefined}
+            disabled={disabled}
+            onChange={(event) => {
+              const first = eligible[0];
+              onChange(
+                event.target.checked
+                  ? {
+                      schemaVersion: "IssueReproductionRequestV1",
+                      claim: defaultClaim,
+                      cases: first ? [newCase(first.version)] : [],
+                    }
+                  : undefined,
               );
-              const profile = option?.version;
-              const selected = selectedProfileIds.includes(entry.profileId);
-              const stale = profile !== undefined && profile.id !== entry.expectedProfileVersionId;
-              const unavailable =
-                profile === undefined
-                  ? "This profile is no longer available. Choose another selected profile."
-                  : !selected
-                    ? "This profile is not included in the run. Include it or choose another profile."
-                    : reproductionProfileUnavailableReason(profile);
-              const profileChoices = choices
-                .filter((candidate) => candidate.suitable)
-                .map((candidate) => ({
-                  value: candidate.version.profileId,
-                  label: `${candidate.version.name} · ${targetLabels[candidate.version.target]} · v${candidate.version.version}`,
-                }));
-              if (!profileChoices.some((candidate) => candidate.value === entry.profileId))
-                profileChoices.push({
-                  value: entry.profileId,
-                  label: profile?.name ?? "Unavailable profile",
-                });
-              return (
-                <Card
-                  key={entry.id}
-                  size="small"
-                  title={`Reproduction case ${index + 1}`}
-                  extra={
-                    <Button
-                      type="text"
-                      danger
-                      aria-label={`Remove reproduction case ${index + 1}`}
-                      icon={<DeleteOutlined />}
-                      disabled={disabled}
-                      onClick={() =>
-                        onChange({
-                          ...value,
-                          cases: value.cases.filter((candidate) => candidate.id !== entry.id),
-                        })
-                      }
-                    />
-                  }
+            }}
+          />
+        }
+        label="Define observations for this issue"
+      />
+      <Typography variant="body2" color="text.secondary">
+        Specify the behavior to reproduce and the observations that confirm it. Each case uses one
+        published validation profile.
+      </Typography>
+      {value !== undefined && (
+        <>
+          {sample && (
+            <Alert severity="info">
+              <AlertTitle>Connected server required</AlertTitle>
+              You can configure cases in this preview. Saving and executing reproduction runs
+              requires a connected server.
+            </Alert>
+          )}
+          <TextField
+            size="medium"
+            label="Reported behavior"
+            required
+            fullWidth
+            disabled={disabled}
+            multiline
+            minRows={2}
+            maxRows={6}
+            slotProps={{ htmlInput: { maxLength: 2048, "aria-label": "Reported behavior" } }}
+            helperText={`${value.claim.length} / 2048`}
+            value={value.claim}
+            onChange={(event) => onChange({ ...value, claim: event.target.value })}
+          />
+          {eligible.length === 0 && (
+            <EmptyState
+              title="No compatible profiles selected"
+              description="Select a compatible issue validation profile with UI assertions or declared test output fields. Publish a new profile version if needed."
+            />
+          )}
+          {choices
+            .filter((entry) => !entry.suitable && entry.version.workflowKind === "issue_validation")
+            .map((entry) => (
+              <Alert key={entry.version.profileId} severity="warning">
+                <AlertTitle>{entry.version.name}</AlertTitle>
+                {entry.reason}
+              </Alert>
+            ))}
+          {value.cases.map((entry, index) => {
+            const option = profiles.find(
+              (candidate) => candidate.version.profileId === entry.profileId,
+            );
+            const profile = option?.version;
+            const selected = selectedProfileIds.includes(entry.profileId);
+            const stale = profile !== undefined && profile.id !== entry.expectedProfileVersionId;
+            const unavailable =
+              profile === undefined
+                ? "This profile is no longer available. Choose another selected profile."
+                : !selected
+                  ? "This profile is not included in the run. Include it or choose another profile."
+                  : reproductionProfileUnavailableReason(profile);
+            const profileChoices = choices
+              .filter((candidate) => candidate.suitable)
+              .map((candidate) => ({
+                value: candidate.version.profileId,
+                label: `${candidate.version.name} · ${targetLabels[candidate.version.target]} · v${candidate.version.version}`,
+              }));
+            if (!profileChoices.some((candidate) => candidate.value === entry.profileId))
+              profileChoices.push({
+                value: entry.profileId,
+                label: profile?.name ?? "Unavailable profile",
+              });
+            return (
+              <Box
+                key={entry.id}
+                component="section"
+                aria-label={`Reproduction case ${index + 1}`}
+                sx={{ borderTop: 1, borderColor: "divider", pt: 3 }}
+              >
+                <Stack
+                  direction="row"
+                  spacing={2}
+                  sx={{ alignItems: "center", justifyContent: "space-between", mb: 3 }}
                 >
-                  <Space orientation="vertical" size="middle" style={vertical}>
-                    <Form layout="vertical" disabled={disabled}>
-                      <Form.Item label="Validation profile" required>
-                        <Select
-                          aria-label={`Reproduction case ${index + 1} profile`}
-                          value={entry.profileId}
-                          options={profileChoices}
-                          onChange={(profileId) => {
-                            const next = eligible.find(
-                              (candidate) => candidate.version.profileId === profileId,
-                            );
-                            if (next) resetProfile(entry, next.version);
-                          }}
-                        />
-                        <Typography.Text type="secondary">
-                          Changing the profile resets this case's conditions.
-                        </Typography.Text>
-                      </Form.Item>
-                      <Form.Item label="Case context" required style={{ marginBottom: 0 }}>
-                        <Input.TextArea
-                          aria-label={`Reproduction case ${index + 1} context`}
-                          value={entry.context}
-                          maxLength={2048}
-                          autoSize={{ minRows: 2, maxRows: 5 }}
-                          placeholder="Describe the environment, input, or user action exercised by this case."
-                          onChange={(event) =>
-                            replace(entry.id, { ...entry, context: event.target.value })
-                          }
-                        />
-                      </Form.Item>
-                    </Form>
-                    {profile && (
-                      <div>
-                        <Tag>{targetLabels[profile.target]}</Tag>
-                        <Typography.Text type="secondary">
-                          Published version {profile.version}
-                        </Typography.Text>
-                      </div>
-                    )}
-                    {unavailable && (
-                      <Alert
-                        type="warning"
-                        showIcon
-                        title="Case profile unavailable"
-                        description={unavailable}
+                  <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                    Reproduction case {index + 1}
+                  </Typography>
+                  <IconButton
+                    color="error"
+                    aria-label={`Remove reproduction case ${index + 1}`}
+                    disabled={disabled}
+                    sx={{ width: 40, height: 40 }}
+                    onClick={() =>
+                      onChange({
+                        ...value,
+                        cases: value.cases.filter((candidate) => candidate.id !== entry.id),
+                      })
+                    }
+                  >
+                    <DeleteOutlinedIcon />
+                  </IconButton>
+                </Stack>
+                <Stack spacing={3}>
+                  <TextField
+                    size="medium"
+                    select
+                    label="Validation profile"
+                    required
+                    fullWidth
+                    disabled={disabled}
+                    slotProps={{
+                      select: {
+                        SelectDisplayProps: {
+                          "aria-label": `Reproduction case ${index + 1} profile`,
+                        },
+                      },
+                    }}
+                    value={entry.profileId}
+                    helperText="Changing the profile resets this case's conditions."
+                    onChange={(event) => {
+                      const profileId = event.target.value;
+                      const next = eligible.find(
+                        (candidate) => candidate.version.profileId === profileId,
+                      );
+                      if (next) resetProfile(entry, next.version);
+                    }}
+                  >
+                    {profileChoices.map((choice) => (
+                      <MenuItem key={choice.value} value={choice.value}>
+                        {choice.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    size="medium"
+                    label="Case context"
+                    required
+                    fullWidth
+                    disabled={disabled}
+                    multiline
+                    minRows={2}
+                    maxRows={5}
+                    slotProps={{
+                      htmlInput: {
+                        maxLength: 2048,
+                        "aria-label": `Reproduction case ${index + 1} context`,
+                      },
+                    }}
+                    value={entry.context}
+                    placeholder="Describe the environment, input, or user action exercised by this case."
+                    onChange={(event) =>
+                      replace(entry.id, { ...entry, context: event.target.value })
+                    }
+                  />
+                  {profile && (
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                      <Chip size="medium" label={targetLabels[profile.target]} />
+                      <Typography variant="body2" color="text.secondary">
+                        Published version {profile.version}
+                      </Typography>
+                    </Stack>
+                  )}
+                  {unavailable && (
+                    <Alert severity="warning">
+                      <AlertTitle>Case profile unavailable</AlertTitle>
+                      {unavailable}
+                    </Alert>
+                  )}
+                  {stale && profile && (
+                    <Alert
+                      severity="warning"
+                      action={
+                        <Button
+                          size="medium"
+                          disabled={disabled || Boolean(unavailable)}
+                          onClick={() => resetProfile(entry, profile)}
+                        >
+                          Use version {profile.version}
+                        </Button>
+                      }
+                    >
+                      <AlertTitle>The bound profile version changed</AlertTitle>
+                      This case still expects its previously selected version. Review the current
+                      version and rebuild its conditions.
+                    </Alert>
+                  )}
+                  {profile && !unavailable && !stale && (
+                    <>
+                      <PreconditionsEditor
+                        profile={profile}
+                        value={entry.preconditions}
+                        disabled={disabled}
+                        onChange={(preconditions) => replace(entry.id, { ...entry, preconditions })}
                       />
-                    )}
-                    {stale && profile && (
-                      <Alert
-                        type="warning"
-                        showIcon
-                        title="The bound profile version changed"
-                        description="This case still expects its previously selected version. Review the current version and rebuild its conditions."
-                        action={
-                          <Button
-                            size="small"
-                            disabled={disabled || Boolean(unavailable)}
-                            onClick={() => resetProfile(entry, profile)}
-                          >
-                            Use version {profile.version}
-                          </Button>
+                      <SignatureEditor
+                        profile={profile}
+                        value={entry.presentWhen}
+                        disabled={disabled}
+                        title="Issue observed when"
+                        label={`case ${index + 1} observed`}
+                        onChange={(presentWhen) => replace(entry.id, { ...entry, presentWhen })}
+                      />
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={entry.absentWhen !== null}
+                            disabled={disabled}
+                            onChange={(event) =>
+                              replace(entry.id, {
+                                ...entry,
+                                absentWhen: event.target.checked ? { allOf: [] } : null,
+                              })
+                            }
+                          />
                         }
+                        label="Define observations that show the issue was absent"
                       />
-                    )}
-                    {profile && !unavailable && !stale && (
-                      <>
-                        <PreconditionsEditor
-                          profile={profile}
-                          value={entry.preconditions}
-                          disabled={disabled}
-                          onChange={(preconditions) =>
-                            replace(entry.id, { ...entry, preconditions })
-                          }
-                        />
+                      {entry.absentWhen !== null ? (
                         <SignatureEditor
                           profile={profile}
-                          value={entry.presentWhen}
+                          value={entry.absentWhen}
                           disabled={disabled}
-                          title="Issue observed when"
-                          label={`case ${index + 1} observed`}
-                          onChange={(presentWhen) => replace(entry.id, { ...entry, presentWhen })}
+                          title="Issue not observed when"
+                          label={`case ${index + 1} absent`}
+                          onChange={(absentWhen) => replace(entry.id, { ...entry, absentWhen })}
                         />
-                        <Checkbox
-                          checked={entry.absentWhen !== null}
-                          disabled={disabled}
-                          onChange={(event) =>
-                            replace(entry.id, {
-                              ...entry,
-                              absentWhen: event.target.checked ? { allOf: [] } : null,
-                            })
-                          }
-                        >
-                          Define observations that show the issue was absent
-                        </Checkbox>
-                        {entry.absentWhen !== null ? (
-                          <SignatureEditor
-                            profile={profile}
-                            value={entry.absentWhen}
-                            disabled={disabled}
-                            title="Issue not observed when"
-                            label={`case ${index + 1} absent`}
-                            onChange={(absentWhen) => replace(entry.id, { ...entry, absentWhen })}
-                          />
-                        ) : (
-                          <Typography.Text type="secondary">
-                            Without an absence condition, a non-matching result remains
-                            inconclusive.
-                          </Typography.Text>
-                        )}
-                      </>
-                    )}
-                  </Space>
-                </Card>
-              );
-            })}
-            <Button
-              icon={<PlusOutlined />}
-              disabled={disabled || eligible.length === 0 || value.cases.length >= 32}
-              onClick={() => {
-                const profile = eligible[0]?.version;
-                if (profile) onChange({ ...value, cases: [...value.cases, newCase(profile)] });
-              }}
-            >
-              Add reproduction case
-            </Button>
-            <Typography.Text type="secondary">
-              {value.cases.length} of 32 cases. Windows, Web, and command-line cases can be included
-              in the same run.
-            </Typography.Text>
-          </>
-        )}
-      </Space>
-    </Card>
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">
+                          Without an absence condition, a non-matching result remains inconclusive.
+                        </Typography>
+                      )}
+                    </>
+                  )}
+                </Stack>
+              </Box>
+            );
+          })}
+          <Button
+            variant="outlined"
+            size="medium"
+            startIcon={<AddIcon />}
+            sx={{ alignSelf: "flex-start" }}
+            disabled={disabled || eligible.length === 0 || value.cases.length >= 32}
+            onClick={() => {
+              const profile = eligible[0]?.version;
+              if (profile) onChange({ ...value, cases: [...value.cases, newCase(profile)] });
+            }}
+          >
+            Add reproduction case
+          </Button>
+          <Typography variant="body2" color="text.secondary">
+            {value.cases.length} of 32 cases. Windows, Web, and command-line cases can be included
+            in the same run.
+          </Typography>
+        </>
+      )}
+    </Stack>
   );
 }

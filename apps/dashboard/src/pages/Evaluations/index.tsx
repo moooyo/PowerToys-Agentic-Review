@@ -1,12 +1,24 @@
+import {
+  Alert,
+  AlertTitle,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Skeleton,
+  Stack,
+  Tab,
+  Tabs,
+} from "@mui/material";
 import { useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Card, ConfigProvider, Empty, Skeleton, Space, Tabs } from "antd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConfigurationScopeGuard } from "@/components/ConfigurationScopeGuard";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { PageHeader } from "@/components/PageHeader";
 import { RepositoryScopeUnavailable, useRepositoryScope } from "@/components/RepositoryScope";
+import { EmptyState } from "@/components/ui";
 import { createHttpEvaluationAdapter } from "@/services/evaluations";
+import { useOperatorSession } from "@/state/session";
 import {
   EvaluationContext,
   useEvaluationPage,
@@ -32,12 +44,26 @@ function RepositoryContent() {
     refresh = useRefreshEvaluations();
   const suites = useEvaluationQuery(["suites"], (signal) =>
     collectCatalog((number) =>
-      page.api.listSuites(page.repositoryId, { page: number, pageSize: 50 }, signal),
+      page.api.listSuites(
+        page.repositoryId,
+        {
+          page: number,
+          pageSize: 50,
+        },
+        signal,
+      ),
     ),
   );
   const sources = useEvaluationQuery(["sources"], (signal) =>
     collectCatalog((number) =>
-      page.api.listSources(page.repositoryId, { page: number, pageSize: 50 }, signal),
+      page.api.listSources(
+        page.repositoryId,
+        {
+          page: number,
+          pageSize: 50,
+        },
+        signal,
+      ),
     ),
   );
   return (
@@ -48,80 +74,105 @@ function RepositoryContent() {
           loading={suites.isFetching || sources.isFetching}
           disabled={!page.readable}
           onClick={refresh}
+          variant="outlined"
         >
           Refresh catalog
         </Button>
       </div>
       {suites.error || sources.error ? (
         <Alert
-          showIcon
-          type="error"
-          title="Catalog unavailable"
-          description={errorMessage(suites.error ?? sources.error)}
           action={
-            <Button disabled={!page.readable} onClick={refresh}>
+            <Button disabled={!page.readable} onClick={refresh} variant="outlined">
               Retry catalog
             </Button>
           }
-        />
+          severity={"error"}
+        >
+          <AlertTitle>{"Catalog unavailable"}</AlertTitle>
+          {errorMessage(suites.error ?? sources.error)}
+        </Alert>
       ) : null}
       {!page.allowsConfigure ? (
-        <Alert
-          type="info"
-          showIcon
-          title="Read-only access"
-          description="Repository configuration permission is required to manage sources and drafts, publish versions, and create or cancel batches."
-        />
+        <Alert severity={"info"}>
+          <AlertTitle>{"Read-only access"}</AlertTitle>
+          {
+            "Repository configuration permission is required to manage sources and drafts, publish versions, and create or cancel batches."
+          }
+        </Alert>
       ) : null}
-      {suites.isPending || sources.isPending ? <Skeleton active paragraph={{ rows: 3 }} /> : null}
-      <Tabs
-        activeKey={activeKind}
-        onChange={setActiveKind}
-        destroyOnHidden={false}
-        items={[
+      {suites.isPending || sources.isPending ? (
+        <Skeleton variant="rounded" height={96} aria-label="Loading evaluation content" />
+      ) : null}
+      <>
+        <Tabs
+          value={activeKind}
+          onChange={(_event, value: string) => setActiveKind(value)}
+          aria-label="Evaluation work item kind"
+        >
+          <Tab
+            value={"pull_request"}
+            label={"Pull requests"}
+            id="evaluation-tab-pull_request"
+            aria-controls="evaluation-panel-pull_request"
+          />
+          <Tab
+            value={"issue"}
+            label={"Issues"}
+            id="evaluation-tab-issue"
+            aria-controls="evaluation-panel-issue"
+          />
+        </Tabs>
+        <Box
+          role="tabpanel"
+          id="evaluation-panel-pull_request"
+          aria-labelledby="evaluation-tab-pull_request"
+          hidden={activeKind !== "pull_request"}
+          sx={{
+            pt: 2,
+          }}
+        >
           {
-            key: "pull_request",
-            label: "Pull requests",
-            forceRender: true,
-            children: (
-              <SuiteWorkspace
-                kind="pull_request"
-                active={activeKind === "pull_request"}
-                suites={(suites.data ?? []).filter(
-                  (suite) => workflowKind(suite.workflowKind) === "pull_request",
-                )}
-                sources={(sources.data ?? []).filter(
-                  (source) => source.workItemKind === "pull_request",
-                )}
-              />
-            ),
-          },
+            <SuiteWorkspace
+              kind="pull_request"
+              active={activeKind === "pull_request"}
+              suites={(suites.data ?? []).filter(
+                (suite) => workflowKind(suite.workflowKind) === "pull_request",
+              )}
+              sources={(sources.data ?? []).filter(
+                (source) => source.workItemKind === "pull_request",
+              )}
+            />
+          }
+        </Box>
+        <Box
+          role="tabpanel"
+          id="evaluation-panel-issue"
+          aria-labelledby="evaluation-tab-issue"
+          hidden={activeKind !== "issue"}
+          sx={{
+            pt: 2,
+          }}
+        >
           {
-            key: "issue",
-            label: "Issues",
-            forceRender: true,
-            children: (
-              <SuiteWorkspace
-                kind="issue"
-                active={activeKind === "issue"}
-                suites={(suites.data ?? []).filter(
-                  (suite) => workflowKind(suite.workflowKind) === "issue",
-                )}
-                sources={(sources.data ?? []).filter((source) => source.workItemKind === "issue")}
-              />
-            ),
-          },
-        ]}
-      />
+            <SuiteWorkspace
+              kind="issue"
+              active={activeKind === "issue"}
+              suites={(suites.data ?? []).filter(
+                (suite) => workflowKind(suite.workflowKind) === "issue",
+              )}
+              sources={(sources.data ?? []).filter((source) => source.workItemKind === "issue")}
+            />
+          }
+        </Box>
+      </>
     </>
   );
 }
-
 export default function EvaluationsPage() {
   const scope = useRepositoryScope(),
     access = useOperatorAccess(scope.repositoryId),
     client = useQueryClient();
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const api = useMemo(() => createHttpEvaluationAdapter(), []);
   const identity = JSON.stringify([
     scope.key,
@@ -132,11 +183,21 @@ export default function EvaluationsPage() {
     access.ready && !access.checking && !access.pending && !access.error
       ? permissionSignature(access.context)
       : null;
-  const [binding, setBinding] = useState({ identity, permissions: verified });
+  const [binding, setBinding] = useState({
+    identity,
+    permissions: verified,
+  });
   const next = nextAccessBinding(binding, identity, verified);
   if (next !== binding) setBinding(next);
-  const [denial, setDenial] = useState({ identity, denied: false });
-  if (denial.identity !== identity) setDenial({ identity, denied: false });
+  const [denial, setDenial] = useState({
+    identity,
+    denied: false,
+  });
+  if (denial.identity !== identity)
+    setDenial({
+      identity,
+      denied: false,
+    });
   const locallyDenied = denial.identity === identity && denial.denied;
   const repositoryError = client.getQueryState([
     "managed-repositories",
@@ -147,10 +208,19 @@ export default function EvaluationsPage() {
   const session = JSON.stringify([identity, next.permissions]);
   const invalidateAccess = useCallback(() => {
     setDenial((previous) =>
-      previous.identity === identity ? { identity, denied: true } : previous,
+      previous.identity === identity
+        ? {
+            identity,
+            denied: true,
+          }
+        : previous,
     );
-    void client.cancelQueries({ queryKey: [...evaluationQueryRoot, session] });
-    client.removeQueries({ queryKey: [...evaluationQueryRoot, session] });
+    void client.cancelQueries({
+      queryKey: [...evaluationQueryRoot, session],
+    });
+    client.removeQueries({
+      queryKey: [...evaluationQueryRoot, session],
+    });
   }, [client, identity, session]);
   const forbidden =
     locallyDenied ||
@@ -172,14 +242,21 @@ export default function EvaluationsPage() {
     !access.error &&
     access.allows("read");
   useEffect(() => {
-    if (!readable) void client.cancelQueries({ queryKey: [...evaluationQueryRoot, session] });
+    if (!readable)
+      void client.cancelQueries({
+        queryKey: [...evaluationQueryRoot, session],
+      });
     return () => {
-      void client.cancelQueries({ queryKey: [...evaluationQueryRoot, session] });
+      void client.cancelQueries({
+        queryKey: [...evaluationQueryRoot, session],
+      });
     };
   }, [client, session, readable]);
   useEffect(
     () => () => {
-      client.removeQueries({ queryKey: [...evaluationQueryRoot, session] });
+      client.removeQueries({
+        queryKey: [...evaluationQueryRoot, session],
+      });
     },
     [client, session],
   );
@@ -187,11 +264,16 @@ export default function EvaluationsPage() {
     await access.refresh();
     await scope.refresh();
     setDenial((previous) =>
-      previous.identity === identity ? { identity, denied: false } : previous,
+      previous.identity === identity
+        ? {
+            identity,
+            denied: false,
+          }
+        : previous,
     );
   };
   const header = (
-    <ConfigProvider theme={{ token: { fontSizeHeading3: 20, fontWeightStrong: 600 } }}>
+    <>
       <PageHeader
         eyebrow="Configuration"
         title="Evaluations"
@@ -202,23 +284,23 @@ export default function EvaluationsPage() {
             : "Choose a repository to manage its evaluation sample sets."
         }
         actions={
-          <Button loading={access.checking} onClick={() => void refreshAccess()}>
+          <Button loading={access.checking} onClick={() => void refreshAccess()} variant="outlined">
             Refresh access
           </Button>
         }
       />
-    </ConfigProvider>
+    </>
   );
   if (access.identityKey[0] === "sample")
     return (
       <section className="evaluations-page">
         {header}
-        <Alert
-          showIcon
-          type="info"
-          title="A connected server is required"
-          description="Evaluation management is unavailable in sample mode. Sources, drafts, publications, and batches are not simulated."
-        />
+        <Alert severity={"info"}>
+          <AlertTitle>{"A connected server is required"}</AlertTitle>
+          {
+            "Evaluation management is unavailable in sample mode. Sources, drafts, publications, and batches are not simulated."
+          }
+        </Alert>
       </section>
     );
   if (forbidden)
@@ -226,20 +308,28 @@ export default function EvaluationsPage() {
       <section className="evaluations-page">
         {header}
         <Alert
-          showIcon
-          type="info"
-          title="Evaluation access is unavailable"
-          description="Previous editor content and pending requests have been cleared. Verify repository access to continue."
-          action={<Button onClick={() => void refreshAccess()}>Verify access</Button>}
-        />
+          action={
+            <Button onClick={() => void refreshAccess()} variant="outlined">
+              Verify access
+            </Button>
+          }
+          severity={"info"}
+        >
+          <AlertTitle>{"Evaluation access is unavailable"}</AlertTitle>
+          {
+            "Previous editor content and pending requests have been cleared. Verify repository access to continue."
+          }
+        </Alert>
       </section>
     );
   if (scope.ready && !scope.repositoryId)
     return (
       <section className="evaluations-page">
         {header}
-        <Card>
-          <Empty description="Select a repository in the sidebar to manage frozen examples." />
+        <Card variant="outlined">
+          <CardContent>
+            <EmptyState title={"Select a repository in the sidebar to manage frozen examples."} />
+          </CardContent>
         </Card>
       </section>
     );
@@ -267,27 +357,40 @@ export default function EvaluationsPage() {
             }}
           >
             {!readable ? (
-              <Space orientation="vertical" className="evaluation-access-notice">
-                <Skeleton active paragraph={{ rows: 2 }} />
+              <Stack
+                className="evaluation-access-notice"
+                direction="column"
+                spacing={1.5}
+                sx={{
+                  minWidth: 0,
+                }}
+              >
+                <Skeleton variant="rounded" height={72} aria-label="Loading evaluation content" />
                 <Alert
-                  showIcon
-                  type={access.error ? "warning" : "info"}
-                  title={access.error ? "Access could not be verified" : "Checking access"}
-                  description="Editors and original pending requests are preserved while this same scope is verified."
-                  action={<Button onClick={() => void refreshAccess()}>Verify access</Button>}
-                />
-              </Space>
+                  action={
+                    <Button onClick={() => void refreshAccess()} variant="outlined">
+                      Verify access
+                    </Button>
+                  }
+                  severity={access.error ? "warning" : "info"}
+                >
+                  <AlertTitle>
+                    {access.error ? "Access could not be verified" : "Checking access"}
+                  </AlertTitle>
+                  {
+                    "Editors and original pending requests are preserved while this same scope is verified."
+                  }
+                </Alert>
+              </Stack>
             ) : null}
             <div hidden={!readable} inert={!readable} aria-hidden={!readable}>
-              <ConfigProvider
-                getPopupContainer={(trigger) => trigger?.parentElement ?? document.body}
-              >
+              <>
                 <RepositoryContent />
-              </ConfigProvider>
+              </>
             </div>
           </EvaluationContext.Provider>
         ) : (
-          <Skeleton active paragraph={{ rows: 4 }} />
+          <Skeleton variant="rounded" height={120} aria-label="Loading evaluation content" />
         )}
       </ConfigurationScopeGuard>
     </section>

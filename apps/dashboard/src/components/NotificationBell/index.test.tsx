@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ElementType, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { notificationSummaryFixture } from "../../services/notifications/fixtures.testing";
@@ -20,7 +20,7 @@ vi.mock("./access", () => ({
     data: access.readable ? state.summary : undefined,
   }),
 }));
-vi.mock("@umijs/max", () => ({
+vi.mock("react-router-dom", () => ({
   useLocation: () => ({ search: state.search }),
   Link: ({ to, children, ...props }: { to: string; children: ReactNode }) => (
     <a href={to} {...props}>
@@ -28,21 +28,37 @@ vi.mock("@umijs/max", () => ({
     </a>
   ),
 }));
-vi.mock("@ant-design/icons", () => ({ BellOutlined: () => <span>Bell</span> }));
-vi.mock("antd", () => ({
+vi.mock("@mui/icons-material/NotificationsOutlined", () => ({ default: () => <span>Bell</span> }));
+vi.mock("@mui/material", () => ({
   Tooltip: ({ children }: { children: ReactNode }) => children,
+  IconButton: ({
+    component: Component,
+    to,
+    "aria-label": label,
+    children,
+  }: {
+    component: ElementType;
+    to: string;
+    "aria-label": string;
+    children: ReactNode;
+  }) => (
+    <Component to={to} aria-label={label}>
+      {children}
+    </Component>
+  ),
+  Box: ({ children }: { children: ReactNode }) => <span>{children}</span>,
   Badge: ({
     children,
-    count,
+    badgeContent,
     showZero,
   }: {
     children: ReactNode;
-    count: ReactNode;
+    badgeContent: ReactNode;
     showZero: boolean;
   }) => (
     <span>
       {children}
-      {showZero ? count : null}
+      {showZero ? badgeContent : null}
     </span>
   ),
 }));

@@ -31,8 +31,8 @@ vi.mock("react", async (original) => ({
     state.effects.push(effect);
   },
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: (repositoryId?: string) => ({
@@ -72,56 +72,19 @@ vi.mock("@tanstack/react-query", () => ({
     invalidateQueries: vi.fn(),
   }),
 }));
-vi.mock("@ant-design/icons", () => ({ ReloadOutlined: () => <span /> }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
-    Button: Content,
-    Col: Content,
-    Divider: Content,
-    Drawer: Content,
-    Row: Content,
-    Space: Content,
-    Tag: Content,
-    Pagination: Content,
-    Card: ({ title, children }: { title: ReactNode; children?: ReactNode }) => (
-      <section>
-        {title}
-        {children}
-      </section>
-    ),
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Skeleton: () => <span>Loading scheduling</span>,
-    Statistic: ({ title, value }: { title: ReactNode; value: number }) => (
-      <div>
-        {title}: {value}
-      </div>
-    ),
-    Table: () => <div>Scheduling event list</div>,
-    Typography: { Title: Content, Text: Content, Paragraph: Content },
-    Form: Object.assign(Content, { useForm: () => [{ setFieldsValue: vi.fn() }] }),
-  };
-});
-
+vi.mock("@/components/ui", () => ({
+  DetailsGrid: ({ items }: { items: { key: string; label: ReactNode; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((item) => (
+        <div key={item.key}>
+          <dt>{item.label}</dt>
+          <dd>{item.value}</dd>
+        </div>
+      ))}
+    </dl>
+  ),
+  DataTable: () => <div>Scheduling event list</div>,
+}));
 const repository: RepositorySchedulingStatus = {
   repositoryId: "repo-one",
   observedAt: "2026-09-07T10:00:00.000Z",

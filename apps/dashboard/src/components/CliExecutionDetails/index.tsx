@@ -1,26 +1,28 @@
 import type { CliModelExecutionV1 } from "@agentic-review/contracts";
-import { Descriptions, Typography } from "antd";
+import { Typography } from "@mui/material";
+import { DetailsGrid } from "@/components/ui";
 
 export function CliExecutionDetails({ execution }: { execution: CliModelExecutionV1 | null }) {
   if (execution === null)
     return (
-      <Typography.Text type="secondary">No CLI execution metadata was recorded.</Typography.Text>
+      <Typography variant="body2" color="text.secondary">
+        No CLI execution metadata was recorded.
+      </Typography>
     );
   return (
-    <Descriptions
-      size="small"
-      column={{ xs: 1, sm: 3 }}
+    <DetailsGrid
+      columns={3}
       items={[
         {
           key: "cli",
           label: "CLI",
-          children: execution.cli.kind === "codex" ? "Codex CLI" : "Copilot CLI",
+          value: execution.cli.kind === "codex" ? "Codex CLI" : "Copilot CLI",
         },
-        { key: "version", label: "CLI version", children: execution.cli.version },
+        { key: "version", label: "CLI version", value: execution.cli.version },
         {
           key: "model",
           label: "Requested model",
-          children: execution.cli.requestedModel ?? "CLI default",
+          value: execution.cli.requestedModel ?? "CLI default",
         },
       ]}
     />

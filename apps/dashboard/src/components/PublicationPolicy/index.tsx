@@ -3,23 +3,26 @@ import type {
   RepositoryPublicationPolicyAuditEvent,
   RepositoryPublicationPolicyUpdateRequest,
 } from "@agentic-review/contracts";
-import { Value } from "@sinclair/typebox/value";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
+  AlertTitle,
   Button,
-  Card,
-  Collapse,
-  Descriptions,
-  Drawer,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
   Pagination,
   Skeleton,
-  Space,
+  Stack,
   Switch,
-  Table,
-  Tag,
+  Tab,
+  Tabs,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { Value } from "@sinclair/typebox/value";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { useOperatorAccess } from "@/components/OperatorAccess";
 import {
@@ -28,6 +31,7 @@ import {
   publicationError,
   usePublicationReadGuard,
 } from "@/components/PublicationPreview/access";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import { publicationQueryRoot, publications } from "@/services/publications";
 
 function PolicyEvent({
@@ -61,52 +65,57 @@ function PolicyEvent({
   }, [query.error, onAccessDenied]);
   const event = !query.isError ? query.data : undefined;
   return (
-    <Drawer
+    <Dialog
       open
-      title="Publication policy event"
-      size={650}
+      fullWidth
+      maxWidth="sm"
       onClose={onClose}
-      extra={<Button onClick={() => void refreshAccess()}>Refresh access</Button>}
+      aria-labelledby="publication-policy-event-title"
     >
-      {query.isError ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load policy event"
-          description={publicationError(query.error)}
-        />
-      ) : !event ? (
-        <Skeleton active />
-      ) : (
-        <Descriptions
-          column={1}
-          items={[
-            { key: "id", label: "Event ID", children: <code>{event.id}</code> },
-            { key: "time", label: "Recorded at", children: event.createdAt },
-            {
-              key: "actor",
-              label: "Actor",
-              children: `${event.actor.subject} · ${event.actor.issuer}`,
-            },
-            {
-              key: "versions",
-              label: "Version",
-              children: `${event.previousVersion} → ${event.version}`,
-            },
-            {
-              key: "previous",
-              label: "Previous policy",
-              children: event.previousSnapshot.enabled ? "Enabled" : "Disabled",
-            },
-            {
-              key: "new",
-              label: "Saved policy",
-              children: event.snapshot.enabled ? "Enabled" : "Disabled",
-            },
-          ]}
-        />
-      )}
-    </Drawer>
+      <DialogTitle id="publication-policy-event-title">Publication policy event</DialogTitle>
+      <DialogContent>
+        {query.isError ? (
+          <Alert severity="error">
+            <AlertTitle>Could not load policy event</AlertTitle>
+            {publicationError(query.error)}
+          </Alert>
+        ) : !event ? (
+          <Skeleton variant="rounded" height={180} />
+        ) : (
+          <DetailsGrid
+            columns={1}
+            items={[
+              { key: "id", label: "Event ID", value: <code>{event.id}</code> },
+              { key: "time", label: "Recorded at", value: event.createdAt },
+              {
+                key: "actor",
+                label: "Actor",
+                value: `${event.actor.subject} · ${event.actor.issuer}`,
+              },
+              {
+                key: "versions",
+                label: "Version",
+                value: `${event.previousVersion} → ${event.version}`,
+              },
+              {
+                key: "previous",
+                label: "Previous policy",
+                value: event.previousSnapshot.enabled ? "Enabled" : "Disabled",
+              },
+              {
+                key: "new",
+                label: "Saved policy",
+                value: event.snapshot.enabled ? "Enabled" : "Disabled",
+              },
+            ]}
+          />
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => void refreshAccess()}>Refresh access</Button>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 function PolicySession({
@@ -229,170 +238,199 @@ function PolicySession({
       if (mounted.current) setSaving(false);
     }
   };
-  if (access.checking) return <Skeleton active paragraph={{ rows: 3 }} />;
+  if (access.checking) return <Skeleton variant="rounded" height={120} />;
   if (denied)
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Publication policy access is unavailable"
-        description="Previous policy content has been cleared."
+        severity="info"
         action={<Button onClick={() => void access.refresh()}>Refresh access</Button>}
-      />
+      >
+        <AlertTitle>Publication policy access is unavailable</AlertTitle>
+        Previous policy content has been cleared.
+      </Alert>
     );
   return (
-    <Card
-      size="small"
-      title="Publication policy"
-      extra={
+    <Stack component="section" spacing={3} aria-label="Publication policy">
+      <Stack
+        direction="row"
+        sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}
+      >
+        <Typography variant="h6" component="h2">
+          Publication policy
+        </Typography>
         <Button disabled={saving} onClick={() => void access.refresh()}>
           Refresh access
         </Button>
-      }
-    >
-      {query.isError ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load publication policy"
-          description={publicationError(query.error)}
-          action={<Button onClick={() => void reload()}>Try again</Button>}
+      </Stack>
+      <Tabs
+        value={historyOpen ? "history" : "settings"}
+        onChange={(_event, value) => setHistoryOpen(value === "history")}
+        aria-label="Publication policy sections"
+        sx={{ borderBottom: 1, borderColor: "divider" }}
+      >
+        <Tab
+          value="settings"
+          label="Policy settings"
+          id="publication-policy-settings-tab"
+          aria-controls="publication-policy-settings"
         />
-      ) : !baseline ? (
-        <Skeleton active paragraph={{ rows: 3 }} />
-      ) : (
-        <Space orientation="vertical" className="publication-stack" size="middle">
-          <Space wrap>
-            <Tag color={baseline.enabled ? "success" : "default"}>
-              {baseline.enabled ? "Publication enabled" : "Publication disabled"}
-            </Tag>
-            <Typography.Text type="secondary">
-              Policy version {baseline.version}
-              {baseline.version === 0 ? " · Not configured" : ""}
-            </Typography.Text>
-          </Space>
-          <Typography.Paragraph>
-            Publication is disabled by default. Enabling this policy permits separately confirmed PR
-            reviews and Issue comments. Recording a decision never sends to GitHub. A separate
-            runtime publisher credential is also required; the ingestion credential is not used.
-          </Typography.Paragraph>
-          <Space>
-            <Switch
-              aria-label="Enable repository publication"
-              checked={enabled}
-              disabled={saving || !access.can("configure")}
-              onChange={(value) => {
-                setEnabled(value);
-                setRequest(null);
-                setFailure(null);
-                setNotice(null);
-              }}
-            />
-            <Typography.Text>Enable repository publication</Typography.Text>
-          </Space>
-          {!access.allows("configure") && (
-            <Typography.Text type="secondary">
-              Maintainer access or higher is required to change this policy.
-            </Typography.Text>
-          )}
-          {!!failure && (
-            <Alert
-              showIcon
-              type="error"
-              title={conflict ? "Publication policy changed" : "Could not save publication policy"}
-              description={
-                conflict
-                  ? "Your selection is retained. Reload the latest policy before applying it again."
-                  : publicationError(failure)
-              }
-            />
-          )}
-          {notice && <Alert showIcon type="success" title={notice} />}
-          <Space wrap>
-            <Button
-              type="primary"
-              loading={saving}
-              disabled={!dirty || conflict || !access.can("configure")}
-              onClick={() => void save()}
+        <Tab
+          value="history"
+          label="Change history"
+          id="publication-policy-history-tab"
+          aria-controls="publication-policy-history"
+        />
+      </Tabs>
+      <div
+        role="tabpanel"
+        id="publication-policy-settings"
+        aria-labelledby="publication-policy-settings-tab"
+        hidden={historyOpen}
+      >
+        {query.isError ? (
+          <Alert severity="error" action={<Button onClick={() => void reload()}>Try again</Button>}>
+            <AlertTitle>Could not load publication policy</AlertTitle>
+            {publicationError(query.error)}
+          </Alert>
+        ) : !baseline ? (
+          <Skeleton variant="rounded" height={120} />
+        ) : (
+          <Stack spacing={2}>
+            <Stack
+              direction="row"
+              useFlexGap
+              sx={{ flexWrap: "wrap", alignItems: "center", gap: 2 }}
             >
-              {request && failure && !conflict
-                ? "Retry original policy save"
-                : "Save publication policy"}
-            </Button>
-            <Button disabled={saving} onClick={() => void reload()}>
-              Reload latest policy
-            </Button>
-            {dirty && <Typography.Text type="secondary">Unsaved changes</Typography.Text>}
-          </Space>
-        </Space>
-      )}
-      <Collapse
-        style={{ marginTop: 20 }}
-        activeKey={historyOpen ? ["history"] : []}
-        onChange={(keys) => setHistoryOpen(keys.includes("history"))}
-        items={[
-          {
-            key: "history",
-            label: "Publication policy history",
-            children: history.isError ? (
-              <Alert
-                showIcon
-                type="error"
-                title="Could not load policy history"
-                description={publicationError(history.error)}
+              <Chip
+                size="medium"
+                color={baseline.enabled ? "success" : "default"}
+                label={baseline.enabled ? "Publication enabled" : "Publication disabled"}
               />
-            ) : !history.data ? (
-              <Skeleton active />
-            ) : (
-              <>
-                <Table<RepositoryPublicationPolicyAuditEvent>
-                  size="small"
-                  rowKey="id"
-                  pagination={false}
-                  dataSource={history.data.items}
-                  columns={[
-                    { key: "time", title: "Recorded at", dataIndex: "createdAt" },
-                    {
-                      key: "version",
-                      title: "Version",
-                      render: (_, event) => `${event.previousVersion} → ${event.version}`,
-                    },
-                    {
-                      key: "policy",
-                      title: "Saved policy",
-                      render: (_, event) => (event.snapshot.enabled ? "Enabled" : "Disabled"),
-                    },
-                    {
-                      key: "action",
-                      title: "Details",
-                      render: (_, event) => (
-                        <Button
-                          aria-label={`Inspect publication policy event ${event.id}`}
-                          onClick={() => setSelected(event)}
-                        >
-                          Inspect
-                        </Button>
-                      ),
-                    },
-                  ]}
-                  locale={{ emptyText: "No publication policy changes have been recorded." }}
-                />
-                <Pagination
-                  current={page}
-                  pageSize={20}
-                  total={history.data.total}
-                  showSizeChanger={false}
-                  hideOnSinglePage
-                  onChange={(value) => {
-                    setPage(value);
-                    setSelected(null);
+              <Typography variant="body2" color="text.secondary">
+                Policy version {baseline.version}
+                {baseline.version === 0 ? " · Not configured" : ""}
+              </Typography>
+            </Stack>
+            <Typography>
+              Publication is disabled by default. Enabling this policy permits separately confirmed
+              PR reviews and Issue comments. Recording a decision never sends to GitHub. A separate
+              runtime publisher credential is also required; the ingestion credential is not used.
+            </Typography>
+            <FormControlLabel
+              label="Enable repository publication"
+              control={
+                <Switch
+                  checked={enabled}
+                  disabled={saving || !access.can("configure")}
+                  onChange={(_event, value) => {
+                    setEnabled(value);
+                    setRequest(null);
+                    setFailure(null);
+                    setNotice(null);
                   }}
                 />
-              </>
-            ),
-          },
-        ]}
-      />
+              }
+            />
+            {!access.allows("configure") && (
+              <Typography color="text.secondary">
+                Maintainer access or higher is required to change this policy.
+              </Typography>
+            )}
+            {!!failure && (
+              <Alert severity="error">
+                <AlertTitle>
+                  {conflict ? "Publication policy changed" : "Could not save publication policy"}
+                </AlertTitle>
+                {conflict
+                  ? "Your selection is retained. Reload the latest policy before applying it again."
+                  : publicationError(failure)}
+              </Alert>
+            )}
+            {notice && <Alert severity="success">{notice}</Alert>}
+            <Stack
+              direction="row"
+              useFlexGap
+              sx={{ flexWrap: "wrap", alignItems: "center", gap: 1 }}
+            >
+              <Button
+                variant="contained"
+                loading={saving}
+                disabled={!dirty || conflict || !access.can("configure")}
+                onClick={() => void save()}
+              >
+                {request && failure && !conflict
+                  ? "Retry original policy save"
+                  : "Save publication policy"}
+              </Button>
+              <Button disabled={saving} onClick={() => void reload()}>
+                Reload latest policy
+              </Button>
+              {dirty && <Typography color="text.secondary">Unsaved changes</Typography>}
+            </Stack>
+          </Stack>
+        )}
+      </div>
+      <div
+        role="tabpanel"
+        id="publication-policy-history"
+        aria-labelledby="publication-policy-history-tab"
+        hidden={!historyOpen}
+      >
+        {history.isError ? (
+          <Alert severity="error">
+            <AlertTitle>Could not load policy history</AlertTitle>
+            {publicationError(history.error)}
+          </Alert>
+        ) : !history.data ? (
+          <Skeleton variant="rounded" height={100} />
+        ) : (
+          <>
+            <DataTable<RepositoryPublicationPolicyAuditEvent>
+              ariaLabel="Publication policy history"
+              rows={history.data.items}
+              getRowId={(event) => event.id}
+              emptyTitle="No publication policy changes have been recorded."
+              columns={[
+                { id: "time", label: "Recorded at", render: (event) => event.createdAt },
+                {
+                  id: "version",
+                  label: "Version",
+                  render: (event) => `${event.previousVersion} → ${event.version}`,
+                },
+                {
+                  id: "policy",
+                  label: "Saved policy",
+                  render: (event) => (event.snapshot.enabled ? "Enabled" : "Disabled"),
+                },
+                {
+                  id: "action",
+                  label: "Details",
+                  render: (event) => (
+                    <Button
+                      aria-label={`Inspect publication policy event ${event.id}`}
+                      onClick={() => setSelected(event)}
+                    >
+                      Inspect
+                    </Button>
+                  ),
+                },
+              ]}
+            />
+            {history.data.total > 20 && (
+              <Pagination
+                aria-label="Policy history pages"
+                page={page}
+                count={Math.ceil(history.data.total / 20)}
+                onChange={(_event, value) => {
+                  setPage(value);
+                  setSelected(null);
+                }}
+                sx={{ mt: 2 }}
+              />
+            )}
+          </>
+        )}
+      </div>
       {selected && (
         <PolicyEvent
           key={selected.id}
@@ -407,7 +445,7 @@ function PolicySession({
           }}
         />
       )}
-    </Card>
+    </Stack>
   );
 }
 export function PublicationPolicy({ repositoryId }: { repositoryId: string }) {

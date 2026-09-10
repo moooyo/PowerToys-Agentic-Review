@@ -3,27 +3,24 @@
 }
 
 .validation-profiles-notice {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
-.validation-profiles-actions,
-.validation-profiles-binding-choice {
+.validation-profiles-binding-choice,
+.validation-profiles-probe-command,
+.validation-profiles-probe-heading {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
 }
 
-.validation-profiles-actions {
-  justify-content: flex-end;
-}
-
 .validation-profiles-binding-choice {
-  align-items: flex-start;
   margin-block: 24px;
 }
 
-.validation-profiles-binding-choice > div {
+.validation-profiles-binding-choice > div,
+.validation-profiles-probe-command > div {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -34,35 +31,42 @@
   gap: 16px;
 }
 
-.validation-profiles-code,
 .validation-profiles-json {
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  tab-size: 2;
-}
-
-.validation-profiles-json {
+  box-sizing: border-box;
+  margin: 0;
   padding: 16px;
   max-height: 480px;
   overflow: auto;
-  border: 1px solid var(--ant-color-border-secondary);
-  border-radius: var(--ant-border-radius);
-  background: var(--ant-color-fill-quaternary);
+  border: 1px solid var(--mui-palette-divider);
+  border-radius: 8px;
+  background: var(--mui-palette-background-default);
+  color: var(--mui-palette-text-primary);
+  font-family: "Roboto Mono", Consolas, monospace;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 24px;
+  tab-size: 2;
 }
 
-.validation-profiles-name.ant-btn {
-  height: auto;
-  padding: 0;
-  font-weight: 600;
+.validation-profiles-json:focus-visible {
+  outline: 2px solid var(--mui-palette-primary-main);
+  outline-offset: 2px;
+}
+
+.validation-profiles-name.MuiButton-root {
+  min-width: 0;
+  justify-content: flex-start;
+  font-weight: 500;
   text-align: left;
   white-space: normal;
 }
 
 .validation-profiles-secondary {
   margin-top: 4px;
-  color: var(--ant-color-text-secondary);
-  font-size: 12px;
+  color: var(--mui-palette-text-secondary);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
   overflow-wrap: anywhere;
 }
 
@@ -77,37 +81,19 @@
   margin-top: 24px;
 }
 
-.validation-profiles-version .ant-descriptions {
-  margin-bottom: 16px;
-}
-
-.validation-profiles-probe-command,
-.validation-profiles-probe-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .validation-profiles-probe-command {
-  padding-block: 12px;
-  border-bottom: 1px solid var(--ant-color-border-secondary);
+  padding-block: 16px;
+  border-bottom: 1px solid var(--mui-palette-divider);
 }
 
-.validation-profiles-probe-command > div {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.validation-profiles-probe-command .ant-btn {
+.validation-profiles-probe-command .MuiButton-root {
   flex-shrink: 0;
 }
 
 .validation-profiles-probe-field {
-  margin-bottom: 16px;
-  padding: 16px;
-  border: 1px solid var(--ant-color-border-secondary);
-  border-radius: var(--ant-border-radius);
+  margin-bottom: 24px;
+  padding-block: 16px;
+  border-bottom: 1px solid var(--mui-palette-divider);
 }
 
 .validation-profiles-probe-heading {
@@ -115,20 +101,12 @@
   margin-bottom: 12px;
 }
 
-.validation-profiles-probe-field > .ant-form-item:last-child {
-  margin-bottom: 0;
-}
-
 @media (max-width: 640px) {
   .validation-profiles-form-grid {
     grid-template-columns: minmax(0, 1fr);
-    gap: 0;
   }
 
-  .validation-profiles-binding-choice {
-    flex-wrap: wrap;
-  }
-
+  .validation-profiles-binding-choice,
   .validation-profiles-probe-command {
     flex-wrap: wrap;
   }

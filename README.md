@@ -16,7 +16,7 @@ baseline.
   authentication, and SQLite persistence.
 - `apps/worker`: one outbound-only Windows Worker that prepares worktrees, runs the selected CLI and validation,
   and submits an inline structured result.
-- `apps/dashboard`: React and Ant Design Pro operator dashboard.
+- `apps/dashboard`: React and Material UI operator dashboard with Vite and React Router.
 - `packages/contracts`: runtime schemas and shared protocol types.
 - `packages/domain`: pure state-transition and scheduling policy logic.
 - `packages/codex`: shell-free model CLI launch specifications, structured output parsing, and result schemas.

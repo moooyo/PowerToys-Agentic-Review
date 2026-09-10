@@ -1,9 +1,24 @@
 import type { JobAdmissionState } from "@agentic-review/contracts";
-import { FilterOutlined, ReloadOutlined } from "@ant-design/icons";
-import { type ActionType, type ProColumns, ProTable } from "@ant-design/pro-components";
-import { useLocation, useNavigate } from "@umijs/max";
-import { Alert, Button, Card, Empty, Input, Popover, Radio, Select } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FilterList, Refresh, Search } from "@mui/icons-material";
+import {
+  Alert,
+  AlertTitle,
+  Autocomplete,
+  Box,
+  Button,
+  IconButton,
+  InputAdornment,
+  Link,
+  MenuItem,
+  Popover,
+  Stack,
+  Tab,
+  Tabs,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { JobDetailDrawer } from "@/components/JobDetails";
 import {
   clearNotificationTargetParameters,
@@ -14,6 +29,7 @@ import { OperatorAccessGate } from "@/components/OperatorAccess";
 import { PageHeader } from "@/components/PageHeader";
 import { RepositoryScopeUnavailable, useRepositoryScope } from "@/components/RepositoryScope";
 import { StatusTag } from "@/components/StatusTag";
+import { type DataColumn, DataTable } from "@/components/ui";
 import { type Job, reviewControl } from "@/services/review-control";
 import { jobDisplayStatus } from "@/services/review-control/admission";
 import { formatDuration } from "@/utils/format";
@@ -58,22 +74,6 @@ const views: { id: string; label: string; statuses: string[]; admission?: JobAdm
   { id: "succeeded", label: "Succeeded", statuses: ["succeeded"] },
   { id: "attention", label: "Needs attention", statuses: ["failed", "dead_letter"] },
 ];
-
-interface JobsParameters {
-  current?: number;
-  pageSize?: number;
-  search?: string;
-  statuses?: string[];
-  stages?: string[];
-  repositoryId?: string;
-  admission?: JobAdmissionState;
-}
-
-interface JobsTableResult {
-  data: Job[];
-  success: boolean;
-  total: number;
-}
 
 function sameStatuses(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((status) => right.includes(status));
@@ -150,98 +150,101 @@ function ScopedJobsPage({
       pathname: location.pathname,
       search: clearNotificationTargetParameters(location.search),
     });
-  const actionRef = useRef<ActionType>(null);
   const requestGeneration = useRef(0);
-  const latestRequest = useRef<Promise<JobsTableResult> | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [statuses, setStatuses] = useState<string[]>([]);
   const [stages, setStages] = useState<string[]>([]);
   const [admission, setAdmission] = useState<JobAdmissionState>();
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [filterAnchor, setFilterAnchor] = useState<HTMLElement | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [rows, setRows] = useState<Job[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState<number | null>(null);
 
+  const refresh = useCallback(() => {
+    const generation = ++requestGeneration.current;
+    setLoading(true);
+    setError(null);
+    setTotal(null);
+    void reviewControl
+      .listJobs({
+        page,
+        pageSize,
+        search: search || undefined,
+        filters: {
+          repositoryId,
+          status: statuses.length ? statuses : undefined,
+          stage: stages.length ? stages : undefined,
+          admission,
+        },
+      })
+      .then((response) => {
+        if (generation !== requestGeneration.current) return;
+        setRows(response.items);
+        setTotal(response.total);
+      })
+      .catch((failure: unknown) => {
+        if (generation !== requestGeneration.current) return;
+        setRows([]);
+        setError(failure instanceof Error ? failure.message : "The jobs request failed.");
+      })
+      .finally(() => {
+        if (generation === requestGeneration.current) setLoading(false);
+      });
+  }, [page, pageSize, search, statuses, stages, admission, repositoryId]);
+
   useEffect(() => {
+    refresh();
     return () => {
       requestGeneration.current += 1;
-      latestRequest.current = null;
     };
-  }, []);
+  }, [refresh]);
 
-  const parameters = useMemo(
-    () => ({ search, statuses, stages, admission, repositoryId }),
-    [search, statuses, stages, admission, repositoryId],
-  );
   const activeView = views.find(
     (view) => sameStatuses(view.statuses, statuses) && view.admission === admission,
   )?.id;
   const filterCount = statuses.length + stages.length + (admission ? 1 : 0);
   const hasConstraints = search.length > 0 || filterCount > 0;
-
-  const resetPage = () => {
-    actionRef.current?.setPageInfo?.({ current: 1 });
-  };
-
-  const requestJobs = useCallback((params: JobsParameters): Promise<JobsTableResult> => {
-    const generation = ++requestGeneration.current;
-    setError(null);
-    setTotal(null);
-    const pending = (async (): Promise<JobsTableResult> => {
-      try {
-        const response = await reviewControl.listJobs({
-          page: params.current ?? 1,
-          pageSize: params.pageSize ?? 20,
-          search: params.search || undefined,
-          filters: {
-            repositoryId: params.repositoryId,
-            status: params.statuses?.length ? params.statuses : undefined,
-            stage: params.stages?.length ? params.stages : undefined,
-            admission: params.admission,
-          },
-        });
-        if (generation !== requestGeneration.current) {
-          return latestRequest.current ?? { data: [], success: false, total: 0 };
-        }
-        setTotal(response.total);
-        return { data: response.items, success: true, total: response.total };
-      } catch (failure) {
-        if (generation !== requestGeneration.current) {
-          return latestRequest.current ?? { data: [], success: false, total: 0 };
-        }
-        setError(failure instanceof Error ? failure.message : "The jobs request failed.");
-        setTotal(null);
-        // Clear prior rows on failure; the explicit error state replaces result counts.
-        return { data: [], success: true, total: 0 };
-      }
-    })();
-    // Older responses resolve to the newest request, so slow pages cannot replace a newer view.
-    latestRequest.current = pending;
-    return pending;
-  }, []);
-
   const clearFilters = () => {
     setStatuses([]);
     setStages([]);
     setAdmission(undefined);
-    resetPage();
+    setPage(1);
   };
-
   const clearAll = () => {
     clearFilters();
     setSearchInput("");
     setSearch("");
   };
-
-  const columns: ProColumns<Job>[] = [
+  const openJob = (job: Job) =>
+    navigate(
+      notificationTargetPath({
+        kind: "job",
+        repositoryId: job.repositoryId,
+        jobId: job.id,
+      }),
+    );
+  const columns: DataColumn<Job>[] = [
     {
-      title: "Work item / job",
-      dataIndex: "workItemRef",
-      width: 256,
-      render: (_, job) => (
+      id: "workItemRef",
+      label: "Work item / job",
+      minWidth: 256,
+      render: (job) => (
         <div className="jobs-cell-stack">
-          <span className="jobs-work-item">{job.workItemRef}</span>
+          <Link
+            component="button"
+            type="button"
+            underline="hover"
+            variant="body1"
+            className="jobs-work-item"
+            onClick={() => openJob(job)}
+            aria-label={`View details for ${job.workItemRef}, job ${job.id}`}
+          >
+            {job.workItemRef}
+          </Link>
           <span className="jobs-utility jobs-job-identity">
             {job.title}
             <span aria-hidden="true"> · </span>
@@ -253,10 +256,10 @@ function ScopedJobsPage({
       ),
     },
     {
-      title: "Execution",
-      dataIndex: "status",
-      width: 168,
-      render: (_, job) => (
+      id: "status",
+      label: "Execution",
+      minWidth: 176,
+      render: (job) => (
         <div className="jobs-cell-stack">
           <StatusTag status={jobDisplayStatus(job.status, job.admission)} />
           <span className="jobs-utility">
@@ -276,10 +279,10 @@ function ScopedJobsPage({
       ),
     },
     {
-      title: "Worker",
-      dataIndex: "workerNodeId",
-      width: 192,
-      render: (_, job) => (
+      id: "workerNodeId",
+      label: "Worker",
+      minWidth: 192,
+      render: (job) => (
         <div className="jobs-cell-stack">
           <span className="jobs-worker" title={job.workerNodeId}>
             {job.workerNodeId ?? "Unassigned"}
@@ -291,109 +294,18 @@ function ScopedJobsPage({
       ),
     },
     {
-      title: "Elapsed",
-      dataIndex: "elapsedSeconds",
-      width: 88,
-      render: (_, job) => (
-        <span className="jobs-numeric">{formatDuration(job.elapsedSeconds)}</span>
-      ),
+      id: "elapsedSeconds",
+      label: "Elapsed",
+      width: 96,
+      render: (job) => <span className="jobs-numeric">{formatDuration(job.elapsedSeconds)}</span>,
     },
     {
-      title: "Created",
-      dataIndex: "createdAt",
-      width: 136,
-      render: (_, job) => <CreatedTime value={job.createdAt} />,
-    },
-    {
-      title: "",
-      key: "details",
-      width: 80,
-      fixed: "right",
-      render: (_, job) => (
-        <Button
-          className="jobs-details-button"
-          type="link"
-          size="small"
-          onClick={() =>
-            navigate(
-              notificationTargetPath({
-                kind: "job",
-                repositoryId: job.repositoryId,
-                jobId: job.id,
-              }),
-            )
-          }
-          aria-label={`View details for ${job.workItemRef}, job ${job.id}`}
-        >
-          Details
-        </Button>
-      ),
+      id: "createdAt",
+      label: "Created",
+      minWidth: 140,
+      render: (job) => <CreatedTime value={job.createdAt} />,
     },
   ];
-
-  const filters = (
-    <div className="jobs-filters">
-      <div className="jobs-filter-field">
-        <label htmlFor="jobs-admission-filter">Queue admission</label>
-        <Select
-          id="jobs-admission-filter"
-          aria-label="Filter jobs by admission"
-          allowClear
-          placeholder="Any admission state"
-          value={admission}
-          options={[
-            { value: "pending", label: "Awaiting admission" },
-            { value: "admitted", label: "Queued" },
-          ]}
-          onChange={(value: JobAdmissionState | undefined) => {
-            setAdmission(value);
-            resetPage();
-          }}
-        />
-        <span className="jobs-utility">Admission filters apply only to waiting jobs.</span>
-      </div>
-      <div className="jobs-filter-field">
-        <label htmlFor="jobs-status-filter">Status</label>
-        <Select
-          id="jobs-status-filter"
-          aria-label="Filter jobs by status"
-          mode="multiple"
-          allowClear
-          placeholder="Any status"
-          options={statusOptions}
-          value={statuses}
-          onChange={(value: string[]) => {
-            setStatuses(value);
-            resetPage();
-          }}
-          maxTagCount="responsive"
-        />
-      </div>
-      <div className="jobs-filter-field">
-        <label htmlFor="jobs-stage-filter">Stage</label>
-        <Select
-          id="jobs-stage-filter"
-          aria-label="Filter jobs by stage"
-          mode="multiple"
-          allowClear
-          placeholder="Any stage"
-          options={stageOptions}
-          value={stages}
-          onChange={(value: string[]) => {
-            setStages(value);
-            resetPage();
-          }}
-          maxTagCount="responsive"
-        />
-      </div>
-      <div className="jobs-filter-actions">
-        <Button type="text" disabled={filterCount === 0} onClick={clearFilters}>
-          Clear filters
-        </Button>
-        <Button onClick={() => setFiltersOpen(false)}>Done</Button>
-      </div>
-    </div>
-  );
 
   return (
     <div className="jobs-page">
@@ -402,158 +314,207 @@ function ScopedJobsPage({
         title="Jobs"
         description="Follow each execution from queue to result."
         actions={
-          <Button
-            icon={<ReloadOutlined />}
-            loading={loading}
-            onClick={() => void actionRef.current?.reload()}
-          >
+          <Button variant="outlined" startIcon={<Refresh />} loading={loading} onClick={refresh}>
             Refresh
           </Button>
         }
       />
-
-      <Card className="jobs-panel" role="region" aria-label="Job execution monitor">
-        <div className="jobs-views">
-          <Radio.Group
-            role="radiogroup"
-            aria-label="Job status views"
-            optionType="button"
-            value={activeView ?? "custom"}
-            options={views.map((view) => ({ value: view.id, label: view.label }))}
-            onChange={(event) => {
-              const view = views.find((item) => item.id === event.target.value);
-              if (view) {
-                setStatuses([...view.statuses]);
-                setAdmission(view.admission);
-                resetPage();
-              }
-            }}
-          />
-        </div>
-
-        <div className="jobs-toolbar">
-          <Input.Search
+      <Box
+        component="section"
+        className="jobs-panel"
+        role="region"
+        aria-label="Job execution monitor"
+      >
+        <Tabs
+          value={activeView ?? false}
+          aria-label="Job status views"
+          variant="scrollable"
+          scrollButtons="auto"
+          onChange={(_, value: string) => {
+            const view = views.find((item) => item.id === value);
+            if (!view) return;
+            setStatuses([...view.statuses]);
+            setAdmission(view.admission);
+            setPage(1);
+          }}
+          sx={{ borderBottom: 1, borderColor: "divider" }}
+        >
+          {views.map((view) => (
+            <Tab key={view.id} value={view.id} label={view.label} />
+          ))}
+        </Tabs>
+        <Box className="jobs-toolbar" sx={{ py: 3 }}>
+          <Box
+            component="form"
             className="jobs-search"
-            aria-label="Search jobs"
-            placeholder="Search work item, job, or worker"
-            allowClear
-            maxLength={512}
-            value={searchInput}
-            onChange={(event) => {
-              setSearchInput(event.target.value);
-              if (event.target.value.length === 0) {
-                setSearch("");
-                resetPage();
-              }
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSearch(searchInput.trim());
+              setPage(1);
             }}
-            onSearch={(value) => {
-              setSearch(value.trim());
-              resetPage();
-            }}
-          />
-          <Popover
-            content={filters}
-            trigger="click"
-            placement="bottomLeft"
-            open={filtersOpen}
-            onOpenChange={setFiltersOpen}
           >
-            <Button icon={<FilterOutlined />} aria-expanded={filtersOpen}>
-              Filters{filterCount > 0 ? ` (${filterCount})` : ""}
-            </Button>
-          </Popover>
-          {hasConstraints && (
-            <Button className="jobs-reset" type="text" onClick={clearAll}>
-              Reset
-            </Button>
-          )}
-          <span className="jobs-result-count" aria-live="polite">
-            {loading
-              ? "Loading jobs…"
-              : error
-                ? "Results unavailable"
-                : total === null
-                  ? ""
-                  : `${total.toLocaleString("en-US")} ${total === 1 ? "job" : "jobs"}`}
-          </span>
-        </div>
-
+            <TextField
+              fullWidth
+              label="Search jobs"
+              placeholder="Search work item, job, or worker"
+              value={searchInput}
+              slotProps={{
+                htmlInput: { "aria-label": "Search jobs", maxLength: 512 },
+                input: {
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton type="submit" aria-label="Submit job search">
+                        <Search />
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                },
+              }}
+              onChange={(event) => {
+                setSearchInput(event.target.value);
+                if (event.target.value.length === 0) {
+                  setSearch("");
+                  setPage(1);
+                }
+              }}
+            />
+          </Box>
+          <Button
+            variant="outlined"
+            startIcon={<FilterList />}
+            aria-expanded={filterAnchor !== null}
+            aria-controls={filterAnchor ? "jobs-filter-popover" : undefined}
+            onClick={(event) => setFilterAnchor(event.currentTarget)}
+          >
+            Filters{filterCount > 0 ? ` (${filterCount})` : ""}
+          </Button>
+          {hasConstraints && <Button onClick={clearAll}>Reset</Button>}
+        </Box>
+        <Typography variant="body2" className="jobs-result-count" aria-live="polite" sx={{ mb: 2 }}>
+          {loading
+            ? "Loading jobs…"
+            : error
+              ? "Results unavailable"
+              : total === null
+                ? ""
+                : `${total.toLocaleString("en-US")}${total === 1 ? " job" : " jobs"}`}
+        </Typography>
+        <Popover
+          id="jobs-filter-popover"
+          open={filterAnchor !== null}
+          anchorEl={filterAnchor}
+          onClose={() => setFilterAnchor(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+        >
+          <Stack className="jobs-filters" spacing={3} sx={{ p: 3 }}>
+            <Typography component="h2" variant="subtitle1">
+              Filter jobs
+            </Typography>
+            <TextField
+              select
+              label="Queue admission"
+              value={admission ?? ""}
+              helperText="Admission filters apply only to waiting jobs."
+              slotProps={{ select: { inputProps: { "aria-label": "Filter jobs by admission" } } }}
+              onChange={(event) => {
+                setAdmission((event.target.value || undefined) as JobAdmissionState | undefined);
+                setPage(1);
+              }}
+            >
+              <MenuItem value="">Any admission state</MenuItem>
+              <MenuItem value="pending">Awaiting admission</MenuItem>
+              <MenuItem value="admitted">Queued</MenuItem>
+            </TextField>
+            <Autocomplete
+              multiple
+              options={statusOptions}
+              value={statusOptions.filter((option) => statuses.includes(option.value))}
+              onChange={(_, selected) => {
+                setStatuses(selected.map((option) => option.value));
+                setPage(1);
+              }}
+              getOptionLabel={(option) => option.label}
+              renderInput={(params) => (
+                <TextField {...params} label="Status" placeholder="Any status" />
+              )}
+            />
+            <Autocomplete
+              multiple
+              options={stageOptions}
+              value={stageOptions.filter((option) => stages.includes(option.value))}
+              onChange={(_, selected) => {
+                setStages(selected.map((option) => option.value));
+                setPage(1);
+              }}
+              getOptionLabel={(option) => option.label}
+              renderInput={(params) => (
+                <TextField {...params} label="Stage" placeholder="Any stage" />
+              )}
+            />
+            <Stack direction="row" sx={{ justifyContent: "space-between" }}>
+              <Button disabled={filterCount === 0} onClick={clearFilters}>
+                Clear filters
+              </Button>
+              <Button variant="contained" onClick={() => setFilterAnchor(null)}>
+                Done
+              </Button>
+            </Stack>
+          </Stack>
+        </Popover>
         {error && (
           <Alert
-            className="jobs-error"
-            type="error"
-            showIcon
-            title="Unable to load jobs"
-            description={error}
+            severity="error"
+            sx={{ mb: 2 }}
             action={
-              <Button
-                size="small"
-                loading={loading}
-                onClick={() => void actionRef.current?.reload()}
-              >
+              <Button loading={loading} onClick={refresh}>
                 Try again
               </Button>
             }
-          />
+          >
+            <AlertTitle>Unable to load jobs</AlertTitle>
+            {error}
+          </Alert>
         )}
-
-        <ProTable<Job, JobsParameters>
-          actionRef={actionRef}
-          className="operational-table jobs-table"
-          cardProps={false}
+        <DataTable
+          rows={rows}
           columns={columns}
-          rowKey="id"
-          request={requestJobs}
-          params={parameters}
-          onLoadingChange={(value) =>
-            setLoading(
-              value === true ||
-                (typeof value === "object" && value !== null && value.spinning !== false),
-            )
+          getRowId={(job) => job.id}
+          loading={loading}
+          ariaLabel="Job executions"
+          emptyTitle={
+            error
+              ? "Job results could not be retrieved."
+              : hasConstraints
+                ? "No jobs match this view."
+                : "No jobs have been scheduled yet."
           }
-          search={false}
-          options={false}
-          toolBarRender={false}
-          tableAlertRender={false}
-          size="middle"
-          scroll={{ x: 920 }}
-          tableLayout="fixed"
+          emptyDescription={
+            !error && hasConstraints
+              ? "Adjust the search or filters to find an execution."
+              : undefined
+          }
           pagination={{
-            defaultPageSize: 20,
-            hideOnSinglePage: true,
-            showSizeChanger: true,
+            page,
+            pageSize,
             pageSizeOptions: [20, 50, 100],
-            showTotal: (count, range) => (error ? "" : `${range[0]}–${range[1]} of ${count}`),
-          }}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  error
-                    ? "Job results could not be retrieved."
-                    : hasConstraints
-                      ? "No jobs match this view. Adjust the search or filters."
-                      : "No jobs have been scheduled yet."
-                }
-              >
-                {!error && hasConstraints && (
-                  <Button onClick={clearAll}>Clear search and filters</Button>
-                )}
-              </Empty>
-            ),
+            total: total ?? 0,
+            onChange: (nextPage, nextPageSize) => {
+              setPage(nextPageSize === pageSize ? nextPage : 1);
+              setPageSize(nextPageSize);
+            },
           }}
         />
-      </Card>
-
+        {!loading && !error && rows.length === 0 && hasConstraints && (
+          <Box sx={{ pb: 2, textAlign: "center" }}>
+            <Button onClick={clearAll}>Clear search and filters</Button>
+          </Box>
+        )}
+      </Box>
       {target.kind === "invalid" ? (
-        <Alert
-          type="error"
-          showIcon
-          title="Invalid job target"
-          description={target.message}
-          action={<Button onClick={closeTarget}>Clear target</Button>}
-        />
+        <Alert severity="error" action={<Button onClick={closeTarget}>Clear target</Button>}>
+          <AlertTitle>Invalid job target</AlertTitle>
+          {target.message}
+        </Alert>
       ) : (
         <SelectedJobDetails job={selectedJob} onClose={closeTarget} />
       )}

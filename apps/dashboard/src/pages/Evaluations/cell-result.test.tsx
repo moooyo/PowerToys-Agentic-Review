@@ -37,8 +37,8 @@ const state = vi.hoisted(() => ({
 vi.mock("./EvaluationEvidence", () => ({
   EvaluationEvidence: () => <div>Evidence file panel</div>,
 }));
-vi.mock("antd", async (original) => ({
-  ...(await original<typeof import("antd")>()),
+vi.mock("@mui/material", async (original) => ({
+  ...(await original<typeof import("@mui/material")>()),
   Drawer: ({ children, open }: { children: ReactNode; open: boolean }) => (
     <section aria-label="Result drawer" hidden={!open}>
       {children}

@@ -1,28 +1,47 @@
 import {
-  BranchesOutlined,
-  GithubOutlined,
-  IssuesCloseOutlined,
-  ReloadOutlined,
-  SearchOutlined,
-} from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
-import { useLocation, useNavigate } from "@umijs/max";
+  AccountTreeOutlined,
+  AdjustRounded,
+  ChevronRightRounded,
+  CloseRounded,
+  ExpandMoreRounded,
+  GitHub,
+  HistoryRounded,
+  InboxOutlined,
+  PlayArrowRounded,
+  RefreshRounded,
+  SearchRounded,
+} from "@mui/icons-material";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
+  Avatar,
+  Box,
   Button,
-  Card,
-  Descriptions,
+  Chip,
+  type ChipProps,
   Drawer,
-  Empty,
-  Input,
-  Pagination,
-  Select,
+  IconButton,
+  InputAdornment,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  MenuItem,
+  Paper,
   Skeleton,
-  Space,
-  Tag,
+  Stack,
+  TablePagination,
+  TextField,
   Tooltip,
-} from "antd";
+  Typography,
+} from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { CreateReviewRunModal } from "@/components/CreateReviewRun";
 import { JobDetailsPanel } from "@/components/JobDetails";
 import {
@@ -42,6 +61,7 @@ import {
   notificationRunWorkItem,
   type ValidationNotificationTarget,
 } from "@/components/ReviewRuns/navigation";
+import { DetailsGrid, EmptyState } from "@/components/ui";
 import { reviewControl, type WorkItem, type WorkItemKind } from "@/services/review-control";
 import { runs } from "@/services/runs";
 import { shortSha } from "@/utils/format";
@@ -183,20 +203,30 @@ function progressFor(item: WorkItem): WorkItemProgress {
   };
 }
 
-function Progress({ item }: { item: WorkItem }) {
+function Progress({ item, compact = false }: { item: WorkItem; compact?: boolean }) {
   const progress = progressFor(item);
-  const colors: Record<ProgressTone, string> = {
+  const colors: Record<ProgressTone, ChipProps["color"]> = {
     quiet: "default",
-    active: "processing",
+    active: "primary",
     success: "success",
     warning: "warning",
     danger: "error",
   };
 
   return (
-    <div className="workspace-progress">
-      <Tag color={colors[progress.tone]}>{progress.label}</Tag>
-      <span className="workspace-secondary">{progress.detail}</span>
+    <div className={`workspace-progress${compact ? " workspace-progress--compact" : ""}`}>
+      <Tooltip title={compact ? progress.detail : undefined}>
+        <Chip
+          color={colors[progress.tone]}
+          label={progress.label}
+          variant={progress.tone === "active" ? "filled" : "outlined"}
+        />
+      </Tooltip>
+      {!compact ? (
+        <Typography variant="body2" color="text.secondary">
+          {progress.detail}
+        </Typography>
+      ) : null}
     </div>
   );
 }
@@ -225,6 +255,179 @@ function RequestContext({ item }: { item: WorkItem }) {
   );
 }
 
+function ItemIcon({ kind }: { kind: WorkItemKind }) {
+  return kind === "pull_request" ? (
+    <AccountTreeOutlined fontSize="small" />
+  ) : (
+    <AdjustRounded fontSize="small" />
+  );
+}
+
+const itemKey = (item: WorkItem) => `${item.repositoryId}:${item.id}`;
+
+interface WorkItemListRowProps {
+  item: WorkItem;
+  disabled?: boolean;
+  onOpenDetails: (item: WorkItem) => void;
+  onViewRuns: (item: WorkItem) => void;
+}
+
+export function WorkItemListRow({
+  item,
+  disabled = false,
+  onOpenDetails,
+  onViewRuns,
+}: WorkItemListRowProps) {
+  const content = copy[item.kind];
+  const openDetails = () => {
+    if (disabled) return;
+    onOpenDetails(item);
+  };
+  return (
+    <ListItem
+      disablePadding
+      className="workspace-list-item"
+      secondaryAction={
+        <div className="workspace-list-item__actions">
+          <Tooltip title="View runs">
+            <span>
+              <IconButton
+                disabled={disabled}
+                aria-label={`View runs for ${content.item} ${item.number}`}
+                onClick={() => {
+                  if (disabled) return;
+                  onViewRuns(item);
+                }}
+              >
+                <HistoryRounded />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title={item.latestJobStatus === "succeeded" ? content.action : "Open details"}>
+            <span>
+              <IconButton
+                disabled={disabled}
+                aria-label={`Open ${content.item} ${item.number}`}
+                onClick={openDetails}
+              >
+                <ChevronRightRounded />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </div>
+      }
+    >
+      <ListItemButton
+        className="workspace-list-item__button"
+        disabled={disabled}
+        onClick={openDetails}
+        aria-label={`Open ${content.item} ${item.number}: ${item.title}`}
+      >
+        <ListItemIcon className="workspace-list-item__leading">
+          <Avatar className="workspace-list-item__avatar">
+            <ItemIcon kind={item.kind} />
+          </Avatar>
+        </ListItemIcon>
+        <ListItemText
+          className="workspace-list-item__text"
+          primary={item.title}
+          secondary={
+            <>
+              {item.repository} <code>#{item.number}</code> · {item.author}
+              {item.state === "closed" ? " · Closed" : null}
+              {item.kind === "pull_request" && item.headSha ? (
+                <>
+                  {" "}
+                  · <code>{shortSha(item.headSha)}</code>
+                </>
+              ) : null}
+            </>
+          }
+          slotProps={{
+            primary: {
+              component: "span",
+              sx: { fontSize: 16, lineHeight: "24px", fontWeight: 500 },
+            },
+            secondary: {
+              component: "span",
+              sx: { display: "block", mt: 0.5, fontSize: 14, lineHeight: "20px" },
+            },
+          }}
+        />
+        <div className="workspace-list-item__activity">
+          <Progress item={item} compact />
+          <Tooltip title={`Last synchronized: ${new Date(item.updatedAt).toLocaleString("en-US")}`}>
+            <time className="workspace-updated" dateTime={item.updatedAt}>
+              {updatedLabel(item.updatedAt)}
+            </time>
+          </Tooltip>
+        </div>
+      </ListItemButton>
+    </ListItem>
+  );
+}
+
+function WorkItemRequestContext({ item }: { item: WorkItem }) {
+  return (
+    <Accordion
+      disableGutters
+      elevation={0}
+      className="workspace-request-context"
+      sx={{ mb: 3, bgcolor: "transparent", "&::before": { display: "none" } }}
+    >
+      <AccordionSummary
+        expandIcon={<ExpandMoreRounded />}
+        aria-controls="work-item-request-context"
+        id="work-item-request-context-heading"
+      >
+        <Typography component="h3" variant="subtitle1">
+          Request context
+        </Typography>
+      </AccordionSummary>
+      <AccordionDetails>
+        <DetailsGrid
+          columns={2}
+          items={[
+            { label: "GitHub state", value: stateLabels[item.state] },
+            { label: "Request", value: <RequestContext item={item} /> },
+            { label: "Authorization", value: authorizationLabels[item.authorization] },
+            ...(item.headSha
+              ? [
+                  {
+                    label: "Current revision",
+                    value: (
+                      <Tooltip title={item.headSha}>
+                        <code>{shortSha(item.headSha)}</code>
+                      </Tooltip>
+                    ),
+                  },
+                ]
+              : []),
+            ...(item.reviewedSha
+              ? [
+                  {
+                    label: "Reviewed revision",
+                    value: (
+                      <Tooltip title={item.reviewedSha}>
+                        <code>{shortSha(item.reviewedSha)}</code>
+                      </Tooltip>
+                    ),
+                  },
+                ]
+              : []),
+            ...(item.latestJobAttemptCount !== null
+              ? [{ label: "Job attempts", value: item.latestJobAttemptCount }]
+              : []),
+            ...(item.workerNodeId
+              ? [{ label: "Worker", value: <code>{item.workerNodeId}</code> }]
+              : []),
+            { label: "Last synchronized", value: new Date(item.updatedAt).toLocaleString("en-US") },
+          ]}
+        />
+      </AccordionDetails>
+    </Accordion>
+  );
+}
 interface WorkItemDetailsProps {
   item: WorkItem | null;
   onClose: () => void;
@@ -255,7 +458,7 @@ function WorkItemDetailsContent({
   const access = useOperatorAccess(item.repositoryId);
   const permissionReason = reviewPermissionUnavailableReason(access);
   const latestRun = useQuery({
-    queryKey: ["review-runs", item.repositoryId, item.id, "latest"],
+    queryKey: ["review-runs", item.repositoryId, item.id, "latest", ...access.identityKey],
     retry: false,
     enabled: access.can("read"),
     staleTime: Infinity,
@@ -264,53 +467,92 @@ function WorkItemDetailsContent({
   });
   return (
     <Drawer
-      className="workspace-detail"
-      destroyOnHidden
+      anchor="right"
+      open
       onClose={onClose}
-      open={item !== null}
-      size="large"
-      title={
-        access.checking ? (
-          "Work item"
-        ) : item ? (
-          <div className="workspace-detail__identity">
-            {item.kind === "pull_request" ? <BranchesOutlined /> : <IssuesCloseOutlined />}
-            <span>{item.kind === "pull_request" ? "Pull request" : "Issue"}</span>
-            <span className="workspace-detail__number">#{item.number}</span>
-          </div>
-        ) : (
-          ""
-        )
-      }
-      extra={
-        !access.checking && item ? (
-          <Button href={item.githubUrl} icon={<GithubOutlined />} target="_blank" rel="noreferrer">
-            GitHub
-          </Button>
-        ) : null
-      }
+      slotProps={{
+        paper: {
+          className: "workspace-detail",
+          role: "dialog",
+          "aria-labelledby": "workspace-detail-title",
+          sx: { width: { xs: "100%", md: 860 }, maxWidth: "100vw" },
+        },
+      }}
     >
-      {access.checking && <Skeleton active aria-label="Verifying repository access" />}
-      <div hidden={access.checking} inert={access.checking} aria-hidden={access.checking}>
-        {item && content ? (
+      <div className="workspace-detail__bar">
+        <Typography
+          component="h2"
+          variant="subtitle1"
+          id="workspace-detail-title"
+          className="workspace-detail__identity"
+        >
+          {access.checking ? (
+            "Work item"
+          ) : (
+            <>
+              <ItemIcon kind={item.kind} />
+              <span>{item.kind === "pull_request" ? "Pull request" : "Issue"}</span>
+              <code>#{item.number}</code>
+            </>
+          )}
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          {!access.checking ? (
+            <Button href={item.githubUrl} startIcon={<GitHub />} target="_blank" rel="noreferrer">
+              GitHub
+            </Button>
+          ) : null}
+          <IconButton aria-label="Close work item details" onClick={onClose}>
+            <CloseRounded />
+          </IconButton>
+        </Stack>
+      </div>
+      <Box sx={{ p: { xs: 2, sm: 3 } }}>
+        {access.checking ? (
+          <Stack role="status" aria-label="Verifying repository access" spacing={1.5}>
+            <Skeleton width="60%" />
+            <Skeleton height={120} />
+          </Stack>
+        ) : (
           <>
             <header className="workspace-detail__header">
-              <p className="workspace-detail__repository">{item.repository}</p>
-              <h2>{item.title}</h2>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                {item.repository}
+              </Typography>
+              <Typography component="h2" variant="h5" sx={{ mb: 1.5 }}>
+                {item.title}
+              </Typography>
               <div className="workspace-detail__context">
                 <span className="workspace-secondary">Opened by {item.author}</span>
-                <span className="workspace-detail__separator" aria-hidden="true">
-                  ·
-                </span>
+                <span aria-hidden="true">·</span>
                 <RequestContext item={item} />
               </div>
             </header>
-            <Space wrap className="workspace-run-actions">
-              <Button onClick={() => onViewRuns(item)}>View runs</Button>
+            <Box sx={{ mb: 3 }}>
+              <Progress item={item} />
+              {item.attentionReason ? (
+                <Typography variant="body2" color="error.main" sx={{ mt: 1 }}>
+                  {item.attentionReason}
+                </Typography>
+              ) : null}
+            </Box>
+            <Stack direction="row" spacing={1} useFlexGap sx={{ mb: 2, flexWrap: "wrap" }}>
+              <Button
+                variant="outlined"
+                startIcon={<HistoryRounded />}
+                disabled={!access.can("read")}
+                onClick={() => {
+                  if (!access.can("read")) return;
+                  onViewRuns(item);
+                }}
+              >
+                View runs
+              </Button>
               <Tooltip title={permissionReason}>
                 <span>
                   <Button
-                    type="primary"
+                    variant="contained"
+                    startIcon={<PlayArrowRounded />}
                     disabled={!access.can("review")}
                     onClick={() => {
                       if (!access.can("review")) return;
@@ -321,16 +563,19 @@ function WorkItemDetailsContent({
                   </Button>
                 </span>
               </Tooltip>
-            </Space>
-            {permissionReason && <p className="workspace-secondary">{permissionReason}</p>}
+            </Stack>
+            {permissionReason ? (
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                {permissionReason}
+              </Typography>
+            ) : null}
+            <WorkItemRequestContext item={item} />
             {latestRun.data === null && item.freshness === "superseded" ? (
-              <Alert
-                className="workspace-detail__notice"
-                title="A newer revision is available"
-                description="The execution below targets an earlier revision. Start a new authorized request on GitHub to review the current revision."
-                type="warning"
-                showIcon
-              />
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                <AlertTitle>A newer revision is available</AlertTitle>
+                The execution below targets an earlier revision. Start a new authorized request on
+                GitHub to review the current revision.
+              </Alert>
             ) : null}
             {latestRun.isError ? (
               <ErrorNotice
@@ -339,15 +584,18 @@ function WorkItemDetailsContent({
                 retry={() => void latestRun.refetch()}
               />
             ) : latestRun.isPending ? (
-              <Skeleton active aria-label="Loading latest validation run" />
+              <Stack role="status" aria-label="Loading latest validation run" spacing={1}>
+                <Skeleton height={48} />
+                <Skeleton variant="rounded" height={180} />
+              </Stack>
             ) : latestRun.data ? (
               <ReviewRunsPanel
-                key={`${item.repositoryId}:${item.id}:${latestRun.data.id}`}
+                key={`${itemKey(item)}:${latestRun.data.id}`}
                 workItem={item}
                 initialRunId={latestRun.data.id}
                 embedded
               />
-            ) : !access.checking && item.latestJobId ? (
+            ) : item.latestJobId ? (
               <JobDetailsPanel
                 key={item.latestJobId}
                 repositoryId={item.repositoryId}
@@ -355,60 +603,30 @@ function WorkItemDetailsContent({
                 embedded
               />
             ) : (
-              <div className="workspace-unscheduled">
-                <Alert
-                  title={content.noRun}
-                  description={
-                    item.state === "closed"
-                      ? "This item is closed on GitHub. Reopen it before making a new authorized request."
-                      : content.noRunDescription
-                  }
-                  type="info"
-                  showIcon
-                />
-                <Descriptions
-                  column={1}
-                  size="small"
-                  items={[
-                    { key: "state", label: "GitHub state", children: stateLabels[item.state] },
-                    {
-                      key: "authorization",
-                      label: "Authorization",
-                      children: authorizationLabels[item.authorization],
-                    },
-                    ...(item.headSha
-                      ? [
-                          {
-                            key: "revision",
-                            label: "Current revision",
-                            children: <code>{shortSha(item.headSha)}</code>,
-                          },
-                        ]
-                      : []),
-                    {
-                      key: "updated",
-                      label: "Last synchronized",
-                      children: new Date(item.updatedAt).toLocaleString("en-US"),
-                    },
-                  ]}
-                />
+              <Stack spacing={3}>
+                <Alert severity="info">
+                  <AlertTitle>{content.noRun}</AlertTitle>
+                  {item.state === "closed"
+                    ? "This item is closed on GitHub. Reopen it before making a new authorized request."
+                    : content.noRunDescription}
+                </Alert>
                 <Button
                   href={item.githubUrl}
                   target="_blank"
                   rel="noreferrer"
-                  icon={<GithubOutlined />}
+                  startIcon={<GitHub />}
+                  sx={{ alignSelf: "flex-start" }}
                 >
                   Open {content.item} on GitHub
                 </Button>
-              </div>
+              </Stack>
             )}
           </>
-        ) : null}
-      </div>
+        )}
+      </Box>
     </Drawer>
   );
 }
-
 export function WorkItemWorkspace({ kind }: { kind: WorkItemKind }) {
   const scope = useRepositoryScope();
   const location = useLocation();
@@ -432,13 +650,32 @@ export function WorkItemWorkspace({ kind }: { kind: WorkItemKind }) {
         repositoryName={scope.label}
       />
       {selection.kind === "invalid" ? (
-        <Drawer open destroyOnHidden title="Validation target unavailable" onClose={closeTarget}>
-          <Alert
-            type="error"
-            showIcon
-            title="Invalid validation target"
-            description={selection.message}
-          />
+        <Drawer
+          anchor="right"
+          open
+          onClose={closeTarget}
+          slotProps={{
+            paper: {
+              role: "dialog",
+              "aria-labelledby": "workspace-invalid-target-title",
+              sx: { width: { xs: "100%", sm: 480 }, maxWidth: "100vw" },
+            },
+          }}
+        >
+          <div className="workspace-detail__bar">
+            <Typography id="workspace-invalid-target-title" component="h2" variant="subtitle1">
+              Validation target unavailable
+            </Typography>
+            <IconButton aria-label="Close validation target" onClick={closeTarget}>
+              <CloseRounded />
+            </IconButton>
+          </div>
+          <Box sx={{ p: 3 }}>
+            <Alert severity="error">
+              <AlertTitle>Invalid validation target</AlertTitle>
+              {selection.message}
+            </Alert>
+          </Box>
         </Drawer>
       ) : target ? (
         <NotificationRunTarget
@@ -493,8 +730,27 @@ function NotificationRunTargetContent({
     );
   }
   return (
-    <Drawer open destroyOnHidden title="Validation target" onClose={onClose}>
-      <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Drawer
+      anchor="right"
+      open
+      onClose={onClose}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-labelledby": "workspace-target-title",
+          sx: { width: { xs: "100%", sm: 480 }, maxWidth: "100vw" },
+        },
+      }}
+    >
+      <div className="workspace-detail__bar">
+        <Typography component="h2" variant="subtitle1" id="workspace-target-title">
+          Validation target
+        </Typography>
+        <IconButton aria-label="Close validation target" onClick={onClose}>
+          <CloseRounded />
+        </IconButton>
+      </div>
+      <Stack spacing={2} sx={{ p: 3 }}>
         <Button
           disabled={access.checking}
           loading={access.checking}
@@ -503,7 +759,10 @@ function NotificationRunTargetContent({
           Refresh access
         </Button>
         {access.checking || query.isPending ? (
-          <Skeleton active aria-label="Loading the exact validation target" />
+          <Stack role="status" aria-label="Loading the exact validation target">
+            <Skeleton height={48} />
+            <Skeleton variant="rounded" height={120} />
+          </Stack>
         ) : (
           <ErrorNotice
             title="Could not load the notification's validation target"
@@ -511,7 +770,7 @@ function NotificationRunTargetContent({
             retry={() => void query.refetch()}
           />
         )}
-      </Space>
+      </Stack>
     </Drawer>
   );
 }
@@ -539,17 +798,29 @@ function ScopedWorkItemWorkspace({
   const [selectedItem, setSelectedItem] = useState<WorkItem | null>(null);
   const [runView, setRunView] = useState<{ item: WorkItem; runId?: string } | null>(null);
   const [creatingRunItem, setCreatingRunItem] = useState<WorkItem | null>(null);
+  const listAccess = useOperatorAccess(repositoryId);
   const actionRepositoryId =
     selectedItem?.repositoryId ??
     runView?.item.repositoryId ??
     creatingRunItem?.repositoryId ??
     repositoryId;
   const access = useOperatorAccess(actionRepositoryId);
-  const mayRead = access.can("read");
+  const mayRead = listAccess.can("read");
   const requestVersion = useRef(0);
-  const queryKey = JSON.stringify({ kind, repositoryId, page, pageSize, search, stage });
+  const queryKey = JSON.stringify({
+    kind,
+    repositoryId,
+    page,
+    pageSize,
+    search,
+    stage,
+    identity: listAccess.identityKey,
+  });
   const isUpdating = loading || settledQuery !== queryKey || searchInput.trim() !== search;
   const currentError = isUpdating ? null : error;
+  const openDetails = (item: WorkItem) => {
+    setSelectedItem(item);
+  };
   const viewRuns = (item: WorkItem) => {
     setSelectedItem(null);
     setRunView({ item });
@@ -558,6 +829,12 @@ function ScopedWorkItemWorkspace({
     if (item.repositoryId !== actionRepositoryId || !access.can("review")) return;
     setSelectedItem(null);
     setCreatingRunItem(item);
+  };
+  const clearFilters = () => {
+    setSearchInput("");
+    setSearch("");
+    setStage(undefined);
+    setPage(1);
   };
 
   useEffect(() => {
@@ -615,9 +892,9 @@ function ScopedWorkItemWorkspace({
     <section
       className="workspace-page"
       aria-labelledby={`workspace-${kind}-title`}
-      hidden={access.checking}
-      inert={access.checking}
-      aria-hidden={access.checking}
+      hidden={listAccess.checking}
+      inert={listAccess.checking}
+      aria-hidden={listAccess.checking}
     >
       <PageHeader
         eyebrow={repositoryName}
@@ -626,7 +903,8 @@ function ScopedWorkItemWorkspace({
         description={content.description}
         actions={
           <Button
-            icon={<ReloadOutlined spin={isUpdating} />}
+            variant="outlined"
+            startIcon={<RefreshRounded />}
             onClick={loadItems}
             disabled={isUpdating}
           >
@@ -634,195 +912,164 @@ function ScopedWorkItemWorkspace({
           </Button>
         }
       />
-
-      <Card
-        aria-label={content.title}
-        className="workspace-panel"
-        styles={{ body: { padding: 0 } }}
-      >
-        <header className="workspace-panel__header">
-          <div className="workspace-panel__heading">
-            <h2>{content.inbox}</h2>
-            <span
-              role="status"
-              className="workspace-count"
-              aria-label={
-                currentError
-                  ? "Count unavailable"
-                  : isUpdating
-                    ? "Loading count"
-                    : `${total} ${total === 1 ? content.item : content.title.toLowerCase()}${search || stage ? " matched" : " tracked"}`
-              }
-              aria-live="polite"
-            >
-              ({currentError ? "—" : isUpdating ? "…" : total})
-            </span>
-          </div>
-          <div className="workspace-toolbar">
-            <Input
-              allowClear
-              aria-label={`Search ${content.title.toLowerCase()}`}
-              className="workspace-search"
-              maxLength={512}
-              onChange={(event) => setSearchInput(event.target.value)}
-              placeholder={content.search}
-              prefix={<SearchOutlined />}
-              value={searchInput}
-            />
-            <Select
-              allowClear
-              aria-label={`Filter ${content.title.toLowerCase()} by latest job progress`}
-              className="workspace-stage"
-              onChange={(value: string | undefined) => {
-                setStage(value);
-                setPage(1);
-              }}
-              options={Object.entries(stageLabels).map(([value, label]) => ({
-                value,
-                label: value === "reviewing" && kind === "issue" ? "Triaging" : label,
-              }))}
-              placeholder="Latest job progress"
-              value={stage}
-            />
-          </div>
-        </header>
-
+      <Paper elevation={0} aria-label={content.title} className="workspace-panel">
+        <search className="workspace-toolbar" aria-label={`Find ${content.title.toLowerCase()}`}>
+          <TextField
+            className="workspace-search"
+            variant="filled"
+            hiddenLabel
+            placeholder={`Search ${content.title.toLowerCase()}`}
+            onChange={(event) => setSearchInput(event.target.value)}
+            value={searchInput}
+            slotProps={{
+              htmlInput: {
+                maxLength: 512,
+                "aria-label": `Search ${content.title.toLowerCase()}`,
+              },
+              input: {
+                disableUnderline: true,
+                sx: {
+                  height: 56,
+                  borderRadius: "28px",
+                  px: 2,
+                  bgcolor: "background.default",
+                  "&:hover, &.Mui-focused": { bgcolor: "background.default" },
+                  "& .MuiFilledInput-input": { p: 0, height: 24, lineHeight: "24px" },
+                  "& .MuiInputAdornment-root": { mt: 0 },
+                },
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchRounded />
+                  </InputAdornment>
+                ),
+                endAdornment: searchInput ? (
+                  <InputAdornment position="end">
+                    <IconButton aria-label="Clear search" onClick={() => setSearchInput("")}>
+                      <CloseRounded />
+                    </IconButton>
+                  </InputAdornment>
+                ) : undefined,
+              },
+            }}
+          />
+          <TextField
+            className="workspace-stage"
+            variant="outlined"
+            select
+            label="Latest job progress"
+            value={stage ?? "all"}
+            onChange={(event) => {
+              setStage(event.target.value === "all" ? undefined : event.target.value);
+              setPage(1);
+            }}
+          >
+            <MenuItem value="all">All progress</MenuItem>
+            {Object.entries(stageLabels).map(([value, label]) => (
+              <MenuItem key={value} value={value}>
+                {value === "reviewing" && kind === "issue" ? "Triaging" : label}
+              </MenuItem>
+            ))}
+          </TextField>
+          {searchInput || stage ? <Button onClick={clearFilters}>Clear filters</Button> : null}
+        </search>
+        <Typography
+          className="workspace-count"
+          id={`workspace-${kind}-count`}
+          component="p"
+          variant="body2"
+          color="text.secondary"
+          role="status"
+          aria-live="polite"
+        >
+          {currentError
+            ? "Count unavailable"
+            : isUpdating
+              ? `Loading ${content.title.toLowerCase()}…`
+              : `${total} ${total === 1 ? content.item : content.title.toLowerCase()}${search || stage ? " matched" : ""}`}
+        </Typography>
         {currentError ? (
           <Alert
-            className="workspace-error"
-            title={`Could not load ${content.title.toLowerCase()}`}
-            description={currentError}
-            type="error"
-            showIcon
+            severity="error"
+            sx={{ m: 2 }}
             action={<Button onClick={loadItems}>Try again</Button>}
-          />
-        ) : isUpdating ? (
-          <div
-            className="workspace-loading"
-            role="status"
-            aria-label={`Loading ${content.title.toLowerCase()}`}
           >
-            {[0, 1, 2, 3].map((row) => (
+            <AlertTitle>Could not load {content.title.toLowerCase()}</AlertTitle>
+            {currentError}
+          </Alert>
+        ) : isUpdating ? (
+          <div role="status" aria-label={`Loading ${content.title.toLowerCase()}`}>
+            {[0, 1, 2, 3, 4].map((row) => (
               <div className="workspace-skeleton" key={row} aria-hidden="true">
-                <Skeleton active paragraph={{ rows: 1, width: "45%" }} title={{ width: "70%" }} />
+                <Skeleton variant="circular" width={40} height={40} />
+                <Stack spacing={0.5} sx={{ flex: 1 }}>
+                  <Skeleton width="70%" height={24} />
+                  <Skeleton width="50%" height={20} />
+                </Stack>
+                <Skeleton
+                  variant="rounded"
+                  width={120}
+                  height={32}
+                  sx={{ display: { xs: "none", sm: "block" } }}
+                />
               </div>
             ))}
           </div>
         ) : items.length === 0 ? (
-          <Empty
-            className="workspace-empty"
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          <EmptyState
+            title={search || stage ? "No matching results" : content.empty}
             description={
-              <div>
-                <strong>{search || stage ? "No matching results" : content.empty}</strong>
-                <p>
-                  {search || stage
-                    ? "Try another search or clear the progress filter."
-                    : content.emptyDescription}
-                </p>
-              </div>
+              search || stage
+                ? "Try another search or clear the progress filter."
+                : content.emptyDescription
             }
-          >
-            {search || stage ? (
-              <Button
-                onClick={() => {
-                  setSearchInput("");
-                  setSearch("");
-                  setStage(undefined);
-                  setPage(1);
-                }}
-              >
-                Clear filters
-              </Button>
-            ) : null}
-          </Empty>
+            icon={<InboxOutlined />}
+            action={
+              search || stage ? <Button onClick={clearFilters}>Clear filters</Button> : undefined
+            }
+          />
         ) : (
-          <ul className="workspace-inbox" aria-label={content.inbox}>
+          <List
+            disablePadding
+            aria-label={content.inbox}
+            aria-describedby={`workspace-${kind}-count`}
+          >
             {items.map((item) => (
-              <li className="workspace-item" key={item.id}>
-                <div className="workspace-item__content">
-                  <button
-                    className="workspace-item__title"
-                    onClick={() => setSelectedItem(item)}
-                    type="button"
-                  >
-                    {item.title}
-                  </button>
-                  <div className="workspace-item__meta">
-                    <a href={item.githubUrl} target="_blank" rel="noreferrer">
-                      {item.repository}{" "}
-                      <span className="workspace-item__number">#{item.number}</span>
-                    </a>
-                    <span>by {item.author}</span>
-                    {item.state === "closed" ? (
-                      <span className="workspace-item__closed">Closed</span>
-                    ) : null}
-                    {kind === "pull_request" && item.headSha ? (
-                      <Tooltip title={`Current revision: ${item.headSha}`}>
-                        <code>{shortSha(item.headSha)}</code>
-                      </Tooltip>
-                    ) : null}
-                    <Tooltip
-                      title={`Last synchronized: ${new Date(item.updatedAt).toLocaleString("en-US")}`}
-                    >
-                      <time className="workspace-updated" dateTime={item.updatedAt}>
-                        {updatedLabel(item.updatedAt)}
-                      </time>
-                    </Tooltip>
-                  </div>
-                </div>
-                <div className="workspace-item__aside">
-                  <Progress item={item} />
-                  <div className="workspace-item__actions">
-                    <Button
-                      className="workspace-open"
-                      type="link"
-                      onClick={() => setSelectedItem(item)}
-                      aria-label={`Open ${content.item} ${item.number}`}
-                    >
-                      {item.latestJobStatus === "succeeded" ? content.action : "Details"}
-                    </Button>
-                    <Button
-                      type="link"
-                      onClick={() => viewRuns(item)}
-                      aria-label={`View runs for ${content.item} ${item.number}`}
-                    >
-                      View runs
-                    </Button>
-                  </div>
-                </div>
-              </li>
+              <WorkItemListRow
+                key={itemKey(item)}
+                item={item}
+                disabled={isUpdating || listAccess.checking}
+                onOpenDetails={openDetails}
+                onViewRuns={viewRuns}
+              />
             ))}
-          </ul>
+          </List>
         )}
-
-        {!currentError && !isUpdating && total > pageSize ? (
+        {!currentError && !isUpdating && total > 0 ? (
           <footer className="workspace-footer">
-            <span aria-live="polite">
-              Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
-              {search || stage
-                ? " matching items"
-                : ` ${total === 1 ? content.item : content.title.toLowerCase()}`}
-            </span>
-            <Pagination
-              current={page}
-              disabled={isUpdating}
-              hideOnSinglePage
-              onChange={(nextPage, nextSize) => {
-                setPage(nextSize === pageSize ? nextPage : 1);
-                setPageSize(nextSize);
+            <TablePagination
+              component="div"
+              count={total}
+              page={page - 1}
+              rowsPerPage={pageSize}
+              rowsPerPageOptions={[20, 50, 100]}
+              onPageChange={(_, nextPage) => setPage(nextPage + 1)}
+              onRowsPerPageChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
               }}
-              pageSize={pageSize}
-              pageSizeOptions={[20, 50, 100]}
-              showSizeChanger
-              total={total}
+              labelRowsPerPage="Items per page"
+              labelDisplayedRows={({ from, to, count }) =>
+                `${from}–${to} of ${count}${search || stage ? " matching" : ""}`
+              }
+              showFirstButton
+              showLastButton
+              disabled={isUpdating}
             />
           </footer>
         ) : null}
-      </Card>
-
+      </Paper>
       <p className="workspace-guidance">
-        <GithubOutlined />
+        <GitHub fontSize="small" />
         {kind === "pull_request"
           ? "Reviews begin with an authorized review request or assignment on GitHub."
           : "Triage begins when an authorized maintainer assigns an issue on GitHub."}

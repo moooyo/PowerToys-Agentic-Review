@@ -4,18 +4,18 @@
 
 .prompt-bindings-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
-.prompt-bindings-toolbar .ant-typography {
+.prompt-bindings-toolbar .MuiTypography-root {
   margin-top: 0;
   margin-bottom: 8px;
 }
 
-.prompt-bindings-toolbar > .ant-btn {
+.prompt-bindings-toolbar > .MuiButton-root {
   flex-shrink: 0;
 }
 
@@ -27,11 +27,11 @@
 
 .prompt-bindings-item {
   display: grid;
-  grid-template-columns: minmax(190px, 0.8fr) minmax(260px, 1.7fr) auto;
+  grid-template-columns: minmax(200px, 0.8fr) minmax(280px, 1.7fr) auto;
   align-items: start;
   gap: 24px;
   padding: 24px 0;
-  border-top: 1px solid var(--app-line);
+  border-bottom: 1px solid var(--app-line);
 }
 
 .prompt-bindings-workflow,
@@ -41,25 +41,26 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
 .prompt-bindings-workflow {
-  gap: 10px;
+  gap: 12px;
 }
 
 .prompt-bindings-details {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 18px;
+  gap: 24px;
   min-width: 0;
 }
 
 .prompt-bindings-secondary {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 20px;
+  font-weight: 400;
   overflow-wrap: anywhere;
 }
 
@@ -67,7 +68,9 @@
   max-width: 100%;
   overflow-wrap: anywhere;
   font-family: var(--app-code-font);
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
 }
 
 .prompt-bindings-wrap {
@@ -81,16 +84,16 @@
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
 }
 
 .prompt-bindings-item-actions {
-  max-width: 270px;
+  max-width: 300px;
 }
 
 .prompt-bindings-notice,
 .prompt-bindings-facts {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .prompt-bindings-notice p:last-child {
@@ -99,48 +102,39 @@
 
 .prompt-bindings-selection {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 24px;
-  padding: 16px;
-  border: 1px solid var(--app-line);
-  border-radius: 8px;
+  margin-bottom: 32px;
 }
 
-.prompt-bindings-selection > .ant-btn {
+.prompt-bindings-selection > .MuiButton-root {
   flex-shrink: 0;
 }
 
 .prompt-bindings-pagination {
   display: flex;
   justify-content: flex-end;
-  margin-top: 20px;
+  margin-top: 24px;
 }
 
 .prompt-bindings-chosen {
-  margin-top: 20px;
-  padding: 16px;
-  border: 1px solid var(--app-accent);
-  border-radius: 8px;
-  background: var(--app-accent-soft);
-}
-
-.prompt-bindings-selected-row > td {
+  margin-top: 24px;
+  padding: 20px 24px;
+  border-radius: 12px;
   background: var(--app-accent-soft);
 }
 
 .prompt-bindings-content {
-  margin: 20px 0 0;
-  padding: 16px;
+  margin-top: 24px;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  border: 1px solid var(--app-line);
-  border-radius: 8px;
-  background: var(--app-canvas);
+}
+
+.prompt-bindings-content .MuiInputBase-input {
   font-family: var(--app-code-font);
-  font-size: 12px;
-  line-height: 1.75;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
 }
 
 @media (max-width: 1199px) {
@@ -159,6 +153,7 @@
   .prompt-bindings-toolbar,
   .prompt-bindings-selection {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .prompt-bindings-item,
@@ -176,5 +171,9 @@
 
   .prompt-bindings-pagination {
     justify-content: flex-start;
+  }
+
+  .prompt-bindings-chosen {
+    padding: 16px;
   }
 }

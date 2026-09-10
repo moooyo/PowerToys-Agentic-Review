@@ -11,11 +11,11 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": ["node", "vite/client"],
     "paths": {
-      "@/*": ["./src/*"],
-      "@@/*": ["./src/.umi/*"]
+      "@/*": ["./src/*"]
     }
   },
-  "include": ["config/**/*.ts", "src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts"]
+  "include": ["config/**/*.ts", "src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts", "vite.config.mts"],
+  "exclude": ["node_modules", "dist", "src/.umi", "src/.umi-production"]
 }

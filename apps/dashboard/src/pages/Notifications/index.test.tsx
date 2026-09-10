@@ -16,7 +16,6 @@ const state = vi.hoisted(() => ({
   list: undefined as unknown,
   overview: undefined as unknown,
   keys: [] as unknown[][],
-  buttons: new Map<string, boolean>(),
   links: [] as { to: string; onClick: unknown }[],
   change: vi.fn(),
 }));
@@ -62,7 +61,7 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("@umijs/max", () => ({
+vi.mock("react-router-dom", () => ({
   Link: ({
     to,
     children,
@@ -81,68 +80,12 @@ vi.mock("@umijs/max", () => ({
     );
   },
 }));
-vi.mock("@ant-design/icons", () => ({ ReloadOutlined: () => <span /> }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({ title, description }: { title: ReactNode; description: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
-    Button: ({ children, disabled }: { children: ReactNode; disabled?: boolean }) => {
-      if (typeof children === "string") state.buttons.set(children, !!disabled);
-      return (
-        <button type="button" disabled={disabled}>
-          {children}
-        </button>
-      );
-    },
-    Card: ({
-      children,
-      title,
-      extra,
-    }: {
-      children: ReactNode;
-      title: ReactNode;
-      extra: ReactNode;
-    }) => (
-      <section>
-        {title}
-        {extra}
-        {children}
-      </section>
-    ),
-    Pagination: Content,
-    Select: Content,
-    Skeleton: Content,
-    Space: Content,
-    Tag: Content,
-    Table: ({
-      dataSource,
-      columns,
-      locale,
-    }: {
-      dataSource: unknown[];
-      columns: { key: string; render: (value: unknown, item: unknown) => ReactNode }[];
-      locale: { emptyText: string };
-    }) => (
-      <div>
-        {dataSource.length === 0
-          ? locale.emptyText
-          : dataSource.map((item, index) => (
-              <div key={String(index)}>
-                {columns.map((column) => (
-                  <div key={column.key}>{column.render(null, item)}</div>
-                ))}
-              </div>
-            ))}
-      </div>
-    ),
-    Typography: { Text: Content, Paragraph: Content },
-  };
-});
+function buttonMarkup(html: string, label: string): string {
+  const buttons = html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [];
+  const button = buttons.find((markup) => markup.replace(/<[^>]*>/g, "").includes(label));
+  expect(button).toBeDefined();
+  return button ?? "";
+}
 beforeEach(() => {
   state.repositoryId = undefined;
   state.sample = false;
@@ -151,7 +94,6 @@ beforeEach(() => {
   state.list = notificationListFixture();
   state.overview = notificationOverviewFixture();
   state.keys = [];
-  state.buttons.clear();
   state.links = [];
   state.change.mockClear();
 });
@@ -159,6 +101,7 @@ describe("notification inbox", () => {
   it("uses the overview without issuing a fanout list of repository events", () => {
     const html = renderToStaticMarkup(<NotificationsPage />);
     expect(html).toContain("Repository inboxes");
+    expect(html).toContain('aria-label="Repository notification inboxes"');
     expect(html).toContain("synthetic/repository-a");
     expect(state.keys).toEqual([["notifications", "session-all", "overview", 1]]);
     expect(state.links).toEqual([
@@ -174,14 +117,16 @@ describe("notification inbox", () => {
     expect(state.links[0]?.to).toContain("requestId=request-a&jobId=job-a");
     expect(state.links[0]?.onClick).toBeUndefined();
     expect(state.change).not.toHaveBeenCalled();
-    expect(state.buttons.get("Mark read")).toBe(true);
+    expect(buttonMarkup(html, "Mark read")).toContain('disabled=""');
+    expect(html).toContain('aria-label="Select notification notification-a"');
+    expect(html).toContain('aria-label="Select all notifications on this page"');
   });
   it("keeps the older continuation enabled for an empty bounded filter window", () => {
     state.repositoryId = "repository-a";
     state.list = { ...notificationListFixture(), items: [], nextCursor: "80", scanLimited: true };
     const html = renderToStaticMarkup(<NotificationsPage />);
     expect(html).toContain("No matching events in this time window");
-    expect(state.buttons.get("Older events")).toBe(false);
+    expect(buttonMarkup(html, "Older events")).not.toContain('disabled=""');
   });
   it("hides cached event rows after a failed refresh", () => {
     state.repositoryId = "repository-a";

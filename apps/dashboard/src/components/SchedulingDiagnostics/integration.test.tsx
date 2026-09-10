@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { jobs } from "../../services/review-control/mock/fixtures";
@@ -27,8 +26,8 @@ vi.mock("@/components/OperatorAccess", () => ({
     can: (permission: string) => permission === "read",
   }),
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: 1 } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: 1 } }),
 }));
 vi.mock("@/components/IssueReproduction", () => ({ IssueReproductionSummary: () => null }));
 vi.mock("@/components/ReviewRunDecisions", () => ({ ReviewRunDecisions: () => null }));
@@ -47,51 +46,6 @@ vi.mock("@tanstack/react-query", () => ({
     refetch: vi.fn(),
   }),
 }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
-    Button: Content,
-    Space: Content,
-    Tag: Content,
-    Tooltip: Content,
-    Divider: () => <hr />,
-    Empty: Object.assign(Content, { PRESENTED_IMAGE_SIMPLE: "simple" }),
-    Skeleton: Content,
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Table: ({ columns }: { columns: { title: ReactNode }[] }) => (
-      <div>
-        {columns.map((column) => (
-          <span key={String(column.title)}>{column.title}</span>
-        ))}
-      </div>
-    ),
-    Collapse: () => null,
-    Modal: () => null,
-    Tabs: ({ items }: { items: { children: ReactNode }[] }) => <div>{items[0]?.children}</div>,
-    Grid: { useBreakpoint: () => ({}) },
-    Drawer: Content,
-    Typography: { Title: Content, Text: Content, Paragraph: Content },
-  };
-});
 beforeEach(() => {
   state.scopes = [];
   state.rerun.mockReset();
@@ -131,8 +85,8 @@ describe("scheduling entry-point wiring", () => {
         visible,
       },
     ]);
-    expect(html).toContain("<dt>Execution prerequisites</dt>");
-    expect(html).toContain("<span>Execution prerequisites</span>");
+    expect(html).toMatch(/<dt\b[^>]*>Execution prerequisites<\/dt>/);
+    expect(html).toMatch(/<th\b[^>]*>Execution prerequisites<\/th>/);
     expect(state.rerun).not.toHaveBeenCalled();
     expect(state.cancel).not.toHaveBeenCalled();
   });

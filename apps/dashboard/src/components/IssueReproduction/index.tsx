@@ -6,12 +6,31 @@ import type {
   IssueReproductionCaseAssessment,
   OperatorPrincipal,
 } from "@agentic-review/contracts";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
+  AlertTitle,
+  Button,
+  Divider,
+  Skeleton,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TablePagination,
+  TableRow,
+  Typography,
+} from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Collapse, Divider, Skeleton, Space, Table, Typography } from "antd";
 import { useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { runs } from "@/services/runs";
+import { useOperatorSession } from "@/state/session";
 import { CopyValue, ErrorNotice, Facts, Prose } from "../ReviewRuns/common";
 import { EvidenceView } from "../ReviewRuns/EvidenceView";
 import { evidencePollingViewVisible } from "../ReviewRuns/evidence-verification";
@@ -135,17 +154,27 @@ function CaseDetails({
     ? reproductionEvidenceScope(loaded.detail, loaded.savedResult)
     : null;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
-        <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack spacing={3} sx={{ width: "100%" }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{ flexWrap: "wrap", justifyContent: "space-between", alignItems: "center" }}
+      >
+        <Typography variant="h6" component="h3">
           Case detail · {reproductionTargetLabel[selection.target]}
-        </Typography.Title>
-        <Button disabled={!mayRead} loading={query.isFetching} onClick={() => void query.refetch()}>
+        </Typography>
+        <Button
+          variant="outlined"
+          disabled={!mayRead}
+          loading={query.isFetching}
+          onClick={() => void query.refetch()}
+        >
           Refresh case
         </Button>
-      </Space>
+      </Stack>
       {!mayRead ? (
-        <Alert showIcon type="info" title="Repository read access is required" />
+        <Alert severity="info">Repository read access is required</Alert>
       ) : query.isError ? (
         <ErrorNotice
           title="Could not load reproduction case"
@@ -153,50 +182,70 @@ function CaseDetails({
           retry={() => void query.refetch()}
         />
       ) : !loaded ? (
-        <Skeleton active />
+        <Skeleton variant="rounded" height={160} />
       ) : (
         <>
-          <Typography.Text type="secondary">Frozen reproduction claim</Typography.Text>
+          <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+            Frozen reproduction claim
+          </Typography>
           <Prose>{loaded.detail.binding.claim}</Prose>
           <ReproductionCaseFacts detail={loaded.detail} result={loaded.savedResult} />
-          <Collapse
-            activeKey={openPanels}
-            onChange={(keys) => setOpenPanels(Array.isArray(keys) ? keys : [keys])}
-            items={[
-              {
-                key: "identity",
-                label: "Frozen case and saved result identity",
-                children: (
-                  <Facts
-                    items={[
-                      { label: "Case ID", value: <CopyValue value={loaded.detail.caseId} /> },
-                      { label: "Request ID", value: <CopyValue value={loaded.detail.requestId} /> },
-                      { label: "Job ID", value: <CopyValue value={loaded.detail.jobId} /> },
-                      { label: "Result ID", value: <CopyValue value={loaded.detail.resultId} /> },
-                      {
-                        label: "Run attempt ID",
-                        value: <CopyValue value={loaded.savedResult?.runAttemptId} />,
-                      },
-                      {
-                        label: "Issue revision key",
-                        value: <CopyValue value={loaded.detail.binding.issueRevisionKey} />,
-                      },
-                      {
-                        label: "Reproduction binding digest",
-                        value: <CopyValue value={loaded.detail.bindingDigest} />,
-                      },
-                      {
-                        label: "Plan digest",
-                        value: <CopyValue value={loaded.detail.planDigest} />,
-                      },
-                    ]}
-                  />
-                ),
-              },
-              {
-                key: "evidence",
-                label: `Inspect case evidence (${evidenceReferences(loaded.detail).length} references)`,
-                children: openPanels.includes("evidence") ? (
+          <Stack>
+            <Accordion
+              expanded={openPanels.includes("identity")}
+              onChange={(_, expanded) =>
+                setOpenPanels((panels) =>
+                  expanded
+                    ? [...panels, "identity"]
+                    : panels.filter((panel) => panel !== "identity"),
+                )
+              }
+            >
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                Frozen case and saved result identity
+              </AccordionSummary>
+              <AccordionDetails>
+                <Facts
+                  items={[
+                    { label: "Case ID", value: <CopyValue value={loaded.detail.caseId} /> },
+                    { label: "Request ID", value: <CopyValue value={loaded.detail.requestId} /> },
+                    { label: "Job ID", value: <CopyValue value={loaded.detail.jobId} /> },
+                    { label: "Result ID", value: <CopyValue value={loaded.detail.resultId} /> },
+                    {
+                      label: "Run attempt ID",
+                      value: <CopyValue value={loaded.savedResult?.runAttemptId} />,
+                    },
+                    {
+                      label: "Issue revision key",
+                      value: <CopyValue value={loaded.detail.binding.issueRevisionKey} />,
+                    },
+                    {
+                      label: "Reproduction binding digest",
+                      value: <CopyValue value={loaded.detail.bindingDigest} />,
+                    },
+                    {
+                      label: "Plan digest",
+                      value: <CopyValue value={loaded.detail.planDigest} />,
+                    },
+                  ]}
+                />
+              </AccordionDetails>
+            </Accordion>
+            <Accordion
+              expanded={openPanels.includes("evidence")}
+              onChange={(_, expanded) =>
+                setOpenPanels((panels) =>
+                  expanded
+                    ? [...panels, "evidence"]
+                    : panels.filter((panel) => panel !== "evidence"),
+                )
+              }
+            >
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                Inspect case evidence ({evidenceReferences(loaded.detail).length} references)
+              </AccordionSummary>
+              <AccordionDetails>
+                {openPanels.includes("evidence") ? (
                   evidenceScope ? (
                     <EvidenceView
                       key={JSON.stringify([session, evidenceScope])}
@@ -204,24 +253,23 @@ function CaseDetails({
                       references={evidenceReferences(loaded.detail)}
                     />
                   ) : (
-                    <Alert
-                      showIcon
-                      type="info"
-                      title="No saved execution evidence"
-                      description="Evidence files become available only for the exact saved job attempt. Missing evidence does not establish absence."
-                    />
+                    <Alert severity="info">
+                      <AlertTitle>No saved execution evidence</AlertTitle>
+                      Evidence files become available only for the exact saved job attempt. Missing
+                      evidence does not establish absence.
+                    </Alert>
                   )
-                ) : null,
-              },
-            ]}
-          />
-          <Typography.Text type="secondary">
+                ) : null}
+              </AccordionDetails>
+            </Accordion>
+          </Stack>
+          <Typography variant="body2" color="text.secondary">
             Case details and settled summaries refresh every 30 seconds while visible. If evidence
             verification is still pending, use Refresh run or Refresh result to retry it.
-          </Typography.Text>
+          </Typography>
         </>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -259,119 +307,136 @@ function ReproductionSession({
       }
     : null;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack spacing={3} sx={{ width: "100%" }}>
+      <Typography variant="h6" component="h3">
         Issue reproduction
-      </Typography.Title>
+      </Typography>
       {view.claim && <Prose>{view.claim}</Prose>}
       <AssessmentSummary assessment={view.assessment} recorded={view.recorded} />
-      <Collapse
-        items={[
-          {
-            key: "reproduction-identity",
-            label: "Frozen reproduction identity",
-            children: (
-              <Facts
-                items={[
-                  {
-                    label: "Tested source commit",
-                    value: <CopyValue value={view.assessment.testedSourceCommit} />,
-                  },
-                  {
-                    label: "Reproduction binding digest",
-                    value: <CopyValue value={view.assessment.bindingDigest} />,
-                  },
-                ]}
-              />
-            ),
-          },
-        ]}
-      />
-      <Table<CaseRow>
-        size="small"
-        rowKey={(entry) => JSON.stringify([entry.requestId, entry.caseId])}
-        dataSource={view.cases}
-        scroll={{ x: view.recorded ? 900 : 760 }}
-        pagination={{
-          current: page,
-          pageSize: 10,
-          total: view.cases.length,
-          hideOnSinglePage: true,
-          showSizeChanger: false,
-          onChange: setPage,
-        }}
-        columns={[
-          {
-            title: "Case context",
-            render: (_, entry) => (
-              <Space orientation="vertical" size={4}>
-                <Typography.Paragraph
-                  strong
-                  ellipsis={{ rows: 2 }}
-                  style={{ margin: 0, maxWidth: 360 }}
-                >
-                  {entry.context ?? `${reproductionTargetLabel[entry.target]} reproduction case`}
-                </Typography.Paragraph>
-                <Typography.Text
-                  type="secondary"
-                  style={{ fontSize: 12, overflowWrap: "anywhere" }}
-                >
-                  {entry.caseId}
-                </Typography.Text>
-              </Space>
-            ),
-          },
-          {
-            title: "Target / frozen profile",
-            render: (_, entry) => (
-              <Space orientation="vertical" size={4}>
-                <Typography.Text>{reproductionTargetLabel[entry.target]}</Typography.Text>
-                <Typography.Text type="secondary">
-                  {entry.profileLabel ?? entry.profileVersionId}
-                </Typography.Text>
-              </Space>
-            ),
-          },
-          {
-            title: "Current case state",
-            render: (_, entry) => (
-              <Space orientation="vertical" size={4}>
-                <CaseState assessment={entry.current} />
-                {entry.current?.reasons.map((reason) => (
-                  <Typography.Text key={reason} type="secondary">
-                    {reproductionReasonLabel[reason]}
-                  </Typography.Text>
-                ))}
-              </Space>
-            ),
-          },
-          ...(view.recorded
-            ? [
-                {
-                  title: "Recorded case state",
-                  render: (_: unknown, entry: CaseRow) => (
-                    <CaseState assessment={entry.recorded} current={false} />
-                  ),
-                },
-              ]
-            : []),
-          {
-            title: "Details",
-            render: (_, entry) => (
-              <Button
-                type={selected === entry ? "primary" : "default"}
-                disabled={!mayRead}
-                onClick={() => setSelectedKey(JSON.stringify([entry.requestId, entry.caseId]))}
+      <Accordion>
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          Frozen reproduction identity
+        </AccordionSummary>
+        <AccordionDetails>
+          <Facts
+            items={[
+              {
+                label: "Tested source commit",
+                value: <CopyValue value={view.assessment.testedSourceCommit} />,
+              },
+              {
+                label: "Reproduction binding digest",
+                value: <CopyValue value={view.assessment.bindingDigest} />,
+              },
+            ]}
+          />
+        </AccordionDetails>
+      </Accordion>
+      <TableContainer>
+        <Table
+          size="medium"
+          aria-label="Issue reproduction cases"
+          sx={{ minWidth: view.recorded ? 900 : 760 }}
+        >
+          <TableHead>
+            <TableRow>
+              <TableCell>Case context</TableCell>
+              <TableCell>Target / frozen profile</TableCell>
+              <TableCell>Current case state</TableCell>
+              {view.recorded && <TableCell>Recorded case state</TableCell>}
+              <TableCell>Details</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {view.cases.slice((page - 1) * 10, page * 10).map((entry) => (
+              <TableRow
+                key={JSON.stringify([entry.requestId, entry.caseId])}
+                selected={selected === entry}
               >
-                Inspect case
-              </Button>
-            ),
-          },
-        ]}
-      />
+                <TableCell>
+                  <Stack spacing={0.5}>
+                    <Typography
+                      variant="body1"
+                      sx={{
+                        fontWeight: 500,
+                        maxWidth: 360,
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                      }}
+                    >
+                      {entry.context ??
+                        `${reproductionTargetLabel[entry.target]} reproduction case`}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ overflowWrap: "anywhere", fontFamily: '"Roboto Mono", monospace' }}
+                    >
+                      {entry.caseId}
+                    </Typography>
+                  </Stack>
+                </TableCell>
+                <TableCell>
+                  <Stack spacing={0.5}>
+                    <Typography variant="body2">{reproductionTargetLabel[entry.target]}</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {entry.profileLabel ?? entry.profileVersionId}
+                    </Typography>
+                  </Stack>
+                </TableCell>
+                <TableCell>
+                  <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>
+                    <CaseState assessment={entry.current} />
+                    {entry.current?.reasons.map((reason) => (
+                      <Typography key={reason} variant="body2" color="text.secondary">
+                        {reproductionReasonLabel[reason]}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </TableCell>
+                {view.recorded && (
+                  <TableCell>
+                    <CaseState assessment={entry.recorded} current={false} />
+                  </TableCell>
+                )}
+                <TableCell>
+                  <Button
+                    variant={selected === entry ? "contained" : "outlined"}
+                    disabled={!mayRead}
+                    onClick={() => setSelectedKey(JSON.stringify([entry.requestId, entry.caseId]))}
+                  >
+                    Inspect case
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+            {view.cases.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={view.recorded ? 5 : 4}>
+                  <Typography variant="body2" color="text.secondary">
+                    No configured reproduction cases.
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+        {view.cases.length > 10 && (
+          <TablePagination
+            component="div"
+            count={view.cases.length}
+            page={page - 1}
+            rowsPerPage={10}
+            rowsPerPageOptions={[10]}
+            onPageChange={(_, nextPage) => setPage(nextPage + 1)}
+          />
+        )}
+      </TableContainer>
       {selection ? (
         <>
-          <Divider style={{ marginBlock: 0 }} />
+          <Divider />
           <CaseDetails
             key={JSON.stringify(reproductionQueryKey(runs.mode, selection, principal, session))}
             selection={selection}
@@ -382,38 +447,38 @@ function ReproductionSession({
           />
         </>
       ) : (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Inspect a case to compare its frozen preconditions and signatures with selected
           observations and exact execution evidence.
-        </Typography.Text>
+        </Typography>
       )}
-    </Space>
+    </Stack>
   );
 }
 
 function ReproductionAccess({ view }: { view: ReproductionViewProps }) {
   const access = useOperatorAccess(view.repositoryId);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const session = JSON.stringify([
     initialState?.authenticationEpoch ?? 0,
     access.identityKey,
     access.context?.platformAdministrator,
     access.context?.repository,
   ]);
-  if (access.pending) return <Skeleton active paragraph={{ rows: 2 }} />;
+  if (access.pending) return <Skeleton variant="rounded" height={80} />;
   if (!access.principal || !access.allows("read"))
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Repository read access is required"
-        description="Refresh access to load reproduction assessments and evidence."
+        severity="info"
         action={
           <Button loading={access.checking} onClick={() => void access.refresh()}>
             Refresh access
           </Button>
         }
-      />
+      >
+        <AlertTitle>Repository read access is required</AlertTitle>
+        Refresh access to load reproduction assessments and evidence.
+      </Alert>
     );
   return (
     <ReproductionSession
@@ -441,12 +506,11 @@ export function IssueReproductionSummary({ run }: { run: DashboardReviewRunDetai
   const reproduction = run.reproduction;
   if (!reproduction)
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="No frozen reproduction claim"
-        description="This run has no configured reproduction cases. Triage conclusions and passed checks alone do not establish whether the issue reproduces."
-      />
+      <Alert severity="info">
+        <AlertTitle>No frozen reproduction claim</AlertTitle>
+        This run has no configured reproduction cases. Triage conclusions and passed checks alone do
+        not establish whether the issue reproduces.
+      </Alert>
     );
   return (
     <ReproductionAccess
@@ -486,12 +550,11 @@ export function IssueReproductionResult({ result }: { result: DashboardReviewRun
   const reproduction = result.reproduction;
   if (!reproduction)
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="No frozen reproduction assessment"
-        description="This saved result has no assessment bound to configured reproduction cases. Any legacy worker or model conclusion remains separate from a verified reproduction assessment."
-      />
+      <Alert severity="info">
+        <AlertTitle>No frozen reproduction assessment</AlertTitle>
+        This saved result has no assessment bound to configured reproduction cases. Any legacy
+        worker or model conclusion remains separate from a verified reproduction assessment.
+      </Alert>
     );
   return (
     <ReproductionAccess

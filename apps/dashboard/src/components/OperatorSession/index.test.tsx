@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InitialState } from "../../app";
+import type { InitialState } from "@/state/session";
 import { OperatorSessionBoundary } from "./index";
 import { operatorSessionKey } from "./state";
 
@@ -9,10 +9,10 @@ const model = vi.hoisted(() => ({
   initialState: undefined as InitialState | undefined,
   loading: false,
 }));
-vi.mock("@umijs/max", () => ({ useModel: () => model }));
+vi.mock("@/state/session", () => ({ useOperatorSession: () => model }));
 vi.mock("@/components/OperatorAccess", () => ({ OperatorAccessEvents: () => null }));
 vi.mock("@/services/access", () => ({ access: { mode: "connected" } }));
-vi.mock("antd", () => ({ Skeleton: () => <div>Verifying session</div> }));
+vi.mock("@mui/material", () => ({ Skeleton: () => <div>Verifying session</div> }));
 const principal = { issuer: "https://issuer.example", subject: "admin" };
 const state = (): InitialState => ({
   apiConnected: true,
@@ -96,6 +96,9 @@ describe("operator session cache boundary", () => {
     );
     expect(html).toContain("Verifying operator session");
     expect(html).toMatch(/hidden=""[^>]*inert=""[^>]*aria-hidden="true"/u);
+    expect(html).toMatch(
+      /<div id="dashboard-session" hidden="" inert="" aria-hidden="true">[\s\S]*Previous selection[\s\S]*<\/div>/u,
+    );
   });
 
   it("creates an empty business cache for the next identity", () => {

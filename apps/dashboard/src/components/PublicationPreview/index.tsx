@@ -3,9 +3,22 @@ import type {
   PublicationConfirmResponse,
   PublicationPreviewQuery,
 } from "@agentic-review/contracts";
+import {
+  Alert,
+  AlertTitle,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  Skeleton,
+  Stack,
+  Typography,
+} from "@mui/material";
 import { Value } from "@sinclair/typebox/value";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Checkbox, Drawer, Skeleton, Space, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import type { useOperatorAccess } from "@/components/OperatorAccess";
 import { publicationQueryRoot, publications } from "@/services/publications";
@@ -136,35 +149,150 @@ function PreviewSession({
       if (mounted.current) setSaving(false);
     }
   };
+  const closePreview = () => {
+    if (inFlight.current || saving || access.checking) return;
+    onClose();
+  };
   return (
-    <Drawer
+    <Dialog
       open
-      title="Publication preview"
-      size={900}
-      onClose={onClose}
-      closable={!saving && !access.checking}
-      keyboard={!saving && !access.checking}
-      mask={{ closable: !saving && !access.checking }}
-      extra={
-        <Button disabled={saving || access.checking} onClick={() => void access.refresh()}>
-          Refresh access
-        </Button>
-      }
-      footer={
+      fullWidth
+      maxWidth="lg"
+      aria-labelledby="publication-preview-title"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") closePreview();
+      }}
+    >
+      <DialogTitle id="publication-preview-title">
+        <Stack
+          direction="row"
+          sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}
+        >
+          <span>Publication preview</span>
+          <Button disabled={saving || access.checking} onClick={() => void access.refresh()}>
+            Refresh access
+          </Button>
+        </Stack>
+      </DialogTitle>
+      <DialogContent sx={{ display: "grid", gap: 3 }}>
+        {access.checking ? (
+          <Skeleton variant="rounded" height={240} />
+        ) : denied ? (
+          <Alert severity="info">
+            <AlertTitle>Publication access is unavailable</AlertTitle>
+            The previous preview has been cleared. Refresh access before requesting a new preview.
+          </Alert>
+        ) : query.isError ? (
+          <Alert severity="error">
+            <AlertTitle>Could not load publication preview</AlertTitle>
+            {publicationError(query.error)}
+          </Alert>
+        ) : !value ? (
+          <Skeleton variant="rounded" height={240} />
+        ) : (
+          <>
+            <Typography>
+              Recording a decision in this platform does not send to GitHub. Confirming this
+              complete preview creates a durable delivery intent.
+            </Typography>
+            {receipt && (
+              <Alert severity="success">
+                <AlertTitle>
+                  {receipt.replayed
+                    ? "Original publication confirmation recovered"
+                    : "Publication confirmed"}
+                </AlertTitle>
+                <a href={publicationOutboxPath(scope.repositoryId, receipt.intent.publicationId)}>
+                  Inspect delivery in the repository outbox
+                </a>
+              </Alert>
+            )}
+            {!!failure && (
+              <Alert severity="error">
+                <AlertTitle>
+                  {conflict
+                    ? "This preview is no longer current"
+                    : "Publication confirmation failed"}
+                </AlertTitle>
+                {conflict
+                  ? "Refresh the preview and review its complete target and body again. Your previous confirmation is not reused for new content."
+                  : `${publicationError(failure)} The original request identity is retained for an explicit retry.`}
+              </Alert>
+            )}
+            {value.blockers.length > 0 && (
+              <Alert severity="warning">
+                <AlertTitle>Publication cannot be confirmed</AlertTitle>
+                <ul>
+                  {value.blockers.map((code) => (
+                    <li key={code}>{publicationBlockerLabels[code]}</li>
+                  ))}
+                </ul>
+              </Alert>
+            )}
+            {value.existingIntent && (
+              <Typography>
+                <a
+                  href={publicationOutboxPath(
+                    scope.repositoryId,
+                    value.existingIntent.publicationId,
+                  )}
+                >
+                  Open existing publication ({value.existingIntent.status})
+                </a>
+              </Typography>
+            )}
+            <Stack direction="row" useFlexGap sx={{ flexWrap: "wrap", gap: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                Observed {value.observedAt}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Publication policy version {value.policyVersion}
+              </Typography>
+            </Stack>
+            <PublicationDocument
+              target={value.target}
+              payload={value.payload}
+              publisherGitHubUserId={value.publisherGitHubUserId}
+              binding={value.binding}
+              payloadSha256={value.payloadSha256}
+            />
+            <Alert severity="info">
+              <AlertTitle>Delivery and recovery</AlertTitle>
+              {publicationDeliveryLimitations}
+            </Alert>
+            {!access.allows("configure") && (
+              <Typography color="text.secondary">
+                Maintainer access or higher is required to confirm publication.
+              </Typography>
+            )}
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={consent}
+                  disabled={saving || !value.canConfirm || !access.can("configure") || !!receipt}
+                  onChange={(event) => setConsent(event.target.checked)}
+                />
+              }
+              label="I have reviewed the complete body, exact GitHub target, commit and event, and authorize this publication."
+            />
+          </>
+        )}
+      </DialogContent>
+      <DialogActions>
         <div
           className="publication-actions"
           hidden={access.checking}
           inert={access.checking}
           aria-hidden={access.checking}
         >
-          <Button disabled={saving || access.checking} onClick={onClose}>
+          <Button disabled={saving || access.checking} onClick={closePreview}>
             Close
           </Button>
           <Button disabled={saving || denied || access.checking} onClick={() => void refresh()}>
             Refresh preview
           </Button>
           <Button
-            type="primary"
+            variant="contained"
             loading={saving}
             disabled={
               !value?.canConfirm ||
@@ -182,124 +310,8 @@ function PreviewSession({
               : "Confirm publication"}
           </Button>
         </div>
-      }
-    >
-      {access.checking ? (
-        <Skeleton active paragraph={{ rows: 8 }} />
-      ) : denied ? (
-        <Alert
-          showIcon
-          type="info"
-          title="Publication access is unavailable"
-          description="The previous preview has been cleared. Refresh access before requesting a new preview."
-        />
-      ) : query.isError ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load publication preview"
-          description={publicationError(query.error)}
-        />
-      ) : !value ? (
-        <Skeleton active paragraph={{ rows: 8 }} />
-      ) : (
-        <>
-          <Typography.Paragraph>
-            Recording a decision in this platform does not send to GitHub. Confirming this complete
-            preview creates a durable delivery intent.
-          </Typography.Paragraph>
-          {receipt ? (
-            <Alert
-              className="publication-notice"
-              showIcon
-              type="success"
-              title={
-                receipt.replayed
-                  ? "Original publication confirmation recovered"
-                  : "Publication confirmed"
-              }
-              description={
-                <a href={publicationOutboxPath(scope.repositoryId, receipt.intent.publicationId)}>
-                  Inspect delivery in the repository outbox
-                </a>
-              }
-            />
-          ) : null}
-          {failure ? (
-            <Alert
-              className="publication-notice"
-              showIcon
-              type="error"
-              title={
-                conflict ? "This preview is no longer current" : "Publication confirmation failed"
-              }
-              description={
-                conflict
-                  ? "Refresh the preview and review its complete target and body again. Your previous confirmation is not reused for new content."
-                  : `${publicationError(failure)} The original request identity is retained for an explicit retry.`
-              }
-            />
-          ) : null}
-          {value.blockers.length > 0 && (
-            <Alert
-              className="publication-notice"
-              showIcon
-              type="warning"
-              title="Publication cannot be confirmed"
-              description={
-                <ul>
-                  {value.blockers.map((code) => (
-                    <li key={code}>{publicationBlockerLabels[code]}</li>
-                  ))}
-                </ul>
-              }
-            />
-          )}
-          {value.existingIntent && (
-            <Typography.Paragraph>
-              <a
-                href={publicationOutboxPath(scope.repositoryId, value.existingIntent.publicationId)}
-              >
-                Open existing publication ({value.existingIntent.status})
-              </a>
-            </Typography.Paragraph>
-          )}
-          <Space wrap>
-            <Typography.Text type="secondary">Observed {value.observedAt}</Typography.Text>
-            <Typography.Text type="secondary">
-              Publication policy version {value.policyVersion}
-            </Typography.Text>
-          </Space>
-          <PublicationDocument
-            target={value.target}
-            payload={value.payload}
-            publisherGitHubUserId={value.publisherGitHubUserId}
-            binding={value.binding}
-            payloadSha256={value.payloadSha256}
-          />
-          <Alert
-            className="publication-notice"
-            showIcon
-            type="info"
-            title="Delivery and recovery"
-            description={publicationDeliveryLimitations}
-          />
-          {!access.allows("configure") && (
-            <Typography.Paragraph type="secondary">
-              Maintainer access or higher is required to confirm publication.
-            </Typography.Paragraph>
-          )}
-          <Checkbox
-            checked={consent}
-            disabled={saving || !value.canConfirm || !access.can("configure") || !!receipt}
-            onChange={(event) => setConsent(event.target.checked)}
-          >
-            I have reviewed the complete body, exact GitHub target, commit and event, and authorize
-            this publication.
-          </Checkbox>
-        </>
-      )}
-    </Drawer>
+      </DialogActions>
+    </Dialog>
   );
 }
 export function PublicationPreview({

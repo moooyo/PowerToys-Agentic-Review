@@ -130,25 +130,11 @@ vi.mock("@/utils/format", () => ({
   shortSha: (value: string) => value,
   formatDuration: vi.fn(),
 }));
-vi.mock("@ant-design/pro-components", () => ({ ProTable: () => null }));
-vi.mock("@ant-design/icons", () => ({
-  BranchesOutlined: () => null,
-  FilterOutlined: () => null,
-  GithubOutlined: () => null,
-  IssuesCloseOutlined: () => null,
-  ReloadOutlined: () => null,
-  SearchOutlined: () => null,
-}));
-vi.mock("antd", () => {
+vi.mock("@mui/material", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@mui/material")>();
   type ContentProps = { children?: ReactNode };
-  const Content = ({ children }: ContentProps) => <div>{children}</div>;
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
+    ...actual,
     Button: ({
       children,
       disabled,
@@ -161,42 +147,11 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Card: Content,
-    Descriptions: Content,
-    Drawer: ({
-      children,
-      title,
-      extra,
-    }: ContentProps & { title?: ReactNode; extra?: ReactNode }) => (
-      <section>
-        {title}
-        {extra}
-        {children}
-      </section>
-    ),
-    Empty: Object.assign(Content, { PRESENTED_IMAGE_SIMPLE: "simple" }),
-    Grid: { useBreakpoint: () => ({ xl: true }) },
-    Input: Object.assign(Content, { Search: Content }),
-    Pagination: Content,
-    Popover: Content,
-    Radio: { Group: Content },
-    Select: Content,
-    Skeleton: Content,
-    Space: Content,
-    Table: Content,
-    Tabs: ({
-      activeKey,
-      items,
-    }: {
-      activeKey: string;
-      items: { key: string; children?: ReactNode }[];
-    }) => <div>{items.find((item) => item.key === activeKey)?.children}</div>,
-    Tag: Content,
-    Tooltip: Content,
-    Typography: { Paragraph: Content, Text: Content, Title: Content },
+    // Portals do not render in SSR. Keep the protected drawer body observable for these tests.
+    Drawer: ({ children, open }: ContentProps & { open?: boolean }) =>
+      open ? <section>{children}</section> : null,
   };
 });
-
 const workItem: WorkItem = {
   id: "cached-work-item",
   repositoryId: "repository-selected-item",

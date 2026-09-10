@@ -2,25 +2,32 @@ import type {
   DashboardReviewRunDetail,
   IssueReproductionRequestV1,
 } from "@agentic-review/contracts";
-import { ReloadOutlined } from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
+import CloseIcon from "@mui/icons-material/Close";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
   Checkbox,
-  Empty,
-  Form,
-  Input,
-  Modal,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControlLabel,
+  IconButton,
   Skeleton,
-  Space,
-  Table,
-  Tag,
+  Stack,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { OperatorAccessGate, useOperatorAccess } from "@/components/OperatorAccess";
 import { reviewPermissionUnavailableReason } from "@/components/ReviewRuns/actions";
+import { DataTable, EmptyState } from "@/components/ui";
 import { targetLabels, workflowLabels } from "@/pages/ValidationProfiles/forms";
 import { configuration } from "@/services/configuration";
 import type { WorkItem } from "@/services/review-control";
@@ -157,251 +164,302 @@ function RunCreationSession({
       setSelectionError(runCreationError(failure).description);
     }
   };
+  const close = () => {
+    if (!saving && !pending.current) onClose();
+  };
 
   return (
-    <Modal
+    <Dialog
       open
-      title={workItem.kind === "pull_request" ? "Create review run" : "Create issue review run"}
-      width={reproduction === undefined ? 760 : 960}
-      onCancel={onClose}
-      closable={!saving}
-      keyboard={!saving}
-      mask={{ closable: !saving }}
-      cancelButtonProps={{ disabled: saving }}
-      okText="Create review run"
-      onOk={() => void create()}
-      confirmLoading={saving}
-      okButtonProps={{
-        disabled:
-          !access.can("review") ||
-          Boolean(prerequisite) ||
-          !profilesReady ||
-          Boolean(selectionError) ||
-          selection.length === 0 ||
-          (reproduction !== undefined && runs.mode === "sample") ||
-          (needsSource && (!sourceIsValid || !sourceExecutionAuthorized)),
-      }}
-      destroyOnHidden
+      fullWidth
+      maxWidth={reproduction === undefined ? "md" : "lg"}
+      aria-labelledby="create-review-run-title"
+      onClose={close}
+      slotProps={{ paper: { sx: { maxWidth: reproduction === undefined ? 760 : 960 } } }}
     >
-      <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-        {permissionReason && (
-          <Alert
-            type="info"
-            showIcon
-            title="Review actions unavailable"
-            description={permissionReason}
-          />
-        )}
-        <div>
-          <Typography.Text type="secondary">
-            {workItem.repository} #{workItem.number}
-          </Typography.Text>
-          <Typography.Paragraph strong style={{ marginTop: 4, marginBottom: 0 }}>
-            {workItem.title}
-          </Typography.Paragraph>
-        </div>
-        {runs.mode === "sample" && reproduction === undefined && (
-          <Alert
-            type="info"
-            showIcon
-            title="Sample data"
-            description="This preview creates a sample review run only. It does not send a production request or execute code."
-          />
-        )}
-        {prerequisite ? (
-          <Alert
-            type="warning"
-            showIcon
-            title={prerequisite.title}
-            description={prerequisite.description}
-          />
-        ) : (
-          <>
-            <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-              Choose the checks to include in this review run. Creating a run saves a plan; its
-              details will show whether each check is ready or blocked. Creation does not mean that
-              checks ran or passed.
-            </Typography.Paragraph>
-            {workItem.kind === "pull_request" && (
-              <Form layout="vertical">
-                <Form.Item label="Pull request head commit" style={{ marginBottom: 0 }}>
-                  <Typography.Text code style={{ overflowWrap: "anywhere" }}>
+      <DialogTitle id="create-review-run-title" sx={{ p: 3, pr: 8 }}>
+        {workItem.kind === "pull_request" ? "Create review run" : "Create issue review run"}
+        <IconButton
+          aria-label="Close create review run"
+          disabled={saving}
+          onClick={close}
+          sx={{ position: "absolute", right: 20, top: 20, width: 40, height: 40 }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent sx={{ px: 3, pb: 3 }}>
+        <Stack spacing={3}>
+          {permissionReason && (
+            <Alert severity="info">
+              <AlertTitle>Review actions unavailable</AlertTitle>
+              {permissionReason}
+            </Alert>
+          )}
+          <div>
+            <Typography variant="body2" color="text.secondary">
+              {workItem.repository} #{workItem.number}
+            </Typography>
+            <Typography variant="body1" sx={{ mt: 1, fontWeight: 500 }}>
+              {workItem.title}
+            </Typography>
+          </div>
+          {runs.mode === "sample" && reproduction === undefined && (
+            <Alert severity="info">
+              <AlertTitle>Sample data</AlertTitle>
+              This preview creates a sample review run only. It does not send a production request
+              or execute code.
+            </Alert>
+          )}
+          {prerequisite ? (
+            <Alert severity="warning">
+              <AlertTitle>{prerequisite.title}</AlertTitle>
+              {prerequisite.description}
+            </Alert>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary">
+                Choose the checks to include in this review run. Creating a run saves a plan; its
+                details will show whether each check is ready or blocked. Creation does not mean
+                that checks ran or passed.
+              </Typography>
+              {workItem.kind === "pull_request" && (
+                <Stack spacing={1}>
+                  <Typography variant="subtitle1" sx={{ fontWeight: 500 }}>
+                    Pull request head commit
+                  </Typography>
+                  <Typography
+                    component="code"
+                    variant="body2"
+                    sx={{ fontFamily: '"Roboto Mono", monospace', overflowWrap: "anywhere" }}
+                  >
                     {workItem.headSha}
-                  </Typography.Text>
-                  <div>
-                    <Typography.Text type="secondary">
-                      The run targets this head commit. Refresh the pull request if it has changed.
-                    </Typography.Text>
-                  </div>
-                </Form.Item>
-              </Form>
-            )}
-            <Space style={{ width: "100%", justifyContent: "space-between" }}>
-              <Typography.Text strong>Validation profiles</Typography.Text>
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                loading={profilesQuery.isFetching}
-                disabled={saving}
-                onClick={() => void profilesQuery.refetch()}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    The run targets this head commit. Refresh the pull request if it has changed.
+                  </Typography>
+                </Stack>
+              )}
+              <Divider />
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
               >
-                Reload profiles
-              </Button>
-            </Space>
-            {profilesQuery.isError ? (
-              <Alert
-                type="error"
-                showIcon
-                title="The active profile configuration could not be loaded"
-                description={`${runCreationError(profilesQuery.error).description} All active bindings and their published versions must be available before creating a run.`}
-              />
-            ) : profilesQuery.isPending ? (
-              <Skeleton active paragraph={{ rows: 4 }} />
-            ) : profiles.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={`No enabled profiles apply to this ${workItem.kind === "pull_request" ? "pull request" : "issue"}. Publish and enable a matching validation profile for this repository.`}
-              />
-            ) : (
-              <>
-                <Table<RunProfileOption>
-                  size="small"
-                  rowKey={(option) => option.version.profileId}
-                  dataSource={profiles}
+                <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 500 }}>
+                  Validation profiles
+                </Typography>
+                <Button
+                  size="medium"
+                  startIcon={<RefreshIcon />}
                   loading={profilesQuery.isFetching}
-                  pagination={false}
-                  scroll={{ x: 560, y: 300 }}
-                  columns={[
-                    {
-                      title: "Include",
-                      key: "include",
-                      width: 76,
-                      render: (_, option) => (
-                        <Checkbox
-                          aria-label={`Include ${option.version.name}${option.version.required ? " (required)" : ""}`}
-                          checked={
-                            option.version.required || selection.includes(option.version.profileId)
-                          }
-                          disabled={
-                            saving ||
-                            profilesQuery.isFetching ||
-                            option.version.required ||
-                            (selection.length >= maximumRunProfileCount &&
-                              !selection.includes(option.version.profileId))
-                          }
-                          onChange={(event) =>
-                            changeSelection(option.version.profileId, event.target.checked)
-                          }
-                        />
-                      ),
-                    },
-                    {
-                      title: "Profile",
-                      key: "profile",
-                      render: (_, option) => (
-                        <Space orientation="vertical" size={2}>
-                          <Typography.Text strong>{option.version.name}</Typography.Text>
-                          <Typography.Text type="secondary">
-                            {workflowLabels[option.version.workflowKind]} ·{" "}
-                            {targetLabels[option.version.target]}
-                          </Typography.Text>
-                        </Space>
-                      ),
-                    },
-                    {
-                      title: "Bound version",
-                      key: "version",
-                      width: 140,
-                      render: (_, option) => (
-                        <Space orientation="vertical" size={2}>
-                          <Typography.Text>Version {option.version.version}</Typography.Text>
-                          <Tag color={option.version.required ? "processing" : "default"}>
-                            {option.version.required ? "Required" : "Optional"}
-                          </Tag>
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
-                <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  {selection.length} of {maximumRunProfileCount} profiles selected. Required
-                  profiles cannot be excluded. Versions shown are the current bindings; the created
-                  run records the versions selected by the server.
-                </Typography.Paragraph>
-              </>
-            )}
-            {selectionError && (
-              <Alert
-                type="error"
-                showIcon
-                title="Check the profile selection"
-                description={selectionError}
-              />
-            )}
-            {workItem.kind === "issue" && profilesReady && (
-              <ReproductionEditor
-                profiles={profiles}
-                selectedProfileIds={selection}
-                value={reproduction}
-                defaultClaim={workItem.title}
-                disabled={saving || profilesQuery.isFetching}
-                sample={runs.mode === "sample"}
-                onChange={(next) => {
-                  setReproduction(next);
-                  setError(null);
-                }}
-              />
-            )}
-            {needsSource && (
-              <Form layout="vertical" disabled={saving}>
-                <Form.Item
-                  label="Commit to validate"
-                  required
-                  validateStatus={testedSourceCommit && !sourceIsValid ? "error" : undefined}
-                  help="Enter the exact 40- or 64-character lowercase commit SHA. A branch name or abbreviated SHA is not accepted."
+                  disabled={saving}
+                  onClick={() => void profilesQuery.refetch()}
                 >
-                  <Input
+                  Reload profiles
+                </Button>
+              </Stack>
+              {profilesQuery.isError ? (
+                <Alert severity="error">
+                  <AlertTitle>The active profile configuration could not be loaded</AlertTitle>
+                  {`${runCreationError(profilesQuery.error).description} All active bindings and their published versions must be available before creating a run.`}
+                </Alert>
+              ) : profilesQuery.isPending ? (
+                <Skeleton variant="rounded" height={180} />
+              ) : profiles.length === 0 ? (
+                <EmptyState
+                  title="No matching validation profiles"
+                  description={`No enabled profiles apply to this ${workItem.kind === "pull_request" ? "pull request" : "issue"}. Publish and enable a matching validation profile for this repository.`}
+                />
+              ) : (
+                <>
+                  <Box sx={{ maxHeight: 360, overflow: "auto" }}>
+                    <DataTable<RunProfileOption>
+                      getRowId={(option) => option.version.profileId}
+                      rows={profiles}
+                      loading={profilesQuery.isFetching}
+                      ariaLabel="Validation profiles"
+                      columns={[
+                        {
+                          label: "Include",
+                          id: "include",
+                          width: 76,
+                          render: (option) => (
+                            <Checkbox
+                              slotProps={{
+                                input: {
+                                  "aria-label": `Include ${option.version.name}${option.version.required ? " (required)" : ""}`,
+                                },
+                              }}
+                              checked={
+                                option.version.required ||
+                                selection.includes(option.version.profileId)
+                              }
+                              disabled={
+                                saving ||
+                                profilesQuery.isFetching ||
+                                option.version.required ||
+                                (selection.length >= maximumRunProfileCount &&
+                                  !selection.includes(option.version.profileId))
+                              }
+                              onChange={(event) =>
+                                changeSelection(option.version.profileId, event.target.checked)
+                              }
+                            />
+                          ),
+                        },
+                        {
+                          label: "Profile",
+                          id: "profile",
+                          minWidth: 260,
+                          render: (option) => (
+                            <Stack spacing={0.5}>
+                              <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                                {option.version.name}
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                {workflowLabels[option.version.workflowKind]} ·{" "}
+                                {targetLabels[option.version.target]}
+                              </Typography>
+                            </Stack>
+                          ),
+                        },
+                        {
+                          label: "Bound version",
+                          id: "version",
+                          width: 140,
+                          render: (option) => (
+                            <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>
+                              <Typography variant="body2">
+                                Version {option.version.version}
+                              </Typography>
+                              <Chip
+                                size="medium"
+                                color={option.version.required ? "primary" : "default"}
+                                label={option.version.required ? "Required" : "Optional"}
+                              />
+                            </Stack>
+                          ),
+                        },
+                      ]}
+                    />
+                  </Box>
+                  <Typography variant="body2" color="text.secondary">
+                    {selection.length} of {maximumRunProfileCount} profiles selected. Required
+                    profiles cannot be excluded. Versions shown are the current bindings; the
+                    created run records the versions selected by the server.
+                  </Typography>
+                </>
+              )}
+              {selectionError && (
+                <Alert severity="error">
+                  <AlertTitle>Check the profile selection</AlertTitle>
+                  {selectionError}
+                </Alert>
+              )}
+              {workItem.kind === "issue" && profilesReady && (
+                <>
+                  <Divider />
+                  <ReproductionEditor
+                    profiles={profiles}
+                    selectedProfileIds={selection}
+                    value={reproduction}
+                    defaultClaim={workItem.title}
+                    disabled={saving || profilesQuery.isFetching}
+                    sample={runs.mode === "sample"}
+                    onChange={(next) => {
+                      setReproduction(next);
+                      setError(null);
+                    }}
+                  />
+                </>
+              )}
+              {needsSource && (
+                <Stack component="section" aria-label="Source authorization" spacing={2}>
+                  <Divider />
+                  <Typography variant="subtitle1" component="h3" sx={{ fontWeight: 500 }}>
+                    Source authorization
+                  </Typography>
+                  <TextField
+                    size="medium"
+                    label="Commit to validate"
+                    required
+                    fullWidth
+                    disabled={saving}
+                    error={Boolean(testedSourceCommit && !sourceIsValid)}
+                    helperText="Enter the exact 40- or 64-character lowercase commit SHA. A branch name or abbreviated SHA is not accepted."
                     value={testedSourceCommit}
-                    aria-label="Commit to validate"
+                    slotProps={{
+                      htmlInput: { "aria-label": "Commit to validate", spellCheck: false },
+                    }}
                     placeholder="Full commit SHA"
                     autoComplete="off"
-                    spellCheck={false}
                     onChange={(event) => {
                       setTestedSourceCommit(event.target.value);
                       setSourceExecutionAuthorized(false);
                       setError(null);
                     }}
                   />
-                </Form.Item>
-                <Form.Item style={{ marginBottom: 0 }}>
-                  <Checkbox
-                    checked={sourceExecutionAuthorized}
-                    onChange={(event) => setSourceExecutionAuthorized(event.target.checked)}
-                  >
-                    I authorize this operation to execute code at the specified commit.
-                  </Checkbox>
-                  <div>
-                    <Typography.Text type="secondary">
+                  <Box>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={sourceExecutionAuthorized}
+                          disabled={saving}
+                          onChange={(event) => setSourceExecutionAuthorized(event.target.checked)}
+                        />
+                      }
+                      label="I authorize this operation to execute code at the specified commit."
+                    />
+                    <Typography variant="body2" color="text.secondary">
                       Issue validation can run repository setup, build, test, and application
                       commands on a Worker. This is execution authorization for this commit.
-                    </Typography.Text>
-                  </div>
-                </Form.Item>
-              </Form>
-            )}
-            {workItem.kind === "issue" && !needsSource && profilesReady && selection.length > 0 && (
-              <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                Issue triage reads the report without authorizing repository code execution. Select
-                an issue validation profile to validate a specific commit.
-              </Typography.Paragraph>
-            )}
-          </>
-        )}
-        {error && (
-          <Alert type="error" showIcon title={error.title} description={error.description} />
-        )}
-      </Space>
-    </Modal>
+                    </Typography>
+                  </Box>
+                </Stack>
+              )}
+              {workItem.kind === "issue" &&
+                !needsSource &&
+                profilesReady &&
+                selection.length > 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    Issue triage reads the report without authorizing repository code execution.
+                    Select an issue validation profile to validate a specific commit.
+                  </Typography>
+                )}
+            </>
+          )}
+          {error && (
+            <Alert severity="error">
+              <AlertTitle>{error.title}</AlertTitle>
+              {error.description}
+            </Alert>
+          )}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 3, pt: 1, gap: 1 }}>
+        <Button disabled={saving} onClick={close}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          onClick={() => void create()}
+          loading={saving}
+          disabled={
+            !access.can("review") ||
+            Boolean(prerequisite) ||
+            !profilesReady ||
+            Boolean(selectionError) ||
+            selection.length === 0 ||
+            (reproduction !== undefined && runs.mode === "sample") ||
+            (needsSource && (!sourceIsValid || !sourceExecutionAuthorized))
+          }
+        >
+          Create review run
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 

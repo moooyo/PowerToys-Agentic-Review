@@ -1,36 +1,38 @@
 # Agentic Review Dashboard
 
-This application is the React 19 and Ant Design Pro operations console for
-Agentic Review. Umi Max owns routing and application composition, while the
-layout plugin provides the shared navigation shell.
+This application is the React 19 and Material UI 9 operations console for
+Agentic Review. Vite builds the application, React Router owns navigation, and
+the shared Material shell provides repository scope and operator session controls.
 
 The standalone `typecheck` and `build` scripts first build the shared contracts
 package. The dashboard consumes its package-exported declarations instead of
 redirecting the TypeScript project reference to source files; this preserves
 TypeBox's ESM symbol identity across the package boundary.
-Development excludes the workspace contracts package from MFSU dependency
-prebundling so new exported schemas are not hidden by an unchanged package version.
+Run `pnpm --filter @agentic-review/dashboard dev` after building the contracts
+package. The development server binds to `127.0.0.1:8000` and uses sample adapters.
 
 ## Interface design
 
-The interface follows the [Ant Design specification](https://ant.design/docs/spec/introduce-cn).
-Use the default Ant Design theme and native components for controls, status,
-tabs, cards, and structured data. Product CSS handles layout and content
-wrapping without redefining each component's visual system.
+The interface uses [Material UI](https://mui.com/material-ui/) components and
+Material Design interaction patterns. Native controls, tabs, dialogs, tables,
+and typed forms share the theme in `src/theme.tsx`; product CSS handles layout
+and content wrapping. There is no compatibility layer for the previous UI framework.
 
-The [layout](https://ant.design/docs/spec/layout-cn) uses an 8px spacing grid,
-24px desktop page gutters, and 16px mobile gutters. The
-[type system](https://ant.design/docs/spec/font-cn) uses system fonts and
-14px body text with 22px line height. The light navigation and white content
-surfaces use neutral grays; standard blue identifies actions and selections.
-Functional colors retain their standard status meanings.
+The interface follows Material 3's baseline color roles, typography, and geometry.
+A full-width app bar and standard light navigation drawer use tonal surfaces;
+purple identifies actions and selection. Locally bundled Roboto uses regular and
+medium weights, with Roboto Mono for identifiers and code. Buttons, chips, form
+controls, and dialogs share the Material scale. Page gutters are 24px on desktop
+and 16px on mobile. Light and dark themes preserve semantic colors and keyboard focus.
 
-New primary pages use `components/PageHeader` and the `--app-*` aliases in
-`src/global.css`. Following the [data-list guidance](https://ant.design/docs/spec/data-list-cn),
-pull requests and issues have separate lists, while Jobs and Workers use
-tables for comparison. Detail drawers group results, validation, and execution
-using native tabs and descriptions. Result counts come from adapter responses,
-never inferred from the current page of records.
+Primary pages use `components/PageHeader` and the `--app-*` aliases in
+`src/global.css`. Pull requests and issues use a single Material list with a
+filled search bar, progress filter, and trailing actions. Rows open the full
+detail drawer; request context appears in an expansion panel. Jobs and Workers
+use tables for comparison. Detail drawers group results, validation, and execution using native
+tabs and semantic description lists. Result counts come from adapter responses,
+never inferred from the current page of records. See the
+[Material Design reset](../../docs/design/2026-09-10-material-design-reset.md).
 
 ## Data boundary
 
@@ -93,10 +95,10 @@ Token rotation sends the roster record's `updatedAt` value as a compare-and-set
 precondition. A stale dashboard therefore cannot replace a token created by a
 newer concurrent rotation.
 
-Approval, publication, legacy work-item requeue, legacy job cancellation, and worker drain APIs are not
-part of the current Server milestone. The legacy production adapter rejects those
-operations with `ReviewControlUnsupportedOperationError`; it never reports a
-fixture mutation as successful.
+The legacy `ReviewControlAdapter` approval, publication, work-item requeue, job cancellation,
+and worker drain methods remain unsupported in HTTP mode and raise
+`ReviewControlUnsupportedOperationError`. Connected decision and publication workflows use
+their dedicated adapters. Unsupported legacy calls never report fixture mutations as successful.
 
 ## Workspaces and routes
 
@@ -121,11 +123,11 @@ The `repositoryId` query parameter preserves repository selection across navigat
 Pull requests, issues, and jobs apply it to server-side queries and counts; changing
 the selection resets pagination. Invalid or unknown selections display an error
 instead of silently opening an all-repository view.
-The `/approvals` and `/publications` prototype routes remain available for
-development but are hidden from primary navigation; their mutations remain
-unsupported in production. Development previews are labeled as sample data.
-No Ant Design Pro demo dashboard, mock server, account center, or analytics
-sample is included.
+The `/approvals` prototype remains hidden from primary navigation. The
+`/publications` page exposes the connected publication outbox and its permission
+checks. Development previews are labeled as sample data; operations without a
+sample adapter explicitly require a connected server.
+No framework demo dashboard, mock server, account center, or analytics sample is included.
 
 ## Versioned configuration
 

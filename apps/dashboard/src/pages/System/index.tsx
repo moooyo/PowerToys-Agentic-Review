@@ -1,127 +1,157 @@
-import { ReloadOutlined } from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Card,
-  Col,
-  Collapse,
-  Descriptions,
   Divider,
-  Row,
+  List,
+  ListItem,
+  ListItemText,
   Skeleton,
-  Statistic,
-  Table,
+  Stack,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
 import { OperatorAccessGate, useOperatorAccess } from "@/components/OperatorAccess";
 import { PageHeader } from "@/components/PageHeader";
 import { PlatformSchedulingPolicy } from "@/components/SchedulingPolicy";
 import { StatusTag } from "@/components/StatusTag";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import {
   type HealthComponent,
   reviewControl,
   type SystemSnapshot,
 } from "@/services/review-control";
+import { useOperatorSession } from "@/state/session";
 import "./index.css";
 
 function ComponentHealth({ health }: { health: HealthComponent[] }) {
   const needsAttention = health.some((component) => component.status !== "healthy");
 
   return (
-    <Card className="system-panel" title="Component health">
-      <Typography.Paragraph type="secondary">
+    <Box component="section" className="system-panel" aria-label="Component health">
+      <Typography component="h2" variant="h6" sx={{ mb: 0.5 }}>
+        Component health
+      </Typography>
+      <Typography color="text.secondary" variant="body2" sx={{ mb: 2 }}>
         The latest check from each control plane component.
-      </Typography.Paragraph>
+      </Typography>
       {needsAttention && (
-        <Alert
-          className="system-health__notice"
-          title="One or more components require attention. Review the details below."
-          showIcon
-          type="warning"
-        />
+        <Alert className="system-health__notice" severity="warning">
+          One or more components require attention. Review the details below.
+        </Alert>
       )}
-      <Table<HealthComponent>
+      <DataTable<HealthComponent>
         columns={[
-          { title: "Component", dataIndex: "name", width: 176 },
           {
-            title: "Status",
-            dataIndex: "status",
-            width: 112,
-            render: (status: HealthComponent["status"]) => <StatusTag status={status} />,
+            id: "component",
+            label: "Component",
+            width: 176,
+            render: (component) => component.name,
           },
           {
-            title: "Details",
-            dataIndex: "summary",
-            render: (summary: string, component: HealthComponent) => (
+            id: "status",
+            label: "Status",
+            width: 112,
+            render: (component) => <StatusTag status={component.status} />,
+          },
+          {
+            id: "details",
+            label: "Details",
+            minWidth: 240,
+            render: (component) => (
               <div>
-                <span className="system-health__summary">{summary}</span>
-                <Typography.Text className="system-health__checked" type="secondary">
+                <span className="system-health__summary">{component.summary}</span>
+                <Typography
+                  className="system-health__checked"
+                  color="text.secondary"
+                  variant="body2"
+                >
                   Last checked{" "}
                   <time dateTime={component.checkedAt}>
                     {new Date(component.checkedAt).toLocaleString()}
                   </time>
-                </Typography.Text>
+                </Typography>
               </div>
             ),
           },
         ]}
-        dataSource={health}
-        locale={{ emptyText: "No component health checks were returned." }}
-        pagination={false}
-        rowKey="id"
-        scroll={{ x: 480 }}
+        rows={health}
+        emptyTitle="No component health checks were returned."
+        getRowId={(component) => component.id}
+        ariaLabel="Component health"
       />
-    </Card>
+    </Box>
   );
 }
 
 function ProcessingActivity({ snapshot }: { snapshot: SystemSnapshot }) {
+  const activity = [
+    {
+      label: "Active workers",
+      value: snapshot.activeWorkers,
+      description: "Online or draining",
+    },
+    {
+      label: "Active leases",
+      value: snapshot.activeLeases,
+      description: "Leased or running attempts",
+    },
+    {
+      label: "Awaiting admission",
+      value: snapshot.awaitingAdmissionJobs,
+      description: "Saved jobs waiting to enter the queue",
+    },
+    {
+      label: "Queued jobs",
+      value: snapshot.queuedJobs,
+      description: "Admitted jobs waiting to start or retry",
+    },
+    {
+      label: "Requests awaiting prerequisites",
+      value: snapshot.pendingValidationRequests,
+      description: "Pending validation requests with no job",
+    },
+  ];
+
   return (
-    <Card className="system-panel" title="Processing activity">
-      <Typography.Paragraph type="secondary">Current execution capacity.</Typography.Paragraph>
-      <Row gutter={[24, 24]}>
-        <Col span={12}>
-          <Statistic title="Active workers" value={snapshot.activeWorkers} />
-          <Typography.Text type="secondary">Online or draining</Typography.Text>
-        </Col>
-        <Col span={12}>
-          <Statistic title="Active leases" value={snapshot.activeLeases} />
-          <Typography.Text type="secondary">Leased or running attempts</Typography.Text>
-        </Col>
-      </Row>
-      <Divider />
-      <Row gutter={[24, 24]}>
-        <Col span={8}>
-          <Statistic title="Awaiting admission" value={snapshot.awaitingAdmissionJobs} />
-          <Typography.Text type="secondary">Saved jobs waiting to enter the queue</Typography.Text>
-        </Col>
-        <Col span={8}>
-          <Statistic title="Queued jobs" value={snapshot.queuedJobs} />
-          <Typography.Text type="secondary">
-            Admitted jobs waiting to start or retry
-          </Typography.Text>
-        </Col>
-        <Col span={8}>
-          <Statistic
-            title="Requests awaiting prerequisites"
-            value={snapshot.pendingValidationRequests}
-          />
-          <Typography.Text type="secondary">
-            Pending validation requests with no job
-          </Typography.Text>
-        </Col>
-      </Row>
-      <Divider />
-      <Descriptions
-        column={1}
-        layout="vertical"
+    <Box component="section" className="system-panel" aria-label="Processing activity">
+      <Typography component="h2" variant="h6" sx={{ mb: 0.5 }}>
+        Processing activity
+      </Typography>
+      <Typography color="text.secondary" variant="body2" sx={{ mb: 2 }}>
+        Current execution capacity.
+      </Typography>
+      <List disablePadding aria-label="Current execution capacity">
+        {activity.map((item) => (
+          <ListItem key={item.label} disableGutters divider>
+            <ListItemText
+              primary={item.label}
+              secondary={item.description}
+              slotProps={{
+                primary: { variant: "body1", sx: { fontWeight: 500 } },
+                secondary: { variant: "body2" },
+              }}
+            />
+            <Typography variant="h6" sx={{ ml: 3, fontVariantNumeric: "tabular-nums" }}>
+              {item.value}
+            </Typography>
+          </ListItem>
+        ))}
+      </List>
+      <Divider sx={{ my: 2 }} />
+      <DetailsGrid
+        columns={1}
         items={[
           {
             key: "oldest-pending",
             label: "Oldest job awaiting admission",
-            children: snapshot.oldestAwaitingAdmissionAt ? (
+            value: snapshot.oldestAwaitingAdmissionAt ? (
               <time dateTime={snapshot.oldestAwaitingAdmissionAt}>
                 {new Date(snapshot.oldestAwaitingAdmissionAt).toLocaleString()}
               </time>
@@ -132,7 +162,7 @@ function ProcessingActivity({ snapshot }: { snapshot: SystemSnapshot }) {
           {
             key: "oldest-queued",
             label: "Oldest queued job",
-            children: snapshot.oldestQueuedAt ? (
+            value: snapshot.oldestQueuedAt ? (
               <time dateTime={snapshot.oldestQueuedAt}>
                 {new Date(snapshot.oldestQueuedAt).toLocaleString()}
               </time>
@@ -142,63 +172,62 @@ function ProcessingActivity({ snapshot }: { snapshot: SystemSnapshot }) {
           },
         ]}
       />
-      <Typography.Text type="secondary">
+      <Typography color="text.secondary" variant="body2" component="p" sx={{ mb: 0, mt: 2 }}>
         Creation time of the oldest job in each waiting group. Active and completed jobs are
         excluded.
-      </Typography.Text>
-    </Card>
+      </Typography>
+    </Box>
   );
 }
 
 function RuntimeDetails({ snapshot }: { snapshot: SystemSnapshot }) {
   return (
-    <Collapse
-      items={[
-        {
-          key: "runtime",
-          label: "Runtime details",
-          children: (
-            <>
-              <Typography.Paragraph type="secondary">
-                Versions and database storage
-              </Typography.Paragraph>
-              <Descriptions
-                bordered
-                column={{ xs: 1, sm: 2, lg: 3, xl: 5 }}
-                layout="vertical"
-                items={[
-                  {
-                    key: "server-version",
-                    label: "Server version",
-                    children: <Typography.Text code>{snapshot.serverVersion}</Typography.Text>,
-                  },
-                  {
-                    key: "protocol-version",
-                    label: "Protocol version",
-                    children: <Typography.Text code>{snapshot.protocolVersion}</Typography.Text>,
-                  },
-                  {
-                    key: "node-version",
-                    label: "Node.js",
-                    children: <Typography.Text code>{snapshot.nodeVersion}</Typography.Text>,
-                  },
-                  {
-                    key: "sqlite-version",
-                    label: "SQLite",
-                    children: <Typography.Text code>{snapshot.sqliteVersion}</Typography.Text>,
-                  },
-                  {
-                    key: "database-size",
-                    label: "Database size",
-                    children: `${snapshot.databaseSizeMb.toFixed(1)} MiB`,
-                  },
-                ]}
-              />
-            </>
-          ),
-        },
-      ]}
-    />
+    <Accordion elevation={0} disableGutters sx={{ bgcolor: "background.paper" }}>
+      <AccordionSummary
+        expandIcon={<ExpandMoreIcon />}
+        id="system-runtime-summary"
+        aria-controls="system-runtime-details"
+      >
+        <Typography component="h2" variant="subtitle1" sx={{ fontWeight: 500 }}>
+          Runtime details
+        </Typography>
+      </AccordionSummary>
+      <AccordionDetails>
+        <Typography color="text.secondary" variant="body2" sx={{ mb: 2 }}>
+          Versions and database storage
+        </Typography>
+        <DetailsGrid
+          columns={3}
+          items={[
+            {
+              key: "server-version",
+              label: "Server version",
+              value: <code>{snapshot.serverVersion}</code>,
+            },
+            {
+              key: "protocol-version",
+              label: "Protocol version",
+              value: <code>{snapshot.protocolVersion}</code>,
+            },
+            {
+              key: "node-version",
+              label: "Node.js",
+              value: <code>{snapshot.nodeVersion}</code>,
+            },
+            {
+              key: "sqlite-version",
+              label: "SQLite",
+              value: <code>{snapshot.sqliteVersion}</code>,
+            },
+            {
+              key: "database-size",
+              label: "Database size",
+              value: `${snapshot.databaseSizeMb.toFixed(1)} MiB`,
+            },
+          ]}
+        />
+      </AccordionDetails>
+    </Accordion>
   );
 }
 
@@ -212,7 +241,7 @@ export default function SystemPage() {
 
 function SystemContent() {
   const access = useOperatorAccess();
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const snapshotQuery = useQuery({
     queryKey: ["system-snapshot", ...access.identityKey, initialState?.authenticationEpoch ?? 0],
     queryFn: async ({ signal }) => {
@@ -241,8 +270,9 @@ function SystemContent() {
           <div className="system-page__actions">
             <span className="system-page__refresh-note">Updates every 30 seconds</span>
             <Button
-              icon={<ReloadOutlined />}
+              startIcon={<RefreshIcon />}
               loading={snapshotQuery.isFetching}
+              variant="outlined"
               onClick={() => snapshotQuery.refetch()}
             >
               Refresh
@@ -252,30 +282,29 @@ function SystemContent() {
       />
 
       {snapshotQuery.isLoading && (
-        <Card className="system-panel" role="status">
-          <Typography.Paragraph type="secondary">Loading system snapshot...</Typography.Paragraph>
-          <Skeleton active paragraph={{ rows: 5 }} />
-        </Card>
+        <Stack className="system-panel" role="status" spacing={2}>
+          <Typography color="text.secondary" variant="body1">
+            Loading system snapshot...
+          </Typography>
+          <Stack spacing={1}>
+            {["components", "status", "details", "activity", "runtime"].map((section) => (
+              <Skeleton key={section} variant="rounded" height={48} />
+            ))}
+          </Stack>
+        </Stack>
       )}
       {snapshotQuery.isError && (
-        <Alert
-          className="system-page__error"
-          description="The control plane did not return a current system snapshot. Use Refresh to try again."
-          title="System data is unavailable"
-          showIcon
-          type="error"
-        />
+        <Alert className="system-page__error" severity="error">
+          <AlertTitle>System data is unavailable</AlertTitle>
+          The control plane did not return a current system snapshot. Use Refresh to try again.
+        </Alert>
       )}
       {snapshot && (
         <div className="system-page__content">
-          <Row gutter={[24, 24]}>
-            <Col xs={24} xl={16}>
-              <ComponentHealth health={snapshot.health} />
-            </Col>
-            <Col xs={24} xl={8}>
-              <ProcessingActivity snapshot={snapshot} />
-            </Col>
-          </Row>
+          <div className="system-page__overview">
+            <ComponentHealth health={snapshot.health} />
+            <ProcessingActivity snapshot={snapshot} />
+          </div>
           <RuntimeDetails snapshot={snapshot} />
           {snapshotQuery.dataUpdatedAt > 0 && (
             <p className="system-page__last-refreshed">

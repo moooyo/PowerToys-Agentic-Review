@@ -1,18 +1,22 @@
 import type * as C from "@agentic-review/contracts";
+import CloseIcon from "@mui/icons-material/Close";
 import {
   Alert,
+  AlertTitle,
   Button,
   Card,
-  Descriptions,
+  CardContent,
+  CardHeader,
+  Chip,
   Drawer,
+  IconButton,
   Skeleton,
-  Space,
-  Table,
-  Tag,
+  Stack,
   Typography,
-} from "antd";
+} from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
 import { CliExecutionDetails } from "@/components/CliExecutionDetails";
+import { DetailsGrid } from "@/components/ui";
 import {
   createHttpEvaluationAdjudicationAdapter,
   type EvaluationAdjudicationAdapter,
@@ -31,9 +35,9 @@ import {
   currentEvidenceLabel,
 } from "./cell-result-state";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { CopyValue, EvaluationTable } from "./Display";
 import { EvaluationEvidence } from "./EvaluationEvidence";
 import { errorMessage } from "./state";
-
 export function CellResultContent({
   result,
   evidenceAdapter,
@@ -47,45 +51,43 @@ export function CellResultContent({
   const evidenceIds = [...new Set(result.report.checks.flatMap((check) => check.evidenceIds))];
   return (
     <div className="evaluation-cell-result">
-      <Alert
-        type="info"
-        showIcon
-        title="Recorded execution and model advice"
-        description="Check outcomes and model recommendations do not approve a pull request. Expected check values are execution assertions, not the sample set's assessment labels."
-      />
-      <Descriptions
-        size="small"
-        column={2}
+      <Alert severity={"info"}>
+        <AlertTitle>{"Recorded execution and model advice"}</AlertTitle>
+        {
+          "Check outcomes and model recommendations do not approve a pull request. Expected check values are execution assertions, not the sample set's assessment labels."
+        }
+      </Alert>
+      <DetailsGrid
         items={[
           {
             key: "result",
             label: "Result",
-            children: <Typography.Text copyable>{result.resultId}</Typography.Text>,
+            value: <CopyValue value={result.resultId} />,
           },
           {
             key: "arm",
             label: "Arm",
-            children: `${armLabels[result.arm]} · trial ${result.trial}`,
+            value: `${armLabels[result.arm]} · trial ${result.trial}`,
           },
           {
             key: "source",
             label: "Source state",
-            children: <Tag>{result.report.sourceState}</Tag>,
+            value: <Chip label={result.report.sourceState} />,
           },
           {
             key: "evidence",
             label: "Evidence",
-            children: <Tag>{currentEvidenceLabel(result)}</Tag>,
+            value: <Chip label={currentEvidenceLabel(result)} />,
           },
           {
             key: "revision",
             label: "Frozen revision",
-            children: <span className="evaluation-meta">{result.revisionKey}</span>,
+            value: <span className="evaluation-meta">{result.revisionKey}</span>,
           },
           {
             key: "attempt",
             label: "Job attempt",
-            children: (
+            value: (
               <span className="evaluation-meta">
                 {result.jobId} · {result.runAttemptId}
               </span>
@@ -94,258 +96,355 @@ export function CellResultContent({
           {
             key: "profile",
             label: "Profile version",
-            children: <span className="evaluation-meta">{result.profileVersionId}</span>,
+            value: <span className="evaluation-meta">{result.profileVersionId}</span>,
           },
           {
             key: "prompt",
             label: "Prompt version",
-            children: <span className="evaluation-meta">{result.promptVersionId}</span>,
+            value: <span className="evaluation-meta">{result.promptVersionId}</span>,
           },
-          { key: "cleanup", label: "Cleanup", children: result.execution.cleanupState },
-          { key: "created", label: "Recorded", children: result.createdAt },
+          {
+            key: "cleanup",
+            label: "Cleanup",
+            value: result.execution.cleanupState,
+          },
+          {
+            key: "created",
+            label: "Recorded",
+            value: result.createdAt,
+          },
         ]}
+        columns={2}
       />
-      <Typography.Paragraph>{result.report.summary}</Typography.Paragraph>
+      <Typography component="p" variant="body2">
+        {result.report.summary}
+      </Typography>
       {result.report.workItemKind === "issue" ? (
         <p>Runner reproduction conclusion: {result.report.reproductionConclusion}</p>
       ) : null}
-      <Typography.Title level={5}>Checks</Typography.Title>
-      <Table<C.ValidationCheckResult>
-        rowKey="id"
-        size="small"
-        dataSource={result.report.checks}
-        pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
-        scroll={{ x: 700 }}
+      <Typography component="h5" variant="subtitle1">
+        Checks
+      </Typography>
+      <EvaluationTable<C.ValidationCheckResult>
+        rows={result.report.checks}
+        getRowId={(row) => row.id}
         columns={[
           {
-            title: "Check",
-            key: "check",
-            render: (_, check) => (
-              <div>
-                <strong>{check.name}</strong>
-                <span className="evaluation-meta">
-                  {check.id} · {check.kind} · {check.source} ·{" "}
-                  {check.required ? "Required" : "Optional"}
-                </span>
-                <p>{check.summary}</p>
-              </div>
-            ),
-          },
-          { title: "Outcome", dataIndex: "outcome", key: "outcome", width: 105 },
-          {
-            title: "Expected",
-            key: "expected",
-            render: (_, check) => (
-              <span className="evaluation-result-text">{check.expected ?? "Not recorded"}</span>
-            ),
+            id: "check",
+            label: "Check",
+            render: (check) => {
+              return (
+                <div>
+                  <strong>{check.name}</strong>
+                  <span className="evaluation-meta">
+                    {check.id} · {check.kind} · {check.source} ·{" "}
+                    {check.required ? "Required" : "Optional"}
+                  </span>
+                  <p>{check.summary}</p>
+                </div>
+              );
+            },
           },
           {
-            title: "Actual",
-            key: "actual",
-            render: (_, check) => (
-              <span className="evaluation-result-text">{check.actual ?? "Not recorded"}</span>
-            ),
+            id: "outcome",
+            label: "Outcome",
+            width: 105,
+            render: (row) => row.outcome,
           },
           {
-            title: "Evidence IDs",
-            key: "evidence",
-            render: (_, check) =>
-              check.evidenceIds.map((id) => (
+            id: "expected",
+            label: "Expected",
+            render: (check) => {
+              return (
+                <span className="evaluation-result-text">{check.expected ?? "Not recorded"}</span>
+              );
+            },
+          },
+          {
+            id: "actual",
+            label: "Actual",
+            render: (check) => {
+              return (
+                <span className="evaluation-result-text">{check.actual ?? "Not recorded"}</span>
+              );
+            },
+          },
+          {
+            id: "evidence",
+            label: "Evidence IDs",
+            render: (check) => {
+              return check.evidenceIds.map((id) => (
                 <span key={id} className="evaluation-meta">
                   {id}
                 </span>
-              )),
+              ));
+            },
           },
         ]}
+        ariaLabel="Evaluation records"
+        pageSize={10}
       />
-      <Typography.Title level={5}>Execution diagnostics</Typography.Title>
+      <Typography component="h5" variant="subtitle1">
+        Execution diagnostics
+      </Typography>
       {result.execution.blockers.length ? (
-        <Table<C.ValidationLifecycleBlocker & { ordinal: number }>
-          rowKey="ordinal"
-          size="small"
-          dataSource={result.execution.blockers.map((blocker, ordinal) => ({
+        <EvaluationTable<
+          C.ValidationLifecycleBlocker & {
+            ordinal: number;
+          }
+        >
+          rows={result.execution.blockers.map((blocker, ordinal) => ({
             ...blocker,
             ordinal,
           }))}
-          pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
+          getRowId={(row) => row.ordinal}
           columns={[
-            { title: "Phase", dataIndex: "phase", key: "phase" },
-            { title: "Code", dataIndex: "code", key: "code" },
-            { title: "Blocker", dataIndex: "message", key: "message" },
+            {
+              id: "phase",
+              label: "Phase",
+              render: (row) => row.phase,
+            },
+            {
+              id: "code",
+              label: "Code",
+              render: (row) => row.code,
+            },
+            {
+              id: "message",
+              label: "Blocker",
+              render: (row) => row.message,
+            },
           ]}
+          ariaLabel="Evaluation records"
+          pageSize={10}
         />
       ) : (
-        <Typography.Text type="secondary">No execution blockers were recorded.</Typography.Text>
+        <Typography component="span" variant="body2" color={"text.secondary"}>
+          No execution blockers were recorded.
+        </Typography>
       )}
-      <Table<C.ValidationStepDiagnostic & { ordinal: number }>
-        rowKey="ordinal"
-        size="small"
-        dataSource={result.execution.diagnostics.map((diagnostic, ordinal) => ({
+      <EvaluationTable<
+        C.ValidationStepDiagnostic & {
+          ordinal: number;
+        }
+      >
+        rows={result.execution.diagnostics.map((diagnostic, ordinal) => ({
           ...diagnostic,
           ordinal,
         }))}
-        pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
+        getRowId={(row) => row.ordinal}
         columns={[
           {
-            title: "Step",
-            key: "step",
-            render: (_, diagnostic) => (
-              <span className="evaluation-meta">
-                {diagnostic.phase} · {diagnostic.stepId}
-              </span>
-            ),
+            id: "step",
+            label: "Step",
+            render: (diagnostic) => {
+              return (
+                <span className="evaluation-meta">
+                  {diagnostic.phase} · {diagnostic.stepId}
+                </span>
+              );
+            },
           },
           {
-            title: "Outcome",
-            key: "outcome",
-            render: (_, diagnostic) =>
-              `${diagnostic.outcome} · exit ${diagnostic.exitCode ?? "not recorded"}`,
+            id: "outcome",
+            label: "Outcome",
+            render: (diagnostic) => {
+              return `${diagnostic.outcome} · exit ${diagnostic.exitCode ?? "not recorded"}`;
+            },
           },
           {
-            title: "Diagnostic",
-            key: "diagnostic",
-            render: (_, diagnostic) => (
-              <div>
-                <p>{diagnostic.summary}</p>
-                {diagnostic.stdout !== undefined ? (
-                  <pre className="evaluation-source-body">{diagnostic.stdout}</pre>
-                ) : null}
-                {diagnostic.stderr !== undefined ? (
-                  <pre className="evaluation-source-body">{diagnostic.stderr}</pre>
-                ) : null}
-              </div>
-            ),
+            id: "diagnostic",
+            label: "Diagnostic",
+            render: (diagnostic) => {
+              return (
+                <div>
+                  <p>{diagnostic.summary}</p>
+                  {diagnostic.stdout !== undefined ? (
+                    <pre className="evaluation-source-body">{diagnostic.stdout}</pre>
+                  ) : null}
+                  {diagnostic.stderr !== undefined ? (
+                    <pre className="evaluation-source-body">{diagnostic.stderr}</pre>
+                  ) : null}
+                </div>
+              );
+            },
           },
         ]}
+        ariaLabel="Evaluation records"
+        pageSize={10}
       />
-      <Card
-        size="small"
-        title="Model advice"
-        extra={<Tag>{result.modelRequirements.required ? model.state : "Not required"}</Tag>}
-      >
-        {!result.modelRequirements.required ? (
-          <Typography.Paragraph>
-            Model execution was not required for this cell. This is not a model failure.
-          </Typography.Paragraph>
-        ) : null}
-        {result.modelRequirements.required && model.error ? (
-          <Alert type="warning" title={model.error.code} description={model.error.message} />
-        ) : null}
-        <CliExecutionDetails execution={model.execution} />
-        {model.summary ? <Typography.Paragraph>{model.summary}</Typography.Paragraph> : null}
-        {model.recommendation ? <p>Model recommendation: {model.recommendation}</p> : null}
-        {model.reproductionConclusion ? (
-          <p>Model reproduction advice: {model.reproductionConclusion}</p>
-        ) : null}
-        {model.issueTriage ? (
-          <Descriptions
-            size="small"
-            column={1}
-            items={[
+      <Card variant="outlined">
+        <CardHeader
+          title={"Model advice"}
+          action={<Chip label={result.modelRequirements.required ? model.state : "Not required"} />}
+          slotProps={{
+            title: {
+              variant: "subtitle1",
+              component: "h3",
+            },
+          }}
+        />
+        <CardContent>
+          {!result.modelRequirements.required ? (
+            <Typography component="p" variant="body2">
+              Model execution was not required for this cell. This is not a model failure.
+            </Typography>
+          ) : null}
+          {result.modelRequirements.required && model.error ? (
+            <Alert severity={"warning"}>
+              <AlertTitle>{model.error.code}</AlertTitle>
+              {model.error.message}
+            </Alert>
+          ) : null}
+          <CliExecutionDetails execution={model.execution} />
+          {model.summary ? (
+            <Typography component="p" variant="body2">
+              {model.summary}
+            </Typography>
+          ) : null}
+          {model.recommendation ? <p>Model recommendation: {model.recommendation}</p> : null}
+          {model.reproductionConclusion ? (
+            <p>Model reproduction advice: {model.reproductionConclusion}</p>
+          ) : null}
+          {model.issueTriage ? (
+            <DetailsGrid
+              items={[
+                {
+                  key: "triage",
+                  label: "Triage",
+                  value: `${model.issueTriage.category} · priority ${model.issueTriage.priority} · confidence ${model.issueTriage.confidence}`,
+                },
+                {
+                  key: "labels",
+                  label: "Suggested labels",
+                  value: model.issueTriage.suggestedLabels.join(", ") || "None",
+                },
+                {
+                  key: "missing",
+                  label: "Missing information",
+                  value: model.issueTriage.missingInformation.join("; ") || "None",
+                },
+                {
+                  key: "duplicates",
+                  label: "Duplicate candidates",
+                  value:
+                    model.issueTriage.duplicateCandidates
+                      .map((entry) => JSON.stringify(entry))
+                      .join("; ") || "None",
+                },
+              ]}
+              columns={1}
+            />
+          ) : null}
+          <Typography component="h5" variant="subtitle1">
+            Findings
+          </Typography>
+          <EvaluationTable
+            rows={model.findings}
+            getRowId={(row) => row.ordinal}
+            columns={[
               {
-                key: "triage",
-                label: "Triage",
-                children: `${model.issueTriage.category} · priority ${model.issueTriage.priority} · confidence ${model.issueTriage.confidence}`,
+                id: "priority",
+                label: "Priority",
+                width: 80,
+                render: (row) => row.priority,
               },
               {
-                key: "labels",
-                label: "Suggested labels",
-                children: model.issueTriage.suggestedLabels.join(", ") || "None",
-              },
-              {
-                key: "missing",
-                label: "Missing information",
-                children: model.issueTriage.missingInformation.join("; ") || "None",
-              },
-              {
-                key: "duplicates",
-                label: "Duplicate candidates",
-                children:
-                  model.issueTriage.duplicateCandidates
-                    .map((entry) => JSON.stringify(entry))
-                    .join("; ") || "None",
+                id: "finding",
+                label: "Finding",
+                render: (finding) => {
+                  return (
+                    <div>
+                      <strong>{finding.title}</strong>
+                      <p className="evaluation-result-text">{finding.body}</p>
+                      <span className="evaluation-meta">
+                        {finding.findingId} · occurrence {finding.ordinal} ·{" "}
+                        {finding.path ?? "No file"}
+                        {finding.line ? `:${finding.line}` : ""}
+                      </span>
+                    </div>
+                  );
+                },
               },
             ]}
+            ariaLabel="Evaluation records"
+            pageSize={10}
           />
-        ) : null}
-        <Typography.Title level={5}>Findings</Typography.Title>
-        <Table
-          rowKey="ordinal"
-          size="small"
-          dataSource={model.findings}
-          pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
-          columns={[
-            { title: "Priority", dataIndex: "priority", key: "priority", width: 80 },
-            {
-              title: "Finding",
-              key: "finding",
-              render: (_, finding) => (
-                <div>
-                  <strong>{finding.title}</strong>
-                  <p className="evaluation-result-text">{finding.body}</p>
-                  <span className="evaluation-meta">
-                    {finding.findingId} · occurrence {finding.ordinal} · {finding.path ?? "No file"}
-                    {finding.line ? `:${finding.line}` : ""}
-                  </span>
-                </div>
-              ),
-            },
-          ]}
-        />
-        <Typography.Title level={5}>Observations</Typography.Title>
-        <Table<C.ValidationObservation & { ordinal: number }>
-          rowKey="ordinal"
-          size="small"
-          dataSource={model.observations.map((observation, ordinal) => ({
-            ...observation,
-            ordinal,
-          }))}
-          pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
-          columns={[
-            { title: "Priority", dataIndex: "priority", key: "priority", width: 80 },
-            {
-              title: "Observation",
-              key: "observation",
-              render: (_, observation) => (
-                <div>
-                  <strong>{observation.title}</strong>
-                  <p className="evaluation-result-text">{observation.body}</p>
-                  <span className="evaluation-meta">
-                    {observation.id} · {observation.path ?? "No file"}
-                    {observation.line ? `:${observation.line}` : ""}
-                  </span>
-                </div>
-              ),
-            },
-          ]}
-        />
+          <Typography component="h5" variant="subtitle1">
+            Observations
+          </Typography>
+          <EvaluationTable<
+            C.ValidationObservation & {
+              ordinal: number;
+            }
+          >
+            rows={model.observations.map((observation, ordinal) => ({
+              ...observation,
+              ordinal,
+            }))}
+            getRowId={(row) => row.ordinal}
+            columns={[
+              {
+                id: "priority",
+                label: "Priority",
+                width: 80,
+                render: (row) => row.priority,
+              },
+              {
+                id: "observation",
+                label: "Observation",
+                render: (observation) => {
+                  return (
+                    <div>
+                      <strong>{observation.title}</strong>
+                      <p className="evaluation-result-text">{observation.body}</p>
+                      <span className="evaluation-meta">
+                        {observation.id} · {observation.path ?? "No file"}
+                        {observation.line ? `:${observation.line}` : ""}
+                      </span>
+                    </div>
+                  );
+                },
+              },
+            ]}
+            ariaLabel="Evaluation records"
+            pageSize={10}
+          />
+        </CardContent>
       </Card>
       {evidenceAdapter ? (
         <EvaluationEvidence result={result} adapter={evidenceAdapter} active={active} />
       ) : (
         <>
-          <Typography.Title level={5}>Evidence references</Typography.Title>
+          <Typography component="h5" variant="subtitle1">
+            Evidence references
+          </Typography>
           <p className="evaluation-meta">
             These are the result's recorded evidence IDs. Evaluation evidence download is not
             available in this view; no file availability is inferred from an ID.
           </p>
           {evidenceIds.length ? (
-            <Space orientation="vertical">
+            <Stack
+              direction="column"
+              spacing={1.5}
+              sx={{
+                minWidth: 0,
+              }}
+            >
               {evidenceIds.map((id) => (
-                <Typography.Text key={id} copyable>
-                  {id}
-                </Typography.Text>
+                <CopyValue key={id} value={id} />
               ))}
-            </Space>
+            </Stack>
           ) : (
-            <Typography.Text type="secondary">No evidence IDs were recorded.</Typography.Text>
+            <Typography component="span" variant="body2" color={"text.secondary"}>
+              No evidence IDs were recorded.
+            </Typography>
           )}
         </>
       )}
     </div>
   );
 }
-
 export interface RetainedAdjudicationResult {
   identity: string;
   result: C.EvaluationCellResultV1;
@@ -356,10 +455,13 @@ export function retainAdjudicationResult(
   verified: C.EvaluationCellResultV1 | undefined,
 ): RetainedAdjudicationResult | null {
   if (identity === null) return previous;
-  if (verified) return { identity, result: verified };
+  if (verified)
+    return {
+      identity,
+      result: verified,
+    };
   return previous?.identity === identity ? previous : null;
 }
-
 export function CellResultDrawer({
   api,
   binding,
@@ -421,31 +523,59 @@ export function CellResultDrawer({
   };
   return (
     <Drawer
-      title={
-        binding
-          ? `${armLabels[binding.expected.arm]} result · ${binding.caseTitle}`
-          : "Evaluation result"
-      }
       open={active && page.readable && binding !== null}
       onClose={close}
-      getContainer={false}
-      rootStyle={{ position: "fixed" }}
-      styles={{ wrapper: { maxWidth: "96vw" } }}
-      size={1100}
-      extra={
-        <Button
-          disabled={!active || !page.readable || !binding}
-          loading={query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          Refresh evidence
-        </Button>
-      }
+      anchor="right"
+      sx={{ visibility: active && page.readable ? "visible" : "hidden" }}
+      slotProps={{
+        paper: {
+          sx: {
+            width: 1100,
+            maxWidth: "100vw",
+            p: { xs: 2, sm: 3 },
+          },
+          role: "dialog",
+          "aria-label": "Evaluation result",
+        },
+      }}
     >
+      <Stack
+        direction="row"
+        spacing={2}
+        sx={{
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 2,
+          mb: 3,
+        }}
+      >
+        <Typography variant="h5" component="h2" sx={{ flex: 1, minWidth: 200 }}>
+          {binding
+            ? `${armLabels[binding.expected.arm]} result · ${binding.caseTitle}`
+            : "Evaluation result"}
+        </Typography>
+        {
+          <Button
+            disabled={!active || !page.readable || !binding}
+            loading={query.isFetching}
+            onClick={() => void query.refetch()}
+            variant="outlined"
+          >
+            Refresh evidence
+          </Button>
+        }
+        <IconButton aria-label="Close evaluation result" onClick={close}>
+          <CloseIcon />
+        </IconButton>
+      </Stack>
       {query.isFetching || query.isPending ? (
-        <Skeleton active paragraph={{ rows: 6 }} />
+        <Skeleton variant="rounded" height={168} aria-label="Loading evaluation content" />
       ) : query.error ? (
-        <Alert type="error" title="Result unavailable" description={errorMessage(query.error)} />
+        <Alert severity={"error"}>
+          <AlertTitle>{"Result unavailable"}</AlertTitle>
+          {errorMessage(query.error)}
+        </Alert>
       ) : active && binding && query.data ? (
         <CellResultContent
           result={query.data}

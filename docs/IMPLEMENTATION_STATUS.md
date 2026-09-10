@@ -21,11 +21,21 @@ authorized real CLI probes and controlled-fixture workflow acceptance below are 
 
 ## Current branch verification
 
-The remote `main` baseline `bdfa577` passed all three jobs in CI run **34432088155**.
-Local `main` is at `bd4def6`; its M41 publication-helper and documentation changes have not been
-pushed. M42's installation/build/test receipts below are scoped acceptance evidence, not a new full
-project CI run. No GitHub write or authentication-file read occurred in M42. The current external
-write scope is limited to the specified `moooyo/PowerToys` fork; pushing this project is not authorized.
+The dashboard now uses Material UI 9, Vite, React Router, and the
+[Material 3 presentation](./design/2026-09-10-material-design-reset.md). Its final verification on
+`test-env` passed TypeScript checking, the production build, and all **3,603 tests in 116 files**.
+Biome reported zero errors, with 68 existing warnings and eight informational suggestions.
+Browser verification covered all 11 primary routes and 19 desktop/mobile interaction states.
+These dashboard checks are separate from a full project CI run.
+
+The earlier `main` baseline `bdfa577` passed all three jobs in CI run **34432088155**.
+The subsequent `bd4def6` and `db15c1b` commits retain M41 publication-helper changes and M42
+installation/build/test receipts. Those receipts remain scoped acceptance evidence, not a new
+full project CI run. No GitHub write or authentication-file read occurred in M42.
+
+The user explicitly authorized committing the dashboard changes, merging them into `main`, and
+pushing this project's branch, including the two earlier local commits. This delivery approval
+does not authorize repository PR/issue/comment operations; their separately scoped rules remain.
 
 ### Retained M40 CI evidence
 

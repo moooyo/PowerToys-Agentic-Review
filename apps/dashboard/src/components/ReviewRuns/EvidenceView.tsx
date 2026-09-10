@@ -1,6 +1,29 @@
 import type { EvidenceAssetManifest } from "@agentic-review/contracts";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
+  AlertTitle,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TablePagination,
+  TableRow,
+  Typography,
+} from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Button, Image, Modal, Space, Table, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { type EvidenceScope, evidence } from "@/services/evidence";
 import { ReviewControlError, ReviewControlHttpError } from "@/services/review-control/errors";
@@ -66,6 +89,8 @@ export function EvidenceView({
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [failures, setFailures] = useState<Record<string, string>>({});
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(10);
   const failureFor = (id: string) => (Object.hasOwn(failures, id) ? failures[id] : undefined);
   const files = useQuery({
     queryKey: [
@@ -94,6 +119,7 @@ export function EvidenceView({
     setFailures({});
     setBusy(null);
     setPreview(null);
+    setPage(0);
     return () => {
       currentScope.current = "";
       if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
@@ -143,12 +169,16 @@ export function EvidenceView({
     }
   };
   const rows = evidenceRows(files.data ?? [], references);
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
-        <Typography.Title level={5} style={{ margin: 0 }}>
-          Evidence files
-        </Typography.Title>
+    <Stack spacing={3} sx={{ width: "100%" }}>
+      <Stack
+        direction="row"
+        spacing={2}
+        useFlexGap
+        sx={{ flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}
+      >
+        <Typography variant="h6">Evidence files</Typography>
         <Button
           disabled={evidence.mode === "sample"}
           loading={files.isFetching}
@@ -159,19 +189,18 @@ export function EvidenceView({
         >
           Refresh files
         </Button>
-      </Space>
+      </Stack>
       {evidence.mode === "sample" ? (
-        <Alert
-          showIcon
-          type="info"
-          title="Sample references only"
-          description="These sample IDs do not contain uploaded files. Preview and download are available when connected to a server with recorded evidence."
-        />
+        <Alert severity="info">
+          <AlertTitle>Sample references only</AlertTitle>
+          These sample IDs do not contain uploaded files. Preview and download are available when
+          connected to a server with recorded evidence.
+        </Alert>
       ) : (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Files belong to this exact job attempt. PNG screenshots can be previewed; other formats
           are downloaded. Content is checked against its saved digest before it is opened.
-        </Typography.Text>
+        </Typography>
       )}
       {files.isError ? (
         <ErrorNotice
@@ -180,173 +209,219 @@ export function EvidenceView({
           retry={() => void files.refetch()}
         />
       ) : (
-        <Table<EvidenceRow>
-          size="small"
-          rowKey="id"
-          dataSource={rows}
-          loading={evidence.mode === "connected" && files.isPending}
-          scroll={{ x: 700 }}
-          pagination={{ defaultPageSize: 10, pageSizeOptions: [10, 20, 50], showSizeChanger: true }}
-          locale={{
-            emptyText:
-              evidence.mode === "sample"
-                ? "No evidence references in this sample report."
-                : "No evidence files or references were recorded for this attempt.",
-          }}
-          columns={[
-            {
-              title: "File",
-              render: (_, row) => (
-                <Space orientation="vertical" size={0}>
-                  <CopyValue value={row.id} />
-                  <Typography.Text type="secondary">
-                    {row.manifest?.metadata.kind ?? "Reference"}
-                    {row.manifest ? ` · ${sizeLabel(row.manifest.metadata.sizeBytes)}` : ""}
-                  </Typography.Text>
-                </Space>
-              ),
-            },
-            {
-              title: "Status",
-              width: 125,
-              render: (_, row) => (
-                <Tag
-                  color={
-                    evidence.mode === "sample"
-                      ? "default"
-                      : row.manifest?.state === "retired" || !row.manifest || failureFor(row.id)
-                        ? "warning"
-                        : "success"
-                  }
-                >
-                  {evidence.mode === "sample"
-                    ? "Sample"
-                    : files.isPending
-                      ? "Loading"
-                      : row.manifest?.state === "retired"
-                        ? "Retired"
-                        : !row.manifest
-                          ? "Missing"
-                          : failureFor(row.id)
-                            ? "Unavailable"
-                            : "Available"}
-                </Tag>
-              ),
-            },
-            {
-              title: "Captured",
-              width: 185,
-              render: (_, row) =>
-                row.manifest ? timestamp(row.manifest.metadata.capturedAt) : "Not recorded",
-            },
-            {
-              title: "Actions",
-              width: 190,
-              render: (_, row) =>
-                row.manifest?.state === "finalized" && evidence.mode === "connected" ? (
-                  <Space>
-                    {row.manifest.metadata.mediaType === "image/png" && (
-                      <Button
-                        size="small"
-                        disabled={busy !== null}
-                        onClick={() => void load(row.manifest as EvidenceAssetManifest, "preview")}
-                      >
-                        Preview PNG
-                      </Button>
-                    )}
-                    <Button
-                      size="small"
-                      loading={busy === row.id}
-                      disabled={busy !== null && busy !== row.id}
-                      onClick={() => void load(row.manifest as EvidenceAssetManifest, "download")}
-                    >
-                      Download
-                    </Button>
-                  </Space>
+        <Box sx={{ minWidth: 0 }}>
+          <TableContainer>
+            <Table size="medium" aria-label="Evidence files" sx={{ minWidth: 700 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>File and metadata</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Captured</TableCell>
+                  <TableCell>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {evidence.mode === "connected" && files.isPending ? (
+                  <TableRow>
+                    <TableCell colSpan={4}>Loading evidence files…</TableCell>
+                  </TableRow>
+                ) : rows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4} sx={{ py: 4, color: "text.secondary" }}>
+                      {evidence.mode === "sample"
+                        ? "No evidence references in this sample report."
+                        : "No evidence files or references were recorded for this attempt."}
+                    </TableCell>
+                  </TableRow>
                 ) : (
-                  <Typography.Text type="secondary">
-                    {evidence.mode === "sample"
-                      ? "Sample only"
-                      : row.manifest
-                        ? "Content retired"
-                        : "No file available"}
-                  </Typography.Text>
-                ),
-            },
-          ]}
-          expandable={{
-            expandedRowRender: (row) => (
-              <Space orientation="vertical" style={{ width: "100%" }}>
-                {failureFor(row.id) && (
-                  <Alert
-                    showIcon
-                    type="warning"
-                    title="Evidence content unavailable"
-                    description={failureFor(row.id)}
-                  />
+                  rows.slice(currentPage * pageSize, (currentPage + 1) * pageSize).map((row) => (
+                    <TableRow key={row.id} sx={{ "& > td": { verticalAlign: "top" } }}>
+                      <TableCell sx={{ minWidth: 260 }}>
+                        <Accordion
+                          disableGutters
+                          elevation={0}
+                          sx={{
+                            bgcolor: "transparent",
+                            border: 0,
+                            "&::before": { display: "none" },
+                          }}
+                        >
+                          <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0 }}>
+                            <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+                              <Typography
+                                variant="body2"
+                                component="code"
+                                sx={{
+                                  fontFamily: "var(--app-code-font)",
+                                  fontSize: 14,
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                {row.id}
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                {row.manifest?.metadata.kind ?? "Reference"}
+                                {row.manifest
+                                  ? ` · ${sizeLabel(row.manifest.metadata.sizeBytes)}`
+                                  : ""}
+                              </Typography>
+                            </Stack>
+                          </AccordionSummary>
+                          <AccordionDetails sx={{ px: 0 }}>
+                            <Stack spacing={2}>
+                              {failureFor(row.id) && (
+                                <Alert severity="warning">
+                                  <AlertTitle>Evidence content unavailable</AlertTitle>
+                                  {failureFor(row.id)}
+                                </Alert>
+                              )}
+                              <Facts
+                                columns={1}
+                                items={[
+                                  { label: "Evidence ID", value: <CopyValue value={row.id} /> },
+                                  {
+                                    label: "Checks referencing this file",
+                                    value: row.checkIds.length
+                                      ? row.checkIds.join(", ")
+                                      : "No checks reference this file",
+                                  },
+                                  {
+                                    label: "Media type",
+                                    value: row.manifest?.metadata.mediaType ?? "Not recorded",
+                                  },
+                                  {
+                                    label: "Content SHA-256",
+                                    value: <CopyValue value={row.manifest?.metadata.sha256} />,
+                                  },
+                                  {
+                                    label: "Retired",
+                                    value: row.manifest?.retiredAt
+                                      ? timestamp(row.manifest.retiredAt)
+                                      : row.manifest
+                                        ? "Not retired"
+                                        : "Not recorded",
+                                  },
+                                ]}
+                              />
+                            </Stack>
+                          </AccordionDetails>
+                        </Accordion>
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          size="medium"
+                          color={
+                            evidence.mode === "sample"
+                              ? "default"
+                              : row.manifest?.state === "retired" ||
+                                  !row.manifest ||
+                                  failureFor(row.id)
+                                ? "warning"
+                                : "success"
+                          }
+                          label={
+                            evidence.mode === "sample"
+                              ? "Sample"
+                              : files.isPending
+                                ? "Loading"
+                                : row.manifest?.state === "retired"
+                                  ? "Retired"
+                                  : !row.manifest
+                                    ? "Missing"
+                                    : failureFor(row.id)
+                                      ? "Unavailable"
+                                      : "Available"
+                          }
+                        />
+                      </TableCell>
+                      <TableCell sx={{ minWidth: 165 }}>
+                        {row.manifest
+                          ? timestamp(row.manifest.metadata.capturedAt)
+                          : "Not recorded"}
+                      </TableCell>
+                      <TableCell>
+                        {row.manifest?.state === "finalized" && evidence.mode === "connected" ? (
+                          <Stack direction="row" spacing={1}>
+                            {row.manifest.metadata.mediaType === "image/png" && (
+                              <Button
+                                size="medium"
+                                disabled={busy !== null}
+                                onClick={() =>
+                                  void load(row.manifest as EvidenceAssetManifest, "preview")
+                                }
+                              >
+                                Preview PNG
+                              </Button>
+                            )}
+                            <Button
+                              size="medium"
+                              loading={busy === row.id}
+                              disabled={busy !== null && busy !== row.id}
+                              onClick={() =>
+                                void load(row.manifest as EvidenceAssetManifest, "download")
+                              }
+                            >
+                              Download
+                            </Button>
+                          </Stack>
+                        ) : (
+                          <Typography variant="body2" color="text.secondary">
+                            {evidence.mode === "sample"
+                              ? "Sample only"
+                              : row.manifest
+                                ? "Content retired"
+                                : "No file available"}
+                          </Typography>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))
                 )}
-                <Facts
-                  items={[
-                    {
-                      label: "Checks referencing this file",
-                      value: row.checkIds.length
-                        ? row.checkIds.join(", ")
-                        : "No checks reference this file",
-                    },
-                    {
-                      label: "Media type",
-                      value: row.manifest?.metadata.mediaType ?? "Not recorded",
-                    },
-                    {
-                      label: "Content SHA-256",
-                      value: <CopyValue value={row.manifest?.metadata.sha256} />,
-                    },
-                    {
-                      label: "Retired",
-                      value: row.manifest?.retiredAt
-                        ? timestamp(row.manifest.retiredAt)
-                        : row.manifest
-                          ? "Not retired"
-                          : "Not recorded",
-                    },
-                  ]}
-                />
-              </Space>
-            ),
-          }}
-        />
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <TablePagination
+            component="div"
+            count={rows.length}
+            page={currentPage}
+            rowsPerPage={pageSize}
+            rowsPerPageOptions={[10, 20, 50]}
+            onPageChange={(_, nextPage) => setPage(nextPage)}
+            onRowsPerPageChange={(event) => {
+              setPageSize(Number(event.target.value));
+              setPage(0);
+            }}
+          />
+        </Box>
       )}
       {Object.keys(failures).length > 0 && (
-        <Alert
-          showIcon
-          type="warning"
-          title="Some evidence content could not be loaded"
-          description={Object.values(failures).join(" ")}
-        />
+        <Alert severity="warning">
+          <AlertTitle>Some evidence content could not be loaded</AlertTitle>
+          {Object.values(failures).join(" ")}
+        </Alert>
       )}
-      <Modal
-        open={preview !== null}
-        onCancel={closePreview}
-        title={preview ? fileName(preview.manifest) : "Screenshot"}
-        width={960}
-        footer={<Button onClick={closePreview}>Close</Button>}
-        destroyOnHidden
-      >
-        {preview && (
-          <Image
-            width="100%"
-            preview={false}
-            src={preview.url}
-            alt={`Evidence screenshot ${preview.manifest.id}`}
-            onError={() =>
-              setFailures((previous) => ({
-                ...previous,
-                [preview.manifest.id]: "The PNG content could not be displayed.",
-              }))
-            }
-          />
-        )}
-      </Modal>
-    </Space>
+      <Dialog open={preview !== null} onClose={closePreview} fullWidth maxWidth="lg">
+        <DialogTitle>{preview ? fileName(preview.manifest) : "Screenshot"}</DialogTitle>
+        <DialogContent>
+          {preview && (
+            <Box
+              component="img"
+              sx={{ width: "100%", height: "auto" }}
+              src={preview.url}
+              alt={`Evidence screenshot ${preview.manifest.id}`}
+              onError={() =>
+                setFailures((previous) => ({
+                  ...previous,
+                  [preview.manifest.id]: "The PNG content could not be displayed.",
+                }))
+              }
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closePreview}>Close</Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
   );
 }

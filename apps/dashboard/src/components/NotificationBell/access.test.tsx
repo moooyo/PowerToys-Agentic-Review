@@ -18,8 +18,8 @@ const state = vi.hoisted(() => ({
   error: null as Error | null,
   platform: false,
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: (repositoryId?: string) => ({
@@ -39,22 +39,14 @@ vi.mock("@/components/OperatorAccess", () => ({
     refresh: vi.fn(),
   }),
 }));
-vi.mock("antd", () => ({
-  Alert: ({
-    title,
-    description,
-    action,
-  }: {
-    title: ReactNode;
-    description: ReactNode;
-    action: ReactNode;
-  }) => (
+vi.mock("@mui/material", () => ({
+  Alert: ({ children, action }: { children: ReactNode; action: ReactNode }) => (
     <aside>
-      {title}
-      {description}
+      {children}
       {action}
     </aside>
   ),
+  AlertTitle: ({ children }: { children: ReactNode }) => <strong>{children}</strong>,
   Button: ({ children }: { children: ReactNode }) => <button type="button">{children}</button>,
   Skeleton: () => <span>Checking access</span>,
 }));

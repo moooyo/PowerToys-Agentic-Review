@@ -73,15 +73,16 @@ vi.mock("@tanstack/react-query", () => ({
     refetch: vi.fn(),
   }),
 }));
-vi.mock("antd", () => {
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
+    Alert: ({ children, action }: { children?: ReactNode; action?: ReactNode }) => (
       <aside>
-        {title}
-        {description}
+        {children}
+        {action}
       </aside>
     ),
+    AlertTitle: Content,
     Button: ({
       children,
       disabled,
@@ -98,29 +99,31 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Card: ({
-      children,
-      title,
-      extra,
-    }: {
-      children: ReactNode;
-      title: ReactNode;
-      extra: ReactNode;
-    }) => (
-      <section>
+    Card: Content,
+    CardContent: Content,
+    CardHeader: ({ title, action }: { title: ReactNode; action?: ReactNode }) => (
+      <header>
         {title}
-        {extra}
-        {children}
-      </section>
+        {action}
+      </header>
     ),
-    Collapse: Content,
-    Descriptions: Content,
-    Drawer: Content,
+    Accordion: Content,
+    AccordionDetails: Content,
+    AccordionSummary: Content,
+    Dialog: Content,
+    DialogTitle: Content,
+    DialogContent: Content,
+    DialogActions: Content,
     Pagination: Content,
     Skeleton: Content,
-    Space: Content,
-    Table: Content,
-    Tag: Content,
+    Stack: Content,
+    Chip: ({ label }: { label: ReactNode }) => <span>{label}</span>,
+    FormControlLabel: ({ control, label }: { control: ReactNode; label: ReactNode }) => (
+      <label htmlFor="publication-policy-toggle">
+        {control}
+        {label}
+      </label>
+    ),
     Switch: ({
       checked,
       disabled,
@@ -128,14 +131,36 @@ vi.mock("antd", () => {
     }: {
       checked: boolean;
       disabled: boolean;
-      onChange: (value: boolean) => void;
+      onChange: (event: unknown, value: boolean) => void;
     }) => {
-      state.toggle = onChange;
-      return <input type="checkbox" checked={checked} disabled={disabled} readOnly />;
+      state.toggle = (value) => onChange({}, value);
+      return (
+        <input
+          id="publication-policy-toggle"
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          readOnly
+        />
+      );
     },
-    Typography: { Text: Content, Paragraph: Content },
+    Typography: Content,
+    Tabs: Content,
+    Tab: ({ label }: { label: ReactNode }) => <span>{label}</span>,
   };
 });
+vi.mock("@/components/ui", () => ({
+  DataTable: () => <div />,
+  DetailsGrid: ({ items }: { items: { key?: string; label: ReactNode; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((entry, index) => (
+        <div key={entry.key ?? index}>
+          {entry.label}: {entry.value}
+        </div>
+      ))}
+    </dl>
+  ),
+}));
 function render() {
   state.cursor = 0;
   state.buttons = [];

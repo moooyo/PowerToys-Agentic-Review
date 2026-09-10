@@ -1,17 +1,19 @@
 import * as C from "@agentic-review/contracts";
 import {
   Alert,
+  AlertTitle,
+  Autocomplete,
   Button,
   Card,
-  Descriptions,
-  Form,
-  Input,
-  Select,
-  Table,
-  Tag,
+  CardContent,
+  CardHeader,
+  Chip,
+  Stack,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import { HttpConfigurationAdapter } from "@/services/configuration";
 import {
   createHttpEvaluationBatchAdapter,
@@ -30,12 +32,16 @@ import {
   useOriginalMutation,
   useRefreshEvaluations,
 } from "./context";
+import { CopyValue } from "./Display";
 import { BatchReproductionPlan } from "./ReproductionPlan";
 import { FrozenSourceLabel } from "./Sources";
 import { collectCatalog, errorMessage, newIdentity } from "./state";
 
-type SuiteScope = { suiteId: string; workflowKind: C.WorkflowKind; target: C.ValidationTarget };
-
+type SuiteScope = {
+  suiteId: string;
+  workflowKind: C.WorkflowKind;
+  target: C.ValidationTarget;
+};
 export function BatchConfigurationPanel({
   open,
   pending,
@@ -54,19 +60,25 @@ export function BatchConfigurationPanel({
     <>
       {!visible && createdBatchId ? (
         <Alert
-          type="success"
-          title="Batch created"
-          description={`Batch ${createdBatchId} is selected below. Your previous configuration is preserved.`}
           action={
-            <Button onClick={() => onOpenChange(true)} aria-expanded={false}>
+            <Button onClick={() => onOpenChange(true)} aria-expanded={false} variant="outlined">
               Create another batch
             </Button>
           }
-        />
+          severity={"success"}
+        >
+          <AlertTitle>{"Batch created"}</AlertTitle>
+          {`Batch ${createdBatchId} is selected below. Your previous configuration is preserved.`}
+        </Alert>
       ) : null}
       {visible && createdBatchId ? (
         <div>
-          <Button disabled={pending} onClick={() => onOpenChange(false)} aria-expanded>
+          <Button
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+            aria-expanded
+            variant="outlined"
+          >
             Hide configuration
           </Button>
         </div>
@@ -75,7 +87,6 @@ export function BatchConfigurationPanel({
     </>
   );
 }
-
 export function ExecutionCell({
   cell,
   onViewResult,
@@ -85,17 +96,16 @@ export function ExecutionCell({
 }) {
   return (
     <div className="evaluation-cell">
-      <Tag
+      <Chip
+        label={executionLabels[cell.state]}
         color={
           cell.state === "running"
-            ? "processing"
+            ? "info"
             : cell.state === "blocked" || cell.state === "failed" || cell.state === "invalid"
               ? "warning"
-              : undefined
+              : "default"
         }
-      >
-        {executionLabels[cell.state]}
-      </Tag>
+      />
       {cell.state === "awaiting_admission" ? (
         <span className="evaluation-meta">
           The Job is waiting for admission; it is not queued for a Worker.
@@ -111,9 +121,15 @@ export function ExecutionCell({
       ) : null}
       {cell.blockerCount > 0 ? (
         <div>
-          <Typography.Text strong>
+          <Typography
+            component="span"
+            variant="body2"
+            sx={{
+              fontWeight: 500,
+            }}
+          >
             {cell.blockers.length} of {cell.blockerCount} blockers
-          </Typography.Text>
+          </Typography>
           <ul className="evaluation-blockers">
             {cell.blockers.map((blocker) => (
               <li key={JSON.stringify(blocker)}>
@@ -138,12 +154,12 @@ export function ExecutionCell({
       {cell.result ? (
         <div>
           <span className="evaluation-meta">Result identity</span>
-          <Typography.Text copyable>{cell.result.resultId}</Typography.Text>
+          <CopyValue value={cell.result.resultId} />
           {onViewResult ? (
             <Button
-              size="small"
               aria-label={`View ${armLabels[cell.arm]} result for case ${cell.caseId}`}
               onClick={() => onViewResult(cell)}
+              variant="outlined"
             >
               View result
             </Button>
@@ -154,7 +170,6 @@ export function ExecutionCell({
     </div>
   );
 }
-
 export function BatchMatrix({
   matrix,
   onViewResult,
@@ -165,40 +180,48 @@ export function BatchMatrix({
   return (
     <div>
       <div className="evaluation-subheading">
-        <Typography.Text strong>Case execution matrix</Typography.Text>
-        <Tag>{executionLabels[matrix.status]}</Tag>
+        <Typography
+          component="span"
+          variant="body2"
+          sx={{
+            fontWeight: 500,
+          }}
+        >
+          Case execution matrix
+        </Typography>
+        <Chip label={executionLabels[matrix.status]} />
       </div>
-      <Table<C.EvaluationBatchMatrixV1["cases"][number]>
-        rowKey="caseId"
-        size="small"
-        pagination={false}
-        scroll={{ x: 850 }}
-        dataSource={matrix.cases}
+      <DataTable<C.EvaluationBatchMatrixV1["cases"][number]>
+        rows={matrix.cases}
+        getRowId={(row) => row.caseId}
         columns={[
           {
-            title: "Frozen case",
-            key: "case",
+            id: "case",
+            label: "Frozen case",
             width: "34%",
-            render: (_, entry) => (
-              <div>
-                <strong>{entry.title}</strong>
-                <FrozenSourceLabel source={entry.source} />
-                {entry.applicability.state === "not_applicable" ? (
-                  <p>Not applicable: {entry.applicability.reason}</p>
-                ) : null}
-                <span className="evaluation-meta">{entry.caseId}</span>
-              </div>
-            ),
+            render: (entry) => {
+              return (
+                <div>
+                  <strong>{entry.title}</strong>
+                  <FrozenSourceLabel source={entry.source} />
+                  {entry.applicability.state === "not_applicable" ? (
+                    <p>Not applicable: {entry.applicability.reason}</p>
+                  ) : null}
+                  <span className="evaluation-meta">{entry.caseId}</span>
+                </div>
+              );
+            },
           },
           ...arms.map((arm) => ({
-            title: armLabels[arm],
-            key: arm,
+            id: arm,
+            label: armLabels[arm],
             width: "33%",
-            render: (_: unknown, entry: C.EvaluationBatchMatrixV1["cases"][number]) => (
-              <ExecutionCell cell={entry[arm]} onViewResult={onViewResult} />
-            ),
+            render: (entry: C.EvaluationBatchMatrixV1["cases"][number]) => {
+              return <ExecutionCell cell={entry[arm]} onViewResult={onViewResult} />;
+            },
           })),
         ]}
+        ariaLabel="Evaluation records"
       />
       <p className="evaluation-meta">
         Execution state and result IDs do not represent a scored report or verified evidence.
@@ -207,7 +230,6 @@ export function BatchMatrix({
     </div>
   );
 }
-
 export function BatchDetails({
   api,
   evaluationId,
@@ -223,7 +245,10 @@ export function BatchDetails({
 }) {
   const page = useEvaluationPage(),
     refresh = useRefreshEvaluations();
-  const batchScope = { repositoryId: page.repositoryId, evaluationId };
+  const batchScope = {
+    repositoryId: page.repositoryId,
+    evaluationId,
+  };
   const query = useEvaluationQuery(
     ["batch-detail-matrix", scope.suiteId, evaluationId],
     async (signal) => {
@@ -232,7 +257,10 @@ export function BatchDetails({
         api.getBatchMatrix(batchScope, signal),
       ]);
       assertBatchReadScope(detail, matrix, scope);
-      return { detail, matrix };
+      return {
+        detail,
+        matrix,
+      };
     },
     active,
     10_000,
@@ -280,181 +308,260 @@ export function BatchDetails({
     if (!issues.length) cancellation.submit(request);
   };
   return (
-    <Card
-      title="Batch detail"
-      extra={
-        <Button
-          disabled={!active || !page.readable}
-          loading={query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          Refresh batch
-        </Button>
-      }
-    >
-      {query.error ? (
-        <Alert type="error" title="Batch unavailable" description={errorMessage(query.error)} />
-      ) : null}
-      {detail ? (
-        <>
-          <Descriptions
-            size="small"
-            column={2}
-            items={[
-              {
-                key: "id",
-                label: "Batch",
-                children: <Typography.Text copyable>{detail.summary.id}</Typography.Text>,
-              },
-              { key: "state", label: "Status", children: executionLabels[detail.status] },
-              {
-                key: "version",
-                label: "Published suite",
-                children: `Version ${detail.suiteVersion.version} · ${detail.suiteVersion.id}`,
-              },
-              {
-                key: "mode",
-                label: "Mode",
-                children:
-                  detail.summary.mode === "profile_only" ? "Profile only" : "Prompt and profile",
-              },
-              {
-                key: "control",
-                label: "Cancellation control",
-                children: `${detail.control.status} · version ${detail.control.version}`,
-              },
-              {
-                key: "progress",
-                label: "Progress",
-                children: `${detail.progress.completed} completed · ${detail.progress.failed} failed · ${detail.progress.blocked} blocked · ${detail.progress.running} running · ${detail.progress.notApplicableCells} not applicable`,
-              },
-            ]}
-          />
-          {detail.status === "cancelling" ? (
-            <Alert
-              type="info"
-              title="Cancellation is still in progress"
-              description="One or more Jobs remain active. Cancellation has not yet stopped all work."
-            />
-          ) : null}
-          {detail.status === "awaiting_admission" ? (
-            <Alert
-              type="info"
-              title="Awaiting admission"
-              description="Jobs exist but are not yet in the Worker queue. Admission and dispatch blockers appear in the matrix."
-            />
-          ) : null}
-          <div className="evaluation-arm-grid">
-            {arms.map((arm) => (
-              <Card size="small" key={arm} title={armLabels[arm]}>
-                <Typography.Text strong>
-                  {detail.configurations[arm].profile.name} · version{" "}
-                  {detail.configurations[arm].profile.version}
-                </Typography.Text>
-                <span className="evaluation-meta">{detail.configurations[arm].profile.id}</span>
-                <p>
-                  Prompt version {detail.configurations[arm].prompt.version}
-                  <span className="evaluation-meta">{detail.configurations[arm].prompt.id}</span>
-                </p>
-                <Tag>
-                  {detail.configurations[arm].modelRequirements.required
-                    ? "Model required"
-                    : "Profile execution only"}
-                </Tag>
-              </Card>
-            ))}
-          </div>
-          {detail.control.reason ? (
-            <Alert type="info" title="Cancellation reason" description={detail.control.reason} />
-          ) : null}
-        </>
-      ) : null}
-      {query.data ? (
-        <BatchMatrix
-          matrix={query.data.matrix}
-          onViewResult={
-            active && page.readable
-              ? (cell) => {
-                  if (cell.result && cell.job)
-                    setResultSelection({ cellId: cell.cellId, resultId: cell.result.resultId });
-                }
-              : undefined
-          }
-        />
-      ) : null}
-      <CellResultDrawer
-        api={api}
-        binding={resultBinding}
-        active={active}
-        onClose={() => setResultSelection(null)}
-      />
-      {detail?.summary.workflowKind === "issue_validation" && query.data ? (
-        <BatchReproductionPlan
-          key={`reproduction-plan:${evaluationId}`}
-          detail={detail}
-          matrix={query.data.matrix}
-          active={active && page.readable}
-        />
-      ) : null}
-      <AssessmentReports
-        key={`assessment-reports:${evaluationId}`}
-        evaluationId={evaluationId}
-        matrix={query.data?.matrix}
-        active={active && !cancellation.busy && cancellation.request === null}
-        onPendingChange={setAssessmentPending}
-        onViewResult={(cell) => {
-          if (active && page.readable && cell.result && cell.job)
-            setResultSelection({ cellId: cell.cellId, resultId: cell.result.resultId });
+    <Card variant="outlined">
+      <CardHeader
+        title={"Batch detail"}
+        action={
+          <Button
+            disabled={!active || !page.readable}
+            loading={query.isFetching}
+            onClick={() => void query.refetch()}
+            variant="outlined"
+          >
+            Refresh batch
+          </Button>
+        }
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
         }}
       />
-      {notice ? <Alert type="success" title="Cancellation accepted" description={notice} /> : null}
-      {page.allowsConfigure ? (
-        <Form layout="vertical">
-          <Form.Item label="Cancellation reason" required>
-            <Input.TextArea
-              aria-label={`Cancellation reason for batch ${evaluationId}`}
+      <CardContent>
+        {query.error ? (
+          <Alert severity={"error"}>
+            <AlertTitle>{"Batch unavailable"}</AlertTitle>
+            {errorMessage(query.error)}
+          </Alert>
+        ) : null}
+        {detail ? (
+          <>
+            <DetailsGrid
+              items={[
+                {
+                  key: "id",
+                  label: "Batch",
+                  value: <CopyValue value={detail.summary.id} />,
+                },
+                {
+                  key: "state",
+                  label: "Status",
+                  value: executionLabels[detail.status],
+                },
+                {
+                  key: "version",
+                  label: "Published suite",
+                  value: `Version ${detail.suiteVersion.version} · ${detail.suiteVersion.id}`,
+                },
+                {
+                  key: "mode",
+                  label: "Mode",
+                  value:
+                    detail.summary.mode === "profile_only" ? "Profile only" : "Prompt and profile",
+                },
+                {
+                  key: "control",
+                  label: "Cancellation control",
+                  value: `${detail.control.status} · version ${detail.control.version}`,
+                },
+                {
+                  key: "progress",
+                  label: "Progress",
+                  value: `${detail.progress.completed} completed · ${detail.progress.failed} failed · ${detail.progress.blocked} blocked · ${detail.progress.running} running · ${detail.progress.notApplicableCells} not applicable`,
+                },
+              ]}
+              columns={2}
+            />
+            {detail.status === "cancelling" ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"Cancellation is still in progress"}</AlertTitle>
+                {"One or more Jobs remain active. Cancellation has not yet stopped all work."}
+              </Alert>
+            ) : null}
+            {detail.status === "awaiting_admission" ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"Awaiting admission"}</AlertTitle>
+                {
+                  "Jobs exist but are not yet in the Worker queue. Admission and dispatch blockers appear in the matrix."
+                }
+              </Alert>
+            ) : null}
+            <div className="evaluation-arm-grid">
+              {arms.map((arm) => (
+                <Card key={arm} variant="elevation" elevation={0} className="evaluation-tonal-card">
+                  <CardHeader
+                    title={armLabels[arm]}
+                    slotProps={{
+                      title: {
+                        variant: "subtitle1",
+                        component: "h3",
+                      },
+                    }}
+                  />
+                  <CardContent>
+                    <Typography
+                      component="span"
+                      variant="body2"
+                      sx={{
+                        fontWeight: 500,
+                      }}
+                    >
+                      {detail.configurations[arm].profile.name} · version{" "}
+                      {detail.configurations[arm].profile.version}
+                    </Typography>
+                    <span className="evaluation-meta">{detail.configurations[arm].profile.id}</span>
+                    <p>
+                      Prompt version {detail.configurations[arm].prompt.version}
+                      <span className="evaluation-meta">
+                        {detail.configurations[arm].prompt.id}
+                      </span>
+                    </p>
+                    <Chip
+                      label={
+                        detail.configurations[arm].modelRequirements.required
+                          ? "Model required"
+                          : "Profile execution only"
+                      }
+                    />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+            {detail.control.reason ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"Cancellation reason"}</AlertTitle>
+                {detail.control.reason}
+              </Alert>
+            ) : null}
+          </>
+        ) : null}
+        {query.data ? (
+          <BatchMatrix
+            matrix={query.data.matrix}
+            onViewResult={
+              active && page.readable
+                ? (cell) => {
+                    if (cell.result && cell.job)
+                      setResultSelection({
+                        cellId: cell.cellId,
+                        resultId: cell.result.resultId,
+                      });
+                  }
+                : undefined
+            }
+          />
+        ) : null}
+        <CellResultDrawer
+          api={api}
+          binding={resultBinding}
+          active={active}
+          onClose={() => setResultSelection(null)}
+        />
+        {detail?.summary.workflowKind === "issue_validation" && query.data ? (
+          <BatchReproductionPlan
+            key={`reproduction-plan:${evaluationId}`}
+            detail={detail}
+            matrix={query.data.matrix}
+            active={active && page.readable}
+          />
+        ) : null}
+        <AssessmentReports
+          key={`assessment-reports:${evaluationId}`}
+          evaluationId={evaluationId}
+          matrix={query.data?.matrix}
+          active={active && !cancellation.busy && cancellation.request === null}
+          onPendingChange={setAssessmentPending}
+          onViewResult={(cell) => {
+            if (active && page.readable && cell.result && cell.job)
+              setResultSelection({
+                cellId: cell.cellId,
+                resultId: cell.result.resultId,
+              });
+          }}
+        />
+        {notice ? (
+          <Alert severity={"success"}>
+            <AlertTitle>{"Cancellation accepted"}</AlertTitle>
+            {notice}
+          </Alert>
+        ) : null}
+        {page.allowsConfigure ? (
+          <Stack
+            component="fieldset"
+            spacing={2}
+            sx={{
+              border: 0,
+              p: 0,
+              m: 0,
+              minWidth: 0,
+            }}
+          >
+            <TextField
               value={reason}
-              maxLength={2048}
               disabled={locked}
               onChange={(event) => setReason(event.target.value)}
-              autoSize={{ minRows: 2, maxRows: 4 }}
-            />
-          </Form.Item>
-          {error ? (
-            <Alert type="error" title="Enter a cancellation reason" description={error} />
-          ) : null}
-          <MutationNotice
-            mutation={cancellation}
-            conflictTitle="Cancellation control changed"
-            conflictDescription="Your reason is preserved. Refresh the control before deciding whether a new cancellation request is still needed."
-          />
-          {cancellation.conflict ? (
-            <Button
-              disabled={!active || !page.readable}
-              onClick={async () => {
-                const result = await query.refetch();
-                if (!result.isError) cancellation.reset();
+              fullWidth
+              label={"Cancellation reason"}
+              required={true}
+              slotProps={{
+                htmlInput: {
+                  maxLength: 2048,
+                  "aria-label": `Cancellation reason for batch ${evaluationId}`,
+                },
               }}
+              multiline
+              minRows={2}
+              maxRows={4}
+            />
+            {error ? (
+              <Alert severity={"error"}>
+                <AlertTitle>{"Enter a cancellation reason"}</AlertTitle>
+                {error}
+              </Alert>
+            ) : null}
+            <MutationNotice
+              mutation={cancellation}
+              conflictTitle="Cancellation control changed"
+              conflictDescription="Your reason is preserved. Refresh the control before deciding whether a new cancellation request is still needed."
+            />
+            {cancellation.conflict ? (
+              <Button
+                disabled={!active || !page.readable}
+                onClick={async () => {
+                  const result = await query.refetch();
+                  if (!result.isError) cancellation.reset();
+                }}
+                variant="outlined"
+              >
+                Reload cancellation control
+              </Button>
+            ) : null}
+            <Button
+              disabled={locked}
+              loading={cancellation.busy}
+              onClick={cancel}
+              variant="outlined"
+              color="error"
             >
-              Reload cancellation control
+              Cancel evaluation batch
             </Button>
-          ) : null}
-          <Button danger disabled={locked} loading={cancellation.busy} onClick={cancel}>
-            Cancel evaluation batch
-          </Button>
-        </Form>
-      ) : null}
+          </Stack>
+        ) : null}
+      </CardContent>
     </Card>
   );
 }
-
 export function BatchWorkspace({
   suiteId,
   workflowKind,
   target,
   active,
   onPendingChange,
-}: SuiteScope & { active: boolean; onPendingChange: (pending: boolean) => void }) {
+}: SuiteScope & {
+  active: boolean;
+  onPendingChange: (pending: boolean) => void;
+}) {
   const page = useEvaluationPage(),
     refresh = useRefreshEvaluations();
   const api = useMemo(() => createHttpEvaluationBatchAdapter(), []),
@@ -480,8 +587,13 @@ export function BatchWorkspace({
       return;
     const element = detailElement.current;
     if (!element) return;
-    element.focus({ preventScroll: true });
-    element.scrollIntoView({ block: "start", behavior: "auto" });
+    element.focus({
+      preventScroll: true,
+    });
+    element.scrollIntoView({
+      block: "start",
+      behavior: "auto",
+    });
     setFocusBatchId(null);
   }, [active, page.readable, configurationVisible, focusBatchId, selected]);
   const pending = createPending || cancelPending;
@@ -493,8 +605,14 @@ export function BatchWorkspace({
     (signal) =>
       collectCatalog((number) =>
         page.api.listSuiteVersions(
-          { repositoryId: page.repositoryId, suiteId },
-          { page: number, pageSize: 50 },
+          {
+            repositoryId: page.repositoryId,
+            suiteId,
+          },
+          {
+            page: number,
+            pageSize: 50,
+          },
           signal,
         ),
       ),
@@ -504,7 +622,11 @@ export function BatchWorkspace({
     ["version", suiteId, versionId],
     async (signal) => {
       const result = await page.api.getSuiteVersion(
-        { repositoryId: page.repositoryId, suiteId, versionId: versionId ?? "" },
+        {
+          repositoryId: page.repositoryId,
+          suiteId,
+          versionId: versionId ?? "",
+        },
         signal,
       );
       if (result.workflowKind !== workflowKind || result.target !== target)
@@ -525,7 +647,12 @@ export function BatchWorkspace({
     (signal) =>
       api.listBatches(
         page.repositoryId,
-        { suiteId, workflowKind, page: listPage, pageSize: 20 },
+        {
+          suiteId,
+          workflowKind,
+          page: listPage,
+          pageSize: 20,
+        },
         signal,
       ),
     active,
@@ -535,13 +662,29 @@ export function BatchWorkspace({
   return (
     <div className="evaluation-batch-workspace">
       <div className="evaluation-subheading">
-        <Typography.Text strong>Evaluation batches</Typography.Text>
-        <Button disabled={!active || !page.readable} loading={list.isFetching} onClick={refresh}>
+        <Typography
+          component="span"
+          variant="body2"
+          sx={{
+            fontWeight: 500,
+          }}
+        >
+          Evaluation batches
+        </Typography>
+        <Button
+          disabled={!active || !page.readable}
+          loading={list.isFetching}
+          onClick={refresh}
+          variant="outlined"
+        >
           Refresh batches
         </Button>
       </div>
       {error ? (
-        <Alert type="error" title="Batch data unavailable" description={errorMessage(error)} />
+        <Alert severity={"error"}>
+          <AlertTitle>{"Batch data unavailable"}</AlertTitle>
+          {errorMessage(error)}
+        </Alert>
       ) : null}
       {page.allowsConfigure ? (
         <BatchConfigurationPanel
@@ -550,27 +693,69 @@ export function BatchWorkspace({
           createdBatchId={createdBatchId}
           onOpenChange={setConfigurationOpen}
         >
-          <Form layout="vertical">
-            <Form.Item label="Published version to evaluate">
-              <Select
-                aria-label="Published suite version to evaluate"
-                disabled={!active || !page.canConfigure || pending}
-                value={versionId}
-                placeholder="Choose the exact immutable suite version"
-                loading={versions.isFetching}
-                options={(versions.data ?? []).map((entry) => ({
-                  value: entry.id,
-                  label: `Version ${entry.version} · ${entry.caseCount} cases · ${entry.id}`,
-                }))}
-                onChange={(id) => {
-                  if (!pending) {
-                    setVersionId(id);
-                    setFrozenVersion(null);
-                  }
-                }}
-              />
-            </Form.Item>
-          </Form>
+          <Stack
+            component="fieldset"
+            spacing={2}
+            sx={{
+              border: 0,
+              p: 0,
+              m: 0,
+              minWidth: 0,
+            }}
+          >
+            <Autocomplete
+              disabled={!active || !page.canConfigure || pending}
+              loading={versions.isFetching}
+              options={(versions.data ?? []).map((entry) => ({
+                value: entry.id,
+                label: `Version ${entry.version} · ${entry.caseCount} cases · ${entry.id}`,
+              }))}
+              disablePortal
+              fullWidth
+              value={
+                (versions.data ?? [])
+                  .map((entry) => ({
+                    value: entry.id,
+                    label: `Version ${entry.version} · ${entry.caseCount} cases · ${entry.id}`,
+                  }))
+                  .find((option) => option.value === versionId) ??
+                (versionId == null || String(versionId) === ""
+                  ? null
+                  : {
+                      value: versionId as NonNullable<typeof versionId>,
+                      label: String(versionId),
+                    })
+              }
+              onChange={(_event, option) => {
+                if (option !== null)
+                  ((id) => {
+                    if (!pending) {
+                      setVersionId(id);
+                      setFrozenVersion(null);
+                    }
+                  })(option.value as NonNullable<typeof versionId>);
+              }}
+              getOptionLabel={(option) => option.label}
+              isOptionEqualToValue={(option, selected) => option.value === selected.value}
+              getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={"Published version to evaluate"}
+                  placeholder={"Choose the exact immutable suite version"}
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: {
+                      ...params.slotProps.htmlInput,
+                      "aria-label": "Published suite version to evaluate",
+                    },
+                  }}
+                />
+              )}
+              disableClearable={Boolean(versionId)}
+              getOptionKey={(option) => option.value}
+            />
+          </Stack>
           {frozenVersion && frozenVersion.id === versionId ? (
             <BatchCreate
               key={frozenVersion.id}
@@ -590,63 +775,65 @@ export function BatchWorkspace({
           ) : null}
         </BatchConfigurationPanel>
       ) : null}
-      <Table<C.EvaluationBatchListItemV1>
-        rowKey={(entry) => entry.summary.id}
-        size="small"
+      <DataTable<C.EvaluationBatchListItemV1>
         loading={active && list.isPending}
-        dataSource={list.data?.items ?? []}
-        scroll={{ x: 760 }}
-        pagination={{
-          current: listPage,
-          pageSize: 20,
-          total: list.data?.total ?? 0,
-          showSizeChanger: false,
-          hideOnSinglePage: true,
-          onChange: setListPage,
-        }}
+        rows={list.data?.items ?? []}
+        getRowId={(entry) => entry.summary.id}
         columns={[
           {
-            title: "Batch",
-            key: "batch",
-            render: (_, entry) => (
-              <Button
-                type="link"
-                className="evaluation-name"
-                disabled={pending && selected !== entry.summary.id}
-                onClick={() => {
-                  if (!pending) setSelected(entry.summary.id);
-                }}
-              >
-                {entry.summary.id}
-              </Button>
-            ),
+            id: "batch",
+            label: "Batch",
+            render: (entry) => {
+              return (
+                <Button
+                  className="evaluation-name"
+                  disabled={pending && selected !== entry.summary.id}
+                  onClick={() => {
+                    if (!pending) setSelected(entry.summary.id);
+                  }}
+                  variant="text"
+                >
+                  {entry.summary.id}
+                </Button>
+              );
+            },
           },
           {
-            title: "Published version",
-            key: "version",
-            render: (_, entry) => (
-              <span className="evaluation-meta">{entry.summary.suiteVersionId}</span>
-            ),
+            id: "version",
+            label: "Published version",
+            render: (entry) => {
+              return <span className="evaluation-meta">{entry.summary.suiteVersionId}</span>;
+            },
           },
           {
-            title: "Status",
-            key: "status",
-            render: (_, entry) => <Tag>{executionLabels[entry.status]}</Tag>,
+            id: "status",
+            label: "Status",
+            render: (entry) => {
+              return <Chip label={executionLabels[entry.status]} />;
+            },
           },
           {
-            title: "Cells",
-            key: "cells",
-            render: (_, entry) =>
-              `${entry.progress.completed}/${entry.progress.applicableCells} completed · ${entry.progress.failed} failed · ${entry.progress.blocked} blocked`,
+            id: "cells",
+            label: "Cells",
+            render: (entry) => {
+              return `${entry.progress.completed}/${entry.progress.applicableCells} completed · ${entry.progress.failed} failed · ${entry.progress.blocked} blocked`;
+            },
           },
           {
-            title: "Created",
-            key: "created",
-            render: (_, entry) => (
-              <span className="evaluation-meta">{entry.summary.createdAt}</span>
-            ),
+            id: "created",
+            label: "Created",
+            render: (entry) => {
+              return <span className="evaluation-meta">{entry.summary.createdAt}</span>;
+            },
           },
         ]}
+        ariaLabel="Evaluation records"
+        pagination={{
+          page: listPage,
+          pageSize: 20,
+          total: list.data?.total ?? 0,
+          onChange: setListPage,
+        }}
       />
       {selected ? (
         <section
@@ -659,7 +846,11 @@ export function BatchWorkspace({
             key={selected}
             api={api}
             evaluationId={selected}
-            scope={{ suiteId, workflowKind, target }}
+            scope={{
+              suiteId,
+              workflowKind,
+              target,
+            }}
             active={active && !createPending}
             onPendingChange={setCancelPending}
           />

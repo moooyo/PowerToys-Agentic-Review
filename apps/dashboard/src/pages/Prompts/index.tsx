@@ -4,30 +4,34 @@ import {
   type WorkflowKind,
   WorkflowOutputSchemaVersions,
 } from "@agentic-review/contracts";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import AddIcon from "@mui/icons-material/Add";
+import CloseIcon from "@mui/icons-material/Close";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Card,
+  Chip,
   Drawer,
-  Empty,
-  Form,
-  Input,
-  Select,
-  Space,
-  Table,
+  IconButton,
+  MenuItem,
+  Stack,
+  Tab,
+  TablePagination,
   Tabs,
-  Tag,
+  TextField,
   Typography,
-} from "antd";
-import { useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
 import { GlobalPromptActivity } from "@/components/ConfigurationAudit";
 import { configurationAuditQueryRoot } from "@/components/ConfigurationAudit/state";
 import { ConfigurationScopeGuard } from "@/components/ConfigurationScopeGuard";
 import { OperatorAccessGate } from "@/components/OperatorAccess";
 import { PageHeader } from "@/components/PageHeader";
 import { RepositoryScopeUnavailable, useRepositoryScope } from "@/components/RepositoryScope";
+import { DataTable } from "@/components/ui";
 import { configuration } from "@/services/configuration";
 import { usePromptAvailable } from "./access";
 import {
@@ -54,12 +58,39 @@ function CreatePromptDrawer({
   initialWorkflowKind: WorkflowKind;
 }) {
   const available = usePromptAvailable();
-  const [form] = Form.useForm<CreatePromptValues>();
-  const workflowKind: WorkflowKind = Form.useWatch("workflowKind", form) ?? initialWorkflowKind;
+  const [values, setValues] = useState<CreatePromptValues>({
+    name: "",
+    description: "",
+    workflowKind: initialWorkflowKind,
+    content: "",
+  });
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof CreatePromptValues, string>>>(
+    {},
+  );
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const create = async (values: CreatePromptValues) => {
-    if (!available || saving) return;
+  const workflowKind = values.workflowKind;
+  const create = async () => {
+    if (!available || savingRef.current) return;
+    const errors: Partial<Record<keyof CreatePromptValues, string>> = {};
+    try {
+      validatePromptName(values.name);
+    } catch (failure) {
+      errors.name = configurationErrorMessage(failure);
+    }
+    if (values.description.length > 2_048 || values.description.includes("\u0000")) {
+      errors.description =
+        "Description must contain at most 2,048 characters without null characters.";
+    }
+    try {
+      validatePromptContent(values.content);
+    } catch (failure) {
+      errors.content = configurationErrorMessage(failure);
+    }
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -67,137 +98,172 @@ function CreatePromptDrawer({
     } catch (failure) {
       setError(configurationErrorMessage(failure));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
+  };
+  const close = () => {
+    if (!savingRef.current) onClose();
   };
   return (
     <Drawer
       open
-      title="Create prompt template"
-      size={760}
-      closable={!saving}
-      mask={{ closable: !saving }}
-      keyboard={!saving}
-      onClose={onClose}
-      footer={
-        <div className="prompts-drawer-actions">
-          <Button disabled={saving} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            type="primary"
-            loading={saving}
-            disabled={!available}
-            onClick={() => form.submit()}
-          >
-            Create template
-          </Button>
-        </div>
-      }
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") close();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-labelledby": "create-prompt-title",
+          sx: { width: { xs: "100%", sm: 760 }, maxWidth: "100%" },
+        },
+      }}
     >
-      <Typography.Paragraph type="secondary">
-        Create a shared template with an editable draft. Publishing and workflow binding are
-        separate steps.
-      </Typography.Paragraph>
-      {error && (
-        <Alert
-          className="prompts-notice"
-          showIcon
-          type="error"
-          title="Could not create template"
-          description={error}
-        />
-      )}
-      <Form
-        form={form}
-        layout="vertical"
-        disabled={!available || saving}
-        initialValues={{
-          name: "",
-          description: "",
-          workflowKind: initialWorkflowKind,
-          content: "",
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography id="create-prompt-title" variant="h6" sx={{ flex: 1 }}>
+          Create prompt template
+        </Typography>
+        <IconButton aria-label="Close" disabled={saving} onClick={close}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box
+        component="form"
+        id="create-prompt-form"
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault();
+          void create();
         }}
-        onFinish={create}
+        sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}
       >
-        <Form.Item
-          label="Template name"
-          name="name"
-          rules={[
-            { required: true, whitespace: true, message: "Enter a template name." },
-            { max: 128, message: "Use at most 128 characters." },
-            {
-              validator: async (_: unknown, value: string | undefined) =>
-                validatePromptName(value ?? ""),
-            },
-          ]}
-        >
-          <Input maxLength={128} placeholder="e.g. Maintainer code review" />
-        </Form.Item>
-        <Form.Item
-          label="Description"
-          name="description"
-          rules={[
-            { max: 2_048, message: "Use at most 2,048 characters." },
-            {
-              validator: async (_: unknown, value: string | undefined) => {
-                if (value?.includes("\u0000")) throw new Error("Remove null characters.");
-              },
-            },
-          ]}
-        >
-          <Input.TextArea
-            autoSize={{ minRows: 2, maxRows: 4 }}
-            maxLength={2_048}
-            placeholder="What should this template help reviewers do?"
-          />
-        </Form.Item>
-        <div className="prompts-form-columns">
-          <Form.Item
-            label="Workflow"
-            name="workflowKind"
-            rules={[{ required: true }]}
-            extra="A template's workflow cannot be changed after creation."
-          >
-            <Select options={workflowOptions} />
-          </Form.Item>
-          <Form.Item label="Output schema" extra="Determined by the workflow.">
-            <Input
-              readOnly
-              value={WorkflowOutputSchemaVersions[workflowKind]}
-              aria-label="Output schema determined by workflow"
-            />
-          </Form.Item>
-        </div>
-        {(workflowKind === "pr_ui" || workflowKind === "issue_validation") && (
-          <Alert
-            className="prompts-notice"
-            showIcon
-            type="info"
-            title="Validation also requires a configured driver"
-            description="Publishing this prompt will not enable validation or start a job. Configure the workflow's validation profile and driver separately."
-          />
+        <Typography color="text.secondary" sx={{ mb: 2 }}>
+          Create a shared template with an editable draft. Publishing and workflow binding are
+          separate steps.
+        </Typography>
+        {error && (
+          <Alert severity="error" className="prompts-notice">
+            <AlertTitle>Could not create template</AlertTitle>
+            {error}
+          </Alert>
         )}
-        <Form.Item
-          label="Prompt content"
-          name="content"
-          rules={[
-            {
-              validator: async (_: unknown, value: string | undefined) =>
-                validatePromptContent(value ?? ""),
-            },
-          ]}
-          required
-          extra="Content is preserved exactly as entered. Maximum size: 262,144 UTF-8 bytes."
+        <Box
+          component="fieldset"
+          disabled={!available || saving}
+          sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}
         >
-          <Input.TextArea
-            className="prompts-code-editor"
-            autoSize={{ minRows: 14, maxRows: 26 }}
-            spellCheck={false}
-            placeholder="Write the instructions for this workflow…"
-          />
-        </Form.Item>
-      </Form>
+          <Stack spacing={3}>
+            <TextField
+              label="Template name"
+              required
+              fullWidth
+              value={values.name}
+              slotProps={{ htmlInput: { maxLength: 128 } }}
+              placeholder="e.g. Maintainer code review"
+              error={Boolean(fieldErrors.name)}
+              helperText={fieldErrors.name}
+              onChange={(event) =>
+                setValues((current) => ({ ...current, name: event.target.value }))
+              }
+            />
+            <TextField
+              label="Description"
+              fullWidth
+              multiline
+              minRows={2}
+              maxRows={4}
+              value={values.description}
+              slotProps={{ htmlInput: { maxLength: 2_048 } }}
+              placeholder="What should this template help reviewers do?"
+              error={Boolean(fieldErrors.description)}
+              helperText={fieldErrors.description}
+              onChange={(event) =>
+                setValues((current) => ({ ...current, description: event.target.value }))
+              }
+            />
+            <div className="prompts-form-columns">
+              <TextField
+                label="Workflow"
+                select
+                fullWidth
+                required
+                value={workflowKind}
+                disabled={!available || saving}
+                helperText="A template's workflow cannot be changed after creation."
+                onChange={(event) =>
+                  setValues((current) => ({
+                    ...current,
+                    workflowKind: event.target.value as WorkflowKind,
+                  }))
+                }
+              >
+                {workflowOptions.map((option) => (
+                  <MenuItem key={option.value} value={option.value}>
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                label="Output schema"
+                fullWidth
+                value={WorkflowOutputSchemaVersions[workflowKind]}
+                helperText="Determined by the workflow."
+                slotProps={{
+                  htmlInput: {
+                    readOnly: true,
+                    "aria-label": "Output schema determined by workflow",
+                  },
+                }}
+              />
+            </div>
+            {(workflowKind === "pr_ui" || workflowKind === "issue_validation") && (
+              <Alert severity="info">
+                <AlertTitle>Validation also requires a configured driver</AlertTitle>
+                Publishing this prompt will not enable validation or start a job. Configure the
+                workflow's validation profile and driver separately.
+              </Alert>
+            )}
+            <TextField
+              label="Prompt content"
+              required
+              fullWidth
+              multiline
+              minRows={14}
+              maxRows={26}
+              className="prompts-code-editor"
+              value={values.content}
+              slotProps={{ htmlInput: { spellCheck: false } }}
+              placeholder="Write the instructions for this workflow…"
+              error={Boolean(fieldErrors.content)}
+              helperText={
+                fieldErrors.content ??
+                "Content is preserved exactly as entered. Maximum size: 262,144 UTF-8 bytes."
+              }
+              onChange={(event) =>
+                setValues((current) => ({ ...current, content: event.target.value }))
+              }
+            />
+          </Stack>
+        </Box>
+      </Box>
+      <Box
+        sx={{ px: { xs: 2, sm: 3 }, py: 2, borderTop: 1, borderColor: "divider" }}
+        className="prompts-drawer-actions"
+      >
+        <Button disabled={saving} onClick={close}>
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          form="create-prompt-form"
+          variant="contained"
+          loading={saving}
+          disabled={!available || saving}
+        >
+          Create template
+        </Button>
+      </Box>
     </Drawer>
   );
 }
@@ -209,6 +275,9 @@ function PromptWorkspace({
   repositoryId: string | null;
   scopeLabel: string;
 }) {
+  const [activePromptTab, setActivePromptTab] = useState("templates");
+  const [visitedPromptTabs, setVisitedPromptTabs] = useState<string[]>(["templates"]);
+
   const available = usePromptAvailable();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
@@ -239,214 +308,291 @@ function PromptWorkspace({
         titleId="prompts-page-title"
         description="Write workflow instructions, publish versions, and choose which version each workflow uses."
         actions={
-          <Space wrap>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}
+          >
             <Button
-              icon={<ReloadOutlined />}
               loading={listQuery.isFetching}
               disabled={!available}
               onClick={refresh}
+              variant="outlined"
+              startIcon={<RefreshIcon />}
             >
               Refresh
             </Button>
             <Button
-              type="primary"
-              icon={<PlusOutlined />}
               disabled={!available}
               onClick={() => setCreating(true)}
+              variant={"contained"}
+              startIcon={<AddIcon />}
             >
               Create template
             </Button>
-          </Space>
+          </Stack>
         }
       />
       {process.env.NODE_ENV === "development" && (
-        <Alert
-          className="prompts-notice"
-          type="info"
-          showIcon
-          title="Sample data"
-          description="This preview uses sample templates and bindings. Changes affect the preview only."
-        />
+        <Alert className="prompts-notice" severity={"info"}>
+          <AlertTitle>{"Sample data"}</AlertTitle>
+          {"This preview uses sample templates and bindings. Changes affect the preview only."}
+        </Alert>
       )}
-      <Card>
+      <Box>
         <Tabs
-          items={[
+          value={activePromptTab}
+          onChange={(_event, next: string) => {
+            setActivePromptTab(next);
+            setVisitedPromptTabs((current) =>
+              current.includes(next) ? current : [...current, next],
+            );
+          }}
+          variant="scrollable"
+          scrollButtons="auto"
+        >
+          <Tab
+            value={"templates"}
+            label={"Templates"}
+            disabled={!available}
+            id={"PromptWorkspace-tab-" + "templates"}
+            aria-controls={"PromptWorkspace-panel-" + "templates"}
+          />
+          <Tab
+            value={"bindings"}
+            label={"Workflow bindings"}
+            disabled={!available}
+            id={"PromptWorkspace-tab-" + "bindings"}
+            aria-controls={"PromptWorkspace-panel-" + "bindings"}
+          />
+          <Tab
+            value={"activity"}
+            label={"Global prompt activity"}
+            disabled={!available}
+            id={"PromptWorkspace-tab-" + "activity"}
+            aria-controls={"PromptWorkspace-panel-" + "activity"}
+          />
+        </Tabs>
+        {visitedPromptTabs.includes("templates") && (
+          <Box
+            role="tabpanel"
+            id={"PromptWorkspace-panel-" + "templates"}
+            aria-labelledby={"PromptWorkspace-tab-" + "templates"}
+            hidden={activePromptTab !== "templates"}
+            sx={{ pt: 3 }}
+          >
             {
-              key: "templates",
-              label: "Templates",
-              disabled: !available,
-              children: (
-                <>
-                  <div className="prompts-toolbar">
-                    <Typography.Paragraph type="secondary">
-                      Templates are shared across repositories. Workflow bindings select the
-                      versions used by each repository.
-                    </Typography.Paragraph>
-                    <Select
-                      aria-label="Filter templates by workflow"
-                      className="prompts-workflow-filter"
-                      allowClear
-                      placeholder="All workflows"
-                      options={workflowOptions}
-                      value={workflowKind}
-                      disabled={!available}
-                      onChange={(value: WorkflowKind | undefined) => {
-                        setWorkflowKind(value);
-                        setPage(1);
-                      }}
-                    />
-                  </div>
-                  {listQuery.isError ? (
-                    <Alert
-                      type="error"
-                      showIcon
-                      title="Could not load templates"
-                      description={configurationErrorMessage(listQuery.error)}
-                      action={
-                        <Button
-                          disabled={!available}
-                          onClick={() => {
-                            if (available) void listQuery.refetch();
-                          }}
-                        >
-                          Try again
-                        </Button>
-                      }
-                    />
-                  ) : (
-                    <Table<PromptTemplateSummary>
-                      rowKey="id"
-                      loading={listQuery.isFetching}
-                      dataSource={listQuery.data?.items ?? []}
+              <>
+                <div className="prompts-toolbar">
+                  <Typography variant="body2" component="p" color="text.secondary">
+                    Templates are shared across repositories. Workflow bindings select the versions
+                    used by each repository.
+                  </Typography>
+                  <TextField
+                    select
+                    label="Filter templates by workflow"
+                    className="prompts-workflow-filter"
+                    value={workflowKind ?? ""}
+                    disabled={!available}
+                    onChange={(event) => {
+                      setWorkflowKind(
+                        event.target.value ? (event.target.value as WorkflowKind) : undefined,
+                      );
+                      setPage(1);
+                    }}
+                  >
+                    <MenuItem value="">All workflows</MenuItem>
+                    {workflowOptions.map((option) => (
+                      <MenuItem key={option.value} value={option.value}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </div>
+                {listQuery.isError ? (
+                  <Alert
+                    action={
+                      <Button
+                        disabled={!available}
+                        onClick={() => {
+                          if (available) void listQuery.refetch();
+                        }}
+                        variant="outlined"
+                      >
+                        Try again
+                      </Button>
+                    }
+                    severity={"error"}
+                  >
+                    <AlertTitle>{"Could not load templates"}</AlertTitle>
+                    {configurationErrorMessage(listQuery.error)}
+                  </Alert>
+                ) : (
+                  <>
+                    <DataTable<PromptTemplateSummary>
+                      rows={listQuery.data?.items ?? []}
                       columns={[
                         {
-                          title: "Template",
-                          dataIndex: "name",
-                          render: (name: string, template) => (
-                            <div className="prompts-template-cell">
+                          id: "name",
+                          label: "Template",
+                          render: (template) => {
+                            const name = template.name;
+                            return (
+                              <div className="prompts-template-cell">
+                                <Button
+                                  className="prompts-name-link"
+                                  disabled={!available}
+                                  onClick={() => setSelectedTemplateId(template.id)}
+                                  variant={"text"}
+                                >
+                                  {name}
+                                </Button>
+                                {template.description && (
+                                  <span className="prompts-secondary prompts-break">
+                                    {template.description}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          },
+                        },
+                        {
+                          id: "workflowKind",
+                          label: "Workflow",
+                          width: 230,
+                          render: (row) => {
+                            const value = row.workflowKind;
+                            return workflowLabels[value];
+                          },
+                        },
+                        {
+                          id: "publication",
+                          label: "Publication",
+                          width: 150,
+                          render: (template) => {
+                            return (
+                              <div className="prompts-template-cell">
+                                <Chip
+                                  size="medium"
+                                  label={
+                                    template.latestPublishedVersionId
+                                      ? "Published version available"
+                                      : "Draft only"
+                                  }
+                                  color={template.latestPublishedVersionId ? "primary" : "default"}
+                                ></Chip>
+                                <span className="prompts-secondary">
+                                  Draft revision {template.draftRevision}
+                                </span>
+                              </div>
+                            );
+                          },
+                        },
+                        {
+                          id: "updatedAt",
+                          label: "Updated",
+                          width: 170,
+                          render: (row) => {
+                            const value = row.updatedAt;
+                            return (
+                              <time dateTime={value}>
+                                {new Date(value).toLocaleString("en-US")}
+                              </time>
+                            );
+                          },
+                        },
+                        {
+                          id: "edit",
+                          label: "",
+                          width: 105,
+                          render: (template) => {
+                            return (
                               <Button
-                                type="link"
-                                className="prompts-name-link"
                                 disabled={!available}
                                 onClick={() => setSelectedTemplateId(template.id)}
+                                aria-label={`Edit ${template.name}`}
+                                variant="outlined"
                               >
-                                {name}
+                                Open
                               </Button>
-                              {template.description && (
-                                <span className="prompts-secondary prompts-break">
-                                  {template.description}
-                                </span>
-                              )}
-                            </div>
-                          ),
-                        },
-                        {
-                          title: "Workflow",
-                          dataIndex: "workflowKind",
-                          width: 230,
-                          render: (value: WorkflowKind) => workflowLabels[value],
-                        },
-                        {
-                          title: "Publication",
-                          key: "publication",
-                          width: 150,
-                          render: (_: unknown, template) => (
-                            <div className="prompts-template-cell">
-                              <Tag color={template.latestPublishedVersionId ? "blue" : "default"}>
-                                {template.latestPublishedVersionId
-                                  ? "Published version available"
-                                  : "Draft only"}
-                              </Tag>
-                              <span className="prompts-secondary">
-                                Draft revision {template.draftRevision}
-                              </span>
-                            </div>
-                          ),
-                        },
-                        {
-                          title: "Updated",
-                          dataIndex: "updatedAt",
-                          width: 170,
-                          render: (value: string) => (
-                            <time dateTime={value}>{new Date(value).toLocaleString("en-US")}</time>
-                          ),
-                        },
-                        {
-                          title: "",
-                          key: "edit",
-                          width: 105,
-                          render: (_: unknown, template) => (
-                            <Button
-                              disabled={!available}
-                              onClick={() => setSelectedTemplateId(template.id)}
-                              aria-label={`Edit ${template.name}`}
-                            >
-                              Open
-                            </Button>
-                          ),
+                            );
+                          },
                         },
                       ]}
-                      scroll={{ x: 900 }}
-                      locale={{
-                        emptyText: (
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description={
-                              workflowKind
-                                ? "No templates for this workflow."
-                                : "Create a template to define your review instructions."
-                            }
-                          >
-                            <Button
-                              type="primary"
-                              disabled={!available}
-                              onClick={() => setCreating(true)}
-                            >
-                              Create template
-                            </Button>
-                          </Empty>
-                        ),
-                      }}
-                      pagination={{
-                        current: page,
-                        pageSize,
-                        total: listQuery.data?.total ?? 0,
-                        hideOnSinglePage: true,
-                        showSizeChanger: true,
-                        pageSizeOptions: [20, 50],
-                        disabled: !available,
-                        onChange: (nextPage, nextSize) => {
-                          setPage(nextSize === pageSize ? nextPage : 1);
-                          setPageSize(nextSize);
-                        },
-                        showTotal: (count, range) => `${range[0]}–${range[1]} of ${count}`,
-                      }}
+                      getRowId={(row) => row.id}
+                      loading={listQuery.isFetching}
+                      emptyTitle={
+                        workflowKind
+                          ? "No templates for this workflow."
+                          : "Create a template to define your review instructions."
+                      }
                     />
-                  )}
-                </>
-              ),
-            },
+                    {!listQuery.isFetching && listQuery.data?.items.length === 0 && (
+                      <Box sx={{ display: "flex", justifyContent: "center", pb: 2 }}>
+                        <Button
+                          variant="contained"
+                          disabled={!available}
+                          onClick={() => setCreating(true)}
+                        >
+                          Create template
+                        </Button>
+                      </Box>
+                    )}
+                    {(listQuery.data?.total ?? 0) > pageSize && (
+                      <TablePagination
+                        component="div"
+                        page={page - 1}
+                        rowsPerPage={pageSize}
+                        count={listQuery.data?.total ?? 0}
+                        rowsPerPageOptions={[20, 50]}
+                        disabled={!available}
+                        onPageChange={(_event, nextPage) => {
+                          if (!available) return;
+                          setPage(nextPage + 1);
+                        }}
+                        onRowsPerPageChange={(event) => {
+                          if (!available) return;
+                          setPage(1);
+                          setPageSize(Number(event.target.value));
+                        }}
+                      />
+                    )}
+                  </>
+                )}
+              </>
+            }
+          </Box>
+        )}
+        {visitedPromptTabs.includes("bindings") && (
+          <Box
+            role="tabpanel"
+            id={"PromptWorkspace-panel-" + "bindings"}
+            aria-labelledby={"PromptWorkspace-tab-" + "bindings"}
+            hidden={activePromptTab !== "bindings"}
+            sx={{ pt: 3 }}
+          >
             {
-              key: "bindings",
-              label: "Workflow bindings",
-              disabled: !available,
-              children: (
-                <PromptBindings
-                  key={repositoryId ?? "global"}
-                  repositoryId={repositoryId}
-                  scopeLabel={scopeLabel}
-                />
-              ),
-            },
-            {
-              key: "activity",
-              label: "Global prompt activity",
-              disabled: !available,
-              children: <GlobalPromptActivity enabled={available} />,
-            },
-          ]}
-        />
-      </Card>
+              <PromptBindings
+                key={repositoryId ?? "global"}
+                repositoryId={repositoryId}
+                scopeLabel={scopeLabel}
+              />
+            }
+          </Box>
+        )}
+        {visitedPromptTabs.includes("activity") && (
+          <Box
+            role="tabpanel"
+            id={"PromptWorkspace-panel-" + "activity"}
+            aria-labelledby={"PromptWorkspace-tab-" + "activity"}
+            hidden={activePromptTab !== "activity"}
+            sx={{ pt: 3 }}
+          >
+            {<GlobalPromptActivity enabled={available} />}
+          </Box>
+        )}
+      </Box>
       {creating && (
         <CreatePromptDrawer
           initialWorkflowKind={workflowKind ?? "pr_static_build"}

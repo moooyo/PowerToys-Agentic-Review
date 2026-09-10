@@ -1,29 +1,28 @@
 .prompts-page {
   width: 100%;
-  padding: 24px;
 }
 
 .prompts-notice {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .prompts-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px 24px;
-  margin-bottom: 20px;
+  gap: 16px 24px;
+  margin-bottom: 24px;
 }
 
-.prompts-toolbar > .ant-typography {
+.prompts-toolbar > .MuiTypography-root {
   flex: 1;
   min-width: 240px;
   margin: 0;
 }
 
 .prompts-workflow-filter {
-  width: 250px;
+  width: 280px;
   max-width: 100%;
 }
 
@@ -31,14 +30,17 @@
   display: flex;
   align-items: flex-start;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
 .prompts-name-link {
-  height: auto;
-  padding: 0;
-  font-weight: 600;
+  min-height: 40px;
+  padding: 8px 12px;
+  margin-inline-start: -12px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -46,8 +48,9 @@
 
 .prompts-secondary {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 20px;
+  font-weight: 400;
 }
 
 .prompts-break {
@@ -62,7 +65,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 16px;
 }
 
 .prompts-drawer-actions {
@@ -71,53 +74,52 @@
 
 .prompts-editor-actions {
   justify-content: space-between;
-  margin-top: 16px;
+  margin-top: 24px;
 }
 
 .prompts-editor-status {
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .prompts-template-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin-bottom: 24px;
 }
 
 .prompts-form-columns {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 20px;
+  gap: 24px;
 }
 
 .prompts-field-label {
   display: block;
   margin-bottom: 8px;
+  font-size: 14px;
+  line-height: 20px;
   font-weight: 500;
 }
 
 .prompts-code-editor,
-.prompts-readonly {
+.prompts-readonly,
+.prompts-code-editor .MuiInputBase-input,
+.prompts-readonly .MuiInputBase-input {
   font-family: var(--app-code-font);
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
   tab-size: 2;
 }
 
 .prompts-readonly {
-  max-height: 60vh;
-  margin: 16px 0 0;
-  padding: 16px;
-  overflow: auto;
-  border: 1px solid var(--app-line);
-  border-radius: 6px;
-  background: var(--app-canvas);
-  white-space: pre-wrap;
+  margin-top: 24px;
   overflow-wrap: anywhere;
 }
 
@@ -129,31 +131,24 @@
 
 .prompts-preview-result,
 .prompts-section-note {
-  margin-top: 20px;
+  margin-top: 24px;
 }
 
 .prompts-preview-digest {
-  margin-top: 12px;
+  margin-top: 24px;
 }
 
 .prompts-preview-meta {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 20px;
   overflow-wrap: anywhere;
 }
 
 @media (max-width: 767px) {
-  .prompts-page {
-    padding: 16px;
-  }
-
-  .prompts-page > .ant-card > .ant-card-body {
-    padding: 16px;
-  }
-
   .prompts-form-columns {
     grid-template-columns: minmax(0, 1fr);
-    gap: 0;
+    gap: 24px;
   }
 
   .prompts-workflow-filter {

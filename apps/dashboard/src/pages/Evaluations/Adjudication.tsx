@@ -1,13 +1,27 @@
 import * as C from "@agentic-review/contracts";
-import { Alert, Button, Card, Form, Input, Select, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  AlertTitle,
+  Autocomplete,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable } from "@/components/ui";
 import type { EvaluationAdjudicationAdapter } from "@/services/evaluation-adjudication";
 import {
   ReviewControlProtocolError,
   ReviewControlRequestError,
 } from "@/services/review-control/errors";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { EvaluationTable } from "./Display";
 import { errorMessage, newIdentity, OriginalMutation } from "./state";
 
 type ContextItem = C.EvaluationAdjudicationContextV1["items"][number];
@@ -23,12 +37,23 @@ interface ChangeIntent {
   request: C.EvaluationAdjudicationChangeRequest;
 }
 const kinds = [
-  { value: "match", label: "Matches an expected finding" },
-  { value: "duplicate", label: "Duplicate of a primary match" },
-  { value: "false_positive", label: "False positive" },
-  { value: "unjudged", label: "Unjudged" },
+  {
+    value: "match",
+    label: "Matches an expected finding",
+  },
+  {
+    value: "duplicate",
+    label: "Duplicate of a primary match",
+  },
+  {
+    value: "false_positive",
+    label: "False positive",
+  },
+  {
+    value: "unjudged",
+    label: "Unjudged",
+  },
 ] as const;
-
 export function resultAdjudicationScope(
   result: C.EvaluationCellResultV1,
 ): C.EvaluationCellResultReadQuery {
@@ -96,23 +121,45 @@ export function assertAdjudicationContext(
   }
 }
 export function judgmentFromCurrent(value: C.EvaluationFindingAdjudication | null): Judgment {
-  if (!value) return { kind: "unjudged", reason: "" };
+  if (!value)
+    return {
+      kind: "unjudged",
+      reason: "",
+    };
   if (value.kind === "match")
-    return { kind: value.kind, expectedFindingId: value.expectedFindingId, reason: value.reason };
+    return {
+      kind: value.kind,
+      expectedFindingId: value.expectedFindingId,
+      reason: value.reason,
+    };
   if (value.kind === "duplicate")
     return {
       kind: value.kind,
       primaryOccurrenceKey: value.primaryOccurrenceKey,
       reason: value.reason,
     };
-  return { kind: value.kind, reason: value.reason };
+  return {
+    kind: value.kind,
+    reason: value.reason,
+  };
 }
 export function changeJudgmentKind(previous: Judgment, kind: Judgment["kind"]): Judgment {
   return kind === "match"
-    ? { kind, expectedFindingId: "", reason: previous.reason }
+    ? {
+        kind,
+        expectedFindingId: "",
+        reason: previous.reason,
+      }
     : kind === "duplicate"
-      ? { kind, primaryOccurrenceKey: "", reason: previous.reason }
-      : { kind, reason: previous.reason };
+      ? {
+          kind,
+          primaryOccurrenceKey: "",
+          reason: previous.reason,
+        }
+      : {
+          kind,
+          reason: previous.reason,
+        };
 }
 export function adjudicationEditorForItem(item: ContextItem): Editor {
   const judgment = judgmentFromCurrent(item.adjudication);
@@ -125,7 +172,10 @@ export function adjudicationEditorForItem(item: ContextItem): Editor {
 }
 export function applyReviewedAdjudicationVersion(
   editor: Editor,
-  reviewed: { occurrenceKey: string; version: number },
+  reviewed: {
+    occurrenceKey: string;
+    version: number;
+  },
 ): Editor {
   if (editor.occurrenceKey !== reviewed.occurrenceKey)
     throw new ReviewControlRequestError(
@@ -133,7 +183,10 @@ export function applyReviewedAdjudicationVersion(
       "occurrenceKey",
       "The refreshed version belongs to another occurrence.",
     );
-  return { ...editor, expectedVersion: reviewed.version };
+  return {
+    ...editor,
+    expectedVersion: reviewed.version,
+  };
 }
 export function validateJudgmentIntent(
   context: C.EvaluationAdjudicationContextV1,
@@ -219,7 +272,6 @@ export function adjudicationEditingAllowed(
     !access.fetching
   );
 }
-
 export function Adjudication({
   result,
   adapter,
@@ -250,7 +302,10 @@ export function Adjudication({
   const [editor, setEditor] = useState<Editor | null>(null),
     [historyOpen, setHistoryOpen] = useState(false),
     [historyPage, setHistoryPage] = useState(1);
-  const [reviewed, setReviewed] = useState<{ occurrenceKey: string; version: number } | null>(null),
+  const [reviewed, setReviewed] = useState<{
+      occurrenceKey: string;
+      version: number;
+    } | null>(null),
     [error, setError] = useState<string | null>(null),
     [notice, setNotice] = useState<string | null>(null);
   const owner = useMemo(() => new OriginalMutation<ChangeIntent>(), []);
@@ -348,7 +403,13 @@ export function Adjudication({
       setError(null);
       setNotice(null);
       void owner.run(
-        { scope: { ...scope, occurrenceKey: editor.occurrenceKey }, request },
+        {
+          scope: {
+            ...scope,
+            occurrenceKey: editor.occurrenceKey,
+          },
+          request,
+        },
         execute,
         success,
         page.invalidateAccess,
@@ -368,7 +429,10 @@ export function Adjudication({
     if (!value.isError && value.data && selectedKey) {
       const item = value.data.items.find((candidate) => candidate.occurrence.key === selectedKey);
       if (item) {
-        setReviewed({ occurrenceKey: selectedKey, version: item.version });
+        setReviewed({
+          occurrenceKey: selectedKey,
+          version: item.version,
+        });
         setNotice("Current judgments refreshed. Your proposed judgment is unchanged.");
       }
     }
@@ -378,8 +442,14 @@ export function Adjudication({
     async (signal) => {
       if (!editor) throw new Error("Select an occurrence first.");
       const value = await adapter.history(
-        { ...scope, occurrenceKey: editor.occurrenceKey },
-        { page: historyPage, pageSize: 20 },
+        {
+          ...scope,
+          occurrenceKey: editor.occurrenceKey,
+        },
+        {
+          page: historyPage,
+          pageSize: 20,
+        },
         signal,
       );
       if (
@@ -413,344 +483,575 @@ export function Adjudication({
     item: context?.items.find((item) => item.occurrence.key === occurrence.key),
     content: occurrenceContent(result, occurrence),
   }));
+  const selectedExpectedFindingId =
+    editor?.judgment.kind === "match" ? editor.judgment.expectedFindingId : "";
+  const selectedPrimaryOccurrenceKey =
+    editor?.judgment.kind === "duplicate" ? editor.judgment.primaryOccurrenceKey : "";
   return (
-    <Card
-      size="small"
-      title="Human adjudication"
-      extra={
-        <Button
-          disabled={!active || !page.readable || pending}
-          loading={contextQuery.isFetching}
-          onClick={() => void refresh()}
-        >
-          Refresh judgments
-        </Button>
-      }
-    >
-      <Typography.Paragraph type="secondary">
-        Judge each model occurrence against this case's frozen expected findings. Evidence
-        verification is separate; a judgment never approves a pull request.
-      </Typography.Paragraph>
-      {reason ? <Alert type="info" title="Read-only adjudication" description={reason} /> : null}
-      {contextQuery.error ? (
-        <Alert
-          type="error"
-          title="Adjudication context unavailable"
-          description={errorMessage(contextQuery.error)}
-        />
-      ) : null}
-      {context ? (
-        <Card
-          size="small"
-          title="Frozen expected findings"
-          extra={<Tag>{context.expectations.annotation}</Tag>}
-        >
-          <Typography.Paragraph>
-            {context.expectations.annotation === "unlabeled"
-              ? "Finding expectations are unlabeled; an empty list is not a negative example."
-              : context.expectations.annotation === "partial"
-                ? "Only known positive findings are labeled. Other findings remain unassessed."
-                : context.expectations.expected.length === 0
-                  ? "Complete labels explicitly declare that no findings are expected."
-                  : "This list declares all expected findings for the frozen case."}
-          </Typography.Paragraph>
-          {context.expectations.expected.map((expected) => (
-            <p key={expected.expectedFindingId}>
-              {expected.description}
-              <span className="evaluation-meta">{expected.expectedFindingId}</span>
-            </p>
-          ))}
-        </Card>
-      ) : null}
-      <Table
-        rowKey={(row) => row.occurrence.key}
-        size="small"
-        dataSource={context ? rows : []}
-        loading={contextQuery.isPending}
-        pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
-        columns={[
-          {
-            title: "Model occurrence",
-            key: "occurrence",
-            render: (_, row) => (
-              <div>
-                <strong>{row.content?.title}</strong>
-                <p className="evaluation-result-text">{row.content?.body}</p>
-                <span className="evaluation-meta">
-                  {row.occurrence.kind} · ordinal {row.occurrence.ordinal} · {row.occurrence.key}
-                </span>
-              </div>
-            ),
+    <Card variant="elevation" elevation={0} className="evaluation-section-card">
+      <CardHeader
+        title={"Human adjudication"}
+        action={
+          <Button
+            disabled={!active || !page.readable || pending}
+            loading={contextQuery.isFetching}
+            onClick={() => void refresh()}
+            variant="outlined"
+          >
+            Refresh judgments
+          </Button>
+        }
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
           },
-          {
-            title: "Current judgment",
-            key: "current",
-            render: (_, row) => (
-              <div>
-                {judgmentLabel(row.item?.adjudication ?? null)}
-                <span className="evaluation-meta">Version {row.item?.version ?? 0}</span>
-              </div>
-            ),
-          },
-          {
-            title: "Actions",
-            key: "actions",
-            render: (_, row) =>
-              row.item ? (
-                <Space wrap>
-                  <Button
-                    size="small"
-                    disabled={pending || (dirty && row.occurrence.key !== editor?.occurrenceKey)}
-                    onClick={() => row.item && select(row.item)}
-                  >
-                    Inspect judgment
-                  </Button>
-                  <Button
-                    size="small"
-                    disabled={pending || (dirty && row.occurrence.key !== editor?.occurrenceKey)}
-                    onClick={() => row.item && select(row.item, true)}
-                  >
-                    History
-                  </Button>
-                </Space>
-              ) : null,
-          },
-        ]}
+        }}
       />
-      {editor && current && context ? (
-        <Card
-          size="small"
-          title={`Judgment · occurrence ${current.occurrence.ordinal}`}
-          extra={
-            <Button
-              disabled={pending}
-              onClick={() => {
-                setEditor(null);
-                owner.reset();
-                setReviewed(null);
-                setHistoryOpen(false);
+      <CardContent>
+        <Typography component="p" variant="body2" color={"text.secondary"}>
+          Judge each model occurrence against this case's frozen expected findings. Evidence
+          verification is separate; a judgment never approves a pull request.
+        </Typography>
+        {reason ? (
+          <Alert severity={"info"}>
+            <AlertTitle>{"Read-only adjudication"}</AlertTitle>
+            {reason}
+          </Alert>
+        ) : null}
+        {contextQuery.error ? (
+          <Alert severity={"error"}>
+            <AlertTitle>{"Adjudication context unavailable"}</AlertTitle>
+            {errorMessage(contextQuery.error)}
+          </Alert>
+        ) : null}
+        {context ? (
+          <Card variant="elevation" elevation={0} className="evaluation-tonal-card">
+            <CardHeader
+              title={"Frozen expected findings"}
+              action={<Chip label={context.expectations.annotation} />}
+              slotProps={{
+                title: {
+                  variant: "subtitle1",
+                  component: "h3",
+                },
               }}
-            >
-              Discard editor
-            </Button>
-          }
-        >
-          <span className="evaluation-meta">
-            {editor.occurrenceKey} · editing version {editor.expectedVersion} · current version{" "}
-            {current.version}
-          </span>
-          {conflict ? (
-            <Alert
-              type="warning"
-              title="The current judgment changed"
-              description="Your proposed judgment and original version are preserved. Refresh current judgments to compare, then explicitly use the refreshed version before creating a new change."
+            />
+            <CardContent>
+              <Typography component="p" variant="body2">
+                {context.expectations.annotation === "unlabeled"
+                  ? "Finding expectations are unlabeled; an empty list is not a negative example."
+                  : context.expectations.annotation === "partial"
+                    ? "Only known positive findings are labeled. Other findings remain unassessed."
+                    : context.expectations.expected.length === 0
+                      ? "Complete labels explicitly declare that no findings are expected."
+                      : "This list declares all expected findings for the frozen case."}
+              </Typography>
+              {context.expectations.expected.map((expected) => (
+                <p key={expected.expectedFindingId}>
+                  {expected.description}
+                  <span className="evaluation-meta">{expected.expectedFindingId}</span>
+                </p>
+              ))}
+            </CardContent>
+          </Card>
+        ) : null}
+        <EvaluationTable
+          loading={contextQuery.isPending}
+          rows={context ? rows : []}
+          getRowId={(row) => row.occurrence.key}
+          columns={[
+            {
+              id: "occurrence",
+              label: "Model occurrence",
+              render: (row) => {
+                return (
+                  <div>
+                    <strong>{row.content?.title}</strong>
+                    <p className="evaluation-result-text">{row.content?.body}</p>
+                    <span className="evaluation-meta">
+                      {row.occurrence.kind} · ordinal {row.occurrence.ordinal} ·{" "}
+                      {row.occurrence.key}
+                    </span>
+                  </div>
+                );
+              },
+            },
+            {
+              id: "current",
+              label: "Current judgment",
+              render: (row) => {
+                return (
+                  <div>
+                    {judgmentLabel(row.item?.adjudication ?? null)}
+                    <span className="evaluation-meta">Version {row.item?.version ?? 0}</span>
+                  </div>
+                );
+              },
+            },
+            {
+              id: "actions",
+              label: "Actions",
+              render: (row) => {
+                return row.item ? (
+                  <Stack
+                    direction="row"
+                    spacing={1.5}
+                    sx={{
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 1,
+                    }}
+                  >
+                    <Button
+                      disabled={pending || (dirty && row.occurrence.key !== editor?.occurrenceKey)}
+                      onClick={() => row.item && select(row.item)}
+                      variant="outlined"
+                    >
+                      Inspect judgment
+                    </Button>
+                    <Button
+                      disabled={pending || (dirty && row.occurrence.key !== editor?.occurrenceKey)}
+                      onClick={() => row.item && select(row.item, true)}
+                      variant="outlined"
+                    >
+                      History
+                    </Button>
+                  </Stack>
+                ) : null;
+              },
+            },
+          ]}
+          ariaLabel="Evaluation records"
+          pageSize={10}
+        />
+        {editor && current && context ? (
+          <Card variant="outlined">
+            <CardHeader
+              title={`Judgment · occurrence ${current.occurrence.ordinal}`}
               action={
                 <Button
-                  disabled={!active || !page.readable || pending}
-                  onClick={() => void refresh()}
+                  disabled={pending}
+                  onClick={() => {
+                    setEditor(null);
+                    owner.reset();
+                    setReviewed(null);
+                    setHistoryOpen(false);
+                  }}
+                  variant="outlined"
                 >
-                  Refresh current judgment
+                  Discard editor
                 </Button>
               }
-            />
-          ) : null}
-          {conflict && reviewed?.occurrenceKey === editor.occurrenceKey ? (
-            <Button
-              disabled={!canWrite || pending}
-              onClick={() => {
-                if (!canWrite || pending) return;
-                setEditor(applyReviewedAdjudicationVersion(editor, reviewed));
-                owner.reset();
-                setReviewed(null);
+              slotProps={{
+                title: {
+                  variant: "subtitle1",
+                  component: "h3",
+                },
               }}
-            >
-              Use refreshed version {reviewed.version} for this intent
-            </Button>
-          ) : null}
-          <Form layout="vertical" disabled={locked}>
-            <Form.Item label="Judgment">
-              <Select
-                aria-label="Evaluation finding judgment"
-                value={editor.judgment.kind}
-                options={[...kinds]}
-                onChange={(kind) => {
-                  if (!locked)
-                    setEditor({ ...editor, judgment: changeJudgmentKind(editor.judgment, kind) });
-                }}
-              />
-            </Form.Item>
-            {editor.judgment.kind === "match" ? (
-              <Form.Item label="Frozen expected finding" required>
-                <Select
-                  aria-label="Matched frozen expected finding"
-                  value={editor.judgment.expectedFindingId || undefined}
-                  placeholder="Select a frozen expectation"
-                  options={context.expectations.expected.map((expected) => ({
-                    value: expected.expectedFindingId,
-                    label: expected.description,
-                    disabled: context.items.some(
-                      (item) =>
-                        item.occurrence.key !== editor.occurrenceKey &&
-                        item.adjudication?.kind === "match" &&
-                        item.adjudication.expectedFindingId === expected.expectedFindingId,
-                    ),
-                  }))}
-                  onChange={(expectedFindingId) => {
-                    if (!locked)
-                      setEditor({
-                        ...editor,
-                        judgment: {
-                          kind: "match",
-                          expectedFindingId,
-                          reason: editor.judgment.reason,
-                        },
-                      });
-                  }}
-                />
-              </Form.Item>
-            ) : editor.judgment.kind === "duplicate" ? (
-              <Form.Item label="Primary match" required>
-                <Select
-                  aria-label="Duplicate primary occurrence"
-                  value={editor.judgment.primaryOccurrenceKey || undefined}
-                  placeholder="Select a current primary match"
-                  options={context.items
-                    .filter(
-                      (item) =>
-                        item.occurrence.key !== editor.occurrenceKey &&
-                        item.adjudication?.kind === "match",
-                    )
-                    .map((item) => ({
-                      value: item.occurrence.key,
-                      label: `${occurrenceContent(result, item.occurrence)?.title ?? item.occurrence.kind} · ordinal ${item.occurrence.ordinal}`,
-                    }))}
-                  onChange={(primaryOccurrenceKey) => {
-                    if (!locked)
-                      setEditor({
-                        ...editor,
-                        judgment: {
-                          kind: "duplicate",
-                          primaryOccurrenceKey,
-                          reason: editor.judgment.reason,
-                        },
-                      });
-                  }}
-                />
-              </Form.Item>
-            ) : null}
-            <Form.Item label="Reason" required>
-              <Input.TextArea
-                aria-label="Adjudication reason"
-                value={editor.judgment.reason}
-                maxLength={2048}
-                autoSize={{ minRows: 2, maxRows: 5 }}
-                onChange={(event) => {
-                  if (!locked)
-                    setEditor({
-                      ...editor,
-                      judgment: { ...editor.judgment, reason: event.target.value },
-                    });
-                }}
-              />
-            </Form.Item>
-          </Form>
-          {error ? (
-            <Alert type="error" title="Review the proposed judgment" description={error} />
-          ) : null}
-          {mutation.error ? (
-            <Alert
-              type={mutation.conflict ? "warning" : "error"}
-              title={mutation.request ? "The result is not confirmed" : "The judgment was rejected"}
-              description={mutation.error}
-              action={
-                mutation.request ? (
-                  <Button disabled={!canWrite} loading={mutation.busy} onClick={retry}>
-                    Retry original judgment
-                  </Button>
-                ) : undefined
-              }
             />
-          ) : null}
-          {mutation.request ? (
-            <p className="evaluation-meta">
-              The exact occurrence, change ID, expected version and judgment are preserved for
-              retry.
-            </p>
-          ) : null}
-          {notice ? <Alert type="info" title={notice} /> : null}
-          {editor.expectedVersion >= Number.MAX_SAFE_INTEGER ? (
-            <Alert type="info" title="The judgment version limit has been reached" />
-          ) : null}
-          <Space>
-            <Button
-              type="primary"
-              disabled={
-                locked ||
-                conflict ||
-                !dirty ||
-                !currentVersionMatches ||
-                editor.expectedVersion >= Number.MAX_SAFE_INTEGER
-              }
-              loading={mutation.busy}
-              onClick={save}
-            >
-              Save judgment
-            </Button>
-            <Button onClick={() => setHistoryOpen((value) => !value)}>
-              {historyOpen ? "Hide history" : "Show history"}
-            </Button>
-          </Space>
-          {historyOpen ? (
-            <>
-              {history.error ? (
+            <CardContent>
+              <span className="evaluation-meta">
+                {editor.occurrenceKey} · editing version {editor.expectedVersion} · current version{" "}
+                {current.version}
+              </span>
+              {conflict ? (
                 <Alert
-                  type="error"
-                  title="History unavailable"
-                  description={errorMessage(history.error)}
-                />
+                  action={
+                    <Button
+                      disabled={!active || !page.readable || pending}
+                      onClick={() => void refresh()}
+                      variant="outlined"
+                    >
+                      Refresh current judgment
+                    </Button>
+                  }
+                  severity={"warning"}
+                >
+                  <AlertTitle>{"The current judgment changed"}</AlertTitle>
+                  {
+                    "Your proposed judgment and original version are preserved. Refresh current judgments to compare, then explicitly use the refreshed version before creating a new change."
+                  }
+                </Alert>
               ) : null}
-              <Table
-                rowKey={(item) => item.adjudication.adjudicationId}
-                size="small"
-                dataSource={history.data?.items ?? []}
-                loading={history.isFetching}
-                pagination={{
-                  current: historyPage,
-                  pageSize: 20,
-                  total: history.data?.total ?? 0,
-                  showSizeChanger: false,
-                  hideOnSinglePage: true,
-                  onChange: setHistoryPage,
+              {conflict && reviewed?.occurrenceKey === editor.occurrenceKey ? (
+                <Button
+                  disabled={!canWrite || pending}
+                  onClick={() => {
+                    if (!canWrite || pending) return;
+                    setEditor(applyReviewedAdjudicationVersion(editor, reviewed));
+                    owner.reset();
+                    setReviewed(null);
+                  }}
+                  variant="outlined"
+                >
+                  Use refreshed version {reviewed.version} for this intent
+                </Button>
+              ) : null}
+              <Stack
+                disabled={locked}
+                component="fieldset"
+                spacing={2}
+                sx={{
+                  border: 0,
+                  p: 0,
+                  m: 0,
+                  minWidth: 0,
                 }}
-                columns={[
-                  { title: "Version", dataIndex: "version", key: "version" },
-                  {
-                    title: "Judgment",
-                    key: "judgment",
-                    render: (_, item) => (
-                      <div>
-                        {judgmentLabel(item.adjudication)}
-                        <p>{item.adjudication.reason}</p>
-                      </div>
-                    ),
-                  },
-                  {
-                    title: "Reviewer",
-                    key: "actor",
-                    render: (_, item) => (
-                      <span className="evaluation-meta">
-                        {item.adjudication.actor.issuer} · {item.adjudication.actor.subject}
-                        <br />
-                        {item.adjudication.createdAt}
-                      </span>
-                    ),
-                  },
-                ]}
-              />
-            </>
-          ) : null}
-        </Card>
-      ) : null}
+              >
+                <Autocomplete
+                  options={[...kinds]}
+                  disablePortal
+                  fullWidth
+                  disabled={locked}
+                  value={
+                    [...kinds].find((option) => option.value === editor.judgment.kind) ??
+                    (editor.judgment.kind == null || String(editor.judgment.kind) === ""
+                      ? null
+                      : {
+                          value: editor.judgment.kind as NonNullable<
+                            NonNullable<NonNullable<typeof editor>["judgment"]>["kind"]
+                          >,
+                          label: String(editor.judgment.kind),
+                        })
+                  }
+                  onChange={(_event, option) => {
+                    if (option !== null)
+                      ((kind) => {
+                        if (!locked)
+                          setEditor({
+                            ...editor,
+                            judgment: changeJudgmentKind(editor.judgment, kind),
+                          });
+                      })(
+                        option.value as NonNullable<
+                          NonNullable<NonNullable<typeof editor>["judgment"]>["kind"]
+                        >,
+                      );
+                  }}
+                  getOptionLabel={(option) => option.label}
+                  isOptionEqualToValue={(option, selected) => option.value === selected.value}
+                  getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label={"Judgment"}
+                      slotProps={{
+                        ...params.slotProps,
+                        htmlInput: {
+                          ...params.slotProps.htmlInput,
+                          "aria-label": "Evaluation finding judgment",
+                        },
+                      }}
+                    />
+                  )}
+                  disableClearable={Boolean(editor.judgment.kind)}
+                  getOptionKey={(option) => option.value}
+                />
+                {editor.judgment.kind === "match" ? (
+                  <Autocomplete
+                    options={context.expectations.expected.map((expected) => ({
+                      value: expected.expectedFindingId,
+                      label: expected.description,
+                      disabled: context.items.some(
+                        (item) =>
+                          item.occurrence.key !== editor.occurrenceKey &&
+                          item.adjudication?.kind === "match" &&
+                          item.adjudication.expectedFindingId === expected.expectedFindingId,
+                      ),
+                    }))}
+                    disablePortal
+                    fullWidth
+                    disabled={locked}
+                    value={
+                      context.expectations.expected
+                        .map((expected) => ({
+                          value: expected.expectedFindingId,
+                          label: expected.description,
+                          disabled: context.items.some(
+                            (item) =>
+                              item.occurrence.key !== editor.occurrenceKey &&
+                              item.adjudication?.kind === "match" &&
+                              item.adjudication.expectedFindingId === expected.expectedFindingId,
+                          ),
+                        }))
+                        .find(
+                          (option) => option.value === (selectedExpectedFindingId || undefined),
+                        ) ??
+                      ((selectedExpectedFindingId || undefined) == null ||
+                      String(selectedExpectedFindingId || undefined) === ""
+                        ? null
+                        : {
+                            value: (selectedExpectedFindingId || undefined) as NonNullable<string>,
+                            label: String(selectedExpectedFindingId || undefined),
+                            disabled: false,
+                          })
+                    }
+                    onChange={(_event, option) => {
+                      if (option !== null)
+                        ((expectedFindingId) => {
+                          if (!locked)
+                            setEditor({
+                              ...editor,
+                              judgment: {
+                                kind: "match",
+                                expectedFindingId,
+                                reason: editor.judgment.reason,
+                              },
+                            });
+                        })(option.value as NonNullable<string>);
+                    }}
+                    getOptionLabel={(option) => option.label}
+                    isOptionEqualToValue={(option, selected) => option.value === selected.value}
+                    getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label={"Frozen expected finding"}
+                        placeholder={"Select a frozen expectation"}
+                        required
+                        slotProps={{
+                          ...params.slotProps,
+                          htmlInput: {
+                            ...params.slotProps.htmlInput,
+                            "aria-label": "Matched frozen expected finding",
+                          },
+                        }}
+                      />
+                    )}
+                    disableClearable={Boolean(selectedExpectedFindingId || undefined)}
+                    getOptionKey={(option) => option.value}
+                  />
+                ) : editor.judgment.kind === "duplicate" ? (
+                  <Autocomplete
+                    options={context.items
+                      .filter(
+                        (item) =>
+                          item.occurrence.key !== editor.occurrenceKey &&
+                          item.adjudication?.kind === "match",
+                      )
+                      .map((item) => ({
+                        value: item.occurrence.key,
+                        label: `${occurrenceContent(result, item.occurrence)?.title ?? item.occurrence.kind} · ordinal ${item.occurrence.ordinal}`,
+                      }))}
+                    disablePortal
+                    fullWidth
+                    disabled={locked}
+                    value={
+                      context.items
+                        .filter(
+                          (item) =>
+                            item.occurrence.key !== editor.occurrenceKey &&
+                            item.adjudication?.kind === "match",
+                        )
+                        .map((item) => ({
+                          value: item.occurrence.key,
+                          label: `${occurrenceContent(result, item.occurrence)?.title ?? item.occurrence.kind} · ordinal ${item.occurrence.ordinal}`,
+                        }))
+                        .find(
+                          (option) => option.value === (selectedPrimaryOccurrenceKey || undefined),
+                        ) ??
+                      ((selectedPrimaryOccurrenceKey || undefined) == null ||
+                      String(selectedPrimaryOccurrenceKey || undefined) === ""
+                        ? null
+                        : {
+                            value: (selectedPrimaryOccurrenceKey ||
+                              undefined) as NonNullable<string>,
+                            label: String(selectedPrimaryOccurrenceKey || undefined),
+                          })
+                    }
+                    onChange={(_event, option) => {
+                      if (option !== null)
+                        ((primaryOccurrenceKey) => {
+                          if (!locked)
+                            setEditor({
+                              ...editor,
+                              judgment: {
+                                kind: "duplicate",
+                                primaryOccurrenceKey,
+                                reason: editor.judgment.reason,
+                              },
+                            });
+                        })(option.value as NonNullable<string>);
+                    }}
+                    getOptionLabel={(option) => option.label}
+                    isOptionEqualToValue={(option, selected) => option.value === selected.value}
+                    getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label={"Primary match"}
+                        placeholder={"Select a current primary match"}
+                        required
+                        slotProps={{
+                          ...params.slotProps,
+                          htmlInput: {
+                            ...params.slotProps.htmlInput,
+                            "aria-label": "Duplicate primary occurrence",
+                          },
+                        }}
+                      />
+                    )}
+                    disableClearable={Boolean(selectedPrimaryOccurrenceKey || undefined)}
+                    getOptionKey={(option) => option.value}
+                  />
+                ) : null}
+                <TextField
+                  value={editor.judgment.reason}
+                  onChange={(event) => {
+                    if (!locked)
+                      setEditor({
+                        ...editor,
+                        judgment: {
+                          ...editor.judgment,
+                          reason: event.target.value,
+                        },
+                      });
+                  }}
+                  fullWidth
+                  label={"Reason"}
+                  required={true}
+                  disabled={locked}
+                  slotProps={{
+                    htmlInput: {
+                      maxLength: 2048,
+                      "aria-label": "Adjudication reason",
+                    },
+                  }}
+                  multiline
+                  minRows={2}
+                  maxRows={5}
+                />
+              </Stack>
+              {error ? (
+                <Alert severity={"error"}>
+                  <AlertTitle>{"Review the proposed judgment"}</AlertTitle>
+                  {error}
+                </Alert>
+              ) : null}
+              {mutation.error ? (
+                <Alert
+                  action={
+                    mutation.request ? (
+                      <Button
+                        disabled={!canWrite}
+                        loading={mutation.busy}
+                        onClick={retry}
+                        variant="outlined"
+                      >
+                        Retry original judgment
+                      </Button>
+                    ) : undefined
+                  }
+                  severity={mutation.conflict ? "warning" : "error"}
+                >
+                  <AlertTitle>
+                    {mutation.request ? "The result is not confirmed" : "The judgment was rejected"}
+                  </AlertTitle>
+                  {mutation.error}
+                </Alert>
+              ) : null}
+              {mutation.request ? (
+                <p className="evaluation-meta">
+                  The exact occurrence, change ID, expected version and judgment are preserved for
+                  retry.
+                </p>
+              ) : null}
+              {notice ? (
+                <Alert severity={"info"}>
+                  <AlertTitle>{notice}</AlertTitle>
+                </Alert>
+              ) : null}
+              {editor.expectedVersion >= Number.MAX_SAFE_INTEGER ? (
+                <Alert severity={"info"}>
+                  <AlertTitle>{"The judgment version limit has been reached"}</AlertTitle>
+                </Alert>
+              ) : null}
+              <Stack
+                direction="row"
+                spacing={1.5}
+                sx={{
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 1,
+                }}
+              >
+                <Button
+                  disabled={
+                    locked ||
+                    conflict ||
+                    !dirty ||
+                    !currentVersionMatches ||
+                    editor.expectedVersion >= Number.MAX_SAFE_INTEGER
+                  }
+                  loading={mutation.busy}
+                  onClick={save}
+                  variant="contained"
+                >
+                  Save judgment
+                </Button>
+                <Button onClick={() => setHistoryOpen((value) => !value)} variant="outlined">
+                  {historyOpen ? "Hide history" : "Show history"}
+                </Button>
+              </Stack>
+              {historyOpen ? (
+                <>
+                  {history.error ? (
+                    <Alert severity={"error"}>
+                      <AlertTitle>{"History unavailable"}</AlertTitle>
+                      {errorMessage(history.error)}
+                    </Alert>
+                  ) : null}
+                  <DataTable
+                    loading={history.isFetching}
+                    rows={history.data?.items ?? []}
+                    getRowId={(item) => item.adjudication.adjudicationId}
+                    columns={[
+                      {
+                        id: "version",
+                        label: "Version",
+                        render: (row) => row.version,
+                      },
+                      {
+                        id: "judgment",
+                        label: "Judgment",
+                        render: (item) => {
+                          return (
+                            <div>
+                              {judgmentLabel(item.adjudication)}
+                              <p>{item.adjudication.reason}</p>
+                            </div>
+                          );
+                        },
+                      },
+                      {
+                        id: "actor",
+                        label: "Reviewer",
+                        render: (item) => {
+                          return (
+                            <span className="evaluation-meta">
+                              {item.adjudication.actor.issuer} · {item.adjudication.actor.subject}
+                              <br />
+                              {item.adjudication.createdAt}
+                            </span>
+                          );
+                        },
+                      },
+                    ]}
+                    ariaLabel="Evaluation records"
+                    pagination={{
+                      page: historyPage,
+                      pageSize: 20,
+                      total: history.data?.total ?? 0,
+                      onChange: setHistoryPage,
+                    }}
+                  />
+                </>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+      </CardContent>
     </Card>
   );
 }

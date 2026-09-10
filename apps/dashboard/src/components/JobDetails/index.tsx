@@ -1,26 +1,34 @@
-import { ReloadOutlined } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
+import CloseIcon from "@mui/icons-material/Close";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Collapse,
-  Descriptions,
+  Chip,
   Drawer,
-  Grid,
+  IconButton,
   Skeleton,
-  Table,
+  Tab,
   Tabs,
-  Tag,
+  Tooltip,
   Typography,
-} from "antd";
-import { type ReactNode, useEffect, useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { JobAdmission } from "@/components/JobAdmission";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { SchedulingDiagnostics } from "@/components/SchedulingDiagnostics";
 import { StatusTag } from "@/components/StatusTag";
+import { DataTable, DetailsGrid, notify } from "@/components/ui";
 import { type JobDetails, type JobReviewResult, reviewControl } from "@/services/review-control";
 import { jobDisplayStatus } from "@/services/review-control/admission";
+import { useOperatorSession } from "@/state/session";
 import { formatDuration } from "@/utils/format";
 import {
   clearJobDetailsQuery,
@@ -77,9 +85,25 @@ function timestamp(value?: string | null): string {
 
 function CopyValue({ value }: { value?: string | null }) {
   return value ? (
-    <Typography.Text className="job-details__code" copyable={{ text: value }}>
-      {value}
-    </Typography.Text>
+    <span className="job-details__copy-value">
+      <code className="job-details__code">{value}</code>
+      <Tooltip title="Copy value">
+        <IconButton
+          size="medium"
+          aria-label="Copy value"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(value);
+              notify("Copied to clipboard.");
+            } catch {
+              notify("Unable to copy this value to the clipboard.", "error");
+            }
+          }}
+        >
+          <ContentCopyIcon fontSize="inherit" />
+        </IconButton>
+      </Tooltip>
+    </span>
   ) : (
     <span className="job-details__muted">Not recorded</span>
   );
@@ -87,13 +111,25 @@ function CopyValue({ value }: { value?: string | null }) {
 
 function Facts({ items }: { items: Array<{ label: string; value: ReactNode }> }) {
   return (
-    <Descriptions
-      className="job-details__facts"
-      size="small"
-      layout="vertical"
-      column={{ xs: 1, sm: 2, md: 3 }}
-      items={items.map((item) => ({ key: item.label, label: item.label, children: item.value }))}
-    />
+    <div className="job-details__facts">
+      <DetailsGrid items={items} columns={2} />
+    </div>
+  );
+}
+
+function DetailsSkeleton({ lines = 7 }: { lines?: number }) {
+  return (
+    <Box sx={{ py: 1 }}>
+      {Array.from({ length: lines }, (_, index) => (
+        <Skeleton
+          // biome-ignore lint/suspicious/noArrayIndexKey: Loading skeleton rows have no data identity, state, or reorder behavior.
+          key={`line-${index}`}
+          animation="wave"
+          height={28}
+          width={index === lines - 1 ? "68%" : "100%"}
+        />
+      ))}
+    </Box>
   );
 }
 
@@ -150,17 +186,15 @@ function PendingResult({ job, showExecution }: { job: JobDetails; showExecution:
     }
   })();
   return (
-    <Alert
-      type={job.status === "failed" || job.status === "dead_letter" ? "error" : "info"}
-      showIcon
-      title={state.title}
-      description={
-        <div className="job-details__pending">
-          <p>{state.body}</p>
-          <Button onClick={showExecution}>View execution</Button>
-        </div>
-      }
-    />
+    <Alert severity={job.status === "failed" || job.status === "dead_letter" ? "error" : "info"}>
+      <AlertTitle>{state.title}</AlertTitle>
+      <div className="job-details__pending">
+        <p>{state.body}</p>
+        <Button variant="outlined" onClick={showExecution}>
+          View execution
+        </Button>
+      </div>
+    </Alert>
   );
 }
 
@@ -169,11 +203,12 @@ function ResultContent({ result }: { result: JobReviewResult }) {
   const issue = result.issueTriage;
   return (
     <div className="job-details__stack job-details__report">
-      <section className="job-details__section">
+      <section className="job-details__section job-details__section--summary">
         <div className="job-details__section-heading">
           <h3>{pr ? "Review recommendation" : "Triage summary"}</h3>
           {pr && (
-            <Tag
+            <Chip
+              size="medium"
               color={
                 pr.assessment === "approve"
                   ? "success"
@@ -181,9 +216,8 @@ function ResultContent({ result }: { result: JobReviewResult }) {
                     ? "warning"
                     : "default"
               }
-            >
-              {recommendationLabels[pr.assessment]}
-            </Tag>
+              label={recommendationLabels[pr.assessment]}
+            />
           )}
         </div>
         <p className="job-details__prose">{result.summary}</p>
@@ -196,7 +230,7 @@ function ResultContent({ result }: { result: JobReviewResult }) {
         >
           <div className="job-details__section-heading">
             <h3>Findings</h3>
-            <Tag>{pr.findings.length}</Tag>
+            <Chip size="medium" label={pr.findings.length} />
           </div>
           {pr.findings.length === 0 ? (
             <p className="job-details__quiet-message">
@@ -207,7 +241,8 @@ function ResultContent({ result }: { result: JobReviewResult }) {
             <div className="job-details__finding-list">
               {pr.findings.map((finding) => (
                 <article className="job-details__finding" key={finding.findingId}>
-                  <Tag
+                  <Chip
+                    size="medium"
                     className="job-details__priority"
                     aria-label={`Priority ${finding.priority}`}
                     color={
@@ -217,9 +252,8 @@ function ResultContent({ result }: { result: JobReviewResult }) {
                           ? "warning"
                           : "default"
                     }
-                  >
-                    P{finding.priority}
-                  </Tag>
+                    label={`P${finding.priority}`}
+                  />
                   <div className="job-details__finding-content">
                     <h4>{finding.title}</h4>
                     <div className="job-details__location job-details__code">
@@ -256,7 +290,7 @@ function ResultContent({ result }: { result: JobReviewResult }) {
               ) : (
                 <div className="job-details__labels">
                   {issue.suggestedLabels.map((label) => (
-                    <Tag key={label}>{label}</Tag>
+                    <Chip size="medium" key={label} label={label} />
                   ))}
                 </div>
               )}
@@ -310,7 +344,7 @@ function ValidationContent({ result }: { result: JobReviewResult | null }) {
       <section className="job-details__section">
         <div className="job-details__section-heading">
           <h3>Reported verification</h3>
-          <Tag>Model report</Tag>
+          <Chip size="medium" label="Model report" />
         </div>
         <p className="job-details__evidence-note">
           The model describes what it checked. Compare this report with the worker observations
@@ -326,23 +360,21 @@ function ValidationContent({ result }: { result: JobReviewResult | null }) {
         </p>
         {reportedCommands && reportedCommands.length > 0 ? (
           <section className="job-details__table-wrap" aria-label="Commands reported by the model">
-            <Table
-              size="small"
-              pagination={false}
-              tableLayout="fixed"
-              rowKey="rowKey"
-              dataSource={reportedCommands}
+            <DataTable
+              ariaLabel="Commands reported by the model"
+              getRowId={(command) => command.rowKey}
+              rows={reportedCommands}
               columns={[
                 {
-                  title: "Command",
-                  dataIndex: "command",
-                  render: (value: string) => <code className="job-details__code">{value}</code>,
+                  id: "command",
+                  label: "Command",
+                  render: (command) => <code className="job-details__code">{command.command}</code>,
                 },
                 {
-                  title: "Reported outcome",
-                  dataIndex: "status",
+                  id: "status",
+                  label: "Reported outcome",
                   width: 144,
-                  render: (value: keyof typeof verificationLabels) => verificationLabels[value],
+                  render: (command) => verificationLabels[command.status],
                 },
               ]}
             />
@@ -355,7 +387,7 @@ function ValidationContent({ result }: { result: JobReviewResult | null }) {
       <section className="job-details__section">
         <div className="job-details__section-heading">
           <h3>Observed execution</h3>
-          <Tag>Worker capture</Tag>
+          <Chip size="medium" label="Worker capture" />
         </div>
         <p className="job-details__evidence-note">
           These commands and exit codes come from captured CLI events. Exit code 0 describes a
@@ -379,39 +411,34 @@ function ValidationContent({ result }: { result: JobReviewResult | null }) {
           ]}
         />
         {evidence?.commandCapture === "incomplete" && (
-          <Alert
-            className="job-details__capture-warning"
-            type="warning"
-            showIcon
-            title="Incomplete command capture"
-            description="Some command events, exit codes, or command text may be missing."
-          />
+          <Alert className="job-details__capture-warning" severity="warning">
+            <AlertTitle>Incomplete command capture</AlertTitle>
+            Some command events, exit codes, or command text may be missing.
+          </Alert>
         )}
         {evidence && evidence.commands.length > 0 ? (
           <section className="job-details__table-wrap" aria-label="Commands captured by the worker">
-            <Table
-              size="small"
-              pagination={false}
-              tableLayout="fixed"
-              rowKey="itemId"
-              dataSource={evidence.commands}
+            <DataTable
+              ariaLabel="Commands captured by the worker"
+              getRowId={(command) => command.itemId}
+              rows={evidence.commands}
               columns={[
                 {
-                  title: "Command",
-                  dataIndex: "command",
-                  render: (value: string) => <code className="job-details__code">{value}</code>,
+                  id: "command",
+                  label: "Command",
+                  render: (command) => <code className="job-details__code">{command.command}</code>,
                 },
                 {
-                  title: "Outcome",
-                  dataIndex: "status",
+                  id: "status",
+                  label: "Outcome",
                   width: 112,
-                  render: (value: keyof typeof commandLabels) => commandLabels[value],
+                  render: (command) => commandLabels[command.status],
                 },
                 {
-                  title: "Exit code",
-                  dataIndex: "exitCode",
+                  id: "exitCode",
+                  label: "Exit code",
                   width: 80,
-                  render: (value: number | null) => value ?? "Unknown",
+                  render: (command) => command.exitCode ?? "Unknown",
                 },
               ]}
             />
@@ -431,6 +458,7 @@ function ValidationContent({ result }: { result: JobReviewResult | null }) {
 function ExecutionContent({ job }: { job: JobDetails }) {
   const diagnostics = job.failureDiagnostics;
   const result = job.reviewResult;
+  const metadataId = useId();
   return (
     <div className="job-details__stack">
       {(job.failureCode || job.failureMessage || diagnostics) && (
@@ -449,12 +477,9 @@ function ExecutionContent({ job }: { job: JobDetails }) {
           {job.failureMessage && <p className="job-details__prose">{job.failureMessage}</p>}
           {diagnostics && (
             <>
-              <Alert
-                className="job-details__diagnostic-summary"
-                type="error"
-                showIcon
-                title={diagnostics.summary}
-              />
+              <Alert className="job-details__diagnostic-summary" severity="error">
+                {diagnostics.summary}
+              </Alert>
               <div className="job-details__field">
                 <span className="job-details__field-label">Correlation ID</span>
                 <CopyValue value={diagnostics.correlationId} />
@@ -493,41 +518,39 @@ function ExecutionContent({ job }: { job: JobDetails }) {
           <CopyValue value={job.targetSha} />
         </div>
       </section>
-      <Collapse
-        className="job-details__metadata"
-        items={[
-          {
-            key: "metadata",
-            label: "Result metadata",
-            children: (
-              <>
-                <Facts
-                  items={[
-                    { label: "Work item ID", value: <CopyValue value={job.workItemId} /> },
-                    { label: "Result ID", value: <CopyValue value={result?.reviewResultId} /> },
-                    { label: "Schema", value: result?.schemaId ?? "Not recorded" },
-                    { label: "Result saved", value: timestamp(result?.createdAt) },
-                    {
-                      label: "Evidence schema",
-                      value: result?.executionEvidence?.schemaVersion ?? "Not recorded",
-                    },
-                    {
-                      label: "Requested recipes",
-                      value: result?.requestedRecipeIds.length
-                        ? result.requestedRecipeIds.join(", ")
-                        : "None",
-                    },
-                  ]}
-                />
-                <div className="job-details__field">
-                  <span className="job-details__field-label">Result digest</span>
-                  <CopyValue value={result?.resultDigest ?? job.resultDigest} />
-                </div>
-              </>
-            ),
-          },
-        ]}
-      />
+      <Accordion className="job-details__metadata" disableGutters>
+        <AccordionSummary
+          expandIcon={<ExpandMoreIcon />}
+          id={`${metadataId}-summary`}
+          aria-controls={`${metadataId}-content`}
+        >
+          Result metadata
+        </AccordionSummary>
+        <AccordionDetails>
+          <Facts
+            items={[
+              { label: "Work item ID", value: <CopyValue value={job.workItemId} /> },
+              { label: "Result ID", value: <CopyValue value={result?.reviewResultId} /> },
+              { label: "Schema", value: result?.schemaId ?? "Not recorded" },
+              { label: "Result saved", value: timestamp(result?.createdAt) },
+              {
+                label: "Evidence schema",
+                value: result?.executionEvidence?.schemaVersion ?? "Not recorded",
+              },
+              {
+                label: "Requested recipes",
+                value: result?.requestedRecipeIds.length
+                  ? result.requestedRecipeIds.join(", ")
+                  : "None",
+              },
+            ]}
+          />
+          <div className="job-details__field">
+            <span className="job-details__field-label">Result digest</span>
+            <CopyValue value={result?.resultDigest ?? job.resultDigest} />
+          </div>
+        </AccordionDetails>
+      </Accordion>
     </div>
   );
 }
@@ -552,7 +575,13 @@ function JobDetailsContent({
   session: string;
   embedded?: boolean;
 }) {
+  const tabsId = useId();
   const [activeTab, setActiveTab] = useState("result");
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(["result"]));
+  const selectTab = (tab: string) => {
+    setActiveTab(tab);
+    setVisitedTabs((previous) => new Set(previous).add(tab));
+  };
   const query = useQuery({
     queryKey: [...jobDetailsQueryRoot, session, jobId],
     queryFn: async ({ signal }) => {
@@ -582,7 +611,7 @@ function JobDetailsContent({
         aria-label="Loading job details"
         aria-busy="true"
       >
-        <Skeleton active paragraph={{ rows: 7 }} />
+        <DetailsSkeleton />
       </div>
     );
   }
@@ -594,7 +623,8 @@ function JobDetailsContent({
           {query.error instanceof Error ? query.error.message : "The job details request failed."}
         </p>
         <Button
-          icon={<ReloadOutlined />}
+          startIcon={<RefreshIcon />}
+          variant="outlined"
           loading={query.isFetching}
           onClick={() => void query.refetch()}
         >
@@ -618,8 +648,8 @@ function JobDetailsContent({
         <div className="job-details__identity">
           {!embedded && (
             <>
-              <span className="job-details__eyebrow">{job.title}</span>
-              <h2>{job.workItemRef}</h2>
+              <h2>{job.title}</h2>
+              <span className="job-details__reference">{job.workItemRef}</span>
             </>
           )}
           <div className="job-details__header-status">
@@ -633,44 +663,82 @@ function JobDetailsContent({
             </span>
           </div>
         </div>
-        <Button
+        <IconButton
           aria-label="Refresh job details"
           title="Refresh job details"
-          icon={<ReloadOutlined />}
           loading={query.isFetching}
           onClick={() => void query.refetch()}
-        />
+        >
+          <RefreshIcon />
+        </IconButton>
       </header>
       <JobAdmission admission={job.admission} />
-      <SchedulingDiagnostics
-        scope={{
-          kind: "repository_job",
-          repositoryId: job.repositoryId,
-          workItemId: job.workItemId,
-          jobId: job.id,
-        }}
-      />
       <Tabs
-        activeKey={activeTab}
-        onChange={setActiveTab}
-        items={[
-          {
-            key: "result",
-            label: "Result",
-            children: job.reviewResult ? (
-              <ResultContent result={job.reviewResult} />
-            ) : (
-              <PendingResult job={job} showExecution={() => setActiveTab("execution")} />
-            ),
-          },
-          {
-            key: "validation",
-            label: "Validation",
-            children: <ValidationContent result={job.reviewResult} />,
-          },
-          { key: "execution", label: "Execution", children: <ExecutionContent job={job} /> },
-        ]}
-      />
+        className="job-details__tabs"
+        value={activeTab}
+        onChange={(_, tab: string) => selectTab(tab)}
+        aria-label="Job details sections"
+        variant="scrollable"
+        scrollButtons="auto"
+      >
+        {[
+          ["result", "Result"],
+          ["validation", "Validation"],
+          ["execution", "Execution"],
+        ].map(([value, label]) => (
+          <Tab
+            key={value}
+            value={value}
+            label={label}
+            id={`${tabsId}-${value}-tab`}
+            aria-controls={`${tabsId}-${value}-panel`}
+          />
+        ))}
+      </Tabs>
+      <div
+        className="job-details__tab-panel"
+        role="tabpanel"
+        id={`${tabsId}-result-panel`}
+        aria-labelledby={`${tabsId}-result-tab`}
+        hidden={activeTab !== "result"}
+        tabIndex={activeTab === "result" ? 0 : -1}
+      >
+        {job.reviewResult ? (
+          <ResultContent result={job.reviewResult} />
+        ) : (
+          <PendingResult job={job} showExecution={() => selectTab("execution")} />
+        )}
+      </div>
+      <div
+        className="job-details__tab-panel"
+        role="tabpanel"
+        id={`${tabsId}-validation-panel`}
+        aria-labelledby={`${tabsId}-validation-tab`}
+        hidden={activeTab !== "validation"}
+        tabIndex={activeTab === "validation" ? 0 : -1}
+      >
+        {visitedTabs.has("validation") && <ValidationContent result={job.reviewResult} />}
+      </div>
+      <div
+        className="job-details__tab-panel"
+        role="tabpanel"
+        id={`${tabsId}-execution-panel`}
+        aria-labelledby={`${tabsId}-execution-tab`}
+        hidden={activeTab !== "execution"}
+        tabIndex={activeTab === "execution" ? 0 : -1}
+      >
+        {visitedTabs.has("execution") && <ExecutionContent job={job} />}
+      </div>
+      <div className="job-details__scheduling">
+        <SchedulingDiagnostics
+          scope={{
+            kind: "repository_job",
+            repositoryId: job.repositoryId,
+            workItemId: job.workItemId,
+            jobId: job.id,
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -685,7 +753,7 @@ export function JobDetailsPanel({
   embedded?: boolean;
 }) {
   const access = useOperatorAccess(repositoryId);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const session = jobReadSessionKey(
     repositoryId,
     access.identityKey,
@@ -695,16 +763,21 @@ export function JobDetailsPanel({
   const unavailable =
     access.pending || access.checking || !access.ready || !!access.error || !access.allows("read");
   useClearJobSession(session, jobId, unavailable);
-  if (access.pending || access.checking) return <Skeleton active paragraph={{ rows: 5 }} />;
+  if (access.pending || access.checking)
+    return (
+      <div role="status" aria-label="Checking job access" aria-busy="true">
+        <DetailsSkeleton lines={5} />
+      </div>
+    );
   if (unavailable)
     return (
       <Alert
-        type="info"
-        showIcon
-        title="Job access is unavailable"
-        description="Repository read access is required. Previous job details have been cleared."
+        severity="info"
         action={<Button onClick={() => void access.refresh()}>Refresh access</Button>}
-      />
+      >
+        <AlertTitle>Job access is unavailable</AlertTitle>
+        Repository read access is required. Previous job details have been cleared.
+      </Alert>
     );
   return (
     <JobDetailsContent
@@ -726,23 +799,39 @@ export function JobDetailDrawer({
   jobId: string | null;
   onClose: () => void;
 }) {
-  const screens = Grid.useBreakpoint();
+  const titleId = useId();
   const access = useOperatorAccess(repositoryId);
   return (
     <Drawer
       className="job-detail-drawer"
-      title="Job details"
+      anchor="right"
       open={jobId !== null}
       onClose={onClose}
-      destroyOnHidden
-      size={screens.lg ? 860 : "100%"}
-      extra={
-        <Button loading={access.checking} onClick={() => void access.refresh()}>
-          Refresh access
-        </Button>
-      }
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-modal": true,
+          "aria-labelledby": titleId,
+          sx: { width: "100%", "@media (min-width: 992px)": { width: 860 } },
+        },
+      }}
     >
-      {jobId !== null && <JobDetailsPanel repositoryId={repositoryId} jobId={jobId} />}
+      <header className="job-detail-drawer__header">
+        <Typography component="h2" variant="h6" id={titleId}>
+          Job details
+        </Typography>
+        <div className="job-detail-drawer__actions">
+          <Button loading={access.checking} onClick={() => void access.refresh()}>
+            Refresh access
+          </Button>
+          <IconButton aria-label="Close job details" onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </div>
+      </header>
+      <div className="job-detail-drawer__body">
+        {jobId !== null && <JobDetailsPanel repositoryId={repositoryId} jobId={jobId} />}
+      </div>
     </Drawer>
   );
 }

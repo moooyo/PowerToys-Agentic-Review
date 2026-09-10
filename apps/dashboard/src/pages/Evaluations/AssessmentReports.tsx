@@ -1,7 +1,20 @@
 import type * as C from "@agentic-review/contracts";
-import { Alert, Button, Card, Descriptions, Select, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  AlertTitle,
+  Autocomplete,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable, DetailsGrid } from "@/components/ui";
 import {
   createHttpEvaluationAssessmentAdapter,
   type EvaluationAssessmentAdapter,
@@ -12,8 +25,8 @@ import {
 } from "@/services/review-control/errors";
 import { armLabels, arms } from "./batch-state";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { CopyValue, EvaluationTable } from "./Display";
 import { accessDenied, errorMessage, newIdentity, OriginalMutation } from "./state";
-
 export function assessmentRatioLabel(ratio: C.EvaluationRatio): string {
   return ratio.value === null || ratio.denominator === 0
     ? `Not evaluable (${ratio.numerator}/${ratio.denominator})`
@@ -26,7 +39,10 @@ export function changeAssessmentReportPageSize(pageSize: number): {
 } {
   if (!assessmentReportPageSizes.some((value) => value === pageSize))
     throw new RangeError("Choose a supported report page size.");
-  return { page: 1, pageSize };
+  return {
+    page: 1,
+    pageSize,
+  };
 }
 export function isAssessmentReportPageTooLarge(error: unknown): boolean {
   return (
@@ -59,7 +75,12 @@ interface PreviewState {
 }
 /** Preview reads are exclusively user-triggered. Query invalidation and polling never call this owner. */
 export class ManualAssessmentPreview {
-  #state: PreviewState = { value: null, busy: false, error: null, calculation: 0 };
+  #state: PreviewState = {
+    value: null,
+    busy: false,
+    error: null,
+    calculation: 0,
+  };
   #listeners = new Set<() => void>();
   #controller: AbortController | null = null;
   #generation = 0;
@@ -82,11 +103,19 @@ export class ManualAssessmentPreview {
     this.#generation++;
     this.#controller?.abort();
     this.#controller = null;
-    if (this.#state.busy) this.#set({ ...this.#state, busy: false });
+    if (this.#state.busy)
+      this.#set({
+        ...this.#state,
+        busy: false,
+      });
   }
   invalidate() {
     this.pause();
-    this.#set({ ...this.#state, value: null, error: null });
+    this.#set({
+      ...this.#state,
+      value: null,
+      error: null,
+    });
   }
   dispose() {
     this.#disposed = true;
@@ -101,23 +130,41 @@ export class ManualAssessmentPreview {
     const generation = ++this.#generation,
       controller = new AbortController();
     this.#controller = controller;
-    this.#set({ ...this.#state, value: null, busy: true, error: null });
+    this.#set({
+      ...this.#state,
+      value: null,
+      busy: true,
+      error: null,
+    });
     try {
       const value = await load(controller.signal);
       if (this.#disposed || generation !== this.#generation || controller.signal.aborted) return;
-      this.#set({ value, busy: false, error: null, calculation: this.#state.calculation + 1 });
+      this.#set({
+        value,
+        busy: false,
+        error: null,
+        calculation: this.#state.calculation + 1,
+      });
     } catch (error) {
       if (this.#disposed || generation !== this.#generation || controller.signal.aborted) return;
-      this.#set({ ...this.#state, value: null, busy: false, error: errorMessage(error) });
+      this.#set({
+        ...this.#state,
+        value: null,
+        busy: false,
+        error: errorMessage(error),
+      });
       if (accessDenied(error)) denied();
     } finally {
       if (generation === this.#generation) this.#controller = null;
     }
   }
 }
-
 export function AssessmentSummary({ summary }: { summary: C.EvaluationScoringSummaryV1 }) {
-  const rows: { name: string; baseline: string; candidate: string }[] = [];
+  const rows: {
+    name: string;
+    baseline: string;
+    candidate: string;
+  }[] = [];
   const add = (name: string, read: (aggregate: C.EvaluationArmAggregate) => string | number) =>
     rows.push({
       name,
@@ -173,60 +220,83 @@ export function AssessmentSummary({ summary }: { summary: C.EvaluationScoringSum
   add("Finding recall", (arm) => assessmentRatioLabel(arm.quality.recall));
   return (
     <div className="evaluation-cell-result">
-      <Typography.Paragraph type="secondary">
+      <Typography component="p" variant="body2" color={"text.secondary"}>
         Coverage describes what could be assessed. Unknown model output, unavailable evidence and
         unjudged findings do not become correct results. A zero denominator is not evaluable.
-      </Typography.Paragraph>
+      </Typography>
       {summary.baseline.quality.provisional || summary.candidate.quality.provisional ? (
-        <Alert
-          type="info"
-          title="Finding assessment is provisional"
-          description="Review the unjudged and unresolved counts before interpreting quality ratios."
-        />
+        <Alert severity={"info"}>
+          <AlertTitle>{"Finding assessment is provisional"}</AlertTitle>
+          {"Review the unjudged and unresolved counts before interpreting quality ratios."}
+        </Alert>
       ) : null}
-      <Table
-        rowKey="name"
-        size="small"
-        pagination={false}
-        dataSource={rows}
+      <DataTable
+        rows={rows}
+        getRowId={(row) => row.name}
         columns={[
-          { title: "Measure", dataIndex: "name", key: "name" },
-          { title: "Baseline", dataIndex: "baseline", key: "baseline" },
-          { title: "Candidate", dataIndex: "candidate", key: "candidate" },
+          {
+            id: "name",
+            label: "Measure",
+            render: (row) => row.name,
+          },
+          {
+            id: "baseline",
+            label: "Baseline",
+            render: (row) => row.baseline,
+          },
+          {
+            id: "candidate",
+            label: "Candidate",
+            render: (row) => row.candidate,
+          },
         ]}
+        ariaLabel="Evaluation records"
       />
-      <Typography.Title level={5}>Paired changes</Typography.Title>
-      <Table
-        rowKey="name"
-        size="small"
-        pagination={false}
-        dataSource={(["criteria", "findings"] as const).map((name) => ({
+      <Typography component="h5" variant="subtitle1">
+        Paired changes
+      </Typography>
+      <DataTable
+        rows={(["criteria", "findings"] as const).map((name) => ({
           name,
           ...summary.paired[name],
         }))}
+        getRowId={(row) => row.name}
         columns={[
-          { title: "Comparison", dataIndex: "name", key: "name" },
           {
-            title: "Coverage",
-            key: "coverage",
-            render: (_, item) => assessmentRatioLabel(item.coverage),
+            id: "name",
+            label: "Comparison",
+            render: (row) => row.name,
           },
           {
-            title: "Improved / regressed / unchanged",
-            key: "quality",
-            render: (_, item) => `${item.improved} / ${item.regressed} / ${item.unchanged}`,
+            id: "coverage",
+            label: "Coverage",
+            render: (item) => {
+              return assessmentRatioLabel(item.coverage);
+            },
           },
           {
-            title: "Coverage improved / regressed",
-            key: "coverageChange",
-            render: (_, item) => `${item.coverageImproved} / ${item.coverageRegressed}`,
+            id: "quality",
+            label: "Improved / regressed / unchanged",
+            render: (item) => {
+              return `${item.improved} / ${item.regressed} / ${item.unchanged}`;
+            },
           },
           {
-            title: "Unavailable / not applicable",
-            key: "unavailable",
-            render: (_, item) => `${item.unavailable} / ${item.notApplicable}`,
+            id: "coverageChange",
+            label: "Coverage improved / regressed",
+            render: (item) => {
+              return `${item.coverageImproved} / ${item.coverageRegressed}`;
+            },
+          },
+          {
+            id: "unavailable",
+            label: "Unavailable / not applicable",
+            render: (item) => {
+              return `${item.unavailable} / ${item.notApplicable}`;
+            },
           },
         ]}
+        ariaLabel="Evaluation records"
       />
     </div>
   );
@@ -285,210 +355,263 @@ export function AssessmentCase({
   const score = value.case,
     expectation = value.expectation;
   return (
-    <Card size="small" title={value.caseTitle}>
-      <Space wrap>
-        <Tag>{score.applicable ? "Applicable" : "Not applicable"}</Tag>
-        <Typography.Text type="secondary">{score.caseId}</Typography.Text>
-      </Space>
-      {expectation.applicability.state === "not_applicable" ? (
-        <p>{expectation.applicability.reason}</p>
-      ) : null}
-      <p className="evaluation-meta">
-        Frozen source digest {expectation.sourceDigest}. This saved assessment does not reverify
-        live evidence.
-      </p>
-      <div className="evaluation-arm-grid">
-        {arms.map((arm) => {
-          const assessment = score[arm],
-            current = currentAssessmentResult(matrix, assessment);
-          return (
-            <Card size="small" key={arm} title={armLabels[arm]}>
-              <Tag>{readableState(assessment.executionState)}</Tag>
-              {assessment.executionReason ? <p>{assessment.executionReason}</p> : null}
-              <span className="evaluation-meta">Run {assessment.runId}</span>
-              {assessment.result ? (
-                <>
-                  <span className="evaluation-meta">
-                    Recorded result {assessment.result.resultId} · attempt{" "}
-                    {assessment.result.runAttemptId}
-                  </span>
-                  {current && onViewResult ? (
-                    <Button size="small" onClick={() => onViewResult(current)}>
-                      View current result
-                    </Button>
+    <Card variant="outlined">
+      <CardHeader
+        title={value.caseTitle}
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
+        }}
+      />
+      <CardContent>
+        <Stack
+          direction="row"
+          spacing={1.5}
+          sx={{
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 1,
+          }}
+        >
+          <Chip label={score.applicable ? "Applicable" : "Not applicable"} />
+          <Typography component="span" variant="body2" color={"text.secondary"}>
+            {score.caseId}
+          </Typography>
+        </Stack>
+        {expectation.applicability.state === "not_applicable" ? (
+          <p>{expectation.applicability.reason}</p>
+        ) : null}
+        <p className="evaluation-meta">
+          Frozen source digest {expectation.sourceDigest}. This saved assessment does not reverify
+          live evidence.
+        </p>
+        <div className="evaluation-arm-grid">
+          {arms.map((arm) => {
+            const assessment = score[arm],
+              current = currentAssessmentResult(matrix, assessment);
+            return (
+              <Card key={arm} variant="elevation" elevation={0} className="evaluation-tonal-card">
+                <CardHeader
+                  title={armLabels[arm]}
+                  slotProps={{
+                    title: {
+                      variant: "subtitle1",
+                      component: "h3",
+                    },
+                  }}
+                />
+                <CardContent>
+                  <Chip label={readableState(assessment.executionState)} />
+                  {assessment.executionReason ? <p>{assessment.executionReason}</p> : null}
+                  <span className="evaluation-meta">Run {assessment.runId}</span>
+                  {assessment.result ? (
+                    <>
+                      <span className="evaluation-meta">
+                        Recorded result {assessment.result.resultId} · attempt{" "}
+                        {assessment.result.runAttemptId}
+                      </span>
+                      {current && onViewResult ? (
+                        <Button onClick={() => onViewResult(current)} variant="outlined">
+                          View current result
+                        </Button>
+                      ) : (
+                        <span className="evaluation-meta">
+                          Recorded identity only; no current result link is assumed.
+                        </span>
+                      )}
+                    </>
                   ) : (
-                    <span className="evaluation-meta">
-                      Recorded identity only; no current result link is assumed.
-                    </span>
+                    <p>No result was available for this saved assessment.</p>
                   )}
-                </>
-              ) : (
-                <p>No result was available for this saved assessment.</p>
-              )}
-              <p>Model findings: {readableState(assessment.findings.state)}</p>
-              {assessment.findings.reason ? <p>{assessment.findings.reason}</p> : null}
-            </Card>
-          );
-        })}
-      </div>
-      <Typography.Title level={5}>Frozen criteria and observed outcomes</Typography.Title>
-      <Table
-        rowKey="criterionId"
-        size="small"
-        pagination={false}
-        dataSource={expectation.criteria}
-        columns={[
-          {
-            title: "Expected criterion",
-            key: "expected",
-            render: (_, criterion) => (
-              <div>
-                <strong>{criterion.description}</strong>
-                <span className="evaluation-meta">
-                  {criterion.criterionId} · expected {criterion.expectedOutcome} ·{" "}
-                  {readableState(criterion.applicability.state)}
-                </span>
-                {criterion.applicability.state === "not_applicable" ? (
-                  <p>{criterion.applicability.reason}</p>
-                ) : null}
-              </div>
-            ),
-          },
-          ...arms.map((arm) => ({
-            title: armLabels[arm],
-            key: arm,
-            render: (_: unknown, criterion: C.EvaluationCaseExpectation["criteria"][number]) => {
-              const actual = score[arm].criteria.find(
-                (item) => item.criterionId === criterion.criterionId,
-              );
-              return (
-                <div>
-                  <Tag>{actual ? readableState(actual.state) : "Unavailable"}</Tag>
-                  <p>Actual: {actual?.actualOutcome ?? "Not available"}</p>
-                  <span className="evaluation-meta">{actual?.checkId ?? "Unmapped"}</span>
-                  {actual?.reason ? <p>{actual.reason}</p> : null}
-                </div>
-              );
+                  <p>Model findings: {readableState(assessment.findings.state)}</p>
+                  {assessment.findings.reason ? <p>{assessment.findings.reason}</p> : null}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+        <Typography component="h5" variant="subtitle1">
+          Frozen criteria and observed outcomes
+        </Typography>
+        <DataTable
+          rows={expectation.criteria}
+          getRowId={(row) => row.criterionId}
+          columns={[
+            {
+              id: "expected",
+              label: "Expected criterion",
+              render: (criterion) => {
+                return (
+                  <div>
+                    <strong>{criterion.description}</strong>
+                    <span className="evaluation-meta">
+                      {criterion.criterionId} · expected {criterion.expectedOutcome} ·{" "}
+                      {readableState(criterion.applicability.state)}
+                    </span>
+                    {criterion.applicability.state === "not_applicable" ? (
+                      <p>{criterion.applicability.reason}</p>
+                    ) : null}
+                  </div>
+                );
+              },
             },
-          })),
-          {
-            title: "Paired change",
-            key: "paired",
-            render: (_, criterion) =>
-              readableState(
-                score.paired.criteria.find((item) => item.criterionId === criterion.criterionId)
-                  ?.change ?? "unavailable",
-              ),
-          },
-        ]}
-      />
-      <Typography.Title level={5}>Frozen finding expectations</Typography.Title>
-      <Tag>{expectation.findings.annotation}</Tag>
-      <p>
-        {expectation.findings.annotation === "unlabeled"
-          ? "Unlabeled findings are not negative examples."
-          : expectation.findings.annotation === "partial"
-            ? "Only the listed known positives are labeled."
-            : expectation.findings.expected.length === 0
-              ? "Complete labels declare no expected findings."
-              : "These are the complete expected finding labels."}
-      </p>
-      <Table
-        rowKey="expectedFindingId"
-        size="small"
-        pagination={false}
-        dataSource={expectation.findings.expected}
-        columns={[
-          {
-            title: "Expected finding",
-            key: "expected",
-            render: (_, finding) => (
-              <div>
-                {finding.description}
-                <span className="evaluation-meta">{finding.expectedFindingId}</span>
-              </div>
-            ),
-          },
-          ...arms.map((arm) => ({
-            title: armLabels[arm],
-            key: arm,
-            render: (
-              _: unknown,
-              expected: C.EvaluationCaseExpectation["findings"]["expected"][number],
-            ) => {
-              const finding = score[arm].findings.expected.find(
-                (item) => item.expectedFindingId === expected.expectedFindingId,
-              );
-              return (
-                <div>
-                  {readableState(finding?.state ?? "unresolved")}
-                  <span className="evaluation-meta">
-                    {finding?.occurrenceKey ?? "No matched occurrence"}
-                  </span>
-                </div>
-              );
+            ...arms.map((arm) => ({
+              id: arm,
+              label: armLabels[arm],
+              render: (criterion: C.EvaluationCaseExpectation["criteria"][number]) => {
+                const actual = score[arm].criteria.find(
+                  (item) => item.criterionId === criterion.criterionId,
+                );
+                return (
+                  <div>
+                    <Chip label={actual ? readableState(actual.state) : "Unavailable"} />
+                    <p>Actual: {actual?.actualOutcome ?? "Not available"}</p>
+                    <span className="evaluation-meta">{actual?.checkId ?? "Unmapped"}</span>
+                    {actual?.reason ? <p>{actual.reason}</p> : null}
+                  </div>
+                );
+              },
+            })),
+            {
+              id: "paired",
+              label: "Paired change",
+              render: (criterion) => {
+                return readableState(
+                  score.paired.criteria.find((item) => item.criterionId === criterion.criterionId)
+                    ?.change ?? "unavailable",
+                );
+              },
             },
-          })),
-          {
-            title: "Paired change",
-            key: "paired",
-            render: (_, expected) =>
-              readableState(
-                score.paired.findings.find(
+          ]}
+          ariaLabel="Evaluation records"
+        />
+        <Typography component="h5" variant="subtitle1">
+          Frozen finding expectations
+        </Typography>
+        <Chip label={expectation.findings.annotation} />
+        <p>
+          {expectation.findings.annotation === "unlabeled"
+            ? "Unlabeled findings are not negative examples."
+            : expectation.findings.annotation === "partial"
+              ? "Only the listed known positives are labeled."
+              : expectation.findings.expected.length === 0
+                ? "Complete labels declare no expected findings."
+                : "These are the complete expected finding labels."}
+        </p>
+        <DataTable
+          rows={expectation.findings.expected}
+          getRowId={(row) => row.expectedFindingId}
+          columns={[
+            {
+              id: "expected",
+              label: "Expected finding",
+              render: (finding) => {
+                return (
+                  <div>
+                    {finding.description}
+                    <span className="evaluation-meta">{finding.expectedFindingId}</span>
+                  </div>
+                );
+              },
+            },
+            ...arms.map((arm) => ({
+              id: arm,
+              label: armLabels[arm],
+              render: (expected: C.EvaluationCaseExpectation["findings"]["expected"][number]) => {
+                const finding = score[arm].findings.expected.find(
                   (item) => item.expectedFindingId === expected.expectedFindingId,
-                )?.change ?? "unavailable",
-              ),
-          },
-        ]}
-      />
-      <div className="evaluation-arm-grid">
-        {arms.map((arm) => {
-          const findings = score[arm].findings;
-          return (
-            <Card key={arm} size="small" title={`${armLabels[arm]} finding assessment`}>
-              <p>
-                True positives {findings.truePositives} · false positives {findings.falsePositives}{" "}
-                · false negatives {findings.falseNegatives}
-              </p>
-              <p>
-                Duplicates {findings.duplicates} · unjudged {findings.unjudged} · unresolved{" "}
-                {findings.unresolvedExpected}
-              </p>
-              <p>
-                Precision: {assessmentRatioLabel(findings.precision)}
-                <br />
-                Recall: {assessmentRatioLabel(findings.recall)}
-                <br />
-                Known-positive recall: {assessmentRatioLabel(findings.knownPositiveRecall)}
-              </p>
-              <Table
-                rowKey="occurrenceKey"
-                size="small"
-                dataSource={findings.occurrences}
-                pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
-                columns={[
-                  {
-                    title: "Occurrence",
-                    dataIndex: "occurrenceKey",
-                    key: "key",
-                    render: (key: string) => <span className="evaluation-meta">{key}</span>,
-                  },
-                  { title: "Judgment", dataIndex: "kind", key: "kind" },
-                ]}
-              />
-            </Card>
-          );
-        })}
-      </div>
-      <p>
-        Paired model coverage: {readableState(score.paired.modelCoverage)} · false-positive delta:{" "}
-        {score.paired.falsePositiveDelta ?? "Not evaluable"} · duplicate delta:{" "}
-        {score.paired.duplicateDelta ?? "Not evaluable"}
-      </p>
+                );
+                return (
+                  <div>
+                    {readableState(finding?.state ?? "unresolved")}
+                    <span className="evaluation-meta">
+                      {finding?.occurrenceKey ?? "No matched occurrence"}
+                    </span>
+                  </div>
+                );
+              },
+            })),
+            {
+              id: "paired",
+              label: "Paired change",
+              render: (expected) => {
+                return readableState(
+                  score.paired.findings.find(
+                    (item) => item.expectedFindingId === expected.expectedFindingId,
+                  )?.change ?? "unavailable",
+                );
+              },
+            },
+          ]}
+          ariaLabel="Evaluation records"
+        />
+        <div className="evaluation-arm-grid">
+          {arms.map((arm) => {
+            const findings = score[arm].findings;
+            return (
+              <Card key={arm} variant="elevation" elevation={0} className="evaluation-tonal-card">
+                <CardHeader
+                  title={`${armLabels[arm]} finding assessment`}
+                  slotProps={{
+                    title: {
+                      variant: "subtitle1",
+                      component: "h3",
+                    },
+                  }}
+                />
+                <CardContent>
+                  <p>
+                    True positives {findings.truePositives} · false positives{" "}
+                    {findings.falsePositives} · false negatives {findings.falseNegatives}
+                  </p>
+                  <p>
+                    Duplicates {findings.duplicates} · unjudged {findings.unjudged} · unresolved{" "}
+                    {findings.unresolvedExpected}
+                  </p>
+                  <p>
+                    Precision: {assessmentRatioLabel(findings.precision)}
+                    <br />
+                    Recall: {assessmentRatioLabel(findings.recall)}
+                    <br />
+                    Known-positive recall: {assessmentRatioLabel(findings.knownPositiveRecall)}
+                  </p>
+                  <EvaluationTable
+                    rows={findings.occurrences}
+                    getRowId={(row) => row.occurrenceKey}
+                    columns={[
+                      {
+                        id: "key",
+                        label: "Occurrence",
+                        render: (row) => {
+                          const key: string = row.occurrenceKey;
+                          return <span className="evaluation-meta">{key}</span>;
+                        },
+                      },
+                      {
+                        id: "kind",
+                        label: "Judgment",
+                        render: (row) => row.kind,
+                      },
+                    ]}
+                    ariaLabel="Evaluation records"
+                    pageSize={10}
+                  />
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+        <p>
+          Paired model coverage: {readableState(score.paired.modelCoverage)} · false-positive delta:{" "}
+          {score.paired.falsePositiveDelta ?? "Not evaluable"} · duplicate delta:{" "}
+          {score.paired.duplicateDelta ?? "Not evaluable"}
+        </p>
+      </CardContent>
     </Card>
   );
 }
-
 interface SaveIntent {
   scope: C.EvaluationAssessmentScope;
   request: C.EvaluationAssessmentPublishRequest;
@@ -568,7 +691,10 @@ export function AssessmentReports({
     () => providedAdapter ?? createHttpEvaluationAssessmentAdapter(),
     [providedAdapter],
   );
-  const scope = { repositoryId: page.repositoryId, evaluationId },
+  const scope = {
+      repositoryId: page.repositoryId,
+      evaluationId,
+    },
     scopeKey = JSON.stringify(scope);
   const previewOwner = useMemo(() => new ManualAssessmentPreview(), []),
     saveOwner = useMemo(() => new OriginalMutation<SaveIntent>(), []);
@@ -602,7 +728,10 @@ export function AssessmentReports({
     }
     previousStamp.current = stamp;
   }, [stamp, previewOwner]);
-  const [listPagination, setListPagination] = useState({ page: 1, pageSize: 20 }),
+  const [listPagination, setListPagination] = useState({
+      page: 1,
+      pageSize: 20,
+    }),
     [selected, setSelected] = useState<string | null>(null),
     [caseId, setCaseId] = useState<string | null>(null);
   const pending = mutation.busy || mutation.request !== null;
@@ -625,7 +754,14 @@ export function AssessmentReports({
   );
   const report = useEvaluationQuery(
     ["assessment", scopeKey, selected],
-    (signal) => adapter.get({ ...scope, assessmentId: selected ?? "" }, signal),
+    (signal) =>
+      adapter.get(
+        {
+          ...scope,
+          assessmentId: selected ?? "",
+        },
+        signal,
+      ),
     active && selected !== null,
   );
   const caseDetail = useEvaluationQuery(
@@ -633,7 +769,11 @@ export function AssessmentReports({
     async (signal) => {
       if (!report.data) throw new Error("Load the saved report before selecting a case.");
       const value = await adapter.getCase(
-        { ...scope, assessmentId: selected ?? "", caseId: caseId ?? "" },
+        {
+          ...scope,
+          assessmentId: selected ?? "",
+          caseId: caseId ?? "",
+        },
         signal,
       );
       assertAssessmentCaseReport(value, report.data);
@@ -693,228 +833,380 @@ export function AssessmentReports({
   const shownPreview = mutation.request?.preview ?? preview.value;
   return (
     <Card
-      size="small"
-      title="Assessment reports"
       hidden={!active || !page.readable}
       inert={!active || !page.readable}
-      extra={
-        <Button
-          disabled={!active || !page.readable}
-          loading={list.isFetching}
-          onClick={() => void list.refetch()}
-        >
-          Refresh reports
-        </Button>
-      }
+      variant="elevation"
+      elevation={0}
+      className="evaluation-section-card"
     >
-      <Typography.Paragraph type="secondary">
-        Saved reports preserve the observations, evidence assessment and human judgments used at
-        that time. They do not represent live evidence or an approval decision.
-      </Typography.Paragraph>
-      {list.error || report.error || caseDetail.error ? (
-        <Alert
-          type="error"
-          title={
-            isAssessmentReportPageTooLarge(list.error)
-              ? "Report page is too large"
-              : "Report data unavailable"
-          }
-          description={
-            isAssessmentReportPageTooLarge(list.error)
-              ? "Choose a smaller page size to load these reports"
-              : errorMessage(list.error ?? report.error ?? caseDetail.error)
-          }
-        />
-      ) : null}
-      <Space wrap style={{ marginBlock: 12 }}>
-        <Typography.Text>Reports per page</Typography.Text>
-        <Select
-          aria-label="Reports per page"
-          style={{ minWidth: 120 }}
-          value={listPagination.pageSize}
-          disabled={!active || !page.readable}
-          options={assessmentReportPageSizes.map((value) => ({ value, label: String(value) }))}
-          onChange={(value) => setListPagination(changeAssessmentReportPageSize(value))}
-        />
-      </Space>
-      <Table<C.EvaluationAssessmentSummaryV1>
-        rowKey="assessmentId"
-        size="small"
-        dataSource={list.data?.items ?? []}
-        loading={active && list.isPending}
-        pagination={{
-          current: listPagination.page,
-          pageSize: listPagination.pageSize,
-          total: list.data?.total ?? 0,
-          showSizeChanger: false,
-          hideOnSinglePage: true,
-          onChange: (page) => setListPagination((previous) => ({ ...previous, page })),
-        }}
-        columns={[
-          {
-            title: "Report",
-            key: "report",
-            render: (_, item) => (
-              <Button
-                type="link"
-                disabled={pending || !active || !page.readable}
-                onClick={() => {
-                  setSelected(item.assessmentId);
-                  setCaseId(null);
-                }}
-              >
-                Version {item.version}
-              </Button>
-            ),
-          },
-          { title: "Saved", dataIndex: "createdAt", key: "created" },
-          { title: "Scoring rules", dataIndex: "scorerVersion", key: "rules" },
-        ]}
-      />
-      {report.data && !report.isFetching ? (
-        <Card size="small" title={`Saved report · version ${report.data.version}`}>
-          <Descriptions
-            column={1}
-            size="small"
-            items={[
-              {
-                key: "saved",
-                label: "Saved by",
-                children: `${report.data.createdBy.issuer} · ${report.data.createdBy.subject} · ${report.data.createdAt}`,
-              },
-              {
-                key: "digest",
-                label: "Report digest",
-                children: <Typography.Text copyable>{report.data.reportDigest}</Typography.Text>,
-              },
-            ]}
-          />
-          <AssessmentSummary summary={report.data.summary} />
-          <Select
-            aria-label="Saved report case"
-            disabled={!active || !page.readable}
-            style={{ width: "100%", marginBlock: 16 }}
-            value={caseId ?? undefined}
-            placeholder="Inspect a frozen case"
-            options={report.data.caseIds.map((id) => ({
-              value: id,
-              label: matrix?.cases.find((entry) => entry.caseId === id)?.title ?? id,
-            }))}
-            onChange={setCaseId}
-          />
-          {caseDetail.data && !caseDetail.isFetching ? (
-            <AssessmentCase
-              value={caseDetail.data}
-              matrix={matrix}
-              onViewResult={active && page.readable ? onViewResult : undefined}
-            />
-          ) : null}
-        </Card>
-      ) : null}
-      <Card
-        size="small"
-        title="Current preview"
-        extra={
+      <CardHeader
+        title={"Assessment reports"}
+        action={
           <Button
-            disabled={!active || !page.readable || pending}
-            loading={preview.busy}
-            onClick={calculate}
+            disabled={!active || !page.readable}
+            loading={list.isFetching}
+            onClick={() => void list.refetch()}
+            variant="outlined"
           >
-            {preview.value || mutation.conflict ? "Refresh preview" : "Calculate preview"}
+            Refresh reports
           </Button>
         }
-      >
-        <p className="evaluation-meta">
-          Preview calculation verifies the current batch inputs only when requested. Batch polling
-          does not recalculate it.
-        </p>
-        {stale ? (
-          <Alert
-            type="info"
-            title="The batch changed since the previous preview"
-            description="Calculate a new preview before saving a new report. Any original request awaiting confirmation is retained."
-          />
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
+        }}
+      />
+      <CardContent>
+        <Typography component="p" variant="body2" color={"text.secondary"}>
+          Saved reports preserve the observations, evidence assessment and human judgments used at
+          that time. They do not represent live evidence or an approval decision.
+        </Typography>
+        {list.error || report.error || caseDetail.error ? (
+          <Alert severity={"error"}>
+            <AlertTitle>
+              {isAssessmentReportPageTooLarge(list.error)
+                ? "Report page is too large"
+                : "Report data unavailable"}
+            </AlertTitle>
+            {isAssessmentReportPageTooLarge(list.error)
+              ? "Choose a smaller page size to load these reports"
+              : errorMessage(list.error ?? report.error ?? caseDetail.error)}
+          </Alert>
         ) : null}
-        {preview.error ? (
-          <Alert type="error" title="Preview unavailable" description={preview.error} />
-        ) : null}
-        {shownPreview ? (
-          <>
-            <p className="evaluation-meta">
-              Calculated {shownPreview.generatedAt} · assessment version{" "}
-              {shownPreview.assessmentVersion} · {shownPreview.summary.rulesVersion}
-            </p>
-            <AssessmentSummary summary={shownPreview.summary} />
-          </>
-        ) : (
-          <Typography.Paragraph type="secondary">
-            Calculate a preview to inspect current coverage and comparison results.
-          </Typography.Paragraph>
-        )}
-        {!reviewer ? (
-          <Alert type="info" title="Reviewer permission is required to save reports" />
-        ) : null}
-        {mutation.error ? (
-          <Alert
-            type={mutation.conflict ? "warning" : "error"}
-            title={
-              mutation.conflict
-                ? "The report inputs or version changed"
-                : mutation.request
-                  ? "The save result is not confirmed"
-                  : "The report was rejected"
-            }
-            description={mutation.error}
-            action={
-              mutation.request ? (
-                <Button disabled={!canSave} loading={mutation.busy} onClick={retry}>
-                  Retry original save
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : null}
-        {mutation.request ? (
-          <p className="evaluation-meta">
-            The original change ID, input digest and expected version are preserved.
-          </p>
-        ) : null}
-        {mutation.conflict ? (
-          <>
-            <p>
-              Refresh the preview, review it, and explicitly confirm it before submitting a new
-              report request.
-            </p>
-            {preview.value && lastAttempt && preview.calculation > lastAttempt.calculation ? (
-              <Button
-                disabled={!canSave || pending}
-                onClick={() => {
-                  saveOwner.reset();
-                  setLastAttempt(null);
-                }}
-              >
-                Use this refreshed preview
-              </Button>
-            ) : null}
-          </>
-        ) : null}
-        {notice ? <Alert type="success" title={notice} /> : null}
-        <Button
-          type="primary"
-          disabled={
-            !canSave ||
-            pending ||
-            mutation.conflict ||
-            preview.busy ||
-            !preview.value ||
-            preview.value.assessmentVersion >= Number.MAX_SAFE_INTEGER
-          }
-          loading={mutation.busy}
-          onClick={save}
+        <Stack
+          style={{
+            marginBlock: 12,
+          }}
+          direction="row"
+          spacing={1.5}
+          sx={{
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 1,
+          }}
         >
-          Save report
-        </Button>
-      </Card>
+          <Typography component="span" variant="body2">
+            Reports per page
+          </Typography>
+          <Autocomplete
+            style={{
+              minWidth: 120,
+            }}
+            disabled={!active || !page.readable}
+            options={assessmentReportPageSizes.map((value) => ({
+              value,
+              label: String(value),
+            }))}
+            disablePortal
+            fullWidth
+            value={
+              assessmentReportPageSizes
+                .map((value) => ({
+                  value,
+                  label: String(value),
+                }))
+                .find((option) => option.value === listPagination.pageSize) ??
+              (listPagination.pageSize == null || String(listPagination.pageSize) === ""
+                ? null
+                : {
+                    value: listPagination.pageSize as NonNullable<
+                      NonNullable<typeof listPagination>["pageSize"]
+                    >,
+                    label: String(listPagination.pageSize),
+                  })
+            }
+            onChange={(_event, option) => {
+              if (option !== null)
+                ((value) => setListPagination(changeAssessmentReportPageSize(value)))(
+                  option.value as NonNullable<NonNullable<typeof listPagination>["pageSize"]>,
+                );
+            }}
+            getOptionLabel={(option) => option.label}
+            isOptionEqualToValue={(option, selected) => option.value === selected.value}
+            getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label={"Reports per page"}
+                slotProps={{
+                  ...params.slotProps,
+                  htmlInput: {
+                    ...params.slotProps.htmlInput,
+                    "aria-label": "Reports per page",
+                  },
+                }}
+              />
+            )}
+            disableClearable={Boolean(listPagination.pageSize)}
+            getOptionKey={(option) => option.value}
+          />
+        </Stack>
+        <DataTable<C.EvaluationAssessmentSummaryV1>
+          loading={active && list.isPending}
+          rows={list.data?.items ?? []}
+          getRowId={(row) => row.assessmentId}
+          columns={[
+            {
+              id: "report",
+              label: "Report",
+              render: (item) => {
+                return (
+                  <Button
+                    disabled={pending || !active || !page.readable}
+                    onClick={() => {
+                      setSelected(item.assessmentId);
+                      setCaseId(null);
+                    }}
+                    variant="text"
+                  >
+                    Version {item.version}
+                  </Button>
+                );
+              },
+            },
+            {
+              id: "created",
+              label: "Saved",
+              render: (row) => row.createdAt,
+            },
+            {
+              id: "rules",
+              label: "Scoring rules",
+              render: (row) => row.scorerVersion,
+            },
+          ]}
+          ariaLabel="Evaluation records"
+          pagination={{
+            page: listPagination.page,
+            pageSize: listPagination.pageSize,
+            total: list.data?.total ?? 0,
+            onChange: (page) =>
+              setListPagination((previous) => ({
+                ...previous,
+                page,
+              })),
+          }}
+        />
+        {report.data && !report.isFetching ? (
+          <Card variant="elevation" elevation={0} className="evaluation-section-card">
+            <CardHeader
+              title={`Saved report · version ${report.data.version}`}
+              slotProps={{
+                title: {
+                  variant: "subtitle1",
+                  component: "h3",
+                },
+              }}
+            />
+            <CardContent>
+              <DetailsGrid
+                items={[
+                  {
+                    key: "saved",
+                    label: "Saved by",
+                    value: `${report.data.createdBy.issuer} · ${report.data.createdBy.subject} · ${report.data.createdAt}`,
+                  },
+                  {
+                    key: "digest",
+                    label: "Report digest",
+                    value: <CopyValue value={report.data.reportDigest} />,
+                  },
+                ]}
+                columns={1}
+              />
+              <AssessmentSummary summary={report.data.summary} />
+              <Autocomplete
+                disabled={!active || !page.readable}
+                style={{
+                  width: "100%",
+                  marginBlock: 16,
+                }}
+                options={report.data.caseIds.map((id) => ({
+                  value: id,
+                  label: matrix?.cases.find((entry) => entry.caseId === id)?.title ?? id,
+                }))}
+                disablePortal
+                fullWidth
+                value={
+                  report.data.caseIds
+                    .map((id) => ({
+                      value: id,
+                      label: matrix?.cases.find((entry) => entry.caseId === id)?.title ?? id,
+                    }))
+                    .find((option) => option.value === (caseId ?? undefined)) ??
+                  ((caseId ?? undefined) == null || String(caseId ?? undefined) === ""
+                    ? null
+                    : {
+                        value: (caseId ?? undefined) as NonNullable<typeof caseId>,
+                        label: String(caseId ?? undefined),
+                      })
+                }
+                onChange={(_event, option) => {
+                  if (option !== null) setCaseId(option.value as NonNullable<typeof caseId>);
+                }}
+                getOptionLabel={(option) => option.label}
+                isOptionEqualToValue={(option, selected) => option.value === selected.value}
+                getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label={"Saved report case"}
+                    placeholder={"Inspect a frozen case"}
+                    slotProps={{
+                      ...params.slotProps,
+                      htmlInput: {
+                        ...params.slotProps.htmlInput,
+                        "aria-label": "Saved report case",
+                      },
+                    }}
+                  />
+                )}
+                disableClearable={Boolean(caseId ?? undefined)}
+                getOptionKey={(option) => option.value}
+              />
+              {caseDetail.data && !caseDetail.isFetching ? (
+                <AssessmentCase
+                  value={caseDetail.data}
+                  matrix={matrix}
+                  onViewResult={active && page.readable ? onViewResult : undefined}
+                />
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+        <Card variant="elevation" elevation={0} className="evaluation-section-card">
+          <CardHeader
+            title={"Current preview"}
+            action={
+              <Button
+                disabled={!active || !page.readable || pending}
+                loading={preview.busy}
+                onClick={calculate}
+                variant="outlined"
+              >
+                {preview.value || mutation.conflict ? "Refresh preview" : "Calculate preview"}
+              </Button>
+            }
+            slotProps={{
+              title: {
+                variant: "subtitle1",
+                component: "h3",
+              },
+            }}
+          />
+          <CardContent>
+            <p className="evaluation-meta">
+              Preview calculation verifies the current batch inputs only when requested. Batch
+              polling does not recalculate it.
+            </p>
+            {stale ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"The batch changed since the previous preview"}</AlertTitle>
+                {
+                  "Calculate a new preview before saving a new report. Any original request awaiting confirmation is retained."
+                }
+              </Alert>
+            ) : null}
+            {preview.error ? (
+              <Alert severity={"error"}>
+                <AlertTitle>{"Preview unavailable"}</AlertTitle>
+                {preview.error}
+              </Alert>
+            ) : null}
+            {shownPreview ? (
+              <>
+                <p className="evaluation-meta">
+                  Calculated {shownPreview.generatedAt} · assessment version{" "}
+                  {shownPreview.assessmentVersion} · {shownPreview.summary.rulesVersion}
+                </p>
+                <AssessmentSummary summary={shownPreview.summary} />
+              </>
+            ) : (
+              <Typography component="p" variant="body2" color={"text.secondary"}>
+                Calculate a preview to inspect current coverage and comparison results.
+              </Typography>
+            )}
+            {!reviewer ? (
+              <Alert severity={"info"}>
+                <AlertTitle>{"Reviewer permission is required to save reports"}</AlertTitle>
+              </Alert>
+            ) : null}
+            {mutation.error ? (
+              <Alert
+                action={
+                  mutation.request ? (
+                    <Button
+                      disabled={!canSave}
+                      loading={mutation.busy}
+                      onClick={retry}
+                      variant="outlined"
+                    >
+                      Retry original save
+                    </Button>
+                  ) : undefined
+                }
+                severity={mutation.conflict ? "warning" : "error"}
+              >
+                <AlertTitle>
+                  {mutation.conflict
+                    ? "The report inputs or version changed"
+                    : mutation.request
+                      ? "The save result is not confirmed"
+                      : "The report was rejected"}
+                </AlertTitle>
+                {mutation.error}
+              </Alert>
+            ) : null}
+            {mutation.request ? (
+              <p className="evaluation-meta">
+                The original change ID, input digest and expected version are preserved.
+              </p>
+            ) : null}
+            {mutation.conflict ? (
+              <>
+                <p>
+                  Refresh the preview, review it, and explicitly confirm it before submitting a new
+                  report request.
+                </p>
+                {preview.value && lastAttempt && preview.calculation > lastAttempt.calculation ? (
+                  <Button
+                    disabled={!canSave || pending}
+                    onClick={() => {
+                      saveOwner.reset();
+                      setLastAttempt(null);
+                    }}
+                    variant="outlined"
+                  >
+                    Use this refreshed preview
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+            {notice ? (
+              <Alert severity={"success"}>
+                <AlertTitle>{notice}</AlertTitle>
+              </Alert>
+            ) : null}
+            <Button
+              disabled={
+                !canSave ||
+                pending ||
+                mutation.conflict ||
+                preview.busy ||
+                !preview.value ||
+                preview.value.assessmentVersion >= Number.MAX_SAFE_INTEGER
+              }
+              loading={mutation.busy}
+              onClick={save}
+              variant="contained"
+            >
+              Save report
+            </Button>
+          </CardContent>
+        </Card>
+      </CardContent>
     </Card>
   );
 }

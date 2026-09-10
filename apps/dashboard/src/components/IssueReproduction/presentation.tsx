@@ -5,7 +5,8 @@ import type {
   IssueReproductionCaseAssessment,
   ObservationEquals,
 } from "@agentic-review/contracts";
-import { Alert, Space, Table, Tag, Typography, theme } from "antd";
+import { Alert, AlertTitle, Box, Chip, Stack, Typography } from "@mui/material";
+import { DataTable } from "@/components/ui";
 import { CopyValue, EvidenceIds, Facts, Prose } from "../ReviewRuns/common";
 import {
   observationFactLabel,
@@ -26,7 +27,13 @@ export function CaseState({
   current?: boolean;
 }) {
   const view = reproductionCasePresentation(assessment, current);
-  return <Tag color={view.tone}>{view.label}</Tag>;
+  return (
+    <Chip
+      size="medium"
+      color={view.tone === "processing" ? "info" : view.tone}
+      label={view.label}
+    />
+  );
 }
 
 export function AssessmentSummary({
@@ -42,58 +49,70 @@ export function AssessmentSummary({
     "cases" | "conclusion" | "coverage" | "rulesVersion"
   >;
 }) {
-  const { token } = theme.useToken();
   const assessments = [
     { title: "Current assessment", value: assessment, current: true },
     ...(recorded ? [{ title: "Recorded assessment", value: recorded, current: false }] : []),
   ];
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      <div
-        style={{
+    <Stack spacing={2} sx={{ width: "100%" }}>
+      <Box
+        sx={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))",
-          gap: token.margin,
+          gap: 3,
         }}
       >
         {assessments.map(({ title, value, current }) => {
           const view = reproductionConclusionPresentation(value, current);
           return (
-            <section
+            <Box
+              component="section"
               key={title}
               aria-label={title}
-              style={{
-                borderInlineStart: `3px solid ${current ? token.colorPrimaryBorder : token.colorBorderSecondary}`,
-                paddingInlineStart: token.paddingSM,
+              sx={{
+                pb: 2,
+                borderBottom: 1,
+                borderColor: "divider",
               }}
             >
-              <Typography.Text type="secondary">{title}</Typography.Text>
-              <div style={{ marginBlock: token.marginXS }}>
-                <Tag color={view.tone}>{view.label}</Tag>
-                <Typography.Text>
+              <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                {title}
+              </Typography>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{ my: 1, flexWrap: "wrap", alignItems: "center" }}
+              >
+                <Chip
+                  size="medium"
+                  color={view.tone === "processing" ? "info" : view.tone}
+                  label={view.label}
+                />
+                <Typography variant="body2">
                   {value.coverage === "complete" ? "Complete coverage" : "Partial coverage"}
-                </Typography.Text>
-              </div>
-              <Typography.Text type="secondary">
+                </Typography>
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
                 {value.cases.length} configured case(s) · rules version {value.rulesVersion}
-              </Typography.Text>
-            </section>
+              </Typography>
+            </Box>
           );
         })}
-      </div>
-      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+      </Box>
+      <Typography variant="body2" color="text.secondary">
         A confirmed case establishes the claim only in its frozen context. Not reproduced requires
         an explicit absent signature for every configured case. Missing observations never establish
         absence. Coverage describes these configured cases, not all environments.
-      </Typography.Paragraph>
+      </Typography>
       {recorded && (
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        <Typography variant="body2" color="text.secondary">
           The recorded assessment is preserved from this saved result. The current assessment also
           considers whether the execution is still current and its required evidence remains
           available.
-        </Typography.Paragraph>
+        </Typography>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -103,7 +122,7 @@ export function CaseAssessmentComparison({
   detail: DashboardReviewRunReproductionCaseResponse;
 }) {
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
+    <Stack spacing={2} sx={{ width: "100%" }}>
       <Facts
         items={[
           { label: "Current case state", value: <CaseState assessment={detail.current} /> },
@@ -114,26 +133,22 @@ export function CaseAssessmentComparison({
         ]}
       />
       {detail.current.reasons.length > 0 && (
-        <Alert
-          showIcon
-          type={detail.current.reasons.includes("execution_pending") ? "info" : "warning"}
-          title="Current assessment reasons"
-          description={
-            <ul style={{ marginBottom: 0, paddingInlineStart: 20 }}>
-              {detail.current.reasons.map((reason) => (
-                <li key={reason}>{reproductionReasonLabel[reason]}</li>
-              ))}
-            </ul>
-          }
-        />
+        <Alert severity={detail.current.reasons.includes("execution_pending") ? "info" : "warning"}>
+          <AlertTitle>Current assessment reasons</AlertTitle>
+          <ul style={{ marginBottom: 0, paddingInlineStart: 20 }}>
+            {detail.current.reasons.map((reason) => (
+              <li key={reason}>{reproductionReasonLabel[reason]}</li>
+            ))}
+          </ul>
+        </Alert>
       )}
       {detail.recorded && detail.recorded.reasons.length > 0 && (
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        <Typography variant="body2" color="text.secondary">
           Recorded reasons:{" "}
           {detail.recorded.reasons.map((reason) => reproductionReasonLabel[reason]).join("; ")}.
-        </Typography.Paragraph>
+        </Typography>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -154,41 +169,61 @@ function Signature({
     ),
   }));
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      <Typography.Text strong>{title} · all conditions must hold</Typography.Text>
-      <Table
-        size="small"
-        rowKey="key"
-        dataSource={rows}
-        pagination={false}
-        scroll={{ x: 680 }}
+    <Stack spacing={2} sx={{ width: "100%" }}>
+      <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+        {title} · all conditions must hold
+      </Typography>
+      <DataTable
+        getRowId={(row) => row.key}
+        rows={rows}
+        ariaLabel={`${title} conditions`}
         columns={[
           {
-            title: "Selected observation",
+            id: "observation",
+            label: "Selected observation",
             width: "36%",
-            render: (_, row) => observationRefLabel(row.predicate.observation),
+            minWidth: 240,
+            render: (row) => observationRefLabel(row.predicate.observation),
           },
           {
-            title: "Expected value",
+            id: "expected",
+            label: "Expected value",
             width: "28%",
-            render: (_, row) => (
-              <Typography.Text code>{observationValueLabel(row.predicate.equals)}</Typography.Text>
+            minWidth: 180,
+            render: (row) => (
+              <Typography
+                variant="body2"
+                component="code"
+                sx={{ fontFamily: '"Roboto Mono", monospace' }}
+              >
+                {observationValueLabel(row.predicate.equals)}
+              </Typography>
             ),
           },
           {
-            title: "Observed fact",
-            render: (_, row) => (
-              <Space orientation="vertical" size={4}>
-                <Typography.Text code={row.fact?.state === "observed"}>
+            id: "observed",
+            label: "Observed fact",
+            minWidth: 260,
+            render: (row) => (
+              <Stack spacing={0.5}>
+                <Typography
+                  variant="body2"
+                  component={row.fact?.state === "observed" ? "code" : "span"}
+                  sx={
+                    row.fact?.state === "observed"
+                      ? { fontFamily: '"Roboto Mono", monospace' }
+                      : undefined
+                  }
+                >
                   {observationFactLabel(row.fact)}
-                </Typography.Text>
+                </Typography>
                 {row.fact && <EvidenceIds ids={row.fact.evidenceIds} />}
-              </Space>
+              </Stack>
             ),
           },
         ]}
       />
-    </Space>
+    </Stack>
   );
 }
 
@@ -201,11 +236,11 @@ export function ReproductionCaseFacts({
 }) {
   const selected = detail.case;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+    <Stack spacing={3} sx={{ width: "100%" }}>
       <CaseAssessmentComparison detail={detail} />
-      <Typography.Title level={5} style={{ margin: 0 }}>
+      <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
         Frozen case context
-      </Typography.Title>
+      </Typography>
       <Prose>{selected.context}</Prose>
       <Facts
         items={[
@@ -222,55 +257,68 @@ export function ReproductionCaseFacts({
           },
         ]}
       />
-      <Typography.Text strong>Preconditions · all required</Typography.Text>
+      <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+        Preconditions · all required
+      </Typography>
       {selected.preconditions.length === 0 ? (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           No additional preconditions were configured.
-        </Typography.Text>
+        </Typography>
       ) : (
-        <Table
-          size="small"
-          rowKey={(_, index) => `precondition:${index}`}
-          dataSource={selected.preconditions}
-          pagination={false}
-          scroll={{ x: 680 }}
+        <DataTable
+          getRowId={(row) => row.key}
+          rows={selected.preconditions.map((precondition, index) => ({
+            key: `precondition:${index}`,
+            precondition,
+          }))}
+          ariaLabel="Reproduction preconditions"
           columns={[
             {
-              title: "Required condition",
+              id: "condition",
+              label: "Required condition",
               width: "36%",
-              render: (_, precondition) =>
+              minWidth: 240,
+              render: ({ precondition }) =>
                 precondition.kind === "check_passed"
                   ? `Worker check · ${precondition.checkId}`
                   : observationRefLabel(precondition.predicate.observation),
             },
             {
-              title: "Expected value",
+              id: "expected",
+              label: "Expected value",
               width: "28%",
-              render: (_, precondition) =>
+              minWidth: 180,
+              render: ({ precondition }) =>
                 precondition.kind === "check_passed" ? (
                   "Passed"
                 ) : (
-                  <Typography.Text code>
+                  <Typography
+                    variant="body2"
+                    component="code"
+                    sx={{ fontFamily: '"Roboto Mono", monospace' }}
+                  >
                     {observationValueLabel(precondition.predicate.equals)}
-                  </Typography.Text>
+                  </Typography>
                 ),
             },
             {
-              title: "Observed fact",
-              render: (_, precondition) => {
+              id: "observed",
+              label: "Observed fact",
+              minWidth: 260,
+              render: ({ precondition }) => {
                 if (precondition.kind === "check_passed") {
                   const check = result?.report.checks.find(
                     (entry) => entry.id === precondition.checkId,
                   );
                   return (
-                    <Space orientation="vertical" size={4}>
-                      <Typography.Text>
+                    <Stack spacing={0.5}>
+                      <Typography variant="body2">
                         {check
                           ? `Recorded check · ${check.outcome.replaceAll("_", " ")}`
                           : "Check outcome not recorded"}
-                      </Typography.Text>
+                      </Typography>
                       {check && <EvidenceIds ids={check.evidenceIds} />}
-                    </Space>
+                    </Stack>
                   );
                 }
                 const fact = detail.observations.find(
@@ -279,9 +327,17 @@ export function ReproductionCaseFacts({
                     observationRefKey(precondition.predicate.observation),
                 );
                 return (
-                  <Typography.Text code={fact?.state === "observed"}>
+                  <Typography
+                    variant="body2"
+                    component={fact?.state === "observed" ? "code" : "span"}
+                    sx={
+                      fact?.state === "observed"
+                        ? { fontFamily: '"Roboto Mono", monospace' }
+                        : undefined
+                    }
+                  >
                     {observationFactLabel(fact)}
-                  </Typography.Text>
+                  </Typography>
                 );
               },
             },
@@ -300,18 +356,17 @@ export function ReproductionCaseFacts({
           detail={detail}
         />
       ) : (
-        <Alert
-          showIcon
-          type="info"
-          title="No absent signature configured"
-          description="This case can establish presence. Failure to match the present signature cannot establish absence."
-        />
+        <Alert severity="info">
+          <AlertTitle>No absent signature configured</AlertTitle>
+          This case can establish presence. Failure to match the present signature cannot establish
+          absence.
+        </Alert>
       )}
-      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+      <Typography variant="body2" color="text.secondary">
         These are the selected typed facts supplied by the server. Unavailable captures, missing
         elements, and missing evidence do not become an observed false value. This comparison does
         not change the recorded or current assessment.
-      </Typography.Paragraph>
-    </Space>
+      </Typography>
+    </Stack>
   );
 }

@@ -1,28 +1,30 @@
 import type * as C from "@agentic-review/contracts";
 import {
   Alert,
+  AlertTitle,
+  Autocomplete,
   Button,
   Card,
-  Descriptions,
-  Empty,
-  Select,
-  Space,
-  Table,
-  Tag,
+  CardContent,
+  CardHeader,
+  Chip,
+  Stack,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
 import { useMemo, useState } from "react";
 import { observationRefKey, observationRefLabel } from "@/components/IssueReproduction/state";
+import { DataTable, DetailsGrid, EmptyState } from "@/components/ui";
 import {
   createHttpEvaluationReproductionAdapter,
   type EvaluationReproductionAdapter,
 } from "@/services/evaluation-reproduction";
 import { armLabels } from "./batch-state";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { CopyValue } from "./Display";
 import { OriginalReproductionCase } from "./ReproductionMapping";
 import { assertFrozenReproductionCell, assertReproductionPlanScope } from "./reproduction-state";
 import { errorMessage } from "./state";
-
 export function FrozenReproductionRecord({
   detail,
   original,
@@ -34,43 +36,56 @@ export function FrozenReproductionRecord({
   const selected =
     original?.binding.cases.filter((entry) => record.selectedCaseIds.includes(entry.id)) ?? [];
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Descriptions
-        size="small"
-        column={2}
+    <Stack
+      style={{
+        width: "100%",
+      }}
+      direction="column"
+      spacing={1.5}
+      sx={{
+        minWidth: 0,
+      }}
+    >
+      <DetailsGrid
         items={[
-          { key: "arm", label: "Arm", children: armLabels[record.arm] },
+          {
+            key: "arm",
+            label: "Arm",
+            value: armLabels[record.arm],
+          },
           {
             key: "state",
             label: "Frozen mapping",
-            children: (
-              <Tag color={record.state === "blocked" ? "warning" : undefined}>
-                {record.state === "ready"
-                  ? "Mapping ready"
-                  : record.state === "blocked"
-                    ? "Blocked"
-                    : "Not applicable"}
-              </Tag>
+            value: (
+              <Chip
+                label={
+                  record.state === "ready"
+                    ? "Mapping ready"
+                    : record.state === "blocked"
+                      ? "Blocked"
+                      : "Not applicable"
+                }
+                color={record.state === "blocked" ? "warning" : "default"}
+              />
             ),
           },
           {
             key: "cases",
             label: "Selected original cases",
-            children: record.selectedCaseIds.join(", ") || "None",
+            value: record.selectedCaseIds.join(", ") || "None",
           },
           {
             key: "digest",
             label: "Cell record digest",
-            children: <Typography.Text copyable>{detail.cellRecordSha256}</Typography.Text>,
+            value: <CopyValue value={detail.cellRecordSha256} />,
           },
         ]}
+        columns={2}
       />
       {record.blockers.length ? (
-        <Alert
-          showIcon
-          type="warning"
-          title="Frozen mapping blockers"
-          description={
+        <Alert severity={"warning"}>
+          <AlertTitle>{"Frozen mapping blockers"}</AlertTitle>
+          {
             <ul>
               {[
                 ...new Map(
@@ -84,12 +99,16 @@ export function FrozenReproductionRecord({
               ))}
             </ul>
           }
-        />
+        </Alert>
       ) : null}
       {original ? (
         <>
-          <Typography.Title level={5}>Original reproduction claim</Typography.Title>
-          <Typography.Paragraph>{original.binding.claim}</Typography.Paragraph>
+          <Typography component="h5" variant="subtitle1">
+            Original reproduction claim
+          </Typography>
+          <Typography component="p" variant="body2">
+            {original.binding.claim}
+          </Typography>
           {selected.map((entry) => (
             <OriginalReproductionCase key={entry.id} value={entry} />
           ))}
@@ -98,60 +117,68 @@ export function FrozenReproductionRecord({
           ) : null}
         </>
       ) : (
-        <Typography.Paragraph type="secondary">
+        <Typography component="p" variant="body2" color={"text.secondary"}>
           This source has no frozen reproduction definition.
-        </Typography.Paragraph>
+        </Typography>
       )}
       {record.mappings ? (
         <>
-          <Table
-            rowKey={(entry) => observationRefKey(entry.from)}
-            size="small"
-            pagination={false}
-            scroll={{ x: 600 }}
-            dataSource={record.mappings.observationMappings}
+          <DataTable
+            rows={record.mappings.observationMappings}
+            getRowId={(entry) => observationRefKey(entry.from)}
             columns={[
               {
-                title: "Original observation",
-                key: "from",
-                render: (_, entry) => observationRefLabel(entry.from),
+                id: "from",
+                label: "Original observation",
+                render: (entry) => {
+                  return observationRefLabel(entry.from);
+                },
               },
               {
-                title: "Frozen arm observation",
-                key: "to",
-                render: (_, entry) =>
-                  entry.to ? observationRefLabel(entry.to) : <Tag color="warning">Unmapped</Tag>,
+                id: "to",
+                label: "Frozen arm observation",
+                render: (entry) => {
+                  return entry.to ? (
+                    observationRefLabel(entry.to)
+                  ) : (
+                    <Chip label={"Unmapped"} color={"warning"} />
+                  );
+                },
               },
             ]}
+            ariaLabel="Evaluation records"
           />
           {record.mappings.checkMappings.length ? (
-            <Table
-              rowKey="fromCheckId"
-              size="small"
-              pagination={false}
-              scroll={{ x: 600 }}
-              dataSource={record.mappings.checkMappings}
+            <DataTable
+              rows={record.mappings.checkMappings}
+              getRowId={(row) => row.fromCheckId}
               columns={[
-                { title: "Original check precondition", dataIndex: "fromCheckId" },
                 {
-                  title: "Frozen arm check",
-                  key: "to",
-                  render: (_, entry) => entry.toCheckId ?? <Tag color="warning">Unmapped</Tag>,
+                  id: "fromCheckId",
+                  label: "Original check precondition",
+                  render: (row) => row.fromCheckId,
+                },
+                {
+                  id: "to",
+                  label: "Frozen arm check",
+                  render: (entry) => {
+                    return entry.toCheckId ?? <Chip label={"Unmapped"} color={"warning"} />;
+                  },
                 },
               ]}
+              ariaLabel="Evaluation records"
             />
           ) : null}
         </>
       ) : null}
-      <Typography.Paragraph type="secondary">
+      <Typography component="p" variant="body2" color={"text.secondary"}>
         This is the mapping saved with the batch. A ready mapping does not establish execution,
         reproduction or a passing result. Later source or profile changes do not replace this
         record.
-      </Typography.Paragraph>
-    </Space>
+      </Typography>
+    </Stack>
   );
 }
-
 function FrozenCell({
   api,
   manifest,
@@ -188,46 +215,68 @@ function FrozenCell({
         ),
         reference
           ? api.getSource(
-              { repositoryId: manifest.repositoryId, sourceId: reference.sourceId },
+              {
+                repositoryId: manifest.repositoryId,
+                sourceId: reference.sourceId,
+              },
               signal,
             )
           : Promise.resolve(null),
       ]);
-      assertFrozenReproductionCell({ detail, source, manifest, cell, profile });
-      return { detail, source };
+      assertFrozenReproductionCell({
+        detail,
+        source,
+        manifest,
+        cell,
+        profile,
+      });
+      return {
+        detail,
+        source,
+      };
     },
     active,
   );
   return (
-    <Card
-      size="small"
-      title="Frozen reproduction cell"
-      extra={
-        <Button disabled={!active} loading={query.isFetching} onClick={() => void query.refetch()}>
-          Refresh record
-        </Button>
-      }
-    >
-      {query.error ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Frozen mapping unavailable"
-          description={errorMessage(query.error)}
-        />
-      ) : null}
-      {query.data ? (
-        <FrozenReproductionRecord
-          detail={query.data.detail}
-          original={query.data.source?.sourceDefinition ?? null}
-        />
-      ) : query.isFetching ? (
-        <p>Loading the exact frozen reproduction record…</p>
-      ) : null}
+    <Card variant="outlined">
+      <CardHeader
+        title={"Frozen reproduction cell"}
+        action={
+          <Button
+            disabled={!active}
+            loading={query.isFetching}
+            onClick={() => void query.refetch()}
+            variant="outlined"
+          >
+            Refresh record
+          </Button>
+        }
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
+        }}
+      />
+      <CardContent>
+        {query.error ? (
+          <Alert severity={"error"}>
+            <AlertTitle>{"Frozen mapping unavailable"}</AlertTitle>
+            {errorMessage(query.error)}
+          </Alert>
+        ) : null}
+        {query.data ? (
+          <FrozenReproductionRecord
+            detail={query.data.detail}
+            original={query.data.source?.sourceDefinition ?? null}
+          />
+        ) : query.isFetching ? (
+          <p>Loading the exact frozen reproduction record…</p>
+        ) : null}
+      </CardContent>
     </Card>
   );
 }
-
 export function BatchReproductionPlan({
   detail,
   matrix,
@@ -247,7 +296,10 @@ export function BatchReproductionPlan({
     ["reproduction-batch-plan", detail.summary.id, detail.summary.suiteVersionId],
     async (signal) => {
       const value = await api.getPlan(
-        { repositoryId: page.repositoryId, evaluationId: detail.summary.id },
+        {
+          repositoryId: page.repositoryId,
+          evaluationId: detail.summary.id,
+        },
         signal,
       );
       assertReproductionPlanScope(value, matrix);
@@ -259,54 +311,109 @@ export function BatchReproductionPlan({
   const selected = cells.find((cell) => cell.cellId === cellId);
   const manifest = query.data?.manifest;
   return (
-    <Card size="small" title="Frozen reproduction plan">
-      {query.error ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Reproduction plan unavailable"
-          description={errorMessage(query.error)}
-          action={
-            <Button disabled={!active || !page.readable} onClick={() => void query.refetch()}>
-              Retry plan
-            </Button>
-          }
-        />
-      ) : null}
-      {query.data && !manifest ? (
-        <Empty description="This batch has no saved reproduction mapping manifest." />
-      ) : null}
-      {manifest ? (
-        <>
-          <Typography.Paragraph type="secondary">
-            {manifest.sources.length} historical reproduction sources · {manifest.cells.length}{" "}
-            frozen arm records. Select a cell to inspect its original requirements, explicit
-            mappings and blockers.
-          </Typography.Paragraph>
-          <Select
-            aria-label="Frozen reproduction cell"
-            placeholder="Select a batch cell"
-            disabled={!active || !page.readable}
-            style={{ width: "100%", marginBottom: 16 }}
-            value={selected?.cellId ?? null}
-            options={cells.map((cell) => ({
-              value: cell.cellId,
-              label: `${cell.caseId} · ${armLabels[cell.arm]}`,
-            }))}
-            onChange={setCellId}
-          />
-          {selected ? (
-            <FrozenCell
-              key={`${detail.summary.id}:${selected.cellId}`}
-              api={api}
-              manifest={manifest}
-              cell={selected}
-              profile={detail.configurations[selected.arm].profile}
-              active={active && page.readable}
+    <Card variant="elevation" elevation={0} className="evaluation-section-card">
+      <CardHeader
+        title={"Frozen reproduction plan"}
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
+        }}
+      />
+      <CardContent>
+        {query.error ? (
+          <Alert
+            action={
+              <Button
+                disabled={!active || !page.readable}
+                onClick={() => void query.refetch()}
+                variant="outlined"
+              >
+                Retry plan
+              </Button>
+            }
+            severity={"error"}
+          >
+            <AlertTitle>{"Reproduction plan unavailable"}</AlertTitle>
+            {errorMessage(query.error)}
+          </Alert>
+        ) : null}
+        {query.data && !manifest ? (
+          <EmptyState title={"This batch has no saved reproduction mapping manifest."} />
+        ) : null}
+        {manifest ? (
+          <>
+            <Typography component="p" variant="body2" color={"text.secondary"}>
+              {manifest.sources.length} historical reproduction sources · {manifest.cells.length}{" "}
+              frozen arm records. Select a cell to inspect its original requirements, explicit
+              mappings and blockers.
+            </Typography>
+            <Autocomplete
+              disabled={!active || !page.readable}
+              style={{
+                width: "100%",
+                marginBottom: 16,
+              }}
+              options={cells.map((cell) => ({
+                value: cell.cellId,
+                label: `${cell.caseId} · ${armLabels[cell.arm]}`,
+              }))}
+              disablePortal
+              fullWidth
+              value={
+                cells
+                  .map((cell) => ({
+                    value: cell.cellId,
+                    label: `${cell.caseId} · ${armLabels[cell.arm]}`,
+                  }))
+                  .find((option) => option.value === (selected?.cellId ?? null)) ??
+                ((selected?.cellId ?? null) == null || String(selected?.cellId ?? null) === ""
+                  ? null
+                  : {
+                      value: (selected?.cellId ?? null) as NonNullable<
+                        NonNullable<typeof selected>["cellId"]
+                      >,
+                      label: String(selected?.cellId ?? null),
+                    })
+              }
+              onChange={(_event, option) => {
+                if (option !== null)
+                  setCellId(option.value as NonNullable<NonNullable<typeof selected>["cellId"]>);
+              }}
+              getOptionLabel={(option) => option.label}
+              isOptionEqualToValue={(option, selected) => option.value === selected.value}
+              getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={"Frozen reproduction cell"}
+                  placeholder={"Select a batch cell"}
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: {
+                      ...params.slotProps.htmlInput,
+                      "aria-label": "Frozen reproduction cell",
+                    },
+                  }}
+                />
+              )}
+              disableClearable={Boolean(selected?.cellId ?? null)}
+              getOptionKey={(option) => option.value}
             />
-          ) : null}
-        </>
-      ) : null}
+            {selected ? (
+              <FrozenCell
+                key={`${detail.summary.id}:${selected.cellId}`}
+                api={api}
+                manifest={manifest}
+                cell={selected}
+                profile={detail.configurations[selected.arm].profile}
+                active={active && page.readable}
+              />
+            ) : null}
+          </>
+        ) : null}
+      </CardContent>
     </Card>
   );
 }

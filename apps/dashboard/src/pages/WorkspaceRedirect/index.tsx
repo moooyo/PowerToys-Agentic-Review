@@ -1,5 +1,5 @@
-import { useLocation, useNavigate } from "@umijs/max";
 import { useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { pathWithRepositoryScope } from "@/components/RepositoryScope/scope";
 
 export default function WorkspaceRedirect() {

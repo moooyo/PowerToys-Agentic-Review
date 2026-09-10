@@ -1,373 +1,439 @@
-import type { OperatorAccessContext, OperatorPrincipal } from "@agentic-review/contracts";
 import {
-  BranchesOutlined,
-  GithubOutlined,
-  LogoutOutlined,
-  MenuFoldOutlined,
-  MenuOutlined,
-  MenuUnfoldOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
-import type { Settings as LayoutSettings } from "@ant-design/pro-components";
-import type { RunTimeLayoutConfig } from "@umijs/max";
-import { Avatar, Badge, Button, Tooltip } from "antd";
-import type { ReactNode } from "react";
-import { NotificationBell } from "@/components/NotificationBell";
-import { NotificationSession } from "@/components/NotificationBell/access";
-import { useOperatorAccess } from "@/components/OperatorAccess";
-import { samePrincipal } from "@/components/OperatorAccess/state";
-import { OperatorSessionBoundary } from "@/components/OperatorSession";
+  AccountTreeRounded,
+  ArrowOutwardRounded,
+  AssignmentTurnedInOutlined,
+  CloseRounded,
+  DarkModeOutlined,
+  DashboardCustomizeOutlined,
+  FactCheckOutlined,
+  FolderOutlined,
+  GitHub,
+  LightModeOutlined,
+  LogoutRounded,
+  MenuRounded,
+  NotificationsOutlined,
+  PlayCircleOutlineRounded,
+  SettingsOutlined,
+  SourceOutlined,
+  TerminalRounded,
+  TuneRounded,
+  WidgetsOutlined,
+} from "@mui/icons-material";
+import {
+  Alert,
+  AppBar,
+  Avatar,
+  Box,
+  Button,
+  Chip,
+  Divider,
+  Drawer,
+  IconButton,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  Menu,
+  MenuItem,
+  Stack,
+  Toolbar,
+  Tooltip,
+  Typography,
+  useMediaQuery,
+  useTheme,
+} from "@mui/material";
+import { type ComponentType, lazy, Suspense, useEffect, useState } from "react";
+import { BrowserRouter, Link, Route, Routes, useLocation } from "react-router-dom";
+import routeDefinitions from "../config/routes";
+import accessForSession from "./access";
+import { NotificationBell } from "./components/NotificationBell";
+import { NotificationSession } from "./components/NotificationBell/access";
+import { OperatorSessionBoundary } from "./components/OperatorSession";
 import {
   RepositoryScopedLink,
   RepositorySelector,
   useRepositoryScope,
-} from "@/components/RepositoryScope";
-import { access } from "@/services/access";
-import defaultSettings from "../config/defaultSettings";
+} from "./components/RepositoryScope";
+import { NotificationsHost } from "./components/ui";
+import { SessionProvider, useOperatorSession } from "./state/session";
+import { MaterialTheme, useColorMode } from "./theme";
 import "./global.css";
 
-export interface InitialState {
-  apiConnected: boolean;
-  sessionEpoch: number;
-  authenticationEpoch: number;
-  authenticated: boolean;
-  operatorAccess: OperatorAccessContext | null;
-  accessResolvedAt: number;
-  currentUser: {
-    displayName: string;
-    principal: OperatorPrincipal | null;
-  };
-  settings: Partial<LayoutSettings>;
-}
+export type { InitialState } from "./state/session";
+export { getInitialState } from "./state/session";
 
-let sessionEpoch = 0;
-let authenticationEpoch = 0;
-let resolvedSessionIdentity: string | undefined;
-
-function resolveSessionEpoch(principal: OperatorPrincipal | null): number {
-  const identity = JSON.stringify(
-    principal === null ? null : [principal.issuer, principal.subject],
-  );
-  if (identity !== resolvedSessionIdentity) {
-    resolvedSessionIdentity = identity;
-    sessionEpoch += 1;
-  }
-  return sessionEpoch;
-}
-
-export async function getInitialState(): Promise<InitialState> {
-  const currentAuthenticationEpoch = ++authenticationEpoch;
-  const developmentMode = process.env.NODE_ENV === "development";
-  if (developmentMode) {
-    const context = await access.context();
-    return {
-      apiConnected: true,
-      sessionEpoch: resolveSessionEpoch(context.principal),
-      authenticationEpoch: currentAuthenticationEpoch,
-      authenticated: true,
-      operatorAccess: context,
-      accessResolvedAt: Date.now(),
-      currentUser: {
-        displayName: "Development Operator",
-        principal: context.principal,
-      },
-      settings: defaultSettings as Partial<LayoutSettings>,
-    };
-  }
-
-  try {
-    const response = await fetch("/api/v1/auth/session", {
-      cache: "no-store",
-      credentials: "include",
-      headers: { Accept: "application/json" },
-      redirect: "error",
-    });
-    if (!response.ok) {
-      throw new Error(`Operator session endpoint returned ${response.status}.`);
-    }
-    const value: unknown = await response.json();
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error("Operator session endpoint returned an invalid payload.");
-    }
-    const session = value as Record<string, unknown>;
-    if (session.authenticated !== true) {
-      if (globalThis.location?.pathname !== "/signed-out") {
-        globalThis.location?.assign("/signed-out");
-      }
-      return {
-        apiConnected: true,
-        sessionEpoch: resolveSessionEpoch(null),
-        authenticationEpoch: currentAuthenticationEpoch,
-        authenticated: false,
-        operatorAccess: null,
-        accessResolvedAt: 0,
-        currentUser: { displayName: "Signing in", principal: null },
-        settings: defaultSettings as Partial<LayoutSettings>,
-      };
-    }
-    const operator = session.operator;
-    if (typeof operator !== "object" || operator === null || Array.isArray(operator)) {
-      throw new Error("Operator session endpoint omitted the operator identity.");
-    }
-    const identity = operator as Record<string, unknown>;
-    const displayName =
-      (typeof identity.displayName === "string" && identity.displayName) ||
-      (typeof identity.email === "string" && identity.email) ||
-      (typeof identity.subject === "string" && identity.subject);
-    if (
-      !displayName ||
-      typeof identity.issuer !== "string" ||
-      !identity.issuer ||
-      typeof identity.subject !== "string" ||
-      !identity.subject
-    ) {
-      throw new Error("Operator session endpoint returned an invalid identity.");
-    }
-    const principal = { issuer: identity.issuer, subject: identity.subject };
-    let context: OperatorAccessContext | null = null;
-    try {
-      const response = await access.context();
-      if (!samePrincipal(response.principal, principal))
-        throw new Error("The access identity does not match the session.");
-      context = response;
-    } catch {
-      // A permissions failure must not sign out an otherwise authenticated operator.
-    }
-    return {
-      apiConnected: true,
-      sessionEpoch: resolveSessionEpoch(principal),
-      authenticationEpoch: currentAuthenticationEpoch,
-      authenticated: true,
-      operatorAccess: context,
-      accessResolvedAt: context ? Date.now() : 0,
-      currentUser: { displayName, principal },
-      settings: defaultSettings as Partial<LayoutSettings>,
-    };
-  } catch {
-    return {
-      apiConnected: false,
-      sessionEpoch,
-      authenticationEpoch: currentAuthenticationEpoch,
-      authenticated: false,
-      operatorAccess: null,
-      accessResolvedAt: 0,
-      currentUser: { displayName: "Unavailable", principal: null },
-      settings: defaultSettings as Partial<LayoutSettings>,
-    };
-  }
-}
-
-function AppBrand({
-  collapsed = false,
-  onNavigate,
-}: {
-  collapsed?: boolean;
-  onNavigate?: () => void;
-}) {
-  const scope = useRepositoryScope();
-  return (
-    <RepositoryScopedLink
-      aria-label="Agentic Review home"
-      className={`app-brand${collapsed ? " app-brand--collapsed" : ""}`}
-      onClick={onNavigate}
-      title={`Agentic Review · ${scope.label}`}
-      to="/pull-requests"
-    >
-      <span aria-hidden="true" className="app-brand__mark">
-        <BranchesOutlined />
-      </span>
-      {!collapsed && (
-        <span className="app-brand__copy">
-          <span className="app-brand__name">Agentic Review</span>
-          <span className="app-brand__context">{scope.label}</span>
-        </span>
-      )}
-    </RepositoryScopedLink>
-  );
-}
-
-function SidebarFooter({
-  initialState,
-  collapsed,
-  onToggle,
-}: {
-  initialState: InitialState | undefined;
-  collapsed: boolean;
-  onToggle?: () => void;
-}) {
-  const scope = useRepositoryScope();
-  const operatorAccess = useOperatorAccess(scope.repositoryId);
-  const preview = process.env.NODE_ENV === "development";
-  const connected = initialState?.apiConnected === true;
-  const displayName = initialState?.currentUser.displayName ?? "Operator";
-  const status = preview ? "warning" : connected ? "success" : "error";
-  const statusLabel = preview ? "Local preview" : connected ? "Connected" : "API unavailable";
-  const statusDescription = preview
-    ? "This preview uses sample data."
-    : connected
-      ? "The authenticated Review Control API is available."
-      : "The Review Control API is unavailable.";
-
-  return (
-    <div className={`app-sidebar-footer${collapsed ? " app-sidebar-footer--collapsed" : ""}`}>
-      <div className="app-sidebar-footer__status-row">
-        <Tooltip placement="right" title={statusDescription}>
-          <span role="status" aria-label={statusLabel} className="app-connection">
-            <Badge status={status} text={collapsed ? undefined : statusLabel} />
-          </span>
-        </Tooltip>
-        <div className="app-sidebar-footer__tools">
-          <NotificationBell />
-          {scope.repository ? (
-            <Tooltip placement="top" title={`Open ${scope.repository.fullName} on GitHub`}>
-              <Button
-                aria-label={`Open ${scope.repository.fullName} on GitHub`}
-                href={`https://github.com/${scope.repository.fullName}`}
-                icon={<GithubOutlined />}
-                target="_blank"
-                rel="noreferrer"
-                size="small"
-                type="text"
-              />
-            </Tooltip>
-          ) : null}
-          {onToggle && (
-            <Tooltip
-              placement="top"
-              title={collapsed ? "Expand navigation" : "Collapse navigation"}
-            >
-              <Button
-                aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
-                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                onClick={onToggle}
-                size="small"
-                type="text"
-              />
-            </Tooltip>
-          )}
-        </div>
-      </div>
-      <div className="app-sidebar-footer__profile">
-        <Avatar className="app-user-avatar" size={32} icon={<UserOutlined />} aria-hidden="true" />
-        {!collapsed && (
-          <div className="app-user-copy">
-            <span className="app-user-copy__name" title={displayName}>
-              {displayName}
-            </span>
-            <span className="app-user-copy__role">
-              {preview
-                ? "Sample data"
-                : operatorAccess.platformAdministrator
-                  ? "Platform administrator"
-                  : (operatorAccess.context?.repository?.role ??
-                    (connected ? "Authenticated operator" : "Session unavailable"))}
-            </span>
-          </div>
-        )}
-        {!preview && (
-          <Tooltip placement="right" title="Sign out">
-            <Button
-              aria-label="Sign out"
-              className="app-sign-out"
-              icon={<LogoutOutlined />}
-              onClick={() => {
-                void fetch("/api/v1/auth/logout", {
-                  credentials: "include",
-                  method: "POST",
-                  redirect: "error",
-                })
-                  .catch(() => undefined)
-                  .finally(() => globalThis.location?.assign("/signed-out"));
-              }}
-              size="small"
-              type="text"
-            />
-          </Tooltip>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export const layout: RunTimeLayoutConfig = ({ initialState }) => ({
-  ...defaultSettings,
-  ...initialState?.settings,
-  className: "app-shell",
-  avatarProps: false,
-  actionsRender: false,
-  collapsedButtonRender: false,
-  menu: { type: "group", locale: false },
-  menuDataRender: (items) => {
-    const reviewPaths = new Set(["/pull-requests", "/issues"]);
-    const configurationPaths = new Set([
-      "/repositories",
-      "/prompts",
-      "/validation-profiles",
-      "/evaluations",
-    ]);
-    return [
-      {
-        key: "review-workspace",
-        name: "Workspace",
-        children: items.filter((item) => reviewPaths.has(item.path ?? "")),
-      },
-      {
-        key: "review-operations",
-        name: "Operations",
-        children: items.filter(
-          (item) => !reviewPaths.has(item.path ?? "") && !configurationPaths.has(item.path ?? ""),
-        ),
-      },
-      {
-        key: "review-configuration",
-        name: "Configuration",
-        children: items.filter((item) => configurationPaths.has(item.path ?? "")),
-      },
-    ].filter((group) => group.children.length > 0);
+const pages: Record<string, ComponentType> = {
+  "./WorkspaceRedirect": lazy(() => import("./pages/WorkspaceRedirect")),
+  "./PullRequests": lazy(() => import("./pages/PullRequests")),
+  "./Issues": lazy(() => import("./pages/Issues")),
+  "./Jobs": lazy(() => import("./pages/Jobs")),
+  "./Repositories": lazy(() => import("./pages/Repositories")),
+  "./Prompts": lazy(() => import("./pages/Prompts")),
+  "./ValidationProfiles": lazy(() => import("./pages/ValidationProfiles")),
+  "./Workers": lazy(() => import("./pages/Workers")),
+  "./Evaluations": lazy(() => import("./pages/Evaluations")),
+  "./Approvals": lazy(() => import("./pages/Approvals")),
+  "./Publications": lazy(() => import("./pages/Publications")),
+  "./Notifications": lazy(() => import("./pages/Notifications")),
+  "./System": lazy(() => import("./pages/System")),
+  "./SignedOut": lazy(() => import("./pages/SignedOut")),
+  "./NotFound": lazy(() => import("./pages/NotFound")),
+};
+const navIcons: Record<string, ComponentType<{ fontSize?: "small" }>> = {
+  "/pull-requests": AccountTreeRounded,
+  "/issues": FactCheckOutlined,
+  "/jobs": PlayCircleOutlineRounded,
+  "/workers": TerminalRounded,
+  "/publications": ArrowOutwardRounded,
+  "/notifications": NotificationsOutlined,
+  "/system": SettingsOutlined,
+  "/repositories": FolderOutlined,
+  "/prompts": SourceOutlined,
+  "/validation-profiles": TuneRounded,
+  "/evaluations": DashboardCustomizeOutlined,
+  "/approvals": AssignmentTurnedInOutlined,
+};
+const sections = [
+  { label: "Review", paths: ["/pull-requests", "/issues"] },
+  {
+    label: "Operations",
+    paths: ["/jobs", "/workers", "/publications", "/notifications", "/system"],
   },
-  menuItemRender: (item, dom) =>
-    item.path ? (
-      <RepositoryScopedLink onClick={item.isMobile ? item.onClick : undefined} to={item.path}>
-        {dom}
-      </RepositoryScopedLink>
-    ) : (
-      dom
-    ),
-  menuHeaderRender: (_logo, _title, props) => (
-    <AppBrand
-      collapsed={props?.collapsed === true}
-      {...(props?.isMobile ? { onNavigate: () => props.onCollapse?.(true) } : {})}
-    />
-  ),
-  menuExtraRender: (props) => <RepositorySelector collapsed={props?.collapsed === true} />,
-  menuFooterRender: (props) => (
-    <SidebarFooter
-      initialState={initialState}
-      collapsed={props?.collapsed === true}
-      {...(props?.onCollapse && !props.isMobile
-        ? { onToggle: () => props?.onCollapse?.(!props?.collapsed) }
-        : {})}
-    />
-  ),
-  headerRender: (props) => (
-    <div className="app-mobile-header">
-      <Button
-        aria-expanded={!props.collapsed}
-        aria-label={props.collapsed ? "Open navigation" : "Close navigation"}
-        icon={<MenuOutlined />}
-        onClick={() => props.onCollapse?.(!props.collapsed)}
-        type="text"
-      />
-      <AppBrand />
-    </div>
-  ),
-  footerRender: false,
-});
+  {
+    label: "Configuration",
+    paths: ["/repositories", "/prompts", "/validation-profiles", "/evaluations"],
+  },
+];
+const sidebarWidth = 280;
 
-export function innerProvider(container: ReactNode) {
+function PageLoading() {
   return (
-    <OperatorSessionBoundary>
-      <NotificationSession>{container}</NotificationSession>
-    </OperatorSessionBoundary>
+    <Box role="status" aria-label="Loading page" sx={{ p: 4 }}>
+      <Typography color="text.secondary">Loading workspace…</Typography>
+    </Box>
+  );
+}
+
+function RouteContent({ component, permission }: { component: string; permission?: string }) {
+  const { initialState } = useOperatorSession();
+  const allowed = accessForSession(initialState);
+  const Page = pages[component];
+  if (!Page) return null;
+  if (permission && allowed[permission as keyof typeof allowed] !== true)
+    return (
+      <Alert severity="info">
+        This page requires additional access. Contact your platform administrator.
+      </Alert>
+    );
+  return <Page />;
+}
+
+function ApplicationShell() {
+  const { initialState, refresh } = useOperatorSession();
+  const repositoryScope = useRepositoryScope();
+  const location = useLocation();
+  const desktop = useMediaQuery(useTheme().breakpoints.up("lg"));
+  const [desktopOpen, setDesktopOpen] = useState(true);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
+  const { mode, toggle } = useColorMode();
+  const allowed = accessForSession(initialState);
+  const preview = process.env.NODE_ENV === "development";
+  const active = routeDefinitions.find((route) => route.path === location.pathname);
+  const barePage = active?.layout === false || !active;
+  useEffect(() => {
+    document.title = (active?.name ?? "Workspace") + " · Agentic Review";
+    setMobileOpen(false);
+    setAccountAnchor(null);
+  }, [active?.name]);
+
+  const routeTree = (
+    <Suspense fallback={<PageLoading />}>
+      <Routes>
+        {routeDefinitions.map((route) => (
+          <Route
+            key={route.path}
+            path={route.path}
+            element={<RouteContent component={route.component} permission={route.access} />}
+          />
+        ))}
+      </Routes>
+    </Suspense>
+  );
+  if (barePage) return routeTree;
+  if (!initialState?.authenticated)
+    return (
+      <Box sx={{ maxWidth: 620, mx: "auto", pt: 12, px: 3 }}>
+        <Alert severity={initialState?.apiConnected ? "info" : "error"} sx={{ mb: 3 }}>
+          {initialState?.apiConnected
+            ? "Sign in to open your review workspace."
+            : "The review service is unavailable. Check the connection and try again."}
+        </Alert>
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" onClick={() => void refresh()}>
+            Try again
+          </Button>
+          <Button component={Link} to="/signed-out">
+            Sign in
+          </Button>
+        </Stack>
+      </Box>
+    );
+
+  const displayName = initialState.currentUser.displayName;
+  const initials = displayName
+    .split(/\s+/u)
+    .slice(0, 2)
+    .map((word) => word[0])
+    .join("");
+  const status = (
+    <Chip
+      label={preview ? "Sample data" : initialState.apiConnected ? "Connected" : "Disconnected"}
+      variant="outlined"
+      sx={{ color: "text.secondary", borderColor: "divider", flexShrink: 0 }}
+    />
+  );
+  const githubShortcut = repositoryScope.repository ? (
+    <Tooltip title={"Open " + repositoryScope.repository.fullName + " on GitHub"}>
+      <IconButton
+        component="a"
+        href={"https://github.com/" + repositoryScope.repository.fullName}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={"Open " + repositoryScope.repository.fullName + " on GitHub"}
+      >
+        <GitHub />
+      </IconButton>
+    </Tooltip>
+  ) : null;
+  const navigation = (
+    <Box
+      component="nav"
+      aria-label="Main navigation"
+      sx={{ height: "100%", display: "flex", flexDirection: "column", px: 1.5, pb: 2 }}
+    >
+      {!desktop && (
+        <Stack direction="row" sx={{ alignItems: "center", minHeight: 72, px: 1, gap: 2 }}>
+          <AccountTreeRounded color="primary" />
+          <Typography variant="h6" sx={{ flex: 1 }}>
+            Agentic Review
+          </Typography>
+          <IconButton aria-label="Close navigation" onClick={() => setMobileOpen(false)}>
+            <CloseRounded />
+          </IconButton>
+        </Stack>
+      )}
+      <Box sx={{ flex: 1, overflowY: "auto", pt: desktop ? 1 : 0 }}>
+        {sections.map((section) => {
+          const routes = routeDefinitions.filter(
+            (route) =>
+              section.paths.includes(route.path) &&
+              !route.hideInMenu &&
+              (!route.access || allowed[route.access as keyof typeof allowed]),
+          );
+          return routes.length ? (
+            <Box key={section.label} sx={{ mb: 1.5 }}>
+              <Typography variant="subtitle2" sx={{ color: "text.secondary", px: 2, py: 1.5 }}>
+                {section.label}
+              </Typography>
+              <List disablePadding>
+                {routes.map((route) => {
+                  const Icon = navIcons[route.path] ?? WidgetsOutlined;
+                  const selected = location.pathname === route.path;
+                  return (
+                    <ListItemButton
+                      key={route.path}
+                      component={RepositoryScopedLink}
+                      to={route.path}
+                      selected={selected}
+                      aria-current={selected ? "page" : undefined}
+                      onClick={() => setMobileOpen(false)}
+                      sx={{
+                        minHeight: 52,
+                        borderRadius: 100,
+                        px: 2,
+                        mb: 0.5,
+                        color: "text.secondary",
+                        "&.Mui-selected": {
+                          bgcolor: "var(--app-secondary-container)",
+                          color: "var(--app-on-secondary-container)",
+                          "&:hover": { bgcolor: "var(--app-secondary-container)" },
+                        },
+                      }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 40, color: "inherit" }}>
+                        <Icon />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={route.name}
+                        slotProps={{
+                          primary: { sx: { fontSize: 14, lineHeight: "20px", fontWeight: 500 } },
+                        }}
+                      />
+                    </ListItemButton>
+                  );
+                })}
+              </List>
+            </Box>
+          ) : null;
+        })}
+      </Box>
+      <Divider sx={{ mx: 2, mb: 2 }} />
+      <Typography variant="body2" sx={{ px: 2, color: "text.secondary" }}>
+        {preview ? "Local preview" : "Review workspace"}
+      </Typography>
+    </Box>
+  );
+
+  return (
+    <Box sx={{ minHeight: "100vh" }}>
+      <AppBar position="sticky">
+        <Toolbar sx={{ minHeight: 64, px: { xs: 1.5, md: 2 }, gap: { xs: 0.5, sm: 1 } }}>
+          <Tooltip title={desktop && desktopOpen ? "Close navigation" : "Open navigation"}>
+            <IconButton
+              aria-label={desktop && desktopOpen ? "Close navigation" : "Open navigation"}
+              onClick={() => (desktop ? setDesktopOpen((value) => !value) : setMobileOpen(true))}
+            >
+              <MenuRounded />
+            </IconButton>
+          </Tooltip>
+          <RepositoryScopedLink
+            className="material-brand"
+            to="/pull-requests"
+            aria-label="Agentic Review home"
+          >
+            <AccountTreeRounded
+              sx={{ color: "primary.main", display: { xs: "none", sm: "block" } }}
+            />
+            <Typography component="span" variant="h6" sx={{ fontSize: { xs: 20, sm: 22 } }}>
+              Agentic Review
+            </Typography>
+          </RepositoryScopedLink>
+          <Box sx={{ flex: 1 }} />
+          {desktop && (
+            <>
+              <RepositorySelector />
+              {githubShortcut}
+              <Box sx={{ mx: 1 }}>{status}</Box>
+            </>
+          )}
+          <Tooltip title={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}>
+            <IconButton
+              aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
+              onClick={toggle}
+            >
+              {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
+            </IconButton>
+          </Tooltip>
+          <NotificationBell />
+          <Tooltip title={displayName}>
+            <IconButton
+              aria-label="Open account menu"
+              aria-controls={accountAnchor ? "account-menu" : undefined}
+              aria-haspopup="true"
+              aria-expanded={Boolean(accountAnchor)}
+              onClick={(event) => setAccountAnchor(event.currentTarget)}
+            >
+              <Avatar sx={{ width: 32, height: 32, fontSize: 14 }}>{initials}</Avatar>
+            </IconButton>
+          </Tooltip>
+        </Toolbar>
+      </AppBar>
+      <Menu
+        id="account-menu"
+        anchorEl={accountAnchor}
+        open={Boolean(accountAnchor)}
+        onClose={() => setAccountAnchor(null)}
+      >
+        <Box sx={{ px: 2, py: 1.5, minWidth: 220 }}>
+          <Typography variant="subtitle1">{displayName}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {preview ? "Sample workspace" : "Signed in"}
+          </Typography>
+        </Box>
+        {!preview && <Divider />}
+        {!preview && (
+          <MenuItem
+            onClick={() => {
+              void fetch("/api/v1/auth/logout", {
+                credentials: "include",
+                method: "POST",
+                redirect: "error",
+              })
+                .catch(() => undefined)
+                .finally(() => globalThis.location?.assign("/signed-out"));
+            }}
+          >
+            <ListItemIcon>
+              <LogoutRounded />
+            </ListItemIcon>
+            Sign out
+          </MenuItem>
+        )}
+      </Menu>
+      <Box sx={{ display: "flex" }}>
+        <Drawer
+          variant={desktop ? "persistent" : "temporary"}
+          open={desktop ? desktopOpen : mobileOpen}
+          onClose={() => setMobileOpen(false)}
+          sx={{ width: desktop && desktopOpen ? sidebarWidth : 0, flexShrink: 0 }}
+          slotProps={{
+            paper: {
+              sx: {
+                width: sidebarWidth,
+                border: 0,
+                bgcolor: "background.default",
+                top: desktop ? 64 : 0,
+                height: desktop ? "calc(100dvh - 64px)" : "100%",
+                borderRadius: desktop ? 0 : "0 16px 16px 0",
+              },
+            },
+          }}
+        >
+          {navigation}
+        </Drawer>
+        <Box sx={{ flex: 1, minWidth: 0, pr: { xs: 0, lg: 2 }, pb: { xs: 0, lg: 2 } }}>
+          {!desktop && (
+            <Stack direction="row" sx={{ alignItems: "center", px: 2, pt: 1, pb: 2, gap: 1 }}>
+              <RepositorySelector fullWidth />
+              {githubShortcut}
+              {status}
+            </Stack>
+          )}
+          <Box
+            component="main"
+            className="material-main"
+            sx={{
+              maxWidth: 1600,
+              mx: "auto",
+              minHeight: "calc(100dvh - 80px)",
+              bgcolor: "background.paper",
+              borderRadius: { xs: 0, lg: "24px" },
+              p: { xs: 2, md: 3 },
+              pb: 5,
+            }}
+          >
+            {routeTree}
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+export default function App() {
+  return (
+    <MaterialTheme>
+      <SessionProvider>
+        <BrowserRouter>
+          <OperatorSessionBoundary>
+            <NotificationSession>
+              <ApplicationShell />
+              <NotificationsHost />
+            </NotificationSession>
+          </OperatorSessionBoundary>
+        </BrowserRouter>
+      </SessionProvider>
+    </MaterialTheme>
   );
 }

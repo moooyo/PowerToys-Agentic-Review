@@ -1,8 +1,21 @@
 import type * as C from "@agentic-review/contracts";
-import { Alert, Button, Image, Modal, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  AlertTitle,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Typography,
+} from "@mui/material";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { EvaluationEvidenceAdapter } from "@/services/evaluation-evidence";
 import { useEvaluationPage, useEvaluationQuery } from "./context";
+import { CopyValue, EvaluationTable } from "./Display";
 import {
   assertResultEvidenceReferences,
   browserEvidenceResources,
@@ -18,19 +31,21 @@ import { errorMessage } from "./state";
 type EvidenceRow = C.EvaluationResultEvidenceListV1["items"][number];
 export function EvidencePreviewContent({ preview }: { preview: EvidencePreview | null }) {
   return preview?.kind === "image" ? (
-    <Image
-      preview={false}
+    <Box
       src={preview.url}
       alt={`Evidence ${preview.assetId}`}
-      style={{ maxWidth: "100%" }}
+      style={{
+        maxWidth: "100%",
+      }}
+      component="img"
     />
   ) : preview?.kind === "text" ? (
     <>
-      <Typography.Paragraph type="secondary">
+      <Typography component="p" variant="body2" color={"text.secondary"}>
         {preview.truncated
           ? `Truncated preview: the first ${maximumEvidenceTextPreviewBytes / 1024} KiB. Download the verified file for all content.`
           : "Complete verified text file."}
-      </Typography.Paragraph>
+      </Typography>
       <pre className="evaluation-source-body">{preview.text}</pre>
     </>
   ) : null;
@@ -85,9 +100,15 @@ export function EvaluationEvidence({
   return (
     <div className="evaluation-cell-result">
       <div className="evaluation-subheading">
-        <Typography.Title level={5} style={{ margin: 0 }}>
+        <Typography
+          style={{
+            margin: 0,
+          }}
+          component="h5"
+          variant="subtitle1"
+        >
           Evidence files
-        </Typography.Title>
+        </Typography>
         <Button
           disabled={!enabled || session.busy !== null}
           loading={files.isFetching}
@@ -95,124 +116,145 @@ export function EvaluationEvidence({
             owner.reset();
             void files.refetch();
           }}
+          variant="outlined"
         >
           Refresh files
         </Button>
       </div>
-      <Typography.Paragraph type="secondary">
+      <Typography component="p" variant="body2" color={"text.secondary"}>
         Preview and download verify the complete file bytes against the refreshed manifest.
         Verifying a file does not verify a UI assertion or change the result's evidence assessment.
-      </Typography.Paragraph>
+      </Typography>
       {files.error ? (
-        <Alert
-          type="error"
-          title="Evidence list unavailable"
-          description={errorMessage(files.error)}
-        />
+        <Alert severity={"error"}>
+          <AlertTitle>{"Evidence list unavailable"}</AlertTitle>
+          {errorMessage(files.error)}
+        </Alert>
       ) : null}
       {session.error && enabled ? (
         <Alert
-          type={session.error.status === 404 || session.error.status === 410 ? "info" : "error"}
-          title={errorLabel}
-          description={`${session.error.assetId}: ${session.error.message}`}
-        />
+          severity={session.error.status === 404 || session.error.status === 410 ? "info" : "error"}
+        >
+          <AlertTitle>{errorLabel}</AlertTitle>
+          {`${session.error.assetId}: ${session.error.message}`}
+        </Alert>
       ) : null}
       {session.downloaded && enabled ? (
-        <Alert type="success" title="Verified download started" description={session.downloaded} />
+        <Alert severity={"success"}>
+          <AlertTitle>{"Verified download started"}</AlertTitle>
+          {session.downloaded}
+        </Alert>
       ) : null}
-      <Table<EvidenceRow>
-        rowKey="assetId"
-        size="small"
-        dataSource={enabled && !files.error && !loading ? (files.data ?? []) : []}
+      <EvaluationTable<EvidenceRow>
         loading={enabled && loading}
-        pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
+        rows={enabled && !files.error && !loading ? (files.data ?? []) : []}
+        getRowId={(row) => row.assetId}
         columns={[
           {
-            title: "File",
-            key: "file",
-            render: (_, row) => (
-              <div>
-                <Typography.Text copyable>{row.assetId}</Typography.Text>
-                <span className="evaluation-meta">
-                  {row.manifest
-                    ? `${row.manifest.metadata.kind} · ${row.manifest.metadata.mediaType} · ${row.manifest.metadata.sizeBytes.toLocaleString()} bytes`
-                    : "Recorded reference"}
-                </span>
-                {row.checkIds.map((id) => (
-                  <span key={id} className="evaluation-meta">
-                    {id}
+            id: "file",
+            label: "File",
+            render: (row) => {
+              return (
+                <div>
+                  <CopyValue value={row.assetId} />
+                  <span className="evaluation-meta">
+                    {row.manifest
+                      ? `${row.manifest.metadata.kind} · ${row.manifest.metadata.mediaType} · ${row.manifest.metadata.sizeBytes.toLocaleString()} bytes`
+                      : "Recorded reference"}
                   </span>
-                ))}
-              </div>
-            ),
+                  {row.checkIds.map((id) => (
+                    <span key={id} className="evaluation-meta">
+                      {id}
+                    </span>
+                  ))}
+                </div>
+              );
+            },
           },
           {
-            title: "Status",
-            key: "status",
+            id: "status",
+            label: "Status",
             width: 170,
-            render: (_, row) => (
-              <Tag>
-                {row.manifest === null
-                  ? "Missing"
-                  : row.manifest.state === "retired"
-                    ? "Retired"
-                    : session.error?.assetId === row.assetId
-                      ? "Unavailable"
-                      : "Recorded; verify on open"}
-              </Tag>
-            ),
+            render: (row) => {
+              return (
+                <Chip
+                  label={
+                    row.manifest === null
+                      ? "Missing"
+                      : row.manifest.state === "retired"
+                        ? "Retired"
+                        : session.error?.assetId === row.assetId
+                          ? "Unavailable"
+                          : "Recorded; verify on open"
+                  }
+                />
+              );
+            },
           },
           {
-            title: "Actions",
-            key: "actions",
+            id: "actions",
+            label: "Actions",
             width: 175,
-            render: (_, row) => {
+            render: (row) => {
               const manifest = row.manifest,
                 disabled =
                   !enabled || loading || session.busy !== null || manifest?.state !== "finalized";
               return (
-                <Space wrap>
+                <Stack
+                  direction="row"
+                  spacing={1.5}
+                  sx={{
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: 1,
+                  }}
+                >
                   {manifest && manifest.metadata.kind !== "trace" ? (
                     <Button
-                      size="small"
                       disabled={disabled}
                       aria-label={`Preview evidence ${row.assetId}`}
                       loading={session.busy === row.assetId}
                       onClick={() => {
                         if (!disabled) void owner.run("preview", manifest);
                       }}
+                      variant="outlined"
                     >
                       Preview
                     </Button>
                   ) : null}
                   <Button
-                    size="small"
                     disabled={disabled}
                     aria-label={`Download evidence ${row.assetId}`}
                     onClick={() => {
                       if (!disabled && manifest) void owner.run("download", manifest);
                     }}
+                    variant="outlined"
                   >
                     Download
                   </Button>
-                </Space>
+                </Stack>
               );
             },
           },
         ]}
+        ariaLabel="Evaluation records"
+        pageSize={10}
       />
-      <Modal
-        open={preview !== null}
-        title={preview ? `Verified file preview · ${preview.assetId}` : "Evidence preview"}
-        onCancel={() => owner.closePreview()}
-        getContainer={false}
-        footer={<Button onClick={() => owner.closePreview()}>Close preview</Button>}
-        width={980}
-        styles={{ container: { maxWidth: "94vw" } }}
-        destroyOnHidden
-      >
-        <EvidencePreviewContent preview={preview} />
-      </Modal>
+      <Dialog open={preview !== null} onClose={() => owner.closePreview()} fullWidth maxWidth="lg">
+        <DialogTitle>
+          {preview ? `Verified file preview · ${preview.assetId}` : "Evidence preview"}
+        </DialogTitle>
+        <DialogContent>
+          <EvidencePreviewContent preview={preview} />
+        </DialogContent>
+        <DialogActions>
+          {
+            <Button onClick={() => owner.closePreview()} variant="outlined">
+              Close preview
+            </Button>
+          }
+        </DialogActions>
+      </Dialog>
     </div>
   );
 }

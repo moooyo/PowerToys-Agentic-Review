@@ -3,18 +3,24 @@ import type {
   OperatorPrincipal,
   ReviewRunDecisionChangeResponse,
 } from "@agentic-review/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
   Button,
-  Collapse,
-  Input,
+  Card,
+  CardContent,
   Pagination,
   Skeleton,
-  Space,
+  Stack,
+  TextField,
   Tooltip,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { PublicationPreview } from "@/components/PublicationPreview";
@@ -87,7 +93,11 @@ function DecisionSession({
   });
   const historyQuery = useQuery({
     queryKey: [...baseKey, "history", page, stateQuery.data?.version ?? 0],
-    queryFn: () => decisions.listHistory(run.repositoryId, run.id, { page, pageSize: 20 }),
+    queryFn: () =>
+      decisions.listHistory(run.repositoryId, run.id, {
+        page,
+        pageSize: 20,
+      }),
     enabled: mayRead && historyOpen,
     retry: false,
     refetchOnMount: "always",
@@ -170,7 +180,10 @@ function DecisionSession({
       if (!decisionEventMatchesRun(accepted.change, run)) {
         throw new Error("The decision receipt does not match the selected run.");
       }
-      await client.invalidateQueries({ queryKey: baseKey, refetchType: "none" });
+      await client.invalidateQueries({
+        queryKey: baseKey,
+        refetchType: "none",
+      });
       await client.invalidateQueries({
         queryKey: ["review-runs", run.repositoryId],
         refetchType: "none",
@@ -192,7 +205,6 @@ function DecisionSession({
       if (mounted.current) setSaving(false);
     }
   };
-
   const denied =
     isDecisionAccessDenied(stateError) ||
     isDecisionAccessDenied(historyError) ||
@@ -200,10 +212,6 @@ function DecisionSession({
   if ((!mayRead || denied) && !access.checking) {
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Decision records unavailable"
-        description="Read access to this repository is required. Existing drafts are retained for this session while access is refreshed."
         action={
           <Button
             disabled={saving}
@@ -216,11 +224,18 @@ function DecisionSession({
                 ]),
               );
             }}
+            variant="outlined"
           >
             Refresh decision access
           </Button>
         }
-      />
+        severity="info"
+      >
+        <AlertTitle>{"Decision records unavailable"}</AlertTitle>
+        {
+          "Read access to this repository is required. Existing drafts are retained for this session while access is refreshed."
+        }
+      </Alert>
     );
   }
   const actions: DecisionAction[] =
@@ -228,49 +243,67 @@ function DecisionSession({
       ? ["request_changes", "comment", "withdraw"]
       : ["approve", "request_changes", "comment", "override_approve", "withdraw"];
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap>
-        <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack component="section" spacing={3} sx={{ width: "100%", minWidth: 0 }}>
+      <Stack
+        spacing={2}
+        direction="row"
+        useFlexGap
+        sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+      >
+        <Typography
+          style={{
+            margin: 0,
+          }}
+          variant="h5"
+          component="h3"
+          sx={{ fontWeight: 500 }}
+        >
           Recorded run decision
-        </Typography.Title>
+        </Typography>
         <Button
           loading={stateQuery.isFetching}
           disabled={saving || reviewing || access.checking}
           onClick={() => void refresh()}
+          variant="outlined"
         >
           Refresh decisions
         </Button>
-      </Space>
-      <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
+      </Stack>
+      <Typography
+        style={{
+          margin: 0,
+        }}
+        variant="body1"
+        component="p"
+        color="text.secondary"
+      >
         {decisionPublicationNotice} Decisions apply only to this run and its reviewed result set.
         Comments do not replace a decision.
-      </Typography.Paragraph>
+      </Typography>
       {context && stateQuery.dataUpdatedAt > 0 && !access.checking && (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" component="span" color="text.secondary">
           Last checked: {timestamp(new Date(stateQuery.dataUpdatedAt).toISOString())}.
           {decisions.mode === "connected"
             ? " Refreshes every 30 seconds while this page is visible and access is available. Refresh manually after an error."
             : " Sample records are refreshed on request."}
-        </Typography.Text>
+        </Typography>
       )}
       {decisions.mode === "sample" && (
-        <Alert
-          showIcon
-          type="info"
-          title="Sample decision records"
-          description="This preview uses simulated decision records. Changes affect sample data only."
-        />
+        <Alert severity="info">
+          <AlertTitle>{"Sample decision records"}</AlertTitle>
+          {"This preview uses simulated decision records. Changes affect sample data only."}
+        </Alert>
       )}
       {receipt && !access.checking && (
-        <Alert
-          showIcon
-          type="success"
-          title={receipt.replayed ? "Existing decision receipt received" : "Decision recorded"}
-          description={decisionReceiptSummary(receipt.change)}
-        />
+        <Alert severity="success">
+          <AlertTitle>
+            {receipt.replayed ? "Existing decision receipt received" : "Decision recorded"}
+          </AlertTitle>
+          {decisionReceiptSummary(receipt.change)}
+        </Alert>
       )}
       {access.checking ? (
-        <Skeleton active paragraph={{ rows: 3 }} />
+        <Skeleton variant="rounded" height={72} />
       ) : stateError ? (
         <ErrorNotice
           title="Could not load decision state"
@@ -278,7 +311,7 @@ function DecisionSession({
           retry={() => void refresh()}
         />
       ) : !context ? (
-        <Skeleton active paragraph={{ rows: 3 }} />
+        <Skeleton variant="rounded" height={72} />
       ) : (
         <>
           <CurrentDecision context={context} />
@@ -286,28 +319,33 @@ function DecisionSession({
             <Button
               disabled={decisions.mode !== "connected" || !access.can("read")}
               onClick={() => setPublicationDecisionId(context.recordedDecision?.id ?? null)}
+              variant="outlined"
             >
               Preview GitHub publication
             </Button>
           )}
-          <Collapse
-            items={[
-              {
-                key: "binding",
-                label: "Current decision binding and policy",
-                children: <DecisionBinding context={context} />,
-              },
-            ]}
-          />
-          <Space wrap>
+          <Accordion key="binding" disableGutters elevation={0} sx={{ bgcolor: "transparent" }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+              <Typography variant="subtitle1" component="div">
+                {"Current decision binding and policy"}
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0, pb: 3 }}>
+              <DecisionBinding context={context} />
+            </AccordionDetails>
+          </Accordion>
+          <Stack
+            spacing={1}
+            direction="row"
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}
+          >
             {actions.map((action) => {
               const reason = decisionUnavailableReason(action, context, access);
               return (
                 <Tooltip key={action} title={reason}>
                   <span>
                     <Button
-                      type={action === "approve" ? "primary" : "default"}
-                      danger={action === "override_approve" || action === "withdraw"}
                       disabled={Boolean(reason) || busy || editor !== null}
                       onClick={() => {
                         if (!reason && !busy) {
@@ -315,6 +353,16 @@ function DecisionSession({
                           setFailure(null);
                         }
                       }}
+                      variant={
+                        action === "approve"
+                          ? "contained"
+                          : action === "request_changes" || action === "override_approve"
+                            ? "outlined"
+                            : "text"
+                      }
+                      color={
+                        action === "override_approve" || action === "withdraw" ? "error" : "primary"
+                      }
                     >
                       {action === "override_approve"
                         ? "Record approval with exception"
@@ -324,193 +372,251 @@ function DecisionSession({
                 </Tooltip>
               );
             })}
-          </Space>
+          </Stack>
           {!access.can("review") && (
-            <Typography.Text type="secondary">
+            <Typography variant="body2" component="span" color="text.secondary">
               Reviewer access is required to record decisions, comments, and withdrawals. Only the
               recorded author or a maintainer can withdraw a decision.
-            </Typography.Text>
+            </Typography>
           )}
         </>
       )}
       {editor && !access.checking && (
-        <Space
-          orientation="vertical"
-          size="small"
-          style={{
-            width: "100%",
-            border: "1px solid var(--ant-color-border-secondary, #f0f0f0)",
-            borderRadius: 8,
-            padding: 16,
-          }}
-        >
-          <Typography.Text strong>
-            {decisionActionLabel(editor.action, editor.reviewed.workItemKind)} · review before
-            recording
-          </Typography.Text>
-          <DecisionBinding context={editor.reviewed} />
-          {editor.action === "withdraw" && (
-            <Typography.Text>
-              Withdrawal target: {editor.reviewed.recordedDecision?.id}
-            </Typography.Text>
-          )}
-          {editor.action === "override_approve" && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Record an explicit human exception"
-              description="Explain why approval is appropriate despite policy findings or missing validation. This never changes check outcomes or policy eligibility."
-            />
-          )}
-          <Typography.Text>Reason</Typography.Text>
-          <Input.TextArea
-            aria-label="Decision reason"
-            rows={3}
-            maxLength={2_048}
-            showCount
-            value={editor.reason}
-            disabled={saving || reviewing || editor.request !== null}
-            onChange={(event) =>
-              setEditor((current) =>
-                current && !current.request ? { ...current, reason: event.target.value } : current,
-              )
-            }
-            placeholder="Explain the decision for this source revision and result set."
-          />
-          {editor.request && (
-            <Typography.Text type="secondary">
-              This submitted intent is locked. Retry sends the original request and may return its
-              historical receipt after later changes. To revise it, review and explicitly use the
-              latest state.
-            </Typography.Text>
-          )}
-          {freshReviewRequired && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Fresh review required"
-              description="The decision stream, source, or result set changed, or the server rejected the original binding. Your reason and original binding are preserved. Review the latest state before preparing another request."
-            />
-          )}
-          {failure !== null && (
-            <Alert
-              showIcon
-              type="error"
-              title="Decision request could not be completed"
-              description={
-                failure instanceof Error ? failure.message : "The operation could not be completed."
-              }
-            />
-          )}
-          {editReason && <Typography.Text type="secondary">{editReason}</Typography.Text>}
-          {editor.candidate && (
-            <Space orientation="vertical" style={{ width: "100%" }}>
-              <Typography.Text strong>Latest state for your review</Typography.Text>
-              <CurrentDecision context={editor.candidate} />
-              <DecisionBinding context={editor.candidate} />
-              <Button
-                disabled={busy || !context || !decisionBindingMatches(editor.candidate, context)}
-                onClick={() => {
-                  if (
-                    !busy &&
-                    context &&
-                    editor.candidate &&
-                    decisionBindingMatches(editor.candidate, context)
-                  ) {
-                    setEditor(acceptReviewedDecisionState(editor));
-                    setFailure(null);
+        <Card elevation={0} sx={{ width: "100%", bgcolor: "background.default" }}>
+          <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+            <Stack spacing={2}>
+              <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                {decisionActionLabel(editor.action, editor.reviewed.workItemKind)} · review before
+                recording
+              </Typography>
+              <Accordion disableGutters elevation={0} sx={{ bgcolor: "transparent" }}>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+                  <Typography variant="subtitle1" component="div">
+                    Reviewed source and decision policy
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ px: 0, pb: 3 }}>
+                  <DecisionBinding context={editor.reviewed} />
+                </AccordionDetails>
+              </Accordion>
+              {editor.action === "withdraw" && (
+                <Typography variant="body2" component="span">
+                  Withdrawal target: {editor.reviewed.recordedDecision?.id}
+                </Typography>
+              )}
+              {editor.action === "override_approve" && (
+                <Alert severity="warning">
+                  <AlertTitle>{"Record an explicit human exception"}</AlertTitle>
+                  {
+                    "Explain why approval is appropriate despite policy findings or missing validation. This never changes check outcomes or policy eligibility."
                   }
+                </Alert>
+              )}
+              <TextField
+                rows={3}
+                value={editor.reason}
+                disabled={saving || reviewing || editor.request !== null}
+                onChange={(event) =>
+                  setEditor((current) =>
+                    current && !current.request
+                      ? {
+                          ...current,
+                          reason: event.target.value,
+                        }
+                      : current,
+                  )
+                }
+                placeholder="Explain the decision for this source revision and result set."
+                multiline
+                fullWidth
+                label="Decision reason"
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 2_048,
+                  },
                 }}
+                helperText={`${editor.reason.length} / 2048`}
+              />
+              {editor.request && (
+                <Typography variant="body2" component="span" color="text.secondary">
+                  This submitted intent is locked. Retry sends the original request and may return
+                  its historical receipt after later changes. To revise it, review and explicitly
+                  use the latest state.
+                </Typography>
+              )}
+              {freshReviewRequired && (
+                <Alert severity="warning">
+                  <AlertTitle>{"Fresh review required"}</AlertTitle>
+                  {
+                    "The decision stream, source, or result set changed, or the server rejected the original binding. Your reason and original binding are preserved. Review the latest state before preparing another request."
+                  }
+                </Alert>
+              )}
+              {failure !== null && (
+                <Alert severity="error">
+                  <AlertTitle>{"Decision request could not be completed"}</AlertTitle>
+                  {failure instanceof Error
+                    ? failure.message
+                    : "The operation could not be completed."}
+                </Alert>
+              )}
+              {editReason && (
+                <Typography variant="body2" component="span" color="text.secondary">
+                  {editReason}
+                </Typography>
+              )}
+              {editor.candidate && (
+                <Stack
+                  style={{
+                    width: "100%",
+                  }}
+                  spacing={1.5}
+                >
+                  <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                    Latest state for your review
+                  </Typography>
+                  <CurrentDecision context={editor.candidate} />
+                  <DecisionBinding context={editor.candidate} />
+                  <Button
+                    disabled={
+                      busy || !context || !decisionBindingMatches(editor.candidate, context)
+                    }
+                    onClick={() => {
+                      if (
+                        !busy &&
+                        context &&
+                        editor.candidate &&
+                        decisionBindingMatches(editor.candidate, context)
+                      ) {
+                        setEditor(acceptReviewedDecisionState(editor));
+                        setFailure(null);
+                      }
+                    }}
+                    variant="outlined"
+                  >
+                    Use this reviewed state
+                  </Button>
+                </Stack>
+              )}
+              <Stack
+                spacing={1}
+                direction="row"
+                useFlexGap
+                sx={{ alignItems: "center", flexWrap: "wrap" }}
               >
-                Use this reviewed state
-              </Button>
-            </Space>
-          )}
-          <Space wrap>
-            <Button
-              type="primary"
-              danger={editor.action === "override_approve" || editor.action === "withdraw"}
-              loading={saving}
-              disabled={busy || Boolean(editReason) || freshReviewRequired || !editor.reason.trim()}
-              onClick={() => void submit()}
-            >
-              {editor.request ? "Retry original submission" : "Record in platform"}
-            </Button>
-            <Button
-              loading={reviewing}
-              disabled={busy || !access.can("read")}
-              onClick={() => void loadReview()}
-            >
-              Review latest state
-            </Button>
-            <Button
-              disabled={saving || reviewing}
-              onClick={() => {
-                setEditor(null);
-                setFailure(null);
-              }}
-            >
-              Discard draft
-            </Button>
-          </Space>
-        </Space>
+                <Button
+                  loading={saving}
+                  disabled={
+                    busy || Boolean(editReason) || freshReviewRequired || !editor.reason.trim()
+                  }
+                  onClick={() => void submit()}
+                  variant="contained"
+                  color={
+                    editor.action === "override_approve" || editor.action === "withdraw"
+                      ? "error"
+                      : "primary"
+                  }
+                >
+                  {editor.request ? "Retry original submission" : "Record in platform"}
+                </Button>
+                <Button
+                  loading={reviewing}
+                  disabled={busy || !access.can("read")}
+                  onClick={() => void loadReview()}
+                  variant="outlined"
+                >
+                  Review latest state
+                </Button>
+                <Button
+                  disabled={saving || reviewing}
+                  onClick={() => {
+                    setEditor(null);
+                    setFailure(null);
+                  }}
+                  variant="text"
+                >
+                  Discard draft
+                </Button>
+              </Stack>
+            </Stack>
+          </CardContent>
+        </Card>
       )}
       {!access.checking && (
-        <Collapse
-          activeKey={historyOpen ? ["history"] : []}
-          onChange={(keys) => setHistoryOpen(keys.includes("history"))}
-          items={[
-            {
-              key: "history",
-              label: "Decision and comment history",
-              children: historyError ? (
-                <ErrorNotice
-                  title="Could not load decision history"
-                  error={historyError}
-                  retry={() => void historyQuery.refetch()}
-                />
-              ) : historyQuery.isPending ? (
-                <Skeleton active />
-              ) : (
-                <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-                  <Typography.Text type="secondary">
-                    Entries are immutable records of the actor, source, result set, and policy at
-                    recording. Earlier entries do not describe the current decision.
-                  </Typography.Text>
-                  {historyQuery.data?.items.length ? (
-                    historyQuery.data.items.map((event) => (
-                      <Space key={event.id} orientation="vertical" style={{ width: "100%" }}>
-                        <DecisionEvent event={event} />
-                        {event.action !== "withdraw" && (
-                          <Button
-                            disabled={decisions.mode !== "connected" || !access.can("read")}
-                            aria-label={`Preview publication for decision ${event.id}`}
-                            onClick={() => setPublicationDecisionId(event.id)}
-                          >
-                            Preview GitHub publication
-                          </Button>
-                        )}
-                      </Space>
-                    ))
-                  ) : (
-                    <Typography.Text type="secondary">
-                      No decisions or comments have been recorded.
-                    </Typography.Text>
-                  )}
+        <Accordion
+          key="history"
+          disableGutters
+          elevation={0}
+          sx={{ bgcolor: "transparent" }}
+          expanded={historyOpen}
+          onChange={(_event, expanded) => setHistoryOpen(expanded)}
+        >
+          <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+            <Typography variant="subtitle1" component="div">
+              {"Decision and comment history"}
+            </Typography>
+          </AccordionSummary>
+          <AccordionDetails sx={{ px: 0, pb: 3 }}>
+            {historyError ? (
+              <ErrorNotice
+                title="Could not load decision history"
+                error={historyError}
+                retry={() => void historyQuery.refetch()}
+              />
+            ) : historyQuery.isPending ? (
+              <Skeleton variant="rounded" height={72} />
+            ) : (
+              <Stack
+                style={{
+                  width: "100%",
+                }}
+                spacing={2}
+              >
+                <Typography variant="body2" component="span" color="text.secondary">
+                  Entries are immutable records of the actor, source, result set, and policy at
+                  recording. Earlier entries do not describe the current decision.
+                </Typography>
+                {historyQuery.data?.items.length ? (
+                  historyQuery.data.items.map((event) => (
+                    <Stack
+                      key={event.id}
+                      style={{
+                        width: "100%",
+                      }}
+                      spacing={1.5}
+                    >
+                      <DecisionEvent event={event} />
+                      {event.action !== "withdraw" && (
+                        <Button
+                          disabled={decisions.mode !== "connected" || !access.can("read")}
+                          aria-label={`Preview publication for decision ${event.id}`}
+                          onClick={() => setPublicationDecisionId(event.id)}
+                          variant="text"
+                        >
+                          Preview GitHub publication
+                        </Button>
+                      )}
+                    </Stack>
+                  ))
+                ) : (
+                  <Typography variant="body2" component="span" color="text.secondary">
+                    No decisions or comments have been recorded.
+                  </Typography>
+                )}
+                {Math.ceil((historyQuery.data?.total ?? 0) / 20) > 1 && (
                   <Pagination
-                    current={page}
-                    pageSize={20}
-                    total={historyQuery.data?.total ?? 0}
-                    showSizeChanger={false}
-                    hideOnSinglePage
                     disabled={saving || historyQuery.isFetching}
-                    onChange={setPage}
+                    onChange={(_event, next) => setPage(next)}
+                    page={page}
+                    count={Math.ceil((historyQuery.data?.total ?? 0) / 20)}
+                    color="primary"
+                    size="medium"
                   />
-                </Space>
-              ),
-            },
-          ]}
-        />
+                )}
+              </Stack>
+            )}
+          </AccordionDetails>
+        </Accordion>
       )}
       {publicationDecisionId && access.ready && (mayRead || access.checking) && !denied && (
         <PublicationPreview
@@ -521,13 +627,12 @@ function DecisionSession({
           onClose={() => setPublicationDecisionId(null)}
         />
       )}
-    </Space>
+    </Stack>
   );
 }
-
 export function ReviewRunDecisions({ run }: { run: DashboardReviewRunDetail }) {
   const access = useOperatorAccess(run.repositoryId);
-  if (!access.principal) return <Skeleton active paragraph={{ rows: 2 }} />;
+  if (!access.principal) return <Skeleton variant="rounded" height={48} />;
   return (
     <DecisionSession
       key={JSON.stringify([

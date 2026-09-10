@@ -44,9 +44,12 @@ vi.mock("@/components/RepositoryScope", () => ({
 vi.mock("@/components/PageHeader", () => ({
   PageHeader: ({ actions }: { actions?: ReactNode }) => actions,
 }));
-vi.mock("@ant-design/icons", () => ({
-  PlusOutlined: () => null,
-  ReloadOutlined: () => null,
+vi.mock("@mui/icons-material", () => ({
+  Add: () => null,
+  Close: () => null,
+  ContentCopy: () => null,
+  ExpandMore: () => null,
+  Refresh: () => null,
 }));
 vi.mock("@/services/configuration", () => ({
   configuration: {
@@ -75,82 +78,102 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("antd", async () => {
+vi.mock("react-hook-form", () => ({
+  useForm: () => ({
+    control: {},
+    watch: (name: keyof ProfileFormValues) => profileFormValues()[name],
+    reset: vi.fn(),
+    getValues: (name: keyof ProfileFormValues) => profileFormValues()[name],
+    setValue: vi.fn(),
+    trigger: vi.fn(),
+    handleSubmit: (onFinish: typeof state.finish) => {
+      state.finish = onFinish;
+      return () => onFinish?.({ ...profileFormValues(), name: "New profile" });
+    },
+  }),
+  Controller: () => null,
+}));
+vi.mock("@mui/material", async () => {
   const React = await import("react");
   type ContentProps = { children?: ReactNode };
   const Content = ({ children }: ContentProps) => React.createElement("div", null, children);
-  const Form = Object.assign(
-    ({ children, onFinish }: ContentProps & { onFinish?: typeof state.finish }) => {
-      state.finish = onFinish;
-      return React.createElement("form", null, children);
-    },
-    {
-      Item: Content,
-      useWatch: () => undefined,
-      useForm: () => [{ setFieldsValue: vi.fn(), getFieldValue: vi.fn(), submit: vi.fn() }],
-    },
-  );
+  const Button = ({
+    children,
+    disabled,
+    onClick,
+  }: ContentProps & { disabled?: boolean; onClick?: () => unknown }) => {
+    if (typeof children === "string" && onClick) state.buttons.set(children, onClick);
+    return React.createElement("button", { disabled }, children);
+  };
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) =>
-      React.createElement("aside", null, title, description),
-    Button: ({
-      children,
-      disabled,
-      onClick,
-    }: ContentProps & {
-      disabled?: boolean;
-      onClick?: () => unknown;
-    }) => {
-      if (typeof children === "string" && onClick) state.buttons.set(children, onClick);
-      return React.createElement("button", { disabled }, children);
-    },
-    Card: Content,
-    Collapse: Content,
-    Descriptions: Content,
-    Drawer: ({
-      children,
-      extra,
-      footer,
-    }: ContentProps & {
-      extra?: ReactNode;
-      footer?: ReactNode;
-    }) => React.createElement("section", null, extra, children, footer),
-    Empty: Content,
-    Form,
-    Input: Object.assign(Content, { TextArea: Content }),
-    Select: Content,
+    Accordion: Content,
+    AccordionDetails: Content,
+    AccordionSummary: Content,
+    Alert: ({ children, action }: ContentProps & { action?: ReactNode }) =>
+      React.createElement("aside", null, children, action),
+    AlertTitle: Content,
+    Box: Content,
+    Button,
+    Chip: ({ label }: { label?: ReactNode }) => React.createElement("span", null, label),
+    Dialog: Content,
+    DialogActions: Content,
+    DialogContent: Content,
+    DialogTitle: Content,
+    Drawer: Content,
+    FormControlLabel: Content,
+    IconButton: Button,
+    Paper: Content,
     Skeleton: Content,
-    Space: Content,
+    Stack: Content,
     Switch: Content,
-    Table: ({
-      dataSource,
+    Tab: Content,
+    Tabs: Content,
+    TextField: Content,
+    Tooltip: Content,
+    Typography: Content,
+  };
+});
+vi.mock("@/components/ui", async () => {
+  const React = await import("react");
+  return {
+    DetailsGrid: ({ items }: { items: { label: ReactNode; value: ReactNode }[] }) =>
+      React.createElement(
+        "dl",
+        null,
+        items.map((item, index) =>
+          React.createElement("div", { key: index }, item.label, item.value),
+        ),
+      ),
+    EmptyState: ({
+      title,
+      description,
+      action,
+    }: {
+      title: ReactNode;
+      description?: ReactNode;
+      action?: ReactNode;
+    }) => React.createElement("div", null, title, description, action),
+    notify: vi.fn(),
+    DataTable: ({
+      rows,
       columns,
     }: {
-      dataSource: Record<string, unknown>[];
-      columns: { render?: (value: unknown, record: Record<string, unknown>) => ReactNode }[];
+      rows: Record<string, unknown>[];
+      columns: { id: string; render: (row: Record<string, unknown>, index: number) => ReactNode }[];
     }) =>
       React.createElement(
         "div",
         null,
-        dataSource.map((record, row) =>
+        rows.map((row, index) =>
           React.createElement(
             "div",
-            { key: row },
-            columns.map((column, index) =>
-              React.createElement("div", { key: index }, column.render?.(undefined, record)),
+            { key: index },
+            columns.map((column) =>
+              React.createElement("div", { key: column.id }, column.render(row, index)),
             ),
           ),
         ),
       ),
-    Tabs: ({ items }: { items: { key: string; children: ReactNode }[] }) =>
-      React.createElement(
-        "div",
-        null,
-        items.map((item) => React.createElement("div", { key: item.key }, item.children)),
-      ),
-    Tag: Content,
-    Typography: { Paragraph: Content, Text: Content, Title: Content },
-    message: { useMessage: () => [{ success: vi.fn() }, null] },
   };
 });
 

@@ -79,26 +79,11 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("antd", () => {
-  type ContentProps = { children?: ReactNode };
-  const Content = ({ children }: ContentProps) => <div>{children}</div>;
+vi.mock("@mui/material", async () => {
+  const { materialComponents } = await import("../FindingReview/material.testing");
   return {
-    Alert: ({
-      title,
-      description,
-      action,
-    }: {
-      title?: ReactNode;
-      description?: ReactNode;
-      action?: ReactNode;
-    }) => (
-      <aside>
-        {title}
-        {description}
-        {action}
-      </aside>
-    ),
-    Button: ({ children, disabled = false }: ContentProps & { disabled?: boolean }) => {
+    ...materialComponents,
+    Button: ({ children, disabled = false }: { children?: ReactNode; disabled?: boolean }) => {
       if (typeof children === "string") state.buttons.set(children, disabled);
       return (
         <button type="button" disabled={disabled}>
@@ -106,41 +91,15 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Collapse: ({ items }: { items: { key: string; label: ReactNode; children: ReactNode }[] }) => (
-      <div>
-        {items.map((item) => (
-          <details key={item.key}>
-            <summary>{item.label}</summary>
-            {item.children}
-          </details>
-        ))}
-      </div>
-    ),
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Input: Object.assign(Content, { TextArea: Content }),
-    Pagination: Content,
     Skeleton: () => <span>Loading decision data</span>,
-    Space: Content,
-    Tag: Content,
-    Tooltip: ({ children, title }: ContentProps & { title?: string }) => (
-      <span title={title}>{children}</span>
-    ),
-    Typography: { Paragraph: Content, Text: Content, Title: Content },
   };
 });
+vi.mock(
+  "@/components/ui",
+  async () => (await import("../FindingReview/material.testing")).materialUiHelpers,
+);
+vi.mock("@mui/icons-material/ExpandMore", () => ({ default: () => null }));
+vi.mock("@mui/icons-material/ContentCopy", () => ({ default: () => null }));
 
 const principal = { issuer: "https://issuer.example", subject: "Reviewer" };
 const selected = sampleReviewRuns.find((item) => item.workItemKind === "pull_request");

@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   role: "viewer",
   principal: { issuer: "https://issuer.example", subject: "Viewer" },
   page: 1,
+  changePage: null as ((event: unknown, page: number) => void) | null,
   selected: null as unknown,
   list: undefined as unknown,
   detail: undefined as unknown,
@@ -38,12 +39,15 @@ vi.mock("react", async (importOriginal) => {
     ...actual,
     useState: (initial: unknown) => [
       initial === null ? state.selected : initial === 1 ? state.page : initial,
-      vi.fn(),
+      (value: unknown) => {
+        if (initial === 1) state.page = value as number;
+        else if (initial === null) state.selected = value;
+      },
     ],
   };
 });
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: (repositoryId?: string) => {
@@ -86,25 +90,19 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("@ant-design/icons", () => ({ ReloadOutlined: () => <span /> }));
-vi.mock("antd", () => {
+vi.mock("@mui/icons-material/Refresh", () => ({ default: () => <span /> }));
+vi.mock("@mui/icons-material/Close", () => ({ default: () => <span /> }));
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({
-      title,
-      description,
-      action,
-    }: {
-      title?: ReactNode;
-      description?: ReactNode;
-      action?: ReactNode;
-    }) => (
+    Alert: ({ children, action }: { children?: ReactNode; action?: ReactNode }) => (
       <aside>
-        {title}
-        {description}
+        {children}
         {action}
       </aside>
     ),
+    AlertTitle: Content,
+    Box: Content,
     Button: ({ children, onClick }: { children?: ReactNode; onClick?: () => void }) => {
       state.buttons.push({ children, onClick });
       return (
@@ -113,62 +111,67 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Descriptions: ({
-      items,
+    IconButton: Content,
+    Drawer: Content,
+    Chip: ({ label }: { label: ReactNode }) => <span>{label}</span>,
+    Pagination: ({
+      page,
+      count,
+      onChange,
     }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((entry) => (
-          <div key={entry.key}>
-            <dt>{entry.label}</dt>
-            <dd>{entry.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Drawer: ({ children, extra }: { children?: ReactNode; extra?: ReactNode }) => (
-      <div>
-        {extra}
-        {children}
-      </div>
-    ),
-    Empty: ({ description }: { description: ReactNode }) => <span>{description}</span>,
-    Pagination: ({ current, total }: { current: number; total: number }) => (
-      <div>
-        Page {current} of {total} events
-      </div>
-    ),
+      page: number;
+      count: number;
+      onChange: (event: unknown, page: number) => void;
+    }) => {
+      state.changePage = onChange;
+      return (
+        <div>
+          Page {page} of {count}
+        </div>
+      );
+    },
     Skeleton: () => <span>Loading audit</span>,
-    Table: ({
-      dataSource,
-      columns,
-      rowKey,
-    }: {
-      dataSource: ConfigurationAuditSummary[];
-      columns: {
-        key?: string;
-        dataIndex?: keyof ConfigurationAuditSummary;
-        render: (value: unknown, row: ConfigurationAuditSummary) => ReactNode;
-      }[];
-      rowKey: (row: ConfigurationAuditSummary) => string;
-    }) => (
-      <div>
-        {dataSource.map((row) => (
-          <article key={rowKey(row)}>
-            {columns.map((column) => (
-              <div key={column.key ?? column.dataIndex}>
-                {column.render(column.dataIndex ? row[column.dataIndex] : undefined, row)}
-              </div>
-            ))}
-          </article>
-        ))}
-      </div>
-    ),
-    Tag: Content,
-    Typography: { Text: Content, Title: Content, Paragraph: Content },
+    Typography: Content,
   };
 });
+vi.mock("@/components/ui", () => ({
+  DetailsGrid: ({ items }: { items: { key?: string; label: ReactNode; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((entry, index) => (
+        <div key={entry.key ?? index}>
+          <dt>{entry.label}</dt>
+          <dd>{entry.value}</dd>
+        </div>
+      ))}
+    </dl>
+  ),
+  DataTable: ({
+    rows,
+    columns,
+    getRowId,
+    emptyTitle,
+  }: {
+    rows: ConfigurationAuditSummary[];
+    columns: { id: string; render: (row: ConfigurationAuditSummary, index: number) => ReactNode }[];
+    getRowId: (row: ConfigurationAuditSummary) => string;
+    emptyTitle: string;
+  }) =>
+    rows.length === 0 ? (
+      <span>{emptyTitle}</span>
+    ) : (
+      <table>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={getRowId(row)}>
+              {columns.map((column) => (
+                <td key={column.id}>{column.render(row, index)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    ),
+}));
 
 const summary = {
   id: "event-one",
@@ -218,6 +221,7 @@ beforeEach(() => {
   state.mode = "connected";
   state.principal = { issuer: "https://issuer.example", subject: "Viewer" };
   state.page = 1;
+  state.changePage = null;
   state.selected = null;
   state.list = {
     repositoryId: "repo-one",
@@ -297,6 +301,23 @@ describe("configuration audit access and caching", () => {
       templateId: "template-one",
     });
     expect(state.listRepository).not.toHaveBeenCalled();
+  });
+
+  it("requests the selected server page and clears the previous event selection", async () => {
+    state.selected = repositorySummary;
+    state.list = { items: [repositorySummary], total: 41, page: 1, pageSize: 20 };
+    renderRepository();
+    expect(state.changePage).not.toBeNull();
+    state.changePage?.(null, 2);
+    expect(state.selected).toBeNull();
+    expect(state.page).toBe(2);
+    state.queries = [];
+    renderRepository();
+    await lastQuery().queryFn({ signal: new AbortController().signal });
+    expect(state.listRepository).toHaveBeenCalledExactlyOnceWith("repo-one", {
+      page: 2,
+      pageSize: 20,
+    });
   });
 });
 

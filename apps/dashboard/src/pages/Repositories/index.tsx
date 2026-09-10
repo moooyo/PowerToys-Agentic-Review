@@ -3,34 +3,32 @@ import type {
   ManagedRepository,
   ManagedRepositorySummary,
 } from "@agentic-review/contracts";
-import {
-  CheckCircleOutlined,
-  GithubOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
+import { Add, CheckCircle, Close, GitHub, Refresh, Search } from "@mui/icons-material";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
   Card,
-  Descriptions,
+  CardContent,
+  Chip,
   Divider,
   Drawer,
-  Empty,
-  Form,
-  Input,
-  message,
-  Pagination,
-  Select,
+  FormControlLabel,
+  IconButton,
+  InputAdornment,
+  Link,
+  MenuItem,
   Skeleton,
-  Space,
+  Stack,
   Switch,
-  Tag,
+  TablePagination,
+  TextField,
   Typography,
-} from "antd";
-import { useEffect, useRef, useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import { RepositoryConfigurationActivity } from "@/components/ConfigurationAudit";
 import { configurationAuditQueryRoot } from "@/components/ConfigurationAudit/state";
 import { OperatorAccessGate, useOperatorAccess } from "@/components/OperatorAccess";
@@ -38,18 +36,20 @@ import { PageHeader } from "@/components/PageHeader";
 import { PublicationPolicy } from "@/components/PublicationPolicy";
 import { RepositoryAccessDrawer } from "@/components/RepositoryAccess";
 import { RepositorySchedulingPolicy } from "@/components/SchedulingPolicy";
-import { SchedulingLimitFields } from "@/components/SchedulingPolicy/LimitFields";
+import {
+  SchedulingLimitFields,
+  SchedulingLimitFieldsProvider,
+} from "@/components/SchedulingPolicy/LimitFields";
+import { DataTable, DetailsGrid, EmptyState, notify } from "@/components/ui";
 import { repositories } from "@/services/repositories";
 import { schedulingPolicyQueryRoot } from "@/services/scheduling-policy";
+import { useOperatorSession } from "@/state/session";
 import {
   buildRepositoryUpdate,
   isConfigurationConflict,
-  parseAllowlistedActors,
-  parsePositiveSafeInteger,
   type RepositorySettingsValues,
   repositorySettingsValues,
 } from "./form";
-import "./index.css";
 
 const connectionLabels = { unknown: "Not checked", ready: "Connected", error: "Connection error" };
 const repositoryNamePattern =
@@ -59,10 +59,79 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The request could not be completed. Try again.";
 }
 
+function RepositoryPanel({
+  title,
+  children,
+  onClose,
+  busy = false,
+  width = 600,
+  actions,
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  busy?: boolean;
+  width?: number;
+  actions?: ReactNode;
+}) {
+  return (
+    <Drawer
+      open
+      anchor="right"
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+      slotProps={{ paper: { sx: { width: { xs: "100%", sm: width }, maxWidth: "100%" } } }}
+    >
+      <Stack
+        direction="row"
+        sx={{
+          px: 3,
+          py: 2,
+          minHeight: 72,
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 2,
+        }}
+      >
+        <Typography variant="h6" sx={{ overflowWrap: "anywhere" }}>
+          {title}
+        </Typography>
+        <IconButton aria-label="Close repository panel" disabled={busy} onClick={onClose}>
+          <Close />
+        </IconButton>
+      </Stack>
+      <Divider />
+      <Box sx={{ p: { xs: 2, sm: 3 }, flex: 1, overflowY: "auto" }}>{children}</Box>
+      {actions && (
+        <>
+          <Divider />
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{
+              px: 3,
+              py: 2,
+              bgcolor: "background.default",
+              justifyContent: "flex-end",
+              flexWrap: "wrap",
+            }}
+          >
+            {actions}
+          </Stack>
+        </>
+      )}
+    </Drawer>
+  );
+}
+
 function Connection({ repository }: { repository: ManagedRepositorySummary }) {
   return (
-    <div className="repositories-connection">
-      <Tag
+    <Stack spacing={1} sx={{ alignItems: "flex-start", minWidth: 0 }}>
+      <Chip
+        size="medium"
+        variant="outlined"
         color={
           repository.connectionStatus === "ready"
             ? "success"
@@ -70,18 +139,17 @@ function Connection({ repository }: { repository: ManagedRepositorySummary }) {
               ? "error"
               : "default"
         }
-      >
-        {connectionLabels[repository.connectionStatus]}
-      </Tag>
-      <span className="repositories-secondary">
+        label={connectionLabels[repository.connectionStatus]}
+      />
+      <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
         {repository.connectionMessage ??
           (repository.connectionStatus === "unknown"
             ? "Run a connection check to verify GitHub access."
             : repository.connectionStatus === "ready"
               ? "GitHub access verified."
               : "Check the repository configuration and try again.")}
-      </span>
-    </div>
+      </Typography>
+    </Stack>
   );
 }
 
@@ -100,7 +168,6 @@ function AddRepositoryDrawer({
   const [resolving, setResolving] = useState(false);
   const [creating, setCreating] = useState(false);
   const generation = useRef(0);
-
   useEffect(
     () => () => {
       generation.current += 1;
@@ -128,9 +195,9 @@ function AddRepositoryDrawer({
       if (request === generation.current) setResolving(false);
     }
   };
-
   const create = async () => {
-    if (!resolved || !operatorAccess.platformAdministrator || operatorAccess.checking) return;
+    if (!resolved || creating || !operatorAccess.platformAdministrator || operatorAccess.checking)
+      return;
     setCreating(true);
     setError(null);
     try {
@@ -146,23 +213,19 @@ function AddRepositoryDrawer({
       setCreating(false);
     }
   };
-
   return (
-    <Drawer
-      open
+    <RepositoryPanel
       title="Add repository"
-      size={560}
+      width={560}
       onClose={onClose}
-      closable={!creating}
-      mask={{ closable: !creating }}
-      keyboard={!creating}
-      footer={
-        <div className="repositories-drawer-actions">
+      busy={creating}
+      actions={
+        <>
           <Button disabled={creating} onClick={onClose}>
             Cancel
           </Button>
           <Button
-            type="primary"
+            variant="contained"
             disabled={
               !resolved ||
               resolving ||
@@ -170,123 +233,123 @@ function AddRepositoryDrawer({
               operatorAccess.checking
             }
             loading={creating}
-            onClick={create}
+            onClick={() => void create()}
           >
             Add repository
           </Button>
-        </div>
+        </>
       }
     >
-      <Typography.Paragraph type="secondary">
-        Find a repository on GitHub, then add it to your review workspace.
-      </Typography.Paragraph>
-      <Form layout="vertical">
-        <Form.Item label="GitHub repository" htmlFor="repository-full-name" required>
-          <Space.Compact className="repositories-full-width">
-            <Input
-              id="repository-full-name"
-              placeholder="owner/repository"
-              maxLength={201}
-              disabled={creating}
-              value={name}
-              onChange={(event) => {
-                generation.current += 1;
-                setName(event.target.value);
-                setResolved(null);
-                setResolving(false);
-                setError(null);
-              }}
-              onPressEnter={() => void resolve()}
-            />
-            <Button
-              loading={resolving}
-              disabled={
-                creating ||
-                !name.trim() ||
-                !operatorAccess.platformAdministrator ||
-                operatorAccess.checking
-              }
-              onClick={resolve}
-            >
-              Find repository
-            </Button>
-          </Space.Compact>
-        </Form.Item>
-        {error && (
-          <Alert
-            className="repositories-notice"
-            showIcon
-            type="error"
-            title="Could not add repository"
-            description={error}
+      <Stack spacing={2.5}>
+        <Typography variant="body2" color="text.secondary">
+          Find a repository on GitHub, then add it to your review workspace.
+        </Typography>
+        <Stack
+          component="form"
+          spacing={1.5}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void resolve();
+          }}
+        >
+          <TextField
+            id="repository-full-name"
+            label="GitHub repository"
+            required
+            fullWidth
+            placeholder="owner/repository"
+            slotProps={{ htmlInput: { maxLength: 201 } }}
+            disabled={creating}
+            value={name}
+            onChange={(event) => {
+              generation.current += 1;
+              setName(event.target.value);
+              setResolved(null);
+              setResolving(false);
+              setError(null);
+            }}
           />
+          <Button
+            type="submit"
+            variant="outlined"
+            loading={resolving}
+            disabled={
+              creating ||
+              !name.trim() ||
+              !operatorAccess.platformAdministrator ||
+              operatorAccess.checking
+            }
+            sx={{ alignSelf: "flex-start" }}
+          >
+            Find repository
+          </Button>
+        </Stack>
+        {error && (
+          <Alert severity="error">
+            <AlertTitle>Could not add repository</AlertTitle>
+            {error}
+          </Alert>
         )}
         {resolved && (
-          <Card size="small" className="repositories-resolved">
-            <div className="repositories-resolved-heading">
-              <CheckCircleOutlined className="repositories-resolved-icon" />
-              <Typography.Text strong>Repository found</Typography.Text>
-            </div>
-            <Descriptions
-              column={1}
-              size="small"
+          <Box sx={{ p: 3, borderRadius: 3, bgcolor: "background.default" }}>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 2 }}>
+              <CheckCircle color="success" fontSize="small" />
+              <Typography variant="subtitle1">Repository found</Typography>
+            </Stack>
+            <DetailsGrid
+              columns={1}
               items={[
                 {
                   key: "name",
                   label: "Repository",
-                  children: (
-                    <a href={resolved.htmlUrl} target="_blank" rel="noreferrer">
+                  value: (
+                    <Link href={resolved.htmlUrl} target="_blank" rel="noreferrer">
                       {resolved.fullName}
-                    </a>
+                    </Link>
                   ),
                 },
                 {
                   key: "visibility",
                   label: "Visibility",
-                  children: resolved.isPrivate ? "Private" : "Public",
+                  value: resolved.isPrivate ? "Private" : "Public",
                 },
                 {
                   key: "branch",
                   label: "Default branch",
-                  children: <code>{resolved.defaultBranch}</code>,
+                  value: <code>{resolved.defaultBranch}</code>,
                 },
                 {
                   key: "id",
                   label: "GitHub repository ID",
-                  children: <code>{resolved.githubRepositoryId}</code>,
+                  value: <code>{resolved.githubRepositoryId}</code>,
                 },
               ]}
             />
-          </Card>
+          </Box>
         )}
-        <div className="repositories-setting-row">
-          <div>
-            <label htmlFor="repository-create-enabled">Enable repository</label>
-            <p>Allow this repository to participate in synchronization and scheduling.</p>
-          </div>
-          <Switch
-            id="repository-create-enabled"
-            checked={enabled}
-            onChange={setEnabled}
-            disabled={creating}
+        <Box>
+          <FormControlLabel
+            label="Enable repository"
+            control={
+              <Switch
+                id="repository-create-enabled"
+                checked={enabled}
+                onChange={(_, checked) => setEnabled(checked)}
+                disabled={creating}
+              />
+            }
           />
-        </div>
-        <Typography.Paragraph type="secondary">
+          <Typography variant="body2" color="text.secondary">
+            Allow this repository to participate in synchronization and scheduling.
+          </Typography>
+        </Box>
+        <Typography variant="body2" color="text.secondary">
           New repositories inherit the default reviewer and authorization policy. You can change
           these after adding the repository.
-        </Typography.Paragraph>
-      </Form>
-    </Drawer>
+        </Typography>
+      </Stack>
+    </RepositoryPanel>
   );
-}
-
-function positiveIntegerRule(label: string, required = true) {
-  return {
-    validator: async (_: unknown, value: string | undefined) => {
-      if (!required && !value?.trim()) return;
-      parsePositiveSafeInteger(value ?? "", label);
-    },
-  };
 }
 
 function RepositorySettingsDrawer({
@@ -299,15 +362,13 @@ function RepositorySettingsDrawer({
   onSaved: (repository: ManagedRepository) => void;
 }) {
   const operatorAccess = useOperatorAccess(repositoryId);
-  const { initialState } = useModel("@@initialState");
-  const [form] = Form.useForm<RepositorySettingsValues>();
+  const { initialState } = useOperatorSession();
+  const [values, setValues] = useState<RepositorySettingsValues | null>(null);
   const [baseline, setBaseline] = useState<ManagedRepository | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const reviewerMode = Form.useWatch("reviewerMode", form);
-  const policyMode = Form.useWatch("policyMode", form);
   const repositoryQuery = useQuery({
     queryKey: [
       "managed-repositories",
@@ -321,20 +382,25 @@ function RepositorySettingsDrawer({
     gcTime: 0,
     refetchOnWindowFocus: false,
   });
-
   useEffect(() => {
     if (repositoryQuery.data && !baseline) {
       setBaseline(repositoryQuery.data);
-      form.setFieldsValue(repositorySettingsValues(repositoryQuery.data));
+      setValues(repositorySettingsValues(repositoryQuery.data));
     }
-  }, [repositoryQuery.data, baseline, form]);
-
+  }, [repositoryQuery.data, baseline]);
+  const update = <K extends keyof RepositorySettingsValues>(
+    key: K,
+    value: RepositorySettingsValues[K],
+  ) => {
+    setValues((current) => (current ? { ...current, [key]: value } : current));
+    setDirty(true);
+  };
   const reloadLatest = async () => {
     try {
       const result = await repositoryQuery.refetch({ throwOnError: true });
       if (!result.data) return;
       setBaseline(result.data);
-      form.setFieldsValue(repositorySettingsValues(result.data));
+      setValues(repositorySettingsValues(result.data));
       setConflict(false);
       setDirty(false);
       setError(null);
@@ -342,12 +408,20 @@ function RepositorySettingsDrawer({
       setError(errorMessage(failure));
     }
   };
-
-  const save = async (values: RepositorySettingsValues) => {
-    if (!baseline || !dirty || conflict || !operatorAccess.can("configure")) return;
+  const save = async () => {
+    if (!baseline || !values || !dirty || saving || conflict || !operatorAccess.can("configure"))
+      return;
     setSaving(true);
     setError(null);
     try {
+      if (
+        values.reviewerMode === "custom" &&
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(values.reviewerGithubLogin)
+      ) {
+        throw new Error(
+          "Use up to 39 letters, numbers, or hyphens, starting with a letter or number.",
+        );
+      }
       const result = await repositories.update(
         repositoryId,
         buildRepositoryUpdate(values, baseline.version),
@@ -360,23 +434,21 @@ function RepositorySettingsDrawer({
       setSaving(false);
     }
   };
-
+  const disabled = saving || !operatorAccess.can("configure");
   return (
-    <Drawer
-      open
+    <RepositoryPanel
       title={baseline ? `Settings · ${baseline.fullName}` : "Repository settings"}
-      size={600}
       onClose={onClose}
-      closable={!saving}
-      mask={{ closable: !saving }}
-      keyboard={!saving}
-      footer={
-        <div className="repositories-drawer-actions">
+      busy={saving}
+      actions={
+        <>
           <Button disabled={saving} onClick={onClose}>
             Cancel
           </Button>
           <Button
-            type="primary"
+            variant="contained"
+            type="submit"
+            form="repository-settings-form"
             loading={saving}
             disabled={
               !baseline ||
@@ -385,212 +457,237 @@ function RepositorySettingsDrawer({
               repositoryQuery.isFetching ||
               !operatorAccess.can("configure")
             }
-            onClick={() => form.submit()}
           >
             Save changes
           </Button>
-        </div>
+        </>
       }
     >
-      {!baseline && repositoryQuery.isPending && <Skeleton active paragraph={{ rows: 8 }} />}
+      {!baseline && repositoryQuery.isPending && <Skeleton variant="rounded" height={400} />}
       {!baseline && repositoryQuery.isError && (
         <Alert
-          type="error"
-          showIcon
-          title="Could not load repository settings"
-          description={errorMessage(repositoryQuery.error)}
-          action={<Button onClick={reloadLatest}>Try again</Button>}
-        />
-      )}
-      {baseline && (
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={save}
-          onValuesChange={() => setDirty(true)}
-          disabled={saving || !operatorAccess.can("configure")}
+          severity="error"
+          action={<Button onClick={() => void reloadLatest()}>Try again</Button>}
         >
-          <Descriptions
-            size="small"
-            column={1}
+          <AlertTitle>Could not load repository settings</AlertTitle>
+          {errorMessage(repositoryQuery.error)}
+        </Alert>
+      )}
+      {baseline && values && (
+        <Stack
+          component="form"
+          id="repository-settings-form"
+          spacing={4}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <DetailsGrid
+            columns={1}
             items={[
-              { key: "repository", label: "Repository", children: baseline.fullName },
+              { key: "repository", label: "Repository", value: baseline.fullName },
               {
                 key: "github-id",
                 label: "GitHub repository ID",
-                children: <code>{baseline.githubRepositoryId}</code>,
+                value: <code>{baseline.githubRepositoryId}</code>,
               },
             ]}
           />
           <Divider />
           {conflict ? (
             <Alert
-              className="repositories-notice"
-              showIcon
-              type="warning"
-              title="These settings changed while you were editing"
-              description={
-                <>
-                  <p>{error}</p>
-                  <p>
-                    Your changes have not been saved. Reload the latest settings, then reapply your
-                    changes. Reloading replaces this draft.
-                  </p>
-                </>
-              }
+              severity="warning"
               action={
-                <Button loading={repositoryQuery.isFetching} onClick={reloadLatest}>
+                <Button loading={repositoryQuery.isFetching} onClick={() => void reloadLatest()}>
                   Reload latest settings
                 </Button>
               }
-            />
+            >
+              <AlertTitle>These settings changed while you were editing</AlertTitle>
+              <Typography variant="body2">{error}</Typography>
+              <Typography variant="body2">
+                Your changes have not been saved. Reload the latest settings, then reapply your
+                changes. Reloading replaces this draft.
+              </Typography>
+            </Alert>
           ) : error ? (
-            <Alert
-              className="repositories-notice"
-              showIcon
-              type="error"
-              title="Could not save changes"
-              description={error}
-            />
+            <Alert severity="error">
+              <AlertTitle>Could not save changes</AlertTitle>
+              {error}
+            </Alert>
           ) : null}
-          <Form.Item
-            name="enabled"
-            label="Enable repository"
-            valuePropName="checked"
-            extra="Disabled repositories do not participate in new synchronization or scheduling."
-          >
-            <Switch />
-          </Form.Item>
-          <Divider />
-          <Typography.Title level={5}>Scheduling</Typography.Title>
-          <SchedulingLimitFields />
-          <Typography.Paragraph type="secondary">
-            Unlimited at repository scope still obeys global limits and Worker constraints.
-          </Typography.Paragraph>
-          <Divider />
-          <Typography.Title level={5}>Reviewer</Typography.Title>
-          <Form.Item name="reviewerMode" label="Reviewer configuration">
-            <Select
-              options={[
-                { value: "inherit", label: "Inherit default reviewer" },
-                { value: "custom", label: "Configure for this repository" },
-              ]}
-            />
-          </Form.Item>
-          {reviewerMode === "custom" ? (
-            <>
-              <Form.Item
-                name="reviewerGithubUserId"
-                label="Reviewer GitHub user ID"
-                required
-                rules={[positiveIntegerRule("Reviewer ID")]}
-                extra="Numeric identity used for scheduling. Configure the ID and login together."
-              >
-                <Input inputMode="numeric" placeholder="e.g. 12345678" maxLength={16} />
-              </Form.Item>
-              <Form.Item
-                name="reviewerGithubLogin"
-                label="Reviewer GitHub login"
-                rules={[
-                  { required: true, message: "Enter the reviewer login." },
-                  {
-                    pattern: /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u,
-                    message:
-                      "Use up to 39 letters, numbers, or hyphens, starting with a letter or number.",
-                  },
-                ]}
-                extra="The login of the configured reviewer account. The numeric ID determines authorization."
-              >
-                <Input placeholder="e.g. review-bot" maxLength={39} />
-              </Form.Item>
-            </>
-          ) : (
-            <Typography.Paragraph type="secondary">
-              Uses the server's default reviewer ID and login.
-            </Typography.Paragraph>
-          )}
-          <Divider />
-          <Typography.Title level={5}>Authorization</Typography.Title>
-          <Form.Item name="policyMode" label="Authorization policy">
-            <Select
-              options={[
-                { value: "inherit", label: "Inherit default policy" },
-                { value: "custom", label: "Self or allowlisted actors" },
-              ]}
-            />
-          </Form.Item>
-          {policyMode === "custom" ? (
-            <>
-              {reviewerMode === "inherit" && (
-                <Alert
-                  className="repositories-notice"
-                  type="warning"
-                  showIcon
-                  title="Configure a reviewer above to use a custom authorization policy."
+          <Box>
+            <FormControlLabel
+              label="Enable repository"
+              control={
+                <Switch
+                  checked={values.enabled}
+                  disabled={disabled}
+                  onChange={(_, checked) => update("enabled", checked)}
                 />
-              )}
-              <Typography.Paragraph type="secondary">
-                The configured reviewer can authorize requests for itself. Allowlisted actors can
-                also authorize requests for this reviewer. Unknown actors are always denied.
-              </Typography.Paragraph>
-              <Form.Item
-                name="schedulingTargetGithubUserId"
-                label="Scheduling target GitHub user ID"
-                rules={[positiveIntegerRule("Scheduling target ID")]}
-                required
-                extra="Must match the configured reviewer ID above. This account receives review requests and assignments."
-              >
-                <Input inputMode="numeric" placeholder="GitHub user ID" maxLength={16} />
-              </Form.Item>
-              <Form.Item
-                name="allowlistedActorGithubUserIds"
-                label="Allowlisted actor IDs"
-                rules={[
-                  {
-                    validator: async (_: unknown, value: string | undefined) => {
-                      parseAllowlistedActors(value ?? "");
-                    },
-                  },
-                ]}
-                extra="Enter numeric GitHub user IDs, one per line or separated by commas. An empty list permits only self-requests."
-              >
-                <Input.TextArea
-                  autoSize={{ minRows: 3, maxRows: 8 }}
+              }
+            />
+            <Typography variant="body2" color="text.secondary">
+              Disabled repositories do not participate in new synchronization or scheduling.
+            </Typography>
+          </Box>
+          <Divider />
+          <Stack component="section" spacing={3} aria-labelledby="repository-scheduling-heading">
+            <Typography id="repository-scheduling-heading" variant="subtitle1">
+              Scheduling
+            </Typography>
+            <SchedulingLimitFieldsProvider
+              values={values}
+              disabled={disabled}
+              onChange={(next) => {
+                setValues((current) => (current ? { ...current, ...next } : current));
+                setDirty(true);
+              }}
+            >
+              <SchedulingLimitFields />
+            </SchedulingLimitFieldsProvider>
+            <Typography variant="body2" color="text.secondary">
+              Unlimited at repository scope still obeys global limits and Worker constraints.
+            </Typography>
+          </Stack>
+          <Divider />
+          <Stack component="section" spacing={3} aria-labelledby="repository-reviewer-heading">
+            <Typography id="repository-reviewer-heading" variant="subtitle1">
+              Reviewer
+            </Typography>
+            <TextField
+              select
+              label="Reviewer configuration"
+              value={values.reviewerMode}
+              disabled={disabled}
+              onChange={(event) =>
+                update(
+                  "reviewerMode",
+                  event.target.value as RepositorySettingsValues["reviewerMode"],
+                )
+              }
+            >
+              <MenuItem value="inherit">Inherit default reviewer</MenuItem>
+              <MenuItem value="custom">Configure for this repository</MenuItem>
+            </TextField>
+            {values.reviewerMode === "custom" ? (
+              <>
+                <TextField
+                  label="Reviewer GitHub user ID"
+                  required
+                  value={values.reviewerGithubUserId}
+                  disabled={disabled}
+                  onChange={(event) => update("reviewerGithubUserId", event.target.value)}
+                  placeholder="e.g. 12345678"
+                  slotProps={{ htmlInput: { inputMode: "numeric", maxLength: 16 } }}
+                  helperText="Numeric identity used for scheduling. Configure the ID and login together."
+                />
+                <TextField
+                  label="Reviewer GitHub login"
+                  required
+                  value={values.reviewerGithubLogin}
+                  disabled={disabled}
+                  onChange={(event) => update("reviewerGithubLogin", event.target.value)}
+                  placeholder="e.g. review-bot"
+                  slotProps={{ htmlInput: { maxLength: 39 } }}
+                  helperText="The login of the configured reviewer account. The numeric ID determines authorization."
+                />
+              </>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                Uses the server's default reviewer ID and login.
+              </Typography>
+            )}
+          </Stack>
+          <Divider />
+          <Stack component="section" spacing={3} aria-labelledby="repository-authorization-heading">
+            <Typography id="repository-authorization-heading" variant="subtitle1">
+              Authorization
+            </Typography>
+            <TextField
+              select
+              label="Authorization policy"
+              value={values.policyMode}
+              disabled={disabled}
+              onChange={(event) =>
+                update("policyMode", event.target.value as RepositorySettingsValues["policyMode"])
+              }
+            >
+              <MenuItem value="inherit">Inherit default policy</MenuItem>
+              <MenuItem value="custom">Self or allowlisted actors</MenuItem>
+            </TextField>
+            {values.policyMode === "custom" ? (
+              <>
+                {values.reviewerMode === "inherit" && (
+                  <Alert severity="warning">
+                    Configure a reviewer above to use a custom authorization policy.
+                  </Alert>
+                )}
+                <Typography variant="body2" color="text.secondary">
+                  The configured reviewer can authorize requests for itself. Allowlisted actors can
+                  also authorize requests for this reviewer. Unknown actors are always denied.
+                </Typography>
+                <TextField
+                  label="Scheduling target GitHub user ID"
+                  required
+                  value={values.schedulingTargetGithubUserId}
+                  disabled={disabled}
+                  onChange={(event) => update("schedulingTargetGithubUserId", event.target.value)}
+                  placeholder="GitHub user ID"
+                  slotProps={{ htmlInput: { inputMode: "numeric", maxLength: 16 } }}
+                  helperText="Must match the configured reviewer ID above. This account receives review requests and assignments."
+                />
+                <TextField
+                  label="Allowlisted actor IDs"
+                  multiline
+                  minRows={3}
+                  maxRows={8}
+                  value={values.allowlistedActorGithubUserIds}
+                  disabled={disabled}
+                  onChange={(event) => update("allowlistedActorGithubUserIds", event.target.value)}
                   placeholder={"12345678\n87654321"}
-                  className="repositories-code-input"
+                  helperText="Enter numeric GitHub user IDs, one per line or separated by commas. An empty list permits only self-requests."
+                  sx={{ "& textarea": { fontFamily: '"Roboto Mono", monospace' } }}
                 />
-              </Form.Item>
-              <Form.Item name="newRevisionPolicy" label="When a pull request receives new commits">
-                <Select
-                  options={[
-                    { value: "default", label: "Default: require a new authorization" },
-                    { value: "require_new_authorization", label: "Require a new authorization" },
-                    {
-                      value: "inherit_authorized_epoch",
-                      label: "Carry authorization forward while the request is active",
-                    },
-                  ]}
+                <TextField
+                  select
+                  label="When a pull request receives new commits"
+                  value={values.newRevisionPolicy}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    update(
+                      "newRevisionPolicy",
+                      event.target.value as RepositorySettingsValues["newRevisionPolicy"],
+                    )
+                  }
+                >
+                  <MenuItem value="default">Default: require a new authorization</MenuItem>
+                  <MenuItem value="require_new_authorization">Require a new authorization</MenuItem>
+                  <MenuItem value="inherit_authorized_epoch">
+                    Carry authorization forward while the request is active
+                  </MenuItem>
+                </TextField>
+                <TextField
+                  label="Policy version"
+                  required
+                  value={values.policyVersion}
+                  disabled={disabled}
+                  onChange={(event) => update("policyVersion", event.target.value)}
+                  slotProps={{ htmlInput: { inputMode: "numeric", maxLength: 16 } }}
+                  helperText="Version recorded with authorization decisions. Set this explicitly when revising your policy."
                 />
-              </Form.Item>
-              <Form.Item
-                name="policyVersion"
-                label="Policy version"
-                rules={[positiveIntegerRule("Policy version")]}
-                required
-                extra="Version recorded with authorization decisions. Set this explicitly when revising your policy."
-              >
-                <Input inputMode="numeric" maxLength={16} />
-              </Form.Item>
-            </>
-          ) : (
-            <Typography.Paragraph type="secondary">
-              Uses the server's default authorization policy, including who may request reviews and
-              how new commits are authorized.
-            </Typography.Paragraph>
-          )}
-        </Form>
+              </>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                Uses the server's default authorization policy, including who may request reviews
+                and how new commits are authorized.
+              </Typography>
+            )}
+          </Stack>
+        </Stack>
       )}
-    </Drawer>
+    </RepositoryPanel>
   );
 }
 
@@ -602,7 +699,7 @@ function RepositoryManagement({
   onUpdated: () => void;
 }) {
   const operatorAccess = useOperatorAccess(repository.id);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const queryClient = useQueryClient();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
@@ -625,8 +722,8 @@ function RepositoryManagement({
             : (result.connectionMessage ?? "The connection could not be verified."),
       });
       onUpdated();
-    } catch (error) {
-      setConnectionNotice({ success: false, message: errorMessage(error) });
+    } catch (failure) {
+      setConnectionNotice({ success: false, message: errorMessage(failure) });
     } finally {
       setChecking(false);
     }
@@ -636,66 +733,68 @@ function RepositoryManagement({
     onUpdated();
   };
   return (
-    <Space orientation="vertical" size="large" className="repositories-full-width">
-      <Descriptions
-        column={1}
-        size="small"
+    <Stack spacing={3}>
+      <DetailsGrid
+        columns={1}
         items={[
-          { key: "repository", label: "Repository", children: repository.fullName },
+          { key: "repository", label: "Repository", value: repository.fullName },
           {
             key: "role",
             label: "Your access",
-            children: operatorAccess.platformAdministrator
+            value: operatorAccess.platformAdministrator
               ? "Platform administrator"
               : operatorAccess.context?.repository?.role,
           },
-          {
-            key: "connection",
-            label: "Connection",
-            children: <Connection repository={repository} />,
-          },
+          { key: "connection", label: "Connection", value: <Connection repository={repository} /> },
         ]}
       />
-      {!operatorAccess.allows("configure") ? (
-        <Alert
-          type="info"
-          showIcon
-          title="Read-only repository settings"
-          description="Maintainer access or higher is required to change repository settings and verify the connection."
-        />
-      ) : null}
-      <Space wrap>
+      {!operatorAccess.allows("configure") && (
+        <Alert severity="info">
+          <AlertTitle>Read-only repository settings</AlertTitle>Maintainer access or higher is
+          required to change repository settings and verify the connection.
+        </Alert>
+      )}
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
         <Button
+          variant="outlined"
           disabled={!operatorAccess.can("configure")}
           loading={checking}
           onClick={() => void checkConnection()}
         >
           Check connection
         </Button>
-        <Button disabled={!operatorAccess.can("configure")} onClick={() => setSettingsOpen(true)}>
+        <Button
+          variant="contained"
+          disabled={!operatorAccess.can("configure")}
+          onClick={() => setSettingsOpen(true)}
+        >
           Settings
         </Button>
-        <Button disabled={!operatorAccess.can("manage_access")} onClick={() => setAccessOpen(true)}>
+        <Button
+          variant="outlined"
+          disabled={!operatorAccess.can("manage_access")}
+          onClick={() => setAccessOpen(true)}
+        >
           Members and access
         </Button>
-      </Space>
-      {!operatorAccess.allows("manage_access") ? (
-        <Typography.Paragraph type="secondary">
+      </Stack>
+      {!operatorAccess.allows("manage_access") && (
+        <Typography variant="body2" color="text.secondary">
           Repository administrators manage members and access history.
-        </Typography.Paragraph>
-      ) : null}
-      {connectionNotice ? (
-        <Alert
-          showIcon
-          type={connectionNotice.success ? "success" : "error"}
-          title={connectionNotice.success ? "Connection verified" : "Connection check failed"}
-          description={connectionNotice.message}
-        />
-      ) : null}
+        </Typography>
+      )}
+      {connectionNotice && (
+        <Alert severity={connectionNotice.success ? "success" : "error"}>
+          <AlertTitle>
+            {connectionNotice.success ? "Connection verified" : "Connection check failed"}
+          </AlertTitle>
+          {connectionNotice.message}
+        </Alert>
+      )}
       <RepositoryConfigurationActivity repositoryId={repository.id} />
       <RepositorySchedulingPolicy repositoryId={repository.id} />
       <PublicationPolicy repositoryId={repository.id} />
-      {settingsOpen ? (
+      {settingsOpen && (
         <OperatorAccessGate repositoryId={repository.id} permission="configure">
           <RepositorySettingsDrawer
             key={JSON.stringify([
@@ -716,8 +815,8 @@ function RepositoryManagement({
             }}
           />
         </OperatorAccessGate>
-      ) : null}
-      {accessOpen && operatorAccess.principal ? (
+      )}
+      {accessOpen && operatorAccess.principal && (
         <RepositoryAccessDrawer
           repositoryId={repository.id}
           repositoryName={repository.fullName}
@@ -728,8 +827,8 @@ function RepositoryManagement({
           currentPrincipal={operatorAccess.principal}
           onChanged={refreshAccess}
         />
-      ) : null}
-    </Space>
+      )}
+    </Stack>
   );
 }
 
@@ -744,7 +843,6 @@ export default function RepositoriesPage() {
 function RepositoriesContent() {
   const operatorAccess = useOperatorAccess();
   const queryClient = useQueryClient();
-  const [messageApi, messageContext] = message.useMessage();
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -762,175 +860,232 @@ function RepositoriesContent() {
   });
   const items = listQuery.data?.items ?? [];
   const total = listQuery.data?.total ?? 0;
-
   useEffect(() => {
-    if (listQuery.data && total > 0 && page > Math.ceil(total / pageSize)) {
+    if (listQuery.data && total > 0 && page > Math.ceil(total / pageSize))
       setPage(Math.ceil(total / pageSize));
-    }
   }, [listQuery.data, total, page, pageSize]);
-
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["managed-repositories"] });
-
+  const clearSearch = () => {
+    setSearch("");
+    setSearchInput("");
+    setPage(1);
+  };
   return (
-    <section className="repositories-page" aria-labelledby="repositories-page-title">
-      {messageContext}
+    <Stack component="section" spacing={3} aria-labelledby="repositories-page-title">
       <PageHeader
         eyebrow="Configuration"
         title="Repositories"
         titleId="repositories-page-title"
         description="Connect GitHub repositories and control who can request reviews."
         actions={
-          <Space>
-            <Button icon={<ReloadOutlined />} loading={listQuery.isFetching} onClick={refresh}>
+          <Stack direction="row" spacing={1}>
+            <Button
+              startIcon={<Refresh />}
+              loading={listQuery.isFetching}
+              onClick={() => void refresh()}
+            >
               Refresh
             </Button>
-            {operatorAccess.platformAdministrator ? (
+            {operatorAccess.platformAdministrator && (
               <Button
-                type="primary"
-                icon={<PlusOutlined />}
+                variant="contained"
+                startIcon={<Add />}
                 disabled={operatorAccess.checking}
                 onClick={() => setAdding(true)}
               >
                 Add repository
               </Button>
-            ) : null}
-          </Space>
+            )}
+          </Stack>
         }
       />
       {process.env.NODE_ENV === "development" && (
-        <Alert
-          className="repositories-notice"
-          showIcon
-          type="info"
-          title="Sample data"
-          description="This preview uses sample repositories. Changes affect the preview only."
-        />
+        <Alert severity="info">
+          <AlertTitle>Sample data</AlertTitle>This preview uses sample repositories. Changes affect
+          the preview only.
+        </Alert>
       )}
-      <Card className="repositories-panel">
-        <div className="repositories-toolbar">
-          <Input.Search
-            className="repositories-search"
-            aria-label="Search repositories"
-            placeholder="Search owner or repository name"
-            allowClear
-            maxLength={512}
-            value={searchInput}
-            onChange={(event) => {
-              setSearchInput(event.target.value);
-              if (!event.target.value) {
-                setSearch("");
-                setPage(1);
-              }
-            }}
-            onSearch={(value) => {
-              setSearch(value.trim());
-              setPage(1);
-            }}
-          />
-          <span className="repositories-secondary" aria-live="polite">
-            {listQuery.isFetching
-              ? "Loading repositories…"
-              : listQuery.isError
-                ? "Repositories unavailable"
-                : `${total.toLocaleString("en-US")} ${total === 1 ? "repository" : "repositories"}`}
-          </span>
-        </div>
-        {listQuery.isError ? (
-          <Alert
-            showIcon
-            type="error"
-            title="Could not load repositories"
-            description={errorMessage(listQuery.error)}
-            action={<Button onClick={refresh}>Try again</Button>}
-          />
-        ) : listQuery.isPending ? (
-          <div role="status" aria-label="Loading repositories">
-            <Skeleton active paragraph={{ rows: 6 }} />
-          </div>
-        ) : items.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={
-              search
-                ? "No repositories match your search."
-                : operatorAccess.platformAdministrator
-                  ? "Add your first repository to start reviewing pull requests and issues."
-                  : "No repository access. Ask a repository or platform administrator to share a repository with you."
-            }
+      <Card elevation={0}>
+        <CardContent>
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            spacing={2}
+            sx={{ justifyContent: "space-between", alignItems: { sm: "center" }, mb: 2 }}
           >
-            {search ? (
-              <Button
-                onClick={() => {
-                  setSearch("");
-                  setSearchInput("");
-                  setPage(1);
+            <Box
+              component="form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setSearch(searchInput.trim());
+                setPage(1);
+              }}
+              sx={{ width: { xs: "100%", sm: 440 } }}
+            >
+              <TextField
+                fullWidth
+                label="Search repositories"
+                placeholder="Search owner or repository name"
+                value={searchInput}
+                onChange={(event) => {
+                  setSearchInput(event.target.value);
+                  if (!event.target.value) {
+                    setSearch("");
+                    setPage(1);
+                  }
                 }}
-              >
-                Clear search
-              </Button>
-            ) : operatorAccess.platformAdministrator ? (
-              <Button type="primary" onClick={() => setAdding(true)}>
-                Add repository
-              </Button>
-            ) : null}
-          </Empty>
-        ) : (
-          <ul className="repositories-list" aria-label="Managed repositories">
-            {items.map((repository) => (
-              <li className="repositories-item" key={repository.id}>
-                <div className="repositories-item-main">
-                  <div className="repositories-identity">
-                    <GithubOutlined aria-hidden="true" className="repositories-github-icon" />
-                    <div>
-                      <a
-                        className="repositories-name"
-                        href={`/pull-requests?repositoryId=${encodeURIComponent(repository.id)}`}
-                      >
-                        {repository.fullName}
-                      </a>
-                      <div className="repositories-metadata">
-                        <span>{repository.enabled ? "Enabled" : "Disabled"}</span>
-                        <span>
-                          Reviewer:{" "}
-                          {repository.reviewerGithubLogin ??
-                            (repository.reviewerGithubUserId
-                              ? `ID ${repository.reviewerGithubUserId}`
-                              : "Inherited default")}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <Connection repository={repository} />
-                  <div className="repositories-item-actions">
+                slotProps={{
+                  htmlInput: { maxLength: 512, "aria-label": "Search repositories" },
+                  input: {
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        {searchInput && (
+                          <IconButton aria-label="Clear search" size="medium" onClick={clearSearch}>
+                            <Close fontSize="small" />
+                          </IconButton>
+                        )}
+                        <IconButton type="submit" aria-label="Search repositories" size="medium">
+                          <Search fontSize="small" />
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  },
+                }}
+              />
+            </Box>
+            <Typography variant="body2" color="text.secondary" aria-live="polite">
+              {listQuery.isFetching
+                ? "Loading repositories…"
+                : listQuery.isError
+                  ? "Repositories unavailable"
+                  : `${total.toLocaleString("en-US")} ${total === 1 ? "repository" : "repositories"}`}
+            </Typography>
+          </Stack>
+          {listQuery.isError ? (
+            <Alert
+              severity="error"
+              action={<Button onClick={() => void refresh()}>Try again</Button>}
+            >
+              <AlertTitle>Could not load repositories</AlertTitle>
+              {errorMessage(listQuery.error)}
+            </Alert>
+          ) : listQuery.isPending ? (
+            <Box role="status" aria-label="Loading repositories">
+              <Skeleton variant="rounded" height={260} />
+            </Box>
+          ) : items.length === 0 ? (
+            <EmptyState
+              title={
+                search
+                  ? "No repositories match your search."
+                  : operatorAccess.platformAdministrator
+                    ? "Add your first repository"
+                    : "No repository access"
+              }
+              description={
+                search
+                  ? undefined
+                  : operatorAccess.platformAdministrator
+                    ? "Add your first repository to start reviewing pull requests and issues."
+                    : "No repository access. Ask a repository or platform administrator to share a repository with you."
+              }
+              action={
+                search ? (
+                  <Button onClick={clearSearch}>Clear search</Button>
+                ) : operatorAccess.platformAdministrator ? (
+                  <Button variant="contained" onClick={() => setAdding(true)}>
+                    Add repository
+                  </Button>
+                ) : undefined
+              }
+              icon={<GitHub />}
+            />
+          ) : (
+            <DataTable<ManagedRepositorySummary>
+              rows={items}
+              getRowId={(repository) => repository.id}
+              ariaLabel="Managed repositories"
+              columns={[
+                {
+                  id: "repository",
+                  label: "Repository",
+                  minWidth: 230,
+                  render: (repository) => (
+                    <Stack direction="row" spacing={1.5} sx={{ alignItems: "flex-start" }}>
+                      <GitHub fontSize="small" sx={{ color: "text.secondary", mt: 0.25 }} />
+                      <Box>
+                        <Link
+                          component={RouterLink}
+                          to={`/pull-requests?repositoryId=${encodeURIComponent(repository.id)}`}
+                          sx={{ fontWeight: 500, overflowWrap: "anywhere" }}
+                        >
+                          {repository.fullName}
+                        </Link>
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          sx={{ display: "block" }}
+                        >
+                          {repository.enabled ? "Enabled" : "Disabled"}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  ),
+                },
+                {
+                  id: "reviewer",
+                  label: "Reviewer",
+                  minWidth: 140,
+                  render: (repository) => (
+                    <Typography variant="body2">
+                      {repository.reviewerGithubLogin ??
+                        (repository.reviewerGithubUserId
+                          ? `ID ${repository.reviewerGithubUserId}`
+                          : "Inherited default")}
+                    </Typography>
+                  ),
+                },
+                {
+                  id: "connection",
+                  label: "Connection",
+                  minWidth: 220,
+                  render: (repository) => <Connection repository={repository} />,
+                },
+                {
+                  id: "actions",
+                  label: "Manage",
+                  width: 210,
+                  minWidth: 210,
+                  render: (repository) => (
                     <Button
+                      size="medium"
+                      variant="outlined"
+                      sx={{ whiteSpace: "nowrap" }}
                       onClick={() => setManaging(repository)}
                       aria-label={`Settings and access for ${repository.fullName}`}
                     >
                       Settings and access
                     </Button>
-                  </div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-        {!listQuery.isError && total > pageSize && (
-          <div className="repositories-pagination">
-            <Pagination
-              current={page}
-              pageSize={pageSize}
-              total={total}
-              showSizeChanger
-              pageSizeOptions={[20, 50]}
-              disabled={listQuery.isFetching}
-              onChange={(nextPage, nextSize) => {
-                setPage(nextSize === pageSize ? nextPage : 1);
-                setPageSize(nextSize);
-              }}
-              showTotal={(count, range) => `${range[0]}–${range[1]} of ${count}`}
+                  ),
+                },
+              ]}
             />
-          </div>
-        )}
+          )}
+          {!listQuery.isError && total > pageSize && (
+            <TablePagination
+              component="div"
+              page={page - 1}
+              rowsPerPage={pageSize}
+              count={total}
+              rowsPerPageOptions={[20, 50]}
+              disabled={listQuery.isFetching}
+              onPageChange={(_, nextPage) => setPage(nextPage + 1)}
+              onRowsPerPageChange={(event) => {
+                setPage(1);
+                setPageSize(Number(event.target.value));
+              }}
+            />
+          )}
+        </CardContent>
       </Card>
       {adding && (
         <OperatorAccessGate platformOnly>
@@ -938,16 +1093,15 @@ function RepositoriesContent() {
             onClose={() => setAdding(false)}
             onCreated={(repository) => {
               setAdding(false);
-              void messageApi.success(`${repository.fullName} added.`);
+              notify(`${repository.fullName} added.`);
               void refresh();
             }}
           />
         </OperatorAccessGate>
       )}
-      {managing ? (
-        <Drawer
-          open
-          size={960}
+      {managing && (
+        <RepositoryPanel
+          width={960}
           title={`Settings and access · ${managing.fullName}`}
           onClose={() => setManaging(null)}
         >
@@ -958,8 +1112,8 @@ function RepositoriesContent() {
               onUpdated={() => void refresh()}
             />
           </OperatorAccessGate>
-        </Drawer>
-      ) : null}
-    </section>
+        </RepositoryPanel>
+      )}
+    </Stack>
   );
 }

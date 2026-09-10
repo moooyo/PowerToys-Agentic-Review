@@ -3,25 +3,48 @@ import type {
   DashboardReviewRunJob,
   DashboardReviewRunRequest,
 } from "@agentic-review/contracts";
-import { useQuery } from "@tanstack/react-query";
+import { ExpandLess, ExpandMore } from "@mui/icons-material";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
+  Box,
   Button,
+  Chip,
   Collapse,
   Divider,
-  Empty,
+  IconButton,
+  LinearProgress,
   Skeleton,
-  Space,
+  Stack,
   Table,
-  Tag,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TablePagination,
+  TableRow,
   Typography,
-} from "antd";
-import { useState } from "react";
+} from "@mui/material";
+import { useQuery } from "@tanstack/react-query";
+import { Fragment, useState } from "react";
 import { IssueReproductionSummary } from "@/components/IssueReproduction";
 import { JobAdmission } from "@/components/JobAdmission";
 import { ReviewRunDecisions } from "@/components/ReviewRunDecisions";
+import { DataTable, EmptyState } from "@/components/ui";
 import { runs } from "@/services/runs";
-import { CopyValue, ErrorNotice, EvidenceIds, Facts, Prose, readable, timestamp } from "./common";
+import {
+  CopyValue,
+  ErrorNotice,
+  EvidenceIds,
+  Facts,
+  Prose,
+  readable,
+  timestamp,
+  withOccurrenceKeys,
+} from "./common";
 import {
   evidenceVerificationLabel,
   evidenceVerificationPendingLabel,
@@ -69,34 +92,40 @@ function Policy({ run }: { run: DashboardReviewRunDetail }) {
   const policy = policyPresentation(run.policy);
   const findings = policyFindingPresentation(run.policy);
   const pending = pendingEvidenceRequests(run);
+  const reasonRows = withOccurrenceKeys(run.policy.reasons, (reason) => JSON.stringify(reason));
+  const [reasonsPage, setReasonsPage] = useState(0);
+  const currentReasonsPage = Math.min(
+    reasonsPage,
+    Math.max(0, Math.ceil(run.policy.reasons.length / 10) - 1),
+  );
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      <Typography.Title level={5}>Policy eligibility</Typography.Title>
-      <Space wrap>
-        <Tag color={policy.tone}>{policy.label}</Tag>
-        <Typography.Text type="secondary">{run.policy.policyVersion}</Typography.Text>
-      </Space>
+    <Stack component="section" spacing={2} sx={{ width: "100%", minWidth: 0 }}>
+      <Typography variant="h6" component="h3">
+        Policy eligibility
+      </Typography>
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
+        <Chip size="medium" color={policy.tone} label={policy.label} />
+        <Typography variant="body2" color="text.secondary">
+          {run.policy.policyVersion}
+        </Typography>
+      </Stack>
       <Prose>{policy.description}</Prose>
       {(pending.required > 0 || pending.optional > 0) && (
-        <Alert
-          type="info"
-          showIcon
-          title={evidenceVerificationPendingLabel}
-          description={
-            pending.required > 0
-              ? `Evidence for ${pending.required} required request(s) is being verified.${run.policy.applicable ? " Approval eligibility remains withheld." : ""} Recorded check outcomes are unchanged. Automatic refresh is limited; use Refresh run to check again if needed.`
-              : `Evidence for ${pending.optional} optional request(s) is being verified. This does not block completed required validation. Recorded check outcomes are unchanged. Automatic refresh is limited; use Refresh run to check again if needed.`
-          }
-        />
+        <Alert severity="info">
+          <AlertTitle>{evidenceVerificationPendingLabel}</AlertTitle>
+          {pending.required > 0
+            ? `Evidence for ${pending.required} required request(s) is being verified.${run.policy.applicable ? " Approval eligibility remains withheld." : ""} Recorded check outcomes are unchanged. Automatic refresh is limited; use Refresh run to check again if needed.`
+            : `Evidence for ${pending.optional} optional request(s) is being verified. This does not block completed required validation. Recorded check outcomes are unchanged. Automatic refresh is limited; use Refresh run to check again if needed.`}
+        </Alert>
       )}
       {run.policy.applicable && (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           {run.policy.policyVersion === "required-checks-and-unresolved-p0-p1-v2"
             ? "Eligibility reflects the current execution results and finding dispositions for this frozen run."
             : "Eligibility applies to this frozen run."}{" "}
           It does not record an approval or publication.
           {run.freshness === "superseded" ? " This run has been superseded." : ""}
-        </Typography.Text>
+        </Typography>
       )}
       <Facts
         items={[
@@ -112,62 +141,75 @@ function Policy({ run }: { run: DashboardReviewRunDetail }) {
             : []),
         ]}
       />
-      <Typography.Paragraph type="secondary">{findings.description}</Typography.Paragraph>
+      <Typography variant="body2" color="text.secondary">
+        {findings.description}
+      </Typography>
       {run.policy.reasons.length > 0 && (
-        <Collapse
-          items={[
-            {
-              key: "reasons",
-              label: `Policy reasons (${run.policy.reasonCount})`,
-              children: (
-                <>
-                  {run.policy.reasonsTruncated && (
-                    <Alert
-                      showIcon
-                      type="warning"
-                      title={`Showing ${run.policy.reasons.length} of ${run.policy.reasonCount} reasons`}
-                      description="The control plane returned a bounded preview of the reasons."
-                    />
-                  )}
-                  <Table
-                    size="small"
-                    rowKey={(_, index) => `reason-${index}`}
-                    dataSource={run.policy.reasons}
-                    scroll={{ x: 760 }}
-                    pagination={{ defaultPageSize: 10, showSizeChanger: false }}
-                    columns={[
-                      { title: "Reason code", dataIndex: "code" },
-                      {
-                        title: "Request / check",
-                        render: (_, reason) => (
-                          <Space orientation="vertical" size={0}>
-                            {reason.requestId && <CopyValue value={reason.requestId} />}
-                            {reason.checkId && <CopyValue value={reason.checkId} />}
-                            {!reason.requestId && !reason.checkId && "Run policy"}
-                          </Space>
-                        ),
-                      },
-                      {
-                        title: "Outcome",
-                        dataIndex: "outcome",
-                        render: (value: string | undefined) =>
-                          value ? readable(value) : "Not specified",
-                      },
-                      {
-                        title: "Explanation",
-                        dataIndex: "reason",
-                        render: (value: string | undefined) =>
-                          value ?? "No additional explanation recorded.",
-                      },
-                    ]}
-                  />
-                </>
-              ),
-            },
-          ]}
-        />
+        <Accordion disableGutters>
+          <AccordionSummary expandIcon={<ExpandMore />}>
+            <Typography variant="body2" component="span" sx={{ fontWeight: 500 }}>
+              {`Policy reasons (${run.policy.reasonCount})`}
+            </Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Stack spacing={2}>
+              {run.policy.reasonsTruncated && (
+                <Alert severity="warning">
+                  <AlertTitle>
+                    {`Showing ${run.policy.reasons.length} of ${run.policy.reasonCount} reasons`}
+                  </AlertTitle>
+                  The control plane returned a bounded preview of the reasons.
+                </Alert>
+              )}
+              <Box>
+                <TableContainer>
+                  <Table size="medium" aria-label="Policy reasons" sx={{ minWidth: 760 }}>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Reason code</TableCell>
+                        <TableCell>Request / check</TableCell>
+                        <TableCell>Outcome</TableCell>
+                        <TableCell>Explanation</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {reasonRows
+                        .slice(currentReasonsPage * 10, currentReasonsPage * 10 + 10)
+                        .map(({ key, item: reason }) => (
+                          <TableRow key={key}>
+                            <TableCell>{reason.code}</TableCell>
+                            <TableCell>
+                              <Stack spacing={0}>
+                                {reason.requestId && <CopyValue value={reason.requestId} />}
+                                {reason.checkId && <CopyValue value={reason.checkId} />}
+                                {!reason.requestId && !reason.checkId && "Run policy"}
+                              </Stack>
+                            </TableCell>
+                            <TableCell>
+                              {reason.outcome ? readable(reason.outcome) : "Not specified"}
+                            </TableCell>
+                            <TableCell>
+                              {reason.reason ?? "No additional explanation recorded."}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                <TablePagination
+                  component="div"
+                  count={run.policy.reasons.length}
+                  page={currentReasonsPage}
+                  rowsPerPage={10}
+                  rowsPerPageOptions={[10]}
+                  onPageChange={(_, nextPage) => setReasonsPage(nextPage)}
+                />
+              </Box>
+            </Stack>
+          </AccordionDetails>
+        </Accordion>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -182,6 +224,7 @@ function RequestJobs({
 }) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [expandedJobs, setExpandedJobs] = useState<string[]>([]);
   const jobs = useQuery({
     queryKey: [
       "review-runs",
@@ -204,19 +247,24 @@ function RequestJobs({
         : false,
   });
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap>
-        <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack component="section" spacing={3} sx={{ width: "100%", minWidth: 0 }}>
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
+        <Typography variant="h6" component="h3">
           Job history
-        </Typography.Title>
-        <Button loading={jobs.isFetching} onClick={() => void jobs.refetch()}>
+        </Typography>
+        <Button
+          variant="outlined"
+          size="medium"
+          loading={jobs.isFetching}
+          onClick={() => void jobs.refetch()}
+        >
           Refresh jobs
         </Button>
-      </Space>
-      <Typography.Paragraph type="secondary">
+      </Stack>
+      <Typography variant="body2" color="text.secondary">
         Each activation has its own saved result. Execution completion alone does not establish
         passed validation.
-      </Typography.Paragraph>
+      </Typography>
       {jobs.isError ? (
         <ErrorNotice
           title="Could not load job history"
@@ -224,88 +272,145 @@ function RequestJobs({
           retry={() => void jobs.refetch()}
         />
       ) : jobs.isPending ? (
-        <Skeleton active />
+        <Skeleton variant="rounded" height={180} />
       ) : (
-        <Table<DashboardReviewRunJob>
-          size="small"
-          rowKey="jobId"
-          loading={jobs.isFetching}
-          dataSource={jobs.data.items}
-          scroll={{ x: 760 }}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No jobs have been scheduled for this request."
-              />
-            ),
-          }}
-          pagination={{
-            current: page,
-            pageSize,
-            total: jobs.data.total,
-            showSizeChanger: true,
-            pageSizeOptions: [10, 20, 50],
-            onChange: (nextPage, nextSize) => {
-              setPage(nextSize === pageSize ? nextPage : 1);
-              setPageSize(Math.min(nextSize, 50));
-            },
-          }}
-          columns={[
-            { title: "Activation", dataIndex: "activationNumber" },
-            {
-              title: "Execution",
-              dataIndex: "status",
-              render: (status: DashboardReviewRunJob["status"], job) => (
-                <Space orientation="vertical" size={0}>
-                  {executionLabel(status, job.admission)}
-                  <Typography.Text type="secondary">
-                    {job.phase ? readable(job.phase) : "No active phase"}
-                  </Typography.Text>
-                </Space>
-              ),
-            },
-            { title: "Attempts", dataIndex: "attemptCount" },
-            {
-              title: "Created",
-              dataIndex: "createdAt",
-              render: (value: string) => timestamp(value),
-            },
-            {
-              title: "Saved result",
-              dataIndex: "resultId",
-              render: (value: string | null) => (value ? "Available" : "No saved report"),
-            },
-            {
-              title: "Action",
-              key: "action",
-              render: (_, job) => (
-                <Button onClick={() => onSelectJob(request, job)}>Inspect job</Button>
-              ),
-            },
-          ]}
-          expandable={{
-            expandedRowRender: (job) => (
-              <Facts
-                items={[
-                  { label: "Job ID", value: <CopyValue value={job.jobId} /> },
-                  { label: "Run attempt ID", value: <CopyValue value={job.runAttemptId} /> },
-                  { label: "Started", value: timestamp(job.startedAt) },
-                  { label: "Completed", value: timestamp(job.completedAt) },
-                  { label: "Failure code", value: job.failureCode ?? "None recorded" },
-                  {
-                    label: "Failure message",
-                    value: <Prose>{job.failureMessage ?? "None recorded"}</Prose>,
-                  },
-                  { label: "Result ID", value: <CopyValue value={job.resultId} /> },
-                  { label: "Result digest", value: <CopyValue value={job.resultDigest} /> },
-                ]}
-              />
-            ),
-          }}
-        />
+        <Box aria-busy={jobs.isFetching}>
+          {jobs.isFetching && <LinearProgress aria-label="Refreshing job history" />}
+          <TableContainer>
+            <Table size="medium" aria-label="Job history" sx={{ minWidth: 760 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell padding="checkbox">
+                    <Box
+                      component="span"
+                      sx={{
+                        position: "absolute",
+                        width: 1,
+                        height: 1,
+                        overflow: "hidden",
+                        clipPath: "inset(50%)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Job details
+                    </Box>
+                  </TableCell>
+                  <TableCell>Activation</TableCell>
+                  <TableCell>Execution</TableCell>
+                  <TableCell>Attempts</TableCell>
+                  <TableCell>Created</TableCell>
+                  <TableCell>Saved result</TableCell>
+                  <TableCell>Action</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {jobs.data.items.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={7}>
+                      <EmptyState title="No jobs have been scheduled for this request." />
+                    </TableCell>
+                  </TableRow>
+                )}
+                {jobs.data.items.map((job) => {
+                  const expanded = expandedJobs.includes(job.jobId);
+                  return (
+                    <Fragment key={job.jobId}>
+                      <TableRow hover>
+                        <TableCell padding="checkbox">
+                          <IconButton
+                            size="medium"
+                            aria-label={`${expanded ? "Hide" : "Show"} details for activation ${job.activationNumber}`}
+                            aria-expanded={expanded}
+                            aria-controls={`job-details-${job.jobId}`}
+                            onClick={() =>
+                              setExpandedJobs((current) =>
+                                current.includes(job.jobId)
+                                  ? current.filter((jobId) => jobId !== job.jobId)
+                                  : [...current, job.jobId],
+                              )
+                            }
+                          >
+                            {expanded ? <ExpandLess /> : <ExpandMore />}
+                          </IconButton>
+                        </TableCell>
+                        <TableCell>{job.activationNumber}</TableCell>
+                        <TableCell>
+                          <Stack spacing={0}>
+                            {executionLabel(job.status, job.admission)}
+                            <Typography variant="body2" color="text.secondary">
+                              {job.phase ? readable(job.phase) : "No active phase"}
+                            </Typography>
+                          </Stack>
+                        </TableCell>
+                        <TableCell>{job.attemptCount}</TableCell>
+                        <TableCell>{timestamp(job.createdAt)}</TableCell>
+                        <TableCell>{job.resultId ? "Available" : "No saved report"}</TableCell>
+                        <TableCell>
+                          <Button
+                            size="medium"
+                            variant="outlined"
+                            onClick={() => onSelectJob(request, job)}
+                          >
+                            Inspect job
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                      <TableRow>
+                        <TableCell
+                          colSpan={7}
+                          sx={{ py: 0, borderBottom: expanded ? undefined : 0 }}
+                        >
+                          <Collapse in={expanded} timeout="auto" unmountOnExit>
+                            <Box id={`job-details-${job.jobId}`} sx={{ py: 2 }}>
+                              <Facts
+                                items={[
+                                  { label: "Job ID", value: <CopyValue value={job.jobId} /> },
+                                  {
+                                    label: "Run attempt ID",
+                                    value: <CopyValue value={job.runAttemptId} />,
+                                  },
+                                  { label: "Started", value: timestamp(job.startedAt) },
+                                  { label: "Completed", value: timestamp(job.completedAt) },
+                                  {
+                                    label: "Failure code",
+                                    value: job.failureCode ?? "None recorded",
+                                  },
+                                  {
+                                    label: "Failure message",
+                                    value: <Prose>{job.failureMessage ?? "None recorded"}</Prose>,
+                                  },
+                                  { label: "Result ID", value: <CopyValue value={job.resultId} /> },
+                                  {
+                                    label: "Result digest",
+                                    value: <CopyValue value={job.resultDigest} />,
+                                  },
+                                ]}
+                              />
+                            </Box>
+                          </Collapse>
+                        </TableCell>
+                      </TableRow>
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <TablePagination
+            component="div"
+            count={jobs.data.total}
+            page={page - 1}
+            rowsPerPage={pageSize}
+            rowsPerPageOptions={[10, 20, 50]}
+            onPageChange={(_, nextPage) => setPage(nextPage + 1)}
+            onRowsPerPageChange={(event) => {
+              setPage(1);
+              setPageSize(Math.min(Number(event.target.value), 50));
+            }}
+          />
+        </Box>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -322,11 +427,11 @@ function RequestDetails({
 }) {
   const result = request.latestResult;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Typography.Title level={5}>
+    <Stack component="section" spacing={3} sx={{ width: "100%", minWidth: 0 }}>
+      <Typography variant="h6" component="h3">
         {requestTargetLabel(request.workflowKind, request.target)} ·{" "}
         {request.profile?.name ?? "Missing profile"}
-      </Typography.Title>
+      </Typography>
       <RequestActions
         key={`${run.id}:${request.requestId}`}
         run={run}
@@ -379,83 +484,80 @@ function RequestDetails({
         ]}
       />
       {request.blockers.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          title="Request readiness blockers"
-          description={
-            <>
-              <ul>
-                {[...new Set(request.blockers)].map((blocker) => (
-                  <li key={blocker}>
-                    {blocker === "evidence_verification_pending"
-                      ? evidenceVerificationPendingLabel
-                      : blocker}
-                  </li>
-                ))}
-              </ul>
-              {request.blockersTruncated && (
-                <p>Additional blockers were omitted from this preview.</p>
-              )}
-            </>
-          }
-        />
+        <Alert severity="warning">
+          <AlertTitle>Request readiness blockers</AlertTitle>
+          <Box component="ul" sx={{ my: 0, pl: 2.5 }}>
+            {[...new Set(request.blockers)].map((blocker) => (
+              <li key={blocker}>
+                {blocker === "evidence_verification_pending"
+                  ? evidenceVerificationPendingLabel
+                  : blocker}
+              </li>
+            ))}
+          </Box>
+          {request.blockersTruncated && (
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Additional blockers were omitted from this preview.
+            </Typography>
+          )}
+        </Alert>
       )}
-      <Collapse
-        items={[
-          {
-            key: "versions",
-            label: "Frozen profile and prompt versions",
-            children: (
-              <Facts
-                items={[
-                  {
-                    label: "Profile",
-                    value: request.profile
-                      ? `${request.profile.name} · Version ${request.profile.version}`
-                      : "Missing profile snapshot",
-                  },
-                  { label: "Profile ID", value: <CopyValue value={request.profile?.profileId} /> },
-                  { label: "Profile version ID", value: <CopyValue value={request.profile?.id} /> },
-                  {
-                    label: "Profile digest",
-                    value: <CopyValue value={request.profile?.configSha256} />,
-                  },
-                  {
-                    label: "Prompt version",
-                    value: request.prompt?.version ?? "Missing prompt snapshot",
-                  },
-                  {
-                    label: "Prompt template ID",
-                    value: <CopyValue value={request.prompt?.templateId} />,
-                  },
-                  { label: "Prompt version ID", value: <CopyValue value={request.prompt?.id} /> },
-                  {
-                    label: "Prompt content digest",
-                    value: <CopyValue value={request.prompt?.contentSha256} />,
-                  },
-                  {
-                    label: "Required check IDs",
-                    value: request.requiredCheckIds.length ? (
-                      <EvidenceIds ids={request.requiredCheckIds} />
-                    ) : (
-                      "No required check IDs in this request"
-                    ),
-                  },
-                ]}
-              />
-            ),
-          },
-        ]}
-      />
+      <Accordion disableGutters>
+        <AccordionSummary expandIcon={<ExpandMore />}>
+          <Typography variant="body2" component="span" sx={{ fontWeight: 500 }}>
+            Frozen profile and prompt versions
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Facts
+            items={[
+              {
+                label: "Profile",
+                value: request.profile
+                  ? `${request.profile.name} · Version ${request.profile.version}`
+                  : "Missing profile snapshot",
+              },
+              { label: "Profile ID", value: <CopyValue value={request.profile?.profileId} /> },
+              { label: "Profile version ID", value: <CopyValue value={request.profile?.id} /> },
+              {
+                label: "Profile digest",
+                value: <CopyValue value={request.profile?.configSha256} />,
+              },
+              {
+                label: "Prompt version",
+                value: request.prompt?.version ?? "Missing prompt snapshot",
+              },
+              {
+                label: "Prompt template ID",
+                value: <CopyValue value={request.prompt?.templateId} />,
+              },
+              { label: "Prompt version ID", value: <CopyValue value={request.prompt?.id} /> },
+              {
+                label: "Prompt content digest",
+                value: <CopyValue value={request.prompt?.contentSha256} />,
+              },
+              {
+                label: "Required check IDs",
+                value: request.requiredCheckIds.length ? (
+                  <EvidenceIds ids={request.requiredCheckIds} />
+                ) : (
+                  "No required check IDs in this request"
+                ),
+              },
+            ]}
+          />
+        </AccordionDetails>
+      </Accordion>
       {result ? (
         <>
-          <Typography.Title level={5}>Latest result preview</Typography.Title>
+          <Typography variant="h6" component="h3">
+            Latest result preview
+          </Typography>
           <Prose>{result.summary}</Prose>
           {result.summaryTruncated && (
-            <Typography.Text type="secondary">
+            <Typography variant="body2" color="text.secondary">
               The summary is truncated. Inspect the saved job report for the complete summary.
-            </Typography.Text>
+            </Typography>
           )}
           <Facts
             items={[
@@ -471,19 +573,15 @@ function RequestDetails({
           />
         </>
       ) : (
-        <Alert
-          type="info"
-          showIcon
-          title="No saved report"
-          description={
-            run.workItemKind === "issue"
-              ? "No recorded checks or reproduction observations are available for this request."
-              : "Validation outcomes and model recommendations are not available for this request."
-          }
-        />
+        <Alert severity="info">
+          <AlertTitle>No saved report</AlertTitle>
+          {run.workItemKind === "issue"
+            ? "No recorded checks or reproduction observations are available for this request."
+            : "Validation outcomes and model recommendations are not available for this request."}
+        </Alert>
       )}
       <RequestJobs key={request.requestId} run={run} request={request} onSelectJob={onSelectJob} />
-    </Space>
+    </Stack>
   );
 }
 
@@ -504,53 +602,67 @@ export function RunDetails({
 }) {
   const selectedRequest = run.requests.find((request) => request.requestId === selectedRequestId);
   return (
-    <Space orientation="vertical" size="large" style={{ width: "100%" }}>
+    <Stack spacing={4} sx={{ width: "100%", minWidth: 0 }}>
       {!checking && (
         <>
-          <Facts
-            items={[
-              { label: "Run ID", value: <CopyValue value={run.id} /> },
-              { label: "Created", value: timestamp(run.createdAt) },
-              {
-                label: "Run freshness",
-                value: (
-                  <Tag color={run.freshness === "current" ? "default" : "warning"}>
-                    {readable(run.freshness)}
-                  </Tag>
-                ),
-              },
-              {
-                label: "Requests",
-                value: `${run.requestCount} total · ${run.requiredRequestCount} required`,
-              },
-            ]}
-          />
-          <TestedSource run={run} />
-          <Collapse
-            items={[
-              {
-                key: "identity",
-                label: "Frozen plan identity",
-                children: (
-                  <Facts
-                    items={[
-                      { label: "Revision key", value: <CopyValue value={run.revisionKey} /> },
-                      {
-                        label: "Current revision key",
-                        value: <CopyValue value={run.currentRevisionKey} />,
-                      },
-                      { label: "Plan digest", value: <CopyValue value={run.planDigest} /> },
-                      { label: "Activation ID", value: <CopyValue value={run.activationId} /> },
-                      {
-                        label: "Authorization epoch",
-                        value: <CopyValue value={run.requestEpochId} />,
-                      },
-                    ]}
-                  />
-                ),
-              },
-            ]}
-          />
+          <Stack
+            component="section"
+            spacing={2}
+            sx={{ p: { xs: 2, sm: 3 }, bgcolor: "var(--app-accent-soft)", borderRadius: "12px" }}
+          >
+            <Typography variant="h6" component="h3">
+              Run overview
+            </Typography>
+            <Facts
+              items={[
+                { label: "Run ID", value: <CopyValue value={run.id} /> },
+                { label: "Created", value: timestamp(run.createdAt) },
+                {
+                  label: "Run freshness",
+                  value: (
+                    <Chip
+                      size="medium"
+                      color={run.freshness === "current" ? "default" : "warning"}
+                      label={readable(run.freshness)}
+                    />
+                  ),
+                },
+                {
+                  label: "Requests",
+                  value: `${run.requestCount} total · ${run.requiredRequestCount} required`,
+                },
+              ]}
+            />
+            <TestedSource run={run} />
+          </Stack>
+          <Accordion
+            disableGutters
+            elevation={0}
+            sx={{ bgcolor: "transparent", border: 0, borderBottom: 1, borderColor: "divider" }}
+          >
+            <AccordionSummary expandIcon={<ExpandMore />}>
+              <Typography variant="body2" component="span" sx={{ fontWeight: 500 }}>
+                Frozen plan identity
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Facts
+                items={[
+                  { label: "Revision key", value: <CopyValue value={run.revisionKey} /> },
+                  {
+                    label: "Current revision key",
+                    value: <CopyValue value={run.currentRevisionKey} />,
+                  },
+                  { label: "Plan digest", value: <CopyValue value={run.planDigest} /> },
+                  { label: "Activation ID", value: <CopyValue value={run.activationId} /> },
+                  {
+                    label: "Authorization epoch",
+                    value: <CopyValue value={run.requestEpochId} />,
+                  },
+                ]}
+              />
+            </AccordionDetails>
+          </Accordion>
           {run.workItemKind === "pull_request" && <Policy run={run} />}
           <IssueReproductionSummary key={`reproduction:${run.id}`} run={run} />
         </>
@@ -558,72 +670,90 @@ export function RunDetails({
       <ReviewRunDecisions key={`decisions:${run.id}`} run={run} />
       {!checking && (
         <>
-          <Typography.Title level={5}>Execution requests</Typography.Title>
-          <Table<DashboardReviewRunRequest>
-            size="small"
-            rowKey="requestId"
-            dataSource={run.requests}
-            pagination={false}
-            scroll={{ x: 1_080 }}
+          <Typography variant="h6" component="h3">
+            Execution requests
+          </Typography>
+          <DataTable<DashboardReviewRunRequest>
+            rows={run.requests}
+            getRowId={(request) => request.requestId}
+            ariaLabel="Execution requests"
+            emptyTitle="No execution requests"
             columns={[
               {
-                title: "Workflow / target",
-                render: (_, request) => (
-                  <Space orientation="vertical" size={0}>
-                    <Typography.Text strong>
+                id: "target",
+                label: "Workflow / target",
+                minWidth: 180,
+                render: (request) => (
+                  <Stack spacing={0}>
+                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
                       {requestTargetLabel(request.workflowKind, request.target)}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
                       {request.profile
                         ? `${request.profile.name} · v${request.profile.version}`
                         : "Profile not configured"}
-                    </Typography.Text>
-                  </Space>
+                    </Typography>
+                  </Stack>
                 ),
               },
               {
-                title: "Required",
-                dataIndex: "required",
-                render: (value: boolean) => (value ? "Required" : "Optional"),
+                id: "required",
+                label: "Required",
+                render: (request) => (request.required ? "Required" : "Optional"),
               },
               {
-                title: "Execution prerequisites",
-                dataIndex: "readiness",
-                render: (value: string) => (
-                  <Tag color={value === "blocked" ? "warning" : "default"}>{readable(value)}</Tag>
+                id: "readiness",
+                label: "Execution prerequisites",
+                minWidth: 160,
+                render: (request) => (
+                  <Chip
+                    size="medium"
+                    color={request.readiness === "blocked" ? "warning" : "default"}
+                    label={readable(request.readiness)}
+                  />
                 ),
               },
               {
-                title: "Execution",
-                render: (_, request) =>
+                id: "execution",
+                label: "Execution",
+                minWidth: 150,
+                render: (request) =>
                   executionLabel(request.latestJob?.status, request.latestJob?.admission ?? null),
               },
               {
-                title: "Worker checks",
+                id: "checks",
+                label: "Worker checks",
                 width: 205,
-                render: (_, request) => (
-                  <Space orientation="vertical" size={4}>
+                minWidth: 205,
+                render: (request) => (
+                  <Stack spacing={0.5} sx={{ alignItems: "flex-start" }}>
                     <span>{summarizeCheckOutcomes(request.latestResult?.checks)}</span>
                     {requestEvidencePending(request) && (
-                      <Tag color="processing">{evidenceVerificationPendingLabel}</Tag>
+                      <Chip size="medium" color="info" label={evidenceVerificationPendingLabel} />
                     )}
-                  </Space>
+                  </Stack>
                 ),
               },
               ...(run.workItemKind === "pull_request"
                 ? [
                     {
-                      title: "Model recommendation",
-                      render: (_: unknown, request: DashboardReviewRunRequest) =>
+                      id: "recommendation",
+                      label: "Model recommendation",
+                      minWidth: 180,
+                      render: (request: DashboardReviewRunRequest) =>
                         recommendationLabel(request.latestResult?.recommendation),
                     },
                   ]
                 : []),
               {
-                title: "Action",
-                render: (_, request) => (
+                id: "action",
+                label: "Action",
+                minWidth: 130,
+                render: (request) => (
                   <Button
-                    type={request.requestId === selectedRequestId ? "primary" : "default"}
+                    size="medium"
+                    variant={request.requestId === selectedRequestId ? "contained" : "outlined"}
+                    aria-pressed={request.requestId === selectedRequestId}
                     onClick={() => onSelectRequest(request.requestId)}
                   >
                     View request
@@ -643,12 +773,12 @@ export function RunDetails({
               />
             </>
           ) : (
-            <Typography.Paragraph type="secondary">
+            <Typography variant="body2" color="text.secondary">
               Select a request to inspect its frozen versions, readiness blockers, and job history.
-            </Typography.Paragraph>
+            </Typography>
           )}
         </>
       )}
-    </Space>
+    </Stack>
   );
 }

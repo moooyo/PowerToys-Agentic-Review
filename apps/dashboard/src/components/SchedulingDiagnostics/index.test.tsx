@@ -1,6 +1,6 @@
 import type { SchedulingDiagnostics as DiagnosticValue } from "@agentic-review/contracts";
 import { QueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import type { DependencyList } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewControlHttpError } from "@/services/review-control/errors";
@@ -37,13 +37,13 @@ const state = vi.hoisted(() => ({
   get: vi.fn(),
   client: null as QueryClient | null,
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
-  useEffect: (effect: () => undefined | (() => void)) => {
-    state.effects.push(effect);
+  useEffect: (effect: () => undefined | (() => void), dependencies?: DependencyList) => {
+    if (state.client && dependencies?.includes(state.client)) state.effects.push(effect);
   },
 }));
 vi.mock("@/components/OperatorAccess", () => ({
@@ -91,45 +91,6 @@ vi.mock("@tanstack/react-query", async (original) => ({
     };
   },
 }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({
-      title,
-      description,
-      action,
-    }: {
-      title?: ReactNode;
-      description?: ReactNode;
-      action?: ReactNode;
-    }) => (
-      <aside>
-        {title}
-        {description}
-        {action}
-      </aside>
-    ),
-    Button: ({ children }: { children?: ReactNode }) => <button type="button">{children}</button>,
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Skeleton: () => <div>Loading current scheduling</div>,
-    Space: Content,
-    Tag: Content,
-    Typography: { Title: Content, Text: Content },
-  };
-});
 const render = (visible = true) =>
   renderToStaticMarkup(<SchedulingDiagnostics scope={repositoryScope} visible={visible} />);
 const query = () => {

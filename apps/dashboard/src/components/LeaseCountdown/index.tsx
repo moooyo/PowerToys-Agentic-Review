@@ -1,5 +1,5 @@
-import { ClockCircleOutlined } from "@ant-design/icons";
-import { Space, Tooltip, Typography } from "antd";
+import AccessTimeOutlined from "@mui/icons-material/AccessTimeOutlined";
+import { Stack, Tooltip, Typography } from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
 
 export interface LeaseCountdownProps {
@@ -25,15 +25,29 @@ export function LeaseCountdown({ expiresAt }: LeaseCountdownProps) {
   );
 
   if (remaining === undefined || expiresAt === undefined) {
-    return <Typography.Text type="secondary">Unleased</Typography.Text>;
+    return (
+      <Typography component="span" variant="body2" color="text.secondary">
+        Unleased
+      </Typography>
+    );
   }
 
   return (
     <Tooltip title={new Date(expiresAt).toLocaleString()}>
-      <Space size={5}>
-        <ClockCircleOutlined />
-        <Typography.Text type={remaining < 30 ? "danger" : undefined}>{remaining}s</Typography.Text>
-      </Space>
+      <Stack
+        component="span"
+        direction="row"
+        sx={{ display: "inline-flex", alignItems: "center", gap: 1 }}
+      >
+        <AccessTimeOutlined sx={{ fontSize: 20 }} />
+        <Typography
+          component="span"
+          variant="body2"
+          color={remaining < 30 ? "error.main" : "text.primary"}
+        >
+          {remaining}s
+        </Typography>
+      </Stack>
     </Tooltip>
   );
 }

@@ -45,8 +45,8 @@ vi.mock("react", async (importOriginal) => {
     ],
   };
 });
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: (repositoryId: string) => {
@@ -95,76 +95,60 @@ vi.mock("./presentation", () => ({
     <div>{value.case.context}</div>
   ),
 }));
-vi.mock("antd", () => {
+vi.mock("@mui/icons-material/ExpandMore", () => ({ default: () => <span /> }));
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({
-      title,
-      description,
-      action,
-    }: {
-      title?: ReactNode;
-      description?: ReactNode;
-      action?: ReactNode;
-    }) => (
+    Alert: ({ children, action }: { children?: ReactNode; action?: ReactNode }) => (
       <aside>
-        {title}
-        {description}
+        {children}
         {action}
       </aside>
     ),
+    AlertTitle: Content,
     Button: ({ children, disabled }: { children?: ReactNode; disabled?: boolean }) => (
       <button type="button" disabled={disabled}>
         {children}
       </button>
     ),
-    Collapse: ({ items }: { items: { key: string; label: ReactNode; children?: ReactNode }[] }) => (
-      <div>
-        {items.map((entry) => (
-          <section key={entry.key}>
-            {entry.label}
-            {entry.children}
-          </section>
-        ))}
-      </div>
-    ),
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((entry) => (
-          <div key={entry.key}>
-            <dt>{entry.label}</dt>
-            <dd>{entry.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
+    Accordion: Content,
+    AccordionDetails: Content,
+    AccordionSummary: Content,
     Divider: Content,
     Skeleton: () => <span>Loading reproduction</span>,
-    Space: Content,
-    Table: ({
-      dataSource,
-      columns,
-    }: {
-      dataSource: { caseId: string }[];
-      columns: { title: string; render: (value: unknown, row: unknown) => ReactNode }[];
-    }) => (
-      <div>
-        {dataSource.map((entry) => (
-          <article key={entry.caseId}>
-            {columns.map((column) => (
-              <div key={column.title}>{column.render(null, entry)}</div>
-            ))}
-          </article>
-        ))}
-      </div>
-    ),
-    Typography: { Text: Content, Paragraph: Content, Title: Content },
+    Stack: Content,
+    Table: ({ children }: { children?: ReactNode }) => <table>{children}</table>,
+    TableBody: ({ children }: { children?: ReactNode }) => <tbody>{children}</tbody>,
+    TableCell: ({ children }: { children?: ReactNode }) => <td>{children}</td>,
+    TableContainer: Content,
+    TableHead: ({ children }: { children?: ReactNode }) => <thead>{children}</thead>,
+    TablePagination: Content,
+    TableRow: ({ children }: { children?: ReactNode }) => <tr>{children}</tr>,
+    Typography: Content,
   };
 });
+vi.mock("../ReviewRuns/common", () => ({
+  CopyValue: ({ value }: { value: string | null | undefined }) => (
+    <code>{value ?? "Not recorded"}</code>
+  ),
+  ErrorNotice: ({ title, error }: { title: string; error: unknown }) => (
+    <aside>
+      {title}
+      {error instanceof Error ? error.message : "The request could not be completed."}
+    </aside>
+  ),
+  Facts: ({ items }: { items: { label: string; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((item) => (
+        <div key={item.label}>
+          <dt>{item.label}</dt>
+          <dd>{item.value}</dd>
+        </div>
+      ))}
+    </dl>
+  ),
+  Prose: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+}));
 
 const sampleRun = sampleReviewRuns.find((entry) => entry.workItemKind === "issue");
 if (!sampleRun) throw new Error("An issue sample run is required.");

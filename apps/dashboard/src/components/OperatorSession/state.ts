@@ -1,4 +1,4 @@
-import type { InitialState } from "../../app";
+import type { InitialState } from "@/state/session";
 
 export function operatorSessionKey(
   state: InitialState | undefined,

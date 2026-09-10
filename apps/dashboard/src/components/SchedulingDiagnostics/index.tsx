@@ -1,16 +1,17 @@
 import type { SchedulingDiagnostics as DiagnosticValue } from "@agentic-review/contracts";
-import { ReloadOutlined } from "@ant-design/icons";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import { Alert, AlertTitle, Box, Button, Chip, Skeleton, Stack, Typography } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Descriptions, Skeleton, Space, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DetailsGrid } from "@/components/ui";
 import {
   type SchedulingReadScope,
   scheduling,
   schedulingMatchesScope,
   schedulingScopeKey,
 } from "@/services/scheduling";
+import { useOperatorSession } from "@/state/session";
 import {
   schedulingAccessDenied,
   schedulingDocumentVisible,
@@ -36,22 +37,32 @@ function LimitUsage({ usage, limit }: { usage: number; limit: number | null }) {
   );
 }
 
+function SchedulingSkeleton() {
+  return (
+    <Stack spacing={1} aria-label="Loading current scheduling">
+      <Skeleton variant="text" width="40%" />
+      <Skeleton variant="text" />
+      <Skeleton variant="text" width="75%" />
+    </Stack>
+  );
+}
+
 export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
   const repository = value.policy.repository;
   const platform = value.policy.platform;
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      <Space wrap>
-        <Tag color={value.stage === "waiting" ? "processing" : "default"}>
-          {schedulingStageLabel(value)}
-        </Tag>
-        <Typography.Text type="secondary">
+    <Stack spacing={2} sx={{ width: "100%" }}>
+      <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+        <Chip
+          color={value.stage === "waiting" ? "info" : "default"}
+          label={schedulingStageLabel(value)}
+        />
+        <Typography variant="body2" color="text.secondary">
           Observed <Time value={value.observedAt} />
-        </Typography.Text>
-      </Space>
-      <Descriptions
-        size="small"
-        column={1}
+        </Typography>
+      </Stack>
+      <DetailsGrid
+        columns={1}
         items={[
           ...(repository === null
             ? []
@@ -59,12 +70,12 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
                 {
                   key: "repository-policy",
                   label: "Repository policy",
-                  children: `Version ${repository.version}${repository.enabled ? "" : " — paused"}`,
+                  value: `Version ${repository.version}${repository.enabled ? "" : " — paused"}`,
                 },
                 {
                   key: "repository-active",
                   label: "Repository active executions",
-                  children: (
+                  value: (
                     <LimitUsage
                       usage={repository.usage.activeLeases}
                       limit={repository.limits.maxActiveLeases}
@@ -74,7 +85,7 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
                 {
                   key: "repository-queue",
                   label: "Repository admitted queue",
-                  children: (
+                  value: (
                     <LimitUsage
                       usage={repository.usage.admittedQueuedJobs}
                       limit={repository.limits.maxQueuedJobs}
@@ -84,19 +95,19 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
                 {
                   key: "repository-pending",
                   label: "Repository awaiting admission",
-                  children: repository.usage.awaitingAdmissionJobs,
+                  value: repository.usage.awaitingAdmissionJobs,
                 },
                 {
                   key: "repository-no-job",
                   label: "Repository awaiting valid configuration",
-                  children: repository.usage.awaitingConfigurationRequests,
+                  value: repository.usage.awaitingConfigurationRequests,
                 },
                 ...(repository.overage.activeLeases > 0 || repository.overage.admittedQueuedJobs > 0
                   ? [
                       {
                         key: "repository-overage",
                         label: "Repository overage",
-                        children: `${repository.overage.activeLeases} active; ${repository.overage.admittedQueuedJobs} admitted. Existing work is retained.`,
+                        value: `${repository.overage.activeLeases} active; ${repository.overage.admittedQueuedJobs} admitted. Existing work is retained.`,
                       },
                     ]
                   : []),
@@ -104,21 +115,21 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
           {
             key: "platform-policy",
             label: "Platform policy",
-            children: `Version ${platform.visibility === "full" ? platform.configuration.version : platform.version}`,
+            value: `Version ${platform.visibility === "full" ? platform.configuration.version : platform.version}`,
           },
           ...(platform.visibility === "restricted"
             ? [
                 {
                   key: "platform-capacity",
                   label: "Platform quota capacity",
-                  children: `Active: ${platform.activeCapacity}; queue: ${platform.queueCapacity}. Global usage details are restricted.`,
+                  value: `Active: ${platform.activeCapacity}; queue: ${platform.queueCapacity}. Global usage details are restricted.`,
                 },
               ]
             : [
                 {
                   key: "platform-active",
                   label: "Platform active executions",
-                  children: (
+                  value: (
                     <LimitUsage
                       usage={platform.usage.activeLeases}
                       limit={platform.configuration.limits.maxActiveLeases}
@@ -128,7 +139,7 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
                 {
                   key: "platform-queue",
                   label: "Platform admitted queue",
-                  children: (
+                  value: (
                     <LimitUsage
                       usage={platform.usage.admittedQueuedJobs}
                       limit={platform.configuration.limits.maxQueuedJobs}
@@ -138,19 +149,19 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
                 {
                   key: "platform-pending",
                   label: "Platform awaiting admission",
-                  children: platform.usage.awaitingAdmissionJobs,
+                  value: platform.usage.awaitingAdmissionJobs,
                 },
                 {
                   key: "platform-no-job",
                   label: "Platform awaiting valid configuration",
-                  children: platform.usage.awaitingConfigurationRequests,
+                  value: platform.usage.awaitingConfigurationRequests,
                 },
                 ...(platform.overage.activeLeases > 0 || platform.overage.admittedQueuedJobs > 0
                   ? [
                       {
                         key: "platform-overage",
                         label: "Platform overage",
-                        children: `${platform.overage.activeLeases} active; ${platform.overage.admittedQueuedJobs} admitted. Existing work is retained.`,
+                        value: `${platform.overage.activeLeases} active; ${platform.overage.admittedQueuedJobs} admitted. Existing work is retained.`,
                       },
                     ]
                   : []),
@@ -158,7 +169,7 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
           {
             key: "inspection",
             label: "Inspection coverage",
-            children:
+            value:
               value.workerInspection.state === "complete"
                 ? "Complete"
                 : value.workerInspection.state === "partial"
@@ -168,7 +179,7 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
           {
             key: "contact",
             label: "Latest matching worker contact",
-            children: value.workerInspection.latestContactAt ? (
+            value: value.workerInspection.latestContactAt ? (
               <Time value={value.workerInspection.latestContactAt} />
             ) : (
               "Not recorded"
@@ -176,65 +187,77 @@ export function SchedulingObservation({ value }: { value: DiagnosticValue }) {
           },
         ]}
       />
-      <Typography.Text type="secondary">
+      <Typography variant="body2" color="text.secondary">
         Quota capacity describes current limits only. It does not establish worker availability or
         reserve a slot.
-      </Typography.Text>
+      </Typography>
       {value.workerInspection.latestContactAt && (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Contact time does not establish the age of reported local capacity.
-        </Typography.Text>
+        </Typography>
       )}
       {value.reasons.length > 0 ? (
-        <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+        <Box component="ul" sx={{ m: 0, p: 0, listStyle: "none", display: "grid", gap: 2 }}>
           {value.reasons.map((reason) => (
             <li key={JSON.stringify(reason)}>
-              <Space wrap size="small">
-                <Tag>{schedulingEffectLabels[reason.effect]}</Tag>
-                <span>{schedulingReasonLabels[reason.code]}</span>
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{ alignItems: "center", flexWrap: "wrap" }}
+              >
+                <Chip label={schedulingEffectLabels[reason.effect]} />
+                <Typography variant="body2">{schedulingReasonLabels[reason.code]}</Typography>
                 {reason.code === "retry_backoff" && (
-                  <span>
+                  <Typography variant="body2">
                     Retry eligible after <Time value={reason.until} />; this is not an estimated
                     start.
-                  </span>
+                  </Typography>
                 )}
                 {reason.code === "plan_prerequisite_missing" && reason.requirement && (
-                  <Tag>{reason.requirement}</Tag>
+                  <Chip label={reason.requirement} />
                 )}
-              </Space>
+              </Stack>
             </li>
           ))}
-        </ul>
+        </Box>
       ) : value.stage === "waiting" ? (
-        <Typography.Text>
+        <Typography variant="body2">
           {value.job !== null && "Waiting for a Worker claim. "}
           No blocking cause was observed. This observation does not reserve capacity or predict a
           start time.
-        </Typography.Text>
+        </Typography>
       ) : null}
       {value.reasonsTruncated && (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Additional reasons were omitted from this observation.
-        </Typography.Text>
+        </Typography>
       )}
       {value.requirements.names.length > 0 && (
-        <Space wrap>
-          <Typography.Text type="secondary">Required capabilities</Typography.Text>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}
+        >
+          <Typography variant="body2" color="text.secondary">
+            Required capabilities
+          </Typography>
           {value.requirements.names.map((name) => (
-            <Tag key={name}>{name}</Tag>
+            <Chip key={name} label={name} />
           ))}
-        </Space>
+        </Stack>
       )}
       {value.requirements.truncated && (
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Some requirement names could not be included.
-        </Typography.Text>
+        </Typography>
       )}
-      <Typography.Text type="secondary">
+      <Typography variant="body2" color="text.secondary">
         Current scheduling observations are separate from frozen plan readiness. Current request
         requirements do not necessarily prevent an already queued execution from starting.
-      </Typography.Text>
-    </Space>
+      </Typography>
+    </Stack>
   );
 }
 
@@ -296,12 +319,16 @@ function SchedulingSession({
   if (unavailable)
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Scheduling access is unavailable"
-        description="Verify access before loading this observation again."
-        action={<Button onClick={() => void refreshAccess()}>Refresh access</Button>}
-      />
+        severity="info"
+        action={
+          <Button color="inherit" onClick={() => void refreshAccess()}>
+            Refresh access
+          </Button>
+        }
+      >
+        <AlertTitle>Scheduling access is unavailable</AlertTitle>
+        Verify access before loading this observation again.
+      </Alert>
     );
   const value =
     !query.isError &&
@@ -311,38 +338,41 @@ function SchedulingSession({
       ? query.data
       : null;
   return (
-    <section aria-label="Current scheduling" style={{ width: "100%" }}>
-      <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-        <Space wrap>
-          <Typography.Title level={5} style={{ margin: 0 }}>
+    <Box component="section" aria-label="Current scheduling" sx={{ width: "100%" }}>
+      <Stack spacing={2} sx={{ width: "100%" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}
+        >
+          <Typography variant="subtitle1" component="h3" sx={{ mr: "auto" }}>
             Current scheduling
-          </Typography.Title>
+          </Typography>
           <Button
-            size="small"
-            icon={<ReloadOutlined />}
+            variant="outlined"
+            startIcon={<RefreshIcon />}
             loading={query.isFetching}
             onClick={() => void query.refetch()}
           >
             Refresh scheduling
           </Button>
-        </Space>
+        </Stack>
         {query.isError || (query.isSuccess && !value) ? (
-          <Alert
-            showIcon
-            type="warning"
-            title="Current scheduling could not be loaded"
-            description="Refresh to try again. No previous observation is shown."
-          />
+          <Alert severity="warning">
+            <AlertTitle>Current scheduling could not be loaded</AlertTitle>
+            Refresh to try again. No previous observation is shown.
+          </Alert>
         ) : query.isPending ? (
-          <Skeleton active paragraph={{ rows: 2 }} />
+          <SchedulingSkeleton />
         ) : value ? (
           <SchedulingObservation value={value} />
         ) : null}
-        <Typography.Text type="secondary">
+        <Typography variant="body2" color="text.secondary">
           Visible waiting and active observations refresh every 5 seconds.
-        </Typography.Text>
-      </Space>
-    </section>
+        </Typography>
+      </Stack>
+    </Box>
   );
 }
 
@@ -354,7 +384,7 @@ export function SchedulingDiagnostics({
   visible?: boolean;
 }) {
   const access = useOperatorAccess(scope.kind === "platform_job" ? undefined : scope.repositoryId);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const [documentVisible, setDocumentVisible] = useState(schedulingDocumentVisible);
   useEffect(() => {
     const changed = () => setDocumentVisible(schedulingDocumentVisible());
@@ -367,14 +397,13 @@ export function SchedulingDiagnostics({
   if (!visible || !documentVisible) return null;
   if (scheduling.mode === "sample")
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="Live scheduling is unavailable in Sample mode"
-        description="Sample data does not contain real scheduling observations. Connect to a server to inspect current waiting reasons."
-      />
+      <Alert severity="info">
+        <AlertTitle>Live scheduling is unavailable in Sample mode</AlertTitle>
+        Sample data does not contain real scheduling observations. Connect to a server to inspect
+        current waiting reasons.
+      </Alert>
     );
-  if (access.pending || access.checking) return <Skeleton active paragraph={{ rows: 2 }} />;
+  if (access.pending || access.checking) return <SchedulingSkeleton />;
   const allowed =
     access.ready &&
     !access.error &&
@@ -383,16 +412,18 @@ export function SchedulingDiagnostics({
   if (!allowed)
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Scheduling access is unavailable"
-        description={
-          scope.kind === "platform_job"
-            ? "Platform administrator access is required for this job observation."
-            : "Repository read access is required for this observation."
+        severity="info"
+        action={
+          <Button color="inherit" onClick={() => void access.refresh()}>
+            Refresh access
+          </Button>
         }
-        action={<Button onClick={() => void access.refresh()}>Refresh access</Button>}
-      />
+      >
+        <AlertTitle>Scheduling access is unavailable</AlertTitle>
+        {scope.kind === "platform_job"
+          ? "Platform administrator access is required for this job observation."
+          : "Repository read access is required for this observation."}
+      </Alert>
     );
   const session = JSON.stringify([
     initialState?.authenticationEpoch ?? 0,

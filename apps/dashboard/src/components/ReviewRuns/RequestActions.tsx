@@ -2,8 +2,19 @@ import type {
   DashboardReviewRunDetail,
   DashboardReviewRunRequest,
 } from "@agentic-review/contracts";
+import {
+  Alert,
+  AlertTitle,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Stack,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import { useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Modal, Space, Tooltip, Typography } from "antd";
 import { useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { SchedulingDiagnostics } from "@/components/SchedulingDiagnostics";
@@ -109,12 +120,12 @@ export function RequestActions({
     }
   };
   return (
-    <Space orientation="vertical" size="small" style={{ width: "100%" }}>
-      <SchedulingDiagnostics scope={schedulingScope} visible={visible} />
-      <Space wrap>
+    <Stack spacing={2} sx={{ width: "100%" }}>
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
         <Tooltip title={rerunReason}>
           <span>
             <Button
+              variant="outlined"
               disabled={rerunReason !== null || saving}
               onClick={() => {
                 if (!access.can("review") || rerunReason !== null || saving) return;
@@ -129,7 +140,7 @@ export function RequestActions({
         <Tooltip title={cancelReason}>
           <span>
             <Button
-              danger
+              color="error"
               disabled={cancelReason !== null || saving}
               onClick={() => {
                 if (!access.can("review") || cancelReason !== null || saving) return;
@@ -143,66 +154,78 @@ export function RequestActions({
             </Button>
           </span>
         </Tooltip>
-      </Space>
-      {permissionReason && <Typography.Text type="secondary">{permissionReason}</Typography.Text>}
-      {sample && (
-        <Typography.Text type="secondary">
-          Sample mode · execution controls require a connected server.
-        </Typography.Text>
+      </Stack>
+      {permissionReason && (
+        <Typography variant="body2" color="text.secondary">
+          {permissionReason}
+        </Typography>
       )}
-      {notice && <Alert showIcon type="success" title={notice} />}
-      <Modal
+      {sample && (
+        <Typography variant="body2" color="text.secondary">
+          Sample mode · execution controls require a connected server.
+        </Typography>
+      )}
+      <SchedulingDiagnostics scope={schedulingScope} visible={visible} />
+      {notice && <Alert severity="success">{notice}</Alert>}
+      <Dialog
         open={intent !== null}
-        title={
-          intent?.kind === "rerun" ? "Rerun this validation profile?" : "Cancel this execution?"
-        }
-        okText={
-          error ? "Retry" : intent?.kind === "rerun" ? "Create execution" : "Cancel execution"
-        }
-        okButtonProps={{
-          danger: intent?.kind === "cancel",
-          disabled: intentReason !== null || saving,
+        fullWidth
+        maxWidth="sm"
+        onClose={() => {
+          if (saving) return;
+          setIntent(null);
+          setError(null);
         }}
-        confirmLoading={saving}
-        cancelButtonProps={{ disabled: saving }}
-        mask={{ closable: !saving }}
-        keyboard={!saving}
-        closable={!saving}
-        onOk={() => void submit()}
-        onCancel={() => {
-          if (!saving) {
-            setIntent(null);
-            setError(null);
-          }
-        }}
-        destroyOnHidden
       >
-        <Space orientation="vertical" style={{ width: "100%" }}>
-          {permissionReason && (
-            <Alert
-              showIcon
-              type="info"
-              title="Review actions unavailable"
-              description={permissionReason}
-            />
-          )}
-          <Typography.Text strong>{request.profile?.name ?? "Validation profile"}</Typography.Text>
-          <Typography.Paragraph>
-            {intent?.kind === "rerun"
-              ? "This creates another execution using this run's frozen revision, profile, and prompt versions. Existing results are preserved. The server checks current authorization and configuration before creating it; queue admission is separate."
-              : "Only the selected job is stopped. Its recorded history and other profile executions are preserved."}
-          </Typography.Paragraph>
-          <CopyValue value={intent?.kind === "cancel" ? intent.jobId : run.revisionKey} />
-          {error && (
-            <Alert
-              showIcon
-              type="error"
-              title="Operation could not be completed"
-              description={error}
-            />
-          )}
-        </Space>
-      </Modal>
-    </Space>
+        <DialogTitle>
+          {intent?.kind === "rerun" ? "Rerun this validation profile?" : "Cancel this execution?"}
+        </DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            {permissionReason && (
+              <Alert severity="info">
+                <AlertTitle>Review actions unavailable</AlertTitle>
+                {permissionReason}
+              </Alert>
+            )}
+            <Typography variant="subtitle1">
+              {request.profile?.name ?? "Validation profile"}
+            </Typography>
+            <Typography variant="body1">
+              {intent?.kind === "rerun"
+                ? "This creates another execution using this run's frozen revision, profile, and prompt versions. Existing results are preserved. The server checks current authorization and configuration before creating it; queue admission is separate."
+                : "Only the selected job is stopped. Its recorded history and other profile executions are preserved."}
+            </Typography>
+            <CopyValue value={intent?.kind === "cancel" ? intent.jobId : run.revisionKey} />
+            {error && (
+              <Alert severity="error">
+                <AlertTitle>Operation could not be completed</AlertTitle>
+                {error}
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            disabled={saving}
+            onClick={() => {
+              setIntent(null);
+              setError(null);
+            }}
+          >
+            Back
+          </Button>
+          <Button
+            variant="contained"
+            color={intent?.kind === "cancel" ? "error" : "primary"}
+            disabled={intentReason !== null || saving}
+            loading={saving}
+            onClick={() => void submit()}
+          >
+            {error ? "Retry" : intent?.kind === "rerun" ? "Create execution" : "Cancel execution"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
   );
 }

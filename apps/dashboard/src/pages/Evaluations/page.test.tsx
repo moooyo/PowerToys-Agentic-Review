@@ -35,8 +35,8 @@ const state = vi.hoisted(() => ({
     publishSuite: vi.fn(),
   },
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: 1 } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: 1 } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: () => ({

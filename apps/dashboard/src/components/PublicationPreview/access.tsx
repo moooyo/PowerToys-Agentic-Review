@@ -1,6 +1,5 @@
+import { Alert, AlertTitle, Button, Skeleton } from "@mui/material";
 import { type QueryKey, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Skeleton } from "antd";
 import {
   createContext,
   type ReactNode,
@@ -12,6 +11,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { useOperatorSession } from "@/state/session";
 import { publicationAccessRefreshVerified } from "./access-refresh";
 import { PublicationReadGuard } from "./read-guard";
 
@@ -52,7 +52,7 @@ export function PublicationAccess({
   const client = useQueryClient();
   const [refreshEpoch, setRefreshEpoch] = useState(0);
   const guards = useRef(new Set<PublicationReadGuard>());
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const session = JSON.stringify([
     repositoryId,
     access.identityKey,
@@ -85,29 +85,27 @@ export function PublicationAccess({
     )
       setRefreshEpoch((previous) => previous + 1);
   };
-  if (access.pending && !access.ready) return <Skeleton active paragraph={{ rows: 3 }} />;
+  if (access.pending && !access.ready) return <Skeleton variant="rounded" height={120} />;
   if (!access.ready || access.error || !access.allows("read"))
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Publication access is unavailable"
-        description="Repository read access is required. Previous publication content is hidden."
+        severity="info"
         action={<Button onClick={() => void access.refresh()}>Refresh access</Button>}
-      />
+      >
+        <AlertTitle>Publication access is unavailable</AlertTitle>
+        Repository read access is required. Previous publication content is hidden.
+      </Alert>
     );
   if (access.identityKey[0] === "sample")
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="A connected server is required"
-        description="Sample mode does not create publication previews, policies, or delivery records."
-      />
+      <Alert severity="info">
+        <AlertTitle>A connected server is required</AlertTitle>
+        Sample mode does not create publication previews, policies, or delivery records.
+      </Alert>
     );
   return (
     <div key={session}>
-      {access.checking ? <Skeleton active paragraph={{ rows: 3 }} /> : null}
+      {access.checking ? <Skeleton variant="rounded" height={120} /> : null}
       <div hidden={access.checking} inert={access.checking} aria-hidden={access.checking}>
         <PublicationGuardOwners.Provider value={guards.current}>
           {children(session, {

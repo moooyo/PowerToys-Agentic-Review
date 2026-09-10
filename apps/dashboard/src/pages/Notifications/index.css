@@ -1,33 +1,62 @@
 .notifications-page {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
+  width: 100%;
+  min-width: 0;
 }
+
+.notifications-section-header {
+  margin-bottom: 24px;
+}
+
 .notifications-summary {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.notifications-filters,
-.notifications-actions {
+  gap: 8px 16px;
   margin-bottom: 16px;
 }
+
+.notifications-toolbar {
+  margin: 24px 0;
+}
+
 .notification-event {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 4px 0;
+  gap: 8px;
   max-width: 720px;
 }
+
+.notification-event a {
+  font-weight: 500;
+}
+
 .notifications-pagination {
-  margin-top: 16px;
+  margin-top: 24px;
 }
+
 .notifications-coverage {
-  margin: 16px 0 0;
-  font-size: 12px;
+  display: block;
+  margin: 24px 0 0;
+  font-size: 14px;
+  line-height: 20px;
 }
-.notifications-page .ant-alert {
-  margin-bottom: 16px;
+
+.notifications-page .MuiAlert-root {
+  margin-bottom: 24px;
+}
+
+@media (max-width: 767px) {
+  .notifications-toolbar > .MuiTypography-root {
+    flex-basis: 100%;
+  }
+
+  .notifications-page .MuiAlert-root {
+    flex-wrap: wrap;
+  }
+
+  .notifications-page .MuiAlert-action {
+    flex-basis: 100%;
+    margin-left: 0;
+    padding: 8px 0 0;
+  }
 }

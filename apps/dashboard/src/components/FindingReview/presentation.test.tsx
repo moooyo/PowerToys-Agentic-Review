@@ -1,5 +1,4 @@
-import type { FindingComparisonResponse, FindingComparisonRow } from "@agentic-review/contracts";
-import type { ReactNode } from "react";
+import type { FindingComparisonResponse } from "@agentic-review/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { context, event, listResponse, occurrence } from "./fixtures.testing";
@@ -11,67 +10,13 @@ import {
   OriginalFinding,
 } from "./presentation";
 
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
-    Collapse: ({ items }: { items: { key: string; label: ReactNode; children: ReactNode }[] }) => (
-      <div>
-        {items.map((item) => (
-          <details key={item.key}>
-            <summary>{item.label}</summary>
-            {item.children}
-          </details>
-        ))}
-      </div>
-    ),
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
-    ),
-    Table: ({
-      dataSource,
-      columns,
-    }: {
-      dataSource: FindingComparisonRow[];
-      columns: {
-        title: string;
-        render: (value: unknown, row: FindingComparisonRow) => ReactNode;
-      }[];
-    }) => (
-      <div>
-        {dataSource.map((row) => (
-          <article key={`${row.before?.key ?? "none"}:${row.after?.key ?? "none"}`}>
-            {columns.map((column) => (
-              <div key={column.title}>
-                {column.title}
-                {column.render(null, row)}
-              </div>
-            ))}
-          </article>
-        ))}
-      </div>
-    ),
-    Space: Content,
-    Tag: Content,
-    Typography: { Paragraph: Content, Text: Content },
-  };
+vi.mock("@mui/material", async () => {
+  const { materialComponents } = await import("./material.testing");
+  return { ...materialComponents };
 });
+vi.mock("@/components/ui", async () => (await import("./material.testing")).materialUiHelpers);
+vi.mock("@mui/icons-material/ExpandMore", () => ({ default: () => null }));
+vi.mock("@mui/icons-material/ContentCopy", () => ({ default: () => null }));
 const side = {
   key: occurrence.key,
   resultId: occurrence.resultId,

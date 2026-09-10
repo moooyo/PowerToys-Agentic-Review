@@ -1,15 +1,15 @@
 import type { OperatorRepositoryPermission } from "@agentic-review/contracts";
+import { Alert, AlertTitle, Button, Skeleton } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Skeleton } from "antd";
 import { type ReactNode, useEffect } from "react";
 import { access } from "@/services/access";
 import { ReviewControlHttpError } from "@/services/review-control/errors";
 import { OPERATOR_ACCESS_DENIED_EVENT } from "@/services/review-control/http-client";
+import { useOperatorSession } from "@/state/session";
 import { accessContextMatches, contextAllows, samePrincipal } from "./state";
 
 export function useOperatorAccess(repositoryId?: string) {
-  const { initialState, setInitialState, loading } = useModel("@@initialState");
+  const { initialState, setInitialState, loading } = useOperatorSession();
   const principal = initialState?.currentUser.principal ?? null;
   const authenticated = initialState?.authenticated === true && principal !== null;
   const identityKey = [access.mode, principal?.issuer ?? null, principal?.subject ?? null];
@@ -126,8 +126,7 @@ export function OperatorAccessGate({
   children: ReactNode;
 }) {
   const accessState = useOperatorAccess(repositoryId);
-  if (accessState.pending)
-    return <Skeleton active title={{ width: 220 }} paragraph={{ rows: 3 }} />;
+  if (accessState.pending) return <Skeleton variant="rounded" height={160} />;
   if (
     accessState.ready &&
     (platformOnly ? accessState.platformAdministrator : accessState.allows(permission))
@@ -139,24 +138,24 @@ export function OperatorAccessGate({
     [403, 404].includes(accessState.error.status);
   return (
     <Alert
-      showIcon
-      type={accessState.error && !denied ? "error" : "info"}
-      title={accessState.error && !denied ? "Access could not be verified" : "Access required"}
-      description={
-        accessState.error && !denied
-          ? "Permissions are unavailable. Refresh to verify access before continuing."
-          : platformOnly
-            ? "This page requires a platform administrator. Platform access is managed in the server configuration."
-            : permission === "read"
-              ? "You do not have access to this repository. Ask a repository or platform administrator for access."
-              : `This action requires ${permission === "review" ? "reviewer" : permission === "configure" ? "maintainer" : "repository administrator"} access or higher.`
-      }
+      severity={accessState.error && !denied ? "error" : "info"}
       action={
         <Button loading={accessState.checking} onClick={() => void accessState.refresh()}>
           Refresh access
         </Button>
       }
-    />
+    >
+      <AlertTitle>
+        {accessState.error && !denied ? "Access could not be verified" : "Access required"}
+      </AlertTitle>
+      {accessState.error && !denied
+        ? "Permissions are unavailable. Refresh to verify access before continuing."
+        : platformOnly
+          ? "This page requires a platform administrator. Platform access is managed in the server configuration."
+          : permission === "read"
+            ? "You do not have access to this repository. Ask a repository or platform administrator for access."
+            : `This action requires ${permission === "review" ? "reviewer" : permission === "configure" ? "maintainer" : "repository administrator"} access or higher.`}
+    </Alert>
   );
 }
 

@@ -1,253 +1,79 @@
 :root {
-  --app-canvas: #f5f5f5;
-  --app-surface: #ffffff;
-  --app-text: rgb(0 0 0 / 88%);
-  --app-muted: rgb(0 0 0 / 65%);
-  --app-line: #f0f0f0;
-  --app-accent: #1677ff;
-  --app-accent-soft: #e6f4ff;
-  --app-body-font:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
-    sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --app-canvas: var(--mui-palette-background-default, #f7f2fa);
+  --app-surface: var(--mui-palette-background-paper, #fffbfe);
+  --app-text: var(--mui-palette-text-primary, #1d1b20);
+  --app-muted: var(--mui-palette-text-secondary, #49454f);
+  --app-line: var(--mui-palette-divider, #cac4d0);
+  --app-accent: var(--mui-palette-primary-main, #6750a4);
+  --app-accent-soft: var(--app-primary-container, #eaddff);
+  --app-hover: var(--mui-palette-action-hover, rgb(29 27 32 / 8%));
+  --app-body-font: "Roboto", "Segoe UI", sans-serif;
   --app-display-font: var(--app-body-font);
-  --app-code-font: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-  --app-shadow: none;
+  --app-heading-font: var(--app-body-font);
+  --app-code-font: "Roboto Mono", monospace;
+  --app-shadow: 0 1px 3px rgb(0 0 0 / 12%), 0 1px 2px rgb(0 0 0 / 8%);
 }
-
 html,
 body,
 #root {
   min-height: 100%;
   margin: 0;
 }
-
 body {
-  min-width: 320px;
-  background: var(--app-canvas);
-  color: var(--app-text);
-  font-family: var(--app-body-font);
-  font-size: 14px;
-  line-height: 1.571429;
+  min-width: 360px;
 }
-
 * {
   box-sizing: border-box;
 }
-
+[hidden] {
+  /* biome-ignore lint/complexity/noImportantStyles: Session revocation must hide content despite component display rules. */
+  display: none !important;
+}
+a {
+  color: inherit;
+}
 button,
 input,
 select,
 textarea {
   font: inherit;
 }
-
-:where(a, button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
-}
-
-.app-shell {
-  min-height: 100vh;
-  background: var(--app-canvas);
-}
-
-.app-shell.ant-pro-layout .ant-pro-layout-content {
-  background: var(--app-canvas);
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider {
-  border-inline-end: 1px solid var(--app-line);
-  box-shadow: none;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-layout-sider-children {
-  margin-inline-end: 0;
-  border-inline-end: 0;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-pro-sider-logo {
-  min-height: 64px;
-  margin: 0;
-  padding: 8px 16px;
-}
-
-.app-brand {
-  display: flex;
+.material-brand {
   align-items: center;
-  gap: 8px;
-  min-width: 0;
   color: var(--app-text);
-  text-decoration: none;
-}
-
-.app-brand__mark {
-  display: flex;
-  flex: 0 0 24px;
-  align-items: center;
-  justify-content: center;
-  color: var(--app-accent);
-  font-size: 24px;
-}
-
-.app-brand__copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-.app-brand__name {
-  color: var(--app-text);
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 24px;
-  white-space: nowrap;
-}
-
-.app-brand__context {
-  overflow-wrap: anywhere;
-  color: var(--app-muted);
-  font-size: 12px;
-  line-height: 20px;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-menu-item a {
-  display: flex;
-  align-items: center;
-  min-height: 32px;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-menu-item a:focus-visible {
-  border-radius: 4px;
-  outline-offset: -2px;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-menu-item-divider:last-child {
-  display: none;
-}
-
-.app-shell.ant-pro-layout .ant-pro-sider .ant-pro-sider-footer {
-  margin: 0;
-  padding: 0;
-  border-block-start: 1px solid var(--app-line);
-}
-
-.app-sidebar-footer {
-  padding: 16px;
-}
-
-.app-shell.ant-pro-layout .ant-pro-layout-content {
-  min-width: 0;
-  padding: 24px;
-}
-
-@media (max-width: 767px) {
-  .app-shell.ant-pro-layout .ant-pro-layout-content {
-    padding: 16px;
-  }
-}
-
-.app-sidebar-footer__status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-block-end: 16px;
-}
-
-.app-connection {
   display: inline-flex;
-  min-width: 0;
+  gap: 12px;
+  text-decoration: none;
   white-space: nowrap;
 }
-
-.app-sidebar-footer__tools {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 4px;
-}
-
-.app-sidebar-footer__profile {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.material-main,
+.material-main > * {
   min-width: 0;
 }
-
-.app-user-avatar,
-.app-sign-out {
-  flex: 0 0 auto;
-}
-
-.app-user-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.app-user-copy__name {
-  display: block;
-  overflow: hidden;
-  color: var(--app-text);
-  font-size: 12px;
-  line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.app-user-copy__role {
-  display: block;
-  color: var(--app-muted);
-  font-size: 12px;
-  line-height: 20px;
-}
-
-.app-sidebar-footer--collapsed {
-  padding-inline: 8px;
-}
-
-.app-sidebar-footer--collapsed .app-sidebar-footer__status-row,
-.app-sidebar-footer--collapsed .app-sidebar-footer__tools,
-.app-sidebar-footer--collapsed .app-sidebar-footer__profile {
-  flex-direction: column;
-  gap: 8px;
-}
-
-.app-mobile-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  height: 56px;
-  padding-inline: 16px;
-  border-block-end: 1px solid var(--app-line);
-  background: var(--app-surface);
-}
-
-.operational-table .ant-pro-card-body {
-  padding: 0;
-}
-
-.mono {
+.mono,
+code,
+pre {
   font-family: var(--app-code-font);
-  font-variant-numeric: tabular-nums;
 }
-
-.muted {
-  color: var(--app-muted);
+pre {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-
+::selection {
+  background: var(--app-primary-container);
+  color: var(--app-on-primary-container);
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    /* biome-ignore lint/complexity/noImportantStyles: User motion preferences must override component styles. */
-    scroll-behavior: auto !important;
-    /* biome-ignore lint/complexity/noImportantStyles: User motion preferences must override component styles. */
+    /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override component animations. */
     animation-duration: 0.01ms !important;
-    /* biome-ignore lint/complexity/noImportantStyles: User motion preferences must override component styles. */
-    animation-iteration-count: 1 !important;
-    /* biome-ignore lint/complexity/noImportantStyles: User motion preferences must override component styles. */
+    /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override component transitions. */
     transition-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override smooth scrolling. */
+    scroll-behavior: auto !important;
   }
 }

@@ -4,24 +4,32 @@ import type {
   DashboardReviewRunRequest,
   DashboardReviewRunSummary,
 } from "@agentic-review/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import CloseIcon from "@mui/icons-material/Close";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
+  Box,
   Button,
+  Chip,
+  Divider,
   Drawer,
-  Empty,
-  Grid,
+  IconButton,
   Skeleton,
-  Space,
-  Table,
+  Stack,
+  Tab,
   Tabs,
-  Tag,
   Tooltip,
   Typography,
-} from "antd";
-import { useEffect, useRef, useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useId, useRef, useState } from "react";
 import { JobAdmission } from "@/components/JobAdmission";
 import { OperatorAccessGate, useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable, EmptyState } from "@/components/ui";
 import { runs } from "@/services/runs";
 import { reviewPermissionUnavailableReason } from "./actions";
 import { CopyValue, ErrorNotice, Facts, Prose, readable, timestamp } from "./common";
@@ -148,49 +156,74 @@ function JobResult({ run, selection }: { run: DashboardReviewRunDetail; selectio
   };
   if (!request) {
     return (
-      <Alert
-        type="error"
-        showIcon
-        title="The selected request is unavailable in this run"
-        description="Select a request from Run details to inspect its jobs."
-      />
+      <Alert severity="error">
+        <AlertTitle>The selected request is unavailable in this run</AlertTitle>Select a request
+        from Run details to inspect its jobs.
+      </Alert>
     );
   }
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap>
-        <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack spacing={3} sx={{ width: "100%" }}>
+      <Stack
+        direction="row"
+        spacing={2}
+        useFlexGap
+        sx={{ flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}
+      >
+        <Typography variant="h6">
           {requestTargetLabel(request.workflowKind, request.target)} · Activation{" "}
           {job.activationNumber}
-        </Typography.Title>
+        </Typography>
         <Button loading={result.isFetching} onClick={refreshResult}>
           Refresh result
         </Button>
-      </Space>
-      <Facts
-        items={[
-          { label: "Job ID", value: <CopyValue value={job.jobId} /> },
-          { label: "Execution status", value: executionLabel(job.status, job.admission) },
-          { label: "Phase", value: job.phase ? readable(job.phase) : "No active phase" },
-          { label: "Required request", value: request.required ? "Required" : "Optional" },
-          {
-            label: "Profile",
-            value: request.profile
-              ? `${request.profile.name} · Version ${request.profile.version}`
-              : "Missing profile snapshot",
-          },
-          { label: "Prompt version", value: request.prompt?.version ?? "Missing prompt snapshot" },
-        ]}
-      />
-      <TestedSource run={run} />
+      </Stack>
+      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
+        <Chip label={executionLabel(job.status, job.admission)} />
+        <Typography variant="body2" color="text.secondary">
+          {job.phase ? readable(job.phase) : "No active phase"}
+        </Typography>
+      </Stack>
+      <Accordion
+        disableGutters
+        elevation={0}
+        sx={{ bgcolor: "transparent", border: 0, borderBottom: 1, borderColor: "divider" }}
+      >
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography variant="subtitle1" component="span">
+            Execution and source details
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Stack spacing={3}>
+            <Facts
+              items={[
+                { label: "Job ID", value: <CopyValue value={job.jobId} /> },
+                { label: "Execution status", value: executionLabel(job.status, job.admission) },
+                { label: "Phase", value: job.phase ? readable(job.phase) : "No active phase" },
+                { label: "Required request", value: request.required ? "Required" : "Optional" },
+                {
+                  label: "Profile",
+                  value: request.profile
+                    ? `${request.profile.name} · Version ${request.profile.version}`
+                    : "Missing profile snapshot",
+                },
+                {
+                  label: "Prompt version",
+                  value: request.prompt?.version ?? "Missing prompt snapshot",
+                },
+              ]}
+            />
+            <TestedSource run={run} />
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
       <JobAdmission admission={job.admission} />
       {(job.failureCode || job.failureMessage) && (
-        <Alert
-          showIcon
-          type="error"
-          title={job.failureCode ?? "Execution failure"}
-          description={<Prose>{job.failureMessage ?? "No failure message was recorded."}</Prose>}
-        />
+        <Alert severity="error">
+          <AlertTitle>{job.failureCode ?? "Execution failure"}</AlertTitle>
+          <Prose>{job.failureMessage ?? "No failure message was recorded."}</Prose>
+        </Alert>
       )}
       {result.isError ? (
         <ErrorNotice
@@ -199,17 +232,16 @@ function JobResult({ run, selection }: { run: DashboardReviewRunDetail; selectio
           retry={refreshResult}
         />
       ) : result.isPending ? (
-        <Skeleton active />
+        <Skeleton variant="rounded" height={180} />
       ) : result.data ? (
         <ReportView result={result.data} />
       ) : (
         <>
-          <Alert
-            type="info"
-            showIcon
-            title="No saved report for this job"
-            description="Validation outcomes, evidence, and a model recommendation have not been recorded for this job. Its execution status does not establish policy eligibility. Refresh this result after execution completes."
-          />
+          <Alert severity="info">
+            <AlertTitle>No saved report for this job</AlertTitle>Validation outcomes, evidence, and
+            a model recommendation have not been recorded for this job. Its execution status does
+            not establish policy eligibility. Refresh this result after execution completes.
+          </Alert>
           {job.runAttemptId && request.profile && (
             <EvidenceView
               scope={{
@@ -226,7 +258,7 @@ function JobResult({ run, selection }: { run: DashboardReviewRunDetail; selectio
           )}
         </>
       )}
-    </Space>
+    </Stack>
   );
 }
 
@@ -256,6 +288,7 @@ function ReviewRunsPanelContent({
   initialJobId,
   embedded = false,
 }: ReviewRunsPanelProps) {
+  const viewId = useId();
   const access = useOperatorAccess(workItem.repositoryId);
   const canRead = access.can("read");
   const [activeTab, setActiveTab] = useState(
@@ -400,19 +433,17 @@ function ReviewRunsPanelContent({
 
   if (!validScope) {
     return (
-      <Alert
-        type="error"
-        showIcon
-        title="Repository and work item identity are required"
-        description="Reopen the work item from a selected repository to load its runs."
-      />
+      <Alert severity="error">
+        <AlertTitle>Repository and work item identity are required</AlertTitle>Reopen the work item
+        from a selected repository to load its runs.
+      </Alert>
     );
   }
 
   const detailsContent = detail.isError ? (
     <ErrorNotice title="Could not load this run" error={detail.error} retry={refreshDetail} />
   ) : selectedRunId && detail.isPending ? (
-    <Skeleton active />
+    <Skeleton variant="rounded" height={180} />
   ) : run ? (
     <RunDetails
       run={run}
@@ -423,38 +454,38 @@ function ReviewRunsPanelContent({
       onSelectJob={selectJob}
     />
   ) : (
-    <Empty
-      image={Empty.PRESENTED_IMAGE_SIMPLE}
+    <EmptyState
+      title="Select a run"
       description="Select a run from History to inspect its requests and policy."
     />
   );
 
   return (
     <>
-      {access.checking && <Skeleton active aria-label="Verifying repository access" />}
+      {access.checking && (
+        <Skeleton variant="rounded" height={180} aria-label="Verifying repository access" />
+      )}
       <div hidden={access.checking} inert={access.checking} aria-hidden={access.checking}>
-        <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
+        <Stack spacing={3} sx={{ width: "100%" }}>
           {!embedded && (
-            <>
-              <Typography.Title level={4} style={{ margin: 0 }}>
+            <Box>
+              <Typography variant="h5" sx={{ mb: 1 }}>
                 {workItem.title}
-              </Typography.Title>
-              <Typography.Text type="secondary">
+              </Typography>
+              <Typography variant="body1" color="text.secondary">
                 {workItem.repository} #{workItem.number}
-              </Typography.Text>
-            </>
+              </Typography>
+            </Box>
           )}
           {run?.freshness === "superseded" && activeTab !== "history" && (
-            <Alert
-              showIcon
-              type="warning"
-              title="This run has been superseded"
-              description="The revision or authorization state changed. Inspect a current run before making a decision."
-            />
+            <Alert severity="warning">
+              <AlertTitle>This run has been superseded</AlertTitle>The revision or authorization
+              state changed. Inspect a current run before making a decision.
+            </Alert>
           )}
           {selectedRunId && activeTab !== "history" && (
             <Button
-              style={{ alignSelf: "flex-start" }}
+              sx={{ alignSelf: "flex-start" }}
               loading={detail.isFetching}
               onClick={refreshDetail}
             >
@@ -462,142 +493,171 @@ function ReviewRunsPanelContent({
             </Button>
           )}
           <Tabs
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            items={[
-              {
-                key: "history",
-                label: "History",
-                children: (
-                  <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-                    <Space wrap>
-                      <Typography.Text type="secondary">
-                        Runs for this {workItem.kind === "pull_request" ? "pull request" : "issue"}{" "}
-                        only
-                      </Typography.Text>
-                      <Button loading={history.isFetching} onClick={() => void history.refetch()}>
-                        Refresh history
-                      </Button>
-                    </Space>
-                    {history.isError ? (
-                      <ErrorNotice
-                        title="Could not load run history"
-                        error={history.error}
-                        retry={() => void history.refetch()}
-                      />
-                    ) : history.isPending ? (
-                      <Skeleton active />
-                    ) : (
-                      <Table<DashboardReviewRunSummary>
-                        size="small"
-                        rowKey="id"
-                        dataSource={history.data.items}
-                        loading={history.isFetching}
-                        scroll={{ x: 780 }}
-                        locale={{
-                          emptyText: (
-                            <Empty
-                              image={Empty.PRESENTED_IMAGE_SIMPLE}
-                              description="No review runs have been created for this work item."
-                            />
-                          ),
-                        }}
-                        pagination={{
-                          current: page,
-                          pageSize,
-                          total: history.data.total,
-                          pageSizeOptions: [10, 20, 50],
-                          showSizeChanger: true,
-                          onChange: (nextPage, nextSize) => {
-                            setPage(nextSize === pageSize ? nextPage : 1);
-                            setPageSize(Math.min(nextSize, 50));
-                          },
-                        }}
-                        columns={[
-                          {
-                            title: "Run",
-                            dataIndex: "createdAt",
-                            render: (value: string, item) => (
-                              <Space orientation="vertical" size={0}>
-                                <Typography.Text strong>{timestamp(value)}</Typography.Text>
-                                <CopyValue value={item.id} />
-                              </Space>
-                            ),
-                          },
-                          {
-                            title: "Revision",
-                            dataIndex: "freshness",
-                            render: (value: string) => (
-                              <Tag color={value === "superseded" ? "warning" : "default"}>
-                                {readable(value)}
-                              </Tag>
-                            ),
-                          },
-                          {
-                            title: "Requests",
-                            render: (_, item) =>
-                              `${item.requestCount} total · ${item.requiredRequestCount} required`,
-                          },
-                          {
-                            title: "Execution",
-                            width: 250,
-                            render: (_, item) => executionSummary(item.execution),
-                          },
-                          {
-                            title: "Action",
-                            render: (_, item) => (
-                              <Button onClick={() => selectRun(item.id)}>View run</Button>
-                            ),
-                          },
-                        ]}
-                      />
-                    )}
-                  </Space>
-                ),
-              },
-              {
-                key: "detail",
-                label: "Run details",
-                disabled: !selectedRunId,
-                children: activeTab === "detail" ? detailsContent : null,
-              },
-              {
-                key: "result",
-                label: "Job result",
-                disabled: !notificationJobSelected && selectedJob === null,
-                children:
-                  activeTab !== "result" ? null : access.checking ? (
-                    <Skeleton active />
-                  ) : detail.isError ? (
-                    <ErrorNotice
-                      title="Could not confirm the selected run"
-                      error={detail.error}
-                      retry={refreshDetail}
-                    />
-                  ) : notificationJobSelected && notificationJob.isError ? (
-                    <ErrorNotice
-                      title="Could not locate this job in the selected run"
-                      error={notificationJob.error}
-                      retry={() => void notificationJob.refetch()}
-                    />
-                  ) : run && displayedJob ? (
-                    <JobResult
-                      key={`${run.id}:${displayedJob.requestId}:${displayedJob.job.jobId}`}
-                      run={run}
-                      selection={displayedJob}
-                    />
-                  ) : (
-                    <Skeleton active />
-                  ),
-              },
-            ]}
-          />
-        </Space>
+            value={activeTab}
+            onChange={(_, value: string) => setActiveTab(value)}
+            variant="scrollable"
+            scrollButtons="auto"
+            aria-label="Review run views"
+            sx={{ borderBottom: 1, borderColor: "divider" }}
+          >
+            <Tab
+              value="history"
+              label="History"
+              id={`${viewId}-tab-history`}
+              aria-controls={`${viewId}-panel-history`}
+            />
+            <Tab
+              value="detail"
+              label="Run details"
+              disabled={!selectedRunId}
+              id={`${viewId}-tab-detail`}
+              aria-controls={`${viewId}-panel-detail`}
+            />
+            <Tab
+              value="result"
+              label="Job result"
+              disabled={!notificationJobSelected && selectedJob === null}
+              id={`${viewId}-tab-result`}
+              aria-controls={`${viewId}-panel-result`}
+            />
+          </Tabs>
+          {activeTab === "history" && (
+            <Stack
+              role="tabpanel"
+              id={`${viewId}-panel-history`}
+              aria-labelledby={`${viewId}-tab-history`}
+              spacing={2}
+            >
+              <Stack
+                direction="row"
+                spacing={1}
+                useFlexGap
+                sx={{ flexWrap: "wrap", alignItems: "center" }}
+              >
+                <Typography variant="body2" color="text.secondary">
+                  Runs for this {workItem.kind === "pull_request" ? "pull request" : "issue"} only
+                </Typography>
+                <Button loading={history.isFetching} onClick={() => void history.refetch()}>
+                  Refresh history
+                </Button>
+              </Stack>
+              {history.isError ? (
+                <ErrorNotice
+                  title="Could not load run history"
+                  error={history.error}
+                  retry={() => void history.refetch()}
+                />
+              ) : history.isPending ? (
+                <Skeleton variant="rounded" height={180} />
+              ) : (
+                <DataTable<DashboardReviewRunSummary>
+                  ariaLabel="Review run history"
+                  rows={history.data.items}
+                  getRowId={(item) => item.id}
+                  loading={history.isFetching}
+                  emptyTitle="No review runs"
+                  emptyDescription="No review runs have been created for this work item."
+                  pagination={{
+                    page,
+                    pageSize,
+                    total: history.data.total,
+                    onChange: (nextPage, nextSize) => {
+                      setPage(nextSize === pageSize ? nextPage : 1);
+                      setPageSize(Math.min(nextSize, 50));
+                    },
+                  }}
+                  columns={[
+                    {
+                      id: "run",
+                      label: "Run",
+                      minWidth: 200,
+                      render: (item) => (
+                        <Stack spacing={0.5}>
+                          <Typography variant="subtitle2">{timestamp(item.createdAt)}</Typography>
+                          <CopyValue value={item.id} />
+                        </Stack>
+                      ),
+                    },
+                    {
+                      id: "revision",
+                      label: "Revision",
+                      render: (item) => (
+                        <Chip
+                          size="medium"
+                          color={item.freshness === "superseded" ? "warning" : "default"}
+                          label={readable(item.freshness)}
+                        />
+                      ),
+                    },
+                    {
+                      id: "requests",
+                      label: "Requests",
+                      render: (item) =>
+                        `${item.requestCount} total · ${item.requiredRequestCount} required`,
+                    },
+                    {
+                      id: "execution",
+                      label: "Execution",
+                      minWidth: 230,
+                      render: (item) => executionSummary(item.execution),
+                    },
+                    {
+                      id: "action",
+                      label: "Action",
+                      render: (item) => (
+                        <Button onClick={() => selectRun(item.id)}>View run</Button>
+                      ),
+                    },
+                  ]}
+                />
+              )}
+            </Stack>
+          )}
+          {activeTab === "detail" && (
+            <Box
+              role="tabpanel"
+              id={`${viewId}-panel-detail`}
+              aria-labelledby={`${viewId}-tab-detail`}
+            >
+              {detailsContent}
+            </Box>
+          )}
+          {activeTab === "result" && (
+            <Box
+              role="tabpanel"
+              id={`${viewId}-panel-result`}
+              aria-labelledby={`${viewId}-tab-result`}
+            >
+              {access.checking ? (
+                <Skeleton variant="rounded" height={180} />
+              ) : detail.isError ? (
+                <ErrorNotice
+                  title="Could not confirm the selected run"
+                  error={detail.error}
+                  retry={refreshDetail}
+                />
+              ) : notificationJobSelected && notificationJob.isError ? (
+                <ErrorNotice
+                  title="Could not locate this job in the selected run"
+                  error={notificationJob.error}
+                  retry={() => void notificationJob.refetch()}
+                />
+              ) : run && displayedJob ? (
+                <JobResult
+                  key={`${run.id}:${displayedJob.requestId}:${displayedJob.job.jobId}`}
+                  run={run}
+                  selection={displayedJob}
+                />
+              ) : (
+                <Skeleton variant="rounded" height={180} />
+              )}
+            </Box>
+          )}
+        </Stack>
       </div>
     </>
   );
 }
-
 interface ReviewRunsDrawerProps {
   workItem: ReviewRunWorkItem | null;
   onClose: () => void;
@@ -628,18 +688,36 @@ function ReviewRunsDrawerContent({
   initialJobId,
   onCreateRun,
 }: Omit<ReviewRunsDrawerProps, "workItem"> & { workItem: ReviewRunWorkItem }) {
-  const screens = Grid.useBreakpoint();
   const access = useOperatorAccess(workItem?.repositoryId);
   const permissionReason = reviewPermissionUnavailableReason(access);
   return (
     <Drawer
-      title={workItem?.kind === "issue" ? "Issue runs" : "Pull request runs"}
+      anchor="right"
       open={workItem !== null}
       onClose={onClose}
-      destroyOnHidden
-      size={screens.xl ? 1_160 : "100%"}
-      extra={
-        <Space>
+      slotProps={{ paper: { sx: { width: { xs: "100%", lg: 1160 }, maxWidth: "100%" } } }}
+    >
+      <Stack
+        direction="row"
+        spacing={2}
+        sx={{
+          px: { xs: 2, sm: 3 },
+          py: 2,
+          minHeight: 72,
+          alignItems: "center",
+          justifyContent: "space-between",
+          bgcolor: "background.default",
+        }}
+      >
+        <Typography variant="h6">
+          {workItem.kind === "issue" ? "Issue runs" : "Pull request runs"}
+        </Typography>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}
+        >
           <Button
             loading={access.checking}
             disabled={access.checking}
@@ -651,7 +729,7 @@ function ReviewRunsDrawerContent({
             <Tooltip title={permissionReason}>
               <span>
                 <Button
-                  type="primary"
+                  variant="contained"
                   disabled={!access.can("review")}
                   onClick={() => {
                     if (!access.can("review")) return;
@@ -663,26 +741,35 @@ function ReviewRunsDrawerContent({
               </span>
             </Tooltip>
           ) : null}
-        </Space>
-      }
-    >
-      {access.checking && <Skeleton active aria-label="Verifying repository access" />}
-      <div hidden={access.checking} inert={access.checking} aria-hidden={access.checking}>
-        {workItem && (
-          <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-            {onCreateRun && permissionReason && (
-              <Typography.Text type="secondary">{permissionReason}</Typography.Text>
-            )}
-            <ReviewRunsPanel
-              key={`${workItem.repositoryId}:${workItem.id}:${initialRunId ?? "history"}`}
-              workItem={workItem}
-              initialRunId={initialRunId}
-              initialRequestId={initialRequestId}
-              initialJobId={initialJobId}
-            />
-          </Space>
+          <IconButton aria-label="Close review runs" onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </Stack>
+      <Divider />
+      <Box sx={{ p: { xs: 2, sm: 3 }, minWidth: 0 }}>
+        {access.checking && (
+          <Skeleton variant="rounded" height={180} aria-label="Verifying repository access" />
         )}
-      </div>
+        <div hidden={access.checking} inert={access.checking} aria-hidden={access.checking}>
+          {workItem && (
+            <Stack spacing={2} sx={{ width: "100%" }}>
+              {onCreateRun && permissionReason && (
+                <Typography variant="body2" color="text.secondary">
+                  {permissionReason}
+                </Typography>
+              )}
+              <ReviewRunsPanel
+                key={`${workItem.repositoryId}:${workItem.id}:${initialRunId ?? "history"}`}
+                workItem={workItem}
+                initialRunId={initialRunId}
+                initialRequestId={initialRequestId}
+                initialJobId={initialJobId}
+              />
+            </Stack>
+          )}
+        </div>
+      </Box>
     </Drawer>
   );
 }

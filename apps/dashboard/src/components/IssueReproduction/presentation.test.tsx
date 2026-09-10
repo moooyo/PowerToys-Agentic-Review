@@ -9,82 +9,91 @@ import { describe, expect, it, vi } from "vitest";
 import { assessment, check, detail, predicates, recorded, result } from "./fixtures.testing";
 import { AssessmentSummary, CaseAssessmentComparison, ReproductionCaseFacts } from "./presentation";
 
-vi.mock("antd", () => {
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        <strong>{title}</strong>
-        {description}
-      </aside>
-    ),
-    Descriptions: ({
-      items,
+    Alert: ({ children }: { children?: ReactNode }) => <aside>{children}</aside>,
+    AlertTitle: ({ children }: { children?: ReactNode }) => <strong>{children}</strong>,
+    Box: ({
+      children,
+      component,
+      "aria-label": label,
     }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((item) => (
-          <div key={item.key}>
-            <dt>{item.label}</dt>
-            <dd>{item.children}</dd>
-          </div>
-        ))}
-      </dl>
+      children?: ReactNode;
+      component?: string;
+      "aria-label"?: string;
+    }) =>
+      component === "section" ? (
+        <section aria-label={label}>{children}</section>
+      ) : (
+        <div>{children}</div>
+      ),
+    Chip: ({ label, color }: { label?: ReactNode; color?: string }) => (
+      <span data-tone={color}>{label}</span>
     ),
-    Table: <Row,>({
-      dataSource,
-      columns,
-      rowKey,
-    }: {
-      dataSource: Row[];
-      columns: { title: string; render: (value: unknown, row: Row) => ReactNode }[];
-      rowKey: keyof Row | ((row: Row, index: number) => string);
-    }) => (
-      <table>
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <th key={column.title}>{column.title}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {dataSource.map((row, index) => {
-            const key = typeof rowKey === "function" ? rowKey(row, index) : String(row[rowKey]);
-            return (
-              <tr key={key}>
-                {columns.map((column) => (
-                  <td key={column.title}>{column.render(null, row)}</td>
-                ))}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    ),
-    Space: Content,
-    Tag: ({ children, color }: { children?: ReactNode; color?: string }) => (
-      <span data-tone={color}>{children}</span>
-    ),
-    Typography: {
-      Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
-      Paragraph: ({ children }: { children?: ReactNode }) => <p>{children}</p>,
-      Title: ({ children }: { children?: ReactNode }) => <h5>{children}</h5>,
-    },
-    theme: {
-      useToken: () => ({
-        token: {
-          margin: 16,
-          marginXS: 8,
-          paddingSM: 12,
-          colorPrimaryBorder: "#91caff",
-          colorBorderSecondary: "#f0f0f0",
-        },
-      }),
-    },
+    Stack: Content,
+    Typography: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
   };
 });
+vi.mock("@/components/ui", () => ({
+  DataTable: <Row,>({
+    rows,
+    columns,
+    getRowId,
+  }: {
+    rows: Row[];
+    columns: { id: string; label: ReactNode; render: (row: Row, index: number) => ReactNode }[];
+    getRowId: (row: Row, index: number) => string | number;
+  }) => (
+    <table>
+      <thead>
+        <tr>
+          {columns.map((column) => (
+            <th key={column.id}>{column.label}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, index) => {
+          const key = getRowId(row, index);
+          return (
+            <tr key={key}>
+              {columns.map((column) => (
+                <td key={column.id}>{column.render(row, index)}</td>
+              ))}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  ),
+}));
+vi.mock("../ReviewRuns/common", () => ({
+  CopyValue: ({ value }: { value: string | null | undefined }) => (
+    <code>{value ?? "Not recorded"}</code>
+  ),
+  EvidenceIds: ({ ids }: { ids: string[] }) =>
+    ids.length ? (
+      <div>
+        {ids.map((id) => (
+          <code key={id}>{id}</code>
+        ))}
+      </div>
+    ) : (
+      <span>No evidence IDs recorded</span>
+    ),
+  Facts: ({ items }: { items: { label: string; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((item) => (
+        <div key={item.label}>
+          <dt>{item.label}</dt>
+          <dd>{item.value}</dd>
+        </div>
+      ))}
+    </dl>
+  ),
+  Prose: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+}));
 
 const renderedText = (html: string): string =>
   html

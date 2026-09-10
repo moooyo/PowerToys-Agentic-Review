@@ -1,6 +1,5 @@
+import { Alert, AlertTitle, Button, Skeleton } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useModel } from "@umijs/max";
-import { Alert, Button, Skeleton } from "antd";
 import {
   createContext,
   type ReactNode,
@@ -15,6 +14,7 @@ import { useOperatorAccess } from "@/components/OperatorAccess";
 import { notificationQueryRoot, notifications } from "@/services/notifications";
 import { ReviewControlHttpError } from "@/services/review-control/errors";
 import { OPERATOR_ACCESS_DENIED_EVENT } from "@/services/review-control/http-client";
+import { useOperatorSession } from "@/state/session";
 import { discardNotificationQueries } from "./cache";
 
 const NotificationSessionContext = createContext<{
@@ -100,7 +100,7 @@ export function useNotificationAccess(repositoryId?: string) {
   const shared = useContext(NotificationSessionContext);
   if (shared === null) throw new Error("Notifications require an operator session boundary.");
   const access = useOperatorAccess(repositoryId);
-  const { initialState } = useModel("@@initialState");
+  const { initialState } = useOperatorSession();
   const bindingSession = JSON.stringify([
     repositoryId ?? null,
     access.identityKey,
@@ -145,29 +145,28 @@ export function NotificationAccess({
 }) {
   if (access.sample)
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="A connected server is required"
-        description="Personal notifications are unavailable in sample mode. Connect to a server to read events and manage your inbox."
-      />
+      <Alert severity="info">
+        <AlertTitle>A connected server is required</AlertTitle>
+        Personal notifications are unavailable in sample mode. Connect to a server to read events
+        and manage your inbox.
+      </Alert>
     );
   if (access.blocked || access.error || (!access.readable && !access.pending && !access.checking))
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Notification access is unavailable"
-        description="Previous notification counts, events and selections are hidden until access is verified."
+        severity="info"
         action={<Button onClick={() => void access.refreshAccess()}>Refresh access</Button>}
-      />
+      >
+        <AlertTitle>Notification access is unavailable</AlertTitle>
+        Previous notification counts, events and selections are hidden until access is verified.
+      </Alert>
     );
   const checking = access.pending || access.checking;
   // Keep an in-flight or uncertain personal change while the same scope is being verified.
   // Read queries use a separate epoch and are disabled and emptied during this interval.
   return (
     <div key={access.bindingSession}>
-      {checking ? <Skeleton active paragraph={{ rows: 3 }} /> : null}
+      {checking ? <Skeleton variant="rounded" height={160} /> : null}
       <div hidden={checking} inert={checking} aria-hidden={checking}>
         {children}
       </div>

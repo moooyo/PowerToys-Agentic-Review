@@ -1,5 +1,4 @@
-import { Tag } from "antd";
-import "./index.css";
+import { alpha, Chip, useTheme } from "@mui/material";
 
 const statusPresentation: Record<string, { color: string; label: string }> = {
   healthy: { color: "success", label: "Healthy" },
@@ -61,14 +60,32 @@ export interface StatusTagProps {
 }
 
 export function StatusTag({ status }: StatusTagProps) {
+  const theme = useTheme();
   const presentation = statusPresentation[status] ?? {
     color: "default",
     label: status.replaceAll("_", " "),
   };
 
+  const color = presentation.color === "processing" ? "info" : presentation.color;
+  const tone =
+    color === "success"
+      ? theme.palette.success.main
+      : color === "warning"
+        ? theme.palette.warning.main
+        : color === "error"
+          ? theme.palette.error.main
+          : color === "info"
+            ? theme.palette.primary.main
+            : theme.palette.text.secondary;
   return (
-    <Tag className="status-tag" color={presentation.color}>
-      {presentation.label}
-    </Tag>
+    <Chip
+      label={presentation.label}
+      className="status-tag"
+      sx={{
+        color: tone,
+        bgcolor: alpha(tone, 0.09),
+        maxWidth: "100%",
+      }}
+    />
   );
 }

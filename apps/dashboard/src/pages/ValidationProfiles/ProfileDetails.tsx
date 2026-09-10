@@ -3,23 +3,28 @@ import type {
   ValidationProfileVersion,
   ValidationProfileVersionSummary,
 } from "@agentic-review/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Close, ContentCopy } from "@mui/icons-material";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Descriptions,
+  Chip,
   Drawer,
-  Empty,
-  Space,
+  IconButton,
+  Stack,
   Switch,
-  Table,
+  Tab,
   Tabs,
-  Tag,
+  TextField,
+  Tooltip,
   Typography,
-} from "antd";
-import { useEffect, useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { useConfigurationAvailable } from "@/components/ConfigurationScopeGuard";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable, DetailsGrid, notify } from "@/components/ui";
 import { configuration } from "@/services/configuration";
 import type { ValidationProfileBindingHistory } from "@/services/configuration/adapter";
 import {
@@ -32,6 +37,39 @@ import {
   workflowLabels,
 } from "./forms";
 
+function CopyValue({ value, label }: { value: string; label: string }) {
+  return (
+    <Stack direction="row" spacing={0.5} sx={{ alignItems: "flex-start" }}>
+      <Box
+        component="code"
+        sx={{
+          overflowWrap: "anywhere",
+          fontFamily: '"Roboto Mono", Consolas, monospace',
+          fontSize: 14,
+          lineHeight: "20px",
+        }}
+      >
+        {value}
+      </Box>
+      <Tooltip title={`Copy ${label}`}>
+        <IconButton
+          aria-label={`Copy ${label}`}
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(value);
+              notify(`Copied ${label}.`);
+            } catch {
+              notify(`Could not copy ${label}.`, "error");
+            }
+          }}
+        >
+          <ContentCopy fontSize="small" />
+        </IconButton>
+      </Tooltip>
+    </Stack>
+  );
+}
+
 function PublishedVersion({ profile }: { profile: ValidationProfileVersion }) {
   const configurationJson = JSON.stringify(profile.config, null, 2);
   const observables = profile.config.test.flatMap((step) =>
@@ -43,79 +81,60 @@ function PublishedVersion({ profile }: { profile: ValidationProfileVersion }) {
     })),
   );
   return (
-    <div className="validation-profiles-version">
-      <Typography.Title level={5}>
+    <Stack spacing={3} className="validation-profiles-version">
+      <Typography variant="h6" component="h3">
         Version {profile.version} · {profile.name}
-      </Typography.Title>
-      <Descriptions
-        column={1}
-        size="small"
+      </Typography>
+      <DetailsGrid
+        columns={1}
         items={[
-          { key: "workflow", label: "Workflow", children: workflowLabels[profile.workflowKind] },
-          { key: "target", label: "Execution target", children: targetLabels[profile.target] },
-          { key: "required", label: "Required", children: profile.required ? "Yes" : "No" },
+          { label: "Workflow", value: workflowLabels[profile.workflowKind] },
+          { label: "Execution target", value: targetLabels[profile.target] },
+          { label: "Required", value: profile.required ? "Yes" : "No" },
           ...(profile.config.ui?.target === "web"
             ? [
                 {
-                  key: "trace",
                   label: "Browser trace capture",
-                  children: webTraceLabels[profile.config.ui.evidence.trace],
+                  value: webTraceLabels[profile.config.ui.evidence.trace],
                 },
               ]
             : []),
+          { label: "Output schema", value: <code>{profile.outputSchemaVersion}</code> },
+          { label: "Published", value: profile.publishedAt },
+          { label: "Published by", value: profile.createdBy },
+          { label: "Version ID", value: <CopyValue value={profile.id} label="version ID" /> },
           {
-            key: "schema",
-            label: "Output schema",
-            children: <code>{profile.outputSchemaVersion}</code>,
-          },
-          { key: "published", label: "Published", children: profile.publishedAt },
-          { key: "author", label: "Published by", children: profile.createdBy },
-          {
-            key: "id",
-            label: "Version ID",
-            children: (
-              <Typography.Text copyable code>
-                {profile.id}
-              </Typography.Text>
-            ),
-          },
-          {
-            key: "digest",
             label: "Configuration digest",
-            children: (
-              <Typography.Text copyable code>
-                {profile.configSha256}
-              </Typography.Text>
-            ),
+            value: <CopyValue value={profile.configSha256} label="configuration digest" />,
           },
         ]}
       />
-      <Typography.Paragraph type="secondary">
+      <Typography color="text.secondary">
         Published configuration is read-only. Create a new version to change commands or settings.
-      </Typography.Paragraph>
+      </Typography>
       {profile.workflowKind !== "issue_triage" && (
-        <div className="validation-profiles-notice">
-          <Typography.Title level={5}>Test observables</Typography.Title>
-          <Typography.Paragraph type="secondary">
+        <Box>
+          <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+            Test observables
+          </Typography>
+          <Typography color="text.secondary" sx={{ mb: 1.5 }}>
             Issue reproduction cases can select these fields from this published version.
-          </Typography.Paragraph>
+          </Typography>
           {observables.length === 0 ? (
-            <Typography.Paragraph type="secondary">
+            <Typography color="text.secondary">
               This version has no declared test observables.
-            </Typography.Paragraph>
+            </Typography>
           ) : (
-            <Table
-              size="small"
-              rowKey="key"
-              pagination={false}
-              scroll={{ x: 600 }}
-              dataSource={observables}
+            <DataTable
+              rows={observables}
+              getRowId={(field) => field.key}
+              ariaLabel="Published test observables"
               columns={[
                 {
-                  title: "Test command",
-                  key: "testStepId",
-                  width: 180,
-                  render: (_, field) => (
+                  id: "testStepId",
+                  label: "Test command",
+                  minWidth: 180,
+                  render: (field) => (
                     <>
                       {field.testStepName}
                       <div className="validation-profiles-secondary">
@@ -125,28 +144,47 @@ function PublishedVersion({ profile }: { profile: ValidationProfileVersion }) {
                   ),
                 },
                 {
-                  title: "Field ID",
-                  dataIndex: "id",
-                  width: 150,
-                  render: (id: string) => <Typography.Text code>{id}</Typography.Text>,
+                  id: "id",
+                  label: "Field ID",
+                  minWidth: 150,
+                  render: (field) => <code>{field.id}</code>,
                 },
-                { title: "Type", dataIndex: "type", width: 90 },
-                { title: "Description", dataIndex: "description" },
+                { id: "type", label: "Type", width: 90, render: (field) => field.type },
+                {
+                  id: "description",
+                  label: "Description",
+                  minWidth: 200,
+                  render: (field) => field.description,
+                },
               ]}
             />
           )}
-        </div>
+        </Box>
       )}
-      <textarea
-        className="validation-profiles-json"
-        readOnly
-        wrap="off"
-        rows={Math.min(24, configurationJson.split("\n").length)}
-        style={{ width: "100%", resize: "vertical" }}
-        aria-label={`Published configuration for version ${profile.version}`}
+      <TextField
+        fullWidth
+        multiline
+        variant="outlined"
+        label="Published execution configuration"
+        minRows={Math.min(24, configurationJson.split("\n").length)}
+        maxRows={24}
+        slotProps={{
+          input: { readOnly: true },
+          htmlInput: {
+            spellCheck: false,
+            "aria-label": `Published configuration for version ${profile.version}`,
+          },
+        }}
+        sx={{
+          "& textarea": {
+            fontFamily: '"Roboto Mono", Consolas, monospace',
+            fontSize: 14,
+            lineHeight: "24px",
+          },
+        }}
         value={configurationJson}
       />
-    </div>
+    </Stack>
   );
 }
 
@@ -178,6 +216,7 @@ export function ProfileDetails({
   const [bindingLoaded, setBindingLoaded] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
+  const mutationInFlight = useRef(false);
   const [selectingVersionId, setSelectingVersionId] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -289,7 +328,7 @@ export function ProfileDetails({
     }
   };
   const saveBinding = async () => {
-    if (!canConfigure || saving || selectingVersionId !== null) return;
+    if (!canConfigure || mutationInFlight.current || saving || selectingVersionId !== null) return;
     if (
       !bindingLoaded ||
       !selectionReady ||
@@ -298,6 +337,7 @@ export function ProfileDetails({
       conflict
     )
       return;
+    mutationInFlight.current = true;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -314,11 +354,13 @@ export function ProfileDetails({
       setConflict(isProfileConflict(failure));
       setError(configurationErrorMessage(failure));
     } finally {
+      mutationInFlight.current = false;
       setSaving(false);
     }
   };
   const selectHistoricalVersion = async (versionId: string) => {
-    if (!canConfigure || saving || selectingVersionId !== null) return;
+    if (!canConfigure || mutationInFlight.current || saving || selectingVersionId !== null) return;
+    mutationInFlight.current = true;
     setSelectingVersionId(versionId);
     setError(null);
     try {
@@ -334,422 +376,463 @@ export function ProfileDetails({
     } catch (failure) {
       setError(configurationErrorMessage(failure));
     } finally {
+      mutationInFlight.current = false;
       setSelectingVersionId(null);
     }
   };
   const mutationDisabled = saving || selectingVersionId !== null;
   const unchanged = binding?.profileVersionId === selected.id && binding.enabled === enabled;
+  const closeDetails = () => {
+    if (!mutationInFlight.current && !mutationDisabled) onClose();
+  };
 
   return (
     <Drawer
       open
-      title={profile.name}
-      size={920}
-      onClose={onClose}
-      closable={!mutationDisabled}
-      mask={{ closable: !mutationDisabled }}
-      keyboard={!mutationDisabled}
-      extra={
-        allowsConfigure && (
-          <Button
-            disabled={!canConfigure || mutationDisabled}
-            onClick={() => {
-              if (canConfigure) onNewVersion();
-            }}
-          >
-            Create new version
-          </Button>
-        )
-      }
+      anchor="right"
+      onClose={closeDetails}
+      slotProps={{
+        paper: {
+          sx: { width: { xs: "100%", md: 920 }, maxWidth: "100%" },
+          role: "dialog",
+          "aria-labelledby": "profile-details-title",
+        },
+      }}
     >
-      <Typography.Paragraph type="secondary">
-        {workflowLabels[profile.workflowKind]} · {targetLabels[profile.target]}
-      </Typography.Paragraph>
-      {profile.workflowKind === "pr_ui" || profile.workflowKind === "issue_validation" ? (
-        <Alert
-          className="validation-profiles-notice"
-          type="info"
-          showIcon
-          title="Execution needs a matching driver"
-          description="A Worker must have a driver for this workflow and target. A published or enabled profile is configuration, not evidence of a passed validation."
-        />
-      ) : null}
-      {error && !conflict && (
-        <Alert
-          className="validation-profiles-notice"
-          type="error"
-          showIcon
-          title="The request could not be completed"
-          description={error}
-        />
-      )}
-      <Tabs
-        activeKey={tab}
-        onChange={setTab}
-        items={[
-          {
-            key: "versions",
-            label: "Published versions",
-            children: (
-              <>
-                {versionsQuery.isError ? (
-                  <Alert
-                    type="error"
-                    showIcon
-                    title="Could not load version history"
-                    description={configurationErrorMessage(versionsQuery.error)}
-                    action={<Button onClick={() => void versionsQuery.refetch()}>Try again</Button>}
-                  />
-                ) : (
-                  <Table<ValidationProfileVersionSummary>
-                    rowKey="id"
-                    loading={versionsQuery.isPending}
-                    dataSource={versionsQuery.data?.items ?? []}
-                    size="small"
-                    scroll={{ x: 660 }}
-                    locale={{
-                      emptyText: (
-                        <Empty
-                          image={Empty.PRESENTED_IMAGE_SIMPLE}
-                          description="No published versions are available."
-                        />
-                      ),
-                    }}
-                    pagination={{
-                      current: page,
-                      pageSize,
-                      total: versionsQuery.data?.total ?? 0,
-                      showSizeChanger: true,
-                      pageSizeOptions: [10, 20, 50],
-                      onChange: (nextPage, nextSize) => {
-                        setPage(nextSize === pageSize ? nextPage : 1);
-                        setPageSize(nextSize);
-                      },
-                      showTotal: (total) => `${total} versions`,
-                    }}
-                    columns={[
-                      {
-                        title: "Version",
-                        key: "version",
-                        width: 95,
-                        render: (_, item) => (
-                          <Typography.Text strong>v{item.version}</Typography.Text>
-                        ),
-                      },
-                      { title: "Name", dataIndex: "name", key: "name" },
-                      {
-                        title: "Published",
-                        dataIndex: "publishedAt",
-                        key: "published",
-                        render: (value: string) => (
-                          <span className="validation-profiles-date">{value}</span>
-                        ),
-                      },
-                      {
-                        title: "Actions",
-                        key: "actions",
-                        width: 210,
-                        render: (_, item) => (
-                          <Space>
-                            <Button size="small" onClick={() => setViewedVersionId(item.id)}>
-                              View
-                            </Button>
-                            {allowsConfigure && (
-                              <Button
-                                size="small"
-                                disabled={!canConfigure || mutationDisabled}
-                                onClick={() => {
-                                  if (!canConfigure) return;
-                                  setSelected(item);
-                                  setSelectionReady(true);
-                                  setSaved(false);
-                                  setTab("binding");
-                                }}
-                              >
-                                Use this version
-                              </Button>
-                            )}
-                          </Space>
-                        ),
-                      },
-                    ]}
-                  />
-                )}
-                {versionQuery.isError ? (
-                  <Alert
-                    className="validation-profiles-notice"
-                    type="error"
-                    showIcon
-                    title="Could not load this published version"
-                    description={configurationErrorMessage(versionQuery.error)}
-                    action={<Button onClick={() => void versionQuery.refetch()}>Try again</Button>}
-                  />
-                ) : versionQuery.isPending ? (
-                  <Typography.Paragraph role="status">
-                    Loading published configuration…
-                  </Typography.Paragraph>
-                ) : (
-                  <PublishedVersion profile={versionQuery.data} />
-                )}
-              </>
-            ),
-          },
-          {
-            key: "binding",
-            label: "Repository binding",
-            children: (
-              <>
-                <Typography.Paragraph>
-                  {allowsConfigure
-                    ? "Choose the published version used for this repository. To roll back, select an older version in Published versions, then save this binding. Published content stays unchanged."
-                    : "View the published version used for this repository. Repository configuration permission is required to change this binding."}
-                </Typography.Paragraph>
-                {bindingsQuery.isError ? (
-                  <Alert
-                    className="validation-profiles-notice"
-                    type="error"
-                    showIcon
-                    title="Could not load current bindings"
-                    description={configurationErrorMessage(bindingsQuery.error)}
-                    action={
-                      <Button loading={bindingsQuery.isFetching} onClick={reloadBinding}>
-                        Reload bindings
-                      </Button>
-                    }
-                  />
-                ) : !bindingLoaded ? (
-                  <Typography.Paragraph role="status">
-                    Loading current binding…
-                  </Typography.Paragraph>
-                ) : (
-                  <Descriptions
-                    column={1}
-                    size="small"
-                    className="validation-profiles-notice"
-                    items={[
-                      {
-                        key: "current",
-                        label: "Current version",
-                        children: binding ? (
-                          <>
-                            {boundVersionQuery.data ? (
-                              `v${boundVersionQuery.data.version} · ${boundVersionQuery.data.name}`
-                            ) : (
-                              <code>{binding.profileVersionId}</code>
-                            )}{" "}
-                            <Tag>{binding.enabled ? "Enabled" : "Disabled"}</Tag>
-                          </>
-                        ) : (
-                          "Not bound"
-                        ),
-                      },
-                      {
-                        key: "revision",
-                        label: "Binding revision",
-                        children: binding?.version ?? "No binding yet",
-                      },
-                    ]}
-                  />
-                )}
-                {boundVersionQuery.isError && binding && (
-                  <Alert
-                    className="validation-profiles-notice"
-                    type="error"
-                    showIcon
-                    title="Could not load the bound version"
-                    description={configurationErrorMessage(boundVersionQuery.error)}
-                    action={
-                      <Button onClick={() => void boundVersionQuery.refetch()}>Try again</Button>
-                    }
-                  />
-                )}
-                {conflict && (
-                  <Alert
-                    className="validation-profiles-notice"
-                    type="warning"
-                    showIcon
-                    title="The repository binding changed"
-                    description={
-                      <>
-                        <p>{error}</p>
-                        <p>
-                          Reload the current binding, review the selected version and enabled state,
-                          then save again.
-                        </p>
-                      </>
-                    }
-                    action={
-                      <Button loading={bindingsQuery.isFetching} onClick={reloadBinding}>
-                        Reload current binding
-                      </Button>
-                    }
-                  />
-                )}
-                {saved && (
-                  <Alert
-                    className="validation-profiles-notice"
-                    type="success"
-                    showIcon
-                    title="Repository binding saved"
-                    description="This updates configuration for future work. It does not start or confirm a validation run."
-                  />
-                )}
-                {allowsConfigure && (
-                  <>
-                    <div className="validation-profiles-binding-choice">
-                      <div>
-                        <Typography.Text strong>Version to bind</Typography.Text>
-                        <Typography.Paragraph>
-                          {selectionReady
-                            ? `v${selected.version} · ${selected.name}`
-                            : "Loading current version…"}
-                        </Typography.Paragraph>
-                        {selectionReady && (
-                          <Typography.Text type="secondary">{selected.id}</Typography.Text>
-                        )}
-                      </div>
-                      <Button
-                        disabled={!canConfigure || mutationDisabled}
-                        onClick={() => {
-                          if (canConfigure) setTab("versions");
-                        }}
-                      >
-                        Choose another version
-                      </Button>
-                    </div>
-                    <div className="validation-profiles-binding-choice">
-                      <div>
-                        <label htmlFor="profile-binding-enabled">Enable this profile</label>
-                        <Typography.Paragraph type="secondary">
-                          Allow future work to select this profile through the repository binding.
-                        </Typography.Paragraph>
-                      </div>
-                      <Switch
-                        id="profile-binding-enabled"
-                        checked={enabled}
-                        disabled={
-                          !canConfigure ||
-                          !bindingLoaded ||
-                          bindingsQuery.isError ||
-                          mutationDisabled ||
-                          conflict
-                        }
-                        onChange={(value) => {
-                          if (!canConfigure) return;
-                          setEnabled(value);
-                          setSaved(false);
-                        }}
-                      />
-                    </div>
-                    <Button
-                      type="primary"
-                      loading={saving}
-                      disabled={
-                        !canConfigure ||
-                        !bindingLoaded ||
-                        !selectionReady ||
-                        bindingsQuery.isError ||
-                        bindingsQuery.isFetching ||
-                        conflict ||
-                        unchanged ||
-                        selectingVersionId !== null
-                      }
-                      onClick={saveBinding}
-                    >
-                      Save repository binding
-                    </Button>
-                  </>
-                )}
-              </>
-            ),
-          },
-          {
-            key: "history",
-            label: "Binding history",
-            children: historyQuery.isError ? (
-              <Alert
-                type="error"
-                showIcon
-                title="Could not load binding history"
-                description={configurationErrorMessage(historyQuery.error)}
-                action={<Button onClick={() => void historyQuery.refetch()}>Try again</Button>}
-              />
-            ) : (
-              <Table<ValidationProfileBindingHistory>
-                rowKey="id"
-                size="small"
-                loading={historyQuery.isPending}
-                dataSource={historyQuery.data?.items ?? []}
-                scroll={{ x: 720 }}
-                locale={{
-                  emptyText: (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="This profile has no binding history yet."
-                    />
+      <Stack
+        direction="row"
+        spacing={2}
+        sx={{
+          px: 3,
+          py: 2,
+          borderBottom: 1,
+          borderColor: "divider",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="h6" component="h2" id="profile-details-title">
+            {profile.name}
+          </Typography>
+          <Typography color="text.secondary" variant="body2">
+            {workflowLabels[profile.workflowKind]} · {targetLabels[profile.target]}
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          {allowsConfigure && (
+            <Button
+              variant="outlined"
+              disabled={!canConfigure || mutationDisabled}
+              onClick={() => {
+                if (canConfigure && !mutationInFlight.current) onNewVersion();
+              }}
+            >
+              Create new version
+            </Button>
+          )}
+          <IconButton
+            aria-label="Close profile details"
+            disabled={mutationDisabled}
+            onClick={closeDetails}
+          >
+            <Close />
+          </IconButton>
+        </Stack>
+      </Stack>
+      <Box sx={{ p: { xs: 2, sm: 3 }, overflowY: "auto", flex: 1 }}>
+        {(profile.workflowKind === "pr_ui" || profile.workflowKind === "issue_validation") && (
+          <Alert className="validation-profiles-notice" severity="info">
+            <AlertTitle>Execution needs a matching driver</AlertTitle>A Worker must have a driver
+            for this workflow and target. A published or enabled profile is configuration, not
+            evidence of a passed validation.
+          </Alert>
+        )}
+        {error && !conflict && (
+          <Alert className="validation-profiles-notice" severity="error">
+            <AlertTitle>The request could not be completed</AlertTitle>
+            {error}
+          </Alert>
+        )}
+        <Tabs
+          value={tab}
+          onChange={(_, value: string) => setTab(value)}
+          variant="scrollable"
+          scrollButtons="auto"
+          aria-label="Profile details"
+          sx={{ borderBottom: 1, borderColor: "divider", mb: 3 }}
+        >
+          <Tab
+            value="versions"
+            label="Published versions"
+            id="profile-tab-versions"
+            aria-controls="profile-panel-versions"
+          />
+          <Tab
+            value="binding"
+            label="Repository binding"
+            id="profile-tab-binding"
+            aria-controls="profile-panel-binding"
+          />
+          <Tab
+            value="history"
+            label="Binding history"
+            id="profile-tab-history"
+            aria-controls="profile-panel-history"
+          />
+        </Tabs>
+        <Box
+          role="tabpanel"
+          id="profile-panel-versions"
+          aria-labelledby="profile-tab-versions"
+          hidden={tab !== "versions"}
+        >
+          {versionsQuery.isError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" onClick={() => void versionsQuery.refetch()}>
+                  Try again
+                </Button>
+              }
+            >
+              <AlertTitle>Could not load version history</AlertTitle>
+              {configurationErrorMessage(versionsQuery.error)}
+            </Alert>
+          ) : (
+            <DataTable<ValidationProfileVersionSummary>
+              ariaLabel="Published profile versions"
+              getRowId={(item) => item.id}
+              loading={versionsQuery.isPending}
+              rows={versionsQuery.data?.items ?? []}
+              emptyTitle="No published versions are available."
+              pagination={{
+                page,
+                pageSize,
+                total: versionsQuery.data?.total ?? 0,
+                onChange: (nextPage, nextSize) => {
+                  setPage(nextSize === pageSize ? nextPage : 1);
+                  setPageSize(nextSize);
+                },
+              }}
+              columns={[
+                {
+                  id: "version",
+                  label: "Version",
+                  width: 95,
+                  render: (item) => (
+                    <Typography variant="body2" component="span" sx={{ fontWeight: 500 }}>
+                      v{item.version}
+                    </Typography>
                   ),
-                }}
-                pagination={{
-                  current: historyPage,
-                  pageSize: historyPageSize,
-                  total: historyQuery.data?.total ?? 0,
-                  showSizeChanger: true,
-                  pageSizeOptions: [10, 20, 50],
-                  onChange: (nextPage, nextSize) => {
-                    setHistoryPage(nextSize === historyPageSize ? nextPage : 1);
-                    setHistoryPageSize(nextSize);
-                  },
-                  showTotal: (total) => `${total} changes`,
-                }}
-                columns={[
-                  { title: "Revision", dataIndex: "version", key: "version", width: 85 },
-                  {
-                    title: "Version ID",
-                    key: "profileVersionId",
-                    render: (_, item) => (
-                      <Typography.Text code copyable>
-                        {item.profileVersionId}
-                      </Typography.Text>
-                    ),
-                  },
-                  {
-                    title: "State",
-                    key: "enabled",
-                    width: 95,
-                    render: (_, item) => <Tag>{item.enabled ? "Enabled" : "Disabled"}</Tag>,
-                  },
-                  {
-                    title: "Changed",
-                    key: "createdAt",
-                    render: (_, item) => (
-                      <>
-                        <span className="validation-profiles-date">{item.createdAt}</span>
-                        <div className="validation-profiles-secondary">{item.createdBy}</div>
-                      </>
-                    ),
-                  },
-                  {
-                    title: "Actions",
-                    key: "actions",
-                    width: 145,
-                    render: (_, item) =>
-                      allowsConfigure && (
+                },
+                { id: "name", label: "Name", minWidth: 180, render: (item) => item.name },
+                {
+                  id: "publishedAt",
+                  label: "Published",
+                  minWidth: 160,
+                  render: (item) => (
+                    <span className="validation-profiles-date">{item.publishedAt}</span>
+                  ),
+                },
+                {
+                  id: "actions",
+                  label: "Actions",
+                  minWidth: 210,
+                  render: (item) => (
+                    <Stack direction="row" spacing={1}>
+                      <Button onClick={() => setViewedVersionId(item.id)}>View</Button>
+                      {allowsConfigure && (
                         <Button
-                          size="small"
                           disabled={!canConfigure || mutationDisabled}
-                          loading={selectingVersionId === item.profileVersionId}
-                          onClick={() => void selectHistoricalVersion(item.profileVersionId)}
+                          onClick={() => {
+                            if (!canConfigure || mutationInFlight.current) return;
+                            setSelected(item);
+                            setSelectionReady(true);
+                            setSaved(false);
+                            setTab("binding");
+                          }}
                         >
                           Use this version
                         </Button>
-                      ),
-                  },
-                ]}
-              />
-            ),
-          },
-        ]}
-      />
+                      )}
+                    </Stack>
+                  ),
+                },
+              ]}
+            />
+          )}
+          {versionQuery.isError ? (
+            <Alert
+              className="validation-profiles-notice"
+              severity="error"
+              action={
+                <Button color="inherit" onClick={() => void versionQuery.refetch()}>
+                  Try again
+                </Button>
+              }
+            >
+              <AlertTitle>Could not load this published version</AlertTitle>
+              {configurationErrorMessage(versionQuery.error)}
+            </Alert>
+          ) : versionQuery.isPending ? (
+            <Typography role="status" sx={{ mt: 3 }}>
+              Loading published configuration…
+            </Typography>
+          ) : (
+            <PublishedVersion profile={versionQuery.data} />
+          )}
+        </Box>
+        <Box
+          role="tabpanel"
+          id="profile-panel-binding"
+          aria-labelledby="profile-tab-binding"
+          hidden={tab !== "binding"}
+        >
+          <Typography sx={{ mb: 2 }}>
+            {allowsConfigure
+              ? "Choose the published version used for this repository. To roll back, select an older version in Published versions, then save this binding. Published content stays unchanged."
+              : "View the published version used for this repository. Repository configuration permission is required to change this binding."}
+          </Typography>
+          {bindingsQuery.isError ? (
+            <Alert
+              className="validation-profiles-notice"
+              severity="error"
+              action={
+                <Button color="inherit" loading={bindingsQuery.isFetching} onClick={reloadBinding}>
+                  Reload bindings
+                </Button>
+              }
+            >
+              <AlertTitle>Could not load current bindings</AlertTitle>
+              {configurationErrorMessage(bindingsQuery.error)}
+            </Alert>
+          ) : !bindingLoaded ? (
+            <Typography role="status">Loading current binding…</Typography>
+          ) : (
+            <DetailsGrid
+              columns={1}
+              items={[
+                {
+                  label: "Current version",
+                  value: binding ? (
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      useFlexGap
+                      sx={{ alignItems: "center", flexWrap: "wrap" }}
+                    >
+                      <span>
+                        {boundVersionQuery.data ? (
+                          `v${boundVersionQuery.data.version} · ${boundVersionQuery.data.name}`
+                        ) : (
+                          <code>{binding.profileVersionId}</code>
+                        )}
+                      </span>
+                      <Chip variant="outlined" label={binding.enabled ? "Enabled" : "Disabled"} />
+                    </Stack>
+                  ) : (
+                    "Not bound"
+                  ),
+                },
+                { label: "Binding revision", value: binding?.version ?? "No binding yet" },
+              ]}
+            />
+          )}
+          {boundVersionQuery.isError && binding && (
+            <Alert
+              className="validation-profiles-notice"
+              severity="error"
+              action={
+                <Button color="inherit" onClick={() => void boundVersionQuery.refetch()}>
+                  Try again
+                </Button>
+              }
+            >
+              <AlertTitle>Could not load the bound version</AlertTitle>
+              {configurationErrorMessage(boundVersionQuery.error)}
+            </Alert>
+          )}
+          {conflict && (
+            <Alert
+              className="validation-profiles-notice"
+              severity="warning"
+              action={
+                <Button color="inherit" loading={bindingsQuery.isFetching} onClick={reloadBinding}>
+                  Reload current binding
+                </Button>
+              }
+            >
+              <AlertTitle>The repository binding changed</AlertTitle>
+              <p>{error}</p>
+              <p>
+                Reload the current binding, review the selected version and enabled state, then save
+                again.
+              </p>
+            </Alert>
+          )}
+          {saved && (
+            <Alert className="validation-profiles-notice" severity="success">
+              <AlertTitle>Repository binding saved</AlertTitle>This updates configuration for future
+              work. It does not start or confirm a validation run.
+            </Alert>
+          )}
+          {allowsConfigure && (
+            <>
+              <div className="validation-profiles-binding-choice">
+                <div>
+                  <Typography sx={{ fontWeight: 500 }}>Version to bind</Typography>
+                  <Typography>
+                    {selectionReady
+                      ? `v${selected.version} · ${selected.name}`
+                      : "Loading current version…"}
+                  </Typography>
+                  {selectionReady && (
+                    <Typography variant="body2" color="text.secondary">
+                      {selected.id}
+                    </Typography>
+                  )}
+                </div>
+                <Button
+                  disabled={!canConfigure || mutationDisabled}
+                  onClick={() => {
+                    if (canConfigure) setTab("versions");
+                  }}
+                >
+                  Choose another version
+                </Button>
+              </div>
+              <div className="validation-profiles-binding-choice">
+                <div>
+                  <Typography
+                    component="label"
+                    htmlFor="profile-binding-enabled"
+                    sx={{ fontWeight: 500 }}
+                  >
+                    Enable this profile
+                  </Typography>
+                  <Typography color="text.secondary">
+                    Allow future work to select this profile through the repository binding.
+                  </Typography>
+                </div>
+                <Switch
+                  slotProps={{ input: { id: "profile-binding-enabled" } }}
+                  checked={enabled}
+                  disabled={
+                    !canConfigure ||
+                    !bindingLoaded ||
+                    bindingsQuery.isError ||
+                    mutationDisabled ||
+                    conflict
+                  }
+                  onChange={(_, value) => {
+                    if (!canConfigure) return;
+                    setEnabled(value);
+                    setSaved(false);
+                  }}
+                />
+              </div>
+              <Button
+                variant="contained"
+                loading={saving}
+                disabled={
+                  !canConfigure ||
+                  !bindingLoaded ||
+                  !selectionReady ||
+                  bindingsQuery.isError ||
+                  bindingsQuery.isFetching ||
+                  conflict ||
+                  unchanged ||
+                  selectingVersionId !== null
+                }
+                onClick={saveBinding}
+              >
+                Save repository binding
+              </Button>
+            </>
+          )}
+        </Box>
+        <Box
+          role="tabpanel"
+          id="profile-panel-history"
+          aria-labelledby="profile-tab-history"
+          hidden={tab !== "history"}
+        >
+          {historyQuery.isError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" onClick={() => void historyQuery.refetch()}>
+                  Try again
+                </Button>
+              }
+            >
+              <AlertTitle>Could not load binding history</AlertTitle>
+              {configurationErrorMessage(historyQuery.error)}
+            </Alert>
+          ) : (
+            <DataTable<ValidationProfileBindingHistory>
+              ariaLabel="Profile binding history"
+              getRowId={(item) => item.id}
+              rows={historyQuery.data?.items ?? []}
+              loading={historyQuery.isPending}
+              emptyTitle="This profile has no binding history yet."
+              pagination={{
+                page: historyPage,
+                pageSize: historyPageSize,
+                total: historyQuery.data?.total ?? 0,
+                onChange: (nextPage, nextSize) => {
+                  setHistoryPage(nextSize === historyPageSize ? nextPage : 1);
+                  setHistoryPageSize(nextSize);
+                },
+              }}
+              columns={[
+                { id: "version", label: "Revision", width: 85, render: (item) => item.version },
+                {
+                  id: "profileVersionId",
+                  label: "Version ID",
+                  minWidth: 200,
+                  render: (item) => <CopyValue value={item.profileVersionId} label="version ID" />,
+                },
+                {
+                  id: "enabled",
+                  label: "State",
+                  width: 95,
+                  render: (item) => (
+                    <Chip variant="outlined" label={item.enabled ? "Enabled" : "Disabled"} />
+                  ),
+                },
+                {
+                  id: "createdAt",
+                  label: "Changed",
+                  minWidth: 160,
+                  render: (item) => (
+                    <>
+                      <span className="validation-profiles-date">{item.createdAt}</span>
+                      <div className="validation-profiles-secondary">{item.createdBy}</div>
+                    </>
+                  ),
+                },
+                {
+                  id: "actions",
+                  label: "Actions",
+                  minWidth: 145,
+                  render: (item) =>
+                    allowsConfigure && (
+                      <Button
+                        disabled={!canConfigure || mutationDisabled}
+                        loading={selectingVersionId === item.profileVersionId}
+                        onClick={() => void selectHistoricalVersion(item.profileVersionId)}
+                      >
+                        Use this version
+                      </Button>
+                    ),
+                },
+              ]}
+            />
+          )}
+        </Box>
+      </Box>
     </Drawer>
   );
 }

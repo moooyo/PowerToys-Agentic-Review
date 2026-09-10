@@ -1,10 +1,9 @@
 import type { OperatorPrincipal } from "@agentic-review/contracts";
+import { Alert, AlertTitle, Button, Stack } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Space } from "antd";
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { EvaluationAdapter } from "@/services/evaluations";
 import { accessDenied, evaluationQueryRoot, OriginalMutation } from "./state";
-
 export interface EvaluationPageContext {
   readonly api: EvaluationAdapter;
   readonly session: string;
@@ -48,13 +47,18 @@ export function useEvaluationQuery<T>(
         : false,
     refetchIntervalInBackground: false,
   });
-  return { ...query, data: page.readable && !query.isError ? query.data : undefined };
+  return {
+    ...query,
+    data: page.readable && !query.isError ? query.data : undefined,
+  };
 }
 export function useRefreshEvaluations() {
   const page = useEvaluationPage(),
     client = useQueryClient();
   return () => {
-    void client.invalidateQueries({ queryKey: [...evaluationQueryRoot, page.session] });
+    void client.invalidateQueries({
+      queryKey: [...evaluationQueryRoot, page.session],
+    });
   };
 }
 export function useOriginalMutation<T, R>(
@@ -100,17 +104,35 @@ export function MutationNotice({
   if (!mutation.error) return null;
   return (
     <Alert
-      showIcon
-      type={mutation.conflict ? "warning" : "error"}
-      title={
-        mutation.conflict
+      action={
+        mutation.request ? (
+          <Button
+            disabled={!page.canConfigure}
+            loading={mutation.busy}
+            onClick={mutation.retry}
+            variant="outlined"
+          >
+            Retry original request
+          </Button>
+        ) : undefined
+      }
+      severity={mutation.conflict ? "warning" : "error"}
+    >
+      <AlertTitle>
+        {mutation.conflict
           ? conflictTitle
           : mutation.request
             ? "The result is not confirmed"
-            : "The change was rejected"
-      }
-      description={
-        <Space orientation="vertical">
+            : "The change was rejected"}
+      </AlertTitle>
+      {
+        <Stack
+          direction="column"
+          spacing={1.5}
+          sx={{
+            minWidth: 0,
+          }}
+        >
           <span>{mutation.error}</span>
           {mutation.request ? (
             <span>
@@ -119,15 +141,8 @@ export function MutationNotice({
           ) : mutation.conflict ? (
             <span>{conflictDescription}</span>
           ) : null}
-        </Space>
+        </Stack>
       }
-      action={
-        mutation.request ? (
-          <Button disabled={!page.canConfigure} loading={mutation.busy} onClick={mutation.retry}>
-            Retry original request
-          </Button>
-        ) : undefined
-      }
-    />
+    </Alert>
   );
 }

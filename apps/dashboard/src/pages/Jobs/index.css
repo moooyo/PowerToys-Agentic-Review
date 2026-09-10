@@ -1,58 +1,45 @@
 .jobs-page {
   width: 100%;
-  padding: 24px;
 }
 
 .jobs-panel {
   min-width: 0;
 }
 
-.jobs-views {
-  max-width: 100%;
-  margin-bottom: 16px;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
 .jobs-toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 16px;
 }
 
 .jobs-search {
-  width: 360px;
-  max-width: 100%;
+  flex: 1 1 360px;
+  max-width: 560px;
 }
 
 .jobs-result-count {
-  margin-left: auto;
   color: var(--app-muted);
   font-variant-numeric: tabular-nums;
-}
-
-.jobs-error {
-  margin-bottom: 16px;
 }
 
 .jobs-cell-stack {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 8px;
   min-width: 0;
 }
 
 .jobs-work-item {
-  font-weight: 600;
+  font-weight: 500;
+  text-align: left;
   overflow-wrap: anywhere;
 }
 
 .jobs-utility {
   color: var(--app-muted);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 20px;
 }
 
@@ -62,7 +49,7 @@
 
 .jobs-code {
   font-family: var(--app-code-font);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .jobs-worker {
@@ -78,37 +65,12 @@
 }
 
 .jobs-filters {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  width: min(320px, calc(100vw - 64px));
-}
-
-.jobs-filter-field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.jobs-filter-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: 16px;
-  border-top: 1px solid var(--app-line);
+  width: min(400px, calc(100vw - 32px));
 }
 
 @media (max-width: 767px) {
-  .jobs-page {
-    padding: 16px;
-  }
-
-  .jobs-panel > .ant-card-body {
-    padding: 16px;
-  }
-
   .jobs-search {
-    width: 100%;
     flex-basis: 100%;
+    max-width: none;
   }
 }

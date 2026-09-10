@@ -1,5 +1,5 @@
 import type { FindingComparisonResponse } from "@agentic-review/contracts";
-import type { ReactNode } from "react";
+import { Children, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewControlHttpError } from "../../services/review-control/errors";
@@ -14,18 +14,23 @@ interface Query {
   enabled?: boolean;
   retry?: boolean;
 }
-interface SelectProps {
-  "aria-label": string;
+interface SelectionFieldProps {
+  label: string;
   value?: string;
-  options?: { label: string; value: string; disabled?: boolean }[];
-  onChange: (value: string) => void;
+  children?: ReactNode;
+  onChange: (event: { target: { value: string } }) => void;
+}
+interface SelectionRecord {
+  value?: string | undefined;
+  choices: { label: string; value: string; disabled?: boolean | undefined }[];
+  onChange: SelectionFieldProps["onChange"];
 }
 const state = vi.hoisted(() => ({
   values: [] as unknown[],
   cursor: 0,
   queries: [] as Query[],
   cache: new Map<string, { data?: unknown; error?: unknown; fetching?: boolean }>(),
-  selects: new Map<string, SelectProps>(),
+  selects: new Map<string, SelectionRecord>(),
   buttons: new Map<string, { disabled?: boolean; onClick?: () => void }>(),
   list: vi.fn(),
   get: vi.fn(),
@@ -72,15 +77,10 @@ vi.mock("./presentation", () => ({
     </article>
   ),
 }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
+vi.mock("@mui/material", async () => {
+  const { materialComponents } = await import("./material.testing");
   return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
+    ...materialComponents,
     Button: ({
       children,
       disabled,
@@ -97,24 +97,40 @@ vi.mock("antd", () => {
         </button>
       );
     },
-    Select: (props: SelectProps) => {
-      state.selects.set(props["aria-label"], props);
+    TextField: (props: SelectionFieldProps) => {
+      const choices = Children.toArray(props.children).flatMap((child) => {
+        if (
+          !isValidElement<{ value?: string; disabled?: boolean; children?: ReactNode }>(child) ||
+          typeof child.props.value !== "string" ||
+          child.props.value === ""
+        )
+          return [];
+        return [
+          {
+            value: child.props.value,
+            label: String(child.props.children),
+            disabled: child.props.disabled,
+          },
+        ];
+      });
+      state.selects.set(props.label, { value: props.value, choices, onChange: props.onChange });
       return (
-        <select aria-label={props["aria-label"]} value={props.value} onChange={() => undefined}>
-          {props.options?.map((option) => (
-            <option key={option.value} value={option.value} disabled={option.disabled}>
-              {option.label}
+        <select aria-label={props.label} value={props.value} onChange={() => undefined}>
+          <option value="">Select a baseline</option>
+          {choices.map((choice) => (
+            <option key={choice.value} value={choice.value} disabled={choice.disabled}>
+              {choice.label}
             </option>
           ))}
         </select>
       );
     },
-    Pagination: Content,
     Skeleton: () => <span>Loading comparison</span>,
-    Space: Content,
-    Typography: { Text: Content, Paragraph: Content },
   };
 });
+vi.mock("@/components/ui", async () => (await import("./material.testing")).materialUiHelpers);
+vi.mock("@mui/icons-material/ExpandMore", () => ({ default: () => null }));
+vi.mock("@mui/icons-material/ContentCopy", () => ({ default: () => null }));
 const run = sampleReviewRuns.find((candidate) => candidate.id === result.reviewRunId);
 const request = run?.requests.find((candidate) => candidate.requestId === result.requestId);
 if (!run || !request?.latestJob) throw new Error("A matching run and request are required.");
@@ -154,11 +170,11 @@ const render = () => {
 };
 const chooseBaseline = () => {
   render();
-  state.selects.get("Baseline run")?.onChange(run.id);
+  state.selects.get("Baseline run")?.onChange({ target: { value: run.id } });
   render();
-  state.selects.get("Baseline request")?.onChange(request.requestId);
+  state.selects.get("Baseline request")?.onChange({ target: { value: request.requestId } });
   render();
-  state.selects.get("Baseline saved job")?.onChange(baselineJob.jobId);
+  state.selects.get("Baseline saved job")?.onChange({ target: { value: baselineJob.jobId } });
   render();
   state.buttons.get("Compare selected results")?.onClick?.();
   render();
@@ -223,19 +239,19 @@ describe("explicit comparison baseline selection", () => {
   });
   it("disables the current result and jobs with no saved result", () => {
     chooseBaseline();
-    const options = state.selects.get("Baseline saved job")?.options;
+    const options = state.selects.get("Baseline saved job")?.choices;
     expect(options?.find((option) => option.value === result.jobId)?.disabled).toBe(true);
     expect(options?.find((option) => option.value === "no-result")?.disabled).toBe(true);
     expect(options?.find((option) => option.value === baselineJob.jobId)?.disabled).toBe(false);
   });
   it("clears an earlier baseline when the run or request selection changes", () => {
     chooseBaseline();
-    state.selects.get("Baseline request")?.onChange(request.requestId);
+    state.selects.get("Baseline request")?.onChange({ target: { value: request.requestId } });
     render();
     expect(state.queries[3]?.enabled).toBe(false);
     expect(state.buttons.get("Compare selected results")?.disabled).toBe(true);
     chooseBaseline();
-    state.selects.get("Baseline run")?.onChange(run.id);
+    state.selects.get("Baseline run")?.onChange({ target: { value: run.id } });
     render();
     expect(state.selects.has("Baseline saved job")).toBe(false);
     expect(state.queries[3]?.enabled).toBe(false);

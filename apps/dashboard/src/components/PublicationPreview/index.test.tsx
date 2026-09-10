@@ -48,8 +48,8 @@ vi.mock("react", async (original) => ({
     state.effects.push({ run: effect, dependencies });
   },
 }));
-vi.mock("@umijs/max", () => ({
-  useModel: () => ({ initialState: { authenticationEpoch: state.epoch } }),
+vi.mock("@/state/session", () => ({
+  useOperatorSession: () => ({ initialState: { authenticationEpoch: state.epoch } }),
 }));
 vi.mock("@/components/OperatorAccess", () => ({
   useOperatorAccess: (repositoryId: string) => ({
@@ -88,24 +88,16 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("antd", () => {
+vi.mock("@mui/material", () => {
   const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {
-    Alert: ({
-      title,
-      description,
-      action,
-    }: {
-      title?: ReactNode;
-      description?: ReactNode;
-      action?: ReactNode;
-    }) => (
+    Alert: ({ children, action }: { children?: ReactNode; action?: ReactNode }) => (
       <aside>
-        {title}
-        {description}
+        {children}
         {action}
       </aside>
     ),
+    AlertTitle: Content,
     Button: ({
       children,
       disabled,
@@ -123,55 +115,47 @@ vi.mock("antd", () => {
       );
     },
     Checkbox: (props: {
-      children: ReactNode;
       checked: boolean;
       disabled: boolean;
       onChange: (event: { target: { checked: boolean } }) => void;
     }) => {
       state.checkbox = props;
       return (
-        <label>
-          <input type="checkbox" checked={props.checked} disabled={props.disabled} readOnly />
-          {props.children}
-        </label>
+        <input
+          id="publication-preview-consent"
+          type="checkbox"
+          checked={props.checked}
+          disabled={props.disabled}
+          readOnly
+        />
       );
     },
-    Drawer: ({
-      children,
-      title,
-      extra,
-      footer,
-    }: {
-      children: ReactNode;
-      title: ReactNode;
-      extra: ReactNode;
-      footer: ReactNode;
-    }) => (
-      <section>
-        {title}
-        {extra}
-        {children}
-        {footer}
-      </section>
+    FormControlLabel: ({ control, label }: { control: ReactNode; label: ReactNode }) => (
+      <label htmlFor="publication-preview-consent">
+        {control}
+        {label}
+      </label>
     ),
-    Descriptions: ({
-      items,
-    }: {
-      items: { key: string; label: ReactNode; children: ReactNode }[];
-    }) => (
-      <dl>
-        {items.map((entry) => (
-          <div key={entry.key}>
-            {entry.label}: {entry.children}
-          </div>
-        ))}
-      </dl>
-    ),
+    Dialog: Content,
+    DialogTitle: Content,
+    DialogContent: Content,
+    DialogActions: Content,
     Skeleton: () => <span>Loading publication</span>,
-    Space: Content,
-    Typography: { Text: Content, Paragraph: Content, Title: Content },
+    Stack: Content,
+    Typography: Content,
   };
 });
+vi.mock("@/components/ui", () => ({
+  DetailsGrid: ({ items }: { items: { key?: string; label: ReactNode; value: ReactNode }[] }) => (
+    <dl>
+      {items.map((entry, index) => (
+        <div key={entry.key ?? index}>
+          {entry.label}: {entry.value}
+        </div>
+      ))}
+    </dl>
+  ),
+}));
 function render(scope = publicationTestScope) {
   state.cursor = 0;
   state.buttons = [];

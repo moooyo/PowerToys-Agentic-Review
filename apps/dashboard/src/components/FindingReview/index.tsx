@@ -6,22 +6,28 @@ import type {
   FindingOccurrenceRef,
   OperatorPrincipal,
 } from "@agentic-review/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
+  AlertTitle,
   Button,
-  Collapse,
-  Input,
+  Card,
+  CardContent,
+  Chip,
   Pagination,
   Skeleton,
-  Space,
-  Table,
-  Tag,
+  Stack,
+  TextField,
   Tooltip,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOperatorAccess } from "@/components/OperatorAccess";
+import { DataTable } from "@/components/ui";
 import { findings } from "@/services/findings";
 import { ErrorNotice, timestamp } from "../ReviewRuns/common";
 import { evidencePollingViewVisible } from "../ReviewRuns/evidence-verification";
@@ -56,7 +62,6 @@ function occurrenceRef(finding: FindingOccurrence): FindingOccurrenceRef {
     ordinal: finding.ordinal,
   };
 }
-
 function FindingSession({
   result,
   principal,
@@ -108,7 +113,10 @@ function FindingSession({
         hasError: query.state.status === "error",
       }),
     queryFn: async () => {
-      const response = await findings.list(scope, { page, pageSize: 20 });
+      const response = await findings.list(scope, {
+        page,
+        pageSize: 20,
+      });
       if (!findingContextMatchesResult(response.context, result))
         throw new Error("The finding list does not match the selected immutable result.");
       return response;
@@ -153,7 +161,10 @@ function FindingSession({
     refetchOnWindowFocus: true,
     queryFn: () => {
       if (!history) throw new Error("Select a finding to inspect its history.");
-      return findings.history(scope, history, { page: historyPage, pageSize: 20 });
+      return findings.history(scope, history, {
+        page: historyPage,
+        pageSize: 20,
+      });
     },
   });
   const listError =
@@ -217,9 +228,16 @@ function FindingSession({
         principal,
       );
       await Promise.all([
-        client.invalidateQueries({ queryKey: baseKey, refetchType: "none" }),
-        client.invalidateQueries({ queryKey: ["review-runs", result.repositoryId] }),
-        client.invalidateQueries({ queryKey: ["review-run-decisions"] }),
+        client.invalidateQueries({
+          queryKey: baseKey,
+          refetchType: "none",
+        }),
+        client.invalidateQueries({
+          queryKey: ["review-runs", result.repositoryId],
+        }),
+        client.invalidateQueries({
+          queryKey: ["review-run-decisions"],
+        }),
       ]);
       if (!mounted.current) return;
       setReceipt(accepted);
@@ -240,10 +258,6 @@ function FindingSession({
   if ((!mayRead || denied) && !access.checking)
     return (
       <Alert
-        showIcon
-        type="info"
-        title="Finding records unavailable"
-        description="Repository read access is required. Drafts are retained for this session while access is refreshed."
         action={
           <Button
             disabled={saving}
@@ -259,33 +273,57 @@ function FindingSession({
                   ]),
                 );
             }}
+            variant="outlined"
           >
             Refresh finding access
           </Button>
         }
-      />
+        severity="info"
+      >
+        <AlertTitle>{"Finding records unavailable"}</AlertTitle>
+        {
+          "Repository read access is required. Drafts are retained for this session while access is refreshed."
+        }
+      </Alert>
     );
-  if (access.checking) return <Skeleton active paragraph={{ rows: 3 }} />;
+  if (access.checking) return <Skeleton variant="rounded" height={72} />;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Space wrap>
-        <Typography.Title level={5} style={{ margin: 0 }}>
+    <Stack component="section" spacing={3} sx={{ width: "100%", minWidth: 0 }}>
+      <Stack
+        spacing={2}
+        direction="row"
+        useFlexGap
+        sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+      >
+        <Typography
+          style={{
+            margin: 0,
+          }}
+          variant="h5"
+          component="h3"
+          sx={{ fontWeight: 500 }}
+        >
           Findings and dispositions
-        </Typography.Title>
-        <Button loading={list.isFetching} disabled={busy} onClick={() => void refresh()}>
+        </Typography>
+        <Button
+          loading={list.isFetching}
+          disabled={busy}
+          onClick={() => void refresh()}
+          variant="outlined"
+        >
           Refresh findings
         </Button>
-      </Space>
-      <Typography.Paragraph type="secondary">{findingPublicationNotice}</Typography.Paragraph>
+      </Stack>
+      <Typography variant="body1" component="p" color="text.secondary">
+        {findingPublicationNotice}
+      </Typography>
       {receipt && (
-        <Alert
-          showIcon
-          type="success"
-          title={
-            receipt.replayed ? "Existing disposition receipt received" : "Disposition recorded"
-          }
-          description={findingReceiptSummary(receipt.change)}
-        />
+        <Alert severity="success">
+          <AlertTitle>
+            {receipt.replayed ? "Existing disposition receipt received" : "Disposition recorded"}
+          </AlertTitle>
+          {findingReceiptSummary(receipt.change)}
+        </Alert>
       )}
       {listError ? (
         <ErrorNotice
@@ -294,91 +332,106 @@ function FindingSession({
           retry={() => void refresh()}
         />
       ) : !context || !list.data ? (
-        <Skeleton active />
+        <Skeleton variant="rounded" height={72} />
       ) : (
         <>
           {list.dataUpdatedAt > 0 && (
-            <Typography.Text type="secondary">
+            <Typography variant="body2" component="span" color="text.secondary">
               Last checked: {timestamp(new Date(list.dataUpdatedAt).toISOString())}. Refreshes every
               30 seconds while visible. Automatic refresh stops after an error.
-            </Typography.Text>
+            </Typography>
           )}
           {context.historical && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Historical result findings"
-              description="Changes here apply only to this saved result. They do not carry over to the latest activation or a different run. The reviewed execution context is checked again when you submit."
-            />
+            <Alert severity="warning">
+              <AlertTitle>{"Historical result findings"}</AlertTitle>
+              {
+                "Changes here apply only to this saved result. They do not carry over to the latest activation or a different run. The reviewed execution context is checked again when you submit."
+              }
+            </Alert>
           )}
           {context.modelAvailability !== "complete" && (
-            <Alert
-              showIcon
-              type="info"
-              title="Complete model findings are unavailable"
-              description={`Model output: ${context.modelAvailability.replaceAll("_", " ")}. Missing output does not establish that this result has no problems.`}
-            />
+            <Alert severity="info">
+              <AlertTitle>{"Complete model findings are unavailable"}</AlertTitle>
+              {`Model output: ${context.modelAvailability.replaceAll("_", " ")}. Missing output does not establish that this result has no problems.`}
+            </Alert>
           )}
           <FindingSummary summary={list.data.summary} />
-          <Collapse
-            items={[
-              {
-                key: "binding",
-                label: "Finding result identity and execution context",
-                children: <FindingBinding context={context} />,
-              },
-            ]}
-          />
-          <Table<FindingOccurrence>
-            size="small"
-            dataSource={list.data.items}
-            rowKey="key"
-            pagination={false}
-            scroll={{ x: 820 }}
-            locale={{
-              emptyText:
-                context.modelAvailability === "complete"
-                  ? "No findings were reported in this complete model output."
-                  : "No findings are available from a complete model output.",
-            }}
+          <Accordion key="binding" disableGutters elevation={0} sx={{ bgcolor: "transparent" }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+              <Typography variant="subtitle1" component="div">
+                {"Finding result identity and execution context"}
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0, pb: 3 }}>
+              <FindingBinding context={context} />
+            </AccordionDetails>
+          </Accordion>
+          <DataTable<FindingOccurrence>
+            rows={list.data.items}
             columns={[
               {
-                title: "Priority",
-                render: (_, finding) => (
-                  <Tag color={finding.priority < 2 ? "warning" : "default"}>
-                    P{finding.priority}
-                  </Tag>
+                id: "priority",
+                label: "Priority",
+                render: (finding) => (
+                  <Chip
+                    color={finding.priority < 2 ? "warning" : "default"}
+                    size="medium"
+                    label={<>P{finding.priority}</>}
+                    sx={{
+                      alignSelf: "flex-start",
+                    }}
+                  />
                 ),
+                minWidth: 96,
               },
               {
-                title: "Finding",
-                render: (_, finding) => (
-                  <Space orientation="vertical" size={0}>
-                    <Typography.Text strong>{finding.title}</Typography.Text>
-                    <Typography.Text type="secondary">
-                      {finding.path ?? "No location"}
-                      {finding.line === null ? "" : `:${finding.line}`}
-                    </Typography.Text>
-                  </Space>
+                id: "finding",
+                label: "Finding",
+                render: (finding) => (
+                  <Accordion disableGutters elevation={0} sx={{ bgcolor: "transparent" }}>
+                    <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+                      <Stack spacing={0.5}>
+                        <Typography variant="body1" component="span" sx={{ fontWeight: 500 }}>
+                          {finding.title}
+                        </Typography>
+                        <Typography variant="body2" component="span" color="text.secondary">
+                          {finding.path ?? "No location"}
+                          {finding.line === null ? "" : `:${finding.line}`}
+                        </Typography>
+                      </Stack>
+                    </AccordionSummary>
+                    <AccordionDetails sx={{ px: 0, pb: 3 }}>
+                      <OriginalFinding finding={finding} />
+                    </AccordionDetails>
+                  </Accordion>
                 ),
+                minWidth: 320,
               },
               {
-                title: "Disposition",
-                render: (_, finding) => (
-                  <Space orientation="vertical" size={0}>
-                    <Typography.Text>
+                id: "disposition",
+                label: "Disposition",
+                render: (finding) => (
+                  <Stack spacing={0.5}>
+                    <Typography variant="body2" component="span">
                       {findingStateLabel(finding.disposition.state)}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
+                    </Typography>
+                    <Typography variant="body2" component="span" color="text.secondary">
                       Version {finding.disposition.version}
-                    </Typography.Text>
-                  </Space>
+                    </Typography>
+                  </Stack>
                 ),
+                minWidth: 180,
               },
               {
-                title: "Actions",
-                render: (_, finding) => (
-                  <Space wrap>
+                id: "actions",
+                label: "Actions",
+                render: (finding) => (
+                  <Stack
+                    spacing={1}
+                    direction="row"
+                    useFlexGap
+                    sx={{ alignItems: "center", flexWrap: "wrap" }}
+                  >
                     {(["accept", "dismiss", "resolve", "reopen"] as FindingDispositionAction[]).map(
                       (action) => (
                         <Tooltip
@@ -391,12 +444,13 @@ function FindingSession({
                         >
                           <span>
                             <Button
-                              size="small"
+                              size="medium"
                               disabled={!access.can("review") || busy || editor !== null}
                               onClick={() => {
                                 setEditor(createFindingEditor(context, finding, action));
                                 setFailure(null);
                               }}
+                              variant="text"
                             >
                               {findingActionLabel(action)}
                             </Button>
@@ -405,178 +459,231 @@ function FindingSession({
                       ),
                     )}
                     <Button
-                      size="small"
+                      size="medium"
                       onClick={() => {
                         setHistory(occurrenceRef(finding));
                         setHistoryPage(1);
                       }}
+                      variant="text"
                     >
                       History
                     </Button>
-                  </Space>
+                  </Stack>
                 ),
+                minWidth: 360,
               },
             ]}
-            expandable={{ expandedRowRender: (finding) => <OriginalFinding finding={finding} /> }}
+            getRowId={(row) => row.key}
+            emptyTitle={
+              context.modelAvailability === "complete"
+                ? "No findings were reported in this complete model output."
+                : "No findings are available from a complete model output."
+            }
+            ariaLabel="Findings and dispositions"
           />
-          <Pagination
-            current={page}
-            pageSize={20}
-            total={list.data.total}
-            showSizeChanger={false}
-            hideOnSinglePage
-            disabled={busy || editor !== null}
-            onChange={(next) => {
-              setPage(next);
-              setHistory(null);
-            }}
-          />
+          {Math.ceil(list.data.total / 20) > 1 && (
+            <Pagination
+              disabled={busy || editor !== null}
+              onChange={(_event, next) => {
+                setPage(next);
+                setHistory(null);
+              }}
+              page={page}
+              count={Math.ceil(list.data.total / 20)}
+              color="primary"
+              size="medium"
+            />
+          )}
           {!access.can("review") && (
-            <Typography.Text type="secondary">
+            <Typography variant="body2" component="span" color="text.secondary">
               Reviewer access is required to change dispositions. Original findings and history
               remain readable.
-            </Typography.Text>
+            </Typography>
           )}
         </>
       )}
       {editor && (
-        <Space
-          orientation="vertical"
-          style={{
-            width: "100%",
-            border: "1px solid var(--ant-color-border-secondary, #f0f0f0)",
-            borderRadius: 8,
-            padding: 16,
-          }}
-        >
-          <Typography.Text strong>
-            {findingActionLabel(editor.action)} · {editor.occurrence.title}
-          </Typography.Text>
-          <Alert
-            showIcon
-            type={editor.action === "dismiss" || editor.action === "resolve" ? "warning" : "info"}
-            title="Review before recording"
-            description={findingActionDescription(editor.action)}
-          />
-          <OriginalFinding finding={editor.occurrence} />
-          <Collapse
-            items={[
-              {
-                key: "reviewed",
-                label: "Reviewed result and execution context",
-                children: <FindingBinding context={editor.context} />,
-              },
-            ]}
-          />
-          <Typography.Text>Reason</Typography.Text>
-          <Input.TextArea
-            aria-label="Finding disposition reason"
-            rows={3}
-            maxLength={2_048}
-            showCount
-            value={editor.reason}
-            disabled={saving || reviewing || editor.request !== null}
-            onChange={(event) =>
-              setEditor((current) =>
-                current && !current.request ? { ...current, reason: event.target.value } : current,
-              )
-            }
-            placeholder="Explain the disposition for this exact original finding."
-          />
-          {editor.request && (
-            <Typography.Text type="secondary">
-              The submitted intent is locked. Retry sends the exact original request and may return
-              a historical receipt after later changes. To revise it, review and explicitly use the
-              latest state.
-            </Typography.Text>
-          )}
-          {editReason && (
-            <Alert
-              showIcon
-              type="warning"
-              title="Fresh review or access is required"
-              description={`${editReason} Your reason and original binding are preserved.`}
-            />
-          )}
-          {failure !== null && (
-            <Alert
-              showIcon
-              type="error"
-              title="Disposition request could not be completed"
-              description={
-                failure instanceof Error ? failure.message : "The operation could not be completed."
-              }
-            />
-          )}
-          {editor.candidate && (
-            <Space orientation="vertical" style={{ width: "100%" }}>
-              <Typography.Text strong>Latest state for your review</Typography.Text>
-              <OriginalFinding finding={editor.candidate.occurrence} />
-              <FindingBinding context={editor.candidate.context} />
-              <Button
-                disabled={
-                  busy ||
-                  !context ||
-                  !currentFinding ||
-                  !findingBindingMatches(editor.candidate, context, currentFinding)
+        <Card elevation={0} sx={{ width: "100%", bgcolor: "background.default" }}>
+          <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+            <Stack spacing={2}>
+              <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                {findingActionLabel(editor.action)} · {editor.occurrence.title}
+              </Typography>
+              <Alert
+                severity={
+                  editor.action === "dismiss" || editor.action === "resolve" ? "warning" : "info"
                 }
-                onClick={() => {
-                  if (
-                    !busy &&
-                    context &&
-                    currentFinding &&
-                    editor.candidate &&
-                    findingBindingMatches(editor.candidate, context, currentFinding)
-                  ) {
-                    setEditor(acceptReviewedFinding(editor));
-                    setFailure(null);
-                  }
-                }}
               >
-                Use this reviewed finding state
-              </Button>
-            </Space>
-          )}
-          <Space wrap>
-            <Button
-              type="primary"
-              loading={saving}
-              disabled={busy || Boolean(editReason) || !editor.reason.trim()}
-              onClick={() => void submit()}
-            >
-              {editor.request ? "Retry original submission" : "Record disposition in platform"}
-            </Button>
-            <Button
-              disabled={busy || !mayRead}
-              loading={reviewing}
-              onClick={() => void loadLatest()}
-            >
-              Review latest finding state
-            </Button>
-            <Button
-              disabled={saving || reviewing}
-              onClick={() => {
-                setEditor(null);
-                setFailure(null);
-              }}
-            >
-              Discard draft
-            </Button>
-          </Space>
-        </Space>
+                <AlertTitle>{"Review before recording"}</AlertTitle>
+                {findingActionDescription(editor.action)}
+              </Alert>
+              <OriginalFinding finding={editor.occurrence} />
+              <Accordion
+                key="reviewed"
+                disableGutters
+                elevation={0}
+                sx={{ bgcolor: "transparent" }}
+              >
+                <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+                  <Typography variant="subtitle1" component="div">
+                    {"Reviewed result and execution context"}
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ px: 0, pb: 3 }}>
+                  <FindingBinding context={editor.context} />
+                </AccordionDetails>
+              </Accordion>
+              <TextField
+                rows={3}
+                value={editor.reason}
+                disabled={saving || reviewing || editor.request !== null}
+                onChange={(event) =>
+                  setEditor((current) =>
+                    current && !current.request
+                      ? {
+                          ...current,
+                          reason: event.target.value,
+                        }
+                      : current,
+                  )
+                }
+                placeholder="Explain the disposition for this exact original finding."
+                multiline
+                fullWidth
+                label="Finding disposition reason"
+                slotProps={{
+                  htmlInput: {
+                    maxLength: 2_048,
+                  },
+                }}
+                helperText={`${editor.reason.length} / 2048`}
+              />
+              {editor.request && (
+                <Typography variant="body2" component="span" color="text.secondary">
+                  The submitted intent is locked. Retry sends the exact original request and may
+                  return a historical receipt after later changes. To revise it, review and
+                  explicitly use the latest state.
+                </Typography>
+              )}
+              {editReason && (
+                <Alert severity="warning">
+                  <AlertTitle>{"Fresh review or access is required"}</AlertTitle>
+                  {`${editReason} Your reason and original binding are preserved.`}
+                </Alert>
+              )}
+              {failure !== null && (
+                <Alert severity="error">
+                  <AlertTitle>{"Disposition request could not be completed"}</AlertTitle>
+                  {failure instanceof Error
+                    ? failure.message
+                    : "The operation could not be completed."}
+                </Alert>
+              )}
+              {editor.candidate && (
+                <Stack
+                  style={{
+                    width: "100%",
+                  }}
+                  spacing={1.5}
+                >
+                  <Typography variant="subtitle1" component="h4" sx={{ fontWeight: 500 }}>
+                    Latest state for your review
+                  </Typography>
+                  <OriginalFinding finding={editor.candidate.occurrence} />
+                  <FindingBinding context={editor.candidate.context} />
+                  <Button
+                    disabled={
+                      busy ||
+                      !context ||
+                      !currentFinding ||
+                      !findingBindingMatches(editor.candidate, context, currentFinding)
+                    }
+                    onClick={() => {
+                      if (
+                        !busy &&
+                        context &&
+                        currentFinding &&
+                        editor.candidate &&
+                        findingBindingMatches(editor.candidate, context, currentFinding)
+                      ) {
+                        setEditor(acceptReviewedFinding(editor));
+                        setFailure(null);
+                      }
+                    }}
+                    variant="outlined"
+                  >
+                    Use this reviewed finding state
+                  </Button>
+                </Stack>
+              )}
+              <Stack
+                spacing={1}
+                direction="row"
+                useFlexGap
+                sx={{ alignItems: "center", flexWrap: "wrap" }}
+              >
+                <Button
+                  loading={saving}
+                  disabled={busy || Boolean(editReason) || !editor.reason.trim()}
+                  onClick={() => void submit()}
+                  variant="contained"
+                >
+                  {editor.request ? "Retry original submission" : "Record disposition in platform"}
+                </Button>
+                <Button
+                  disabled={busy || !mayRead}
+                  loading={reviewing}
+                  onClick={() => void loadLatest()}
+                  variant="outlined"
+                >
+                  Review latest finding state
+                </Button>
+                <Button
+                  disabled={saving || reviewing}
+                  onClick={() => {
+                    setEditor(null);
+                    setFailure(null);
+                  }}
+                  variant="text"
+                >
+                  Discard draft
+                </Button>
+              </Stack>
+            </Stack>
+          </CardContent>
+        </Card>
       )}
       {history && (
-        <Space orientation="vertical" style={{ width: "100%" }}>
-          <Space wrap>
-            <Typography.Title level={5} style={{ margin: 0 }}>
+        <Stack
+          style={{
+            width: "100%",
+          }}
+          spacing={1.5}
+        >
+          <Stack
+            spacing={1}
+            direction="row"
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}
+          >
+            <Typography
+              style={{
+                margin: 0,
+              }}
+              variant="subtitle1"
+              component="h3"
+              sx={{ fontWeight: 500 }}
+            >
               Finding disposition history
-            </Typography.Title>
-            <Button onClick={() => setHistory(null)}>Close history</Button>
-          </Space>
-          <Typography.Paragraph type="secondary">
+            </Typography>
+            <Button onClick={() => setHistory(null)} variant="text">
+              Close history
+            </Button>
+          </Stack>
+          <Typography variant="body2" component="p" color="text.secondary">
             Immutable entries preserve the actor, reason, version, and execution context. An earlier
             receipt does not describe the current disposition.
-          </Typography.Paragraph>
+          </Typography>
           {historyQuery.isError ? (
             <ErrorNotice
               title="Could not load disposition history"
@@ -584,7 +691,7 @@ function FindingSession({
               retry={() => void historyQuery.refetch()}
             />
           ) : !historyQuery.data ? (
-            <Skeleton active />
+            <Skeleton variant="rounded" height={72} />
           ) : (
             <>
               {historyQuery.data.items.length ? (
@@ -592,55 +699,61 @@ function FindingSession({
                   <FindingEvent key={event.id} event={event} />
                 ))
               ) : (
-                <Typography.Text type="secondary">
+                <Typography variant="body2" component="span" color="text.secondary">
                   No disposition has been recorded for this finding.
-                </Typography.Text>
+                </Typography>
               )}
-              <Pagination
-                current={historyPage}
-                pageSize={20}
-                total={historyQuery.data.total}
-                hideOnSinglePage
-                showSizeChanger={false}
-                disabled={historyQuery.isFetching}
-                onChange={setHistoryPage}
-              />
+              {Math.ceil(historyQuery.data.total / 20) > 1 && (
+                <Pagination
+                  disabled={historyQuery.isFetching}
+                  onChange={(_event, next) => setHistoryPage(next)}
+                  page={historyPage}
+                  count={Math.ceil(historyQuery.data.total / 20)}
+                  color="primary"
+                  size="medium"
+                />
+              )}
             </>
           )}
-        </Space>
+        </Stack>
       )}
-      <Collapse
-        activeKey={comparisonOpen ? ["comparison"] : []}
-        onChange={(keys) => setComparisonOpen(keys.includes("comparison"))}
-        items={[
-          {
-            key: "comparison",
-            label: "Compare with an earlier saved result",
-            children: comparisonOpen ? (
-              <FindingComparison
-                result={result}
-                principal={principal}
-                onDenied={markComparisonDenied}
-              />
-            ) : null,
-          },
-        ]}
-      />
-    </Space>
+      <Accordion
+        key="comparison"
+        disableGutters
+        elevation={0}
+        sx={{ bgcolor: "transparent" }}
+        expanded={comparisonOpen}
+        onChange={(_event, expanded) => setComparisonOpen(expanded)}
+      >
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ px: 0, minHeight: 56 }}>
+          <Typography variant="subtitle1" component="div">
+            {"Compare with an earlier saved result"}
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 0, pb: 3 }}>
+          {comparisonOpen ? (
+            <FindingComparison
+              result={result}
+              principal={principal}
+              onDenied={markComparisonDenied}
+            />
+          ) : null}
+        </AccordionDetails>
+      </Accordion>
+    </Stack>
   );
 }
-
 export function FindingReview({ result }: { result: DashboardReviewRunResult }) {
   const access = useOperatorAccess(result.repositoryId);
-  if (!access.principal) return <Skeleton active paragraph={{ rows: 2 }} />;
+  if (!access.principal) return <Skeleton variant="rounded" height={48} />;
   if (findings.mode === "sample")
     return (
-      <Alert
-        showIcon
-        type="info"
-        title="Sample finding preview"
-        description="The original sample model output is shown above. Finding dispositions and comparisons require a connected control plane; this preview does not simulate those records or change sample approval eligibility."
-      />
+      <Alert severity="info">
+        <AlertTitle>{"Sample finding preview"}</AlertTitle>
+        {
+          "The original sample model output is shown above. Finding dispositions and comparisons require a connected control plane; this preview does not simulate those records or change sample approval eligibility."
+        }
+      </Alert>
     );
   return (
     <FindingSession

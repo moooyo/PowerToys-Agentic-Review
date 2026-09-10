@@ -1,4 +1,4 @@
-import { Modal, Typography } from "antd";
+import { Dialog, DialogContent, DialogTitle, Stack, Typography } from "@mui/material";
 import { createContext, type ReactNode, useContext, useState } from "react";
 import { nextConfigurationScopeState } from "./state";
 
@@ -28,22 +28,29 @@ export function ConfigurationScopeGuard({
   return (
     <ConfigurationAvailable.Provider value={available}>
       {children}
-      <Modal
+      <Dialog
         open={!available}
-        title="Repository confirmation is unavailable"
-        closable={false}
-        mask={{ closable: false }}
-        keyboard={false}
-        footer={null}
-        zIndex={3000}
-        destroyOnHidden
+        onClose={() => {
+          // Only repository confirmation can unlock the preserved editors.
+        }}
+        fullWidth
+        maxWidth="sm"
+        aria-labelledby="configuration-scope-guard-title"
+        sx={{ zIndex: 3000 }}
       >
-        <Typography.Paragraph>
-          Your open editors and unsaved changes are preserved. Confirm this repository again to
-          continue. Choosing a different repository closes these editors.
-        </Typography.Paragraph>
-        {fallback}
-      </Modal>
+        <DialogTitle id="configuration-scope-guard-title">
+          Repository confirmation is unavailable
+        </DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            <Typography>
+              Your open editors and unsaved changes are preserved. Confirm this repository again to
+              continue. Choosing a different repository closes these editors.
+            </Typography>
+            {fallback}
+          </Stack>
+        </DialogContent>
+      </Dialog>
     </ConfigurationAvailable.Provider>
   );
 }

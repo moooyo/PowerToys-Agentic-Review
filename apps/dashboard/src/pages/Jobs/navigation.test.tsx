@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
   jobs: [] as { repositoryId: string; jobId: string }[],
   close: undefined as (() => void) | undefined,
 }));
-vi.mock("@umijs/max", () => ({
+vi.mock("react-router-dom", () => ({
   useLocation: () => ({ pathname: "/jobs", search: state.search }),
   useNavigate: () => state.navigate,
 }));
@@ -47,26 +47,7 @@ vi.mock("@/components/JobDetails", () => ({
 vi.mock("@/components/PageHeader", () => ({ PageHeader: () => null }));
 vi.mock("@/components/StatusTag", () => ({ StatusTag: () => null }));
 vi.mock("@/services/review-control", () => ({ reviewControl: {} }));
-vi.mock("@ant-design/pro-components", () => ({ ProTable: () => null }));
-vi.mock("@ant-design/icons", () => ({ FilterOutlined: () => null, ReloadOutlined: () => null }));
-vi.mock("antd", () => {
-  const Content = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
-  return {
-    Alert: ({ title, description }: { title?: ReactNode; description?: ReactNode }) => (
-      <aside>
-        {title}
-        {description}
-      </aside>
-    ),
-    Button: Content,
-    Card: Content,
-    Empty: Object.assign(Content, { PRESENTED_IMAGE_SIMPLE: "simple" }),
-    Input: { Search: Content },
-    Popover: Content,
-    Radio: { Group: Content },
-    Select: Content,
-  };
-});
+vi.mock("@/components/ui", () => ({ DataTable: () => null }));
 
 beforeEach(() => {
   state.search = "?repositoryId=repository-a&jobId=job-a";

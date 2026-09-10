@@ -3,12 +3,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InitialState } from "../../app";
+import type { InitialState } from "@/state/session";
 import { ReviewControlHttpError } from "../../services/review-control/errors";
 import { OperatorAccessGate, useOperatorAccess } from "./index";
 
 const model = vi.hoisted(() => ({ initialState: null as InitialState | null }));
-vi.mock("@umijs/max", () => ({ useModel: () => model }));
+vi.mock("@/state/session", () => ({ useOperatorSession: () => model }));
 vi.mock("@/services/access", () => ({ access: { mode: "connected", context: vi.fn() } }));
 vi.mock("@/services/review-control/http-client", () => ({
   OPERATOR_ACCESS_DENIED_EVENT: "operator-access-denied",
@@ -17,13 +17,9 @@ vi.mock(
   "@/services/review-control/errors",
   async () => import("../../services/review-control/errors"),
 );
-vi.mock("antd", () => ({
-  Alert: ({ title, description }: { title: string; description: string }) => (
-    <aside>
-      {title}
-      {description}
-    </aside>
-  ),
+vi.mock("@mui/material", () => ({
+  Alert: ({ children }: { children: ReactNode }) => <aside>{children}</aside>,
+  AlertTitle: ({ children }: { children: ReactNode }) => <strong>{children}</strong>,
   Button: ({ children }: { children: ReactNode }) => <button type="button">{children}</button>,
   Skeleton: () => <div>Loading permissions</div>,
 }));

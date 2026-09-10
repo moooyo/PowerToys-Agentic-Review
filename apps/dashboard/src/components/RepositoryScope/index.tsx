@@ -1,14 +1,22 @@
 import type { ManagedRepositorySummary } from "@agentic-review/contracts";
-import { DatabaseOutlined, ReloadOutlined } from "@ant-design/icons";
+import RefreshRounded from "@mui/icons-material/RefreshRounded";
+import {
+  Alert,
+  AlertTitle,
+  Autocomplete,
+  Box,
+  Button,
+  Skeleton,
+  Stack,
+  TextField,
+} from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useLocation, useNavigate } from "@umijs/max";
-import { Alert, Button, Select, Skeleton, Space, Tooltip } from "antd";
-import type { MouseEventHandler, ReactNode } from "react";
+import { forwardRef, type MouseEventHandler, type ReactNode } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useOperatorAccess } from "@/components/OperatorAccess";
 import { repositories } from "@/services/repositories";
 import { ReviewControlHttpError } from "@/services/review-control/errors";
 import { parseRepositoryScope, pathWithRepositoryScope, searchWithRepositoryScope } from "./scope";
-import "./index.css";
 
 async function listScopeRepositories(): Promise<ManagedRepositorySummary[]> {
   const result: ManagedRepositorySummary[] = [];
@@ -115,97 +123,92 @@ export function useRepositoryScope() {
   };
 }
 
-export function RepositoryScopedLink({
-  to,
-  children,
-  ...props
-}: {
-  to: string;
-  children: ReactNode;
-  onClick?: MouseEventHandler<HTMLAnchorElement>;
-  className?: string;
-  title?: string;
-  "aria-label"?: string;
-}) {
+export const RepositoryScopedLink = forwardRef<
+  HTMLAnchorElement,
+  {
+    to: string;
+    children: ReactNode;
+    onClick?: MouseEventHandler<HTMLAnchorElement>;
+    className?: string;
+    title?: string;
+    "aria-label"?: string;
+  }
+>(function RepositoryScopedLink({ to, children, ...props }, ref) {
   const location = useLocation();
   return (
-    <Link {...props} to={pathWithRepositoryScope(to, location.search)}>
+    <Link ref={ref} {...props} to={pathWithRepositoryScope(to, location.search)}>
       {children}
     </Link>
   );
-}
+});
 
-export function RepositorySelector({ collapsed = false }: { collapsed?: boolean }) {
+export function RepositorySelector({
+  collapsed = false,
+  fullWidth = false,
+}: {
+  collapsed?: boolean;
+  fullWidth?: boolean;
+}) {
   const location = useLocation();
   const navigate = useNavigate();
   const scope = useRepositoryScope();
   const selection = parseRepositoryScope(location.search);
   const { query } = useAuthorizedRepositories();
+  const all = { label: "All repositories", value: "__all__" };
   const options = [
-    { label: "All repositories", value: "__all__" },
+    all,
     ...(query.data ?? []).map((item) => ({
       label: `${item.fullName}${item.enabled ? "" : " (disabled)"}`,
       value: item.id,
     })),
   ];
-  if (scope.repositoryId && !options.some((item) => item.value === scope.repositoryId)) {
+  if (scope.repositoryId && !options.some((item) => item.value === scope.repositoryId))
     options.push({ label: scope.label, value: scope.repositoryId });
-  }
-  if (selection.kind === "invalid") {
+  if (selection.kind === "invalid")
     options.push({ label: "Invalid repository scope", value: "__invalid__" });
-  }
+  const value =
+    selection.kind === "all"
+      ? "__all__"
+      : selection.kind === "invalid"
+        ? "__invalid__"
+        : selection.repositoryId;
   return (
-    <div className={`repository-selector${collapsed ? " repository-selector--collapsed" : ""}`}>
-      {!collapsed ? <label htmlFor="repository-scope">Repository</label> : null}
-      <Tooltip title={collapsed ? scope.label : undefined} placement="right">
-        <Select
-          id="repository-scope"
-          aria-label="Repository scope"
-          className="repository-selector__input"
-          showSearch
-          optionFilterProp="label"
-          loading={query.isPending}
-          status={scope.error || query.isError ? "error" : undefined}
-          prefix={collapsed ? <DatabaseOutlined /> : undefined}
-          value={
-            selection.kind === "all"
-              ? "__all__"
-              : selection.kind === "invalid"
-                ? "__invalid__"
-                : selection.repositoryId
-          }
-          options={options}
-          popupMatchSelectWidth={collapsed ? 290 : false}
-          onChange={(value: string) => {
-            if (value === "__invalid__") return;
-            navigate({
-              pathname: location.pathname,
-              search: searchWithRepositoryScope(
-                location.search,
-                value === "__all__" ? undefined : value,
-              ),
-              hash: location.hash,
-            });
-          }}
-        />
-      </Tooltip>
-      {query.isError && !collapsed ? (
-        <div className="repository-selector__error">
-          <span>Repository list unavailable</span>
-          <Button
-            type="link"
-            size="small"
-            icon={<ReloadOutlined />}
-            onClick={() => void query.refetch()}
-          >
-            Retry
-          </Button>
-        </div>
-      ) : null}
-      {scope.noAccess && !collapsed ? (
-        <div className="repository-selector__error">No repository access</div>
-      ) : null}
-    </div>
+    <Box
+      sx={{
+        width: fullWidth ? "100%" : { xs: 176, sm: collapsed ? 220 : 284 },
+        flex: fullWidth ? 1 : undefined,
+        minWidth: 0,
+      }}
+    >
+      <Autocomplete
+        id="repository-scope"
+        disableClearable
+        size="small"
+        options={options}
+        loading={query.isPending}
+        value={options.find((option) => option.value === value) ?? all}
+        isOptionEqualToValue={(option, selected) => option.value === selected.value}
+        onChange={(_event, next) => {
+          if (next.value === "__invalid__") return;
+          navigate({
+            pathname: location.pathname,
+            search: searchWithRepositoryScope(
+              location.search,
+              next.value === "__all__" ? undefined : next.value,
+            ),
+            hash: location.hash,
+          });
+        }}
+        renderInput={(params) => (
+          <TextField {...params} label="Repository" error={Boolean(scope.error || query.isError)} />
+        )}
+      />
+      {query.isError && !collapsed && (
+        <Button size="small" startIcon={<RefreshRounded />} onClick={() => void query.refetch()}>
+          Retry repository list
+        </Button>
+      )}
+    </Box>
   );
 }
 
@@ -214,33 +217,35 @@ export function RepositoryScopeUnavailable() {
   const location = useLocation();
   const navigate = useNavigate();
   return (
-    <div className="repository-scope-unavailable">
+    <Box className="repository-scope-unavailable" sx={{ py: 2 }}>
       {scope.error ? (
-        <Alert
-          title={scope.noAccess ? "No repository access" : "Repository unavailable"}
-          description={scope.error}
-          type={scope.noAccess ? "info" : "error"}
-          showIcon
-          action={
-            <Space wrap>
-              <Button onClick={() => void scope.refresh()}>Refresh</Button>
-              <Button
-                onClick={() =>
-                  navigate({
-                    pathname: location.pathname,
-                    search: searchWithRepositoryScope(location.search),
-                    hash: location.hash,
-                  })
-                }
-              >
-                Show all repositories
-              </Button>
-            </Space>
-          }
-        />
+        <Alert severity={scope.noAccess ? "info" : "error"}>
+          <AlertTitle>
+            {scope.noAccess ? "No repository access" : "Repository unavailable"}
+          </AlertTitle>
+          {scope.error}
+          <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1, mt: 2 }}>
+            <Button onClick={() => void scope.refresh()}>Refresh</Button>
+            <Button
+              onClick={() =>
+                navigate({
+                  pathname: location.pathname,
+                  search: searchWithRepositoryScope(location.search),
+                  hash: location.hash,
+                })
+              }
+            >
+              Show all repositories
+            </Button>
+          </Stack>
+        </Alert>
       ) : (
-        <Skeleton active title={{ width: 240 }} paragraph={{ rows: 3 }} />
+        <Stack spacing={1}>
+          <Skeleton width={240} height={36} />
+          <Skeleton height={56} />
+          <Skeleton height={120} />
+        </Stack>
       )}
-    </div>
+    </Box>
   );
 }

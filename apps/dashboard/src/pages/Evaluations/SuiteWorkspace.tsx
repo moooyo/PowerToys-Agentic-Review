@@ -1,18 +1,27 @@
 import * as C from "@agentic-review/contracts";
 import {
   Alert,
+  AlertTitle,
+  Autocomplete,
+  Box,
   Button,
   Card,
-  Empty,
-  Form,
-  Input,
+  CardContent,
+  CardHeader,
+  Chip,
   List,
-  Select,
-  Space,
-  Tag,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  Pagination,
+  Stack,
+  Tab,
+  Tabs,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
 import { useEffect, useRef, useState } from "react";
+import { EmptyState } from "@/components/ui";
 import { BatchWorkspace } from "./BatchWorkspace";
 import { CaseEditor } from "./CaseEditor";
 import {
@@ -78,53 +87,172 @@ function CreateSuite({
     if (!issues.length) mutation.submit(request);
   };
   return (
-    <Card size="small" title="Create sample set">
-      <Form layout="vertical" disabled={locked}>
-        <Form.Item label="Name" required>
-          <Input value={name} maxLength={128} onChange={(event) => setName(event.target.value)} />
-        </Form.Item>
-        <Form.Item label="Description">
-          <Input.TextArea
-            value={description}
-            maxLength={2048}
-            onChange={(event) => setDescription(event.target.value)}
+    <Card variant="outlined">
+      <CardHeader
+        title={"Create sample set"}
+        slotProps={{
+          title: {
+            variant: "subtitle1",
+            component: "h3",
+          },
+        }}
+      />
+      <CardContent>
+        <Stack
+          disabled={locked}
+          component="fieldset"
+          spacing={2}
+          sx={{
+            border: 0,
+            p: 0,
+            m: 0,
+            minWidth: 0,
+          }}
+        >
+          <TextField
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            fullWidth
+            label={"Name"}
+            required={true}
+            disabled={locked}
+            slotProps={{
+              htmlInput: {
+                maxLength: 128,
+              },
+            }}
           />
-        </Form.Item>
-        <div className="evaluation-field-grid">
-          <Form.Item label="Workflow">
-            <Select
-              value={workflow}
+          <TextField
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            fullWidth
+            label={"Description"}
+            disabled={locked}
+            slotProps={{
+              htmlInput: {
+                maxLength: 2048,
+              },
+            }}
+            multiline
+            minRows={2}
+          />
+          <div className="evaluation-field-grid">
+            <Autocomplete
               options={(kind === "pull_request"
                 ? (["pr_static_build", "pr_ui"] as const)
                 : (["issue_triage", "issue_validation"] as const)
-              ).map((value) => ({ value, label: workflowLabels[value] }))}
-              onChange={(value) => {
-                setWorkflow(value);
-                setTarget(value === "pr_ui" ? "windows_desktop" : "headless");
+              ).map((value) => ({
+                value,
+                label: workflowLabels[value],
+              }))}
+              disablePortal
+              fullWidth
+              disabled={locked}
+              value={
+                (kind === "pull_request"
+                  ? (["pr_static_build", "pr_ui"] as const)
+                  : (["issue_triage", "issue_validation"] as const)
+                )
+                  .map((value) => ({
+                    value,
+                    label: workflowLabels[value],
+                  }))
+                  .find((option) => option.value === workflow) ??
+                (workflow == null || String(workflow) === ""
+                  ? null
+                  : {
+                      value: workflow as NonNullable<typeof workflow>,
+                      label: String(workflow),
+                    })
+              }
+              onChange={(_event, option) => {
+                if (option !== null)
+                  ((value) => {
+                    setWorkflow(value);
+                    setTarget(value === "pr_ui" ? "windows_desktop" : "headless");
+                  })(option.value as NonNullable<typeof workflow>);
               }}
+              getOptionLabel={(option) => option.label}
+              isOptionEqualToValue={(option, selected) => option.value === selected.value}
+              getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={"Workflow"}
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: {
+                      ...params.slotProps.htmlInput,
+                      "aria-label": "Workflow",
+                    },
+                  }}
+                />
+              )}
+              disableClearable={Boolean(workflow)}
+              getOptionKey={(option) => option.value}
             />
-          </Form.Item>
-          <Form.Item label="Target">
-            <Select
-              value={target}
-              options={targets.map((value) => ({ value, label: targetLabels[value] }))}
-              onChange={setTarget}
+            <Autocomplete
+              options={targets.map((value) => ({
+                value,
+                label: targetLabels[value],
+              }))}
+              disablePortal
+              fullWidth
+              disabled={locked}
+              value={
+                targets
+                  .map((value) => ({
+                    value,
+                    label: targetLabels[value],
+                  }))
+                  .find((option) => option.value === target) ??
+                (target == null || String(target) === ""
+                  ? null
+                  : {
+                      value: target as NonNullable<typeof target>,
+                      label: String(target),
+                    })
+              }
+              onChange={(_event, option) => {
+                if (option !== null) setTarget(option.value as NonNullable<typeof target>);
+              }}
+              getOptionLabel={(option) => option.label}
+              isOptionEqualToValue={(option, selected) => option.value === selected.value}
+              getOptionDisabled={(option) => "disabled" in option && option.disabled === true}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={"Target"}
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: {
+                      ...params.slotProps.htmlInput,
+                      "aria-label": "Target",
+                    },
+                  }}
+                />
+              )}
+              disableClearable={Boolean(target)}
+              getOptionKey={(option) => option.value}
             />
-          </Form.Item>
-        </div>
-      </Form>
-      <p className="evaluation-meta">
-        Workflow and target stay fixed for this sample set. Creation does not start any execution.
-      </p>
-      {error ? <Alert type="error" title={error} /> : null}
-      <MutationNotice mutation={mutation} />
-      <Button type="primary" disabled={locked} loading={mutation.busy} onClick={create}>
-        Create sample set
-      </Button>
+          </div>
+        </Stack>
+        <p className="evaluation-meta">
+          Workflow and target stay fixed for this sample set. Creation does not start any execution.
+        </p>
+        {error ? (
+          <Alert severity={"error"}>
+            <AlertTitle>{error}</AlertTitle>
+          </Alert>
+        ) : null}
+        <MutationNotice mutation={mutation} />
+        <Button disabled={locked} loading={mutation.busy} onClick={create} variant="contained">
+          Create sample set
+        </Button>
+      </CardContent>
     </Card>
   );
 }
-
 interface EditorState {
   suiteId: string;
   revision: number;
@@ -144,6 +272,7 @@ export function SuiteWorkspace({
   sources: C.EvaluationSourceSummaryV1[];
   active: boolean;
 }) {
+  const [suitePage, setSuitePage] = useState(1);
   const page = useEvaluationPage(),
     refresh = useRefreshEvaluations();
   const [selected, setSelected] = useState<string | null>(null),
@@ -164,7 +293,10 @@ export function SuiteWorkspace({
       live.current = false;
     };
   }, []);
-  const scope = { repositoryId: page.repositoryId, suiteId: selected ?? "" };
+  const scope = {
+    repositoryId: page.repositoryId,
+    suiteId: selected ?? "",
+  };
   const detail = useEvaluationQuery(
     ["suite", selected],
     (signal) => page.api.getSuite(scope, signal),
@@ -202,7 +334,12 @@ export function SuiteWorkspace({
     (request) => page.api.publishSuite(scope, request, page.principal),
     (result) => {
       setEditor((previous) =>
-        previous ? { ...previous, revision: result.sourceDraftRevision + 1 } : null,
+        previous
+          ? {
+              ...previous,
+              revision: result.sourceDraftRevision + 1,
+            }
+          : null,
       );
       setVersionId(result.id);
       setView("versions");
@@ -269,63 +406,104 @@ export function SuiteWorkspace({
     const issues = C.getEvaluationSuitePublicationIssues(editor.draft);
     setError(issues[0] ?? null);
     if (!issues.length)
-      publish.submit({ changeId: newIdentity(), expectedRevision: editor.revision });
+      publish.submit({
+        changeId: newIdentity(),
+        expectedRevision: editor.revision,
+      });
   };
   const add = (source: C.EvaluationSourceSummaryV1) => {
     if (!editor || locked || view !== "draft" || editor.draft.cases.length >= 32) return;
     setEditor({
       ...editor,
-      draft: { ...editor.draft, cases: [...editor.draft.cases, newCase(source)] },
+      draft: {
+        ...editor.draft,
+        cases: [...editor.draft.cases, newCase(source)],
+      },
     });
   };
   return (
     <div className="evaluation-kind-workspace">
       <div className="evaluation-workspace-grid">
-        <Card
-          title={`${kind === "pull_request" ? "PR" : "Issue"} sample sets`}
-          className="evaluation-suite-navigation"
-          extra={
-            page.allowsConfigure ? (
-              <Button
-                size="small"
-                disabled={!page.canConfigure || pending || dirty}
-                onClick={() => {
-                  setCreateVisited(true);
-                  setCreateOpen((value) => !value);
-                }}
-              >
-                New set
-              </Button>
-            ) : null
-          }
-        >
-          <List<C.EvaluationSuiteSummaryV1>
-            dataSource={suites}
-            pagination={{ pageSize: 10, hideOnSinglePage: true }}
-            locale={{ emptyText: "No sample sets for this item kind." }}
-            renderItem={(suite) => (
-              <List.Item>
+        <Card className="evaluation-suite-navigation" variant="outlined">
+          <CardHeader
+            title={`${kind === "pull_request" ? "PR" : "Issue"} sample sets`}
+            action={
+              page.allowsConfigure ? (
                 <Button
-                  type={selected === suite.id ? "primary" : "text"}
-                  className="evaluation-suite-choice"
-                  disabled={(pending || dirty || reloading) && selected !== suite.id}
-                  onClick={() => select(suite.id)}
+                  disabled={!page.canConfigure || pending || dirty}
+                  onClick={() => {
+                    setCreateVisited(true);
+                    setCreateOpen((value) => !value);
+                  }}
+                  variant="outlined"
                 >
-                  <span>{suite.name}</span>
-                  <span className="evaluation-meta">
-                    {workflowLabels[suite.workflowKind]} · {targetLabels[suite.target]}
-                    <br />
-                    {suite.caseCount} draft cases · revision {suite.draftRevision}
-                  </span>
+                  New set
                 </Button>
-              </List.Item>
-            )}
+              ) : null
+            }
+            slotProps={{
+              title: {
+                variant: "subtitle1",
+                component: "h3",
+              },
+            }}
           />
-          {dirty ? (
-            <p className="evaluation-meta">
-              Save or discard the current draft before opening another set.
-            </p>
-          ) : null}
+          <CardContent>
+            <>
+              {suites.length === 0 ? (
+                <EmptyState title="No sample sets for this item kind." />
+              ) : (
+                <List disablePadding>
+                  {suites
+                    .slice(
+                      (Math.min(suitePage, Math.max(1, Math.ceil(suites.length / 10))) - 1) * 10,
+                      Math.min(suitePage, Math.max(1, Math.ceil(suites.length / 10))) * 10,
+                    )
+                    .map((suite) => (
+                      <ListItem key={suite.id} disableGutters>
+                        <ListItemButton
+                          className="evaluation-suite-choice"
+                          disabled={(pending || dirty || reloading) && selected !== suite.id}
+                          onClick={() => select(suite.id)}
+                          selected={selected === suite.id}
+                          aria-current={selected === suite.id ? "true" : undefined}
+                        >
+                          <ListItemText
+                            primary={suite.name}
+                            secondary={
+                              <>
+                                {workflowLabels[suite.workflowKind]} · {targetLabels[suite.target]}
+                                <br />
+                                {suite.caseCount} draft cases · revision {suite.draftRevision}
+                              </>
+                            }
+                            slotProps={{
+                              primary: { variant: "subtitle1" },
+                              secondary: { variant: "body2" },
+                            }}
+                          />
+                        </ListItemButton>
+                      </ListItem>
+                    ))}
+                </List>
+              )}
+              {suites.length > 10 ? (
+                <Pagination
+                  count={Math.max(1, Math.ceil(suites.length / 10))}
+                  page={Math.min(suitePage, Math.max(1, Math.ceil(suites.length / 10)))}
+                  onChange={(_event, page) => setSuitePage(page)}
+                  sx={{
+                    mt: 2,
+                  }}
+                />
+              ) : null}
+            </>
+            {dirty ? (
+              <p className="evaluation-meta">
+                Save or discard the current draft before opening another set.
+              </p>
+            ) : null}
+          </CardContent>
         </Card>
         <div className="evaluation-editor-area">
           {createVisited ? (
@@ -346,146 +524,193 @@ export function SuiteWorkspace({
             </div>
           ) : null}
           {!selected ? (
-            <Card>
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Choose a sample set or create one to label frozen examples."
-              />
+            <Card variant="outlined">
+              <CardContent>
+                <EmptyState title={"Choose a sample set or create one to label frozen examples."} />
+              </CardContent>
             </Card>
           ) : (
-            <Card
-              title={
-                <Space>
-                  <Typography.Text strong>{detail.data?.name ?? "Sample set"}</Typography.Text>
-                  <Tag>{detail.data ? workflowLabels[detail.data.workflowKind] : "Loading"}</Tag>
-                  <Tag>{detail.data ? targetLabels[detail.data.target] : ""}</Tag>
-                </Space>
-              }
-              extra={
-                <Space>
-                  <Button
-                    type={view === "draft" ? "primary" : "default"}
-                    onClick={() => setView("draft")}
-                  >
-                    Draft
-                  </Button>
-                  <Button
-                    type={view === "versions" ? "primary" : "default"}
-                    onClick={() => setView("versions")}
-                  >
-                    Published versions
-                  </Button>
-                  <Button
-                    type={view === "batches" ? "primary" : "default"}
-                    onClick={() => setView("batches")}
-                  >
-                    Evaluation batches
-                  </Button>
-                </Space>
-              }
-            >
-              {notice ? <Alert type="success" title={notice} /> : null}
-              {detail.error ? (
-                <Alert
-                  type="error"
-                  title="Sample set unavailable"
-                  description={errorMessage(detail.error)}
+            <Box component="section" className="evaluation-workspace">
+              <Stack
+                direction="row"
+                spacing={1.5}
+                sx={{
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 1,
+                }}
+              >
+                <Typography component="h2" variant="h5">
+                  {detail.data?.name ?? "Sample set"}
+                </Typography>
+                <Chip label={detail.data ? workflowLabels[detail.data.workflowKind] : "Loading"} />
+                <Chip label={detail.data ? targetLabels[detail.data.target] : ""} />
+              </Stack>
+              <Tabs
+                value={view}
+                onChange={(_event, value: "draft" | "versions" | "batches") => setView(value)}
+                aria-label="Sample set workspace"
+                variant="scrollable"
+                scrollButtons="auto"
+                allowScrollButtonsMobile
+              >
+                <Tab
+                  label="Draft"
+                  value="draft"
+                  id={`${kind}-suite-tab-draft`}
+                  aria-controls={`${kind}-suite-panel-draft`}
                 />
-              ) : null}
-              <div hidden={view !== "draft"}>
-                {editor ? (
-                  <>
-                    <div className="evaluation-subheading">
-                      <span className="evaluation-meta">
-                        Draft revision {editor.revision} · {editor.draft.cases.length}/32 cases
-                        {dirty ? " · Unsaved changes" : ""}
-                      </span>
-                      <Space>
-                        <Button
-                          disabled={pending || !page.readable || reloading}
-                          loading={reloading}
-                          onClick={() => void reload()}
+                <Tab
+                  label="Published versions"
+                  value="versions"
+                  id={`${kind}-suite-tab-versions`}
+                  aria-controls={`${kind}-suite-panel-versions`}
+                />
+                <Tab
+                  label="Evaluation batches"
+                  value="batches"
+                  id={`${kind}-suite-tab-batches`}
+                  aria-controls={`${kind}-suite-panel-batches`}
+                />
+              </Tabs>
+              <Box>
+                {notice ? (
+                  <Alert severity={"success"}>
+                    <AlertTitle>{notice}</AlertTitle>
+                  </Alert>
+                ) : null}
+                {detail.error ? (
+                  <Alert severity={"error"}>
+                    <AlertTitle>{"Sample set unavailable"}</AlertTitle>
+                    {errorMessage(detail.error)}
+                  </Alert>
+                ) : null}
+                <div
+                  role="tabpanel"
+                  id={`${kind}-suite-panel-draft`}
+                  aria-labelledby={`${kind}-suite-tab-draft`}
+                  hidden={view !== "draft"}
+                >
+                  {editor ? (
+                    <>
+                      <div className="evaluation-subheading">
+                        <span className="evaluation-meta">
+                          Draft revision {editor.revision} · {editor.draft.cases.length}/32 cases
+                          {dirty ? " · Unsaved changes" : ""}
+                        </span>
+                        <Stack
+                          direction="row"
+                          spacing={1.5}
+                          sx={{
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            gap: 1,
+                          }}
                         >
-                          {dirty || conflict ? "Discard draft and reload" : "Reload draft"}
-                        </Button>
-                        {page.allowsConfigure ? (
-                          <>
-                            <Button
-                              disabled={locked || !dirty}
-                              loading={save.busy}
-                              onClick={saveDraft}
-                            >
-                              Save draft
-                            </Button>
-                            <Button
-                              type="primary"
-                              disabled={locked || dirty}
-                              loading={publish.busy}
-                              onClick={publishDraft}
-                            >
-                              Publish version
-                            </Button>
-                          </>
-                        ) : null}
-                      </Space>
-                    </div>
-                    {dirty ? (
-                      <p className="evaluation-meta">
-                        Save this draft before publishing. Publication freezes all source and
-                        expectation labels.
-                      </p>
-                    ) : null}
-                    {newerRevision ? (
-                      <Alert
-                        type="warning"
-                        title="A newer saved revision is available"
-                        description="Your editor and its revision are preserved. Discard and reload to review the newer saved draft."
+                          <Button
+                            disabled={pending || !page.readable || reloading}
+                            loading={reloading}
+                            onClick={() => void reload()}
+                            variant="outlined"
+                          >
+                            {dirty || conflict ? "Discard draft and reload" : "Reload draft"}
+                          </Button>
+                          {page.allowsConfigure ? (
+                            <>
+                              <Button
+                                disabled={locked || !dirty}
+                                loading={save.busy}
+                                onClick={saveDraft}
+                                variant="outlined"
+                              >
+                                Save draft
+                              </Button>
+                              <Button
+                                disabled={locked || dirty}
+                                loading={publish.busy}
+                                onClick={publishDraft}
+                                variant="contained"
+                              >
+                                Publish version
+                              </Button>
+                            </>
+                          ) : null}
+                        </Stack>
+                      </div>
+                      {dirty ? (
+                        <p className="evaluation-meta">
+                          Save this draft before publishing. Publication freezes all source and
+                          expectation labels.
+                        </p>
+                      ) : null}
+                      {newerRevision ? (
+                        <Alert severity={"warning"}>
+                          <AlertTitle>{"A newer saved revision is available"}</AlertTitle>
+                          {
+                            "Your editor and its revision are preserved. Discard and reload to review the newer saved draft."
+                          }
+                        </Alert>
+                      ) : null}
+                      {error ? (
+                        <Alert severity={"error"}>
+                          <AlertTitle>{"Complete the draft before continuing"}</AlertTitle>
+                          {error}
+                        </Alert>
+                      ) : null}
+                      <MutationNotice mutation={save} />
+                      <MutationNotice mutation={publish} />
+                      <CaseEditor
+                        value={editor.draft}
+                        sources={sources}
+                        disabled={locked}
+                        onChange={(draft) => {
+                          if (!locked)
+                            setEditor({
+                              ...editor,
+                              draft,
+                            });
+                        }}
                       />
-                    ) : null}
-                    {error ? (
-                      <Alert
-                        type="error"
-                        title="Complete the draft before continuing"
-                        description={error}
-                      />
-                    ) : null}
-                    <MutationNotice mutation={save} />
-                    <MutationNotice mutation={publish} />
-                    <CaseEditor
-                      value={editor.draft}
-                      sources={sources}
-                      disabled={locked}
-                      onChange={(draft) => {
-                        if (!locked) setEditor({ ...editor, draft });
-                      }}
-                    />
-                  </>
-                ) : (
-                  <Typography.Paragraph type="secondary">Loading draft…</Typography.Paragraph>
-                )}
-              </div>
-              <div hidden={view !== "versions"}>
-                <PublishedVersion
-                  key={`${selected}:${versionId ?? "initial"}`}
-                  suiteId={selected}
-                  preferredVersionId={versionId ?? detail.data?.latestVersionId ?? null}
-                  active={active && view === "versions"}
-                  sources={sources}
-                />
-              </div>
-              {editor ? (
-                <div hidden={view !== "batches"}>
-                  <BatchWorkspace
-                    key={selected}
+                    </>
+                  ) : (
+                    <Typography component="p" variant="body2" color={"text.secondary"}>
+                      Loading draft…
+                    </Typography>
+                  )}
+                </div>
+                <div
+                  role="tabpanel"
+                  id={`${kind}-suite-panel-versions`}
+                  aria-labelledby={`${kind}-suite-tab-versions`}
+                  hidden={view !== "versions"}
+                >
+                  <PublishedVersion
+                    key={`${selected}:${versionId ?? "initial"}`}
                     suiteId={selected}
-                    workflowKind={editor.workflowKind}
-                    target={editor.target}
-                    active={active && view === "batches"}
-                    onPendingChange={setBatchPending}
+                    preferredVersionId={versionId ?? detail.data?.latestVersionId ?? null}
+                    active={active && view === "versions"}
+                    sources={sources}
                   />
                 </div>
-              ) : null}
-            </Card>
+                {editor ? (
+                  <div
+                    role="tabpanel"
+                    id={`${kind}-suite-panel-batches`}
+                    aria-labelledby={`${kind}-suite-tab-batches`}
+                    hidden={view !== "batches"}
+                  >
+                    <BatchWorkspace
+                      key={selected}
+                      suiteId={selected}
+                      workflowKind={editor.workflowKind}
+                      target={editor.target}
+                      active={active && view === "batches"}
+                      onPendingChange={setBatchPending}
+                    />
+                  </div>
+                ) : null}
+              </Box>
+            </Box>
           )}
         </div>
       </div>

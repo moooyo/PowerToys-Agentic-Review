@@ -1,6 +1,5 @@
-import { Breadcrumb, Typography, theme } from "antd";
+import { Box, Stack, Typography } from "@mui/material";
 import type { ReactNode } from "react";
-import "./index.css";
 
 interface PageHeaderProps {
   eyebrow: string;
@@ -9,32 +8,38 @@ interface PageHeaderProps {
   description: string;
   actions?: ReactNode;
 }
-
 export function PageHeader({ eyebrow, title, titleId, description, actions }: PageHeaderProps) {
-  const { token } = theme.useToken();
   return (
-    <header className="page-header">
-      <Breadcrumb
-        className="page-header__breadcrumb"
-        items={[{ title: eyebrow === "Review workspace" ? "Workspace" : eyebrow }, { title }]}
-      />
-      <div className="page-header__main">
-        <Typography.Title
-          id={titleId}
-          level={1}
-          style={{
-            margin: 0,
-            fontSize: token.fontSizeHeading3,
-            lineHeight: token.lineHeightHeading3,
-          }}
-        >
+    <Box component="header" className="page-header" sx={{ mb: 3, pt: 1 }}>
+      <Stack
+        direction="row"
+        sx={{ alignItems: "center", justifyContent: "space-between", gap: 2, flexWrap: "wrap" }}
+      >
+        <Typography variant="h1" component="h1" id={titleId}>
           {title}
-        </Typography.Title>
-        {actions ? <div className="page-header__actions">{actions}</div> : null}
-      </div>
-      <Typography.Paragraph type="secondary" className="page-header__description">
-        {description}
-      </Typography.Paragraph>
-    </header>
+        </Typography>
+        {actions && (
+          <Stack direction="row" sx={{ gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+            {actions}
+          </Stack>
+        )}
+      </Stack>
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        sx={{
+          alignItems: { xs: "flex-start", md: "baseline" },
+          columnGap: 1.5,
+          rowGap: 0.5,
+          mt: 1.5,
+        }}
+      >
+        <Typography variant="body2" sx={{ color: "primary.main", fontWeight: 500 }}>
+          {eyebrow}
+        </Typography>
+        <Typography variant="body2" sx={{ color: "text.secondary" }}>
+          {description}
+        </Typography>
+      </Stack>
+    </Box>
   );
 }

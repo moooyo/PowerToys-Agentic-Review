@@ -3,26 +3,29 @@ import type {
   PromptTemplate,
   PromptVersionSummary,
 } from "@agentic-review/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import CloseIcon from "@mui/icons-material/Close";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Descriptions,
+  Chip,
+  CircularProgress,
   Drawer,
-  Empty,
-  Form,
-  Input,
-  Modal,
-  Space,
-  Spin,
-  Table,
+  IconButton,
+  Stack,
+  Tab,
+  TablePagination,
   Tabs,
-  Tag,
+  TextField,
   Typography,
-} from "antd";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { GlobalPromptActivity } from "@/components/ConfigurationAudit";
 import { configurationAuditQueryRoot } from "@/components/ConfigurationAudit/state";
+import { ConfirmDialog, DataTable, DetailsGrid, notify } from "@/components/ui";
 import { configuration } from "@/services/configuration";
 import { usePromptAvailable } from "./access";
 import {
@@ -52,67 +55,101 @@ function PublishedVersionDetails({
     enabled: available,
   });
   return (
-    <Drawer open title="Published prompt · read only" size={760} onClose={onClose}>
-      {query.isPending ? (
-        <Spin />
-      ) : query.isError ? (
-        <Alert
-          type="error"
-          showIcon
-          title="Could not load version"
-          description={configurationErrorMessage(query.error)}
-          action={
-            <Button
-              disabled={!available}
-              onClick={() => {
-                if (available) void query.refetch();
-              }}
+    <Drawer
+      open
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") onClose();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": "Published prompt · read only",
+          sx: { width: { xs: "100%", sm: 760 }, maxWidth: "100%" },
+        },
+      }}
+    >
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography variant="h6" sx={{ flex: 1 }}>
+          {"Published prompt · read only"}
+        </Typography>
+        <IconButton aria-label="Close" disabled={false} onClick={() => onClose()}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        {query.isPending ? (
+          <CircularProgress aria-label="Loading" size={28} />
+        ) : query.isError ? (
+          <Alert
+            action={
+              <Button
+                disabled={!available}
+                onClick={() => {
+                  if (available) void query.refetch();
+                }}
+                variant="outlined"
+              >
+                Try again
+              </Button>
+            }
+            severity={"error"}
+          >
+            <AlertTitle>{"Could not load version"}</AlertTitle>
+            {configurationErrorMessage(query.error)}
+          </Alert>
+        ) : (
+          <>
+            <div>
+              <DetailsGrid
+                columns={2}
+                items={[
+                  { key: "version", label: "Version", value: query.data.version },
+                  {
+                    key: "published",
+                    label: "Published",
+                    value: new Date(query.data.publishedAt).toLocaleString("en-US"),
+                  },
+                  {
+                    key: "author",
+                    label: "Published by",
+                    value: <span className="prompts-break">{query.data.createdBy}</span>,
+                  },
+                  {
+                    key: "schema",
+                    label: "Output schema",
+                    value: <code>{query.data.outputSchemaVersion}</code>,
+                  },
+                  {
+                    key: "digest",
+                    label: "Content SHA-256",
+                    value: <code className="prompts-break">{query.data.contentSha256}</code>,
+                  },
+                ]}
+              />
+            </div>
+            <Typography
+              className="prompts-section-note"
+              variant="body2"
+              component="p"
+              color="text.secondary"
             >
-              Try again
-            </Button>
-          }
-        />
-      ) : (
-        <>
-          <Descriptions
-            column={1}
-            size="small"
-            items={[
-              { key: "version", label: "Version", children: query.data.version },
-              {
-                key: "published",
-                label: "Published",
-                children: new Date(query.data.publishedAt).toLocaleString("en-US"),
-              },
-              {
-                key: "author",
-                label: "Published by",
-                children: <span className="prompts-break">{query.data.createdBy}</span>,
-              },
-              {
-                key: "schema",
-                label: "Output schema",
-                children: <code>{query.data.outputSchemaVersion}</code>,
-              },
-              {
-                key: "digest",
-                label: "Content SHA-256",
-                children: <code className="prompts-break">{query.data.contentSha256}</code>,
-              },
-            ]}
-          />
-          <Typography.Paragraph type="secondary" className="prompts-section-note">
-            Published content is immutable. Edit the template draft to prepare a new version.
-          </Typography.Paragraph>
-          <Input.TextArea
-            className="prompts-readonly"
-            readOnly
-            aria-label="Published prompt content"
-            autoSize={{ minRows: 14, maxRows: 26 }}
-            value={query.data.content}
-          />
-        </>
-      )}
+              Published content is immutable. Edit the template draft to prepare a new version.
+            </Typography>
+            <TextField
+              className="prompts-readonly"
+              value={query.data.content}
+              fullWidth
+              slotProps={{
+                htmlInput: { "aria-label": "Published prompt content", readOnly: true },
+              }}
+              multiline
+              minRows={14}
+              maxRows={26}
+            ></TextField>
+          </>
+        )}
+      </Box>
     </Drawer>
   );
 }
@@ -129,89 +166,102 @@ function PublishedVersions({ templateId }: { templateId: string }) {
   });
   return (
     <>
-      <Typography.Paragraph type="secondary">
+      <Typography variant="body2" component="p" color="text.secondary">
         Inspect immutable published versions. To roll back a workflow, choose an older published
         version in Workflow bindings.
-      </Typography.Paragraph>
+      </Typography>
       {query.isError ? (
         <Alert
-          showIcon
-          type="error"
-          title="Could not load published versions"
-          description={configurationErrorMessage(query.error)}
           action={
             <Button
               disabled={!available}
               onClick={() => {
                 if (available) void query.refetch();
               }}
+              variant="outlined"
             >
               Try again
             </Button>
           }
-        />
+          severity={"error"}
+        >
+          <AlertTitle>{"Could not load published versions"}</AlertTitle>
+          {configurationErrorMessage(query.error)}
+        </Alert>
       ) : (
-        <Table<PromptVersionSummary>
-          rowKey="id"
-          loading={query.isFetching}
-          dataSource={query.data?.items ?? []}
-          columns={[
-            {
-              title: "Version",
-              dataIndex: "version",
-              width: 90,
-              render: (version: number) => <Tag>v{version}</Tag>,
-            },
-            {
-              title: "Published",
-              dataIndex: "publishedAt",
-              width: 180,
-              render: (value: string) => new Date(value).toLocaleString("en-US"),
-            },
-            {
-              title: "Published by",
-              dataIndex: "createdBy",
-              render: (value: string) => <span className="prompts-break">{value}</span>,
-            },
-            {
-              title: "",
-              key: "view",
-              width: 112,
-              render: (_: unknown, item) => (
-                <Button
-                  type="link"
-                  disabled={!available}
-                  onClick={() => setSelectedVersionId(item.id)}
-                >
-                  Read version
-                </Button>
-              ),
-            },
-          ]}
-          scroll={{ x: 580 }}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No published versions. Save and publish the draft to create the first version."
-              />
-            ),
-          }}
-          pagination={{
-            current: page,
-            pageSize,
-            total: query.data?.total ?? 0,
-            hideOnSinglePage: true,
-            showSizeChanger: true,
-            pageSizeOptions: [20, 50],
-            disabled: !available,
-            onChange: (nextPage, nextSize) => {
-              setPage(nextSize === pageSize ? nextPage : 1);
-              setPageSize(nextSize);
-            },
-            showTotal: (count, range) => `${range[0]}–${range[1]} of ${count}`,
-          }}
-        />
+        <>
+          <DataTable<PromptVersionSummary>
+            rows={query.data?.items ?? []}
+            columns={[
+              {
+                id: "version",
+                label: "Version",
+                width: 90,
+                render: (row) => {
+                  const version = row.version;
+                  return <Chip size="medium" label={<>v{version}</>}></Chip>;
+                },
+              },
+              {
+                id: "publishedAt",
+                label: "Published",
+                width: 180,
+                render: (row) => {
+                  const value = row.publishedAt;
+                  return new Date(value).toLocaleString("en-US");
+                },
+              },
+              {
+                id: "createdBy",
+                label: "Published by",
+                render: (row) => {
+                  const value = row.createdBy;
+                  return <span className="prompts-break">{value}</span>;
+                },
+              },
+              {
+                id: "view",
+                label: "",
+                width: 112,
+                render: (item) => {
+                  return (
+                    <Button
+                      disabled={!available}
+                      onClick={() => setSelectedVersionId(item.id)}
+                      variant={"text"}
+                    >
+                      Read version
+                    </Button>
+                  );
+                },
+              },
+            ]}
+            getRowId={(row) => row.id}
+            loading={query.isFetching}
+            emptyTitle={
+              "No published versions. Save and publish the draft to create the first version."
+            }
+          />
+          {(query.data?.total ?? 0) > pageSize && (
+            <TablePagination
+              component="div"
+              page={page - 1}
+              rowsPerPage={pageSize}
+              count={query.data?.total ?? 0}
+              rowsPerPageOptions={[20, 50]}
+              disabled={!available}
+              onPageChange={(_event, nextPage) => {
+                if (!available) return;
+                setPage(nextPage + 1);
+              }}
+              onRowsPerPageChange={(event) => {
+                if (!available) return;
+                setPage(1);
+                setPageSize(Number(event.target.value));
+              }}
+            />
+          )}
+        </>
       )}
       {selectedVersionId && (
         <PublishedVersionDetails
@@ -233,15 +283,19 @@ export function PromptEditor({
   repositoryId: string | null;
   onClose: () => void;
 }) {
+  const [activePromptTab, setActivePromptTab] = useState("draft");
+  const [visitedPromptTabs, setVisitedPromptTabs] = useState<string[]>(["draft"]);
+
   const available = usePromptAvailable();
   const availableRef = useRef(available);
   availableRef.current = available;
   const queryClient = useQueryClient();
-  const [modal, modalContext] = Modal.useModal();
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [baseline, setBaseline] = useState<PromptTemplate | null>(null);
   const [content, setContent] = useState("");
   const [workItemId, setWorkItemId] = useState("");
   const [operation, setOperation] = useState<"save" | "publish" | null>(null);
+  const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [needsReload, setNeedsReload] = useState(false);
@@ -299,7 +353,8 @@ export function PromptEditor({
   };
 
   const save = async () => {
-    if (!available || !baseline || busy || needsReload) return;
+    if (!available || !baseline || busyRef.current || needsReload) return;
+    busyRef.current = true;
     setOperation("save");
     setError(null);
     setNotice(null);
@@ -318,12 +373,14 @@ export function PromptEditor({
       setError(configurationErrorMessage(failure));
       setNeedsReload(isPromptConflict(failure));
     } finally {
+      busyRef.current = false;
       setOperation(null);
     }
   };
 
   const publish = async () => {
-    if (!available || !baseline || busy || needsReload) return;
+    if (!available || !baseline || busyRef.current || needsReload) return;
+    busyRef.current = true;
     setOperation("publish");
     setError(null);
     setNotice(null);
@@ -359,6 +416,7 @@ export function PromptEditor({
       setError(configurationErrorMessage(failure));
       setNeedsReload(isPromptConflict(failure));
     } finally {
+      busyRef.current = false;
       setOperation(null);
     }
   };
@@ -383,84 +441,155 @@ export function PromptEditor({
   };
 
   const close = () => {
-    if (dirty) {
-      modal.confirm({
-        title: "Discard unsaved draft changes?",
-        content: "The last saved draft will be kept. Changes in this editor will be discarded.",
-        okText: "Discard changes",
-        cancelText: "Keep editing",
-        onOk: onClose,
-      });
-    } else onClose();
+    if (busyRef.current) return;
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
   };
 
   return (
     <Drawer
       open
-      title={baseline?.name ?? "Prompt template"}
-      size={880}
-      onClose={close}
-      closable={!busy}
-      mask={{ closable: !busy }}
-      keyboard={!busy}
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") close();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": baseline?.name ?? "Prompt template",
+          sx: { width: { xs: "100%", sm: 880 }, maxWidth: "100%" },
+        },
+      }}
     >
-      {modalContext}
-      {!baseline ? (
-        templateQuery.isError ? (
-          <Alert
-            type="error"
-            showIcon
-            title="Could not load prompt"
-            description={configurationErrorMessage(templateQuery.error)}
-            action={
-              <Button disabled={!available} onClick={reload}>
-                Try again
-              </Button>
-            }
-          />
-        ) : (
-          <Spin />
-        )
-      ) : (
-        <>
-          <div className="prompts-template-meta">
-            <Tag>{workflowLabels[baseline.workflowKind]}</Tag>
-            <code>{baseline.draftOutputSchemaVersion}</code>
-          </div>
-          {baseline.description && (
-            <Typography.Paragraph type="secondary">{baseline.description}</Typography.Paragraph>
-          )}
-          {(baseline.workflowKind === "pr_ui" || baseline.workflowKind === "issue_validation") && (
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography variant="h6" sx={{ flex: 1 }}>
+          {baseline?.name ?? "Prompt template"}
+        </Typography>
+        <IconButton aria-label="Close" disabled={busy} onClick={() => close()}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        <ConfirmDialog
+          open={confirmDiscard}
+          title="Discard unsaved draft changes?"
+          confirmLabel="Discard changes"
+          cancelLabel="Keep editing"
+          onClose={() => setConfirmDiscard(false)}
+          onConfirm={() => {
+            if (!busyRef.current) onClose();
+          }}
+        >
+          The last saved draft will be kept. Changes in this editor will be discarded.
+        </ConfirmDialog>
+        {!baseline ? (
+          templateQuery.isError ? (
             <Alert
-              className="prompts-notice"
-              type="info"
-              showIcon
-              title="Validation needs a configured driver"
-              description="This prompt describes the task. Configure a compatible validation profile and driver separately before running this workflow."
-            />
-          )}
-          <Tabs
-            items={[
-              {
-                key: "draft",
-                label: "Draft",
-                disabled: !available,
-                children: (
+              action={
+                <Button disabled={!available} onClick={reload} variant="outlined">
+                  Try again
+                </Button>
+              }
+              severity={"error"}
+            >
+              <AlertTitle>{"Could not load prompt"}</AlertTitle>
+              {configurationErrorMessage(templateQuery.error)}
+            </Alert>
+          ) : (
+            <CircularProgress aria-label="Loading" size={28} />
+          )
+        ) : (
+          <>
+            <div className="prompts-template-meta">
+              <Chip size="medium" label={workflowLabels[baseline.workflowKind]}></Chip>
+              <code>{baseline.draftOutputSchemaVersion}</code>
+            </div>
+            {baseline.description && (
+              <Typography variant="body2" component="p" color="text.secondary">
+                {baseline.description}
+              </Typography>
+            )}
+            {(baseline.workflowKind === "pr_ui" ||
+              baseline.workflowKind === "issue_validation") && (
+              <Alert className="prompts-notice" severity={"info"}>
+                <AlertTitle>{"Validation needs a configured driver"}</AlertTitle>
+                {
+                  "This prompt describes the task. Configure a compatible validation profile and driver separately before running this workflow."
+                }
+              </Alert>
+            )}
+
+            <Tabs
+              value={activePromptTab}
+              onChange={(_event, next: string) => {
+                setActivePromptTab(next);
+                setVisitedPromptTabs((current) =>
+                  current.includes(next) ? current : [...current, next],
+                );
+              }}
+              variant="scrollable"
+              scrollButtons="auto"
+            >
+              <Tab
+                value={"draft"}
+                label={"Draft"}
+                disabled={!available}
+                id={"PromptEditor-tab-" + "draft"}
+                aria-controls={"PromptEditor-panel-" + "draft"}
+              />
+              <Tab
+                value={"versions"}
+                label={"Published versions"}
+                disabled={!available}
+                id={"PromptEditor-tab-" + "versions"}
+                aria-controls={"PromptEditor-panel-" + "versions"}
+              />
+              <Tab
+                value={"activity"}
+                label={"Template activity"}
+                disabled={!available}
+                id={"PromptEditor-tab-" + "activity"}
+                aria-controls={"PromptEditor-panel-" + "activity"}
+              />
+            </Tabs>
+            {visitedPromptTabs.includes("draft") && (
+              <Box
+                role="tabpanel"
+                id={"PromptEditor-panel-" + "draft"}
+                aria-labelledby={"PromptEditor-tab-" + "draft"}
+                hidden={activePromptTab !== "draft"}
+                sx={{ pt: 3 }}
+              >
+                {
                   <>
                     {notice && (
-                      <Alert className="prompts-notice" type="success" showIcon title={notice} />
+                      <Alert className="prompts-notice" severity={"success"}>
+                        <AlertTitle>{notice}</AlertTitle>
+                      </Alert>
                     )}
                     {error && (
                       <Alert
                         className="prompts-notice"
-                        type={needsReload ? "warning" : "error"}
-                        showIcon
-                        title={
-                          needsReload
-                            ? "Reload the latest draft before continuing"
-                            : "Could not complete the action"
+                        action={
+                          needsReload ? (
+                            <Button
+                              disabled={!available}
+                              loading={templateQuery.isFetching}
+                              onClick={reload}
+                              variant="outlined"
+                            >
+                              Reload latest draft
+                            </Button>
+                          ) : undefined
                         }
-                        description={
+                        severity={needsReload ? "warning" : "error"}
+                      >
+                        <AlertTitle>
+                          {needsReload
+                            ? "Reload the latest draft before continuing"
+                            : "Could not complete the action"}
+                        </AlertTitle>
+                        {
                           <>
                             <p>{error}</p>
                             {needsReload && (
@@ -471,50 +600,49 @@ export function PromptEditor({
                             )}
                           </>
                         }
-                        action={
-                          needsReload ? (
-                            <Button
-                              disabled={!available}
-                              loading={templateQuery.isFetching}
-                              onClick={reload}
-                            >
-                              Reload latest draft
-                            </Button>
-                          ) : undefined
-                        }
-                      />
+                      </Alert>
                     )}
                     <div className="prompts-editor-status">
                       <span>Draft revision {baseline.draftRevision}</span>
-                      <Tag color={dirty ? "orange" : "default"}>
-                        {dirty ? "Unsaved changes" : "Saved draft"}
-                      </Tag>
+                      <Chip
+                        size="medium"
+                        label={dirty ? "Unsaved changes" : "Saved draft"}
+                        color={dirty ? "warning" : "default"}
+                      ></Chip>
                     </div>
                     <label className="prompts-field-label" htmlFor="prompt-draft-content">
                       Prompt content
                     </label>
-                    <Input.TextArea
+                    <TextField
                       id="prompt-draft-content"
                       className="prompts-code-editor"
-                      autoSize={{ minRows: 16, maxRows: 30 }}
                       value={content}
                       disabled={!available || busy}
-                      spellCheck={false}
                       onChange={(event) => {
                         setContent(event.target.value);
                         setNotice(null);
                         clearPreview();
                       }}
-                    />
+                      fullWidth
+                      slotProps={{ htmlInput: { spellCheck: false } }}
+                      multiline
+                      minRows={16}
+                      maxRows={30}
+                    ></TextField>
                     <div className="prompts-editor-actions">
-                      <Space wrap>
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        useFlexGap
+                        sx={{ alignItems: "center", flexWrap: "wrap" }}
+                      >
                         <Button
-                          type="primary"
                           loading={operation === "save"}
                           disabled={
                             !available || !dirty || busy || needsReload || templateQuery.isFetching
                           }
                           onClick={save}
+                          variant={"contained"}
                         >
                           Save draft
                         </Button>
@@ -524,114 +652,150 @@ export function PromptEditor({
                             !available || dirty || busy || needsReload || templateQuery.isFetching
                           }
                           onClick={publish}
+                          variant="outlined"
                         >
                           Publish saved draft
                         </Button>
-                      </Space>
-                      <Typography.Text type="secondary">
+                      </Stack>
+                      <Typography variant="body2" component="span" color="text.secondary">
                         {dirty
                           ? "Save your changes before publishing."
                           : "Publishing creates an immutable version."}
-                      </Typography.Text>
+                      </Typography>
                     </div>
                     <section className="prompts-preview" aria-labelledby="prompt-preview-heading">
-                      <Typography.Title id="prompt-preview-heading" level={5}>
+                      <Typography id="prompt-preview-heading" variant="h6" component="h3">
                         Preview current content
-                      </Typography.Title>
-                      <Typography.Paragraph type="secondary">
+                      </Typography>
+                      <Typography variant="body2" component="p" color="text.secondary">
                         Preview does not save or publish. Optionally render with one work item's
                         context.
-                      </Typography.Paragraph>
-                      <Form layout="vertical">
-                        <Form.Item
+                      </Typography>
+                      <Box sx={{ mb: 2 }}>
+                        <TextField
                           label="Work item ID (optional)"
-                          htmlFor="prompt-preview-work-item"
-                          extra="Use the exact internal work item ID, not a GitHub issue or pull request number."
-                        >
-                          <Input
-                            id="prompt-preview-work-item"
-                            value={workItemId}
-                            maxLength={128}
-                            placeholder="Exact work item ID"
-                            disabled={!available || busy}
-                            onChange={(event) => {
-                              setWorkItemId(event.target.value);
-                              clearPreview();
-                            }}
-                          />
-                        </Form.Item>
-                      </Form>
+                          helperText="Use the exact internal work item ID, not a GitHub issue or pull request number."
+                          id="prompt-preview-work-item"
+                          value={workItemId}
+                          placeholder="Exact work item ID"
+                          disabled={!available || busy}
+                          onChange={(event) => {
+                            setWorkItemId(event.target.value);
+                            clearPreview();
+                          }}
+                          fullWidth
+                          slotProps={{ htmlInput: { maxLength: 128 } }}
+                        ></TextField>
+                      </Box>
                       <Button
                         loading={previewing}
                         disabled={!available || busy || !content.trim()}
                         onClick={renderPreview}
+                        variant="outlined"
                       >
                         Render preview
                       </Button>
                       {previewError && (
-                        <Alert
-                          className="prompts-preview-result"
-                          type="error"
-                          showIcon
-                          title="Preview unavailable"
-                          description={previewError}
-                        />
+                        <Alert className="prompts-preview-result" severity={"error"}>
+                          <AlertTitle>{"Preview unavailable"}</AlertTitle>
+                          {previewError}
+                        </Alert>
                       )}
                       {preview && (
                         <div className="prompts-preview-result">
                           <div className="prompts-preview-meta">
-                            <Tag>Preview only</Tag>
+                            <Chip size="medium" label={<>Preview only</>}></Chip>
                             <span>
                               {preview.workItemId
                                 ? `Work item: ${preview.workItemId}`
                                 : "Template without work item context"}
                             </span>
                           </div>
-                          <Descriptions
-                            className="prompts-preview-digest"
-                            column={1}
-                            size="small"
-                            items={[
-                              {
-                                key: "rendered-digest",
-                                label: "Rendered SHA-256",
-                                children: (
-                                  <Typography.Text className="prompts-break" code copyable>
-                                    {preview.contentSha256}
-                                  </Typography.Text>
-                                ),
-                              },
-                            ]}
-                          />
-                          <Input.TextArea
+                          <div className={"prompts-preview-digest"}>
+                            <DetailsGrid
+                              columns={1}
+                              items={[
+                                {
+                                  key: "rendered-digest",
+                                  label: "Rendered SHA-256",
+                                  value: (
+                                    <Stack
+                                      direction="row"
+                                      spacing={0.5}
+                                      sx={{ minWidth: 0, alignItems: "center" }}
+                                    >
+                                      <Typography
+                                        className="prompts-break"
+                                        variant="body2"
+                                        component="code"
+                                      >
+                                        {preview.contentSha256}
+                                      </Typography>
+                                      <IconButton
+                                        size="medium"
+                                        aria-label="Copy value"
+                                        onClick={() => {
+                                          void navigator.clipboard
+                                            .writeText(preview.contentSha256)
+                                            .catch(() =>
+                                              notify("Could not copy the value.", "error"),
+                                            );
+                                        }}
+                                      >
+                                        <ContentCopyIcon fontSize="inherit" />
+                                      </IconButton>
+                                    </Stack>
+                                  ),
+                                },
+                              ]}
+                            />
+                          </div>
+                          <TextField
                             className="prompts-readonly"
-                            readOnly
-                            aria-label="Rendered prompt preview"
-                            autoSize={{ minRows: 14, maxRows: 26 }}
                             value={preview.renderedContent}
-                          />
+                            fullWidth
+                            slotProps={{
+                              htmlInput: {
+                                "aria-label": "Rendered prompt preview",
+                                readOnly: true,
+                              },
+                            }}
+                            multiline
+                            minRows={14}
+                            maxRows={26}
+                          ></TextField>
                         </div>
                       )}
                     </section>
                   </>
-                ),
-              },
-              {
-                key: "versions",
-                label: "Published versions",
-                disabled: !available,
-                children: <PublishedVersions templateId={templateId} />,
-              },
-              {
-                key: "activity",
-                label: "Template activity",
-                disabled: !available,
-                children: <GlobalPromptActivity templateId={templateId} enabled={available} />,
-              },
-            ]}
-          />
-        </>
-      )}
+                }
+              </Box>
+            )}
+            {visitedPromptTabs.includes("versions") && (
+              <Box
+                role="tabpanel"
+                id={"PromptEditor-panel-" + "versions"}
+                aria-labelledby={"PromptEditor-tab-" + "versions"}
+                hidden={activePromptTab !== "versions"}
+                sx={{ pt: 3 }}
+              >
+                {<PublishedVersions templateId={templateId} />}
+              </Box>
+            )}
+            {visitedPromptTabs.includes("activity") && (
+              <Box
+                role="tabpanel"
+                id={"PromptEditor-panel-" + "activity"}
+                aria-labelledby={"PromptEditor-tab-" + "activity"}
+                hidden={activePromptTab !== "activity"}
+                sx={{ pt: 3 }}
+              >
+                {<GlobalPromptActivity templateId={templateId} enabled={available} />}
+              </Box>
+            )}
+          </>
+        )}
+      </Box>
     </Drawer>
   );
 }

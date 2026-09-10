@@ -5,25 +5,29 @@ import {
   type WorkflowKind,
   WorkflowKindValues,
 } from "@agentic-review/contracts";
-import { HistoryOutlined, ReloadOutlined } from "@ant-design/icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import CloseIcon from "@mui/icons-material/Close";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import HistoryIcon from "@mui/icons-material/History";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   Alert,
+  AlertTitle,
+  Box,
   Button,
-  Descriptions,
+  Chip,
   Drawer,
-  Empty,
-  Input,
-  message,
-  Pagination,
+  IconButton,
   Skeleton,
-  Space,
-  Table,
+  Stack,
+  Tab,
+  TablePagination,
   Tabs,
-  Tag,
+  TextField,
   Typography,
-} from "antd";
-import { useState } from "react";
+} from "@mui/material";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { DataTable, DetailsGrid, notify } from "@/components/ui";
 import { configuration } from "@/services/configuration";
 import type { ConfigurationPage, PromptBindingHistory } from "@/services/configuration/adapter";
 import { usePromptAvailable } from "./access";
@@ -42,9 +46,22 @@ function Timestamp({ value }: { value: string }) {
 
 function VersionId({ value }: { value: string }) {
   return (
-    <Typography.Text className="prompt-bindings-code" copyable={{ text: value }}>
-      {value}
-    </Typography.Text>
+    <Stack direction="row" spacing={0.5} sx={{ minWidth: 0, alignItems: "center" }}>
+      <Typography className="prompt-bindings-code" variant="body2" component="span">
+        {value}
+      </Typography>
+      <IconButton
+        size="medium"
+        aria-label="Copy value"
+        onClick={() => {
+          void navigator.clipboard
+            .writeText(value)
+            .catch(() => notify("Could not copy the value.", "error"));
+        }}
+      >
+        <ContentCopyIcon fontSize="inherit" />
+      </IconButton>
+    </Stack>
   );
 }
 
@@ -60,15 +77,19 @@ function BindingPagination({
   if (result.total === 0) return null;
   return (
     <div className="prompt-bindings-pagination">
-      <Pagination
-        current={result.page}
-        pageSize={result.pageSize}
-        total={result.total}
-        showSizeChanger
-        pageSizeOptions={[20, 50]}
+      <TablePagination
+        component="div"
+        page={result.page - 1}
+        rowsPerPage={result.pageSize}
+        count={result.total}
+        rowsPerPageOptions={[20, 50]}
         disabled={loading}
-        onChange={(page, pageSize) => onChange(pageSize === result.pageSize ? page : 1, pageSize)}
-        showTotal={(total, range) => `${range[0]}–${range[1]} of ${total}`}
+        onPageChange={(_event, page) => {
+          if (!loading) onChange(page + 1, result.pageSize);
+        }}
+        onRowsPerPageChange={(event) => {
+          if (!loading) onChange(1, Number(event.target.value));
+        }}
       />
     </div>
   );
@@ -94,78 +115,103 @@ function PublishedVersionDrawer({
   return (
     <Drawer
       open
-      title={`Published version ${version.version} · ${template.name}`}
-      size={760}
-      mask={{ closable: true }}
-      onClose={onClose}
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") onClose();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": `Published version ${version.version} · ${template.name}`,
+          sx: { width: { xs: "100%", sm: 760 }, maxWidth: "100%" },
+        },
+      }}
     >
-      {versionQuery.isPending && <Skeleton active paragraph={{ rows: 10 }} />}
-      {versionQuery.isError && (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load published version"
-          description={configurationErrorMessage(versionQuery.error)}
-          action={
-            <Button
-              disabled={!available}
-              onClick={() => {
-                if (available) void versionQuery.refetch();
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography
+          variant="h6"
+          sx={{ flex: 1 }}
+        >{`Published version ${version.version} · ${template.name}`}</Typography>
+        <IconButton aria-label="Close" disabled={false} onClick={() => onClose()}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        {versionQuery.isPending && (
+          <Skeleton variant="rounded" height={10 * 24} aria-label="Loading" />
+        )}
+        {versionQuery.isError && (
+          <Alert
+            action={
+              <Button
+                disabled={!available}
+                onClick={() => {
+                  if (available) void versionQuery.refetch();
+                }}
+                variant="outlined"
+              >
+                Try again
+              </Button>
+            }
+            severity={"error"}
+          >
+            <AlertTitle>{"Could not load published version"}</AlertTitle>
+            {configurationErrorMessage(versionQuery.error)}
+          </Alert>
+        )}
+        {versionQuery.isSuccess && (
+          <>
+            <Typography variant="body2" component="p" color="text.secondary">
+              Published content is immutable. This is a read-only view.
+            </Typography>
+            <div className={"prompt-bindings-facts"}>
+              <DetailsGrid
+                columns={2}
+                items={[
+                  {
+                    key: "id",
+                    label: "Version ID",
+                    value: <VersionId value={versionQuery.data.id} />,
+                  },
+                  {
+                    key: "schema",
+                    label: "Output schema",
+                    value: versionQuery.data.outputSchemaVersion,
+                  },
+                  {
+                    key: "published",
+                    label: "Published",
+                    value: <Timestamp value={versionQuery.data.publishedAt} />,
+                  },
+                  {
+                    key: "actor",
+                    label: "Published by",
+                    value: (
+                      <span className="prompt-bindings-wrap">{versionQuery.data.createdBy}</span>
+                    ),
+                  },
+                  {
+                    key: "hash",
+                    label: "SHA-256",
+                    value: <VersionId value={versionQuery.data.contentSha256} />,
+                  },
+                ]}
+              />
+            </div>
+            <TextField
+              className="prompt-bindings-content"
+              value={versionQuery.data.content}
+              fullWidth
+              slotProps={{
+                htmlInput: { "aria-label": "Published prompt content", readOnly: true },
               }}
-            >
-              Try again
-            </Button>
-          }
-        />
-      )}
-      {versionQuery.isSuccess && (
-        <>
-          <Typography.Paragraph type="secondary">
-            Published content is immutable. This is a read-only view.
-          </Typography.Paragraph>
-          <Descriptions
-            className="prompt-bindings-facts"
-            column={1}
-            size="small"
-            items={[
-              {
-                key: "id",
-                label: "Version ID",
-                children: <VersionId value={versionQuery.data.id} />,
-              },
-              {
-                key: "schema",
-                label: "Output schema",
-                children: versionQuery.data.outputSchemaVersion,
-              },
-              {
-                key: "published",
-                label: "Published",
-                children: <Timestamp value={versionQuery.data.publishedAt} />,
-              },
-              {
-                key: "actor",
-                label: "Published by",
-                children: (
-                  <span className="prompt-bindings-wrap">{versionQuery.data.createdBy}</span>
-                ),
-              },
-              {
-                key: "hash",
-                label: "SHA-256",
-                children: <VersionId value={versionQuery.data.contentSha256} />,
-              },
-            ]}
-          />
-          <Input.TextArea
-            className="prompt-bindings-content"
-            aria-label="Published prompt content"
-            readOnly
-            autoSize={{ minRows: 14, maxRows: 30 }}
-            value={versionQuery.data.content}
-          />
-        </>
-      )}
+              multiline
+              minRows={14}
+              maxRows={30}
+            ></TextField>
+          </>
+        )}
+      </Box>
     </Drawer>
   );
 }
@@ -200,6 +246,7 @@ function BindingEditor({
   const [viewingVersion, setViewingVersion] = useState<PromptVersionSummary | null>(null);
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const busyRef = useRef(false);
   const [conflict, setConflict] = useState(false);
   const [reloaded, setReloaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -230,7 +277,8 @@ function BindingEditor({
   });
 
   const reloadLatest = async () => {
-    if (!available || saving || reloading) return;
+    if (!available || busyRef.current) return;
+    busyRef.current = true;
     setReloading(true);
     setError(null);
     try {
@@ -252,13 +300,13 @@ function BindingEditor({
     } catch (failure) {
       setError(configurationErrorMessage(failure));
     } finally {
+      busyRef.current = false;
       setReloading(false);
     }
   };
 
   const save = async () => {
-    if (!available || !selectedTemplate || !selectedVersion || conflict || saving || reloading)
-      return;
+    if (!available || !selectedTemplate || !selectedVersion || conflict || busyRef.current) return;
     if (selectedVersion.id === baseline?.promptVersionId) return;
     if (
       selectedVersion.templateId !== selectedTemplate.id ||
@@ -267,6 +315,7 @@ function BindingEditor({
       setError("Select a published version from a template for this workflow.");
       return;
     }
+    busyRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -283,351 +332,396 @@ function BindingEditor({
       setConflict(isPromptConflict(failure));
       setError(configurationErrorMessage(failure));
     } finally {
+      busyRef.current = false;
       setSaving(false);
     }
   };
 
   const selectionDisabled = !available || saving || reloading || conflict;
   const unchanged = selectedVersion?.id === baseline?.promptVersionId && selectedVersion !== null;
+  const close = () => {
+    if (!busyRef.current) onClose();
+  };
 
   return (
     <Drawer
       open
-      title={`Bind prompt · ${workflowLabels[workflowKind]}`}
-      size={900}
-      onClose={onClose}
-      closable={!saving && !reloading}
-      mask={{ closable: !saving && !reloading }}
-      keyboard={!saving && !reloading}
-      footer={
-        <div className="prompt-bindings-drawer-actions">
-          <Button disabled={saving || reloading} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            type="primary"
-            loading={saving}
-            disabled={!selectedVersion || selectionDisabled || unchanged}
-            onClick={() => void save()}
-          >
-            {repositoryId !== null && !baseline ? "Create repository override" : "Save binding"}
-          </Button>
-        </div>
-      }
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") close();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": `Bind prompt · ${workflowLabels[workflowKind]}`,
+          sx: { width: { xs: "100%", sm: 900 }, maxWidth: "100%" },
+        },
+      }}
     >
-      <Descriptions
-        className="prompt-bindings-facts"
-        size="small"
-        column={1}
-        items={[
-          { key: "scope", label: "Binding scope", children: scopeLabel },
-          {
-            key: "current",
-            label: repositoryId === null ? "Current global binding" : "Current repository binding",
-            children: baseline ? (
-              <VersionId value={baseline.promptVersionId} />
-            ) : (
-              "Not bound in this scope"
-            ),
-          },
-          ...(baseline
-            ? [{ key: "revision", label: "Binding revision", children: baseline.version }]
-            : []),
-        ]}
-      />
-      {repositoryId === null && (
-        <Alert
-          className="prompt-bindings-notice"
-          type="info"
-          showIcon
-          title="This changes the global default"
-          description="Every repository without an override for this workflow uses this binding."
-        />
-      )}
-      {conflict ? (
-        <Alert
-          className="prompt-bindings-notice"
-          type="warning"
-          showIcon
-          title="This binding changed while you were choosing a version"
-          description={
-            <>
-              {error && <p>{error}</p>}
-              <p>
-                Your selection has not been saved. Reload the latest binding, then choose a template
-                and published version again.
-              </p>
-            </>
-          }
-          action={
-            <Button disabled={!available} loading={reloading} onClick={() => void reloadLatest()}>
-              Reload latest binding
-            </Button>
-          }
-        />
-      ) : error ? (
-        <Alert
-          className="prompt-bindings-notice"
-          type="error"
-          showIcon
-          title="Could not save binding"
-          description={error}
-        />
-      ) : reloaded ? (
-        <Alert
-          className="prompt-bindings-notice"
-          type="info"
-          showIcon
-          title="Latest binding loaded"
-          description="The previous selection was cleared. Choose a published version again to continue."
-        />
-      ) : null}
-
-      {!selectedTemplate ? (
-        <>
-          <Typography.Title level={5}>1. Choose a template</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            Templates for {workflowLabels[workflowKind].toLowerCase()}. Only templates with
-            published versions can be bound.
-          </Typography.Paragraph>
-          {templatesQuery.isError ? (
-            <Alert
-              type="error"
-              showIcon
-              title="Could not load templates"
-              description={configurationErrorMessage(templatesQuery.error)}
-              action={
-                <Button
-                  disabled={!available}
-                  onClick={() => {
-                    if (available) void templatesQuery.refetch();
-                  }}
-                >
-                  Try again
-                </Button>
-              }
-            />
-          ) : (
-            <Table<PromptTemplateSummary>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              loading={templatesQuery.isFetching}
-              dataSource={templatesQuery.data?.items ?? []}
-              locale={{
-                emptyText: (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="No templates for this workflow"
-                  />
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography
+          variant="h6"
+          sx={{ flex: 1 }}
+        >{`Bind prompt · ${workflowLabels[workflowKind]}`}</Typography>
+        <IconButton aria-label="Close" disabled={!(!saving && !reloading)} onClick={close}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        <div className={"prompt-bindings-facts"}>
+          <DetailsGrid
+            columns={2}
+            items={[
+              { key: "scope", label: "Binding scope", value: scopeLabel },
+              {
+                key: "current",
+                label:
+                  repositoryId === null ? "Current global binding" : "Current repository binding",
+                value: baseline ? (
+                  <VersionId value={baseline.promptVersionId} />
+                ) : (
+                  "Not bound in this scope"
                 ),
-              }}
-              columns={[
-                {
-                  title: "Template",
-                  key: "template",
-                  render: (_, template) => (
-                    <div className="prompt-bindings-template">
-                      <Typography.Text strong>{template.name}</Typography.Text>
-                      {template.description && (
-                        <span className="prompt-bindings-secondary">{template.description}</span>
-                      )}
-                      <code className="prompt-bindings-secondary">{template.id}</code>
-                    </div>
-                  ),
-                },
-                {
-                  title: "Publication",
-                  key: "published",
-                  width: 160,
-                  render: (_, template) => (
-                    <Tag color={template.latestPublishedVersionId ? "success" : "default"}>
-                      {template.latestPublishedVersionId ? "Published versions" : "Draft only"}
-                    </Tag>
-                  ),
-                },
-                {
-                  title: "Action",
-                  key: "action",
-                  width: 140,
-                  render: (_, template) => (
-                    <Button
-                      disabled={selectionDisabled || !template.latestPublishedVersionId}
-                      onClick={() => {
-                        setSelectedTemplate(template);
-                        setSelectedVersion(null);
-                        setVersionPage(1);
-                        setReloaded(false);
-                        setError(null);
-                      }}
-                      aria-label={`Choose template ${template.name}`}
-                    >
-                      Choose template
-                    </Button>
-                  ),
-                },
-              ]}
-              scroll={{ x: 560 }}
-            />
-          )}
-          {templatesQuery.isSuccess && (
-            <BindingPagination
-              result={templatesQuery.data}
-              loading={templatesQuery.isFetching || selectionDisabled}
-              onChange={(page, pageSize) => {
-                setTemplatePage(page);
-                setTemplatePageSize(pageSize);
-              }}
-            />
-          )}
-        </>
-      ) : (
-        <>
-          <div className="prompt-bindings-selection">
-            <div className="prompt-bindings-template">
-              <span className="prompt-bindings-secondary">Selected template</span>
-              <Typography.Text strong>{selectedTemplate.name}</Typography.Text>
-              <code className="prompt-bindings-secondary">{selectedTemplate.id}</code>
+              },
+              ...(baseline
+                ? [{ key: "revision", label: "Binding revision", value: baseline.version }]
+                : []),
+            ]}
+          />
+        </div>
+        {repositoryId === null && (
+          <Alert className="prompt-bindings-notice" severity={"info"}>
+            <AlertTitle>{"This changes the global default"}</AlertTitle>
+            {"Every repository without an override for this workflow uses this binding."}
+          </Alert>
+        )}
+        {conflict ? (
+          <Alert
+            className="prompt-bindings-notice"
+            action={
+              <Button
+                disabled={!available}
+                loading={reloading}
+                onClick={() => void reloadLatest()}
+                variant="outlined"
+              >
+                Reload latest binding
+              </Button>
+            }
+            severity={"warning"}
+          >
+            <AlertTitle>{"This binding changed while you were choosing a version"}</AlertTitle>
+            {
+              <>
+                {error && <p>{error}</p>}
+                <p>
+                  Your selection has not been saved. Reload the latest binding, then choose a
+                  template and published version again.
+                </p>
+              </>
+            }
+          </Alert>
+        ) : error ? (
+          <Alert className="prompt-bindings-notice" severity={"error"}>
+            <AlertTitle>{"Could not save binding"}</AlertTitle>
+            {error}
+          </Alert>
+        ) : reloaded ? (
+          <Alert className="prompt-bindings-notice" severity={"info"}>
+            <AlertTitle>{"Latest binding loaded"}</AlertTitle>
+            {"The previous selection was cleared. Choose a published version again to continue."}
+          </Alert>
+        ) : null}
+
+        {!selectedTemplate ? (
+          <>
+            <Typography variant="h6" component="h3">
+              1. Choose a template
+            </Typography>
+            <Typography variant="body2" component="p" color="text.secondary">
+              Templates for {workflowLabels[workflowKind].toLowerCase()}. Only templates with
+              published versions can be bound.
+            </Typography>
+            {templatesQuery.isError ? (
+              <Alert
+                action={
+                  <Button
+                    disabled={!available}
+                    onClick={() => {
+                      if (available) void templatesQuery.refetch();
+                    }}
+                    variant="outlined"
+                  >
+                    Try again
+                  </Button>
+                }
+                severity={"error"}
+              >
+                <AlertTitle>{"Could not load templates"}</AlertTitle>
+                {configurationErrorMessage(templatesQuery.error)}
+              </Alert>
+            ) : (
+              <DataTable<PromptTemplateSummary>
+                rows={templatesQuery.data?.items ?? []}
+                columns={[
+                  {
+                    id: "template",
+                    label: "Template",
+                    render: (template) => {
+                      return (
+                        <div className="prompt-bindings-template">
+                          <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+                            {template.name}
+                          </Typography>
+                          {template.description && (
+                            <span className="prompt-bindings-secondary">
+                              {template.description}
+                            </span>
+                          )}
+                          <code className="prompt-bindings-secondary">{template.id}</code>
+                        </div>
+                      );
+                    },
+                  },
+                  {
+                    id: "published",
+                    label: "Publication",
+                    width: 160,
+                    render: (template) => {
+                      return (
+                        <Chip
+                          size="medium"
+                          label={
+                            template.latestPublishedVersionId ? "Published versions" : "Draft only"
+                          }
+                          color={template.latestPublishedVersionId ? "success" : "default"}
+                        ></Chip>
+                      );
+                    },
+                  },
+                  {
+                    id: "action",
+                    label: "Action",
+                    width: 140,
+                    render: (template) => {
+                      return (
+                        <Button
+                          disabled={selectionDisabled || !template.latestPublishedVersionId}
+                          onClick={() => {
+                            setSelectedTemplate(template);
+                            setSelectedVersion(null);
+                            setVersionPage(1);
+                            setReloaded(false);
+                            setError(null);
+                          }}
+                          aria-label={`Choose template ${template.name}`}
+                          variant="outlined"
+                        >
+                          Choose template
+                        </Button>
+                      );
+                    },
+                  },
+                ]}
+                getRowId={(row) => row.id}
+                loading={templatesQuery.isFetching}
+                emptyTitle={"No templates for this workflow"}
+              />
+            )}
+            {templatesQuery.isSuccess && (
+              <BindingPagination
+                result={templatesQuery.data}
+                loading={templatesQuery.isFetching || selectionDisabled}
+                onChange={(page, pageSize) => {
+                  setTemplatePage(page);
+                  setTemplatePageSize(pageSize);
+                }}
+              />
+            )}
+          </>
+        ) : (
+          <>
+            <div className="prompt-bindings-selection">
+              <div className="prompt-bindings-template">
+                <span className="prompt-bindings-secondary">Selected template</span>
+                <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+                  {selectedTemplate.name}
+                </Typography>
+                <code className="prompt-bindings-secondary">{selectedTemplate.id}</code>
+              </div>
+              <Button
+                disabled={selectionDisabled}
+                onClick={() => {
+                  setSelectedTemplate(null);
+                  setSelectedVersion(null);
+                  setViewingVersion(null);
+                  setError(null);
+                }}
+                variant="outlined"
+              >
+                Change template
+              </Button>
             </div>
+            <Typography variant="h6" component="h3">
+              2. Choose a published version
+            </Typography>
+            <Typography variant="body2" component="p" color="text.secondary">
+              You can select any published version, including an earlier version for a rollback.
+            </Typography>
+            {versionsQuery.isError ? (
+              <Alert
+                action={
+                  <Button
+                    disabled={!available}
+                    onClick={() => {
+                      if (available) void versionsQuery.refetch();
+                    }}
+                    variant="outlined"
+                  >
+                    Try again
+                  </Button>
+                }
+                severity={"error"}
+              >
+                <AlertTitle>{"Could not load published versions"}</AlertTitle>
+                {configurationErrorMessage(versionsQuery.error)}
+              </Alert>
+            ) : (
+              <DataTable<PromptVersionSummary>
+                rows={versionsQuery.data?.items ?? []}
+                columns={[
+                  {
+                    id: "version",
+                    label: "Version",
+                    render: (version) => {
+                      return (
+                        <div className="prompt-bindings-template">
+                          <Stack
+                            direction="row"
+                            spacing={1}
+                            useFlexGap
+                            sx={{ alignItems: "center", flexWrap: "wrap" }}
+                          >
+                            <Typography
+                              variant="subtitle1"
+                              component="span"
+                              sx={{ fontWeight: 500 }}
+                            >
+                              Version {version.version}
+                            </Typography>
+                            {version.id === selectedTemplate.latestPublishedVersionId && (
+                              <Chip size="medium" label={<>Latest</>} color={"primary"}></Chip>
+                            )}
+                            {version.id === baseline?.promptVersionId && (
+                              <Chip size="medium" label={<>Current binding</>}></Chip>
+                            )}
+                          </Stack>
+                          <VersionId value={version.id} />
+                        </div>
+                      );
+                    },
+                  },
+                  {
+                    id: "published",
+                    label: "Published",
+                    width: 180,
+                    render: (version) => {
+                      return <Timestamp value={version.publishedAt} />;
+                    },
+                  },
+                  {
+                    id: "actions",
+                    label: "Actions",
+                    width: 220,
+                    render: (version) => {
+                      return (
+                        <Stack
+                          direction="row"
+                          spacing={1}
+                          useFlexGap
+                          sx={{ alignItems: "center", flexWrap: "wrap" }}
+                        >
+                          <Button
+                            disabled={!available || saving || reloading}
+                            onClick={() => setViewingVersion(version)}
+                            variant="outlined"
+                          >
+                            View content
+                          </Button>
+                          <Button
+                            disabled={selectionDisabled}
+                            aria-pressed={version.id === selectedVersion?.id}
+                            aria-label={`Select published version ${version.version}`}
+                            onClick={() => {
+                              setSelectedVersion(version);
+                              setError(null);
+                            }}
+                            variant={version.id === selectedVersion?.id ? "contained" : "outlined"}
+                          >
+                            {version.id === selectedVersion?.id ? "Selected" : "Select"}
+                          </Button>
+                        </Stack>
+                      );
+                    },
+                  },
+                ]}
+                getRowId={(row) => row.id}
+                loading={versionsQuery.isFetching}
+                emptyTitle={"This template has no published versions"}
+              />
+            )}
+            {versionsQuery.isSuccess && (
+              <BindingPagination
+                result={versionsQuery.data}
+                loading={versionsQuery.isFetching || selectionDisabled}
+                onChange={(page, pageSize) => {
+                  setVersionPage(page);
+                  setVersionPageSize(pageSize);
+                }}
+              />
+            )}
+            {selectedVersion && (
+              <div className="prompt-bindings-chosen" aria-live="polite">
+                <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+                  Selected: {selectedTemplate.name} · Version {selectedVersion.version}
+                </Typography>
+                <VersionId value={selectedVersion.id} />
+                {unchanged && (
+                  <span className="prompt-bindings-secondary">
+                    This version is already bound in this scope. Select a different version to make
+                    a change.
+                  </span>
+                )}
+              </div>
+            )}
+          </>
+        )}
+        {selectedTemplate && viewingVersion && (
+          <PublishedVersionDrawer
+            key={viewingVersion.id}
+            template={selectedTemplate}
+            version={viewingVersion}
+            onClose={() => setViewingVersion(null)}
+          />
+        )}
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 2, borderTop: 1, borderColor: "divider" }}>
+        {
+          <div className="prompt-bindings-drawer-actions">
+            <Button disabled={saving || reloading} onClick={close} variant="outlined">
+              Cancel
+            </Button>
             <Button
-              disabled={selectionDisabled}
-              onClick={() => {
-                setSelectedTemplate(null);
-                setSelectedVersion(null);
-                setViewingVersion(null);
-                setError(null);
-              }}
+              loading={saving}
+              disabled={!selectedVersion || selectionDisabled || unchanged}
+              onClick={() => void save()}
+              variant={"contained"}
             >
-              Change template
+              {repositoryId !== null && !baseline ? "Create repository override" : "Save binding"}
             </Button>
           </div>
-          <Typography.Title level={5}>2. Choose a published version</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            You can select any published version, including an earlier version for a rollback.
-          </Typography.Paragraph>
-          {versionsQuery.isError ? (
-            <Alert
-              type="error"
-              showIcon
-              title="Could not load published versions"
-              description={configurationErrorMessage(versionsQuery.error)}
-              action={
-                <Button
-                  disabled={!available}
-                  onClick={() => {
-                    if (available) void versionsQuery.refetch();
-                  }}
-                >
-                  Try again
-                </Button>
-              }
-            />
-          ) : (
-            <Table<PromptVersionSummary>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              loading={versionsQuery.isFetching}
-              dataSource={versionsQuery.data?.items ?? []}
-              rowClassName={(version) =>
-                version.id === selectedVersion?.id ? "prompt-bindings-selected-row" : ""
-              }
-              locale={{
-                emptyText: (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="This template has no published versions"
-                  />
-                ),
-              }}
-              columns={[
-                {
-                  title: "Version",
-                  key: "version",
-                  render: (_, version) => (
-                    <div className="prompt-bindings-template">
-                      <Space wrap>
-                        <Typography.Text strong>Version {version.version}</Typography.Text>
-                        {version.id === selectedTemplate.latestPublishedVersionId && (
-                          <Tag color="blue">Latest</Tag>
-                        )}
-                        {version.id === baseline?.promptVersionId && <Tag>Current binding</Tag>}
-                      </Space>
-                      <VersionId value={version.id} />
-                    </div>
-                  ),
-                },
-                {
-                  title: "Published",
-                  key: "published",
-                  width: 180,
-                  render: (_, version) => <Timestamp value={version.publishedAt} />,
-                },
-                {
-                  title: "Actions",
-                  key: "actions",
-                  width: 220,
-                  render: (_, version) => (
-                    <Space wrap>
-                      <Button
-                        disabled={!available || saving || reloading}
-                        onClick={() => setViewingVersion(version)}
-                      >
-                        View content
-                      </Button>
-                      <Button
-                        type={version.id === selectedVersion?.id ? "primary" : "default"}
-                        disabled={selectionDisabled}
-                        aria-pressed={version.id === selectedVersion?.id}
-                        aria-label={`Select published version ${version.version}`}
-                        onClick={() => {
-                          setSelectedVersion(version);
-                          setError(null);
-                        }}
-                      >
-                        {version.id === selectedVersion?.id ? "Selected" : "Select"}
-                      </Button>
-                    </Space>
-                  ),
-                },
-              ]}
-              scroll={{ x: 620 }}
-            />
-          )}
-          {versionsQuery.isSuccess && (
-            <BindingPagination
-              result={versionsQuery.data}
-              loading={versionsQuery.isFetching || selectionDisabled}
-              onChange={(page, pageSize) => {
-                setVersionPage(page);
-                setVersionPageSize(pageSize);
-              }}
-            />
-          )}
-          {selectedVersion && (
-            <div className="prompt-bindings-chosen" aria-live="polite">
-              <Typography.Text strong>
-                Selected: {selectedTemplate.name} · Version {selectedVersion.version}
-              </Typography.Text>
-              <VersionId value={selectedVersion.id} />
-              {unchanged && (
-                <span className="prompt-bindings-secondary">
-                  This version is already bound in this scope. Select a different version to make a
-                  change.
-                </span>
-              )}
-            </div>
-          )}
-        </>
-      )}
-      {selectedTemplate && viewingVersion && (
-        <PublishedVersionDrawer
-          key={viewingVersion.id}
-          template={selectedTemplate}
-          version={viewingVersion}
-          onClose={() => setViewingVersion(null)}
-        />
-      )}
+        }
+      </Box>
     </Drawer>
   );
 }
@@ -657,97 +751,120 @@ function BindingHistoryDrawer({
   return (
     <Drawer
       open
-      title={`Binding history · ${workflowLabels[workflowKind]}`}
-      size={1120}
-      mask={{ closable: true }}
-      onClose={onClose}
+      anchor="right"
+      onClose={(_event, reason) => {
+        if (reason === "escapeKeyDown" || reason === "backdropClick") onClose();
+      }}
+      slotProps={{
+        paper: {
+          role: "dialog",
+          "aria-label": `Binding history · ${workflowLabels[workflowKind]}`,
+          sx: { width: { xs: "100%", sm: 1120 }, maxWidth: "100%" },
+        },
+      }}
     >
-      <Typography.Paragraph>
-        <Typography.Text strong>Scope: </Typography.Text>
-        {scopeLabel}
-      </Typography.Paragraph>
-      <Typography.Paragraph type="secondary">
-        This read-only history records changes to this scope's binding.
-        {repositoryId !== null &&
-          " Changes to an inherited global default appear in the global binding history."}
-      </Typography.Paragraph>
-      {historyQuery.isError ? (
-        <Alert
-          showIcon
-          type="error"
-          title="Could not load binding history"
-          description={configurationErrorMessage(historyQuery.error)}
-          action={
-            <Button
-              disabled={!available}
-              onClick={() => {
-                if (available) void historyQuery.refetch();
-              }}
-            >
-              Try again
-            </Button>
-          }
-        />
-      ) : (
-        <Table<PromptBindingHistory>
-          rowKey="id"
-          size="small"
-          pagination={false}
-          loading={!available || historyQuery.isFetching}
-          dataSource={historyQuery.data?.items ?? []}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No binding changes recorded for this scope"
-              />
-            ),
-          }}
-          columns={[
-            { title: "Binding revision", dataIndex: "version", width: 110 },
-            {
-              title: "Previous version ID",
-              key: "previous",
-              width: 210,
-              render: (_, entry) =>
-                entry.previousVersionId ? (
-                  <VersionId value={entry.previousVersionId} />
-                ) : (
-                  <span className="prompt-bindings-secondary">No previous binding</span>
-                ),
-            },
-            {
-              title: "New version ID",
-              key: "next",
-              width: 210,
-              render: (_, entry) => <VersionId value={entry.promptVersionId} />,
-            },
-            {
-              title: "Changed by",
-              key: "actor",
-              width: 230,
-              render: (_, entry) => <span className="prompt-bindings-wrap">{entry.createdBy}</span>,
-            },
-            {
-              title: "Changed at",
-              key: "time",
-              width: 180,
-              render: (_, entry) => <Timestamp value={entry.createdAt} />,
-            },
-          ]}
-          scroll={{ x: 940 }}
-        />
-      )}
-      {historyQuery.isSuccess && (
-        <BindingPagination
-          result={historyQuery.data}
-          loading={!available || historyQuery.isFetching}
-          onChange={(nextPage, nextSize) => {
-            setPage(nextPage);
-            setPageSize(nextSize);
-          }}
-        />
-      )}
+      <Box sx={{ px: { xs: 2, sm: 3 }, py: 3, display: "flex", alignItems: "center", gap: 2 }}>
+        <Typography
+          variant="h6"
+          sx={{ flex: 1 }}
+        >{`Binding history · ${workflowLabels[workflowKind]}`}</Typography>
+        <IconButton aria-label="Close" disabled={false} onClick={() => onClose()}>
+          <CloseIcon />
+        </IconButton>
+      </Box>
+      <Box sx={{ px: { xs: 2, sm: 3 }, pb: 3, overflowY: "auto", flex: 1 }}>
+        <Typography variant="body2" component="p">
+          <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+            Scope:{" "}
+          </Typography>
+          {scopeLabel}
+        </Typography>
+        <Typography variant="body2" component="p" color="text.secondary">
+          This read-only history records changes to this scope's binding.
+          {repositoryId !== null &&
+            " Changes to an inherited global default appear in the global binding history."}
+        </Typography>
+        {historyQuery.isError ? (
+          <Alert
+            action={
+              <Button
+                disabled={!available}
+                onClick={() => {
+                  if (available) void historyQuery.refetch();
+                }}
+                variant="outlined"
+              >
+                Try again
+              </Button>
+            }
+            severity={"error"}
+          >
+            <AlertTitle>{"Could not load binding history"}</AlertTitle>
+            {configurationErrorMessage(historyQuery.error)}
+          </Alert>
+        ) : (
+          <DataTable<PromptBindingHistory>
+            rows={historyQuery.data?.items ?? []}
+            columns={[
+              {
+                id: "version",
+                label: "Binding revision",
+                width: 110,
+                render: (row) => row.version,
+              },
+              {
+                id: "previous",
+                label: "Previous version ID",
+                width: 210,
+                render: (entry) => {
+                  return entry.previousVersionId ? (
+                    <VersionId value={entry.previousVersionId} />
+                  ) : (
+                    <span className="prompt-bindings-secondary">No previous binding</span>
+                  );
+                },
+              },
+              {
+                id: "next",
+                label: "New version ID",
+                width: 210,
+                render: (entry) => {
+                  return <VersionId value={entry.promptVersionId} />;
+                },
+              },
+              {
+                id: "actor",
+                label: "Changed by",
+                width: 230,
+                render: (entry) => {
+                  return <span className="prompt-bindings-wrap">{entry.createdBy}</span>;
+                },
+              },
+              {
+                id: "time",
+                label: "Changed at",
+                width: 180,
+                render: (entry) => {
+                  return <Timestamp value={entry.createdAt} />;
+                },
+              },
+            ]}
+            getRowId={(row) => row.id}
+            loading={!available || historyQuery.isFetching}
+            emptyTitle={"No binding changes recorded for this scope"}
+          />
+        )}
+        {historyQuery.isSuccess && (
+          <BindingPagination
+            result={historyQuery.data}
+            loading={!available || historyQuery.isFetching}
+            onChange={(nextPage, nextSize) => {
+              setPage(nextPage);
+              setPageSize(nextSize);
+            }}
+          />
+        )}
+      </Box>
     </Drawer>
   );
 }
@@ -760,7 +877,6 @@ function BindingsScope({
   scopeLabel: string;
 }) {
   const available = usePromptAvailable();
-  const [messageApi, contextHolder] = message.useMessage();
   const [editing, setEditing] = useState<{
     workflowKind: WorkflowKind;
     binding: PromptBinding | undefined;
@@ -781,20 +897,18 @@ function BindingsScope({
 
   return (
     <section className="prompt-bindings" aria-label={`Prompt bindings for ${scopeLabel}`}>
-      {contextHolder}
       <div className="prompt-bindings-toolbar">
         <div>
-          <Typography.Title level={4}>
+          <Typography variant="h6" component="h3">
             {repositoryId === null ? "Global workflow defaults" : "Repository workflow overrides"}
-          </Typography.Title>
-          <Typography.Paragraph type="secondary">
+          </Typography>
+          <Typography variant="body2" component="p" color="text.secondary">
             {repositoryId === null
               ? "Global defaults apply to every repository without an override for the workflow."
               : `Bindings for ${scopeLabel}. A repository override takes precedence over its global default.`}
-          </Typography.Paragraph>
+          </Typography>
         </div>
         <Button
-          icon={<ReloadOutlined />}
           loading={bindingsQuery.isFetching || (repositoryId !== null && globalQuery.isFetching)}
           disabled={!available}
           onClick={() => {
@@ -802,48 +916,56 @@ function BindingsScope({
             void bindingsQuery.refetch();
             if (repositoryId !== null) void globalQuery.refetch();
           }}
+          variant="outlined"
+          startIcon={<RefreshIcon />}
         >
           Refresh bindings
         </Button>
       </div>
-      {bindingsQuery.isPending && <Skeleton active paragraph={{ rows: 8 }} />}
+      {bindingsQuery.isPending && (
+        <Skeleton variant="rounded" height={8 * 24} aria-label="Loading" />
+      )}
       {bindingsQuery.isError && (
         <Alert
           className="prompt-bindings-notice"
-          type="error"
-          showIcon
-          title="Could not load bindings for this scope"
-          description={configurationErrorMessage(bindingsQuery.error)}
           action={
             <Button
               disabled={!available}
               onClick={() => {
                 if (available) void bindingsQuery.refetch();
               }}
+              variant="outlined"
             >
               Try again
             </Button>
           }
-        />
+          severity={"error"}
+        >
+          <AlertTitle>{"Could not load bindings for this scope"}</AlertTitle>
+          {configurationErrorMessage(bindingsQuery.error)}
+        </Alert>
       )}
       {repositoryId !== null && globalQuery.isError && (
         <Alert
           className="prompt-bindings-notice"
-          type="warning"
-          showIcon
-          title="Global defaults are unavailable"
-          description="Repository bindings are shown below. Inheritance cannot be determined until global defaults load."
           action={
             <Button
               disabled={!available}
               onClick={() => {
                 if (available) void globalQuery.refetch();
               }}
+              variant="outlined"
             >
               Retry global defaults
             </Button>
           }
-        />
+          severity={"warning"}
+        >
+          <AlertTitle>{"Global defaults are unavailable"}</AlertTitle>
+          {
+            "Repository bindings are shown below. Inheritance cannot be determined until global defaults load."
+          }
+        </Alert>
       )}
       {bindingsQuery.isSuccess && (
         <ul className="prompt-bindings-list">
@@ -877,8 +999,14 @@ function BindingsScope({
             return (
               <li className="prompt-bindings-item" key={workflowKind}>
                 <div className="prompt-bindings-workflow">
-                  <Typography.Text strong>{workflowLabels[workflowKind]}</Typography.Text>
-                  <Tag color={ownBinding ? "blue" : inherited ? "green" : "default"}>{status}</Tag>
+                  <Typography variant="subtitle1" component="span" sx={{ fontWeight: 500 }}>
+                    {workflowLabels[workflowKind]}
+                  </Typography>
+                  <Chip
+                    size="medium"
+                    label={status}
+                    color={ownBinding ? "primary" : inherited ? "success" : "default"}
+                  ></Chip>
                 </div>
                 <div className="prompt-bindings-details">
                   <div className="prompt-bindings-value">
@@ -929,6 +1057,7 @@ function BindingsScope({
                     disabled={!available || bindingsQuery.isFetching}
                     onClick={() => setEditing({ workflowKind, binding: ownBinding })}
                     aria-label={`Change ${workflowLabels[workflowKind]} binding for ${scopeLabel}`}
+                    variant="outlined"
                   >
                     {ownBinding
                       ? "Change binding"
@@ -937,9 +1066,10 @@ function BindingsScope({
                         : "Create override"}
                   </Button>
                   <Button
-                    icon={<HistoryOutlined />}
                     disabled={!available}
                     onClick={() => setHistoryWorkflow(workflowKind)}
+                    variant="outlined"
+                    startIcon={<HistoryIcon />}
                   >
                     History
                   </Button>
@@ -959,7 +1089,7 @@ function BindingsScope({
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
-            void messageApi.success(`Binding saved for ${workflowLabels[editing.workflowKind]}.`);
+            notify(`Binding saved for ${workflowLabels[editing.workflowKind]}.`);
           }}
         />
       )}
@@ -989,26 +1119,52 @@ export function PromptBindings({
     return <BindingsScope repositoryId={null} scopeLabel="Global defaults" />;
 
   return (
-    <Tabs
-      activeKey={activeScope}
-      onChange={setActiveScope}
-      destroyOnHidden
-      items={[
-        {
-          key: "repository",
-          label: "Repository overrides",
-          disabled: !available,
-          children: (
-            <BindingsScope key={repositoryId} repositoryId={repositoryId} scopeLabel={scopeLabel} />
-          ),
-        },
-        {
-          key: "global",
-          label: "Global defaults",
-          disabled: !available,
-          children: <BindingsScope key="global" repositoryId={null} scopeLabel="Global defaults" />,
-        },
-      ]}
-    />
+    <>
+      <Tabs
+        value={activeScope}
+        onChange={(_event, next: string) => {
+          setActiveScope(next);
+        }}
+        variant="scrollable"
+        scrollButtons="auto"
+      >
+        <Tab
+          value={"repository"}
+          label={"Repository overrides"}
+          disabled={!available}
+          id={"PromptBindings-tab-" + "repository"}
+          aria-controls={"PromptBindings-panel-" + "repository"}
+        />
+        <Tab
+          value={"global"}
+          label={"Global defaults"}
+          disabled={!available}
+          id={"PromptBindings-tab-" + "global"}
+          aria-controls={"PromptBindings-panel-" + "global"}
+        />
+      </Tabs>
+      {activeScope === "repository" && (
+        <Box
+          role="tabpanel"
+          id={"PromptBindings-panel-" + "repository"}
+          aria-labelledby={"PromptBindings-tab-" + "repository"}
+          hidden={activeScope !== "repository"}
+          sx={{ pt: 3 }}
+        >
+          {<BindingsScope key={repositoryId} repositoryId={repositoryId} scopeLabel={scopeLabel} />}
+        </Box>
+      )}
+      {activeScope === "global" && (
+        <Box
+          role="tabpanel"
+          id={"PromptBindings-panel-" + "global"}
+          aria-labelledby={"PromptBindings-tab-" + "global"}
+          hidden={activeScope !== "global"}
+          sx={{ pt: 3 }}
+        >
+          {<BindingsScope key="global" repositoryId={null} scopeLabel="Global defaults" />}
+        </Box>
+      )}
+    </>
   );
 }

@@ -20,9 +20,11 @@ describe("waiting admission presentation", () => {
     expect(executionLabel("retry_waiting", { ...pending, state: "admitted", admittedAt: at })).toBe(
       "Queued",
     );
-    expect(renderToStaticMarkup(<JobAdmission admission={pending} />)).toContain(
-      "No new attempt has started",
-    );
+    const html = renderToStaticMarkup(<JobAdmission admission={pending} />);
+    expect(html).toContain("No new attempt has started");
+    expect(html).toContain("Admission requested");
+    expect(html).toContain(at);
+    expect(html).not.toContain("Entered queue");
   });
   it("does not render queue state for active or terminal projections", () => {
     expect(renderToStaticMarkup(<JobAdmission admission={null} />)).toBe("");
@@ -40,6 +42,8 @@ describe("waiting admission presentation", () => {
     );
     expect(html).toContain("Migration record");
     expect(html).toContain("original queue entry time was not retained");
+    expect(html).toContain("Migration request timestamp");
+    expect(html).toContain("Migration admission timestamp");
     expect(html).not.toContain("Entered queue");
   });
 });

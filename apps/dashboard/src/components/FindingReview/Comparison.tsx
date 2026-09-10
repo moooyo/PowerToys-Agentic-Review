@@ -1,13 +1,22 @@
 import type { DashboardReviewRunResult, OperatorPrincipal } from "@agentic-review/contracts";
+import {
+  Alert,
+  AlertTitle,
+  Button,
+  MenuItem,
+  Pagination,
+  Skeleton,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Button, Pagination, Select, Skeleton, Space, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { type FindingScope, findings } from "@/services/findings";
 import { runs } from "@/services/runs";
 import { ErrorNotice, readable, timestamp } from "../ReviewRuns/common";
 import { FindingComparisonView } from "./presentation";
 import { findingAccessDenied, findingContextMatchesResult, findingQueryKey } from "./state";
-
 export function FindingComparison({
   result,
   principal,
@@ -81,7 +90,10 @@ export function FindingComparison({
     refetchOnMount: "always",
     queryFn: () => {
       if (!runId || !requestId) throw new Error("Select a baseline request.");
-      return runs.listJobs(result.repositoryId, runId, requestId, { page: jobPage, pageSize: 20 });
+      return runs.listJobs(result.repositoryId, runId, requestId, {
+        page: jobPage,
+        pageSize: 20,
+      });
     },
   });
   const comparison = useQuery({
@@ -99,7 +111,10 @@ export function FindingComparison({
           jobId: result.jobId,
         },
         baseline.scope,
-        { page, pageSize: 20 },
+        {
+          page,
+          pageSize: 20,
+        },
       );
       if (
         !findingContextMatchesResult(response.after, result) ||
@@ -119,22 +134,21 @@ export function FindingComparison({
   }, [denied, onDenied]);
   if (denied)
     return (
-      <Alert
-        type="info"
-        title="Finding comparison unavailable"
-        description="Refresh repository access before viewing this comparison."
-      />
+      <Alert severity="info">
+        <AlertTitle>{"Finding comparison unavailable"}</AlertTitle>
+        {"Refresh repository access before viewing this comparison."}
+      </Alert>
     );
   const selectedJob = !jobs.isError
     ? jobs.data?.items.find((job) => job.jobId === jobId)
     : undefined;
   return (
-    <Space orientation="vertical" size="middle" style={{ width: "100%" }}>
-      <Typography.Paragraph type="secondary">
+    <Stack spacing={3} sx={{ width: "100%", minWidth: 0 }}>
+      <Typography variant="body1" component="p" color="text.secondary">
         Choose an earlier saved job for the same PR or Issue. Comparison is explicit; no result is
         selected automatically. The server checks workflow, target, profile and prompt versions, and
         complete model outputs.
-      </Typography.Paragraph>
+      </Typography>
       {runList.isError ? (
         <ErrorNotice
           title="Could not load baseline runs"
@@ -143,17 +157,13 @@ export function FindingComparison({
         />
       ) : (
         <>
-          <Select
-            aria-label="Baseline run"
-            style={{ width: "100%" }}
-            loading={runList.isFetching}
-            placeholder="Select baseline run"
-            value={runId}
-            options={runList.data?.items.map((run) => ({
-              value: run.id,
-              label: `${timestamp(run.createdAt)} · ${run.id}`,
-            }))}
-            onChange={(value: string) => {
+          <TextField
+            style={{
+              width: "100%",
+            }}
+            value={runId ?? ""}
+            onChange={(event) => {
+              const value = event.target.value;
               setRunId(value);
               setRequestId(undefined);
               setJobId(undefined);
@@ -161,16 +171,30 @@ export function FindingComparison({
               setJobPage(1);
               setPage(1);
             }}
-          />
-          <Pagination
-            size="small"
-            current={runPage}
-            pageSize={20}
-            total={runList.data?.total ?? 0}
-            hideOnSinglePage
-            showSizeChanger={false}
-            onChange={setRunPage}
-          />
+            select
+            fullWidth
+            size="medium"
+            label="Baseline run"
+            helperText={runList.isFetching ? "Loading options…" : undefined}
+          >
+            <MenuItem value="" disabled>
+              {"Select baseline run"}
+            </MenuItem>
+            {runList.data?.items.map((run) => (
+              <MenuItem key={run.id} value={run.id}>
+                {`${timestamp(run.createdAt)} · ${run.id}`}
+              </MenuItem>
+            ))}
+          </TextField>
+          {Math.ceil((runList.data?.total ?? 0) / 20) > 1 && (
+            <Pagination
+              size="medium"
+              onChange={(_event, next) => setRunPage(next)}
+              page={runPage}
+              count={Math.ceil((runList.data?.total ?? 0) / 20)}
+              color="primary"
+            />
+          )}
         </>
       )}
       {runQuery.isError ? (
@@ -181,24 +205,34 @@ export function FindingComparison({
         />
       ) : (
         runId && (
-          <Select
-            aria-label="Baseline request"
-            style={{ width: "100%" }}
-            loading={runQuery.isFetching}
-            placeholder="Select baseline request"
-            value={requestId}
-            options={runQuery.data?.requests.map((request) => ({
-              value: request.requestId,
-              label: `${readable(request.workflowKind)} · ${readable(request.target)} · ${request.profile?.name ?? request.requestId}`,
-            }))}
-            onChange={(value: string) => {
+          <TextField
+            style={{
+              width: "100%",
+            }}
+            value={requestId ?? ""}
+            onChange={(event) => {
+              const value = event.target.value;
               setRequestId(value);
               setJobId(undefined);
               setBaseline(undefined);
               setJobPage(1);
               setPage(1);
             }}
-          />
+            select
+            fullWidth
+            size="medium"
+            label="Baseline request"
+            helperText={runQuery.isFetching ? "Loading options…" : undefined}
+          >
+            <MenuItem value="" disabled>
+              {"Select baseline request"}
+            </MenuItem>
+            {runQuery.data?.requests.map((request) => (
+              <MenuItem key={request.requestId} value={request.requestId}>
+                {`${readable(request.workflowKind)} · ${readable(request.target)} · ${request.profile?.name ?? request.requestId}`}
+              </MenuItem>
+            ))}
+          </TextField>
         )
       )}
       {jobs.isError ? (
@@ -210,33 +244,47 @@ export function FindingComparison({
       ) : (
         requestId && (
           <>
-            <Select
-              aria-label="Baseline saved job"
-              style={{ width: "100%" }}
-              loading={jobs.isFetching}
-              placeholder="Select baseline saved job"
-              value={jobId}
-              options={jobs.data?.items.map((job) => ({
-                value: job.jobId,
-                label: `Activation ${job.activationNumber} · ${timestamp(job.createdAt)} · ${job.jobId}${job.resultId ? "" : " · No saved result"}`,
-                disabled:
-                  job.resultId === null || job.resultDigest === null || job.jobId === result.jobId,
-              }))}
-              onChange={(value: string) => {
+            <TextField
+              style={{
+                width: "100%",
+              }}
+              value={jobId ?? ""}
+              onChange={(event) => {
+                const value = event.target.value;
                 setJobId(value);
                 setBaseline(undefined);
                 setPage(1);
               }}
-            />
-            <Pagination
-              size="small"
-              current={jobPage}
-              pageSize={20}
-              total={jobs.data?.total ?? 0}
-              hideOnSinglePage
-              showSizeChanger={false}
-              onChange={setJobPage}
-            />
+              select
+              fullWidth
+              size="medium"
+              label="Baseline saved job"
+              helperText={jobs.isFetching ? "Loading options…" : undefined}
+            >
+              <MenuItem value="" disabled>
+                {"Select baseline saved job"}
+              </MenuItem>
+              {jobs.data?.items.map((job) => (
+                <MenuItem
+                  key={job.jobId}
+                  value={job.jobId}
+                  disabled={
+                    job.resultId === null || job.resultDigest === null || job.jobId === result.jobId
+                  }
+                >
+                  {`Activation ${job.activationNumber} · ${timestamp(job.createdAt)} · ${job.jobId}${job.resultId ? "" : " · No saved result"}`}
+                </MenuItem>
+              ))}
+            </TextField>
+            {Math.ceil((jobs.data?.total ?? 0) / 20) > 1 && (
+              <Pagination
+                size="medium"
+                onChange={(_event, next) => setJobPage(next)}
+                page={jobPage}
+                count={Math.ceil((jobs.data?.total ?? 0) / 20)}
+                color="primary"
+              />
+            )}
           </>
         )
       )}
@@ -265,6 +313,7 @@ export function FindingComparison({
             setPage(1);
           }
         }}
+        variant="contained"
       >
         Compare selected results
       </Button>
@@ -276,21 +325,22 @@ export function FindingComparison({
             retry={() => void comparison.refetch()}
           />
         ) : !comparison.data ? (
-          <Skeleton active />
+          <Skeleton variant="rounded" height={72} />
         ) : (
           <>
             <FindingComparisonView comparison={comparison.data} />
-            <Pagination
-              current={page}
-              pageSize={20}
-              total={comparison.data.total}
-              hideOnSinglePage
-              showSizeChanger={false}
-              disabled={comparison.isFetching}
-              onChange={setPage}
-            />
+            {Math.ceil(comparison.data.total / 20) > 1 && (
+              <Pagination
+                disabled={comparison.isFetching}
+                onChange={(_event, next) => setPage(next)}
+                page={page}
+                count={Math.ceil(comparison.data.total / 20)}
+                color="primary"
+                size="medium"
+              />
+            )}
           </>
         ))}
-    </Space>
+    </Stack>
   );
 }

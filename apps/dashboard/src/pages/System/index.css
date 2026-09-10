@@ -1,6 +1,5 @@
 .system-page {
   width: 100%;
-  padding: 24px;
 }
 
 .system-page__actions {
@@ -15,13 +14,23 @@
 .system-page__last-refreshed {
   color: var(--app-muted);
   font-size: 14px;
-  line-height: 22px;
+  line-height: 20px;
 }
 
 .system-page__content {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 32px;
+  min-width: 0;
+}
+
+.system-page__overview {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.system-panel {
   min-width: 0;
 }
 
@@ -37,7 +46,7 @@
 .system-health__checked {
   display: block;
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 20px;
 }
 
@@ -47,15 +56,11 @@
 
 .system-page__last-refreshed {
   margin: 0;
-  text-align: right;
+  text-align: left;
 }
 
 @media (max-width: 767px) {
-  .system-page {
-    padding: 16px;
-  }
-
-  .system-panel > .ant-card-body {
-    padding: 16px;
+  .system-page__actions {
+    justify-content: flex-start;
   }
 }
