@@ -3,7 +3,10 @@ import type { JobExecutionEnvelopeV2 } from "@agentic-review/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerConfig, WorkerExecutionConfig } from "./config.js";
 import type { JobExecutionContext } from "./execution/job-executor.js";
-import type { PreparedJobWorkspace } from "./execution/job-workspace.js";
+import type {
+  PreparedJobWorkspace,
+  ProductionDisposableJobWorkspaceProviderOptions,
+} from "./execution/job-workspace.js";
 import type { PreparedCliOutputRunnerOptions } from "./execution/prepared-cli-output-runner.js";
 import type { ProfileJobExecutorOptions } from "./execution/profile-job-executor.js";
 import type { UiProfileRunnerOptions } from "./execution/ui-profile-runner.js";
@@ -35,6 +38,7 @@ const state = vi.hoisted(() => ({
   summaryOptions: [] as ValidationSummaryExecutorOptions[],
   preparedOptions: [] as PreparedCliOutputRunnerOptions[],
   workspaceRoots: [] as string[],
+  workspaceOptions: undefined as ProductionDisposableJobWorkspaceProviderOptions | undefined,
 }));
 
 vi.mock("node:fs/promises", async (original) => ({
@@ -65,7 +69,11 @@ vi.mock("./execution/workspace-disk-budget.js", () => ({
   },
 }));
 vi.mock("./execution/job-workspace.js", () => ({
-  ProductionDisposableJobWorkspaceProvider: class {},
+  ProductionDisposableJobWorkspaceProvider: class {
+    constructor(options: ProductionDisposableJobWorkspaceProviderOptions) {
+      state.workspaceOptions = options;
+    }
+  },
 }));
 vi.mock("./execution/job-executor.js", () => ({
   PlaceholderJobExecutor: class {},
@@ -149,6 +157,36 @@ describe("preconfigured CLI production composition", () => {
       },
     } as JobExecutionEnvelopeV2;
   }
+
+  it("starts with Git on the account PATH while preserving that PATH for CLI and profile commands", async () => {
+    const accountPath = "C:\\Windows\\System32;C:\\Trusted;C:\\CustomCli\\bin";
+    vi.stubEnv("PATH", accountPath);
+    await createExecutionRuntime(config(), logger);
+    const options = state.workspaceOptions;
+    if (options === undefined) throw new Error("The workspace configuration was not captured.");
+    expect(options.gitExecutable).toBe("C:\\Trusted\\git.exe");
+    expect(options.gitEnvironment.PATH).toBe("C:\\Windows\\System32");
+    const { ProductionDisposableJobWorkspaceProvider } = await vi.importActual<
+      typeof import("./execution/job-workspace.js")
+    >("./execution/job-workspace.js");
+    expect(() => new ProductionDisposableJobWorkspaceProvider(options)).not.toThrow();
+    expect(
+      () =>
+        new ProductionDisposableJobWorkspaceProvider({
+          ...options,
+          gitEnvironment: { ...options.gitEnvironment, PATH: accountPath },
+        }),
+    ).toThrow();
+    const review = state.reviewOptions[0] as PreparedCliOutputRunnerOptions;
+    expect(review.path).toBe(accountPath);
+    expect(review.cliEnvironment?.PATH).toBe(accountPath);
+    state.profileOptions?.createHeadlessRunner?.(
+      {} as JobExecutionEnvelopeV2,
+      context(),
+      workspace("path-composition"),
+    );
+    expect(state.headlessOptions[0]?.baseEnvironment.PATH).toBe(accountPath);
+  });
 
   it("observes the installed CLI version through a bounded ProcessHost command", async () => {
     state.versionProbe.mockResolvedValue({
@@ -525,6 +563,7 @@ beforeEach(() => {
   state.summaryOptions.length = 0;
   state.preparedOptions.length = 0;
   state.workspaceRoots.length = 0;
+  state.workspaceOptions = undefined;
   state.close.mockResolvedValue(undefined);
   state.createHost.mockResolvedValue({ close: state.close });
   state.versionProbe

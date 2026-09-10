@@ -26,10 +26,17 @@ task prompt, authoritative output schema, cancellation signal and resource limit
 only translate those inputs into documented noninteractive arguments and collect the final result.
 They do not implement model authentication or an alternative model transport.
 
-Codex uses stdin plus its native schema/result-file options. Copilot reads stdin and streams bounded
-text so real output activity can update task progress. The adapter supplies JSON-format/schema
-instructions and validates the complete returned JSON. Mechanical formatting instructions are adapter behavior, not a second application
-prompt or a claim about raw provider request bytes. No provider or tool traffic is intercepted.
+Codex uses stdin plus its native schema/result-file options. Copilot reads stdin and emits bounded
+JSONL events. The runner selects the last complete main-agent assistant message before the CLI's
+single successful terminal result, then validates that message against the output schema. Progress,
+reasoning, tool output and subagent messages cannot become the final answer. New main-agent turns
+or cancellation invalidate an earlier answer until a new complete message arrives.
+The terminal marker freezes that answer. Later informational events cannot replace it; duplicate
+terminal markers or a new main-agent response, turn or cancellation remain invalid.
+Parser failures log a bounded reason, event index and known event type without event bodies.
+The adapter supplies JSON-format/schema instructions. These mechanical formatting instructions
+are adapter behavior, not a second application prompt or a claim about raw provider request bytes.
+No provider or tool traffic is intercepted.
 
 Both adapters require process completion, stream draining, bounded output and schema-valid model
 JSON. Failures stay failures; partial JSON or a zero exit without valid output cannot become a

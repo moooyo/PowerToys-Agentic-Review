@@ -32,6 +32,8 @@ const maximumRetainedRecordCount = 4_096;
 const maximumRetainedRecordCharacters = 8 * 1024 * 1024;
 const maximumJsonlLineCharacters = 1_048_576;
 const maximumResultFileBytes = 2 * 1024 * 1024;
+const maximumCopilotEvents = 32_768;
+const maximumCopilotEventCharacters = 6 * maximumResultFileBytes + 65_536;
 
 export interface ReviewFileStat {
   readonly dev: bigint;
@@ -331,16 +333,21 @@ export class PreparedCliOutputRunner {
       throw fault;
     }
     const progressPulse = new CliProgressPulse(progressContext, input.noProgressTimeoutMs);
-    const output = { text: "", exceeded: false };
+    const output: CopilotOutput = { text: "", exceeded: false, failure: null };
     const settlement = Promise.allSettled([
       managed.completed,
       this.options.engine === "codex"
         ? collectCliRecords(managed.stdout, () => progressPulse.observeActivity())
-        : collectPlainOutput(
+        : collectCopilotOutput(
             managed.stdout,
             output,
             () => progressPulse.observeActivity(),
-            Math.min(maximumResultFileBytes, this.options.maximumOutputBytes),
+            this.options.maximumOutputBytes,
+            (diagnostic) =>
+              this.options.logger?.warn("Copilot JSONL parser rejected an event.", {
+                correlationId: input.correlationId,
+                ...diagnostic,
+              }),
           ),
       drainStream(managed.stderr, () => progressPulse.observeActivity()),
     ] as const);
@@ -441,7 +448,7 @@ export class PreparedCliOutputRunner {
             { processExit: exit, records: stdout.value.records, lastMessage },
             authority.resultSchema,
           )
-        : determinePlainExecutionResult(exit, lastMessage, authority.resultSchema);
+        : determineCopilotExecutionResult(exit, output, authority.resultSchema);
     if (!execution.ok) {
       const failed = failure(
         `CLI_${execution.code.toUpperCase()}`,
@@ -496,30 +503,224 @@ export class PreparedCliOutputRunner {
   }
 }
 
-async function collectPlainOutput(
+type CopilotOutputFailure =
+  | "invalid_event_stream"
+  | "incomplete_event_stream"
+  | "multiple_results"
+  | "copilot_reported_error";
+interface CopilotOutput {
+  text: string;
+  exceeded: boolean;
+  failure: CopilotOutputFailure | null;
+}
+
+type CopilotDiagnosticReason =
+  | "json_syntax"
+  | "event_shape"
+  | "type_shape"
+  | "after_result"
+  | "duplicate_result"
+  | "exit_code_shape"
+  | "terminal_error"
+  | "missing_root_message"
+  | "pending_tool_request"
+  | "data_shape"
+  | "attribution_shape"
+  | "content_shape"
+  | "tool_requests_shape"
+  | "utf8"
+  | "missing_result_marker";
+const copilotDiagnosticEventTypes = [
+  "result",
+  "assistant.message",
+  "assistant.turn_start",
+  "assistant.message_start",
+  "abort",
+  "assistant.message_delta",
+  "assistant.reasoning",
+  "assistant.reasoning_delta",
+  "assistant.turn_end",
+  "assistant.idle",
+  "tool.execution_start",
+  "tool.execution_complete",
+  "session.error",
+  "session.warning",
+  "session.start",
+  "session.resume",
+  "session.title_changed",
+  "session.shutdown",
+] as const;
+interface CopilotParserDiagnostic {
+  readonly reason: CopilotDiagnosticReason;
+  readonly eventIndex: number;
+  readonly eventType: (typeof copilotDiagnosticEventTypes)[number] | "other" | "unparsed";
+}
+/** Copilot's separate result marker closes the root response, not the session event stream. */
+async function collectCopilotOutput(
   stream: Readable,
-  output: { text: string; exceeded: boolean },
+  output: CopilotOutput,
   activity: () => void,
   maximumBytes: number,
+  diagnose: (diagnostic: CopilotParserDiagnostic) => void,
 ): Promise<CollectedCliRecords> {
-  const chunks: Buffer[] = [];
-  let retained = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let buffer = "",
+    totalBytes = 0,
+    eventCount = 0,
+    resultCount = 0;
+  let hasRootMessage = false,
+    pendingToolRequest = false;
+  let diagnosticEventType: CopilotParserDiagnostic["eventType"] = "unparsed";
+  const fail = (
+    code: CopilotOutputFailure,
+    reason: CopilotDiagnosticReason,
+    eventIndex = Math.max(1, eventCount),
+  ): void => {
+    if (output.failure !== null) return;
+    output.failure = code;
+    try {
+      diagnose({ reason, eventIndex, eventType: diagnosticEventType });
+    } catch {
+      /* Diagnostics do not change the output decision. */
+    }
+  };
+  const accept = (line: string): void => {
+    if (!line.trim()) return;
+    if (++eventCount > maximumCopilotEvents) {
+      output.exceeded = true;
+      return;
+    }
+    diagnosticEventType = "unparsed";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      fail("invalid_event_stream", "json_syntax");
+      return;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      fail("invalid_event_stream", "event_shape");
+      return;
+    }
+    const event = parsed as Record<string, unknown>;
+    if (typeof event.type !== "string" || event.type.length === 0) {
+      fail("invalid_event_stream", "type_shape");
+      return;
+    }
+    diagnosticEventType =
+      copilotDiagnosticEventTypes.find((type) => type === event.type) ?? "other";
+    if (event.type === "result") {
+      if (resultCount !== 0) {
+        fail("multiple_results", "duplicate_result");
+        return;
+      }
+      resultCount++;
+      if (typeof event.exitCode !== "number" || !Number.isInteger(event.exitCode)) {
+        fail("invalid_event_stream", "exit_code_shape");
+        return;
+      }
+      if (event.exitCode !== 0) fail("copilot_reported_error", "terminal_error");
+      else if (!hasRootMessage) fail("incomplete_event_stream", "missing_root_message");
+      else if (pendingToolRequest) fail("incomplete_event_stream", "pending_tool_request");
+      return;
+    }
+    if (
+      !["assistant.message", "assistant.turn_start", "assistant.message_start", "abort"].includes(
+        event.type,
+      )
+    )
+      return;
+    if (event.data === null || typeof event.data !== "object" || Array.isArray(event.data)) {
+      fail("invalid_event_stream", "data_shape");
+      return;
+    }
+    const data = event.data as Record<string, unknown>;
+    // Subagent messages cannot replace the root assistant's final response. The second
+    // identifier is the CLI's deprecated subagent attribution field.
+    const agent = event.agentId ?? data.parentToolCallId;
+    if (agent !== undefined && agent !== null) {
+      if (typeof agent !== "string" || agent.length === 0)
+        fail("invalid_event_stream", "attribution_shape");
+      return;
+    }
+    if (resultCount !== 0) {
+      // Late metadata, usage, tool, and subagent events cannot replace the closed
+      // response. A new root response or turn contradicts the terminal marker.
+      fail("invalid_event_stream", "after_result");
+      return;
+    }
+    if (event.type !== "assistant.message") {
+      hasRootMessage = false;
+      pendingToolRequest = false;
+      output.text = "";
+      return;
+    }
+    if (typeof data.content !== "string") {
+      fail("invalid_event_stream", "content_shape");
+      return;
+    }
+    if (data.toolRequests !== undefined && !Array.isArray(data.toolRequests)) {
+      fail("invalid_event_stream", "tool_requests_shape");
+      return;
+    }
+    if (Buffer.byteLength(data.content, "utf8") > maximumResultFileBytes) {
+      output.exceeded = true;
+      return;
+    }
+    hasRootMessage = true;
+    pendingToolRequest = Array.isArray(data.toolRequests) && data.toolRequests.length > 0;
+    // Full root messages may contain intermediate commentary. Keep the last one, and
+    // never fall back to an earlier JSON-looking response if the final one is invalid.
+    output.text = data.content;
+  };
+  const consume = (text: string): void => {
+    buffer += text;
+    let newline = buffer.indexOf("\n");
+    while (newline !== -1 && !output.exceeded && output.failure === null) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line.length > maximumCopilotEventCharacters) {
+        output.exceeded = true;
+        break;
+      }
+      accept(line);
+      newline = buffer.indexOf("\n");
+    }
+    if (buffer.length > maximumCopilotEventCharacters) output.exceeded = true;
+    if (output.exceeded || output.failure !== null) buffer = "";
+  };
   for await (const value of stream) {
     const chunk = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(value);
-    if (chunk.length) activity();
-    if (retained + chunk.length > maximumBytes) output.exceeded = true;
-    if (!output.exceeded) {
-      chunks.push(chunk);
-      retained += chunk.length;
+    if (chunk.length > 0) activity();
+    totalBytes += chunk.byteLength;
+    if (totalBytes > maximumBytes) output.exceeded = true;
+    if (output.exceeded || output.failure !== null) continue;
+    try {
+      consume(decoder.decode(chunk, { stream: true }));
+    } catch {
+      diagnosticEventType = "unparsed";
+      fail("invalid_event_stream", "utf8", eventCount + 1);
+      buffer = "";
     }
   }
-  if (!output.exceeded)
-    output.text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, retained));
+  if (!output.exceeded && output.failure === null) {
+    try {
+      consume(decoder.decode());
+    } catch {
+      diagnosticEventType = "unparsed";
+      fail("invalid_event_stream", "utf8", eventCount + 1);
+    }
+    if (buffer.length > 0 && output.failure === null) accept(buffer);
+    if (resultCount === 0) {
+      diagnosticEventType = "unparsed";
+      fail("incomplete_event_stream", "missing_result_marker", eventCount + 1);
+    }
+  }
   return { records: [], limitExceeded: output.exceeded };
 }
-function determinePlainExecutionResult<T extends TSchema>(
+function determineCopilotExecutionResult<T extends TSchema>(
   exit: { exitCode: number | null; signal: string | null; outputTruncated: boolean },
-  text: string | null,
+  output: CopilotOutput,
   schema: T,
 ) {
   const failed = (code: string, message: string, retryable = false) => ({
@@ -533,22 +734,36 @@ function determinePlainExecutionResult<T extends TSchema>(
     return failed("process_terminated", "The CLI process was terminated.", true);
   if (exit.exitCode !== 0)
     return failed("non_zero_exit", `The CLI exited with code ${exit.exitCode}.`, true);
-  if (!text?.trim()) return failed("missing_result", "The CLI did not emit a final result.", true);
+  if (output.failure !== null) {
+    const messages: Record<CopilotOutputFailure, string> = {
+      invalid_event_stream: "Copilot emitted an invalid JSONL event stream.",
+      incomplete_event_stream: "Copilot did not close a complete root assistant response.",
+      multiple_results: "Copilot emitted more than one terminal result marker.",
+      copilot_reported_error: "Copilot reported an unsuccessful terminal result.",
+    };
+    return failed(output.failure, messages[output.failure]);
+  }
+  if (!output.text.trim())
+    return failed("missing_result", "The CLI did not emit a final result.", true);
   let result: unknown;
   try {
-    result = JSON.parse(text);
+    result = JSON.parse(output.text);
   } catch {
     return failed("invalid_result_json", "The CLI final response is not JSON.");
   }
   if (!Value.Check(schema, result))
     return failed("invalid_result_schema", "The CLI result does not match the output schema.");
-  const canonical = createCanonicalResult(result);
-  return {
-    ok: true as const,
-    result,
-    resultDigest: canonical.sha256,
-    canonicalResultJson: canonical.json,
-  };
+  try {
+    const canonical = createCanonicalResult(result);
+    return {
+      ok: true as const,
+      result,
+      resultDigest: canonical.sha256,
+      canonicalResultJson: canonical.json,
+    };
+  } catch {
+    return failed("invalid_result_json", "The CLI final response is not valid canonical JSON.");
+  }
 }
 function containsProtectedValue(value: unknown, secrets: readonly string[]): boolean {
   const pending: unknown[] = [value];

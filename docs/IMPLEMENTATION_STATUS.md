@@ -16,9 +16,55 @@ absent from the current development contracts, results and UI. The product is un
 maintains the current schema, without database resets, old-version upgrades, data conversion or
 compatibility migration work. Existing SQL initialization remains in use. Existing data and
 historical artifacts remain unchanged. Automated suites use isolated synthetic data; the explicitly
-authorized minimal configured CLI probes below are separately scoped.
+authorized real CLI probes and controlled-fixture workflow acceptance below are separately scoped.
 
-## M38 current delivery and verification
+## M39 current delivery and controlled-fixture acceptance
+
+M39 is **complete for the controlled-fixture workflow scope**: Codex run 3 on source v5 and Copilot
+run 6 on source v8 each completed one ordinary PR review and both baseline/candidate Evaluation
+tasks. The accepted six-task matrix combines two complete engine sequences with separate source/run
+identities; it does not splice partial failed runs or claim one common source/run. The validated
+[workflow summary](../artifacts/m39-cli-workflow-20260910/workflow-summary.json) and
+[M39 handoff](./handoff/2026-09-10-cli-workflow-handoff.md) retain the exact task, source, receipt
+and assessment identities.
+
+Windows ran production Worker execution/lifecycle components, ProcessHost, the configured Codex
+0.145.0 or Copilot 1.0.73 CLI, real Git and Node checks. WSL ran the real Server, SQLite, HTTP result
+handling and scoring. The only Git transport substitution mapped the exact fictional fixture HTTPS
+fetch to an owned local bare repository. This was component composition, not deployment through
+Worker `main.ts`. All required runner checks passed, model branches completed and source remained
+original. Both engine sequences retained one Worker instance, 102 completed managed process trees,
+six released reservations, empty workspaces and Host/Server exits 0. Copilot also recorded zero
+active requests/monitors/reservations, zero abandoned reservations and no Server cleanup failures.
+
+The integration owner read all six finding bodies. They correctly identified the missing
+`percent / 100` conversion in `src/discount.js:2`, yielding `-2400` instead of `75` for `(100,25)`.
+Each Evaluation arm retained one completed case/check and one unjudged finding with provisional
+quality and null precision/recall. These are fixture-specific correctness and scoring observations,
+not a model-quality benchmark. A model's extra failing assertion reproduced the defect; it was not
+a failure of the mandatory runner check.
+
+The final Copilot terminal correction passed 328 tests across four files, `noEmit` typecheck and
+Biome; the main Git-PATH correction passed 40 tests. The final targeted set is **368 passes across
+five distinct files**, with zero failures/skips. M38's full suite was not rerun. The v8 source has
+1,077 files and archive SHA-256 `1e1d0cbe08f4b4f1852d28eac8195a030bc6dbeb13fbff0e53a09d6b3ff5ecf9`;
+build/typecheck/Worker bundling passed. The retained
+[Worker bundle v4](../artifacts/m39-cli-workflow-20260910/worker-bundle-v4/worker.mjs) SHA-256 is
+`b32c3a006bf9313120fc9241c614ae009a1eb3d685de5be660c4fd63d77d3bdf`.
+The [final source check](../artifacts/m39-cli-workflow-20260910/final-source-check.json) confirmed
+all 1,075 compared v8 files byte-for-byte, excluding only the two closing documentation files.
+
+Earlier source compilation, construction, timeout-mismatch, JSON/event-stream and summary-script
+failures remain retained. The historical PID observer was corrected after unrelated processes
+reused exited Git PIDs; current cleanup uses ProcessHost-managed completion. The terminal parser
+freezes one complete successful root response while retaining full-stream validation and rejecting
+contradictory terminal/root events. The exact historical run 5 trailing-event type remains unknown.
+No provider/relay, credential-copying flow or migration was introduced, and no actual PR/Issue write
+occurred. Full Worker `main.ts` and Windows VM deployment acceptance, actual upstream repository
+review and general model-quality evaluation remain separate boundaries, not additional requirements
+for closing this controlled-fixture milestone.
+
+## M38 delivered baseline and verification
 
 M38 architecture cleanup and its recorded verification scope are complete. This is not completion
 of the entire product, real-repository model-quality acceptance or full VM deployment acceptance.

@@ -30,6 +30,20 @@ const schema = Type.Object(
 );
 const digest = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
+function copilotLines(...events: unknown[]): string[] {
+  return events.map((event) => `${JSON.stringify(event)}\n`);
+}
+const copilotFinal = (content: string, extra: Record<string, unknown> = {}) => ({
+  type: "assistant.message",
+  data: { messageId: "root-message", content, ...extra },
+});
+const copilotResult = (exitCode = 0) => ({
+  type: "result",
+  timestamp: "2026-09-10T00:00:00.000Z",
+  sessionId: "fixture-session",
+  exitCode,
+  usage: {},
+});
 function fixture(
   options: {
     engine?: "codex" | "copilot";
@@ -124,7 +138,9 @@ function fixture(
       processId: 1,
       stdout: Readable.from(
         options.stdout ??
-          (engine === "codex" ? events.map((event) => `${JSON.stringify(event)}\n`) : [result]),
+          (engine === "codex"
+            ? events.map((event) => `${JSON.stringify(event)}\n`)
+            : copilotLines(copilotFinal(result), copilotResult())),
       ),
       stderr: Readable.from([options.stderr ?? ""]),
       completed: Promise.resolve({
@@ -270,7 +286,7 @@ describe("PreparedCliOutputRunner", () => {
     expect(f.close).toHaveBeenCalledOnce();
   });
 
-  it("reads Copilot final JSON from stdout without claiming a complete command transcript", async () => {
+  it("reads the last root Copilot response before its terminal marker without claiming a complete command transcript", async () => {
     const f = fixture({ engine: "copilot", result: ' { "message": "Copilot summary" }\n' });
     const result = await f.runner.run(f.input);
     expect(result).toMatchObject({
@@ -287,6 +303,474 @@ describe("PreparedCliOutputRunner", () => {
     expect(result).toMatchObject({ cliExecution: { actualPromptSha256: digest(actualPrompt) } });
   });
 
+  it("selects full root messages while ignoring tool output, deltas, reasoning, and subagents", async () => {
+    const output = copilotLines(
+      { type: "user.message", data: { content: "Task input" } },
+      copilotFinal("", { toolRequests: [{ toolCallId: "view-1", name: "view" }] }),
+      { type: "tool.execution_start", data: { toolCallId: "view-1" } },
+      {
+        type: "tool.execution_complete",
+        data: { toolCallId: "view-1", result: { content: '{"message":"tool output"}' } },
+      },
+      { type: "assistant.message_delta", data: { deltaContent: '{"message":"partial"}' } },
+      copilotFinal('{"message":"actual root result"}'),
+      { ...copilotFinal('{"message":"subagent result"}'), agentId: "subagent-1" },
+      copilotFinal('{"message":"legacy subagent result"}', { parentToolCallId: "task-1" }),
+      { type: "assistant.reasoning", data: { content: '{"message":"reasoning"}' } },
+      { type: "assistant.turn_end", data: { turnId: "1" } },
+      { type: "assistant.idle", data: {} },
+      copilotResult(),
+    );
+    const f = fixture({ engine: "copilot", stdout: output });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "actual root result" },
+    });
+    expect(f.context.reportProgress).toHaveBeenCalledWith({ phase: "cli_review", processCount: 1 });
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+  });
+
+  it("accepts a recovered model_call error when the CLI terminal and process both succeed", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(
+        {
+          type: "session.error",
+          data: { errorType: "model_call", message: "Transient response error" },
+        },
+        copilotFinal('{"message":"Recovered result"}'),
+        copilotResult(),
+      ),
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "Recovered result" },
+    });
+  });
+
+  it.each(["abort", "assistant.turn_start", "assistant.message_start"])(
+    "requires a fresh full root message after %s",
+    async (type) => {
+      const f = fixture({
+        engine: "copilot",
+        stdout: copilotLines(
+          copilotFinal('{"message":"older response"}'),
+          { type, data: {} },
+          copilotResult(),
+        ),
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INCOMPLETE_EVENT_STREAM",
+      });
+    },
+  );
+
+  it.each(["abort", "assistant.turn_start", "assistant.message_start"])(
+    "keeps the main response when a subagent emits %s",
+    async (type) => {
+      const f = fixture({
+        engine: "copilot",
+        stdout: copilotLines(
+          copilotFinal('{"message":"main response"}'),
+          { type, agentId: "child", data: {} },
+          { type, data: { parentToolCallId: "legacy-child" } },
+          copilotResult(),
+        ),
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "succeeded",
+        result: { message: "main response" },
+      });
+    },
+  );
+
+  it("accepts a new complete root response after an interrupted turn", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(
+        copilotFinal('{"message":"old response"}'),
+        { type: "abort", data: {} },
+        { type: "assistant.turn_start", data: { turnId: "new-turn" } },
+        { type: "assistant.message_start", data: { messageId: "new-message" } },
+        copilotFinal('{"message":"new response"}'),
+        copilotResult(),
+      ),
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "new response" },
+    });
+  });
+
+  it.each([
+    { type: "assistant.reasoning", data: { content: "late reasoning" } },
+    { type: "assistant.message_delta", data: { deltaContent: "late text" } },
+    { type: "assistant.usage", data: { model: "fixture-model", outputTokens: 10 } },
+    { type: "session.usage_info", data: { currentTokens: 100 } },
+    { type: "session.usage_checkpoint", data: { totalNanoAiu: 1 } },
+    { type: "session.title_changed", data: { title: "Late title" } },
+    { type: "session.error", data: { errorType: "model_call", message: "Late diagnostic" } },
+    { type: "session.warning", data: { warningType: "mcp", message: "Late warning" } },
+    { type: "tool.execution_complete", data: { result: { content: '{"message":"tool"}' } } },
+    { type: "future.informational_event", data: { content: '{"message":"metadata"}' } },
+    { ...copilotFinal('{"message":"late subagent"}'), agentId: "child" },
+    copilotFinal('{"message":"late legacy subagent"}', { parentToolCallId: "child" }),
+    { type: "assistant.turn_start", agentId: "child", data: {} },
+    { type: "assistant.message_start", data: { parentToolCallId: "child" } },
+    { type: "abort", agentId: "child", data: {} },
+  ])("keeps the closed response when a trailing event arrives: $type", async (event) => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(copilotFinal('{"message":"finished"}'), copilotResult(), event),
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "finished" },
+    });
+  });
+
+  it.each(["assistant.message", "assistant.turn_start", "assistant.message_start", "abort"])(
+    "rejects a root %s after the terminal marker and trailing metadata",
+    async (type) => {
+      const f = fixture({
+        engine: "copilot",
+        stdout: copilotLines(
+          copilotFinal('{"message":"finished"}'),
+          copilotResult(),
+          { type: "assistant.usage", data: { model: "fixture-model" } },
+          { type, data: { content: '{"message":"later"}' } },
+        ),
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INVALID_EVENT_STREAM",
+      });
+    },
+  );
+
+  it("rejects a duplicate terminal marker separated by informational events", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(
+        copilotFinal('{"message":"finished"}'),
+        copilotResult(),
+        { type: "assistant.usage", data: { model: "fixture-model" } },
+        copilotResult(),
+      ),
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_MULTIPLE_RESULTS",
+    });
+  });
+
+  it("allows trailing JSONL whitespace after the unique result marker", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: [...copilotLines(copilotFinal('{"message":"finished"}'), copilotResult()), " \r\n\n"],
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "finished" },
+    });
+  });
+
+  it.each(["not JSON\n", "[]\n", Buffer.from([0xff]), Buffer.from([0xe7, 0x95])])(
+    "still validates the complete trailing JSONL stream: %j",
+    async (trailing) => {
+      const f = fixture({
+        engine: "copilot",
+        stdout: [
+          ...copilotLines(copilotFinal('{"message":"finished"}'), copilotResult()),
+          trailing,
+        ],
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INVALID_EVENT_STREAM",
+      });
+    },
+  );
+
+  it("continues enforcing the event limit after the terminal marker", async () => {
+    const metadata = `${JSON.stringify({ type: "assistant.usage", data: {} })}\n`;
+    const f = fixture({
+      engine: "copilot",
+      stdout: [
+        ...copilotLines(copilotFinal('{"message":"finished"}'), copilotResult()),
+        metadata.repeat(32_767),
+      ],
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_OUTPUT_LIMIT_EXCEEDED",
+    });
+  });
+
+  it("continues enforcing the byte limit after the terminal marker", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(copilotFinal('{"message":"finished"}'), copilotResult(), {
+        type: "future.informational_event",
+        data: { content: "x".repeat(4_096) },
+      }),
+      settings: { maximumOutputBytes: 4_096 },
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_OUTPUT_LIMIT_EXCEEDED",
+    });
+  });
+
+  it.each([
+    {
+      stdout: ["secret-lease-token is not JSON\n"],
+      reason: "json_syntax",
+      eventIndex: 1,
+      eventType: "unparsed",
+    },
+    {
+      stdout: copilotLines({ type: "assistant.message", data: null }),
+      reason: "data_shape",
+      eventIndex: 1,
+      eventType: "assistant.message",
+    },
+    {
+      stdout: copilotLines({ ...copilotFinal("secret-lease-token"), agentId: 4 }),
+      reason: "attribution_shape",
+      eventIndex: 1,
+      eventType: "assistant.message",
+    },
+    {
+      stdout: copilotLines({
+        type: "assistant.message",
+        data: { content: ["secret-lease-token"] },
+      }),
+      reason: "content_shape",
+      eventIndex: 1,
+      eventType: "assistant.message",
+    },
+    {
+      stdout: copilotLines(copilotFinal("secret-lease-token", { toolRequests: {} })),
+      reason: "tool_requests_shape",
+      eventIndex: 1,
+      eventType: "assistant.message",
+    },
+    {
+      stdout: copilotLines(copilotFinal('{"message":"finished"}'), copilotResult(), {
+        type: "assistant.message",
+        data: { content: "secret-lease-token" },
+      }),
+      reason: "after_result",
+      eventIndex: 3,
+      eventType: "assistant.message",
+    },
+    {
+      stdout: copilotLines(copilotFinal('{"message":"finished"}'), copilotResult(), {
+        type: { secret: "secret-lease-token" },
+        data: {},
+      }),
+      reason: "type_shape",
+      eventIndex: 3,
+      eventType: "unparsed",
+    },
+    { stdout: [Buffer.from([0xff])], reason: "utf8", eventIndex: 1, eventType: "unparsed" },
+  ])(
+    "logs only the first safe parser classification: $reason/$eventType",
+    async ({ stdout, reason, eventIndex, eventType }) => {
+      const warn = vi.fn();
+      const f = fixture({
+        engine: "copilot",
+        stdout,
+        settings: { logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } },
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INVALID_EVENT_STREAM",
+      });
+      expect(warn).toHaveBeenCalledExactlyOnceWith("Copilot JSONL parser rejected an event.", {
+        correlationId: "attempt",
+        reason,
+        eventIndex,
+        eventType,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("secret-lease-token");
+      expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not change a failed output decision when the diagnostic logger throws", async () => {
+    const f = fixture({
+      engine: "copilot",
+      stdout: ["malformed\n"],
+      settings: {
+        logger: {
+          debug: vi.fn(),
+          info: vi.fn(),
+          warn: () => {
+            throw new Error("Logger unavailable");
+          },
+          error: vi.fn(),
+        },
+      },
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_INVALID_EVENT_STREAM",
+    });
+  });
+
+  it.each([
+    {
+      name: "missing terminal",
+      events: [copilotFinal('{"message":"not closed"}')],
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    },
+    {
+      name: "duplicate terminal",
+      events: [copilotFinal('{"message":"closed"}'), copilotResult(), copilotResult()],
+      code: "CLI_MULTIPLE_RESULTS",
+    },
+    {
+      name: "missing root message",
+      events: [copilotResult()],
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    },
+    {
+      name: "delta only",
+      events: [
+        { type: "assistant.message_delta", data: { deltaContent: '{"message":"partial"}' } },
+        copilotResult(),
+      ],
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    },
+    {
+      name: "tool output only",
+      events: [
+        {
+          type: "tool.execution_complete",
+          data: { result: { content: '{"message":"tool result"}' } },
+        },
+        copilotResult(),
+      ],
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    },
+    {
+      name: "pending final tool request",
+      events: [
+        copilotFinal('{"message":"tool requested"}', { toolRequests: [{ toolCallId: "pending" }] }),
+        copilotResult(),
+      ],
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    },
+    {
+      name: "unsuccessful terminal",
+      events: [copilotFinal('{"message":"not successful"}'), copilotResult(1)],
+      code: "CLI_COPILOT_REPORTED_ERROR",
+    },
+    {
+      name: "terminal missing exit code",
+      events: [copilotFinal('{"message":"invalid terminal"}'), { type: "result" }],
+      code: "CLI_INVALID_EVENT_STREAM",
+    },
+    {
+      name: "non-string root content",
+      events: [
+        { type: "assistant.message", data: { content: { message: "object" } } },
+        copilotResult(),
+      ],
+      code: "CLI_INVALID_EVENT_STREAM",
+    },
+    {
+      name: "invalid toolRequests",
+      events: [copilotFinal('{"message":"invalid tools"}', { toolRequests: {} }), copilotResult()],
+      code: "CLI_INVALID_EVENT_STREAM",
+    },
+    {
+      name: "root message after terminal",
+      events: [
+        copilotFinal('{"message":"first"}'),
+        copilotResult(),
+        copilotFinal('{"message":"later"}'),
+      ],
+      code: "CLI_INVALID_EVENT_STREAM",
+    },
+    {
+      name: "no fallback to earlier JSON",
+      events: [
+        copilotFinal('{"message":"earlier"}'),
+        copilotFinal("The last answer is not JSON."),
+        copilotResult(),
+      ],
+      code: "CLI_INVALID_RESULT_JSON",
+    },
+  ])("rejects Copilot $name", async ({ events, code }) => {
+    const f = fixture({ engine: "copilot", stdout: copilotLines(...events) });
+    expect(await f.runner.run(f.input)).toMatchObject({ outcome: "failed", code });
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+  });
+
+  it.each(["plain text", "{malformed", "[]", '{"message":"unframed object"}'])(
+    "rejects non-event Copilot stdout without extracting arbitrary braces: %j",
+    async (text) => {
+      const f = fixture({
+        engine: "copilot",
+        stdout: [
+          `${text}\n`,
+          ...copilotLines(copilotFinal('{"message":"later"}'), copilotResult()),
+        ],
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INVALID_EVENT_STREAM",
+      });
+    },
+  );
+
+  it("decodes split UTF-8 event bytes and accepts a final record without a newline", async () => {
+    const bytes = Buffer.from(
+      copilotLines(copilotFinal('{"message":"Résumé 界"}'), copilotResult()).join("").trimEnd(),
+    );
+    const f = fixture({
+      engine: "copilot",
+      stdout: [...bytes].map((value) => Buffer.from([value])),
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "succeeded",
+      result: { message: "Résumé 界" },
+    });
+  });
+
+  it.each([Buffer.from([0xff]), Buffer.from([0xe7, 0x95])])(
+    "rejects invalid or truncated UTF-8 while draining the stream",
+    async (bytes) => {
+      const f = fixture({ engine: "copilot", stdout: [bytes] });
+      const ended = vi.fn();
+      const start = f.start.getMockImplementation();
+      if (start === undefined) throw new Error("The fixture process implementation is missing.");
+      f.start.mockImplementation(async (spec) => {
+        const managed = await start(spec);
+        managed.stdout.once("end", ended);
+        return managed;
+      });
+      expect(await f.runner.run(f.input)).toMatchObject({
+        outcome: "failed",
+        code: "CLI_INVALID_EVENT_STREAM",
+      });
+      expect(ended).toHaveBeenCalledOnce();
+      expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    },
+  );
+
+  it("bounds the number of Copilot events without retaining a full tool transcript", async () => {
+    const metadata = `${JSON.stringify({ type: "assistant.message_delta", data: { deltaContent: "." } })}\n`;
+    const f = fixture({ engine: "copilot", stdout: [metadata.repeat(32_769)] });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_OUTPUT_LIMIT_EXCEEDED",
+    });
+  });
   it.each([
     { result: "", code: "CLI_MISSING_RESULT" },
     { result: '```json\n{"message":"summary"}\n```', code: "CLI_INVALID_RESULT_JSON" },

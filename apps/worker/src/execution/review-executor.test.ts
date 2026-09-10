@@ -550,7 +550,10 @@ describe("ReviewJobExecutor success", () => {
   it("runs the configured Copilot CLI and collects its final JSON response", async () => {
     const result = validIssueResult();
     const host = new FakeProcessHost();
-    host.stdout = Readable.from([JSON.stringify(result)]);
+    host.stdout = Readable.from([
+      `${JSON.stringify({ type: "assistant.message", data: { content: JSON.stringify(result) } })}\n`,
+      `${JSON.stringify({ type: "result", sessionId: "fixture", exitCode: 0 })}\n`,
+    ]);
     const run = await execute(createEnvelope("issue_triage"), undefined, {
       processHost: host,
       executorOptions: {

@@ -156,7 +156,7 @@ export function buildCliLaunchSpec(options: BuildCliLaunchSpecOptions): CliProce
           "--stream",
           "on",
           "--output-format",
-          "text",
+          "json",
           "--no-color",
           ...modelArguments,
         ];

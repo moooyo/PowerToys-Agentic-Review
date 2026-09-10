@@ -300,7 +300,12 @@ export async function createExecutionRuntime(
       gitSharedRootDirectory: execution.gitSharedRootDirectory,
       gitExecutable: binaries.gitPath,
       gitWorkingDirectory,
-      gitEnvironment: { SYSTEMROOT: systemRoot, COMSPEC: comSpec, PATH: path, PATHEXT: pathExt },
+      gitEnvironment: {
+        SYSTEMROOT: systemRoot,
+        COMSPEC: comSpec,
+        PATH: win32.join(systemRoot, "System32"),
+        PATHEXT: pathExt,
+      },
       gitLimits,
       gitSharedCachePolicy: {
         maximumTotalBytes: BigInt(execution.gitSharedCacheMaxBytes),

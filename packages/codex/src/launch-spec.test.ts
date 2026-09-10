@@ -94,7 +94,7 @@ describe("buildCliLaunchSpec", () => {
       "--stream",
       "on",
       "--output-format",
-      "text",
+      "json",
       "--no-color",
     ]);
     expect(spec.arguments).not.toContain("-p");
@@ -470,7 +470,7 @@ describe("buildCliLaunchSpec", () => {
 
   it("rejects a missing mandatory limit at runtime", () => {
     const limits = validLimits() as Partial<CliProcessResourceLimits>;
-    delete limits.maximumOutputBytes;
+    Reflect.deleteProperty(limits, "maximumOutputBytes");
     expect(() =>
       buildCliLaunchSpec({
         ...validOptions(),

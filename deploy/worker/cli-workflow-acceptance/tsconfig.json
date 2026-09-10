@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@agentic-review/contracts": ["../../../packages/contracts/src/index.ts"],
+      "@agentic-review/domain": ["../../../packages/domain/src/index.ts"],
+      "@agentic-review/codex": ["../../../packages/codex/src/index.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}
