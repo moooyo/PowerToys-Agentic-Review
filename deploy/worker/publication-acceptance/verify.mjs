@@ -121,10 +121,15 @@ async function verifyCoordinator() {
     ),
     { name: "active-after-disable", afterDisable: "queued" },
     { name: "disable-readback-enabled", ignoreDisable: true },
+    { name: "disable-http-409", disableHttpFailure: "json" },
+    { name: "disable-http-409-oversized-body", disableHttpFailure: "oversized_body" },
+    { name: "disable-http-409-oversized-field", disableHttpFailure: "oversized_field" },
+    { name: "disable-http-409-malformed-body", disableHttpFailure: "invalid_json" },
     { name: "disabled-readback-omits-settings", omitDisabledFields: true },
     { name: "restored-readback-omits-settings", omitRestoredFields: true },
     { name: "lost-settings-acknowledgements", loseAcknowledgements: true },
     { name: "old-11-operation-plan", oldPlan: true },
+    { name: "old-13-field-disable-plan", oldDisablePlan: true },
   ];
   const summaries = [];
   for (const scenario of scenarios) {
@@ -138,19 +143,28 @@ async function verifyCoordinator() {
       { flag: "wx", mode: 0o600 },
     );
     let approval = approvedDirectory;
-    if (scenario.oldPlan) {
+    if (scenario.oldPlan || scenario.oldDisablePlan) {
       approval = join(directory, "old-approval");
       await mkdir(approval, { recursive: false, mode: 0o700 });
       const previous = JSON.parse(
         await readFile(join(approvedDirectory, "approval-plan.json"), "utf8"),
       );
-      previous.schemaVersion = "PublicationAcceptancePlanV1";
-      previous.operations = previous.operations.filter(
-        (operation) => !["disable-actions", "restore-actions"].includes(operation.id),
-      );
-      delete previous.actions;
-      delete previous.supersedes;
-      assert.equal(previous.operations.length, 11);
+      if (scenario.oldPlan) {
+        previous.schemaVersion = "PublicationAcceptancePlanV1";
+        previous.operations = previous.operations.filter(
+          (operation) => !["disable-actions", "restore-actions"].includes(operation.id),
+        );
+        delete previous.actions;
+        delete previous.supersedes;
+        assert.equal(previous.operations.length, 11);
+      } else {
+        previous.schemaVersion = "PublicationAcceptancePlanV2";
+        previous.operations.find((operation) => operation.id === "disable-actions").body = {
+          ...plan.originalActionsPermissions,
+          enabled: false,
+        };
+        assert.equal(previous.operations.length, 13);
+      }
       await writeFile(join(approval, "approval-plan.json"), JSON.stringify(previous), {
         flag: "wx",
         mode: 0o600,
@@ -199,14 +213,15 @@ async function verifyCoordinator() {
       { flag: "wx", mode: 0o600 },
     );
     const trace = JSON.parse(await readFile(tracePath, "utf8"));
-    const receipt = JSON.parse(await readFile(join(output, "receipt.json"), "utf8"));
+    const receiptText = await readFile(join(output, "receipt.json"), "utf8");
+    const receipt = JSON.parse(receiptText);
     const mutations = trace.calls.filter((call) => call.method !== "GET");
     assert(
       trace.calls.every((call) => !/\/(?:cancel|force-cancel|rerun)(?:\/|$)/u.test(call.path)),
       "The coordinator must never cancel or rerun workflows.",
     );
     assert.equal(childResult.signal, null, "The bounded coordinator child did not exit normally.");
-    if (scenario.oldPlan) {
+    if (scenario.oldPlan || scenario.oldDisablePlan) {
       assert.equal(childResult.code, 1);
       assert.equal(
         trace.calls.length,
@@ -221,6 +236,65 @@ async function verifyCoordinator() {
         receipt.actions.runChecks[0].runs.length,
         101,
         "The second workflow-run page must be inspected.",
+      );
+    } else if (scenario.disableHttpFailure) {
+      assert.equal(childResult.code, 1);
+      assert.deepEqual(
+        mutations.map((call) => call.operationId),
+        ["disable-actions"],
+      );
+      assert.equal(trace.branch, null);
+      assert.equal(trace.hasIssues, false);
+      assert.equal(trace.calls.filter((call) => call.method === "POST").length, 0);
+      assert.equal(receipt.actions.disableAcknowledged, false);
+      assert.deepEqual(receipt.actions.disabled, plan.originalActionsPermissions);
+      assert.deepEqual(receipt.actions.final, plan.originalActionsPermissions);
+      assert.equal(receipt.actions.restoration, "already_original");
+      assert.equal(receipt.publications.length, 0);
+      assert.equal(receipt.failure.code, "ACCEPTANCE_FAILED");
+      const failed = receipt.operations.find(
+        (operation) => operation.operationId === "disable-actions",
+      );
+      assert.equal(failed.status, 409);
+      assert.equal(failed.diagnostic.requestId, "synthetic-request-[REDACTED]");
+      assert.equal(receiptText.includes("synthetic-coordinator-token"), false);
+      assert.equal(receiptText.includes("unselected-sensitive-field"), false);
+      assert.equal(
+        `${childResult.stdout}${childResult.stderr}`.includes("synthetic-coordinator-token"),
+        false,
+      );
+      if (scenario.disableHttpFailure === "json") {
+        assert.deepEqual(failed.diagnostic, {
+          bodyStatus: "json",
+          requestId: "synthetic-request-[REDACTED]",
+          message: "Conflict for [REDACTED]; repeated [REDACTED].",
+          documentation_url: "https://docs.github.com/synthetic/[REDACTED]",
+        });
+      } else if (scenario.disableHttpFailure === "oversized_field") {
+        assert.equal(failed.diagnostic.bodyStatus, "json");
+        assert.equal(failed.diagnostic.message, undefined);
+        assert.equal(
+          failed.diagnostic.documentation_url,
+          "https://docs.github.com/synthetic/[REDACTED]",
+        );
+      } else {
+        assert.deepEqual(failed.diagnostic, {
+          bodyStatus:
+            scenario.disableHttpFailure === "oversized_body" ? "omitted_too_large" : "invalid_json",
+          requestId: "synthetic-request-[REDACTED]",
+        });
+        if (scenario.disableHttpFailure === "oversized_body") {
+          assert.equal(trace.errorBodyCancelled, true);
+          assert.equal(receiptText.includes("synthetic-coordinator-token".slice(0, 12)), false);
+        }
+      }
+      const disable = trace.calls.findIndex((call) => call.operationId === "disable-actions");
+      assert.deepEqual(
+        trace.calls.slice(disable + 1).map((call) => [call.method, call.path]),
+        [
+          ["GET", `/repos/${plan.repository}/actions/permissions`],
+          ["GET", `/repos/${plan.repository}/actions/permissions`],
+        ],
       );
     } else if (scenario.afterDisable || scenario.ignoreDisable) {
       assert.equal(childResult.code, 1);
@@ -281,10 +355,11 @@ async function verifyCoordinator() {
       "All original Actions permission fields must be restored.",
     );
     for (const mutation of mutations.filter((call) => call.path.endsWith("/actions/permissions"))) {
-      assert.equal(mutation.body.allowed_actions, plan.originalActionsPermissions.allowed_actions);
-      assert.equal(
-        mutation.body.sha_pinning_required,
-        plan.originalActionsPermissions.sha_pinning_required,
+      assert.deepEqual(
+        mutation.body,
+        mutation.operationId === "disable-actions"
+          ? { enabled: false }
+          : plan.originalActionsPermissions,
       );
     }
     summaries.push({
@@ -425,6 +500,41 @@ function installCoordinatorFetch(scenario, settings) {
     if (!operation.id.startsWith("publish-"))
       assert.deepEqual(body ?? null, operation.body ?? null);
     if (path === `${root}/actions/permissions`) {
+      if (scenario.disableHttpFailure && !body.enabled) {
+        const token = "synthetic-coordinator-token";
+        const headers = { "x-github-request-id": `synthetic-request-${token}` };
+        if (scenario.disableHttpFailure === "oversized_body") {
+          const prefix = '{"message":"';
+          const tokenPrefix = token.slice(0, 12);
+          const first = `${prefix}${"x".repeat(16_384 - prefix.length - tokenPrefix.length)}${tokenPrefix}`;
+          const chunks = [first, `${token.slice(12)} and the rest of the oversized message"}`];
+          return new Response(
+            new ReadableStream({
+              pull(controller) {
+                if (chunks.length > 0) controller.enqueue(new TextEncoder().encode(chunks.shift()));
+              },
+              cancel() {
+                state.errorBodyCancelled = true;
+                save();
+              },
+            }),
+            { status: 409, headers },
+          );
+        }
+        if (scenario.disableHttpFailure === "invalid_json")
+          return new Response(`Not JSON: ${token}`, { status: 409, headers });
+        return Response.json(
+          {
+            message:
+              scenario.disableHttpFailure === "oversized_field"
+                ? `${"x".repeat(4096)}${token}`
+                : `Conflict for ${token}; repeated ${token}.`,
+            documentation_url: `https://docs.github.com/synthetic/${token}`,
+            errors: [`unselected-sensitive-field ${token}`],
+          },
+          { status: 409, headers },
+        );
+      }
       if (!(scenario.ignoreDisable && !body.enabled)) Object.assign(state.permissions, body);
       save();
       if (scenario.loseAcknowledgements)

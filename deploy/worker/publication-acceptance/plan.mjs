@@ -56,8 +56,9 @@ export const checkSummary =
 export const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 export const approvalPlan = Object.freeze({
-  schemaVersion: "PublicationAcceptancePlanV2",
-  supersedes: "The unapproved, unexecuted PublicationAcceptancePlanV1 with 11 operations.",
+  schemaVersion: "PublicationAcceptancePlanV3",
+  supersedes:
+    "The approved PublicationAcceptancePlanV2 attempt stopped at its first mutation with HTTP 409. Readback confirmed the original Actions state; no branch, PR, Issue, or publication was created. The failed attempt is retained.",
   acceptanceId,
   executionDefault: "prepare-only; no GitHub mutations",
   repository: {
@@ -78,7 +79,7 @@ export const approvalPlan = Object.freeze({
     readiness:
       "Read all workflow-run pages and refuse any status other than completed before disabling Actions and again after disabled-state readback. Never cancel an existing run.",
     preservation:
-      "Only enabled changes. Both PUT requests preserve allowed_actions=all and sha_pinning_required=false, which are supported request fields in the GitHub REST API.",
+      "Only enabled changes. Disable sends only enabled=false, consistent with the GitHub Terraform provider. Readback rejects any visible policy change. Restoration sends the complete original policy and requires all three original fields in final readback.",
     restoration:
       "After all original cleanup actions, read back permissions and restore the original state if this run attempted to change Actions. Record unconfirmed acknowledgements and failed readback; never retry a mutation blindly.",
   },
@@ -93,7 +94,7 @@ export const approvalPlan = Object.freeze({
       id: "disable-actions",
       method: "PUT",
       path: `/repos/${repository}/actions/permissions`,
-      body: { ...originalActionsPermissions, enabled: false },
+      body: { enabled: false },
     },
     {
       id: "create-branch",

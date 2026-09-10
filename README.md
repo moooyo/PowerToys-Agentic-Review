@@ -81,18 +81,18 @@ Issue triage retains its snapshot-based workflow. See [ADR 0030](./docs/adr/0030
 ## Accepted scope and remaining work
 
 [M39](./docs/handoff/2026-09-10-cli-workflow-handoff.md) accepted six real CLI PR review/Evaluation
-tasks through complete Codex and Copilot sequences. M40 accepted six headless Issue summaries on
-a frozen measurement case, including both Evaluation arms per CLI, independent semantic review,
-frozen inputs and confirmed process/workspace/Server cleanup. These runs used production components
-with recorded source identities. M40 also retains human-adjudicated quality observations on three
-small cases, alongside the earlier M26 Web and M34 Notepad++ acceptance.
+tasks through complete Codex and Copilot sequences. M40 accepted six headless Issue summaries with
+independent semantic review and confirmed cleanup. [M41](./docs/handoff/2026-09-10-approved-acceptance-handoff.md)
+accepted the explicitly approved live publication workflow on `moooyo/PowerToys`: one production
+PR review and one Issue comment, acknowledgement-loss reconciliation without duplicate POSTs,
+and independently confirmed target cleanup and settings restoration.
 
 Remaining scope includes full Worker `main.ts` on the intended Windows VM, real PowerToys/UI
-profiles, Issue triage and deployed OIDC. The small quality case set does not establish broad
-review coverage or a general model-quality benchmark. Live publication and the requested Visual
-Studio components require explicit approval. See [Implementation Status](./docs/IMPLEMENTATION_STATUS.md)
-for verified CI, exact accepted scopes, retained failures and the remaining deployment and
-approval work.
+profiles, Issue triage and deployed OIDC. The approved Visual Studio component installation remains
+unfinished after an elevation cancellation; the prepared PowerToys build and test plan has not run.
+M40's three small quality cases do not establish broad review coverage or a general benchmark.
+See [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for CI, exact evidence, retained failures
+and remaining work; each new live target or publication payload still requires its own authorization.
 
 ## Authentication
 

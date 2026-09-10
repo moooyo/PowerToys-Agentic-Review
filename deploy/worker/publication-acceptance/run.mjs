@@ -55,6 +55,65 @@ const receipt = {
   failure: null,
 };
 
+async function failedHttpDiagnostic(response, token) {
+  const diagnostic = { bodyStatus: "unavailable" };
+  const safeText = (text, maximumBytes) => {
+    if (typeof text !== "string") return undefined;
+    const redacted = text.split(token).join("[REDACTED]");
+    return Buffer.byteLength(redacted) <= maximumBytes ? redacted : undefined;
+  };
+  const requestId = safeText(response.headers.get("x-github-request-id"), 256);
+  if (requestId !== undefined) diagnostic.requestId = requestId;
+  try {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      diagnostic.bodyStatus = "empty";
+      return diagnostic;
+    }
+    const chunks = [];
+    let bytes = 0;
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > 16_384) {
+          // Discard the entire body; a truncated prefix could retain part of a token.
+          diagnostic.bodyStatus = "omitted_too_large";
+          await reader.cancel().catch(() => {});
+          return diagnostic;
+        }
+        chunks.push(Buffer.from(chunk.value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (bytes === 0) {
+      diagnostic.bodyStatus = "empty";
+      return diagnostic;
+    }
+    let body;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      diagnostic.bodyStatus = "invalid_json";
+      return diagnostic;
+    }
+    diagnostic.bodyStatus = "json";
+    for (const [field, maximumBytes] of [
+      ["message", 4096],
+      ["documentation_url", 1024],
+    ]) {
+      const text = safeText(body?.[field], maximumBytes);
+      if (text !== undefined) diagnostic[field] = text;
+    }
+  } catch {
+    // Diagnostic transport failures must not change mutation or cleanup behavior.
+    diagnostic.bodyStatus = "unavailable";
+  }
+  return diagnostic;
+}
+
 function syntheticSnapshot(kind) {
   const pull = kind === "pull_request";
   const number = pull ? 1 : 2;
@@ -188,6 +247,7 @@ async function executeApproved() {
     });
     observation.status = response.status;
     if (method === "GET" && response.status === 404) return null;
+    if (!response.ok) observation.diagnostic = await failedHttpDiagnostic(response, token);
     assert(response.ok, `GitHub ${method} failed with status ${response.status}.`);
     if (response.status === 204) return null;
     const text = await response.text();

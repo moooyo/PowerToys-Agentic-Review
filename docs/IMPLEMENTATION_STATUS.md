@@ -21,6 +21,14 @@ authorized real CLI probes and controlled-fixture workflow acceptance below are 
 
 ## Current branch verification
 
+The remote `main` baseline `bdfa577` passed all three jobs in CI run **34432088155**.
+M41's subsequent publication-helper and documentation fixes remain local to this repository;
+their targeted verification is recorded below and is not a claim of a new full CI run. This round
+authorizes external writes only to the specified `moooyo/PowerToys` fork and does not authorize
+pushing the main project repository.
+
+### Retained M40 CI evidence
+
 CI run **34429398701** passed all three jobs at commit
 `62297f72861b3bcdd2bc04804602c29532218713` on `codex/ci-product-completion`, completing at
 `2026-09-10T02:46:33Z`. Linux typecheck/tests/build/lint passed with **13,395 passed, 61 skipped
@@ -42,17 +50,51 @@ boundary tests passed. Production runtime and regular test-suite sources remain 
 CI revision. Final local and remote refs are retained in the
 [delivery receipt](../artifacts/m40-ci-product-20260910/delivery.json).
 
-## M40 current implementation and verified scope
+## M41 approved publication acceptance and PowerToys preparation
 
-The following separates completed implementation/verification from failed runtime exercises and
-operations awaiting external approval. It does not mark the product or all P1/P2 work complete.
+The approved **13-operation publication acceptance passed** on `moooyo/PowerToys`: 11 coordinator
+mutations and two production publisher POSTs. Each publication passed through `unknown` and
+GET-only reconciliation to `published`, with exactly one POST per target. The retained
+[live receipt](../artifacts/m41-approved-acceptance-20260910/publication-live-retained-v2/live-run1/receipt.json)
+records PR **#1**, review **5162481132**, Issue **#2**, comment **5612697745**, and no cleanup failure.
+The [independent readback](../artifacts/m41-approved-acceptance-20260910/publication-live-v2/remote-readback-v2/verification.json)
+confirms the PR closed without merging, the Issue closed, the test branch absent, Issues disabled,
+and all original Actions permission fields restored. Fork `main` remains at
+`3a1e642db52d45f88c0cb702b10663e1f65623f7`; the original four workflow runs are unchanged, with no
+new run and no upstream repository write.
+
+The first V2 attempt received HTTP 409 while disabling Actions and changed no remote state.
+V3 changed that request body to only `{ "enabled": false }`; the
+[scope comparison](../artifacts/m41-approved-acceptance-20260910/publication-v3-scope-comparison.json)
+confirms all other 12 operations and six payload files are identical. Bounded, token-redacted
+HTTP failure diagnostics and the minimal request were verified with two production SQLite outbox
+fixtures, 18 synthetic coordinator scenarios, syntax checks, Biome and independent review.
+[Verification](../artifacts/m41-approved-acceptance-20260910/diagnostics-preparation-v1/verification.json)
+retains the initial `/mnt/d` storage-permission failure. The first independent REST readback also
+remains failed: Issue endpoints returned HTTP 410 after Issues was restored to disabled. The
+successful follow-up used the exact created GraphQL nodes and retained REST responses, without mutations.
+
+The two Visual Studio Spectre components were approved but remain uninstalled: the first attempt
+exited 5007 and the second `RunAs` elevation was canceled. The
+[final component check](../artifacts/m41-approved-acceptance-20260910/vs-components-final-state.json)
+confirms both component directories are absent. A request to display UAC again has no
+reply; no third attempt was made. The [build helper bundle](../artifacts/m41-approved-acceptance-20260910/build-preparation-v1/README.md)
+and [seven-test plan](../artifacts/m41-approved-acceptance-20260910/powertoys-test-plan-v1.md) are prepared
+for the same pinned checkout. No M41 PowerToys build, test or UI run occurred. The personal
+PowerToys instance is outside the owned acceptance scope. See the
+[M41 handoff](./handoff/2026-09-10-approved-acceptance-handoff.md) for the recovery point and next steps.
+
+## M40 retained implementation and verified scope
+
+The following retains M40 implementation and runtime outcomes. M41 advances publication acceptance
+and installation status above; neither milestone marks the product or all P1/P2 work complete.
 
 | Work | Completed or verified scope | Remaining boundary |
 | --- | --- | --- |
 | Finding validation | [finding-validation-run3](../artifacts/m40-ci-product-20260910/finding-validation-run3/) passed 395 tests, `noEmit` and lint; final CI also passed at the commit above. | Earlier failures remain retained; deployed identity/permission acceptance keeps its own scope. |
-| Publication preparation | [V2 preparation](../artifacts/m40-ci-product-20260910/publication-prepare-v2/verification.json) passed both synthetic outbox cases, 13 coordinator scenarios, JavaScript syntax, Biome and independent review. The seven production-boundary tests also passed. | The [13-operation plan](../artifacts/m40-ci-product-20260910/publication-prepare-v2/approval-bundle-v2/approval-plan.json) requires explicit approval. It supersedes the unapproved 11-operation plan and adds temporary Actions suspension/restoration while preserving the original operations and payloads. No live fork operation has executed. |
+| Publication preparation | [V2 preparation](../artifacts/m40-ci-product-20260910/publication-prepare-v2/verification.json) passed both synthetic outbox cases, 13 coordinator scenarios, JavaScript syntax, Biome and independent review. The seven production-boundary tests also passed. | This was preparation only at M40 closeout. The approved live workflow subsequently passed in M41 using the scoped V3 correction above. |
 | Quality checker | Eight pure checker regressions, `noEmit`, checker bundling and Biome passed. Retained nine-task observations passed the corrected postconditions without new models. | The original run receipt is unchanged and still failed on `18 !== 6`; separate revalidation is not a rewritten runtime pass. |
-| PowerToys preparation | Restore passed; the native build failed with six `MSB8040` errors. Host closure and byte/hash-preserved upstream logs are retained. | The two requested Visual Studio Spectre components remain unapproved and uninstalled; PowerToys build/profile/UI acceptance has not passed. |
+| PowerToys preparation | Restore passed; the native build failed with six `MSB8040` errors. Host closure and byte/hash-preserved upstream logs are retained. | M41 installation attempts have not installed the approved components; PowerToys build/profile/UI acceptance has not passed. |
 | Summary diagnostics | Diagnostics v2 passed 318 tests, `noEmit`, Biome and independent review, preserving bounded redacted code/message context. | Earlier generic summary failures remain recorded; this does not itself accept a real model workflow. |
 | Portable model schema | Schema v2 passed 327 tests, `noEmit` and Biome for six model schemas. Run 2's HTTP 400 was traced to regex lookaround in the exported observation-path pattern. | A schema portability defect, not provider configuration. Earlier failed Worker/coordinator receipts remain unchanged. |
 | Headless Issue summaries | Run 3 completed all six actual summaries: ordinary and both Evaluation arms per CLI. Independent semantic/numerical/scope review passed; runner/model conclusions and assessments were confirmed. | Accepted for the frozen headless Issue measurement case, not Issue triage, installed-extension/video/AI/translation behavior or Windows/Web UI execution. |
@@ -82,11 +124,8 @@ used one instance for three sequential tasks; four cross-task boundaries confirm
 finished before the next task. The engines also ran sequentially with different instances.
 Host/Server closure passed, and all 38 copied Server files matched their closed originals.
 
-The fork has Actions enabled and a Spell workflow may comment automatically. The prepared V2
-bundle has 13 operations: temporarily disable Actions first, preserve all original operations
-and payloads, and restore Actions last. It never cancels an existing workflow run. The new
-approval request is pending, and no live fork mutation has occurred. The two Visual Studio
-component installations also remain unapproved and unperformed.
+At M40 closeout, live publication and Visual Studio installation were still awaiting approval.
+Those historical receipts remain unchanged; the approved M41 outcomes are recorded above.
 
 ## M39 completed controlled-fixture acceptance
 
@@ -137,26 +176,25 @@ for closing this controlled-fixture milestone.
 ## Remaining product work
 
 This is the current backlog and acceptance boundary. Historical milestone limitations below do
-not override later M38/M39 completion, and retired designs are not queued implementation work.
+not override later accepted scopes, and retired designs are not queued implementation work.
 
-- **Publication approval:** obtain explicit approval of the prepared 13-operation V2 bundle, then
-  execute that exact live acceptance and restore the original settings. CI and headless Issue run 3 are
-  verified; their completion does not approve external operations.
 - **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
   Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.
   M39 accepted component composition with an owned Git transport substitution, not that deployment.
 - **Real PowerToys profile:** exercise the intended PowerToys source, toolchain, build/test/UI
   profile, evidence and state restoration. Accepted M26 Web and M34 Notepad++ cases retain their
   scopes and do not establish PowerToys readiness. M40's restore succeeded but native build failed;
-  the two requested Spectre components await approval and have not been installed.
+  the approved Spectre components remain uninstalled after the two failed/canceled attempts.
+  Wait for the requested UAC continuation response, then complete prerequisites before executing
+  the prepared build and seven-test plan. UI acceptance requires an owned interactive environment;
+  do not attach to or change the personal PowerToys instance.
 - **Additional model workflows:** accept Issue triage and Windows/Web or other application-specific
   model-assisted workflows beyond M39 PR/static review and the accepted M40 headless Issue case.
   Runner/evidence facts remain independent of model advice.
-- **Deployment identities and live publication:** complete the intended OIDC/multi-user and
-  repository-specific human/finding workflow acceptance. M30 publication preview/outbox passed
-  isolated mock transport, and M40's original preparation passed. The revised 13-operation live
-  plan remains unapproved/unexecuted; deployed targets/payloads require authorization. M31 fixtures do
-  not establish every deployed delivery channel.
+- **Deployment identities and publication coverage:** complete the intended OIDC/multi-user and
+  repository-specific human/finding workflow acceptance. M41 accepts its exact fork PR review and
+  Issue comment through the production publisher; it does not authorize new targets, content or
+  reruns, or establish every deployed delivery channel. M31 fixtures retain their original scope.
 - **Quality and operational coverage:** use appropriately labeled/adjudicated cases for broader
   model-quality comparisons, and verify intended workload capacity and evidence retention. M39's
   provisional results and M40's adjudicated three-case observation have different scopes; neither

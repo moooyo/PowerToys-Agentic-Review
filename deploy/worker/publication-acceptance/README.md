@@ -12,9 +12,14 @@ substitute repository or existing PR/Issue.
 
 ## Requested external changes
 
-This V2 plan replaces the unapproved 11-operation V1 plan. The original document, PR/Issue bodies,
-publication templates, branch, repository identity and source SHA remain unchanged. V1 artifacts
-are retained and cannot be used to execute V2.
+This V3 plan revises only the disable-Actions request body from the approved 13-operation V2
+plan: it now sends only `enabled: false`. The V2 live attempt received HTTP 409 on that first
+request. Readback confirmed the original settings; no branch, PR, Issue, or publication was
+created. Its failed receipt remains unchanged. The original document, PR/Issue bodies,
+publication templates, branch, repository identity, source SHA, and other 12 operations remain
+unchanged. Retain the earlier bundle and failed receipt, generate the revised bundle, and verify
+that only this request representation changed before continuing the authorized operation. A new
+target, publication text, setting change, or operation outside that scope requires new approval.
 
 The exact request bodies are in `approval-plan.json`, generated from `plan.mjs`.
 
@@ -50,12 +55,17 @@ require the complete original permission values.
 
 The official [GitHub REST API description](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.json)
 defines all three request fields for `PUT /repos/{owner}/{repo}/actions/permissions`, with a `204`
-success response. Both payloads explicitly retain `allowed_actions: "all"` and
-`sha_pinning_required: false`; only `enabled` changes. No workflow file or per-workflow state is
-edited. After the original cleanup attempts, the harness reads back permissions and restores the
+success response, but does not explain this 409 response. The
+[GitHub Terraform provider](https://github.com/integrations/terraform-provider-github/blob/main/github/resource_github_actions_repository_permissions.go)
+only sends `allowed_actions` when Actions is enabled. V3 follows that implementation for
+disablement by sending only `enabled: false`. This is a supported hypothesis for the V2
+conflict, not a confirmed diagnosis: V2 did not retain the response body. Restoration still sends
+the complete original policy, and final readback must confirm every original field. No workflow
+file or per-workflow state is edited. After the original cleanup attempts, the harness reads back permissions and restores the
 original state whenever it attempted to change Actions. Lost acknowledgements are recorded and
 resolved with GET; failed or uncertain restoration is retained in the receipt. It never blindly
-retries a mutation.
+retries a mutation. Failed HTTP responses retain bounded, redacted diagnostics for investigation;
+an oversized body is omitted completely.
 
 ## Production components and result meaning
 
