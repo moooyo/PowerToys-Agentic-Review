@@ -2,8 +2,8 @@
 
 PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for multiple
 GitHub repositories, issue triage, and pull request review with Codex CLI or GitHub Copilot CLI.
-The project is pre-release and intentionally
-does not preserve compatibility with the earlier split-worker or artifact-storage prototypes.
+The product is unreleased. It does not preserve compatibility with the earlier split-worker or
+artifact-storage prototypes.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md),
 [docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEMENTATION_STATUS.md), and
@@ -22,7 +22,7 @@ baseline.
 - `packages/codex`: shell-free model CLI launch specifications, structured output parsing, and result schemas.
 - `native/process-host`: Windows Job Object process-tree and resource-control adapter.
 - `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
-- `migrations`: the current SQLite schema through migration `0023`.
+- `migrations`: ordered SQL initialization definitions for the current schema, version `31`.
 - `deploy/worker`: manual trusted deployment guidance for the unpublished Worker.
 
 ## Current execution model
@@ -65,17 +65,34 @@ uses M16 bounded evidence upload and authenticated delivery for screenshots, tra
 test evidence. There is no general-purpose artifact distribution service; see
 [ADR 0031](./docs/adr/0031-profile-validation-runs-and-bounded-evidence.md).
 
-New jobs use V2 results that separate model-reported verification from Worker-observed commands,
-exit codes, and final Git worktree state. Failures retain bounded, redacted diagnostics. Existing
-V1 queued jobs and stored results remain supported. Server startup upgrades the supported schema
-8 single-Worker baseline transactionally; earlier unpublished prototypes still require a clean
-database.
+Current result contracts separate model-reported verification from Worker-observed commands,
+exit codes and final Git worktree state. Envelope versions and result versions are distinct;
+ordinary and Evaluation workflows can use different result versions. Failures retain bounded,
+redacted diagnostics. The unreleased product maintains schema 31 directly through the existing
+SQL initialization machinery. This does not require old-version upgrades, database resets, data
+conversion or compatibility migration work, and it does not authorize changing existing data.
 
 Pull request execution defaults to authorization of the exact base/head revision in an explicit
 webhook request. Polling still reconciles state and withdrawals but cannot approve a current SHA
 using an old timeline actor. Operators that intentionally trust future commits of an authorized PR
 can set `AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY=inherit_authorized_epoch`.
 Issue triage retains its snapshot-based workflow. See [ADR 0030](./docs/adr/0030-explicit-pull-request-execution-authorization.md).
+
+## Accepted scope and remaining work
+
+[M39](./docs/handoff/2026-09-10-cli-workflow-handoff.md) accepted six real CLI PR review/Evaluation
+tasks through complete Codex and Copilot sequences. M40 accepted six headless Issue summaries on
+a frozen measurement case, including both Evaluation arms per CLI, independent semantic review,
+frozen inputs and confirmed process/workspace/Server cleanup. These runs used production components
+with recorded source identities. M40 also retains human-adjudicated quality observations on three
+small cases, alongside the earlier M26 Web and M34 Notepad++ acceptance.
+
+Remaining scope includes full Worker `main.ts` on the intended Windows VM, real PowerToys/UI
+profiles, Issue triage and deployed OIDC. The small quality case set does not establish broad
+review coverage or a general model-quality benchmark. Live publication and the requested Visual
+Studio components require explicit approval. See [Implementation Status](./docs/IMPLEMENTATION_STATUS.md)
+for verified CI, exact accepted scopes, retained failures and the remaining deployment and
+approval work.
 
 ## Authentication
 
@@ -92,7 +109,7 @@ authenticated login without grants sees an empty repository directory. Platform 
 come from trusted startup configuration. OIDC deployments must explicitly configure
 `AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON` as a nonempty subset of authorized login subjects;
 loopback mode uses its configured development identity. See
-[repository access and upgrade guidance](./docs/design/2026-09-07-operator-repository-access.md).
+[repository access design](./docs/design/2026-09-07-operator-repository-access.md).
 
 Run reports keep model advice, validation policy, and recorded human decisions separate. Operators
 can record an exact-revision decision, a comment, or a withdrawal; maintainers can record a qualified
@@ -113,6 +130,8 @@ Run verification on `test-env` by default; local verification requires explicit 
 the current task. The 2026-09-05 Windows runtime E2E exercise passed; its tested configuration,
 evidence, and environment closeout are recorded in the
 [live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
+Historical acceptance receipts apply to their recorded source and scope; they are not a claim that
+the current branch's CI gates have passed.
 
 Automated verification must not write to any repository's PRs or issues without the user's
 explicit approval of the targets, operations, and content. This includes comments, reviews,

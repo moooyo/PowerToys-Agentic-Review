@@ -13,12 +13,82 @@ registry, model HTTP relay or provider call ledger. Capabilities expose nullable
 `cliVersion`, with null values when model execution is disabled. Configured model names do not
 establish independently verified remote-model identity. The unused `executionAccepted` field is
 absent from the current development contracts, results and UI. The product is unreleased: development directly
-maintains the current schema, without database resets, old-version upgrades, data conversion or
-compatibility migration work. Existing SQL initialization remains in use. Existing data and
-historical artifacts remain unchanged. Automated suites use isolated synthetic data; the explicitly
+maintains current SQLite schema **31**, without database resets, old-version upgrades, data
+conversion or compatibility migration work. The existing ordered SQL initialization remains in use.
+Historical schema numbers describe their original snapshots. Existing data and historical artifacts
+remain unchanged. Automated suites use isolated synthetic data; the explicitly
 authorized real CLI probes and controlled-fixture workflow acceptance below are separately scoped.
 
-## M39 current delivery and controlled-fixture acceptance
+## Current branch verification
+
+CI run **34429398701** passed all three jobs at commit
+`62297f72861b3bcdd2bc04804602c29532218713` on `codex/ci-product-completion`, completing at
+`2026-09-10T02:46:33Z`. Linux typecheck/tests/build/lint passed with **13,395 passed, 61 skipped
+and zero failed tests**. Windows Worker passed **1,972 tests with 44 skips**; native Go and
+PowerShell checks passed, as did ProcessHost Linux checks and Windows cross-compilation. Lint
+checked 907 files with zero errors; 132 warnings and 13 informational diagnostics remain.
+The [final CI summary](../artifacts/m40-ci-product-20260910/ci-final-62297f7/summary.md) retains
+the per-package counts, stage results and logs. Skips and warnings are not relabeled as passes.
+
+Earlier CI failures remain historical: the `c7364b2` run passed tests/build but failed seven lint
+checks, and the `a6e0997` run failed a 5,000-ms Worker test while deeply comparing a 2-MiB Buffer.
+`62297f7` changes only two test assertions to native `Buffer.equals`, preserving the data, timeout
+and other assertions. Its [verification](../artifacts/m40-ci-product-20260910/evidence-buffer-comparison-v1/verification.json)
+passed 51 tests on Linux and 51 on Windows plus `noEmit` and Biome. The local baseline did not
+reproduce the CI timeout. Production uploader/model code was unchanged, and the six model tasks
+were not replayed for this test-only correction. The subsequent `5787871` commit changes only the
+opt-in publication acceptance helpers. Their separate synthetic verification and seven production
+boundary tests passed. Production runtime and regular test-suite sources remain at the verified
+CI revision. Final local and remote refs are retained in the
+[delivery receipt](../artifacts/m40-ci-product-20260910/delivery.json).
+
+## M40 current implementation and verified scope
+
+The following separates completed implementation/verification from failed runtime exercises and
+operations awaiting external approval. It does not mark the product or all P1/P2 work complete.
+
+| Work | Completed or verified scope | Remaining boundary |
+| --- | --- | --- |
+| Finding validation | [finding-validation-run3](../artifacts/m40-ci-product-20260910/finding-validation-run3/) passed 395 tests, `noEmit` and lint; final CI also passed at the commit above. | Earlier failures remain retained; deployed identity/permission acceptance keeps its own scope. |
+| Publication preparation | [V2 preparation](../artifacts/m40-ci-product-20260910/publication-prepare-v2/verification.json) passed both synthetic outbox cases, 13 coordinator scenarios, JavaScript syntax, Biome and independent review. The seven production-boundary tests also passed. | The [13-operation plan](../artifacts/m40-ci-product-20260910/publication-prepare-v2/approval-bundle-v2/approval-plan.json) requires explicit approval. It supersedes the unapproved 11-operation plan and adds temporary Actions suspension/restoration while preserving the original operations and payloads. No live fork operation has executed. |
+| Quality checker | Eight pure checker regressions, `noEmit`, checker bundling and Biome passed. Retained nine-task observations passed the corrected postconditions without new models. | The original run receipt is unchanged and still failed on `18 !== 6`; separate revalidation is not a rewritten runtime pass. |
+| PowerToys preparation | Restore passed; the native build failed with six `MSB8040` errors. Host closure and byte/hash-preserved upstream logs are retained. | The two requested Visual Studio Spectre components remain unapproved and uninstalled; PowerToys build/profile/UI acceptance has not passed. |
+| Summary diagnostics | Diagnostics v2 passed 318 tests, `noEmit`, Biome and independent review, preserving bounded redacted code/message context. | Earlier generic summary failures remain recorded; this does not itself accept a real model workflow. |
+| Portable model schema | Schema v2 passed 327 tests, `noEmit` and Biome for six model schemas. Run 2's HTTP 400 was traced to regex lookaround in the exported observation-path pattern. | A schema portability defect, not provider configuration. Earlier failed Worker/coordinator receipts remain unchanged. |
+| Headless Issue summaries | Run 3 completed all six actual summaries: ordinary and both Evaluation arms per CLI. Independent semantic/numerical/scope review passed; runner/model conclusions and assessments were confirmed. | Accepted for the frozen headless Issue measurement case, not Issue triage, installed-extension/video/AI/translation behavior or Windows/Web UI execution. |
+
+The [retained quality revalidation](../artifacts/m40-ci-product-20260910/quality-checker-correction-v1/retained-quality-revalidation.json)
+has SHA-256 `5ff889f8978f611698566b828cb0be8dfec4f1290dd986517783fc17fce0193f`.
+It confirms the original records are unchanged: nine real Codex tasks, 18 admitted/released
+reservations and cleaned workspaces, 324 completed process trees, zero active requests, monitors
+or reservations, and Host/Server exit 0. The original checker wrongly expected the three-task counts;
+its replacement derives counts from `expectedTaskCount`. This revalidation performed no model
+replay or product-service/Git operation.
+
+Four human adjudications yielded, per arm, three correct checks, TP 2, FP/FN/duplicates/unjudged 0,
+precision/recall 1 and `provisional: false`. These are observations on three deliberately small
+cases, not a PowerToys quality benchmark. The healthy candidate explicitly did not complete its
+full base/head review; the model reviews were static and did not run their own tests. Independent
+Node/profile checks remain separate, so the metrics do not prove full review coverage.
+
+Run 3/session 23027 exited 0 and completed at `2026-09-10T02:18:50Z`. Its unified source snapshot
+contained 1,105 matched files, archive SHA-256
+`5e431ed84012d49a3c9794940da84b447d500c4f75c95f9c0e830255c4789899`. The
+[independent review](../artifacts/m40-ci-product-20260910/issue-summary-run3-independent-review/REVIEW.md),
+[retention proof](../artifacts/m40-ci-product-20260910/issue-summary-run3-independent-review/retention.json)
+and [closed Server copies](../artifacts/m40-ci-product-20260910/issue-summary-run3-independent-review/closed-server-copies.json)
+confirm 216 managed process completions, four frozen inputs and 12 deferred cleanups. Each engine
+used one instance for three sequential tasks; four cross-task boundaries confirm prior cleanup
+finished before the next task. The engines also ran sequentially with different instances.
+Host/Server closure passed, and all 38 copied Server files matched their closed originals.
+
+The fork has Actions enabled and a Spell workflow may comment automatically. The prepared V2
+bundle has 13 operations: temporarily disable Actions first, preserve all original operations
+and payloads, and restore Actions last. It never cancels an existing workflow run. The new
+approval request is pending, and no live fork mutation has occurred. The two Visual Studio
+component installations also remain unapproved and unperformed.
+
+## M39 completed controlled-fixture acceptance
 
 M39 is **complete for the controlled-fixture workflow scope**: Codex run 3 on source v5 and Copilot
 run 6 on source v8 each completed one ordinary PR review and both baseline/candidate Evaluation
@@ -63,6 +133,44 @@ No provider/relay, credential-copying flow or migration was introduced, and no a
 occurred. Full Worker `main.ts` and Windows VM deployment acceptance, actual upstream repository
 review and general model-quality evaluation remain separate boundaries, not additional requirements
 for closing this controlled-fixture milestone.
+
+## Remaining product work
+
+This is the current backlog and acceptance boundary. Historical milestone limitations below do
+not override later M38/M39 completion, and retired designs are not queued implementation work.
+
+- **Publication approval:** obtain explicit approval of the prepared 13-operation V2 bundle, then
+  execute that exact live acceptance and restore the original settings. CI and headless Issue run 3 are
+  verified; their completion does not approve external operations.
+- **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
+  Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.
+  M39 accepted component composition with an owned Git transport substitution, not that deployment.
+- **Real PowerToys profile:** exercise the intended PowerToys source, toolchain, build/test/UI
+  profile, evidence and state restoration. Accepted M26 Web and M34 Notepad++ cases retain their
+  scopes and do not establish PowerToys readiness. M40's restore succeeded but native build failed;
+  the two requested Spectre components await approval and have not been installed.
+- **Additional model workflows:** accept Issue triage and Windows/Web or other application-specific
+  model-assisted workflows beyond M39 PR/static review and the accepted M40 headless Issue case.
+  Runner/evidence facts remain independent of model advice.
+- **Deployment identities and live publication:** complete the intended OIDC/multi-user and
+  repository-specific human/finding workflow acceptance. M30 publication preview/outbox passed
+  isolated mock transport, and M40's original preparation passed. The revised 13-operation live
+  plan remains unapproved/unexecuted; deployed targets/payloads require authorization. M31 fixtures do
+  not establish every deployed delivery channel.
+- **Quality and operational coverage:** use appropriately labeled/adjudicated cases for broader
+  model-quality comparisons, and verify intended workload capacity and evidence retention. M39's
+  provisional results and M40's adjudicated three-case observation have different scopes; neither
+  is a general quality benchmark or proof of full review coverage.
+
+The removed split Worker, WindowsAttempt protected-journal/OS-attestation, provider registry and
+model HTTP relay are retired. Old-version upgrades, resets, conversions and compatibility migrations
+are not product tasks for this unreleased codebase. Private checkout, automatic distribution,
+video evidence and reusable build artifacts remain separate unimplemented scope, rather than
+requirements to reopen the completed M38/M39 milestones.
+
+Automated tests must not write any repository's PRs/issues without explicit approval of the exact
+targets, operations and content. General implementation or verification authorization does not
+grant that authority. See [AGENTS.md](../AGENTS.md).
 
 ## M38 delivered baseline and verification
 
@@ -154,7 +262,8 @@ journal/recovery verification remains recorded in its
 [historical handoff](./handoff/2026-09-09-durable-journal-handoff.md); that unused implementation
 is retired by the VM decision. Its passing tests are not evidence for the replacement architecture.
 
-The multi-repository validation platform remains under integration.
+The platform's accepted component and workflow scopes are recorded below. Remaining product and
+deployment work is listed above.
 Contracts, persistence/routes, planners, execution components, evidence handling, and real
 Windows/Web drivers have passing checks. Worker startup composition, automatic GitHub planning,
 Dashboard evidence/actions, M19 repository access, M20a human decisions, M21 finding disposition,
@@ -171,15 +280,16 @@ adds separately authorized publication previews, immutable intents, a delivery o
 conservative recovery with isolated connected acceptance against an in-memory GitHub transport.
 M32 now includes scoped evaluation score previews, immutable assessment history, case details,
 and Dashboard review/save workflows. Its assessment browser checks and lifecycle closure passed
-the isolated synthetic scenarios recorded below; a real configured model/VM end-to-end run remains unverified.
+the isolated synthetic scenarios recorded below. M39 subsequently accepted real CLI ordinary PR
+review and Evaluation scoring on the controlled fixture; full Worker/VM deployment remains separate.
 M32 historically added provider-response observation, a global runtime registry, HTTP call ledgers,
 app-server composition and separate invocation bindings. The CLI-owned architecture retires those
 execution paths and configuration requirements. Their implementation and verification records
 below remain historical evidence for the original source. Current model output stays separate
 from Worker validation facts and evidence, without a provider identity claim.
-Actual repository model review and evaluation execution, further application profiles and repository/toolchain
-deployment acceptance remain outstanding.
-The actual model probe denied controlled file writes but allowed a controlled loopback connection,
+Actual PowerToys and other intended repository/toolchain profiles, summary/Issue/UI model workflows
+and full deployed Worker acceptance remain outside M39's controlled PR/static scope.
+The historical model probe denied controlled file writes but allowed a controlled loopback connection,
 so Worker-enforced network isolation is not claimed. VM access and network policy belong to
 deployment. The
 [implementation ledger](./handoff/2026-09-07-validation-platform-implementation.md)
@@ -199,9 +309,10 @@ Those historical passes do not establish acceptance of the new profile-validatio
 | Operator access | M19 session-bound repository roles, trusted platform-admin configuration, SQL-scoped reads, access rechecks after evidence verification, versioned membership changes, immutable audit history, and Dashboard session-cache isolation. M27 connected diagnostics verify access loss, removal of old DOM data, and restored scoped reads with isolated identities. | Deployed OIDC and the intended deployment's operator-role sessions remain unverified; diagnostic read acceptance does not establish every role's mutation workflow. |
 | Human decisions | M20a immutable Run decision events, exact source/result-set binding, CAS and historical receipts, current policy checks, qualified overrides, comments and withdrawal, history, and Dashboard integration. M21 adds disposition-aware V2 snapshots while retaining V1 history. | Automated integration and connected synthetic administrator HTTP/browser acceptance pass for M20. Actual OIDC/lower-role browser acceptance remains outstanding. M22 reproduction is a separate measured workflow. |
 | Publication | M30 complete body/target/revision previews, separately versioned repository policy, explicit confirmation, immutable scoped intent, dedicated publisher identity, fenced delivery, exact confirmation replay, GET-only reconciliation and policy/attempt history. Two-repository connected acceptance passed with one mock POST per target. | No actual GitHub publication was authorized or performed. Deployment credentials and live target/payload acceptance remain separate. Unknown delivery is never automatically resent; GitHub does not supply distributed exactly-once semantics. |
-| Finding lifecycle | M21 complete result-scoped occurrences, immutable disposition audit and projection, context/CAS checks, policy v2, and conservative explicit result comparison. No disposition or resolution is inherited from a prior result. | Automated integration and connected synthetic administrator HTTP/browser acceptance pass. Actual deployment identities and model/runner execution are separate boundaries; development samples explicitly do not simulate disposition writes. |
-| Prompt/profile evaluation assessments | M32 freezes evaluation inputs, projects result/evidence and explicit finding adjudications, and provides deterministic score previews, immutable assessment versions, bounded case reads with frozen expectations, and Dashboard history/save workflows. | Assessment verification includes blocked, unexecuted batch snapshots and synthetic completed profile-only results. Browser save/retry/history/access scenarios and lifecycle closure passed. Actual evaluation CLI/model execution and Windows application evaluation remain unaccepted. |
-| Issue reproduction | M22 frozen cases, typed probe receipts, Windows/Web assertion capture, capability admission, independent Server assessment, and recorded/current case reads. Dashboard case authoring, profile observables, result comparison, evidence preview, pending reruns, and stale-source transitions passed connected fixture acceptance. | Acceptance uses an isolated local Git source and a fixture disk-monitor callback. Actual repository checkout, production model execution, and deployment-specific toolchain acceptance remain separate work. |
+| Finding lifecycle | M21 complete result-scoped occurrences, immutable disposition audit and projection, context/CAS checks, policy v2, and conservative explicit result comparison. No disposition or resolution is inherited from a prior result. | Connected administrator fixtures passed. M39's model findings do not replace intended deployment identity and human-disposition acceptance; development samples do not simulate disposition writes. |
+| Prompt/profile evaluation assessments | M32 implements frozen inputs, deterministic scoring, immutable assessments and Dashboard workflows. M39 accepted real CLI review arms; M40 accepted both headless Issue-summary arms per CLI and separately retained adjudicated three-case quality observations. | Real PowerToys/UI evaluations, Issue triage and broader representative quality evidence remain outside those specific cases. Their fixture metrics are not a general model-quality benchmark. |
+| CLI PR review | M39 accepted six tasks: ordinary PR review plus baseline/candidate Evaluation for Codex and Copilot, using separate complete source/run sequences and real checks, model output, Server/SQLite processing and cleanup. | Not a Worker `main.ts` deployment, actual upstream repository review, general model-quality benchmark or complete Copilot tool capture. |
+| Issue reproduction | M22 implements frozen cases, typed probes, target observations and independent assessment. M40 accepted the frozen Issue #1064 headless measurement and all six actual CLI summaries with checked numerical facts and primary/control attribution. | Installed-extension, video, AI/translation, GUI and other repository/toolchain reproduction cases require their own evidence; the accepted sample does not establish those behaviors. |
 | Frozen review runs | M14 immutable plans/rendered prompts, request snapshots, job associations, operator creation, and bounded history reads. | Complete product acceptance must exercise real operators and the intended repository policies. |
 | Validation results | M15 `ValidationJobResultV1` persistence and fenced completion, with runner checks, model review, lifecycle diagnostics, and evidence completeness kept separate. Legacy review result tables remain supported. | Current-source eligibility must be verified across full executions, reruns, cancellation, and evidence expiry. |
 | Evidence | M16 bounded upload, scoped delivery, quotas/retention, and private Linux storage. Full hashes/scenario checks run in a bounded read-only Worker; the SQLite owner rechecks authority after preflight. Cold reads explicitly show pending verification. | Component upload/PNG delivery and concurrent heartbeat/cancellation/shutdown have passed. Intended deployment storage and retention still need operational acceptance. |
@@ -209,8 +320,8 @@ Those historical passes do not establish acceptance of the new profile-validatio
 | Current scheduling diagnostics | Strict M29 V3 diagnostics add current policy, exact scoped usage/overage, and separate queue/active limit reasons; historical V1/V2 remain valid. Repository readers receive coarse platform capacity without foreign counts. | Observations do not reserve capacity or establish queue position or an ETA. Partial inventory cannot prove Worker absence; source/authorization observations do not add new claim gates. |
 | GitHub routing | M18 source sequences and immutable legacy/ReviewRun routing per work item, authorization epoch, and source activation. | Automatic webhook/poller-to-profile execution is under integration verification. |
 | Headless execution | Registered commands run setup/build/test/cleanup with typed outcomes. M24 passed actual anonymous Git checkout, frozen install, Web compilation, CI tests, original-source verification, HTTP result equality, Dashboard display, and cleanup on a pinned public repository using production disk accounting. | This accepted run explicitly disabled model execution and used synthetic Issue metadata. It does not establish PR model review, measured Issue reproduction, private checkout, or real UI scenarios. |
-| Optional validation summary | A bounded model summary is available for UI/Issue validation and defaults to disabled. The selected CLI owns login and provider traffic; runner facts and model advice remain separate. | M24's historical elevated model probe denied controlled file writes but allowed an owned loopback connection. The Worker does not claim network confinement; VM policy belongs to deployment. Those observations do not accept the current direct CLI summary path or an actual model deployment. |
-| Windows desktop UI | M34 accepted real Notepad++ build, passing and deliberately failing UI scenarios, all ten original evidence assets and Dashboard delivery. The driver retains owned-window evidence, active-session checks, exclusive session lease, process identity/draining, and reset/quarantine behavior. | Other applications and unattended VM deployment remain unaccepted. The PowerToys Settings readiness review identifies missing Spectre libraries and persistent settings that require profile-specific cleanup or deployment restoration. |
+| Optional validation summary | A bounded model summary is available for UI/Issue validation and defaults to disabled. M40 accepted six real headless Issue summaries, including ordinary V1 advice and required V2 Evaluation summaries; independent review confirmed factual scope and lifecycle. | Windows/Web UI summaries and other cases remain separate acceptance targets. Runner facts and model advice stay distinct, and VM network policy remains deployment-owned. |
+| Windows desktop UI | M34 accepted real Notepad++ build, passing and deliberately failing UI scenarios, all ten original evidence assets and Dashboard delivery. The driver retains owned-window evidence, active-session checks, exclusive session lease, process identity/draining, and reset/quarantine behavior. | Real PowerToys and other applications, their complete toolchains/state restoration and unattended VM deployment require their own acceptance. Earlier PowerToys readiness findings are prerequisites to recheck, not acceptance of the profile. |
 | Web UI | M26 accepted anonymous pinned-source checkout, frozen dependency installation, actual homepage compilation, passing and deliberately failing UI scenarios, fifteen downloaded evidence assets, HTTP equality, Dashboard display/download/PNG preview, and process/workspace cleanup. Real source-capture progress now keeps valid bounded verification visible to the lease coordinator. | This homepage case does not establish extension/userscript integration, provider behavior, model execution, or measured Issue reproduction. |
 
 The architecture decision is [ADR 0031](./adr/0031-profile-validation-runs-and-bounded-evidence.md).
@@ -238,9 +349,13 @@ split Worker, installer, local RPC, or artifact-backed result compatibility desi
   required scenarios, actual driver support, and evidence delivery on the same executor. Current
   UI profiles build their own exact source; build-artifact reuse is not implemented.
 
+## Historical milestone evidence
+
 The following milestone sections retain their original source identities, test counts and runtime
-observations. A stage's historical lack of execution capability is not a current requirement for
-OS attestation; the VM decision above defines the current execution model.
+observations. They describe the source at each milestone, including superseded provider/relay and
+schema-upgrade work. Their former pending items are historical, not current backlog or requirements
+to restore an OS-attestation design. The current schema, CLI model and remaining product work are
+defined above.
 
 ### M27 P0 verification and lifecycle boundary
 
@@ -734,30 +849,10 @@ execution remains unverified by these mapping tests. See the
 [mapping design](./design/2026-09-09-evaluation-reproduction-mappings.md) and
 [verification records](../artifacts/m32-evaluations-20260908/mapped-reproduction-delivery-notes.md).
 
-## Remaining product work
-
-- **Integration acceptance:** exercise actual model/evaluation execution and further application
-  profiles in the intended VM deployment. M26 Web and M34 Notepad++ scenarios are accepted within
-  their recorded scopes. Verify consecutive tasks, stale sources, evidence upload, failed assertions,
-  rerun/cancel, process draining and environment restoration.
-- **P0 deployment boundary:** M27 current waiting diagnostics are complete, alongside M19 repository
-  ACL/membership audit reads and M23 configuration audit reads. Deployed OIDC and the intended
-  multi-user deployment still require acceptance beyond the isolated connected diagnostic cases.
-- **P1 workflow acceptance:** M29 completes the configured scheduling plan. M20a human decisions,
-  M21 finding disposition/history, and M22 measured issue reproduction still need the intended
-  repository and deployment acceptance. Passing generic checks alone does not prove reproduction.
-- **P2:** actual Prompt/profile evaluation execution/comparison acceptance. M31 actionable
-  notifications passed connected acceptance with synthetic source events. M32 assessment APIs and Dashboard workflows passed isolated browser acceptance and
-  lifecycle closure; required model execution remains unaccepted. M30 publication
-  preview/outbox is implemented and accepted with isolated mock transport; deployed publisher
-  credentials and any exact live target/payload require separate acceptance and authorization.
-
-Automated tests must not write any repository's PRs/issues without the user's explicit approval
-of the exact targets, operations, and content. General implementation or local/test-env approval
-does not grant that authority. Existing explicit approval remains valid within its stated scope;
-actions outside that scope require new approval. See [AGENTS.md](../AGENTS.md).
-
 ## Retained architecture baseline
+
+These are the current retained responsibilities. Historical milestone descriptions above do not
+override schema 31, CLI-owned model execution or the current product boundaries.
 
 ### Server
 
@@ -772,8 +867,8 @@ actions outside that scope require new approval. See [AGENTS.md](../AGENTS.md).
 - Authenticated Job detail reads with structured PR-review and issue-triage result projections.
 - Explicit `loopback` or `oidc` operator authentication.
 - Loopback-only database recovery-maintenance mode.
-- The earlier baseline used migrations `0001` through `0011`; current platform integration extends
-  that schema through `0033` without rewriting legacy review results.
+- Current schema 31 uses the existing ordered SQL initialization definitions. No old-version
+  upgrade, reset, data conversion or compatibility migration work is required.
 
 ### Windows Worker
 
@@ -818,7 +913,8 @@ actions outside that scope require new approval. See [AGENTS.md](../AGENTS.md).
 - Inline schema-validated result submission.
 - V2 inline results separate model verification claims from captured command exits and final
   worktree state; bounded redacted failure diagnostics are persisted and shown in job details.
-- V1 queued templates and stored results remain supported across the schema 8+ upgrade path.
+- Current envelope/result versions keep their declared semantics independently of database
+  schema version; they do not introduce an old-database upgrade path.
 - Progress deadline refreshes only on observed CLI stdout/stderr activity; silent execution no
   longer receives synthetic keepalive progress.
 
@@ -855,8 +951,8 @@ by ADR 0031; it must not be described as the restoration of those prototypes.
 
 ## Retained foundation contracts
 
-This section records the earlier architecture baseline. The current validation-platform tables
-above describe its later extensions and acceptance boundaries.
+These foundation boundaries remain in force alongside the current schema and CLI architecture.
+The historical exclusions in the next section are not a current implementation backlog.
 
 - Worker authentication: one node-scoped Bearer Token stored at
   `C:\ProgramData\AgenticReview\Worker\worker-auth-v1.json`.
@@ -911,14 +1007,15 @@ pnpm lint
 
 ProcessHost Go tests and Windows cross-compilation are separate checks. Windows-native validation
 is required in addition to Linux CI, which cannot establish Windows process, path, ACL, Git, or
-Codex runtime behavior. The historical runtime exercise below predates the current remediation.
+CLI runtime behavior. The historical runtime exercise below predates the current remediation;
+its passing counts do not establish that the current branch's CI is green.
 
 The 2026-09-06 remediation passed all Linux gates, 1,354 Linux Node tests, 591 native Windows Worker
 tests with no skips, native Windows ProcessHost tests/vet/build, and the deployment PowerShell
 checks. This includes all 14 Worker tests skipped on Linux. The remediation handoff records the
 explicit authorization and separates these regression gates from historical live Codex E2E. The
 current platform's authorized checks are tracked separately in the implementation ledger. The
-latest M28 full Linux Server suite passed 4,205 tests with one skip across 100 files; Dashboard
+recorded M28 full Linux Server suite passed 4,205 tests with one skip across 100 files; Dashboard
 passed 2,720 tests across 66 files, type checking, and production build; shared
 contracts/domain/Codex packages passed 1,178 tests across 33 files.
 These gates and the synthetic cross-host acceptance do not replace real-repository and production

@@ -2,10 +2,12 @@
 
 ## Scope
 
-This document describes the current pre-release architecture, including the validation-platform
-integration and CLI-owned model execution in the working tree on 2026-09-10. Component checks have passed; complete cross-host
-Server/Worker/Dashboard acceptance is still in progress. See
-[Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for that verification boundary.
+This document describes the unreleased architecture after M38 CLI simplification and M39/M40
+scoped workflow acceptance. M39 exercised six real CLI review tasks; M40 accepted six headless Issue
+summaries through Windows Worker components and a WSL Server, including checks, results, frozen
+inputs and cleanup. These did not exercise full Worker `main.ts` or the intended PowerToys/VM profile. See
+[Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for current CI status and the remaining
+workflow/deployment boundaries.
 
 ADR 0029 replaces the unpublished Control/Executor split, local RPC protocols, result-artifact
 pipeline, and signed Worker package flow. No compatibility path is retained for those prototypes.
@@ -77,8 +79,11 @@ The Fastify Server owns:
 - operator authentication, repository access control, membership audit, and Dashboard APIs; and
 - health and recovery-maintenance behavior.
 
-SQLite has one process owner. The current working tree contains migrations `0001` through `0024`;
-M28 adds the operational `job_admission` and `scheduling_state` tables.
+SQLite has one process owner. Current schema version is **31**, defined by the ordered SQL
+initialization files in `migrations`. The unreleased product maintains those definitions directly;
+existing SQL initialization remains in use, without an old-version upgrade, reset, conversion or
+compatibility migration project. Historical schema-upgrade acceptance reports describe their
+original source only and do not create a current requirement to modify existing data.
 Authoritative result JSON remains in bounded inline database fields. The same database owner
 manages evidence manifests and a private filesystem directory; there is no separate artifact
 service or restoration of the unpublished artifact Worker Thread design.
@@ -134,7 +139,8 @@ M18 records source transitions, including A-to-B-to-A, and pins legacy-versus-Re
 work item, authorization epoch, and source sequence. Transport replay and later binding changes
 cannot launch a second pipeline for the same source activation. Separate active assignment and
 review-request epochs may own separate runs; matching profile jobs retain concurrency exclusion.
-The GitHub bridge and startup/dispatch composition are under integration verification.
+The bridge and dispatch components have integration coverage. Acceptance of the intended
+deployment's actual GitHub authorization-to-Worker flow remains separate from M39's owned fixture.
 
 Issue reproduction requires an explicitly selected commit and an independently authenticated
 operator source authorization bound to the run activation, repository, issue, current issue content
@@ -166,8 +172,9 @@ projections omit Worker identities, other Jobs holding capacity, and global inve
 The Dashboard displays live scheduling observations separately from frozen plan readiness. It
 polls every five seconds while visible and eligible for refresh, cancels hidden or superseded
 requests, and clears old observations when session, scope, or access changes. Terminal observations
-stop polling. M28 adds explicit admission observations below; configured quotas, capacity limits,
-and repository/class fairness remain P1 work.
+stop polling. M29 V3 diagnostics add configured queue/active limits, scoped usage and policy
+observations. Repository/global quotas, queue-credit recovery, fairness and bounded claim
+continuation are implemented; deployment-specific capacity acceptance remains separate.
 
 The [M27 acceptance report](./artifacts/m27-scheduling-diagnostics-20260907/REPORT.md) records the
 completed P0 checks and aggregate browser/HTTP evidence across original and recovery sessions.
@@ -185,28 +192,30 @@ retry paths create a new pending episode in the terminal-attempt transaction. Cl
 admitted row whose `attempt_base` matches the waiting Job's attempt count; SQL guards reject
 missing/stale admission and invalid lease/active-attempt transitions.
 
-Migration 24 backfills every existing Job with the production execution-template parser without
-rewriting historical payloads. Existing waiting Jobs start admitted with an explicit migration
-timestamp basis; active Jobs retain their pre-grant attempt base and lifecycle. Numeric GitHub
-repository buckets and explicit unresolved/conflicting ownership do not grant read access.
+The historical M28 migration 24 backfilled existing Jobs with the production execution-template
+parser without rewriting historical payloads. Waiting Jobs started admitted with an explicit
+migration timestamp basis; active Jobs retained their pre-grant attempt base and lifecycle.
+Numeric GitHub repository buckets and explicit unresolved/conflicting ownership do not grant read access.
 The durable episode and inspection sequences use safe integers. Bounded inspection remains
 explicitly incomplete when its budget cannot establish ownership; a trusted claim witness can
 refine unknown ownership from the actual stored template.
 
 A coalesced production pump processes a bounded pending pass with a captured episode high-water
 mark, retains progress across calls, wakes on relevant changes, falls back every five seconds,
-and drains during shutdown. This implements admission foundation, not repository/class fairness,
-configured limits, or bounded continuation of the complete claim scan. Strict V2 scheduling
-diagnostics retain V1 compatibility. Public Job, Run, Work Item, and System projections distinguish
+and drains during shutdown. This implemented the admission foundation. The subsequent M29 layer
+adds repository/class fairness, configured limits and bounded continuation of the complete claim
+scan. Strict V2 scheduling diagnostics retain V1 compatibility. Public Job, Run, Work Item,
+and System projections distinguish
 pending admission, admitted waiting Jobs, and no-Job prerequisites; the HTTP Job-list whitelist
 accepts the admission filter. Observational GETs do not mutate scheduling state.
 
 The [M28 report](./artifacts/m28-admission-foundation-20260907/REPORT.md) records final automated
 and connected acceptance, including UI cancellation/rerun, unchanged exact replay, production-pump
 admission after Worker registration, access revocation/restoration, and explicit service closure.
-No lease or real PR/Issue write occurred. Configured repository/global limits with CAS/audit,
-queue-credit recovery, repository/class fairness, bounded claim continuation, and 100,000-Job
-latency acceptance remain required by the full scheduling plan.
+No lease or real PR/Issue write occurred in that M28 acceptance. M29 subsequently completed the
+configured limits, CAS/audit, queue-credit recovery, fairness, bounded continuation and declared
+100,000-Job acceptance dataset. Those historical results do not establish every production
+workload's latency or capacity; see the current implementation ledger.
 
 ### Worker API
 
@@ -285,17 +294,17 @@ The Worker is one Node.js process built as `apps/worker/dist/worker.mjs`. A serv
 that process, but the repository does not currently ship a native Worker service wrapper or
 installer. Manual trusted deployment is the supported pre-release path.
 
-At startup the Worker:
+Startup composes the following responsibilities:
 
-1. loads its fixed Bearer Token profile;
-2. checks configured runtime directory identities using read-only `lstat`/`realpath`
+- loads its fixed Bearer Token profile;
+- checks configured runtime directory identities using read-only `lstat`/`realpath`
    validation, rejecting links, aliases, overlap, and observed identity changes;
-3. validates runtime executable paths and ProcessHost/Git integrity settings, and detects the
-   configured model CLI version through a bounded `--version` call;
-4. starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
-5. recovers all abandoned attempt directories under the acquired singleton;
-6. registers one Worker instance; and
-7. enters the claim, heartbeat, execute, and terminal-report loop.
+- validates runtime executable paths and ProcessHost/Git integrity settings;
+- starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
+- detects the configured model CLI version through an available ProcessHost with bounded `--version`;
+- recovers abandoned attempt directories under the acquired singleton;
+- derives prepared runtime capabilities and registers one Worker instance; and
+- enters the claim, heartbeat, execute and terminal-report loop.
 
 Any initialization failure after ProcessHost creation closes that client before rethrowing the
 original error. Cleanup diagnostics are bounded and cannot mask the startup failure.
@@ -316,8 +325,9 @@ unrecoverable infrastructure faults still drain the node.
 
 The profile runtime adds registered executable aliases, protected secret references, headless
 command execution, and managed UI drivers. Capabilities are derived after runtime preparation;
-deployment labels cannot claim unavailable V2, browser, or interactive-desktop execution. Worker
-startup composition exists in the working tree and is being verified with the complete workflow.
+deployment labels cannot claim unavailable V2, browser, or interactive-desktop execution. M39
+accepted production-component workflow composition; the full deployed `main.ts` startup remains
+a separate Windows VM acceptance boundary.
 
 Windows UI uses UI Automation in an active unlocked session and an exclusive desktop lease. It
 operates only on the selected window in the launched process tree; uncertain stop/reset retains a
@@ -431,12 +441,13 @@ summaries are bounded and redacted before submission. Failed attempts retain a s
 exit code, summary, and correlation ID; diagnostic content participates in terminal replay identity.
 The original V1 schema registry remains available for queued jobs and historical results.
 
-Schema 8 and later single-Worker databases can upgrade on startup under exclusive ownership.
-Result migrations preserve V1 JSON, digests, projections, and immutable references. Databases from
-earlier unpublished architectures remain outside the supported upgrade path.
+Versioned result readers preserve the meaning of the result contracts they support. This is
+separate from database-version compatibility: current schema 31 is maintained through the
+existing SQL initialization machinery, without a required old-data upgrade, reset or conversion.
 
-Profile jobs submit `ValidationJobResultV1`, separating the Worker report, command/lifecycle
-diagnostics and cleanup state, and model review. Required checks are derived from the frozen plan.
+Profile jobs use the current `ValidationJobResultV1`/`ValidationJobResultV2` branches, separating
+the Worker report, command/lifecycle diagnostics, cleanup and model content. Recorded V2 model
+output carries CLI execution and input/output consistency facts. Required checks come from the frozen plan.
 Each typed UI scenario has one qualified check ID; its actions and assertions are evidence details.
 Execution success does not imply check success or a recommendation to approve. A failed compile or
 assertion can be a valid, completed report.
@@ -457,8 +468,9 @@ artifact-backed result mode.
 Production result reads validate UI step files against frozen scenarios, including target, order,
 action, expected/actual assertions, and screenshot ownership. A finalized file with a valid SHA but
 fabricated step semantics cannot establish eligibility. Expired or unavailable evidence makes the
-current projection incomplete while preserving the immutable result history. Operator run/history
-and evidence/action components are present; their complete integration acceptance remains pending.
+current projection incomplete while preserving the immutable result history. M26 and M34 accepted
+their actual Web/Notepad++ evidence-delivery cases. Other applications, profiles and deployment
+identities require their own acceptance; a missing asset is not repaired by model output.
 
 ## Deployment
 
@@ -482,32 +494,48 @@ The 2026-09-05 Windows runtime E2E exercise passed, including healthy success, a
 cache reuse, and recovered cleanup. Its tested scope, evidence, and environment closeout are in the
 [live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
 
-## Known pre-release gaps
+## Current product and deployment boundaries
 
-- Automatic Windows service installation, restart policy, and upgrade management remain
-  deployment-owned.
-- Repository checkout currently supports only anonymously readable public GitHub repositories.
-- Connected component acceptance covers static/build and both UI targets; M22 also covers measured
-  Issue reproduction through actual native drivers and HTTP evidence delivery. M24 accepted actual
-  public-source headless installation, Web compilation, CI tests, source verification, result
-  display, and cleanup. M26 accepted a real public Web homepage's passing theme interaction and
-  deliberate assertion failure, original screenshots/steps/traces, Dashboard presentation, and
-  resource cleanup. Actual Windows application scenarios, further toolchains, and the production
-  model remain outstanding. See the [Web acceptance ledger](./docs/design/2026-09-07-real-web-acceptance.md).
-- M24 real-source execution corrected workspace environment composition and active filesystem
-  accounting. The actual elevated model probe denied controlled file writes but allowed an owned
-  loopback connection. Optional summaries remain disabled by default; network isolation and real
-  summary acceptance are not established. See the
-  [production acceptance ledger](./docs/design/2026-09-07-production-validation-acceptance.md).
-- M23 configuration audit reads expose scoped repository events and platform-only prompt history.
-  M19 repository ACLs and membership audit reads are implemented; deployed OIDC and actual lower-role
-  browser acceptance remain outstanding.
-- M27 current diagnostics and M28 admission foundation are implemented. Configured repository/global
-  limits with CAS/audit, queue-credit recovery, repository/class fairness, bounded claim continuation,
-  and 100,000-Job latency acceptance remain required P1 work. M20a human
-  decisions, M21 finding disposition/comparison, and M22 reproduction mapping and Dashboard flows
-  are implemented.
-  M25 enforces repository pause at claim for queued/retrying V1 and V2 jobs while preserving active
-  leases.
-- GitHub publication/outbox delivery, notifications, and Prompt/profile evaluation remain later work.
-- Video evidence, general-purpose artifact distribution, and reusable build packages are not implemented.
+M39 accepted one ordinary review and two Evaluation arms for each CLI on an owned fixture, using
+separate complete Codex/Copilot source/run sequences. All required checks and model steps passed;
+assessments and cleanup were retained.
+The fixture's findings remain provisional/unjudged, with no general precision/recall benchmark.
+See the [M39 handoff](./docs/handoff/2026-09-10-cli-workflow-handoff.md).
+
+M40 adds targeted finding/publication checks and a pure post-run revalidation of a nine-task Codex
+quality exercise. The original failed cardinality receipt was preserved; corrected cleanup/count
+postconditions passed without replaying models. Four human adjudications support the observed
+metrics on three small cases, while the healthy candidate's incomplete full-review statement and
+static-review limits remain. These results do not establish general model quality or a PowerToys
+benchmark. M40 also accepted six headless Issue summaries for a frozen measurement case, with
+independent semantic review, four frozen inputs, 216 managed process completions and 12 deferred
+cleanups. Both closed Server copies matched their original files. The schema-portability correction
+and resulting acceptance retain the earlier failed runs as history; no provider reconfiguration
+or model replay was used to rewrite those failures.
+
+- Full Worker `main.ts` startup and consecutive-task operation on the intended Windows VM still
+  need deployment acceptance, including account/session setup and restart/cleanup behavior.
+  Service installation and restart policy remain deployment-owned.
+- Real PowerToys build/test/UI profiles and their toolchain/state-restoration requirements remain
+  distinct from accepted M26 Web and M34 Notepad++ cases. Private repository checkout, reusable
+  build artifacts and video evidence are not implemented. M40 restore passed, but native build
+  failed with `MSB8040`; two requested Spectre component installations remain unapproved/unperformed.
+- Issue triage, Windows/Web model-assisted workflows and other application-specific reproduction
+  cases need their own acceptance beyond the M40 headless measurement case. Optional summaries
+  remain disabled by default; VM network isolation is deployment-owned.
+- Operator OIDC, intended multi-user roles and repository-specific human/finding workflows still
+  need acceptance in their deployment. Existing connected fixture tests retain their original scope.
+- M30 publication preview/outbox, M31 notifications and M32/M39 Evaluation are implemented within
+  their recorded scopes. Live GitHub publication still requires deployed credentials and separately
+  approved exact targets/payloads and repository-automation effects. M40's synthetic-outbox
+  preparation passed; the revised live plan remains unapproved and unexecuted. Its operational
+  details are tracked in Implementation Status, not implied by mock-transport acceptance.
+- General model-quality comparisons require appropriately labeled/adjudicated cases. Correctly
+  identifying the owned discount defect is not acceptance of broad review quality or complete
+  Copilot command capture.
+
+Current CI/P1/P2 remediation is tracked in [Implementation Status](./docs/IMPLEMENTATION_STATUS.md).
+Historical green gates are not a statement about the latest branch. Retired split-worker,
+WindowsAttempt journal/OS-attestation, provider-registry and model-relay designs are not current
+backlog items. Historical migration reports likewise do not create an unreleased-product upgrade
+or data-conversion project.
