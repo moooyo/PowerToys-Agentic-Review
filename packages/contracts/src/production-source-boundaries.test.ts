@@ -78,6 +78,7 @@ const retiredDatabaseBootstrapTokens = [
 // These entry points and helpers are test-only programs, outside production compilation.
 // Keep exact files here: adjacent deploy scripts must retain the production loader checks.
 const testOnlyAcceptanceSourceFiles = new Set([
+  "deploy/worker/cli-workflow-acceptance/cleanup-verification.ts",
   "deploy/worker/cli-workflow-acceptance/git-fixture.ts",
   "deploy/worker/cli-workflow-acceptance/prepare-server.mjs",
   "deploy/worker/cli-workflow-acceptance/quality-corpus.ts",
@@ -165,6 +166,7 @@ describe("production source boundaries", () => {
       "apps/server/src/route.test.ts",
       "apps/server/src/fixture.testing.ts",
       "apps/dashboard/src/page.spec.tsx",
+      "deploy/worker/cli-workflow-acceptance/cleanup-verification.test.ts",
       ...testOnlyAcceptanceSourceFiles,
     ];
     try {

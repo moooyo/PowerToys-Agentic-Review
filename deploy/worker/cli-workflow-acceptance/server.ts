@@ -13,6 +13,12 @@ import { registerWorkerEvidenceRoutes } from "../../../apps/server/dist/routes/e
 import { registerValidationSummaryInputRoutes } from "../../../apps/server/dist/routes/validation-summary-inputs.js";
 import { registerWorkerRoutes } from "../../../apps/server/dist/routes/workers.js";
 import { canonicalJson } from "../../../apps/server/dist/scheduling/canonical-json.js";
+import {
+  type QualityCorpusCase,
+  qualityAdjudicationPayload,
+  qualityCaseAnnotation,
+  qualityCaseDefinitions,
+} from "./quality-corpus.js";
 
 // This opt-in harness creates only owned synthetic repository records. It imports production
 // Server modules without bundling DatabaseClient, whose sibling Worker entry must stay intact.
@@ -33,10 +39,16 @@ interface Input {
   fixtureCheckScript: string;
   reviewPrompt: string;
   maximumRunMs: number;
+  qualityCases?: readonly QualityCorpusCase[];
 }
-type Phase = "ordinary" | "evaluation" | "complete" | "failed";
+type Phase = "ordinary" | "evaluation" | "awaiting_adjudication" | "complete" | "failed";
 type Stage = "ordinary" | "baseline" | "candidate";
+type FixtureCaseScope = Pick<
+  QualityCorpusCase,
+  "caseId" | "title" | "pullRequestNumber" | "baseSha" | "headSha"
+>;
 interface JobSelection {
+  caseId: string;
   stage: Stage;
   jobId: string;
   runId: string;
@@ -141,6 +153,9 @@ async function readInput(path: string): Promise<Input> {
     fixtureCheckScript: text(value.fixtureCheckScript, "fixtureCheckScript", 256),
     reviewPrompt: text(value.reviewPrompt, "reviewPrompt", 128 * 1024),
     maximumRunMs: value.maximumRunMs === undefined ? 900_000 : Number(value.maximumRunMs),
+    ...(value.qualityCases === undefined
+      ? {}
+      : { qualityCases: value.qualityCases as QualityCorpusCase[] }),
   };
   assert.match(input.nonce, /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u);
   assert.match(input.workerNodeId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
@@ -155,6 +170,20 @@ async function readInput(path: string): Promise<Input> {
   assert.match(input.baseSha, /^[a-f0-9]{40}$/u);
   assert.match(input.headSha, /^[a-f0-9]{40}$/u);
   assert.notEqual(input.baseSha, input.headSha);
+  if (input.qualityCases !== undefined) {
+    assert.equal(input.engine, "codex");
+    assert.ok(Array.isArray(input.qualityCases) && input.qualityCases.length === 3);
+    const definitions = qualityCaseDefinitions();
+    for (const [index, fixture] of input.qualityCases.entries()) {
+      assert.equal(fixture.caseId, definitions[index]!.caseId);
+      assert.equal(fixture.pullRequestNumber, index + 1);
+      assert.equal(fixture.repoFullName, input.repoFullName);
+      assert.match(fixture.baseSha, /^[a-f0-9]{40}$/u);
+      assert.match(fixture.headSha, /^[a-f0-9]{40}$/u);
+      assert.deepEqual(fixture.expectedFindings, definitions[index]!.expectedFindings);
+      assert.equal(fixture.classification, definitions[index]!.classification);
+    }
+  }
   assert.match(input.repoFullName, /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u);
   assert.match(input.nodeExecutablePath, /^[A-Za-z]:\\.+\.exe$/iu);
   assert.match(input.fixtureCheckScript, /^[A-Za-z0-9][A-Za-z0-9._/-]*\.mjs$/u);
@@ -201,6 +230,14 @@ class AcceptanceServer {
   repositoryId = "";
   workItemId = "";
   ordinaryRunId = "";
+  readonly caseBindings: { caseId: string; workItemId: string; ordinaryRunId: string }[] = [];
+  qualityJudgments: unknown[] = [];
+  qualityContexts: {
+    selection: JobSelection;
+    result: C.EvaluationCellResultV1;
+    context: C.EvaluationAdjudicationContextV1;
+  }[] = [];
+  pendingQualityControl: Promise<void> = Promise.resolve();
   evaluationId: string | null = null;
   summaries: AttemptSummary[] = [];
   assessment: unknown = null;
@@ -221,6 +258,22 @@ class AcceptanceServer {
   private admin(): Pick<DatabaseClient, "request"> {
     assert.ok(this.operator, "The operator transport has not started.");
     return this.operator;
+  }
+  private fixtureCases(): readonly FixtureCaseScope[] {
+    return (
+      this.input.qualityCases ?? [
+        {
+          caseId: "owned-discount",
+          title: "Review the owned discount fixture",
+          pullRequestNumber: 1,
+          baseSha: this.input.baseSha,
+          headSha: this.input.headSha,
+        },
+      ]
+    );
+  }
+  private expectedTaskCount(): number {
+    return this.fixtureCases().length * 3;
   }
   private async event(value: unknown): Promise<void> {
     const serialized = JSON.stringify(value)
@@ -340,6 +393,46 @@ class AcceptanceServer {
         reply.header("cache-control", "no-store");
       });
       control.get("/__acceptance/status", async () => this.status());
+      control.get("/__acceptance/quality", async (_request, reply) => {
+        if (this.phase !== "awaiting_adjudication")
+          return reply.code(409).send({ phase: this.phase });
+        await this.pendingQualityControl;
+        return {
+          phase: this.phase,
+          cases: this.qualityContexts,
+          fixtures: this.input.qualityCases,
+        };
+      });
+      control.post(
+        "/__acceptance/adjudicate",
+        { bodyLimit: 256 * 1024 },
+        async (request, reply) => {
+          try {
+            return await this.qualityControl(() => this.applyQualityJudgment(request.body));
+          } catch (error) {
+            return reply.code(409).send({ error: errorRecord(error, this.input).message });
+          }
+        },
+      );
+      control.post("/__acceptance/finalize", async (request, reply) => {
+        try {
+          assert.ok(request.body === undefined || canonicalJson(request.body) === "{}");
+          return await this.qualityControl(async () => {
+            assert.equal(this.phase, "awaiting_adjudication");
+            await this.refreshQualityContexts();
+            assert.ok(
+              this.qualityContexts.every((entry) =>
+                entry.context.items.every((item) => item.adjudication !== null),
+              ),
+              "Every observed finding must receive an explicit root judgment before finalization.",
+            );
+            await this.finalizeEvaluation();
+            return this.status();
+          });
+        } catch (error) {
+          return reply.code(409).send({ error: errorRecord(error, this.input).message });
+        }
+      });
       control.post("/__acceptance/stop", async (_request, reply) => {
         reply.send({ stopping: true });
         setImmediate(() => {
@@ -359,6 +452,9 @@ class AcceptanceServer {
       repositoryId: this.repositoryId,
       workItemId: this.workItemId,
       ordinaryRunId: this.ordinaryRunId,
+      ...(this.input.qualityCases
+        ? { ordinaryRunIds: this.caseBindings.map((entry) => entry.ordinaryRunId) }
+        : {}),
     };
     await writeJson(this.input.readyFilePath, ready);
     await writeJson(join(this.input.serverDirectory, "ready.json"), ready);
@@ -366,7 +462,9 @@ class AcceptanceServer {
   }
   private prompt(stage: Stage): string {
     return [
-      this.input.reviewPrompt,
+      this.input.qualityCases
+        ? "Review the owned synthetic pull request identified by this task's resource. Compare its exact base/head Git diff with the README contract. Report only actionable new correctness defects; describe verification actually performed. Keep all inspection inside the disposable checkout, and do not read credentials, provider settings, or any files outside it. Return PrReviewPlanV2 with requestedRecipeIds set to an empty array."
+        : this.input.reviewPrompt,
       `This is the ${stage} configuration of the owned local CLI workflow fixture.`,
       "Review only this prepared fixture. Do not modify files, contact repository services, run git push, or create or edit any PR or issue.",
       "Keep model conclusions separate from the deterministic Worker check results.",
@@ -457,92 +555,115 @@ class AcceptanceServer {
     const at = new Date().toISOString();
     const [ownerLogin, name] = this.input.repoFullName.split("/");
     assert.ok(ownerLogin && name);
-    const event: C.SchedulingRequestOpenedEvent = {
-      contractVersion: 1,
-      eventId: `m39-open-${this.input.nonce}`,
-      source: "webhook",
-      sourceEventId: `m39-delivery-${this.input.nonce}`,
-      occurredAt: at,
-      observedAt: at,
-      repository: {
-        githubRepositoryId,
-        githubNodeId: "M39-owned-repository",
-        ownerLogin,
-        name,
-        fullName: this.input.repoFullName,
-        htmlUrl: `https://github.com/${this.input.repoFullName}`,
-        defaultBranch: "main",
-        isPrivate: false,
-      },
-      author: reviewer,
-      actor: reviewer,
-      target: reviewer,
-      action: "request_opened",
-      requestKind: "review_request",
-      workItem: {
-        kind: "pull_request",
-        githubRepositoryId,
-        githubWorkItemId: 39001001,
-        githubNodeId: "M39-owned-pull-request",
-        number: 1,
-        title: "Review the owned discount fixture",
-        body: "Synthetic PR metadata for an owned local Git fixture; no GitHub PR exists or is modified.",
-        state: "open",
-        author: reviewer,
-        htmlUrl: `https://github.com/${this.input.repoFullName}/pull/1`,
-        createdAt: at,
-        updatedAt: at,
-        closedAt: null,
-        isDraft: false,
-      },
-      revision: {
-        kind: "pull_request",
-        githubRepositoryId,
-        githubWorkItemId: 39001001,
-        baseSha: this.input.baseSha,
-        headSha: this.input.headSha,
-        revisionKey: sha256(`${this.input.baseSha}\0${this.input.headSha}`),
+    const ordinaryConfigurations = [];
+    for (const fixture of this.fixtureCases()) {
+      const event: C.SchedulingRequestOpenedEvent = {
+        contractVersion: 1,
+        eventId: `m39-open-${this.input.nonce}${this.input.qualityCases ? `-${fixture.pullRequestNumber}` : ""}`,
+        source: "webhook",
+        sourceEventId: `m39-delivery-${this.input.nonce}${this.input.qualityCases ? `-${fixture.pullRequestNumber}` : ""}`,
+        occurredAt: at,
         observedAt: at,
-        sourceUpdatedAt: at,
-      },
-    };
-    const ingested = await this.owner().request("ingestSchedulingEvent", {
-      event,
-      policy,
-      allowScheduling: true,
-      schedule: null,
-      delivery: {
-        deliveryId: event.sourceEventId,
-        eventName: "pull_request",
-        payloadSha256: sha256(canonicalJson(event)),
-        receivedAt: at,
-      },
-    });
-    assert.ok(
-      ingested.authorized && ingested.jobCreated && ingested.jobId,
-      "Normal Profile dispatch must create the ordinary task.",
-    );
-    this.workItemId = ingested.workItemId;
-    const runs = await this.admin().request("listDashboardReviewRuns", {
-      repositoryId: repository.id,
-      workItemId: this.workItemId,
-      page: 1,
-      pageSize: 20,
-    });
-    assert.equal(runs.items.length, 1, "Exactly one ordinary Profile run must exist.");
-    this.ordinaryRunId = runs.items[0]!.id;
-    const detail = await this.admin().request("getDashboardReviewRun", {
-      repositoryId: repository.id,
-      reviewRunId: this.ordinaryRunId,
-    });
-    assert.ok(detail && detail.requests.length === 1 && detail.requests[0]?.latestJob);
-    assert.equal(detail.requests[0].latestJob.jobId, ingested.jobId);
-    this.jobs.push({
-      stage: "ordinary",
-      jobId: ingested.jobId,
-      runId: this.ordinaryRunId,
-      requestId: detail.requests[0].requestId,
-    });
+        repository: {
+          githubRepositoryId,
+          githubNodeId: "M39-owned-repository",
+          ownerLogin,
+          name,
+          fullName: this.input.repoFullName,
+          htmlUrl: `https://github.com/${this.input.repoFullName}`,
+          defaultBranch: "main",
+          isPrivate: false,
+        },
+        author: reviewer,
+        actor: reviewer,
+        target: reviewer,
+        action: "request_opened",
+        requestKind: "review_request",
+        workItem: {
+          kind: "pull_request",
+          githubRepositoryId,
+          githubWorkItemId: 39001000 + fixture.pullRequestNumber,
+          githubNodeId: this.input.qualityCases
+            ? `M39-owned-pull-request-${fixture.pullRequestNumber}`
+            : "M39-owned-pull-request",
+          number: fixture.pullRequestNumber,
+          title: fixture.title,
+          body: this.input.qualityCases
+            ? "Review the source change between the supplied base and head revisions against the README contract. The checkout includes node check.mjs for partial smoke checks."
+            : "Synthetic PR metadata for an owned local Git fixture; no GitHub PR exists or is modified.",
+          state: "open",
+          author: reviewer,
+          htmlUrl: `https://github.com/${this.input.repoFullName}/pull/${fixture.pullRequestNumber}`,
+          createdAt: at,
+          updatedAt: at,
+          closedAt: null,
+          isDraft: false,
+        },
+        revision: {
+          kind: "pull_request",
+          githubRepositoryId,
+          githubWorkItemId: 39001000 + fixture.pullRequestNumber,
+          baseSha: fixture.baseSha,
+          headSha: fixture.headSha,
+          revisionKey: sha256(`${fixture.baseSha}\0${fixture.headSha}`),
+          observedAt: at,
+          sourceUpdatedAt: at,
+        },
+      };
+      const ingested = await this.owner().request("ingestSchedulingEvent", {
+        event,
+        policy,
+        allowScheduling: true,
+        schedule: null,
+        delivery: {
+          deliveryId: event.sourceEventId,
+          eventName: "pull_request",
+          payloadSha256: sha256(canonicalJson(event)),
+          receivedAt: at,
+        },
+      });
+      assert.ok(
+        ingested.authorized && ingested.jobCreated && ingested.jobId,
+        "Normal Profile dispatch must create the ordinary task.",
+      );
+      const runs: C.DashboardReviewRunListResponse = await this.admin().request(
+        "listDashboardReviewRuns",
+        {
+          repositoryId: repository.id,
+          workItemId: ingested.workItemId,
+          page: 1,
+          pageSize: 20,
+        },
+      );
+      assert.equal(runs.items.length, 1, "Exactly one ordinary Profile run must exist.");
+      const ordinaryRunId = runs.items[0]!.id;
+      if (this.caseBindings.length === 0) {
+        this.workItemId = ingested.workItemId;
+        this.ordinaryRunId = ordinaryRunId;
+      }
+      this.caseBindings.push({
+        caseId: fixture.caseId,
+        workItemId: ingested.workItemId,
+        ordinaryRunId,
+      });
+      const detail: C.DashboardReviewRunDetail | null = await this.admin().request(
+        "getDashboardReviewRun",
+        {
+          repositoryId: repository.id,
+          reviewRunId: ordinaryRunId,
+        },
+      );
+      assert.ok(detail && detail.requests.length === 1 && detail.requests[0]?.latestJob);
+      assert.equal(detail.requests[0].latestJob.jobId, ingested.jobId);
+      this.jobs.push({
+        caseId: fixture.caseId,
+        stage: "ordinary",
+        jobId: ingested.jobId,
+        runId: ordinaryRunId,
+        requestId: detail.requests[0].requestId,
+      });
+      ordinaryConfigurations.push({ event, ingested, ordinary, detail });
+    }
     await this.owner().request("createWorkerNodeCredential", {
       workerNodeId: this.input.workerNodeId,
       displayName: `M39 ${this.input.engine} ${this.input.nonce}`,
@@ -551,26 +672,30 @@ class AcceptanceServer {
       createdBySubject: actor.subject,
     });
     await writeJson(join(this.input.serverDirectory, "ordinary-configuration.json"), {
-      event,
-      ingested,
-      ordinary,
-      detail,
+      ...(this.input.qualityCases ? { cases: ordinaryConfigurations } : ordinaryConfigurations[0]),
     });
   }
   private async createEvaluation(): Promise<void> {
     const scope = { repositoryId: this.repositoryId, actor };
-    const captured = await this.admin().request("captureEvaluationSource", {
-      ...scope,
-      request: {
-        changeId: `m39-source-${this.input.nonce}`,
-        source: {
-          kind: "current_work_item",
-          workItemId: this.workItemId,
-          expectedRevisionKey: sha256(`${this.input.baseSha}\0${this.input.headSha}`),
-          testedIssueCommit: null,
+    const capturedCases: { fixture: FixtureCaseScope; captured: C.EvaluationSourceSummaryV1 }[] =
+      [];
+    for (const fixture of this.fixtureCases()) {
+      const binding = this.caseBindings.find((entry) => entry.caseId === fixture.caseId);
+      assert.ok(binding);
+      const captured = await this.admin().request("captureEvaluationSource", {
+        ...scope,
+        request: {
+          changeId: `m39-source-${this.input.nonce}${this.input.qualityCases ? `-${fixture.pullRequestNumber}` : ""}`,
+          source: {
+            kind: "current_work_item",
+            workItemId: binding.workItemId,
+            expectedRevisionKey: sha256(`${fixture.baseSha}\0${fixture.headSha}`),
+            testedIssueCommit: null,
+          },
         },
-      },
-    });
+      });
+      capturedCases.push({ fixture, captured });
+    }
     const suite = await this.admin().request("createEvaluationSuite", {
       ...scope,
       request: {
@@ -591,23 +716,31 @@ class AcceptanceServer {
         draft: {
           name: suite.name,
           description: suite.description,
-          cases: [
-            {
-              caseId: "owned-discount",
-              title: "The frozen discount source receives an independent model review",
-              sourceId: captured.id,
-              applicability: { state: "applicable" },
-              criteria: [
+          cases: this.input.qualityCases
+            ? this.input.qualityCases.map((fixture) =>
+                qualityCaseAnnotation(
+                  fixture,
+                  capturedCases.find((entry) => entry.fixture.caseId === fixture.caseId)!.captured
+                    .id,
+                ),
+              )
+            : [
                 {
-                  criterionId: "fixture-check",
-                  description: "The deterministic fixture check passes.",
+                  caseId: "owned-discount",
+                  title: "The frozen discount source receives an independent model review",
+                  sourceId: capturedCases[0]!.captured.id,
                   applicability: { state: "applicable" },
-                  expectedOutcome: "passed",
+                  criteria: [
+                    {
+                      criterionId: "fixture-check",
+                      description: "The deterministic fixture check passes.",
+                      applicability: { state: "applicable" },
+                      expectedOutcome: "passed",
+                    },
+                  ],
+                  findings: { annotation: "unlabeled", expected: [] },
                 },
               ],
-              findings: { annotation: "unlabeled", expected: [] },
-            },
-          ],
         },
       },
     });
@@ -630,14 +763,12 @@ class AcceptanceServer {
         mode: "prompt_and_profile",
         baseline: baseline.selection,
         candidate: candidate.selection,
-        checkMappings: [
-          {
-            caseId: "owned-discount",
-            criterionId: "fixture-check",
-            baselineCheckId: `${baseline.profile.id}:check-baseline`,
-            candidateCheckId: `${candidate.profile.id}:check-candidate`,
-          },
-        ],
+        checkMappings: capturedCases.map(({ fixture }) => ({
+          caseId: fixture.caseId,
+          criterionId: this.input.qualityCases ? "fixture-smoke" : "fixture-check",
+          baselineCheckId: `${baseline.profile.id}:check-baseline`,
+          candidateCheckId: `${candidate.profile.id}:check-candidate`,
+        })),
       },
     });
     this.evaluationId = batch.id;
@@ -646,21 +777,24 @@ class AcceptanceServer {
       ...scope,
       evaluationId: batch.id,
     });
-    assert.equal(matrix.progress.totalCells, 2);
-    assert.equal(matrix.cases.length, 1);
-    for (const stage of ["baseline", "candidate"] as const) {
-      const cell = matrix.cases[0]![stage];
-      assert.ok(cell.job, "Evaluation must create a real queued Job.");
-      this.jobs.push({
-        stage,
-        jobId: cell.job.jobId,
-        runId: cell.runId,
-        requestId: cell.requestId,
-        cellId: cell.cellId,
-      });
+    assert.equal(matrix.progress.totalCells, this.fixtureCases().length * 2);
+    assert.equal(matrix.cases.length, this.fixtureCases().length);
+    for (const entry of matrix.cases) {
+      for (const stage of ["baseline", "candidate"] as const) {
+        const cell = entry[stage];
+        assert.ok(cell.job, "Evaluation must create a real queued Job.");
+        this.jobs.push({
+          caseId: entry.caseId,
+          stage,
+          jobId: cell.job.jobId,
+          runId: cell.runId,
+          requestId: cell.requestId,
+          cellId: cell.cellId,
+        });
+      }
     }
     await writeJson(join(this.input.serverDirectory, "evaluation-configuration.json"), {
-      captured,
+      ...(this.input.qualityCases ? { capturedCases } : { captured: capturedCases[0]!.captured }),
       suite,
       version,
       baseline,
@@ -774,7 +908,13 @@ class AcceptanceServer {
     this.recordedResults.add(stored.attemptId);
   }
   private scheduleTick(): void {
-    if (this.stopping || this.phase === "complete" || this.phase === "failed") return;
+    if (
+      this.stopping ||
+      this.phase === "complete" ||
+      this.phase === "failed" ||
+      this.phase === "awaiting_adjudication"
+    )
+      return;
     this.tickTimer = setTimeout(() => {
       this.pendingTick = this.tick().catch(async (error: unknown) => {
         if (!this.stopping) {
@@ -790,6 +930,93 @@ class AcceptanceServer {
       });
       void this.pendingTick.then(() => this.scheduleTick());
     }, 500);
+  }
+  private qualityControl<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.pendingQualityControl.then(() => {
+      assert.equal(this.stopping, false, "The acceptance Server is stopping.");
+      return operation();
+    });
+    this.pendingQualityControl = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
+  private async refreshQualityContexts(): Promise<void> {
+    assert.ok(this.input.qualityCases && this.evaluationId);
+    const contexts: typeof this.qualityContexts = [];
+    for (const selection of this.jobs.filter((entry) => entry.stage !== "ordinary")) {
+      const summary = this.summaries.find((entry) => entry.jobId === selection.jobId);
+      assert.ok(summary?.resultId, "Quality adjudication requires an actual completed result.");
+      const scope: C.EvaluationCellResultReadQuery & { actor: C.OperatorPrincipal } = {
+        actor,
+        repositoryId: this.repositoryId,
+        evaluationId: this.evaluationId,
+        cellId: selection.cellId!,
+        resultId: summary.resultId,
+      };
+      const result: C.EvaluationCellResultV1 = await this.admin().request(
+        "getEvaluationCellResult",
+        scope,
+      );
+      assert.equal(result.resultDigest, summary.resultDigest);
+      const context = await this.admin().request("getEvaluationAdjudicationContext", scope);
+      assert.equal(context.resultDigest, result.resultDigest);
+      contexts.push({ selection, result, context });
+    }
+    this.qualityContexts = contexts;
+  }
+  private async applyQualityJudgment(body: unknown) {
+    assert.equal(this.phase, "awaiting_adjudication");
+    assert.ok(this.input.qualityCases);
+    const value = object(body);
+    assert.deepEqual(Object.keys(value).sort(), ["cellId", "occurrenceKey", "request", "resultId"]);
+    const request = object(value.request) as unknown as C.EvaluationAdjudicationChangeRequest;
+    assert.deepEqual(Object.keys(request).sort(), [
+      "changeId",
+      "expectedVersion",
+      "judgment",
+      "resultDigest",
+    ]);
+    await this.refreshQualityContexts();
+    const selected = this.qualityContexts.find(
+      (entry) =>
+        entry.context.scope.cellId === value.cellId &&
+        entry.context.scope.resultId === value.resultId,
+    );
+    assert.ok(selected, "Select an actual result from this quality batch.");
+    const fixture = this.input.qualityCases.find(
+      (entry) => entry.caseId === selected.selection.caseId,
+    )!;
+    const payload = qualityAdjudicationPayload({
+      fixture,
+      context: selected.context,
+      occurrenceKey: text(value.occurrenceKey, "occurrenceKey", 64),
+      changeId: request.changeId,
+      judgment: request.judgment,
+    });
+    assert.equal(
+      canonicalJson(request),
+      canonicalJson({ ...payload.request, expectedVersion: request.expectedVersion }),
+      "Use the actual result digest and a supported explicit judgment.",
+    );
+    // The owner enforces CAS and exact change-ID replay, including a lost prior reply.
+    const receipt = await this.admin().request("changeEvaluationAdjudication", {
+      ...payload.scope,
+      actor,
+      request,
+    });
+    this.qualityJudgments.push(receipt);
+    await writeJson(
+      join(this.input.serverDirectory, `quality-judgment-${this.qualityJudgments.length}.json`),
+      { request: value, receipt },
+    );
+    await this.refreshQualityContexts();
+    return {
+      receipt,
+      context: this.qualityContexts.find((entry) => entry.context.scope.cellId === value.cellId)!
+        .context,
+    };
   }
   private async tick(): Promise<void> {
     if (Date.now() - Date.parse(this.startedAt) > this.input.maximumRunMs)
@@ -809,48 +1036,81 @@ class AcceptanceServer {
       this.summaries.push(this.summarize(selected, attempts.at(-1)!));
     }
     if (this.stopping) return;
-    if (this.phase === "ordinary" && this.summaries[0]?.terminal) await this.createEvaluation();
+    if (
+      this.phase === "ordinary" &&
+      this.summaries.length === this.fixtureCases().length &&
+      this.summaries.every((entry) => entry.terminal)
+    )
+      await this.createEvaluation();
     else if (
       this.phase === "evaluation" &&
-      this.summaries.length === 3 &&
+      this.summaries.length === this.expectedTaskCount() &&
       this.summaries.every((entry) => entry.terminal)
     ) {
-      assert.ok(this.evaluationId);
-      const scope = { actor, repositoryId: this.repositoryId, evaluationId: this.evaluationId };
-      const matrix = await this.admin().request("getEvaluationBatchMatrix", scope);
-      this.preview = await this.admin().request("getEvaluationScorePreview", scope);
-      const preview = this.preview as C.EvaluationScorePreviewV1;
-      this.assessment = await this.admin().request("publishEvaluationAssessment", {
-        ...scope,
-        request: {
-          changeId: `m39-assessment-${this.input.nonce}`,
-          expectedVersion: 0,
-          expectedInputDigest: preview.inputDigest,
-        },
-      });
-      this.phase = "complete";
-      await writeJson(join(this.input.serverDirectory, "report.json"), {
-        ...this.status(),
-        schemaVersion: "M39CliWorkflowServerReportV1",
-        startedAt: this.startedAt,
-        completedAt: new Date().toISOString(),
-        source: {
-          baseSha: this.input.baseSha,
-          headSha: this.input.headSha,
-          repoFullName: this.input.repoFullName,
-        },
-        matrix,
-        preview: this.preview,
-        assessment: this.assessment,
-        qualityInterpretation:
-          "Finding content is retained for human assessment; unlabeled findings do not establish precision or recall. CLI default does not identify the underlying model.",
-      });
-      await this.event({
-        at: new Date().toISOString(),
-        phase: this.phase,
-        successCount: this.summaries.filter((entry) => entry.success).length,
-      });
+      if (this.input.qualityCases) {
+        await this.refreshQualityContexts();
+        this.phase = "awaiting_adjudication";
+        await writeJson(join(this.input.serverDirectory, "quality-review-ready.json"), {
+          phase: this.phase,
+          fixtures: this.input.qualityCases,
+          cases: this.qualityContexts,
+          scope:
+            "All nine CLI tasks are finished. No automatic judgments are made. Root must inspect every real finding and explicitly finalize the observed quality assessment.",
+        });
+        await this.event({ at: new Date().toISOString(), phase: this.phase });
+      } else await this.finalizeEvaluation();
     }
+  }
+  private async finalizeEvaluation(): Promise<void> {
+    assert.ok(this.evaluationId);
+    const scope = { actor, repositoryId: this.repositoryId, evaluationId: this.evaluationId };
+    const matrix = await this.admin().request("getEvaluationBatchMatrix", scope);
+    this.preview = await this.admin().request("getEvaluationScorePreview", scope);
+    const preview = this.preview as C.EvaluationScorePreviewV1;
+    this.assessment = await this.admin().request("publishEvaluationAssessment", {
+      ...scope,
+      request: {
+        changeId: `m39-assessment-${this.input.nonce}`,
+        expectedVersion: preview.assessmentVersion,
+        expectedInputDigest: preview.inputDigest,
+      },
+    });
+    const completedStatus = this.status();
+    await writeJson(join(this.input.serverDirectory, "report.json"), {
+      ...completedStatus,
+      phase: "complete",
+      passed:
+        this.failure === null &&
+        completedStatus.sameWorkerInstance &&
+        this.summaries.every((entry) => entry.success),
+      schemaVersion: "M39CliWorkflowServerReportV1",
+      startedAt: this.startedAt,
+      completedAt: new Date().toISOString(),
+      source: {
+        baseSha: this.input.baseSha,
+        headSha: this.input.headSha,
+        repoFullName: this.input.repoFullName,
+      },
+      matrix,
+      preview: this.preview,
+      assessment: this.assessment,
+      ...(this.input.qualityCases
+        ? {
+            qualityCases: this.input.qualityCases,
+            qualityJudgments: this.qualityJudgments,
+            qualityContexts: this.qualityContexts,
+          }
+        : {}),
+      qualityInterpretation: this.input.qualityCases
+        ? "Scores are observations from three labeled synthetic cases, not a PowerToys benchmark. Missing findings, false positives and unjudged findings are retained. Root must review ambiguous matching. Workflow success does not require ideal quality scores. CLI default does not identify the underlying model."
+        : "Finding content is retained for human assessment; unlabeled findings do not establish precision or recall. CLI default does not identify the underlying model.",
+    });
+    this.phase = "complete";
+    await this.event({
+      at: new Date().toISOString(),
+      phase: this.phase,
+      successCount: this.summaries.filter((entry) => entry.success).length,
+    });
   }
   status() {
     const instanceIds = [
@@ -859,7 +1119,7 @@ class AcceptanceServer {
       ),
     ];
     const sameWorkerInstance =
-      this.summaries.length === 3 &&
+      this.summaries.length === this.expectedTaskCount() &&
       instanceIds.length === 1 &&
       this.summaries.every((entry) => entry.workerInstanceId !== null);
     return {
@@ -875,7 +1135,10 @@ class AcceptanceServer {
         sameWorkerInstance &&
         this.summaries.every((entry) => entry.success),
       evaluationId: this.evaluationId,
-      expectedTaskCount: 3,
+      expectedTaskCount: this.expectedTaskCount(),
+      ...(this.input.qualityCases
+        ? { qualityMode: "synthetic-v1", qualityJudgments: this.qualityJudgments }
+        : {}),
       attempts: this.summaries,
       successfulAttempts: this.summaries.filter((entry) => entry.success),
       failedAttempts: this.summaries.filter((entry) => entry.terminal && !entry.success),
@@ -941,6 +1204,7 @@ class AcceptanceServer {
         }
       });
     if (this.app) await attempt(() => this.app!.close());
+    await attempt(() => this.pendingQualityControl);
     if (this.database) await attempt(() => this.owner().close());
     clearTimeout(this.deadlineTimer);
     await attempt(() => this.pendingTick);

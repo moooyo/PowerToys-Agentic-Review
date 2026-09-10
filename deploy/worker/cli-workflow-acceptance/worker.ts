@@ -40,6 +40,10 @@ import type { LogFields, Logger } from "../../../apps/worker/src/logging/logger.
 import { HttpWorkerApi } from "../../../apps/worker/src/server-client/http-worker-api.js";
 import type { WorkerApi } from "../../../apps/worker/src/server-client/worker-api.js";
 import { WorkerService } from "../../../apps/worker/src/worker-service.js";
+import { assertWorkerCleanup } from "./cleanup-verification.js";
+import type { QualityCorpusCase } from "./quality-corpus.js";
+
+type FixtureScope = Pick<QualityCorpusCase, "caseId" | "pullRequestNumber" | "baseSha" | "headSha">;
 
 export interface WorkerAcceptanceInput {
   readonly schemaVersion: "CliWorkflowAcceptanceInputV1";
@@ -61,12 +65,14 @@ export interface WorkerAcceptanceInput {
   readonly fixtureCheckScript: "check.mjs";
   readonly reviewPrompt: string;
   readonly maximumRunMs: number;
+  readonly qualityCases?: readonly FixtureScope[];
 }
 export interface WorkerAcceptanceReady {
   readonly serverUrl: string;
   readonly engine: "codex" | "copilot";
   readonly workerNodeId: string;
   readonly ordinaryRunId: string;
+  readonly ordinaryRunIds?: readonly string[];
   readonly nonce?: string;
 }
 export interface WorkerAcceptanceProgress {
@@ -79,6 +85,7 @@ export interface WorkerAcceptanceOptions {
   readonly onProgress?: (progress: WorkerAcceptanceProgress) => void;
 }
 interface TaskObservation {
+  readonly caseId: string;
   readonly jobId: string;
   readonly attemptId: string;
   readonly workerInstanceId: string;
@@ -134,7 +141,7 @@ export interface WorkerAcceptanceReceipt {
   readonly events: readonly WorkerAcceptanceProgress[];
 }
 
-/** Runs three Server-scheduled tasks through production Worker components on one Windows Host. */
+/** Runs a bounded Server-scheduled workflow through production Worker components on one Windows Host. */
 export async function runWorker(
   suppliedInput: WorkerAcceptanceInput,
   suppliedReady: WorkerAcceptanceReady,
@@ -148,6 +155,20 @@ export async function runWorker(
   assert.equal(input.fixtureCheckScript, "check.mjs");
   assert.match(input.baseSha, /^[a-f0-9]{40}$/u);
   assert.match(input.headSha, /^[a-f0-9]{40}$/u);
+  if (input.qualityCases !== undefined) {
+    assert.equal(input.engine, "codex");
+    assert.equal(input.qualityCases.length, 3);
+    assert.equal(new Set(input.qualityCases.map((entry) => entry.caseId)).size, 3);
+    assert.deepEqual(
+      input.qualityCases.map((entry) => entry.pullRequestNumber),
+      [1, 2, 3],
+    );
+    for (const fixture of input.qualityCases) {
+      assert.match(fixture.baseSha, /^[a-f0-9]{40}$/u);
+      assert.match(fixture.headSha, /^[a-f0-9]{40}$/u);
+    }
+  }
+  const expectedTaskCount = fixtureScopes(input).length * 3;
   assert.equal(ready.engine, input.engine);
   assert.equal(ready.workerNodeId, input.workerNodeId);
   if (ready.nonce !== undefined) assert.equal(ready.nonce, input.nonce);
@@ -240,7 +261,12 @@ export async function runWorker(
     [];
   const sourceObservations: { attemptId: string; purpose: string; state: string }[] = [];
   const terminalAcknowledgements: { attemptId: string; operation: string; at: string }[] = [];
-  const gitFetchMappings: { source: string; destination: string; refspecs: string[] }[] = [];
+  const gitFetchMappings: {
+    caseId: string;
+    source: string;
+    destination: string;
+    refspecs: string[];
+  }[] = [];
   const activeRequests = new Set<string>(),
     activeReservations = new Set<string>(),
     activeMonitors = new Set<symbol>();
@@ -292,9 +318,9 @@ export async function runWorker(
     const processHost: ProcessHostClient = {
       start: async (spec, signal) => {
         const cli = samePath(spec.executable, input.cliExecutablePath);
-        if (cli && processes.filter((entry) => entry.cli).length >= 3) {
+        if (cli && processes.filter((entry) => entry.cli).length >= expectedTaskCount) {
           fatalExecutionError = new Error(
-            "The acceptance scope permits only three model processes per engine.",
+            `The acceptance scope permits at most ${expectedTaskCount} CLI model processes for this engine.`,
           );
           throw fatalExecutionError;
         }
@@ -393,17 +419,25 @@ export async function runWorker(
           assert.ok(origin > fetch && policy >= 0);
           const refspecs = argumentsList.slice(origin + 1);
           assert.equal(refspecs.length, 2);
-          assert.equal(refspecs[0], `+${input.baseSha}:refs/agentic-review/latest-base`);
+          const fixture = fixtureScopes(input).find(
+            (entry) => refspecs[0] === `+${entry.baseSha}:refs/agentic-review/latest-base`,
+          );
+          assert.ok(fixture, "Git fetch must belong to an admitted fixture case.");
           assert.ok(
             [
-              `+refs/pull/1/head:refs/agentic-review/latest-head`,
-              `+${input.headSha}:refs/agentic-review/latest-head`,
+              `+refs/pull/${fixture.pullRequestNumber}/head:refs/agentic-review/latest-head`,
+              `+${fixture.headSha}:refs/agentic-review/latest-head`,
             ].includes(refspecs[1] ?? ""),
           );
           argumentsList[origin] = bareDirectory;
           argumentsList[policy] = "protocol.file.allow=always";
           spec = { ...original, arguments: argumentsList };
-          gitFetchMappings.push({ source: "origin", destination: bareDirectory, refspecs });
+          gitFetchMappings.push({
+            caseId: fixture.caseId,
+            source: "origin",
+            destination: bareDirectory,
+            refspecs,
+          });
         }
         if (original.arguments.includes("remote.origin.url"))
           assert.equal(original.arguments.at(-1), `https://github.com/${input.repoFullName}.git`);
@@ -518,15 +552,19 @@ export async function runWorker(
       execute: async (envelope, context) => {
         try {
           if (fatalExecutionError !== undefined) throw fatalExecutionError;
-          validateFixtureEnvelope(envelope, input);
+          const fixture = validateFixtureEnvelope(envelope, input);
           assert.equal(envelope.envelopeVersion, 2);
           const frozen = envelope as JobExecutionEnvelopeV2,
             evaluation =
               frozen.validation.schemaVersion === "ValidationJobContextV2"
                 ? frozen.validation
                 : undefined;
-          assert.ok(tasks.length < 3 && !tasks.some((task) => task.jobId === envelope.job.jobId));
+          assert.ok(
+            tasks.length < expectedTaskCount &&
+              !tasks.some((task) => task.jobId === envelope.job.jobId),
+          );
           const task: TaskObservation = {
+            caseId: fixture.caseId,
             jobId: envelope.job.jobId,
             attemptId: envelope.lease.runAttemptId,
             workerInstanceId: envelope.lease.workerInstanceId,
@@ -565,14 +603,15 @@ export async function runWorker(
               .every((check) => check.outcome === "passed");
             const model =
               value.modelReview.state === "completed" ? value.modelReview.result : undefined;
-            task.qualityFindingObserved =
-              model?.schemaVersion === "PrReviewPlanV2" &&
-              model.findings.some(
-                (finding) =>
-                  finding.path === "src/discount.js" &&
-                  finding.line <= 2 &&
-                  (finding.endLine ?? finding.line) >= 2,
-              );
+            if (input.qualityCases === undefined)
+              task.qualityFindingObserved =
+                model?.schemaVersion === "PrReviewPlanV2" &&
+                model.findings.some(
+                  (finding) =>
+                    finding.path === "src/discount.js" &&
+                    finding.line <= 2 &&
+                    (finding.endLine ?? finding.line) >= 2,
+                );
             if (
               value.schemaVersion === "ValidationJobResultV2" &&
               value.modelReview.state === "completed"
@@ -711,11 +750,18 @@ export async function runWorker(
           "passed" in status && status.passed === true,
           "The Server completed with failed tasks.",
         );
-        assert.equal(tasks.length, 3);
-        assert.equal(tasks[0]?.purpose, "ordinary");
-        assert.equal(tasks[0]?.runId, ready.ordinaryRunId);
+        assert.equal(tasks.length, expectedTaskCount);
+        const ordinaryTasks = tasks.filter((task) => task.purpose === "ordinary");
+        assert.equal(ordinaryTasks.length, fixtureScopes(input).length);
+        assert.deepEqual(
+          ordinaryTasks.map((task) => task.runId).sort(),
+          [...(ready.ordinaryRunIds ?? [ready.ordinaryRunId])].sort(),
+        );
+        assert.ok(
+          tasks.slice(0, ordinaryTasks.length).every((task) => task.purpose === "ordinary"),
+        );
         assert.equal(new Set(tasks.map((task) => task.workerInstanceId)).size, 1);
-        assert.equal(new Set(tasks.map((task) => task.attemptId)).size, 3);
+        assert.equal(new Set(tasks.map((task) => task.attemptId)).size, expectedTaskCount);
         assert.ok(
           tasks.every(
             (task) =>
@@ -725,8 +771,15 @@ export async function runWorker(
           ),
         );
         const evaluations = tasks.filter((task) => task.purpose === "evaluation");
-        assert.equal(evaluations.length, 2);
-        assert.deepEqual(evaluations.map((task) => task.arm).sort(), ["baseline", "candidate"]);
+        assert.equal(evaluations.length, fixtureScopes(input).length * 2);
+        for (const fixture of fixtureScopes(input))
+          assert.deepEqual(
+            evaluations
+              .filter((task) => task.caseId === fixture.caseId)
+              .map((task) => task.arm)
+              .sort(),
+            ["baseline", "candidate"],
+          );
         assert.equal(new Set(evaluations.map((task) => task.evaluationId)).size, 1);
         break;
       }
@@ -738,7 +791,7 @@ export async function runWorker(
   } finally {
     if (service !== undefined) {
       const stopping = service.stop(
-        failure === null ? "acceptance_three_tasks_complete" : "acceptance_failed",
+        failure === null ? "acceptance_tasks_complete" : "acceptance_failed",
       );
       void stopping.catch(() => undefined);
       if (failure !== null && host !== undefined)
@@ -779,35 +832,25 @@ export async function runWorker(
         entry.signal !== undefined,
     ).length;
     try {
-      assert.equal(workspaceEntries.length, 0);
-      assert.equal(activeReservations.size, 0);
-      assert.equal(activeMonitors.size, 0);
-      assert.equal(abandonedReservations, 0);
-      assert.equal(admittedReservations, 6);
-      assert.equal(releasedReservations, 6);
-      assert.equal(preparedWorkspaces.length, 6);
-      assert.equal(cleanups.length, 6);
-      assert.equal(activeRequests.size, 0);
-      assert.equal(completedProcessTrees, processes.length);
-      assert.equal(processes.filter((entry) => entry.cli).length, 3);
-      assert.ok(
-        processes.every(
-          (entry) => entry.failure === undefined && entry.exitCode === 0 && entry.signal === null,
-        ),
+      assertWorkerCleanup(
+        {
+          workspaceEntries,
+          activeReservations: activeReservations.size,
+          activeMonitors: activeMonitors.size,
+          abandonedReservations,
+          admittedReservations,
+          releasedReservations,
+          preparedWorkspaces,
+          cleanups,
+          activeProcessRequests: activeRequests.size,
+          completedProcessTrees,
+          processes,
+          sourceObservations,
+          hostClosed,
+          terminalAcknowledgements,
+        },
+        expectedTaskCount,
       );
-      assert.ok(sourceObservations.every((entry) => entry.state === "clean"));
-      assert.ok(
-        hostClosed !== null &&
-          typeof hostClosed === "object" &&
-          "code" in hostClosed &&
-          hostClosed.code === 0,
-      );
-      for (const cleanup of cleanups) {
-        const terminal = terminalAcknowledgements.find(
-          (entry) => entry.attemptId === cleanup.attemptId && entry.operation === "complete",
-        );
-        assert.ok(terminal && Date.parse(terminal.at) <= Date.parse(cleanup.completedAt));
-      }
     } catch (error) {
       failure ??= safeValue(error, secrets);
     }
@@ -849,18 +892,36 @@ export async function runWorker(
   return receipt;
 }
 
+function fixtureScopes(input: WorkerAcceptanceInput): readonly FixtureScope[] {
+  return (
+    input.qualityCases ?? [
+      {
+        caseId: "owned-discount",
+        pullRequestNumber: 1,
+        baseSha: input.baseSha,
+        headSha: input.headSha,
+      },
+    ]
+  );
+}
+
 function validateFixtureEnvelope(
   envelope: JobExecutionEnvelope,
   input: WorkerAcceptanceInput,
-): void {
+): FixtureScope {
   assert.equal(envelope.repository.fullName, input.repoFullName);
   assert.equal(envelope.job.kind, "pull_request_review");
   assert.equal(envelope.resource.kind, "pull_request");
   if (envelope.resource.kind !== "pull_request") throw new Error("Unexpected fixture resource.");
-  assert.equal(envelope.resource.number, 1);
-  assert.equal(envelope.resource.baseSha, input.baseSha);
-  assert.equal(envelope.resource.headSha, input.headSha);
+  const fixture = fixtureScopes(input).find(
+    (entry) => entry.pullRequestNumber === envelope.resource.number,
+  );
+  assert.ok(fixture, "The envelope must select an owned fixture case.");
+  assert.equal(envelope.resource.baseSha, fixture.baseSha);
+  assert.equal(envelope.resource.headSha, fixture.headSha);
   if (envelope.envelopeVersion === 2) {
+    if (envelope.validation.schemaVersion === "ValidationJobContextV2")
+      assert.equal(envelope.validation.purpose.caseId, fixture.caseId);
     assert.equal(envelope.validation.workflowKind, "pr_static_build");
     assert.equal(envelope.validation.target, "headless");
     const config = envelope.validation.profileVersion.config;
@@ -872,10 +933,12 @@ function validateFixtureEnvelope(
       assert.equal(step.command.environment.length, 0);
       assert.ok(
         JSON.stringify(step.command.args) === JSON.stringify([input.fixtureCheckScript]) ||
-          JSON.stringify(step.command.args) === JSON.stringify(["--check", "src/discount.js"]),
+          (input.qualityCases === undefined &&
+            JSON.stringify(step.command.args) === JSON.stringify(["--check", "src/discount.js"])),
       );
     }
   }
+  return fixture;
 }
 function snapshotAccountEnvironment(
   source: NodeJS.ProcessEnv,

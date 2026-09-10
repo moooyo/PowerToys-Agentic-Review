@@ -63,12 +63,16 @@ async function buildWorkerHarness(root) {
   const entry = join(root, "worker-entry.mjs");
   await writeFile(
     entry,
-    'export { runWorker } from "@acceptance/worker";\nexport { createGitFixture } from "@acceptance/fixture";\n',
+    'export { runWorker } from "@acceptance/worker";\nexport { createGitFixture } from "@acceptance/fixture";\nexport { createQualityCorpus } from "@acceptance/quality";\n',
     { flag: "wx" },
   );
   const alias = {
     "@acceptance/worker": join(repository, "deploy/worker/cli-workflow-acceptance/worker.ts"),
     "@acceptance/fixture": join(repository, "deploy/worker/cli-workflow-acceptance/git-fixture.ts"),
+    "@acceptance/quality": join(
+      repository,
+      "deploy/worker/cli-workflow-acceptance/quality-corpus.ts",
+    ),
   };
   for (const name of ["contracts", "domain", "codex"])
     alias[`@agentic-review/${name}`] = join(repository, `packages/${name}/src/index.ts`);
@@ -193,11 +197,17 @@ async function oneEngine(config, engine, harness) {
   const nonce = randomUUID().replaceAll("-", "");
   const root = join(config.runDirectory, engine.engine);
   await mkdir(root);
-  const fixture = await harness.createGitFixture({
+  const fixtureOptions = {
     directory: join(root, "fixture"),
     gitExecutablePath: config.gitExecutablePath,
+    nodeExecutablePath: config.nodeExecutablePath,
     repoFullName: `agentic-review-fixture/workflow-${nonce.slice(0, 16)}`,
-  });
+  };
+  const qualityCorpus =
+    config.qualityMode === "synthetic-v1"
+      ? await harness.createQualityCorpus(fixtureOptions)
+      : undefined;
+  const fixture = qualityCorpus?.cases[0] ?? (await harness.createGitFixture(fixtureOptions));
   const cliVersion = await versionOf(engine.cliExecutablePath, root);
   const readyPath = join(root, "server-ready.json");
   const input = {
@@ -205,6 +215,7 @@ async function oneEngine(config, engine, harness) {
     nonce,
     engine: engine.engine,
     ...fixture,
+    ...(qualityCorpus ? { qualityCases: qualityCorpus.cases } : {}),
     nodeExecutablePath: config.nodeExecutablePath,
     gitExecutablePath: config.gitExecutablePath,
     processHostPath: config.processHostPath,
@@ -228,7 +239,41 @@ async function oneEngine(config, engine, harness) {
     process.stdout.write(
       `${JSON.stringify({ engine: engine.engine, stage: "worker-started", cliVersion })}\n`,
     );
-    worker = await harness.runWorker(input, ready, {
+    const workerInput = qualityCorpus
+      ? Object.fromEntries(
+          [
+            "schemaVersion",
+            "nonce",
+            "engine",
+            "repoFullName",
+            "baseSha",
+            "headSha",
+            "workerNodeId",
+            "workerToken",
+            "controlToken",
+            "workerDirectory",
+            "bareDirectory",
+            "nodeExecutablePath",
+            "gitExecutablePath",
+            "processHostPath",
+            "cliExecutablePath",
+            "cliVersion",
+            "fixtureCheckScript",
+            "reviewPrompt",
+            "maximumRunMs",
+          ].map((key) => [key, input[key]]),
+        )
+      : input;
+    if (qualityCorpus)
+      workerInput.qualityCases = qualityCorpus.cases.map(
+        ({ caseId, pullRequestNumber, baseSha, headSha }) => ({
+          caseId,
+          pullRequestNumber,
+          baseSha,
+          headSha,
+        }),
+      );
+    worker = await harness.runWorker(workerInput, ready, {
       onProgress(event) {
         if (
           [
@@ -284,6 +329,7 @@ async function oneEngine(config, engine, harness) {
       engine: engine.engine,
       cliVersion,
       fixture,
+      ...(qualityCorpus ? { qualityCorpus } : {}),
       serverDirectory: input.serverDirectory,
       worker,
       status,
@@ -317,6 +363,15 @@ for (const key of ["linuxNodeExecutablePath", "linuxSourceDirectory", "linuxRunP
 assert.match(config.wslDistribution, /^[A-Za-z0-9._-]+$/u);
 assert.ok(Array.isArray(config.engines) && config.engines.length > 0 && config.engines.length <= 2);
 assert.equal(new Set(config.engines.map((engine) => engine.engine)).size, config.engines.length);
+assert.ok(config.qualityMode === undefined || config.qualityMode === "synthetic-v1");
+if (config.qualityMode === "synthetic-v1") {
+  assert.equal(
+    config.engines.length,
+    1,
+    "Quality mode permits one engine and at most nine CLI tasks.",
+  );
+  assert.equal(config.engines[0].engine, "codex", "The bounded quality run selects Codex only.");
+}
 for (const engine of config.engines) {
   assert.ok(["codex", "copilot"].includes(engine.engine));
   engine.cliExecutablePath = windowsPath(engine.cliExecutablePath, "cliExecutablePath");
@@ -329,6 +384,8 @@ for (const engine of config.engines) await oneEngine(config, engine, harness);
 await json(join(config.runDirectory, "complete.json"), {
   engines: config.engines.map((engine) => engine.engine),
   completedAt: new Date().toISOString(),
+  qualityMode: config.qualityMode ?? null,
+  maximumCliTasks: config.qualityMode === "synthetic-v1" ? 9 : config.engines.length * 3,
   scope:
     "Owned Git fixture, real profile commands and configured model CLIs, normal Worker/HTTP/SQLite completion and Evaluation scoring.",
 });

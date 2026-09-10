@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { PrReviewPlanV2ModelOutputSchema, type ValidationJobResultV1 } from "@agentic-review/codex";
+import {
+  IssueTriageV2ModelOutputSchema,
+  PrReviewPlanV2ModelOutputSchema,
+  type ValidationJobResultV1,
+} from "@agentic-review/codex";
 import type {
   JobExecutionEnvelopeV2,
   OperatorPrincipal,
@@ -117,47 +121,65 @@ interface Source {
   revisionKey: string;
 }
 
-function seedSource(database: DatabaseSync, number: number, at: string): Source {
-  const event = openedEvent(number, at);
-  if (event.workItem.kind !== "pull_request" || event.revision.kind !== "pull_request")
-    throw new Error("The dispatch fixture requires a pull request.");
+function seedSource(
+  database: DatabaseSync,
+  event: SchedulingRequestOpenedEvent,
+  sourcePolicy: SelfOrAllowlistPolicy,
+  at: string,
+): Source {
+  if (event.workItem.kind !== event.revision.kind)
+    throw new Error("The dispatch fixture work item and revision must have the same kind.");
   const renderedPrompt = "Review the exact source revision.";
+  const pullRequest = event.workItem.kind === "pull_request";
+  const outputSchema = pullRequest
+    ? PrReviewPlanV2ModelOutputSchema
+    : IssueTriageV2ModelOutputSchema;
+  const commonResource = {
+    githubNodeId: event.workItem.githubNodeId,
+    number: event.workItem.number,
+    title: event.workItem.title,
+    author: event.workItem.author,
+    canonicalSnapshot: event.workItem,
+  };
+  const resource =
+    event.workItem.kind === "pull_request" && event.revision.kind === "pull_request"
+      ? {
+          ...commonResource,
+          kind: "pull_request" as const,
+          baseSha: event.revision.baseSha,
+          headSha: event.revision.headSha,
+          isDraft: event.workItem.isDraft,
+        }
+      : { ...commonResource, kind: "issue" as const, revisionDigest: event.revision.revisionKey };
   const opened = ingestSchedulingEvent(database, {
     event,
-    policy,
+    policy: sourcePolicy,
     allowScheduling: true,
     delivery: {
       deliveryId: event.sourceEventId,
-      eventName: "pull_request",
+      eventName: pullRequest ? "pull_request" : "issues",
       payloadSha256: sha256(canonicalJson(event)),
       receivedAt: at,
     },
     schedule: {
-      jobKind: "pull_request_review",
+      jobKind: pullRequest ? "pull_request_review" : "issue_triage",
       priority: 1,
       intentVersion: 1,
       maxAttempts: 2,
       requiredCapabilities: [],
       executionTemplate: {
-        repository: { githubRepositoryId: number, fullName: event.repository.fullName },
-        resource: {
-          kind: "pull_request",
-          githubNodeId: event.workItem.githubNodeId,
-          number: 1,
-          title: event.workItem.title,
-          author: reviewer,
-          canonicalSnapshot: event.workItem,
-          baseSha: event.revision.baseSha,
-          headSha: event.revision.headSha,
-          isDraft: false,
+        repository: {
+          githubRepositoryId: event.repository.githubRepositoryId,
+          fullName: event.repository.fullName,
         },
+        resource,
         prompt: {
           name: "review",
           version: "fixture",
           renderedPrompt,
           promptSha256: sha256(renderedPrompt),
-          outputSchema: PrReviewPlanV2ModelOutputSchema,
-          outputSchemaSha256: sha256(canonicalJson(PrReviewPlanV2ModelOutputSchema)),
+          outputSchema,
+          outputSchemaSha256: sha256(canonicalJson(outputSchema)),
         },
         executionPolicy: {
           hardTimeoutMs: 600_000,
@@ -229,8 +251,37 @@ export async function createEvidenceControlPlaneFixture(
   integrationOptions: {
     readonly publicationPublisher?: { readonly githubUserId: number };
     readonly createClient?: (options: DatabaseWorkerOptions) => Promise<DatabaseClient>;
+    /** Synthetic ingestion data must retain the complete source identity throughout the fixture. */
+    readonly syntheticSource?: {
+      readonly event: SchedulingRequestOpenedEvent;
+      readonly testedSourceSha?: string;
+    };
   } = {},
 ): Promise<EvidenceControlPlaneFixture> {
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const sourceEvent = structuredClone(
+    integrationOptions.syntheticSource?.event ?? openedEvent(1, at),
+  );
+  const sourceReviewer = present(sourceEvent.target);
+  const sourceActor = present(sourceEvent.actor);
+  const sourcePolicy: SelfOrAllowlistPolicy = {
+    ...policy,
+    schedulingTargetGithubUserId: sourceReviewer.githubUserId,
+    allowlistedActorGithubUserIds:
+      sourceActor.githubUserId === sourceReviewer.githubUserId ? [] : [sourceActor.githubUserId],
+  };
+  const issue = sourceEvent.workItem.kind === "issue";
+  const workflowKind = issue ? "issue_validation" : "pr_static_build";
+  const testedSourceSha = integrationOptions.syntheticSource?.testedSourceSha;
+  if (
+    issue &&
+    (testedSourceSha === undefined || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(testedSourceSha))
+  )
+    throw new Error("The synthetic Issue fixture requires an exact tested source commit.");
+  if (!issue && testedSourceSha !== undefined)
+    throw new Error(
+      "The synthetic pull request fixture obtains its commits from the source revision.",
+    );
   const directory = await mkdtemp(join(tmpdir(), "evidence-control-plane-"));
   const databaseDirectory = join(directory, "database");
   const evidenceDirectory = join(directory, "evidence");
@@ -239,7 +290,6 @@ export async function createEvidenceControlPlaneFixture(
   const databasePath = join(databaseDirectory, "server.sqlite");
   const database = new DatabaseSync(databasePath);
   let source: Source;
-  const at = new Date(Date.now() - 60_000).toISOString();
   try {
     database.exec("PRAGMA foreign_keys = ON");
     runMigrations(database, migrationsDirectory);
@@ -248,14 +298,19 @@ export async function createEvidenceControlPlaneFixture(
       {
         operation: "bootstrapManagedRepositories",
         input: {
-          repositories: [{ githubRepositoryId: 1, fullName: "example/project-1" }],
-          reviewer,
-          authorizationPolicy: policy,
+          repositories: [
+            {
+              githubRepositoryId: sourceEvent.repository.githubRepositoryId,
+              fullName: sourceEvent.repository.fullName,
+            },
+          ],
+          reviewer: sourceReviewer,
+          authorizationPolicy: sourcePolicy,
         },
       },
       at,
     );
-    source = seedSource(database, 1, at);
+    source = seedSource(database, sourceEvent, sourcePolicy, at);
   } finally {
     database.close();
   }
@@ -309,9 +364,9 @@ export async function createEvidenceControlPlaneFixture(
       actor,
       request: {
         name: "Evidence integration",
-        workflowKind: "pr_static_build",
+        workflowKind,
         content: "Review the exact source revision.",
-        outputSchemaVersion: "PrReviewPlanV2",
+        outputSchemaVersion: issue ? "ValidationSummaryV1" : "PrReviewPlanV2",
       },
     });
     const prompt = await client.request("publishPromptDraft", {
@@ -321,7 +376,7 @@ export async function createEvidenceControlPlaneFixture(
     });
     await client.request("savePromptBinding", {
       repositoryId: source.repositoryId,
-      workflowKind: "pr_static_build",
+      workflowKind,
       actor,
       request: { expectedVersion: 0, promptVersionId: prompt.id },
     });
@@ -332,11 +387,11 @@ export async function createEvidenceControlPlaneFixture(
         actor,
         request: {
           name: `Evidence build ${index + 1}`,
-          workflowKind: "pr_static_build",
+          workflowKind,
           target: "headless",
           required: true,
           config: profileConfig(),
-          outputSchemaVersion: "PrReviewPlanV2",
+          outputSchemaVersion: issue ? "ValidationReportV1" : "PrReviewPlanV2",
         },
       });
       await client.request("saveValidationProfileBinding", {
@@ -355,6 +410,7 @@ export async function createEvidenceControlPlaneFixture(
         activationId: "evidence-integration-activation",
         expectedRevisionKey: source.revisionKey,
         profileIds,
+        ...(testedSourceSha === undefined ? {} : { testedSourceCommit: testedSourceSha }),
       },
     });
     const query = { repositoryId: source.repositoryId, reviewRunId: run.id };
@@ -411,9 +467,11 @@ export async function createEvidenceControlPlaneFixture(
         }),
       async closeSource() {
         const time = new Date().toISOString();
-        const opened = openedEvent(1, at);
+        const closedIssueDigest = sha256(
+          JSON.stringify([sourceEvent.workItem.title, sourceEvent.workItem.body, "closed", time]),
+        );
         const event = {
-          ...opened,
+          ...sourceEvent,
           eventId: "evidence-source-closed",
           sourceEventId: "evidence-source-close-delivery",
           occurredAt: time,
@@ -422,8 +480,18 @@ export async function createEvidenceControlPlaneFixture(
           requestKind: null,
           target: null,
           closeReason: "work_item_closed" as const,
+          revision:
+            sourceEvent.revision.kind === "issue"
+              ? {
+                  ...sourceEvent.revision,
+                  revisionKey: closedIssueDigest,
+                  contentDigest: closedIssueDigest,
+                  observedAt: time,
+                  sourceUpdatedAt: time,
+                }
+              : sourceEvent.revision,
           workItem: {
-            ...opened.workItem,
+            ...sourceEvent.workItem,
             state: "closed" as const,
             updatedAt: time,
             closedAt: time,
@@ -431,11 +499,11 @@ export async function createEvidenceControlPlaneFixture(
         };
         return client.request("ingestSchedulingEvent", {
           event,
-          policy,
+          policy: sourcePolicy,
           schedule: null,
           delivery: {
             deliveryId: event.sourceEventId,
-            eventName: "pull_request",
+            eventName: issue ? "issues" : "pull_request",
             receivedAt: time,
             payloadSha256: sha256(canonicalJson(event)),
           },
