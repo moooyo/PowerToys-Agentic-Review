@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -837,10 +837,14 @@ describe("native Windows validation file checks", () => {
   it.runIf(process.platform === "win32")(
     "opens real synthetic files without launching a process",
     async () => {
-      const directory = await mkdtemp(win32.join(tmpdir(), "agentic-review-validation-runtime-"));
+      // Windows runner TEMP can use a short-name or redirected directory alias.
+      const temporaryRoot = await realpath(tmpdir());
+      const directory = await mkdtemp(
+        win32.join(temporaryRoot, "agentic-review-validation-runtime-"),
+      );
       if (
         !win32.basename(directory).startsWith("agentic-review-validation-runtime-") ||
-        win32.dirname(directory).toLowerCase() !== win32.resolve(tmpdir()).toLowerCase()
+        win32.dirname(directory).toLowerCase() !== win32.resolve(temporaryRoot).toLowerCase()
       )
         throw new Error("Unexpected validation fixture cleanup path.");
       try {

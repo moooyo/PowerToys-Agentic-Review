@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ import {
 
 let directory = "";
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), "web-driver-test-"));
+  directory = await mkdtemp(join(await realpath(tmpdir()), "web-driver-test-"));
 });
 afterEach(async () => {
   await rm(directory, { recursive: true, force: true });

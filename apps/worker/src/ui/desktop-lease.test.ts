@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { acquireDesktopLease } from "./desktop-lease.js";
 
 let directory: string;
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), "desktop-lease-"));
+  directory = await mkdtemp(join(await realpath(tmpdir()), "desktop-lease-"));
 });
 afterEach(async () => {
   await rm(directory, { force: true, recursive: true });

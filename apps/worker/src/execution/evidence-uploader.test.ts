@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -77,7 +78,8 @@ const scope = {
 let root = "";
 let evidenceDirectory = "";
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "evidence-uploader-test-"));
+  // Windows runner TEMP can use a short-name or redirected directory alias.
+  root = await mkdtemp(join(await realpath(tmpdir()), "evidence-uploader-test-"));
   evidenceDirectory = join(root, "owned");
   await mkdir(evidenceDirectory);
 });

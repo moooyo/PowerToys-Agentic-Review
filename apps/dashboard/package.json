@@ -9,11 +9,15 @@
   },
   "scripts": {
     "dev": "max dev",
-    "build": "pnpm --filter @agentic-review/contracts build && max build",
+    "prepare:workspace-dependencies": "pnpm --filter @agentic-review/contracts build",
+    "build": "pnpm run prepare:workspace-dependencies && pnpm run build:only",
+    "build:only": "max build",
     "preview": "max preview --port 8000",
     "setup": "max setup",
-    "test": "vitest run src",
-    "typecheck": "pnpm --filter @agentic-review/contracts build && max setup && tsc --noEmit"
+    "test": "pnpm run prepare:workspace-dependencies && pnpm run test:only",
+    "test:only": "vitest run src",
+    "typecheck": "pnpm run prepare:workspace-dependencies && pnpm run typecheck:only",
+    "typecheck:only": "max setup && tsc --noEmit"
   },
   "dependencies": {
     "@agentic-review/contracts": "workspace:*",

@@ -16,10 +16,13 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "pnpm --filter @agentic-review/contracts build && pnpm run build:only",
+    "build:only": "tsc -p tsconfig.json",
     "clean": "tsc -b --clean",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "pnpm --filter @agentic-review/contracts build && pnpm run test:only",
+    "test:only": "vitest run",
+    "typecheck": "pnpm --filter @agentic-review/contracts build && pnpm run typecheck:only",
+    "typecheck:only": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentic-review/contracts": "workspace:*",

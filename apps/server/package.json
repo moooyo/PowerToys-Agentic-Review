@@ -7,13 +7,16 @@
     "node": ">=24.20.0 <25"
   },
   "scripts": {
-    "prebuild": "node ./scripts/clean-build-output.mjs",
-    "build": "tsc -b",
+    "prepare:workspace-dependencies": "pnpm --workspace-root run build:shared",
+    "build": "pnpm run prepare:workspace-dependencies && pnpm run build:only",
+    "build:only": "node ./scripts/clean-build-output.mjs && tsc -p tsconfig.json",
     "clean": "node ./scripts/clean-build-output.mjs",
     "dev": "node --enable-source-maps dist/main.js",
     "start": "node --enable-source-maps dist/main.js",
-    "test": "pnpm build && vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "pnpm run build && pnpm run test:only",
+    "test:only": "vitest run",
+    "typecheck": "pnpm run prepare:workspace-dependencies && pnpm run typecheck:only",
+    "typecheck:only": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentic-review/codex": "workspace:*",
