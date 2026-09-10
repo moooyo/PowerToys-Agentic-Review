@@ -263,7 +263,9 @@ describe("bounded evidence streaming", () => {
       sha256: local.sha256,
     });
     expect(h.api.appendChunk).toHaveBeenCalledTimes(3);
-    expect(Buffer.concat([...(h.chunks.get("server-local-1")?.values() ?? [])])).toEqual(bytes);
+    expect(Buffer.concat([...(h.chunks.get("server-local-1")?.values() ?? [])]).equals(bytes)).toBe(
+      true,
+    );
     expect(progress.mock.calls.map((call) => call[0].uploadedBytes)).toEqual([
       maximumEvidenceChunkBytes,
       maximumEvidenceChunkBytes * 2,
@@ -308,9 +310,11 @@ describe("bounded evidence streaming", () => {
     });
     await h.uploader.upload(input([local]));
     expect(h.api.appendChunk.mock.calls[0]?.[0].offset).toBe(17);
-    expect(Buffer.concat([...(h.chunks.get("server-local-1")?.values() ?? [])])).toEqual(
-      bytes.subarray(17),
-    );
+    expect(
+      Buffer.concat([...(h.chunks.get("server-local-1")?.values() ?? [])]).equals(
+        bytes.subarray(17),
+      ),
+    ).toBe(true);
   });
 
   it("retrieves and verifies an already finalized asset without appending more bytes", async () => {
