@@ -100,11 +100,11 @@ describe.skipIf(process.platform !== "linux")(
       });
       expect(JSON.stringify(first)).not.toContain("PRIVATE_REPORT_TEXT");
       expect(item.state).toMatchObject({ state: "unread", version: 0 });
-    expect(await f.client.request("completeLease", input)).toEqual({
-      jobId: input.jobId,
-      runAttemptId: input.runAttemptId,
-      jobState: "succeeded",
-      runState: "succeeded",
+      expect(await f.client.request("completeLease", input)).toEqual({
+        jobId: input.jobId,
+        runAttemptId: input.runAttemptId,
+        jobState: "succeeded",
+        runState: "succeeded",
       });
       expect((await inbox(f)).items).toEqual(first.items);
       expect(await summary(f)).toMatchObject({ unreadCount: 1, capped: false });
@@ -155,7 +155,7 @@ describe.skipIf(process.platform !== "linux")(
       expect(present(value.items[0]).event).toMatchObject({
         kind: "validation",
         jobId: envelope.job.jobId,
-      jobStatus: "failed",
+        jobStatus: "failed",
         result: null,
       });
       expect(JSON.stringify(value)).not.toContain("PRIVATE_FAILURE_TEXT");

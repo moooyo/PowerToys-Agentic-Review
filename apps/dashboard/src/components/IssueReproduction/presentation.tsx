@@ -5,7 +5,7 @@ import type {
   IssueReproductionCaseAssessment,
   ObservationEquals,
 } from "@agentic-review/contracts";
-import { Alert, Space, Table, Tag, theme, Typography } from "antd";
+import { Alert, Space, Table, Tag, Typography, theme } from "antd";
 import { CopyValue, EvidenceIds, Facts, Prose } from "../ReviewRuns/common";
 import {
   observationFactLabel,

@@ -8,17 +8,17 @@ import {
 } from "./job-admission.js";
 import {
   assertActiveSchedulingIntegrity,
+  type RepositorySchedulingPolicy,
   readPlatformSchedulingConfiguration,
   readSchedulingUsage,
   resolveRepositorySchedulingPolicy,
-  type RepositorySchedulingPolicy,
 } from "./scheduling-accounting.js";
 import { inspectJobAdmissionReadinessInTransaction } from "./scheduling-diagnostics.js";
 import {
   ensureRepositorySchedulingStateInTransaction,
+  type RepositorySchedulingService,
   readRepositorySchedulingService,
   recordSuccessfulSchedulingServiceInTransaction,
-  type RepositorySchedulingService,
   type SchedulingWorkClass,
 } from "./scheduling-service.js";
 

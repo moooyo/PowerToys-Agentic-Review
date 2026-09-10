@@ -355,8 +355,7 @@ describe("repository scheduling limits audit migration compatibility", () => {
       expect(auditObjects(database, before.table)).toEqual(before.objects);
     }
     expect(runMigrations(database, migrationDirectory(25))).toBe(25);
-    for (const before of previous)
-      expect(auditBytes(database, before.table)).toEqual(before.bytes);
+    for (const before of previous) expect(auditBytes(database, before.table)).toEqual(before.bytes);
     expectForeignKeys(database);
   });
 });

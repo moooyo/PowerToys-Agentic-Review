@@ -33,6 +33,7 @@ import {
 } from "./forms";
 
 function PublishedVersion({ profile }: { profile: ValidationProfileVersion }) {
+  const configurationJson = JSON.stringify(profile.config, null, 2);
   const observables = profile.config.test.flatMap((step) =>
     (step.probeOutput?.fields ?? []).map((field) => ({
       ...field,
@@ -136,13 +137,15 @@ function PublishedVersion({ profile }: { profile: ValidationProfileVersion }) {
           )}
         </div>
       )}
-      <pre
+      <textarea
         className="validation-profiles-json"
-        tabIndex={0}
+        readOnly
+        wrap="off"
+        rows={Math.min(24, configurationJson.split("\n").length)}
+        style={{ width: "100%", resize: "vertical" }}
         aria-label={`Published configuration for version ${profile.version}`}
-      >
-        {JSON.stringify(profile.config, null, 2)}
-      </pre>
+        value={configurationJson}
+      />
     </div>
   );
 }

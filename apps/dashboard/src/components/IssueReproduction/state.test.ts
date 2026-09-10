@@ -12,6 +12,7 @@ import {
   observationRefKey,
   observationRefLabel,
   observationValueLabel,
+  type ReproductionCaseSelection,
   reproductionCaseMatches,
   reproductionCasePresentation,
   reproductionConclusionPresentation,
@@ -19,7 +20,6 @@ import {
   reproductionPollingInterval,
   reproductionQueryKey,
   reproductionTargetLabel,
-  type ReproductionCaseSelection,
 } from "./state";
 
 const result = sampleReviewRunResults.find((entry) => entry.report.workItemKind === "issue");
