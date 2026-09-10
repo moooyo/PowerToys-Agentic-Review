@@ -8,8 +8,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join, posix, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript/unstable/ast";
 import { createVirtualFileSystem } from "typescript/unstable/fs";
 import { API as TypeScriptApi } from "typescript/unstable/sync";
@@ -75,6 +75,26 @@ const retiredDatabaseBootstrapTokens = [
   "consumeLegacyAdoptionAuthorization",
   "createMigrationBackup",
 ] as const;
+// These entry points and helpers are test-only programs, outside production compilation.
+// Keep exact files here: adjacent deploy scripts must retain the production loader checks.
+const testOnlyAcceptanceSourceFiles = new Set([
+  "deploy/worker/cli-workflow-acceptance/git-fixture.ts",
+  "deploy/worker/cli-workflow-acceptance/prepare-server.mjs",
+  "deploy/worker/cli-workflow-acceptance/quality-corpus.ts",
+  "deploy/worker/cli-workflow-acceptance/run.mjs",
+  "deploy/worker/cli-workflow-acceptance/server.ts",
+  "deploy/worker/cli-workflow-acceptance/worker.ts",
+  "deploy/worker/publication-acceptance/plan.mjs",
+  "deploy/worker/publication-acceptance/publisher.mjs",
+  "deploy/worker/publication-acceptance/run.mjs",
+  "deploy/worker/publication-acceptance/verify.mjs",
+  "deploy/worker/issue-summary-acceptance/case.ts",
+  "deploy/worker/issue-summary-acceptance/prepare-server.mjs",
+  "deploy/worker/issue-summary-acceptance/probe/probe.mjs",
+  "deploy/worker/issue-summary-acceptance/run.mjs",
+  "deploy/worker/issue-summary-acceptance/server.ts",
+  "deploy/worker/issue-summary-acceptance/worker.ts",
+]);
 
 describe("production source boundaries", () => {
   it("prunes the protected Worker directory before inspecting or traversing it", () => {
@@ -129,6 +149,11 @@ describe("production source boundaries", () => {
       "packages/contracts/scripts/clean-build-output.mjs",
       "packages/contracts/src/index.ts",
       "deploy/verify.cjs",
+      "deploy/worker/cli-workflow-acceptance/production-loader.mjs",
+      "deploy/worker/publication-acceptance/unreviewed.mjs",
+      "deploy/worker/issue-summary-acceptance/probe/production.mjs",
+      "deploy/worker/publication-acceptance-old/run.mjs",
+      "apps/worker/src/deploy/worker/cli-workflow-acceptance/run.mjs",
       "config/artifact-policy.ts",
     ];
     const excludedPaths = [
@@ -140,6 +165,7 @@ describe("production source boundaries", () => {
       "apps/server/src/route.test.ts",
       "apps/server/src/fixture.testing.ts",
       "apps/dashboard/src/page.spec.tsx",
+      ...testOnlyAcceptanceSourceFiles,
     ];
     try {
       for (const path of [...includedPaths, ...excludedPaths]) {
@@ -159,6 +185,53 @@ describe("production source boundaries", () => {
       }
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects production imports and re-exports of exact test-only acceptance modules", () => {
+    const root = resolve("test-fixtures");
+    const fileName = join(root, "apps/worker/src/main.ts");
+    const sources = [
+      ...[...testOnlyAcceptanceSourceFiles].map((path) => {
+        const specifier = relative(dirname(fileName), join(root, path)).replaceAll("\\", "/");
+        return `import ${JSON.stringify(specifier)};`;
+      }),
+      'export * from "../../../deploy/worker/cli-workflow-acceptance/worker.js";',
+      'type Fixture = import("../../../deploy/worker/cli-workflow-acceptance/quality-corpus.js").Fixture;',
+      'export type { Fixture } from "../../../deploy/worker/cli-workflow-acceptance/quality-corpus";',
+      'import "../../../deploy/worker/publication-acceptance/../publication-acceptance/run.mjs?entry=1";',
+      'import "../../../deploy/worker/%70ublication-acceptance/run.mjs";',
+      `import ${JSON.stringify(pathToFileURL(join(root, "deploy/worker/publication-acceptance/run.mjs")).href)};`,
+      `import ${JSON.stringify(`${root.replaceAll("\\", "/")}/deploy/worker/publication-acceptance/../publication-acceptance/run.mjs`)};`,
+      `import ${JSON.stringify(pathToFileURL(join(root, "deploy/worker/publication-acceptance/run.mjs")).href.replace("/publication-acceptance/run.mjs", "/publication-acceptance/../publication-acceptance/run.mjs"))};`,
+    ].map((source, index) => ({
+      fileName: join(dirname(fileName), `consumer-${index}.ts`),
+      source,
+    }));
+    const inspections = inspectProductionModules(sources);
+    for (const source of sources) {
+      expect(inspections.get(source.fileName), source.source).toContain(
+        "production import of a test-only acceptance module",
+      );
+    }
+    const adjacentProduction = {
+      fileName,
+      source:
+        'import "../../../deploy/worker/publication-acceptance/unreviewed.mjs"; import "../../../deploy/verify.cjs";',
+    };
+    expect(inspectProductionModules([adjacentProduction]).get(fileName)).toEqual([]);
+    const dashboardSources = [
+      'import "@/../../../deploy/worker/cli-workflow-acceptance/../cli-workflow-acceptance/server";',
+      'export * from "@@/../../../../deploy/worker/issue-summary-acceptance/server.js";',
+    ].map((source, index) => ({
+      fileName: join(root, `apps/dashboard/src/consumer-${index}.tsx`),
+      source,
+    }));
+    const dashboardInspections = inspectProductionModules(dashboardSources);
+    for (const source of dashboardSources) {
+      expect(dashboardInspections.get(source.fileName), source.source).toContain(
+        "production import of a test-only acceptance module",
+      );
     }
   });
 
@@ -501,6 +574,9 @@ function inspectProductionSourceFile(
       ) {
         violations.add("production import of a test bridge");
       }
+      if (isTestOnlyAcceptanceImport(normalizedCandidate, originalFileName)) {
+        violations.add("production import of a test-only acceptance module");
+      }
       const moduleName = sensitiveServerBindingModuleName(candidate);
       if (
         moduleName !== undefined &&
@@ -725,6 +801,24 @@ function inspectProductionSourceFile(
       violations.add("exact evidence verifier worker import count mismatch");
   }
   return [...violations].sort();
+}
+
+function isTestOnlyAcceptanceImport(specifier: string, importingFileName: string): boolean {
+  let path = specifier.split(/[?#]/u, 1)[0] ?? "";
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Invalid percent encoding remains unmatched and fails ordinary module resolution.
+  }
+  if (path.startsWith(".")) path = resolve(dirname(importingFileName), path);
+  path = posix.normalize(path.replaceAll("\\", "/")).toLowerCase();
+  return [...testOnlyAcceptanceSourceFiles].some((sourcePath) =>
+    [
+      sourcePath,
+      sourcePath.replace(/\.ts$/u, ".js"),
+      sourcePath.replace(/\.(?:ts|mjs)$/u, ""),
+    ].some((candidate) => path === candidate || path.endsWith(`/${candidate}`)),
+  );
 }
 
 function sensitiveServerBindingModuleName(specifier: string): string | undefined {
@@ -1512,7 +1606,8 @@ function productionSourceFiles(
         !/\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
         // Fixture modules are excluded from production compilation as well. Imports of these
         // files from a production module remain forbidden by the separate AST inspection.
-        /\.(?:spec|test|testing)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name)
+        /\.(?:spec|test|testing)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
+        testOnlyAcceptanceSourceFiles.has(repositoryPath)
       ) {
         continue;
       }
