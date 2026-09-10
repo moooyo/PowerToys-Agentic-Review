@@ -85,11 +85,13 @@ tasks through complete Codex and Copilot sequences. M40 accepted six headless Is
 independent semantic review and confirmed cleanup. [M41](./docs/handoff/2026-09-10-approved-acceptance-handoff.md)
 accepted the explicitly approved live publication workflow on `moooyo/PowerToys`: one production
 PR review and one Issue comment, acknowledgement-loss reconciliation without duplicate POSTs,
-and independently confirmed target cleanup and settings restoration.
+and independently confirmed target cleanup and settings restoration. M42 installed the approved
+Spectre components, passed the pinned PowerToys Restore/Runner/Settings UI build, and passed seven
+selected Settings serialization/mocked-storage tests.
 
 Remaining scope includes full Worker `main.ts` on the intended Windows VM, real PowerToys/UI
-profiles, Issue triage and deployed OIDC. The approved Visual Studio component installation remains
-unfinished after an elevation cancellation; the prepared PowerToys build and test plan has not run.
+profiles, Issue triage and deployed OIDC. The seven tests do not establish full unit-test coverage;
+no native PowerToys UI has been launched for this acceptance.
 M40's three small quality cases do not establish broad review coverage or a general benchmark.
 See [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for CI, exact evidence, retained failures
 and remaining work; each new live target or publication payload still requires its own authorization.

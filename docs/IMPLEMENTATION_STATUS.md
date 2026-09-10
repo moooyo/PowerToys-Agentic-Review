@@ -22,10 +22,10 @@ authorized real CLI probes and controlled-fixture workflow acceptance below are 
 ## Current branch verification
 
 The remote `main` baseline `bdfa577` passed all three jobs in CI run **34432088155**.
-M41's subsequent publication-helper and documentation fixes remain local to this repository;
-their targeted verification is recorded below and is not a claim of a new full CI run. This round
-authorizes external writes only to the specified `moooyo/PowerToys` fork and does not authorize
-pushing the main project repository.
+Local `main` is at `bd4def6`; its M41 publication-helper and documentation changes have not been
+pushed. M42's installation/build/test receipts below are scoped acceptance evidence, not a new full
+project CI run. No GitHub write or authentication-file read occurred in M42. The current external
+write scope is limited to the specified `moooyo/PowerToys` fork; pushing this project is not authorized.
 
 ### Retained M40 CI evidence
 
@@ -50,7 +50,35 @@ boundary tests passed. Production runtime and regular test-suite sources remain 
 CI revision. Final local and remote refs are retained in the
 [delivery receipt](../artifacts/m40-ci-product-20260910/delivery.json).
 
-## M41 approved publication acceptance and PowerToys preparation
+## M42 installed toolchain, PowerToys build and selected tests
+
+The user-approved third installation attempt passed. Both required Spectre components are
+registered, the expected libraries exist, no installer process remains, and no reboot is required.
+Visual Studio remains at version **18.7.11925.98**. The
+[installation verification](../artifacts/m42-spectre-build-20260910/vs-components-run3/verification.json)
+supersedes the earlier uninstalled state without changing the M41 failure receipts.
+
+PowerToys [build run 2](../artifacts/m42-spectre-build-20260910/powertoys-build-run2/receipt.json)
+passed against `D:\AR\m40-0910\PowerToys` at
+`3a1e642db52d45f88c0cb702b10663e1f65623f7`. Restore, Runner and Settings UI compilation each
+reported zero warnings and zero errors. All three managed process trees completed, Host exited 0,
+cleanup had no failures, and the source preflight was clean. The
+[retention receipt](../artifacts/m42-spectre-build-20260910/powertoys-build-run2/upstream-retained/retention-receipt.json)
+confirms all 12 explicit upstream logs were copied with matching hashes.
+
+Build run 1 remains failed with `MSB3073` / exit 9009 because the standalone helper omitted the
+standard Windows PowerShell directory from `PATH`. Only the M42 artifact helper's `PATH` was
+corrected. The production Worker uses its configured account `PATH` and needed no product change.
+The [Settings test run](../artifacts/m42-spectre-build-20260910/settings-tests-run1/receipt.json)
+built the current test project and passed exactly **7/7** selected serialization/mocked-storage
+tests with zero skips. The [TRX](../artifacts/m42-spectre-build-20260910/settings-tests-run1/results/powertoys-settings-smoke.trx)
+and the receipt's `testVerification` confirm the exact seven methods. All seven managed process
+trees completed, Host exited 0 and cleanup had no failures. This is the selected test scope,
+not all PowerToys unit tests or UI acceptance. No native PowerToys UI was launched, and the
+personal PowerToys instance remains untouched. See the
+[M42 handoff](./handoff/2026-09-10-spectre-build-handoff.md) for the current recovery point.
+
+## M41 retained publication acceptance and PowerToys preparation
 
 The approved **13-operation publication acceptance passed** on `moooyo/PowerToys`: 11 coordinator
 mutations and two production publisher POSTs. Each publication passed through `unknown` and
@@ -74,15 +102,16 @@ retains the initial `/mnt/d` storage-permission failure. The first independent R
 remains failed: Issue endpoints returned HTTP 410 after Issues was restored to disabled. The
 successful follow-up used the exact created GraphQL nodes and retained REST responses, without mutations.
 
-The two Visual Studio Spectre components were approved but remain uninstalled: the first attempt
+At M41 closeout, the two approved Visual Studio Spectre components remained uninstalled: the first attempt
 exited 5007 and the second `RunAs` elevation was canceled. The
 [final component check](../artifacts/m41-approved-acceptance-20260910/vs-components-final-state.json)
-confirms both component directories are absent. A request to display UAC again has no
-reply; no third attempt was made. The [build helper bundle](../artifacts/m41-approved-acceptance-20260910/build-preparation-v1/README.md)
-and [seven-test plan](../artifacts/m41-approved-acceptance-20260910/powertoys-test-plan-v1.md) are prepared
+confirmed both component directories were absent. The request to display UAC again had no
+reply at that point, so no third attempt occurred in M41. The [build helper bundle](../artifacts/m41-approved-acceptance-20260910/build-preparation-v1/README.md)
+and [seven-test plan](../artifacts/m41-approved-acceptance-20260910/powertoys-test-plan-v1.md) were prepared
 for the same pinned checkout. No M41 PowerToys build, test or UI run occurred. The personal
 PowerToys instance is outside the owned acceptance scope. See the
-[M41 handoff](./handoff/2026-09-10-approved-acceptance-handoff.md) for the recovery point and next steps.
+[M41 handoff](./handoff/2026-09-10-approved-acceptance-handoff.md) for that historical recovery point;
+the subsequent M42 installation/build/test results are recorded above.
 
 ## M40 retained implementation and verified scope
 
@@ -94,7 +123,7 @@ and installation status above; neither milestone marks the product or all P1/P2 
 | Finding validation | [finding-validation-run3](../artifacts/m40-ci-product-20260910/finding-validation-run3/) passed 395 tests, `noEmit` and lint; final CI also passed at the commit above. | Earlier failures remain retained; deployed identity/permission acceptance keeps its own scope. |
 | Publication preparation | [V2 preparation](../artifacts/m40-ci-product-20260910/publication-prepare-v2/verification.json) passed both synthetic outbox cases, 13 coordinator scenarios, JavaScript syntax, Biome and independent review. The seven production-boundary tests also passed. | This was preparation only at M40 closeout. The approved live workflow subsequently passed in M41 using the scoped V3 correction above. |
 | Quality checker | Eight pure checker regressions, `noEmit`, checker bundling and Biome passed. Retained nine-task observations passed the corrected postconditions without new models. | The original run receipt is unchanged and still failed on `18 !== 6`; separate revalidation is not a rewritten runtime pass. |
-| PowerToys preparation | Restore passed; the native build failed with six `MSB8040` errors. Host closure and byte/hash-preserved upstream logs are retained. | M41 installation attempts have not installed the approved components; PowerToys build/profile/UI acceptance has not passed. |
+| PowerToys preparation | Restore passed; the native build failed with six `MSB8040` errors. Host closure and byte/hash-preserved upstream logs are retained. | M42 subsequently passed prerequisite installation, the scoped build and seven selected tests; UI acceptance remains separate. |
 | Summary diagnostics | Diagnostics v2 passed 318 tests, `noEmit`, Biome and independent review, preserving bounded redacted code/message context. | Earlier generic summary failures remain recorded; this does not itself accept a real model workflow. |
 | Portable model schema | Schema v2 passed 327 tests, `noEmit` and Biome for six model schemas. Run 2's HTTP 400 was traced to regex lookaround in the exported observation-path pattern. | A schema portability defect, not provider configuration. Earlier failed Worker/coordinator receipts remain unchanged. |
 | Headless Issue summaries | Run 3 completed all six actual summaries: ordinary and both Evaluation arms per CLI. Independent semantic/numerical/scope review passed; runner/model conclusions and assessments were confirmed. | Accepted for the frozen headless Issue measurement case, not Issue triage, installed-extension/video/AI/translation behavior or Windows/Web UI execution. |
@@ -181,12 +210,10 @@ not override later accepted scopes, and retired designs are not queued implement
 - **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
   Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.
   M39 accepted component composition with an owned Git transport substitution, not that deployment.
-- **Real PowerToys profile:** exercise the intended PowerToys source, toolchain, build/test/UI
-  profile, evidence and state restoration. Accepted M26 Web and M34 Notepad++ cases retain their
-  scopes and do not establish PowerToys readiness. M40's restore succeeded but native build failed;
-  the approved Spectre components remain uninstalled after the two failed/canceled attempts.
-  Wait for the requested UAC continuation response, then complete prerequisites before executing
-  the prepared build and seven-test plan. UI acceptance requires an owned interactive environment;
+- **Real PowerToys profile:** complete the intended UI profile, evidence and state restoration.
+  Accepted M26 Web and M34 Notepad++ cases retain their scopes. M42 accepted installation, the
+  Restore/Runner/Settings UI build and seven selected Settings tests, not the full unit-test suite.
+  UI acceptance requires an owned interactive environment and verified state restoration;
   do not attach to or change the personal PowerToys instance.
 - **Additional model workflows:** accept Issue triage and Windows/Web or other application-specific
   model-assisted workflows beyond M39 PR/static review and the accepted M40 headless Issue case.
