@@ -1089,6 +1089,9 @@ describe("optional ValidationSummary executor", () => {
     { path: "C:/file.ts", line: 1 },
     { path: "src/\ud800.ts", line: 1 },
     { path: "src/\u007f.ts", line: 1 },
+    { path: "src/file.ts\n", line: 1 },
+    { path: "src/file.ts\r", line: 1 },
+    { path: "src/file.ts\r\n", line: 1 },
   ])("rejects ambiguous observation source locations %#", async (location) => {
     const f = fixture();
     f.setCandidate({

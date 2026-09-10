@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   IssueValidationReportV1Schema,
+  IssueValidationSummaryV1Schema,
   maximumValidationCheckEvidenceReferences,
   PullRequestValidationReportV1Schema,
+  PullRequestValidationSummaryV1Schema,
   type ValidationCheckResult,
   ValidationCheckResultSchema,
   ValidationObservationSchema,
@@ -31,21 +33,21 @@ function check(overrides: Partial<ValidationCheckResult> = {}): ValidationCheckR
   };
 }
 
-const prSummary: ValidationSummaryV1 = {
+const prSummary = {
   schemaVersion: "ValidationSummaryV1",
   workItemKind: "pull_request",
   summary: "The implementation is consistent with the requested change.",
   recommendation: "approve",
   observations: [],
-};
+} satisfies ValidationSummaryV1;
 
-const issueSummary: ValidationSummaryV1 = {
+const issueSummary = {
   schemaVersion: "ValidationSummaryV1",
   workItemKind: "issue",
   summary: "The reported dialog failure was reproduced.",
   reproductionConclusion: "confirmed",
   observations: [],
-};
+} satisfies ValidationSummaryV1;
 
 function prReport(): ValidationReportV1 {
   return {
@@ -211,12 +213,31 @@ describe("validation result contracts", () => {
   });
 
   it.each([
+    "",
+    "/",
     "/src/file.ts",
     "C:/src/file.ts",
+    "C:file.ts",
+    "\\\\server\\file.ts",
     "src\\file.ts",
+    "src/file.ts:stream",
+    ".",
+    "..",
+    "./file.ts",
     "../file.ts",
+    "src/./file.ts",
     "src/../file.ts",
-    "src\u0000/file.ts",
+    "src/.",
+    "src/..",
+    "src//file.ts",
+    "src/file.ts/",
+    "src/file.ts\n",
+    "src/file.ts\r",
+    "src/file.ts\r\n",
+    "src/\u007f/file.ts",
+    "src/file.ts\u007f",
+    ...Array.from({ length: 32 }, (_, code) => `src/${String.fromCharCode(code)}/file.ts`),
+    "a".repeat(1_025),
   ])("rejects unsafe observation paths: %s", (path) => {
     expect(
       Value.Check(ValidationObservationSchema, {
@@ -229,6 +250,52 @@ describe("validation result contracts", () => {
       }),
     ).toBe(false);
   });
+
+  it.each([
+    ".gitignore",
+    ".a",
+    "...",
+    "..foo",
+    "a.",
+    "src/.../file.ts",
+    "src/..foo/.hidden",
+    "文件/报告 1.ts",
+    "emoji/📄.txt",
+    " leading/file ",
+    "a".repeat(1_024),
+    null,
+  ])("accepts normalized observation paths without restricting ordinary filenames: %j", (path) => {
+    expect(
+      Value.Check(ValidationObservationSchema, {
+        id: "finding:1",
+        title: "Failure",
+        body: "The assertion failed.",
+        priority: 1,
+        path,
+        line: null,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([PullRequestValidationSummaryV1Schema, IssueValidationSummaryV1Schema])(
+    "uses portable patterns throughout each model summary schema %#",
+    (schema) => {
+      const patterns: string[] = [];
+      const visit = (value: unknown): void => {
+        if (value === null || typeof value !== "object") return;
+        for (const [key, child] of Object.entries(value)) {
+          if (key === "pattern" && typeof child === "string") patterns.push(child);
+          else visit(child);
+        }
+      };
+      visit(JSON.parse(JSON.stringify(schema)));
+      expect(patterns.length).toBeGreaterThan(0);
+      for (const pattern of patterns) {
+        expect(pattern).not.toMatch(/\(\?(?:[=!]|<[=!])|\\(?:[1-9]|k[<{])/u);
+        expect(() => new RegExp(pattern, "u")).not.toThrow();
+      }
+    },
+  );
 
   it("bounds observations and accepts a repository-relative source location", () => {
     const observation = {

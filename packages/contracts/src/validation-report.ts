@@ -69,6 +69,10 @@ export const ValidationCheckResultSchema = Type.Object(
 );
 export type ValidationCheckResult = Static<typeof ValidationCheckResultSchema>;
 
+const observationPathCharacter = "[^/\\\\:\\u0000-\\u001F\\u007F]";
+const observationPathNonDotCharacter = "[^./\\\\:\\u0000-\\u001F\\u007F]";
+const observationPathSegment = `(?:${observationPathNonDotCharacter}|\\.${observationPathNonDotCharacter}|\\.\\.${observationPathCharacter})${observationPathCharacter}*`;
+
 export const ValidationObservationSchema = Type.Object(
   {
     id: EntityIdSchema,
@@ -79,7 +83,8 @@ export const ValidationObservationSchema = Type.Object(
       Type.String({
         minLength: 1,
         maxLength: 1_024,
-        pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\:\\u0000-\\u001F]+$",
+        // Portable model-output shape; Worker validation also checks the complete string and Unicode.
+        pattern: `^${observationPathSegment}(?:/${observationPathSegment})*$`,
       }),
       Type.Null(),
     ]),
