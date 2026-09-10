@@ -134,6 +134,7 @@ export class ReviewJobExecutor implements JobExecutor {
       }
 
       let workspace: PreparedJobWorkspace | undefined;
+      let workspaceReady = false;
       context.deferCleanup(
         createIdempotentCleanup(async () => {
           await workspace?.cleanup();
@@ -144,7 +145,10 @@ export class ReviewJobExecutor implements JobExecutor {
           signal: context.signal,
           processHost: context.processHost,
           reportProcessCount: (processCount) => {
-            context.reportProgress({ phase: "preparing", processCount });
+            context.reportProgress({
+              phase: workspaceReady ? "validation" : "preparing",
+              processCount,
+            });
           },
           reportNodeHealthFault: reportNodeHealthFaultOnce,
         });
@@ -160,6 +164,7 @@ export class ReviewJobExecutor implements JobExecutor {
           { cause: error },
         );
       }
+      workspaceReady = true;
       context.signal.throwIfAborted();
       const result = await this.#executePrepared(
         envelope,
@@ -208,6 +213,44 @@ export class ReviewJobExecutor implements JobExecutor {
     const businessError = validateBusinessResult(envelope, execution.result);
     if (businessError !== null) {
       return failure("RESULT_BUSINESS_VALIDATION_FAILED", businessError, false);
+    }
+    if (
+      envelope.resource.kind === "pull_request" &&
+      "findings" in execution.result &&
+      execution.result.findings.length > 0
+    ) {
+      if (workspace.validatePrFindingLocations === undefined)
+        return failure(
+          "FINDING_LOCATION_UNVERIFIED",
+          "The Worker cannot verify PR finding locations against the frozen source.",
+          false,
+        );
+      try {
+        const verified = await workspace.validatePrFindingLocations(
+          {
+            baseSha: envelope.resource.baseSha,
+            headSha: envelope.resource.headSha,
+            findings: execution.result.findings,
+          },
+          context.signal,
+        );
+        context.signal.throwIfAborted();
+        if (verified.status !== "verified")
+          return failure(
+            verified.status === "invalid"
+              ? "FINDING_LOCATION_INVALID"
+              : "FINDING_LOCATION_UNVERIFIED",
+            `PR finding location verification failed: ${verified.reason}${verified.findingIndex === undefined ? "" : ` (finding ${verified.findingIndex + 1})`}.`,
+            false,
+          );
+      } catch {
+        context.signal.throwIfAborted();
+        return failure(
+          "FINDING_LOCATION_UNVERIFIED",
+          "PR finding location verification did not complete against the frozen source.",
+          false,
+        );
+      }
     }
     if (
       execution.result.schemaVersion === "PrReviewPlanV1" ||
@@ -467,7 +510,6 @@ function validateBusinessResult(
     if (!isNormalizedRepositoryRelativePath(finding.path)) {
       return "The PR review contains a finding path that is not a normalized repository-relative path.";
     }
-    // TODO: Revalidate each finding location against the immutable PR diff before publication.
   }
   return null;
 }

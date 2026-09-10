@@ -306,6 +306,10 @@ class FakeWorkspaceProvider implements JobWorkspaceProvider {
   public diskMonitorCloseCalls = 0;
   public readonly diskMonitorController = new AbortController();
   public onPrepare: (() => void) | undefined;
+  public locationValidator: PreparedJobWorkspace["validatePrFindingLocations"] = async () => ({
+    status: "verified",
+    mergeBase: "a".repeat(40),
+  });
 
   public async prepare(): Promise<PreparedJobWorkspace> {
     this.prepareCalls += 1;
@@ -320,6 +324,9 @@ class FakeWorkspaceProvider implements JobWorkspaceProvider {
       tempDirectory: paths.temp,
       userProfileDirectory: paths.userProfile,
       captureWorktreeState: async () => this.worktreeState,
+      ...(this.locationValidator === undefined
+        ? {}
+        : { validatePrFindingLocations: this.locationValidator }),
       startDiskMonitoring: async (parentSignal): Promise<WorkspaceDiskMonitor> => {
         this.diskMonitorCalls += 1;
         const onParentAbort = () => this.diskMonitorController.abort(parentSignal.reason);
@@ -1325,6 +1332,76 @@ describe("ReviewJobExecutor process and result handling", () => {
 });
 
 describe("ReviewJobExecutor business validation", () => {
+  it("binds each PR location check to the immutable envelope before accepting the result", async () => {
+    const workspace = new FakeWorkspaceProvider();
+    const verify = vi.fn<NonNullable<PreparedJobWorkspace["validatePrFindingLocations"]>>(
+      async () => ({ status: "verified", mergeBase: "a".repeat(40) }),
+    );
+    workspace.locationValidator = verify;
+    const input = createEnvelope("pull_request_review");
+    const controller = new AbortController();
+    const run = await execute(input, validPrResult(), { workspace, signal: controller.signal });
+    await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(verify).toHaveBeenCalledExactlyOnceWith(
+      {
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+        findings: [validPrFinding()],
+      },
+      controller.signal,
+    );
+    expect(workspace.cleanupCalls).toBe(0);
+    await run.deferredCleanups[0]?.();
+    expect(workspace.cleanupCalls).toBe(1);
+  });
+  it.each(["invalid", "unverified", "missing", "throws"] as const)(
+    "does not accept a schema-valid finding when location verification is %s",
+    async (status) => {
+      const workspace = new FakeWorkspaceProvider();
+      workspace.locationValidator =
+        status === "missing"
+          ? undefined
+          : async () => {
+              if (status === "throws") throw new Error("Synthetic read failure.");
+              return { status, reason: "synthetic_location_failure", findingIndex: 0 };
+            };
+      const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+        workspace,
+      });
+      await expect(run.execution).resolves.toMatchObject({
+        outcome: "failed",
+        retryable: false,
+        code: status === "invalid" ? "FINDING_LOCATION_INVALID" : "FINDING_LOCATION_UNVERIFIED",
+      });
+      expect(run.deferredCleanups).toHaveLength(1);
+    },
+  );
+  it("does not require a location reader for a finding-free PR or an Issue", async () => {
+    const workspace = new FakeWorkspaceProvider();
+    workspace.locationValidator = undefined;
+    for (const [input, result] of [
+      [createEnvelope("pull_request_review"), { ...validPrResult(), findings: [] }],
+      [createEnvelope("issue_triage"), validIssueResult()],
+    ] as const) {
+      const run = await execute(input, result, { workspace });
+      await expect(run.execution).resolves.toMatchObject({ outcome: "succeeded" });
+    }
+  });
+  it("preserves cancellation during the final location read", async () => {
+    const cancellation = new AbortController();
+    const reason = new Error("Synthetic lease cancellation.");
+    const workspace = new FakeWorkspaceProvider();
+    workspace.locationValidator = async () => {
+      cancellation.abort(reason);
+      throw reason;
+    };
+    const run = await execute(createEnvelope("pull_request_review"), validPrResult(), {
+      workspace,
+      signal: cancellation.signal,
+    });
+    await expect(run.execution).rejects.toBe(reason);
+    expect(run.deferredCleanups).toHaveLength(1);
+  });
   it.each([
     {
       name: "duplicate finding IDs",

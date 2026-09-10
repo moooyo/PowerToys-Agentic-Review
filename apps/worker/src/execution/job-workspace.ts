@@ -27,6 +27,12 @@ import {
   ProductionManagedProcessRunner,
 } from "./managed-process-runner.js";
 import {
+  type PrFindingLocationInput,
+  type PrFindingLocationValidation,
+  prFindingLocationLimits,
+  validatePrFindingLocations,
+} from "./pr-finding-locations.js";
+import {
   assertWindowsLocalAbsolutePath,
   type ProcessHostClient,
   type ProcessResourceLimits,
@@ -49,6 +55,10 @@ export interface PreparedJobWorkspace {
   readonly userProfileDirectory: string;
   startDiskMonitoring(parentSignal: AbortSignal): Promise<WorkspaceDiskMonitor>;
   captureWorktreeState?(signal: AbortSignal): Promise<"clean" | "modified" | "unknown">;
+  validatePrFindingLocations?(
+    input: PrFindingLocationInput,
+    signal: AbortSignal,
+  ): Promise<PrFindingLocationValidation>;
   cleanup(): Promise<void>;
 }
 
@@ -206,6 +216,7 @@ const sourceObservationGitArguments = Object.freeze({
 
 const gitConfigurationArguments = Object.freeze([
   "--no-pager",
+  "--no-replace-objects",
   "--literal-pathspecs",
   "-c",
   "advice.detachedHead=false",
@@ -293,7 +304,7 @@ interface SharedCacheGcOutcome {
   readonly skipReason?: SharedCacheGcSkipReason;
 }
 
-type GitWorkspaceValidationMode = "strict" | "cleanup_safe";
+type GitWorkspaceValidationMode = "strict" | "cleanup_safe" | "monitored_read";
 
 export class ProductionDisposableJobWorkspaceProvider implements JobWorkspaceProvider {
   readonly #workspaceRootDirectory: string;
@@ -433,6 +444,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     }
 
     const guard = new WorkspaceGuard(this.#fileSystem, layout);
+    const isPullRequest = envelope.resource.kind === "pull_request";
     let attemptCreated = false;
     let worktreeRegistered = false;
     let diskReservation: WorkspaceDiskReservation | undefined;
@@ -490,7 +502,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
       await guard.validateAll();
       throwIfAborted(context.signal);
 
-      await this.#initializeRepository(
+      const mergeBases = await this.#initializeRepository(
         layout,
         guard,
         admittedDiskReservation,
@@ -568,6 +580,60 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
             }
           }
           return state;
+        },
+        validatePrFindingLocations: async (input: PrFindingLocationInput, signal: AbortSignal) => {
+          signal.throwIfAborted();
+          if (cleaned || repository === undefined || source === null || !isPullRequest)
+            return { status: "unverified", reason: "frozen_pr_source_unavailable" } as const;
+          const budgetSignal = AbortSignal.any([
+            signal,
+            AbortSignal.timeout(prFindingLocationLimits.maximumDurationMs),
+          ]);
+          let monitor: WorkspaceDiskMonitor | undefined;
+          let result: PrFindingLocationValidation = {
+            status: "unverified",
+            reason: "source_observation_unavailable",
+          };
+          try {
+            result = await validatePrFindingLocations(
+              input,
+              { baseSha: source.baseSha, headSha: source.headSha, mergeBases },
+              async (args, readSignal) => {
+                // All fixed-object reads share one monitor under the validator's total budget.
+                monitor ??= await admittedDiskReservation.startMonitoring(readSignal);
+                const observed = await this.#runGit(
+                  layout,
+                  guard,
+                  admittedDiskReservation,
+                  [`--git-dir=${repository.gitDirectory}`, ...args],
+                  "deterministic_local",
+                  { ...context, signal: AbortSignal.any([readSignal, monitor.signal]) },
+                  null,
+                  true,
+                  undefined,
+                  "monitored_read",
+                );
+                if (observed.stderr.trim() !== "")
+                  throw new Error(
+                    "Git finding verification reported an incomplete or ambiguous comparison.",
+                  );
+                return observed.stdout;
+              },
+              budgetSignal,
+            );
+          } catch {
+            signal.throwIfAborted();
+          } finally {
+            try {
+              await monitor?.close();
+              if (monitor?.violation !== undefined || monitor?.signal.aborted)
+                result = { status: "unverified", reason: "source_monitor_unavailable" };
+            } catch {
+              result = { status: "unverified", reason: "source_monitor_unavailable" };
+            }
+          }
+          signal.throwIfAborted();
+          return result;
         },
         cleanup: async () => {
           if (cleaned) return;
@@ -708,9 +774,9 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     envelope: JobExecutionEnvelope,
     context: WorkspacePreparationContext,
     onWorktreeRegistered: () => void,
-  ): Promise<void> {
+  ): Promise<readonly string[]> {
     const source = workspaceSource(envelope);
-    if (source === null) return;
+    if (source === null) return [];
     if (repository === undefined) {
       throw new JobWorkspaceError(
         "INVALID_ENVELOPE",
@@ -723,6 +789,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
     const headSha = validateGitObjectId(source.headSha, "headSha");
     const headReference =
       source.fetchHead === "exact_commit" ? headSha : `refs/pull/${source.pullRequestNumber}/head`;
+    let mergeBases: readonly string[] = [];
     await this.#withSharedCacheMutationLock(context.signal, async () => {
       await this.#withRepositoryLock(repository.key, context.signal, async () => {
         await this.#validateSharedRepositoryDirectory(repository, false);
@@ -858,6 +925,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
           null,
         );
         assertGitObjectIdList(mergeBase.stdout, "pull request merge base");
+        mergeBases = Object.freeze(mergeBase.stdout.trim().split(/\r?\n/u));
         await this.#runGit(
           layout,
           guard,
@@ -882,6 +950,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         );
       });
     });
+    return mergeBases;
   }
 
   async #verifyPreparedWorktree(
@@ -1485,7 +1554,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         commandArguments === sourceObservationGitArguments.status ||
         commandArguments === sourceObservationGitArguments.head;
       const monitor =
-        validationMode === "cleanup_safe" || observesSource
+        validationMode === "cleanup_safe" || validationMode === "monitored_read" || observesSource
           ? undefined
           : await diskReservation.startMonitoring(context.signal);
       let result: ManagedProcessRunResult | undefined;

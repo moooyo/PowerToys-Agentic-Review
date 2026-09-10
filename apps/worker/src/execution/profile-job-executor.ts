@@ -699,6 +699,7 @@ export class ProfileJobExecutor implements JobExecutor {
         }
         modelWorkspace = result;
         const capture = result.captureWorktreeState;
+        const validateLocations = result.validatePrFindingLocations;
         return {
           attemptDirectory: result.attemptDirectory,
           checkoutDirectory: result.checkoutDirectory,
@@ -709,6 +710,15 @@ export class ProfileJobExecutor implements JobExecutor {
           ...(capture === undefined
             ? {}
             : { captureWorktreeState: (signal: AbortSignal) => capture.call(result, signal) }),
+          ...(validateLocations === undefined
+            ? {}
+            : {
+                validatePrFindingLocations: (
+                  ...args: Parameters<
+                    NonNullable<PreparedJobWorkspace["validatePrFindingLocations"]>
+                  >
+                ) => validateLocations.call(result, ...args),
+              }),
           cleanup: cleanupModel,
         };
       },

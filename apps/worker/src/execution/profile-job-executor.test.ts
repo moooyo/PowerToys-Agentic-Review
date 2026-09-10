@@ -292,6 +292,7 @@ function workspace(purpose: string): PreparedJobWorkspace {
       close: async () => undefined,
     }),
     captureWorktreeState: async () => "clean",
+    validatePrFindingLocations: async () => ({ status: "verified", mergeBase: "a".repeat(40) }),
     cleanup: vi.fn(async () => undefined),
   };
 }
@@ -1491,6 +1492,59 @@ describe("profile job executor", () => {
       run.mockRestore();
     }
   });
+
+  it.each(["verified", "invalid"] as const)(
+    "retains the model workspace's %s finding validator through delegation",
+    async (status) => {
+      const test = harness();
+      const { executionEvidence: _evidence, ...raw } = review();
+      const modelResult = {
+        ...raw,
+        findings: [
+          {
+            findingId: "location",
+            priority: 1 as const,
+            title: "Check the location",
+            body: "A synthetic finding.",
+            path: "src/file.ts",
+            line: 1,
+            endLine: null,
+            confidence: 0.9,
+          },
+        ],
+      };
+      const canonical = createCanonicalResult(modelResult);
+      const verify = vi
+        .spyOn(test.model, "validatePrFindingLocations")
+        .mockImplementation(async function (this: PreparedJobWorkspace) {
+          expect(this).toBe(test.model);
+          return status === "verified"
+            ? { status, mergeBase: "a".repeat(40) }
+            : { status, reason: "line_outside_head_blob", findingIndex: 0 };
+        });
+      const run = vi.spyOn(PreparedCliOutputRunner.prototype, "run").mockResolvedValue({
+        outcome: "succeeded",
+        result: modelResult,
+        resultDigest: canonical.sha256,
+        canonicalResultJson: canonical.json,
+        commandEvidence: { commands: [], commandCapture: "complete" },
+        observedFileChange: false,
+        cliExecution: cliExecution(test.input, canonical.sha256),
+      });
+      try {
+        test.createModelExecutor.mockImplementation((provider) => actualModelExecutor(provider));
+        const result = typed(await test.run());
+        expect(verify).toHaveBeenCalledOnce();
+        expect(result.modelReview.state).toBe(status === "verified" ? "completed" : "failed");
+        if (status === "invalid")
+          expect(result.modelReview).toMatchObject({ code: "FINDING_LOCATION_INVALID" });
+        expect(result.report.checks[0]?.outcome).toBe("passed");
+      } finally {
+        run.mockRestore();
+        verify.mockRestore();
+      }
+    },
+  );
 
   it("rejects an evaluation output artifact attached to an ordinary profile", async () => {
     const test = harness();

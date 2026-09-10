@@ -172,6 +172,12 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
   public worktreeStatusOutput = "";
   public worktreeListOutput: string | undefined;
   public mergeBaseOutput = `${baseSha}\n`;
+  public findingRawDiffOutput =
+    `:100644 100644 ${"c".repeat(40)} ${"d".repeat(40)} M\0src/file.ts\0`;
+  public findingBlobOutput = "changed\ntail\n";
+  public findingDiffOutput =
+    "diff --git a/old b/new\n--- a/old\n+++ b/new\n@@ -1,2 +1,2 @@\n-old\n+changed\n tail\n";
+  public findingWarning = "";
   public onRun: ((spec: ProcessLaunchSpec, context: ManagedProcessRunContext) => void) | undefined;
   public waitForRun: Promise<void> | undefined;
   public fileSystem: FakeWorkspaceFileSystem | undefined;
@@ -202,7 +208,12 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
     }
     let stdout = "";
     if (command === "status") stdout = this.worktreeStatusOutput;
-    if (command === "cat-file") stdout = "commit\n";
+    if (command === "cat-file")
+      stdout = spec.arguments.includes("blob") ? this.findingBlobOutput : "commit\n";
+    if (command === "diff")
+      stdout = spec.arguments.includes("--raw")
+        ? this.findingRawDiffOutput
+        : this.findingDiffOutput;
     if (command === "merge-base") stdout = this.mergeBaseOutput;
     if (command === "worktree" && spec.arguments.includes("list")) {
       const repository = spec.arguments
@@ -217,7 +228,7 @@ class FakeManagedProcessRunner implements ManagedProcessRunner {
           ? this.pullRequestBaseOutput
           : this.pullRequestHeadOutput;
     }
-    return { exitCode: 0, stdout, stderr: "" };
+    return { exitCode: 0, stdout, stderr: command === "diff" ? this.findingWarning : "" };
   }
 }
 
@@ -335,6 +346,7 @@ function commandName(argumentsList: readonly string[]): string | undefined {
     "worktree",
     "rev-parse",
     "status",
+    "diff",
   ]);
   return argumentsList.find((argument) => commands.has(argument));
 }
@@ -755,6 +767,128 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it("verifies findings from frozen Git objects even after the model changes worktree HEAD", async () => {
+    const fileSystem = new FakeWorkspaceFileSystem();
+    const processRunner = new FakeManagedProcessRunner();
+    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+    processRunner.findingRawDiffOutput += `:100644 100644 ${"c".repeat(40)} ${"d".repeat(40)} M\0src/other.ts\0`;
+    const input = envelope("pull_request");
+    const { context } = preparationContext();
+    const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+      input,
+      context,
+      "model",
+    );
+    const preparationCalls = processRunner.calls.length;
+    const preparationMonitors = diskBudget.monitored.length;
+    processRunner.worktreeHeadOutput = `${"e".repeat(40)}\n`;
+    const validation = await workspace.validatePrFindingLocations!(
+      {
+        baseSha,
+        headSha,
+        findings: [
+          { path: "src/file.ts", line: 2, endLine: null },
+          { path: "src/other.ts", line: 1, endLine: null },
+        ],
+      },
+      context.signal,
+    );
+    expect(validation).toEqual({ status: "verified", mergeBase: baseSha });
+    const reads = processRunner.calls.slice(preparationCalls);
+    expect(reads.map((call) => commandName(call.spec.arguments))).toEqual([
+      "diff",
+      "cat-file",
+      "diff",
+      "cat-file",
+      "diff",
+    ]);
+    expect(diskBudget.monitored).toHaveLength(preparationMonitors + 1);
+    expect(reads.every((call) => call.spec.arguments.includes("--no-replace-objects"))).toBe(true);
+    expect(reads.every((call) => call.spec.arguments.includes("--literal-pathspecs"))).toBe(true);
+    expect(reads.some((call) => call.spec.arguments.includes("HEAD^{commit}"))).toBe(false);
+    expect(reads[0]?.spec.arguments.slice(-3)).toEqual([baseSha, headSha, "--"]);
+    expect(reads[2]?.spec.arguments).toEqual(
+      expect.arrayContaining(["--no-ext-diff", "--no-textconv", "--unified=3"]),
+    );
+    expect(await workspace.captureWorktreeState!(context.signal)).toBe("modified");
+    await workspace.cleanup();
+    await expect(
+      workspace.validatePrFindingLocations!({ baseSha, headSha, findings: [] }, context.signal),
+    ).resolves.toMatchObject({ status: "unverified", reason: "frozen_pr_source_unavailable" });
+  });
+
+  it.each(["source", "ambiguous_base", "warning", "truncated"] as const)(
+    "does not verify findings after a %s mismatch or incomplete Git observation",
+    async (condition) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      if (condition === "ambiguous_base")
+        processRunner.mergeBaseOutput = `${baseSha}\n${"c".repeat(40)}\n`;
+      const { context } = preparationContext();
+      const workspace = await provider(fileSystem, processRunner).prepare(
+        envelope("pull_request"),
+        context,
+        "model",
+      );
+      const preparationCalls = processRunner.calls.length;
+      if (condition === "warning")
+        processRunner.findingWarning = "Rename detection was incomplete.";
+      if (condition === "truncated") {
+        processRunner.failAtCall = preparationCalls + 1;
+        processRunner.failureCode = "OUTPUT_TRUNCATED";
+      }
+      const result = await workspace.validatePrFindingLocations!(
+        {
+          baseSha: condition === "source" ? "e".repeat(40) : baseSha,
+          headSha,
+          findings: [{ path: "src/file.ts", line: 1, endLine: null }],
+        },
+        context.signal,
+      );
+      expect(result.status).toBe("unverified");
+      if (condition === "source" || condition === "ambiguous_base")
+        expect(processRunner.calls).toHaveLength(preparationCalls);
+      await workspace.cleanup();
+    },
+  );
+
+  it.each(["close_failure", "late_violation"] as const)(
+    "does not return verified findings after monitor %s",
+    async (condition) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const { context } = preparationContext();
+      const workspace = await provider(fileSystem, processRunner, { diskBudget }).prepare(
+        envelope("pull_request"),
+        context,
+        "model",
+      );
+      let monitorChecks = 0;
+      diskBudget.onMonitorCheck = () => {
+        monitorChecks++;
+        if (condition === "late_violation" && monitorChecks === 2)
+          diskBudget.monitorViolation = new WorkspaceDiskBudgetError(
+            "CURRENT_ATTEMPT_LIMIT_EXCEEDED",
+            "Synthetic final monitoring failure.",
+          );
+      };
+      if (condition === "close_failure")
+        diskBudget.monitorCloseError = new Error("Synthetic monitor closure failure.");
+      await expect(
+        workspace.validatePrFindingLocations?.(
+          { baseSha, headSha, findings: [{ path: "src/file.ts", line: 1, endLine: null }] },
+          context.signal,
+        ),
+      ).resolves.toMatchObject({ status: "unverified", reason: "source_monitor_unavailable" });
+      expect(monitorChecks).toBe(2);
+      diskBudget.onMonitorCheck = undefined;
+      diskBudget.monitorViolation = undefined;
+      diskBudget.monitorCloseError = undefined;
+      await workspace.cleanup();
+    },
+  );
 
   it("isolates model and validation workspaces without changing the leased attempt", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
